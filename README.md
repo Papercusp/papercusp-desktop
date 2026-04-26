@@ -2,10 +2,32 @@
 
 Tauri desktop shell for Papercusp. Bundles a webview + Node sidecar into a small native app for macOS, Windows, and Linux.
 
+## Install (end users)
+
+Releases land at <https://github.com/aviynw/Restart/releases?q=desktop> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
+
+| Platform | Artifact | First-launch friction |
+|---|---|---|
+| **macOS** | `Papercusp_*_universal.dmg` (Intel + Apple Silicon in one bundle) | App is unsigned. Open it once via right-click → **Open** instead of double-click; macOS asks "are you sure?" — choose **Open**. After that, normal double-click works. |
+| **Windows** | `Papercusp_*_x64-setup.exe` or `Papercusp_*_x64_en-US.msi` | App is unsigned. Windows shows a SmartScreen "Windows protected your PC" dialog. Click **More info → Run anyway**. |
+| **Linux** | `Papercusp_*_amd64.AppImage` (portable) or `.deb` / `.rpm` for system install | None. AppImage: `chmod +x Papercusp_*.AppImage && ./Papercusp_*.AppImage`. |
+
+**Prerequisites on the user's machine** (today; both being bundled in a future release):
+
+- **Node 20+** — the sidecar runs on Node. Install via [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`.
+- **PostgreSQL 14+ on `localhost:5432`** — local data store. Install via [postgresql.org/download](https://postgresql.org/download/), then `brew services start postgresql` (mac) or `sudo systemctl start postgresql` (Linux).
+- **`claude` CLI** — orchestrator dependency. Install with `npm install -g @anthropic-ai/claude-code`.
+
+Set your Anthropic + (optional) GitHub PAT keys in **Settings → API Keys** on first launch. Keys are stored at `~/.papercusp/credentials.json` (mode 0600) and never leave your machine.
+
+If any prerequisite is missing, the first-launch screen names it and links to the install instructions — you don't have to read this list ahead of time.
+
 ## Architecture
 
 ```
-┌──────────────── papercusp.app (~30-50 MB) ────────────────┐
+┌──────────────── papercusp.app (~80-100 MB) ───────────────┐
+│  (size dominated by the bundled Node sidecar; ~30-50 MB    │
+│   without the sidecar)                                     │
 │                                                            │
 │  Tauri (Rust) shell                                        │
 │   ├── Native window, menu bar, system integration          │
