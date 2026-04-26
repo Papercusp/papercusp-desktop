@@ -42,7 +42,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../sidecar/**/*"
+      "sidecar/**/*"
     ],
     "publisher": "Papercusp",
     "homepage": "https://papercuspai.com",
