@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg", "msi", "nsis", "deb", "rpm"],
     "category": "DeveloperTool",
     "shortDescription": "Open-source autonomous-harness framework",
     "longDescription": "Papercusp lets you define a goal and watch a coordinated team of AI agent roles plan, execute, validate, and iterate against your spec. Runs locally; your API keys never leave your machine.",
@@ -38,6 +38,7 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
     ],
     "resources": [
