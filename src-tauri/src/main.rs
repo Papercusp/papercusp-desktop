@@ -136,25 +136,32 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-                let state: tauri::State<SidecarState> = app_handle.state();
-                if let Some(mut child) = state.child.lock().unwrap().take() {
-                    println!("[papercusp-desktop] killing sidecar pid={}", child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+                kill_sidecar(app_handle);
             }
             RunEvent::WindowEvent {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
-                let state: tauri::State<SidecarState> = app_handle.state();
-                if let Some(mut child) = state.child.lock().unwrap().take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+                kill_sidecar(app_handle);
             }
             _ => {}
         });
+}
+
+/// Take ownership of the sidecar Child (if any) and kill it.
+///
+/// This is a function rather than inline so the temporary MutexGuard from
+/// `state.child.lock()` is dropped before the borrow of `state` ends —
+/// inlining triggered borrow-checker E0597 in Rust 2021 because the guard
+/// outlived the local `state` binding.
+fn kill_sidecar(app_handle: &tauri::AppHandle) {
+    let state: tauri::State<SidecarState> = app_handle.state();
+    let maybe_child = state.child.lock().unwrap().take();
+    if let Some(mut child) = maybe_child {
+        println!("[papercusp-desktop] killing sidecar pid={}", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn main() {
