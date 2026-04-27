@@ -20,6 +20,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 
 struct SidecarState {
     child: Mutex<Option<Child>>,
+    pglite_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
 }
 
@@ -27,10 +28,54 @@ fn find_free_port() -> Option<u16> {
     portpicker::pick_unused_port()
 }
 
+/// Spawn the bundled pglite-server. Returns the socket dir path on success.
+/// pglite-server listens on a unix socket at `<socket_dir>/.s.PGSQL.5432`.
+fn spawn_pglite_server(
+    pglite_dir: &std::path::Path,
+    socket_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> std::io::Result<Child> {
+    let bin = pglite_dir.join("bin").join("pglite-server.mjs");
+    println!(
+        "[papercusp-desktop] spawning pglite-server bin={} socket={} data={}",
+        bin.display(),
+        socket_dir.display(),
+        data_dir.display()
+    );
+
+    std::fs::create_dir_all(socket_dir)?;
+    std::fs::create_dir_all(data_dir)?;
+
+    let mut cmd = Command::new("node");
+    cmd.arg(&bin)
+        .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
+        .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    cmd.spawn()
+}
+
+fn wait_for_pglite_socket(socket_dir: &std::path::Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    let socket_path = socket_dir.join(".s.PGSQL.5432");
+    while start.elapsed() < timeout {
+        if socket_path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 /// Spawn the Node sidecar from inside the bundled sidecar dir. In dev
 /// (`tauri dev`), we skip this — the developer runs `npm run dev:papercusp`
 /// separately and the webview points at devUrl from tauri.conf.json.
-fn spawn_sidecar(port: u16, sidecar_dir: &std::path::Path) -> std::io::Result<Child> {
+fn spawn_sidecar(
+    port: u16,
+    sidecar_dir: &std::path::Path,
+    pglite_socket_dir: Option<&std::path::Path>,
+) -> std::io::Result<Child> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
     // Next.js standalone bundle layout: sidecar/apps/papercusp/server.js
@@ -50,6 +95,21 @@ fn spawn_sidecar(port: u16, sidecar_dir: &std::path::Path) -> std::io::Result<Ch
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // When pglite is active, point the framework's DB pool at the unix
+    // socket and force pool=1 (workaround for a pglite-socket prepared-
+    // statement state bug across concurrent handlers; safe for desktop
+    // single-user mode).
+    if let Some(socket_dir) = pglite_socket_dir {
+        let socket_str = socket_dir.to_string_lossy().to_string();
+        let app_url = format!("postgres://harness_app@/papercusp?host={}", socket_str);
+        let admin_url = format!("postgres://harness_admin@/papercusp?host={}", socket_str);
+        cmd.env("PAPERCUSP_USE_PGLITE", "1")
+            .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
+            .env("PAPERCUSP_DB_POOL_MAX", "1")
+            .env("HARNESS_DATABASE_URL", app_url)
+            .env("HARNESS_ADMIN_DATABASE_URL", admin_url);
+    }
+
     cmd.spawn()
 }
 
@@ -67,6 +127,7 @@ fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
 pub fn run() {
     let state = SidecarState {
         child: Mutex::new(None),
+        pglite_child: Mutex::new(None),
         port: Mutex::new(None),
     };
 
@@ -100,7 +161,51 @@ pub fn run() {
                 .resolve("sidecar", tauri::path::BaseDirectory::Resource)
                 .unwrap_or_else(|_| std::path::PathBuf::from("./sidecar"));
 
-            let child = match spawn_sidecar(port, &sidecar_dir) {
+            // Default-on for production; opt-out with PAPERCUSP_USE_PGLITE=0.
+            // Desktop installs don't ship Postgres, so pglite is the only
+            // built-in DB. Users with their own Postgres can opt out and
+            // set HARNESS_DATABASE_URL themselves.
+            let use_pglite = std::env::var("PAPERCUSP_USE_PGLITE")
+                .unwrap_or_else(|_| "1".to_string())
+                != "0";
+
+            let pglite_socket_dir: Option<std::path::PathBuf> = if use_pglite {
+                let pglite_dir = sidecar_dir.join("pglite-server");
+                let home_dir = std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let socket_dir = home_dir.join(".papercusp").join("pglite-socket");
+                let data_dir = home_dir.join(".papercusp").join("pglite-data");
+
+                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir) {
+                    Ok(c) => {
+                        let state: tauri::State<SidecarState> = app.state();
+                        *state.pglite_child.lock().unwrap() = Some(c);
+                        if !wait_for_pglite_socket(&socket_dir, Duration::from_secs(15)) {
+                            eprintln!("[papercusp-desktop] pglite-server socket did not appear in 15s");
+                            return Ok(());
+                        }
+                        println!(
+                            "[papercusp-desktop] pglite-server ready (socket={})",
+                            socket_dir.display()
+                        );
+                        Some(socket_dir)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[papercusp-desktop] failed to spawn pglite-server: {}; \
+                             sidecar will use HARNESS_DATABASE_URL from env",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                println!("[papercusp-desktop] PAPERCUSP_USE_PGLITE=0 — skipping pglite-server");
+                None
+            };
+
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref()) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
@@ -159,6 +264,12 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let maybe_child = state.child.lock().unwrap().take();
     if let Some(mut child) = maybe_child {
         println!("[papercusp-desktop] killing sidecar pid={}", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let maybe_pglite = state.pglite_child.lock().unwrap().take();
+    if let Some(mut child) = maybe_pglite {
+        println!("[papercusp-desktop] killing pglite-server pid={}", child.id());
         let _ = child.kill();
         let _ = child.wait();
     }
