@@ -18,6 +18,10 @@ Releases land at <https://github.com/aviynw/Restart/releases?q=desktop> as `desk
 - **PostgreSQL 14+ on `localhost:5432`** — local data store. Install via [postgresql.org/download](https://postgresql.org/download/), then `brew services start postgresql` (mac) or `sudo systemctl start postgresql` (Linux).
 - **`claude` CLI** — orchestrator dependency. Install with `npm install -g @anthropic-ai/claude-code`.
 
+**Optional prerequisites:**
+
+- **`pi` (oh-my-pi)** — required only for the in-app `pi` tab (interactive coding agent that lives alongside the dashboard; you can drop into it mid-mission to steer manually). Install via `brew install can1357/oh-my-pi/oh-my-pi` or see [github.com/can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). Without pi, every other feature still works; only the pi tab shows a "missing" state.
+
 Set your Anthropic + (optional) GitHub PAT keys in **Settings → API Keys** on first launch. Keys are stored at `~/.papercusp/credentials.json` (mode 0600) and never leave your machine.
 
 If any prerequisite is missing, the first-launch screen names it and links to the install instructions — you don't have to read this list ahead of time.

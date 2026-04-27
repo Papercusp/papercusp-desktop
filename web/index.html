@@ -87,6 +87,9 @@
     if (failed.find(c => c.name === 'harness')) {
       lines.push('<strong>harness package</strong> — set <code>PAPERCUSP_HARNESS_DIR</code> or symlink <code>~/autonomous-harness</code> to your harness checkout.');
     }
+    if (failed.find(c => c.name === 'pi')) {
+      lines.push('<strong>pi (oh-my-pi) — optional</strong> — required only for the in-app <code>pi</code> tab (interactive coding agent). Install via <code>brew install can1357/oh-my-pi/oh-my-pi</code> or see <a href="https://github.com/can1357/oh-my-pi" target="_blank">github.com/can1357/oh-my-pi</a>.');
+    }
     hint.innerHTML = lines.join('<br><br>');
     hint.style.display = '';
   }
