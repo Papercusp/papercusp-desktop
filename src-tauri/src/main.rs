@@ -104,16 +104,16 @@ fn spawn_sidecar(
         .stderr(Stdio::piped());
 
     // When pglite is active, point the framework's DB pool at the unix
-    // socket and force pool=1 (workaround for a pglite-socket prepared-
-    // statement state bug across concurrent handlers; safe for desktop
-    // single-user mode).
+    // socket. Pool max defaults to 8 (matches non-pglite default); the
+    // pglite-socket fork at packages/pglite-server/src/socket-server.js
+    // adds per-handler batch stickiness so concurrent parameterized
+    // queries no longer corrupt the unnamed prepared statement state.
     if let Some(socket_dir) = pglite_socket_dir {
         let socket_str = socket_dir.to_string_lossy().to_string();
         let app_url = format!("postgres://harness_app@/papercusp?host={}", socket_str);
         let admin_url = format!("postgres://harness_admin@/papercusp?host={}", socket_str);
         cmd.env("PAPERCUSP_USE_PGLITE", "1")
             .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
-            .env("PAPERCUSP_DB_POOL_MAX", "1")
             .env("HARNESS_DATABASE_URL", app_url)
             .env("HARNESS_ADMIN_DATABASE_URL", admin_url);
     }
