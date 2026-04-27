@@ -46,10 +46,18 @@ fn spawn_pglite_server(
     std::fs::create_dir_all(socket_dir)?;
     std::fs::create_dir_all(data_dir)?;
 
+    // Point pglite-server at the bundled framework DDL so it bootstraps the
+    // schema on first boot (idempotent — re-runs check for harness_shared
+    // schema and skip if present).
+    let db_sql_dir = pglite_dir.parent()
+        .map(|p| p.join("db-sql"))
+        .unwrap_or_else(|| std::path::PathBuf::from("./db-sql"));
+
     let mut cmd = Command::new("node");
     cmd.arg(&bin)
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
+        .env("PGLITE_DB_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
