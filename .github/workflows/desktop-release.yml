@@ -1,0 +1,218 @@
+name: Desktop release
+# Builds Papercusp desktop installers for macOS, Windows, and Linux
+# whenever a `desktop-vX.Y.Z` tag is pushed. Outputs land on the GitHub
+# Release matching the tag.
+#
+# Currently UNSIGNED on all platforms — users will see Gatekeeper /
+# SmartScreen warnings. See PLAN.md for the signing roadmap.
+#
+# Cost-shape:
+#   - Real releases (`desktop-v1.2.3`): full 4-platform matrix incl.
+#     macOS-universal. Auto-triggered on tag push.
+#   - Test/iteration tags (`desktop-v*-test*`): NOT auto-triggered.
+#     Use `workflow_dispatch` if you need to run one. The macOS matrix
+#     entry is also gated off when running on a test tag, since macOS
+#     bills 10× and is rarely what's being tested. Override via the
+#     `macos_mode` input.
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+      - '!desktop-v*-test*'
+  workflow_dispatch:
+    inputs:
+      macos_mode:
+        description: 'macOS build (universal/arm-only/skip)'
+        required: false
+        default: 'arm-only'
+        type: choice
+        options:
+          - universal
+          - arm-only
+          - skip
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target universal-apple-darwin'
+            label: 'macOS (universal)'
+          - platform: 'windows-latest'
+            args: ''
+            label: 'Windows (x86_64)'
+          # Linux x86_64 — using ubuntu-22.04 instead of latest because
+          # linuxdeploy (used for AppImage) has known incompatibilities
+          # with ubuntu-24.04. ubuntu-22.04 builds .AppImage cleanly in
+          # addition to .deb / .rpm.
+          - platform: 'ubuntu-22.04'
+            args: ''
+            label: 'Linux (x86_64)'
+          # Linux ARM64 — Raspberry Pi 4/5, Pine64, Ampere/Graviton VPS,
+          # any aarch64 Linux. Uses GitHub's free ARM Linux runner.
+          - platform: 'ubuntu-22.04-arm'
+            args: '--target aarch64-unknown-linux-gnu'
+            label: 'Linux (arm64)'
+
+    runs-on: ${{ matrix.platform }}
+    name: ${{ matrix.label }}
+    # Skip the macOS entry entirely when:
+    #   - running on a test-suffixed ref (manual dispatch with `-test`
+    #     in the ref), or
+    #   - the dispatcher chose `macos_mode == 'skip'`.
+    # The cheap path for manual dispatch is `arm-only`, which is
+    # ~half the wall-time of universal (handled by the args override
+    # in the build step below).
+    if: |
+      matrix.platform != 'macos-latest'
+      || (
+        !contains(github.ref, '-test')
+        && (github.event_name != 'workflow_dispatch' || inputs.macos_mode != 'skip')
+      )
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS targets: universal needs both archs; arm-only just
+          # needs aarch64. The matrix args (--target ...) controls which
+          # one tauri actually builds; this just makes the toolchain
+          # available so the build doesn't fail at link time.
+          targets: ${{ matrix.platform == 'macos-latest' && (github.event_name == 'workflow_dispatch' && inputs.macos_mode == 'arm-only' && 'aarch64-apple-darwin' || 'aarch64-apple-darwin,x86_64-apple-darwin') || '' }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/papercusp-desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/papercusp-desktop/src-tauri/Cargo.lock') }}
+
+      # Linux only — install webkit2gtk + other build deps + rpm packaging
+      # rpm is required because tauri.conf.json `bundle.targets` includes
+      # `.rpm`, which uses rpmbuild — not preinstalled on Ubuntu runners.
+      - name: Linux build deps
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            rpm
+
+      - name: Install workspace deps
+        run: npm install --legacy-peer-deps
+
+      - name: Build sidecar (Next.js standalone)
+        run: bash bin/build-desktop-sidecar.sh
+
+      - name: Build + bundle desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/papercusp-desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Papercusp Desktop ${{ github.ref_name }}'
+          releaseBody: |
+            Auto-built from ${{ github.sha }}.
+            Unsigned — see install instructions in the description.
+          releaseDraft: true
+          prerelease: false
+          # On a manual dispatch with macos_mode=arm-only, swap the
+          # universal target for the cheaper aarch64-only build (~1/2
+          # the wall-time on macos-latest, ~1/2 the bill at 10× rate).
+          # Tag-triggered runs always get matrix.args (universal).
+          args: ${{ (matrix.platform == 'macos-latest' && github.event_name == 'workflow_dispatch' && inputs.macos_mode == 'arm-only') && '--target aarch64-apple-darwin' || matrix.args }}
+
+      # Linux post-build smoke: install the .deb, launch the binary briefly
+      # (with xvfb so the webview can init), and confirm the Rust shell logs
+      # "sidecar ready on :PORT". Without this, runtime regressions like the
+      # _up_/sidecar path bug ship to users undetected.
+      #
+      # Postgres / claude CLI are NOT installed in CI, so the preflight will
+      # report them as missing — that's fine, the bootstrap UI is supposed
+      # to surface that. We only assert the binary launches and the sidecar
+      # answers HTTP on its dynamic port.
+      - name: Linux post-build smoke
+        # x86_64 only — the smoke test installs the .deb produced by *this*
+        # runner. ARM64 runner produces an arm64 .deb which we don't smoke
+        # test (it'd need an arm64 binary on x86 host or vice versa).
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          set -e
+          DEB=$(find apps/papercusp-desktop/src-tauri/target/release/bundle/deb -name 'Papercusp_*_amd64.deb' | head -1)
+          if [[ -z "$DEB" ]]; then
+            echo "ERROR: no .deb produced; nothing to smoke-test"
+            exit 1
+          fi
+          echo "→ smoke-testing $DEB"
+          sudo apt-get install -y "$DEB" || sudo dpkg -i "$DEB" || true
+          sudo apt-get install -y -f  # fix any missing transitive deps
+          sudo apt-get install -y xvfb curl
+
+          # Run the binary headless under xvfb. Background it; capture stdout.
+          xvfb-run -a /usr/bin/papercusp-desktop > /tmp/papercusp.log 2>&1 &
+          PID=$!
+          # Wait up to 90s for "sidecar ready on :". First-boot pglite has to
+          # apply all framework DDL (4 files + 16 per-harness schemas) AND
+          # bring up the Next.js sidecar — easily 60s on a slow CI runner.
+          for i in {1..180}; do
+            if grep -q "sidecar ready on :" /tmp/papercusp.log 2>/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          if ! grep -q "sidecar ready on :" /tmp/papercusp.log; then
+            echo "✗ Sidecar did not become ready in 90s. Full log:"
+            cat /tmp/papercusp.log
+            echo "---"
+            echo "papercusp dirs in HOME:"
+            ls -la $HOME/.papercusp/ 2>&1 || true
+            kill $PID 2>/dev/null || true
+            exit 1
+          fi
+          PORT=$(grep -oE 'sidecar ready on :[0-9]+' /tmp/papercusp.log | grep -oE '[0-9]+' | head -1)
+          echo "✓ Sidecar reachable on port $PORT"
+
+          # Verify preflight returns valid JSON (don't require ok:true since
+          # postgres/claude/bash may be missing in CI).
+          if ! curl -sfm 5 "http://localhost:$PORT/api/desktop/preflight" | head -c 1000 | tee /tmp/preflight.json; then
+            echo
+            echo "✗ Preflight endpoint did not respond"
+            tail -50 /tmp/papercusp.log
+            kill $PID 2>/dev/null || true
+            exit 1
+          fi
+          echo
+          if ! grep -q '"ok"' /tmp/preflight.json; then
+            echo "✗ Preflight response missing 'ok' field"
+            cat /tmp/preflight.json
+            kill $PID 2>/dev/null || true
+            exit 1
+          fi
+          echo "✓ Preflight responds with valid JSON"
+          kill $PID 2>/dev/null || true
+          echo "✓ Linux post-build smoke passed"
