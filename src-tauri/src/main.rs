@@ -58,8 +58,8 @@ fn spawn_pglite_server(
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
         .env("PGLITE_DB_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
 
     cmd.spawn()
 }
@@ -189,9 +189,8 @@ pub fn run() {
                     Ok(c) => {
                         let state: tauri::State<SidecarState> = app.state();
                         *state.pglite_child.lock().unwrap() = Some(c);
-                        if !wait_for_pglite_socket(&socket_dir, Duration::from_secs(15)) {
-                            eprintln!("[papercusp-desktop] pglite-server socket did not appear in 15s");
-                            return Ok(());
+                        if !wait_for_pglite_socket(&socket_dir, Duration::from_secs(60)) {
+                            eprintln!("[papercusp-desktop] pglite-server socket did not appear in 60s — first-boot DDL may have failed; continuing without DB so preflight is reachable");
                         }
                         println!(
                             "[papercusp-desktop] pglite-server ready (socket={})",
