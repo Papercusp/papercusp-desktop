@@ -127,8 +127,17 @@ fn spawn_sidecar(
     // queries no longer corrupt the unnamed prepared statement state.
     if let Some(socket_dir) = pglite_socket_dir {
         let socket_str = socket_dir.to_string_lossy().to_string();
-        let app_url = format!("postgres://harness_app@/papercusp?host={}", socket_str);
-        let admin_url = format!("postgres://harness_admin@/papercusp?host={}", socket_str);
+        // Note: emit "localhost" as a placeholder host even though we
+        // actually connect via the unix socket. postgres-js honors the
+        // `host=<socket>` query param over the URL host, but Node's
+        // `new URL()` parser rejects the canonical empty-host form
+        // (`postgres://user@/db?host=/sock`) with ERR_INVALID_URL —
+        // some downstream code in the operator's bundled chunks calls
+        // `new URL()` on this string at module load time, taking out
+        // every /api endpoint with an "Invalid URL" 500. The placeholder
+        // hostname keeps the URL parseable and is ignored at connect time.
+        let app_url = format!("postgres://harness_app@localhost/papercusp?host={}", socket_str);
+        let admin_url = format!("postgres://harness_admin@localhost/papercusp?host={}", socket_str);
         cmd.env("PAPERCUSP_USE_PGLITE", "1")
             .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
             .env("HARNESS_DATABASE_URL", app_url)
