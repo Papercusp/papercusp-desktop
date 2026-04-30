@@ -142,9 +142,13 @@ jobs:
         working-directory: _external/papercup
         run: npm install --legacy-peer-deps
 
-      - name: Install papercusp packages deps
-        working-directory: _external/papercusp
-        run: npm install --legacy-peer-deps
+      # No workspace-root install of papercusp: its `apps/*` workspaces
+      # (apps/web, apps/desktop) reference @restart/* packages that live
+      # in the *papercup* repo as submodules and aren't reachable from
+      # this checkout. The desktop build only needs source files from
+      # `packages/harness`, `packages/pglite-server`, and
+      # `packages/papercusp-mcp-server`; bin/build-desktop-sidecar.sh
+      # does targeted installs into the bundled output dirs after copy.
 
       - name: Build sidecar (Next.js standalone via build-desktop-sidecar.sh)
         env:
