@@ -4,7 +4,7 @@ Tauri desktop shell for Papercusp. Bundles a webview + Node sidecar into a small
 
 ## Install (end users)
 
-Releases land at <https://github.com/aviynw/Restart/releases?q=desktop> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
+Releases land at <https://github.com/papercupai/papercusp-desktop/releases> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
 
 | Platform | Artifact | First-launch friction |
 |---|---|---|
@@ -40,7 +40,7 @@ If any prerequisite is missing, the first-launch screen names it and links to th
 │   └── Webview points at http://localhost:<sidecarPort>/    │
 │                                                            │
 │  Node sidecar (bundled inside the app)                     │
-│   ├── apps/papercusp Next.js standalone build              │
+│   ├── apps/operator Next.js standalone build               │
 │   ├── Same Hono routes that papercuspai.com cloud uses     │
 │   ├── Owns the local fs (~/.papercusp/)                    │
 │   └── Talks to local Postgres (or pglite later)            │
@@ -89,10 +89,10 @@ crates (~5 minutes) — subsequent runs are instant.
 For release builds, the sidecar must be a self-contained bundle Tauri can
 ship as a resource. The build chain:
 
-1. `npm --workspace @papercusp/web run build`  
-   → produces `apps/papercusp/.next/standalone/` (the runnable Next.js bundle).
+1. `npm --workspace @papercusp/web run build` (in the sibling `papercup` clone)  
+   → produces `papercup/apps/operator/.next/standalone/` (the runnable Next.js bundle).
 2. `bin/build-desktop-sidecar.sh`  
-   → copies the standalone bundle + node_modules into `apps/papercusp-desktop/sidecar/`.
+   → copies the standalone bundle + node_modules into `src-tauri/sidecar/`.
 3. `npm run build:desktop`  
    → `tauri build` packages the Rust shell + sidecar into platform installers.
 
@@ -115,7 +115,7 @@ for the signing roadmap.
 
 Everything the harness needs to run on a fresh machine:
 
-- Next.js standalone build of apps/papercusp (the UI + API)
+- Next.js standalone build of apps/operator (the UI + API)
 - Node runtime (bundled by the standalone build)
 - Harness substrate (`packages/papercusp-harness/` — run.sh + prompts +
   identity + templates) — copied to user data dir on first launch

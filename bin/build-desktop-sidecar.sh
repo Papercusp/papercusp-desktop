@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the Node sidecar that the Papercusp desktop app bundles.
 #
-# Strategy: build apps/papercusp as a Next.js standalone bundle, then
-# copy it into apps/papercusp-desktop/sidecar/ where Tauri's bundler
+# Strategy: build papercup/apps/operator as a Next.js standalone bundle, then
+# copy it into papercusp-desktop/src-tauri/sidecar/ where Tauri's bundler
 # picks it up as a resource (declared in tauri.conf.json `resources`).
 #
 # The standalone bundle is self-contained — it includes its own
@@ -17,7 +17,7 @@ set -euo pipefail
 #   papercupai/papercup            ← contains apps/operator (the Next.js UI)
 #   papercupai/papercusp           ← contains packages/papercusp-mcp-server
 #                                    + packages/pglite-server (formerly
-#                                    libs/papercusp at aviynw/Restart)
+#                                    formerly libs/papercusp at aviynw/Restart pre-split)
 #
 # Override locations with PAPERCUP_ROOT / PAPERCUSP_ROOT if your layout
 # differs (e.g. CI clones into a flat workspace dir).
@@ -45,9 +45,9 @@ echo "→ installing operator deps"
 (cd "$WEB_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund)
 
 echo "→ verifying workspace deps resolved"
-echo "  apps/papercusp/node_modules/@restart/ contents:"
+echo "  apps/operator/node_modules/@restart/ contents:"
 ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart subdir)"
-echo "  apps/papercusp/node_modules/@papercusp/ contents:"
+echo "  apps/operator/node_modules/@papercusp/ contents:"
 ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
 
 (cd "$WEB_DIR" && npm run build)
@@ -64,23 +64,23 @@ mkdir -p "$SIDECAR_DIR"
 echo "→ copying standalone bundle"
 # The standalone dir layout is preserved:
 #   sidecar/
-#     apps/papercusp/server.js   ← runtime entry point (cwd matters)
+#     apps/operator/server.js    ← runtime entry point (cwd matters)
 #     node_modules/              ← hoisted runtime deps
-# Tauri's main.rs spawns `node apps/papercusp/server.js` with cwd = sidecar/
+# Tauri's main.rs spawns `node apps/operator/server.js` with cwd = sidecar/
 # so __dirname-relative .next paths resolve correctly.
 cp -a "$WEB_DIR/.next/standalone/." "$SIDECAR_DIR/"
 
 # Copy static assets — Next standalone build excludes these by default.
 echo "→ copying static assets"
-mkdir -p "$SIDECAR_DIR/apps/papercusp/.next"
-cp -a "$WEB_DIR/.next/static" "$SIDECAR_DIR/apps/papercusp/.next/static"
+mkdir -p "$SIDECAR_DIR/apps/operator/.next"
+cp -a "$WEB_DIR/.next/static" "$SIDECAR_DIR/apps/operator/.next/static"
 if [[ -d "$WEB_DIR/public" ]]; then
-  cp -a "$WEB_DIR/public" "$SIDECAR_DIR/apps/papercusp/public"
+  cp -a "$WEB_DIR/public" "$SIDECAR_DIR/apps/operator/public"
 fi
 
 # Sanity-check the entry point exists at the expected path
-if [[ ! -f "$SIDECAR_DIR/apps/papercusp/server.js" ]]; then
-  echo "ERROR: expected $SIDECAR_DIR/apps/papercusp/server.js after standalone copy"
+if [[ ! -f "$SIDECAR_DIR/apps/operator/server.js" ]]; then
+  echo "ERROR: expected $SIDECAR_DIR/apps/operator/server.js after standalone copy"
   exit 1
 fi
 
@@ -98,7 +98,7 @@ mkdir -p "$HARNESS_DST"
 # Use `find -type f` enumeration instead of `cp -a` so we:
 #  1. Skip symlinks entirely (find -type f doesn't match -type l). The harness
 #     has dev-time symlinks like docs-viewer/src/content/docs/projects/restart
-#     pointing at /home/marsh-office/Restart/docs — those dangle on CI and
+#     pointing at retired pre-split paths — those dangle on CI and
 #     either cause Tauri's resource bundler to fail (Linux/mac) or `cp` itself
 #     to fail (Windows can't create those symlinks).
 #  2. Skip docs-viewer entirely. It's an Astro sub-project that needs its own

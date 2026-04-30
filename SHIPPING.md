@@ -10,7 +10,7 @@ git tag desktop-v0.0.1-test<N>
 git push origin desktop-v0.0.1-test<N>
 ```
 
-This triggers `.github/workflows/desktop-release.yml` to matrix-build for macOS, Windows, and Linux in parallel. ~15-30 min later artifacts land on a draft GitHub Release at <https://github.com/aviynw/Restart/releases>.
+This triggers `.github/workflows/desktop-release.yml` to matrix-build for macOS, Windows, and Linux in parallel. ~15-30 min later artifacts land on a draft GitHub Release at <https://github.com/papercupai/papercusp-desktop/releases>.
 
 ## Watch progress
 

@@ -2,7 +2,7 @@
 //
 // Architecture:
 //   1. On startup, find a free localhost port.
-//   2. Spawn the Node sidecar (`apps/papercusp` running as `next start`)
+//   2. Spawn the Node sidecar (`apps/operator` running as `next start`)
 //      with PORT set to that free port.
 //   3. Wait for the sidecar to be reachable.
 //   4. Open the main window pointing at http://localhost:<port>/.
@@ -86,10 +86,10 @@ fn spawn_sidecar(
 ) -> std::io::Result<Child> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
-    // Next.js standalone bundle layout: sidecar/apps/papercusp/server.js
+    // Next.js standalone bundle layout: sidecar/apps/operator/server.js
     // is the entry point, and it expects to be invoked with cwd = sidecar/
     // (so __dirname-relative .next paths resolve correctly).
-    let server_js = sidecar_dir.join("apps").join("papercusp").join("server.js");
+    let server_js = sidecar_dir.join("apps").join("operator").join("server.js");
     let harness_dir = sidecar_dir.join("harness");
 
     let mut cmd = Command::new("node");
