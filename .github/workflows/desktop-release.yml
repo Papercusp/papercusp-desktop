@@ -74,19 +74,23 @@ jobs:
       - name: Checkout papercusp-desktop (this repo)
         uses: actions/checkout@v4
 
+      # Cross-repo checkouts use SIBLING_REPO_PAT — a fine-grained PAT with
+      # Contents:read on papercupai/papercup + papercupai/papercusp. The
+      # default secrets.GITHUB_TOKEN is scoped to the current repo only and
+      # 404s on private siblings.
       - name: Checkout papercupai/papercup (sibling for apps/operator UI source)
         uses: actions/checkout@v4
         with:
           repository: papercupai/papercup
           path: _external/papercup
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SIBLING_REPO_PAT }}
 
       - name: Checkout papercupai/papercusp (sibling for harness + mcp + pglite)
         uses: actions/checkout@v4
         with:
           repository: papercupai/papercusp
           path: _external/papercusp
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SIBLING_REPO_PAT }}
 
       - name: Set up Node 20
         uses: actions/setup-node@v4
