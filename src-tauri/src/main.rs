@@ -13,10 +13,12 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod workspaces;
+
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 struct SidecarState {
     child: Mutex<Option<Child>>,
@@ -34,6 +36,7 @@ fn spawn_pglite_server(
     pglite_dir: &std::path::Path,
     socket_dir: &std::path::Path,
     data_dir: &std::path::Path,
+    workspace_home: &std::path::Path,
 ) -> std::io::Result<Child> {
     let bin = pglite_dir.join("bin").join("pglite-server.mjs");
     println!(
@@ -53,11 +56,15 @@ fn spawn_pglite_server(
         .map(|p| p.join("db-sql"))
         .unwrap_or_else(|| std::path::PathBuf::from("./db-sql"));
 
+    let workspace_home_str = workspace_home.to_string_lossy().to_string();
+
     let mut cmd = Command::new("node");
     cmd.arg(&bin)
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
         .env("PGLITE_DB_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
+        .env("HOME", &workspace_home_str)
+        .env("USERPROFILE", &workspace_home_str)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -83,6 +90,7 @@ fn spawn_sidecar(
     port: u16,
     sidecar_dir: &std::path::Path,
     pglite_socket_dir: Option<&std::path::Path>,
+    workspace_home: &std::path::Path,
 ) -> std::io::Result<Child> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
@@ -92,6 +100,13 @@ fn spawn_sidecar(
     let server_js = sidecar_dir.join("apps").join("operator").join("server.js");
     let harness_dir = sidecar_dir.join("harness");
 
+    // Per-workspace isolation: override HOME so the sidecar (and any child
+    // process it spawns — claude CLI, git, pi, etc.) sees a workspace-scoped
+    // home directory. ~/.papercusp/, ~/.claude/, ~/.gitconfig and so on all
+    // resolve into <workspace_home>/, giving each workspace genuine
+    // "fresh-machine" semantics. See workspaces.rs for the layout.
+    let workspace_home_str = workspace_home.to_string_lossy().to_string();
+
     let mut cmd = Command::new("node");
     cmd.arg(&server_js)
         .current_dir(sidecar_dir)
@@ -100,6 +115,8 @@ fn spawn_sidecar(
         .env("NODE_ENV", "production")
         .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_DESKTOP", "1")
+        .env("HOME", &workspace_home_str)
+        .env("USERPROFILE", &workspace_home_str) // Windows
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -119,6 +136,43 @@ fn spawn_sidecar(
     }
 
     cmd.spawn()
+}
+
+// ---------------------------------------------------------------------------
+// Workspace tauri commands
+//
+// Exposed to the operator UI via `invoke('plugin:...')` — see
+// apps/operator/lib/workspaces-tauri.ts for the typed wrapper. Switching
+// kills the running sidecar+pglite-server and restarts the entire app, which
+// is the cleanest way to swap a fake-HOME under a process tree mid-flight.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn workspaces_list() -> workspaces::Registry {
+    workspaces::list()
+}
+
+#[tauri::command]
+fn workspaces_create(name: String) -> Result<workspaces::Workspace, String> {
+    workspaces::create(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn workspaces_rename(id: String, name: String) -> Result<(), String> {
+    workspaces::rename(&id, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn workspaces_delete(id: String) -> Result<(), String> {
+    workspaces::delete(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn workspaces_switch(app: AppHandle, id: String) -> Result<(), String> {
+    workspaces::switch(&id).map_err(|e| e.to_string())?;
+    // Kill children before restart so they don't outlive the process.
+    kill_sidecar(&app);
+    app.restart();
 }
 
 fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
@@ -144,6 +198,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
+        .invoke_handler(tauri::generate_handler![
+            workspaces_list,
+            workspaces_create,
+            workspaces_rename,
+            workspaces_delete,
+            workspaces_switch,
+        ])
         .manage(state)
         .setup(|app| {
             let is_dev = cfg!(debug_assertions);
@@ -169,6 +230,22 @@ pub fn run() {
                 .resolve("sidecar", tauri::path::BaseDirectory::Resource)
                 .unwrap_or_else(|_| std::path::PathBuf::from("./sidecar"));
 
+            // Resolve the active workspace's fake-HOME dir. First-launch
+            // migration of any pre-existing ~/.papercusp happens here.
+            let workspace_home = match workspaces::current_dir() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[papercusp-desktop] workspace init failed: {} — falling back to legacy ~/.papercusp", e);
+                    std::env::var("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                }
+            };
+            if let Err(e) = std::fs::create_dir_all(&workspace_home) {
+                eprintln!("[papercusp-desktop] could not create workspace home {}: {}", workspace_home.display(), e);
+            }
+            println!("[papercusp-desktop] active workspace home: {}", workspace_home.display());
+
             // Default-on for production; opt-out with PAPERCUSP_USE_PGLITE=0.
             // Desktop installs don't ship Postgres, so pglite is the only
             // built-in DB. Users with their own Postgres can opt out and
@@ -179,13 +256,13 @@ pub fn run() {
 
             let pglite_socket_dir: Option<std::path::PathBuf> = if use_pglite {
                 let pglite_dir = sidecar_dir.join("pglite-server");
-                let home_dir = std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let socket_dir = home_dir.join(".papercusp").join("pglite-socket");
-                let data_dir = home_dir.join(".papercusp").join("pglite-data");
+                // Workspace-scoped socket + data dirs. Each workspace gets
+                // its own Postgres data tree, so two workspaces never share
+                // schemas, rows, or replication slots.
+                let socket_dir = workspace_home.join(".papercusp").join("pglite-socket");
+                let data_dir = workspace_home.join(".papercusp").join("pglite-data");
 
-                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir) {
+                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home) {
                     Ok(c) => {
                         let state: tauri::State<SidecarState> = app.state();
                         *state.pglite_child.lock().unwrap() = Some(c);
@@ -212,7 +289,7 @@ pub fn run() {
                 None
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref()) {
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);

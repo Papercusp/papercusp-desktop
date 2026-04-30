@@ -1,0 +1,18 @@
+# Rust build outputs
+src-tauri/target/
+
+# Tauri-generated schema/permissions (regenerated on build)
+src-tauri/gen/
+
+# Bundled sidecar (produced by bin/build-desktop-sidecar.sh on every build)
+src-tauri/sidecar/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
