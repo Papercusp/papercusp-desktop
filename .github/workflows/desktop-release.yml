@@ -84,6 +84,13 @@ jobs:
           repository: papercupai/papercup
           path: _external/papercup
           token: ${{ secrets.SIBLING_REPO_PAT }}
+          # papercup pulls in libs/papercup-db, libs/papergrid, libs/agent-chat,
+          # libs/git-graph, libs/papercup-shared, libs/ui-primitives,
+          # libs/papercusp, and libs/zero-harness as submodules. They're npm
+          # workspace members; if missing, `npm install` 404s on
+          # @restart/papercup-db etc. SIBLING_REPO_PAT must have Contents:read
+          # on every submodule repo (broaden to org-wide if a new one is added).
+          submodules: recursive
 
       - name: Checkout papercupai/papercusp (sibling for harness + mcp + pglite)
         uses: actions/checkout@v4
