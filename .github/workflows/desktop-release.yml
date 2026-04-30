@@ -96,8 +96,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
+          # No cache: this repo has no package-lock.json, and the sibling
+          # papercusp repo doesn't either. Re-introduce npm caching keyed on
+          # _external/papercup/package-lock.json once a green build exists.
 
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
