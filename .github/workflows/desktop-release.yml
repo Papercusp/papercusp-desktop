@@ -61,12 +61,15 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: ${{ matrix.label }}
-    if: |
-      matrix.platform != 'macos-latest'
-      || (
-        !contains(github.ref, '-test')
-        && (github.event_name != 'workflow_dispatch' || inputs.macos_mode != 'skip')
-      )
+    # NOTE: GitHub Actions does NOT allow `matrix` in job-level `if:`
+    # expressions (only `github`, `vars`, `env`, `inputs`, `needs`, `secrets`),
+    # so the previous `if:` gate that filtered macOS by inputs.macos_mode was
+    # itself the cause of every workflow_dispatch / push run failing at
+    # workflow-validation time (HTTP 422 "Unrecognized named-value: 'matrix'").
+    # macos_mode='arm-only' is still respected at step level via the `args`
+    # / `targets` expressions on the tauri-action step. macos_mode='skip' is
+    # currently a no-op — the macOS runner always boots when the workflow
+    # is dispatched. Re-introduce skip semantics if cost becomes a concern.
     steps:
       - name: Checkout papercusp-desktop (this repo)
         uses: actions/checkout@v4
