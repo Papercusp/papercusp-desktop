@@ -165,6 +165,63 @@ fn spawn_sidecar(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    available: bool,
+    current_version: String,
+    new_version: Option<String>,
+    notes: Option<String>,
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    match app.updater().map_err(|e| e.to_string())?.check().await {
+        Ok(Some(update)) => Ok(UpdateInfo {
+            available: true,
+            current_version: current,
+            new_version: Some(update.version.clone()),
+            notes: update.body.clone(),
+        }),
+        Ok(None) => Ok(UpdateInfo {
+            available: false,
+            current_version: current,
+            new_version: None,
+            notes: None,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no update available".to_string())?;
+
+    // Kill children before the binary swap so they don't outlive the parent.
+    kill_sidecar(&app);
+
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // tauri-plugin-process is in scope so we can restart cleanly.
+    app.restart();
+}
+
+#[tauri::command]
 fn workspaces_list() -> workspaces::Registry {
     workspaces::list()
 }
@@ -215,12 +272,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             workspaces_list,
             workspaces_create,
             workspaces_rename,
             workspaces_delete,
             workspaces_switch,
+            app_version,
+            check_for_update,
+            install_update,
         ])
         .manage(state)
         .setup(|app| {

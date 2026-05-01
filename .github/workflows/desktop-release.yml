@@ -166,6 +166,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri updater minisign signing. Without these, tauri-action skips
+          # the per-platform signature + the latest.json manifest, and the
+          # in-app updater errors with "no_compatible_assets". Generate a
+          # keypair with `npx @tauri-apps/cli signer generate` and set:
+          #   TAURI_SIGNING_PRIVATE_KEY            (the base64 private key)
+          #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   (empty if you generated
+          #                                         with -p "")
+          # The matching public key lives in tauri.conf.json under
+          # plugins.updater.pubkey and ships in the bundle.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # No projectPath — src-tauri/ lives at repo root in this multi-repo layout.
           tagName: ${{ github.ref_name }}

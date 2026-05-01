@@ -30,7 +30,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "msi", "nsis", "deb", "rpm"],
+    "targets": ["app", "dmg", "msi", "nsis", "deb", "rpm", "appimage"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "Open-source autonomous-harness framework",
     "longDescription": "Papercusp lets you define a goal and watch a coordinated team of AI agent roles plan, execute, validate, and iterate against your spec. Runs locally; your API keys never leave your machine.",
@@ -62,6 +63,16 @@
       "wix": {
         "language": "en-US"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/papercupai/papercusp-desktop/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDNTA5MkZBODlBRDFFN0UKUldSK0hxMkorcEpRUEREQVhYeVRHVTdoalFuRnBBTDYyODcxUS9ZZFlCK2MzL2JBOUJyQjhudnYK"
     }
   }
 }
