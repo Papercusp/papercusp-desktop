@@ -223,5 +223,24 @@ jobs:
             exit 1
           fi
           echo "✓ Preflight responds with valid JSON"
+
+          # Hit a Hono-catch-all endpoint to make sure /api/[[...route]] is
+          # actually mountable. Preflight alone is not enough — it lives at
+          # app/api/desktop/preflight (a separate file route) and so dodges
+          # any module-load failure in the catch-all (e.g. missing
+          # pty.node prebuild, ERR_INVALID_URL on the pglite connection
+          # string). /api/installed is also a file route; the catch-all
+          # serves /api/harness, /api/projects, etc.
+          # We can't hit /api/harness directly because it requires DB
+          # round-trips that may not be ready yet, so instead we scan the
+          # sidecar log for module-load failures and unhandled errors.
+          # The sidecar inherits parent stdio (papercusp-desktop@7c28555)
+          # so its errors land in /tmp/papercusp.log.
+          if grep -E "Failed to load native module|ERR_INVALID_URL|Cannot find module|MODULE_NOT_FOUND" /tmp/papercusp.log; then
+            echo "✗ Sidecar logged a module-load failure — see above"
+            kill $PID 2>/dev/null || true
+            exit 1
+          fi
+          echo "✓ No module-load errors in sidecar log"
           kill $PID 2>/dev/null || true
           echo "✓ Linux post-build smoke passed"
