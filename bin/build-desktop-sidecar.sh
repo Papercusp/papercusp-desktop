@@ -219,6 +219,107 @@ echo "→ bundling framework DDL"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 
+# Bundle the sidecar preload script. Loaded via `node --require` before
+# server.js to strip Node 22+'s partial localStorage stub (see file
+# header for full reasoning).
+echo "→ bundling sidecar preload"
+cp "$ROOT/bin/sidecar-preload.js" "$SIDECAR_DIR/sidecar-preload.js"
+
+# ---------------------------------------------------------------------------
+# Bundle external binaries — omp (Pi) and code-server.
+#
+# These are the runtime dependencies the @papercupai/pi-coding and
+# @papercupai/vscode-server plugins require. Vendoring them here means
+# desktop installs work out of the box without users having to install
+# Pi via brew or code-server via apt.
+#
+# Layout under the sidecar:
+#   sidecar/bin/omp[.exe]            ← Pi CLI; Tauri prepends sidecar/bin to PATH
+#   sidecar/code-server/bin/code-server  ← code-server entry; Tauri spawns it
+#
+# We pick the binary matching the target platform/arch the build host
+# is running on. CI runs the desktop build under `tauri build` on a
+# matrix of macos-{14,13}, ubuntu-22.04, and windows-2022, so each
+# matrix leg picks the right asset.
+# ---------------------------------------------------------------------------
+target_os=""
+target_arch=""
+case "$(uname -s)" in
+  Linux*)  target_os="linux" ;;
+  Darwin*) target_os="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) target_os="windows" ;;
+  *) target_os="$(uname -s)" ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) target_arch="x64" ;;
+  arm64|aarch64) target_arch="arm64" ;;
+  *) target_arch="$(uname -m)" ;;
+esac
+echo "→ bundling external binaries for $target_os-$target_arch"
+
+# omp (Pi) — github.com/can1357/oh-my-pi releases. Latest tag has
+# omp-{darwin,linux,windows}-{x64,arm64}[.exe] assets.
+OMP_VERSION="${OMP_VERSION:-v14.5.12}"
+OMP_DIR="$SIDECAR_DIR/bin"
+mkdir -p "$OMP_DIR"
+omp_asset=""
+omp_dst=""
+case "$target_os" in
+  darwin)  omp_asset="omp-darwin-${target_arch}";    omp_dst="$OMP_DIR/omp" ;;
+  linux)   omp_asset="omp-linux-${target_arch}";     omp_dst="$OMP_DIR/omp" ;;
+  windows) omp_asset="omp-windows-x64.exe";          omp_dst="$OMP_DIR/omp.exe" ;;
+esac
+if [[ -n "$omp_asset" ]]; then
+  echo "→ downloading omp $OMP_VERSION → $omp_asset"
+  if curl -fsSL "https://github.com/can1357/oh-my-pi/releases/download/$OMP_VERSION/$omp_asset" -o "$omp_dst"; then
+    chmod +x "$omp_dst"
+    echo "  ✓ omp at $omp_dst ($(du -h "$omp_dst" | awk '{print $1}'))"
+  else
+    echo "  ⚠ failed to download omp; pi-coding plugin will fall back to system PATH"
+    rm -f "$omp_dst"
+  fi
+else
+  echo "  ⚠ no omp asset for $target_os-$target_arch; pi-coding plugin will require user-installed omp"
+fi
+
+# code-server — github.com/coder/code-server releases. Linux + macOS only;
+# Windows users would have to install separately (code-server upstream
+# does not ship a native Windows binary).
+CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.117.0}"
+CS_DIR="$SIDECAR_DIR/code-server"
+cs_asset=""
+case "$target_os" in
+  linux)  case "$target_arch" in
+            x64)   cs_asset="code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" ;;
+            arm64) cs_asset="code-server-${CODE_SERVER_VERSION}-linux-arm64.tar.gz" ;;
+          esac ;;
+  darwin) case "$target_arch" in
+            x64)   cs_asset="code-server-${CODE_SERVER_VERSION}-macos-amd64.tar.gz" ;;
+            arm64) cs_asset="code-server-${CODE_SERVER_VERSION}-macos-arm64.tar.gz" ;;
+          esac ;;
+esac
+if [[ -n "$cs_asset" ]]; then
+  echo "→ downloading code-server $CODE_SERVER_VERSION → $cs_asset"
+  cs_tarball="/tmp/$cs_asset"
+  if curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/$cs_asset" -o "$cs_tarball"; then
+    rm -rf "$CS_DIR"
+    mkdir -p "$CS_DIR"
+    tar -xzf "$cs_tarball" -C "$CS_DIR" --strip-components=1
+    rm -f "$cs_tarball"
+    if [[ -x "$CS_DIR/bin/code-server" ]]; then
+      echo "  ✓ code-server at $CS_DIR ($(du -sh "$CS_DIR" | awk '{print $1}'))"
+    else
+      echo "  ⚠ code-server tarball extracted but bin/code-server is missing"
+      rm -rf "$CS_DIR"
+    fi
+  else
+    echo "  ⚠ failed to download code-server; vscode-server plugin will fall back to localhost:8082"
+    rm -f "$cs_tarball"
+  fi
+else
+  echo "  ⚠ no code-server build for $target_os-$target_arch (upstream doesn't ship Windows); vscode-server plugin will require external code-server"
+fi
+
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
 echo "✓ sidecar built at $SIDECAR_DIR ($total_size)"

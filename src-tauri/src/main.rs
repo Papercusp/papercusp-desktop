@@ -40,7 +40,69 @@ fn url_encode(s: &str) -> String {
 struct SidecarState {
     child: Mutex<Option<Child>>,
     pglite_child: Mutex<Option<Child>>,
+    code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+}
+
+/// Spawn the bundled code-server (vscode-in-the-browser). The
+/// @papercupai/vscode-server plugin iframes whatever URL its config
+/// resolves to (default http://localhost:8082), so we bind the bundled
+/// instance to a free local port, run with auth disabled (loopback-
+/// only), and surface the URL via PAPERCUSP_CODE_SERVER_URL so the
+/// operator's contributions resolver can use it as the default for
+/// `iframeUrlConfigKey: codeServerUrl`.
+///
+/// Returns (child, url) on success, or None if the bundled binary is
+/// missing (e.g. Windows builds, where upstream code-server doesn't
+/// ship).
+fn spawn_code_server(
+    code_server_dir: &std::path::Path,
+    workspace_home: &std::path::Path,
+    user_data_dir: &std::path::Path,
+) -> Option<(Child, String)> {
+    let bin = if cfg!(windows) {
+        code_server_dir.join("bin").join("code-server.cmd")
+    } else {
+        code_server_dir.join("bin").join("code-server")
+    };
+    if !bin.exists() {
+        println!(
+            "[papercusp-desktop] no bundled code-server at {} — vscode-server plugin will need an external install",
+            bin.display()
+        );
+        return None;
+    }
+    let port = find_free_port()?;
+    let bind = format!("127.0.0.1:{}", port);
+    println!(
+        "[papercusp-desktop] spawning code-server bin={} bind={}",
+        bin.display(),
+        bind
+    );
+    let workspace_home_str = workspace_home.to_string_lossy().to_string();
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--bind-addr")
+        .arg(&bind)
+        .arg("--auth")
+        .arg("none")
+        .arg("--disable-telemetry")
+        .arg("--disable-update-check")
+        .arg("--user-data-dir")
+        .arg(user_data_dir)
+        .arg("--extensions-dir")
+        .arg(user_data_dir.join("extensions"))
+        .env("HOME", &workspace_home_str)
+        .env("USERPROFILE", &workspace_home_str)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    match cmd.spawn() {
+        Ok(child) => Some((child, format!("http://127.0.0.1:{}", port))),
+        Err(e) => {
+            eprintln!("[papercusp-desktop] failed to spawn code-server: {}", e);
+            None
+        }
+    }
 }
 
 fn find_free_port() -> Option<u16> {
@@ -108,6 +170,7 @@ fn spawn_sidecar(
     sidecar_dir: &std::path::Path,
     pglite_socket_dir: Option<&std::path::Path>,
     workspace_home: &std::path::Path,
+    code_server_url: Option<&str>,
 ) -> std::io::Result<Child> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
@@ -124,22 +187,30 @@ fn spawn_sidecar(
     // "fresh-machine" semantics. See workspaces.rs for the layout.
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
 
-    // Disable Node 22+'s experimental Web Storage API. Without this,
-    // globalThis.localStorage is a partial stub that's truthy but
-    // missing methods, which makes any module using
-    // `if (localStorage) localStorage.getItem(...)` throw
-    // `TypeError: b.getItem is not a function` at module load. The
-    // operator's @rocicorp/zero client trips this during SSR; the
-    // resulting unhandledRejection takes out the catch-all module and
-    // every Hono-mounted /api/* endpoint 404s.
-    //
-    // Must be passed as a CLI arg, not NODE_OPTIONS — the flag isn't on
-    // Node's NODE_OPTIONS allowlist and the runtime errors out on boot
-    // with "--no-experimental-webstorage is not allowed in NODE_OPTIONS".
+    // Strip Node 22+'s partial localStorage stub via a --require preload
+    // (see bin/sidecar-preload.js for full reasoning). We can't use the
+    // --no-experimental-webstorage flag because Node 20 errors with
+    // "bad option" and Node 22+ disallows it in NODE_OPTIONS. A JS
+    // preload that does `delete globalThis.localStorage` is portable.
+    // Prepend the bundled `bin/` dir (omp + any other vendored CLIs) to
+    // PATH so child processes the sidecar spawns — Pi terminals, git,
+    // claude — find them without the user having to install them
+    // separately. The user's PATH is appended after, so system installs
+    // still take precedence if they're earlier on PATH... actually no:
+    // we *prepend*, so bundled binaries win. That's intentional: the
+    // user gets the version we tested against.
+    let bundled_bin = sidecar_dir.join("bin");
+    let path_sep = if cfg!(windows) { ";" } else { ":" };
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path);
+
+    let preload = sidecar_dir.join("sidecar-preload.js");
     let mut cmd = Command::new("node");
-    cmd.arg("--no-experimental-webstorage")
+    cmd.arg("--require")
+        .arg(&preload)
         .arg(&server_js)
         .current_dir(sidecar_dir)
+        .env("PATH", &new_path)
         .env("PORT", port.to_string())
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_ENV", "production")
@@ -199,6 +270,14 @@ fn spawn_sidecar(
             .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
             .env("HARNESS_DATABASE_URL", app_url)
             .env("HARNESS_ADMIN_DATABASE_URL", admin_url);
+    }
+
+    // Surface the bundled code-server URL so the operator's contributions
+    // resolver can use it as the iframe default for the @papercupai/
+    // vscode-server plugin — see app/api/_hono/plugins.ts and
+    // app/api/plugins/[slug]/contributions/route.ts.
+    if let Some(url) = code_server_url {
+        cmd.env("PAPERCUSP_CODE_SERVER_URL", url);
     }
 
     cmd.spawn()
@@ -313,6 +392,7 @@ pub fn run() {
     let state = SidecarState {
         child: Mutex::new(None),
         pglite_child: Mutex::new(None),
+        code_server_child: Mutex::new(None),
         port: Mutex::new(None),
     };
 
@@ -417,7 +497,26 @@ pub fn run() {
                 None
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home) {
+            // Spawn the bundled code-server so the @papercupai/vscode-server
+            // plugin's iframe has something to point at without the user
+            // having to install code-server separately. URL is surfaced to
+            // the sidecar via PAPERCUSP_CODE_SERVER_URL.
+            let code_server_url: Option<String> = {
+                let cs_dir = sidecar_dir.join("code-server");
+                let user_data_dir = workspace_home.join(".papercusp").join("code-server");
+                let _ = std::fs::create_dir_all(&user_data_dir);
+                match spawn_code_server(&cs_dir, &workspace_home, &user_data_dir) {
+                    Some((child, url)) => {
+                        let state: tauri::State<SidecarState> = app.state();
+                        *state.code_server_child.lock().unwrap() = Some(child);
+                        println!("[papercusp-desktop] code-server ready at {}", url);
+                        Some(url)
+                    }
+                    None => None,
+                }
+            };
+
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home, code_server_url.as_deref()) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
@@ -482,6 +581,12 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let maybe_pglite = state.pglite_child.lock().unwrap().take();
     if let Some(mut child) = maybe_pglite {
         println!("[papercusp-desktop] killing pglite-server pid={}", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let maybe_cs = state.code_server_child.lock().unwrap().take();
+    if let Some(mut child) = maybe_cs {
+        println!("[papercusp-desktop] killing code-server pid={}", child.id());
         let _ = child.kill();
         let _ = child.wait();
     }
