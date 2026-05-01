@@ -121,7 +121,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          # Include matrix.platform in the key. runner.os is "Linux" for both
+          # ubuntu-22.04 (x86_64) and ubuntu-22.04-arm (arm64), so the previous
+          # key let an arm cache restore onto an x86_64 runner — cargo then
+          # tried to exec an arm binary out of ~/.cargo/bin and failed with
+          # ENOEXEC ("Exec format error (os error 8)") in `cargo metadata`,
+          # killing the entire Linux x86_64 build.
+          key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Linux build deps
         if: startsWith(matrix.platform, 'ubuntu')
