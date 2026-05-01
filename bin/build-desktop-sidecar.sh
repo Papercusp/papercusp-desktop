@@ -257,11 +257,142 @@ case "$(uname -m)" in
 esac
 echo "→ bundling external binaries for $target_os-$target_arch"
 
+# OMP_DIR / BIN_DIR — destination for bundled CLIs (node, omp, gh). Tauri
+# prepends this dir to the sidecar's PATH on spawn (see main.rs PATH
+# munging) so the sidecar finds them without a user-side install. Hoisted
+# here from below because the Node download block referenced OMP_DIR
+# before its old in-place definition under `set -u`, killing the build
+# with 'OMP_DIR: unbound variable'.
+OMP_DIR="$SIDECAR_DIR/bin"
+mkdir -p "$OMP_DIR"
+
+# Node.js — vendor a known-good runtime so users don't need Node on PATH.
+# Tauri main spawns the sidecar + pglite-server with this binary explicitly
+# (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
+# at runtime, the standalone bundle has its dependencies pre-installed.
+NODE_VERSION="${NODE_VERSION:-v22.20.0}"
+node_dst=""
+case "$target_os" in
+  linux)   node_archive="node-${NODE_VERSION}-linux-${target_arch}.tar.xz" ;;
+  darwin)  case "$target_arch" in
+             x64)   node_archive="node-${NODE_VERSION}-darwin-x64.tar.gz" ;;
+             arm64) node_archive="node-${NODE_VERSION}-darwin-arm64.tar.gz" ;;
+           esac ;;
+  windows) node_archive="node-${NODE_VERSION}-win-x64.zip" ;;
+esac
+if [[ -n "${node_archive:-}" ]]; then
+  echo "→ downloading Node $NODE_VERSION → $node_archive"
+  node_tarball="/tmp/$node_archive"
+  if curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/${node_archive}" -o "$node_tarball"; then
+    tmp_node_dir=$(mktemp -d)
+    case "$node_archive" in
+      *.tar.xz) tar -xJf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
+      *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
+      *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
+                 inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | head -1) && \
+                 mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
+    esac
+    if [[ -f "$tmp_node_dir/bin/node" ]]; then
+      cp "$tmp_node_dir/bin/node" "$OMP_DIR/node"
+      chmod +x "$OMP_DIR/node"
+      node_dst="$OMP_DIR/node"
+    elif [[ -f "$tmp_node_dir/node.exe" ]]; then
+      cp "$tmp_node_dir/node.exe" "$OMP_DIR/node.exe"
+      node_dst="$OMP_DIR/node.exe"
+    fi
+    rm -rf "$tmp_node_dir" "$node_tarball"
+    if [[ -n "$node_dst" ]]; then
+      echo "  ✓ node at $node_dst ($(du -h "$node_dst" | awk '{print $1}'))"
+    else
+      echo "  ⚠ node tarball extracted but no node binary found at expected path; sidecar will fall back to system node"
+    fi
+  else
+    echo "  ⚠ failed to download Node; sidecar will fall back to system node"
+  fi
+fi
+
+# gh (GitHub CLI) — single Go binary, used by harness flows that
+# create/comment on GitHub PRs. cli/cli releases ship per-platform
+# tarballs; we extract just `bin/gh[.exe]` into our sidecar/bin/.
+GH_VERSION="${GH_VERSION:-2.92.0}"
+gh_archive=""
+gh_inner_dir=""
+case "$target_os" in
+  linux)   gh_archive="gh_${GH_VERSION}_linux_${target_arch}.tar.gz";  gh_inner_dir="gh_${GH_VERSION}_linux_${target_arch}" ;;
+  darwin)  case "$target_arch" in
+             x64)   gh_archive="gh_${GH_VERSION}_macOS_amd64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_amd64" ;;
+             arm64) gh_archive="gh_${GH_VERSION}_macOS_arm64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_arm64" ;;
+           esac ;;
+  windows) gh_archive="gh_${GH_VERSION}_windows_amd64.zip";          gh_inner_dir="gh_${GH_VERSION}_windows_amd64" ;;
+esac
+if [[ -n "$gh_archive" ]]; then
+  echo "→ downloading gh $GH_VERSION → $gh_archive"
+  gh_tarball="/tmp/$gh_archive"
+  if curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_archive}" -o "$gh_tarball"; then
+    gh_tmp=$(mktemp -d)
+    case "$gh_archive" in
+      *.tar.gz) tar -xzf "$gh_tarball" -C "$gh_tmp" ;;
+      *.zip)    unzip -q "$gh_tarball" -d "$gh_tmp" ;;
+    esac
+    # Find the gh binary regardless of inner dir naming quirks
+    gh_src=$(find "$gh_tmp" -name "gh" -o -name "gh.exe" 2>/dev/null | head -1)
+    if [[ -n "$gh_src" && -f "$gh_src" ]]; then
+      gh_dst="$OMP_DIR/$(basename "$gh_src")"
+      cp "$gh_src" "$gh_dst"
+      chmod +x "$gh_dst"
+      echo "  ✓ gh at $gh_dst ($(du -h "$gh_dst" | awk '{print $1}'))"
+    else
+      echo "  ⚠ gh archive extracted but no gh binary found"
+    fi
+    rm -rf "$gh_tmp" "$gh_tarball"
+  else
+    echo "  ⚠ failed to download gh; harness GitHub-integration flows will fall back to user-installed gh"
+  fi
+fi
+
+# MinGit-busybox (Windows only) — provides BOTH `git.exe` and a busybox-
+# backed `bash.exe`, plus the small POSIX util set the harness scripts
+# expect (sed, grep, sort, …). macOS/Linux ship git + bash by default so
+# we skip vendoring there. Tauri main prepends `git/cmd` and `git/usr/bin`
+# to PATH on Windows so all bundled tools resolve by name.
+#
+# We pin to the busybox flavor of MinGit (vs. the full MinGit) because it
+# includes the POSIX shell + utils the harness needs; the regular MinGit
+# strips them.
+if [[ "$target_os" == "windows" ]]; then
+  MINGIT_VERSION="${MINGIT_VERSION:-2.54.0}"
+  MINGIT_TAG="${MINGIT_TAG:-v${MINGIT_VERSION}.windows.1}"
+  mingit_asset="MinGit-${MINGIT_VERSION}-busybox-64-bit.zip"
+  GIT_DIR="$SIDECAR_DIR/git"
+  echo "→ downloading MinGit-busybox $MINGIT_VERSION (provides git.exe + bash.exe + POSIX utils on Windows)"
+  mingit_zip="/tmp/$mingit_asset"
+  if curl -fsSL "https://github.com/git-for-windows/git/releases/download/${MINGIT_TAG}/${mingit_asset}" -o "$mingit_zip"; then
+    rm -rf "$GIT_DIR"
+    mkdir -p "$GIT_DIR"
+    unzip -q "$mingit_zip" -d "$GIT_DIR"
+    rm -f "$mingit_zip"
+    # MinGit-busybox bundles busybox.exe but no bash.exe — busybox
+    # dispatches by argv[0], so a copy named bash.exe routes to its
+    # built-in shell. The harness `run.sh` shebang and several scripts
+    # need bash on PATH; this is how we satisfy that on Windows.
+    if [[ -f "$GIT_DIR/mingw64/bin/busybox.exe" ]]; then
+      cp "$GIT_DIR/mingw64/bin/busybox.exe" "$GIT_DIR/mingw64/bin/bash.exe"
+    fi
+    if [[ -f "$GIT_DIR/cmd/git.exe" && -f "$GIT_DIR/mingw64/bin/bash.exe" ]]; then
+      echo "  ✓ MinGit at $GIT_DIR ($(du -sh "$GIT_DIR" | awk '{print $1}'))"
+    else
+      echo "  ⚠ MinGit zip extracted but cmd/git.exe + mingw64/bin/bash.exe not at expected paths"
+      rm -rf "$GIT_DIR"
+    fi
+  else
+    echo "  ⚠ failed to download MinGit; Windows builds will require user-installed Git for Windows"
+  fi
+fi
+
 # omp (Pi) — github.com/can1357/oh-my-pi releases. Latest tag has
 # omp-{darwin,linux,windows}-{x64,arm64}[.exe] assets.
 OMP_VERSION="${OMP_VERSION:-v14.5.12}"
-OMP_DIR="$SIDECAR_DIR/bin"
-mkdir -p "$OMP_DIR"
+# OMP_DIR is now hoisted above; mkdir is idempotent.
 omp_asset=""
 omp_dst=""
 case "$target_os" in
