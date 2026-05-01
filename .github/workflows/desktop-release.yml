@@ -173,6 +173,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tell linuxdeploy + its plugins (which are themselves AppImages)
+          # to self-extract instead of relying on FUSE. Adding libfuse2 to
+          # apt was insufficient on the GitHub-hosted ubuntu-22.04 image —
+          # /dev/fuse isn't available to the runner user. APPIMAGE_EXTRACT_AND_RUN=1
+          # is the canonical CI workaround. No effect on macOS/Windows
+          # builds; harmless to set unconditionally.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
           # Tauri updater minisign signing. Without these, tauri-action skips
           # the per-platform signature + the latest.json manifest, and the
           # in-app updater errors with "no_compatible_assets". Generate a
