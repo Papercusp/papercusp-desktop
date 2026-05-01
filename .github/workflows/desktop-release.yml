@@ -139,7 +139,14 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            rpm
+            rpm \
+            libfuse2 \
+            fuse
+          # libfuse2 + fuse: linuxdeploy/AppImage runtime needs FUSE 2.
+          # Ubuntu 22.04 ships FUSE 3 by default, so without libfuse2 the
+          # AppImage bundling step fails with `failed to run linuxdeploy`
+          # ~15s after starting. AppImage is the Tauri updater target on
+          # Linux, so we cannot just drop it.
 
       - name: Install workspace deps (this repo)
         run: npm install --legacy-peer-deps
