@@ -109,6 +109,24 @@ fn find_free_port() -> Option<u16> {
     portpicker::pick_unused_port()
 }
 
+/// Resolve the Node binary for spawning the sidecar / pglite-server. We
+/// prefer the bundled binary at `<sidecar>/bin/node[.exe]` so installs
+/// don't require the user to have Node on their PATH; falls back to
+/// "node" (system PATH) when the bundled copy is missing — keeps dev
+/// flow + non-bundled builds working.
+fn resolve_node_bin(sidecar_dir: &std::path::Path) -> std::ffi::OsString {
+    let candidate = if cfg!(windows) {
+        sidecar_dir.join("bin").join("node.exe")
+    } else {
+        sidecar_dir.join("bin").join("node")
+    };
+    if candidate.exists() {
+        candidate.into_os_string()
+    } else {
+        std::ffi::OsString::from("node")
+    }
+}
+
 /// Spawn the bundled pglite-server. Returns the socket dir path on success.
 /// pglite-server listens on a unix socket at `<socket_dir>/.s.PGSQL.5432`.
 fn spawn_pglite_server(
@@ -137,7 +155,8 @@ fn spawn_pglite_server(
 
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
 
-    let mut cmd = Command::new("node");
+    let sidecar_dir = pglite_dir.parent().unwrap_or(pglite_dir);
+    let mut cmd = Command::new(resolve_node_bin(sidecar_dir));
     cmd.arg(&bin)
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
@@ -199,13 +218,30 @@ fn spawn_sidecar(
     // still take precedence if they're earlier on PATH... actually no:
     // we *prepend*, so bundled binaries win. That's intentional: the
     // user gets the version we tested against.
-    let bundled_bin = sidecar_dir.join("bin");
     let path_sep = if cfg!(windows) { ";" } else { ":" };
+    let mut path_parts: Vec<String> = Vec::new();
+    path_parts.push(sidecar_dir.join("bin").to_string_lossy().into_owned());
+    // Windows-only: bundled MinGit-busybox provides git + bash + POSIX
+    // utils. Three subdirs need to be on PATH:
+    //   cmd/         — git.exe wrapper
+    //   mingw64/bin/ — busybox.exe + the bash.exe copy our build script
+    //                  drops alongside it (busybox dispatches by argv[0]),
+    //                  plus the mingw POSIX shims
+    //   usr/bin/     — ssh + the msys-* DLL set bash.exe loads at runtime
+    if cfg!(windows) {
+        let git_root = sidecar_dir.join("git");
+        if git_root.exists() {
+            path_parts.push(git_root.join("cmd").to_string_lossy().into_owned());
+            path_parts.push(git_root.join("mingw64").join("bin").to_string_lossy().into_owned());
+            path_parts.push(git_root.join("usr").join("bin").to_string_lossy().into_owned());
+        }
+    }
     let existing_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path);
+    path_parts.push(existing_path);
+    let new_path = path_parts.join(path_sep);
 
     let preload = sidecar_dir.join("sidecar-preload.js");
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(resolve_node_bin(sidecar_dir));
     cmd.arg("--require")
         .arg(&preload)
         .arg(&server_js)
@@ -239,33 +275,27 @@ fn spawn_sidecar(
         // URL-encode the socket dir and put it where the URL's host
         // would normally go. This is the postgres-js convention for unix
         // socket connections: anything that decodes to a path starting
-        // with `/` is treated as a socket directory, not a TCP host.
-        //
-        // We can't use either of the more conventional forms:
+        // The URL uses `localhost` as the host. The actual socket
+        // routing happens via PAPERCUSP_PGLITE_SOCKET_DIR (set below):
+        // libs/db/src/connection.ts reads that env var and passes
+        // `host: <socket>` directly into postgres-js's options, which
+        // overrides whatever the URL says. Three other URL forms were
+        // tried and don't work:
         //   - `postgres://user@/db?host=/sock` is rejected by Node's
-        //     `new URL()` parser (ERR_INVALID_URL) and the operator's
-        //     bundled chunks call new URL() on the connection string at
-        //     module init, taking out every /api endpoint.
-        //   - `postgres://user@localhost/db?host=/sock` parses fine but
-        //     postgres-js treats `host=` as a runtime config parameter
-        //     and sends it to the server as `SET host = '/sock'`,
-        //     which postgres rejects with `unrecognized configuration
+        //     `new URL()` parser (ERR_INVALID_URL).
+        //   - `postgres://user@localhost/db?host=/sock` parses, but
+        //     postgres-js sends `host=` as a SQL `SET` parameter and
+        //     postgres rejects with `unrecognized configuration
         //     parameter "host"` (code 42704).
-        // The percent-encoded host form sidesteps both.
+        //   - `postgres://user@%2Fpath%2Fto%2Fsock/db` parses, but
+        //     postgres-js doesn't decode percent-encoded socket dirs;
+        //     it tries `getaddrinfo` on the literal encoded string.
         //
         // Passwords are required because pglite-server creates roles
-        // with LOGIN PASSWORD '<role>_pwd' (postgres wire protocol
-        // honors rolcanlogin even though pglite is single-user). They
-        // match the defaults in libs/db/src/connection.ts.
-        let socket_enc = url_encode(&socket_str);
-        let app_url = format!(
-            "postgres://harness_app:harness_app_pwd@{}/papercusp",
-            socket_enc
-        );
-        let admin_url = format!(
-            "postgres://harness_admin:harness_admin_pwd@{}/papercusp",
-            socket_enc
-        );
+        // with LOGIN PASSWORD '<role>_pwd'. They match the defaults
+        // in libs/db/src/connection.ts.
+        let app_url = "postgres://harness_app:harness_app_pwd@localhost/papercusp".to_string();
+        let admin_url = "postgres://harness_admin:harness_admin_pwd@localhost/papercusp".to_string();
         cmd.env("PAPERCUSP_USE_PGLITE", "1")
             .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
             .env("HARNESS_DATABASE_URL", app_url)

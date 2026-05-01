@@ -25,6 +25,10 @@
   .check-list .detail { color: #9a9a9a; flex: 1; word-break: break-word; }
   .hint-block { margin-top: 12px; padding: 10px 14px; background: #1a1d22; border-radius: 6px; max-width: 480px; text-align: left; font-size: 12.5px; line-height: 1.5; }
   .hint-block strong { color: #fcd34d; }
+  .install-btn { margin-top: 10px; padding: 7px 14px; background: #1f3a5f; color: #cfe1ff; border: 1px solid #2a4a78; border-radius: 5px; font-size: 12.5px; cursor: pointer; }
+  .install-btn:hover { background: #284a78; }
+  .install-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .install-log { margin-top: 8px; padding: 8px 10px; background: #0a0a0a; border-radius: 4px; max-height: 180px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; color: #9a9a9a; white-space: pre-wrap; word-break: break-all; max-width: 480px; text-align: left; }
 </style>
 </head>
 <body>
@@ -60,7 +64,7 @@
     ul.style.display = '';
     ul.innerHTML = payload.checks.map(c => `
       <li>
-        <span class="name">${c.name}</span>
+        <span class="name">${c.name}${c.optional ? ' <span style="opacity:0.6;font-size:0.85em">(optional)</span>' : ''}</span>
         ${badge(c.status)}
         <span class="detail">${(c.detail ?? '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</span>
       </li>
@@ -79,7 +83,17 @@
       lines.push('<strong>PostgreSQL on :5432</strong> — install from <code>https://postgresql.org/download/</code>, then <code>brew services start postgresql</code> (mac) or <code>sudo systemctl start postgresql</code> (Linux).');
     }
     if (failed.find(c => c.name === 'claude')) {
-      lines.push('<strong>claude CLI</strong> — install via <code>npm i -g @anthropic-ai/claude-code</code>.');
+      lines.push(`<strong>claude CLI + Meridian</strong> — Anthropic ships claude separately and its license doesn't permit us to redistribute the binary, so we install it on first run instead.<br>
+<details style="margin-top:6px"><summary style="cursor:pointer;color:#9a9a9a;font-size:12px">What does this do?</summary>
+<div style="margin-top:6px;padding:8px;background:#0a0a0a;border-radius:4px;font-size:12px;line-height:1.55">
+<strong style="color:#cfe1ff">Step 1 — Claude CLI</strong><br>
+Runs Anthropic's official installer (<code>claude.ai/install.sh</code> on macOS/Linux, <code>install.ps1</code> on Windows). Downloads <code>claude</code> from <code>downloads.claude.ai</code> to <code>~/.claude/bin/</code>. Identical to running the install command yourself.<br><br>
+<strong style="color:#cfe1ff">Step 2 — Meridian</strong><br>
+<code>npm install --prefix ~/.papercusp/runtime @rynfar/meridian</code>. Meridian is an MIT-licensed proxy that lets tools speaking the Anthropic API (Pi, Aider, etc.) route through your Claude Max / Pro subscription instead of needing an API key. Once installed, you sign in once and your subscription powers everything.<br><br>
+<span style="color:#9a9a9a">Both run on your machine; nothing about your account leaves it.</span>
+</div></details>
+<button class="install-btn" id="install-claude-btn" onclick="installClaudeStack()" style="margin-top:8px">Install Claude + Meridian</button>
+<div class="install-log" id="install-log" style="display:none"></div>`);
     }
     if (failed.find(c => c.name === 'bash')) {
       lines.push('<strong>bash</strong> — needed to run the orchestrator. macOS/Linux already have it; Windows: install <a href="https://git-scm.com/download/win" target="_blank">Git for Windows</a>, which ships <code>bash.exe</code>.');
@@ -89,6 +103,15 @@
     }
     if (failed.find(c => c.name === 'pi')) {
       lines.push('<strong>pi (oh-my-pi) — optional</strong> — required only for the in-app <code>pi</code> tab (interactive coding agent). Install via <code>brew install can1357/oh-my-pi/oh-my-pi</code> or see <a href="https://github.com/can1357/oh-my-pi" target="_blank">github.com/can1357/oh-my-pi</a>.');
+    }
+    // Surface soft-prereq hints from the server when missing — these
+    // don't block boot but unblock individual harness flows.
+    const optionalFailed = failed.filter(c => c.optional);
+    if (optionalFailed.length) {
+      const items = optionalFailed
+        .map(c => `<li><code>${c.name}</code> — ${(c.hint ?? c.detail ?? '').replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</li>`)
+        .join('');
+      lines.push(`<strong>Optional CLIs missing</strong> — the app will boot, but some flows need these:<ul style="margin:0.4em 0 0 1.2em;padding:0">${items}</ul>`);
     }
     hint.innerHTML = lines.join('<br><br>');
     hint.style.display = '';
@@ -141,6 +164,65 @@
   }, 8000);
 
   tick();
+
+  // One-click "Install Claude + Meridian" — POSTs to the operator's
+  // /api/desktop/install-claude-stack which streams progress via SSE.
+  // The route runs the official Anthropic install script + npm-installs
+  // meridian into ~/.papercusp/runtime, sidestepping redistribution.
+  window.installClaudeStack = async function () {
+    const btn = document.getElementById('install-claude-btn');
+    const log = document.getElementById('install-log');
+    if (!btn || !log) return;
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+    log.style.display = '';
+    log.textContent = '';
+    try {
+      const res = await fetch(`${sidecarBase()}/api/desktop/install-claude-stack`, {
+        method: 'POST',
+      });
+      if (!res.ok || !res.body) {
+        log.textContent = `Install request failed: HTTP ${res.status}`;
+        btn.disabled = false; btn.textContent = 'Install Claude + Meridian';
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // Parse SSE: blocks separated by \n\n, each "event: X\ndata: Y"
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const eventMatch = block.match(/^event: (.+)$/m);
+          const dataMatch = block.match(/^data: (.+)$/m);
+          if (!eventMatch || !dataMatch) continue;
+          let payload; try { payload = JSON.parse(dataMatch[1]); } catch { continue; }
+          if (eventMatch[1] === 'log' && payload.line) {
+            log.textContent += `[${payload.label}] ${payload.line}`;
+            log.scrollTop = log.scrollHeight;
+          } else if (eventMatch[1] === 'step') {
+            log.textContent += `\n--- ${payload.name}: ${payload.status} ---\n`;
+          } else if (eventMatch[1] === 'done') {
+            log.textContent += `\n=== ${payload.ok ? 'success' : 'failed'} ===\n${payload.hint || payload.reason || ''}\n`;
+            btn.disabled = false;
+            btn.textContent = payload.ok ? 'Restart app to retry preflight' : 'Install Claude + Meridian (retry)';
+            if (payload.ok) {
+              // Re-trigger preflight in case the user prefers not to restart.
+              setTimeout(tick, 1500);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      log.textContent += `\n[client error] ${e?.message ?? e}\n`;
+      btn.disabled = false; btn.textContent = 'Install Claude + Meridian (retry)';
+    }
+  };
 </script>
 </body>
 </html>

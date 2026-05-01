@@ -296,13 +296,36 @@ if [[ -n "${node_archive:-}" ]]; then
       cp "$tmp_node_dir/bin/node" "$OMP_DIR/node"
       chmod +x "$OMP_DIR/node"
       node_dst="$OMP_DIR/node"
+      # Also keep npm — the on-demand "Install Claude + Meridian" flow
+      # needs it. npm is a JS shim under lib/node_modules/npm that's
+      # invoked by a launcher script; copy both.
+      if [[ -d "$tmp_node_dir/lib/node_modules/npm" ]]; then
+        mkdir -p "$SIDECAR_DIR/node-runtime/lib/node_modules"
+        cp -a "$tmp_node_dir/lib/node_modules/npm" "$SIDECAR_DIR/node-runtime/lib/node_modules/npm"
+        cp "$tmp_node_dir/bin/npm" "$OMP_DIR/npm"
+        cp "$tmp_node_dir/bin/npx" "$OMP_DIR/npx"
+        chmod +x "$OMP_DIR/npm" "$OMP_DIR/npx"
+      fi
     elif [[ -f "$tmp_node_dir/node.exe" ]]; then
       cp "$tmp_node_dir/node.exe" "$OMP_DIR/node.exe"
       node_dst="$OMP_DIR/node.exe"
+      # Windows: npm.cmd launcher + lib/node_modules/npm
+      if [[ -d "$tmp_node_dir/node_modules/npm" ]]; then
+        mkdir -p "$SIDECAR_DIR/node-runtime"
+        cp -a "$tmp_node_dir/node_modules" "$SIDECAR_DIR/node-runtime/node_modules"
+      fi
+      for shim in npm.cmd npx.cmd; do
+        if [[ -f "$tmp_node_dir/$shim" ]]; then
+          cp "$tmp_node_dir/$shim" "$OMP_DIR/$shim"
+        fi
+      done
     fi
     rm -rf "$tmp_node_dir" "$node_tarball"
     if [[ -n "$node_dst" ]]; then
       echo "  ✓ node at $node_dst ($(du -h "$node_dst" | awk '{print $1}'))"
+      if [[ -f "$OMP_DIR/npm" || -f "$OMP_DIR/npm.cmd" ]]; then
+        echo "  ✓ npm/npx alongside node (for on-demand Claude install)"
+      fi
     else
       echo "  ⚠ node tarball extracted but no node binary found at expected path; sidecar will fall back to system node"
     fi
@@ -310,6 +333,21 @@ if [[ -n "${node_archive:-}" ]]; then
     echo "  ⚠ failed to download Node; sidecar will fall back to system node"
   fi
 fi
+
+# NOTE on Claude CLI + meridian:
+#
+# We deliberately do NOT vendor either at build time. Both are installed
+# on first launch via the operator's /api/desktop/install-claude-stack
+# route, which runs the official installers from claude.ai/install.sh
+# and then `npm install -g @rynfar/meridian` (which itself depends on
+# @anthropic-ai/claude-code). This sidesteps the redistribution question
+# for the proprietary Claude binary and keeps the installer ~600 MB
+# slimmer. The bundled Node + npm makes the on-demand install work
+# without requiring the user to have Node already installed.
+#
+# To enable bundled npm at runtime, we copy npm out of the Node tarball
+# into sidecar/bin/ alongside the bare node binary. The Node tarball
+# already includes npm — we just preserve it instead of dropping it.
 
 # gh (GitHub CLI) — single Go binary, used by harness flows that
 # create/comment on GitHub PRs. cli/cli releases ship per-platform
