@@ -124,8 +124,21 @@ fn spawn_sidecar(
     // "fresh-machine" semantics. See workspaces.rs for the layout.
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
 
+    // Disable Node 22+'s experimental Web Storage API. Without this,
+    // globalThis.localStorage is a partial stub that's truthy but
+    // missing methods, which makes any module using
+    // `if (localStorage) localStorage.getItem(...)` throw
+    // `TypeError: b.getItem is not a function` at module load. The
+    // operator's @rocicorp/zero client trips this during SSR; the
+    // resulting unhandledRejection takes out the catch-all module and
+    // every Hono-mounted /api/* endpoint 404s.
+    //
+    // Must be passed as a CLI arg, not NODE_OPTIONS — the flag isn't on
+    // Node's NODE_OPTIONS allowlist and the runtime errors out on boot
+    // with "--no-experimental-webstorage is not allowed in NODE_OPTIONS".
     let mut cmd = Command::new("node");
-    cmd.arg(&server_js)
+    cmd.arg("--no-experimental-webstorage")
+        .arg(&server_js)
         .current_dir(sidecar_dir)
         .env("PORT", port.to_string())
         .env("HOSTNAME", "127.0.0.1")
@@ -134,18 +147,6 @@ fn spawn_sidecar(
         .env("PAPERCUSP_DESKTOP", "1")
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str) // Windows
-        // Disable Node 22+'s experimental Web Storage API. Without this,
-        // globalThis.localStorage is a partial stub that's truthy but
-        // missing methods, which makes any module using
-        // `if (localStorage) localStorage.getItem(...)` throw
-        // `TypeError: b.getItem is not a function` at module load. The
-        // operator's @rocicorp/zero client trips this during SSR; the
-        // resulting unhandledRejection takes out the catch-all module
-        // and every Hono-mounted /api/* endpoint 404s.
-        .env(
-            "NODE_OPTIONS",
-            "--no-experimental-webstorage",
-        )
         // Inherit stdio so sidecar errors land in the Tauri parent's
         // stdout/stderr (visible via `papercusp-desktop > log 2>&1` or
         // Console.app on mac). The previous `Stdio::piped()` collected
