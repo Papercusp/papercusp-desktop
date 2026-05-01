@@ -184,13 +184,31 @@ fi
 # explicitly from the source workspace's node_modules into whichever
 # platform packages exist in the bundled tree.
 echo "→ patching @lydell/node-pty prebuilts (native bindings)"
+# Next's tracer copies @lydell/node-pty-<plat>/lib but not the
+# prebuilds/<arch>/pty.node native binary (it's loaded via dynamic
+# require, see next.config.js outputFileTracingIncludes for the
+# half-fix that covers /api/[[...route]]/**). We backfill from the
+# operator workspace's node_modules — that's where npm actually
+# installed @lydell/* — rather than the desktop repo root, which
+# only depends on @tauri-apps/cli.
 for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   [[ -d "$pkg" ]] || continue
   pkg_name="$(basename "$pkg")"
-  src_prebuilds="$ROOT/node_modules/@lydell/$pkg_name/prebuilds"
-  if [[ -d "$src_prebuilds" ]]; then
+  src_prebuilds=""
+  for cand in \
+    "$WEB_DIR/node_modules/@lydell/$pkg_name/prebuilds" \
+    "$PAPERCUP_ROOT/node_modules/@lydell/$pkg_name/prebuilds" \
+    "$ROOT/node_modules/@lydell/$pkg_name/prebuilds"; do
+    if [[ -d "$cand" ]]; then
+      src_prebuilds="$cand"
+      break
+    fi
+  done
+  if [[ -n "$src_prebuilds" ]]; then
     cp -a "$src_prebuilds" "$pkg/"
-    echo "  ✓ $pkg_name → $(find "$pkg/prebuilds" -name '*.node' | wc -l) .node file(s)"
+    echo "  ✓ $pkg_name ← $src_prebuilds → $(find "$pkg/prebuilds" -name '*.node' | wc -l) .node file(s)"
+  else
+    echo "  ⚠ $pkg_name: no prebuilds source found in any candidate path; the catch-all /api route will 500 at module load"
   fi
 done
 
