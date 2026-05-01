@@ -117,8 +117,16 @@ fn spawn_sidecar(
         .env("PAPERCUSP_DESKTOP", "1")
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str) // Windows
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Inherit stdio so sidecar errors land in the Tauri parent's
+        // stdout/stderr (visible via `papercusp-desktop > log 2>&1` or
+        // Console.app on mac). The previous `Stdio::piped()` collected
+        // sidecar output into kernel pipe buffers that nothing ever read,
+        // which (a) hid every server-side error and (b) deadlocked the
+        // sidecar once the buffer filled (~64KB) because writes started
+        // blocking. The forwarding-thread alternative is more code and
+        // didn't buy us anything; inherit is the simplest correct choice.
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
 
     // When pglite is active, point the framework's DB pool at the unix
     // socket. Pool max defaults to 8 (matches non-pglite default); the
