@@ -241,23 +241,25 @@ jobs:
           fi
           echo "✓ Preflight responds with valid JSON"
 
-          # Hit a Hono-catch-all endpoint to make sure /api/[[...route]] is
-          # actually mountable. Preflight alone is not enough — it lives at
-          # app/api/desktop/preflight (a separate file route) and so dodges
-          # any module-load failure in the catch-all (e.g. missing
-          # pty.node prebuild, ERR_INVALID_URL on the pglite connection
-          # string). /api/installed is also a file route; the catch-all
-          # serves /api/harness, /api/projects, etc.
-          # We can't hit /api/harness directly because it requires DB
-          # round-trips that may not be ready yet, so instead we scan the
-          # sidecar log for module-load failures and unhandled errors.
-          # The sidecar inherits parent stdio (papercusp-desktop@7c28555)
-          # so its errors land in /tmp/papercusp.log.
+          # Force the Hono catch-all (/api/[[...route]]) to load by hitting
+          # an endpoint it serves. Preflight + /api/installed are both
+          # file-based routes that dodge any module-load failure in the
+          # catch-all. Next.js loads route handlers lazily, so without a
+          # request that targets the catch-all, its module-load errors
+          # (missing pty.node, ERR_INVALID_URL, etc.) never trigger and
+          # the smoke-grep below sees a clean log.
+          # We don't care about the response — even a 4xx/5xx exercises
+          # module load. Use a known-nonexistent path that won't 200 in
+          # any plausible state, just to be unambiguous.
+          curl -sfm 5 "http://localhost:$PORT/api/__smoke_force_module_load" || true
+          # Give Next.js a moment to log if it's about to.
+          sleep 1
           if grep -E "Failed to load native module|ERR_INVALID_URL|Cannot find module|MODULE_NOT_FOUND" /tmp/papercusp.log; then
             echo "✗ Sidecar logged a module-load failure — see above"
+            tail -100 /tmp/papercusp.log
             kill $PID 2>/dev/null || true
             exit 1
           fi
-          echo "✓ No module-load errors in sidecar log"
+          echo "✓ No module-load errors in sidecar log after catch-all probe"
           kill $PID 2>/dev/null || true
           echo "✓ Linux post-build smoke passed"
