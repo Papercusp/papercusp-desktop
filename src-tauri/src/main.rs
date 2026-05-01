@@ -20,6 +20,23 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
+/// Minimal RFC 3986 percent-encoding for the path component. Only the
+/// reserved + unsafe set; we avoid pulling in a full url crate dep just
+/// for this. Used to encode the pglite unix socket dir into the host
+/// field of the postgres connection URL.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 struct SidecarState {
     child: Mutex<Option<Child>>,
     pglite_child: Mutex<Option<Child>>,
@@ -117,6 +134,18 @@ fn spawn_sidecar(
         .env("PAPERCUSP_DESKTOP", "1")
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str) // Windows
+        // Disable Node 22+'s experimental Web Storage API. Without this,
+        // globalThis.localStorage is a partial stub that's truthy but
+        // missing methods, which makes any module using
+        // `if (localStorage) localStorage.getItem(...)` throw
+        // `TypeError: b.getItem is not a function` at module load. The
+        // operator's @rocicorp/zero client trips this during SSR; the
+        // resulting unhandledRejection takes out the catch-all module
+        // and every Hono-mounted /api/* endpoint 404s.
+        .env(
+            "NODE_OPTIONS",
+            "--no-experimental-webstorage",
+        )
         // Inherit stdio so sidecar errors land in the Tauri parent's
         // stdout/stderr (visible via `papercusp-desktop > log 2>&1` or
         // Console.app on mac). The previous `Stdio::piped()` collected
@@ -135,18 +164,36 @@ fn spawn_sidecar(
     // queries no longer corrupt the unnamed prepared statement state.
     if let Some(socket_dir) = pglite_socket_dir {
         let socket_str = socket_dir.to_string_lossy().to_string();
-        // Note: "localhost" is a placeholder host (Node's new URL() rejects
-        // the canonical empty-host form `postgres://user@/db?host=/sock`
-        // with ERR_INVALID_URL). postgres-js honors the `host=<socket>`
-        // query param over the URL host and routes via the unix socket.
+        // URL-encode the socket dir and put it where the URL's host
+        // would normally go. This is the postgres-js convention for unix
+        // socket connections: anything that decodes to a path starting
+        // with `/` is treated as a socket directory, not a TCP host.
         //
-        // Passwords are required because pglite-server creates roles with
-        // LOGIN PASSWORD '<role>_pwd' so the postgres wire protocol's
-        // role-can-login check passes (NOLOGIN roles get
-        // "password authentication failed" even on a unix socket). They
+        // We can't use either of the more conventional forms:
+        //   - `postgres://user@/db?host=/sock` is rejected by Node's
+        //     `new URL()` parser (ERR_INVALID_URL) and the operator's
+        //     bundled chunks call new URL() on the connection string at
+        //     module init, taking out every /api endpoint.
+        //   - `postgres://user@localhost/db?host=/sock` parses fine but
+        //     postgres-js treats `host=` as a runtime config parameter
+        //     and sends it to the server as `SET host = '/sock'`,
+        //     which postgres rejects with `unrecognized configuration
+        //     parameter "host"` (code 42704).
+        // The percent-encoded host form sidesteps both.
+        //
+        // Passwords are required because pglite-server creates roles
+        // with LOGIN PASSWORD '<role>_pwd' (postgres wire protocol
+        // honors rolcanlogin even though pglite is single-user). They
         // match the defaults in libs/db/src/connection.ts.
-        let app_url = format!("postgres://harness_app:harness_app_pwd@localhost/papercusp?host={}", socket_str);
-        let admin_url = format!("postgres://harness_admin:harness_admin_pwd@localhost/papercusp?host={}", socket_str);
+        let socket_enc = url_encode(&socket_str);
+        let app_url = format!(
+            "postgres://harness_app:harness_app_pwd@{}/papercusp",
+            socket_enc
+        );
+        let admin_url = format!(
+            "postgres://harness_admin:harness_admin_pwd@{}/papercusp",
+            socket_enc
+        );
         cmd.env("PAPERCUSP_USE_PGLITE", "1")
             .env("PAPERCUSP_PGLITE_SOCKET_DIR", &socket_str)
             .env("HARNESS_DATABASE_URL", app_url)
