@@ -451,6 +451,27 @@ else
   echo "  ⚠ no code-server build for $target_os-$target_arch (upstream doesn't ship Windows); vscode-server plugin will require external code-server"
 fi
 
+# Strip musl-libc native binary variants. npm pulls these in as optional
+# deps (e.g. @img/sharp-linuxmusl-*, @lydell/node-pty-linuxmusl-*) alongside
+# the glibc variants, intended for Alpine. Our AppImage targets glibc, so
+# these are dead weight AND they break linuxdeploy: it walks every ELF and
+# tries to resolve its deps, but `libc.musl-x86_64.so.1` doesn't exist on
+# the glibc runner, so AppImage bundling aborts with:
+#   ERROR: Could not find dependency: libc.musl-x86_64.so.1
+#   ERROR: Failed to deploy dependencies for existing files
+#   Error [tauri_cli] failed to bundle project
+# Documented in the AppImage debug arc 2026-05-01.
+echo "→ stripping musl-libc native binary variants (incompatible with glibc AppImage)"
+musl_dirs=$(find "$SIDECAR_DIR" -type d \( -name "*-linuxmusl-*" -o -name "*-linuxmusl" \) 2>/dev/null)
+if [[ -n "$musl_dirs" ]]; then
+  while IFS= read -r d; do
+    echo "  ✗ removing $d"
+    rm -rf "$d"
+  done <<< "$musl_dirs"
+else
+  echo "  (none found)"
+fi
+
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
 echo "✓ sidecar built at $SIDECAR_DIR ($total_size)"
