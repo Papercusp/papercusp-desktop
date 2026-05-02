@@ -356,7 +356,12 @@ GH_VERSION="${GH_VERSION:-2.92.0}"
 gh_archive=""
 gh_inner_dir=""
 case "$target_os" in
-  linux)   gh_archive="gh_${GH_VERSION}_linux_${target_arch}.tar.gz";  gh_inner_dir="gh_${GH_VERSION}_linux_${target_arch}" ;;
+  linux)   case "$target_arch" in
+             x64)   gh_arch="amd64" ;;
+             arm64) gh_arch="arm64" ;;
+             *)     gh_arch="$target_arch" ;;
+           esac
+           gh_archive="gh_${GH_VERSION}_linux_${gh_arch}.tar.gz";  gh_inner_dir="gh_${GH_VERSION}_linux_${gh_arch}" ;;
   darwin)  case "$target_arch" in
              x64)   gh_archive="gh_${GH_VERSION}_macOS_amd64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_amd64" ;;
              arm64) gh_archive="gh_${GH_VERSION}_macOS_arm64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_arm64" ;;
