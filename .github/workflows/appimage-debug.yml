@@ -29,7 +29,13 @@ jobs:
           repository: papercupai/papercup
           path: _external/papercup
           token: ${{ secrets.SIBLING_REPO_PAT }}
-          submodules: recursive
+          # Submodule pointers in papercup/libs/papercusp can lag behind
+          # what the standalone papercupai/papercusp main has been pushed
+          # to (paperclip-active divergence). The sidecar build only needs
+          # the standalone papercusp checkout below, not papercup's
+          # submodule copy. So skip recursion to keep this debug workflow
+          # decoupled from that pre-existing divergence.
+          submodules: false
 
       - name: Checkout sibling papercusp
         uses: actions/checkout@v4
