@@ -391,7 +391,7 @@ fi
 
 # omp (Pi) — github.com/can1357/oh-my-pi releases. Latest tag has
 # omp-{darwin,linux,windows}-{x64,arm64}[.exe] assets.
-OMP_VERSION="${OMP_VERSION:-v14.5.12}"
+OMP_VERSION="${OMP_VERSION:-v14.5.14}"
 # OMP_DIR is now hoisted above; mkdir is idempotent.
 omp_asset=""
 omp_dst=""
