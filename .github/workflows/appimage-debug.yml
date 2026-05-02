@@ -42,15 +42,99 @@ jobs:
           GH_TOKEN: ${{ secrets.SIBLING_REPO_PAT }}
         run: |
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-          for path in $(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}'); do
-            if [[ "$path" == "libs/papercusp" ]]; then
-              url=$(git config --file .gitmodules --get "submodule.$path.url")
-              echo "cloning $url@main into $path (bypassing stale submodule SHA)"
+          # For each submodule, try the recorded SHA first. If that fails
+          # (paperclip-active divergence — local WIP SHA not on remote),
+          # fall back to cloning the submodule's main HEAD directly.
+          for path in $(git config --file .gitmodules --get-regexp '^submodule\..*\.path
+
+      - name: Checkout sibling papercusp
+        uses: actions/checkout@v4
+        with:
+          repository: papercupai/papercusp
+          path: _external/papercusp
+          token: ${{ secrets.SIBLING_REPO_PAT }}
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: appimage-debug-linux-x64
+
+      - name: Install system deps (FUSE + AppImage tooling)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev \
+            libayatana-appindicator3-dev pkg-config build-essential \
+            patchelf libssl-dev rpm libfuse2 fuse
+
+      - name: Install workspace deps
+        run: npm install --legacy-peer-deps
+
+      - name: Install operator deps
+        working-directory: _external/papercup
+        run: npm install --legacy-peer-deps
+
+      - name: Build sidecar
+        env:
+          PAPERCUP_ROOT: ${{ github.workspace }}/_external/papercup
+          PAPERCUSP_ROOT: ${{ github.workspace }}/_external/papercusp
+        run: bash bin/build-desktop-sidecar.sh
+
+      - name: Install Tauri CLI
+        run: |
+          cargo install tauri-cli --version "^2" --locked
+          which cargo-tauri
+          cargo tauri --version
+
+      - name: Build AppImage with verbose linuxdeploy output
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          DEBUG: "1"
+          RUST_LOG: "debug"
+          RUST_BACKTRACE: "1"
+        run: |
+          set +e
+          mkdir -p /tmp/appimage-debug
+          cargo tauri build --bundles appimage --verbose 2>&1 | tee /tmp/appimage-debug/build.log
+          status=${PIPESTATUS[0]}
+          echo "=== cargo tauri build exit status: $status ==="
+          echo
+          echo "=== last 200 lines of build.log ==="
+          tail -200 /tmp/appimage-debug/build.log
+          echo
+          echo "=== any AppImage artifacts produced? ==="
+          find src-tauri/target -name "*.AppImage" -o -name "linuxdeploy*.log" 2>/dev/null | head -20 || true
+          exit $status
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-debug-logs
+          path: |
+            /tmp/appimage-debug/build.log
+            src-tauri/target/release/bundle/appimage/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+ | awk '{print $2}'); do
+            url=$(git config --file .gitmodules --get "submodule.$path.url")
+            if git submodule update --init --depth 1 -- "$path" 2>/tmp/submod-err.log; then
+              echo "OK: $path at recorded SHA"
+            else
+              echo "FALLBACK: $path recorded SHA not reachable; cloning $url@main"
+              cat /tmp/submod-err.log | head -3
               rm -rf "$path"
               git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
-            else
-              echo "initializing $path"
-              git submodule update --init --depth 1 -- "$path"
             fi
           done
 
