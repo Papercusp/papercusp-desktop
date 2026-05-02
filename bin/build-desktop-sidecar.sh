@@ -270,7 +270,7 @@ mkdir -p "$OMP_DIR"
 # Tauri main spawns the sidecar + pglite-server with this binary explicitly
 # (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
 # at runtime, the standalone bundle has its dependencies pre-installed.
-NODE_VERSION="${NODE_VERSION:-v22.20.0}"
+NODE_VERSION="${NODE_VERSION:-v24.15.0}"
 node_dst=""
 case "$target_os" in
   linux)   node_archive="node-${NODE_VERSION}-linux-${target_arch}.tar.xz" ;;
