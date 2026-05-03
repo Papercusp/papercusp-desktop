@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "identifier": "com.papercusp.desktop",
   "build": {
-    "beforeDevCommand": "npm --prefix ../papercup run dev:operator",
+    "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
     "beforeBuildCommand": "",
     "frontendDist": "../web",
     "devUrl": "http://localhost:3055"
