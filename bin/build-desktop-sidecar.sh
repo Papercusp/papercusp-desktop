@@ -159,6 +159,13 @@ if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite" ]]; then
   echo "ERROR: bundled pglite missing — node_modules install didn't include @electric-sql/pglite"
   exit 1
 fi
+# pglite-tools provides the WASM pg_dump that backs the operator's snapshot
+# capture path (PGLITE_ADMIN_URL → /admin/pg-dump in pglite-server). Without
+# it, snapshot create returns 500 on desktop.
+if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite-tools" ]]; then
+  echo "ERROR: bundled pglite-tools missing — snapshot capture would fail on desktop"
+  exit 1
+fi
 
 # Bundle the papercusp MCP server. Auto-registered into ~/.omp/agent/mcp.json
 # on first pi spawn (pty.ts:ensurePapercuspMcpRegistered) so the LLM sees

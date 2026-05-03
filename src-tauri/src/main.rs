@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod pty;
 mod workspaces;
 
 use std::process::{Child, Command, Stdio};
@@ -116,6 +117,7 @@ fn spawn_pglite_server(
     socket_dir: &std::path::Path,
     data_dir: &std::path::Path,
     workspace_home: &std::path::Path,
+    admin_port: Option<u16>,
 ) -> std::io::Result<Child> {
     let bin = pglite_dir.join("bin").join("pglite-server.mjs");
     println!(
@@ -147,6 +149,13 @@ fn spawn_pglite_server(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // Snapshot capture path: pglite-server exposes pgDump via a localhost
+    // HTTP admin endpoint so the operator/CLI doesn't need a system pg_dump
+    // binary. See @papercusp/export-state pglite-admin-client.ts.
+    if let Some(port) = admin_port {
+        cmd.env("PGLITE_ADMIN_PORT", port.to_string());
+    }
+
     cmd.spawn()
 }
 
@@ -171,6 +180,7 @@ fn spawn_sidecar(
     pglite_socket_dir: Option<&std::path::Path>,
     workspace_home: &std::path::Path,
     code_server_url: Option<&str>,
+    pglite_admin_port: Option<u16>,
 ) -> std::io::Result<Child> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
@@ -278,6 +288,13 @@ fn spawn_sidecar(
     // app/api/plugins/[slug]/contributions/route.ts.
     if let Some(url) = code_server_url {
         cmd.env("PAPERCUSP_CODE_SERVER_URL", url);
+    }
+
+    // Snapshot capture path: when pglite-server is running with an admin
+    // port, surface its URL so @papercusp/export-state's pgDump uses
+    // pglite-tools (WASM pg_dump) instead of shelling to the system binary.
+    if let Some(port) = pglite_admin_port {
+        cmd.env("PGLITE_ADMIN_URL", format!("http://127.0.0.1:{}", port));
     }
 
     cmd.spawn()
@@ -412,6 +429,13 @@ pub fn run() {
             app_version,
             check_for_update,
             install_update,
+            // E. Native pty commands — see src-tauri/src/pty.rs
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+            pty::pty_history,
+            pty::pty_is_alive,
         ])
         .manage(state)
         .setup(|app| {
@@ -462,6 +486,7 @@ pub fn run() {
                 .unwrap_or_else(|_| "1".to_string())
                 != "0";
 
+            let mut pglite_admin_port: Option<u16> = None;
             let pglite_socket_dir: Option<std::path::PathBuf> = if use_pglite {
                 let pglite_dir = sidecar_dir.join("pglite-server");
                 // Workspace-scoped socket + data dirs. Each workspace gets
@@ -470,7 +495,12 @@ pub fn run() {
                 let socket_dir = workspace_home.join(".papercusp").join("pglite-socket");
                 let data_dir = workspace_home.join(".papercusp").join("pglite-data");
 
-                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home) {
+                // Allocate a free port for pglite-server's admin HTTP endpoint
+                // (snapshot capture path uses it as a system-pg_dump replacement).
+                let admin_port = portpicker::pick_unused_port();
+                pglite_admin_port = admin_port;
+
+                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home, admin_port) {
                     Ok(c) => {
                         let state: tauri::State<SidecarState> = app.state();
                         *state.pglite_child.lock().unwrap() = Some(c);
@@ -478,8 +508,9 @@ pub fn run() {
                             eprintln!("[papercusp-desktop] pglite-server socket did not appear in 60s — first-boot DDL may have failed; continuing without DB so preflight is reachable");
                         }
                         println!(
-                            "[papercusp-desktop] pglite-server ready (socket={})",
-                            socket_dir.display()
+                            "[papercusp-desktop] pglite-server ready (socket={}, admin={:?})",
+                            socket_dir.display(),
+                            admin_port,
                         );
                         Some(socket_dir)
                     }
@@ -516,7 +547,7 @@ pub fn run() {
                 }
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home, code_server_url.as_deref()) {
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
@@ -540,8 +571,12 @@ pub fn run() {
             // render any missing-prereq UI, then navigate when ready.
             if let Some(window) = app.get_webview_window("main") {
                 let base = format!("http://localhost:{}", port);
+                // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty
+                // path (Tauri invoke + events) instead of the operator's
+                // HTTP+WS bridge. See apps/operator/lib/pty-tauri.ts and
+                // apps/operator/app/harness/PiPanel.tsx.
                 let _ = window.eval(&format!(
-                    "window.__papercuspBase = '{}'; window.dispatchEvent(new CustomEvent('papercusp:base'));",
+                    "window.__papercuspBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
                     base
                 ));
             }
