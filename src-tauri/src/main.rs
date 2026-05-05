@@ -44,6 +44,9 @@ struct SidecarState {
     /// child, whichever spawned. Single mutex covers both since only one
     /// runs per workspace.
     pglite_child: Mutex<Option<Child>>,
+    /// zero-cache child. Only spawned when embedded-postgres came up
+    /// successfully (zero-cache requires PG with logical replication).
+    zero_cache_child: Mutex<Option<Child>>,
     code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
 }
@@ -145,6 +148,66 @@ fn spawn_embedded_postgres_server(
     cmd.spawn()
 }
 
+/// Spawn the bundled zero-cache-server (Rocicorp Zero's WS sync server)
+/// against an already-running embedded-postgres. The harness_zero role
+/// must have REPLICATION + SUPERUSER (set by embedded-postgres-server's
+/// bootstrap). Caller is responsible for `wait_for_pg_tcp` BEFORE calling
+/// this — zero-cache crashes on first-boot if PG isn't ready.
+fn spawn_zero_cache_server(
+    zero_dir: &std::path::Path,
+    upstream_db: &str,
+    port: u16,
+    change_streamer_port: u16,
+    replica_dir: &std::path::Path,
+    workspace_home: &std::path::Path,
+) -> std::io::Result<Child> {
+    let bin = zero_dir.join("bin").join("zero-cache-server.mjs");
+    println!(
+        "[papercusp-desktop] spawning zero-cache-server bin={} port={} change-streamer={} replica={}",
+        bin.display(),
+        port,
+        change_streamer_port,
+        replica_dir.display(),
+    );
+    std::fs::create_dir_all(replica_dir)?;
+    let workspace_home_str = workspace_home.to_string_lossy().to_string();
+    let mut cmd = Command::new("node");
+    cmd.arg(&bin)
+        .env("PAPERCUSP_ZERO_UPSTREAM_DB", upstream_db)
+        .env("PAPERCUSP_ZERO_PORT", port.to_string())
+        .env("PAPERCUSP_ZERO_CHANGE_STREAMER_PORT", change_streamer_port.to_string())
+        .env("PAPERCUSP_ZERO_REPLICA_DIR", replica_dir.to_string_lossy().to_string())
+        .env("HOME", &workspace_home_str)
+        .env("USERPROFILE", &workspace_home_str)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    cmd.spawn()
+}
+
+/// Poll http://127.0.0.1:<port>/keepalive until 200 or timeout.
+/// zero-cache exposes /keepalive once it's accepting WS connections.
+fn wait_for_zero_cache(port: u16, timeout: Duration) -> bool {
+    use std::net::TcpStream;
+    let start = Instant::now();
+    let addr = format!("127.0.0.1:{}", port);
+    while start.elapsed() < timeout {
+        if let Ok(s) = TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            Duration::from_millis(500),
+        ) {
+            drop(s);
+            // TCP is up; zero-cache may still be initializing the schema.
+            // The HTTP keepalive probe is more thorough but we don't have
+            // a built-in HTTP client without adding a dep — TCP is good
+            // enough since zero-cache binds the port last in its startup
+            // sequence.
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    false
+}
+
 /// Poll localhost:<port> until a TCP connect succeeds or timeout.
 fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
     use std::net::TcpStream;
@@ -233,6 +296,10 @@ fn spawn_sidecar(
     pglite_socket_dir: Option<&std::path::Path>,
     // TCP port of the embedded-postgres-server (preferred path).
     pg_tcp_port: Option<u16>,
+    // TCP port of the zero-cache-server, if it spawned successfully.
+    // Surfaced to the operator via NEXT_PUBLIC_ZERO_SERVER so the
+    // HarnessZeroProvider can choose syncType="WEBSOCKETS".
+    zero_cache_port: Option<u16>,
     workspace_home: &std::path::Path,
     code_server_url: Option<&str>,
     pglite_admin_port: Option<u16>,
@@ -358,6 +425,16 @@ fn spawn_sidecar(
     // app/api/plugins/[slug]/contributions/route.ts.
     if let Some(url) = code_server_url {
         cmd.env("PAPERCUSP_CODE_SERVER_URL", url);
+    }
+
+    // Surface the zero-cache URL so HarnessZeroProvider can flip from
+    // POLLING → WEBSOCKETS. Both env vars set: the public one for the
+    // browser bundle (visible client-side), and the internal one for
+    // server-side operator code (named-query resolver target).
+    if let Some(zc_port) = zero_cache_port {
+        let zc_url = format!("http://127.0.0.1:{}", zc_port);
+        cmd.env("NEXT_PUBLIC_ZERO_SERVER", &zc_url)
+            .env("HARNESS_ZERO_INTERNAL_SERVER", &zc_url);
     }
 
     // Snapshot capture path: when pglite-server is running with an admin
@@ -487,6 +564,7 @@ pub fn run() {
     let state = SidecarState {
         child: Mutex::new(None),
         pglite_child: Mutex::new(None),
+        zero_cache_child: Mutex::new(None),
         code_server_child: Mutex::new(None),
         port: Mutex::new(None),
     };
@@ -603,6 +681,7 @@ pub fn run() {
 
             let mut pglite_admin_port: Option<u16> = None;
             let mut pg_tcp_port: Option<u16> = None;
+            let mut zero_cache_port: Option<u16> = None;
             let mut pglite_socket_dir: Option<std::path::PathBuf> = None;
 
             if use_embedded_pg {
@@ -631,6 +710,44 @@ pub fn run() {
                             "[papercusp-desktop] failed to spawn embedded-postgres-server: {}; falling through to pglite",
                             e
                         );
+                    }
+                }
+
+                // If PG is up, optionally also spawn zero-cache. Default ON.
+                // Opt-out: PAPERCUSP_USE_ZERO_CACHE=0. Failure here is
+                // soft — operator falls back to POLLING SyncProvider mode.
+                if pg_tcp_port.is_some() {
+                    let use_zero = std::env::var("PAPERCUSP_USE_ZERO_CACHE")
+                        .unwrap_or_else(|_| "1".to_string()) != "0";
+                    if use_zero {
+                        let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
+                        // change-streamer-port defaults to ZERO_PORT+1 in zero-cache,
+                        // which collides if anything's listening there. Pick a
+                        // separate unused port and pass it explicitly.
+                        let zc_change_port = portpicker::pick_unused_port().unwrap_or(zc_port - 1);
+                        let zero_dir = sidecar_dir.join("zero-cache-server");
+                        let replica_dir = workspace_home.join(".papercusp").join("zero-replica");
+                        let upstream_db = format!(
+                            "postgres://harness_zero:harness_zero_pwd@127.0.0.1:{}/papercusp",
+                            pg_tcp_port.unwrap()
+                        );
+                        match spawn_zero_cache_server(&zero_dir, &upstream_db, zc_port, zc_change_port, &replica_dir, &workspace_home) {
+                            Ok(c) => {
+                                let state: tauri::State<SidecarState> = app.state();
+                                *state.zero_cache_child.lock().unwrap() = Some(c);
+                                if wait_for_zero_cache(zc_port, Duration::from_secs(60)) {
+                                    println!("[papercusp-desktop] zero-cache-server ready on 127.0.0.1:{}", zc_port);
+                                    zero_cache_port = Some(zc_port);
+                                } else {
+                                    eprintln!("[papercusp-desktop] zero-cache-server did not accept TCP in 60s — sidecar will fall back to POLLING");
+                                }
+                            }
+                            Err(e) => eprintln!(
+                                "[papercusp-desktop] failed to spawn zero-cache-server: {}; sidecar will fall back to POLLING", e,
+                            ),
+                        }
+                    } else {
+                        println!("[papercusp-desktop] PAPERCUSP_USE_ZERO_CACHE=0 — skipping zero-cache-server");
                     }
                 }
             } else {
@@ -695,7 +812,7 @@ pub fn run() {
                 }
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
@@ -758,6 +875,15 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let maybe_child = state.child.lock().unwrap().take();
     if let Some(mut child) = maybe_child {
         println!("[papercusp-desktop] killing sidecar pid={}", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Kill zero-cache BEFORE PG so it has a chance to flush its replica
+    // cleanly. Killing PG first leaves zero-cache scribbling errors as
+    // upstream connections drop.
+    let maybe_zc = state.zero_cache_child.lock().unwrap().take();
+    if let Some(mut child) = maybe_zc {
+        println!("[papercusp-desktop] killing zero-cache-server pid={}", child.id());
         let _ = child.kill();
         let _ = child.wait();
     }

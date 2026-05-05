@@ -42,7 +42,7 @@ fi
 
 echo "→ building $WEB_DIR as Next.js standalone bundle"
 echo "→ installing operator deps"
-(cd "$WEB_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund)
+(cd "$WEB_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
 echo "→ verifying workspace deps resolved"
 echo "  apps/operator/node_modules/@restart/ contents:"
@@ -229,6 +229,32 @@ if ! "$SIDECAR_DIR/bin/pg_dump" --version >/dev/null 2>&1; then
 fi
 echo "  pg_dump probe: $("$SIDECAR_DIR/bin/pg_dump" --version)"
 
+# Bundle zero-cache-server (Rocicorp Zero's WebSocket sync server). Boots
+# against embedded-postgres after migrations apply, exposes WS that the
+# operator's HarnessZeroProvider connects to. Without this bundled, the
+# desktop falls back to polling — same UX as today, just slower.
+ZERO_CACHE_SRC="$PAPERCUSP_ROOT/packages/zero-cache-server"
+ZERO_CACHE_DST="$SIDECAR_DIR/zero-cache-server"
+echo "→ bundling zero-cache-server"
+if [[ ! -d "$ZERO_CACHE_SRC" ]]; then
+  echo "ERROR: @restart/zero-cache-server not found at $ZERO_CACHE_SRC"
+  exit 1
+fi
+mkdir -p "$ZERO_CACHE_DST"
+cp "$ZERO_CACHE_SRC/package.json" "$ZERO_CACHE_DST/"
+cp -a "$ZERO_CACHE_SRC/src" "$ZERO_CACHE_DST/"
+cp -a "$ZERO_CACHE_SRC/bin" "$ZERO_CACHE_DST/"
+chmod +x "$ZERO_CACHE_DST/bin/zero-cache-server.mjs"
+echo "→ installing zero-cache-server runtime deps (~50MB @rocicorp/zero)"
+( cd "$ZERO_CACHE_DST" && npm install --omit=dev --no-workspaces --legacy-peer-deps --silent ) || {
+  echo "ERROR: failed to install zero-cache-server runtime deps"
+  exit 1
+}
+if [[ ! -x "$ZERO_CACHE_DST/node_modules/.bin/zero-cache" ]]; then
+  echo "ERROR: bundled zero-cache binary missing"
+  exit 1
+fi
+
 # Bundle the legacy pglite-server. Kept as a fallback path
 # (PAPERCUSP_USE_EMBEDDED_PG=0 → falls back to pglite-server). Will be
 # removed once embedded-postgres-server is validated in production.
@@ -257,12 +283,14 @@ if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite" ]]; then
   echo "ERROR: bundled pglite missing — node_modules install didn't include @electric-sql/pglite"
   exit 1
 fi
-# pglite-tools provides the WASM pg_dump that backs the operator's snapshot
-# capture path (PGLITE_ADMIN_URL → /admin/pg-dump in pglite-server). Without
-# it, snapshot create returns 500 on desktop.
+# pglite-tools (WASM pg_dump for the legacy pglite-server /admin/pg-dump
+# path) is now optional — the embedded-postgres path supplies a real
+# pg_dump on PATH, so snapshot capture works there without it. Warn if
+# missing so users opting back into the pglite fallback get a useful
+# diagnostic if snapshots fail; don't HARD-fail the build.
 if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite-tools" ]]; then
-  echo "ERROR: bundled pglite-tools missing — snapshot capture would fail on desktop"
-  exit 1
+  echo "WARN: bundled pglite-tools missing — pglite fallback won't have snapshot capture"
+  echo "      (the embedded-postgres path uses real pg_dump from sidecar/bin/, so this only matters if PAPERCUSP_USE_EMBEDDED_PG=0)"
 fi
 
 # Bundle the papercusp MCP server. Auto-registered into ~/.omp/agent/mcp.json
