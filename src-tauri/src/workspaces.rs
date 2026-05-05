@@ -61,6 +61,65 @@ pub fn workspace_dir(id: &str) -> PathBuf {
     workspaces_root().join(id)
 }
 
+/// Symlink the user's real ~/.claude.json and ~/.claude/.credentials.json into
+/// the workspace's .claude/ so the claude CLI inherits a working session
+/// instead of asking for re-auth. Per-workspace API keys are still possible:
+/// users who want isolation delete the symlinks and write their own files.
+/// Best-effort — failures are logged but don't block workspace creation.
+pub fn link_claude_credentials(workspace_dir: &PathBuf) -> io::Result<()> {
+    let real_home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let ws_claude_dir = workspace_dir.join(".claude");
+    fs::create_dir_all(&ws_claude_dir)?;
+
+    let pairs: [(PathBuf, PathBuf); 2] = [
+        (real_home.join(".claude.json"), workspace_dir.join(".claude.json")),
+        (
+            real_home.join(".claude").join(".credentials.json"),
+            ws_claude_dir.join(".credentials.json"),
+        ),
+    ];
+
+    for (src, dst) in pairs.iter() {
+        if !src.exists() {
+            continue;
+        }
+        // If dst exists as a real file (user already wrote per-workspace creds),
+        // leave it alone. Only replace dangling/stale symlinks.
+        if dst.exists() && !dst.is_symlink() {
+            continue;
+        }
+        if dst.is_symlink() {
+            let _ = fs::remove_file(dst);
+        }
+        #[cfg(unix)]
+        {
+            if let Err(e) = std::os::unix::fs::symlink(src, dst) {
+                eprintln!(
+                    "[papercusp-desktop] could not link {} -> {}: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // On Windows, fall back to copy.
+            if let Err(e) = fs::copy(src, dst) {
+                eprintln!(
+                    "[papercusp-desktop] could not copy {} -> {}: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,7 +191,19 @@ pub fn ensure_initialized() -> io::Result<Registry> {
                 let mut fixed = reg.clone();
                 fixed.current = first.id.clone();
                 write_registry(&fixed)?;
+                for ws in &fixed.workspaces {
+                    let dir = workspace_dir(&ws.id);
+                    if dir.exists() {
+                        let _ = link_claude_credentials(&dir);
+                    }
+                }
                 return Ok(fixed);
+            }
+        }
+        for ws in &reg.workspaces {
+            let dir = workspace_dir(&ws.id);
+            if dir.exists() {
+                let _ = link_claude_credentials(&dir);
             }
         }
         return Ok(reg);
@@ -180,6 +251,17 @@ pub fn ensure_initialized() -> io::Result<Registry> {
         }],
     };
     write_registry(&reg)?;
+
+    // Link claude creds into every existing workspace dir on every boot —
+    // catches both fresh first-launch and pre-existing workspaces created
+    // before this fix landed.
+    for ws in &reg.workspaces {
+        let dir = workspace_dir(&ws.id);
+        if dir.exists() {
+            let _ = link_claude_credentials(&dir);
+        }
+    }
+
     Ok(reg)
 }
 
@@ -210,6 +292,7 @@ pub fn create(name: &str) -> io::Result<Workspace> {
         ));
     }
     fs::create_dir_all(&dir)?;
+    let _ = link_claude_credentials(&dir);
     let ws = Workspace {
         id,
         name: trimmed.to_string(),
