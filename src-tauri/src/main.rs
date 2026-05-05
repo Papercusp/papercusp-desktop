@@ -208,20 +208,52 @@ fn wait_for_zero_cache(port: u16, timeout: Duration) -> bool {
     false
 }
 
-/// Poll localhost:<port> until a TCP connect succeeds or timeout.
+/// Poll localhost:<port> until Postgres is actually ready to accept
+/// queries — not just listening on TCP.
+///
+/// Why this exists: a TCP-only check returns true the moment postmaster
+/// binds the port, which happens BEFORE crash recovery / startup
+/// finishes. During that window any real query gets back FATAL 57P03
+/// "the database system is not yet accepting connections" and the
+/// caller crashes (zero-cache exits with code 255 on first-boot if it
+/// hits this race). See `spawn_zero_cache_server` doc comment.
+///
+/// We speak PG's wire protocol directly to avoid pulling in a postgres
+/// crate just for a probe: send a StartupMessage, peek at the first
+/// response byte. `R` = AuthenticationRequest = postmaster is past
+/// recovery and willing to talk; `E` = ErrorResponse (typically 57P03
+/// during recovery) = retry. Anything else (or read timeout) = retry.
 fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
+    use std::io::{Read, Write};
     use std::net::TcpStream;
     let start = Instant::now();
     let addr = format!("127.0.0.1:{}", port);
+    let socket: std::net::SocketAddr = addr.parse().unwrap();
+
+    // Build a Postgres v3.0 StartupMessage with user=postgres + database=postgres.
+    // Layout: [length:u32 BE][protocol:0x00030000][param strings, NUL-terminated][NUL]
+    let mut msg: Vec<u8> = Vec::with_capacity(64);
+    msg.extend_from_slice(&[0, 0, 0, 0]); // length placeholder
+    msg.extend_from_slice(&[0, 3, 0, 0]); // protocol 3.0
+    msg.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
+    let len = (msg.len() as u32).to_be_bytes();
+    msg[0..4].copy_from_slice(&len);
+
     while start.elapsed() < timeout {
-        if let Ok(s) = TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(500),
-        ) {
-            drop(s);
-            return true;
+        if let Ok(mut s) = TcpStream::connect_timeout(&socket, Duration::from_millis(500)) {
+            let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
+            if s.write_all(&msg).is_ok() {
+                let mut tag = [0u8; 1];
+                if let Ok(()) = s.read_exact(&mut tag) {
+                    // 'R' (0x52) — postmaster reached the auth step, recovery done.
+                    if tag[0] == b'R' {
+                        return true;
+                    }
+                    // 'E' (0x45) — ErrorResponse. Almost always 57P03 here; loop.
+                }
+            }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(300));
     }
     false
 }
@@ -719,6 +751,14 @@ pub fn run() {
                 if pg_tcp_port.is_some() {
                     let use_zero = std::env::var("PAPERCUSP_USE_ZERO_CACHE")
                         .unwrap_or_else(|_| "1".to_string()) != "0";
+                    // wait_for_pg_tcp returns when PG accepts a TCP connection
+                    // but PG can still respond `57P03 the database system is
+                    // starting up` to the first auth attempts while it
+                    // finishes init. zero-cache treats that as fatal and
+                    // exits. A 3s pause covers the typical init window.
+                    if use_zero {
+                        std::thread::sleep(Duration::from_secs(3));
+                    }
                     if use_zero {
                         let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
                         // change-streamer-port defaults to ZERO_PORT+1 in zero-cache,
