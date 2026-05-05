@@ -7,7 +7,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "build:debug": "tauri build --debug"
+    "build:debug": "tauri build --debug",
+    "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '✓ tauri-bindings.ts regenerated'"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0"

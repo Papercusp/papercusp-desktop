@@ -534,9 +534,15 @@ pub fn run() {
 
     // MCP bridge for AI coding agents — debug builds only. Lets Claude
     // Code / Cursor connect via @hypothesi/tauri-mcp-server and inspect
-    // the running app (IPC, window state, JS eval).
+    // the running app (IPC, window state, JS eval). Bound to localhost
+    // only — the bridge exposes webview_execute_js, so a 0.0.0.0 bind
+    // would let anyone on the LAN drive the dev app.
     #[cfg(debug_assertions)]
-    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    let builder = builder.plugin(
+        tauri_plugin_mcp_bridge::Builder::new()
+            .bind_address("127.0.0.1")
+            .build(),
+    );
 
     builder
         .invoke_handler(specta_builder.invoke_handler())
