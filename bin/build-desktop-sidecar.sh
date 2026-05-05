@@ -167,6 +167,16 @@ fi
 # subsystem (libs/papercusp-export-state/src/pg-dump.ts) finds them.
 # Replaces the legacy WASM-pg_dump path that went through pglite-server's
 # /admin/pg-dump endpoint.
+#
+# IMPORTANT: zonky's embedded-postgres-binaries (what `embedded-postgres`
+# wraps) ships SERVER-only — initdb, pg_ctl, postgres. Client tools
+# (pg_dump, psql, pg_dumpall) are stripped to keep size small (~60MB
+# instead of ~200MB). So we can't symlink from the embedded distribution
+# alone; we have to source the client tools elsewhere. Strategy:
+#   1. If an embedded copy exists for the tool → use it.
+#   2. Otherwise, copy from the build host's system PATH.
+#   3. If neither: HARD FAIL — snapshot capture would be broken on the
+#      shipped bundle. Don't silently produce a broken release.
 mkdir -p "$SIDECAR_DIR/bin"
 EMBEDDED_PG_BIN_DIR=""
 for plat in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/bin; do
@@ -179,12 +189,45 @@ if [[ -z "$EMBEDDED_PG_BIN_DIR" ]]; then
   echo "ERROR: could not find native/bin directory inside @embedded-postgres/*"
   exit 1
 fi
-echo "→ symlinking pg_dump + psql from $EMBEDDED_PG_BIN_DIR into $SIDECAR_DIR/bin/"
+echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
+SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
+> "$SOURCE_NOTE_FILE"
 for tool in pg_dump psql pg_dumpall; do
+  src=""
   if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]]; then
-    ln -sfn "$EMBEDDED_PG_BIN_DIR/$tool" "$SIDECAR_DIR/bin/$tool"
+    src="$EMBEDDED_PG_BIN_DIR/$tool"
+    method="symlink (from embedded-postgres)"
+  elif system_path=$(command -v "$tool" 2>/dev/null) && [[ -n "$system_path" ]]; then
+    src="$system_path"
+    method="copy (from system PATH)"
   fi
+  if [[ -z "$src" ]]; then
+    echo "ERROR: $tool not found in embedded-postgres distribution AND not on system PATH"
+    echo "  embedded-postgres ships server-only (initdb, pg_ctl, postgres). The build"
+    echo "  host needs PostgreSQL client tools installed for the snapshot subsystem"
+    echo "  to work in the bundled desktop app. Install via:"
+    echo "    macOS:   brew install libpq && brew link --force libpq"
+    echo "    Ubuntu:  apt-get install postgresql-client"
+    echo "    Windows: install PostgreSQL from postgresql.org"
+    exit 1
+  fi
+  case "$method" in
+    symlink*) ln -sfn "$src" "$SIDECAR_DIR/bin/$tool" ;;
+    copy*)    cp -L "$src" "$SIDECAR_DIR/bin/$tool"; chmod +x "$SIDECAR_DIR/bin/$tool" ;;
+  esac
+  echo "  $tool: $method ($src)"
+  echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
 done
+# Sanity-check that the bundled binary actually runs
+if ! "$SIDECAR_DIR/bin/pg_dump" --version >/dev/null 2>&1; then
+  echo "ERROR: bundled pg_dump fails --version probe; the binary is not loadable on this host"
+  echo "  This usually means dynamic library mismatch (e.g. system libpq from a different"
+  echo "  PG major version). Resolve by either:"
+  echo "    - building on a host with PG 17/18 client tools matching the server,"
+  echo "    - or vendoring libpq alongside (out of scope for this script)."
+  exit 1
+fi
+echo "  pg_dump probe: $("$SIDECAR_DIR/bin/pg_dump" --version)"
 
 # Bundle the legacy pglite-server. Kept as a fallback path
 # (PAPERCUSP_USE_EMBEDDED_PG=0 → falls back to pglite-server). Will be
