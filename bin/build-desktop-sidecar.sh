@@ -163,6 +163,29 @@ if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q
   exit 1
 fi
 
+# Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
+# subsystem (libs/papercusp-export-state/src/pg-dump.ts) finds them.
+# Replaces the legacy WASM-pg_dump path that went through pglite-server's
+# /admin/pg-dump endpoint.
+mkdir -p "$SIDECAR_DIR/bin"
+EMBEDDED_PG_BIN_DIR=""
+for plat in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/bin; do
+  if [[ -d "$plat" ]]; then
+    EMBEDDED_PG_BIN_DIR="$plat"
+    break
+  fi
+done
+if [[ -z "$EMBEDDED_PG_BIN_DIR" ]]; then
+  echo "ERROR: could not find native/bin directory inside @embedded-postgres/*"
+  exit 1
+fi
+echo "→ symlinking pg_dump + psql from $EMBEDDED_PG_BIN_DIR into $SIDECAR_DIR/bin/"
+for tool in pg_dump psql pg_dumpall; do
+  if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]]; then
+    ln -sfn "$EMBEDDED_PG_BIN_DIR/$tool" "$SIDECAR_DIR/bin/$tool"
+  fi
+done
+
 # Bundle the legacy pglite-server. Kept as a fallback path
 # (PAPERCUSP_USE_EMBEDDED_PG=0 → falls back to pglite-server). Will be
 # removed once embedded-postgres-server is validated in production.
