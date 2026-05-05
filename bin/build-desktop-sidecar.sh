@@ -131,12 +131,44 @@ done
 chmod +x "$HARNESS_DST/run.sh"
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
-# Bundle the embedded pglite-server so desktop installs don't need a
-# system Postgres. The Tauri main spawns this alongside the Next.js
-# sidecar in production builds (gated by PAPERCUSP_USE_PGLITE=1).
+# Bundle the embedded-postgres-server (real PG with logical replication
+# enabled, so Zero / pgoutput consumers can subscribe). This is the
+# preferred desktop DB as of 2026-05-05; pglite-server is still bundled
+# below for legacy fallback (PAPERCUSP_USE_EMBEDDED_PG=0). Tauri main
+# selects which one to spawn.
+EMBEDDED_PG_SRC="$PAPERCUSP_ROOT/packages/embedded-postgres-server"
+EMBEDDED_PG_DST="$SIDECAR_DIR/embedded-postgres-server"
+echo "→ bundling embedded-postgres-server"
+if [[ ! -d "$EMBEDDED_PG_SRC" ]]; then
+  echo "ERROR: @restart/embedded-postgres-server not found at $EMBEDDED_PG_SRC"
+  exit 1
+fi
+mkdir -p "$EMBEDDED_PG_DST"
+cp "$EMBEDDED_PG_SRC/package.json" "$EMBEDDED_PG_DST/"
+cp -a "$EMBEDDED_PG_SRC/src" "$EMBEDDED_PG_DST/"
+cp -a "$EMBEDDED_PG_SRC/bin" "$EMBEDDED_PG_DST/"
+chmod +x "$EMBEDDED_PG_DST/bin/embedded-postgres-server.mjs"
+# Install embedded-postgres + postgres-js. embedded-postgres pulls platform
+# binaries (~60-150MB per arch) — npm picks the right @embedded-postgres/<plat>
+# package automatically based on the build host's platform. For
+# cross-platform releases, run this script once per target platform.
+echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-150MB binary download)"
+( cd "$EMBEDDED_PG_DST" && npm install --omit=dev --no-workspaces --legacy-peer-deps --silent ) || {
+  echo "ERROR: failed to install embedded-postgres-server runtime deps"
+  exit 1
+}
+# Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
+if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q .; then
+  echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
+  exit 1
+fi
+
+# Bundle the legacy pglite-server. Kept as a fallback path
+# (PAPERCUSP_USE_EMBEDDED_PG=0 → falls back to pglite-server). Will be
+# removed once embedded-postgres-server is validated in production.
 PGLITE_SRC="$PAPERCUSP_ROOT/packages/pglite-server"
 PGLITE_DST="$SIDECAR_DIR/pglite-server"
-echo "→ bundling pglite-server"
+echo "→ bundling pglite-server (legacy fallback)"
 if [[ ! -d "$PGLITE_SRC" ]]; then
   echo "ERROR: @restart/pglite-server not found at $PGLITE_SRC"
   exit 1

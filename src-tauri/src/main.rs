@@ -40,6 +40,9 @@ fn url_encode(s: &str) -> String {
 
 struct SidecarState {
     child: Mutex<Option<Child>>,
+    /// Either the embedded-postgres child (preferred) OR the legacy pglite
+    /// child, whichever spawned. Single mutex covers both since only one
+    /// runs per workspace.
     pglite_child: Mutex<Option<Child>>,
     code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
@@ -110,6 +113,56 @@ fn find_free_port() -> Option<u16> {
     portpicker::pick_unused_port()
 }
 
+/// Spawn the bundled embedded-postgres-server (real PG with logical
+/// replication). Returns the spawned child; caller is responsible for
+/// waiting on the TCP port to come up via wait_for_pg_tcp.
+fn spawn_embedded_postgres_server(
+    pg_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    workspace_home: &std::path::Path,
+    port: u16,
+    db_sql_dir: &std::path::Path,
+) -> std::io::Result<Child> {
+    let bin = pg_dir.join("bin").join("embedded-postgres-server.mjs");
+    println!(
+        "[papercusp-desktop] spawning embedded-postgres-server bin={} port={} data={}",
+        bin.display(),
+        port,
+        data_dir.display()
+    );
+    std::fs::create_dir_all(data_dir)?;
+    let workspace_home_str = workspace_home.to_string_lossy().to_string();
+    let mut cmd = Command::new("node");
+    cmd.arg(&bin)
+        .env("PAPERCUSP_PG_DATA_DIR", data_dir.to_string_lossy().to_string())
+        .env("PAPERCUSP_PG_PORT", port.to_string())
+        .env("PAPERCUSP_PG_DB_NAME", "papercusp")
+        .env("PAPERCUSP_PG_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
+        .env("HOME", &workspace_home_str)
+        .env("USERPROFILE", &workspace_home_str)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    cmd.spawn()
+}
+
+/// Poll localhost:<port> until a TCP connect succeeds or timeout.
+fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
+    use std::net::TcpStream;
+    let start = Instant::now();
+    let addr = format!("127.0.0.1:{}", port);
+    while start.elapsed() < timeout {
+        if let Ok(s) = TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            Duration::from_millis(500),
+        ) {
+            drop(s);
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
 /// Spawn the bundled pglite-server. Returns the socket dir path on success.
 /// pglite-server listens on a unix socket at `<socket_dir>/.s.PGSQL.5432`.
 fn spawn_pglite_server(
@@ -178,6 +231,8 @@ fn spawn_sidecar(
     port: u16,
     sidecar_dir: &std::path::Path,
     pglite_socket_dir: Option<&std::path::Path>,
+    // TCP port of the embedded-postgres-server (preferred path).
+    pg_tcp_port: Option<u16>,
     workspace_home: &std::path::Path,
     code_server_url: Option<&str>,
     pglite_admin_port: Option<u16>,
@@ -239,12 +294,27 @@ fn spawn_sidecar(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    // When pglite is active, point the framework's DB pool at the unix
-    // socket. Pool max defaults to 8 (matches non-pglite default); the
-    // pglite-socket fork at packages/pglite-server/src/socket-server.js
-    // adds per-handler batch stickiness so concurrent parameterized
-    // queries no longer corrupt the unnamed prepared statement state.
-    if let Some(socket_dir) = pglite_socket_dir {
+    // Preferred path: real PG via embedded-postgres-server on a TCP port.
+    // wal_level=logical is set on the postmaster, so Zero / pgoutput
+    // consumers can subscribe — fixing the original reason we couldn't
+    // run streamed Zero on the desktop.
+    if let Some(pg_port) = pg_tcp_port {
+        let app_url = format!(
+            "postgresql://harness_app:harness_app_pwd@127.0.0.1:{}/papercusp",
+            pg_port
+        );
+        let admin_url = format!(
+            "postgresql://harness_admin:harness_admin_pwd@127.0.0.1:{}/papercusp",
+            pg_port
+        );
+        cmd.env("PAPERCUSP_USE_EMBEDDED_PG", "1")
+            .env("PAPERCUSP_PG_PORT", pg_port.to_string())
+            .env("HARNESS_DATABASE_URL", &app_url)
+            .env("HARNESS_ADMIN_DATABASE_URL", &admin_url);
+    }
+    // Legacy fallback: pglite-server unix socket (pre-2026-05-05).
+    // Only consulted when embedded-postgres-server didn't spawn.
+    else if let Some(socket_dir) = pglite_socket_dir {
         let socket_str = socket_dir.to_string_lossy().to_string();
         // URL-encode the socket dir and put it where the URL's host
         // would normally go. This is the postgres-js convention for unix
@@ -478,55 +548,94 @@ pub fn run() {
             }
             println!("[papercusp-desktop] active workspace home: {}", workspace_home.display());
 
-            // Default-on for production; opt-out with PAPERCUSP_USE_PGLITE=0.
-            // Desktop installs don't ship Postgres, so pglite is the only
-            // built-in DB. Users with their own Postgres can opt out and
-            // set HARNESS_DATABASE_URL themselves.
-            let use_pglite = std::env::var("PAPERCUSP_USE_PGLITE")
+            // DB spawn order:
+            //   1. Try embedded-postgres-server (real PG, has logical
+            //      replication for Zero) — default ON, opt-out via
+            //      PAPERCUSP_USE_EMBEDDED_PG=0.
+            //   2. If that's disabled or fails, try pglite-server (legacy).
+            //   3. If both disabled, sidecar uses HARNESS_DATABASE_URL from
+            //      the user's env.
+            //
+            // Only one DB runs per workspace; whichever spawned wins the
+            // SidecarState.pglite_child slot (single-mutex on purpose).
+            let use_embedded_pg = std::env::var("PAPERCUSP_USE_EMBEDDED_PG")
                 .unwrap_or_else(|_| "1".to_string())
                 != "0";
 
             let mut pglite_admin_port: Option<u16> = None;
-            let pglite_socket_dir: Option<std::path::PathBuf> = if use_pglite {
-                let pglite_dir = sidecar_dir.join("pglite-server");
-                // Workspace-scoped socket + data dirs. Each workspace gets
-                // its own Postgres data tree, so two workspaces never share
-                // schemas, rows, or replication slots.
-                let socket_dir = workspace_home.join(".papercusp").join("pglite-socket");
-                let data_dir = workspace_home.join(".papercusp").join("pglite-data");
+            let mut pg_tcp_port: Option<u16> = None;
+            let mut pglite_socket_dir: Option<std::path::PathBuf> = None;
 
-                // Allocate a free port for pglite-server's admin HTTP endpoint
-                // (snapshot capture path uses it as a system-pg_dump replacement).
-                let admin_port = portpicker::pick_unused_port();
-                pglite_admin_port = admin_port;
-
-                match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home, admin_port) {
+            if use_embedded_pg {
+                let pg_dir = sidecar_dir.join("embedded-postgres-server");
+                let data_dir = workspace_home.join(".papercusp").join("embedded-pg-data");
+                // Workspace-scoped TCP port. We pick once per spawn rather
+                // than reusing a fixed port so two desktops on the same
+                // host don't collide. The sidecar reads PAPERCUSP_PG_PORT
+                // from its env to know where to connect.
+                let port = portpicker::pick_unused_port()
+                    .unwrap_or(15432);
+                let db_sql_dir = sidecar_dir.join("db-sql");
+                match spawn_embedded_postgres_server(&pg_dir, &data_dir, &workspace_home, port, &db_sql_dir) {
                     Ok(c) => {
                         let state: tauri::State<SidecarState> = app.state();
                         *state.pglite_child.lock().unwrap() = Some(c);
-                        if !wait_for_pglite_socket(&socket_dir, Duration::from_secs(60)) {
-                            eprintln!("[papercusp-desktop] pglite-server socket did not appear in 60s — first-boot DDL may have failed; continuing without DB so preflight is reachable");
+                        if wait_for_pg_tcp(port, Duration::from_secs(60)) {
+                            println!("[papercusp-desktop] embedded-postgres-server ready on 127.0.0.1:{}", port);
+                            pg_tcp_port = Some(port);
+                        } else {
+                            eprintln!("[papercusp-desktop] embedded-postgres-server did not accept TCP in 60s — initdb may have failed; falling through to pglite");
                         }
-                        println!(
-                            "[papercusp-desktop] pglite-server ready (socket={}, admin={:?})",
-                            socket_dir.display(),
-                            admin_port,
-                        );
-                        Some(socket_dir)
                     }
                     Err(e) => {
                         eprintln!(
-                            "[papercusp-desktop] failed to spawn pglite-server: {}; \
-                             sidecar will use HARNESS_DATABASE_URL from env",
+                            "[papercusp-desktop] failed to spawn embedded-postgres-server: {}; falling through to pglite",
                             e
                         );
-                        None
                     }
                 }
             } else {
-                println!("[papercusp-desktop] PAPERCUSP_USE_PGLITE=0 — skipping pglite-server");
-                None
-            };
+                println!("[papercusp-desktop] PAPERCUSP_USE_EMBEDDED_PG=0 — skipping embedded-postgres-server");
+            }
+
+            // pglite fallback — only fired if embedded-postgres didn't come
+            // up. Same env-flag layering as before for legacy compat.
+            if pg_tcp_port.is_none() {
+                let use_pglite = std::env::var("PAPERCUSP_USE_PGLITE")
+                    .unwrap_or_else(|_| "1".to_string())
+                    != "0";
+                if use_pglite {
+                    let pglite_dir = sidecar_dir.join("pglite-server");
+                    let socket_dir = workspace_home.join(".papercusp").join("pglite-socket");
+                    let data_dir = workspace_home.join(".papercusp").join("pglite-data");
+                    let admin_port = portpicker::pick_unused_port();
+                    pglite_admin_port = admin_port;
+                    match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home, admin_port) {
+                        Ok(c) => {
+                            let state: tauri::State<SidecarState> = app.state();
+                            *state.pglite_child.lock().unwrap() = Some(c);
+                            if !wait_for_pglite_socket(&socket_dir, Duration::from_secs(60)) {
+                                eprintln!("[papercusp-desktop] pglite-server socket did not appear in 60s — first-boot DDL may have failed; continuing without DB so preflight is reachable");
+                            }
+                            println!(
+                                "[papercusp-desktop] pglite-server ready (socket={}, admin={:?})",
+                                socket_dir.display(),
+                                admin_port,
+                            );
+                            pglite_socket_dir = Some(socket_dir);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[papercusp-desktop] failed to spawn pglite-server: {}; \
+                                 sidecar will use HARNESS_DATABASE_URL from env",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    println!("[papercusp-desktop] PAPERCUSP_USE_PGLITE=0 — skipping pglite-server");
+                }
+            }
 
             // Spawn the bundled code-server so the @papercupai/vscode-server
             // plugin's iframe has something to point at without the user
@@ -547,7 +656,7 @@ pub fn run() {
                 }
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
+            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
