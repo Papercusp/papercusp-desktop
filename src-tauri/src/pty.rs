@@ -60,7 +60,7 @@ struct PtyEntry {
 static REGISTRY: Lazy<Mutex<HashMap<String, Arc<PtyEntry>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 pub struct PtySpawnOpts {
     pub command: String,
     #[serde(default)]
@@ -76,7 +76,7 @@ pub struct PtySpawnOpts {
 fn default_cols() -> u16 { 80 }
 fn default_rows() -> u16 { 24 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct PtySpawnResult {
     pub id: String,
     pub pid: Option<u32>,
@@ -187,6 +187,7 @@ fn run_reader_loop(
 /// `pty-data` events as bytes arrive. Returns an id the renderer uses
 /// for subsequent write/resize/kill calls.
 #[tauri::command]
+#[specta::specta]
 pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, String> {
     let (id, pid, entry, reader, mut child) = spawn_internal(&opts)?;
 
@@ -228,6 +229,7 @@ pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, S
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn pty_write(id: String, data: String) -> Result<(), String> {
     let entry = REGISTRY
         .lock()
@@ -249,6 +251,7 @@ pub fn pty_write(id: String, data: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn pty_resize(id: String, cols: u16, rows: u16) -> Result<(), String> {
     let entry = REGISTRY
         .lock()
@@ -269,6 +272,7 @@ pub fn pty_resize(id: String, cols: u16, rows: u16) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn pty_kill(id: String) -> Result<(), String> {
     let entry = REGISTRY
         .lock()
@@ -289,6 +293,7 @@ pub fn pty_kill(id: String) -> Result<(), String> {
 /// to reach the same on-screen state. Empty string if the pty is
 /// unknown or the history is empty.
 #[tauri::command]
+#[specta::specta]
 pub fn pty_history(id: String) -> Result<String, String> {
     let entry = REGISTRY
         .lock()
@@ -306,6 +311,7 @@ pub fn pty_history(id: String) -> Result<String, String> {
 /// Whether a pty id is still alive. Lets the renderer fall through to
 /// a fresh spawn when the resume id is stale.
 #[tauri::command]
+#[specta::specta]
 pub fn pty_is_alive(id: String) -> bool {
     let reg = REGISTRY.lock().unwrap();
     match reg.get(&id) {

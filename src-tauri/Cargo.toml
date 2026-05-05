@@ -15,13 +15,26 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["specta"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-os = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# MCP bridge — registered only under #[cfg(debug_assertions)] in main.rs,
+# so it's a no-op at runtime in release builds. Lets coding agents
+# inspect a running dev build (IPC monitor, window state, JS eval).
+tauri-plugin-mcp-bridge = "0.2"
+
+# Typed IPC bridge: every #[tauri::command] gets a #[specta::specta]
+# annotation, and main.rs uses tauri_specta::Builder to emit a
+# `bindings.ts` for the frontend on each debug build. Frontend then
+# imports typed wrappers from `@/bindings` instead of raw `invoke()`.
+specta = { version = "=2.0.0-rc.24", features = ["derive"] }
+specta-typescript = "=0.0.11"
+tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

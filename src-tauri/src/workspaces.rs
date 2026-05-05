@@ -31,7 +31,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, specta::Type)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
@@ -40,7 +40,7 @@ pub struct Workspace {
     pub created_at: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, specta::Type)]
 pub struct Registry {
     pub current: String,
     pub workspaces: Vec<Workspace>,

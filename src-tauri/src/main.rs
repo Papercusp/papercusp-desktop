@@ -380,11 +380,12 @@ fn spawn_sidecar(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+#[specta::specta]
 fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, specta::Type)]
 struct UpdateInfo {
     available: bool,
     current_version: String,
@@ -393,6 +394,7 @@ struct UpdateInfo {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
     use tauri_plugin_updater::UpdaterExt;
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -414,6 +416,7 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
     let update = app
@@ -437,26 +440,31 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 fn workspaces_list() -> workspaces::Registry {
     workspaces::list()
 }
 
 #[tauri::command]
+#[specta::specta]
 fn workspaces_create(name: String) -> Result<workspaces::Workspace, String> {
     workspaces::create(&name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[specta::specta]
 fn workspaces_rename(id: String, name: String) -> Result<(), String> {
     workspaces::rename(&id, &name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[specta::specta]
 fn workspaces_delete(id: String) -> Result<(), String> {
     workspaces::delete(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[specta::specta]
 fn workspaces_switch(app: AppHandle, id: String) -> Result<(), String> {
     workspaces::switch(&id).map_err(|e| e.to_string())?;
     // Kill children before restart so they don't outlive the process.
@@ -483,14 +491,12 @@ pub fn run() {
         port: Mutex::new(None),
     };
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![
+    // tauri-specta Builder — collects every #[specta::specta] command
+    // and emits a typed `bindings.ts` for the frontend on each debug
+    // build. The frontend imports typed wrappers from `@/bindings`
+    // instead of stringly-typed `invoke('cmd', ...)`.
+    let specta_builder = tauri_specta::Builder::<tauri::Wry>::new()
+        .commands(tauri_specta::collect_commands![
             workspaces_list,
             workspaces_create,
             workspaces_rename,
@@ -499,14 +505,41 @@ pub fn run() {
             app_version,
             check_for_update,
             install_update,
-            // E. Native pty commands — see src-tauri/src/pty.rs
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_history,
             pty::pty_is_alive,
-        ])
+        ]);
+
+    // Export to the operator app — that's where the desktop UI lives
+    // (Tauri loads localhost:3055 served by apps/operator). Frontend
+    // imports as `import { commands } from '@/lib/tauri-bindings'`.
+    #[cfg(debug_assertions)]
+    specta_builder
+        .export(
+            specta_typescript::Typescript::default(),
+            "../../papercup/apps/operator/lib/tauri-bindings.ts",
+        )
+        .ok();
+
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+
+    // MCP bridge for AI coding agents — debug builds only. Lets Claude
+    // Code / Cursor connect via @hypothesi/tauri-mcp-server and inspect
+    // the running app (IPC, window state, JS eval).
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+
+    builder
+        .invoke_handler(specta_builder.invoke_handler())
         .manage(state)
         .setup(|app| {
             let is_dev = cfg!(debug_assertions);
