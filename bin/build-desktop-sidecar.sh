@@ -11,13 +11,18 @@
 set -euo pipefail
 
 # Multi-repo layout (post phase-c split). The desktop bundle pulls from
-# three sibling repos that must be cloned next to each other:
+# two sibling clones:
 #
 #   papercupai/papercusp-desktop   ← this repo (HERE = bin/)
-#   papercupai/papercup            ← contains apps/operator (the Next.js UI)
-#   papercupai/papercusp           ← contains packages/papercusp-mcp-server
-#                                    + packages/pglite-server (formerly
-#                                    formerly libs/papercusp at aviynw/Restart pre-split)
+#   papercupai/papercup            ← contains apps/operator (Next.js UI)
+#                                    AND libs/papercusp/ (submodule with
+#                                    embedded-postgres-server, zero-cache-server,
+#                                    harness, papercusp-mcp-server, pglite-server,
+#                                    cli, orchestrator). The submodule is the
+#                                    canonical post-phase-c location for these
+#                                    packages — the old sibling-repo
+#                                    papercupai/papercusp clone is no longer
+#                                    used by this script.
 #
 # Override locations with PAPERCUP_ROOT / PAPERCUSP_ROOT if your layout
 # differs (e.g. CI clones into a flat workspace dir).
@@ -25,7 +30,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PAPERCUP_ROOT="${PAPERCUP_ROOT:-$ROOT/../papercup}"
-PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$ROOT/../papercusp}"
+PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$PAPERCUP_ROOT/libs/papercusp}"
 WEB_DIR="$PAPERCUP_ROOT/apps/operator"
 SIDECAR_DIR="$ROOT/src-tauri/sidecar"
 
