@@ -380,6 +380,14 @@ fn spawn_sidecar(
         .env("NODE_ENV", "production")
         .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_DESKTOP", "1")
+        // Phase 3 / Item 3: any descendant of the sidecar that needs to
+        // reach the operator's HTTP API (run.sh especially — it does
+        // PATCH /features/<id>, GET /status, POST /lanes via its
+        // pg-status helper) must use this env var. Without it, run.sh
+        // falls back to the legacy localhost:3055 default which only
+        // works in dev. The operator port is dynamically picked here,
+        // so the env injection is the only sound channel.
+        .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port))
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str) // Windows
         // Inherit stdio so sidecar errors land in the Tauri parent's
