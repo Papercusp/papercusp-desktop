@@ -188,16 +188,47 @@ fn spawn_zero_cache_server(
         .env("USERPROFILE", &workspace_home_str)
         // Initial replication of all per-harness schemas + harness_shared
         // exhausts Node's default ~4GB old-space heap during first-boot
-        // change-streamer catch-up. Diagnostic 2026-05-06 captured a
-        // FATAL "Zone Allocation failed - process out of memory" with
-        // Mark-Compact 3200/3330MB. Raising to 6GB is a mitigation; the
-        // root cause (likely DDL-event flood in @rocicorp/zero) is
-        // tracked separately. Override via PAPERCUSP_ZERO_NODE_OPTIONS
-        // if a user with a smaller machine still trips this.
+        // change-streamer catch-up.
+        //
+        // Root cause (investigated 2026-05-06): the @rocicorp/zero
+        // change-streamer logs every `ddlUpdate` event with a `schema`
+        // field that re-includes the FULL list of tables + indexes the
+        // replicator knows about. With our 17 migrations × 8 per-harness
+        // schemas × N tables per schema, each DDL event carries 80-100KB
+        // of metadata and there are dozens of events on first boot —
+        // the heap balloons to ~3GB and Mark-Compact GCs spend ~2.7s
+        // each before failing. FATAL "Zone Allocation failed - process
+        // out of memory" with Mark-Compact 3200/3330MB.
+        //
+        // Mitigations layered here:
+        //   1. --max-old-space-size=6144  (default below) gives the
+        //      worst-case workload ~50% headroom over the observed peak.
+        //      Override via PAPERCUSP_ZERO_NODE_OPTIONS for users on
+        //      smaller machines or to opt into the heap snapshot.
+        //   2. --heapsnapshot-near-heap-limit=1 (opt-in via
+        //      PAPERCUSP_ZERO_HEAPSNAPSHOT=1) writes a .heapsnapshot
+        //      file just before the next OOM so we can inspect what's
+        //      actually pinned. Off by default — snapshots are 100s of
+        //      MB.
+        //
+        // The upstream fix would be to (a) trim or omit the schema
+        // field on DDL events, (b) batch CREATE TABLE/CREATE INDEX into
+        // one logical event, or (c) seed the change-streamer from a
+        // snapshot instead of replaying the catch-up log. Tracked as a
+        // separate vendor-patch task.
         .env(
             "NODE_OPTIONS",
-            std::env::var("PAPERCUSP_ZERO_NODE_OPTIONS")
-                .unwrap_or_else(|_| "--max-old-space-size=6144".to_string()),
+            std::env::var("PAPERCUSP_ZERO_NODE_OPTIONS").unwrap_or_else(|_| {
+                let snapshot_flag = if std::env::var("PAPERCUSP_ZERO_HEAPSNAPSHOT")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false)
+                {
+                    " --heapsnapshot-near-heap-limit=1"
+                } else {
+                    ""
+                };
+                format!("--max-old-space-size=6144{}", snapshot_flag)
+            }),
         )
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
