@@ -134,6 +134,13 @@ fn spawn_embedded_postgres_server(
         data_dir.display()
     );
     std::fs::create_dir_all(data_dir)?;
+    // If a postgres process from a prior unclean exit is still holding the
+    // data dir lock, kill it before we try to spawn a new one. Without
+    // this, the new spawn fails with "lock file already exists" or, if
+    // the old PG is reachable on a different port, silently continues
+    // with stale data. Diagnostic 2026-05-06 found PID 386303 (postgres,
+    // parent=init) lingering across desktop sessions.
+    sweep_orphan_postgres(data_dir);
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
     let mut cmd = Command::new("node");
     cmd.arg(&bin)
@@ -179,6 +186,19 @@ fn spawn_zero_cache_server(
         .env("PAPERCUSP_ZERO_REPLICA_DIR", replica_dir.to_string_lossy().to_string())
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str)
+        // Initial replication of all per-harness schemas + harness_shared
+        // exhausts Node's default ~4GB old-space heap during first-boot
+        // change-streamer catch-up. Diagnostic 2026-05-06 captured a
+        // FATAL "Zone Allocation failed - process out of memory" with
+        // Mark-Compact 3200/3330MB. Raising to 6GB is a mitigation; the
+        // root cause (likely DDL-event flood in @rocicorp/zero) is
+        // tracked separately. Override via PAPERCUSP_ZERO_NODE_OPTIONS
+        // if a user with a smaller machine still trips this.
+        .env(
+            "NODE_OPTIONS",
+            std::env::var("PAPERCUSP_ZERO_NODE_OPTIONS")
+                .unwrap_or_else(|_| "--max-old-space-size=6144".to_string()),
+        )
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     cmd.spawn()
@@ -912,40 +932,182 @@ pub fn run() {
         });
 }
 
+/// Sweep for an orphaned postgres process holding `data_dir` (left by a
+/// prior unclean Tauri exit) and SIGTERM/SIGKILL it before we try to
+/// spawn a fresh one.
+///
+/// PG writes its own PID into `<data_dir>/postmaster.pid` on startup and
+/// removes it on clean shutdown. If the file exists and the PID is still
+/// alive AND its cwd / executable matches our data dir, it's a leftover
+/// from a prior session — kill it. If the PID is dead or the file is
+/// stale, just unlink the lockfile so embedded-postgres-server's spawn
+/// doesn't reject it as already-running.
+///
+/// Defensive about misidentifying live processes: only kill when the PID
+/// has `postgres` or `embedded-pg` somewhere in /proc/<pid>/cmdline, AND
+/// references our exact data dir. Otherwise leave it alone and let the
+/// spawn surface its own error — better to fail loud than nuke an
+/// unrelated process.
+fn sweep_orphan_postgres(data_dir: &std::path::Path) {
+    let pid_file = data_dir.join("postmaster.pid");
+    let raw = match std::fs::read_to_string(&pid_file) {
+        Ok(s) => s,
+        Err(_) => return, // No lockfile, no orphan to worry about.
+    };
+    // postmaster.pid format: PID is line 1.
+    let pid_str = match raw.lines().next() {
+        Some(s) => s.trim(),
+        None => return,
+    };
+    let pid: u32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            println!(
+                "[papercusp-desktop] sweep_orphan_postgres: malformed pid '{}' in {}",
+                pid_str,
+                pid_file.display()
+            );
+            return;
+        }
+    };
+    // Is the PID still live?
+    let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
+    if !alive {
+        // Stale lockfile from a crashed prior session — embedded-postgres
+        // usually handles this itself, but unlink eagerly to be safe.
+        println!(
+            "[papercusp-desktop] sweep_orphan_postgres: stale postmaster.pid (pid={} dead), unlinking",
+            pid
+        );
+        let _ = std::fs::remove_file(&pid_file);
+        return;
+    }
+    // Live: confirm it's actually a postgres pointed at OUR data dir
+    // before terminating. Read /proc/<pid>/cmdline.
+    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
+        .unwrap_or_default();
+    let data_dir_str = data_dir.to_string_lossy().to_string();
+    let looks_like_our_pg = (cmdline.contains("postgres")
+        || cmdline.contains("embedded-pg"))
+        && cmdline.contains(&data_dir_str);
+    if !looks_like_our_pg {
+        println!(
+            "[papercusp-desktop] sweep_orphan_postgres: pid={} alive but cmdline doesn't match (data_dir={}) — leaving it alone",
+            pid,
+            data_dir.display()
+        );
+        return;
+    }
+    println!(
+        "[papercusp-desktop] sweep_orphan_postgres: orphan postgres pid={} on {} — terminating",
+        pid,
+        data_dir.display()
+    );
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+        // Give PG a moment to shut down cleanly.
+        std::thread::sleep(Duration::from_millis(2000));
+        if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+            let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    // Clean up the lockfile in case PG's own shutdown didn't.
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+/// Send SIGTERM to a Child, wait up to `grace_ms` for it to exit, then
+/// SIGKILL if still alive. Returns once the child has actually reaped.
+///
+/// Why not just `Child::kill()`? On Unix that's SIGKILL, which gives the
+/// process zero chance to clean up its own children. The embedded-postgres
+/// Node wrapper spawns a real postgres binary as a grandchild — SIGKILLing
+/// the wrapper orphans the postgres process to PID 1 (init). Diagnostic
+/// 2026-05-06 found postgres PIDs persisting across desktop restarts that
+/// way, eventually colliding with the new instance's data dir lock.
+///
+/// SIGTERM lets the Node wrapper run its own SIGTERM handler, which in
+/// turn `pg_ctl stop`s its postgres child cleanly. Same logic applies to
+/// zero-cache (which manages a change-streamer child) and code-server.
+fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
+    let pid = child.id();
+    println!(
+        "[papercusp-desktop] terminating {} pid={} (SIGTERM, grace {}ms)",
+        label, pid, grace_ms
+    );
+    // Send SIGTERM via /bin/kill — avoids pulling in a new Rust dep
+    // for one syscall. `Command::kill()` from std would send SIGKILL.
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows there's no SIGTERM; std's kill() (which calls
+        // TerminateProcess) is already abrupt, so just use it.
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+    // Poll for exit up to grace_ms.
+    let deadline = Instant::now() + Duration::from_millis(grace_ms);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_status)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    // Grace expired — escalate to SIGKILL.
+    println!(
+        "[papercusp-desktop] {} pid={} still alive after grace, SIGKILL",
+        label, pid
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Take ownership of the sidecar Child (if any) and kill it.
 ///
 /// This is a function rather than inline so the temporary MutexGuard from
 /// `state.child.lock()` is dropped before the borrow of `state` ends —
 /// inlining triggered borrow-checker E0597 in Rust 2021 because the guard
 /// outlived the local `state` binding.
+///
+/// Order matters:
+///   1. Operator sidecar first — it's the user-facing process; the user
+///      should perceive shutdown as immediate.
+///   2. zero-cache before PG so it can flush its SQLite replica cleanly.
+///      Killing PG first leaves zero-cache scribbling errors as upstream
+///      connections drop.
+///   3. PG (pglite or embedded) last — gives any DB clients (zero-cache,
+///      operator) a chance to disconnect cleanly first.
+///   4. code-server is independent of the rest; killed alongside.
+///
+/// Each stage uses graceful_kill (SIGTERM with 3s grace, then SIGKILL) so
+/// Node intermediates can reap their own grandchildren — see
+/// graceful_kill's doc comment for why this matters.
 fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let state: tauri::State<SidecarState> = app_handle.state();
     let maybe_child = state.child.lock().unwrap().take();
     if let Some(mut child) = maybe_child {
-        println!("[papercusp-desktop] killing sidecar pid={}", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+        graceful_kill(&mut child, "sidecar", 3000);
     }
-    // Kill zero-cache BEFORE PG so it has a chance to flush its replica
-    // cleanly. Killing PG first leaves zero-cache scribbling errors as
-    // upstream connections drop.
     let maybe_zc = state.zero_cache_child.lock().unwrap().take();
     if let Some(mut child) = maybe_zc {
-        println!("[papercusp-desktop] killing zero-cache-server pid={}", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+        graceful_kill(&mut child, "zero-cache-server", 3000);
     }
     let maybe_pglite = state.pglite_child.lock().unwrap().take();
     if let Some(mut child) = maybe_pglite {
-        println!("[papercusp-desktop] killing pglite-server pid={}", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+        graceful_kill(&mut child, "pglite-server", 5000);
     }
     let maybe_cs = state.code_server_child.lock().unwrap().take();
     if let Some(mut child) = maybe_cs {
-        println!("[papercusp-desktop] killing code-server pid={}", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+        graceful_kill(&mut child, "code-server", 2000);
     }
 }
 
