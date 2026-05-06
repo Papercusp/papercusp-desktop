@@ -201,21 +201,33 @@ fn spawn_zero_cache_server(
         // out of memory" with Mark-Compact 3200/3330MB.
         //
         // Mitigations layered here:
-        //   1. --max-old-space-size=6144  (default below) gives the
-        //      worst-case workload ~50% headroom over the observed peak.
-        //      Override via PAPERCUSP_ZERO_NODE_OPTIONS for users on
-        //      smaller machines or to opt into the heap snapshot.
+        //   1. --max-old-space-size=6144 (default below).
+        //      KNOWN BROKEN: @rocicorp/zero's `zero-cache` binary
+        //      INTERNALLY overrides NODE_OPTIONS to
+        //      `--max-old-space-size=131072 --expose-gc` (128 GB,
+        //      effectively unlimited). Inspecting /proc/<pid>/environ
+        //      on the running zero-cache child confirms this. Our 6 GB
+        //      setting is silently discarded.
         //   2. --heapsnapshot-near-heap-limit=1 (opt-in via
         //      PAPERCUSP_ZERO_HEAPSNAPSHOT=1) writes a .heapsnapshot
         //      file just before the next OOM so we can inspect what's
         //      actually pinned. Off by default — snapshots are 100s of
         //      MB.
         //
-        // The upstream fix would be to (a) trim or omit the schema
-        // field on DDL events, (b) batch CREATE TABLE/CREATE INDEX into
-        // one logical event, or (c) seed the change-streamer from a
-        // snapshot instead of replaying the catch-up log. Tracked as a
-        // separate vendor-patch task.
+        // Even at 128 GB notional heap the process crashed at 3.2 GB
+        // with FATAL "Zone Allocation failed" — a v8 zone-arena failure
+        // unrelated to old-space limits. Likely native-side
+        // fragmentation from @rocicorp/zero-sqlite3 bindings or the
+        // change-streamer's per-event schema-metadata churn. Cannot be
+        // fixed via env vars; needs upstream patch (trim/omit the
+        // `schema` field on `ddlUpdate` events, or snapshot-seed the
+        // change-streamer instead of replaying catch-up).
+        //
+        // Today the process-manager respawns zero-cache after the OOM
+        // and the second start succeeds (smaller catch-up payload), so
+        // the user-visible impact is a few seconds of empty
+        // rest-query results. That's why this is documented but not
+        // hard-blocking.
         .env(
             "NODE_OPTIONS",
             std::env::var("PAPERCUSP_ZERO_NODE_OPTIONS").unwrap_or_else(|_| {
