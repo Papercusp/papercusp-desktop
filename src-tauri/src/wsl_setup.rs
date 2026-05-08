@@ -37,6 +37,11 @@ use specta::Type;
 #[cfg(target_os = "windows")]
 const DISTRO_NAME: &str = "papercup-runtime";
 
+/// Public version of DISTRO_NAME — used by main.rs when constructing
+/// `wsl.exe --distribution …` to spawn the sidecar inside the runtime.
+#[cfg(target_os = "windows")]
+pub const DISTRO_NAME_PUB: &str = DISTRO_NAME;
+
 // Filename of the rootfs tarball shipped as a Tauri resource. Built in
 // CI by running our bootstrap script inside an Ubuntu container then
 // `tar -czf papercup-runtime.tar.gz /`. See
@@ -216,7 +221,7 @@ mod imp {
             .unwrap_or(0)
     }
 
-    pub fn detect(app: &tauri::AppHandle) -> WslStatus {
+    pub(crate) fn detect(app: &tauri::AppHandle) -> WslStatus {
         let exe = wsl_exe_on_path();
         if !exe {
             return WslStatus {
@@ -351,19 +356,25 @@ mod imp {
     }
 }
 
-// ─── Tauri command surface (always compiles) ────────────────────────
+// ─── Programmatic detect (used by main.rs to gate sidecar routing) ──
 
-#[tauri::command]
-#[specta::specta]
-pub fn wsl_status(_app: tauri::AppHandle) -> WslStatus {
+pub fn detect(_app: &tauri::AppHandle) -> WslStatus {
     #[cfg(target_os = "windows")]
     {
-        return imp::detect(&_app);
+        return imp::detect(_app);
     }
     #[cfg(not(target_os = "windows"))]
     {
         WslStatus::unsupported()
     }
+}
+
+// ─── Tauri command surface (always compiles) ────────────────────────
+
+#[tauri::command]
+#[specta::specta]
+pub fn wsl_status(app: tauri::AppHandle) -> WslStatus {
+    detect(&app)
 }
 
 #[tauri::command]

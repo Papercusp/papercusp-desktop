@@ -386,7 +386,99 @@ fn wait_for_pglite_socket(socket_dir: &std::path::Path, timeout: Duration) -> bo
 /// Spawn the Node sidecar from inside the bundled sidecar dir. In dev
 /// (`tauri dev`), we skip this — the developer runs `npm run dev:papercusp`
 /// separately and the webview points at devUrl from tauri.conf.json.
+/// On Windows we route the sidecar through WSL so the harness's POSIX
+/// assumptions (bash, overmind, unix sockets, fs.watch semantics) work.
+/// Returns true once the user has finished the WslOnboardingGate flow
+/// (state == Ready). On non-Windows always returns false.
+#[cfg(target_os = "windows")]
+fn should_route_via_wsl(app: &tauri::AppHandle) -> bool {
+    matches!(wsl_setup::detect(app).state, wsl_setup::WslState::Ready)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn should_route_via_wsl(_app: &tauri::AppHandle) -> bool {
+    false
+}
+
+/// Translate a Windows path (`C:\foo\bar`) to a WSL-visible path
+/// (`/mnt/c/foo/bar`). Doesn't shell out to `wslpath` — pure string
+/// manipulation, fast enough for the per-spawn cost. Lossy on
+/// non-drive-letter paths but those don't occur for our resource dir.
+#[cfg(target_os = "windows")]
+fn windows_path_to_wsl(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().to_string();
+    // Already a posix-style path? Leave it alone.
+    if s.starts_with('/') {
+        return s;
+    }
+    let s = s.replace('\\', "/");
+    // Drive-letter prefix: `C:/foo` → `/mnt/c/foo`.
+    if let Some((drive, rest)) = s.split_once(':') {
+        if drive.len() == 1 {
+            let drive_lower = drive.to_lowercase();
+            return format!("/mnt/{}{}", drive_lower, rest);
+        }
+    }
+    s
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn windows_path_to_wsl(path: &std::path::Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+/// Build the Command that actually runs the sidecar. On Windows with
+/// WSL Ready we wrap node in `wsl.exe --distribution papercup-runtime
+/// --cd <wsl-cwd> --exec node …`. Otherwise we run node natively.
+///
+/// Caller still chains `.env(...)` calls; for the WSL path those env
+/// vars are forwarded to the Linux side via the `WSLENV` env-var list
+/// convention (set automatically here).
+fn make_sidecar_command(
+    via_wsl: bool,
+    sidecar_dir: &std::path::Path,
+    preload: &std::path::Path,
+    server_js: &std::path::Path,
+) -> Command {
+    if via_wsl {
+        #[cfg(target_os = "windows")]
+        {
+            let cwd_wsl = windows_path_to_wsl(sidecar_dir);
+            let preload_wsl = windows_path_to_wsl(preload);
+            let server_js_wsl = windows_path_to_wsl(server_js);
+            let mut cmd = Command::new("wsl.exe");
+            cmd.env("WSL_UTF8", "1")
+                .args([
+                    "--distribution",
+                    wsl_setup::DISTRO_NAME_PUB,
+                    "--cd",
+                    &cwd_wsl,
+                    "--exec",
+                    "node",
+                    "--require",
+                    &preload_wsl,
+                    &server_js_wsl,
+                ]);
+            return cmd;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // unreachable in practice — should_route_via_wsl returns
+            // false on non-Windows. Fall through to native.
+        }
+    }
+    let mut cmd = Command::new("node");
+    cmd.arg("--require")
+        .arg(preload)
+        .arg(server_js)
+        .current_dir(sidecar_dir);
+    cmd
+}
+
 fn spawn_sidecar(
+    via_wsl: bool,
     port: u16,
     sidecar_dir: &std::path::Path,
     pglite_socket_dir: Option<&std::path::Path>,
@@ -433,12 +525,22 @@ fn spawn_sidecar(
     let new_path = format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path);
 
     let preload = sidecar_dir.join("sidecar-preload.js");
-    let mut cmd = Command::new("node");
-    cmd.arg("--require")
-        .arg(&preload)
-        .arg(&server_js)
-        .current_dir(sidecar_dir)
-        .env("PATH", &new_path)
+    let mut cmd = make_sidecar_command(via_wsl, sidecar_dir, &preload, &server_js);
+    // When routed via WSL, env vars must be listed in WSLENV to cross
+    // the Windows→Linux boundary. The `/p` flag translates Windows
+    // paths to Linux paths automatically.
+    if via_wsl {
+        cmd.env(
+            "WSLENV",
+            "PATH/l:PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
+             PAPERCUSP_DESKTOP:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
+             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:HARNESS_DATABASE_URL:\
+             HARNESS_ADMIN_DATABASE_URL:PAPERCUSP_ZERO_PORT:\
+             NEXT_PUBLIC_ZERO_SERVER:PAPERCUSP_CODE_SERVER_URL:\
+             PAPERCUSP_PGLITE_SOCKET_DIR/p:PAPERCUSP_PGLITE_ADMIN_PORT",
+        );
+    }
+    cmd.env("PATH", &new_path)
         .env("PORT", port.to_string())
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_ENV", "production")
@@ -922,7 +1024,28 @@ pub fn run() {
                 }
             };
 
-            let child = match spawn_sidecar(port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
+            // On Windows the harness needs POSIX, so we route the sidecar
+            // through `wsl.exe --distribution papercup-runtime` once the
+            // user has finished the WslOnboardingGate. Until then we
+            // skip the sidecar spawn — the gate covers the whole UI so
+            // there's no app to talk to anyway. The frontend can later
+            // call a respawn-sidecar command (TODO) once WSL transitions
+            // to Ready, or we just rely on a manual app restart.
+            let via_wsl = should_route_via_wsl(&app.handle());
+            #[cfg(target_os = "windows")]
+            {
+                let need_wsl = !matches!(
+                    wsl_setup::detect(&app.handle()).state,
+                    wsl_setup::WslState::Ready
+                );
+                if need_wsl {
+                    println!(
+                        "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes"
+                    );
+                    return Ok(());
+                }
+            }
+            let child = match spawn_sidecar(via_wsl, port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
