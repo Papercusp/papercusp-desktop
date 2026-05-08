@@ -64,6 +64,38 @@ pub enum WslState {
     Error { message: String },
 }
 
+/// Typed error for the install commands. Frontend uses the variant tag
+/// to decide whether to re-launch with elevation, retry, or show a
+/// generic error.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "message")]
+pub enum WslOpError {
+    /// `wsl --install` returned 740 (ERROR_ELEVATION_REQUIRED). User
+    /// must re-launch the app with admin privileges. Message is the
+    /// stderr we got back, mostly for diagnostics.
+    NeedsElevation(String),
+    /// Generic failure — exit code + stderr.
+    Failed(String),
+}
+
+impl WslOpError {
+    #[cfg(target_os = "windows")]
+    fn from_exit(label: &str, code: Option<i32>, stderr: String) -> Self {
+        // Win32 ERROR_ELEVATION_REQUIRED = 740. wsl.exe forwards this
+        // when a sub-step (DISM, optional component install) needs
+        // elevation we don't have.
+        if code == Some(740) {
+            return WslOpError::NeedsElevation(format!("{}: {}", label, stderr));
+        }
+        WslOpError::Failed(format!(
+            "{} exit={} stderr={}",
+            label,
+            code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            stderr
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WslStatus {
@@ -235,20 +267,21 @@ mod imp {
     }
 
     /// Kick off `wsl --install --no-launch --no-distribution`. Requires
-    /// admin — caller is expected to have invoked us with elevation.
-    pub fn install(app: &tauri::AppHandle) -> Result<(), String> {
+    /// admin — on `ERROR_ELEVATION_REQUIRED` (exit 740) we return
+    /// `WslOpError::NeedsElevation` so the frontend can offer a
+    /// one-click "re-launch as admin" instead of a raw error.
+    pub fn install(app: &tauri::AppHandle) -> Result<(), WslOpError> {
         let out = wsl_command()
             .args(["--install", "--no-launch", "--no-distribution"])
             .output()
-            .map_err(|e| format!("spawn wsl --install: {}", e))?;
+            .map_err(|e| WslOpError::Failed(format!("spawn wsl --install: {}", e)))?;
         if !out.status.success() {
-            let code = out.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            return Err(format!("wsl --install exit={} stderr={}", code, stderr));
+            return Err(WslOpError::from_exit("wsl --install", out.status.code(), stderr));
         }
         let mut st = load_state(app);
         st.install_kicked_off = true;
-        save_state(app, &st)?;
+        save_state(app, &st).map_err(WslOpError::Failed)?;
         Ok(())
     }
 
@@ -335,14 +368,51 @@ pub fn wsl_status(_app: tauri::AppHandle) -> WslStatus {
 
 #[tauri::command]
 #[specta::specta]
-pub fn wsl_install(_app: tauri::AppHandle) -> Result<(), String> {
+pub fn wsl_install(_app: tauri::AppHandle) -> Result<(), WslOpError> {
     #[cfg(target_os = "windows")]
     {
         return imp::install(&_app);
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err("wsl_install: only supported on Windows".to_string())
+        Err(WslOpError::Failed(
+            "wsl_install: only supported on Windows".to_string(),
+        ))
+    }
+}
+
+/// Re-launch the desktop app with admin elevation via PowerShell's
+/// `Start-Process -Verb RunAs`. The current process exits as soon as
+/// the elevated child is spawned. The user sees the UAC prompt,
+/// approves, and the app reopens with admin rights — `wsl --install`
+/// will then succeed.
+#[tauri::command]
+#[specta::specta]
+pub fn wsl_relaunch_elevated(_app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("current_exe: {}", e))?;
+        let exe_str = exe.to_str().ok_or_else(|| "exe path not utf8".to_string())?;
+        // PowerShell `Start-Process -Verb RunAs` triggers the UAC prompt.
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &format!("Start-Process -FilePath \"{}\" -Verb RunAs", exe_str),
+            ])
+            .spawn()
+            .map_err(|e| format!("spawn powershell: {}", e))?;
+        // Exit so the elevated child takes over.
+        _app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("wsl_relaunch_elevated: only supported on Windows".to_string())
     }
 }
 

@@ -695,6 +695,7 @@ pub fn run() {
             pty::pty_is_alive,
             wsl_setup::wsl_status,
             wsl_setup::wsl_install,
+            wsl_setup::wsl_relaunch_elevated,
             wsl_setup::wsl_import,
             wsl_setup::wsl_bootstrap,
             wsl_setup::wsl_uninstall,

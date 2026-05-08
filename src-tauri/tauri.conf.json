@@ -44,7 +44,7 @@
     ],
     "resources": [
       "sidecar/**/*",
-      "resources/papercup-runtime.tar.gz"
+      "resources/*"
     ],
     "publisher": "Papercusp",
     "homepage": "https://papercuspai.com",
