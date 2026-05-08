@@ -43,7 +43,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "sidecar/**/*"
+      "sidecar/**/*",
+      "resources/papercup-runtime.tar.gz"
     ],
     "publisher": "Papercusp",
     "homepage": "https://papercuspai.com",

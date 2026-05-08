@@ -15,6 +15,7 @@
 
 mod pty;
 mod workspaces;
+mod wsl_setup;
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -692,6 +693,11 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_history,
             pty::pty_is_alive,
+            wsl_setup::wsl_status,
+            wsl_setup::wsl_install,
+            wsl_setup::wsl_import,
+            wsl_setup::wsl_bootstrap,
+            wsl_setup::wsl_uninstall,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
@@ -816,49 +822,41 @@ pub fn run() {
                     }
                 }
 
-                // If PG is up, optionally also spawn zero-cache. Default ON.
-                // Opt-out: PAPERCUSP_USE_ZERO_CACHE=0. Failure here is
-                // soft — operator falls back to POLLING SyncProvider mode.
-                if pg_tcp_port.is_some() {
-                    let use_zero = std::env::var("PAPERCUSP_USE_ZERO_CACHE")
-                        .unwrap_or_else(|_| "1".to_string()) != "0";
-                    // wait_for_pg_tcp returns when PG accepts a TCP connection
-                    // but PG can still respond `57P03 the database system is
-                    // starting up` to the first auth attempts while it
-                    // finishes init. zero-cache treats that as fatal and
-                    // exits. A 3s pause covers the typical init window.
-                    if use_zero {
-                        std::thread::sleep(Duration::from_secs(3));
-                    }
-                    if use_zero {
-                        let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
-                        // change-streamer-port defaults to ZERO_PORT+1 in zero-cache,
-                        // which collides if anything's listening there. Pick a
-                        // separate unused port and pass it explicitly.
-                        let zc_change_port = portpicker::pick_unused_port().unwrap_or(zc_port - 1);
-                        let zero_dir = sidecar_dir.join("zero-cache-server");
-                        let replica_dir = workspace_home.join(".papercusp").join("zero-replica");
-                        let upstream_db = format!(
-                            "postgres://harness_zero:harness_zero_pwd@127.0.0.1:{}/papercusp",
-                            pg_tcp_port.unwrap()
-                        );
-                        match spawn_zero_cache_server(&zero_dir, &upstream_db, zc_port, zc_change_port, &replica_dir, &workspace_home) {
-                            Ok(c) => {
-                                let state: tauri::State<SidecarState> = app.state();
-                                *state.zero_cache_child.lock().unwrap() = Some(c);
-                                if wait_for_zero_cache(zc_port, Duration::from_secs(60)) {
-                                    println!("[papercusp-desktop] zero-cache-server ready on 127.0.0.1:{}", zc_port);
-                                    zero_cache_port = Some(zc_port);
-                                } else {
-                                    eprintln!("[papercusp-desktop] zero-cache-server did not accept TCP in 60s — sidecar will fall back to POLLING");
-                                }
+                // zero-cache-server retired 2026-05-07 with the Level 1 + Phase 1
+                // sync rewrite. The operator's /api/zero-harness/sse route now
+                // pushes invalidate/update events via PG LISTEN/NOTIFY directly
+                // — no separate process, no replication slot, no role plumbing.
+                // Opt-in legacy spawn: set PAPERCUSP_USE_ZERO_CACHE=1 to bring
+                // the old transport back temporarily (e.g. while diagnosing
+                // a regression in the SSE path).
+                if pg_tcp_port.is_some()
+                    && std::env::var("PAPERCUSP_USE_ZERO_CACHE")
+                        .unwrap_or_else(|_| "0".to_string())
+                        == "1"
+                {
+                    std::thread::sleep(Duration::from_secs(3));
+                    let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
+                    let zc_change_port = portpicker::pick_unused_port().unwrap_or(zc_port - 1);
+                    let zero_dir = sidecar_dir.join("zero-cache-server");
+                    let replica_dir = workspace_home.join(".papercusp").join("zero-replica");
+                    let upstream_db = format!(
+                        "postgres://harness_zero:harness_zero_pwd@127.0.0.1:{}/papercusp",
+                        pg_tcp_port.unwrap()
+                    );
+                    match spawn_zero_cache_server(&zero_dir, &upstream_db, zc_port, zc_change_port, &replica_dir, &workspace_home) {
+                        Ok(c) => {
+                            let state: tauri::State<SidecarState> = app.state();
+                            *state.zero_cache_child.lock().unwrap() = Some(c);
+                            if wait_for_zero_cache(zc_port, Duration::from_secs(60)) {
+                                println!("[papercusp-desktop] zero-cache-server ready on 127.0.0.1:{} (legacy opt-in)", zc_port);
+                                zero_cache_port = Some(zc_port);
+                            } else {
+                                eprintln!("[papercusp-desktop] zero-cache-server did not accept TCP in 60s");
                             }
-                            Err(e) => eprintln!(
-                                "[papercusp-desktop] failed to spawn zero-cache-server: {}; sidecar will fall back to POLLING", e,
-                            ),
                         }
-                    } else {
-                        println!("[papercusp-desktop] PAPERCUSP_USE_ZERO_CACHE=0 — skipping zero-cache-server");
+                        Err(e) => eprintln!(
+                            "[papercusp-desktop] failed to spawn zero-cache-server: {}", e,
+                        ),
                     }
                 }
             } else {
