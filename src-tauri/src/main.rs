@@ -401,32 +401,120 @@ fn should_route_via_wsl(_app: &tauri::AppHandle) -> bool {
     false
 }
 
-/// Translate a Windows path (`C:\foo\bar`) to a WSL-visible path
-/// (`/mnt/c/foo/bar`). Doesn't shell out to `wslpath` — pure string
-/// manipulation, fast enough for the per-spawn cost. Lossy on
-/// non-drive-letter paths but those don't occur for our resource dir.
-#[cfg(target_os = "windows")]
+/// Translate a Windows path to a WSL-visible path. Pure string
+/// manipulation — doesn't shell out to `wslpath`. Handles:
+///
+///   - Drive letters:        `C:\foo\bar`     → `/mnt/c/foo/bar`
+///   - Long-path syntax:     `\\?\C:\foo`     → `/mnt/c/foo`
+///   - UNC long-path:        `\\?\UNC\srv\s` → `//srv/s` (rare; passes
+///                           through with forward slashes — WSL mounts
+///                           UNC paths via 9p, but only when the user
+///                           explicitly mounted them; we leave the path
+///                           as a forward-slash UNC and let the kernel
+///                           ENOENT if unmounted)
+///   - Plain UNC:            `\\srv\share`    → `//srv/share`
+///   - Already-posix:        `/foo/bar`       → `/foo/bar` (no-op)
+///
+/// Defined on every platform so the helper is unit-testable from CI
+/// regardless of host OS. Used by the Windows-only sidecar-via-WSL
+/// path; see `make_sidecar_command`.
 fn windows_path_to_wsl(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
     // Already a posix-style path? Leave it alone.
-    if s.starts_with('/') {
+    if s.starts_with('/') && !s.starts_with("//") {
         return s;
     }
-    let s = s.replace('\\', "/");
+
+    // Strip the long-path prefix (`\\?\` or `\\?\UNC\`). Beyond
+    // ~260-char paths, Windows APIs use this prefix — it shows up in
+    // resource resolution sometimes.
+    let rest = if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+        // \\?\UNC\server\share\... — re-form as a regular UNC path so
+        // the rest of the function handles it.
+        format!(r"\\{}", stripped)
+    } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        s
+    };
+
+    // Plain UNC path (`\\server\share\...`)? Translate to forward
+    // slashes; WSL doesn't have a built-in mount for these, but the
+    // forward-slash form is what wsl.exe interprets identically when
+    // a 9p mount happens to exist.
+    if rest.starts_with(r"\\") {
+        return rest.replace('\\', "/");
+    }
+
+    let normalized = rest.replace('\\', "/");
+
     // Drive-letter prefix: `C:/foo` → `/mnt/c/foo`.
-    if let Some((drive, rest)) = s.split_once(':') {
-        if drive.len() == 1 {
+    if let Some((drive, after)) = normalized.split_once(':') {
+        if drive.len() == 1 && drive.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
             let drive_lower = drive.to_lowercase();
-            return format!("/mnt/{}{}", drive_lower, rest);
+            // Ensure the rest starts with `/` (handles `C:foo` weirdly
+            // by keeping it relative, though that's not a valid
+            // Windows resource path in our context).
+            let after = if after.starts_with('/') { after.to_string() } else { format!("/{}", after) };
+            return format!("/mnt/{}{}", drive_lower, after);
         }
     }
-    s
+
+    normalized
 }
 
-#[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
-fn windows_path_to_wsl(path: &std::path::Path) -> String {
-    path.to_string_lossy().to_string()
+#[cfg(test)]
+mod tests {
+    use super::windows_path_to_wsl;
+    use std::path::PathBuf;
+
+    fn t(input: &str, expected: &str) {
+        let got = windows_path_to_wsl(&PathBuf::from(input));
+        assert_eq!(got, expected, "input={:?}", input);
+    }
+
+    #[test]
+    fn drive_letter() {
+        t(r"C:\foo\bar", "/mnt/c/foo/bar");
+        t(r"D:\Users\me\Desktop", "/mnt/d/Users/me/Desktop");
+        t(r"c:\lower", "/mnt/c/lower");
+    }
+
+    #[test]
+    fn long_path_prefix() {
+        t(r"\\?\C:\very\long\path", "/mnt/c/very/long/path");
+        t(r"\\?\D:\foo", "/mnt/d/foo");
+    }
+
+    #[test]
+    fn unc_long_path_prefix() {
+        // \\?\UNC\server\share\path → //server/share/path
+        t(r"\\?\UNC\srv\share\file", "//srv/share/file");
+    }
+
+    #[test]
+    fn plain_unc() {
+        t(r"\\server\share\foo", "//server/share/foo");
+    }
+
+    #[test]
+    fn already_posix_passthrough() {
+        // Forward-slash absolute paths aren't transformed (they may be
+        // legitimate Linux paths in the WSL distro).
+        t("/home/papercup", "/home/papercup");
+    }
+
+    #[test]
+    fn forward_slash_drive_letter() {
+        // `C:/foo` is an alternate Windows form; treat it the same as
+        // backslash form.
+        t("C:/foo/bar", "/mnt/c/foo/bar");
+    }
+
+    #[test]
+    fn mixed_separators() {
+        t(r"C:\foo/bar\baz", "/mnt/c/foo/bar/baz");
+    }
 }
 
 /// Build the Command that actually runs the sidecar. On Windows with
