@@ -458,6 +458,18 @@ pub fn wsl_bootstrap(_app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
+/// Restart the desktop app after WSL onboarding completes. The
+/// sidecar spawn in setup() short-circuits while WSL state isn't
+/// Ready, so a clean restart picks up the now-Ready state and routes
+/// the sidecar through `wsl.exe`. Frontend calls this immediately
+/// after `wsl_bootstrap` succeeds and a follow-up `wsl_status` returns
+/// Ready.
+#[tauri::command]
+#[specta::specta]
+pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
+    app.restart();
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn wsl_uninstall(_app: tauri::AppHandle) -> Result<(), String> {

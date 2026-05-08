@@ -800,6 +800,7 @@ pub fn run() {
             wsl_setup::wsl_relaunch_elevated,
             wsl_setup::wsl_import,
             wsl_setup::wsl_bootstrap,
+            wsl_setup::wsl_finalize_ready,
             wsl_setup::wsl_uninstall,
         ]);
 
