@@ -47,6 +47,22 @@ if command -v psql >/dev/null; then
     || { echo "ERROR: cannot connect to ${APP_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}"; exit 1; }
 fi
 
+# Workspace-registry symlink workaround.
+# Tauri (src-tauri/src/main.rs:602) hard-overrides HOME to the per-workspace
+# dir for isolation. The operator bundle then resolves
+# `~/.papercusp-workspaces/registry.json` relative to the FAKE home, finds
+# nothing, and a Turbopack TDZ bug surfaces as
+# `ReferenceError: DEFAULT_WORKSPACE_ID is not defined` at module init —
+# which kills every /api/* route. Ensuring the symlink is present makes
+# the workspace lookup succeed, sidesteps the TDZ entirely, and lets the
+# dev shell see the same workspace registry as the webapp at :3055/:3070.
+WORKSPACE_HOME="${PAPERCUSP_WORKSPACE_HOME:-$HOME/.papercusp-workspaces/default}"
+if [[ -f "$HOME/.papercusp-workspaces/registry.json" ]]; then
+  mkdir -p "$WORKSPACE_HOME/.papercusp-workspaces"
+  ln -sfn "$HOME/.papercusp-workspaces/registry.json" \
+    "$WORKSPACE_HOME/.papercusp-workspaces/registry.json"
+fi
+
 echo "==> killing any running papercusp-desktop + orphan sidecars"
 pgrep -af "papercusp-desktop|embedded-postgres-server|sidecar/.*next-server|sidecar/.*code-server" \
   | grep -v "$$" | grep -v "pgrep\|grep " | awk '{print $1}' \
@@ -55,7 +71,12 @@ sleep 2
 
 echo "==> launching $BIN (mode=dev-pg, target=${APP_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}, log=$LOG)"
 EXPORTS=(
+  # Both flags must be 0. The Rust shell at main.rs:1054 falls through
+  # from embedded-postgres to pglite-server when only the first is set,
+  # then overrides HARNESS_DATABASE_URL with the pglite socket form.
+  # Setting USE_PGLITE=0 too leaves the sidecar with our supplied URL.
   "PAPERCUSP_USE_EMBEDDED_PG=0"
+  "PAPERCUSP_USE_PGLITE=0"
   "HARNESS_DATABASE_URL=postgresql://${APP_USER}:${APP_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
   "HARNESS_ADMIN_DATABASE_URL=postgresql://${ADMIN_USER}:${ADMIN_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
 )
