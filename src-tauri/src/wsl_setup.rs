@@ -50,9 +50,16 @@ pub const DISTRO_NAME_PUB: &str = DISTRO_NAME;
 const ROOTFS_FILENAME: &str = "papercup-runtime.tar.gz";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(tag = "kind")]
 pub enum WslState {
     /// Not on Windows; nothing to do.
+    ///
+    /// Note: NO `rename_all = "camelCase"` here. The frontend
+    /// (apps/operator/lib/wsl-tauri.ts) and the WslOnboardingGate
+    /// component check `state.kind === 'NotSupported' | 'NotInstalled'
+    /// | …` in PascalCase. Adding camelCase here makes the gate's
+    /// pass-through check fail on Linux — the wizard then shows on
+    /// machines that should never see it.
     NotSupported,
     /// `wsl.exe` not on PATH, or `wsl --status` errored.
     NotInstalled,
@@ -72,8 +79,10 @@ pub enum WslState {
 /// Typed error for the install commands. Frontend uses the variant tag
 /// to decide whether to re-launch with elevation, retry, or show a
 /// generic error.
+// Same PascalCase-tag rule as WslState above — the frontend matches
+// on `err.kind === 'NeedsElevation' | 'Failed'`.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase", tag = "kind", content = "message")]
+#[serde(tag = "kind", content = "message")]
 pub enum WslOpError {
     /// `wsl --install` returned 740 (ERROR_ELEVATION_REQUIRED). User
     /// must re-launch the app with admin privileges. Message is the
