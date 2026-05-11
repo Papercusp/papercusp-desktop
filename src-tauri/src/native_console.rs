@@ -116,28 +116,137 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
         return Err(format!("unsupported platform"));
     };
 
-    // 5. Sentinel-file cleanup is scheduled in a follow-up commit;
-    //    for now the user's `.mcp.json` stays in place until they
-    //    manually delete it or until the next console launch overwrites.
-    //    Acceptable for v1 since superuser tokens persist across runs.
+    // 5. Schedule .mcp.json restore when the user's shell exits.
+    //    We can't watch the terminal launcher's pid (it exits in ~1s);
+    //    we watch for the sentinel files the launcher's bash one-liner
+    //    drops in cwd. Cap at 24h so a botched cleanup eventually heals.
+    if displaced {
+        let cwd_clone = cwd.clone();
+        let mcp_path_clone = mcp_path.clone();
+        let backup_path = cwd.join(".mcp.json.papercusp.bak");
+        std::thread::spawn(move || {
+            watch_and_restore_mcp_json(cwd_clone, mcp_path_clone, backup_path);
+        });
+    } else {
+        // Even when we didn't displace anything, schedule a cleanup of
+        // the .mcp.json we wrote — otherwise it sits in the user's
+        // project forever, surprising them later when they `cat .mcp.json`.
+        let mcp_path_clone = mcp_path.clone();
+        let cwd_clone = cwd.clone();
+        std::thread::spawn(move || {
+            watch_and_remove_mcp_json(cwd_clone, mcp_path_clone);
+        });
+    }
 
     Ok((pid, displaced, bootstrapped))
 }
 
+/// Poll cwd for sentinel files. When none remain (the user closed the
+/// last papercup-launched shell), restore the prior `.mcp.json` from
+/// the backup. Bounded by a 24h hard timeout so a hung shell doesn't
+/// leak our .mcp.json forever.
+fn watch_and_restore_mcp_json(
+    cwd: PathBuf,
+    mcp_path: PathBuf,
+    backup_path: PathBuf,
+) {
+    if !wait_for_sentinels_to_clear(&cwd) {
+        // Hard timeout fired. Restore anyway — better to lose freshness
+        // than to leak our config forever.
+    }
+    // Atomic-ish restore: rename bak over mcp_path. If the user
+    // edited .mcp.json in the meantime they lose those edits — but
+    // they wrote them into our temporary file, which was always
+    // documented as ephemeral.
+    let _ = std::fs::rename(&backup_path, &mcp_path);
+}
+
+/// Same as `watch_and_restore_mcp_json` but for the case where no
+/// prior `.mcp.json` existed — we just remove ours when the last
+/// console exits.
+fn watch_and_remove_mcp_json(cwd: PathBuf, mcp_path: PathBuf) {
+    let _cleared = wait_for_sentinels_to_clear(&cwd);
+    // On either clean exit OR 24h timeout we remove our file. Leaving
+    // it indefinitely would surprise the user; they can rerun the
+    // launcher to get it back.
+    let _ = std::fs::remove_file(&mcp_path);
+}
+
+/// Poll cwd every 5s for `.papercup-console-active.*` files. Returns
+/// true when the last sentinel went away (clean exit), false on
+/// 24h timeout.
+fn wait_for_sentinels_to_clear(cwd: &std::path::Path) -> bool {
+    use std::time::{Duration, Instant};
+    const POLL: Duration = Duration::from_secs(5);
+    const HARD_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+    let deadline = Instant::now() + HARD_TIMEOUT;
+
+    // Initial grace window: the launcher one-liner needs a few seconds
+    // to actually touch the first sentinel after the terminal opens.
+    // Without this, a fast-polling loop would see zero sentinels at
+    // t=0 and restore immediately, before the user's shell started.
+    std::thread::sleep(Duration::from_secs(8));
+
+    loop {
+        if Instant::now() > deadline {
+            return false;
+        }
+        let any = count_sentinels(cwd) > 0;
+        if !any {
+            return true;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+fn count_sentinels(cwd: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(cwd) else {
+        return 0;
+    };
+    let prefix = SENTINEL_PREFIX;
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(prefix))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 /// Build the bash one-liner the terminal runs as its first command.
-/// Pattern: cd → env exports → greeting → exec user's shell.
+/// Pattern:
+///   cd → env exports → drop sentinel → trap-cleanup → greeting → exec shell
+///
+/// The sentinel file (`.papercup-console-active.$`) is how the Rust
+/// side knows the user's shell is still alive. We can't trust the pid
+/// of the terminal launcher itself (open/wt.exe/gnome-terminal etc.
+/// exit immediately after the window appears), so we use a filesystem
+/// fingerprint that survives across process boundaries.
+///
 /// `exec` chains so the env survives without touching rc files.
 fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     let env_exports = build_env_exports(&envelope.env);
     let greeting = envelope.greeting_cmd.replace('\'', "'\\''");
     let cwd_escaped = shell_escape_single(&envelope.cwd);
     format!(
-        "cd {cwd} && {exports} ({greet}) ; exec \"${{SHELL:-/bin/bash}}\" -l",
+        "cd {cwd} && {exports} \
+         && touch {sentinel_glob}.$ \
+         && trap 'rm -f {sentinel_glob}.$' EXIT \
+         && ({greet}) ; \
+         exec \"${{SHELL:-/bin/bash}}\" -l",
         cwd = cwd_escaped,
         exports = env_exports,
+        sentinel_glob = SENTINEL_PREFIX,
         greet = greeting,
     )
 }
+
+/// Sentinel filename prefix. The launcher one-liner writes
+/// `<prefix>.<pid>` on entry and deletes it on exit (trap). The
+/// cleanup watcher polls for any matching file in cwd.
+const SENTINEL_PREFIX: &str = ".papercup-console-active";
 
 fn build_env_exports(env: &HashMap<String, String>) -> String {
     let mut parts = Vec::with_capacity(env.len() + 1);
@@ -523,6 +632,22 @@ mod tests {
     }
 
     #[test]
+    fn oneliner_drops_sentinel_with_trap() {
+        let e = envelope("/x");
+        let out = build_launcher_oneliner(&e);
+        // Touches sentinel with shell pid suffix
+        assert!(
+            out.contains("touch .papercup-console-active.$"),
+            "sentinel touch missing: {out}"
+        );
+        // trap fires on EXIT to clean up
+        assert!(
+            out.contains("trap 'rm -f .papercup-console-active.$' EXIT"),
+            "EXIT trap missing: {out}"
+        );
+    }
+
+    #[test]
     fn scripts_dir_prepended_to_path() {
         let e = envelope("/x");
         let out = build_launcher_oneliner(&e);
@@ -569,6 +694,26 @@ mod tests {
             Some(format!("\\\\wsl.localhost\\{WSL_DISTRO}\\home\\avi\\papercup")),
         );
         assert_eq!(wsl_path_to_windows_unc("relative/path"), None);
+    }
+
+    #[test]
+    fn count_sentinels_finds_only_matching_files() {
+        let tmp = std::env::temp_dir().join(format!(
+            "papercup-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // None yet.
+        assert_eq!(count_sentinels(&tmp), 0);
+        // Drop two sentinels + an unrelated file.
+        std::fs::write(tmp.join(".papercup-console-active.123"), "").unwrap();
+        std::fs::write(tmp.join(".papercup-console-active.456"), "").unwrap();
+        std::fs::write(tmp.join("README.md"), "").unwrap();
+        assert_eq!(count_sentinels(&tmp), 2);
+        // Remove one.
+        std::fs::remove_file(tmp.join(".papercup-console-active.123")).unwrap();
+        assert_eq!(count_sentinels(&tmp), 1);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
