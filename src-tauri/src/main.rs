@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod native_console;
 mod pty;
 mod workspaces;
 mod wsl_setup;
@@ -890,6 +891,7 @@ pub fn run() {
             wsl_setup::wsl_bootstrap,
             wsl_setup::wsl_finalize_ready,
             wsl_setup::wsl_uninstall,
+            native_console::console_launch,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
