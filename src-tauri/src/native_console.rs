@@ -111,7 +111,7 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     } else if cfg!(target_os = "linux") {
         spawn_linux_new_window(&envelope, &oneliner)?
     } else if cfg!(target_os = "windows") {
-        return Err("Windows native console launch not yet implemented".into());
+        spawn_windows_wsl_new_window(&envelope, &oneliner)?
     } else {
         return Err(format!("unsupported platform"));
     };
@@ -381,6 +381,113 @@ fn is_on_path(bin: &str) -> bool {
     })
 }
 
+// ─── Windows (WSL) spawner ───────────────────────────────────────────
+
+/// Distro name installed by wsl_setup::wsl_import (the bootstrap flow).
+/// All console launches target this distro — we don't try to detect
+/// the user's other distros because the operator's sidecar runs here.
+const WSL_DISTRO: &str = "papercup-runtime";
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_wsl_new_window(
+    envelope: &ConsoleEnvelope,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
+    use std::os::windows::process::CommandExt as _;
+
+    // Map the Linux-side cwd to a Windows UNC for wt.exe's
+    // --startingDirectory. Without this, wt opens at C:\ and the user's
+    // first action is to `cd` somewhere — defeats the point.
+    let cwd_unc = wsl_path_to_windows_unc(&envelope.cwd);
+
+    // Prefer Windows Terminal — `-w new` forces a new window every
+    // invocation; --startingDirectory + wsl --cd jointly land the
+    // shell at the right place in both Win + WSL filesystems.
+    if is_on_path_windows("wt.exe") {
+        let mut cmd = std::process::Command::new("wt.exe");
+        cmd.arg("-w").arg("new");
+        if let Some(unc) = &cwd_unc {
+            cmd.arg("--startingDirectory").arg(unc);
+        }
+        cmd.arg("wsl.exe")
+            .arg("-d")
+            .arg(WSL_DISTRO)
+            .arg("--cd")
+            .arg(&envelope.cwd)
+            .arg("--")
+            .arg("bash")
+            .arg("-lc")
+            .arg(oneliner);
+        // CREATE_NEW_CONSOLE = 0x00000010 — even when wt is fronted,
+        // belt-and-suspenders so we never inherit our parent's console.
+        cmd.creation_flags(0x00000010);
+        let child = cmd.spawn().map_err(|e| {
+            format!(
+                "wt.exe spawn failed: {e}. Is the '{WSL_DISTRO}' WSL distro installed? \
+                 Open Papercup's WSL setup wizard to finish onboarding."
+            )
+        })?;
+        return Ok(Some(child.id()));
+    }
+
+    // Fallback: direct wsl.exe in a fresh conhost. Ugly but works on
+    // older Windows installs without Windows Terminal.
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.arg("-d")
+        .arg(WSL_DISTRO)
+        .arg("--cd")
+        .arg(&envelope.cwd)
+        .arg("--")
+        .arg("bash")
+        .arg("-lc")
+        .arg(oneliner);
+    cmd.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("wsl.exe spawn failed: {e}. WSL not installed?"))?;
+    Ok(Some(child.id()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_windows_wsl_new_window(
+    _envelope: &ConsoleEnvelope,
+    _oneliner: &str,
+) -> Result<Option<u32>, String> {
+    unreachable!("Windows spawner called on non-Windows build")
+}
+
+/// Translate a Linux path inside the WSL distro to its Windows UNC.
+/// E.g. `/home/avi/papercup` → `\\wsl.localhost\papercup-runtime\home\avi\papercup`.
+/// Returns None if the path doesn't look absolute.
+///
+/// We use `\\wsl.localhost\` (Win10 20H2+) which Windows Terminal accepts
+/// as --startingDirectory. Older Windows uses `\\wsl$\` — if the user is
+/// on that, the spawn still succeeds (wt accepts it), they just see the
+/// path written one way vs. the other.
+fn wsl_path_to_windows_unc(linux_path: &str) -> Option<String> {
+    if !linux_path.starts_with('/') {
+        return None;
+    }
+    let win_path = linux_path.replace('/', "\\");
+    Some(format!("\\\\wsl.localhost\\{WSL_DISTRO}{win_path}"))
+}
+
+#[cfg(target_os = "windows")]
+fn is_on_path_windows(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false; };
+    std::env::split_paths(&path).any(|d| {
+        // On Windows PATHEXT matters but for known .exe names we can
+        // skip that — we only check well-known commands by full name.
+        d.join(bin).exists()
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+fn is_on_path_windows(_bin: &str) -> bool {
+    false
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -453,6 +560,15 @@ mod tests {
                 "{bin} has no trailing args — would pass user command as flag"
             );
         }
+    }
+
+    #[test]
+    fn wsl_unc_translation() {
+        assert_eq!(
+            wsl_path_to_windows_unc("/home/avi/papercup"),
+            Some(format!("\\\\wsl.localhost\\{WSL_DISTRO}\\home\\avi\\papercup")),
+        );
+        assert_eq!(wsl_path_to_windows_unc("relative/path"), None);
     }
 
     #[test]
