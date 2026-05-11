@@ -167,6 +167,12 @@ jobs:
         env:
           PAPERCUP_ROOT: ${{ github.workspace }}/_external/papercup
           PAPERCUSP_ROOT: ${{ github.workspace }}/_external/papercusp
+          # validateMemoryMapAttributions() walks getKnownRoles() at module-init
+          # of apps/operator/app/api/_hono/harness.ts (Next.js page-data collection).
+          # Without this env it falls back to ~/autonomous-harness which doesn't
+          # exist on the runner, validRoles collapses to ['orchestrator'], and
+          # every MEMORY_MAP attribution that isn't 'orchestrator' fails the build.
+          PAPERCUSP_HARNESS_DIR: ${{ github.workspace }}/_external/papercusp/packages/harness
         run: bash bin/build-desktop-sidecar.sh
 
       - name: Build + bundle desktop app
