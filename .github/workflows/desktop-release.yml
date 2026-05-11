@@ -141,7 +141,12 @@ jobs:
             libssl-dev \
             rpm \
             libfuse2 \
-            fuse
+            fuse \
+            postgresql-client
+          # postgresql-client: build-desktop-sidecar.sh symlinks pg_dump/psql/
+          # pg_dumpall into the bundled sidecar (embedded-postgres ships
+          # server-only). Both ubuntu-22.04 and ubuntu-22.04-arm need this —
+          # neither image pre-installs it.
           # libfuse2 + fuse: linuxdeploy/AppImage runtime needs FUSE 2.
           # Ubuntu 22.04 ships FUSE 3 by default, so without libfuse2 the
           # AppImage bundling step fails with `failed to run linuxdeploy`
