@@ -109,8 +109,7 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     let pid = if cfg!(target_os = "macos") {
         spawn_macos_new_window(&envelope, &oneliner)?
     } else if cfg!(target_os = "linux") {
-        // Linux + Windows-WSL coming in follow-up commits.
-        return Err("Linux native console launch not yet implemented".into());
+        spawn_linux_new_window(&envelope, &oneliner)?
     } else if cfg!(target_os = "windows") {
         return Err("Windows native console launch not yet implemented".into());
     } else {
@@ -291,6 +290,97 @@ fn detect_macos_default_terminal() -> String {
     "Terminal.app".to_string()
 }
 
+// ─── Linux spawner ───────────────────────────────────────────────────
+
+/// Known Linux terminal emulators in preference order with the args to
+/// pass right before the user's command. All entries here open a NEW
+/// WINDOW when invoked (not reuse-existing-tab) — flags chosen to make
+/// that explicit where the default would be ambiguous.
+const LINUX_TERMINALS: &[(&str, &[&str])] = &[
+    // (binary, args before our command)
+    ("gnome-terminal", &["--window", "--"]),
+    ("konsole", &["--new-window", "-e"]),
+    ("xfce4-terminal", &["--window", "-e"]),
+    ("alacritty", &["-e"]),
+    ("kitty", &["--"]),
+    ("wezterm", &["start", "--always-new-process", "--"]),
+    ("xterm", &["-e"]),
+];
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_new_window(
+    envelope: &ConsoleEnvelope,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
+    // 1. Honor $TERMINAL if user set one.
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if is_on_path(&term) {
+            return spawn_linux_with(&term, &["-e"], envelope, oneliner);
+        }
+    }
+    // 2. Cascade through known terminals.
+    for (bin, args) in LINUX_TERMINALS {
+        if is_on_path(bin) {
+            return spawn_linux_with(bin, args, envelope, oneliner);
+        }
+    }
+    let tried: Vec<&str> = LINUX_TERMINALS.iter().map(|(b, _)| *b).collect();
+    Err(format!(
+        "no terminal emulator found. Set $TERMINAL or install one of: {}",
+        tried.join(", ")
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_linux_new_window(
+    _envelope: &ConsoleEnvelope,
+    _oneliner: &str,
+) -> Result<Option<u32>, String> {
+    unreachable!("Linux spawner called on non-Linux build")
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_with(
+    bin: &str,
+    args: &[&str],
+    envelope: &ConsoleEnvelope,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.current_dir(&envelope.cwd);
+    for (k, v) in &envelope.env {
+        if is_valid_env_name(k) {
+            cmd.env(k, v);
+        }
+    }
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd.arg("bash").arg("-lc").arg(oneliner);
+    // Detach stdio so closing the operator's terminal doesn't kill the
+    // user's new window.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {bin}: {e}"))?;
+    Ok(Some(child.id()))
+}
+
+/// Cheap PATH lookup. We can't pull in the `which` crate without
+/// adding a dep, so this walks $PATH manually. Linux-only.
+fn is_on_path(bin: &str) -> bool {
+    if bin.contains('/') {
+        return std::path::Path::new(bin).exists();
+    }
+    let Some(path) = std::env::var_os("PATH") else { return false; };
+    std::env::split_paths(&path).any(|d| {
+        let candidate = d.join(bin);
+        candidate.exists()
+    })
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -349,5 +439,37 @@ mod tests {
         assert!(out.contains("export GOOD_NAME="));
         assert!(!out.contains("123BAD"));
         assert!(!out.contains("BAD-DASH"));
+    }
+
+    #[test]
+    fn linux_table_entries_are_well_formed() {
+        // Every entry must (a) have a non-empty binary name, (b) have
+        // at least one trailing arg so the user's command is positional
+        // and not interpreted as an option to the terminal itself.
+        for (bin, args) in LINUX_TERMINALS {
+            assert!(!bin.is_empty(), "empty binary in LINUX_TERMINALS");
+            assert!(
+                !args.is_empty(),
+                "{bin} has no trailing args — would pass user command as flag"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_table_covers_common_terminals() {
+        let bins: Vec<&str> = LINUX_TERMINALS.iter().map(|(b, _)| *b).collect();
+        for must_have in &[
+            "gnome-terminal",
+            "konsole",
+            "alacritty",
+            "kitty",
+            "wezterm",
+            "xterm",
+        ] {
+            assert!(
+                bins.contains(must_have),
+                "{must_have} missing from LINUX_TERMINALS"
+            );
+        }
     }
 }
