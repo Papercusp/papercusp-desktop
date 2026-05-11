@@ -89,6 +89,27 @@ if [[ ! -f "$SIDECAR_DIR/apps/operator/server.js" ]]; then
   exit 1
 fi
 
+# Bundle the `papercup` CLI shim + greeting status script. Used by the
+# native-console launcher (the "+" button in the chrome header) — the
+# user's spawned terminal runs `papercup status` before exec'ing their
+# shell. Next.js standalone build doesn't include apps/operator/scripts/
+# (not imported by any route), so we copy them explicitly.
+#
+# Lives in `sidecar/bin/` so Tauri's existing PATH-prepend
+# (sidecar/bin → child PATH) makes `papercup` discoverable without
+# absolute paths in the launcher one-liner.
+PAPERCUP_SCRIPTS_SRC="$WEB_DIR/scripts"
+PAPERCUP_BIN_DST="$SIDECAR_DIR/bin"
+if [[ -f "$PAPERCUP_SCRIPTS_SRC/papercup" && -f "$PAPERCUP_SCRIPTS_SRC/papercup-status.mjs" ]]; then
+  echo "→ copying papercup CLI shim → $PAPERCUP_BIN_DST"
+  mkdir -p "$PAPERCUP_BIN_DST"
+  cp -a "$PAPERCUP_SCRIPTS_SRC/papercup" "$PAPERCUP_BIN_DST/papercup"
+  cp -a "$PAPERCUP_SCRIPTS_SRC/papercup-status.mjs" "$PAPERCUP_BIN_DST/papercup-status.mjs"
+  chmod +x "$PAPERCUP_BIN_DST/papercup"
+else
+  echo "  ⚠ papercup shim source not found at $PAPERCUP_SCRIPTS_SRC; native console greeting will degrade"
+fi
+
 # Bundle the harness package (run.sh, prompts, templates, identity, docs-viewer).
 # At runtime, the sidecar reads PAPERCUSP_HARNESS_DIR (set by Tauri main.rs)
 # to locate this. Without it, the harness loop has nothing to execute.
