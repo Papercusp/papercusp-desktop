@@ -31,7 +31,7 @@ tauri-plugin-mcp-bridge = "0.2"
 # annotation, and main.rs uses tauri_specta::Builder to emit a
 # `bindings.ts` for the frontend on each debug build. Frontend then
 # imports typed wrappers from `@/bindings` instead of raw `invoke()`.
-specta = { version = "=2.0.0-rc.24", features = ["derive"] }
+specta = { version = "=2.0.0-rc.24", features = ["derive", "serde_json"] }
 specta-typescript = "=0.0.11"
 tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 

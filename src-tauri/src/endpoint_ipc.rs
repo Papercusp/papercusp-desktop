@@ -36,7 +36,7 @@ use crate::endpoint_ipc_framing::{
 ///   | { kind: 'binary', name: string, data: number[] }
 ///   | { kind: 'done', result: ToolResult }
 ///   | { kind: 'error', code: string, message: string }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EndpointEvent {
     /// JSON-valued event (delta, tool_call, suggestion, cost, etc.).

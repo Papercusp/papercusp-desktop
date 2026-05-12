@@ -894,6 +894,8 @@ pub fn run() {
             wsl_setup::wsl_finalize_ready,
             wsl_setup::wsl_uninstall,
             native_console::console_launch,
+            endpoint_ipc::endpoint_invoke,
+            endpoint_ipc::endpoint_cancel,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
