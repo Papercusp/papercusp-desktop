@@ -13,6 +13,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod endpoint_ipc;
+mod endpoint_ipc_framing;
 mod native_console;
 mod pty;
 mod workspaces;

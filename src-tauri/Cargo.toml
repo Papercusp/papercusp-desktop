@@ -38,6 +38,15 @@ tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Endpoint IPC client — async UnixStream / named-pipe transport for
+# dispatching projected tools without the localhost HTTP round-trip.
+# See apps/operator/lib/endpoint-ipc/PROTOCOL.md in the operator repo
+# for the wire spec; src-tauri/src/endpoint_ipc.rs mirrors it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+dashmap = "6"
+bytes = "1"
+thiserror = "1"
+
 # Sidecar lifecycle
 portpicker = "0.1"
 
