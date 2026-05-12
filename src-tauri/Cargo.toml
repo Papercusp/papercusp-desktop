@@ -22,6 +22,10 @@ tauri-plugin-fs = "2"
 tauri-plugin-os = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# url is re-used by tauri_plugin_updater's UpdaterBuilder::endpoints(Vec<Url>);
+# we depend on it directly so resolve_update_endpoint() can build the
+# operator-sidecar URL at runtime instead of baking it into tauri.conf.json.
+url = "2"
 # MCP bridge — registered only under #[cfg(debug_assertions)] in main.rs,
 # so it's a no-op at runtime in release builds. Lets coding agents
 # inspect a running dev build (IPC monitor, window state, JS eval).
