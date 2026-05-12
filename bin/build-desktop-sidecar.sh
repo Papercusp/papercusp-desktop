@@ -89,6 +89,27 @@ if [[ ! -f "$SIDECAR_DIR/apps/operator/server.js" ]]; then
   exit 1
 fi
 
+# Bundle the `papercup` CLI shim + greeting status script. Used by the
+# native-console launcher (the "+" button in the chrome header) — the
+# user's spawned terminal runs `papercup status` before exec'ing their
+# shell. Next.js standalone build doesn't include apps/operator/scripts/
+# (not imported by any route), so we copy them explicitly.
+#
+# Lives in `sidecar/bin/` so Tauri's existing PATH-prepend
+# (sidecar/bin → child PATH) makes `papercup` discoverable without
+# absolute paths in the launcher one-liner.
+PAPERCUP_SCRIPTS_SRC="$WEB_DIR/scripts"
+PAPERCUP_BIN_DST="$SIDECAR_DIR/bin"
+if [[ -f "$PAPERCUP_SCRIPTS_SRC/papercup" && -f "$PAPERCUP_SCRIPTS_SRC/papercup-status.mjs" ]]; then
+  echo "→ copying papercup CLI shim → $PAPERCUP_BIN_DST"
+  mkdir -p "$PAPERCUP_BIN_DST"
+  cp -a "$PAPERCUP_SCRIPTS_SRC/papercup" "$PAPERCUP_BIN_DST/papercup"
+  cp -a "$PAPERCUP_SCRIPTS_SRC/papercup-status.mjs" "$PAPERCUP_BIN_DST/papercup-status.mjs"
+  chmod +x "$PAPERCUP_BIN_DST/papercup"
+else
+  echo "  ⚠ papercup shim source not found at $PAPERCUP_SCRIPTS_SRC; native console greeting will degrade"
+fi
+
 # Bundle the harness package (run.sh, prompts, templates, identity, docs-viewer).
 # At runtime, the sidecar reads PAPERCUSP_HARNESS_DIR (set by Tauri main.rs)
 # to locate this. Without it, the harness loop has nothing to execute.
@@ -168,6 +189,75 @@ if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q
   exit 1
 fi
 
+# Bundle pgvector into the embedded-postgres binary tree, per platform.
+# Without this, mem0's vector store falls back to in-process memory
+# (volatile across restarts). The embedded-postgres binaries from zonky
+# ship server-only — no extensions beyond plpgsql — so we source pgvector
+# from a system install on the build host and copy it into the bundle.
+#
+# Platform sources:
+#   Linux (Ubuntu/Debian): apt install postgresql-18-pgvector
+#                          → /usr/lib/postgresql/18/lib/vector.so
+#                            /usr/share/postgresql/18/extension/vector*
+#   macOS (Homebrew):      brew install pgvector (against postgresql@18)
+#                          → $(brew --prefix)/lib/postgresql/vector.dylib
+#                            $(brew --prefix)/share/postgresql@18/extension/vector*
+#   Windows:               No automation yet; we warn and continue. mem0
+#                          falls back to in-memory provider on Windows
+#                          desktops until a vector.dll is bundled.
+echo "→ bundling pgvector into embedded-postgres (per platform)"
+pgvector_copied=0
+# Compute platform locally — target_os is computed later in this script.
+case "$(uname -s)" in
+  Linux*)               _pgv_os="linux" ;;
+  Darwin*)              _pgv_os="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) _pgv_os="windows" ;;
+  *)                    _pgv_os="$(uname -s)" ;;
+esac
+case "$_pgv_os" in
+  linux)
+    pgv_lib_src="/usr/lib/postgresql/18/lib/vector.so"
+    pgv_ext_src="/usr/share/postgresql/18/extension"
+    pgv_lib_ext="so"
+    ;;
+  darwin)
+    if command -v brew >/dev/null 2>&1; then
+      brew_prefix="$(brew --prefix 2>/dev/null)"
+      pgv_lib_src="$brew_prefix/lib/postgresql/vector.dylib"
+      pgv_ext_src="$brew_prefix/share/postgresql@18/extension"
+      if [[ ! -f "$pgv_lib_src" ]] && pg_prefix=$(brew --prefix postgresql@18 2>/dev/null); then
+        pgv_lib_src="$pg_prefix/lib/postgresql/vector.dylib"
+        pgv_ext_src="$pg_prefix/share/postgresql@18/extension"
+      fi
+      pgv_lib_ext="dylib"
+    fi
+    ;;
+  windows)
+    echo "  ⚠ pgvector not bundled on Windows (no automated source); mem0 will use in-memory fallback on Windows desktops"
+    pgv_lib_src=""
+    ;;
+esac
+
+if [[ -n "${pgv_lib_src:-}" ]]; then
+  if [[ -f "$pgv_lib_src" && -d "$pgv_ext_src" ]]; then
+    for plat_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native; do
+      [[ -d "$plat_dir" ]] || continue
+      mkdir -p "$plat_dir/lib/postgresql" "$plat_dir/share/postgresql/extension"
+      cp -u "$pgv_lib_src" "$plat_dir/lib/postgresql/"
+      cp -u "$pgv_ext_src"/vector*.sql "$plat_dir/share/postgresql/extension/"
+      cp -u "$pgv_ext_src/vector.control" "$plat_dir/share/postgresql/extension/"
+      pgvector_copied=$((pgvector_copied + 1))
+    done
+    echo "  ✓ pgvector copied into $pgvector_copied embedded-postgres tree(s) (lib.${pgv_lib_ext} + sql + control)"
+  else
+    echo "  ⚠ pgvector not found at $pgv_lib_src (build host missing pgvector); mem0 will use in-memory fallback"
+    case "$_pgv_os" in
+      linux)  echo "    Install: sudo apt install postgresql-18-pgvector" ;;
+      darwin) echo "    Install: brew install pgvector  (requires postgresql@18 keg)" ;;
+    esac
+  fi
+fi
+
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
 # subsystem (libs/papercusp-export-state/src/pg-dump.ts) finds them.
 # Replaces the legacy WASM-pg_dump path that went through pglite-server's
@@ -197,7 +287,7 @@ fi
 echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
 SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
 > "$SOURCE_NOTE_FILE"
-for tool in pg_dump psql pg_dumpall; do
+for tool in pg_dump psql pg_dumpall pg_restore; do
   src=""
   if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]]; then
     src="$EMBEDDED_PG_BIN_DIR/$tool"
@@ -551,6 +641,58 @@ else
   echo "  ⚠ no omp asset for $target_os-$target_arch; pi-coding plugin will require user-installed omp"
 fi
 
+# meridian — routes omp/pi through the user's Claude Max subscription.
+# Bundled at build time so the user doesn't need npm-i it; its
+# transitive dep @anthropic-ai/claude-code (closed-source, Commercial
+# ToS) is stripped here and re-installed at first launch by the
+# desktop's Rust startup. This keeps redistribution clean while still
+# giving users a one-double-click experience after a brief first-run
+# install (~30s on a fast link).
+MERIDIAN_VERSION="${MERIDIAN_VERSION:-1.42.1}"
+MERIDIAN_DIR="$SIDECAR_DIR/meridian-host"
+echo "→ bundling meridian @rynfar/meridian@$MERIDIAN_VERSION → $MERIDIAN_DIR"
+mkdir -p "$MERIDIAN_DIR"
+cat > "$MERIDIAN_DIR/package.json" <<JSON
+{
+  "name": "papercusp-meridian-host",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": { "@rynfar/meridian": "$MERIDIAN_VERSION" }
+}
+JSON
+if (cd "$MERIDIAN_DIR" && npm install --no-package-lock --omit=dev --silent 2>&1 | tail -5); then
+  # Strip closed-source claude-code from the bundle. First-launch
+  # install on the user's machine pulls it from the official npm
+  # registry (Anthropic-published) into the same node_modules tree, so
+  # the require() path resolves identically.
+  rm -rf "$MERIDIAN_DIR/node_modules/@anthropic-ai/claude-code"
+  rm -rf "$MERIDIAN_DIR/node_modules/@anthropic-ai/claude-agent-sdk"
+  # Tauri's resource bundler enumerates all files at config-time. The
+  # claude-code .bin symlink (`meridian-host/node_modules/.bin/claude`)
+  # is referenced by tauri.conf.json — without a placeholder, cargo
+  # check fails with "resource path doesn't exist". Stub it here so
+  # bundling succeeds; first-launch install (handled by Rust startup)
+  # overwrites with the real binary.
+  # Replace dangling .bin symlinks with stubs (tauri's resource bundler
+  # validates symlink targets — dangles fail cargo check). The first-
+  # launch installer overwrites them with real binaries.
+  mkdir -p "$MERIDIAN_DIR/node_modules/.bin"
+  for stub_name in claude anthropic-ai-sdk; do
+    rm -f "$MERIDIAN_DIR/node_modules/.bin/$stub_name"
+    cat > "$MERIDIAN_DIR/node_modules/.bin/$stub_name" <<'STUB'
+#!/usr/bin/env sh
+echo "claude-code is being installed on first launch — please wait, then retry." >&2
+exit 1
+STUB
+    chmod +x "$MERIDIAN_DIR/node_modules/.bin/$stub_name"
+  done
+  meridian_size=$(du -sh "$MERIDIAN_DIR" 2>/dev/null | awk '{print $1}')
+  echo "  ✓ meridian bundled ($meridian_size; claude-code deferred to first launch)"
+else
+  echo "  ⚠ failed to npm-install meridian; AI agent routing will require user-installed meridian"
+  rm -rf "$MERIDIAN_DIR"
+fi
+
 # code-server — github.com/coder/code-server releases. Linux + macOS only;
 # Windows users would have to install separately (code-server upstream
 # does not ship a native Windows binary).
@@ -589,6 +731,33 @@ else
   echo "  ⚠ no code-server build for $target_os-$target_arch (upstream doesn't ship Windows); vscode-server plugin will require external code-server"
 fi
 
+# Strip embedded-postgres language extensions that link to system libs we
+# don't ship (libpython3.6, libperl5.26, libtcl). These are PL/Python,
+# PL/Perl, PL/Tcl — none of which Papercusp uses. linuxdeploy walks every
+# ELF in the sidecar during AppImage bundling and bails on missing libs.
+# IMPORTANT: only strip plperl/plpython/pltcl — DO NOT strip plpgsql,
+# which is the default procedural language and required for ANY pgdata
+# initdb (FATAL: extension "plpgsql" is not available).
+echo "→ stripping unused PL/* extensions (plperl, plpython, pltcl) from embedded-postgres"
+pl_count=0
+for ext_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/share/postgresql/extension; do
+  [[ -d "$ext_dir" ]] || continue
+  for f in "$ext_dir"/plperl* "$ext_dir"/plpython* "$ext_dir"/pltcl*; do
+    [[ -e "$f" ]] || continue
+    rm -f "$f"
+    pl_count=$((pl_count + 1))
+  done
+done
+for lib_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/lib/postgresql; do
+  [[ -d "$lib_dir" ]] || continue
+  for f in "$lib_dir"/plperl* "$lib_dir"/plpython* "$lib_dir"/pltcl*; do
+    [[ -e "$f" ]] || continue
+    rm -f "$f"
+    pl_count=$((pl_count + 1))
+  done
+done
+echo "  removed $pl_count PL/* extension files (plpgsql preserved)"
+
 # Strip musl-libc native binary variants. npm pulls these in as optional
 # deps (e.g. @img/sharp-linuxmusl-*, @lydell/node-pty-linuxmusl-*) alongside
 # the glibc variants, intended for Alpine. Our AppImage targets glibc, so
@@ -608,6 +777,50 @@ if [[ -n "$musl_dirs" ]]; then
   done <<< "$musl_dirs"
 else
   echo "  (none found)"
+fi
+
+# Bake a seed dump (Part 2 — build-time data sync to Mac/Windows).
+#
+# When PAPERCUSP_SEED_PG_URL is set, pg_dump that DB into sidecar/seed.dump.
+# On first launch in a fresh install, the desktop's Rust main detects an
+# empty data dir AND the presence of seed.dump, then runs pg_restore so
+# the user's Mac/Windows install starts with the same data as Linux at
+# build time.
+#
+# Typical invocation:
+#   PAPERCUSP_SEED_PG_URL=$(jq -r .url ~/.papercusp/embedded-pg.json) \
+#     bin/build-desktop-sidecar.sh
+#
+# When PAPERCUSP_SEED_PG_URL is unset, the seed step is skipped entirely
+# and the resulting bundle behaves like before (empty PG on first boot,
+# only schema applied via migrations).
+if [[ -n "${PAPERCUSP_SEED_PG_URL:-}" ]]; then
+  echo "→ baking seed.dump from $PAPERCUSP_SEED_PG_URL"
+  # --no-owner / --no-acl keep the dump portable across PG roles (the
+  # restored DB owns rows as harness_admin, regardless of source owner).
+  # --no-publications skips zero_harness publication (recreated by the
+  # embedded-pg-server's startup code, post-migrations).
+  # Custom format (-F c) is compressed and supports parallel restore.
+  if "$SIDECAR_DIR/bin/pg_dump" \
+        -d "$PAPERCUSP_SEED_PG_URL" \
+        -F c --no-owner --no-acl --no-publications --no-subscriptions \
+        --exclude-schema='_zero_*' --exclude-schema='zero_0*' \
+        -f "$SIDECAR_DIR/seed.dump" 2>&1; then
+    seed_size=$(du -h "$SIDECAR_DIR/seed.dump" | awk '{print $1}')
+    echo "  ✓ seed.dump baked ($seed_size)"
+  else
+    echo "  ⚠ pg_dump failed; bundle will ship without seed (fresh installs start empty)"
+    rm -f "$SIDECAR_DIR/seed.dump"
+  fi
+else
+  if [[ -f "$SIDECAR_DIR/seed.dump" ]]; then
+    seed_size=$(du -h "$SIDECAR_DIR/seed.dump" | awk '{print $1}')
+    echo "→ no PAPERCUSP_SEED_PG_URL set; reusing existing seed.dump ($seed_size)"
+    echo "  (this is the cross-platform path: bake on Linux once, rsync to Mac/Win,"
+    echo "   then run this script without the env var so the pre-baked dump survives.)"
+  else
+    echo "→ no PAPERCUSP_SEED_PG_URL set and no existing seed.dump; bundle will boot empty"
+  fi
 fi
 
 # Compute size

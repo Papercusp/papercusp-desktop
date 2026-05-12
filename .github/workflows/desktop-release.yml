@@ -142,7 +142,8 @@ jobs:
             rpm \
             libfuse2 \
             fuse \
-            postgresql-client
+            postgresql-client \
+            postgresql-18-pgvector
           # postgresql-client: build-desktop-sidecar.sh symlinks pg_dump/psql/
           # pg_dumpall into the bundled sidecar (embedded-postgres ships
           # server-only). Both ubuntu-22.04 and ubuntu-22.04-arm need this —
@@ -157,12 +158,18 @@ jobs:
        # PATH. Embedded-postgres ships server-only — client tools come from the
        # build host. Ubuntu runners pre-install postgresql-client; macOS does
        # not. Windows uses chocolatey's postgres which lands them in PATH.
-      - name: macOS PG client tools (pg_dump / psql)
+      - name: macOS PG client tools (pg_dump / psql) + pgvector
         if: startsWith(matrix.platform, 'macos')
         run: |
           brew install libpq
           BREW_PREFIX=$(brew --prefix libpq)
           echo "$BREW_PREFIX/bin" >> $GITHUB_PATH
+          # pgvector is bundled into the embedded-postgres tree by
+          # build-desktop-sidecar.sh so mem0 has a persistent vector
+          # store. Without postgresql@18 + pgvector here, the bundle
+          # ships without vector.dylib and mem0 falls back to its
+          # volatile in-memory provider.
+          brew install postgresql@18 pgvector || true
 
       - name: Install workspace deps (this repo)
         run: npm install --legacy-peer-deps
