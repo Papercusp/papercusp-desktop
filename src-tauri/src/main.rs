@@ -935,6 +935,13 @@ pub fn run() {
                 // In dev mode we trust the developer to run the Next.js dev
                 // server themselves on :3055 (devUrl in tauri.conf.json).
                 println!("[papercusp-desktop] dev mode — skipping sidecar spawn (expecting :3055 to be served externally)");
+                // Auto-open devtools so the developer can debug the
+                // operator UI without hunting for keyboard shortcuts.
+                // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
+                // through reliably; opening from Rust is foolproof.
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
                 return Ok(());
             }
 
