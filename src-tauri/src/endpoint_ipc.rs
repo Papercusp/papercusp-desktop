@@ -91,8 +91,95 @@ struct ErrorPayload {
 }
 
 /// Per-call channel handle. The reader-loop fans events into here.
+///
+/// `events_sent` is the per-call backpressure counter. Tauri 2's
+/// `Channel::send()` queues internally with no exposed backpressure —
+/// a tool emitting faster than the webview drains would grow Rust
+/// process memory until OOM. The 10k cap was promised in the plan as
+/// "non-negotiable"; this is the implementation.
+///
+/// When the cap trips:
+///   1. One final ERROR is sent (the consumer-visible terminal).
+///   2. `overflowed` flips to true; subsequent sends short-circuit.
+///   3. The server-side dispatch keeps running (we can't cancel it
+///      from the client mid-stream cheaply), but its emitted events
+///      land in the void from the Rust side onward.
+///
+/// 10k is generous for the steady-state load we expect (token streams
+/// at ~30/sec for 5-minute turns = 9k events) but bounded enough that
+/// a wedged consumer can't take the desktop down. Tune via telemetry
+/// if a real workload approaches the cap.
+const PER_CALL_EVENT_CAP: u64 = 10_000;
+
 struct CallSink {
     channel: Channel<EndpointEvent>,
+    events_sent: AtomicU64,
+    overflowed: std::sync::atomic::AtomicBool,
+}
+
+/// Decision returned by `decide_backpressure` — testable in isolation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BackpressureDecision {
+    /// Forward the event to the channel; under cap.
+    Forward,
+    /// First overflow event — emit a single backpressure_overflow error,
+    /// then drop everything subsequent.
+    EmitOverflowAndStop,
+    /// Cap already tripped earlier; silently drop.
+    Drop,
+}
+
+/// Pure decision function — given counter state and the cap, decide
+/// what to do with the next event. Atomic state is updated in-place.
+/// Extracted from `CallSink::try_send_event` so it can be tested
+/// without spinning up a Tauri webview to construct a Channel.
+fn decide_backpressure(
+    events_sent: &AtomicU64,
+    overflowed: &std::sync::atomic::AtomicBool,
+    cap: u64,
+) -> BackpressureDecision {
+    use std::sync::atomic::Ordering;
+    if overflowed.load(Ordering::Relaxed) {
+        return BackpressureDecision::Drop;
+    }
+    let n = events_sent.fetch_add(1, Ordering::Relaxed);
+    if n >= cap {
+        if !overflowed.swap(true, Ordering::Relaxed) {
+            BackpressureDecision::EmitOverflowAndStop
+        } else {
+            BackpressureDecision::Drop
+        }
+    } else {
+        BackpressureDecision::Forward
+    }
+}
+
+impl CallSink {
+    /// Send a non-terminal event with the per-call cap enforced. Returns
+    /// true if the event was forwarded; false if it was dropped (cap or
+    /// channel error).
+    fn try_send_event(&self, event: EndpointEvent) -> bool {
+        match decide_backpressure(&self.events_sent, &self.overflowed, PER_CALL_EVENT_CAP) {
+            BackpressureDecision::Forward => self.channel.send(event).is_ok(),
+            BackpressureDecision::EmitOverflowAndStop => {
+                let _ = self.channel.send(EndpointEvent::Error {
+                    code: "backpressure_overflow".to_string(),
+                    message: format!(
+                        "per-call event cap {} exceeded — server kept emitting but client can't keep up",
+                        PER_CALL_EVENT_CAP
+                    ),
+                });
+                false
+            }
+            BackpressureDecision::Drop => false,
+        }
+    }
+
+    /// Send a terminal event (Done / Error). Always attempts to forward,
+    /// even when overflowed — the consumer needs to know the call ended.
+    fn send_terminal(&self, event: EndpointEvent) {
+        let _ = self.channel.send(event);
+    }
 }
 
 /// Cross-platform stream — Unix domain socket OR Windows named pipe.
@@ -151,7 +238,11 @@ impl IpcClient {
         channel: Channel<EndpointEvent>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.in_flight.insert(id, CallSink { channel });
+        self.in_flight.insert(id, CallSink {
+            channel,
+            events_sent: AtomicU64::new(0),
+            overflowed: std::sync::atomic::AtomicBool::new(false),
+        });
         let req = serde_json::json!({
             "id": id,
             "toolName": tool_name,
@@ -199,7 +290,7 @@ async fn reader_loop(
                 FrameType::EventJson => {
                     if let Ok(env) = serde_json::from_slice::<EventJsonEnvelope>(&frame.payload) {
                         if let Some(sink) = in_flight.get(&env.id) {
-                            let _ = sink.channel.send(EndpointEvent::Event {
+                            sink.try_send_event(EndpointEvent::Event {
                                 name: env.name,
                                 data: env.data,
                             });
@@ -215,7 +306,7 @@ async fn reader_loop(
                                 use base64::Engine;
                                 let b64 = base64::engine::general_purpose::STANDARD
                                     .encode(&decoded.binary);
-                                let _ = sink.channel.send(EndpointEvent::Binary {
+                                sink.try_send_event(EndpointEvent::Binary {
                                     name: decoded.name,
                                     data: b64,
                                 });
@@ -227,14 +318,14 @@ async fn reader_loop(
                 FrameType::Done => {
                     if let Ok(env) = serde_json::from_slice::<DoneEnvelope>(&frame.payload) {
                         if let Some((_, sink)) = in_flight.remove(&env.id) {
-                            let _ = sink.channel.send(EndpointEvent::Done { result: env.result });
+                            sink.send_terminal(EndpointEvent::Done { result: env.result });
                         }
                     }
                 }
                 FrameType::Error => {
                     if let Ok(env) = serde_json::from_slice::<ErrorEnvelope>(&frame.payload) {
                         if let Some((_, sink)) = in_flight.remove(&env.id) {
-                            let _ = sink.channel.send(EndpointEvent::Error {
+                            sink.send_terminal(EndpointEvent::Error {
                                 code: env.error.code,
                                 message: env.error.message,
                             });
@@ -254,7 +345,7 @@ async fn reader_loop(
 
     // EOF / error — notify every in-flight Channel.
     for entry in in_flight.iter() {
-        let _ = entry.channel.send(EndpointEvent::Error {
+        entry.send_terminal(EndpointEvent::Error {
             code: "connection_lost".to_string(),
             message: "endpoint-ipc Node sidecar connection closed".to_string(),
         });
@@ -297,6 +388,63 @@ pub fn parse_ipc_ready_line(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn backpressure_forwards_under_cap() {
+        let sent = AtomicU64::new(0);
+        let overflowed = AtomicBool::new(false);
+        for _ in 0..10 {
+            assert_eq!(
+                decide_backpressure(&sent, &overflowed, 10_000),
+                BackpressureDecision::Forward,
+            );
+        }
+        assert_eq!(sent.load(Ordering::Relaxed), 10);
+        assert!(!overflowed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn backpressure_emits_overflow_exactly_once_at_cap() {
+        let sent = AtomicU64::new(9_999);
+        let overflowed = AtomicBool::new(false);
+        // 10_000th send is the last allowed; 10_001th trips the cap.
+        assert_eq!(
+            decide_backpressure(&sent, &overflowed, 10_000),
+            BackpressureDecision::Forward,
+        );
+        assert_eq!(
+            decide_backpressure(&sent, &overflowed, 10_000),
+            BackpressureDecision::EmitOverflowAndStop,
+        );
+        assert!(overflowed.load(Ordering::Relaxed));
+        // Subsequent sends drop silently.
+        for _ in 0..5 {
+            assert_eq!(
+                decide_backpressure(&sent, &overflowed, 10_000),
+                BackpressureDecision::Drop,
+            );
+        }
+    }
+
+    #[test]
+    fn backpressure_pre_overflowed_state_drops_immediately() {
+        let sent = AtomicU64::new(50_000);
+        let overflowed = AtomicBool::new(true);
+        for _ in 0..3 {
+            assert_eq!(
+                decide_backpressure(&sent, &overflowed, 10_000),
+                BackpressureDecision::Drop,
+            );
+        }
+    }
+
+    #[test]
+    fn per_call_cap_constant_matches_plan() {
+        // Plan said 10_000 per-call. Don't let a refactor silently
+        // halve it without a deliberate decision.
+        assert_eq!(PER_CALL_EVENT_CAP, 10_000);
+    }
 
     #[test]
     fn parses_ready_line_with_unix_path() {
