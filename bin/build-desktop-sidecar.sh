@@ -233,8 +233,17 @@ case "$_pgv_os" in
     fi
     ;;
   windows)
-    echo "  ⚠ pgvector not bundled on Windows (no automated source); mem0 will use in-memory fallback on Windows desktops"
-    pgv_lib_src=""
+    # CI workflow (desktop-release.yml) builds pgvector against PG 18
+    # and exports PGVECTOR_WIN_DIR. Local builds without this env var
+    # fall back to the in-memory provider (acceptable).
+    if [[ -n "${PGVECTOR_WIN_DIR:-}" && -f "$PGVECTOR_WIN_DIR/vector.dll" ]]; then
+      pgv_lib_src="$PGVECTOR_WIN_DIR/vector.dll"
+      pgv_ext_src="$PGVECTOR_WIN_DIR"
+      pgv_lib_ext="dll"
+    else
+      echo "  ⚠ pgvector not bundled on Windows (PGVECTOR_WIN_DIR unset or vector.dll missing); mem0 will use in-memory fallback"
+      pgv_lib_src=""
+    fi
     ;;
 esac
 
@@ -254,6 +263,7 @@ if [[ -n "${pgv_lib_src:-}" ]]; then
     case "$_pgv_os" in
       linux)  echo "    Install: sudo apt install postgresql-18-pgvector" ;;
       darwin) echo "    Install: brew install pgvector  (requires postgresql@18 keg)" ;;
+      windows) echo "    CI: PGVECTOR_WIN_DIR must point at a directory with vector.dll + vector*.sql + vector.control (the desktop-release.yml workflow builds it from source)" ;;
     esac
   fi
 fi
@@ -313,6 +323,28 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
   echo "  $tool: $method ($src)"
   echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
 done
+
+# On Darwin, pg_dump et al are linked via @loader_path/../lib/libpq.5.dylib.
+# Copying the bin without its sibling dylibs leaves the binary unloadable
+# (Abort trap: 6 / "Library not loaded: libpq.5.dylib"). Mirror the source
+# distribution's lib/ next to the bin/ so @loader_path/../lib resolves.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # pg_dump is linked via @loader_path/../lib/*. Each linked dylib has
+  # its OWN transitive @loader_path/../lib/* references (libpq → libssl
+  # → libcrypto → libgssapi → libkrb5 → libcom_err …). Rather than walk
+  # the dep tree, copy the entire source lib/ directory — it's a self-
+  # contained PG client distribution (~50-100 MB) and includes every
+  # dylib in the closure.
+  src_root=$(dirname "$(dirname "$src")")
+  if [[ -d "$src_root/lib" ]]; then
+    mkdir -p "$SIDECAR_DIR/lib"
+    # cp -RL: recursive + follow symlinks (versioned dylibs are typically
+    # symlinks to the real file in the same dir).
+    cp -RL "$src_root/lib/"* "$SIDECAR_DIR/lib/" 2>/dev/null
+    dylib_count=$(ls "$SIDECAR_DIR/lib"/*.dylib 2>/dev/null | wc -l | tr -d ' ')
+    echo "  ✓ copied $dylib_count dylibs from $src_root/lib → $SIDECAR_DIR/lib"
+  fi
+fi
 # Sanity-check that the bundled binary actually runs
 if ! "$SIDECAR_DIR/bin/pg_dump" --version >/dev/null 2>&1; then
   echo "ERROR: bundled pg_dump fails --version probe; the binary is not loadable on this host"

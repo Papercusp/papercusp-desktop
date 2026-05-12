@@ -171,6 +171,53 @@ jobs:
           # volatile in-memory provider.
           brew install postgresql@18 pgvector || true
 
+      - name: Windows pgvector build (from source against PG 18)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Build pgvector.dll against PostgreSQL 18 so mem0 gets a
+          # persistent vector store on Windows. Without this, the
+          # desktop bundle ships no vector.dll and mem0 falls back to
+          # its in-process memory provider (volatile across restarts).
+          #
+          # Chocolatey ships postgresql18 with the dev headers we need.
+          # Build with MSVC + nmake using pgvector's stock Makefile.win.
+          # Output is consumed by bin/build-desktop-sidecar.sh which
+          # checks PGVECTOR_WIN_DIR for the artifact set.
+          $ErrorActionPreference = 'Continue'
+          choco install -y postgresql18 --params '/Password:postgres /Port:54318' 2>$null
+          if (-not (Test-Path 'C:\Program Files\PostgreSQL\18')) {
+            Write-Host "::warning::PostgreSQL 18 not installed by choco; skipping Windows pgvector build (in-memory fallback ships)"
+            exit 0
+          }
+          $env:PGROOT = 'C:\Program Files\PostgreSQL\18'
+          git clone --depth 1 --branch v0.8.0 https://github.com/pgvector/pgvector.git $env:RUNNER_TEMP\pgvector
+          Push-Location $env:RUNNER_TEMP\pgvector
+          # Find the VS 2022 dev shell + run nmake. If anything fails,
+          # log + continue (Windows users get in-memory fallback, build
+          # itself doesn't abort).
+          try {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vsPath = & $vswhere -latest -property installationPath
+            $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+            cmd /c "`"$vcvars`" && nmake /F Makefile.win" 2>&1 | Tee-Object pgvector-build.log
+            if (-not (Test-Path .\vector.dll)) {
+              Write-Host "::warning::pgvector vector.dll not produced; build log: $(Get-Content pgvector-build.log -Raw)"
+              exit 0
+            }
+            $outDir = Join-Path $env:GITHUB_WORKSPACE 'pgvector-win'
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            Copy-Item vector.dll $outDir\
+            Copy-Item sql\vector--*.sql $outDir\
+            Copy-Item vector.control $outDir\
+            "PGVECTOR_WIN_DIR=$outDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "✓ pgvector built; staged in $outDir for build-desktop-sidecar.sh"
+          } catch {
+            Write-Host "::warning::pgvector build failed: $_"
+          } finally {
+            Pop-Location
+          }
+
       - name: Install workspace deps (this repo)
         run: npm install --legacy-peer-deps
 
