@@ -13,6 +13,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod endpoint_ipc;
+mod endpoint_ipc_framing;
 mod native_console;
 mod pty;
 mod workspaces;
@@ -20,6 +22,7 @@ mod wsl_setup;
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
@@ -51,6 +54,10 @@ struct SidecarState {
     zero_cache_child: Mutex<Option<Child>>,
     code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    /// Endpoint-IPC socket path resolved from the sidecar's
+    /// `PAPERCUSP_IPC_READY socket=<path>` stdout line. None when IPC
+    /// is disabled (default) or the handshake hadn't completed yet.
+    endpoint_ipc_socket: Mutex<Option<String>>,
 }
 
 /// Spawn the bundled code-server (vscode-in-the-browser). The
@@ -566,6 +573,15 @@ fn make_sidecar_command(
     cmd
 }
 
+/// Returned by `spawn_sidecar`. The receiver fires once with the
+/// resolved endpoint-IPC socket path when IPC is enabled and the
+/// sidecar prints its `PAPERCUSP_IPC_READY socket=<path>` handshake
+/// line. None when IPC is disabled (default).
+pub struct SidecarHandle {
+    pub child: Child,
+    pub ipc_ready_rx: Option<std_mpsc::Receiver<String>>,
+}
+
 fn spawn_sidecar(
     via_wsl: bool,
     port: u16,
@@ -580,7 +596,7 @@ fn spawn_sidecar(
     workspace_home: &std::path::Path,
     code_server_url: Option<&str>,
     pglite_admin_port: Option<u16>,
-) -> std::io::Result<Child> {
+) -> std::io::Result<SidecarHandle> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
     // Next.js standalone bundle layout: sidecar/apps/operator/server.js
@@ -644,17 +660,32 @@ fn spawn_sidecar(
         // so the env injection is the only sound channel.
         .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port))
         .env("HOME", &workspace_home_str)
-        .env("USERPROFILE", &workspace_home_str) // Windows
-        // Inherit stdio so sidecar errors land in the Tauri parent's
-        // stdout/stderr (visible via `papercusp-desktop > log 2>&1` or
-        // Console.app on mac). The previous `Stdio::piped()` collected
-        // sidecar output into kernel pipe buffers that nothing ever read,
-        // which (a) hid every server-side error and (b) deadlocked the
-        // sidecar once the buffer filled (~64KB) because writes started
-        // blocking. The forwarding-thread alternative is more code and
-        // didn't buy us anything; inherit is the simplest correct choice.
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .env("USERPROFILE", &workspace_home_str); // Windows
+    // Endpoint IPC opt-in. When enabled:
+    //   1. Sidecar boot starts the IPC server (see operator
+    //      instrumentation-node.ts § maybeStartEndpointIpcServer).
+    //   2. Stdout is piped so we can parse the
+    //      `PAPERCUSP_IPC_READY socket=<path>` handshake line.
+    //   3. A forwarder thread (spawned post-`cmd.spawn()` below)
+    //      consumes EVERY stdout line, watches for the marker, and
+    //      forwards everything else to the parent's stdout via
+    //      println!. This is the "forwarding-thread alternative" the
+    //      original Stdio::inherit() comment dismissed as "didn't buy
+    //      us anything" — now it buys the handshake.
+    //   4. Without an actively-consuming reader, kernel pipe buffers
+    //      (~64 KB) deadlock the sidecar after the first burst of
+    //      logs. The forwarder must stay running for the lifetime of
+    //      the sidecar.
+    //
+    // When disabled (default): keep Stdio::inherit(), no extra
+    // threads, no behavior change vs pre-IPC.
+    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() == Some("1");
+    if ipc_enabled {
+        cmd.env("PAPERCUSP_IPC_ENABLE", "1");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
+    } else {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
 
     // Preferred path: real PG via embedded-postgres-server on a TCP port.
     // wal_level=logical is set on the postmaster, so Zero / pgoutput
@@ -739,7 +770,52 @@ fn spawn_sidecar(
         cmd.env("PGLITE_ADMIN_URL", format!("http://127.0.0.1:{}", port));
     }
 
-    cmd.spawn()
+    let mut child = cmd.spawn()?;
+
+    // IPC bootstrap: drain stdout in a background thread, forward
+    // everything to the parent's stdout, capture the
+    // `PAPERCUSP_IPC_READY socket=<path>` line and signal the path
+    // through a sync_channel. The receiver is `recv_timeout`'d in
+    // setup() after wait_for_sidecar succeeds. Once captured, the
+    // thread keeps draining for the lifetime of the sidecar so kernel
+    // pipe buffers never fill (the 64KB deadlock case).
+    let ipc_ready_rx = if ipc_enabled {
+        if let Some(stdout) = child.stdout.take() {
+            let (tx, rx) = std_mpsc::sync_channel::<String>(1);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(stdout);
+                let mut signaled = false;
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    // Forward to parent stdout so logs stay visible.
+                    println!("{line}");
+                    if !signaled {
+                        if let Some(path) = crate::endpoint_ipc::parse_ipc_ready_line(
+                            &format!("{line}\n"),
+                        ) {
+                            let _ = tx.try_send(path.to_string());
+                            signaled = true;
+                            // Drop the sender so recv_timeout returns
+                            // immediately on the consumer side; the
+                            // thread keeps reading.
+                            drop(tx.clone()); // no-op for sync_channel but documents intent
+                        }
+                    }
+                }
+            });
+            Some(rx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(SidecarHandle { child, ipc_ready_rx })
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +981,7 @@ pub fn run() {
         zero_cache_child: Mutex::new(None),
         code_server_child: Mutex::new(None),
         port: Mutex::new(None),
+        endpoint_ipc_socket: Mutex::new(None),
     };
 
     // tauri-specta Builder — collects every #[specta::specta] command
@@ -935,6 +1012,8 @@ pub fn run() {
             wsl_setup::wsl_finalize_ready,
             wsl_setup::wsl_uninstall,
             native_console::console_launch,
+            endpoint_ipc::endpoint_invoke,
+            endpoint_ipc::endpoint_cancel,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
@@ -1186,8 +1265,8 @@ pub fn run() {
                     return Ok(());
                 }
             }
-            let child = match spawn_sidecar(via_wsl, port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
-                Ok(c) => c,
+            let handle = match spawn_sidecar(via_wsl, port, &sidecar_dir, pglite_socket_dir.as_deref(), pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref(), pglite_admin_port) {
+                Ok(h) => h,
                 Err(e) => {
                     eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
                     return Ok(());
@@ -1195,8 +1274,9 @@ pub fn run() {
             };
 
             let state: tauri::State<SidecarState> = app.state();
-            *state.child.lock().unwrap() = Some(child);
+            *state.child.lock().unwrap() = Some(handle.child);
             *state.port.lock().unwrap() = Some(port);
+            let ipc_ready_rx = handle.ipc_ready_rx;
 
             // Wait for the sidecar to start accepting connections (up to 30s).
             if !wait_for_sidecar(port, Duration::from_secs(30)) {
@@ -1204,6 +1284,41 @@ pub fn run() {
                 return Ok(());
             }
             println!("[papercusp-desktop] sidecar ready on :{}", port);
+
+            // Endpoint-IPC handshake: when IPC is enabled, wait for the
+            // sidecar's PAPERCUSP_IPC_READY stdout line and open the
+            // client socket. ~30s timeout — if it doesn't arrive, the
+            // IPC path stays disabled (commands return state-not-managed
+            // error to JS, which ipc-stream.ts surfaces as 'invoke_failed'
+            // and the consumer-side picker can fall back to HTTP).
+            if let Some(rx) = ipc_ready_rx {
+                match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(socket_path) => {
+                        println!("[papercusp-desktop] endpoint-ipc socket: {socket_path}");
+                        *state.endpoint_ipc_socket.lock().unwrap() = Some(socket_path.clone());
+
+                        // Connect from Rust. async_runtime::block_on uses
+                        // Tauri's tokio runtime — no separate runtime
+                        // creation needed.
+                        let connect_path = std::path::PathBuf::from(socket_path);
+                        let connect_result = tauri::async_runtime::block_on(async move {
+                            endpoint_ipc::IpcClient::connect(&connect_path).await
+                        });
+                        match connect_result {
+                            Ok(client) => {
+                                app.manage(client);
+                                println!("[papercusp-desktop] endpoint-ipc client connected");
+                            }
+                            Err(e) => {
+                                eprintln!("[papercusp-desktop] endpoint-ipc client connect failed: {e}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("[papercusp-desktop] endpoint-ipc handshake timeout after 30s — IPC disabled this session");
+                    }
+                }
+            }
 
             // Tell the bootstrap page where the sidecar is. The JS in
             // web/index.html will poll /api/desktop/preflight on that base,
