@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# audit-bundle.sh — verify production artifacts contain no PostHog leaks.
+#
+# V1 privacy contract: a freshly installed production binary must make
+# zero network requests to flags.papercuspai.com under any usage. That
+# requires that NO discovery file and NO PostHog env var has been baked
+# into the artifact at build time.
+#
+# Usage:
+#   bin/audit-bundle.sh path/to/artifact.deb [path/to/artifact.dmg ...]
+#
+# Exits 0 if every artifact is clean. Exits 1 (and lists matches) if any
+# artifact contains posthog.json, posthog-personal.json, or any of the
+# PAPERCUSP_POSTHOG_* env-var names.
+#
+# Supported formats: .deb, .dmg, .msi, .exe, .rpm, .AppImage, or a raw
+# directory (e.g. an unpacked Papercusp.app or .next-prod/standalone).
+set -euo pipefail
+
+NEEDLES=(
+  'posthog.json'
+  'posthog-personal.json'
+  'PAPERCUSP_POSTHOG_HOST'
+  'PAPERCUSP_POSTHOG_KEY'
+  'PAPERCUSP_POSTHOG_PERSONAL_KEY'
+  'PAPERCUSP_POSTHOG_TESTING_FEATURES'
+)
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: $0 <artifact> [<artifact>...]" >&2
+  exit 2
+fi
+
+FAIL=0
+PASSED=0
+TOTAL=$#
+
+scan_path() {
+  local path="$1"
+  local label="$2"
+  local matches=()
+  for needle in "${NEEDLES[@]}"; do
+    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null | head -5 | grep -q .; then
+      matches+=("$needle")
+    fi
+  done
+  if [[ ${#matches[@]} -gt 0 ]]; then
+    echo "FAIL: $label" >&2
+    for m in "${matches[@]}"; do
+      echo "  - found: $m" >&2
+      grep -rlF --binary-files=text -- "$m" "$path" 2>/dev/null | head -3 | sed 's|^|      |' >&2
+    done
+    return 1
+  fi
+  return 0
+}
+
+for artifact in "$@"; do
+  if [[ ! -e "$artifact" ]]; then
+    echo "FAIL: $artifact (not found)" >&2
+    FAIL=$((FAIL+1))
+    continue
+  fi
+
+  TMPDIR=$(mktemp -d)
+  trap 'rm -rf "$TMPDIR"' EXIT
+
+  case "$artifact" in
+    *.deb)
+      dpkg-deb -x "$artifact" "$TMPDIR" 2>/dev/null
+      ;;
+    *.rpm)
+      (cd "$TMPDIR" && rpm2cpio "$artifact" 2>/dev/null | cpio -idm --quiet 2>/dev/null)
+      ;;
+    *.AppImage)
+      cp "$artifact" "$TMPDIR/app.AppImage"
+      chmod +x "$TMPDIR/app.AppImage"
+      (cd "$TMPDIR" && ./app.AppImage --appimage-extract >/dev/null 2>&1) || true
+      ;;
+    *.dmg)
+      # On Linux: use 7z to extract. On macOS: hdiutil. Try both.
+      if command -v 7z >/dev/null 2>&1; then
+        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+      elif command -v hdiutil >/dev/null 2>&1; then
+        MOUNT=$(hdiutil attach -nobrowse -readonly "$artifact" | grep '/Volumes/' | head -1 | awk '{print $NF}')
+        cp -R "$MOUNT" "$TMPDIR/"
+        hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+      else
+        echo "WARN: $artifact — neither 7z nor hdiutil available, scanning as binary blob" >&2
+        cp "$artifact" "$TMPDIR/blob.dmg"
+      fi
+      ;;
+    *.msi)
+      # Use 7z (handles MSI containers). Fall back to raw scan.
+      if command -v 7z >/dev/null 2>&1; then
+        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+      else
+        echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
+        cp "$artifact" "$TMPDIR/blob.msi"
+      fi
+      ;;
+    *.exe)
+      # NSIS .exe installers — 7z can usually crack them.
+      if command -v 7z >/dev/null 2>&1; then
+        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+      else
+        echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
+        cp "$artifact" "$TMPDIR/blob.exe"
+      fi
+      ;;
+    *)
+      if [[ -d "$artifact" ]]; then
+        cp -R "$artifact" "$TMPDIR/"
+      else
+        cp "$artifact" "$TMPDIR/"
+      fi
+      ;;
+  esac
+
+  if scan_path "$TMPDIR" "$artifact"; then
+    echo "OK:   $artifact"
+    PASSED=$((PASSED+1))
+  else
+    FAIL=$((FAIL+1))
+  fi
+
+  rm -rf "$TMPDIR"
+  trap - EXIT
+done
+
+echo
+if [[ $FAIL -gt 0 ]]; then
+  echo "FAIL: $FAIL of $TOTAL artifacts contain PostHog leaks" >&2
+  exit 1
+fi
+echo "OK: $PASSED/$TOTAL artifacts clean"
+exit 0
