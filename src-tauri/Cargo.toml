@@ -66,3 +66,4 @@ base64 = "0.22"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+devtools = []

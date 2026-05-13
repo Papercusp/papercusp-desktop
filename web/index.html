@@ -45,8 +45,14 @@
   //   Dev: point at :3055 (the externally-run Next dev server).
   function sidecarBase() {
     if (window.__papercuspBase) return window.__papercuspBase;
+    // Inside a Tauri prod webview the window starts at tauri://localhost
+    // BEFORE main.rs's init script has set window.__papercuspBase. Returning
+    // a fallback here would race the init script — and on a dev machine
+    // where :3055 happens to be running, we'd hijack the bootstrap and load
+    // the dev app inside the prod binary. Return null and let the caller
+    // wait for the `papercusp:base` event instead.
     if (location.hostname === 'tauri.localhost' || location.protocol === 'tauri:') {
-      return 'http://localhost:3055';
+      return null;
     }
     return location.origin;
   }
@@ -101,8 +107,15 @@
   async function tick() {
     attempt += 1;
     const msg = document.getElementById('msg');
+    const base = sidecarBase();
+    if (!base) {
+      // Still waiting for Tauri's init script to set window.__papercuspBase.
+      msg.textContent = `waiting for sidecar port… (attempt ${attempt})`;
+      setTimeout(tick, 200);
+      return;
+    }
     try {
-      const r = await fetch(`${sidecarBase()}/api/desktop/preflight`, { cache: 'no-store' });
+      const r = await fetch(`${base}/api/desktop/preflight`, { cache: 'no-store' });
       if (!r.ok) throw new Error('preflight responded ' + r.status);
       const data = await r.json();
       everReached = true;
@@ -115,8 +128,9 @@
       if (data.ok) {
         consecutiveOk += 1;
         if (consecutiveOk >= 1) {
-          // Real navigation — leave this bootstrap page.
-          location.href = `${sidecarBase()}/harness`;
+          // Replace the bootstrap page so Back returns to the prior real app route,
+          // not the startup/preflight screen.
+          location.replace(`${base}/harness`);
           return;
         }
       } else {
