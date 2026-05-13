@@ -26,6 +26,26 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
+/// Resolve the bundled node binary path so spawns work when launched
+/// from Finder/Start menu where /usr/local/bin isn't on PATH.
+///
+/// macOS GUI launches inherit `PATH=/usr/bin:/bin:/usr/sbin:/sbin` only.
+/// `Command::new("node")` then fails with ENOENT even when the user has
+/// node installed via brew. The sidecar ships its own node — use that
+/// absolute path so the spawn is GUI-launch-proof.
+///
+/// Falls back to bare "node" if the bundled binary isn't there yet
+/// (e.g. early-development checkouts that haven't run the sidecar build).
+fn bundled_node(sidecar_dir: &std::path::Path) -> std::ffi::OsString {
+    let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    let p = sidecar_dir.join("bin").join(exe);
+    if p.exists() {
+        p.into_os_string()
+    } else {
+        std::ffi::OsString::from("node")
+    }
+}
+
 /// Minimal RFC 3986 percent-encoding for the path component. Only the
 /// reserved + unsafe set; we avoid pulling in a full url crate dep just
 /// for this. Used to encode the pglite unix socket dir into the host
@@ -151,7 +171,8 @@ fn spawn_embedded_postgres_server(
     // parent=init) lingering across desktop sessions.
     sweep_orphan_postgres(data_dir);
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let mut cmd = Command::new("node");
+    let sidecar_dir = pg_dir.parent().unwrap_or(pg_dir);
+    let mut cmd = Command::new(bundled_node(sidecar_dir));
     cmd.arg(&bin)
         .env("PAPERCUSP_PG_DATA_DIR", data_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_PG_PORT", port.to_string())
@@ -161,6 +182,14 @@ fn spawn_embedded_postgres_server(
         .env("USERPROFILE", &workspace_home_str)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    let seed_dump = sidecar_dir.join("seed.dump");
+    if seed_dump.exists() {
+        cmd.env("PAPERCUSP_PG_SEED_DUMP_PATH", seed_dump.to_string_lossy().to_string());
+    }
+    let pg_restore = sidecar_dir.join("bin").join(if cfg!(windows) { "pg_restore.exe" } else { "pg_restore" });
+    if pg_restore.exists() {
+        cmd.env("PAPERCUSP_PG_RESTORE_BIN", pg_restore.to_string_lossy().to_string());
+    }
     cmd.spawn()
 }
 
@@ -187,7 +216,8 @@ fn spawn_zero_cache_server(
     );
     std::fs::create_dir_all(replica_dir)?;
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let mut cmd = Command::new("node");
+    let sidecar_dir = zero_dir.parent().unwrap_or(zero_dir);
+    let mut cmd = Command::new(bundled_node(sidecar_dir));
     cmd.arg(&bin)
         .env("PAPERCUSP_ZERO_UPSTREAM_DB", upstream_db)
         .env("PAPERCUSP_ZERO_PORT", port.to_string())
@@ -295,6 +325,56 @@ fn wait_for_zero_cache(port: u16, timeout: Duration) -> bool {
 /// response byte. `R` = AuthenticationRequest = postmaster is past
 /// recovery and willing to talk; `E` = ErrorResponse (typically 57P03
 /// during recovery) = retry. Anything else (or read timeout) = retry.
+fn home_dir_simple() -> Option<std::path::PathBuf> {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() { return Some(std::path::PathBuf::from(h)); }
+    }
+    if let Ok(h) = std::env::var("USERPROFILE") {
+        if !h.is_empty() { return Some(std::path::PathBuf::from(h)); }
+    }
+    None
+}
+
+/// Write `~/.papercusp/embedded-pg.json` so the webapp dev (`npm run dev`)
+/// can discover the running embedded Postgres without env vars. Includes
+/// the PID so a cohabiting Tauri instance can tell whether the file is
+/// theirs before deleting it on shutdown.
+fn write_pg_discovery_file(port: u16) {
+    let Some(home) = home_dir_simple() else { return };
+    let dir = home.join(".papercusp");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[papercusp-desktop] failed to create {}: {}", dir.display(), e);
+        return;
+    }
+    let path = dir.join("embedded-pg.json");
+    let tmp = dir.join("embedded-pg.json.tmp");
+    let pid = std::process::id();
+    let body = format!(
+        "{{\"version\":1,\"host\":\"127.0.0.1\",\"port\":{port},\"database\":\"papercusp\",\"user\":\"harness_admin\",\"url\":\"postgres://harness_admin:harness_admin_pwd@127.0.0.1:{port}/papercusp\",\"pid\":{pid}}}\n"
+    );
+    if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
+        eprintln!("[papercusp-desktop] failed to write {}: {}", tmp.display(), e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[papercusp-desktop] failed to rename to {}: {}", path.display(), e);
+        return;
+    }
+    println!("[papercusp-desktop] wrote PG discovery file at {} (port={port})", path.display());
+}
+
+fn delete_pg_discovery_file_if_owned() {
+    let Some(home) = home_dir_simple() else { return };
+    let path = home.join(".papercusp").join("embedded-pg.json");
+    let Ok(body) = std::fs::read_to_string(&path) else { return };
+    let our_pid = std::process::id();
+    let needle = format!("\"pid\":{}", our_pid);
+    if body.contains(&needle) {
+        let _ = std::fs::remove_file(&path);
+        println!("[papercusp-desktop] removed PG discovery file (owned)");
+    }
+}
+
 fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -359,7 +439,8 @@ fn spawn_pglite_server(
 
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
 
-    let mut cmd = Command::new("node");
+    let sidecar_dir = pglite_dir.parent().unwrap_or(pglite_dir);
+    let mut cmd = Command::new(bundled_node(sidecar_dir));
     cmd.arg(&bin)
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
@@ -565,7 +646,7 @@ fn make_sidecar_command(
             // false on non-Windows. Fall through to native.
         }
     }
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(bundled_node(sidecar_dir));
     cmd.arg("--require")
         .arg(preload)
         .arg(server_js)
@@ -1018,6 +1099,7 @@ pub fn run() {
                 // operator UI without hunting for keyboard shortcuts.
                 // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
                 // through reliably; opening from Rust is foolproof.
+                #[cfg(any(debug_assertions, feature = "devtools"))]
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
                 }
@@ -1090,6 +1172,7 @@ pub fn run() {
                         if wait_for_pg_tcp(port, Duration::from_secs(60)) {
                             println!("[papercusp-desktop] embedded-postgres-server ready on 127.0.0.1:{}", port);
                             pg_tcp_port = Some(port);
+                            write_pg_discovery_file(port);
                         } else {
                             eprintln!("[papercusp-desktop] embedded-postgres-server did not accept TCP in 60s — initdb may have failed; falling through to pglite");
                         }
@@ -1299,12 +1382,14 @@ pub fn run() {
         .run(|app_handle, event| match event {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                 kill_sidecar(app_handle);
+                delete_pg_discovery_file_if_owned();
             }
             RunEvent::WindowEvent {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
                 kill_sidecar(app_handle);
+                delete_pg_discovery_file_if_owned();
             }
             _ => {}
         });
