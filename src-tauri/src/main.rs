@@ -26,26 +26,6 @@ use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
-/// Resolve the bundled node binary path so spawns work when launched
-/// from Finder/Start menu where /usr/local/bin isn't on PATH.
-///
-/// macOS GUI launches inherit `PATH=/usr/bin:/bin:/usr/sbin:/sbin` only.
-/// `Command::new("node")` then fails with ENOENT even when the user has
-/// node installed via brew. The sidecar ships its own node — use that
-/// absolute path so the spawn is GUI-launch-proof.
-///
-/// Falls back to bare "node" if the bundled binary isn't there yet
-/// (e.g. early-development checkouts that haven't run the sidecar build).
-fn bundled_node(sidecar_dir: &std::path::Path) -> std::ffi::OsString {
-    let exe = if cfg!(windows) { "node.exe" } else { "node" };
-    let p = sidecar_dir.join("bin").join(exe);
-    if p.exists() {
-        p.into_os_string()
-    } else {
-        std::ffi::OsString::from("node")
-    }
-}
-
 /// Minimal RFC 3986 percent-encoding for the path component. Only the
 /// reserved + unsafe set; we avoid pulling in a full url crate dep just
 /// for this. Used to encode the pglite unix socket dir into the host
@@ -171,8 +151,7 @@ fn spawn_embedded_postgres_server(
     // parent=init) lingering across desktop sessions.
     sweep_orphan_postgres(data_dir);
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let sidecar_dir = pg_dir.parent().unwrap_or(pg_dir);
-    let mut cmd = Command::new(bundled_node(sidecar_dir));
+    let mut cmd = Command::new("node");
     cmd.arg(&bin)
         .env("PAPERCUSP_PG_DATA_DIR", data_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_PG_PORT", port.to_string())
@@ -182,14 +161,6 @@ fn spawn_embedded_postgres_server(
         .env("USERPROFILE", &workspace_home_str)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let seed_dump = sidecar_dir.join("seed.dump");
-    if seed_dump.exists() {
-        cmd.env("PAPERCUSP_PG_SEED_DUMP_PATH", seed_dump.to_string_lossy().to_string());
-    }
-    let pg_restore = sidecar_dir.join("bin").join(if cfg!(windows) { "pg_restore.exe" } else { "pg_restore" });
-    if pg_restore.exists() {
-        cmd.env("PAPERCUSP_PG_RESTORE_BIN", pg_restore.to_string_lossy().to_string());
-    }
     cmd.spawn()
 }
 
@@ -216,8 +187,7 @@ fn spawn_zero_cache_server(
     );
     std::fs::create_dir_all(replica_dir)?;
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let sidecar_dir = zero_dir.parent().unwrap_or(zero_dir);
-    let mut cmd = Command::new(bundled_node(sidecar_dir));
+    let mut cmd = Command::new("node");
     cmd.arg(&bin)
         .env("PAPERCUSP_ZERO_UPSTREAM_DB", upstream_db)
         .env("PAPERCUSP_ZERO_PORT", port.to_string())
@@ -325,56 +295,6 @@ fn wait_for_zero_cache(port: u16, timeout: Duration) -> bool {
 /// response byte. `R` = AuthenticationRequest = postmaster is past
 /// recovery and willing to talk; `E` = ErrorResponse (typically 57P03
 /// during recovery) = retry. Anything else (or read timeout) = retry.
-fn home_dir_simple() -> Option<std::path::PathBuf> {
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() { return Some(std::path::PathBuf::from(h)); }
-    }
-    if let Ok(h) = std::env::var("USERPROFILE") {
-        if !h.is_empty() { return Some(std::path::PathBuf::from(h)); }
-    }
-    None
-}
-
-/// Write `~/.papercusp/embedded-pg.json` so the webapp dev (`npm run dev`)
-/// can discover the running embedded Postgres without env vars. Includes
-/// the PID so a cohabiting Tauri instance can tell whether the file is
-/// theirs before deleting it on shutdown.
-fn write_pg_discovery_file(port: u16) {
-    let Some(home) = home_dir_simple() else { return };
-    let dir = home.join(".papercusp");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("[papercusp-desktop] failed to create {}: {}", dir.display(), e);
-        return;
-    }
-    let path = dir.join("embedded-pg.json");
-    let tmp = dir.join("embedded-pg.json.tmp");
-    let pid = std::process::id();
-    let body = format!(
-        "{{\"version\":1,\"host\":\"127.0.0.1\",\"port\":{port},\"database\":\"papercusp\",\"user\":\"harness_admin\",\"url\":\"postgres://harness_admin:harness_admin_pwd@127.0.0.1:{port}/papercusp\",\"pid\":{pid}}}\n"
-    );
-    if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
-        eprintln!("[papercusp-desktop] failed to write {}: {}", tmp.display(), e);
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        eprintln!("[papercusp-desktop] failed to rename to {}: {}", path.display(), e);
-        return;
-    }
-    println!("[papercusp-desktop] wrote PG discovery file at {} (port={port})", path.display());
-}
-
-fn delete_pg_discovery_file_if_owned() {
-    let Some(home) = home_dir_simple() else { return };
-    let path = home.join(".papercusp").join("embedded-pg.json");
-    let Ok(body) = std::fs::read_to_string(&path) else { return };
-    let our_pid = std::process::id();
-    let needle = format!("\"pid\":{}", our_pid);
-    if body.contains(&needle) {
-        let _ = std::fs::remove_file(&path);
-        println!("[papercusp-desktop] removed PG discovery file (owned)");
-    }
-}
-
 fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -439,8 +359,7 @@ fn spawn_pglite_server(
 
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
 
-    let sidecar_dir = pglite_dir.parent().unwrap_or(pglite_dir);
-    let mut cmd = Command::new(bundled_node(sidecar_dir));
+    let mut cmd = Command::new("node");
     cmd.arg(&bin)
         .env("PGLITE_SOCKET_DIR", socket_dir.to_string_lossy().to_string())
         .env("PGLITE_DATA_DIR", data_dir.to_string_lossy().to_string())
@@ -646,7 +565,7 @@ fn make_sidecar_command(
             // false on non-Windows. Fall through to native.
         }
     }
-    let mut cmd = Command::new(bundled_node(sidecar_dir));
+    let mut cmd = Command::new("node");
     cmd.arg("--require")
         .arg(preload)
         .arg(server_js)
@@ -922,12 +841,49 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// Build the per-call updater endpoint targeted at the operator sidecar.
+///
+/// We don't hardcode a single static URL in `tauri.conf.json` because:
+///   1. The operator picks a free port at boot — known only at runtime.
+///   2. We want the operator's PG-backed `setup_wizard_state.update_channel`
+///      to drive which channel's release is served, without baking the
+///      channel into compile-time config.
+///
+/// The operator route at `/api/updates/manifest` handles channel
+/// resolution: query-param wins, then stored preference, then 'stable'.
+/// Tauri substitutes `{{target}}`, `{{arch}}`, and `{{current_version}}`
+/// when it issues the GET.
+fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
+    let port: u16 = if cfg!(debug_assertions) {
+        // Dev: webview points at devUrl in tauri.conf.json (localhost:3055).
+        // No sidecar process to read a port from.
+        3055
+    } else {
+        let state: tauri::State<SidecarState> = app.state();
+        let guard = state.port.lock().map_err(|e| e.to_string())?;
+        guard
+            .ok_or_else(|| "sidecar port not yet known; try again after boot completes".to_string())?
+    };
+    Ok(format!(
+        "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}",
+        port
+    ))
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
     use tauri_plugin_updater::UpdaterExt;
+    let endpoint = resolve_update_endpoint(&app)?;
+    let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let current = env!("CARGO_PKG_VERSION").to_string();
-    match app.updater().map_err(|e| e.to_string())?.check().await {
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    match updater.check().await {
         Ok(Some(update)) => Ok(UpdateInfo {
             available: true,
             current_version: current,
@@ -948,9 +904,15 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
 #[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
-    let update = app
-        .updater()
+    let endpoint = resolve_update_endpoint(&app)?;
+    let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
         .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    let update = updater
         .check()
         .await
         .map_err(|e| e.to_string())?
@@ -1099,7 +1061,6 @@ pub fn run() {
                 // operator UI without hunting for keyboard shortcuts.
                 // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
                 // through reliably; opening from Rust is foolproof.
-                #[cfg(any(debug_assertions, feature = "devtools"))]
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
                 }
@@ -1172,7 +1133,6 @@ pub fn run() {
                         if wait_for_pg_tcp(port, Duration::from_secs(60)) {
                             println!("[papercusp-desktop] embedded-postgres-server ready on 127.0.0.1:{}", port);
                             pg_tcp_port = Some(port);
-                            write_pg_discovery_file(port);
                         } else {
                             eprintln!("[papercusp-desktop] embedded-postgres-server did not accept TCP in 60s — initdb may have failed; falling through to pglite");
                         }
@@ -1382,14 +1342,12 @@ pub fn run() {
         .run(|app_handle, event| match event {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                 kill_sidecar(app_handle);
-                delete_pg_discovery_file_if_owned();
             }
             RunEvent::WindowEvent {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
                 kill_sidecar(app_handle);
-                delete_pg_discovery_file_if_owned();
             }
             _ => {}
         });
