@@ -18,12 +18,29 @@
 set -euo pipefail
 
 NEEDLES=(
-  'posthog.json'
-  'posthog-personal.json'
-  'PAPERCUSP_POSTHOG_HOST'
-  'PAPERCUSP_POSTHOG_KEY'
-  'PAPERCUSP_POSTHOG_PERSONAL_KEY'
-  'PAPERCUSP_POSTHOG_TESTING_FEATURES'
+  # No literal-string needles. Bare `phx_` / `phc_` / `posthog.json`
+  # all show up legitimately in source/docs/code. We use regex needles
+  # below to match only actual SECRETS (long random suffixes), not
+  # placeholders or path references.
+  ''
+)
+
+# Regex needles. Match real PostHog keys: phx_ / phc_ followed by 30+
+# alphanumeric / underscore chars. Placeholders like phx_xxx or phc_…
+# don't qualify. Hand-crafted to avoid false positives in docs.
+REGEX_NEEDLES=(
+  'phx_[A-Za-z0-9_]{30,}'
+  'phc_[A-Za-z0-9_]{30,}'
+)
+
+# Soft-warn needles: signals that posthog-js (the browser SDK) is in the
+# bundle. Today it's dynamic-imported only when the user opts into
+# telemetry (default off), so its presence is not a privacy leak per se.
+# But a hostile fork could remove the opt-in gate and silently turn it
+# on, so it's worth surfacing. WARN, do not FAIL.
+WARN_NEEDLES=(
+  'node_modules/posthog-js/'
+  'posthog-js@'
 )
 
 if [[ $# -eq 0 ]]; then
@@ -39,16 +56,54 @@ scan_path() {
   local path="$1"
   local label="$2"
   local matches=()
+  # Paths to ignore: documentation that legitimately mentions the
+  # needles in prose (e.g. content/docs/posthog/*, .mdx, .md). These
+  # don't load into a shipped runtime, so they aren't privacy leaks.
+  local exclude_re='(content/docs|/docs/|\.mdx|\.md$|\.rsc$|app/docs/.*\.html$)'
   for needle in "${NEEDLES[@]}"; do
-    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null | head -5 | grep -q .; then
+    [[ -z "$needle" ]] && continue
+    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null \
+        | grep -vE "$exclude_re" \
+        | head -5 | grep -q .; then
       matches+=("$needle")
     fi
   done
+  for re in "${REGEX_NEEDLES[@]}"; do
+    if grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null \
+        | grep -vE "$exclude_re" \
+        | head -5 | grep -q .; then
+      matches+=("regex:$re")
+    fi
+  done
+
+  # Soft warnings (informational, do not affect exit code).
+  local warnings=()
+  for needle in "${WARN_NEEDLES[@]}"; do
+    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null | head -3 | grep -q .; then
+      warnings+=("$needle")
+    fi
+  done
+  if [[ ${#warnings[@]} -gt 0 ]]; then
+    echo "WARN: $label contains telemetry-related code (default OFF; opt-in gated):" >&2
+    for w in "${warnings[@]}"; do
+      echo "  - found: $w" >&2
+    done
+  fi
+
   if [[ ${#matches[@]} -gt 0 ]]; then
     echo "FAIL: $label" >&2
     for m in "${matches[@]}"; do
       echo "  - found: $m" >&2
-      grep -rlF --binary-files=text -- "$m" "$path" 2>/dev/null | head -3 | sed 's|^|      |' >&2
+      if [[ "$m" == regex:* ]]; then
+        local re="${m#regex:}"
+        grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null \
+          | grep -vE "$exclude_re" \
+          | head -3 | sed 's|^|      |' >&2
+      else
+        grep -rlF --binary-files=text -- "$m" "$path" 2>/dev/null \
+          | grep -vE "$exclude_re" \
+          | head -3 | sed 's|^|      |' >&2
+      fi
     done
     return 1
   fi
