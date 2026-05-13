@@ -70,7 +70,15 @@ for artifact in "$@"; do
       dpkg-deb -x "$artifact" "$TMPDIR" 2>/dev/null
       ;;
     *.rpm)
-      (cd "$TMPDIR" && rpm2cpio "$artifact" 2>/dev/null | cpio -idm --quiet 2>/dev/null)
+      if command -v rpm2cpio >/dev/null 2>&1; then
+        (cd "$TMPDIR" && rpm2cpio "$artifact" | cpio -idm --quiet 2>/dev/null) || { echo "FAIL: $artifact rpm2cpio extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
+      elif command -v 7z >/dev/null 2>&1; then
+        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || { echo "FAIL: $artifact 7z extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
+      else
+        echo "FAIL: $artifact — neither rpm2cpio nor 7z available" >&2
+        FAIL=$((FAIL+1))
+        continue
+      fi
       ;;
     *.AppImage)
       cp "$artifact" "$TMPDIR/app.AppImage"
