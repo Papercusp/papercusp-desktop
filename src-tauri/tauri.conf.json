@@ -70,7 +70,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://github.com/papercupai/papercusp-desktop/releases/latest/download/latest.json"
+        "http://127.0.0.1:3055/api/updates/manifest?target={{target}}&arch={{arch}}&current_version={{current_version}}"
       ],
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI0NTA3QUE3NjlEMjU0M0EKUldRNlZOSnBwM3BRdEZNRDBESnpiZEtCMHdRVG4rWHozUkhhY3ZoN0pZczFmWlNhV21kMkhIamsK"

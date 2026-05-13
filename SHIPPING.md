@@ -2,15 +2,52 @@
 
 Cheat sheet for cutting + verifying a release.
 
-## Cut a test build
+## Tag → channel mapping
+
+The Setup Wizard's auto-update step routes through the operator at
+`/api/updates/manifest`. That route classifies each GH release by tag
+suffix and surfaces it to users on a matching (or laxer) channel:
+
+| Tag pattern                | Channel | Visible to subscribers of |
+| -------------------------- | ------- | ------------------------- |
+| `desktop-v<X.Y.Z>`         | stable  | alpha + beta + stable     |
+| `desktop-v<X.Y.Z>-beta.N`  | beta    | alpha + beta              |
+| `desktop-v<X.Y.Z>-rc.N`    | beta    | alpha + beta              |
+| `desktop-v<X.Y.Z>-alpha.N` | alpha   | alpha only                |
+| `desktop-v<X.Y.Z>-test.N`  | —       | not auto-built (workflow filter)  |
+
+## Cut a release
+
+Use `bin/cut-release.sh` — it bumps `package.json` / `Cargo.toml` /
+`tauri.conf.json`, commits, and tags. It does **not** push (so you can
+review the diff first).
 
 ```sh
-git checkout feat/desktop-app
+bin/cut-release.sh 0.1.0              # stable v0.1.0
+bin/cut-release.sh 0.1.0 alpha 3      # v0.1.0-alpha.3
+bin/cut-release.sh 0.1.0 beta 1       # v0.1.0-beta.1
+```
+
+Then:
+
+```sh
+git show HEAD                                 # review the bump commit
+git push origin main desktop-v<full>          # triggers the workflow
+gh run watch                                  # follow the matrix build
+```
+
+The push triggers `.github/workflows/desktop-release.yml` which matrix-builds for macOS (universal), Windows (x86_64), and Linux (x86_64 + arm64) in parallel. ~15-30 min later artifacts land on a draft GitHub Release at <https://github.com/papercupai/papercusp-desktop/releases>.
+
+## Cut a test build
+
+For iterations that should NOT trigger a release (workflow filter excludes `*-test*`):
+
+```sh
 git tag desktop-v0.0.1-test<N>
 git push origin desktop-v0.0.1-test<N>
 ```
 
-This triggers `.github/workflows/desktop-release.yml` to matrix-build for macOS, Windows, and Linux in parallel. ~15-30 min later artifacts land on a draft GitHub Release at <https://github.com/papercupai/papercusp-desktop/releases>.
+Workflow won't fire. Use `workflow_dispatch` from the Actions UI if you want a one-off build.
 
 ## Watch progress
 

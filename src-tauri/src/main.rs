@@ -841,12 +841,49 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// Build the per-call updater endpoint targeted at the operator sidecar.
+///
+/// We don't hardcode a single static URL in `tauri.conf.json` because:
+///   1. The operator picks a free port at boot — known only at runtime.
+///   2. We want the operator's PG-backed `setup_wizard_state.update_channel`
+///      to drive which channel's release is served, without baking the
+///      channel into compile-time config.
+///
+/// The operator route at `/api/updates/manifest` handles channel
+/// resolution: query-param wins, then stored preference, then 'stable'.
+/// Tauri substitutes `{{target}}`, `{{arch}}`, and `{{current_version}}`
+/// when it issues the GET.
+fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
+    let port: u16 = if cfg!(debug_assertions) {
+        // Dev: webview points at devUrl in tauri.conf.json (localhost:3055).
+        // No sidecar process to read a port from.
+        3055
+    } else {
+        let state: tauri::State<SidecarState> = app.state();
+        let guard = state.port.lock().map_err(|e| e.to_string())?;
+        guard
+            .ok_or_else(|| "sidecar port not yet known; try again after boot completes".to_string())?
+    };
+    Ok(format!(
+        "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}",
+        port
+    ))
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
     use tauri_plugin_updater::UpdaterExt;
+    let endpoint = resolve_update_endpoint(&app)?;
+    let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let current = env!("CARGO_PKG_VERSION").to_string();
-    match app.updater().map_err(|e| e.to_string())?.check().await {
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    match updater.check().await {
         Ok(Some(update)) => Ok(UpdateInfo {
             available: true,
             current_version: current,
@@ -867,9 +904,15 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
 #[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
-    let update = app
-        .updater()
+    let endpoint = resolve_update_endpoint(&app)?;
+    let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
         .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    let update = updater
         .check()
         .await
         .map_err(|e| e.to_string())?
