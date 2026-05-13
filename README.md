@@ -102,14 +102,20 @@ Outputs (per platform):
 - Windows — `.msi`, `.exe` in `src-tauri/target/release/bundle/`
 - Linux — `.AppImage`, `.deb`, `.rpm` in `src-tauri/target/release/bundle/`
 
-## Cross-platform CI
+## Cross-platform releases
 
-`.github/workflows/desktop-release.yml` builds all four artifacts on push of
-a `vX.Y.Z` tag (matrix: macos-latest, windows-latest, ubuntu-latest, ubuntu-latest-arm64).
-Outputs land on a GitHub Release.
+Builds are run **locally**, not through GitHub Actions. The legacy
+`.github/workflows/desktop-release.yml` was removed; see `SHIPPING.md`
+for the current flow. TL;DR:
 
-Builds are unsigned at the moment — see `HANDOFF-paperclip.md` and `PLAN.md`
-for the signing roadmap.
+```sh
+bin/setup-signing-key.sh       # one-time keypair gen
+bin/release-local.sh 0.0.2 alpha  # build + sign + tag + push + gh release create
+```
+
+Linux x86_64 builds natively from a Linux box. Windows + Linux arm64 are
+opt-in cross-builds (`WITH_WINDOWS=1`, `WITH_ARM64=1`). macOS still
+requires real Mac hardware (Apple notarization tooling is macOS-only).
 
 ## What's bundled
 
