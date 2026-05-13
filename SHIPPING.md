@@ -1,74 +1,83 @@
 # Shipping Papercusp Desktop
 
-Cheat sheet for cutting + verifying a release.
+Local-build release flow — no GitHub Actions required.
 
-## Cut a test build
-
-```sh
-git checkout feat/desktop-app
-git tag desktop-v0.0.1-test<N>
-git push origin desktop-v0.0.1-test<N>
-```
-
-This triggers `.github/workflows/desktop-release.yml` to matrix-build for macOS, Windows, and Linux in parallel. ~15-30 min later artifacts land on a draft GitHub Release at <https://github.com/papercupai/papercusp-desktop/releases>.
-
-## Watch progress
+## One-time setup
 
 ```sh
-gh run list -L 5                                # find the run id
-gh run view <run-id>                            # high-level status
-gh run view <run-id> --log-failed | head -2000  # diagnose failures
+# 1. Generate the Tauri updater signing keypair (lives in ~/.papercusp/signing/)
+bin/setup-signing-key.sh
+
+# 2. (Optional) write the PostHog discovery file for feature-flag + telemetry
+bin/setup-posthog.sh
 ```
 
-## Verify a build before promoting test → real release
+After step 1, `src-tauri/tauri.conf.json`'s `pubkey` is updated to embed the new public key. Commit that change so released binaries verify against the right pubkey.
 
-Download the platform's installer from the draft Release, then:
+After step 2, restart the operator. The wizard's Step 12 will indicate when telemetry is fully live (requires user opt-in *and* `testingFeatures: true` in the discovery file).
 
-### macOS — `.dmg`
-
-1. Double-click the `.dmg`, drag Papercusp into `/Applications`.
-2. **Right-click** Papercusp.app → **Open** (the first launch only — bypasses Gatekeeper for the unsigned build).
-3. The app's bootstrap window should appear within ~2s.
-4. The preflight checks should run; if Postgres / claude / bash isn't installed locally, the check list shows what's missing.
-5. Once all checks pass, the window navigates to `/harness`.
-
-If preflight stays stuck on "starting harness sidecar…", the Node sidecar failed to spawn. Open Console.app, filter on "papercusp" — the Rust shell logs everything to stdout/stderr.
-
-### Windows — `.msi` or `.exe`
-
-1. Run the installer; click **More info → Run anyway** when SmartScreen warns about the unsigned binary.
-2. Launch from Start Menu.
-3. Same flow as macOS — bootstrap → preflight → `/harness`.
-
-If the sidecar fails to spawn, open Event Viewer → Windows Logs → Application and look for events with source "Papercusp".
-
-### Linux — `.AppImage` (recommended)
+## Cut a release
 
 ```sh
-chmod +x Papercusp_*.AppImage
-./Papercusp_*.AppImage
+# Stable release (cuts tag `desktop-vX.Y.Z`)
+bin/release-local.sh 0.0.2 stable
+
+# Beta (cuts `desktop-vX.Y.Z-beta` + marks GH release as prerelease)
+bin/release-local.sh 0.0.3 beta
+
+# Alpha (cuts `desktop-vX.Y.Z-alpha`, dirty tree allowed for fast iteration)
+bin/release-local.sh 0.0.4 alpha
 ```
 
-For `.deb`: `sudo dpkg -i Papercusp_*.deb && papercusp`. For `.rpm`: `sudo rpm -i Papercusp_*.rpm`.
+The script:
 
-Logs go to stdout — run from terminal to see them.
+1. Bumps `version` in `package.json`, `Cargo.toml`, `tauri.conf.json`
+2. Builds the Node sidecar (`papercup/apps/operator` → `src-tauri/sidecar/`)
+3. Runs `tauri build` with the Linux x86_64 target, signing each artifact
+4. Generates `latest.json` for the auto-updater
+5. Commits + tags + pushes via `git push origin HEAD <tag>`
+6. Creates the GitHub Release via `gh release create` (no Actions involved)
 
-## Promote test → release
+The auto-updater route (`/api/updates/manifest` in the operator) reads from these releases by tag pattern.
 
-When a `desktop-v0.0.1-test<N>` build looks good:
+## Build targets
 
-1. Edit the draft GitHub Release on github.com (no longer draft, version number stripped of `-test<N>`).
-2. Update the release notes with what's new.
-3. Click **Publish release**.
+| Target | Default | How to enable |
+|---|---|---|
+| Linux x86_64 | ✓ always | — |
+| Linux arm64 | optional | `WITH_ARM64=1 bin/release-local.sh …` (needs `cross` set up) |
+| Windows x86_64 | optional | `WITH_WINDOWS=1 bin/release-local.sh …` (needs `cross` set up) |
+| macOS universal | ✗ | requires a Mac + Apple Developer cert; not buildable from Linux |
 
-For now, all releases are unsigned. Code signing roadmap:
+For macOS you have three options:
+- Skip macOS during alpha. Acceptable: `latest.json` won't list a darwin entry, the updater will say "no compatible asset" on Macs.
+- Borrow / rent a Mac for builds. Run `bin/release-local.sh` there; it works.
+- Pay for a hosted Mac runner (BuildJet, MacStadium). Out of scope of this repo.
 
-- **macOS:** Apple Developer ID (~$99/year) + notarization. Sets `APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD` + `APPLE_SIGNING_IDENTITY` + `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` GitHub secrets, `tauri-action` picks them up.
-- **Windows:** OV/EV code-signing cert from a CA (~$200-500/year). Sets `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` GitHub secrets.
-- **Linux:** AppImage + deb don't need signing for typical install. Flathub publication is its own flow.
+## Verify a build
 
-Once codesigned, also enable `bundle.createUpdaterArtifacts: true` in tauri.conf.json + add `tauri-plugin-updater` Rust dep + `[plugins.updater]` section. The bundler then produces signed `.tar.gz`/`.zip` artifacts the in-app updater consumes.
+After `bin/release-local.sh` succeeds:
 
-## Troubleshooting common CI failures
+```sh
+# Inspect what landed
+gh release view desktop-v0.0.2 --repo papercupai/papercusp-desktop
 
-See `project_desktop_app_build.md` in auto-memory — it has the 8 pitfalls catalogued from initial bring-up. Most failures fall into one of those buckets.
+# Test the auto-updater manifest end-to-end against your local operator
+curl 'http://127.0.0.1:3055/api/updates/manifest?target=linux-x86_64&arch=x86_64&current_version=0.0.1'
+```
+
+The manifest endpoint resolves the channel (per the wizard's `update_channel`) and serves the right release.
+
+## Disaster recovery
+
+- **Signing key lost** → run `bin/setup-signing-key.sh` again. All previously-signed releases will fail signature verification on existing installs. Push a new release with the new pubkey baked in. Users on the old install can't auto-update; they need to reinstall.
+- **Bad release published** → `gh release delete <tag>` + delete the tag (`git push origin :refs/tags/<tag>`). Cut a new patch version.
+- **Manifest wrong on prod** → The manifest is generated at request time by the operator from the GH Release contents. There's no separate manifest file to fix; redeploy the operator if the route logic itself has a bug.
+
+## What's NOT local
+
+A few things still need real-world action:
+
+- **macOS builds** — see above.
+- **Production user devices** — these only get builds via `gh release upload` (which `release-local.sh` does for you).
+- **PostHog deployment** — `~/.papercusp/posthog.json` is per-machine. End users don't need one; admins / devs do if they want feature flags or telemetry capture.
