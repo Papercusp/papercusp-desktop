@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dev_bridge;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod native_console;
@@ -426,6 +427,37 @@ fn should_route_via_wsl(_app: &tauri::AppHandle) -> bool {
 /// Defined on every platform so the helper is unit-testable from CI
 /// regardless of host OS. Used by the Windows-only sidecar-via-WSL
 /// path; see `make_sidecar_command`.
+/// Auto-grant getUserMedia (microphone/camera) on Linux WebKitGTK.
+///
+/// WebKitGTK denies media access by default — the webview emits a
+/// `permission-request` signal and refuses if nobody listens. That
+/// surfaces in JS as `navigator.mediaDevices.getUserMedia()` rejecting
+/// with `NotAllowedError`, which the operator's voice/wake-word/
+/// elevenlabs paths report as console errors on every page load when
+/// the user has `lastMode != 'off'` saved.
+///
+/// We auto-grant because the Tauri shell is the only consumer of the
+/// webview — there is no third-party site asking; permission gating
+/// would just trip up our own code.
+#[cfg(target_os = "linux")]
+fn grant_media_permission<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::WebViewExt;
+        use webkit2gtk::glib::ObjectExt;
+        let wv: webkit2gtk::WebView = webview.inner();
+        wv.connect_permission_request(|_, req| {
+            // Allow audio/video media access requests; pass on everything else.
+            if req.is::<webkit2gtk::UserMediaPermissionRequest>() {
+                use webkit2gtk::PermissionRequestExt;
+                req.allow();
+            }
+            // Returning false means "we didn't handle it"; for media we
+            // already called allow() so the request is satisfied either way.
+            false
+        });
+    });
+}
+
 fn windows_path_to_wsl(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
     // Already a posix-style path? Leave it alone.
@@ -1014,6 +1046,7 @@ pub fn run() {
             native_console::console_launch,
             endpoint_ipc::endpoint_invoke,
             endpoint_ipc::endpoint_cancel,
+            dev_bridge::__dev_bridge_result,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
@@ -1057,12 +1090,30 @@ pub fn run() {
                 // In dev mode we trust the developer to run the Next.js dev
                 // server themselves on :3055 (devUrl in tauri.conf.json).
                 println!("[papercusp-desktop] dev mode — skipping sidecar spawn (expecting :3055 to be served externally)");
+
+                // tauri-agent-tools dev bridge — debug-only, localhost-only,
+                // token-authenticated. Writes /tmp/tauri-dev-bridge-<pid>.token
+                // for the CLI to auto-discover.
+                match dev_bridge::start_bridge(app.handle()) {
+                    Ok((port, _log_buffer, _sidecar_registry)) => {
+                        println!("[papercusp-desktop] dev bridge listening on 127.0.0.1:{port}");
+                    }
+                    Err(e) => {
+                        eprintln!("[papercusp-desktop] failed to start dev bridge: {e}");
+                    }
+                }
+
                 // Auto-open devtools so the developer can debug the
                 // operator UI without hunting for keyboard shortcuts.
                 // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
                 // through reliably; opening from Rust is foolproof.
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
+                    // WebKitGTK denies getUserMedia by default; auto-grant
+                    // so the operator's voice/wake-word/elevenlabs paths
+                    // work without surfacing NotAllowedError on every load.
+                    #[cfg(target_os = "linux")]
+                    grant_media_permission(&window);
                 }
                 return Ok(());
             }
@@ -1333,6 +1384,11 @@ pub fn run() {
                     "window.__papercuspBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
                     base
                 ));
+                // WebKitGTK denies getUserMedia by default; auto-grant
+                // so voice / wake-word / elevenlabs work in the shipped
+                // build the same way they do in browsers.
+                #[cfg(target_os = "linux")]
+                grant_media_permission(&window);
             }
 
             Ok(())
