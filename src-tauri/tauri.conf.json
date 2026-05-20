@@ -7,7 +7,7 @@
     "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
     "beforeBuildCommand": "",
     "frontendDist": "../web",
-    "devUrl": "http://127.0.0.1:3055"
+    "devUrl": "http://localhost:3055"
   },
   "app": {
     "windows": [
@@ -23,6 +23,7 @@
         "decorations": true
       }
     ],
+    "withGlobalTauri": true,
     "security": {
       "csp": null,
       "dangerousDisableAssetCspModification": true
