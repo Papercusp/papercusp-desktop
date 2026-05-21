@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Launch the desktop app in DEV mode WITHOUT HMR.
+#
+# vs bin/desktop-dev:
+#   bin/desktop-dev          → tauri dev → devUrl http://localhost:3055 (Vite dev server, HMR client active)
+#   bin/desktop-dev-nohmr    → tauri dev → devUrl http://localhost:3070 (Hono host serving the rebuilt dist/)
+#
+# Pair with `npm run dev:operator:nohmr` in the papercup repo, which runs
+# `vite build --watch --mode development` to keep apps/operator-vite/dist/
+# fresh. The Hono host on :3070 (host-spa.ts, Phase G3) serves that dist/
+# with SPA fallback.
+#
+# Why use this instead of HMR:
+#   - Mirrors the prod runtime path exactly (Hono host + static dist), so
+#     a bug in dev maps 1:1 to a bug a real user would hit.
+#   - No `ws://localhost:3055/?token=…` HMR socket in the console.
+#   - No libsoup connection-pool exhaustion from HMR + SSE competing for
+#     the 6-connection budget.
+#
+# Cost: manual reload (Cmd-R / Ctrl-R in the Tauri webview) to see changes.
+# Rebuild is incremental, typically 200-500ms.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
+# We only override devUrl; everything else stays the same.
+exec npm run tauri -- dev --config '{"build":{"devUrl":"http://localhost:3070"}}'
