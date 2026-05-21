@@ -631,10 +631,15 @@ fn spawn_sidecar(
 ) -> std::io::Result<SidecarHandle> {
     println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
 
-    // Next.js standalone bundle layout: sidecar/apps/operator/server.js
-    // is the entry point, and it expects to be invoked with cwd = sidecar/
-    // (so __dirname-relative .next paths resolve correctly).
-    let server_js = sidecar_dir.join("apps").join("operator").join("server.js");
+    // operator-vite sidecar layout (Phase F3/G4): the entry point is the
+    // esbuild-bundled Hono host at sidecar/host.mjs. It serves the Vite SPA
+    // (sidecar/spa/) + /api/* + /internal/docs/* (sidecar/internal-docs/)
+    // as a single process. The SPA + docs roots are passed explicitly via
+    // env (PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT) because a bundled
+    // file's __dirname is the sidecar root, not the original bin/ dir.
+    let server_js = sidecar_dir.join("host.mjs");
+    let spa_dist = sidecar_dir.join("spa");
+    let docs_root = sidecar_dir.join("internal-docs");
     let harness_dir = sidecar_dir.join("harness");
 
     // Per-workspace isolation: override HOME so the sidecar (and any child
@@ -674,7 +679,8 @@ fn spawn_sidecar(
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:HARNESS_DATABASE_URL:\
              HARNESS_ADMIN_DATABASE_URL:PAPERCUSP_ZERO_PORT:\
              NEXT_PUBLIC_ZERO_SERVER:PAPERCUSP_CODE_SERVER_URL:\
-             PAPERCUSP_PGLITE_SOCKET_DIR/p:PAPERCUSP_PGLITE_ADMIN_PORT",
+             PAPERCUSP_PGLITE_SOCKET_DIR/p:PAPERCUSP_PGLITE_ADMIN_PORT:\
+             PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p",
         );
     }
     cmd.env("PATH", &new_path)
@@ -691,6 +697,13 @@ fn spawn_sidecar(
         // works in dev. The operator port is dynamically picked here,
         // so the env injection is the only sound channel.
         .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port))
+        // Phase F3/G4: the Hono host serves the Vite SPA + Starlight docs
+        // from these roots. Passed explicitly because the host is an
+        // esbuild bundle — its __dirname is the sidecar root, so the
+        // __dirname-relative fallbacks in host-spa.ts / host-docs.ts would
+        // resolve wrong. See those files' root-resolution comments.
+        .env("PAPERCUSP_SPA_DIST", spa_dist.to_string_lossy().to_string())
+        .env("PAPERCUSP_DOCS_ROOT", docs_root.to_string_lossy().to_string())
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str); // Windows
     // Endpoint IPC opt-in. When enabled:

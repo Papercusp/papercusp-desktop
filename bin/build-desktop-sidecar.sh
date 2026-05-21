@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Build the Node sidecar that the Papercusp desktop app bundles.
 #
-# Strategy: build papercup/apps/operator as a Next.js standalone bundle, then
-# copy it into papercusp-desktop/src-tauri/sidecar/ where Tauri's bundler
-# picks it up as a resource (declared in tauri.conf.json `resources`).
+# Strategy (post operator-vite migration, Phase F3/G4): the operator UI is
+# the Vite SPA (apps/operator-vite), and the SPA + /api/* + /internal/docs/*
+# are served by a single-process Hono host (apps/operator/bin/hono-host.ts).
+# This script `vite build`s the SPA and esbuild-bundles the host into
+# papercusp-desktop/src-tauri/sidecar/, which Tauri's bundler picks up as a
+# resource (declared in tauri.conf.json `resources`). Tauri main.rs spawns
+# `node sidecar/host.cjs`.
 #
-# The standalone bundle is self-contained — it includes its own
-# node_modules tree pruned to only what's needed at runtime.
+# The bundled sidecar is self-contained: host.cjs has every inlinable module
+# bundled in; only genuinely-native deps (node-pty) ship as node_modules.
 
 set -euo pipefail
 
@@ -45,8 +49,40 @@ if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   exit 1
 fi
 
-echo "→ building $WEB_DIR as Next.js standalone bundle"
-echo "→ installing operator deps"
+# ---------------------------------------------------------------------------
+# operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
+# Next.js app — it is the Vite SPA (apps/operator-vite) served, together
+# with /api/* and /internal/docs/*, by the single-process Hono host
+# (apps/operator/bin/hono-host.ts). So instead of `next build` →
+# `.next/standalone`, this section:
+#
+#   1. installs operator + operator-vite deps,
+#   2. `vite build`s the SPA → apps/operator-vite/dist/,
+#   3. esbuild-bundles the Hono host into one CJS file (sidecar/host.cjs),
+#   4. copies the SPA, the Starlight docs, operator prompts, and the one
+#      externalized native dep (node-pty) into the sidecar.
+#
+# Why esbuild and not a node_modules copy: the monorepo hoists deps to the
+# repo-root node_modules, so `cp apps/operator/node_modules` would miss
+# them. `next build`'s standalone tracer used to resolve that; esbuild
+# resolves it differently — it follows the host's import graph and *inlines*
+# every module, hoisting and workspace symlinks alike. The result needs no
+# node_modules except the handful that genuinely cannot be inlined.
+#
+# ┌─ BUNDLE STEP: VERIFIED 2026-05-21 ──────────────────────────────────┐
+# │ The esbuild bundle step itself is verified — esbuild@0.25.0 bundles  │
+# │ the full host import graph clean (17.5MB host.mjs, parses as valid   │
+# │ ESM) with exactly the HOST_EXTERNALS below. node-pty is the only     │
+# │ genuinely-native external. UNVERIFIED beyond bundling: whether the   │
+# │ bundle RUNS correctly in the packaged desktop (needs a real          │
+# │ `tauri build` + the embedded-PG sidecars). If a FUTURE host route    │
+# │ adds a native (.node) or .wasm dep, esbuild will fail with "Could    │
+# │ not resolve" — add that package to HOST_EXTERNALS and copy it into   │
+# │ sidecar/node_modules alongside the node-pty copy below.              │
+# └─────────────────────────────────────────────────────────────────────┘
+# ---------------------------------------------------------------------------
+echo "→ building operator-vite SPA + esbuild-bundling the Hono host"
+echo "→ installing operator deps (esbuild resolves the host import graph against these)"
 (cd "$WEB_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
 echo "→ verifying workspace deps resolved"
@@ -55,38 +91,95 @@ ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart su
 echo "  apps/operator/node_modules/@papercusp/ contents:"
 ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
 
-(cd "$WEB_DIR" && npm run build)
+VITE_DIR="$PAPERCUP_ROOT/apps/operator-vite"
+if [[ ! -d "$VITE_DIR" ]]; then
+  echo "ERROR: apps/operator-vite not found at $VITE_DIR"
+  exit 1
+fi
+echo "→ installing operator-vite deps"
+(cd "$VITE_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
-if [[ ! -d "$WEB_DIR/.next/standalone" ]]; then
-  echo "ERROR: expected $WEB_DIR/.next/standalone after build — did the build fail?"
+echo "→ building operator-vite SPA (vite build → dist/)"
+(cd "$PAPERCUP_ROOT" && npm --workspace @papercusp/operator-vite run build)
+if [[ ! -f "$VITE_DIR/dist/index.html" ]]; then
+  echo "ERROR: expected $VITE_DIR/dist/index.html after the Vite build"
   exit 1
 fi
 
 echo "→ clearing old sidecar at $SIDECAR_DIR"
 rm -rf "$SIDECAR_DIR"
-mkdir -p "$SIDECAR_DIR"
+mkdir -p "$SIDECAR_DIR" "$SIDECAR_DIR/node_modules/@lydell"
 
-echo "→ copying standalone bundle"
-# The standalone dir layout is preserved:
-#   sidecar/
-#     apps/operator/server.js    ← runtime entry point (cwd matters)
-#     node_modules/              ← hoisted runtime deps
-# Tauri's main.rs spawns `node apps/operator/server.js` with cwd = sidecar/
-# so __dirname-relative .next paths resolve correctly.
-cp -a "$WEB_DIR/.next/standalone/." "$SIDECAR_DIR/"
-
-# Copy static assets — Next standalone build excludes these by default.
-echo "→ copying static assets"
-mkdir -p "$SIDECAR_DIR/apps/operator/.next"
-cp -a "$WEB_DIR/.next/static" "$SIDECAR_DIR/apps/operator/.next/static"
-if [[ -d "$WEB_DIR/public" ]]; then
-  cp -a "$WEB_DIR/public" "$SIDECAR_DIR/apps/operator/public"
+echo "→ esbuild-bundling the Hono host → $SIDECAR_DIR/host.mjs"
+# ESM output: the host's import graph contains `import.meta.url` (a CJS
+# bundle rejects it). ESM has no `__dirname`/`__filename`/`require`, so the
+# banner re-creates them — the standard esbuild-ESM-for-Node recipe — for
+# the bundled code + the externalized CJS deps below.
+#
+# node-pty (the pty-terminal routes) is the host's one hard native dep —
+# it loads a platform .node binary and cannot be inlined. Keep the list in
+# sync if a future host route pulls in another native/.wasm package (see
+# the FIRST-BUILD NOTE above).
+HOST_BANNER="import{createRequire as __pcr}from'module';import{fileURLToPath as __pftu}from'url';import{dirname as __pdn}from'path';const require=__pcr(import.meta.url);const __filename=__pftu(import.meta.url);const __dirname=__pdn(__filename);"
+HOST_EXTERNALS=(
+  --external:@lydell/*
+  --external:bufferutil
+  --external:utf-8-validate
+  --external:fsevents
+)
+# esbuild pinned to 0.25.x — the repo's hoisted esbuild is 0.17.x, which
+# predates `with { type: 'json' }` import-attribute support (the host graph
+# imports a plugin JSON schema that way). Verified 2026-05-21: 0.25.0
+# bundles the full host graph clean (17.5MB host.mjs, valid ESM) with the
+# externals below — esbuild inlines workspace + hoisted deps alike, so the
+# monorepo dep-hoist is a non-issue.
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/hono-host.ts \
+  --bundle --platform=node --format=esm --target=node22 \
+  --outfile="$SIDECAR_DIR/host.mjs" \
+  --banner:js="$HOST_BANNER" \
+  "${HOST_EXTERNALS[@]}")
+if [[ ! -f "$SIDECAR_DIR/host.mjs" ]]; then
+  echo "ERROR: esbuild did not produce $SIDECAR_DIR/host.mjs"
+  exit 1
 fi
 
-# Sanity-check the entry point exists at the expected path
-if [[ ! -f "$SIDECAR_DIR/apps/operator/server.js" ]]; then
-  echo "ERROR: expected $SIDECAR_DIR/apps/operator/server.js after standalone copy"
+# Copy the externalized native deps. esbuild inlined everything else, so
+# this is a tiny tree — node-pty + its platform-binary sub-package(s).
+# Search every node_modules the monorepo might have hoisted them into.
+echo "→ copying externalized native deps (node-pty) into the sidecar"
+npt_count=0
+for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
+  for nptdir in "$base/@lydell"/node-pty*; do
+    [[ -d "$nptdir" ]] || continue
+    name="$(basename "$nptdir")"
+    [[ -e "$SIDECAR_DIR/node_modules/@lydell/$name" ]] && continue
+    cp -aL "$nptdir" "$SIDECAR_DIR/node_modules/@lydell/$name"
+    npt_count=$((npt_count + 1))
+  done
+done
+echo "  copied $npt_count node-pty package(s)"
+if [[ "$npt_count" -eq 0 ]]; then
+  echo "ERROR: node-pty not found in any node_modules — the pty terminal routes will crash"
   exit 1
+fi
+
+# Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
+# from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
+# sets — see those files' root-resolution comments.
+echo "→ copying operator-vite/dist → sidecar/spa"
+cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"
+echo "→ copying Starlight docs → sidecar/internal-docs"
+if [[ -d "$WEB_DIR/public/internal/docs" ]]; then
+  cp -a "$WEB_DIR/public/internal/docs" "$SIDECAR_DIR/internal-docs"
+else
+  echo "  ⚠ $WEB_DIR/public/internal/docs not found — /internal/docs/* will 404 in the bundle"
+fi
+
+# Operator prompts — some endpoint-route handlers read apps/operator/prompts/
+# at runtime. esbuild doesn't trace runtime fs reads, so copy them explicitly.
+if [[ -d "$WEB_DIR/prompts" ]]; then
+  echo "→ copying operator prompts → sidecar/prompts"
+  cp -a "$WEB_DIR/prompts" "$SIDECAR_DIR/prompts"
 fi
 
 # Bundle the `papercup` CLI shim + greeting status script. Used by the
