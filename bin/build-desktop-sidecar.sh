@@ -182,6 +182,35 @@ if [[ -d "$WEB_DIR/prompts" ]]; then
   cp -a "$WEB_DIR/prompts" "$SIDECAR_DIR/prompts"
 fi
 
+# Desktop-install integration (Phase 1 of
+# desktop-app-install-integration-2026-05-23) reads two files at runtime
+# and copies them into ~/.papercusp/: the engineer-collaborator playbook
+# and the omp coord extension. The playbook lives under prompts/ (above),
+# but the coord extension is under apps/operator/scripts/hooks/omp/.
+# esbuild doesn't trace it (read via fs.readFile path), so copy
+# explicitly, preserving the apps/operator/scripts/hooks/omp/ layout
+# that lib/desktop-install/papercusp-files.ts expects.
+COORD_HOOK_SRC="$WEB_DIR/scripts/hooks/omp/coord-hook.ts"
+if [[ -f "$COORD_HOOK_SRC" ]]; then
+  COORD_HOOK_DST="$SIDECAR_DIR/apps/operator/scripts/hooks/omp/coord-hook.ts"
+  echo "→ copying omp coord-hook → sidecar/apps/operator/scripts/hooks/omp/"
+  mkdir -p "$(dirname "$COORD_HOOK_DST")"
+  cp -a "$COORD_HOOK_SRC" "$COORD_HOOK_DST"
+fi
+
+# Same reason: lib/desktop-install/papercusp-files.ts resolves the
+# playbook source via <operatorAppRoot>/prompts/papercusp-su.tools.md.
+# In production the operator app root lives at sidecar/apps/operator/,
+# so the playbook must be available there too (the sidecar/prompts/
+# copy above is for other endpoint-route handlers with a different
+# expectation).
+PLAYBOOK_SRC="$WEB_DIR/prompts/papercusp-su.tools.md"
+if [[ -f "$PLAYBOOK_SRC" ]]; then
+  PLAYBOOK_DST="$SIDECAR_DIR/apps/operator/prompts/papercusp-su.tools.md"
+  mkdir -p "$(dirname "$PLAYBOOK_DST")"
+  cp -a "$PLAYBOOK_SRC" "$PLAYBOOK_DST"
+fi
+
 # Bundle the `papercup` CLI shim + greeting status script. Used by the
 # native-console launcher (the "+" button in the chrome header) — the
 # user's spawned terminal runs `papercup status` before exec'ing their
