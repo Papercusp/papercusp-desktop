@@ -6,6 +6,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "bin/desktop-dev-nohmr",
+    "dev:nohmr": "bin/desktop-dev-nohmr",
+    "dev:preview": "bin/desktop-preview-prod",
     "dev:hmr": "tauri dev",
     "build": "tauri build",
     "build:debug": "tauri build --debug",
