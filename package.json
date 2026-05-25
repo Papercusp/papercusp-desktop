@@ -5,7 +5,8 @@
   "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
   "scripts": {
     "tauri": "tauri",
-    "dev": "tauri dev",
+    "dev": "bin/desktop-dev-nohmr",
+    "dev:hmr": "tauri dev",
     "build": "tauri build",
     "build:debug": "tauri build --debug",
     "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '✓ tauri-bindings.ts regenerated'"
