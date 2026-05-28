@@ -17,15 +17,15 @@ set -euo pipefail
 # Multi-repo layout (post phase-c split). The desktop bundle pulls from
 # two sibling clones:
 #
-#   papercupai/papercusp-desktop   ← this repo (HERE = bin/)
-#   papercupai/papercup            ← contains apps/operator (Next.js UI)
+#   Papercusp/papercusp-desktop   ← this repo (HERE = bin/)
+#   Papercusp/papercup            ← contains apps/operator (Next.js UI)
 #                                    AND libs/papercusp/ (submodule with
 #                                    embedded-postgres-server, zero-cache-server,
 #                                    harness, papercusp-mcp-server, pglite-server,
 #                                    cli, orchestrator). The submodule is the
 #                                    canonical post-phase-c location for these
 #                                    packages — the old sibling-repo
-#                                    papercupai/papercusp clone is no longer
+#                                    Papercusp/papercusp clone is no longer
 #                                    used by this script.
 #
 # Override locations with PAPERCUP_ROOT / PAPERCUSP_ROOT if your layout
@@ -40,12 +40,12 @@ SIDECAR_DIR="$ROOT/src-tauri/sidecar"
 
 if [[ ! -d "$WEB_DIR" ]]; then
   echo "ERROR: papercup/apps/operator not found at $WEB_DIR"
-  echo "       Set PAPERCUP_ROOT to the path of your papercupai/papercup clone."
+  echo "       Set PAPERCUP_ROOT to the path of your Papercusp/papercup clone."
   exit 1
 fi
 if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   echo "ERROR: papercusp not found at $PAPERCUSP_ROOT"
-  echo "       Set PAPERCUSP_ROOT to the path of your papercupai/papercusp clone."
+  echo "       Set PAPERCUSP_ROOT to the path of your Papercusp/papercusp clone."
   exit 1
 fi
 

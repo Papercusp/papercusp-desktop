@@ -167,7 +167,7 @@ version, channel, tag, out_path, notes_path = sys.argv[1:6]
 artifacts = [pathlib.Path(p) for p in sys.argv[6:]]
 
 def repo_url(name: str) -> str:
-    return f"https://github.com/papercupai/papercusp-desktop/releases/download/{tag}/{name}"
+    return f"https://github.com/Papercusp/papercusp-desktop/releases/download/{tag}/{name}"
 
 # Map (platform, arch, ext) → (url, signature). The operator's
 # /api/updates/manifest already converts this latest.json to the
@@ -234,12 +234,12 @@ if [[ "$CHANNEL" != "stable" ]]; then
   PRERELEASE_FLAG="--prerelease"
 fi
 
-if gh release view "$TAG" --repo papercupai/papercusp-desktop >/dev/null 2>&1; then
+if gh release view "$TAG" --repo Papercusp/papercusp-desktop >/dev/null 2>&1; then
   echo "    release exists; uploading artifacts with --clobber"
-  gh release upload "$TAG" "${ARTIFACTS[@]}" "$LATEST_JSON" --repo papercupai/papercusp-desktop --clobber
+  gh release upload "$TAG" "${ARTIFACTS[@]}" "$LATEST_JSON" --repo Papercusp/papercusp-desktop --clobber
 else
   gh release create "$TAG" "${ARTIFACTS[@]}" "$LATEST_JSON" \
-    --repo papercupai/papercusp-desktop \
+    --repo Papercusp/papercusp-desktop \
     --title "Papercusp desktop $VERSION ($CHANNEL)" \
     --notes-file "$NOTES_FILE" \
     $PRERELEASE_FLAG
@@ -248,5 +248,5 @@ fi
 echo
 echo "==> done"
 echo "    tag:     $TAG"
-echo "    release: https://github.com/papercupai/papercusp-desktop/releases/tag/$TAG"
+echo "    release: https://github.com/Papercusp/papercusp-desktop/releases/tag/$TAG"
 echo "    artifacts: ${#ARTIFACTS[@]}"
