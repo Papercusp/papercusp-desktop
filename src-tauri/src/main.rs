@@ -1157,6 +1157,11 @@ pub fn run() {
                 // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
                 // through reliably; opening from Rust is foolproof.
                 if let Some(window) = app.get_webview_window("main") {
+                    // Auto-open devtools only in debug — `open_devtools` is
+                    // compiled out in release unless the tauri `devtools`
+                    // feature is on (and we don't want devtools popping in a
+                    // shipped/release build anyway).
+                    #[cfg(debug_assertions)]
                     window.open_devtools();
                     // WebKitGTK denies getUserMedia by default; auto-grant
                     // so the operator's voice/wake-word/elevenlabs paths
