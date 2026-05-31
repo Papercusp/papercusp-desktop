@@ -734,9 +734,14 @@ fn spawn_sidecar(
     //      logs. The forwarder must stay running for the lifetime of
     //      the sidecar.
     //
-    // When disabled (default): keep Stdio::inherit(), no extra
-    // threads, no behavior change vs pre-IPC.
-    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() == Some("1");
+    // Default-ON: IPC is the shipping transport — it dodges WebKitGTK's
+    // ~6-connection-per-host libsoup cap for the webview's SSE/fetch
+    // traffic. Disable only by setting PAPERCUSP_DESKTOP_IPC=0; then we
+    // keep Stdio::inherit(), no extra threads, no behavior change vs
+    // pre-IPC. Defaulting on is safe because the webview's ipcFetch /
+    // IpcEventSource polyfills fall back to native HTTP when the handshake
+    // never completes (see @papercusp/desktop-ipc desktop-bootstrap).
+    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
     if ipc_enabled {
         cmd.env("PAPERCUSP_IPC_ENABLE", "1");
         cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
