@@ -704,6 +704,18 @@ fn spawn_sidecar(
         // resolve wrong. See those files' root-resolution comments.
         .env("PAPERCUSP_SPA_DIST", spa_dist.to_string_lossy().to_string())
         .env("PAPERCUSP_DOCS_ROOT", docs_root.to_string_lossy().to_string())
+        // The workspace registry + per-workspace dirs live ABOVE the
+        // per-workspace isolation boundary, at the real home's
+        // ~/.papercusp-workspaces/. But HOME below is remapped to the
+        // active workspace dir, so the sidecar's homedir() points INSIDE
+        // a workspace — TS code resolving ~/.papercusp-workspaces via
+        // homedir() would land in a nested per-workspace registry that
+        // disagrees with the one this Rust shell owns. Pass the real root
+        // explicitly so workspace-registry.ts resolves it correctly.
+        .env(
+            "PAPERCUSP_WORKSPACES_ROOT",
+            workspaces::workspaces_root().to_string_lossy().to_string(),
+        )
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str); // Windows
     // Endpoint IPC opt-in. When enabled:
@@ -1008,6 +1020,23 @@ fn workspaces_switch(app: AppHandle, id: String) -> Result<(), String> {
     app.restart();
 }
 
+/// Raise a native OS notification (planning-attention-importance D-007).
+/// Invoked from the webview's DesktopAttentionNotifier on `attention.notify`
+/// SSE events (escalation / smoke-fail / plan-review / needs-human≥high).
+/// The webview already shows an in-app toast, so a failure here is non-fatal
+/// — it's returned as a string and the caller swallows it.
+#[tauri::command]
+#[specta::specta]
+fn show_attention_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -1040,6 +1069,7 @@ pub fn run() {
             workspaces_rename,
             workspaces_delete,
             workspaces_switch,
+            show_attention_notification,
             app_version,
             check_for_update,
             install_update,
@@ -1079,6 +1109,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     // MCP bridge for AI coding agents — debug builds only. Lets Claude

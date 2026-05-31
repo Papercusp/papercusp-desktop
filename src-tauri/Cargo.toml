@@ -22,6 +22,9 @@ tauri-plugin-fs = "2"
 tauri-plugin-os = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Native OS notifications — raised from the webview via the
+# show_attention_notification command (planning-attention-importance D-007).
+tauri-plugin-notification = "2"
 # url is re-used by tauri_plugin_updater's UpdaterBuilder::endpoints(Vec<Url>);
 # we depend on it directly so resolve_update_endpoint() can build the
 # operator-sidecar URL at runtime instead of baking it into tauri.conf.json.
