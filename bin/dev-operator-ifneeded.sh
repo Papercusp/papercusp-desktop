@@ -32,4 +32,9 @@ if in_use; then
 fi
 
 echo "[tauri] starting operator dev server on :$PORT"
+# Dev endpoint-IPC: start the IPC server on the socket the desktop connects to,
+# so the webview's /api fetch + EventSource ride IPC instead of HTTP in dev too.
+# (The desktop dev branch connects its IpcClient to this same socket.)
+export PAPERCUSP_IPC_ENABLE=1
+export PAPERCUSP_IPC_SOCKET="${PAPERCUSP_IPC_SOCKET:-$HOME/.papercusp/sockets/dev.sock}"
 exec npm --prefix ../papercup run dev:operator

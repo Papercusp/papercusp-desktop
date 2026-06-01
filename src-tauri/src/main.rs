@@ -1239,6 +1239,52 @@ pub fn run() {
                     }
                 }
 
+                // Dev-mode endpoint-IPC. Unlike prod we don't spawn the sidecar
+                // (the operator dev server runs externally on :3070), so there's
+                // no stdout `PAPERCUSP_IPC_READY` handshake to read — instead we
+                // connect directly to a known socket. The dev server opts in by
+                // running with PAPERCUSP_IPC_ENABLE=1 + PAPERCUSP_IPC_SOCKET=<path>;
+                // we connect to that same path (or the default dev socket),
+                // retrying in a background thread until it's up (the dev server
+                // may start after us, or restart). Once the IpcClient is managed,
+                // the webview's same-origin `/api` fetch + EventSource ride IPC
+                // instead of HTTP — the desktop-ipc polyfill intercepts `/api/*`
+                // regardless of the page origin. Retries are fast (250ms) so we
+                // connect before the SPA's first `/api` call, otherwise the
+                // polyfill latches to HTTP for the rest of the session.
+                {
+                    let socket_path = std::env::var("PAPERCUSP_IPC_SOCKET").unwrap_or_else(|_| {
+                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                        format!("{home}/.papercusp/sockets/dev.sock")
+                    });
+                    let app_handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        let connect_path = std::path::PathBuf::from(&socket_path);
+                        for _ in 0..120 {
+                            if connect_path.exists() {
+                                match tauri::async_runtime::block_on(
+                                    endpoint_ipc::IpcClient::connect(&connect_path),
+                                ) {
+                                    Ok(client) => {
+                                        app_handle.manage(client);
+                                        println!(
+                                            "[papercusp-desktop] dev endpoint-ipc connected: {socket_path}"
+                                        );
+                                        return;
+                                    }
+                                    Err(e) => eprintln!(
+                                        "[papercusp-desktop] dev endpoint-ipc connect retry: {e}"
+                                    ),
+                                }
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        eprintln!(
+                            "[papercusp-desktop] dev endpoint-ipc: {socket_path} not connectable in 30s — staying on HTTP"
+                        );
+                    });
+                }
+
                 // Auto-open devtools so the developer can debug the
                 // operator UI without hunting for keyboard shortcuts.
                 // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
