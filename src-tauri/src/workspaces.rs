@@ -61,24 +61,34 @@ pub fn workspace_dir(id: &str) -> PathBuf {
     workspaces_root().join(id)
 }
 
-/// Symlink the user's real ~/.claude.json and ~/.claude/.credentials.json into
-/// the workspace's .claude/ so the claude CLI inherits a working session
-/// instead of asking for re-auth. Per-workspace API keys are still possible:
-/// users who want isolation delete the symlinks and write their own files.
-/// Best-effort — failures are logged but don't block workspace creation.
-pub fn link_claude_credentials(workspace_dir: &PathBuf) -> io::Result<()> {
+/// Symlink the user's real credentials + identity into a workspace's fake-HOME
+/// so CLI children spawned with `HOME=<workspace_dir>` inherit a working session
+/// instead of re-authing:
+///   - `~/.claude.json` + `~/.claude/.credentials.json` (claude CLI session)
+///   - `~/.gitconfig` (git identity — without it a spawned `git` has no
+///     `user.name`/`user.email` and commits fail). The header comment has
+///     always listed `.gitconfig` as a per-workspace file, but only the claude
+///     creds were ever linked; per-window-workspace-context P-051 (per-spawn
+///     HOME) relies on every workspace HOME carrying gitconfig too, else the
+///     HOME flip silently breaks git for spawned agents.
+/// Per-workspace overrides stay possible: users who want isolation delete a
+/// symlink and write their own file (we never clobber a real file, only stale
+/// symlinks). Best-effort — failures are logged but don't block creation.
+pub fn link_workspace_credentials(workspace_dir: &PathBuf) -> io::Result<()> {
     let real_home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     let ws_claude_dir = workspace_dir.join(".claude");
     fs::create_dir_all(&ws_claude_dir)?;
 
-    let pairs: [(PathBuf, PathBuf); 2] = [
+    let pairs: [(PathBuf, PathBuf); 3] = [
         (real_home.join(".claude.json"), workspace_dir.join(".claude.json")),
         (
             real_home.join(".claude").join(".credentials.json"),
             ws_claude_dir.join(".credentials.json"),
         ),
+        // git identity (P-051) — at the HOME root, like .claude.json.
+        (real_home.join(".gitconfig"), workspace_dir.join(".gitconfig")),
     ];
 
     for (src, dst) in pairs.iter() {
@@ -194,7 +204,7 @@ pub fn ensure_initialized() -> io::Result<Registry> {
                 for ws in &fixed.workspaces {
                     let dir = workspace_dir(&ws.id);
                     if dir.exists() {
-                        let _ = link_claude_credentials(&dir);
+                        let _ = link_workspace_credentials(&dir);
                     }
                 }
                 return Ok(fixed);
@@ -202,8 +212,16 @@ pub fn ensure_initialized() -> io::Result<Registry> {
         }
         for ws in &reg.workspaces {
             let dir = workspace_dir(&ws.id);
+            if !dir.exists() {
+                // Self-heal a registry entry whose data dir was never
+                // provisioned — e.g. one added by the operator-side dogfood
+                // bootstrap. Without this, `switch()` rejects it with
+                // "workspace dir for <id> missing". Provisioning an empty dir
+                // is safe: the sidecar populates it on first boot.
+                let _ = fs::create_dir_all(&dir);
+            }
             if dir.exists() {
-                let _ = link_claude_credentials(&dir);
+                let _ = link_workspace_credentials(&dir);
             }
         }
         return Ok(reg);
@@ -258,7 +276,7 @@ pub fn ensure_initialized() -> io::Result<Registry> {
     for ws in &reg.workspaces {
         let dir = workspace_dir(&ws.id);
         if dir.exists() {
-            let _ = link_claude_credentials(&dir);
+            let _ = link_workspace_credentials(&dir);
         }
     }
 
@@ -292,7 +310,7 @@ pub fn create(name: &str) -> io::Result<Workspace> {
         ));
     }
     fs::create_dir_all(&dir)?;
-    let _ = link_claude_credentials(&dir);
+    let _ = link_workspace_credentials(&dir);
     let ws = Workspace {
         id,
         name: trimmed.to_string(),
