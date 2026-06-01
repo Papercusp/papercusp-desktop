@@ -178,22 +178,38 @@ if [[ "$npt_count" -eq 0 ]]; then
   exit 1
 fi
 
-# Copy the externalized hypercore/holepunch native packages (with prebuilds/)
-# into the bundle, mirroring the node-pty copy above. Without these, host.mjs
-# crashes at load resolving sodium-native's addon.
-echo "→ copying externalized native deps (hypercore/holepunch stack) into the sidecar"
-nat_copied=0
-for np in "${NATIVE_PKGS[@]}"; do
-  [[ -e "$SIDECAR_DIR/node_modules/$np" ]] && continue
-  for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
-    [[ -d "$base/$np" ]] || continue
-    cp -aL "$base/$np" "$SIDECAR_DIR/node_modules/$np"
-    nat_copied=$((nat_copied + 1))
-    break
+# Copy the externalized hypercore/holepunch native packages — WITH their full
+# runtime dependency closure (require-addon, streamx, b4a, compact-encoding, …)
+# — into the bundle. esbuild inlines the host's own JS, but the externalized
+# native packages resolve their deps from node_modules at runtime, so the whole
+# closure must be present or host.mjs crashes ("Cannot find module
+# 'require-addon'"). BFS each native package's package.json `dependencies`.
+echo "→ copying externalized native deps + their dependency closure into the sidecar"
+nat_copied=0; nat_missing=0
+declare -A _seen=()
+copy_pkg_closure() {
+  local queue=("$1")
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    local cur="${queue[0]}"; queue=("${queue[@]:1}")
+    [[ -n "${_seen[$cur]:-}" ]] && continue
+    _seen[$cur]=1
+    [[ -e "$SIDECAR_DIR/node_modules/$cur" ]] && continue
+    local src=""
+    for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
+      [[ -d "$base/$cur" ]] && { src="$base/$cur"; break; }
+    done
+    if [[ -z "$src" ]]; then
+      echo "  ⚠ closure dep '$cur' not found in any node_modules"; nat_missing=$((nat_missing+1)); continue
+    fi
+    mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
+    cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
+    nat_copied=$((nat_copied+1))
+    local deps; deps=$(node -e "try{const d=require('$src/package.json').dependencies||{};process.stdout.write(Object.keys(d).join(' '))}catch(e){}" 2>/dev/null)
+    for d in $deps; do queue+=("$d"); done
   done
-  [[ -e "$SIDECAR_DIR/node_modules/$np" ]] || echo "  ⚠ native pkg '$np' not found in any node_modules — boot will crash if it's required"
-done
-echo "  copied $nat_copied native package(s)"
+}
+for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
+echo "  copied $nat_copied package(s) ($nat_missing missing)"
 
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
