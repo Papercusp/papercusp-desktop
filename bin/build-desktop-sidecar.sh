@@ -120,7 +120,13 @@ echo "→ esbuild-bundling the Hono host → $SIDECAR_DIR/host.mjs"
 # it loads a platform .node binary and cannot be inlined. Keep the list in
 # sync if a future host route pulls in another native/.wasm package (see
 # the FIRST-BUILD NOTE above).
-HOST_BANNER="import{createRequire as __pcr}from'module';import{fileURLToPath as __pftu}from'url';import{dirname as __pdn}from'path';const require=__pcr(import.meta.url);const __filename=__pftu(import.meta.url);const __dirname=__pdn(__filename);"
+# `const module/exports`: some bundled files use the CJS `if (require.main ===
+# module)` CLI-guard idiom (e.g. bin/audit-memory-anchors.ts). In an ESM bundle
+# `module` is undefined → ReferenceError at host.mjs load. Define a dummy
+# `module` (an object, so `require.main === module` is always false → the CLI
+# guard body is skipped, which is correct — it is not the entrypoint) + a
+# matching `exports`.
+HOST_BANNER="import{createRequire as __pcr}from'module';import{fileURLToPath as __pftu}from'url';import{dirname as __pdn}from'path';const require=__pcr(import.meta.url);const __filename=__pftu(import.meta.url);const __dirname=__pdn(__filename);const module={exports:{}};const exports=module.exports;"
 # Native (.node-addon) packages esbuild cannot inline — they load a platform
 # binary via node-gyp-build / bare's `require.addon`, which only resolves
 # relative to the real package dir. Inlining them makes host.mjs crash at LOAD
