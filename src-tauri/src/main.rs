@@ -1046,24 +1046,36 @@ fn workspaces_switch(id: String) -> Result<(), String> {
 /// every request — and the RLS `app.workspace_id` GUC — to this workspace. The
 /// window is labeled `ws-<id>` so it matches the `ws-*` capability pattern that
 /// grants IPC (see capabilities/default.json); re-opening focuses the existing
-/// one. Packaged-runtime only (dev has no sidecar / port).
+/// one.
 #[tauri::command]
 #[specta::specta]
 fn workspaces_open_window(app: AppHandle, id: String) -> Result<(), String> {
     if !workspaces::workspace_dir(&id).exists() {
         return Err(format!("no workspace dir for {}", id));
     }
-    let port = {
-        let state: tauri::State<SidecarState> = app.state();
-        let guard = state.port.lock().map_err(|e| e.to_string())?;
-        (*guard).ok_or_else(|| "sidecar not ready yet".to_string())?
-    };
     let label = format!("ws-{}", id);
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.set_focus();
         return Ok(());
     }
-    let base = format!("http://localhost:{}", port);
+    // Resolve the app origin from the MAIN window's current URL — the source of
+    // truth for "where the app is served" — so this works in BOTH dev (webview
+    // → external devUrl :3055/:3070; no sidecar spawned, SidecarState.port is
+    // None) and release (→ the spawned sidecar's free port). Fall back to the
+    // sidecar port only if the main window's URL is somehow unreadable.
+    let base = app
+        .get_webview_window("main")
+        .and_then(|w| w.url().ok())
+        .map(|u| {
+            let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
+            format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or("localhost"), port)
+        })
+        .or_else(|| {
+            let state: tauri::State<SidecarState> = app.state();
+            let guard = state.port.lock().ok()?;
+            (*guard).map(|p| format!("http://localhost:{}", p))
+        })
+        .ok_or_else(|| "could not resolve app origin (no main window URL, no sidecar port)".to_string())?;
     let url = format!("{}/harness?ws={}", base, url_encode(&id));
     let parsed = url
         .parse()
