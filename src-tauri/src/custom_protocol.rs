@@ -89,6 +89,11 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
         Err(e) => return error_response(502, &format!("papercusp: client init failed: {e}")),
     };
 
+    let debug = std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_DEBUG").ok().as_deref() == Some("1");
+    if debug {
+        eprintln!("[custom_protocol] {} {} → {}", request.method().as_str(), path_and_query, target);
+    }
+
     let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
         .unwrap_or(reqwest::Method::GET);
     let mut req = client.request(method, &target);
@@ -116,6 +121,9 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
             let status = up.status().as_u16();
             let headers = up.headers().clone();
             let body = up.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            if debug {
+                eprintln!("[custom_protocol]   ← {} {} ({} bytes)", status, path_and_query, body.len());
+            }
 
             let mut builder = Response::builder().status(status);
             for (k, v) in headers.iter() {
