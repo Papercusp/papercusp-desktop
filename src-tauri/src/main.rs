@@ -1257,57 +1257,32 @@ pub fn run() {
                         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
                         format!("{home}/.papercusp/sockets/dev.sock")
                     });
-                    let connect_path = std::path::PathBuf::from(&socket_path);
-                    if connect_path.exists() {
-                        // Common case (persistent dev server): the socket already
-                        // exists, so connect SYNCHRONOUSLY here — before the webview's
-                        // SPA finishes loading and fires its first /api / EventSource
-                        // call. This is critical: the fetch polyfill retries IPC per
-                        // call (no permanent latch), but IpcEventSource latches to
-                        // HTTP on the first failure, so the IpcClient MUST be managed
-                        // up-front or SSE (and any early fetch) never rides IPC. A
-                        // unix-socket connect is sub-100ms, far faster than the bundle
-                        // load + React mount, so this wins the race deterministically.
-                        match tauri::async_runtime::block_on(endpoint_ipc::IpcClient::connect(
-                            &connect_path,
-                        )) {
-                            Ok(client) => {
-                                app.manage(client);
-                                println!(
-                                    "[papercusp-desktop] dev endpoint-ipc connected: {socket_path}"
-                                );
-                            }
-                            Err(e) => eprintln!(
-                                "[papercusp-desktop] dev endpoint-ipc connect failed: {e} — staying on HTTP"
-                            ),
-                        }
-                    } else if std::env::var("PAPERCUSP_IPC_SOCKET").is_ok() {
-                        // Opted in (env set) but the dev server is still starting —
-                        // retry in the background until its socket appears. Early
-                        // /api calls may go HTTP until then (acceptable for a
-                        // cold-start dev server); the persistent case above avoids it.
-                        let app_handle = app.handle().clone();
-                        std::thread::spawn(move || {
-                            for _ in 0..120 {
-                                std::thread::sleep(std::time::Duration::from_millis(250));
-                                if connect_path.exists() {
-                                    if let Ok(client) = tauri::async_runtime::block_on(
-                                        endpoint_ipc::IpcClient::connect(&connect_path),
-                                    ) {
+                    let app_handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        let connect_path = std::path::PathBuf::from(&socket_path);
+                        for _ in 0..120 {
+                            if connect_path.exists() {
+                                match tauri::async_runtime::block_on(
+                                    endpoint_ipc::IpcClient::connect(&connect_path),
+                                ) {
+                                    Ok(client) => {
                                         app_handle.manage(client);
                                         println!(
-                                            "[papercusp-desktop] dev endpoint-ipc connected (late): {socket_path}"
+                                            "[papercusp-desktop] dev endpoint-ipc connected: {socket_path}"
                                         );
                                         return;
                                     }
+                                    Err(e) => eprintln!(
+                                        "[papercusp-desktop] dev endpoint-ipc connect retry: {e}"
+                                    ),
                                 }
                             }
-                            eprintln!(
-                                "[papercusp-desktop] dev endpoint-ipc: {socket_path} not connectable in 30s — staying on HTTP"
-                            );
-                        });
-                    }
-                    // else: no dev IPC configured — leave the fast HTTP dev path as-is.
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        eprintln!(
+                            "[papercusp-desktop] dev endpoint-ipc: {socket_path} not connectable in 30s — staying on HTTP"
+                        );
+                    });
                 }
 
                 // Auto-open devtools so the developer can debug the
