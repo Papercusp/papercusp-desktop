@@ -676,7 +676,7 @@ fn spawn_sidecar(
         cmd.env(
             "WSLENV",
             "PATH/l:PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
-             PAPERCUSP_DESKTOP:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
+             PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:HARNESS_DATABASE_URL:\
              HARNESS_ADMIN_DATABASE_URL:PAPERCUSP_ZERO_PORT:\
              NEXT_PUBLIC_ZERO_SERVER:PAPERCUSP_CODE_SERVER_URL:\
@@ -690,6 +690,12 @@ fn spawn_sidecar(
         .env("NODE_ENV", "production")
         .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_DESKTOP", "1")
+        // Phase E (P-051): signal the shared-operator model so the orchestrator
+        // sets a per-spawn HOME from each job's workspace (one sidecar, neutral
+        // process HOME, per-workspace child creds). Only THIS shared-model build
+        // sets it; dev / legacy per-process-HOME builds leave it unset, so the
+        // HOME flip never fires there (D-009 — never flip piecemeal in dev).
+        .env("PAPERCUSP_SHARED_OPERATOR", "1")
         // Phase 3 / Item 3: any descendant of the sidecar that needs to
         // reach the operator's HTTP API (run.sh especially — it does
         // PATCH /features/<id>, GET /status, POST /lanes via its
