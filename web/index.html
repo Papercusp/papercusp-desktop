@@ -130,7 +130,10 @@
         if (consecutiveOk >= 1) {
           // Replace the bootstrap page so Back returns to the prior real app route,
           // not the startup/preflight screen.
-          location.replace(`${base}/harness`);
+          // Phase 4: navigate the real app to __papercuspAppBase when set
+          // (papercusp://localhost — off HTTP); falls back to the HTTP base.
+          const appBase = window.__papercuspAppBase || base;
+          location.replace(`${appBase}/harness`);
           return;
         }
       } else {

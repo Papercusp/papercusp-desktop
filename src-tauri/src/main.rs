@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod custom_protocol;
 mod dev_bridge;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
@@ -1129,6 +1130,21 @@ pub fn run() {
             .build(),
     );
 
+    // Phase 4 — `papercusp://` custom protocol (gated, default-off). When
+    // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1, register the async scheme handler
+    // so the window can load `papercusp://localhost/…` (forwarded to the
+    // loopback sidecar) and open zero HTTP connections from the webview.
+    // Default-off keeps the boot byte-identical until verified on a bootable
+    // build. See custom_protocol.rs + the navigate hook in setup().
+    let builder = if custom_protocol::enabled() {
+        builder.register_asynchronous_uri_scheme_protocol(
+            custom_protocol::SCHEME,
+            custom_protocol::handle,
+        )
+    } else {
+        builder
+    };
+
     builder
         .invoke_handler(specta_builder.invoke_handler())
         .manage(state)
@@ -1430,13 +1446,23 @@ pub fn run() {
             // render any missing-prereq UI, then navigate when ready.
             if let Some(window) = app.get_webview_window("main") {
                 let base = format!("http://localhost:{}", port);
+                // Phase 4: the bootstrap polls preflight over `base` (HTTP —
+                // it's a transient pre-app page) but navigates the real app to
+                // `app_base`. With the custom protocol on, that's
+                // `papercusp://localhost`, so the operator SPA loads off HTTP;
+                // off (default) it's the same HTTP `base` as before.
+                let app_base = if custom_protocol::enabled() {
+                    custom_protocol::APP_ORIGIN.to_string()
+                } else {
+                    base.clone()
+                };
                 // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty
                 // path (Tauri invoke + events) instead of the operator's
                 // HTTP+WS bridge. See apps/operator/lib/pty-tauri.ts and
                 // apps/operator/app/harness/PiPanel.tsx.
                 let _ = window.eval(&format!(
-                    "window.__papercuspBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
-                    base
+                    "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
+                    base, app_base
                 ));
                 // WebKitGTK denies getUserMedia by default; auto-grant
                 // so voice / wake-word / elevenlabs work in the shipped

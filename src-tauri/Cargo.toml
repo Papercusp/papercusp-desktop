@@ -57,6 +57,11 @@ thiserror = "1"
 # Sidecar lifecycle
 portpicker = "0.1"
 
+# Phase 4 (custom_protocol.rs): forward `papercusp://` page/asset requests to
+# the operator's loopback HTTP base. http-only loopback → no TLS backend
+# needed (default-features off keeps the compile light).
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
+
 # E. Native pty for the desktop fast path. PiPanel detects window.__PAPERCUSP_TAURI__
 # and routes spawn/write/resize/kill through Tauri commands instead of the
 # operator's HTTP+WS bridge. Latency drops from ~5ms WS to ~1ms IPC because
