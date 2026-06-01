@@ -61,6 +61,28 @@ pub fn workspace_dir(id: &str) -> PathBuf {
     workspaces_root().join(id)
 }
 
+/// Phase E (P-050 / D-008): the ONE shared sidecar serves EVERY workspace, so
+/// it runs under the real user HOME (where `~/.claude`, `~/.gitconfig` and the
+/// legacy `~/.papercusp` live). Per-workspace credential isolation no longer
+/// rides the sidecar's process HOME — it moves to each spawned CHILD's HOME,
+/// set operator-side from the job's workspace (P-051). Operator state itself is
+/// already workspace-scoped via `papercuspRoot()` (P-052), so a shared sidecar
+/// HOME is safe. Returns the process's real HOME, NOT a per-workspace dir.
+pub fn shared_sidecar_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Phase E (P-050 / D-006): the shared embedded-PG (and code-server) data dir.
+/// One RLS-scoped Postgres instance backs ALL workspaces, so its data lives
+/// here — beside the registry under `~/.papercusp-workspaces/.shared/` — NOT
+/// under any single workspace's `.papercusp/`. The leading dot keeps it from
+/// ever colliding with a workspace id (ids are slugs: `[a-z0-9-]`).
+pub fn shared_data_dir() -> PathBuf {
+    workspaces_root().join(".shared")
+}
+
 /// Symlink the user's real credentials + identity into a workspace's fake-HOME
 /// so CLI children spawned with `HOME=<workspace_dir>` inherit a working session
 /// instead of re-authing:
@@ -285,11 +307,6 @@ pub fn ensure_initialized() -> io::Result<Registry> {
 
 pub fn list() -> Registry {
     ensure_initialized().unwrap_or_default()
-}
-
-pub fn current_dir() -> io::Result<PathBuf> {
-    let reg = ensure_initialized()?;
-    Ok(workspace_dir(&reg.current))
 }
 
 pub fn create(name: &str) -> io::Result<Workspace> {

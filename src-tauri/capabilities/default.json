@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the Papercusp desktop shell.",
-  "windows": ["main", "papercusp-perf-recorder-*"],
+  "windows": ["main", "papercusp-perf-recorder-*", "ws-*"],
   "permissions": [
     "core:default",
     "core:window:default",

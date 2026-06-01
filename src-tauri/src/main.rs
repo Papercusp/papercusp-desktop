@@ -1017,13 +1017,65 @@ fn workspaces_delete(id: String) -> Result<(), String> {
     workspaces::delete(&id).map_err(|e| e.to_string())
 }
 
+/// Switch the *registry default* workspace (Phase E, P-050).
+///
+/// Pre-Phase-E this killed the sidecar + per-workspace PG and `app.restart()`'d
+/// — the only way to swap a per-process fake-HOME. Now ONE shared sidecar
+/// serves every workspace and scoping is per-request (`?ws=` / the workspace
+/// header → ALS → RLS GUC), so a switch is just a per-WINDOW navigation that
+/// the frontend performs (`switchWorkspace` → navigate to `/harness?ws=<id>`).
+/// This command only persists `registry.current` so a fresh launch / the first
+/// window defaults to it. It NO LONGER restarts — other windows are untouched
+/// (P-031).
 #[tauri::command]
 #[specta::specta]
-fn workspaces_switch(app: AppHandle, id: String) -> Result<(), String> {
-    workspaces::switch(&id).map_err(|e| e.to_string())?;
-    // Kill children before restart so they don't outlive the process.
-    kill_sidecar(&app);
-    app.restart();
+fn workspaces_switch(id: String) -> Result<(), String> {
+    workspaces::switch(&id).map_err(|e| e.to_string())
+}
+
+/// Open an ADDITIONAL window pinned to a workspace (Phase E, P-053).
+///
+/// The one shared sidecar serves it; the window self-identifies via `?ws=<id>`
+/// in its URL, so `getBrowserWorkspaceId()` + the header/`?ws=` stamping scope
+/// every request — and the RLS `app.workspace_id` GUC — to this workspace. The
+/// window is labeled `ws-<id>` so it matches the `ws-*` capability pattern that
+/// grants IPC (see capabilities/default.json); re-opening focuses the existing
+/// one. Packaged-runtime only (dev has no sidecar / port).
+#[tauri::command]
+#[specta::specta]
+fn workspaces_open_window(app: AppHandle, id: String) -> Result<(), String> {
+    if !workspaces::workspace_dir(&id).exists() {
+        return Err(format!("no workspace dir for {}", id));
+    }
+    let port = {
+        let state: tauri::State<SidecarState> = app.state();
+        let guard = state.port.lock().map_err(|e| e.to_string())?;
+        (*guard).ok_or_else(|| "sidecar not ready yet".to_string())?
+    };
+    let label = format!("ws-{}", id);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let base = format!("http://localhost:{}", port);
+    let url = format!("{}/harness?ws={}", base, url_encode(&id));
+    let parsed = url
+        .parse()
+        .map_err(|e| format!("bad window url {}: {}", url, e))?;
+    let win = tauri::WebviewWindowBuilder::new(&app, label.clone(), tauri::WebviewUrl::External(parsed))
+        .title(format!("Papercusp — {}", id))
+        .inner_size(1280.0, 800.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    // Hand the new window the sidecar base + native PTY mode, exactly like the
+    // main window's setup() injection (main.rs ~1463). getBrowserWorkspaceId()
+    // reads ?ws= from the URL, so the workspace is known even before this runs.
+    let _ = win.eval(&format!(
+        "window.__papercuspBase = '{base}'; window.__papercuspAppBase = '{base}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));"
+    ));
+    #[cfg(target_os = "linux")]
+    grant_media_permission(&win);
+    Ok(())
 }
 
 /// Raise a native OS notification (planning-attention-importance D-007).
@@ -1075,6 +1127,7 @@ pub fn run() {
             workspaces_rename,
             workspaces_delete,
             workspaces_switch,
+            workspaces_open_window,
             show_attention_notification,
             app_version,
             check_for_update,
@@ -1202,21 +1255,30 @@ pub fn run() {
                 .resolve("sidecar", tauri::path::BaseDirectory::Resource)
                 .unwrap_or_else(|_| std::path::PathBuf::from("./sidecar"));
 
-            // Resolve the active workspace's fake-HOME dir. First-launch
-            // migration of any pre-existing ~/.papercusp happens here.
-            let workspace_home = match workspaces::current_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[papercusp-desktop] workspace init failed: {} — falling back to legacy ~/.papercusp", e);
-                    std::env::var("HOME")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                }
-            };
-            if let Err(e) = std::fs::create_dir_all(&workspace_home) {
-                eprintln!("[papercusp-desktop] could not create workspace home {}: {}", workspace_home.display(), e);
+            // Phase E (P-050 / D-008): ONE shared sidecar serves every
+            // workspace. It runs under the real user HOME (`shared_sidecar_home`
+            // — where ~/.claude / ~/.gitconfig live); per-workspace credential
+            // isolation moves to each spawned CHILD's HOME (P-051, set
+            // operator-side from the job's workspace). The embedded-PG +
+            // code-server data live in a SHARED dir (`shared_data_dir`), NOT
+            // under any one workspace, because the DB is a single RLS-scoped
+            // instance for all workspaces (D-006). `ensure_initialized()` still
+            // runs the first-launch ~/.papercusp migration + provisions each
+            // per-workspace dir's credentials, so the per-spawn HOME flip has
+            // populated credential homes to point at.
+            if let Err(e) = workspaces::ensure_initialized() {
+                eprintln!("[papercusp-desktop] workspace registry init failed: {} (continuing with shared home)", e);
             }
-            println!("[papercusp-desktop] active workspace home: {}", workspace_home.display());
+            let workspace_home = workspaces::shared_sidecar_home();
+            let shared_state_dir = workspaces::shared_data_dir();
+            if let Err(e) = std::fs::create_dir_all(&shared_state_dir) {
+                eprintln!("[papercusp-desktop] could not create shared state dir {}: {}", shared_state_dir.display(), e);
+            }
+            println!(
+                "[papercusp-desktop] shared sidecar home: {} | shared state dir: {}",
+                workspace_home.display(),
+                shared_state_dir.display()
+            );
 
             // DB spawn order:
             //   1. Try embedded-postgres-server (real PG, has logical
@@ -1239,7 +1301,8 @@ pub fn run() {
 
             if use_embedded_pg {
                 let pg_dir = sidecar_dir.join("embedded-postgres-server");
-                let data_dir = workspace_home.join(".papercusp").join("embedded-pg-data");
+                // Phase E (P-050): shared, single RLS-scoped PG for all workspaces.
+                let data_dir = shared_state_dir.join("embedded-pg-data");
                 // Workspace-scoped TCP port. We pick once per spawn rather
                 // than reusing a fixed port so two desktops on the same
                 // host don't collide. The sidecar reads PAPERCUSP_PG_PORT
@@ -1282,7 +1345,7 @@ pub fn run() {
                     let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
                     let zc_change_port = portpicker::pick_unused_port().unwrap_or(zc_port - 1);
                     let zero_dir = sidecar_dir.join("zero-cache-server");
-                    let replica_dir = workspace_home.join(".papercusp").join("zero-replica");
+                    let replica_dir = shared_state_dir.join("zero-replica");
                     let upstream_db = format!(
                         "postgres://harness_zero:harness_zero_pwd@127.0.0.1:{}/papercusp",
                         pg_tcp_port.unwrap()
@@ -1315,8 +1378,8 @@ pub fn run() {
                     != "0";
                 if use_pglite {
                     let pglite_dir = sidecar_dir.join("pglite-server");
-                    let socket_dir = workspace_home.join(".papercusp").join("pglite-socket");
-                    let data_dir = workspace_home.join(".papercusp").join("pglite-data");
+                    let socket_dir = shared_state_dir.join("pglite-socket");
+                    let data_dir = shared_state_dir.join("pglite-data");
                     let admin_port = portpicker::pick_unused_port();
                     pglite_admin_port = admin_port;
                     match spawn_pglite_server(&pglite_dir, &socket_dir, &data_dir, &workspace_home, admin_port) {
@@ -1352,7 +1415,7 @@ pub fn run() {
             // the sidecar via PAPERCUSP_CODE_SERVER_URL.
             let code_server_url: Option<String> = {
                 let cs_dir = sidecar_dir.join("code-server");
-                let user_data_dir = workspace_home.join(".papercusp").join("code-server");
+                let user_data_dir = shared_state_dir.join("code-server");
                 let _ = std::fs::create_dir_all(&user_data_dir);
                 match spawn_code_server(&cs_dir, &workspace_home, &user_data_dir) {
                     Some((child, url)) => {
