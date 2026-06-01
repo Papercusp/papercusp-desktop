@@ -268,15 +268,16 @@ while IFS= read -r f; do
 done < /tmp/harness-files.txt
 rm -f /tmp/harness-files.txt
 
-# Sanity-check the artifacts the orchestrator actually needs
-for required in run.sh prompts templates; do
+# Sanity-check the artifacts the orchestrator actually needs.
+# (run.sh was retired — see harness commit 4b7e162 "retire run.sh — the TS
+# orchestrator is the only driver"; the iteration driver is now
+# @papercusp/orchestrator, so the legacy run.sh is no longer bundled.)
+for required in prompts templates; do
   if [[ ! -e "$HARNESS_DST/$required" ]]; then
     echo "ERROR: harness bundle missing $required at $HARNESS_DST"
     exit 1
   fi
 done
-# run.sh needs to be executable (cp loses the bit on some platforms)
-chmod +x "$HARNESS_DST/run.sh"
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
 # Bundle the embedded-postgres-server (real PG with logical replication
