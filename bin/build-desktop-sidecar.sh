@@ -121,12 +121,27 @@ echo "→ esbuild-bundling the Hono host → $SIDECAR_DIR/host.mjs"
 # sync if a future host route pulls in another native/.wasm package (see
 # the FIRST-BUILD NOTE above).
 HOST_BANNER="import{createRequire as __pcr}from'module';import{fileURLToPath as __pftu}from'url';import{dirname as __pdn}from'path';const require=__pcr(import.meta.url);const __filename=__pftu(import.meta.url);const __dirname=__pdn(__filename);"
+# Native (.node-addon) packages esbuild cannot inline — they load a platform
+# binary via node-gyp-build / bare's `require.addon`, which only resolves
+# relative to the real package dir. Inlining them makes host.mjs crash at LOAD
+# with "Cannot find addon" (observed: sodium-native). node-pty (@lydell) is the
+# pty dep; the rest are the hypercore/holepunch "dogfood substrate" P2P stack,
+# eagerly imported by the orchestrator-claim + harness + dogfood-substrate
+# routes. Each is externalized here AND copied (with prebuilds/) into the
+# bundle below. Over-shipping an unused one is harmless; a missing required one
+# crashes the boot.
+NATIVE_PKGS=(
+  sodium-native udx-native rocksdb-native quickbit-native rabin-native
+  simdle-native fs-native-extensions
+  bare-fs bare-os bare-url bare-inspect bare-type
+)
 HOST_EXTERNALS=(
   --external:@lydell/*
   --external:bufferutil
   --external:utf-8-validate
   --external:fsevents
 )
+for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # esbuild pinned to 0.25.x — the repo's hoisted esbuild is 0.17.x, which
 # predates `with { type: 'json' }` import-attribute support (the host graph
 # imports a plugin JSON schema that way). Verified 2026-05-21: 0.25.0
@@ -162,6 +177,23 @@ if [[ "$npt_count" -eq 0 ]]; then
   echo "ERROR: node-pty not found in any node_modules — the pty terminal routes will crash"
   exit 1
 fi
+
+# Copy the externalized hypercore/holepunch native packages (with prebuilds/)
+# into the bundle, mirroring the node-pty copy above. Without these, host.mjs
+# crashes at load resolving sodium-native's addon.
+echo "→ copying externalized native deps (hypercore/holepunch stack) into the sidecar"
+nat_copied=0
+for np in "${NATIVE_PKGS[@]}"; do
+  [[ -e "$SIDECAR_DIR/node_modules/$np" ]] && continue
+  for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
+    [[ -d "$base/$np" ]] || continue
+    cp -aL "$base/$np" "$SIDECAR_DIR/node_modules/$np"
+    nat_copied=$((nat_copied + 1))
+    break
+  done
+  [[ -e "$SIDECAR_DIR/node_modules/$np" ]] || echo "  ⚠ native pkg '$np' not found in any node_modules — boot will crash if it's required"
+done
+echo "  copied $nat_copied native package(s)"
 
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
