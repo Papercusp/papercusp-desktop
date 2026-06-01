@@ -20,12 +20,21 @@
 //! ever serves what the browser loads directly: the document and the
 //! JS/CSS/font/image chunks — all GETs, all bufferable.
 //!
-//! GATED + DEFAULT-OFF. Changing the webview origin is hard to verify
-//! without a bootable build (dev uses the HTTP `devUrl`; a packaged build is
-//! gated on an unrelated embedded-PG migration drift), so the scheme is only
-//! registered, and the window only pointed at it, when the env flag is set.
-//! Rollback is unsetting the flag (the plan's stated Phase-4 rollback:
-//! "point the window back at http://localhost:<port>").
+//! DEFAULT-ON (shipped 2026-06-01). The scheme was live-verified end-to-end
+//! by driving the running webview via the dev-shell bridge on GL hardware:
+//! navigated the top frame onto `papercusp://localhost`, confirmed the SPA
+//! rendered (origin `papercusp://localhost`, secure context, `crypto.subtle`)
+//! and that the same-origin `/api` round-trips through the desktop-ipc
+//! polyfill (200). Rollback is a single env var: set
+//! `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0` to point the window back at
+//! `http://localhost:<port>` (see `enabled()`).
+//!
+//! STREAMING CAVEAT: this handler buffers (`reqwest::blocking` + `.bytes()`)
+//! and Tauri's URI-scheme responder is itself buffered (`Response<Vec<u8>>`,
+//! no streaming API), so SSE under `papercusp://` must ride the IPC polyfill
+//! (`sys:http`), not this handler. That holds as long as the desktop-ipc IPC
+//! handshake succeeds in the packaged sidecar; if IPC is unavailable the SPA's
+//! `/api` falls back to this buffering handler and SSE would not stream.
 
 use tauri::http::{Request, Response};
 use tauri::{Manager, UriSchemeContext, UriSchemeResponder, Wry};
@@ -36,9 +45,15 @@ use crate::SidecarState;
 /// `http://papercusp.localhost`; on Linux/macOS it is `papercusp://localhost`.
 pub const SCHEME: &str = "papercusp";
 
-/// Env flag that opts the window onto the custom protocol. Default off.
+/// Whether the window loads `papercusp://localhost` instead of the HTTP base.
+///
+/// DEFAULT ON (Phase 4 shipped 2026-06-01, after the scheme was live-verified
+/// end-to-end via the dev-shell bridge on GL hardware: off-HTTP origin, SPA
+/// render in a secure context, polyfilled same-origin `/api`). Rollback is a
+/// one-liner for the user: set `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0` to point
+/// the window back at `http://localhost:<port>`.
 pub fn enabled() -> bool {
-    std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() == Some("1")
+    std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() != Some("0")
 }
 
 /// The origin the window is pointed at when `enabled()`.

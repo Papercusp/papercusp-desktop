@@ -1201,12 +1201,12 @@ pub fn run() {
             .build(),
     );
 
-    // Phase 4 — `papercusp://` custom protocol (gated, default-off). When
-    // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1, register the async scheme handler
-    // so the window can load `papercusp://localhost/…` (forwarded to the
-    // loopback sidecar) and open zero HTTP connections from the webview.
-    // Default-off keeps the boot byte-identical until verified on a bootable
-    // build. See custom_protocol.rs + the navigate hook in setup().
+    // Phase 4 — `papercusp://` custom protocol (DEFAULT-ON, shipped
+    // 2026-06-01). Register the async scheme handler so the window loads
+    // `papercusp://localhost/…` (forwarded to the loopback sidecar) and opens
+    // zero HTTP connections from the webview. Set
+    // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 to roll back to the HTTP origin.
+    // See custom_protocol.rs + the navigate hook in setup().
     let builder = if custom_protocol::enabled() {
         builder.register_asynchronous_uri_scheme_protocol(
             custom_protocol::SCHEME,
@@ -1529,9 +1529,9 @@ pub fn run() {
                 let base = format!("http://localhost:{}", port);
                 // Phase 4: the bootstrap polls preflight over `base` (HTTP —
                 // it's a transient pre-app page) but navigates the real app to
-                // `app_base`. With the custom protocol on, that's
+                // `app_base`. With the custom protocol on (default), that's
                 // `papercusp://localhost`, so the operator SPA loads off HTTP;
-                // off (default) it's the same HTTP `base` as before.
+                // with PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 it's the HTTP `base`.
                 let app_base = if custom_protocol::enabled() {
                     custom_protocol::APP_ORIGIN.to_string()
                 } else {
