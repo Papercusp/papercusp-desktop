@@ -52,8 +52,12 @@ log(){ printf '\n=== %s ===\n' "$*"; }
 cleanup() {
   log "cleanup"
   for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
-  # kill anything still pointed at our isolated homes (sidecar/node/postgres)
-  ps -eo pid,args 2>/dev/null | grep -E "$WORK/inst-" | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null || true
+  # Kill the whole packaged-instance tree (desktop binary, sidecar host.mjs,
+  # embedded-PG, code-server). Match on $WORK, NOT "$WORK/inst-": the binary's
+  # args carry the pkg/ path (HOME=inst-* lives only in the env), so the old
+  # inst- pattern matched nothing and leaked every instance after rm -rf $WORK.
+  pkill -9 -f "$WORK" 2>/dev/null || true
+  ps -eo pid,args 2>/dev/null | grep -E "$WORK" | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null || true
   [ "$STARTED_XVFB" = "1" ] && pkill -f "Xvfb :$DISPLAY_NUM" 2>/dev/null || true
   rm -rf "$WORK" 2>/dev/null || true
 }
