@@ -21,7 +21,7 @@ set -euo pipefail
 #   Papercusp/papercup            ← contains apps/operator (Next.js UI)
 #                                    AND libs/papercusp/ (submodule with
 #                                    embedded-postgres-server, zero-cache-server,
-#                                    harness, papercusp-mcp-server, pglite-server,
+#                                    harness, papercusp-mcp-server,
 #                                    cli, orchestrator). The submodule is the
 #                                    canonical post-phase-c location for these
 #                                    packages — the old sibling-repo
@@ -335,10 +335,10 @@ done
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
 # Bundle the embedded-postgres-server (real PG with logical replication
-# enabled, so Zero / pgoutput consumers can subscribe). This is the
-# preferred desktop DB as of 2026-05-05; pglite-server is still bundled
-# below for legacy fallback (PAPERCUSP_USE_EMBEDDED_PG=0). Tauri main
-# selects which one to spawn.
+# enabled, so Zero / pgoutput consumers can subscribe). This is the ONLY
+# desktop DB — the legacy pglite-server fallback was removed 2026-06-01
+# (a failed embedded-PG must fail LOUD, not silently degrade to a WASM
+# single-connection engine). Tauri main spawns this and only this.
 EMBEDDED_PG_SRC="$PAPERCUSP_ROOT/packages/embedded-postgres-server"
 EMBEDDED_PG_DST="$SIDECAR_DIR/embedded-postgres-server"
 echo "→ bundling embedded-postgres-server"
@@ -363,6 +363,51 @@ echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-
 # Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
 if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q .; then
   echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
+  exit 1
+fi
+
+# ── BUILD-TIME ASSERTION: the embedded-PG server binaries MUST be real ──────
+# This is the guard for the 0-byte-binary bug (2026-06-01): a concurrent /
+# interrupted build, a strip step, or a botched copy can leave initdb /
+# postgres present-but-empty or non-executable in the bundle. The packaged
+# app would then fail to initdb at runtime. With the pglite fallback gone,
+# that's a hard, user-visible failure — so catch it HERE, at build time,
+# before anything ships. We assert across EVERY bundled @embedded-postgres
+# platform tree (cross-platform builds may have more than one).
+echo "→ asserting embedded-postgres binaries are present, non-empty, and executable"
+pg_bin_checked=0
+for _pg_bin_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/bin; do
+  [[ -d "$_pg_bin_dir" ]] || continue
+  for _req_bin in initdb postgres; do
+    _bin_path="$_pg_bin_dir/$_req_bin"
+    if [[ ! -e "$_bin_path" ]]; then
+      echo "ERROR: bundled embedded-PG binary missing: $_bin_path"
+      echo "  The embedded-postgres npm install did not produce this binary."
+      echo "  Refusing to ship a bundle whose Postgres cannot initdb."
+      exit 1
+    fi
+    if [[ ! -s "$_bin_path" ]]; then
+      echo "ERROR: bundled embedded-PG binary is 0 bytes: $_bin_path"
+      echo "  An empty binary means a concurrent/interrupted build or a botched"
+      echo "  copy truncated it. Re-run this build with NO other build of the"
+      echo "  same sidecar dir running in parallel ('rm -rf \$SIDECAR_DIR' at the"
+      echo "  top is not concurrency-safe). Refusing to ship a broken Postgres."
+      exit 1
+    fi
+    if [[ ! -x "$_bin_path" ]]; then
+      echo "ERROR: bundled embedded-PG binary is not executable: $_bin_path"
+      echo "  The executable bit was lost (cp without -a / mode-preservation)."
+      echo "  Refusing to ship a Postgres binary the app cannot exec."
+      exit 1
+    fi
+    _bin_size=$(stat -c %s "$_bin_path" 2>/dev/null || stat -f %z "$_bin_path" 2>/dev/null || echo 0)
+    echo "  ✓ $_req_bin: ${_bin_size} bytes, executable ($_bin_path)"
+    pg_bin_checked=$((pg_bin_checked + 1))
+  done
+done
+if [[ "$pg_bin_checked" -eq 0 ]]; then
+  echo "ERROR: no @embedded-postgres/*/native/bin/ tree found to assert against"
+  echo "  Expected initdb + postgres under $EMBEDDED_PG_DST/node_modules/@embedded-postgres/*/native/bin/"
   exit 1
 fi
 
@@ -527,43 +572,10 @@ if [[ ! -x "$ZERO_CACHE_DST/node_modules/.bin/zero-cache" ]]; then
   exit 1
 fi
 
-# Bundle the legacy pglite-server. Kept as a fallback path
-# (PAPERCUSP_USE_EMBEDDED_PG=0 → falls back to pglite-server). Will be
-# removed once embedded-postgres-server is validated in production.
-PGLITE_SRC="$PAPERCUSP_ROOT/packages/pglite-server"
-PGLITE_DST="$SIDECAR_DIR/pglite-server"
-echo "→ bundling pglite-server (legacy fallback)"
-if [[ ! -d "$PGLITE_SRC" ]]; then
-  echo "ERROR: @restart/pglite-server not found at $PGLITE_SRC"
-  exit 1
-fi
-mkdir -p "$PGLITE_DST"
-cp "$PGLITE_SRC/package.json" "$PGLITE_DST/"
-cp -a "$PGLITE_SRC/src" "$PGLITE_DST/"
-cp -a "$PGLITE_SRC/bin" "$PGLITE_DST/"
-chmod +x "$PGLITE_DST/bin/pglite-server.mjs"
-# Install pglite + pglite-socket into the bundled package's node_modules.
-# These pull in WASM + native artifacts that Next standalone tracing
-# doesn't pick up, so we install them locally inside the bundle.
-echo "→ installing pglite-server runtime deps into the bundle"
-( cd "$PGLITE_DST" && npm install --omit=dev --silent ) || {
-  echo "ERROR: failed to install pglite-server runtime deps"
-  exit 1
-}
-# Sanity check
-if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite" ]]; then
-  echo "ERROR: bundled pglite missing — node_modules install didn't include @electric-sql/pglite"
-  exit 1
-fi
-# pglite-tools (WASM pg_dump for the legacy pglite-server /admin/pg-dump
-# path) is now optional — the embedded-postgres path supplies a real
-# pg_dump on PATH, so snapshot capture works there without it. Warn if
-# missing so users opting back into the pglite fallback get a useful
-# diagnostic if snapshots fail; don't HARD-fail the build.
-if [[ ! -d "$PGLITE_DST/node_modules/@electric-sql/pglite-tools" ]]; then
-  echo "WARN: bundled pglite-tools missing — pglite fallback won't have snapshot capture"
-  echo "      (the embedded-postgres path uses real pg_dump from sidecar/bin/, so this only matters if PAPERCUSP_USE_EMBEDDED_PG=0)"
-fi
+# NOTE: the legacy pglite-server is no longer bundled (removed 2026-06-01).
+# embedded-postgres-server is the only desktop DB. A failed embedded-PG must
+# fail LOUD (see Tauri main.rs) rather than silently degrade to a WASM
+# single-connection engine with limited LISTEN/NOTIFY.
 
 # Bundle the papercusp MCP server. Auto-registered into ~/.omp/agent/mcp.json
 # on first pi spawn (pty.ts:ensurePapercuspMcpRegistered) so the LLM sees
@@ -617,9 +629,9 @@ for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   fi
 done
 
-# Bundle the framework DDL files so pglite-mode init can find them at
-# runtime. The Tauri main applies these on first boot via
-# papercusp-init-db.sh in pglite mode.
+# Bundle the framework DDL files so embedded-PG first-boot init can find
+# them at runtime. The Tauri main passes this dir to embedded-postgres-server
+# (PAPERCUSP_DB_SQL_DIR) which applies the schema on first boot.
 echo "→ bundling framework DDL"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
@@ -672,8 +684,8 @@ OMP_DIR="$SIDECAR_DIR/bin"
 mkdir -p "$OMP_DIR"
 
 # Node.js — vendor a known-good runtime so users don't need Node on PATH.
-# Tauri main spawns the sidecar + pglite-server with this binary explicitly
-# (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
+# Tauri main spawns the sidecar + embedded-postgres-server with this binary
+# explicitly (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
 # at runtime, the standalone bundle has its dependencies pre-installed.
 NODE_VERSION="${NODE_VERSION:-v24.15.0}"
 node_dst=""

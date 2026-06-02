@@ -71,12 +71,11 @@ sleep 2
 
 echo "==> launching $BIN (mode=dev-pg, target=${APP_USER}@${PG_HOST}:${PG_PORT}/${PG_DB}, log=$LOG)"
 EXPORTS=(
-  # Both flags must be 0. The Rust shell at main.rs:1054 falls through
-  # from embedded-postgres to pglite-server when only the first is set,
-  # then overrides HARNESS_DATABASE_URL with the pglite socket form.
-  # Setting USE_PGLITE=0 too leaves the sidecar with our supplied URL.
+  # PAPERCUSP_USE_EMBEDDED_PG=0 tells the Rust shell to skip spawning
+  # embedded-postgres-server and use our supplied HARNESS_DATABASE_URL
+  # instead (dev-PG mode against an external Postgres). The legacy pglite
+  # fallback was removed 2026-06-01, so this single flag is all it takes.
   "PAPERCUSP_USE_EMBEDDED_PG=0"
-  "PAPERCUSP_USE_PGLITE=0"
   "HARNESS_DATABASE_URL=postgresql://${APP_USER}:${APP_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
   "HARNESS_ADMIN_DATABASE_URL=postgresql://${ADMIN_USER}:${ADMIN_PWD}@${PG_HOST}:${PG_PORT}/${PG_DB}"
 )

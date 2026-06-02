@@ -1,7 +1,7 @@
 // Per-workspace isolation.
 //
 // A "workspace" is a fully-isolated fake-HOME directory that the Node
-// sidecar and pglite-server are spawned with. Two workspaces look to the
+// sidecar and embedded-postgres-server are spawned with. Two workspaces look to the
 // app like two completely separate machines: separate Postgres data,
 // separate ~/.papercusp/, separate ~/.claude/ (so different API keys
 // per workspace if the user wants), separate ~/.gitconfig, separate
