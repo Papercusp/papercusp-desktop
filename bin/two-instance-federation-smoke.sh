@@ -18,11 +18,21 @@
 #   To exercise a REAL packaged merge: point this at a real repo both identities
 #   can publish to (or run the live two-machine P-079).
 #
-# VALIDATION STATUS (2026-06-02): the clobber pre-check + extract + Xvfb + single-
-#   instance launch path were run for real. The current release .deb is CORRUPT
-#   (0-byte sidecar bundle — the build-desktop-sidecar.sh concurrent-build clobber,
-#   project_desktop_bundle_empty_pg_binaries), so the pre-check below FAILS LOUD on
-#   it. Rebuild a clean .deb (bin/release-local.sh) before the launch path runs.
+# VALIDATION STATUS (2026-06-02, full run): ran end-to-end against a freshly
+#   rebuilt CLEAN .deb (real 2.4G sidecar; 687M .deb). RESULT: clobber pre-check
+#   PASS, both packaged instances booted embedded-PG + sidecar and were ISOLATED
+#   (distinct PG + sidecar ports) → "boot + isolation: PASS". Peer DISCOVERY was
+#   INCONCLUSIVE: the synthetic share 404s in a fresh workspace (no registered
+#   harness), so the two instances never join the same topic. To exercise
+#   discovery, scaffold/select a harness with slug "sheets" in EACH instance
+#   before the share step (see dogfood docs). MERGE stays P-079-gated (real
+#   GitHub bindings) and is wire-proven by two-peer-swarm-bidi.test.ts.
+#   Gotcha that bites every rebuild: plain `npm run build` (tauri build) does NOT
+#   build the sidecar (beforeBuildCommand is "") and reuses a STALE 0-byte
+#   target/release/sidecar copy on an incremental cargo build. For a clean .deb:
+#   build-desktop-sidecar.sh first, then `cargo clean -p papercusp-desktop` (forces
+#   a fresh resource recopy), then tauri build — and copy the .deb out of the tree
+#   immediately (a concurrent peer build-desktop-sidecar.sh rm -rf's the source).
 #
 # Usage:
 #   bin/two-instance-federation-smoke.sh [path/to/Papercusp_*.deb] [synthetic_repo_id]
