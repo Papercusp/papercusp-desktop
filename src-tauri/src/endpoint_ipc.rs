@@ -15,8 +15,8 @@
 
 #![allow(dead_code)] // wired up by main.rs in a follow-up
 
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -208,6 +208,9 @@ pub struct IpcClient {
     writer: Mutex<tokio::io::WriteHalf<IpcStream>>,
     next_id: AtomicU64,
     in_flight: Arc<DashMap<u64, CallSink>>,
+    /// Cleared once the reader loop sees EOF/error or a write fails — the
+    /// connection is dead and `IpcClientHandle` should reconnect.
+    alive: Arc<AtomicBool>,
     /// Drop-guard: when this is dropped, the reader task notices and exits.
     _reader_task: tokio::task::JoinHandle<()>,
 }
@@ -220,13 +223,21 @@ impl IpcClient {
         let stream = connect_stream(socket_path).await?;
         let (read_half, write_half) = tokio::io::split(stream);
         let in_flight: Arc<DashMap<u64, CallSink>> = Arc::new(DashMap::new());
-        let reader_task = tokio::spawn(reader_loop(read_half, in_flight.clone()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let reader_task = tokio::spawn(reader_loop(read_half, in_flight.clone(), alive.clone()));
         Ok(Arc::new(Self {
             writer: Mutex::new(write_half),
             next_id: AtomicU64::new(1),
             in_flight,
+            alive,
             _reader_task: reader_task,
         }))
+    }
+
+    /// False once the reader loop has seen EOF/error or a write has failed.
+    /// The owning `IpcClientHandle` reconnects on the next call.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// Send a REQUEST and register the Channel for the response stream.
@@ -251,7 +262,12 @@ impl IpcClient {
         let bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         let frame = encode_frame(FrameType::Request, &bytes).map_err(|e| e.to_string())?;
         let mut w = self.writer.lock().await;
-        w.write_all(&frame).await.map_err(|e| e.to_string())?;
+        if let Err(e) = w.write_all(&frame).await {
+            // Socket gone (e.g. operator restarted) — mark dead so the next
+            // call reconnects instead of writing to a broken pipe forever.
+            self.alive.store(false, Ordering::Relaxed);
+            return Err(e.to_string());
+        }
         Ok(id)
     }
 
@@ -272,6 +288,7 @@ impl IpcClient {
 async fn reader_loop(
     mut reader: tokio::io::ReadHalf<IpcStream>,
     in_flight: Arc<DashMap<u64, CallSink>>,
+    alive: Arc<AtomicBool>,
 ) {
     let mut dec = FrameDecoder::new();
     let mut buf = [0u8; 64 * 1024];
@@ -343,7 +360,9 @@ async fn reader_loop(
         }
     }
 
-    // EOF / error — notify every in-flight Channel.
+    // EOF / error — mark dead so the handle reconnects, then notify every
+    // in-flight Channel.
+    alive.store(false, Ordering::Relaxed);
     for entry in in_flight.iter() {
         entry.send_terminal(EndpointEvent::Error {
             code: "connection_lost".to_string(),
@@ -353,12 +372,86 @@ async fn reader_loop(
     in_flight.clear();
 }
 
+/// Reconnecting wrapper around `IpcClient` — the managed Tauri state.
+///
+/// `endpoint_invoke` / `endpoint_cancel` go through this so a dropped
+/// connection (most commonly the DEV operator being restarted, which
+/// changes its socket path) is transparently re-established on the next
+/// call, instead of wedging every `/api` fetch onto the hanging HTTP
+/// fallback (libsoup's 6-socket pool — the "loading… forever" / "few
+/// seconds" bug). The socket path is resolved lazily via `socket_source`
+/// on each (re)connect:
+///   - prod: a fixed path from the sidecar's `PAPERCUSP_IPC_READY` handshake.
+///   - dev:  re-reads `~/.papercusp/endpoint-ipc.json`, so a restarted
+///           operator's NEW socket is picked up automatically.
+///
+/// A failed (re)connect returns an `invoke_failed:`-prefixed error so the
+/// webview's `ipc-fetch.ts` treats IPC as unavailable and falls back to
+/// HTTP, exactly as before IPC was wired.
+pub struct IpcClientHandle {
+    client: Mutex<Option<Arc<IpcClient>>>,
+    socket_source: Box<dyn Fn() -> Option<PathBuf> + Send + Sync>,
+}
+
+impl IpcClientHandle {
+    pub fn new(
+        socket_source: impl Fn() -> Option<PathBuf> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            client: Mutex::new(None),
+            socket_source: Box::new(socket_source),
+        })
+    }
+
+    /// Return a live client, reconnecting if the current one is dead/absent.
+    async fn live(&self) -> Result<Arc<IpcClient>, String> {
+        let mut guard = self.client.lock().await;
+        if let Some(c) = guard.as_ref() {
+            if c.is_alive() {
+                return Ok(c.clone());
+            }
+        }
+        let path = (self.socket_source)()
+            .ok_or_else(|| "invoke_failed: no endpoint-ipc socket available".to_string())?;
+        let c = IpcClient::connect(&path)
+            .await
+            .map_err(|e| format!("invoke_failed: endpoint-ipc connect: {e}"))?;
+        *guard = Some(c.clone());
+        Ok(c)
+    }
+
+    /// Eagerly (re)connect — used to warm the connection at startup.
+    pub async fn warm(&self) -> Result<(), String> {
+        self.live().await.map(|_| ())
+    }
+
+    pub async fn invoke(
+        &self,
+        tool_name: String,
+        input: serde_json::Value,
+        channel: Channel<EndpointEvent>,
+    ) -> Result<u64, String> {
+        self.live().await?.invoke(tool_name, input, channel).await
+    }
+
+    pub async fn cancel(&self, id: u64) -> Result<(), String> {
+        // Only the currently-connected client owns its ids; a cancel after a
+        // reconnect targets a call that's already gone, so a missing/replaced
+        // client is a no-op success.
+        let guard = self.client.lock().await;
+        match guard.as_ref() {
+            Some(c) => c.cancel(id).await,
+            None => Ok(()),
+        }
+    }
+}
+
 /// Tauri command — invoked from the webview. The wire shape mirrors
-/// what `apps/operator/lib/transport-adapters/ipc-stream.ts` will send.
+/// what `apps/operator/lib/transport-adapters/ipc-stream.ts` sends.
 #[tauri::command]
 #[specta::specta]
 pub async fn endpoint_invoke(
-    state: tauri::State<'_, Arc<IpcClient>>,
+    state: tauri::State<'_, Arc<IpcClientHandle>>,
     tool_name: String,
     input: serde_json::Value,
     channel: Channel<EndpointEvent>,
@@ -370,7 +463,7 @@ pub async fn endpoint_invoke(
 #[tauri::command]
 #[specta::specta]
 pub async fn endpoint_cancel(
-    state: tauri::State<'_, Arc<IpcClient>>,
+    state: tauri::State<'_, Arc<IpcClientHandle>>,
     call_id: u64,
 ) -> Result<(), String> {
     state.cancel(call_id).await
