@@ -169,3 +169,29 @@ fn error_response(status: u16, msg: &str) -> Response<Vec<u8>> {
         .body(msg.as_bytes().to_vec())
         .expect("static error response always builds")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_response_sets_status_and_plaintext_body() {
+        let r = error_response(404, "nope");
+        assert_eq!(r.status().as_u16(), 404);
+        assert_eq!(
+            r.headers().get("content-type").unwrap().to_str().unwrap(),
+            "text/plain; charset=utf-8",
+        );
+        assert_eq!(String::from_utf8_lossy(r.body()), "nope");
+    }
+
+    #[test]
+    fn error_response_carries_arbitrary_status_and_message() {
+        let r = error_response(502, "papercusp: upstream error: boom");
+        assert_eq!(r.status().as_u16(), 502);
+        assert_eq!(
+            String::from_utf8_lossy(r.body()),
+            "papercusp: upstream error: boom",
+        );
+    }
+}

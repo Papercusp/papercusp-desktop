@@ -941,3 +941,22 @@ fn devtools_response() -> DevtoolsResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_true_for_current_process() {
+        // kill(self, 0) succeeds → the bridge reports its own process alive.
+        assert_eq!(pid_alive(std::process::id()), Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_false_for_an_unused_high_pid() {
+        // Well above any realistic pid_max (and positive as i32) → ESRCH → false.
+        assert_eq!(pid_alive(2_000_000_000), Some(false));
+    }
+}
