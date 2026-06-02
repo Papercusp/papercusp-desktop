@@ -125,6 +125,61 @@ fn find_free_port() -> Option<u16> {
     portpicker::pick_unused_port()
 }
 
+/// DEV ONLY: discover + connect the endpoint-IPC client.
+///
+/// In `tauri dev` we don't spawn the sidecar (the operator runs externally —
+/// see the `is_dev` branch in `setup`), so there's no stdout
+/// `PAPERCUSP_IPC_READY` handshake to read. Instead the operator publishes
+/// its socket path to `~/.papercusp/endpoint-ipc.json`
+/// (apps/operator/lib/endpoint-ipc-discovery.ts). Poll for it, connect, and
+/// `manage` the client so `endpoint_invoke` works and the webview's `/api`
+/// fetch + EventSource ride IPC instead of competing in libsoup's
+/// 6-socket-per-origin pool (the Plans-tab "loading… forever" bug). If the
+/// file never appears or the socket can't be opened within the window, `/api`
+/// stays on HTTP — the same graceful fallback `ipc-fetch.ts` already does.
+#[cfg(debug_assertions)]
+async fn connect_dev_endpoint_ipc(app: AppHandle) {
+    let home = match std::env::var_os("HOME") {
+        Some(h) => h,
+        None => {
+            eprintln!("[papercusp-desktop] dev endpoint-ipc: no $HOME — /api stays on HTTP");
+            return;
+        }
+    };
+    let disc = std::path::PathBuf::from(home).join(".papercusp/endpoint-ipc.json");
+    // The operator may boot (or restart) after the webview. Poll up to ~60s;
+    // re-reading the file each tick picks up a freshly-written socket path.
+    for _ in 0..120 {
+        if let Some(socket) = read_dev_ipc_socket(&disc) {
+            let socket_path = std::path::PathBuf::from(&socket);
+            match endpoint_ipc::IpcClient::connect(&socket_path).await {
+                Ok(client) => {
+                    // `manage` is type-keyed; in dev this is the sole owner of
+                    // `Arc<IpcClient>` (the prod connect branch never runs).
+                    app.manage(client);
+                    println!("[papercusp-desktop] dev endpoint-ipc connected: {socket}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[papercusp-desktop] dev endpoint-ipc connect failed ({socket}): {e} — retrying"
+                    );
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    eprintln!("[papercusp-desktop] dev endpoint-ipc: no usable socket after 60s — /api stays on HTTP");
+}
+
+/// Pull the `socketPath` field out of the dev discovery JSON, or `None`.
+#[cfg(debug_assertions)]
+fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    v.get("socketPath")?.as_str().map(|s| s.to_string())
+}
+
 /// Spawn the bundled embedded-postgres-server (real PG with logical
 /// replication). Returns the spawned child; caller is responsible for
 /// waiting on the TCP port to come up via wait_for_pg_tcp.
@@ -1144,6 +1199,20 @@ pub fn run() {
                     #[cfg(target_os = "linux")]
                     grant_media_permission(&window);
                 }
+
+                // DEV endpoint-IPC: we don't spawn the sidecar in dev, so
+                // there's no stdout PAPERCUSP_IPC_READY handshake. The
+                // externally-run operator instead publishes its socket path to
+                // ~/.papercusp/endpoint-ipc.json; poll for it + connect so the
+                // webview's /api fetch + EventSource ride IPC instead of
+                // starving in libsoup's 6-socket-per-origin pool (the
+                // "loading… forever" bug). Graceful HTTP fallback if absent.
+                #[cfg(debug_assertions)]
+                {
+                    let ipc_app = app.handle().clone();
+                    tauri::async_runtime::spawn(connect_dev_endpoint_ipc(ipc_app));
+                }
+
                 return Ok(());
             }
 
