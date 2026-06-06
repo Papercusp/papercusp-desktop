@@ -91,9 +91,20 @@ libc = "0.2"
 # sibling window by _NET_WM_PID and pin it adjacent to the Tauri GUI window
 # via EWMH _NET_MOVERESIZE_WINDOW on every move/resize. Pure-Rust so the
 # shipped .deb/.rpm/AppImage carries no runtime dependency on wmctrl/xdotool.
+#
+# gtk + glib + libloading — the D-009 embedded native terminal VIEW (the
+# Wayland-safe path): a real VTE widget packed beside the WebKitWebView in
+# the Tauri window's own GTK tree (one window, no foreign-window glue).
+# `gtk`/`glib` pin to the same 0.18 line tauri/wry already use (one GTK in
+# the process); libvte-2.91 itself is dlopen'd at RUNTIME (libloading), so
+# the shipped bundle takes NO hard dependency on VTE — when the library is
+# absent the strategy downgrades to NewWindow.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2"
 x11rb = "0.13"
+gtk = "0.18"
+glib = "0.18"
+libloading = "0.8"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

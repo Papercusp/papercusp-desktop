@@ -1030,7 +1030,8 @@ fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
 // Native sibling terminal (native-terminal-desktop-2026-06-06)
 //
 // The desktop terminal is a fully NATIVE terminal, not xterm.js. On X11 we
-// launch a borderless GPU-native Ghostty window hosting `pui workbench` and
+// launch a borderless GPU-native Ghostty window hosting the chat dock
+// (`pui chat` — operator chat | brain, P-013 / D-011) and
 // pin it adjacent to the GUI window so the pair reads as one app. The glue is
 // visual only — the terminal coordinates with the GUI through the substrate.
 // See src/native_terminal.rs for the strategy + geometry + x11rb glue.
@@ -1103,8 +1104,77 @@ fn start_native_terminal(app: &AppHandle) {
                 eprintln!("[papercusp-desktop] native-terminal launch_new_window failed: {e}");
             }
         }
-        // Embedded views are downgraded to NewWindow until their backends land;
-        // Disabled means no display / opted out.
+        // D-009: the Linux embedded VTE view — a real terminal widget packed
+        // beside the webview in OUR window's GTK tree (one window; Wayland-safe;
+        // the GtkPaned handle is the draggable split). Must run on the GTK main
+        // thread. Falls back to NewWindow if the surgery fails.
+        #[cfg(target_os = "linux")]
+        TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::Vte) => {
+            let Some(window) = app.get_webview_window("main") else {
+                eprintln!("[papercusp-desktop] native-terminal: no main window for the VTE embed");
+                return;
+            };
+            let handle = app.clone();
+            let win = window.clone();
+            let res = window.run_on_main_thread(move || {
+                // Defer the GTK surgery until the window is fully realized +
+                // mapped: creating/re-parenting native-windowed widgets
+                // mid-realization wedges VTE's internal geometry (it latches a
+                // boot-time inset and computes its grid against it forever —
+                // root-caused live: the same surgery a beat after map renders
+                // perfectly). Poll until mapped, give the layout one more
+                // settle beat, then embed.
+                use webkit2gtk::glib;
+                let mut settle_beats: u8 = 0;
+                glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                    let mapped = win
+                        .gtk_window()
+                        .map(|w| gtk::prelude::WidgetExt::is_mapped(&w))
+                        .unwrap_or(false);
+                    if !mapped {
+                        return glib::ControlFlow::Continue;
+                    }
+                    settle_beats += 1;
+                    // ~2s after first map. Shorter settles (500ms) still hit
+                    // the mid-realization wedge — verified empirically; wry's
+                    // own post-map bootstrap (webview sizing + bounds passes)
+                    // has to finish before the tree is safe to cut.
+                    if settle_beats < 8 {
+                        return glib::ControlFlow::Continue;
+                    }
+                    let spec = native_terminal::GhosttySpec::dock();
+                    let cfg = native_terminal::GlueConfig::from_env();
+                    let embedded = match (win.gtk_window(), win.default_vbox()) {
+                        (Ok(gtk_win), Ok(vbox)) => native_terminal::vte_embed::embed_into_window(
+                            &gtk_win,
+                            &vbox,
+                            &spec.command,
+                            cfg.side,
+                            cfg.fraction,
+                            &spec.background,
+                        ),
+                        _ => Err("no gtk window / default vbox".to_string()),
+                    };
+                    match embedded {
+                        Ok(()) => println!("[papercusp-desktop] native-terminal: VTE view embedded"),
+                        Err(e) => {
+                            eprintln!(
+                                "[papercusp-desktop] native-terminal VTE embed failed: {e} — falling back to new-window"
+                            );
+                            let _ = handle
+                                .state::<native_terminal::NativeTerminal>()
+                                .launch_new_window();
+                        }
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
+            if let Err(e) = res {
+                eprintln!("[papercusp-desktop] native-terminal: VTE embed main-thread hop failed: {e}");
+            }
+        }
+        // Remaining embedded views (SwiftTerm/ConPTY) are downgraded to
+        // NewWindow until their backends land; Disabled = no display / opted out.
         TerminalStrategy::EmbeddedView(_) | TerminalStrategy::Disabled => {}
     }
 }

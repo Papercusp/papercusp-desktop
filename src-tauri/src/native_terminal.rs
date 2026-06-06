@@ -3,13 +3,16 @@
 // Owner directive (native-terminal-desktop-2026-06-06): the desktop terminal
 // must be a fully NATIVE terminal, NOT xterm.js. A webview renders HTML and
 // can only host a *web* terminal, so the native terminal cannot be a Tauri /
-// dockview pane. Option A: the terminal workbench (`pui workbench` = zellij +
-// the ratatui pui) runs in its OWN native window, a SIBLING of the Tauri GUI
-// window, glued visually so the pair reads as one app.
+// dockview pane. Option A: the terminal surface runs in its OWN native window,
+// a SIBLING of the Tauri GUI window, glued visually so the pair reads as one
+// app. The DESKTOP-DOCKED surface is the chat dock (`pui chat` = zellij with
+// exactly two panes: operator chat | brain — P-013 / D-011); the full
+// workbench (`pui workbench`, HUD + work-area agent panes) stays the
+// STANDALONE surface a human launches from a plain terminal.
 //
 // Strategy (P-001 / P-008):
 //   - Linux/X11  → GluedGhosttyX11 (D-003): spawn a borderless GPU-native
-//     Ghostty window hosting `pui workbench`, share the app-id (WM_CLASS) with
+//     Ghostty window hosting `pui chat`, share the app-id (WM_CLASS) with
 //     the Tauri window, matched theme, and pin it flush-adjacent on every
 //     Tauri-window move/resize (EWMH _NET_MOVERESIZE_WINDOW). GPU-native +
 //     one-window-look, X11-only (only X11 lets you position a foreign window).
@@ -17,7 +20,7 @@
 //     a terminal window and renders a native terminal VIEW in it
 //     (VTE / SwiftTerm / ConPTY — CPU-native, D-005). Not buildable/testable
 //     on this X11 box; until those land we fall back to NewWindow (launch
-//     `pui workbench` in a real native terminal window — still native, just
+//     `pui chat` in a real native terminal window — still native, just
 //     not glued). The seam is kept clean so a future embeddable libghostty
 //     drops into the EmbeddedView path without rework.
 //   - No display (headless / CI) → Disabled.
@@ -25,8 +28,7 @@
 // The glue is VISUAL ONLY (D-006): the terminal coordinates with the GUI
 // through the durable substrate (operator API / coord / roster), exactly as
 // the standalone pui does — never through the window relationship. Nothing in
-// this module touches that; `pui workbench` is already a standalone substrate
-// client.
+// this module touches that; the pui is already a standalone substrate client.
 
 use std::sync::Mutex;
 
@@ -69,8 +71,9 @@ pub enum TerminalStrategy {
     /// Phase 2 portable path: an owned window with an embedded native view.
     EmbeddedView(EmbedBackend),
     /// Interim cross-platform fallback while the embedded views are unbuilt:
-    /// launch `pui workbench` in a real native terminal NEW WINDOW (native,
-    /// not glued). Reuses the proven `native_console` new-window spawner.
+    /// launch the chat dock (`pui chat`) in a real native terminal NEW WINDOW
+    /// (native, not glued). Reuses the proven `native_console` new-window
+    /// spawner.
     NewWindow,
     /// Headless / no display — no terminal window.
     Disabled,
@@ -188,11 +191,25 @@ pub fn resolve_strategy_from_env() -> TerminalStrategy {
     downgrade_unbuilt(select_strategy(info))
 }
 
-/// Phase-2 backends aren't implemented on this build yet — serve them with the
-/// NewWindow fallback so the cross-platform path is still a real native
-/// terminal. Centralised here so enabling a backend is a one-line change.
+/// Serve unbuilt/unavailable Phase-2 backends with the NewWindow fallback so
+/// the cross-platform path is still a real native terminal. The Linux VTE
+/// embed (D-009) IS built — it stays selected whenever the runtime
+/// libvte-2.91 is loadable (it's dlopen'd, not linked, so its absence is a
+/// runtime question); SwiftTerm/ConPTY remain unbuilt (no mac/Windows
+/// toolchain on the dev box). Centralised here so enabling a backend is a
+/// one-line change.
 fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
+    #[cfg(target_os = "linux")]
+    let vte_available = vte_embed::available();
+    #[cfg(not(target_os = "linux"))]
+    let vte_available = false;
+    downgrade_unbuilt_with(s, vte_available)
+}
+
+/// The pure policy behind `downgrade_unbuilt` (availability injected for tests).
+fn downgrade_unbuilt_with(s: TerminalStrategy, vte_available: bool) -> TerminalStrategy {
     match s {
+        TerminalStrategy::EmbeddedView(EmbedBackend::Vte) if vte_available => s,
         TerminalStrategy::EmbeddedView(_) => TerminalStrategy::NewWindow,
         other => other,
     }
@@ -359,6 +376,118 @@ pub fn resized_extent(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// D-012 — BIDIRECTIONAL drag: a TERMINAL-edge drag drives the split too
+//
+// P-015's first cut drove the split only from the GUI's WM-resizable edge;
+// a direct resize of the borderless terminal was indistinguishable from
+// ghostty drift and got snapped back. These helpers classify how the
+// sibling's ACTUAL geometry departed from its glue target so the tick can
+// tell a user terminal-edge drag (adopt it; on a seam drag reflow the GUI)
+// from a real reset (snap back). The WM-fight D-012 warned about is avoided
+// structurally: we never re-assert the window the user is dragging — on a
+// seam drag we move the OTHER window (the GUI), and a short settle window
+// keeps the GUI-edge inference from double-applying the same delta.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// How the sibling terminal's actual geometry departed from its glue target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingDelta {
+    /// Within tolerance of the target — nothing to do.
+    InPlace,
+    /// The user dragged the terminal's SEAM edge (the one facing the GUI):
+    /// outer edge + cross axis anchored, seam moved. Adopt `extent` and
+    /// reflow the GUI so the seam follows the drag (GUI far edge anchored).
+    SeamResize { extent: i32 },
+    /// The user dragged the terminal's OUTER edge: seam + cross axis anchored.
+    /// Adopt `extent`; the GUI stays put (the glued pair grows outward).
+    OuterResize { extent: i32 },
+    /// Anything else — wholesale move, cross-axis change, a ghostty geometry
+    /// reset. Treated as drift: the glue snaps the sibling back.
+    Jump,
+}
+
+/// (seam, outer) edge coordinates of a SIBLING rect on the docking axis. The
+/// seam is the edge facing the GUI window; the outer edge is the opposite one.
+/// (Distinct from `axis_edges`, which reads the GUI window's edges.)
+fn sibling_edges(r: Rect, side: DockSide) -> (i32, i32) {
+    match side {
+        // Terminal left of the GUI → its RIGHT edge is the seam.
+        DockSide::Left => (r.x + r.w, r.x),
+        DockSide::Right => (r.x, r.x + r.w),
+        DockSide::Top => (r.y + r.h, r.y),
+        DockSide::Bottom => (r.y, r.y + r.h),
+    }
+}
+
+/// Classify the sibling's actual rect against its last glue target (D-012).
+/// `seam_tol` is the dead-band on the dock-axis edges — bigger than the
+/// rounding noise of a flush placement but small enough that a deliberate
+/// drag registers; a sub-tolerance ghostty cell-snap reads as `InPlace`
+/// (and a supra-tolerance one is ADOPTED like a drag, which keeps the seam
+/// flush against a size ghostty refuses to hold — self-stabilising either
+/// way). `cross_tol` is the drift tolerance on the other axis. Pure.
+pub fn classify_sibling_change(
+    side: DockSide,
+    target: Rect,
+    actual: Rect,
+    seam_tol: i32,
+    cross_tol: i32,
+) -> SiblingDelta {
+    let cross_ok = match side {
+        DockSide::Left | DockSide::Right => {
+            (actual.y - target.y).abs() <= cross_tol && (actual.h - target.h).abs() <= cross_tol
+        }
+        DockSide::Top | DockSide::Bottom => {
+            (actual.x - target.x).abs() <= cross_tol && (actual.w - target.w).abs() <= cross_tol
+        }
+    };
+    let (seam_t, outer_t) = sibling_edges(target, side);
+    let (seam_a, outer_a) = sibling_edges(actual, side);
+    let seam_moved = (seam_a - seam_t).abs() > seam_tol;
+    let outer_moved = (outer_a - outer_t).abs() > seam_tol;
+    if !cross_ok {
+        return SiblingDelta::Jump;
+    }
+    let extent = match side {
+        DockSide::Left | DockSide::Right => actual.w,
+        DockSide::Top | DockSide::Bottom => actual.h,
+    };
+    match (seam_moved, outer_moved) {
+        (false, false) => SiblingDelta::InPlace,
+        (true, false) => SiblingDelta::SeamResize { extent },
+        (false, true) => SiblingDelta::OuterResize { extent },
+        // Both edges moved together = a wholesale move (or a reset) — the
+        // terminal isn't independently movable while glued; snap it back.
+        (true, true) => SiblingDelta::Jump,
+    }
+}
+
+/// The GUI rect that follows a SEAM drag of the sibling (D-012): the GUI's
+/// boundary edge moves flush to the sibling's dragged seam (+`gap`), its FAR
+/// edge stays anchored, the cross axis is untouched. Pure.
+pub fn reflow_gui_for_seam(side: DockSide, gui: Rect, sibling: Rect, gap: i32) -> Rect {
+    match side {
+        DockSide::Left => {
+            let far = gui.x + gui.w; // anchored right edge
+            let x = sibling.x + sibling.w + gap;
+            Rect { x, y: gui.y, w: (far - x).max(1), h: gui.h }
+        }
+        DockSide::Right => {
+            // Terminal right of the GUI; the GUI's LEFT edge is anchored.
+            Rect { x: gui.x, y: gui.y, w: (sibling.x - gap - gui.x).max(1), h: gui.h }
+        }
+        DockSide::Top => {
+            let far = gui.y + gui.h;
+            let y = sibling.y + sibling.h + gap;
+            Rect { x: gui.x, y, w: gui.w, h: (far - y).max(1) }
+        }
+        DockSide::Bottom => {
+            Rect { x: gui.x, y: gui.y, w: gui.w, h: (sibling.y - gap - gui.y).max(1) }
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // P-004 — the Ghostty launch argv (pure, testable)
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -374,16 +503,19 @@ pub struct GhosttySpec {
     /// Background hex (e.g. "#282c34"), matched to the GUI theme so there's no
     /// visual seam.
     pub background: String,
-    /// The command Ghostty hosts. Normally `["pui", "workbench"]`.
+    /// The command Ghostty hosts. Normally `["pui", "chat"]` (the chat dock).
     pub command: Vec<String>,
     /// ghostty binary (overridable via PAPERCUSP_GHOSTTY_BIN for tests / snaps).
     pub bin: String,
 }
 
 impl GhosttySpec {
-    /// The default workbench spec: a borderless GPU-native Ghostty hosting
-    /// `pui workbench`, sharing the desktop app-id.
-    pub fn workbench() -> GhosttySpec {
+    /// The default desktop-docked spec: a borderless GPU-native Ghostty hosting
+    /// the chat dock — `pui chat`, zellij with exactly two panes (operator chat
+    /// | brain), no workbench HUD / work area (P-013 / D-011) — sharing the
+    /// desktop app-id. Override the hosted command with
+    /// PAPERCUSP_NATIVE_TERMINAL_CMD (e.g. `pui workbench` for the full HUD).
+    pub fn dock() -> GhosttySpec {
         let class = std::env::var("PAPERCUSP_NATIVE_TERMINAL_CLASS")
             .unwrap_or_else(|_| "com.papercusp.desktop".to_string());
         let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG")
@@ -393,7 +525,7 @@ impl GhosttySpec {
             Ok(s) if !s.trim().is_empty() => {
                 s.split_whitespace().map(|x| x.to_string()).collect()
             }
-            _ => vec!["pui".to_string(), "workbench".to_string()],
+            _ => vec!["pui".to_string(), "chat".to_string()],
         };
         GhosttySpec {
             class,
@@ -505,8 +637,8 @@ mod x11_glue {
     //! reparenting WMs). Foreign-window positioning is exactly what X11 uniquely
     //! allows (D-003) and Wayland forbids.
     use super::{
-        compute_sibling_geometry, rects_close, resized_extent, sibling_extent, DockSide,
-        GlueConfig, Rect,
+        classify_sibling_change, compute_sibling_geometry, rects_close, reflow_gui_for_seam,
+        resized_extent, sibling_extent, DockSide, GlueConfig, Rect, SiblingDelta,
     };
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
@@ -540,6 +672,12 @@ mod x11_glue {
         /// (P-015) diffs against to tell a boundary-edge RESIZE from a
         /// whole-window MOVE. `None` until the first tick seeds it.
         last_gui: Option<Rect>,
+        /// Ticks left of the settle window after WE commanded a GUI
+        /// move_resize (the D-012 seam reflow). While >0 the GUI-edge
+        /// inference (`resized_extent`) is suspended so the WM applying our
+        /// own command isn't re-read as a user boundary drag (which would
+        /// double-apply — or, applied late, revert — the adopted extent).
+        gui_settle: u8,
     }
 
     impl GlueSession {
@@ -571,6 +709,7 @@ mod x11_glue {
                 extent: None,
                 last_target: None,
                 last_gui: None,
+                gui_settle: 0,
             };
             let mut sibling = None;
             for _ in 0..40 {
@@ -672,29 +811,100 @@ mod x11_glue {
         /// (the sibling jumped on its own — ghostty occasionally re-applies its
         /// default geometry; the drift check observes the sibling's ACTUAL
         /// geometry, with a tolerance that ignores terminal cell-snap but catches
-        /// a real reset). Returns `(target, changed, drifted)` when it moved.
+        /// a real reset). The split is BIDIRECTIONAL (D-012): a drag of the
+        /// terminal's own seam/outer edge is classified apart from drift and
+        /// adopted (a seam drag reflows the GUI) instead of snapped back.
+        /// Returns `(target, changed, drifted)` when it moved.
         pub fn tick(&mut self, force: bool) -> Option<(Rect, bool, bool)> {
+            /// Drift tolerance: bigger than terminal cell-snap, far smaller
+            /// than a real geometry reset.
+            const DRIFT_TOL: i32 = 40;
+            /// Dock-axis dead-band for the D-012 terminal-edge drag: above
+            /// flush-placement rounding noise, low enough that a deliberate
+            /// drag registers within a tick or two.
+            const SEAM_TOL: i32 = 8;
+
             let main = self.geometry(self.gui)?;
+
+            // D-012 bidirectional drag: when the GUI is at rest but the sibling
+            // departed from target along the dock axis, the user dragged the
+            // TERMINAL's edge (one pointer: a moving GUI means the gesture is on
+            // the GUI side — the established path below owns that). Never
+            // re-assert the window the user is holding; on a seam drag move the
+            // OTHER window (the GUI) to follow.
+            let gui_at_rest = self.last_gui == Some(main) && self.gui_settle == 0;
+            if !force && gui_at_rest {
+                if let (Some(t), Some(actual)) = (self.last_target, self.geometry(self.sibling)) {
+                    match classify_sibling_change(self.side, t, actual, SEAM_TOL, DRIFT_TOL) {
+                        SiblingDelta::SeamResize { extent } => {
+                            let lo = self.min_px.min(self.max_px);
+                            let hi = self.max_px.max(self.min_px);
+                            let clamped = extent.clamp(lo, hi);
+                            // At the clamp the split can't follow further — fall
+                            // through to the normal flush, which snaps the
+                            // sibling back to the bound (standard splitter feel).
+                            if Some(clamped) != self.extent {
+                                self.extent = Some(clamped);
+                                let g = reflow_gui_for_seam(self.side, main, actual, self.gap);
+                                self.move_resize(self.gui, g.x, g.y, g.w, g.h);
+                                // Predict the commanded GUI rect as the new
+                                // baseline + open the settle window so the WM
+                                // applying OUR move isn't re-read as a user
+                                // boundary drag next tick.
+                                self.last_gui = Some(g);
+                                self.gui_settle = 2;
+                                let t2 = compute_sibling_geometry(g, self.side, clamped, self.gap);
+                                self.last_target = Some(t2);
+                                return Some((t2, true, false));
+                            }
+                        }
+                        SiblingDelta::OuterResize { extent } => {
+                            // Adopt the dragged extent; the GUI stays put. The
+                            // normal flush below recomputes the target from the
+                            // unchanged GUI + adopted extent — which lands
+                            // exactly where the user dragged the outer edge.
+                            let lo = self.min_px.min(self.max_px);
+                            let hi = self.max_px.max(self.min_px);
+                            self.extent = Some(extent.clamp(lo, hi));
+                        }
+                        SiblingDelta::InPlace | SiblingDelta::Jump => {
+                            // Jump = real drift — the flush below snaps it back.
+                        }
+                    }
+                }
+            }
+
             // Resolve the terminal extent. Initial extent = the configured
             // fraction; thereafter the user RESIZES it by dragging the boundary
             // edge between the two windows (P-015) — a draggable split, not a
             // fixed ratio. `resized_extent` distinguishes that boundary drag from
-            // a whole-window move (which only translates the sibling).
+            // a whole-window move (which only translates the sibling). During the
+            // settle window after a D-012 GUI reflow the inference is suspended —
+            // the GUI deltas in flight are our own command being applied.
+            let settling = self.gui_settle > 0;
             let extent = match (self.extent, self.last_gui) {
                 (Some(prev), Some(prev_gui)) => {
-                    resized_extent(self.side, prev_gui, main, prev, self.min_px, self.max_px)
+                    if settling {
+                        self.gui_settle -= 1;
+                        prev
+                    } else {
+                        resized_extent(self.side, prev_gui, main, prev, self.min_px, self.max_px)
+                    }
                 }
                 _ => sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px),
             };
             self.extent = Some(extent);
             self.last_gui = Some(main);
             let t = compute_sibling_geometry(main, self.side, extent, self.gap);
-            const DRIFT_TOL: i32 = 40;
             let changed = self.last_target != Some(t);
-            let drifted = self
-                .geometry(self.sibling)
-                .map(|cur| !rects_close(cur, t, DRIFT_TOL))
-                .unwrap_or(false);
+            // While settling, sibling departure is most likely the user's drag
+            // still in flight — don't snap it back; the next at-rest tick
+            // classifies (and adopts) it properly.
+            let drifted = !settling
+                && self
+                    .geometry(self.sibling)
+                    .map(|cur| !rects_close(cur, t, DRIFT_TOL))
+                    .unwrap_or(false);
             if force || changed || drifted {
                 self.move_resize(self.sibling, t.x, t.y, t.w, t.h);
                 self.last_target = Some(t);
@@ -706,13 +916,295 @@ mod x11_glue {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// D-009 — Linux embedded native terminal VIEW (the Wayland-safe Phase-2 path)
+//
+// The app OWNS the terminal: a real VTE widget (CPU-native, accepted — D-005)
+// packed beside the WebKitWebView inside the Tauri window's own GTK tree via
+// a GtkPaned — ONE window, no foreign-window glue, so it works on Wayland
+// where X11's foreign positioning is forbidden (D-004). The paned handle IS
+// the draggable split, so this path gets D-012's bidirectional drag for free.
+//
+// libvte-2.91 (the GTK3 build, matching tauri/wry's GTK3) is loaded at
+// RUNTIME via dlopen — the shipped bundle takes no link-time dependency on
+// VTE; when the library is absent `resolve_strategy_from_env` downgrades the
+// selection to NewWindow (still a real native terminal).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+pub mod vte_embed {
+    use super::DockSide;
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::sync::OnceLock;
+
+    /// GTK3 build of VTE (matches tauri/wry's GTK3; the -gtk4 soname is a
+    /// different, incompatible build).
+    const SONAMES: &[&str] = &["libvte-2.91.so.0", "libvte-2.91.so"];
+    /// GSpawnFlags: resolve the command on PATH (G_SPAWN_SEARCH_PATH).
+    const G_SPAWN_SEARCH_PATH: c_int = 1 << 2;
+
+    /// `GdkRGBA` — four doubles, by C layout.
+    #[repr(C)]
+    pub struct GdkRgba {
+        pub red: f64,
+        pub green: f64,
+        pub blue: f64,
+        pub alpha: f64,
+    }
+
+    type FnTerminalNew = unsafe extern "C" fn() -> *mut c_void;
+    #[allow(clippy::type_complexity)]
+    type FnSpawnAsync = unsafe extern "C" fn(
+        terminal: *mut c_void,
+        pty_flags: c_int,         // VtePtyFlags; 0 = VTE_PTY_DEFAULT
+        working_directory: *const c_char,
+        argv: *const *const c_char,
+        envv: *const *const c_char,
+        spawn_flags: c_int,
+        child_setup: *const c_void,
+        child_setup_data: *mut c_void,
+        child_setup_data_destroy: *const c_void,
+        timeout: c_int,
+        cancellable: *mut c_void,
+        callback: *const c_void,
+        user_data: *mut c_void,
+    );
+    type FnSetColors = unsafe extern "C" fn(
+        terminal: *mut c_void,
+        foreground: *const GdkRgba,
+        background: *const GdkRgba,
+        palette: *const GdkRgba,
+        palette_size: usize,
+    );
+    type FnSetSize = unsafe extern "C" fn(terminal: *mut c_void, columns: i64, rows: i64);
+    type FnGetCharDim = unsafe extern "C" fn(terminal: *mut c_void) -> i64;
+
+    struct Vte {
+        /// Held for the process lifetime — the fn pointers below point into it.
+        _lib: libloading::Library,
+        terminal_new: FnTerminalNew,
+        spawn_async: FnSpawnAsync,
+        set_colors: Option<FnSetColors>,
+        set_size: Option<FnSetSize>,
+        char_width: Option<FnGetCharDim>,
+        char_height: Option<FnGetCharDim>,
+    }
+
+    // SAFETY: the library handle + C fn pointers are immutable after load and
+    // libvte's entry points are called only from the GTK main thread.
+    unsafe impl Send for Vte {}
+    unsafe impl Sync for Vte {}
+
+    fn lib() -> Option<&'static Vte> {
+        static LIB: OnceLock<Option<Vte>> = OnceLock::new();
+        LIB.get_or_init(|| {
+            for name in SONAMES {
+                // SAFETY: dlopen of a system library; we only resolve C symbols.
+                let l = match unsafe { libloading::Library::new(name) } {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                unsafe {
+                    let terminal_new = match l.get::<FnTerminalNew>(b"vte_terminal_new\0") {
+                        Ok(s) => *s,
+                        Err(_) => continue,
+                    };
+                    let spawn_async = match l.get::<FnSpawnAsync>(b"vte_terminal_spawn_async\0") {
+                        Ok(s) => *s,
+                        Err(_) => continue,
+                    };
+                    let set_colors = l
+                        .get::<FnSetColors>(b"vte_terminal_set_colors\0")
+                        .ok()
+                        .map(|s| *s);
+                    let set_size = l.get::<FnSetSize>(b"vte_terminal_set_size\0").ok().map(|s| *s);
+                    let char_width =
+                        l.get::<FnGetCharDim>(b"vte_terminal_get_char_width\0").ok().map(|s| *s);
+                    let char_height =
+                        l.get::<FnGetCharDim>(b"vte_terminal_get_char_height\0").ok().map(|s| *s);
+                    return Some(Vte {
+                        terminal_new,
+                        spawn_async,
+                        set_colors,
+                        set_size,
+                        char_width,
+                        char_height,
+                        _lib: l,
+                    });
+                }
+            }
+            None
+        })
+        .as_ref()
+    }
+
+    /// Whether the runtime VTE library is present + loadable. Drives the
+    /// strategy downgrade: no VTE → NewWindow fallback.
+    pub fn available() -> bool {
+        lib().is_some()
+    }
+
+    /// `#rrggbb` → GdkRGBA (alpha 1). Pure — unit-tested.
+    pub fn parse_hex_rgba(hex: &str) -> Option<GdkRgba> {
+        let h = hex.trim().strip_prefix('#')?;
+        if h.len() != 6 || !h.is_ascii() {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+        Some(GdkRgba {
+            red: byte(0)? as f64 / 255.0,
+            green: byte(2)? as f64 / 255.0,
+            blue: byte(4)? as f64 / 255.0,
+            alpha: 1.0,
+        })
+    }
+
+    /// The GtkPaned split position for the configured side + fraction: the
+    /// terminal takes `fraction` of `total` on its side of the handle. Pure.
+    pub fn initial_split_position(side: DockSide, total: i32, fraction: f32) -> i32 {
+        let extent = (total as f32 * fraction).round() as i32;
+        match side {
+            // Terminal is pane1 → the handle sits at its extent.
+            DockSide::Left | DockSide::Top => extent.clamp(1, total.max(1)),
+            // Webview is pane1 → the handle sits at total - extent.
+            DockSide::Right | DockSide::Bottom => (total - extent).clamp(1, total.max(1)),
+        }
+    }
+
+    /// Pack a live VTE terminal (hosting `command`) beside the webview inside
+    /// the Tauri window's default GTK vbox: the vbox's last child (the
+    /// webview) is re-parented into a GtkPaned with the terminal on the
+    /// configured side. MUST run on the GTK main thread.
+    pub fn embed_into_window(
+        win: &gtk::ApplicationWindow,
+        vbox: &gtk::Box,
+        command: &[String],
+        side: DockSide,
+        fraction: f32,
+        background: &str,
+    ) -> Result<(), String> {
+        use gtk::prelude::*;
+
+        let vte = lib().ok_or("libvte-2.91 (gtk3) is not loadable")?;
+        // SAFETY: vte_terminal_new returns a floating GtkWidget*.
+        let term_ptr = unsafe { (vte.terminal_new)() };
+        if term_ptr.is_null() {
+            return Err("vte_terminal_new returned null".into());
+        }
+        // SAFETY: the pointer is a valid GtkWidget; from_glib_none refs it.
+        let term: gtk::Widget =
+            unsafe { glib::translate::from_glib_none(term_ptr as *mut gtk::ffi::GtkWidget) };
+
+        // Match the GUI theme (no visual seam — P-004's theming goal).
+        if let (Some(set_colors), Some(bg)) = (vte.set_colors, parse_hex_rgba(background)) {
+            let fg = GdkRgba { red: 0.87, green: 0.87, blue: 0.87, alpha: 1.0 };
+            // SAFETY: valid terminal pointer + stack GdkRGBAs; null palette is allowed.
+            unsafe { set_colors(term_ptr, &fg, &bg, std::ptr::null(), 0) };
+        }
+
+        // The GTK tree surgery: tauri's default vbox is [optional menubar…,
+        // webview]; re-parent the webview (the LAST child) into a paned with
+        // the terminal on the configured side. The paned handle is the
+        // user-draggable split (D-012 bidirectional, for free).
+        let children = vbox.children();
+        let webview = children.last().cloned().ok_or("tauri vbox has no children")?;
+        vbox.remove(&webview);
+        let orientation = match side {
+            DockSide::Left | DockSide::Right => gtk::Orientation::Horizontal,
+            DockSide::Top | DockSide::Bottom => gtk::Orientation::Vertical,
+        };
+        let paned = gtk::Paned::new(orientation);
+        match side {
+            DockSide::Left | DockSide::Top => {
+                // resize=true on BOTH panes keeps allocations proportional on
+                // window resize; shrink=false keeps panes from collapsing to 0.
+                paned.pack1(&term, true, false);
+                paned.pack2(&webview, true, false);
+            }
+            DockSide::Right | DockSide::Bottom => {
+                paned.pack1(&webview, true, false);
+                paned.pack2(&term, true, false);
+            }
+        }
+        let total = match orientation {
+            gtk::Orientation::Horizontal => win.allocated_width(),
+            _ => win.allocated_height(),
+        };
+        paned.set_position(initial_split_position(side, total, fraction));
+        vbox.pack_start(&paned, true, true, 0);
+        paned.show_all();
+
+        // Drive the terminal grid from the widget allocation EXPLICITLY.
+        // Inside this embedding VTE's automatic allocation→grid pipeline
+        // misbehaves (it latches a boot-time height and keeps computing rows
+        // against it — verified via the allocation tree, which is correct on
+        // the GTK side), so on every size-allocate we compute cols/rows from
+        // the live allocation + VTE's own cell metrics and force them with
+        // vte_terminal_set_size (which also WINCHes the pty).
+        if let (Some(set_size), Some(cw_fn), Some(ch_fn)) =
+            (vte.set_size, vte.char_width, vte.char_height)
+        {
+            let term_addr = term_ptr as usize;
+            term.connect_size_allocate(move |_w, alloc| {
+                let t = term_addr as *mut c_void;
+                // SAFETY: the VTE widget outlives the signal (it lives in the
+                // window's tree for the process lifetime); calls are on the
+                // GTK main thread.
+                unsafe {
+                    let (cw, ch) = ((cw_fn)(t), (ch_fn)(t));
+                    if cw > 0 && ch > 0 {
+                        let cols = (alloc.width() as i64 / cw).max(2);
+                        let rows = (alloc.height() as i64 / ch).max(2);
+                        set_size(t, cols, rows);
+                    }
+                }
+            });
+        }
+
+        // Host the chat dock (`pui chat` — P-013/D-011) in the terminal.
+        // Spawned AFTER the widget is packed + shown: spawning into an
+        // unrealized 80x24 default leaves the pty stuck at the boot-time grid
+        // (zellij then paints a corner of the pane and never reflows).
+        if command.is_empty() {
+            return Err("empty terminal command".into());
+        }
+        let cstrs: Vec<CString> = command
+            .iter()
+            .map(|s| CString::new(s.as_str()).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let mut argv: Vec<*const c_char> = cstrs.iter().map(|c| c.as_ptr()).collect();
+        argv.push(std::ptr::null());
+        // SAFETY: argv/cstrs outlive the call (vte copies them before forking);
+        // null envv inherits ours; all callback pointers are optional per VTE docs.
+        unsafe {
+            (vte.spawn_async)(
+                term_ptr,
+                0, // VTE_PTY_DEFAULT
+                std::ptr::null(),
+                argv.as_ptr(),
+                std::ptr::null(),
+                G_SPAWN_SEARCH_PATH,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                -1,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+        }
+        Ok(())
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Launch + glue driving (Linux). Called from main.rs's setup() + window-event
 // hook. Non-Linux builds compile these as no-ops so the call sites stay clean.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
 impl NativeTerminal {
-    /// Spawn the borderless Ghostty sibling hosting `pui workbench`. Idempotent
+    /// Spawn the borderless Ghostty sibling hosting the chat dock (`pui chat`,
+    /// P-013 / D-011). Idempotent
     /// — a no-op if already running. The X11 window is resolved + first-glued
     /// separately via `poll_resolve_window` + the steady glue loop (off the
     /// setup thread) so launch never blocks on the window mapping.
@@ -727,7 +1219,7 @@ impl NativeTerminal {
         if guard.is_some() {
             return Ok(());
         }
-        let spec = GhosttySpec::workbench();
+        let spec = GhosttySpec::dock();
         // The shared app identity is the bundle id `com.papercusp.desktop`
         // (GhosttySpec default / PAPERCUSP_NATIVE_TERMINAL_CLASS). The Tauri
         // window exposes no _GTK_APPLICATION_ID and its WM_CLASS *class*
@@ -799,16 +1291,17 @@ impl NativeTerminal {
         }
     }
 
-    /// Interim cross-platform fallback (Wayland today): launch `pui workbench`
-    /// in a real native terminal window — decorated, normal, NOT glued. Still a
-    /// fully native terminal; it just isn't pinned to the GUI window (foreign
-    /// positioning is forbidden off X11). Replaced per-OS by the embedded views.
+    /// Interim cross-platform fallback (Wayland today): launch the chat dock
+    /// (`pui chat`) in a real native terminal window — decorated, normal, NOT
+    /// glued. Still a fully native terminal; it just isn't pinned to the GUI
+    /// window (foreign positioning is forbidden off X11). Replaced per-OS by
+    /// the embedded views.
     pub fn launch_new_window(&self) -> Result<(), String> {
         let mut guard = self.live.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
             return Ok(());
         }
-        let spec = GhosttySpec::workbench();
+        let spec = GhosttySpec::dock();
         // Same hosted command + shared class (so taskbars still group it), but
         // keep decorations + skip the glue knobs.
         let mut argv = vec![
@@ -923,12 +1416,23 @@ mod tests {
 
     #[test]
     fn unbuilt_embedded_views_downgrade_to_new_window() {
+        // D-009: the Linux VTE embed is BUILT — it survives whenever the
+        // runtime libvte is loadable, and downgrades only when it isn't.
         assert_eq!(
-            downgrade_unbuilt(TerminalStrategy::EmbeddedView(EmbedBackend::Vte)),
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), true),
+            TerminalStrategy::EmbeddedView(EmbedBackend::Vte)
+        );
+        assert_eq!(
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), false),
+            TerminalStrategy::NewWindow
+        );
+        // SwiftTerm/ConPTY stay unbuilt → NewWindow regardless of VTE.
+        assert_eq!(
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm), true),
             TerminalStrategy::NewWindow
         );
         assert_eq!(
-            downgrade_unbuilt(TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)),
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::ConPty), true),
             TerminalStrategy::NewWindow
         );
         // The X11 glued path is never downgraded.
@@ -936,6 +1440,36 @@ mod tests {
             downgrade_unbuilt(TerminalStrategy::GluedGhosttyX11),
             TerminalStrategy::GluedGhosttyX11
         );
+    }
+
+    // ── D-009 VTE embed (pure parts) ─────────────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_hex_parsing_and_split_position() {
+        let bg = vte_embed::parse_hex_rgba("#282c34").expect("valid hex");
+        assert!((bg.red - 0x28 as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.green - 0x2c as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.blue - 0x34 as f64 / 255.0).abs() < 1e-9);
+        assert_eq!(bg.alpha, 1.0);
+        assert!(vte_embed::parse_hex_rgba("nope").is_none());
+        assert!(vte_embed::parse_hex_rgba("#28c3").is_none());
+
+        // Terminal-left split: handle at the terminal's extent.
+        assert_eq!(vte_embed::initial_split_position(DockSide::Left, 2000, 0.42), 840);
+        // Terminal-right split: handle at total - extent.
+        assert_eq!(vte_embed::initial_split_position(DockSide::Right, 2000, 0.42), 1160);
+        // Degenerate sizes clamp sanely.
+        assert_eq!(vte_embed::initial_split_position(DockSide::Left, 0, 0.42), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_runtime_library_is_loadable_on_this_box() {
+        // The dev box ships libvte-2.91.so.0 (runtime, no dev headers needed —
+        // the embed dlopens). If this fails the strategy downgrade path is
+        // what users without VTE get; the assert documents the dev-box rig.
+        assert!(vte_embed::available());
     }
 
     #[test]
@@ -1090,6 +1624,116 @@ mod tests {
         assert_eq!(resized_extent(DockSide::Left, a, b, 400, 100, 2000), 2000);
     }
 
+    // ── D-012 bidirectional terminal-edge drag ──────────────────────────────
+
+    /// A Left-docked sibling target: terminal at x=100..600 (w=500), GUI to its
+    /// right at x=600.
+    fn left_target() -> Rect {
+        Rect { x: 100, y: 0, w: 500, h: 800 }
+    }
+
+    #[test]
+    fn classify_in_place_within_tolerances() {
+        let t = left_target();
+        // Cell-snap sized wiggle on every coordinate stays InPlace.
+        let a = Rect { x: t.x + 3, y: t.y + 10, w: t.w - 6, h: t.h - 12 };
+        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::InPlace);
+    }
+
+    #[test]
+    fn classify_seam_drag_left_dock() {
+        let t = left_target();
+        // Seam = right edge (x+w): dragged +120, outer edge anchored.
+        let a = Rect { x: t.x, y: t.y, w: t.w + 120, h: t.h };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, a, 8, 40),
+            SiblingDelta::SeamResize { extent: 620 }
+        );
+    }
+
+    #[test]
+    fn classify_outer_drag_left_dock() {
+        let t = left_target();
+        // Outer = left edge: dragged -80 (grow outward), seam anchored.
+        let a = Rect { x: t.x - 80, y: t.y, w: t.w + 80, h: t.h };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, a, 8, 40),
+            SiblingDelta::OuterResize { extent: 580 }
+        );
+    }
+
+    #[test]
+    fn classify_wholesale_move_is_a_jump() {
+        let t = left_target();
+        // Both dock-axis edges shifted together = a move/reset → snap back.
+        let a = Rect { x: t.x + 200, y: t.y, w: t.w, h: t.h };
+        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::Jump);
+    }
+
+    #[test]
+    fn classify_cross_axis_breach_is_a_jump() {
+        let t = left_target();
+        // A big vertical jump (ghostty geometry reset) → Jump even with the
+        // dock-axis edges intact.
+        let a = Rect { x: t.x, y: t.y + 300, w: t.w, h: t.h };
+        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::Jump);
+    }
+
+    #[test]
+    fn classify_seam_drag_right_dock() {
+        // Right-docked sibling: terminal right of the GUI; seam = its LEFT edge.
+        let t = Rect { x: 1200, y: 0, w: 400, h: 800 };
+        // Drag the seam left 100px (terminal grows): x -100, w +100.
+        let a = Rect { x: 1100, y: 0, w: 500, h: 800 };
+        assert_eq!(
+            classify_sibling_change(DockSide::Right, t, a, 8, 40),
+            SiblingDelta::SeamResize { extent: 500 }
+        );
+    }
+
+    #[test]
+    fn reflow_left_dock_keeps_far_edge_anchored() {
+        // GUI at 600..2000; sibling seam dragged from 600 to 720.
+        let gui = Rect { x: 600, y: 0, w: 1400, h: 800 };
+        let sibling = Rect { x: 100, y: 0, w: 620, h: 800 };
+        let g = reflow_gui_for_seam(DockSide::Left, gui, sibling, 0);
+        assert_eq!(g, Rect { x: 720, y: 0, w: 1280, h: 800 });
+        // The pair's combined outer rect is preserved: GUI far edge fixed.
+        assert_eq!(g.x + g.w, gui.x + gui.w);
+    }
+
+    #[test]
+    fn reflow_right_dock_keeps_left_edge_anchored() {
+        let gui = Rect { x: 0, y: 0, w: 1200, h: 800 };
+        // Sibling (right of GUI) seam dragged left to x=1100.
+        let sibling = Rect { x: 1100, y: 0, w: 500, h: 800 };
+        let g = reflow_gui_for_seam(DockSide::Right, gui, sibling, 0);
+        assert_eq!(g, Rect { x: 0, y: 0, w: 1100, h: 800 });
+    }
+
+    #[test]
+    fn reflow_honors_the_gap() {
+        let gui = Rect { x: 600, y: 0, w: 1400, h: 800 };
+        let sibling = Rect { x: 100, y: 0, w: 620, h: 800 };
+        let g = reflow_gui_for_seam(DockSide::Left, gui, sibling, 4);
+        assert_eq!(g.x, 724); // seam + gap
+        assert_eq!(g.x + g.w, 2000); // far edge still anchored
+    }
+
+    #[test]
+    fn reflow_vertical_docks() {
+        // Top dock: sibling above; GUI's bottom edge anchored.
+        let gui = Rect { x: 0, y: 400, w: 1200, h: 600 };
+        let sib_top = Rect { x: 0, y: 0, w: 1200, h: 500 };
+        let g = reflow_gui_for_seam(DockSide::Top, gui, sib_top, 0);
+        assert_eq!(g, Rect { x: 0, y: 500, w: 1200, h: 500 });
+        // Bottom dock: sibling below; GUI's top edge anchored.
+        let gui2 = Rect { x: 0, y: 0, w: 1200, h: 600 };
+        let sib_bot = Rect { x: 0, y: 550, w: 1200, h: 450 };
+        let g2 = reflow_gui_for_seam(DockSide::Bottom, gui2, sib_bot, 0);
+        assert_eq!(g2, Rect { x: 0, y: 0, w: 1200, h: 550 });
+    }
+
     // ── P-004 launch argv ────────────────────────────────────────────────────
 
     #[test]
@@ -1098,7 +1742,7 @@ mod tests {
             class: "com.papercusp.desktop".into(),
             instance: "papercusp-terminal".into(),
             background: "#282c34".into(),
-            command: vec!["pui".into(), "workbench".into()],
+            command: vec!["pui".into(), "chat".into()],
             bin: "ghostty".into(),
         };
         let argv = spec.argv();
@@ -1110,7 +1754,20 @@ mod tests {
         // `-e` must be present and everything after it is the hosted command,
         // in order, at the very end.
         let e = argv.iter().position(|a| a == "-e").expect("missing -e");
-        assert_eq!(&argv[e + 1..], &["pui".to_string(), "workbench".to_string()]);
+        assert_eq!(&argv[e + 1..], &["pui".to_string(), "chat".to_string()]);
         assert_eq!(e, argv.len() - 3, "-e must be immediately before the command");
+    }
+
+    #[test]
+    fn dock_spec_hosts_the_chat_dock_by_default() {
+        // The DESKTOP-DOCKED surface is the 2-pane chat dock (`pui chat`,
+        // P-013 / D-011) — NOT the full `pui workbench`. Skip (vacuously pass)
+        // when the env override is set in this test environment.
+        if std::env::var("PAPERCUSP_NATIVE_TERMINAL_CMD").map_or(true, |s| s.trim().is_empty()) {
+            assert_eq!(
+                GhosttySpec::dock().command,
+                vec!["pui".to_string(), "chat".to_string()]
+            );
+        }
     }
 }
