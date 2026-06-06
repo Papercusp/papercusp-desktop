@@ -106,6 +106,12 @@ gtk = "0.18"
 glib = "0.18"
 libloading = "0.8"
 
+# libloading on macOS — the D-009 SwiftTerm embed dlopens the
+# macos-term-shim dylib at runtime (same no-link-time-dependency pattern as
+# the Linux VTE embed; absent shim → NewWindow downgrade).
+[target.'cfg(target_os = "macos")'.dependencies]
+libloading = "0.8"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 devtools = []

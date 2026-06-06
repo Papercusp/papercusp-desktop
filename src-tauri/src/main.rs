@@ -1173,8 +1173,50 @@ fn start_native_terminal(app: &AppHandle) {
                 eprintln!("[papercusp-desktop] native-terminal: VTE embed main-thread hop failed: {e}");
             }
         }
-        // Remaining embedded views (SwiftTerm/ConPTY) are downgraded to
-        // NewWindow until their backends land; Disabled = no display / opted out.
+        // D-009: the macOS embedded SwiftTerm view — a real native terminal
+        // attached inside OUR window's content view via the dlopen'd
+        // macos-term-shim (terminal left, webview shrunk right — P-014). Must
+        // run on the AppKit main thread. Falls back to NewWindow on failure.
+        #[cfg(target_os = "macos")]
+        TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::SwiftTerm) => {
+            let Some(window) = app.get_webview_window("main") else {
+                eprintln!("[papercusp-desktop] native-terminal: no main window for the SwiftTerm embed");
+                return;
+            };
+            let handle = app.clone();
+            let win = window.clone();
+            let res = window.run_on_main_thread(move || {
+                let spec = native_terminal::GhosttySpec::dock();
+                let cfg = native_terminal::GlueConfig::from_env();
+                let embedded = match win.ns_window() {
+                    Ok(ns) => native_terminal::swiftterm_embed::embed_into_window(
+                        ns as *mut std::ffi::c_void,
+                        &spec.command,
+                        cfg.fraction,
+                        cfg.min_px,
+                        cfg.max_px,
+                    ),
+                    Err(e) => Err(format!("no ns_window: {e}")),
+                };
+                match embedded {
+                    Ok(()) => println!("[papercusp-desktop] native-terminal: SwiftTerm view embedded"),
+                    Err(e) => {
+                        eprintln!(
+                            "[papercusp-desktop] native-terminal SwiftTerm embed failed: {e} — falling back to new-window"
+                        );
+                        let _ = handle
+                            .state::<native_terminal::NativeTerminal>()
+                            .launch_new_window();
+                    }
+                }
+            });
+            if let Err(e) = res {
+                eprintln!("[papercusp-desktop] native-terminal: SwiftTerm embed main-thread hop failed: {e}");
+            }
+        }
+        // Remaining embedded views (ConPTY; VTE/SwiftTerm on the wrong OS) are
+        // downgraded to NewWindow until their backends land; Disabled = no
+        // display / opted out.
         TerminalStrategy::EmbeddedView(_) | TerminalStrategy::Disabled => {}
     }
 }

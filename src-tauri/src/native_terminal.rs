@@ -177,6 +177,9 @@ pub fn resolve_strategy_from_env() -> TerminalStrategy {
             "new-window" => return TerminalStrategy::NewWindow,
             "disabled" => return TerminalStrategy::Disabled,
             "embedded-vte" => return TerminalStrategy::EmbeddedView(EmbedBackend::Vte),
+            "embedded-swiftterm" => {
+                return TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
+            }
             _ => {}
         }
     }
@@ -203,13 +206,22 @@ fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
     let vte_available = vte_embed::available();
     #[cfg(not(target_os = "linux"))]
     let vte_available = false;
-    downgrade_unbuilt_with(s, vte_available)
+    #[cfg(target_os = "macos")]
+    let swiftterm_available = swiftterm_embed::available();
+    #[cfg(not(target_os = "macos"))]
+    let swiftterm_available = false;
+    downgrade_unbuilt_with(s, vte_available, swiftterm_available)
 }
 
 /// The pure policy behind `downgrade_unbuilt` (availability injected for tests).
-fn downgrade_unbuilt_with(s: TerminalStrategy, vte_available: bool) -> TerminalStrategy {
+fn downgrade_unbuilt_with(
+    s: TerminalStrategy,
+    vte_available: bool,
+    swiftterm_available: bool,
+) -> TerminalStrategy {
     match s {
         TerminalStrategy::EmbeddedView(EmbedBackend::Vte) if vte_available => s,
+        TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm) if swiftterm_available => s,
         TerminalStrategy::EmbeddedView(_) => TerminalStrategy::NewWindow,
         other => other,
     }
@@ -1363,6 +1375,132 @@ pub mod vte_embed {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// D-009 — macOS embedded native terminal VIEW (SwiftTerm)
+//
+// Mirrors the Linux VTE pattern one-to-one: the app OWNS the terminal — a
+// real SwiftTerm LocalProcessTerminalView (CPU-native, accepted — D-005)
+// attached INSIDE the Tauri window's content view, with the WKWebView shrunk
+// to the right remainder (terminal left, GUI right — P-014). The Swift side
+// lives in `macos-term-shim/` (a SwiftPM dylib exposing a C ABI), and is
+// dlopen'd at RUNTIME — the shipped bundle takes no link-time dependency on
+// Swift/SwiftTerm; when the dylib is absent the strategy downgrades to
+// NewWindow, exactly like a missing libvte on Linux.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+pub mod swiftterm_embed {
+    use std::ffi::{c_char, c_void, CString};
+    use std::sync::OnceLock;
+
+    type FnAttachLeft = unsafe extern "C" fn(
+        ns_window: *mut c_void,
+        fraction: f64,
+        min_px: f64,
+        max_px: f64,
+        exe: *const c_char,
+        args_blob: *const c_char,
+        args_len: i32,
+    ) -> *mut c_void;
+
+    struct Shim {
+        _lib: libloading::Library,
+        attach_left: FnAttachLeft,
+    }
+    // SAFETY: immutable after load; called only on the AppKit main thread.
+    unsafe impl Send for Shim {}
+    unsafe impl Sync for Shim {}
+
+    /// Candidate dylib locations: the env override, then next to the
+    /// executable (bundled), then the in-repo SwiftPM build output (dev).
+    fn candidates() -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(p) = std::env::var("PAPERCUSP_TERM_SHIM") {
+            if !p.trim().is_empty() {
+                out.push(p.into());
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                out.push(dir.join("libPapercuspTermShim.dylib"));
+                // cargo target/<profile>/ → the repo's src-tauri/, where the
+                // SwiftPM package builds its release output (dev workflow).
+                out.push(
+                    dir.join("../../macos-term-shim/.build/release/libPapercuspTermShim.dylib"),
+                );
+            }
+        }
+        out
+    }
+
+    fn lib() -> Option<&'static Shim> {
+        static LIB: OnceLock<Option<Shim>> = OnceLock::new();
+        LIB.get_or_init(|| {
+            for path in candidates() {
+                if !path.exists() {
+                    continue;
+                }
+                // SAFETY: dlopen of our own shim; we only resolve C symbols.
+                let l = match unsafe { libloading::Library::new(&path) } {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                unsafe {
+                    let attach_left = match l.get::<FnAttachLeft>(b"pcterm_attach_left\0") {
+                        Ok(s) => *s,
+                        Err(_) => continue,
+                    };
+                    return Some(Shim { attach_left, _lib: l });
+                }
+            }
+            None
+        })
+        .as_ref()
+    }
+
+    /// Whether the runtime shim dylib is present + loadable. Drives the
+    /// strategy downgrade: no shim → NewWindow fallback.
+    pub fn available() -> bool {
+        lib().is_some()
+    }
+
+    /// Attach the terminal (hosting `command`) to the left `fraction` of the
+    /// Tauri window. `ns_window` is tauri's raw NSWindow pointer. MUST run on
+    /// the AppKit main thread.
+    pub fn embed_into_window(
+        ns_window: *mut c_void,
+        command: &[String],
+        fraction: f32,
+        min_px: i32,
+        max_px: i32,
+    ) -> Result<(), String> {
+        let shim = lib().ok_or("PapercuspTermShim dylib not loadable")?;
+        let (exe, rest) = command.split_first().ok_or("empty terminal command")?;
+        let exe_c = CString::new(exe.as_str()).map_err(|e| e.to_string())?;
+        // NUL-separated argv tail (the shim splits on NUL).
+        let blob: Vec<u8> = rest
+            .iter()
+            .flat_map(|a| a.as_bytes().iter().copied().chain(std::iter::once(0u8)))
+            .collect();
+        // SAFETY: pointers outlive the call; the shim copies what it keeps.
+        let handle = unsafe {
+            (shim.attach_left)(
+                ns_window,
+                fraction as f64,
+                min_px as f64,
+                max_px as f64,
+                exe_c.as_ptr(),
+                blob.as_ptr() as *const std::ffi::c_char,
+                blob.len() as i32,
+            )
+        };
+        if handle.is_null() {
+            return Err("pcterm_attach_left returned null".into());
+        }
+        Ok(())
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Launch + glue driving (Linux). Called from main.rs's setup() + window-event
 // hook. Non-Linux builds compile these as no-ops so the call sites stay clean.
 // ───────────────────────────────────────────────────────────────────────────
@@ -1593,23 +1731,36 @@ mod tests {
 
     #[test]
     fn unbuilt_embedded_views_downgrade_to_new_window() {
-        // D-009: the Linux VTE embed is BUILT — it survives whenever the
-        // runtime libvte is loadable, and downgrades only when it isn't.
+        // D-009: the Linux VTE + macOS SwiftTerm embeds are BUILT — each
+        // survives whenever its runtime library/shim is loadable, and
+        // downgrades only when it isn't.
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), true),
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), true, false),
             TerminalStrategy::EmbeddedView(EmbedBackend::Vte)
         );
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), false),
-            TerminalStrategy::NewWindow
-        );
-        // SwiftTerm/ConPTY stay unbuilt → NewWindow regardless of VTE.
-        assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm), true),
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), false, false),
             TerminalStrategy::NewWindow
         );
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::ConPty), true),
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm),
+                false,
+                true
+            ),
+            TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
+        );
+        assert_eq!(
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm),
+                true,
+                false
+            ),
+            TerminalStrategy::NewWindow
+        );
+        // ConPTY stays unbuilt → NewWindow regardless.
+        assert_eq!(
+            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::ConPty), true, true),
             TerminalStrategy::NewWindow
         );
         // The X11 glued path is never downgraded.
