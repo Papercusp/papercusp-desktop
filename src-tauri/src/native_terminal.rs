@@ -462,6 +462,17 @@ pub fn classify_sibling_change(
     }
 }
 
+/// P-005 minimize follow: what to do with the sibling when the GUI's
+/// hidden/iconified state changes. `Some(true)` = iconify the sibling too,
+/// `Some(false)` = restore it, `None` = no transition. Pure.
+pub fn iconify_transition(gui_hidden: bool, last_hidden: bool) -> Option<bool> {
+    if gui_hidden == last_hidden {
+        None
+    } else {
+        Some(gui_hidden)
+    }
+}
+
 /// P-005 "share focus sensibly": which window of the glued pair to restack
 /// when the WM's active window changes. When ONE of the pair becomes active
 /// (the user clicked/alt-tabbed to it), the OTHER is raised just above it so
@@ -660,9 +671,9 @@ mod x11_glue {
     //! reparenting WMs). Foreign-window positioning is exactly what X11 uniquely
     //! allows (D-003) and Wayland forbids.
     use super::{
-        classify_sibling_change, compute_sibling_geometry, partner_to_raise, rects_close,
-        reflow_gui_for_seam, resized_extent, sibling_extent, DockSide, GlueConfig, Rect,
-        SiblingDelta,
+        classify_sibling_change, compute_sibling_geometry, iconify_transition, partner_to_raise,
+        rects_close, reflow_gui_for_seam, resized_extent, sibling_extent, DockSide, GlueConfig,
+        Rect, SiblingDelta,
     };
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
@@ -685,6 +696,11 @@ mod x11_glue {
         net_frame_extents: u32,
         net_active_window: u32,
         net_restack_window: u32,
+        net_wm_state: u32,
+        net_wm_state_hidden: u32,
+        net_wm_state_skip_taskbar: u32,
+        net_wm_state_skip_pager: u32,
+        wm_change_state: u32,
         gui: u32,
         sibling: u32,
         side: DockSide,
@@ -707,6 +723,9 @@ mod x11_glue {
         /// The WM's `_NET_ACTIVE_WINDOW` last tick — the focus-share baseline
         /// (P-005): a TRANSITION to one of the pair raises the other.
         last_active: Option<u32>,
+        /// Whether the GUI was hidden/iconified last tick — the minimize-follow
+        /// baseline (P-005): a transition iconifies/restores the sibling.
+        last_gui_hidden: bool,
     }
 
     impl GlueSession {
@@ -723,6 +742,11 @@ mod x11_glue {
             let net_frame_extents = intern(&conn, b"_NET_FRAME_EXTENTS")?;
             let net_active_window = intern(&conn, b"_NET_ACTIVE_WINDOW")?;
             let net_restack_window = intern(&conn, b"_NET_RESTACK_WINDOW")?;
+            let net_wm_state = intern(&conn, b"_NET_WM_STATE")?;
+            let net_wm_state_hidden = intern(&conn, b"_NET_WM_STATE_HIDDEN")?;
+            let net_wm_state_skip_taskbar = intern(&conn, b"_NET_WM_STATE_SKIP_TASKBAR")?;
+            let net_wm_state_skip_pager = intern(&conn, b"_NET_WM_STATE_SKIP_PAGER")?;
+            let wm_change_state = intern(&conn, b"WM_CHANGE_STATE")?;
             let mut me = GlueSession {
                 conn,
                 root,
@@ -732,6 +756,11 @@ mod x11_glue {
                 net_frame_extents,
                 net_active_window,
                 net_restack_window,
+                net_wm_state,
+                net_wm_state_hidden,
+                net_wm_state_skip_taskbar,
+                net_wm_state_skip_pager,
+                wm_change_state,
                 gui: 0,
                 sibling: 0,
                 side: cfg.side,
@@ -744,6 +773,7 @@ mod x11_glue {
                 last_gui: None,
                 gui_settle: 0,
                 last_active: None,
+                last_gui_hidden: false,
             };
             let mut sibling = None;
             for _ in 0..40 {
@@ -856,6 +886,67 @@ mod x11_glue {
         /// together.
         pub fn raise(&self) {
             self.restack_above(self.sibling, self.gui);
+        }
+
+        /// Hide the borderless sibling from the taskbar + alt-tab switcher
+        /// (P-005 grouping): the pair then presents as ONE entry — the GUI —
+        /// and activating it surfaces the terminal via the focus share.
+        /// EWMH `_NET_WM_STATE` add (1) of SKIP_TASKBAR + SKIP_PAGER, source
+        /// pager (2). Called once after the windows resolve.
+        pub fn apply_skip_taskbar(&self) {
+            let data = [
+                1u32, // _NET_WM_STATE_ADD
+                self.net_wm_state_skip_taskbar,
+                self.net_wm_state_skip_pager,
+                2, // source: pager
+                0,
+            ];
+            let event = ClientMessageEvent::new(32, self.sibling, self.net_wm_state, data);
+            let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
+            let _ = self.conn.send_event(false, self.root, mask, event);
+            let _ = self.conn.flush();
+        }
+
+        /// Whether the GUI window is hidden/iconified (`_NET_WM_STATE_HIDDEN`
+        /// present in its `_NET_WM_STATE`).
+        fn gui_hidden(&self) -> bool {
+            let Ok(cookie) =
+                self.conn
+                    .get_property(false, self.gui, self.net_wm_state, AtomEnum::ATOM, 0, 64)
+            else {
+                return false;
+            };
+            let Ok(reply) = cookie.reply() else { return false };
+            reply
+                .value32()
+                .map(|mut it| it.any(|a| a == self.net_wm_state_hidden))
+                .unwrap_or(false)
+        }
+
+        /// P-005 minimize follow: when the GUI is iconified, iconify the
+        /// sibling too (ICCCM `WM_CHANGE_STATE` → IconicState); when restored,
+        /// map it back and re-pin it just above the GUI. Returns whether the
+        /// GUI is currently hidden so the caller can skip the geometry/focus
+        /// ticks (never fight the WM over an iconified pair).
+        pub fn minimize_tick(&mut self) -> bool {
+            let hidden = self.gui_hidden();
+            if let Some(hide) = iconify_transition(hidden, self.last_gui_hidden) {
+                if hide {
+                    let data = [3u32 /* IconicState */, 0, 0, 0, 0];
+                    let event =
+                        ClientMessageEvent::new(32, self.sibling, self.wm_change_state, data);
+                    let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
+                    let _ = self.conn.send_event(false, self.root, mask, event);
+                    let _ = self.conn.flush();
+                } else {
+                    // ICCCM: mapping an iconified window restores it.
+                    let _ = self.conn.map_window(self.sibling);
+                    let _ = self.conn.flush();
+                    self.restack_above(self.sibling, self.gui);
+                }
+                self.last_gui_hidden = hidden;
+            }
+            hidden
         }
 
         /// The WM's `_NET_ACTIVE_WINDOW` (the active toplevel), if any.
@@ -1345,11 +1436,20 @@ impl NativeTerminal {
             sess.sibling()
         );
         sess.raise();
+        // P-005 grouping: one taskbar/alt-tab entry for the pair (the GUI).
+        sess.apply_skip_taskbar();
         let debug = std::env::var("PAPERCUSP_NATIVE_TERMINAL_DEBUG").is_ok();
         let mut tick: u32 = 0;
         loop {
             if !self.is_running() {
                 break;
+            }
+            // P-005 minimize follow — while the GUI is iconified the sibling
+            // is too; skip the geometry/focus ticks (don't fight the WM over
+            // an iconified pair).
+            if sess.minimize_tick() {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                continue;
             }
             // Warmup re-asserts the placement for the first ~2s so we win
             // ghostty applying its own initial geometry after we placed it.
@@ -1766,6 +1866,19 @@ mod tests {
             classify_sibling_change(DockSide::Right, t, a, 8, 40),
             SiblingDelta::SeamResize { extent: 500 }
         );
+    }
+
+    // ── P-005 minimize follow ────────────────────────────────────────────────
+
+    #[test]
+    fn iconify_follows_gui_transitions_only() {
+        // GUI just minimized → iconify the sibling.
+        assert_eq!(iconify_transition(true, false), Some(true));
+        // GUI just restored → restore the sibling.
+        assert_eq!(iconify_transition(false, true), Some(false));
+        // Steady states → leave the sibling alone (no per-tick WM spam).
+        assert_eq!(iconify_transition(false, false), None);
+        assert_eq!(iconify_transition(true, true), None);
     }
 
     // ── P-005 focus share ────────────────────────────────────────────────────
