@@ -85,8 +85,15 @@ libc = "0.2"
 # getUserMedia permission so the operator's voice paths work without
 # the webview surfacing a NotAllowedError on every load. See
 # `grant_media_permission` in src/main.rs.
+#
+# x11rb — pure-Rust X11 client. Drives the native-terminal "glue" on X11
+# (native-terminal-desktop-2026-06-06 / D-003): find the borderless Ghostty
+# sibling window by _NET_WM_PID and pin it adjacent to the Tauri GUI window
+# via EWMH _NET_MOVERESIZE_WINDOW on every move/resize. Pure-Rust so the
+# shipped .deb/.rpm/AppImage carries no runtime dependency on wmctrl/xdotool.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2"
+x11rb = "0.13"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

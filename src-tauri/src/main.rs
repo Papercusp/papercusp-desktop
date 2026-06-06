@@ -18,6 +18,7 @@ mod dev_bridge;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod native_console;
+mod native_terminal;
 mod pty;
 mod workspaces;
 mod wsl_setup;
@@ -1025,6 +1026,110 @@ fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Native sibling terminal (native-terminal-desktop-2026-06-06)
+//
+// The desktop terminal is a fully NATIVE terminal, not xterm.js. On X11 we
+// launch a borderless GPU-native Ghostty window hosting `pui workbench` and
+// pin it adjacent to the GUI window so the pair reads as one app. The glue is
+// visual only — the terminal coordinates with the GUI through the substrate.
+// See src/native_terminal.rs for the strategy + geometry + x11rb glue.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, specta::Type)]
+struct NativeTerminalStatus {
+    /// One of glued-ghostty-x11 / new-window / embedded-* / disabled.
+    strategy: String,
+    running: bool,
+}
+
+#[tauri::command]
+#[specta::specta]
+fn native_terminal_status(
+    nt: tauri::State<native_terminal::NativeTerminal>,
+) -> NativeTerminalStatus {
+    NativeTerminalStatus {
+        strategy: nt.strategy.label().to_string(),
+        running: nt.is_running(),
+    }
+}
+
+/// Show/hide the native sibling terminal. Returns the new running state.
+#[tauri::command]
+#[specta::specta]
+fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
+    let running = {
+        let nt = app.state::<native_terminal::NativeTerminal>();
+        nt.is_running()
+    };
+    if running {
+        app.state::<native_terminal::NativeTerminal>().shutdown();
+        Ok(false)
+    } else {
+        start_native_terminal(&app);
+        Ok(true)
+    }
+}
+
+/// Launch the native terminal per the resolved strategy. Shared by setup() and
+/// the toggle command. For the glued path, the X11 window is resolved + first-
+/// glued on a background thread so this never blocks.
+fn start_native_terminal(app: &AppHandle) {
+    use native_terminal::TerminalStrategy;
+    let strategy = app.state::<native_terminal::NativeTerminal>().strategy;
+    match strategy {
+        TerminalStrategy::GluedGhosttyX11 => {
+            if let Err(e) = app.state::<native_terminal::NativeTerminal>().launch_glued() {
+                eprintln!("[papercusp-desktop] native-terminal launch_glued failed: {e}");
+                return;
+            }
+            // Drive the steady glue loop off-thread. It owns one persistent X11
+            // connection and re-pins the sibling to our GUI window's true
+            // geometry every ~150ms until shutdown — robust to whichever window
+            // events GTK does/doesn't emit (programmatic/WM moves don't reliably
+            // surface as Moved, and outer_position lags). See run_glue_loop.
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                handle
+                    .state::<native_terminal::NativeTerminal>()
+                    .run_glue_loop();
+            });
+        }
+        TerminalStrategy::NewWindow => {
+            if let Err(e) = app
+                .state::<native_terminal::NativeTerminal>()
+                .launch_new_window()
+            {
+                eprintln!("[papercusp-desktop] native-terminal launch_new_window failed: {e}");
+            }
+        }
+        // Embedded views are downgraded to NewWindow until their backends land;
+        // Disabled means no display / opted out.
+        TerminalStrategy::EmbeddedView(_) | TerminalStrategy::Disabled => {}
+    }
+}
+
+/// Resolve the terminal strategy, manage the `NativeTerminal`, launch it for
+/// the main window, and register the move/resize/focus glue hook. Runs in both
+/// dev and prod so the terminal is present whenever the desktop is.
+fn init_native_terminal(app: &tauri::App) {
+    let strategy = native_terminal::resolve_strategy_from_env();
+    println!(
+        "[papercusp-desktop] native-terminal strategy: {}",
+        strategy.label()
+    );
+    app.manage(native_terminal::NativeTerminal::new(strategy));
+
+    // The main window must exist before we launch (the glue resolves it by pid).
+    if app.get_webview_window("main").is_none() {
+        return;
+    }
+
+    // The glue loop (run_glue_loop) owns the move/resize tracking, so there's no
+    // per-window-event hook to register here.
+    start_native_terminal(app.handle());
+}
+
 pub fn run() {
     let state = SidecarState {
         child: Mutex::new(None),
@@ -1065,6 +1170,8 @@ pub fn run() {
             wsl_setup::wsl_finalize_ready,
             wsl_setup::wsl_uninstall,
             native_console::console_launch,
+            native_terminal_status,
+            native_terminal_toggle,
             endpoint_ipc::endpoint_invoke,
             endpoint_ipc::endpoint_cancel,
             dev_bridge::__dev_bridge_result,
@@ -1122,6 +1229,11 @@ pub fn run() {
         .manage(state)
         .setup(|app| {
             let is_dev = cfg!(debug_assertions);
+
+            // Native sibling terminal — resolve strategy + launch the glued
+            // (X11) / native terminal and register the glue hook, in both dev
+            // and prod. Visual-only; the terminal coordinates via the substrate.
+            init_native_terminal(app);
 
             if is_dev {
                 // In dev mode we trust the developer to run the Next.js dev
@@ -1469,12 +1581,14 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                shutdown_native_terminal(app_handle);
                 kill_sidecar(app_handle);
             }
             RunEvent::WindowEvent {
                 event: WindowEvent::CloseRequested { .. },
                 ..
             } => {
+                shutdown_native_terminal(app_handle);
                 kill_sidecar(app_handle);
             }
             _ => {}
@@ -1618,6 +1732,14 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
     );
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Kill the native sibling terminal (if any) on shutdown. `try_state` so it's
+/// a no-op when the terminal was never managed (headless / opted out).
+fn shutdown_native_terminal(app_handle: &tauri::AppHandle) {
+    if let Some(nt) = app_handle.try_state::<native_terminal::NativeTerminal>() {
+        nt.shutdown();
+    }
 }
 
 /// Take ownership of the sidecar Child (if any) and kill it.
