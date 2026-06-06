@@ -462,6 +462,29 @@ pub fn classify_sibling_change(
     }
 }
 
+/// P-005 "share focus sensibly": which window of the glued pair to restack
+/// when the WM's active window changes. When ONE of the pair becomes active
+/// (the user clicked/alt-tabbed to it), the OTHER is raised just above it so
+/// the pair surfaces together — without this, focusing the GUI leaves the
+/// terminal buried behind whatever app was covering it. Returns
+/// `(window_to_raise, above_whom)`; `None` when focus didn't change or went
+/// to an unrelated window (never fight other apps' stacking). Pure.
+pub fn partner_to_raise(
+    active: Option<u32>,
+    last: Option<u32>,
+    gui: u32,
+    sibling: u32,
+) -> Option<(u32, u32)> {
+    if active == last {
+        return None;
+    }
+    match active {
+        Some(w) if w == gui => Some((sibling, gui)),
+        Some(w) if w == sibling => Some((gui, sibling)),
+        _ => None,
+    }
+}
+
 /// The GUI rect that follows a SEAM drag of the sibling (D-012): the GUI's
 /// boundary edge moves flush to the sibling's dragged seam (+`gap`), its FAR
 /// edge stays anchored, the cross axis is untouched. Pure.
@@ -637,8 +660,9 @@ mod x11_glue {
     //! reparenting WMs). Foreign-window positioning is exactly what X11 uniquely
     //! allows (D-003) and Wayland forbids.
     use super::{
-        classify_sibling_change, compute_sibling_geometry, rects_close, reflow_gui_for_seam,
-        resized_extent, sibling_extent, DockSide, GlueConfig, Rect, SiblingDelta,
+        classify_sibling_change, compute_sibling_geometry, partner_to_raise, rects_close,
+        reflow_gui_for_seam, resized_extent, sibling_extent, DockSide, GlueConfig, Rect,
+        SiblingDelta,
     };
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
@@ -659,6 +683,8 @@ mod x11_glue {
         net_wm_pid: u32,
         net_moveresize: u32,
         net_frame_extents: u32,
+        net_active_window: u32,
+        net_restack_window: u32,
         gui: u32,
         sibling: u32,
         side: DockSide,
@@ -678,6 +704,9 @@ mod x11_glue {
         /// own command isn't re-read as a user boundary drag (which would
         /// double-apply — or, applied late, revert — the adopted extent).
         gui_settle: u8,
+        /// The WM's `_NET_ACTIVE_WINDOW` last tick — the focus-share baseline
+        /// (P-005): a TRANSITION to one of the pair raises the other.
+        last_active: Option<u32>,
     }
 
     impl GlueSession {
@@ -692,6 +721,8 @@ mod x11_glue {
             let net_wm_pid = intern(&conn, b"_NET_WM_PID")?;
             let net_moveresize = intern(&conn, b"_NET_MOVERESIZE_WINDOW")?;
             let net_frame_extents = intern(&conn, b"_NET_FRAME_EXTENTS")?;
+            let net_active_window = intern(&conn, b"_NET_ACTIVE_WINDOW")?;
+            let net_restack_window = intern(&conn, b"_NET_RESTACK_WINDOW")?;
             let mut me = GlueSession {
                 conn,
                 root,
@@ -699,6 +730,8 @@ mod x11_glue {
                 net_wm_pid,
                 net_moveresize,
                 net_frame_extents,
+                net_active_window,
+                net_restack_window,
                 gui: 0,
                 sibling: 0,
                 side: cfg.side,
@@ -710,6 +743,7 @@ mod x11_glue {
                 last_target: None,
                 last_gui: None,
                 gui_settle: 0,
+                last_active: None,
             };
             let mut sibling = None;
             for _ in 0..40 {
@@ -797,13 +831,54 @@ mod x11_glue {
             let _ = self.conn.flush();
         }
 
-        /// Raise the sibling above (keep it with the GUI's z-order — "share
-        /// focus sensibly"). Called once after the initial placement.
-        pub fn raise(&self) {
+        /// Restack `win` directly ABOVE `above` (z-order), WM-correctly.
+        /// Under a reparenting WM (mutter/openbox) toplevels live inside frame
+        /// windows, so a raw `configure_window(ABOVE)` only restacks the client
+        /// INSIDE its own frame — a visual no-op. The EWMH way is a
+        /// `_NET_RESTACK_WINDOW` client message to the root (source=2 pager,
+        /// sibling=`above`, detail=Above), which the WM applies to the frames.
+        /// The raw configure is still sent as a fallback for WM-less X (bare
+        /// Xvfb), where there's no redirect and it applies directly.
+        fn restack_above(&self, win: u32, above: u32) {
+            let data = [2u32, above, 0 /* Above */, 0, 0];
+            let event = ClientMessageEvent::new(32, win, self.net_restack_window, data);
+            let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
+            let _ = self.conn.send_event(false, self.root, mask, event);
             use x11rb::protocol::xproto::ConfigureWindowAux;
-            let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-            let _ = self.conn.configure_window(self.sibling, &aux);
+            let aux = ConfigureWindowAux::new().sibling(above).stack_mode(StackMode::ABOVE);
+            let _ = self.conn.configure_window(win, &aux);
             let _ = self.conn.flush();
+        }
+
+        /// Raise the sibling just above the GUI (keep it with the GUI's
+        /// z-order — "share focus sensibly"). Called once after the initial
+        /// placement; thereafter `focus_tick` keeps the pair surfacing
+        /// together.
+        pub fn raise(&self) {
+            self.restack_above(self.sibling, self.gui);
+        }
+
+        /// The WM's `_NET_ACTIVE_WINDOW` (the active toplevel), if any.
+        fn active_window(&self) -> Option<u32> {
+            let r = self
+                .conn
+                .get_property(false, self.root, self.net_active_window, AtomEnum::WINDOW, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?;
+            r.value32().and_then(|mut it| it.next()).filter(|w| *w != 0)
+        }
+
+        /// P-005 focus share: when the user focuses ONE window of the glued
+        /// pair, surface the OTHER alongside it (restacked just above the
+        /// newly-active one, not top-of-everything). Transition-edge only —
+        /// when focus sits on an unrelated app we never touch stacking.
+        pub fn focus_tick(&mut self) {
+            let active = self.active_window();
+            if let Some((win, above)) = partner_to_raise(active, self.last_active, self.gui, self.sibling) {
+                self.restack_above(win, above);
+            }
+            self.last_active = active;
         }
 
         /// One glue step: read the GUI geometry and pin the sibling flush to it.
@@ -1286,6 +1361,8 @@ impl NativeTerminal {
                     );
                 }
             }
+            // P-005 focus share: focusing either window surfaces the pair.
+            sess.focus_tick();
             tick = tick.saturating_add(1);
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
@@ -1689,6 +1766,33 @@ mod tests {
             classify_sibling_change(DockSide::Right, t, a, 8, 40),
             SiblingDelta::SeamResize { extent: 500 }
         );
+    }
+
+    // ── P-005 focus share ────────────────────────────────────────────────────
+
+    #[test]
+    fn focus_transition_to_gui_raises_the_sibling_above_it() {
+        // Focus moved from elsewhere onto the GUI → raise the terminal, just
+        // above the GUI (travel as a unit, not top-of-everything).
+        assert_eq!(partner_to_raise(Some(10), Some(99), 10, 20), Some((20, 10)));
+        // ...and symmetrically: focusing the terminal surfaces the GUI.
+        assert_eq!(partner_to_raise(Some(20), Some(99), 10, 20), Some((10, 20)));
+        // From "nothing active" too (first focus after launch).
+        assert_eq!(partner_to_raise(Some(10), None, 10, 20), Some((20, 10)));
+    }
+
+    #[test]
+    fn focus_share_never_fights_other_apps_or_refires() {
+        // Unrelated window became active → leave stacking alone.
+        assert_eq!(partner_to_raise(Some(99), Some(10), 10, 20), None);
+        // No transition → no restack (don't spam the WM every tick).
+        assert_eq!(partner_to_raise(Some(10), Some(10), 10, 20), None);
+        assert_eq!(partner_to_raise(None, None, 10, 20), None);
+        // Active window vanished (focus lost) → nothing to do.
+        assert_eq!(partner_to_raise(None, Some(10), 10, 20), None);
+        // Flipping focus BETWEEN the pair still re-asserts the partner — the
+        // transition is what matters, not where focus came from.
+        assert_eq!(partner_to_raise(Some(20), Some(10), 10, 20), Some((10, 20)));
     }
 
     #[test]
