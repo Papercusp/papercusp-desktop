@@ -112,6 +112,18 @@ libloading = "0.8"
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = "0.8"
 
+# windows — the D-009 Windows embedded terminal: Win32 allows SetParent on
+# foreign windows (unlike Wayland), so the strongest portable-path backend
+# here is a GLUED-CHILD-HWND — spawn a real console window hosting the chat
+# dock, reparent it INTO the Tauri window as a left-band child, and shrink
+# the WebView2 child to the right remainder.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 devtools = []

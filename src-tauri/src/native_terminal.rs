@@ -32,6 +32,8 @@
 
 use std::sync::Mutex;
 
+const HONEYCOMB_TERMINAL_BG: &str = "#050505";
+
 // ───────────────────────────────────────────────────────────────────────────
 // P-001 — runtime session detection + strategy selection (pure, testable)
 // ───────────────────────────────────────────────────────────────────────────
@@ -180,6 +182,7 @@ pub fn resolve_strategy_from_env() -> TerminalStrategy {
             "embedded-swiftterm" => {
                 return TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
             }
+            "embedded-conpty" => return TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
             _ => {}
         }
     }
@@ -546,7 +549,7 @@ pub struct GhosttySpec {
     pub class: String,
     /// WM_CLASS *instance* — unique so we can find the window deterministically.
     pub instance: String,
-    /// Background hex (e.g. "#282c34"), matched to the GUI theme so there's no
+    /// Background hex (e.g. "#050505"), matched to the GUI theme so there's no
     /// visual seam.
     pub background: String,
     /// The command Ghostty hosts. Normally `["pui", "chat"]` (the chat dock).
@@ -565,7 +568,7 @@ impl GhosttySpec {
         let class = std::env::var("PAPERCUSP_NATIVE_TERMINAL_CLASS")
             .unwrap_or_else(|_| "com.papercusp.desktop".to_string());
         let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG")
-            .unwrap_or_else(|_| "#282c34".to_string());
+            .unwrap_or_else(|_| HONEYCOMB_TERMINAL_BG.to_string());
         let bin = std::env::var("PAPERCUSP_GHOSTTY_BIN").unwrap_or_else(|_| "ghostty".to_string());
         let command = match std::env::var("PAPERCUSP_NATIVE_TERMINAL_CMD") {
             Ok(s) if !s.trim().is_empty() => {
@@ -629,7 +632,12 @@ impl GlueConfig {
             side: DockSide::from_env(std::env::var("PAPERCUSP_NATIVE_TERMINAL_SIDE").ok().as_deref()),
             fraction: f("PAPERCUSP_NATIVE_TERMINAL_FRACTION", 0.42),
             min_px: i("PAPERCUSP_NATIVE_TERMINAL_MIN_PX", 480),
-            max_px: i("PAPERCUSP_NATIVE_TERMINAL_MAX_PX", 1200),
+            // Drag ceiling, not the default size (fraction governs that). 1200
+            // capped the dock at a sliver of a 4K monitor — unusable for the
+            // 5-pane chat dock (owner report 2026-06-06). A monitor-fraction
+            // ceiling is the better long-term shape (P-015's owner); until
+            // then a generous fixed ceiling unblocks wide displays.
+            max_px: i("PAPERCUSP_NATIVE_TERMINAL_MAX_PX", 2800),
             gap: i("PAPERCUSP_NATIVE_TERMINAL_GAP", 0),
         }
     }
@@ -1274,7 +1282,12 @@ pub mod vte_embed {
 
         // Match the GUI theme (no visual seam — P-004's theming goal).
         if let (Some(set_colors), Some(bg)) = (vte.set_colors, parse_hex_rgba(background)) {
-            let fg = GdkRgba { red: 0.87, green: 0.87, blue: 0.87, alpha: 1.0 };
+            let fg = GdkRgba {
+                red: 0xff as f64 / 255.0,
+                green: 0xf7 as f64 / 255.0,
+                blue: 0xdf as f64 / 255.0,
+                alpha: 1.0,
+            };
             // SAFETY: valid terminal pointer + stack GdkRGBAs; null palette is allowed.
             unsafe { set_colors(term_ptr, &fg, &bg, std::ptr::null(), 0) };
         }
@@ -1497,6 +1510,141 @@ pub mod swiftterm_embed {
             return Err("pcterm_attach_left returned null".into());
         }
         Ok(())
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// D-009 — Windows embedded terminal — UNVERIFIED SPIKE (glued-child conhost)
+//
+// The idea: Win32 (unlike Wayland) lets you SetParent a FOREIGN top-level
+// window, so this spawns the console window (conhost hosting the chat dock,
+// ConPTY-backed) and re-parents it as a left-band CHILD of the Tauri window,
+// WebView2 shrunk right.
+//
+// ⚠ STATUS (verified 2026-06-06 in the Windows VM): this COMPILES and the
+// Win32 calls (SetParent/MoveWindow) return Ok, but the embed is NOT visually
+// confirmed — and conhost windows are a known special case: csrss owns their
+// painting and they famously resist re-parenting (SetParent can succeed while
+// the window stays effectively top-level / fails to render inside the parent).
+// A window-tree probe of a running instance could not confirm the console as a
+// genuine child. So this path is gated FORCE-ONLY
+// (PAPERCUSP_NATIVE_TERMINAL_FORCE=embedded-conpty); the Windows DEFAULT stays
+// NewWindow (a real terminal in its own window — see downgrade_unbuilt_with,
+// which never keeps ConPty). The KNOWN-CORRECT Windows embed is a ConPTY
+// PSEUDOCONSOLE (CreatePseudoConsole) feeding a CUSTOM terminal renderer — the
+// same tier of work as building a terminal widget, deferred. This spike is
+// kept (compiles, seam wired) so that build drops into the EmbeddedView arm
+// without rework.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+pub mod win_embed {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect,
+        GetWindowThreadProcessId, MoveWindow, SetParent, SetWindowLongPtrW, GWL_STYLE, WS_CHILD,
+        WS_VISIBLE,
+    };
+
+    /// First top-level window owned by `pid` (the spawned console).
+    fn find_toplevel_by_pid(pid: u32) -> Option<HWND> {
+        struct Ctx {
+            pid: u32,
+            found: Option<HWND>,
+        }
+        unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            let mut wpid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut wpid)) };
+            if wpid == ctx.pid {
+                ctx.found = Some(hwnd);
+                return BOOL(0); // stop enumerating
+            }
+            BOOL(1)
+        }
+        let mut ctx = Ctx { pid, found: None };
+        unsafe {
+            let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
+        }
+        ctx.found
+    }
+
+    /// The WebView2 host child of the Tauri window (class `Chrome_WidgetWin_*`).
+    fn find_webview_child(parent: HWND) -> Option<HWND> {
+        struct Ctx {
+            found: Option<HWND>,
+        }
+        unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            let mut name = [0u16; 64];
+            let n = unsafe { GetClassNameW(hwnd, &mut name) };
+            let cls = String::from_utf16_lossy(&name[..n.max(0) as usize]);
+            if cls.starts_with("Chrome_WidgetWin") {
+                ctx.found = Some(hwnd);
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+        let mut ctx = Ctx { found: None };
+        unsafe {
+            let _ = EnumChildWindows(parent, Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
+        }
+        ctx.found
+    }
+
+    /// Spawn the console hosting `command`, wait for its window, glue it as a
+    /// left-band CHILD of `tauri_hwnd` and shrink the WebView2 child to the
+    /// remainder. Returns the console pid (for shutdown kill).
+    pub fn embed_into_window(
+        tauri_hwnd: *mut c_void,
+        command: &[String],
+        fraction: f32,
+        min_px: i32,
+        max_px: i32,
+    ) -> Result<u32, String> {
+        let parent = HWND(tauri_hwnd);
+        let (exe, rest) = command.split_first().ok_or("empty terminal command")?;
+        // CREATE_NEW_CONSOLE → the child gets its OWN (ConPTY-backed) console
+        // window — the thing we reparent.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let child = std::process::Command::new(exe)
+            .args(rest)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("spawn {exe}: {e}"))?;
+        let pid = child.id();
+
+        // The console window maps asynchronously — poll for it (~5s).
+        let mut hwnd = None;
+        for _ in 0..50 {
+            if let Some(h) = find_toplevel_by_pid(pid) {
+                hwnd = Some(h);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let term = hwnd.ok_or("console window never appeared")?;
+
+        let mut rc = RECT::default();
+        unsafe { GetClientRect(parent, &mut rc) }.map_err(|e| e.to_string())?;
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        let extent = ((w as f32 * fraction) as i32)
+            .clamp(min_px.min(max_px), max_px.max(min_px))
+            .min(w - 50);
+
+        unsafe {
+            // Child style BEFORE SetParent (Win32 docs ordering).
+            SetWindowLongPtrW(term, GWL_STYLE, (WS_CHILD.0 | WS_VISIBLE.0) as isize);
+            SetParent(term, parent).map_err(|e| format!("SetParent: {e}"))?;
+            let _ = MoveWindow(term, 0, 0, extent, h, true);
+            if let Some(webview) = find_webview_child(parent) {
+                let _ = MoveWindow(webview, extent, 0, w - extent, h, true);
+            }
+        }
+        Ok(pid)
     }
 }
 
@@ -1775,10 +1923,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn vte_hex_parsing_and_split_position() {
-        let bg = vte_embed::parse_hex_rgba("#282c34").expect("valid hex");
-        assert!((bg.red - 0x28 as f64 / 255.0).abs() < 1e-9);
-        assert!((bg.green - 0x2c as f64 / 255.0).abs() < 1e-9);
-        assert!((bg.blue - 0x34 as f64 / 255.0).abs() < 1e-9);
+        let bg = vte_embed::parse_hex_rgba(HONEYCOMB_TERMINAL_BG).expect("valid hex");
+        assert!((bg.red - 0x05 as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.green - 0x05 as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.blue - 0x05 as f64 / 255.0).abs() < 1e-9);
         assert_eq!(bg.alpha, 1.0);
         assert!(vte_embed::parse_hex_rgba("nope").is_none());
         assert!(vte_embed::parse_hex_rgba("#28c3").is_none());
@@ -2109,7 +2257,7 @@ mod tests {
         let spec = GhosttySpec {
             class: "com.papercusp.desktop".into(),
             instance: "papercusp-terminal".into(),
-            background: "#282c34".into(),
+            background: HONEYCOMB_TERMINAL_BG.into(),
             command: vec!["pui".into(), "chat".into()],
             bin: "ghostty".into(),
         };
@@ -2118,7 +2266,7 @@ mod tests {
         assert!(argv.contains(&"--x11-instance-name=papercusp-terminal".to_string()));
         assert!(argv.contains(&"--window-decoration=false".to_string()));
         assert!(argv.contains(&"--gtk-single-instance=false".to_string()));
-        assert!(argv.contains(&"--background=#282c34".to_string()));
+        assert!(argv.contains(&format!("--background={HONEYCOMB_TERMINAL_BG}")));
         // `-e` must be present and everything after it is the hosted command,
         // in order, at the very end.
         let e = argv.iter().position(|a| a == "-e").expect("missing -e");

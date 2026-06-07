@@ -39,11 +39,14 @@ public func pcterm_attach_left(
     let bounds = content.bounds
     let extent = min(max(bounds.width * fraction, minPx), max(maxPx, minPx))
 
-    // Terminal: left band, full height. Autoresize height + keep the right
-    // margin flexible so the band stays put as the window grows.
+    // Terminal: left band, full height, themed dark (matches the GUI; also
+    // makes the band visually unambiguous on an unstyled webview). Autoresize
+    // height so the band tracks window resizes.
     let term = LocalProcessTerminalView(
         frame: NSRect(x: 0, y: 0, width: extent, height: bounds.height))
     term.autoresizingMask = [.height]
+    term.nativeBackgroundColor = NSColor(red: 0.020, green: 0.020, blue: 0.020, alpha: 1) // #050505
+    term.nativeForegroundColor = NSColor(red: 1.000, green: 0.969, blue: 0.875, alpha: 1) // #fff7df
 
     // Shrink the webview to the right remainder (width tracks the window).
     if let webview = findWebView(content) {
@@ -51,7 +54,9 @@ public func pcterm_attach_left(
             x: extent, y: 0, width: bounds.width - extent, height: bounds.height)
         webview.autoresizingMask = [.width, .height]
     }
-    content.addSubview(term)
+    // positioned .above: never let a later sibling (the webview re-layout)
+    // cover the band.
+    content.addSubview(term, positioned: .above, relativeTo: nil)
 
     // argsBlob: NUL-separated argv tail (exe is argv[0]).
     var args: [String] = []

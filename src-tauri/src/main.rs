@@ -1185,24 +1185,84 @@ fn start_native_terminal(app: &AppHandle) {
             };
             let handle = app.clone();
             let win = window.clone();
-            let res = window.run_on_main_thread(move || {
+            // Same lesson as the Linux VTE embed: surgery mid-realization is
+            // hazardous — and here the WKWebView mounts AFTER setup(), at full
+            // bounds, covering an early-attached terminal. Defer ~2s off-thread,
+            // then hop to the AppKit main thread for the attach.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+                let win2 = win.clone();
+                let res = win.run_on_main_thread(move || {
+                    let spec = native_terminal::GhosttySpec::dock();
+                    let cfg = native_terminal::GlueConfig::from_env();
+                    let embedded = match win2.ns_window() {
+                        Ok(ns) => native_terminal::swiftterm_embed::embed_into_window(
+                            ns as *mut std::ffi::c_void,
+                            &spec.command,
+                            cfg.fraction,
+                            cfg.min_px,
+                            cfg.max_px,
+                        ),
+                        Err(e) => Err(format!("no ns_window: {e}")),
+                    };
+                    match embedded {
+                        Ok(()) => {
+                            println!("[papercusp-desktop] native-terminal: SwiftTerm view embedded")
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[papercusp-desktop] native-terminal SwiftTerm embed failed: {e} — falling back to new-window"
+                            );
+                            let _ = handle
+                                .state::<native_terminal::NativeTerminal>()
+                                .launch_new_window();
+                        }
+                    }
+                });
+                if let Err(e) = res {
+                    eprintln!(
+                        "[papercusp-desktop] native-terminal: SwiftTerm embed main-thread hop failed: {e}"
+                    );
+                }
+            });
+        }
+        // D-009: the Windows glued-child-HWND terminal — a real ConPTY-backed
+        // console window reparented INTO the Tauri window (left band), with
+        // the WebView2 child shrunk right. Win32 calls are cross-thread-safe,
+        // so the (window-poll-blocking) embed runs on a worker thread.
+        #[cfg(target_os = "windows")]
+        TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::ConPty) => {
+            let Some(window) = app.get_webview_window("main") else {
+                eprintln!("[papercusp-desktop] native-terminal: no main window for the ConPTY embed");
+                return;
+            };
+            let Ok(hwnd) = window.hwnd() else {
+                eprintln!("[papercusp-desktop] native-terminal: no hwnd for the ConPTY embed");
+                return;
+            };
+            let handle = app.clone();
+            // Raw pointers aren't Send — carry the HWND across the thread as
+            // usize and rebuild it inside.
+            let hwnd_addr = hwnd.0 as usize;
+            std::thread::spawn(move || {
+                // Same lesson as the Linux VTE embed: let the window finish
+                // realizing + the WebView2 child mount before cutting the tree.
+                std::thread::sleep(std::time::Duration::from_millis(2000));
                 let spec = native_terminal::GhosttySpec::dock();
                 let cfg = native_terminal::GlueConfig::from_env();
-                let embedded = match win.ns_window() {
-                    Ok(ns) => native_terminal::swiftterm_embed::embed_into_window(
-                        ns as *mut std::ffi::c_void,
-                        &spec.command,
-                        cfg.fraction,
-                        cfg.min_px,
-                        cfg.max_px,
+                match native_terminal::win_embed::embed_into_window(
+                    hwnd_addr as *mut std::ffi::c_void,
+                    &spec.command,
+                    cfg.fraction,
+                    cfg.min_px,
+                    cfg.max_px,
+                ) {
+                    Ok(pid) => println!(
+                        "[papercusp-desktop] native-terminal: ConPTY console embedded (pid={pid})"
                     ),
-                    Err(e) => Err(format!("no ns_window: {e}")),
-                };
-                match embedded {
-                    Ok(()) => println!("[papercusp-desktop] native-terminal: SwiftTerm view embedded"),
                     Err(e) => {
                         eprintln!(
-                            "[papercusp-desktop] native-terminal SwiftTerm embed failed: {e} — falling back to new-window"
+                            "[papercusp-desktop] native-terminal ConPTY embed failed: {e} — falling back to new-window"
                         );
                         let _ = handle
                             .state::<native_terminal::NativeTerminal>()
@@ -1210,13 +1270,9 @@ fn start_native_terminal(app: &AppHandle) {
                     }
                 }
             });
-            if let Err(e) = res {
-                eprintln!("[papercusp-desktop] native-terminal: SwiftTerm embed main-thread hop failed: {e}");
-            }
         }
-        // Remaining embedded views (ConPTY; VTE/SwiftTerm on the wrong OS) are
-        // downgraded to NewWindow until their backends land; Disabled = no
-        // display / opted out.
+        // Remaining embedded views (a backend on the wrong OS) are downgraded
+        // to NewWindow until they land; Disabled = no display / opted out.
         TerminalStrategy::EmbeddedView(_) | TerminalStrategy::Disabled => {}
     }
 }
