@@ -1,0 +1,82 @@
+#cloud-config
+# Golden-image first-boot provisioning for the Papercusp Linux clean-room test VM.
+# Rendered by `vmctl provision` (the __SSH_PUBKEY__ token is substituted with the
+# contents of ~/.ssh/papercup-vm-linux.pub) into a one-shot seed.iso.
+#
+# Installs a MINIMAL X stack (Xorg + openbox via getty-autologin + startx) — NOT a
+# full GNOME desktop: GNOME-Shell fails to register its session on the qxl GPU under
+# autologin, and a display manager adds fragility we don't need. openbox-on-:0 is
+# reliable in qemu, keeps the app on the qxl framebuffer (so host-side `screendump`
+# + interactive SPICE both work), and — crucially — does NOT pre-install
+# libwebkit2gtk, so `apt install ./Papercusp.deb` pulls the WebKitGTK runtime from
+# scratch. That from-scratch dependency resolution IS the fresh-install test (D-001).
+
+hostname: papercusp-testvm
+preserve_hostname: false
+
+users:
+  - name: tester
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    ssh_authorized_keys:
+      - __SSH_PUBKEY__
+
+# Weak password — fine for a throwaway loopback VM; makes the SPICE console usable.
+chpasswd:
+  expire: false
+  users:
+    - {name: tester, password: tester, type: text}
+ssh_pwauth: true
+
+package_update: true
+package_upgrade: false
+packages:
+  - xserver-xorg
+  - xserver-xorg-video-qxl
+  - xinit
+  - openbox
+  - spice-vdagent
+  - x11-utils
+  - x11-xserver-utils
+  - scrot
+  - dbus-x11
+  - curl
+
+write_files:
+  # Autologin tester on tty1 (no display manager).
+  - path: /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin tester --noclear %I $TERM
+  # On tty1 login, start X (deferred so /home/tester exists by then).
+  - path: /home/tester/.bash_profile
+    defer: true
+    owner: "tester:tester"
+    permissions: "0644"
+    content: |
+      [ -f ~/.bashrc ] && . ~/.bashrc
+      if [ "$(tty)" = "/dev/tty1" ] && [ -z "${DISPLAY:-}" ]; then
+        exec startx -- -nolisten tcp vt1 >~/startx.log 2>&1
+      fi
+  - path: /home/tester/.xinitrc
+    defer: true
+    owner: "tester:tester"
+    permissions: "0755"
+    content: |
+      xset s off -dpms || true
+      [ -x /usr/bin/spice-vdagent ] && spice-vdagent || true
+      exec openbox-session
+
+runcmd:
+  # No display manager → multi-user.target + getty autologin + startx is the path.
+  - [systemctl, set-default, multi-user.target]
+  - [systemctl, daemon-reload]
+  - [systemctl, restart, "getty@tty1"]
+
+# No auto power_state: `vmctl provision` polls `cloud-init status --wait` over SSH
+# (which exits non-zero on a provisioning error, e.g. a failed package install),
+# verifies success, then powers the VM off itself. That makes provisioning
+# failures observable instead of silently shutting down a half-built golden image.

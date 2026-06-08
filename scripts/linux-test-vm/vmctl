@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# vmctl — Papercusp Linux clean-room test VM control.
+#
+# A disposable Ubuntu 24.04 VM for (1) fresh-install testing the packaged .deb on a
+# pristine system and (2) acting as a separate machine for shared-harness/federation
+# testing. Plan: linux-test-vm-and-federation-2026-06-04.
+#
+#   vmctl provision               build the golden image (one-time, ~10–20 min)
+#   vmctl up    [name]            boot a VM (overlay off golden); default name "clean"
+#   vmctl down  [name]            graceful shutdown
+#   vmctl reset [name]            recreate a pristine overlay from golden
+#   vmctl ssh   [name] [cmd...]   shell / run a command in the VM
+#   vmctl install [name] [deb]    scp the newest .deb in + apt install (fresh-install test)
+#   vmctl launch  [name]          start the installed app in the VM's GUI session
+#   vmctl gui     [name]          open a SPICE viewer (run this yourself; opens a window)
+#   vmctl verify  [name]          assert install/PG/operator/window; capture logs+screenshot
+#   vmctl status  [name]          VM up? app up? operator :3070? disk free?
+#   vmctl help
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+SELF_DIR="$SCRIPT_DIR"
+
+# ── provision ──────────────────────────────────────────────────────────────
+cmd_provision() {
+  local force=0; [ "${1:-}" = "--force" ] && force=1
+  mkdir -p "$IMAGES_DIR" "$RUN_DIR"
+
+  if [ ! -f "$SSH_KEY" ]; then
+    log "generating SSH key $SSH_KEY"
+    ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C papercup-vm-linux >/dev/null
+  fi
+
+  if [ ! -f "$BASE_IMG" ]; then
+    log "downloading Ubuntu 24.04 cloud image → $BASE_IMG"
+    wget --progress=dot:giga -O "$BASE_IMG.part" "$UBUNTU_IMG_URL"
+    mv "$BASE_IMG.part" "$BASE_IMG"
+  fi
+  [ "$(stat -c%s "$BASE_IMG")" -gt 100000000 ] || die "base image looks truncated: $BASE_IMG"
+
+  if [ -f "$GOLDEN" ] && [ "$force" -ne 1 ]; then
+    die "golden already exists ($GOLDEN). Re-provision with: vmctl provision --force"
+  fi
+  log "building golden.qcow2 from base (resize → $DISK_SIZE)"
+  rm -f "$GOLDEN"
+  qemu-img convert -O qcow2 "$BASE_IMG" "$GOLDEN"
+  qemu-img resize "$GOLDEN" "$DISK_SIZE"
+
+  # Render the cloud-init seed (inject our pubkey).
+  local pdir="$RUN_DIR/_provision"; mkdir -p "$pdir"
+  local ud="$pdir/user-data" seed; seed="$pdir/seed.iso"
+  sed "s#__SSH_PUBKEY__#$(cat "$SSH_KEY.pub")#" \
+      "$SELF_DIR/cloud-init/user-data.tmpl" > "$ud"
+  cloud-localds "$seed" "$ud" "$SELF_DIR/cloud-init/meta-data"
+
+  # Boot golden directly with the seed (under the "clean" port slot).
+  log "first boot of golden with cloud-init seed (installs the desktop — slow)"
+  BOOT_DISK="$GOLDEN" BOOT_SEED="$seed" bash "$SELF_DIR/boot-vm.sh" clean
+
+  wait_ssh clean 600 || die "VM never came up for SSH during provisioning (see $(vm_serial clean))"
+  log "cloud-init running — waiting for completion (ubuntu-desktop-minimal install)…"
+  vm_ssh clean 'cloud-init status --wait' || warn "cloud-init --wait returned non-zero"
+  local ci; ci="$(vm_ssh clean 'cloud-init status' 2>/dev/null || true)"
+  log "cloud-init: $ci"
+  case "$ci" in
+    *done*) log "provisioning OK" ;;
+    *error*) die "cloud-init reported an error — golden is half-built. Inspect: vmctl ssh clean 'sudo cloud-init status --long'" ;;
+    *) warn "cloud-init status unclear ($ci) — continuing, verify manually" ;;
+  esac
+
+  log "powering off the golden VM"
+  vm_ssh clean 'sudo systemctl poweroff' 2>/dev/null || true
+  local w=0; while vm_running clean && [ "$w" -lt 120 ]; do sleep 3; w=$((w+3)); done
+  vm_running clean && { warn "VM still up — forcing"; kill "$(vm_pid clean)" 2>/dev/null || true; }
+  rm -f "$(vm_pidfile clean)" "$(vm_monitor clean)"
+
+  log "GOLDEN READY: $GOLDEN"
+  log "next: vmctl up clean && vmctl install clean && vmctl verify clean"
+}
+
+# ── lifecycle ──────────────────────────────────────────────────────────────
+ensure_overlay() {  # ensure_overlay <name>
+  local name="$1" ov; ov="$(vm_overlay "$name")"
+  require_golden
+  mkdir -p "$(vm_rundir "$name")"
+  if [ ! -f "$ov" ]; then
+    log "creating overlay for $name (backed by golden)"
+    qemu-img create -f qcow2 -b "$GOLDEN" -F qcow2 "$ov" >/dev/null
+  fi
+}
+
+cmd_up() {
+  local name="${1:-clean}"
+  ensure_overlay "$name"
+  bash "$SELF_DIR/boot-vm.sh" "$name"
+  wait_ssh "$name" 180 || warn "SSH not up yet — check 'vmctl status $name' / $(vm_serial "$name")"
+}
+
+cmd_down() {
+  local name="${1:-clean}"
+  vm_running "$name" || { log "$name not running"; return 0; }
+  log "shutting down $name (pid $(vm_pid "$name"))"
+  vm_ssh "$name" 'sudo systemctl poweroff' 2>/dev/null || true
+  local w=0; while vm_running "$name" && [ "$w" -lt 60 ]; do sleep 3; w=$((w+3)); done
+  if vm_running "$name"; then
+    warn "graceful shutdown timed out — SIGTERM"; kill "$(vm_pid "$name")" 2>/dev/null || true
+    sleep 3; vm_running "$name" && kill -9 "$(vm_pid "$name")" 2>/dev/null || true
+  fi
+  rm -f "$(vm_pidfile "$name")" "$(vm_monitor "$name")"
+  log "$name down"
+}
+
+cmd_reset() {
+  local name="${1:-clean}"
+  cmd_down "$name"
+  local ov; ov="$(vm_overlay "$name")"
+  rm -f "$ov"
+  ensure_overlay "$name"
+  log "$name reset to a pristine overlay. Boot it with: vmctl up $name"
+}
+
+cmd_ssh() { local name="${1:-clean}"; shift || true; vm_ssh "$name" "$@"; }
+
+# ── install / launch / gui (P-004) ─────────────────────────────────────────
+cmd_install() {
+  local name="${1:-clean}" deb="${2:-}"
+  [ -n "$deb" ] || deb="$(default_deb)"
+  [ -n "$deb" ] && [ -f "$deb" ] || die "no .deb found. Build one or pass a path: vmctl install $name <deb>"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  log "copying $(basename "$deb") ($(du -h "$deb" | cut -f1)) into $name…"
+  vm_scp "$name" "$deb" /tmp/Papercusp.deb
+  log "apt install (resolving runtime deps — the fresh-install test)…"
+  # --reinstall so a SAME-version rebuilt .deb (version stays 0.0.1) is actually
+  # re-laid-down on a --no-reset overlay; without it apt skips "already newest"
+  # and a code-only rebuild silently wouldn't land. On a pristine overlay it's a
+  # plain install (nothing to reinstall).
+  vm_ssh "$name" 'sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall /tmp/Papercusp.deb'
+  log "installed:"; vm_ssh "$name" "dpkg -l | grep -i papercusp || true"
+}
+
+cmd_launch() {
+  local name="${1:-clean}"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  log "launching the app in $name's X session (display :0)…"
+  # startx (getty autologin) runs the openbox session as tester on :0 and writes
+  # the cookie to ~/.Xauthority, so this is deterministic — no session probing.
+  vm_run "$name" <<'EOF'
+export DISPLAY=:0
+export XAUTHORITY="$HOME/.Xauthority"
+for _ in $(seq 1 30); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 1; done
+xdpyinfo -display :0 >/dev/null 2>&1 || { echo "X :0 not ready (see ~/startx.log)"; exit 1; }
+echo "launching with DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"
+setsid bash -c 'exec /usr/bin/papercusp-desktop' >"$HOME/papercusp-app.log" 2>&1 </dev/null &
+sleep 1; echo "started; log → ~/papercusp-app.log"
+EOF
+  log "app launching. Watch: vmctl ssh $name 'tail -f papercusp-app.log'  ·  view: vmctl gui $name"
+}
+
+cmd_gui() {
+  local name="${1:-clean}"
+  local spice; spice="$(ports_for "$name" | awk '{print $2}')"
+  log "opening SPICE viewer → spice://127.0.0.1:$spice (close the window to disconnect)"
+  exec remote-viewer "spice://127.0.0.1:$spice"
+}
+
+# ── screenshot via the qemu monitor (host-side; no guest tools needed) ──────
+screenshot() {  # screenshot <name> <out.ppm>
+  local name="$1" out="$2" mon; mon="$(vm_monitor "$name")"
+  [ -S "$mon" ] || { warn "no monitor socket for $name"; return 1; }
+  if command -v socat >/dev/null; then
+    printf 'screendump %s\n' "$out" | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1
+    [ -s "$out" ]
+  else
+    # scrot inside the guest, scp'd out (fallback).
+    vm_run "$name" >/dev/null 2>&1 <<'EOF' || return 1
+export DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority"
+scrot -o /tmp/shot.png
+EOF
+    vm_scp_back "$name" /tmp/shot.png "${out%.ppm}.png"
+  fi
+}
+vm_scp_back() { local name="$1" src="$2" dst="$3" p; p="$(ports_for "$name"|awk '{print $1}')"; scp $(_ssh_opts) -P "$p" "$VM_USER@127.0.0.1:$src" "$dst"; }
+
+# ── verify (P-005) ─────────────────────────────────────────────────────────
+# Probe an in-guest loopback HTTP port; any status (even 404) = responding, 000 = down.
+op_responds() {  # op_responds <name> <port>
+  local name="$1" port="$2" code
+  code="$(vm_run "$name" <<EOF
+curl -s -m8 -o /dev/null -w '%{http_code}' http://127.0.0.1:$port/ 2>/dev/null || true
+EOF
+)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+cmd_verify() {
+  local name="${1:-clean}"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  set +e   # this function probes a lot; don't let a non-zero probe abort it
+  local out; out="$(vm_rundir "$name")/verify"; mkdir -p "$out"
+  local pass=0 fail=0
+  check() { if eval "$2"; then echo "  ✓ $1"; pass=$((pass+1)); else echo "  ✗ $1"; fail=$((fail+1)); fi; }
+
+  echo "── fresh-install verification: $name ──"
+  check "package installed (dpkg)"           "vm_ssh '$name' 'dpkg -l | grep -qi papercusp' 2>/dev/null"
+  check "no missing deps (apt-get check)"    "vm_ssh '$name' 'sudo apt-get -s check >/dev/null 2>&1'"
+  check "installed binary links cleanly"     "! vm_ssh '$name' 'ldd /usr/bin/papercusp-desktop 2>/dev/null | grep -qi \"not found\"' 2>/dev/null"
+
+  # Ensure the app is running; if not, launch it.
+  if ! vm_ssh "$name" 'pgrep -f [p]apercusp-desktop >/dev/null' 2>/dev/null; then
+    log "app not running — launching for verification"; cmd_launch "$name"
+  fi
+  # Poll up to 120s for the operator to come up (it picks a DYNAMIC port, not 3070).
+  # Stop early if the embedded-PG spawn fatally fails (no point waiting).
+  log "waiting for embedded Postgres + operator…"
+  local op="" _i
+  for _i in $(seq 1 24); do
+    vm_ssh "$name" "cat papercusp-app.log 2>/dev/null" > "$out/app.log" 2>/dev/null || true
+    grep -q 'failed to spawn embedded-postgres-server' "$out/app.log" && break
+    op="$(grep -oE '(\[serve\]|hono-host\]) listening on http://127\.0\.0\.1:[0-9]+' "$out/app.log" | grep -oE '[0-9]+$' | tail -1)"
+    [ -n "$op" ] && op_responds "$name" "$op" && break
+    sleep 5
+  done
+
+  check "app process running"                "vm_ssh '$name' 'pgrep -f [p]apercusp-desktop >/dev/null' 2>/dev/null"
+  # PG ready = a postgres serving the embedded data dir is actually running.
+  check "embedded Postgres running"          "vm_ssh '$name' 'pgrep -af [p]ostgres 2>/dev/null | grep -q embedded-pg-data' 2>/dev/null"
+  if [ -n "$op" ] && op_responds "$name" "$op"; then
+    echo "  ✓ operator responds (port $op)"; pass=$((pass+1))
+  else
+    echo "  ✗ operator responds${op:+ (port $op)}"; fail=$((fail+1))
+  fi
+
+  if screenshot "$name" "$out/screen.ppm"; then
+    echo "  ✓ screenshot captured → $out/screen.ppm"; pass=$((pass+1))
+  else
+    echo "  ✗ screenshot"; fail=$((fail+1))
+  fi
+
+  # Surface the smoking gun if anything below the install checks failed.
+  if [ "$fail" -gt 0 ]; then
+    echo "── app log diagnostics (FATAL/error/panic lines) ──"
+    grep -iE 'FATAL|panicked|ECONNREFUSED|failed to spawn|did not start' "$out/app.log" | sed 's/^/    /' | head -12
+  fi
+
+  echo "── result: $pass passed, $fail failed · artifacts in $out ──"
+  [ "$fail" -eq 0 ]
+}
+
+# ── status ─────────────────────────────────────────────────────────────────
+cmd_status() {
+  local name="${1:-clean}"
+  read -r ssh_port spice_port op_port <<<"$(ports_for "$name")"
+  echo "instance:   $name"
+  echo "golden:     $([ -f "$GOLDEN" ] && echo present || echo MISSING)"
+  echo "overlay:    $([ -f "$(vm_overlay "$name")" ] && echo present || echo none)"
+  if vm_running "$name"; then
+    echo "qemu:       running (pid $(vm_pid "$name"))  ssh:$ssh_port spice:127.0.0.1:$spice_port"
+    if vm_ssh "$name" true 2>/dev/null; then
+      echo "ssh:        reachable"
+      echo "app:        $(vm_ssh "$name" 'pgrep -f [p]apercusp-desktop >/dev/null && echo running || echo stopped' 2>/dev/null)"
+      # operator runs on a DYNAMIC port — parse it from the app log, don't assume :3070.
+      local op; op="$(vm_ssh "$name" "grep -oE '\[serve\] listening on http://127\.0\.0\.1:[0-9]+|sidecar ready on :[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null)"
+      if [ -n "$op" ] && op_responds "$name" "$op"; then
+        echo "operator:   up (port $op)"
+      elif [ -n "$op" ]; then
+        echo "operator:   down (port $op)"
+      else
+        echo "operator:   not started (run: vmctl launch $name)"
+      fi
+      echo "disk:       $(vm_ssh "$name" "df -h / | awk 'NR==2{print \$4\" free of \"\$2}'" 2>/dev/null)"
+    else
+      echo "ssh:        not reachable yet"
+    fi
+  else
+    echo "qemu:       stopped"
+  fi
+}
+
+cmd_help() { sed -n '2,30p' "$SELF_DIR/vmctl" | sed 's/^# \{0,1\}//'; }
+
+# ── dispatch ───────────────────────────────────────────────────────────────
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  provision) cmd_provision "$@" ;;
+  up)        cmd_up "$@" ;;
+  down)      cmd_down "$@" ;;
+  reset)     cmd_reset "$@" ;;
+  ssh)       cmd_ssh "$@" ;;
+  install)   cmd_install "$@" ;;
+  launch)    cmd_launch "$@" ;;
+  gui)       cmd_gui "$@" ;;
+  verify)    cmd_verify "$@" ;;
+  status)    cmd_status "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) die "unknown command: $cmd (try: vmctl help)" ;;
+esac
