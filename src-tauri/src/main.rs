@@ -26,6 +26,11 @@
 
 mod custom_protocol;
 mod dev_bridge;
+// Dev wrapper — the build switcher + pipeline-status bar OUTSIDE the
+// switchable SPA builds (desktop-build-switcher-wrapper-2026-06-09).
+// Feature-gated so a real-production build compiles none of it (D-005).
+#[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
+mod dev_wrapper;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod native_console;
@@ -1224,6 +1229,17 @@ pub fn run() {
                     // work without surfacing NotAllowedError on every load.
                     #[cfg(target_os = "linux")]
                     grant_media_permission(&window);
+                }
+
+                // Dev wrapper (desktop-build-switcher-wrapper-2026-06-09):
+                // the native build-switcher + pipeline-status bar around the
+                // content webview, plus the document-start dev-rail signal.
+                // Dev-only by design — the packaged app drives its own
+                // sidecar on a dynamic port / papercusp:// origin where the
+                // fixed :3070/:3170/:3055 targets are meaningless.
+                #[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
+                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() != Some("0") {
+                    dev_wrapper::init(app);
                 }
 
                 // DEV endpoint-IPC: we don't spawn the sidecar in dev, so
