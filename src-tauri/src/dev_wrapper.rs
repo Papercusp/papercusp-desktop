@@ -75,6 +75,9 @@ struct StatusSnapshot {
     /// staging HEAD (deploy.mainHead — field names predate the staging
     /// rename: mainHead = the integration branch, i.e. staging).
     staging_sha: Option<String>,
+    /// When the staging tip was committed (deploy.mainHead.committedAtMs) —
+    /// drives the tip-age in the P-009 verdict.
+    staging_committed_ms: Option<i64>,
     /// The green pin (deploy.ready = the `main` branch).
     main_sha: Option<String>,
     /// What the live :3070 release checkout runs (deploy.deployed).
@@ -214,6 +217,11 @@ fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
             }
             snap.source_port = port;
             snap.staging_sha = short_sha(&v, "mainHead");
+            snap.staging_committed_ms = v
+                .get("deploy")
+                .and_then(|d| d.get("mainHead"))
+                .and_then(|m| m.get("committedAtMs"))
+                .and_then(|x| x.as_i64());
             snap.main_sha = short_sha(&v, "ready");
             snap.deployed_sha = short_sha(&v, "deployed");
             snap.main_behind = v
@@ -260,6 +268,28 @@ fn fmt_age(now_ms: i64, then_ms: Option<i64>) -> String {
     }
 }
 
+/// P-009 — the "where's my change" verdict: where the staging TIP stands in
+/// the promote→deploy pipeline. Box-level by design: on this dev box the
+/// staging tip IS "your latest work" (git-sync sweeps every agent's edits
+/// into it within minutes), so tip-promoted/tip-deployed answers the
+/// question without per-author sha attribution.
+///   - `main_behind`  = commits staging has that the green `main` pin lacks
+///     (0 → the tip has been PROMOTED by green-checkpoint);
+///   - `deployed_behind` = commits staging has that the live :3070 checkout
+///     lacks (0 → the tip is DEPLOYED).
+fn change_verdict(snap: &StatusSnapshot) -> String {
+    match (snap.main_behind, snap.deployed_behind) {
+        (Some(0), Some(0)) => "live on :3070 ✓".into(),
+        (Some(0), _) => "promoted ✓, deploy pending".into(),
+        (Some(_), _) if snap.gate_stalled => "awaiting green — gate STALLED".into(),
+        (Some(_), _) if snap.gate_reds > 0 => {
+            format!("awaiting green (gate red ×{})", snap.gate_reds)
+        }
+        (Some(_), _) => "awaiting promotion".into(),
+        _ => "?".into(),
+    }
+}
+
 fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
     if let Some(e) = &snap.error {
         return format!("⚠ {e}");
@@ -278,8 +308,17 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
     } else {
         format!("gate ✓ {}", fmt_age(now_ms, snap.gate_last_green_ms))
     };
+    // The verdict leads: the status label ellipsizes at the RIGHT on narrow
+    // windows, and "is my change live" is the one segment that must never
+    // truncate away (the trailing sync state is the least-load-bearing).
+    let tip_age = snap
+        .staging_committed_ms
+        .map(|t| format!("({})", fmt_age(now_ms, Some(t))))
+        .unwrap_or_default();
     format!(
-        "staging {} · main {}{} · live {}{} · {} · sync {}",
+        "tip{}: {} · staging {} · main {}{} · live {}{} · {} · sync {}",
+        tip_age,
+        change_verdict(snap),
         sha(&snap.staging_sha),
         sha(&snap.main_sha),
         behind(snap.main_behind),
@@ -570,6 +609,7 @@ mod tests {
         let mut s = StatusSnapshot {
             source_port: 3070,
             staging_sha: Some("aaaa1111".into()),
+            staging_committed_ms: Some(1_000_000),
             main_sha: Some("bbbb2222".into()),
             deployed_sha: Some("bbbb2222".into()),
             main_behind: Some(2),
@@ -597,8 +637,31 @@ mod tests {
         let line = compose_status(&snap(), 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "staging aaaa1111 · main bbbb2222 (−2) · live bbbb2222 (−3) · gate ✓ 5m · sync synced"
+            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 (−2) · live bbbb2222 (−3) · gate ✓ 5m · sync synced"
         );
+    }
+
+    #[test]
+    fn change_verdict_states() {
+        let mut s = snap();
+        // Tip not yet promoted, gate green → awaiting promotion (P-009).
+        assert_eq!(change_verdict(&s), "awaiting promotion");
+        // Gate red blocks promotion — say so, with the streak.
+        s.gate_reds = 2;
+        assert_eq!(change_verdict(&s), "awaiting green (gate red ×2)");
+        s.gate_stalled = true;
+        assert_eq!(change_verdict(&s), "awaiting green — gate STALLED");
+        // Promoted but the release-trigger hasn't deployed yet.
+        s.gate_reds = 0;
+        s.gate_stalled = false;
+        s.main_behind = Some(0);
+        assert_eq!(change_verdict(&s), "promoted ✓, deploy pending");
+        // Fully caught up.
+        s.deployed_behind = Some(0);
+        assert_eq!(change_verdict(&s), "live on :3070 ✓");
+        // No data → no claim.
+        s.main_behind = None;
+        assert_eq!(change_verdict(&s), "?");
     }
 
     #[test]
