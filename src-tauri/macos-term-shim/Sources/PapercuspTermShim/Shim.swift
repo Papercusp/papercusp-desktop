@@ -45,8 +45,8 @@ public func pcterm_attach_left(
     let term = LocalProcessTerminalView(
         frame: NSRect(x: 0, y: 0, width: extent, height: bounds.height))
     term.autoresizingMask = [.height]
-    term.nativeBackgroundColor = NSColor(red: 0.020, green: 0.020, blue: 0.020, alpha: 1) // #050505
-    term.nativeForegroundColor = NSColor(red: 1.000, green: 0.969, blue: 0.875, alpha: 1) // #fff7df
+    term.nativeBackgroundColor = NSColor(red: 0.027, green: 0.063, blue: 0.114, alpha: 1) // #07101d
+    term.nativeForegroundColor = NSColor(red: 0.906, green: 0.969, blue: 1.000, alpha: 1) // #e7f7ff
 
     // Shrink the webview to the right remainder (width tracks the window).
     if let webview = findWebView(content) {

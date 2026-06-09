@@ -1,15 +1,26 @@
 // Papercusp desktop shell.
 //
-// Architecture:
-//   1. On startup, find a free localhost port.
-//   2. Spawn the Node sidecar (`apps/operator` running as `next start`)
-//      with PORT set to that free port.
-//   3. Wait for the sidecar to be reachable.
-//   4. Open the main window pointing at http://localhost:<port>/.
-//   5. On window-close, kill the sidecar.
+// Architecture (SP1 C5 — the desktop is an EMBEDDER of `papercusp serve`,
+// plan operator-core-headless-serve-2026-06-04 Decision F):
+//   1. On startup, find a free localhost port (cold-start hint).
+//   2. Spawn the bundled `serve.mjs --ensure` (apps/operator/bin/serve.ts).
+//      serve OWNS the operator lifecycle: embedded Postgres (start,
+//      migrations, ~/.papercusp/embedded-pg.json), runBootstrap(), the Hono
+//      host, and the ~/.papercusp/operator.json discovery file. `--ensure`
+//      reuses an already-healthy operator instead of double-booting.
+//   3. Poll operator.json until (pid alive + HTTP reachable); read the REAL
+//      port from it (reuse may land on a different port than our hint).
+//   4. Open the main window pointing at the discovered operator.
+//   5. On window-close, SIGTERM the serve child (it stops PG + removes
+//      operator.json on the way down).
 //
-// The same Node sidecar binary is what we'd run in a cloud container —
-// no shell-out into platform-specific tooling here.
+// Rust retains: webview, endpoint-IPC client, the papercusp:// custom
+// protocol, window management, PTY, workspace HOME isolation, the update
+// checker, and the bundled code-server spawn. Everything PG/operator
+// process-management moved INTO serve.
+//
+// The same `serve.mjs` is what we'd run in a cloud container — no shell-out
+// into platform-specific tooling here.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -25,7 +36,6 @@ mod wsl_setup;
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
@@ -46,18 +56,17 @@ fn url_encode(s: &str) -> String {
 }
 
 struct SidecarState {
+    /// The `serve.mjs --ensure` child (SP1 C5). serve owns embedded-PG
+    /// in-process, so there is no separate db child anymore. None when
+    /// --ensure reused an operator another process owns (we then must NOT
+    /// kill it on exit — it isn't ours).
     child: Mutex<Option<Child>>,
-    /// The embedded-postgres child. The legacy pglite fallback was removed
-    /// 2026-06-01 — embedded-PG is the only desktop DB now.
-    db_child: Mutex<Option<Child>>,
-    /// zero-cache child. Only spawned when embedded-postgres came up
-    /// successfully (zero-cache requires PG with logical replication).
-    zero_cache_child: Mutex<Option<Child>>,
     code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
-    /// Endpoint-IPC socket path resolved from the sidecar's
-    /// `PAPERCUSP_IPC_READY socket=<path>` stdout line. None when IPC
-    /// is disabled (default) or the handshake hadn't completed yet.
+    /// Endpoint-IPC socket path resolved from the operator's
+    /// `~/.papercusp/endpoint-ipc.json` discovery file (written by
+    /// runBootstrap inside serve). None when IPC is disabled or discovery
+    /// hadn't completed yet.
     endpoint_ipc_socket: Mutex<Option<String>>,
 }
 
@@ -129,220 +138,38 @@ fn find_free_port() -> Option<u16> {
 /// Pull the `socketPath` field out of the dev discovery JSON
 /// (`~/.papercusp/endpoint-ipc.json`, written by
 /// apps/operator/lib/endpoint-ipc-discovery.ts), or `None`. Used as the
-/// `IpcClientHandle` socket source in the dev `setup` branch, so each
-/// reconnect re-reads the file and picks up a restarted operator's new
-/// socket.
-#[cfg(debug_assertions)]
+/// `IpcClientHandle` socket source in BOTH setup branches (dev points at the
+/// externally-run operator; production reads the file serve's runBootstrap
+/// writes — SP1 C5), so each reconnect re-reads the file and picks up a
+/// restarted operator's new socket.
 fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
     let txt = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     v.get("socketPath")?.as_str().map(|s| s.to_string())
 }
 
-/// Spawn the bundled embedded-postgres-server (real PG with logical
-/// replication). Returns the spawned child; caller is responsible for
-/// waiting on the TCP port to come up via wait_for_pg_tcp.
-fn spawn_embedded_postgres_server(
-    pg_dir: &std::path::Path,
-    data_dir: &std::path::Path,
-    workspace_home: &std::path::Path,
-    port: u16,
-    db_sql_dir: &std::path::Path,
-) -> std::io::Result<Child> {
-    let bin = pg_dir.join("bin").join("embedded-postgres-server.mjs");
-    println!(
-        "[papercusp-desktop] spawning embedded-postgres-server bin={} port={} data={}",
-        bin.display(),
-        port,
-        data_dir.display()
-    );
-    std::fs::create_dir_all(data_dir)?;
-    // If a postgres process from a prior unclean exit is still holding the
-    // data dir lock, kill it before we try to spawn a new one. Without
-    // this, the new spawn fails with "lock file already exists" or, if
-    // the old PG is reachable on a different port, silently continues
-    // with stale data. Diagnostic 2026-05-06 found PID 386303 (postgres,
-    // parent=init) lingering across desktop sessions.
-    sweep_orphan_postgres(data_dir);
-    let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let mut cmd = Command::new("node");
-    cmd.arg(&bin)
-        .env("PAPERCUSP_PG_DATA_DIR", data_dir.to_string_lossy().to_string())
-        .env("PAPERCUSP_PG_PORT", port.to_string())
-        .env("PAPERCUSP_PG_DB_NAME", "papercusp")
-        .env("PAPERCUSP_PG_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
-        .env("HOME", &workspace_home_str)
-        .env("USERPROFILE", &workspace_home_str)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    cmd.spawn()
+/// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
+/// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
+/// `.deb` launch inherits a minimal PATH), so a bare `Command::new("node")`
+/// resolves against the child PATH and fails with ENOENT on a clean machine.
+/// EVERY node-based sidecar spawn (host, embedded-postgres-server,
+/// zero-cache-server) must route through this. `dir` is the sidecar root that
+/// contains `bin/`.
+fn bundled_path_env(dir: &std::path::Path) -> String {
+    let bundled_bin = dir.join("bin");
+    let path_sep = if cfg!(windows) { ";" } else { ":" };
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path)
 }
 
-/// Spawn the bundled zero-cache-server (Rocicorp Zero's WS sync server)
-/// against an already-running embedded-postgres. The harness_zero role
-/// must have REPLICATION + SUPERUSER (set by embedded-postgres-server's
-/// bootstrap). Caller is responsible for `wait_for_pg_tcp` BEFORE calling
-/// this — zero-cache crashes on first-boot if PG isn't ready.
-fn spawn_zero_cache_server(
-    zero_dir: &std::path::Path,
-    upstream_db: &str,
-    port: u16,
-    change_streamer_port: u16,
-    replica_dir: &std::path::Path,
-    workspace_home: &std::path::Path,
-) -> std::io::Result<Child> {
-    let bin = zero_dir.join("bin").join("zero-cache-server.mjs");
-    println!(
-        "[papercusp-desktop] spawning zero-cache-server bin={} port={} change-streamer={} replica={}",
-        bin.display(),
-        port,
-        change_streamer_port,
-        replica_dir.display(),
-    );
-    std::fs::create_dir_all(replica_dir)?;
-    let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let mut cmd = Command::new("node");
-    cmd.arg(&bin)
-        .env("PAPERCUSP_ZERO_UPSTREAM_DB", upstream_db)
-        .env("PAPERCUSP_ZERO_PORT", port.to_string())
-        .env("PAPERCUSP_ZERO_CHANGE_STREAMER_PORT", change_streamer_port.to_string())
-        .env("PAPERCUSP_ZERO_REPLICA_DIR", replica_dir.to_string_lossy().to_string())
-        .env("HOME", &workspace_home_str)
-        .env("USERPROFILE", &workspace_home_str)
-        // Initial replication of all per-harness schemas + harness_shared
-        // exhausts Node's default ~4GB old-space heap during first-boot
-        // change-streamer catch-up.
-        //
-        // Root cause (investigated 2026-05-06): the @rocicorp/zero
-        // change-streamer logs every `ddlUpdate` event with a `schema`
-        // field that re-includes the FULL list of tables + indexes the
-        // replicator knows about. With our 17 migrations × 8 per-harness
-        // schemas × N tables per schema, each DDL event carries 80-100KB
-        // of metadata and there are dozens of events on first boot —
-        // the heap balloons to ~3GB and Mark-Compact GCs spend ~2.7s
-        // each before failing. FATAL "Zone Allocation failed - process
-        // out of memory" with Mark-Compact 3200/3330MB.
-        //
-        // Mitigations layered here:
-        //   1. --max-old-space-size=6144 (default below).
-        //      KNOWN BROKEN: @rocicorp/zero's `zero-cache` binary
-        //      INTERNALLY overrides NODE_OPTIONS to
-        //      `--max-old-space-size=131072 --expose-gc` (128 GB,
-        //      effectively unlimited). Inspecting /proc/<pid>/environ
-        //      on the running zero-cache child confirms this. Our 6 GB
-        //      setting is silently discarded.
-        //   2. --heapsnapshot-near-heap-limit=1 (opt-in via
-        //      PAPERCUSP_ZERO_HEAPSNAPSHOT=1) writes a .heapsnapshot
-        //      file just before the next OOM so we can inspect what's
-        //      actually pinned. Off by default — snapshots are 100s of
-        //      MB.
-        //
-        // Even at 128 GB notional heap the process crashed at 3.2 GB
-        // with FATAL "Zone Allocation failed" — a v8 zone-arena failure
-        // unrelated to old-space limits. Likely native-side
-        // fragmentation from @rocicorp/zero-sqlite3 bindings or the
-        // change-streamer's per-event schema-metadata churn. Cannot be
-        // fixed via env vars; needs upstream patch (trim/omit the
-        // `schema` field on `ddlUpdate` events, or snapshot-seed the
-        // change-streamer instead of replaying catch-up).
-        //
-        // Today the process-manager respawns zero-cache after the OOM
-        // and the second start succeeds (smaller catch-up payload), so
-        // the user-visible impact is a few seconds of empty
-        // rest-query results. That's why this is documented but not
-        // hard-blocking.
-        .env(
-            "NODE_OPTIONS",
-            std::env::var("PAPERCUSP_ZERO_NODE_OPTIONS").unwrap_or_else(|_| {
-                let snapshot_flag = if std::env::var("PAPERCUSP_ZERO_HEAPSNAPSHOT")
-                    .map(|v| v == "1" || v == "true")
-                    .unwrap_or(false)
-                {
-                    " --heapsnapshot-near-heap-limit=1"
-                } else {
-                    ""
-                };
-                format!("--max-old-space-size=6144{}", snapshot_flag)
-            }),
-        )
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    cmd.spawn()
-}
+/// (SP1 C5) The embedded-postgres + zero-cache process management that used
+/// to live here moved INTO `serve.mjs` (apps/operator/bin/serve.ts): PG
+/// port selection, the orphan-postmaster sweep, the PG wire-protocol ready
+/// probe, migrations, and the embedded-pg.json write are all serve's now.
+/// The legacy opt-in zero-cache spawn (PAPERCUSP_USE_ZERO_CACHE=1) was
+/// removed outright — the SSE path replaced the Zero WS transport on
+/// desktop 2026-05-07 and the bundle no longer ships zero-cache-server.
 
-/// Poll http://127.0.0.1:<port>/keepalive until 200 or timeout.
-/// zero-cache exposes /keepalive once it's accepting WS connections.
-fn wait_for_zero_cache(port: u16, timeout: Duration) -> bool {
-    use std::net::TcpStream;
-    let start = Instant::now();
-    let addr = format!("127.0.0.1:{}", port);
-    while start.elapsed() < timeout {
-        if let Ok(s) = TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(500),
-        ) {
-            drop(s);
-            // TCP is up; zero-cache may still be initializing the schema.
-            // The HTTP keepalive probe is more thorough but we don't have
-            // a built-in HTTP client without adding a dep — TCP is good
-            // enough since zero-cache binds the port last in its startup
-            // sequence.
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    false
-}
-
-/// Poll localhost:<port> until Postgres is actually ready to accept
-/// queries — not just listening on TCP.
-///
-/// Why this exists: a TCP-only check returns true the moment postmaster
-/// binds the port, which happens BEFORE crash recovery / startup
-/// finishes. During that window any real query gets back FATAL 57P03
-/// "the database system is not yet accepting connections" and the
-/// caller crashes (zero-cache exits with code 255 on first-boot if it
-/// hits this race). See `spawn_zero_cache_server` doc comment.
-///
-/// We speak PG's wire protocol directly to avoid pulling in a postgres
-/// crate just for a probe: send a StartupMessage, peek at the first
-/// response byte. `R` = AuthenticationRequest = postmaster is past
-/// recovery and willing to talk; `E` = ErrorResponse (typically 57P03
-/// during recovery) = retry. Anything else (or read timeout) = retry.
-fn wait_for_pg_tcp(port: u16, timeout: Duration) -> bool {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let start = Instant::now();
-    let addr = format!("127.0.0.1:{}", port);
-    let socket: std::net::SocketAddr = addr.parse().unwrap();
-
-    // Build a Postgres v3.0 StartupMessage with user=postgres + database=postgres.
-    // Layout: [length:u32 BE][protocol:0x00030000][param strings, NUL-terminated][NUL]
-    let mut msg: Vec<u8> = Vec::with_capacity(64);
-    msg.extend_from_slice(&[0, 0, 0, 0]); // length placeholder
-    msg.extend_from_slice(&[0, 3, 0, 0]); // protocol 3.0
-    msg.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
-    let len = (msg.len() as u32).to_be_bytes();
-    msg[0..4].copy_from_slice(&len);
-
-    while start.elapsed() < timeout {
-        if let Ok(mut s) = TcpStream::connect_timeout(&socket, Duration::from_millis(500)) {
-            let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
-            if s.write_all(&msg).is_ok() {
-                let mut tag = [0u8; 1];
-                if let Ok(()) = s.read_exact(&mut tag) {
-                    // 'R' (0x52) — postmaster reached the auth step, recovery done.
-                    if tag[0] == b'R' {
-                        return true;
-                    }
-                    // 'E' (0x45) — ErrorResponse. Almost always 57P03 here; loop.
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    false
-}
 
 /// Spawn the Node sidecar from inside the bundled sidecar dir. In dev
 /// (`tauri dev`), we skip this — the developer runs `npm run dev:papercusp`
@@ -557,236 +384,195 @@ fn make_sidecar_command(
     cmd
 }
 
-/// Returned by `spawn_sidecar`. The receiver fires once with the
-/// resolved endpoint-IPC socket path when IPC is enabled and the
-/// sidecar prints its `PAPERCUSP_IPC_READY socket=<path>` handshake
-/// line. None when IPC is disabled (default).
-pub struct SidecarHandle {
-    pub child: Child,
-    pub ipc_ready_rx: Option<std_mpsc::Receiver<String>>,
+/// Minimal operator.json discovery (SP1 C5). Written atomically by `serve`
+/// once the host is listening; removed on its clean shutdown. Mirrors the
+/// `OperatorDiscovery` interface in apps/operator/bin/serve.ts.
+#[derive(Debug, Clone)]
+struct OperatorDiscovery {
+    port: u16,
+    pid: u32,
 }
 
-fn spawn_sidecar(
+/// Parse `<home>/.papercusp/operator.json`, or None.
+fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorDiscovery> {
+    let path = workspace_home.join(".papercusp/operator.json");
+    let txt = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    let port = v.get("port")?.as_u64()? as u16;
+    let pid = v.get("pid")?.as_u64()? as u32;
+    if port == 0 || pid == 0 {
+        return None;
+    }
+    Some(OperatorDiscovery { port, pid })
+}
+
+/// Liveness probe for a discovery-file pid (signal-0 equivalent: /proc on
+/// Linux, `kill -0` elsewhere). Guards against a STALE operator.json whose
+/// port has since been reused by an unrelated process.
+fn discovery_pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Poll operator.json until it names a live, reachable operator (pid alive +
+/// TCP accept), or time out. This is the embedder's whole boot wait: serve
+/// owns PG startup + migrations + host boot internally, so first boot
+/// (initdb + full migration replay) can legitimately take a while.
+fn wait_for_operator(
+    workspace_home: &std::path::Path,
+    timeout: Duration,
+) -> Option<OperatorDiscovery> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(d) = read_operator_discovery(workspace_home) {
+            if discovery_pid_alive(d.pid)
+                && std::net::TcpStream::connect(format!("127.0.0.1:{}", d.port)).is_ok()
+            {
+                return Some(d);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    None
+}
+
+/// Spawn the bundled `serve.mjs --ensure` (SP1 C5). serve owns embedded-PG +
+/// the Hono host + the discovery files; this fn just assembles the desktop
+/// environment for it:
+///   - bundled PATH (node + vendored CLIs), workspace-HOME isolation
+///   - the SPA/docs roots (desktop serves the UI: PAPERCUSP_SERVE_UI=1)
+///   - PG knobs (picked port, shared data dir, bundled migrations dir)
+///   - the cold-start port hint (PAPERCUSP_HONO_PORT)
+/// stdout/stderr are inherited — boot progress + the smoke-harness grep
+/// lines land in the desktop log. The endpoint-IPC handshake is NOT parsed
+/// from stdout anymore; the discovery file (~/.papercusp/endpoint-ipc.json)
+/// is the one channel that also covers the --ensure reuse case.
+#[allow(clippy::too_many_arguments)]
+fn spawn_serve(
     via_wsl: bool,
-    port: u16,
+    port_hint: u16,
     sidecar_dir: &std::path::Path,
-    // TCP port of the embedded-postgres-server (the only desktop DB).
-    pg_tcp_port: Option<u16>,
-    // TCP port of the zero-cache-server, if it spawned successfully.
-    // Surfaced to the operator via NEXT_PUBLIC_ZERO_SERVER so the
-    // HarnessZeroProvider can choose syncType="WEBSOCKETS".
-    zero_cache_port: Option<u16>,
+    pg_port_hint: u16,
+    shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
     code_server_url: Option<&str>,
-) -> std::io::Result<SidecarHandle> {
-    println!("[papercusp-desktop] spawning sidecar on port {} from {}", port, sidecar_dir.display());
+) -> std::io::Result<Child> {
+    println!(
+        "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}",
+        port_hint,
+        sidecar_dir.display()
+    );
 
-    // operator-vite sidecar layout (Phase F3/G4): the entry point is the
-    // esbuild-bundled Hono host at sidecar/host.mjs. It serves the Vite SPA
-    // (sidecar/spa/) + /api/* + /internal/docs/* (sidecar/internal-docs/)
-    // as a single process. The SPA + docs roots are passed explicitly via
-    // env (PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT) because a bundled
-    // file's __dirname is the sidecar root, not the original bin/ dir.
-    let server_js = sidecar_dir.join("host.mjs");
+    let server_js = sidecar_dir.join("serve.mjs");
     let spa_dist = sidecar_dir.join("spa");
     let docs_root = sidecar_dir.join("internal-docs");
     let harness_dir = sidecar_dir.join("harness");
+    let prompts_dir = sidecar_dir.join("prompts");
+    let db_sql_dir = sidecar_dir.join("db-sql");
+    let pg_data_dir = shared_state_dir.join("embedded-pg-data");
 
-    // Per-workspace isolation: override HOME so the sidecar (and any child
-    // process it spawns — claude CLI, git, pi, etc.) sees a workspace-scoped
-    // home directory. ~/.papercusp/, ~/.claude/, ~/.gitconfig and so on all
-    // resolve into <workspace_home>/, giving each workspace genuine
-    // "fresh-machine" semantics. See workspaces.rs for the layout.
+    // Per-workspace isolation: override HOME so serve (and any child process
+    // it spawns — claude CLI, git, pi, etc.) sees a workspace-scoped home.
+    // ~/.papercusp/ (operator.json, embedded-pg.json, endpoint-ipc.json,
+    // superuser-token) all resolve into <workspace_home>/. See workspaces.rs.
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-
-    // Strip Node 22+'s partial localStorage stub via a --require preload
-    // (see bin/sidecar-preload.js for full reasoning). We can't use the
-    // --no-experimental-webstorage flag because Node 20 errors with
-    // "bad option" and Node 22+ disallows it in NODE_OPTIONS. A JS
-    // preload that does `delete globalThis.localStorage` is portable.
-    // Prepend the bundled `bin/` dir (omp + any other vendored CLIs) to
-    // PATH so child processes the sidecar spawns — Pi terminals, git,
-    // claude — find them without the user having to install them
-    // separately. The user's PATH is appended after, so system installs
-    // still take precedence if they're earlier on PATH... actually no:
-    // we *prepend*, so bundled binaries win. That's intentional: the
-    // user gets the version we tested against.
-    let bundled_bin = sidecar_dir.join("bin");
-    let path_sep = if cfg!(windows) { ";" } else { ":" };
-    let existing_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path);
+    let new_path = bundled_path_env(sidecar_dir);
 
     let preload = sidecar_dir.join("sidecar-preload.js");
     let mut cmd = make_sidecar_command(via_wsl, sidecar_dir, &preload, &server_js);
-    // When routed via WSL, env vars must be listed in WSLENV to cross
-    // the Windows→Linux boundary. The `/p` flag translates Windows
-    // paths to Linux paths automatically.
+    cmd.arg("--ensure");
+    // When routed via WSL, env vars must be listed in WSLENV to cross the
+    // Windows→Linux boundary. The `/p` flag translates Windows paths.
     if via_wsl {
         cmd.env(
             "WSLENV",
             "PATH/l:PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
-             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:HARNESS_DATABASE_URL:\
-             HARNESS_ADMIN_DATABASE_URL:PAPERCUSP_ZERO_PORT:\
-             NEXT_PUBLIC_ZERO_SERVER:PAPERCUSP_CODE_SERVER_URL:\
-             PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p",
+             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR/p:\
+             PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
+             PAPERCUSP_SERVE_UI:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
+             PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
+             PAPERCUSP_PROMPTS_DIR/p",
         );
     }
     cmd.env("PATH", &new_path)
-        .env("PORT", port.to_string())
+        // serve reads PAPERCUSP_HONO_PORT (cold-start hint; reuse may differ).
+        .env("PAPERCUSP_HONO_PORT", port_hint.to_string())
+        .env("PAPERCUSP_BIND_HOST", "127.0.0.1")
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_ENV", "production")
+        // The desktop webview consumes the SPA — keep the UI mounted (serve
+        // alone defaults it OFF for headless use; Decision E).
+        .env("PAPERCUSP_SERVE_UI", "1")
         .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_DESKTOP", "1")
-        // Phase E (P-051): signal the shared-operator model so the orchestrator
-        // sets a per-spawn HOME from each job's workspace (one sidecar, neutral
-        // process HOME, per-workspace child creds). Only THIS shared-model build
-        // sets it; dev / legacy per-process-HOME builds leave it unset, so the
-        // HOME flip never fires there (D-009 — never flip piecemeal in dev).
+        // Phase E (P-051): shared-operator model — per-spawn HOME comes from
+        // each job's workspace, set operator-side.
         .env("PAPERCUSP_SHARED_OPERATOR", "1")
-        // Phase 3 / Item 3: any descendant of the sidecar that needs to
-        // reach the operator's HTTP API (run.sh especially — it does
-        // PATCH /features/<id>, GET /status, POST /lanes via its
-        // pg-status helper) must use this env var. Without it, run.sh
-        // falls back to the legacy localhost:3055 default which only
-        // works in dev. The operator port is dynamically picked here,
-        // so the env injection is the only sound channel.
-        .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port))
-        // Phase F3/G4: the Hono host serves the Vite SPA + Starlight docs
-        // from these roots. Passed explicitly because the host is an
-        // esbuild bundle — its __dirname is the sidecar root, so the
-        // __dirname-relative fallbacks in host-spa.ts / host-docs.ts would
-        // resolve wrong. See those files' root-resolution comments.
+        // Descendants that need the operator's HTTP API (run.sh pg-status
+        // helpers etc.) use this; the port is dynamic so env is the channel.
+        .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port_hint))
+        // Hono host serves the Vite SPA + Starlight docs from these roots —
+        // passed explicitly because a bundled file's __dirname is the sidecar
+        // root (see host-spa.ts / host-docs.ts root-resolution comments).
         .env("PAPERCUSP_SPA_DIST", spa_dist.to_string_lossy().to_string())
         .env("PAPERCUSP_DOCS_ROOT", docs_root.to_string_lossy().to_string())
-        // The workspace registry + per-workspace dirs live ABOVE the
-        // per-workspace isolation boundary, at the real home's
-        // ~/.papercusp-workspaces/. But HOME below is remapped to the
-        // active workspace dir, so the sidecar's homedir() points INSIDE
-        // a workspace — TS code resolving ~/.papercusp-workspaces via
-        // homedir() would land in a nested per-workspace registry that
-        // disagrees with the one this Rust shell owns. Pass the real root
-        // explicitly so workspace-registry.ts resolves it correctly.
+        // Persona/tools prompt root — explicit because the cwd heuristics in
+        // prompt-assembly.ts misfire in the sidecar layout: sidecar/apps/
+        // operator/prompts exists (desktop-install playbook only) and would
+        // shadow the full sidecar/prompts copy (see promptsDir()).
+        .env("PAPERCUSP_PROMPTS_DIR", prompts_dir.to_string_lossy().to_string())
+        // PG knobs (SP1 C5: PG ownership moved into serve). The port is
+        // freshly picked per spawn so two desktops on one host don't collide;
+        // data lives in the SHARED state dir (one RLS-scoped PG for all
+        // workspaces, D-006), migrations ship at sidecar/db-sql.
+        .env("PAPERCUSP_PG_PORT", pg_port_hint.to_string())
+        .env("PAPERCUSP_PG_DATA_DIR", pg_data_dir.to_string_lossy().to_string())
+        .env("PAPERCUSP_PG_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
+        // The workspace registry lives ABOVE the per-workspace isolation
+        // boundary; HOME below is remapped, so pass the real root explicitly
+        // (workspace-registry.ts would otherwise resolve a nested registry).
         .env(
             "PAPERCUSP_WORKSPACES_ROOT",
             workspaces::workspaces_root().to_string_lossy().to_string(),
         )
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str); // Windows
-    // Endpoint IPC opt-in. When enabled:
-    //   1. Sidecar boot starts the IPC server (see operator
-    //      instrumentation-node.ts § maybeStartEndpointIpcServer).
-    //   2. Stdout is piped so we can parse the
-    //      `PAPERCUSP_IPC_READY socket=<path>` handshake line.
-    //   3. A forwarder thread (spawned post-`cmd.spawn()` below)
-    //      consumes EVERY stdout line, watches for the marker, and
-    //      forwards everything else to the parent's stdout via
-    //      println!. This is the "forwarding-thread alternative" the
-    //      original Stdio::inherit() comment dismissed as "didn't buy
-    //      us anything" — now it buys the handshake.
-    //   4. Without an actively-consuming reader, kernel pipe buffers
-    //      (~64 KB) deadlock the sidecar after the first burst of
-    //      logs. The forwarder must stay running for the lifetime of
-    //      the sidecar.
-    //
-    // Default-ON: IPC is the shipping transport — it dodges WebKitGTK's
-    // ~6-connection-per-host libsoup cap for the webview's SSE/fetch
-    // traffic. Disable only by setting PAPERCUSP_DESKTOP_IPC=0; then we
-    // keep Stdio::inherit(), no extra threads, no behavior change vs
-    // pre-IPC. Defaulting on is safe because the webview's ipcFetch /
-    // IpcEventSource polyfills fall back to native HTTP when the handshake
-    // never completes (see @papercusp/desktop-ipc desktop-bootstrap).
-    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
-    if ipc_enabled {
-        cmd.env("PAPERCUSP_IPC_ENABLE", "1");
-        cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    } else {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    }
 
-    // Preferred path: real PG via embedded-postgres-server on a TCP port.
-    // wal_level=logical is set on the postmaster, so Zero / pgoutput
-    // consumers can subscribe — fixing the original reason we couldn't
-    // run streamed Zero on the desktop.
-    if let Some(pg_port) = pg_tcp_port {
-        let app_url = format!(
-            "postgresql://harness_app:harness_app_pwd@127.0.0.1:{}/papercusp",
-            pg_port
-        );
-        let admin_url = format!(
-            "postgresql://harness_admin:harness_admin_pwd@127.0.0.1:{}/papercusp",
-            pg_port
-        );
-        cmd.env("PAPERCUSP_USE_EMBEDDED_PG", "1")
-            .env("PAPERCUSP_PG_PORT", pg_port.to_string())
-            .env("HARNESS_DATABASE_URL", &app_url)
-            .env("HARNESS_ADMIN_DATABASE_URL", &admin_url);
+    // PAPERCUSP_USE_EMBEDDED_PG passthrough: default ON (serve's default).
+    // =0 attaches external PG via HARNESS_*_DATABASE_URL from our env, which
+    // Command inherits by default.
+    if let Ok(v) = std::env::var("PAPERCUSP_USE_EMBEDDED_PG") {
+        cmd.env("PAPERCUSP_USE_EMBEDDED_PG", v);
     }
 
     // Surface the bundled code-server URL so the operator's contributions
-    // resolver can use it as the iframe default for the @papercupai/
-    // vscode-server plugin — see app/api/_hono/plugins.ts and
-    // app/api/plugins/[slug]/contributions/route.ts.
+    // resolver can use it as the iframe default for @papercupai/vscode-server.
     if let Some(url) = code_server_url {
         cmd.env("PAPERCUSP_CODE_SERVER_URL", url);
     }
 
-    // Surface the zero-cache URL so HarnessZeroProvider can flip from
-    // POLLING → WEBSOCKETS. Both env vars set: the public one for the
-    // browser bundle (visible client-side), and the internal one for
-    // server-side operator code (named-query resolver target).
-    if let Some(zc_port) = zero_cache_port {
-        let zc_url = format!("http://127.0.0.1:{}", zc_port);
-        cmd.env("NEXT_PUBLIC_ZERO_SERVER", &zc_url)
-            .env("HARNESS_ZERO_INTERNAL_SERVER", &zc_url);
+    // Endpoint IPC opt-in (default ON — it dodges WebKitGTK's ~6-connection
+    // libsoup cap for the webview's SSE/fetch traffic). runBootstrap inside
+    // serve starts the IPC server and writes endpoint-ipc.json; we read the
+    // file rather than parse stdout, so stdout can stay inherited.
+    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
+    if ipc_enabled {
+        cmd.env("PAPERCUSP_IPC_ENABLE", "1");
     }
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn()?;
-
-    // IPC bootstrap: drain stdout in a background thread, forward
-    // everything to the parent's stdout, capture the
-    // `PAPERCUSP_IPC_READY socket=<path>` line and signal the path
-    // through a sync_channel. The receiver is `recv_timeout`'d in
-    // setup() after wait_for_sidecar succeeds. Once captured, the
-    // thread keeps draining for the lifetime of the sidecar so kernel
-    // pipe buffers never fill (the 64KB deadlock case).
-    let ipc_ready_rx = if ipc_enabled {
-        if let Some(stdout) = child.stdout.take() {
-            let (tx, rx) = std_mpsc::sync_channel::<String>(1);
-            std::thread::spawn(move || {
-                use std::io::{BufRead, BufReader};
-                let reader = BufReader::new(stdout);
-                let mut signaled = false;
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(_) => break,
-                    };
-                    // Forward to parent stdout so logs stay visible.
-                    println!("{line}");
-                    if !signaled {
-                        if let Some(path) = crate::endpoint_ipc::parse_ipc_ready_line(
-                            &format!("{line}\n"),
-                        ) {
-                            let _ = tx.try_send(path.to_string());
-                            signaled = true;
-                            // Drop the sender so recv_timeout returns
-                            // immediately on the consumer side; the
-                            // thread keeps reading.
-                            drop(tx.clone()); // no-op for sync_channel but documents intent
-                        }
-                    }
-                }
-            });
-            Some(rx)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(SidecarHandle { child, ipc_ready_rx })
+    cmd.spawn()
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,17 +799,6 @@ fn show_attention_notification(app: AppHandle, title: String, body: String) -> R
         .body(body)
         .show()
         .map_err(|e| e.to_string())
-}
-
-fn wait_for_sidecar(port: u16, timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,8 +1076,6 @@ fn init_native_terminal(app: &tauri::App) {
 pub fn run() {
     let state = SidecarState {
         child: Mutex::new(None),
-        db_child: Mutex::new(None),
-        zero_cache_child: Mutex::new(None),
         code_server_child: Mutex::new(None),
         port: Mutex::new(None),
         endpoint_ipc_socket: Mutex::new(None),
@@ -1512,107 +1285,16 @@ pub fn run() {
                 shared_state_dir.display()
             );
 
-            // DB spawn: embedded-postgres-server is the ONLY desktop DB.
-            //   - Default ON; opt-out via PAPERCUSP_USE_EMBEDDED_PG=0 (then
-            //     the sidecar uses HARNESS_DATABASE_URL from the user's env).
-            //   - The legacy pglite fallback was removed 2026-06-01. If
-            //     embedded-PG fails to spawn or accept TCP, we FAIL LOUD
-            //     (log a clear error) rather than silently degrade to a
-            //     WASM single-connection engine with limited LISTEN/NOTIFY.
-            //
-            // The spawned child lives in SidecarState.db_child.
-            let use_embedded_pg = std::env::var("PAPERCUSP_USE_EMBEDDED_PG")
-                .unwrap_or_else(|_| "1".to_string())
-                != "0";
-
-            let mut pg_tcp_port: Option<u16> = None;
-            let mut zero_cache_port: Option<u16> = None;
-
-            if use_embedded_pg {
-                let pg_dir = sidecar_dir.join("embedded-postgres-server");
-                // Phase E (P-050): shared, single RLS-scoped PG for all workspaces.
-                let data_dir = shared_state_dir.join("embedded-pg-data");
-                // Workspace-scoped TCP port. We pick once per spawn rather
-                // than reusing a fixed port so two desktops on the same
-                // host don't collide. The sidecar reads PAPERCUSP_PG_PORT
-                // from its env to know where to connect.
-                let port = portpicker::pick_unused_port()
-                    .unwrap_or(15432);
-                let db_sql_dir = sidecar_dir.join("db-sql");
-                match spawn_embedded_postgres_server(&pg_dir, &data_dir, &workspace_home, port, &db_sql_dir) {
-                    Ok(c) => {
-                        let state: tauri::State<SidecarState> = app.state();
-                        *state.db_child.lock().unwrap() = Some(c);
-                        if wait_for_pg_tcp(port, Duration::from_secs(60)) {
-                            println!("[papercusp-desktop] embedded-postgres-server ready on 127.0.0.1:{}", port);
-                            pg_tcp_port = Some(port);
-                        } else {
-                            // FAIL LOUD: embedded-PG is the only DB. No pglite
-                            // fallback — a DB that won't accept TCP is a hard,
-                            // user-visible failure, not a reason to degrade.
-                            eprintln!(
-                                "[papercusp-desktop] FATAL: embedded-postgres-server did not accept TCP \
-                                 on 127.0.0.1:{} within 60s — initdb likely failed (check the bundled \
-                                 @embedded-postgres binaries are valid + executable). The app has NO \
-                                 database; operator features depending on PG will not work.",
-                                port
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // FAIL LOUD: could not even spawn the embedded-PG process.
-                        eprintln!(
-                            "[papercusp-desktop] FATAL: failed to spawn embedded-postgres-server: {}. \
-                             The app has NO database (the legacy pglite fallback was removed). Check \
-                             the bundled embedded-postgres-server + its @embedded-postgres binaries.",
-                            e
-                        );
-                    }
-                }
-
-                // zero-cache-server retired 2026-05-07 with the Level 1 + Phase 1
-                // sync rewrite. The operator's /api/zero-harness/sse route now
-                // pushes invalidate/update events via PG LISTEN/NOTIFY directly
-                // — no separate process, no replication slot, no role plumbing.
-                // Opt-in legacy spawn: set PAPERCUSP_USE_ZERO_CACHE=1 to bring
-                // the old transport back temporarily (e.g. while diagnosing
-                // a regression in the SSE path).
-                if pg_tcp_port.is_some()
-                    && std::env::var("PAPERCUSP_USE_ZERO_CACHE")
-                        .unwrap_or_else(|_| "0".to_string())
-                        == "1"
-                {
-                    std::thread::sleep(Duration::from_secs(3));
-                    let zc_port = portpicker::pick_unused_port().unwrap_or(14848);
-                    let zc_change_port = portpicker::pick_unused_port().unwrap_or(zc_port - 1);
-                    let zero_dir = sidecar_dir.join("zero-cache-server");
-                    let replica_dir = shared_state_dir.join("zero-replica");
-                    let upstream_db = format!(
-                        "postgres://harness_zero:harness_zero_pwd@127.0.0.1:{}/papercusp",
-                        pg_tcp_port.unwrap()
-                    );
-                    match spawn_zero_cache_server(&zero_dir, &upstream_db, zc_port, zc_change_port, &replica_dir, &workspace_home) {
-                        Ok(c) => {
-                            let state: tauri::State<SidecarState> = app.state();
-                            *state.zero_cache_child.lock().unwrap() = Some(c);
-                            if wait_for_zero_cache(zc_port, Duration::from_secs(60)) {
-                                println!("[papercusp-desktop] zero-cache-server ready on 127.0.0.1:{} (legacy opt-in)", zc_port);
-                                zero_cache_port = Some(zc_port);
-                            } else {
-                                eprintln!("[papercusp-desktop] zero-cache-server did not accept TCP in 60s");
-                            }
-                        }
-                        Err(e) => eprintln!(
-                            "[papercusp-desktop] failed to spawn zero-cache-server: {}", e,
-                        ),
-                    }
-                }
-            } else {
-                println!(
-                    "[papercusp-desktop] PAPERCUSP_USE_EMBEDDED_PG=0 — skipping embedded-postgres-server; \
-                     sidecar will use HARNESS_DATABASE_URL from env"
-                );
-            }
+            // PG (SP1 C5): embedded Postgres is OWNED BY SERVE now — port
+            // selection, the orphan-postmaster sweep, the wire-protocol ready
+            // probe, migrations, and the embedded-pg.json write all happen
+            // inside serve.mjs. We only pick a fresh TCP port hint per spawn
+            // so two desktops on one host don't collide (`serve --ensure`
+            // makes same-HOME double-launches converge on ONE operator
+            // instead of double-booting PG on one data dir).
+            // PAPERCUSP_USE_EMBEDDED_PG=0 (external PG via the inherited
+            // HARNESS_*_DATABASE_URL env) passes through inside spawn_serve.
+            let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
 
             // Spawn the bundled code-server so the @papercupai/vscode-server
             // plugin's iframe has something to point at without the user
@@ -1654,70 +1336,93 @@ pub fn run() {
                     return Ok(());
                 }
             }
-            let handle = match spawn_sidecar(via_wsl, port, &sidecar_dir, pg_tcp_port, zero_cache_port, &workspace_home, code_server_url.as_deref()) {
-                Ok(h) => h,
+            let serve_child = match spawn_serve(
+                via_wsl,
+                port,
+                &sidecar_dir,
+                pg_port_hint,
+                &shared_state_dir,
+                &workspace_home,
+                code_server_url.as_deref(),
+            ) {
+                Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[papercusp-desktop] failed to spawn sidecar: {}", e);
+                    eprintln!("[papercusp-desktop] failed to spawn serve: {}", e);
                     return Ok(());
                 }
             };
 
             let state: tauri::State<SidecarState> = app.state();
-            *state.child.lock().unwrap() = Some(handle.child);
-            *state.port.lock().unwrap() = Some(port);
-            let ipc_ready_rx = handle.ipc_ready_rx;
+            *state.child.lock().unwrap() = Some(serve_child);
 
-            // Wait for the sidecar to start accepting connections (up to 30s).
-            if !wait_for_sidecar(port, Duration::from_secs(30)) {
-                eprintln!("[papercusp-desktop] sidecar did not start within 30s");
-                return Ok(());
-            }
-            println!("[papercusp-desktop] sidecar ready on :{}", port);
-
-            // Endpoint-IPC handshake: when IPC is enabled, wait for the
-            // sidecar's PAPERCUSP_IPC_READY stdout line and open the
-            // client socket. ~30s timeout — if it doesn't arrive, the
-            // IPC path stays disabled (commands return state-not-managed
-            // error to JS, which ipc-stream.ts surfaces as 'invoke_failed'
-            // and the consumer-side picker can fall back to HTTP).
-            if let Some(rx) = ipc_ready_rx {
-                match rx.recv_timeout(Duration::from_secs(30)) {
-                    Ok(socket_path) => {
-                        println!("[papercusp-desktop] endpoint-ipc socket: {socket_path}");
-                        *state.endpoint_ipc_socket.lock().unwrap() = Some(socket_path.clone());
-
-                        // Manage a reconnecting handle over the (fixed) sidecar
-                        // socket. Reconnect won't normally trigger in prod — the
-                        // sidecar's socket lives as long as the app — but it's a
-                        // free safety net if the connection ever drops, and keeps
-                        // a single code path with dev. Warm eagerly so the first
-                        // /api call doesn't pay the connect; block_on uses Tauri's
-                        // tokio runtime.
-                        let fixed = socket_path.clone();
-                        let handle = endpoint_ipc::IpcClientHandle::new(move || {
-                            Some(std::path::PathBuf::from(&fixed))
-                        });
-                        app.manage(handle.clone());
-                        match tauri::async_runtime::block_on(handle.warm()) {
-                            Ok(()) => {
-                                println!("[papercusp-desktop] endpoint-ipc client connected");
-                            }
-                            Err(e) => {
-                                eprintln!("[papercusp-desktop] endpoint-ipc warm connect failed (will retry on first call): {e}");
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        eprintln!("[papercusp-desktop] endpoint-ipc handshake timeout after 30s — IPC disabled this session");
-                    }
+            // Wait for serve's operator.json discovery (pid alive + TCP
+            // accept). Generous timeout: a FIRST boot pays initdb + the full
+            // migration replay inside serve before the host listens.
+            let discovery = match wait_for_operator(&workspace_home, Duration::from_secs(120)) {
+                Some(d) => d,
+                None => {
+                    eprintln!(
+                        "[papercusp-desktop] FATAL: operator did not become ready within 120s \
+                         (no live operator.json under {}/.papercusp). Check the serve logs above — \
+                         embedded-PG initdb/migrations are the usual first-boot suspects.",
+                        workspace_home.display()
+                    );
+                    return Ok(());
                 }
+            };
+            // The REAL port comes from discovery — `serve --ensure` may have
+            // reused an already-running operator on a different port than our
+            // cold-start hint.
+            let port = discovery.port;
+            *state.port.lock().unwrap() = Some(port);
+            println!(
+                "[papercusp-desktop] operator ready on :{} (pid {})",
+                port, discovery.pid
+            );
+
+            // Endpoint-IPC: runBootstrap inside serve starts the IPC server
+            // and writes ~/.papercusp/endpoint-ipc.json (the discovery file
+            // also covers the --ensure reuse case, where there is no fresh
+            // child stdout to parse). Manage a reconnecting handle whose
+            // socket source re-reads the file — same pattern as the dev
+            // branch — and warm it in the background. If the socket never
+            // appears, /api falls back to HTTP (ipcFetch polyfill).
+            let ipc_enabled =
+                std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
+            if ipc_enabled {
+                let disc = workspace_home.join(".papercusp/endpoint-ipc.json");
+                let disc_src = disc.clone();
+                let handle = endpoint_ipc::IpcClientHandle::new(move || {
+                    read_dev_ipc_socket(&disc_src).map(std::path::PathBuf::from)
+                });
+                app.manage(handle.clone());
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    for _ in 0..120 {
+                        if handle.warm().await.is_ok() {
+                            println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
+                            if let Some(path) = read_dev_ipc_socket(&disc) {
+                                let state: tauri::State<SidecarState> = app_handle.state();
+                                *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
+                            }
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    eprintln!(
+                        "[papercusp-desktop] endpoint-ipc: no socket after 60s — /api stays on HTTP this session"
+                    );
+                });
             }
 
             // Tell the bootstrap page where the sidecar is. The JS in
             // web/index.html will poll /api/desktop/preflight on that base,
             // render any missing-prereq UI, then navigate when ready.
             if let Some(window) = app.get_webview_window("main") {
-                let base = format!("http://localhost:{}", port);
+                // Use 127.0.0.1, not localhost: WebKitGTK may resolve
+                // `localhost` to ::1 while the sidecar binds IPv4 loopback,
+                // which fails the bootstrap's preflight fetch.
+                let base = format!("http://127.0.0.1:{}", port);
                 // Phase 4: the bootstrap polls preflight over `base` (HTTP —
                 // it's a transient pre-app page) but navigates the real app to
                 // `app_base`. With the custom protocol on (default), that's
@@ -1728,19 +1433,34 @@ pub fn run() {
                 } else {
                     base.clone()
                 };
-                // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty
-                // path (Tauri invoke + events) instead of the operator's
-                // HTTP+WS bridge. See apps/operator/lib/pty-tauri.ts and
-                // apps/operator/app/harness/PiPanel.tsx.
-                let _ = window.eval(&format!(
-                    "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
-                    base, app_base
-                ));
                 // WebKitGTK denies getUserMedia by default; auto-grant
                 // so voice / wake-word / elevenlabs work in the shipped
                 // build the same way they do in browsers.
                 #[cfg(target_os = "linux")]
                 grant_media_permission(&window);
+                // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty
+                // path (Tauri invoke + events) instead of the operator's
+                // HTTP+WS bridge. See apps/operator/lib/pty-tauri.ts and
+                // apps/operator/app/harness/PiPanel.tsx.
+                //
+                // setup() runs before the bootstrap page (frontendDist=../web)
+                // has finished loading, so a single eval can land on a document
+                // that the page-load then replaces, dropping __papercuspBase —
+                // the bootstrap then polls for a port that never arrives. Re-eval
+                // on a short timer so whichever document is live when the page is
+                // ready receives the port. (web/index.html's tick() polls
+                // window.__papercuspBase, so a late set is picked up.)
+                let inject = format!(
+                    "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
+                    base, app_base
+                );
+                let win = window.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        let _ = win.eval(&inject);
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                });
             }
 
             Ok(())
@@ -1763,90 +1483,9 @@ pub fn run() {
         });
 }
 
-/// Sweep for an orphaned postgres process holding `data_dir` (left by a
-/// prior unclean Tauri exit) and SIGTERM/SIGKILL it before we try to
-/// spawn a fresh one.
-///
-/// PG writes its own PID into `<data_dir>/postmaster.pid` on startup and
-/// removes it on clean shutdown. If the file exists and the PID is still
-/// alive AND its cwd / executable matches our data dir, it's a leftover
-/// from a prior session — kill it. If the PID is dead or the file is
-/// stale, just unlink the lockfile so embedded-postgres-server's spawn
-/// doesn't reject it as already-running.
-///
-/// Defensive about misidentifying live processes: only kill when the PID
-/// has `postgres` or `embedded-pg` somewhere in /proc/<pid>/cmdline, AND
-/// references our exact data dir. Otherwise leave it alone and let the
-/// spawn surface its own error — better to fail loud than nuke an
-/// unrelated process.
-fn sweep_orphan_postgres(data_dir: &std::path::Path) {
-    let pid_file = data_dir.join("postmaster.pid");
-    let raw = match std::fs::read_to_string(&pid_file) {
-        Ok(s) => s,
-        Err(_) => return, // No lockfile, no orphan to worry about.
-    };
-    // postmaster.pid format: PID is line 1.
-    let pid_str = match raw.lines().next() {
-        Some(s) => s.trim(),
-        None => return,
-    };
-    let pid: u32 = match pid_str.parse() {
-        Ok(p) => p,
-        Err(_) => {
-            println!(
-                "[papercusp-desktop] sweep_orphan_postgres: malformed pid '{}' in {}",
-                pid_str,
-                pid_file.display()
-            );
-            return;
-        }
-    };
-    // Is the PID still live?
-    let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
-    if !alive {
-        // Stale lockfile from a crashed prior session — embedded-postgres
-        // usually handles this itself, but unlink eagerly to be safe.
-        println!(
-            "[papercusp-desktop] sweep_orphan_postgres: stale postmaster.pid (pid={} dead), unlinking",
-            pid
-        );
-        let _ = std::fs::remove_file(&pid_file);
-        return;
-    }
-    // Live: confirm it's actually a postgres pointed at OUR data dir
-    // before terminating. Read /proc/<pid>/cmdline.
-    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
-        .unwrap_or_default();
-    let data_dir_str = data_dir.to_string_lossy().to_string();
-    let looks_like_our_pg = (cmdline.contains("postgres")
-        || cmdline.contains("embedded-pg"))
-        && cmdline.contains(&data_dir_str);
-    if !looks_like_our_pg {
-        println!(
-            "[papercusp-desktop] sweep_orphan_postgres: pid={} alive but cmdline doesn't match (data_dir={}) — leaving it alone",
-            pid,
-            data_dir.display()
-        );
-        return;
-    }
-    println!(
-        "[papercusp-desktop] sweep_orphan_postgres: orphan postgres pid={} on {} — terminating",
-        pid,
-        data_dir.display()
-    );
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
-        // Give PG a moment to shut down cleanly.
-        std::thread::sleep(Duration::from_millis(2000));
-        if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-            let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-    // Clean up the lockfile in case PG's own shutdown didn't.
-    let _ = std::fs::remove_file(&pid_file);
-}
+// (SP1 C5) sweep_orphan_postgres moved to serve.ts (sweepOrphanPostgres) —
+// PG lifecycle ownership lives in `papercusp serve` now, so the orphan
+// sweep runs there, right before startEmbeddedPostgresServer.
 
 /// Send SIGTERM to a Child, wait up to `grace_ms` for it to exit, then
 /// SIGKILL if still alive. Returns once the child has actually reaped.
@@ -1917,32 +1556,22 @@ fn shutdown_native_terminal(app_handle: &tauri::AppHandle) {
 /// inlining triggered borrow-checker E0597 in Rust 2021 because the guard
 /// outlived the local `state` binding.
 ///
-/// Order matters:
-///   1. Operator sidecar first — it's the user-facing process; the user
-///      should perceive shutdown as immediate.
-///   2. zero-cache before PG so it can flush its SQLite replica cleanly.
-///      Killing PG first leaves zero-cache scribbling errors as upstream
-///      connections drop.
-///   3. embedded PG last — gives any DB clients (zero-cache,
-///      operator) a chance to disconnect cleanly first.
-///   4. code-server is independent of the rest; killed alongside.
+/// (SP1 C5) The serve child owns embedded-PG in-process: SIGTERM triggers
+/// serve's own shutdown handler (close host → remove operator.json →
+/// pg.stop() → release cold-start lock), so it gets a longer grace than the
+/// old bare sidecar before the SIGKILL fallback. When `serve --ensure`
+/// REUSED a foreign operator, `state.child` holds the (already-exited)
+/// ensure process — killing it is a no-op and the reused operator keeps
+/// running, which is the intended singleton semantics (Decision C).
 ///
-/// Each stage uses graceful_kill (SIGTERM with 3s grace, then SIGKILL) so
-/// Node intermediates can reap their own grandchildren — see
-/// graceful_kill's doc comment for why this matters.
+/// Each stage uses graceful_kill (SIGTERM with grace, then SIGKILL) so Node
+/// intermediates can reap their own grandchildren — see graceful_kill's doc
+/// comment for why this matters.
 fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let state: tauri::State<SidecarState> = app_handle.state();
     let maybe_child = state.child.lock().unwrap().take();
     if let Some(mut child) = maybe_child {
-        graceful_kill(&mut child, "sidecar", 3000);
-    }
-    let maybe_zc = state.zero_cache_child.lock().unwrap().take();
-    if let Some(mut child) = maybe_zc {
-        graceful_kill(&mut child, "zero-cache-server", 3000);
-    }
-    let maybe_db = state.db_child.lock().unwrap().take();
-    if let Some(mut child) = maybe_db {
-        graceful_kill(&mut child, "embedded-postgres-server", 5000);
+        graceful_kill(&mut child, "serve (operator + embedded-PG)", 8000);
     }
     let maybe_cs = state.code_server_child.lock().unwrap().take();
     if let Some(mut child) = maybe_cs {

@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 # Launch the desktop app in DEV mode WITHOUT HMR.
 #
-# vs bin/desktop-dev:
-#   bin/desktop-dev          → tauri dev → devUrl http://localhost:3055 (Vite dev server, HMR client active)
-#   bin/desktop-dev-nohmr    → tauri dev → devUrl http://localhost:3070 (Hono host serving the rebuilt dist/)
+# NOTE: nohmr / :3070 is now the DEFAULT devUrl in tauri.conf.json, so this
+# explicit override is redundant — it's kept for clarity / self-documentation.
+# HMR is the explicit opt-in: `npm run dev:hmr` (devUrl http://localhost:3055,
+# Vite dev server with the HMR client active).
 #
-# Pair with `npm run dev:operator:nohmr` in the papercup repo, which runs
-# `vite build --watch --mode development` to keep apps/operator-vite/dist/
-# fresh. The Hono host on :3070 (host-spa.ts, Phase G3) serves that dist/
-# with SPA fallback.
+# Why nohmr / :3070 is the default:
+#   - The Tauri shell is the product surface and this checkout is edited by a
+#     FLEET of agents at once. A Vite dev server (:3055) reloads the webview on
+#     fleet edits / dep re-optimization / proxy errors while :3070 redeploys,
+#     so the window "constantly refreshes". :3070 serves a STATIC bundle that
+#     only changes on a release deploy — no dev-server reload pressure.
+#   - Mirrors the prod runtime path exactly (Hono host + static dist).
+#   - No `ws://localhost:3055/?token=…` HMR socket competing with SSE for the
+#     libsoup 6-connection budget.
 #
-# Why use this instead of HMR:
-#   - Mirrors the prod runtime path exactly (Hono host + static dist), so
-#     a bug in dev maps 1:1 to a bug a real user would hit.
-#   - No `ws://localhost:3055/?token=…` HMR socket in the console.
-#   - No libsoup connection-pool exhaustion from HMR + SSE competing for
-#     the 6-connection budget.
+# Post-cutover (2026-06-06) topology — what :3070 actually serves:
+#   :3070 = the GREEN release operator (papercup-dev-api, runs from the
+#   papercup-release checkout, pinned to green `main`). Its dist is FROZEN
+#   between release deploys (≤15min, green-gated) — you see SHIPPED state.
+#   To watch latest *staging* work instead, point devUrl at :3170 (the
+#   staging operator, which IS fed by `vite build --watch`); it's nohmr too,
+#   so it updates on a manual Ctrl-R, not on every edit.
 #
-# Cost: manual reload (Cmd-R / Ctrl-R in the Tauri webview) to see changes.
-# Rebuild is incremental, typically 200-500ms.
+# Cost: manual reload (Cmd-R / Ctrl-R in the Tauri webview) to pick up a new
+# deploy.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Build the Node sidecar that the Papercusp desktop app bundles.
 #
-# Strategy (post operator-vite migration, Phase F3/G4): the operator UI is
-# the Vite SPA (apps/operator-vite), and the SPA + /api/* + /internal/docs/*
-# are served by a single-process Hono host (apps/operator/bin/hono-host.ts).
-# This script `vite build`s the SPA and esbuild-bundles the host into
+# Strategy (post operator-vite migration, Phase F3/G4; entry swapped to
+# `serve` by SP1 C5): the operator UI is the Vite SPA (apps/operator-vite),
+# and the SPA + /api/* + /internal/docs/* are served by a single-process Hono
+# host. The boot entry is `apps/operator/bin/serve.ts` — the headless
+# operator orchestrator that ALSO owns embedded Postgres (start, migrations,
+# ~/.papercusp/embedded-pg.json) and writes ~/.papercusp/operator.json
+# discovery. This script `vite build`s the SPA and esbuild-bundles serve into
 # papercusp-desktop/src-tauri/sidecar/, which Tauri's bundler picks up as a
 # resource (declared in tauri.conf.json `resources`). Tauri main.rs spawns
-# `node sidecar/host.cjs`.
+# `node sidecar/serve.mjs --ensure`.
 #
-# The bundled sidecar is self-contained: host.cjs has every inlinable module
-# bundled in; only genuinely-native deps (node-pty) ship as node_modules.
+# The bundled sidecar is self-contained: serve.mjs has every inlinable module
+# bundled in; only genuinely-native deps (node-pty, the holepunch stack) and
+# the embedded-postgres-server package (PG binaries resolve off its real
+# package dir) ship as node_modules.
 
 set -euo pipefail
 
@@ -33,7 +38,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PAPERCUP_ROOT="${PAPERCUP_ROOT:-$ROOT/../papercup}"
+PAPERCUP_ROOT="${PAPERCUP_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$PAPERCUP_ROOT/libs/papercusp}"
 WEB_DIR="$PAPERCUP_ROOT/apps/operator"
 SIDECAR_DIR="$ROOT/src-tauri/sidecar"
@@ -58,9 +63,10 @@ fi
 #
 #   1. installs operator + operator-vite deps,
 #   2. `vite build`s the SPA → apps/operator-vite/dist/,
-#   3. esbuild-bundles the Hono host into one CJS file (sidecar/host.cjs),
-#   4. copies the SPA, the Starlight docs, operator prompts, and the one
-#      externalized native dep (node-pty) into the sidecar.
+#   3. esbuild-bundles the serve entry into one ESM file (sidecar/serve.mjs),
+#   4. copies the SPA, the Starlight docs, operator prompts, and the
+#      externalized native deps (node-pty, embedded-postgres-server, …)
+#      into the sidecar.
 #
 # Why esbuild and not a node_modules copy: the monorepo hoists deps to the
 # repo-root node_modules, so `cp apps/operator/node_modules` would miss
@@ -110,7 +116,15 @@ echo "→ clearing old sidecar at $SIDECAR_DIR"
 rm -rf "$SIDECAR_DIR"
 mkdir -p "$SIDECAR_DIR" "$SIDECAR_DIR/node_modules/@lydell"
 
-echo "→ esbuild-bundling the Hono host → $SIDECAR_DIR/host.mjs"
+echo "→ esbuild-bundling the serve entry (headless operator boot) → $SIDECAR_DIR/serve.mjs"
+# SP1 C5 (operator-core-headless-serve-2026-06-04, Decision F): the sidecar
+# entry is now `bin/serve.ts` — the self-contained operator boot that OWNS
+# embedded-PG (start, migrations, embedded-pg.json) and writes operator.json
+# discovery. The Rust embedder spawns `serve.mjs --ensure` instead of the old
+# host.mjs + a separate embedded-postgres-server process. serve imports the
+# full host graph (host-handler/host-bootstrap), so the bundle recipe is the
+# same as the old host.mjs one.
+#
 # ESM output: the host's import graph contains `import.meta.url` (a CJS
 # bundle rejects it). ESM has no `__dirname`/`__filename`/`require`, so the
 # banner re-creates them — the standard esbuild-ESM-for-Node recipe — for
@@ -146,6 +160,28 @@ HOST_EXTERNALS=(
   --external:bufferutil
   --external:utf-8-validate
   --external:fsevents
+  # @embedded-postgres/<platform> — `embedded-postgres/dist/binary.js` does
+  # `import('@embedded-postgres/<plat>')` for EVERY platform, but only the host's
+  # own (linux-x64) is installed, so esbuild can't resolve the others and the
+  # bundle fails. Externalize ONLY the non-host platforms; linux-x64 MUST stay
+  # bundled — host.mjs imports it at runtime (the operator's embedded-PG discovery
+  # path), and externalizing it makes host.mjs crash at boot with
+  # ERR_MODULE_NOT_FOUND (it's not resolvable next to the standalone host.mjs).
+  --external:@embedded-postgres/darwin-arm64
+  --external:@embedded-postgres/darwin-x64
+  --external:@embedded-postgres/linux-arm
+  --external:@embedded-postgres/linux-arm64
+  --external:@embedded-postgres/linux-ia32
+  --external:@embedded-postgres/linux-ppc64
+  --external:@embedded-postgres/windows-x64
+  # SP1 C5: serve starts embedded PG IN-PROCESS via this package. It must be
+  # externalized — its PG binary paths resolve off the real package dir
+  # (@embedded-postgres/<plat>/dist/index.js uses import.meta.url), which an
+  # inlined bundle would break. The real package (with its node_modules incl.
+  # the platform binaries) ships at sidecar/node_modules/@papercusp/
+  # embedded-postgres-server below, where bare-specifier resolution from
+  # serve.mjs finds it.
+  --external:@papercusp/embedded-postgres-server
 )
 for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # esbuild pinned to 0.25.x — the repo's hoisted esbuild is 0.17.x, which
@@ -154,13 +190,13 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # bundles the full host graph clean (17.5MB host.mjs, valid ESM) with the
 # externals below — esbuild inlines workspace + hoisted deps alike, so the
 # monorepo dep-hoist is a non-issue.
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/hono-host.ts \
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
-  --outfile="$SIDECAR_DIR/host.mjs" \
+  --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
   "${HOST_EXTERNALS[@]}")
-if [[ ! -f "$SIDECAR_DIR/host.mjs" ]]; then
-  echo "ERROR: esbuild did not produce $SIDECAR_DIR/host.mjs"
+if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
+  echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
   exit 1
 fi
 
@@ -334,13 +370,49 @@ for required in prompts templates; do
 done
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
-# Bundle the embedded-postgres-server (real PG with logical replication
-# enabled, so Zero / pgoutput consumers can subscribe). This is the ONLY
-# desktop DB — the legacy pglite-server fallback was removed 2026-06-01
-# (a failed embedded-PG must fail LOUD, not silently degrade to a WASM
-# single-connection engine). Tauri main spawns this and only this.
+# Bundle the @papercusp/orchestrator entry bins as self-contained esbuild .mjs,
+# shipped as a SIBLING of harness/ (sidecar/orchestrator/bin/*.mjs) — the path
+# harnessPath('../orchestrator/bin/...') + the preflight harness check resolve to.
+# The DBOS orchestrator-runner spawns invoke-once as a SEPARATE `node` process;
+# bundling it self-contained means no tsx + no node_modules dep tree on disk
+# (mirrors the host.mjs approach). harness-paths.ts prefers the .mjs when present.
+ORCH_SRC="$PAPERCUSP_ROOT/packages/orchestrator"
+ORCH_DST="$SIDECAR_DIR/orchestrator"
+echo "→ esbuild-bundling orchestrator bins from $ORCH_SRC"
+if [[ ! -d "$ORCH_SRC/bin" ]]; then
+  echo "ERROR: orchestrator package not found at $ORCH_SRC"
+  exit 1
+fi
+mkdir -p "$ORCH_DST/bin"
+for b in invoke-once run assemble-prompt get-plan-context; do
+  if [[ -f "$ORCH_SRC/bin/$b.ts" ]]; then
+    (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
+      --bundle --platform=node --format=esm --target=node22 \
+      --outfile="$ORCH_DST/bin/$b.mjs")
+  fi
+done
+# Minimal package.json so the dir is a resolvable @papercusp/orchestrator root.
+cat > "$ORCH_DST/package.json" <<'JSON'
+{ "name": "@papercusp/orchestrator", "version": "0.0.1", "private": true, "type": "module" }
+JSON
+if [[ ! -f "$ORCH_DST/bin/invoke-once.mjs" ]]; then
+  echo "ERROR: orchestrator invoke-once.mjs not produced at $ORCH_DST/bin"
+  exit 1
+fi
+echo "  ✓ orchestrator bins bundled → $ORCH_DST/bin"
+
+# Bundle the embedded-postgres-server package (real PG with logical
+# replication enabled). This is the ONLY desktop DB — the legacy
+# pglite-server fallback was removed 2026-06-01 (a failed embedded-PG must
+# fail LOUD, not silently degrade to a WASM single-connection engine).
+#
+# SP1 C5: no longer spawned as its own process — serve.mjs imports
+# `@papercusp/embedded-postgres-server` (externalized in the esbuild step
+# above) and runs PG IN-PROCESS. Shipping it under sidecar/node_modules/
+# makes the bare-specifier import resolve, and keeps the PG binary paths
+# (computed from the package's own import.meta.url) correct.
 EMBEDDED_PG_SRC="$PAPERCUSP_ROOT/packages/embedded-postgres-server"
-EMBEDDED_PG_DST="$SIDECAR_DIR/embedded-postgres-server"
+EMBEDDED_PG_DST="$SIDECAR_DIR/node_modules/@papercusp/embedded-postgres-server"
 echo "→ bundling embedded-postgres-server"
 if [[ ! -d "$EMBEDDED_PG_SRC" ]]; then
   echo "ERROR: @restart/embedded-postgres-server not found at $EMBEDDED_PG_SRC"
@@ -546,31 +618,11 @@ if ! "$SIDECAR_DIR/bin/pg_dump" --version >/dev/null 2>&1; then
 fi
 echo "  pg_dump probe: $("$SIDECAR_DIR/bin/pg_dump" --version)"
 
-# Bundle zero-cache-server (Rocicorp Zero's WebSocket sync server). Boots
-# against embedded-postgres after migrations apply, exposes WS that the
-# operator's HarnessZeroProvider connects to. Without this bundled, the
-# desktop falls back to polling — same UX as today, just slower.
-ZERO_CACHE_SRC="$PAPERCUSP_ROOT/packages/zero-cache-server"
-ZERO_CACHE_DST="$SIDECAR_DIR/zero-cache-server"
-echo "→ bundling zero-cache-server"
-if [[ ! -d "$ZERO_CACHE_SRC" ]]; then
-  echo "ERROR: @restart/zero-cache-server not found at $ZERO_CACHE_SRC"
-  exit 1
-fi
-mkdir -p "$ZERO_CACHE_DST"
-cp "$ZERO_CACHE_SRC/package.json" "$ZERO_CACHE_DST/"
-cp -a "$ZERO_CACHE_SRC/src" "$ZERO_CACHE_DST/"
-cp -a "$ZERO_CACHE_SRC/bin" "$ZERO_CACHE_DST/"
-chmod +x "$ZERO_CACHE_DST/bin/zero-cache-server.mjs"
-echo "→ installing zero-cache-server runtime deps (~50MB @rocicorp/zero)"
-( cd "$ZERO_CACHE_DST" && npm install --omit=dev --no-workspaces --legacy-peer-deps --silent ) || {
-  echo "ERROR: failed to install zero-cache-server runtime deps"
-  exit 1
-}
-if [[ ! -x "$ZERO_CACHE_DST/node_modules/.bin/zero-cache" ]]; then
-  echo "ERROR: bundled zero-cache binary missing"
-  exit 1
-fi
+# NOTE: zero-cache-server is no longer bundled (SP1 C5, 2026-06-06). The
+# legacy opt-in spawn (PAPERCUSP_USE_ZERO_CACHE=1) was removed from the Rust
+# embedder along with the rest of its PG/sidecar process management — the
+# operator's /api/zero-harness/sse path (PG LISTEN/NOTIFY) replaced the Zero
+# WS transport on desktop back on 2026-05-07. Saves ~50MB of bundle.
 
 # NOTE: the legacy pglite-server is no longer bundled (removed 2026-06-01).
 # embedded-postgres-server is the only desktop DB. A failed embedded-PG must
@@ -630,8 +682,8 @@ for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
 done
 
 # Bundle the framework DDL files so embedded-PG first-boot init can find
-# them at runtime. The Tauri main passes this dir to embedded-postgres-server
-# (PAPERCUSP_DB_SQL_DIR) which applies the schema on first boot.
+# them at runtime. The Tauri main passes this dir to serve.mjs
+# (PAPERCUSP_PG_SQL_DIR) which applies the schema on first boot.
 echo "→ bundling framework DDL"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"

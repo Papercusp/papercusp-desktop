@@ -31,7 +31,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PREVIEW_PORT="${PREVIEW_PORT:-4173}"
-OPERATOR_VITE_DIR="${OPERATOR_VITE_DIR:-../papercup/apps/operator-vite}"
+OPERATOR_VITE_DIR="${OPERATOR_VITE_DIR:-../apps/operator-vite}"
 
 # Confirm the prod bundle exists; if not, build it once (no watcher).
 if [[ ! -f "$OPERATOR_VITE_DIR/dist/index.html" ]]; then

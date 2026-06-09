@@ -32,7 +32,7 @@
 
 use std::sync::Mutex;
 
-const HONEYCOMB_TERMINAL_BG: &str = "#050505";
+const BLUE_FROST_TERMINAL_BG: &str = "#07101d";
 
 // ───────────────────────────────────────────────────────────────────────────
 // P-001 — runtime session detection + strategy selection (pure, testable)
@@ -549,7 +549,7 @@ pub struct GhosttySpec {
     pub class: String,
     /// WM_CLASS *instance* — unique so we can find the window deterministically.
     pub instance: String,
-    /// Background hex (e.g. "#050505"), matched to the GUI theme so there's no
+    /// Background hex (e.g. "#07101d"), matched to the GUI theme so there's no
     /// visual seam.
     pub background: String,
     /// The command Ghostty hosts. Normally `["pui", "chat"]` (the chat dock).
@@ -568,7 +568,7 @@ impl GhosttySpec {
         let class = std::env::var("PAPERCUSP_NATIVE_TERMINAL_CLASS")
             .unwrap_or_else(|_| "com.papercusp.desktop".to_string());
         let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG")
-            .unwrap_or_else(|_| HONEYCOMB_TERMINAL_BG.to_string());
+            .unwrap_or_else(|_| BLUE_FROST_TERMINAL_BG.to_string());
         let bin = std::env::var("PAPERCUSP_GHOSTTY_BIN").unwrap_or_else(|_| "ghostty".to_string());
         let command = match std::env::var("PAPERCUSP_NATIVE_TERMINAL_CMD") {
             Ok(s) if !s.trim().is_empty() => {
@@ -1283,9 +1283,9 @@ pub mod vte_embed {
         // Match the GUI theme (no visual seam — P-004's theming goal).
         if let (Some(set_colors), Some(bg)) = (vte.set_colors, parse_hex_rgba(background)) {
             let fg = GdkRgba {
-                red: 0xff as f64 / 255.0,
+                red: 0xe7 as f64 / 255.0,
                 green: 0xf7 as f64 / 255.0,
-                blue: 0xdf as f64 / 255.0,
+                blue: 0xff as f64 / 255.0,
                 alpha: 1.0,
             };
             // SAFETY: valid terminal pointer + stack GdkRGBAs; null palette is allowed.
@@ -1923,10 +1923,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn vte_hex_parsing_and_split_position() {
-        let bg = vte_embed::parse_hex_rgba(HONEYCOMB_TERMINAL_BG).expect("valid hex");
-        assert!((bg.red - 0x05 as f64 / 255.0).abs() < 1e-9);
-        assert!((bg.green - 0x05 as f64 / 255.0).abs() < 1e-9);
-        assert!((bg.blue - 0x05 as f64 / 255.0).abs() < 1e-9);
+        let bg = vte_embed::parse_hex_rgba(BLUE_FROST_TERMINAL_BG).expect("valid hex");
+        assert!((bg.red - 0x07 as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.green - 0x10 as f64 / 255.0).abs() < 1e-9);
+        assert!((bg.blue - 0x1d as f64 / 255.0).abs() < 1e-9);
         assert_eq!(bg.alpha, 1.0);
         assert!(vte_embed::parse_hex_rgba("nope").is_none());
         assert!(vte_embed::parse_hex_rgba("#28c3").is_none());
@@ -2257,7 +2257,7 @@ mod tests {
         let spec = GhosttySpec {
             class: "com.papercusp.desktop".into(),
             instance: "papercusp-terminal".into(),
-            background: HONEYCOMB_TERMINAL_BG.into(),
+            background: BLUE_FROST_TERMINAL_BG.into(),
             command: vec!["pui".into(), "chat".into()],
             bin: "ghostty".into(),
         };
@@ -2266,7 +2266,7 @@ mod tests {
         assert!(argv.contains(&"--x11-instance-name=papercusp-terminal".to_string()));
         assert!(argv.contains(&"--window-decoration=false".to_string()));
         assert!(argv.contains(&"--gtk-single-instance=false".to_string()));
-        assert!(argv.contains(&format!("--background={HONEYCOMB_TERMINAL_BG}")));
+        assert!(argv.contains(&format!("--background={BLUE_FROST_TERMINAL_BG}")));
         // `-e` must be present and everything after it is the hosted command,
         // in order, at the very end.
         let e = argv.iter().position(|a| a == "-e").expect("missing -e");

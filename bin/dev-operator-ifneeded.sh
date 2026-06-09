@@ -32,4 +32,4 @@ if in_use; then
 fi
 
 echo "[tauri] starting operator dev server on :$PORT"
-exec npm --prefix ../papercup run dev:operator
+exec npm --prefix .. run dev:operator
