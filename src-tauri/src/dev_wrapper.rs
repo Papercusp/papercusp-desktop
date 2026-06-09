@@ -157,8 +157,14 @@ fn ipc_owner_checkout() -> Option<String> {
     let txt = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let pid = v.get("pid")?.as_u64()?;
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-    Some(ipc_owner_label(&cwd.to_string_lossy()))
+    match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        Ok(cwd) => Some(ipc_owner_label(&cwd.to_string_lossy())),
+        // The writer is gone and no later operator boot re-wrote the file —
+        // the desktop's IPC reconnect dials a dead socket and degrades to
+        // the HTTP fallback. Observed live (2026-06-09): a staging restart
+        // wrote the file, died, and the NEXT staging boot left it stale.
+        Err(_) => Some(format!("STALE (writer pid {pid} gone)")),
+    }
 }
 
 /// Map an operator cwd to a human checkout label.
@@ -301,6 +307,9 @@ fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) 
     let Some(owner) = &snap.ipc_owner else {
         return (format!("{spa} · API ? (no endpoint-ipc.json)"), true);
     };
+    if owner.starts_with("STALE") {
+        return (format!("{spa} · API→{owner}"), true);
+    }
     let owner_port = ipc_owner_port(owner);
     let api_sha = owner_port
         .and_then(|p| snap.health.get(&p).and_then(|h| h.sha.clone()))
@@ -628,6 +637,15 @@ mod tests {
         // :3055 has no operator of its own; /api intentionally rides IPC.
         let (_, warn) = compose_skew(&snap(), Some(3055));
         assert!(!warn);
+    }
+
+    #[test]
+    fn stale_ipc_writer_is_flagged() {
+        let mut s = snap();
+        s.ipc_owner = Some("STALE (writer pid 2842557 gone)".into());
+        let (line, warn) = compose_skew(&s, Some(3070));
+        assert!(warn, "{line}");
+        assert!(line.contains("API→STALE"), "{line}");
     }
 
     #[test]
