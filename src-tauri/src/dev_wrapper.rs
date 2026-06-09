@@ -30,7 +30,7 @@
 //     embedded-pg.json / endpoint-ipc.json; storage-policy bootstrap
 //     exception).
 //   - Status line (P-005 / D-003): a 30s poll (named, deliberate cadence —
-//     matches VersionBadge) of GET /api/dev/git-pipeline (P-010), trying
+//     matches VersionBadge) of GET /api/desktop/git-pipeline (P-010), trying
 //     :3070 (the always-up operator) then :3170 (until the endpoint deploys
 //     to green), rendering staging/main/deployed shas + the
 //     green-checkpoint gate.
@@ -208,7 +208,7 @@ fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
         if !snap.health.get(&port).map(|h| h.reachable).unwrap_or(false) {
             continue;
         }
-        if let Some(v) = fetch_json(client, &format!("http://127.0.0.1:{port}/api/dev/git-pipeline")) {
+        if let Some(v) = fetch_json(client, &format!("http://127.0.0.1:{port}/api/desktop/git-pipeline")) {
             if v.get("gitSync").is_none() {
                 continue;
             }
