@@ -32,4 +32,10 @@ cd "$(dirname "$0")/.."
 
 # tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
 # We only override devUrl; everything else stays the same.
-exec npm run tauri -- dev --config '{"build":{"devUrl":"http://localhost:3070"}}'
+#
+# Use 127.0.0.1, NOT localhost: on a box where `localhost` resolves to IPv6
+# ::1 first (getent hosts localhost → ::1) and the :3070 operator binds IPv4
+# only (0.0.0.0), a `localhost` devUrl makes WebKitGTK hit ::1, fail, and the
+# webview reload-loops on first load before limping onto IPv4. (Same reason
+# main.rs injects the runtime base as 127.0.0.1.)
+exec npm run tauri -- dev --config '{"build":{"devUrl":"http://127.0.0.1:3070"}}'
