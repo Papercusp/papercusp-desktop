@@ -271,6 +271,18 @@ impl IpcClient {
         Ok(id)
     }
 
+    /// Drop every in-flight call registration and return the ids.
+    ///
+    /// Used on webview page (re)load: the JS context that owned the
+    /// Channels is gone, so every further `Channel::send` would eval
+    /// `runCallback` against a callback id the new page doesn't have —
+    /// the endless "[TAURI] Couldn't find callback id" console flood.
+    /// CANCELs for the returned ids must be sent separately (async) so
+    /// the server stops streaming work nobody can receive.
+    pub fn detach_all(&self) -> Vec<u64> {
+        drain_in_flight(&self.in_flight)
+    }
+
     /// Send a CANCEL for an in-flight call. The server aborts the
     /// per-call AbortController and emits a terminal ERROR. Idempotent
     /// — extra CANCELs for an already-terminated id are ignored.
@@ -282,6 +294,17 @@ impl IpcClient {
         w.write_all(&frame).await.map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// Remove every entry from the in-flight map, returning the call ids.
+/// Extracted from `IpcClient::detach_all` so it can be tested without a
+/// connected socket.
+fn drain_in_flight(in_flight: &DashMap<u64, CallSink>) -> Vec<u64> {
+    let ids: Vec<u64> = in_flight.iter().map(|e| *e.key()).collect();
+    for id in &ids {
+        in_flight.remove(id);
+    }
+    ids
 }
 
 /// Pump bytes off the read half, decode frames, dispatch to Channels.
@@ -444,6 +467,40 @@ impl IpcClientHandle {
             None => Ok(()),
         }
     }
+
+    /// Flush every in-flight call because the webview is (re)loading.
+    ///
+    /// The old page's JS context owned all the Channels; after a reload the
+    /// reader loop would keep fanning server stream frames (sync SSE, log
+    /// tails, heartbeats, …) into dead callbacks forever — each send evals
+    /// `runCallback(<stale id>)` and floods the console with
+    /// "[TAURI] Couldn't find callback id". Detach synchronously (so the new
+    /// page's first invoke can't be swept up), then CANCEL server-side in the
+    /// background so the operator stops streaming work nobody receives.
+    pub fn flush_for_page_load(&self) {
+        let client = match self.client.try_lock() {
+            Ok(guard) => guard.as_ref().cloned(),
+            // The lock is only held across (re)connects and brief
+            // invoke/cancel forwarding; a client mid-(re)connect is brand
+            // new and owns no stale calls. Skipping is safe either way —
+            // worst case the flood resumes until the next reload.
+            Err(_) => None,
+        };
+        let Some(c) = client else { return };
+        let ids = c.detach_all();
+        if ids.is_empty() {
+            return;
+        }
+        println!(
+            "[endpoint_ipc] webview (re)load — cancelled {} stale in-flight call(s)",
+            ids.len()
+        );
+        tauri::async_runtime::spawn(async move {
+            for id in ids {
+                let _ = c.cancel(id).await;
+            }
+        });
+    }
 }
 
 /// Tauri command — invoked from the webview. The wire shape mirrors
@@ -530,6 +587,27 @@ mod tests {
                 BackpressureDecision::Drop,
             );
         }
+    }
+
+    #[test]
+    fn drain_in_flight_empties_map_and_returns_ids() {
+        let map: DashMap<u64, CallSink> = DashMap::new();
+        for id in [3u64, 7, 11] {
+            map.insert(
+                id,
+                CallSink {
+                    channel: Channel::new(|_| Ok(())),
+                    events_sent: AtomicU64::new(0),
+                    overflowed: AtomicBool::new(false),
+                },
+            );
+        }
+        let mut ids = drain_in_flight(&map);
+        ids.sort_unstable();
+        assert_eq!(ids, vec![3, 7, 11]);
+        assert!(map.is_empty());
+        // Idempotent on an empty map.
+        assert!(drain_in_flight(&map).is_empty());
     }
 
     #[test]

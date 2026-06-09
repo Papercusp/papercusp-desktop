@@ -1168,6 +1168,21 @@ pub fn run() {
     builder
         .invoke_handler(specta_builder.invoke_handler())
         .manage(state)
+        // A page (re)load (Ctrl+R, Vite full-reload, navigation) destroys the
+        // JS context that owns every in-flight endpoint-IPC Channel, but the
+        // Rust-side registrations survive — the reader loop would keep
+        // fanning server stream frames into dead callbacks forever, flooding
+        // the console with "[TAURI] Couldn't find callback id" warnings.
+        // Flush at Started, before the new page registers any calls.
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(handle) =
+                    webview.try_state::<std::sync::Arc<endpoint_ipc::IpcClientHandle>>()
+                {
+                    handle.flush_for_page_load();
+                }
+            }
+        })
         .setup(|app| {
             let is_dev = cfg!(debug_assertions);
 
