@@ -160,6 +160,12 @@ HOST_EXTERNALS=(
   --external:bufferutil
   --external:utf-8-validate
   --external:fsevents
+  # cpu-features — OPTIONAL native dep of ssh2 (required inside try/catch; ssh2
+  # falls back cleanly when the require fails). Its build/Release/*.node binding
+  # comes and goes with node_modules churn (node-gyp can't rebuild it under
+  # modern Python — distutils removed), so bundling it makes the sidecar build
+  # flaky. Externalize: present → loads; absent → ssh2's catch handles it.
+  --external:cpu-features
   # @embedded-postgres/<platform> — `embedded-postgres/dist/binary.js` does
   # `import('@embedded-postgres/<plat>')` for EVERY platform, but only the host's
   # own (linux-x64) is installed, so esbuild can't resolve the others and the

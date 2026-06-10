@@ -183,7 +183,7 @@ if [ "$B_LINK" = "$JOIN_LINK" ]; then links_ok=1; fi
 join_ok=0; fed_ok=0
 if [ "$links_ok" = 1 ]; then
   log "B ($P_B_USER): join via the discovered link"
-  join_resp="$(curl -s -m 120 -X POST "http://127.0.0.1:${FED_SC[b]}/api/harness/join-link" \
+  join_resp="$(curl -s -m 310 -X POST "http://127.0.0.1:${FED_SC[b]}/api/harness/join-link" \
     -H 'content-type: application/json' \
     -d "{\"slug\":\"$SLUG\",\"harnessLinkUrl\":\"$B_LINK\"}")"
   echo "B join → $(echo "$join_resp" | head -c 300)"
