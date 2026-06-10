@@ -54,6 +54,27 @@ if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   exit 1
 fi
 
+# ── EI-160: no concurrent-build clobber (P-056) ─────────────────────────────
+# Two builds racing into the same live SIDECAR_DIR used to interleave
+# rm -rf/cp — a reader (a running `tauri dev`, the federation smoke rigs)
+# caught mid-swap saw a half-written bundle, and a second builder could
+# truncate binaries the first was still copying. Serialize whole builds with
+# flock, build into a temp sibling, and publish with an atomic rename at the
+# very end so readers only ever see the complete old tree or the complete
+# new tree.
+SIDECAR_FINAL_DIR="$SIDECAR_DIR"
+SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
+mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
+exec 9>"$SIDECAR_FINAL_DIR.lock"
+if ! flock -n 9; then
+  echo "→ another build-desktop-sidecar.sh holds $SIDECAR_FINAL_DIR.lock — waiting for it"
+  flock 9
+fi
+SIDECAR_DIR="$SIDECAR_TMP_DIR"
+# Clean the temp tree on any exit; after the publish rename it no longer
+# exists and this is a no-op.
+trap 'rm -rf "$SIDECAR_TMP_DIR"' EXIT
+
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
 # Next.js app — it is the Vite SPA (apps/operator-vite) served, together
@@ -112,7 +133,7 @@ if [[ ! -f "$VITE_DIR/dist/index.html" ]]; then
   exit 1
 fi
 
-echo "→ clearing old sidecar at $SIDECAR_DIR"
+echo "→ building sidecar into $SIDECAR_DIR (atomic publish to $SIDECAR_FINAL_DIR at the end)"
 rm -rf "$SIDECAR_DIR"
 mkdir -p "$SIDECAR_DIR" "$SIDECAR_DIR/node_modules/@lydell"
 
@@ -466,10 +487,10 @@ for _pg_bin_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/b
     fi
     if [[ ! -s "$_bin_path" ]]; then
       echo "ERROR: bundled embedded-PG binary is 0 bytes: $_bin_path"
-      echo "  An empty binary means a concurrent/interrupted build or a botched"
-      echo "  copy truncated it. Re-run this build with NO other build of the"
-      echo "  same sidecar dir running in parallel ('rm -rf \$SIDECAR_DIR' at the"
-      echo "  top is not concurrency-safe). Refusing to ship a broken Postgres."
+      echo "  An empty binary means an interrupted build or a botched copy"
+      echo "  truncated it. (Concurrent builds are flock-serialized and publish"
+      echo "  atomically since P-056, so a parallel build should no longer be"
+      echo "  the cause.) Refusing to ship a broken Postgres."
       exit 1
     fi
     if [[ ! -x "$_bin_path" ]]; then
@@ -1060,6 +1081,11 @@ if [[ -n "${PAPERCUSP_SEED_PG_URL:-}" ]]; then
     rm -f "$SIDECAR_DIR/seed.dump"
   fi
 else
+  # The temp build dir never carries a prior seed — pull it forward from
+  # the last PUBLISHED bundle when present (the cross-platform bake flow).
+  if [[ -f "$SIDECAR_FINAL_DIR/seed.dump" && ! -f "$SIDECAR_DIR/seed.dump" ]]; then
+    cp -a "$SIDECAR_FINAL_DIR/seed.dump" "$SIDECAR_DIR/seed.dump"
+  fi
   if [[ -f "$SIDECAR_DIR/seed.dump" ]]; then
     seed_size=$(du -h "$SIDECAR_DIR/seed.dump" | awk '{print $1}')
     echo "→ no PAPERCUSP_SEED_PG_URL set; reusing existing seed.dump ($seed_size)"
@@ -1069,6 +1095,19 @@ else
     echo "→ no PAPERCUSP_SEED_PG_URL set and no existing seed.dump; bundle will boot empty"
   fi
 fi
+
+# ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
+# Retire the old bundle via rename, rename the temp build into place, then
+# delete the retired tree. Renames on one filesystem are atomic, so a
+# concurrent reader sees only complete-old or complete-new — never the
+# half-written dir the old in-place rm -rf/cp produced.
+OLD_DIR="$SIDECAR_FINAL_DIR.old.$$"
+if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
+  mv -T "$SIDECAR_FINAL_DIR" "$OLD_DIR"
+fi
+mv -T "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
+rm -rf "$OLD_DIR"
+SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
