@@ -426,7 +426,13 @@ pub fn __dev_bridge_result(
     value: serde_json::Value,
     state: tauri::State<'_, Arc<PendingResults>>,
 ) {
-    let mut results = state.results.lock().unwrap();
+    // Poison recovery (P-057): a panicking bridge thread poisons this mutex;
+    // the map itself can't be torn by a panic between insert/notify, so
+    // recover the guard instead of letting every later eval result die.
+    let mut results = state
+        .results
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     results.insert(id, value);
     state.notify.notify_all();
 }
@@ -510,6 +516,14 @@ pub fn start_bridge(
         // Keep _guard alive for the lifetime of the server thread
         let _cleanup = _guard;
 
+        // Survive handler panics (P-057): a panic anywhere in the
+        // per-request handling used to unwind this whole thread, silently
+        // killing the bridge for the rest of the session. Catch, log, and
+        // re-enter the accept loop — `server` outlives the iterator, so
+        // incoming_requests() can simply be called again. (The for-body
+        // keeps its original indentation; only the wrapper is new.)
+        loop {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for mut request in server.incoming_requests() {
             let is_post = request.method().as_str() == "POST";
             let url = request.url().to_string();
@@ -779,8 +793,14 @@ pub fn start_bridge(
 
                 let _ = window.eval(&callback_js);
 
-                // Wait for the result with a 5-second timeout
-                let mut results = pending.results.lock().unwrap();
+                // Wait for the result with a 5-second timeout. Poison
+                // recovery on both the lock and the Condvar wait (P-057):
+                // one panicked handler must not silently kill eval for the
+                // rest of the session.
+                let mut results = pending
+                    .results
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let deadline = std::time::Duration::from_secs(5);
                 let start = std::time::Instant::now();
 
@@ -806,8 +826,10 @@ pub fn start_bridge(
                     }
 
                     let remaining = deadline - elapsed;
-                    let (guard, timeout_result) =
-                        pending.notify.wait_timeout(results, remaining).unwrap();
+                    let (guard, timeout_result) = pending
+                        .notify
+                        .wait_timeout(results, remaining)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     results = guard;
 
                     if timeout_result.timed_out() && !results.contains_key(&request_id) {
@@ -826,6 +848,18 @@ pub fn start_bridge(
                 let header = Header::from_bytes("Content-Type", "application/json").unwrap();
                 let _ = request.respond(Response::from_string(json).with_header(header));
             }
+        }
+        }));
+        match outcome {
+            // incoming_requests() drained — the server socket closed; end
+            // the thread for real.
+            Ok(()) => break,
+            Err(_) => {
+                eprintln!(
+                    "[dev-bridge] request handler panicked — recovering; the bridge stays up"
+                );
+            }
+        }
         }
     });
 

@@ -42,7 +42,7 @@ mod wsl_setup;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent};
 
 /// Minimal RFC 3986 percent-encoding for the path component. Only the
 /// reserved + unsafe set; we avoid pulling in a full url crate dep just
@@ -73,6 +73,11 @@ struct SidecarState {
     /// runBootstrap inside serve). None when IPC is disabled or discovery
     /// hadn't completed yet.
     endpoint_ipc_socket: Mutex<Option<String>>,
+    /// One-shot guard for the exit teardown (P-051): ExitRequested AND Exit
+    /// both fire on a normal quit, and each used to run the full
+    /// terminal+sidecar teardown again. `shutdown_children_once` swaps this
+    /// to make the teardown idempotent.
+    shutdown_done: std::sync::atomic::AtomicBool,
 }
 
 /// Spawn the bundled code-server (vscode-in-the-browser). The
@@ -127,6 +132,7 @@ fn spawn_code_server(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    isolate_process_group(&mut cmd);
     match cmd.spawn() {
         Ok(child) => Some((child, format!("http://127.0.0.1:{}", port))),
         Err(e) => {
@@ -138,6 +144,23 @@ fn spawn_code_server(
 
 fn find_free_port() -> Option<u16> {
     portpicker::pick_unused_port()
+}
+
+/// (P-055) Put a child in its own Windows process group so graceful_kill's
+/// CTRL_BREAK_EVENT targets that child's group instead of ours (without
+/// CREATE_NEW_PROCESS_GROUP the pid isn't a group id and the event would
+/// fan out to our whole console group, including this process). No-op on
+/// non-Windows.
+fn isolate_process_group(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
 }
 
 /// Pull the `socketPath` field out of the dev discovery JSON
@@ -359,6 +382,41 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod discovery_tests {
+    use super::parse_operator_discovery;
+
+    #[test]
+    fn parses_valid_payload() {
+        let d = parse_operator_discovery(r#"{"port":3070,"pid":1234}"#).unwrap();
+        assert_eq!(d.port, 3070);
+        assert_eq!(d.pid, 1234);
+    }
+
+    #[test]
+    fn tolerates_extra_fields() {
+        assert!(
+            parse_operator_discovery(r#"{"port":1,"pid":2,"startedAt":"2026-06-10"}"#).is_some()
+        );
+    }
+
+    #[test]
+    fn rejects_zero_port_or_pid() {
+        // A half-written discovery file must read as "not ready", never as
+        // a connect target.
+        assert!(parse_operator_discovery(r#"{"port":0,"pid":12}"#).is_none());
+        assert!(parse_operator_discovery(r#"{"port":3070,"pid":0}"#).is_none());
+    }
+
+    #[test]
+    fn rejects_garbage_and_missing_fields() {
+        assert!(parse_operator_discovery("not json").is_none());
+        assert!(parse_operator_discovery("{}").is_none());
+        assert!(parse_operator_discovery(r#"{"port":3070}"#).is_none());
+        assert!(parse_operator_discovery(r#"{"pid":3070}"#).is_none());
+    }
+}
+
 /// Build the Command that actually runs the sidecar. On Windows with
 /// WSL Ready we wrap node in `wsl.exe --distribution papercup-runtime
 /// --cd <wsl-cwd> --exec node …`. Otherwise we run node natively.
@@ -391,6 +449,7 @@ fn make_sidecar_command(
                     &preload_wsl,
                     &server_js_wsl,
                 ]);
+            isolate_process_group(&mut cmd);
             return cmd;
         }
         #[cfg(not(target_os = "windows"))]
@@ -404,6 +463,7 @@ fn make_sidecar_command(
         .arg(preload)
         .arg(server_js)
         .current_dir(sidecar_dir);
+    isolate_process_group(&mut cmd);
     cmd
 }
 
@@ -416,17 +476,23 @@ struct OperatorDiscovery {
     pid: u32,
 }
 
-/// Parse `<home>/.papercusp/operator.json`, or None.
-fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorDiscovery> {
-    let path = workspace_home.join(".papercusp/operator.json");
-    let txt = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+/// Parse the operator.json discovery payload, or None. Factored from the
+/// file read so the validation (port/pid present and nonzero) is unit-tested.
+fn parse_operator_discovery(txt: &str) -> Option<OperatorDiscovery> {
+    let v: serde_json::Value = serde_json::from_str(txt).ok()?;
     let port = v.get("port")?.as_u64()? as u16;
     let pid = v.get("pid")?.as_u64()? as u32;
     if port == 0 || pid == 0 {
         return None;
     }
     Some(OperatorDiscovery { port, pid })
+}
+
+/// Parse `<home>/.papercusp/operator.json`, or None.
+fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorDiscovery> {
+    let path = workspace_home.join(".papercusp/operator.json");
+    let txt = std::fs::read_to_string(path).ok()?;
+    parse_operator_discovery(&txt)
 }
 
 /// Liveness probe for a discovery-file pid (signal-0 equivalent: /proc on
@@ -448,25 +514,181 @@ fn discovery_pid_alive(pid: u32) -> bool {
 }
 
 /// Poll operator.json until it names a live, reachable operator (pid alive +
-/// TCP accept), or time out. This is the embedder's whole boot wait: serve
-/// owns PG startup + migrations + host boot internally, so first boot
-/// (initdb + full migration replay) can legitimately take a while.
+/// TCP accept), the serve child dies, or the timeout lapses. This is the
+/// embedder's whole boot wait: serve owns PG startup + migrations + host
+/// boot internally, so first boot (initdb + full migration replay) can
+/// legitimately take a while.
+///
+/// (P-053) Runs on the finish_boot worker thread — NEVER on the Tauri
+/// setup/main thread, where this poll used to freeze the unpainted window
+/// for up to 120s (macOS unresponsive-app watchdog risk).
 fn wait_for_operator(
+    app_handle: &tauri::AppHandle,
     workspace_home: &std::path::Path,
     timeout: Duration,
-) -> Option<OperatorDiscovery> {
+) -> Result<OperatorDiscovery, String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
         if let Some(d) = read_operator_discovery(workspace_home) {
             if discovery_pid_alive(d.pid)
                 && std::net::TcpStream::connect(format!("127.0.0.1:{}", d.port)).is_ok()
             {
-                return Some(d);
+                return Ok(d);
+            }
+        }
+        // Fail fast when serve died with an error — no point burning the
+        // full timeout polling for a discovery file that will never appear.
+        // A SUCCESS exit is different: `serve --ensure` exits 0 after
+        // reusing an already-running operator (Decision C), so keep polling
+        // for that operator's discovery file.
+        {
+            let state: tauri::State<SidecarState> = app_handle.state();
+            let mut guard = state.child.lock().unwrap();
+            if let Some(child) = guard.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    if !status.success() {
+                        return Err(format!(
+                            "the operator process (serve.mjs) exited with {} before becoming \
+                             ready — check the serve boot logs above",
+                            status
+                        ));
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    None
+    Err(format!(
+        "operator did not become ready within {}s (no live operator.json under {}/.papercusp). \
+         Embedded-PG initdb/migrations are the usual first-boot suspects — check the serve logs.",
+        timeout.as_secs(),
+        workspace_home.display()
+    ))
+}
+
+/// Everything that used to run synchronously in setup() after spawning serve
+/// (P-053): wait for discovery, record the port, wire endpoint-IPC, and feed
+/// the bootstrap page its base — or a visible failure state. Runs on a worker
+/// thread so the main thread reaches the event loop immediately and the
+/// window paints the bootstrap page while serve boots.
+fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf) {
+    let discovery =
+        match wait_for_operator(&app_handle, &workspace_home, Duration::from_secs(120)) {
+            Ok(d) => d,
+            Err(reason) => {
+                eprintln!("[papercusp-desktop] FATAL: {}", reason);
+                // Surface the failure ON the bootstrap page — web/index.html
+                // renders window.__papercuspBootError as a terminal error
+                // state instead of spinning forever. Re-eval for a while:
+                // the page may still be mid-load when this fires (same
+                // re-eval rationale as the success inject below).
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let inject = format!(
+                        "window.__papercuspBootError = {}; window.dispatchEvent(new CustomEvent('papercusp:boot-error'));",
+                        serde_json::to_string(&reason)
+                            .unwrap_or_else(|_| "\"operator boot failed\"".to_string())
+                    );
+                    for _ in 0..20 {
+                        let _ = window.eval(&inject);
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                }
+                return;
+            }
+        };
+    // The REAL port comes from discovery — `serve --ensure` may have reused
+    // an already-running operator on a different port than our cold-start
+    // hint.
+    let port = discovery.port;
+    {
+        let state: tauri::State<SidecarState> = app_handle.state();
+        *state.port.lock().unwrap() = Some(port);
+    }
+    println!(
+        "[papercusp-desktop] operator ready on :{} (pid {})",
+        port, discovery.pid
+    );
+
+    // Endpoint-IPC: runBootstrap inside serve starts the IPC server and
+    // writes ~/.papercusp/endpoint-ipc.json (the discovery file also covers
+    // the --ensure reuse case, where there is no fresh child stdout to
+    // parse). Manage a reconnecting handle whose socket source re-reads the
+    // file — same pattern as the dev branch — and warm it in the background.
+    // If the socket never appears, /api falls back to HTTP (ipcFetch
+    // polyfill).
+    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
+    if ipc_enabled {
+        let disc = workspace_home.join(".papercusp/endpoint-ipc.json");
+        let disc_src = disc.clone();
+        let handle = endpoint_ipc::IpcClientHandle::new(move || {
+            read_dev_ipc_socket(&disc_src).map(std::path::PathBuf::from)
+        });
+        app_handle.manage(handle.clone());
+        let ipc_app_handle = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            for _ in 0..120 {
+                if handle.warm().await.is_ok() {
+                    println!(
+                        "[papercusp-desktop] endpoint-ipc client connected (discovery file)"
+                    );
+                    if let Some(path) = read_dev_ipc_socket(&disc) {
+                        let state: tauri::State<SidecarState> = ipc_app_handle.state();
+                        *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            eprintln!(
+                "[papercusp-desktop] endpoint-ipc: no socket after 60s — /api stays on HTTP this session"
+            );
+        });
+    }
+
+    // Tell the bootstrap page where the sidecar is. The JS in web/index.html
+    // will poll /api/desktop/preflight on that base, render any
+    // missing-prereq UI, then navigate when ready.
+    if let Some(window) = app_handle.get_webview_window("main") {
+        // Use 127.0.0.1, not localhost: WebKitGTK may resolve `localhost`
+        // to ::1 while the sidecar binds IPv4 loopback, which fails the
+        // bootstrap's preflight fetch.
+        let base = format!("http://127.0.0.1:{}", port);
+        // Phase 4: the bootstrap polls preflight over `base` (HTTP — it's a
+        // transient pre-app page) but navigates the real app to `app_base`.
+        // With the custom protocol on (default), that's
+        // `papercusp://localhost`, so the operator SPA loads off HTTP; with
+        // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 it's the HTTP `base`.
+        let app_base = if custom_protocol::enabled() {
+            custom_protocol::APP_ORIGIN.to_string()
+        } else {
+            base.clone()
+        };
+        // WebKitGTK denies getUserMedia by default; auto-grant so voice /
+        // wake-word / elevenlabs work in the shipped build the same way they
+        // do in browsers.
+        #[cfg(target_os = "linux")]
+        grant_media_permission(&window);
+        // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty path
+        // (Tauri invoke + events) instead of the operator's HTTP+WS bridge.
+        // See apps/operator/lib/pty-tauri.ts and
+        // apps/operator/app/harness/PiPanel.tsx.
+        //
+        // The bootstrap page may (re)load at any point around this thread's
+        // timing, and a single eval can land on a document that a page-load
+        // then replaces, dropping __papercuspBase — the bootstrap would then
+        // poll for a port that never arrives. Re-eval on a short timer so
+        // whichever document is live when the page is ready receives the
+        // port. (web/index.html's tick() polls window.__papercuspBase, so a
+        // late set is picked up.)
+        let inject = format!(
+            "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
+            base, app_base
+        );
+        for _ in 0..30 {
+            let _ = window.eval(&inject);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
 }
 
 /// Spawn the bundled `serve.mjs --ensure` (SP1 C5). serve owns embedded-PG +
@@ -629,15 +851,26 @@ struct UpdateInfo {
 ///      to drive which channel's release is served, without baking the
 ///      channel into compile-time config.
 ///
+/// (P-052) `tauri.conf.json` therefore ships NO static `endpoints` entry:
+/// the old baked URL (`https://127.0.0.1:3055/...`) could never work — TLS
+/// against a plain-HTTP port the packaged sidecar doesn't even use — so
+/// every plugin-driven background check failed. The conf keeps
+/// `dangerousInsecureTransportProtocol: true` so the loopback-http URL built
+/// here passes the updater's release-build https validation (loopback-only,
+/// no transport exposure).
+///
 /// The operator route at `/api/updates/manifest` handles channel
 /// resolution: query-param wins, then stored preference, then 'stable'.
 /// Tauri substitutes `{{target}}`, `{{arch}}`, and `{{current_version}}`
 /// when it issues the GET.
 fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
     let port: u16 = if cfg!(debug_assertions) {
-        // Dev: webview points at devUrl in tauri.conf.json (localhost:3055).
-        // No sidecar process to read a port from.
-        3055
+        // Dev: no sidecar process to read a port from — follow the operator
+        // the desktop currently targets (devUrl is :3070; the dev wrapper's
+        // build switcher retargets SELECTED_API_PORT per selected build,
+        // EI-190). The old hardcoded 3055 pointed at Vite, which doesn't
+        // serve /api/updates/manifest at all (P-052).
+        SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed)
     } else {
         let state: tauri::State<SidecarState> = app.state();
         let guard = state.port.lock().map_err(|e| e.to_string())?;
@@ -1102,6 +1335,7 @@ pub fn run() {
         code_server_child: Mutex::new(None),
         port: Mutex::new(None),
         endpoint_ipc_socket: Mutex::new(None),
+        shutdown_done: std::sync::atomic::AtomicBool::new(false),
     };
 
     // tauri-specta Builder — collects every #[specta::specta] command
@@ -1414,129 +1648,32 @@ pub fn run() {
             let state: tauri::State<SidecarState> = app.state();
             *state.child.lock().unwrap() = Some(serve_child);
 
-            // Wait for serve's operator.json discovery (pid alive + TCP
-            // accept). Generous timeout: a FIRST boot pays initdb + the full
-            // migration replay inside serve before the host listens.
-            let discovery = match wait_for_operator(&workspace_home, Duration::from_secs(120)) {
-                Some(d) => d,
-                None => {
-                    eprintln!(
-                        "[papercusp-desktop] FATAL: operator did not become ready within 120s \
-                         (no live operator.json under {}/.papercusp). Check the serve logs above — \
-                         embedded-PG initdb/migrations are the usual first-boot suspects.",
-                        workspace_home.display()
-                    );
-                    return Ok(());
-                }
-            };
-            // The REAL port comes from discovery — `serve --ensure` may have
-            // reused an already-running operator on a different port than our
-            // cold-start hint.
-            let port = discovery.port;
-            *state.port.lock().unwrap() = Some(port);
-            println!(
-                "[papercusp-desktop] operator ready on :{} (pid {})",
-                port, discovery.pid
-            );
-
-            // Endpoint-IPC: runBootstrap inside serve starts the IPC server
-            // and writes ~/.papercusp/endpoint-ipc.json (the discovery file
-            // also covers the --ensure reuse case, where there is no fresh
-            // child stdout to parse). Manage a reconnecting handle whose
-            // socket source re-reads the file — same pattern as the dev
-            // branch — and warm it in the background. If the socket never
-            // appears, /api falls back to HTTP (ipcFetch polyfill).
-            let ipc_enabled =
-                std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
-            if ipc_enabled {
-                let disc = workspace_home.join(".papercusp/endpoint-ipc.json");
-                let disc_src = disc.clone();
-                let handle = endpoint_ipc::IpcClientHandle::new(move || {
-                    read_dev_ipc_socket(&disc_src).map(std::path::PathBuf::from)
-                });
-                app.manage(handle.clone());
-                let app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    for _ in 0..120 {
-                        if handle.warm().await.is_ok() {
-                            println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
-                            if let Some(path) = read_dev_ipc_socket(&disc) {
-                                let state: tauri::State<SidecarState> = app_handle.state();
-                                *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
-                            }
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                    eprintln!(
-                        "[papercusp-desktop] endpoint-ipc: no socket after 60s — /api stays on HTTP this session"
-                    );
-                });
-            }
-
-            // Tell the bootstrap page where the sidecar is. The JS in
-            // web/index.html will poll /api/desktop/preflight on that base,
-            // render any missing-prereq UI, then navigate when ready.
-            if let Some(window) = app.get_webview_window("main") {
-                // Use 127.0.0.1, not localhost: WebKitGTK may resolve
-                // `localhost` to ::1 while the sidecar binds IPv4 loopback,
-                // which fails the bootstrap's preflight fetch.
-                let base = format!("http://127.0.0.1:{}", port);
-                // Phase 4: the bootstrap polls preflight over `base` (HTTP —
-                // it's a transient pre-app page) but navigates the real app to
-                // `app_base`. With the custom protocol on (default), that's
-                // `papercusp://localhost`, so the operator SPA loads off HTTP;
-                // with PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 it's the HTTP `base`.
-                let app_base = if custom_protocol::enabled() {
-                    custom_protocol::APP_ORIGIN.to_string()
-                } else {
-                    base.clone()
-                };
-                // WebKitGTK denies getUserMedia by default; auto-grant
-                // so voice / wake-word / elevenlabs work in the shipped
-                // build the same way they do in browsers.
-                #[cfg(target_os = "linux")]
-                grant_media_permission(&window);
-                // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty
-                // path (Tauri invoke + events) instead of the operator's
-                // HTTP+WS bridge. See apps/operator/lib/pty-tauri.ts and
-                // apps/operator/app/harness/PiPanel.tsx.
-                //
-                // setup() runs before the bootstrap page (frontendDist=../web)
-                // has finished loading, so a single eval can land on a document
-                // that the page-load then replaces, dropping __papercuspBase —
-                // the bootstrap then polls for a port that never arrives. Re-eval
-                // on a short timer so whichever document is live when the page is
-                // ready receives the port. (web/index.html's tick() polls
-                // window.__papercuspBase, so a late set is picked up.)
-                let inject = format!(
-                    "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
-                    base, app_base
-                );
-                let win = window.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..30 {
-                        let _ = win.eval(&inject);
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                    }
-                });
-            }
+            // (P-053) setup() must NOT block on operator readiness — it runs
+            // on the main thread before the event loop starts, so the old
+            // 120s discovery poll here froze the still-unpainted window for
+            // the whole first boot (initdb + full migration replay) and
+            // risked the macOS unresponsive-app watchdog. finish_boot waits,
+            // wires endpoint-IPC, and feeds the bootstrap page its base — or
+            // a visible failure state — off-thread.
+            let app_handle = app.handle().clone();
+            let workspace_home_bg = workspace_home.clone();
+            std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg));
 
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
+            // App-level exit is the ONE teardown trigger. A per-window
+            // CloseRequested arm used to sit here too — that killed the
+            // shared operator whenever ANY window closed (including a
+            // secondary `ws-<id>` workspace window, stranding every other
+            // window), and on the plain quit path it ran the teardown again
+            // when ExitRequested/Exit followed (P-051). Closing the last
+            // window ends the event loop, so ExitRequested → Exit still
+            // covers the single-window quit.
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-                shutdown_native_terminal(app_handle);
-                kill_sidecar(app_handle);
-            }
-            RunEvent::WindowEvent {
-                event: WindowEvent::CloseRequested { .. },
-                ..
-            } => {
-                shutdown_native_terminal(app_handle);
-                kill_sidecar(app_handle);
+                shutdown_children_once(app_handle);
             }
             _ => {}
         });
@@ -1562,7 +1699,7 @@ pub fn run() {
 fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
     let pid = child.id();
     println!(
-        "[papercusp-desktop] terminating {} pid={} (SIGTERM, grace {}ms)",
+        "[papercusp-desktop] terminating {} pid={} (soft signal, grace {}ms)",
         label, pid, grace_ms
     );
     // Send SIGTERM via /bin/kill — avoids pulling in a new Rust dep
@@ -1574,13 +1711,24 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
             .arg(pid.to_string())
             .status();
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows there's no SIGTERM; std's kill() (which calls
-        // TerminateProcess) is already abrupt, so just use it.
-        let _ = child.kill();
-        let _ = child.wait();
-        return;
+        // (P-055) CTRL_BREAK_EVENT instead of an immediate TerminateProcess:
+        // Node surfaces it as SIGBREAK, so serve.mjs's shutdown handler runs
+        // and embedded PG gets a clean `pg_ctl stop`. The children are
+        // spawned with CREATE_NEW_PROCESS_GROUP (isolate_process_group) so
+        // the event targets exactly that child's group, not ours. Honest
+        // limit (not runtime-verified on Windows): the event only reaches
+        // processes sharing a console with us, so from a console-less GUI
+        // launch it may reach nobody — then the grace below lapses and the
+        // TerminateProcess fallback fires, which is the old behavior.
+        use windows::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) }.is_err() {
+            eprintln!(
+                "[papercusp-desktop] {} pid={}: CTRL_BREAK_EVENT not deliverable — relying on the hard-kill fallback",
+                label, pid
+            );
+        }
     }
     // Poll for exit up to grace_ms.
     let deadline = Instant::now() + Duration::from_millis(grace_ms);
@@ -1591,9 +1739,9 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
             Err(_) => break,
         }
     }
-    // Grace expired — escalate to SIGKILL.
+    // Grace expired — escalate to a hard kill (SIGKILL / TerminateProcess).
     println!(
-        "[papercusp-desktop] {} pid={} still alive after grace, SIGKILL",
+        "[papercusp-desktop] {} pid={} still alive after grace, hard kill",
         label, pid
     );
     let _ = child.kill();
@@ -1636,6 +1784,24 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
     if let Some(mut child) = maybe_cs {
         graceful_kill(&mut child, "code-server", 2000);
     }
+}
+
+/// Run the exit teardown (native terminal + sidecar children) exactly once.
+/// ExitRequested and Exit both arrive on a normal quit; the AtomicBool in
+/// SidecarState gates every invocation after the first (P-051).
+/// `install_update` still calls kill_sidecar directly — its children must
+/// die before the binary swap — and the subsequent restart's Exit event
+/// funnels through here for the terminal teardown.
+fn shutdown_children_once(app_handle: &tauri::AppHandle) {
+    let state: tauri::State<SidecarState> = app_handle.state();
+    if state
+        .shutdown_done
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    shutdown_native_terminal(app_handle);
+    kill_sidecar(app_handle);
 }
 
 fn main() {

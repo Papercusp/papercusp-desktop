@@ -1791,16 +1791,35 @@ impl NativeTerminal {
         Ok(())
     }
 
-    /// Kill the sibling on shutdown. SIGHUP via process kill ends the hosted
-    /// zellij + pui cleanly enough for an app exit.
+    /// Kill the sibling on shutdown: SIGTERM with a short grace, then
+    /// SIGKILL (P-057). The old straight `Child::kill()` was SIGKILL despite
+    /// the doc claiming a clean end — the hosted zellij/pui never got to run
+    /// its exit handlers, leaving stale zellij sessions/sockets behind.
     pub fn shutdown(&self) {
-        if let Ok(mut guard) = self.live.lock() {
-            if let Some(mut live) = guard.take() {
-                let pid = live.child.id();
-                println!("[papercusp-desktop] native-terminal: terminating ghostty pid={pid}");
-                let _ = live.child.kill();
-                let _ = live.child.wait();
+        // Poison recovery: a panicked glue/launch thread must not make
+        // shutdown silently skip the kill and orphan the terminal.
+        let mut guard = self
+            .live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut live) = guard.take() {
+            let pid = live.child.id();
+            println!(
+                "[papercusp-desktop] native-terminal: terminating ghostty pid={pid} (SIGTERM, 2s grace)"
+            );
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
             }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+            while std::time::Instant::now() < deadline {
+                match live.child.try_wait() {
+                    Ok(Some(_status)) => return,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+            let _ = live.child.kill();
+            let _ = live.child.wait();
         }
     }
 }

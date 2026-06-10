@@ -103,15 +103,44 @@
   let attempt = 0;
   let everReached = false;
   let consecutiveOk = 0;
+  let bootErrorShown = false;
+
+  // P-053: main.rs's finish_boot thread injects window.__papercuspBootError
+  // (and fires `papercusp:boot-error`) when the operator never becomes ready
+  // (120s timeout, or serve exited with an error). Render it as a terminal
+  // failure state instead of spinning forever — but keep polling at a slow
+  // cadence: a glacial first boot (initdb + migrations on a slow disk) can
+  // still come up after the Rust-side deadline, and recovery should be
+  // automatic when it does.
+  function renderBootError() {
+    if (bootErrorShown) return;
+    bootErrorShown = true;
+    document.getElementById('spinner').style.display = 'none';
+    const msg = document.getElementById('msg');
+    msg.classList.add('err');
+    msg.textContent = window.__papercuspBootError || 'the operator failed to start';
+    const hint = document.getElementById('install-hint');
+    hint.innerHTML = '<strong>The operator backend did not start.</strong> ' +
+      'Quit and relaunch Papercusp; if it persists, check the launch logs ' +
+      '(run the app from a terminal to see them) — embedded-Postgres ' +
+      'initdb/migrations are the usual first-boot suspects.';
+    hint.style.display = '';
+  }
+  window.addEventListener('papercusp:boot-error', renderBootError);
 
   async function tick() {
     attempt += 1;
     const msg = document.getElementById('msg');
+    // The boot-error var may have been set before our listener registered
+    // (the Rust side re-evals it for a while) — poll it here too.
+    if (window.__papercuspBootError) renderBootError();
     const base = sidecarBase();
     if (!base) {
       // Still waiting for Tauri's init script to set window.__papercuspBase.
-      msg.textContent = `waiting for sidecar port… (attempt ${attempt})`;
-      setTimeout(tick, 200);
+      if (!bootErrorShown) {
+        msg.textContent = `waiting for sidecar port… (attempt ${attempt})`;
+      }
+      setTimeout(tick, bootErrorShown ? 5000 : 200);
       return;
     }
     try {
@@ -141,13 +170,15 @@
       }
     } catch (err) {
       if (!everReached) {
-        msg.textContent = `starting harness sidecar… (attempt ${attempt})`;
+        if (!bootErrorShown) {
+          msg.textContent = `starting harness sidecar… (attempt ${attempt})`;
+        }
       } else {
         msg.classList.add('err');
         msg.textContent = `sidecar unreachable: ${err.message}`;
       }
     }
-    setTimeout(tick, 1000);
+    setTimeout(tick, bootErrorShown ? 5000 : 1000);
   }
 
   // After 8s with no sidecar contact, show the dev-mode hint.

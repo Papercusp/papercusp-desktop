@@ -122,6 +122,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
+    "Win32_System_Console",
 ] }
 
 # tauri-runtime-wry 2.11.0 + one local fix: its undecorated-resizing hit-test
