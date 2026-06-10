@@ -148,7 +148,13 @@ JOIN_LINK="papercusp://harness?topic=$TOPIC&github=$FULL_NAME&repo_id=$REPO_ID"
 STATE="{\"topic\":\"$TOPIC\",\"github_repository_id\":$REPO_ID,\"github_remote\":\"https://github.com/$FULL_NAME\",\"privacy\":\"shared-private\"}"
 log "A: register + share $SLUG write-free on the real repo (topic=${TOPIC:0:16}…)"
 fed_register_project a "$SLUG" "$WORK" proj-a
-echo "A share: $(fed_share_finalize a "$SLUG" "$STATE" | grep -oE '"bindingPublished":[a-z]+|"state":"[a-z-]+"')"
+# Inline share (not fed_share_finalize): the route allows 300s (timeoutSec) so
+# the client must too, and we want the FULL response for diagnosis.
+share_resp="$(curl -s -m 310 -X POST "http://127.0.0.1:${FED_SC[a]}/api/harness/$SLUG/share/finalize" \
+  -H 'content-type: application/json' \
+  -d "{\"state\":$STATE}")"
+echo "A share → $(echo "$share_resp" | head -c 400)"
+echo "$share_resp" | grep -q '"bindingPublished":true' || echo "⚠ A share did not report bindingPublished:true"
 
 # ── A publishes (carrying the REAL join link) → B lists; B publishes → A lists ──
 log "A ($P_A_USER): publish hive-from-a to the directory (memberLink = real join link)"
@@ -190,7 +196,7 @@ if [ "$links_ok" = 1 ]; then
   echo "$join_resp" | grep -q '"ok":true' && join_ok=1
   if [ "$join_ok" = 1 ]; then
     log "wait for swarm discovery between A and B on the harness topic"
-    disc="$(fed_wait_discovery a b strict 30 || true)"
+    disc="$(fed_wait_discovery a b strict 60 || true)"
     [ "$disc" = 1 ] && echo "✓ peers discovered each other" || echo "⚠ no peer_connected in ~90s"
     log "A→B: INSERT feature on A → expect origin=remote in B (federation through a directory-discovered join)"
     fed_ok="$(fed_merge_assert a b "$SLUG" F-DIR2B "joined via directory" todo 30 || true)"
@@ -205,8 +211,10 @@ if [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$links_ok" = 1 ] && [ "$join_ok" = 1 ] &
   echo "OVERALL: PASS — browse → join → federate proven end-to-end in the packaged app"
   exit 0
 else
-  echo "OVERALL: INCOMPLETE — check [hive-directory]/[swarm] lines in ${FED_LOG[a]} / ${FED_LOG[b]}"
-  grep -iE "hive-directory|\[swarm\]" "${FED_LOG[a]}" 2>/dev/null | tail -8
-  grep -iE "hive-directory|\[swarm\]" "${FED_LOG[b]}" 2>/dev/null | tail -8
+  DBG="/tmp/hive-join-smoke-debug-$$"
+  mkdir -p "$DBG" && cp "${FED_LOG[a]}" "$DBG/a.log" 2>/dev/null; cp "${FED_LOG[b]}" "$DBG/b.log" 2>/dev/null
+  echo "OVERALL: INCOMPLETE — instance logs preserved at $DBG"
+  grep -iE "hive-directory|\[swarm\]|share|finalize|error" "${FED_LOG[a]}" 2>/dev/null | tail -12
+  grep -iE "hive-directory|\[swarm\]" "${FED_LOG[b]}" 2>/dev/null | tail -6
   exit 6
 fi

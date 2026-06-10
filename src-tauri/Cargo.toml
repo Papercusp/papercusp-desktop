@@ -124,6 +124,17 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
 ] }
 
+# tauri-runtime-wry 2.11.0 + one local fix: its undecorated-resizing hit-test
+# does `webview.parent().parent()` and UNWRAPS a downcast to GtkWindow — any
+# embedder that reparents the webview (our native-terminal VTE embed nests it
+# in a GtkPaned) panics the main thread on the first click. The vendored copy
+# resolves the real toplevel instead (see the PAPERCUSP PATCH markers in
+# vendor/tauri-runtime-wry/src/undecorated_resizing.rs). Upstream dev branch
+# still carries the unwrap as of 2026-06-09 — drop this patch when a released
+# tauri-runtime-wry walks the ancestry safely.
+[patch.crates-io]
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+
 [features]
 default = ["dev-wrapper"]
 custom-protocol = ["tauri/custom-protocol"]
