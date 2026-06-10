@@ -40,9 +40,10 @@
   </div>
 <script>
   // Determine the sidecar base URL.
-  //   Production: Tauri's main.rs sets window.__papercuspBase to
-  //               http://localhost:<picked-port> once the sidecar is up.
-  //   Dev: point at :3055 (the externally-run Next dev server).
+  //   Production: Tauri's main.rs (finish_boot) sets window.__papercuspBase
+  //               to http://127.0.0.1:<picked-port> once the sidecar is up,
+  //               or window.__papercuspBootError when it never comes up.
+  //   Dev: the webview loads devUrl (:3070) directly — this page isn't used.
   function sidecarBase() {
     if (window.__papercuspBase) return window.__papercuspBase;
     // Inside a Tauri prod webview the window starts at tauri://localhost

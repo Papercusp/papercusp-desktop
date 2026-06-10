@@ -1449,9 +1449,11 @@ pub fn run() {
             init_native_terminal(app);
 
             if is_dev {
-                // In dev mode we trust the developer to run the Next.js dev
-                // server themselves on :3055 (devUrl in tauri.conf.json).
-                println!("[papercusp-desktop] dev mode — skipping sidecar spawn (expecting :3055 to be served externally)");
+                // In dev mode we trust the developer (or beforeDevCommand's
+                // dev-operator-ifneeded.sh) to run the operator dev stack
+                // externally; the webview points at devUrl from
+                // tauri.conf.json (:3070, the Hono host).
+                println!("[papercusp-desktop] dev mode — skipping sidecar spawn (expecting devUrl :3070 to be served externally)");
 
                 // tauri-agent-tools dev bridge — debug-only, localhost-only,
                 // token-authenticated. Writes /tmp/tauri-dev-bridge-<pid>.token
