@@ -8,6 +8,12 @@
 # smoke asserts it appears in instance B's directory (GET /api/discovery/hives)
 # with title/owner/member-links intact, and symmetrically B's hive on A.
 #
+# Includes the JOIN leg (the owner directive's "and can join"): A shares a REAL
+# harness (throwaway public GitHub repo under the A account, deleted in cleanup),
+# carries the REAL join link in its hive announce; B extracts the link FROM ITS
+# DIRECTORY LISTING, joins via POST /api/harness/join-link, and a feature written
+# on A must federate into B's PG (origin=remote) — browse → join → federate.
+#
 # This is the FULL-APP-STACK version of the in-process live E2E
 # (hive-directory-live-two-peer.test.ts): real per-instance identity resolution
 # + attestation gists, the real boot-join (boot-all → wireHiveDirectoryForWorkspace,
@@ -77,18 +83,21 @@ fed_wait_api b 30 || { echo "B sidecar API never came up"; exit 4; }
 
 # ── helpers: per-instance MCP tool call + directory listing ─────────────────────
 
-# dir_set_hive <inst> <home> <hiveId> <title> — publish a public hive listing on
-# one instance via its own MCP surface (superuser bearer is self-provisioned at
-# boot under that instance's HOME). Echoes the tool's JSON result text.
+# dir_set_hive <inst> <home> <hiveId> <title> [memberLink] — publish a public
+# hive listing on one instance via its own MCP surface (superuser bearer is
+# self-provisioned at boot under that instance's HOME). Echoes the tool's JSON
+# result text. memberLink (when given) rides the announce for one-click join.
 dir_set_hive() {
-  local inst="$1" home="$2" hive_id="$3" title="$4" tok
+  local inst="$1" home="$2" hive_id="$3" title="$4" link="${5:-}" tok links_json
   tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null)" || true
   [ -n "$tok" ] || { echo '{"error":"no superuser-token under instance HOME"}'; return 1; }
+  links_json=""
+  [ -n "$link" ] && links_json=",\"memberLinks\":[\"$link\"]"
   curl -s -m 30 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1" \
     -H "Authorization: Bearer $tok" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"discovery:set_hive\",\"arguments\":{\"hiveId\":\"$hive_id\",\"title\":\"$title\",\"description\":\"packaged two-instance directory smoke\",\"visibility\":\"public\",\"memberLinks\":[\"papercusp://harness?topic=$(printf 'a%.0s' {1..64})&repo=918273645\"]}}}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"discovery:set_hive\",\"arguments\":{\"hiveId\":\"$hive_id\",\"title\":\"$title\",\"description\":\"packaged two-instance directory smoke\",\"visibility\":\"public\"$links_json}}}" \
     | grep -o '"text":"{[^}]*}*"' | head -1
 }
 
@@ -112,9 +121,38 @@ dir_wait_listed() {
   echo 0; return 1
 }
 
-# ── A publishes → B lists; B publishes → A lists ───────────────────────────────
-log "A ($P_A_USER): publish hive-from-a to the directory"
-resA="$(dir_set_hive a "$A_HOME" hive-from-a "Alpha live hive ($P_A_USER)")"
+# ── A: create a REAL throwaway public repo + share a harness on it ──────────────
+# The join leg needs a clonable repo (join's clone_repo step hard-fails on a
+# synthetic id). Public → B (a different GitHub identity) can clone it. Deleted
+# in cleanup (best-effort — needs delete_repo scope; a lingering empty public
+# smoke repo is harmless).
+SLUG="hivejoinsmoke"
+REPO_NAME="hive-join-smoke-$RANDOM"
+log "A ($P_A_USER): create throwaway public repo $REPO_NAME"
+repo_json="$(curl -s -m 30 -X POST https://api.github.com/user/repos \
+  -H "Authorization: Bearer $A_TOKEN" -H 'Accept: application/vnd.github+json' \
+  -d "{\"name\":\"$REPO_NAME\",\"private\":false,\"auto_init\":true}")"
+REPO_ID="$(echo "$repo_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
+FULL_NAME="$(echo "$repo_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("full_name",""))' 2>/dev/null)"
+[ -n "$REPO_ID" ] && [ -n "$FULL_NAME" ] || { echo "FATAL: repo create failed: $(echo "$repo_json" | head -c 200)"; exit 7; }
+echo "repo: $FULL_NAME (id=$REPO_ID)"
+cleanup_repo() {
+  curl -s -m 30 -X DELETE "https://api.github.com/repos/$FULL_NAME" \
+    -H "Authorization: Bearer $A_TOKEN" -H 'Accept: application/vnd.github+json' -o /dev/null \
+    && echo "repo $FULL_NAME deleted" || echo "repo $FULL_NAME NOT deleted (token may lack delete_repo) — harmless, delete by hand"
+}
+trap 'cleanup_repo; cleanup' EXIT
+
+TOPIC=$(printf 'papercusp-substrate-v1:gh:%s' "$REPO_ID" | sha256sum | cut -d' ' -f1)
+JOIN_LINK="papercusp://harness?topic=$TOPIC&github=$FULL_NAME&repo_id=$REPO_ID"
+STATE="{\"topic\":\"$TOPIC\",\"github_repository_id\":$REPO_ID,\"github_remote\":\"https://github.com/$FULL_NAME\",\"privacy\":\"shared-private\"}"
+log "A: register + share $SLUG write-free on the real repo (topic=${TOPIC:0:16}…)"
+fed_register_project a "$SLUG" "$WORK" proj-a
+echo "A share: $(fed_share_finalize a "$SLUG" "$STATE" | grep -oE '"bindingPublished":[a-z]+|"state":"[a-z-]+"')"
+
+# ── A publishes (carrying the REAL join link) → B lists; B publishes → A lists ──
+log "A ($P_A_USER): publish hive-from-a to the directory (memberLink = real join link)"
+resA="$(dir_set_hive a "$A_HOME" hive-from-a "Alpha live hive ($P_A_USER)" "$JOIN_LINK")"
 echo "A set_hive → $resA"
 log "B ($P_B_USER): publish hive-from-b to the directory"
 resB="$(dir_set_hive b "$B_HOME" hive-from-b "Beta live hive ($P_B_USER)")"
@@ -128,16 +166,43 @@ log "wait: A's directory lists hive-from-b (reverse direction)"
 ba="$(dir_wait_listed a hive-from-b "$P_B_USER" 40 || true)"
 [ "$ba" = 1 ] && echo "✓ B→A: hive-from-b listed on A (owner=$P_B_USER)" || { echo "✗ B→A: hive-from-b never listed on A"; echo "A directory: $(dir_list a | head -c 400)"; }
 
-# member-links must survive the announce → ingest → HTTP projection round-trip.
+# The REAL join link must survive the announce → ingest → HTTP projection
+# round-trip — B extracts it FROM ITS OWN DIRECTORY LISTING (no out-of-band copy).
 links_ok=0
-if [ "$ab" = 1 ] && dir_list b | grep -q "papercusp://harness?topic=aaaa"; then links_ok=1; fi
-[ "$links_ok" = 1 ] && echo "✓ member-links intact on B's listing" || echo "✗ member-links missing on B's listing"
+B_LINK="$(dir_list b | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for r in d.get("rows",[]):
+    if r.get("hiveId")=="hive-from-a" and r.get("memberLinks"):
+        print(r["memberLinks"][0]); break
+' 2>/dev/null)"
+if [ "$B_LINK" = "$JOIN_LINK" ]; then links_ok=1; fi
+[ "$links_ok" = 1 ] && echo "✓ member-link intact on B's listing ($B_LINK)" || echo "✗ member-link missing/mismatched on B (got: $B_LINK)"
+
+# ── THE JOIN LEG: B joins A's harness from the DISCOVERED link, then federates ──
+join_ok=0; fed_ok=0
+if [ "$links_ok" = 1 ]; then
+  log "B ($P_B_USER): join via the discovered link"
+  join_resp="$(curl -s -m 120 -X POST "http://127.0.0.1:${FED_SC[b]}/api/harness/join-link" \
+    -H 'content-type: application/json' \
+    -d "{\"slug\":\"$SLUG\",\"harnessLinkUrl\":\"$B_LINK\"}")"
+  echo "B join → $(echo "$join_resp" | head -c 300)"
+  echo "$join_resp" | grep -q '"ok":true' && join_ok=1
+  if [ "$join_ok" = 1 ]; then
+    log "wait for swarm discovery between A and B on the harness topic"
+    disc="$(fed_wait_discovery a b strict 30 || true)"
+    [ "$disc" = 1 ] && echo "✓ peers discovered each other" || echo "⚠ no peer_connected in ~90s"
+    log "A→B: INSERT feature on A → expect origin=remote in B (federation through a directory-discovered join)"
+    fed_ok="$(fed_merge_assert a b "$SLUG" F-DIR2B "joined via directory" todo 30 || true)"
+    [ "$fed_ok" = 1 ] && echo "✓ FEDERATED: F-DIR2B landed in B as origin=remote" || echo "✗ F-DIR2B not in B after ~90s"
+  fi
+fi
 
 # ── report ───────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "A→B-listed=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-listed=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)"
-if [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$links_ok" = 1 ]; then
-  echo "OVERALL: PASS — packaged two-instance hive directory proven"
+echo "A→B-listed=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-listed=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  member-link=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  federate=$([ "$fed_ok" = 1 ] && echo PASS || echo FAIL)"
+if [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$links_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$fed_ok" = 1 ]; then
+  echo "OVERALL: PASS — browse → join → federate proven end-to-end in the packaged app"
   exit 0
 else
   echo "OVERALL: INCOMPLETE — check [hive-directory]/[swarm] lines in ${FED_LOG[a]} / ${FED_LOG[b]}"
