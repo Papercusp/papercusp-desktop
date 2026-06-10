@@ -134,6 +134,26 @@ impl WslStatus {
     }
 }
 
+/// Parse the default WSL major version out of `wsl --status` output.
+///
+/// The "Default Version: 2" label is locale-dependent, so no English text is
+/// matched: this takes the LAST line whose value — the segment after the
+/// final `:`, or the whole line when there is no `:` — trims to a bare
+/// integer. Distro names (`Ubuntu-18.04`), kernel versions (`5.15.133.1-1`)
+/// and WSL build versions (`2.0.9.0`) never parse as a bare integer, so they
+/// can't shadow the version line. (The previous implementation took the
+/// FIRST ASCII digit anywhere in the output, so a digit-bearing
+/// `Default Distribution:` line above the version line — e.g. Ubuntu-18.04 —
+/// made it report version 1.)
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn parse_default_version(status_output: &str) -> u8 {
+    status_output
+        .lines()
+        .filter_map(|line| line.rsplit(':').next().unwrap_or(line).trim().parse::<u8>().ok())
+        .next_back()
+        .unwrap_or(0)
+}
+
 // ─── Windows implementation ─────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -221,13 +241,7 @@ mod imp {
             .ok()
             .filter(|o| o.status.success());
         let Some(out) = out else { return 0 };
-        let text = String::from_utf8_lossy(&out.stdout);
-        // The "Default Version: 2" line is locale-dependent; the digit
-        // is the only ASCII digit in the output → robust enough.
-        text.chars()
-            .find_map(|c| c.to_digit(10))
-            .map(|d| d as u8)
-            .unwrap_or(0)
+        super::parse_default_version(&String::from_utf8_lossy(&out.stdout))
     }
 
     pub(crate) fn detect(app: &tauri::AppHandle) -> WslStatus {
@@ -489,5 +503,241 @@ pub fn wsl_uninstall(_app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("wsl_uninstall: only supported on Windows".to_string())
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+//
+// Everything inside `mod imp` shells out to wsl.exe, so what's unit-
+// testable cross-platform is the pure surface: the serde wire shapes
+// the frontend matches on (apps/operator/lib/tauri-bindings.ts checks
+// `state.kind === 'NotSupported' | …` and `err.kind ===
+// 'NeedsElevation' | 'Failed'` — see the PascalCase-tag comments on
+// WslState/WslOpError above), plus the 740-elevation mapping (Windows-
+// only, gated below).
+//
+// Deliberately NOT covered here (each would need a non-test refactor):
+//
+// * `imp::list_distros` — the wsl.exe output parsing is inlined in the
+//   same function that spawns the process. To unit test it you'd
+//   extract a pure `parse_distro_list(stdout: &str) -> Vec<String>`
+//   helper (outside the cfg(windows) gate so it tests on Linux) and
+//   have the shelling wrapper call it. `read_default_version` HAD the
+//   same shape plus a real bug (first-digit-anywhere scan misread a
+//   digit-bearing distro name like "Ubuntu-18.04" as version 1); its
+//   parsing is now the extracted `parse_default_version`, tested below.
+//   The UTF-16LE pitfall itself is avoided at the source:
+//   `wsl_command()` sets WSL_UTF8=1.
+// * `detect()` / persisted-state transitions — they take a
+//   `tauri::AppHandle`, which can't be constructed in unit tests
+//   without enabling tauri's "test" feature (`tauri::test::mock_app`)
+//   as a dev-dependency.
+// * `imp::PersistedState` round-trip — private to the cfg(windows)
+//   `imp` module; only testable from a test module inside it (Windows-
+//   only, unverifiable from this Linux box), so skipped.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn to_json<T: Serialize>(v: &T) -> serde_json::Value {
+        serde_json::to_value(v).expect("serialize")
+    }
+
+    // ── parse_default_version (extracted from imp::read_default_version) ──
+
+    #[test]
+    fn parse_default_version_reads_the_version_line_not_the_first_digit() {
+        // Regression: a digit-bearing distro name sits ABOVE the version
+        // line in `wsl --status` output; the old first-digit-anywhere scan
+        // reported version 1 here.
+        let out = "Default Distribution: Ubuntu-18.04\nDefault Version: 2\n";
+        assert_eq!(parse_default_version(out), 2);
+    }
+
+    #[test]
+    fn parse_default_version_is_locale_tolerant() {
+        // No English label text is matched — only the bare-integer value
+        // shape after the last colon.
+        let out = "Distribution par défaut : Ubuntu\nVersion par défaut : 2\n";
+        assert_eq!(parse_default_version(out), 2);
+    }
+
+    #[test]
+    fn parse_default_version_ignores_dotted_version_noise() {
+        let out = "WSL version: 2.0.9.0\nKernel version: 5.15.133.1-1\nDefault Version: 1\n";
+        assert_eq!(parse_default_version(out), 1);
+    }
+
+    #[test]
+    fn parse_default_version_returns_zero_when_no_version_line() {
+        assert_eq!(parse_default_version(""), 0);
+        assert_eq!(parse_default_version("Default Distribution: Ubuntu\n"), 0);
+    }
+
+    // ── WslState wire shape ─────────────────────────────────────────
+
+    #[test]
+    fn wsl_state_kind_tag_is_pascal_case() {
+        // The WslOnboardingGate matches these exact strings; a stray
+        // `rename_all = "camelCase"` would make the gate's pass-through
+        // check fail on Linux (see the comment on WslState).
+        let cases: [(WslState, &str); 6] = [
+            (WslState::NotSupported, "NotSupported"),
+            (WslState::NotInstalled, "NotInstalled"),
+            (WslState::PendingReboot, "PendingReboot"),
+            (WslState::InstalledNoDistro, "InstalledNoDistro"),
+            (WslState::PendingBootstrap, "PendingBootstrap"),
+            (WslState::Ready, "Ready"),
+        ];
+        for (state, kind) in cases {
+            assert_eq!(to_json(&state), serde_json::json!({ "kind": kind }));
+        }
+    }
+
+    #[test]
+    fn wsl_state_error_inlines_message_next_to_kind() {
+        let j = to_json(&WslState::Error { message: "bootstrap exit=1".into() });
+        assert_eq!(
+            j,
+            serde_json::json!({ "kind": "Error", "message": "bootstrap exit=1" })
+        );
+    }
+
+    #[test]
+    fn wsl_state_rejects_camel_case_kind() {
+        // PascalCase deserializes; camelCase must NOT silently work —
+        // it would mask a frontend/backend tag-casing drift.
+        assert!(serde_json::from_str::<WslState>(r#"{"kind":"NotSupported"}"#).is_ok());
+        assert!(serde_json::from_str::<WslState>(r#"{"kind":"notSupported"}"#).is_err());
+    }
+
+    #[test]
+    fn wsl_state_round_trips_through_json() {
+        let states = [
+            WslState::NotSupported,
+            WslState::NotInstalled,
+            WslState::PendingReboot,
+            WslState::InstalledNoDistro,
+            WslState::PendingBootstrap,
+            WslState::Ready,
+            WslState::Error { message: "boom".into() },
+        ];
+        for state in states {
+            let j = to_json(&state);
+            let back: WslState = serde_json::from_value(j.clone()).expect("deserialize");
+            assert_eq!(to_json(&back), j, "round-trip changed {:?}", state);
+        }
+    }
+
+    // ── WslOpError wire shape ───────────────────────────────────────
+
+    #[test]
+    fn wsl_op_error_uses_kind_plus_message_layout() {
+        // tag = "kind", content = "message" — the frontend reads
+        // `err.kind` to decide elevate-vs-retry and `err.message` for
+        // diagnostics.
+        let j = to_json(&WslOpError::NeedsElevation("wsl --install: denied".into()));
+        assert_eq!(
+            j,
+            serde_json::json!({ "kind": "NeedsElevation", "message": "wsl --install: denied" })
+        );
+        let j = to_json(&WslOpError::Failed("wsl --install exit=1 stderr=".into()));
+        assert_eq!(
+            j,
+            serde_json::json!({ "kind": "Failed", "message": "wsl --install exit=1 stderr=" })
+        );
+    }
+
+    #[test]
+    fn wsl_op_error_round_trips_through_json() {
+        let back: WslOpError =
+            serde_json::from_str(r#"{"kind":"NeedsElevation","message":"m"}"#).expect("de");
+        assert!(matches!(back, WslOpError::NeedsElevation(ref m) if m == "m"));
+        let back: WslOpError =
+            serde_json::from_str(r#"{"kind":"Failed","message":"f"}"#).expect("de");
+        assert!(matches!(back, WslOpError::Failed(ref m) if m == "f"));
+    }
+
+    // ── WslStatus wire shape ────────────────────────────────────────
+
+    #[test]
+    fn wsl_status_serializes_camel_case_fields() {
+        let st = WslStatus {
+            state: WslState::Ready,
+            wsl_exe_available: true,
+            distros: vec!["papercup-runtime".into()],
+            default_version: 2,
+        };
+        assert_eq!(
+            to_json(&st),
+            serde_json::json!({
+                "state": { "kind": "Ready" },
+                "wslExeAvailable": true,
+                "distros": ["papercup-runtime"],
+                "defaultVersion": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn wsl_status_unsupported_is_the_non_windows_shape() {
+        // This is what `detect()` returns on every non-Windows platform
+        // — the gate must see NotSupported and pass straight through.
+        let st = WslStatus::unsupported();
+        assert!(matches!(st.state, WslState::NotSupported));
+        assert!(!st.wsl_exe_available);
+        assert!(st.distros.is_empty());
+        assert_eq!(st.default_version, 0);
+    }
+
+    #[test]
+    fn wsl_status_round_trips_through_json() {
+        let j = to_json(&WslStatus::unsupported());
+        let back: WslStatus = serde_json::from_value(j.clone()).expect("deserialize");
+        assert_eq!(to_json(&back), j);
+    }
+}
+
+// Windows-only pure logic: the exit-code → error-variant mapping.
+// `WslOpError::from_exit` is cfg(windows), so these can't run on the
+// Linux dev box (they're compiled out here and execute on a Windows
+// `cargo test`); the cross-platform suite above stays runnable
+// everywhere.
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn from_exit_maps_740_to_needs_elevation() {
+        // Win32 ERROR_ELEVATION_REQUIRED — frontend offers "re-launch
+        // as admin" instead of a raw error.
+        match WslOpError::from_exit("wsl --install", Some(740), "access denied".into()) {
+            WslOpError::NeedsElevation(msg) => {
+                assert_eq!(msg, "wsl --install: access denied");
+            }
+            other => panic!("expected NeedsElevation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_exit_other_codes_map_to_failed() {
+        match WslOpError::from_exit("wsl --import", Some(1), "boom".into()) {
+            WslOpError::Failed(msg) => {
+                assert!(msg.contains("wsl --import"), "label missing: {}", msg);
+                assert!(msg.contains("exit=1"), "exit code missing: {}", msg);
+                assert!(msg.contains("stderr=boom"), "stderr missing: {}", msg);
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_exit_without_code_formats_unknown_exit() {
+        // No exit code (process killed) → "exit=?", never a panic.
+        match WslOpError::from_exit("wsl --install", None, String::new()) {
+            WslOpError::Failed(msg) => assert!(msg.contains("exit=?"), "got: {}", msg),
+            other => panic!("expected Failed, got {:?}", other),
+        }
     }
 }

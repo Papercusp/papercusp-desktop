@@ -448,6 +448,22 @@ impl IpcClientHandle {
         self.live().await.map(|_| ())
     }
 
+    /// Drop the current connection so the NEXT call re-resolves the socket
+    /// via `socket_source` and dials fresh. EI-190: the dev wrapper calls
+    /// this when the build switcher changes the selected /api operator — the
+    /// OLD operator's socket is usually still healthy, so the `is_alive()`
+    /// reconnect path would never fire on its own. In-flight calls are
+    /// flushed first, exactly like a page (re)load (the build switch
+    /// navigates the webview, so the old page's channels are dead anyway).
+    pub fn reset(self: &Arc<Self>) {
+        self.flush_for_page_load();
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut guard = this.client.lock().await;
+            *guard = None;
+        });
+    }
+
     pub async fn invoke(
         &self,
         tool_name: String,

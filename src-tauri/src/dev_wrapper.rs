@@ -61,6 +61,14 @@ const TARGETS: [(&str, &str, u16); 3] = [
 /// /api/desktop/version poll, and the bar is ambient signal, not a console.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// EI-190: which operator should serve /api for a given content target.
+/// :3070 and :3170 are operators themselves; :3055 is the bare Vite HMR
+/// server with NO operator of its own — its /api historically proxied to
+/// :3070, so the green release operator backs it here too.
+pub(crate) fn api_port_for_target(target_port: u16) -> u16 {
+    if target_port == 3055 { 3070 } else { target_port }
+}
+
 #[derive(Default, Clone)]
 struct PortHealth {
     reachable: bool,
@@ -89,7 +97,9 @@ struct StatusSnapshot {
     gate_stalled: bool,
     gate_last_green_ms: Option<i64>,
     git_sync_status: Option<String>,
-    /// Which checkout owns the IPC socket: "release" / "staging-tree" / other.
+    /// The operator port /api currently targets (EI-190 — follows the switcher).
+    api_port: u16,
+    /// Which checkout owns the targeted IPC socket: "release" / "staging-tree" / other.
     ipc_owner: Option<String>,
     health: HashMap<u16, PortHealth>,
     error: Option<String>,
@@ -151,12 +161,14 @@ fn short_sha(v: &serde_json::Value, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Resolve which checkout owns the IPC socket: endpoint-ipc.json pid →
-/// /proc/<pid>/cwd. Last-writer-wins between the :3070/:3170 operators, so
-/// this is the ONLY honest way to know where /api lands (D-006).
-fn ipc_owner_checkout() -> Option<String> {
+/// Resolve which checkout owns the IPC socket /api targets: the per-port
+/// discovery file (EI-190; singleton fallback for a not-yet-restarted
+/// operator) → pid → /proc/<pid>/cwd.
+fn ipc_owner_checkout(api_port: u16) -> Option<String> {
     let home = std::env::var_os("HOME")?;
-    let path = std::path::PathBuf::from(home).join(".papercusp/endpoint-ipc.json");
+    let dir = std::path::PathBuf::from(home).join(".papercusp");
+    let per_port = dir.join(format!("endpoint-ipc.{api_port}.json"));
+    let path = if per_port.exists() { per_port } else { dir.join("endpoint-ipc.json") };
     let txt = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let pid = v.get("pid")?.as_u64()?;
@@ -191,7 +203,10 @@ fn ipc_owner_port(owner: &str) -> Option<u16> {
 }
 
 fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
-    let mut snap = StatusSnapshot::default();
+    let mut snap = StatusSnapshot {
+        api_port: crate::SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed),
+        ..StatusSnapshot::default()
+    };
 
     for (_, _, port) in TARGETS {
         let reachable = port_reachable(port);
@@ -248,7 +263,7 @@ fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
         snap.error = Some("pipeline status unreachable (:3070 + :3170)".into());
     }
 
-    snap.ipc_owner = ipc_owner_checkout();
+    snap.ipc_owner = ipc_owner_checkout(snap.api_port);
     snap
 }
 
@@ -329,8 +344,12 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
     )
 }
 
-/// The skew line + whether it warrants the warn style (D-006). `spa_port` is
-/// the origin the content webview currently shows.
+/// The /api line + whether it warrants the warn style. Since EI-190 the api
+/// target FOLLOWS the switcher (`snap.api_port`), so the classic
+/// staging-SPA/green-API skew can no longer happen by accident — the warn
+/// states left are: no discovery file, a STALE (dead-writer) file, the
+/// singleton fallback resolving a DIFFERENT operator than selected, and an
+/// SPA/api divergence that should be impossible (guard).
 fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) {
     let spa = match spa_port {
         Some(p) => {
@@ -343,25 +362,36 @@ fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) 
         }
         None => "SPA ?".to_string(),
     };
+    let api = snap.api_port;
     let Some(owner) = &snap.ipc_owner else {
-        return (format!("{spa} · API ? (no endpoint-ipc.json)"), true);
+        return (format!("{spa} · API :{api} ? (no discovery file)"), true);
     };
     if owner.starts_with("STALE") {
-        return (format!("{spa} · API→{owner}"), true);
+        return (format!("{spa} · API :{api}→{owner}"), true);
     }
     let owner_port = ipc_owner_port(owner);
-    let api_sha = owner_port
-        .and_then(|p| snap.health.get(&p).and_then(|h| h.sha.clone()))
+    let api_sha = snap
+        .health
+        .get(&api)
+        .and_then(|h| h.sha.clone())
         .unwrap_or_else(|| "?".into());
-    let skewed = match (spa_port, owner_port) {
-        (Some(s), Some(o)) => s != o && s != 3055,
-        _ => false,
-    };
+    // The singleton fallback can hand us the WRONG operator's socket when
+    // the selected one hasn't restarted since per-port files shipped.
+    let fallback_mismatch = owner_port.map(|p| p != api).unwrap_or(false);
+    // Should be impossible (switch_to sets both) — guard regardless.
+    let diverged = spa_port.map(|p| api_port_for_target(p) != api).unwrap_or(false);
+    let warn = fallback_mismatch || diverged;
     let line = format!(
-        "{spa} · API→{owner} {api_sha}{}",
-        if skewed { " — SKEW" } else { "" }
+        "{spa} · API :{api} {owner} {api_sha}{}",
+        if fallback_mismatch {
+            " — WRONG OPERATOR (singleton fallback)"
+        } else if diverged {
+            " — SPA/API DIVERGED"
+        } else {
+            ""
+        }
     );
-    (line, skewed)
+    (line, warn)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +425,29 @@ fn switch_to(window: &tauri::WebviewWindow, name: &str, port: u16) {
             Ok(()) => {
                 println!("[dev-wrapper] switched content webview → {target}");
                 write_persisted_target(name, port);
+                retarget_api(window, port);
             }
             Err(e) => eprintln!("[dev-wrapper] navigate to {target} failed: {e}"),
         },
         Err(e) => eprintln!("[dev-wrapper] bad target url {target}: {e}"),
+    }
+}
+
+/// EI-190: make /api follow the switcher. Stores the mapped operator port
+/// and drops the live IPC connection so the next call dials the selected
+/// operator's socket (per-port discovery file).
+fn retarget_api(window: &tauri::WebviewWindow, target_port: u16) {
+    use tauri::Manager;
+    let api_port = api_port_for_target(target_port);
+    crate::SELECTED_API_PORT.store(api_port, std::sync::atomic::Ordering::Relaxed);
+    if let Some(ipc) = window
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::endpoint_ipc::IpcClientHandle>>()
+    {
+        ipc.reset();
+        println!("[dev-wrapper] /api target → :{api_port} (IPC re-dial)");
+    } else {
+        println!("[dev-wrapper] /api target → :{api_port} (no IPC handle managed — HTTP only)");
     }
 }
 
@@ -518,22 +567,33 @@ fn install_rail_signal(window: &tauri::WebviewWindow) {
 
 /// Re-apply the persisted build target on launch (P-004) — only when the
 /// target is alive, so a stale selection can't boot into a blank webview.
+/// Either way, point /api at the EFFECTIVE build (EI-190): the persisted
+/// target when restored, else the default the webview actually shows.
 fn apply_persisted_target(window: &tauri::WebviewWindow) {
-    let Some(port) = read_persisted_target() else { return };
-    if window.url().ok().and_then(|u| u.port()) == Some(port) {
-        return;
-    }
-    if !port_reachable(port) {
-        println!("[dev-wrapper] persisted build target :{port} is down — keeping the default");
-        return;
-    }
-    let url = format!("http://127.0.0.1:{port}/");
-    if let Ok(u) = url::Url::parse(&url) {
-        match window.navigate(u) {
-            Ok(()) => println!("[dev-wrapper] restored persisted build target :{port}"),
-            Err(e) => eprintln!("[dev-wrapper] could not restore target :{port}: {e}"),
+    let effective = 'restore: {
+        let Some(port) = read_persisted_target() else { break 'restore 3070 };
+        if window.url().ok().and_then(|u| u.port()) == Some(port) {
+            break 'restore port;
         }
-    }
+        if !port_reachable(port) {
+            println!("[dev-wrapper] persisted build target :{port} is down — keeping the default");
+            break 'restore 3070;
+        }
+        let url = format!("http://127.0.0.1:{port}/");
+        match url::Url::parse(&url).map_err(|e| e.to_string()).and_then(|u| {
+            window.navigate(u).map_err(|e| e.to_string())
+        }) {
+            Ok(()) => {
+                println!("[dev-wrapper] restored persisted build target :{port}");
+                port
+            }
+            Err(e) => {
+                eprintln!("[dev-wrapper] could not restore target :{port}: {e}");
+                3070
+            }
+        }
+    };
+    retarget_api(window, effective);
 }
 
 /// Initialize the dev wrapper around the main window. Call from setup() on
@@ -618,6 +678,7 @@ mod tests {
             gate_stalled: false,
             gate_last_green_ms: Some(1_000_000),
             git_sync_status: Some("synced".into()),
+            api_port: 3070,
             ipc_owner: Some("release".into()),
             ..Default::default()
         };
@@ -680,26 +741,54 @@ mod tests {
     }
 
     #[test]
-    fn skew_flagged_when_spa_and_ipc_diverge() {
-        // SPA on staging, IPC owned by release → skew.
+    fn divergence_guard_fires_when_api_did_not_follow_spa() {
+        // SPA on staging but api_port still 3070 — switch_to sets both, so
+        // this state should be impossible; the guard surfaces it loudly.
         let (line, warn) = compose_skew(&snap(), Some(3170));
         assert!(warn, "{line}");
-        assert!(line.contains("SKEW"), "{line}");
-        assert!(line.contains("API→release"), "{line}");
+        assert!(line.contains("DIVERGED"), "{line}");
+    }
+
+    #[test]
+    fn wrong_operator_flagged_when_singleton_fallback_resolves_other_port() {
+        // /api targets :3170 but the discovery resolution handed us the
+        // RELEASE operator (per-port file missing → singleton fallback).
+        let mut s = snap();
+        s.api_port = 3170;
+        let (line, warn) = compose_skew(&s, Some(3170));
+        assert!(warn, "{line}");
+        assert!(line.contains("WRONG OPERATOR"), "{line}");
+    }
+
+    #[test]
+    fn api_follows_switcher_aligned_staging() {
+        let mut s = snap();
+        s.api_port = 3170;
+        s.ipc_owner = Some("staging-tree".into());
+        let (line, warn) = compose_skew(&s, Some(3170));
+        assert!(!warn, "{line}");
+        assert!(line.contains("API :3170 staging-tree"), "{line}");
     }
 
     #[test]
     fn no_skew_when_aligned() {
         let (line, warn) = compose_skew(&snap(), Some(3070));
         assert!(!warn, "{line}");
-        assert!(!line.contains("SKEW"), "{line}");
+        assert!(line.contains("API :3070 release"), "{line}");
     }
 
     #[test]
     fn local_vite_spa_is_not_skew() {
-        // :3055 has no operator of its own; /api intentionally rides IPC.
+        // :3055 has no operator of its own; /api maps to the :3070 operator.
         let (_, warn) = compose_skew(&snap(), Some(3055));
         assert!(!warn);
+    }
+
+    #[test]
+    fn api_port_mapping() {
+        assert_eq!(api_port_for_target(3070), 3070);
+        assert_eq!(api_port_for_target(3170), 3170);
+        assert_eq!(api_port_for_target(3055), 3070); // vite has no operator
     }
 
     #[test]
@@ -708,7 +797,7 @@ mod tests {
         s.ipc_owner = Some("STALE (writer pid 2842557 gone)".into());
         let (line, warn) = compose_skew(&s, Some(3070));
         assert!(warn, "{line}");
-        assert!(line.contains("API→STALE"), "{line}");
+        assert!(line.contains("API :3070→STALE"), "{line}");
     }
 
     #[test]

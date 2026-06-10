@@ -153,6 +153,24 @@ fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
     v.get("socketPath")?.as_str().map(|s| s.to_string())
 }
 
+/// EI-190: the operator PORT the desktop's /api endpoint-IPC currently
+/// targets. Default :3070 (the green release operator — today's implicit
+/// behavior made explicit). The dev wrapper's build switcher stores the
+/// mapped target here (`dev_wrapper::api_port_for_target`) and resets the
+/// IPC client so /api follows the selected build instead of riding
+/// whichever operator last rewrote the singleton discovery file.
+pub static SELECTED_API_PORT: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(3070);
+
+/// Per-port discovery read (EI-190): prefer `endpoint-ipc.<port>.json`
+/// (every operator boot publishes it since the per-port change), falling
+/// back to the legacy last-writer-wins singleton for an operator that
+/// hasn't restarted since the change shipped.
+fn read_dev_ipc_socket_for_port(papercusp_dir: &std::path::Path, port: u16) -> Option<String> {
+    read_dev_ipc_socket(&papercusp_dir.join(format!("endpoint-ipc.{port}.json")))
+        .or_else(|| read_dev_ipc_socket(&papercusp_dir.join("endpoint-ipc.json")))
+}
+
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
 /// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
 /// `.deb` launch inherits a minimal PATH), so a bare `Command::new("node")`
@@ -1231,17 +1249,6 @@ pub fn run() {
                     grant_media_permission(&window);
                 }
 
-                // Dev wrapper (desktop-build-switcher-wrapper-2026-06-09):
-                // the native build-switcher + pipeline-status bar around the
-                // content webview, plus the document-start dev-rail signal.
-                // Dev-only by design — the packaged app drives its own
-                // sidecar on a dynamic port / papercusp:// origin where the
-                // fixed :3070/:3170/:3055 targets are meaningless.
-                #[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
-                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() != Some("0") {
-                    dev_wrapper::init(app);
-                }
-
                 // DEV endpoint-IPC: we don't spawn the sidecar in dev, so
                 // there's no stdout PAPERCUSP_IPC_READY handshake. The
                 // externally-run operator publishes its socket path to
@@ -1254,10 +1261,17 @@ pub fn run() {
                 // fallback while the operator is down.
                 #[cfg(debug_assertions)]
                 if let Some(home) = std::env::var_os("HOME") {
-                    let disc = std::path::PathBuf::from(home).join(".papercusp/endpoint-ipc.json");
-                    let disc_src = disc.clone();
+                    let papercusp_dir = std::path::PathBuf::from(home).join(".papercusp");
+                    // EI-190: resolve the socket for the SELECTED operator
+                    // (the dev wrapper's build switcher), re-read on every
+                    // (re)connect — so /api deliberately follows the chosen
+                    // build instead of the singleton's restart-order accident.
+                    let dir_src = papercusp_dir.clone();
                     let handle = endpoint_ipc::IpcClientHandle::new(move || {
-                        read_dev_ipc_socket(&disc_src).map(std::path::PathBuf::from)
+                        let port =
+                            SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                        read_dev_ipc_socket_for_port(&dir_src, port)
+                            .map(std::path::PathBuf::from)
                     });
                     app.manage(handle.clone());
                     // Warm in the background — the operator may boot after the
@@ -1272,6 +1286,20 @@ pub fn run() {
                         }
                         eprintln!("[papercusp-desktop] dev endpoint-ipc: no socket after 60s — /api on HTTP until operator is up");
                     });
+                }
+
+                // Dev wrapper (desktop-build-switcher-wrapper-2026-06-09):
+                // the native build-switcher + pipeline-status bar around the
+                // content webview, plus the document-start dev-rail signal.
+                // AFTER the endpoint-IPC manage above — init retargets /api
+                // to the persisted build (EI-190), which needs the managed
+                // handle to reset. Dev-only by design: the packaged app
+                // drives its own sidecar on a dynamic port / papercusp://
+                // origin where the fixed :3070/:3170/:3055 targets are
+                // meaningless.
+                #[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
+                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() != Some("0") {
+                    dev_wrapper::init(app);
                 }
 
                 return Ok(());
