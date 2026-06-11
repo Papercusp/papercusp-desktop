@@ -1074,19 +1074,37 @@ fn spawn_serve(
     cmd.arg("--ensure");
     // When routed via WSL, env vars must be listed in WSLENV to cross the
     // Windows→Linux boundary. The `/p` flag translates Windows paths.
+    //
+    // PATH is deliberately NOT forwarded: `PATH/l` used to be first in this
+    // list, and the translated Windows PATH *replaced* the distro PATH inside
+    // serve — /usr/bin et al vanished, so every distro-binary spawn from the
+    // operator (kopia, locale, git) died ENOENT while the same binaries
+    // worked from a fresh `wsl --exec` session (found live 2026-06-11,
+    // P-010a). The bundled sidecar bin dir crosses as its own
+    // PAPERCUSP_SIDECAR_BIN/p instead; serve prepends it to the DISTRO PATH
+    // (see serve.ts main()). Bare `node` in make_sidecar_command still
+    // resolves — the rootfs bakes node into /usr/local for exactly that
+    // no-shell lookup (P-004).
     if via_wsl {
         cmd.env(
             "WSLENV",
-            "PATH/l:PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
+            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
              PAPERCUSP_SERVE_UI:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
-             PAPERCUSP_PROMPTS_DIR/p",
+             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
         );
     }
     cmd.env("PATH", &new_path)
+        // The bundled bin dir, as its own var: on the WSL route it crosses
+        // via WSLENV /p and serve prepends it to the distro PATH; on native
+        // platforms the PATH above already carries it (harmless duplicate).
+        .env(
+            "PAPERCUSP_SIDECAR_BIN",
+            sidecar_dir.join("bin").to_string_lossy().to_string(),
+        )
         // serve reads PAPERCUSP_HONO_PORT (cold-start hint; reuse may differ).
         .env("PAPERCUSP_HONO_PORT", port_hint.to_string())
         .env("PAPERCUSP_BIND_HOST", "127.0.0.1")
