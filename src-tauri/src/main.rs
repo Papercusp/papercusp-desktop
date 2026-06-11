@@ -802,6 +802,7 @@ fn wait_for_operator(
     // runs inside WSL — the distro user's real home over \\wsl.localhost
     // (HOME forwarding doesn't survive WSL session init; see
     // wsl_sidecar_home_unc).
+    #[allow(unused_mut)] // pushed onto only in the cfg(windows) branch
     let mut homes: Vec<std::path::PathBuf> = vec![workspace_home.to_path_buf()];
     #[cfg(target_os = "windows")]
     if via_wsl {
@@ -851,9 +852,9 @@ fn wait_for_operator(
 /// the bootstrap page its base — or a visible failure state. Runs on a worker
 /// thread so the main thread reaches the event loop immediately and the
 /// window paints the bootstrap page while serve boots.
-fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf) {
+fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
     let discovery =
-        match wait_for_operator(&app_handle, &workspace_home, Duration::from_secs(120)) {
+        match wait_for_operator(&app_handle, &workspace_home, via_wsl, Duration::from_secs(120)) {
             Ok(d) => d,
             Err(reason) => {
                 eprintln!("[papercusp-desktop] FATAL: {}", reason);
@@ -1967,7 +1968,7 @@ pub fn run() {
             // a visible failure state — off-thread.
             let app_handle = app.handle().clone();
             let workspace_home_bg = workspace_home.clone();
-            std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg));
+            std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg, via_wsl));
 
             Ok(())
         })
