@@ -730,10 +730,45 @@ fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorD
     parse_operator_discovery(&txt)
 }
 
+/// The sidecar's REAL home when it runs inside WSL, reachable from Windows
+/// via the \\wsl.localhost UNC share. WSLENV `HOME/p` forwarding does NOT
+/// survive WSL session init (it re-sets HOME from /etc/passwd after the
+/// WSLENV merge — found live 2026-06-11), so serve writes operator.json /
+/// state under the distro user's /home/papercup, not the forwarded
+/// /mnt/c home. Discovery polls here when routed via WSL.
+#[cfg(target_os = "windows")]
+fn wsl_sidecar_home_unc() -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        r"\\wsl.localhost\{}\home\papercup",
+        wsl_setup::DISTRO_NAME_PUB
+    ))
+}
+
 /// Liveness probe for a discovery-file pid (signal-0 equivalent: /proc on
 /// Linux, `kill -0` elsewhere). Guards against a STALE operator.json whose
 /// port has since been reused by an unrelated process.
-fn discovery_pid_alive(pid: u32) -> bool {
+///
+/// `via_wsl`: the pid is a LINUX pid inside the papercup-runtime distro —
+/// probe its /proc entry through wsl.exe (`kill` doesn't exist on Windows,
+/// and a Windows pid check would be meaningless for it).
+fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
+    if via_wsl {
+        #[cfg(target_os = "windows")]
+        {
+            return Command::new("wsl.exe")
+                .args([
+                    "--distribution",
+                    wsl_setup::DISTRO_NAME_PUB,
+                    "-e",
+                    "test",
+                    "-d",
+                    &format!("/proc/{}", pid),
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         std::path::Path::new(&format!("/proc/{}", pid)).exists()
@@ -760,12 +795,22 @@ fn discovery_pid_alive(pid: u32) -> bool {
 fn wait_for_operator(
     app_handle: &tauri::AppHandle,
     workspace_home: &std::path::Path,
+    via_wsl: bool,
     timeout: Duration,
 ) -> Result<OperatorDiscovery, String> {
+    // Candidate discovery homes: the workspace home, plus — when the sidecar
+    // runs inside WSL — the distro user's real home over \\wsl.localhost
+    // (HOME forwarding doesn't survive WSL session init; see
+    // wsl_sidecar_home_unc).
+    let mut homes: Vec<std::path::PathBuf> = vec![workspace_home.to_path_buf()];
+    #[cfg(target_os = "windows")]
+    if via_wsl {
+        homes.push(wsl_sidecar_home_unc());
+    }
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Some(d) = read_operator_discovery(workspace_home) {
-            if discovery_pid_alive(d.pid)
+        if let Some(d) = homes.iter().find_map(|h| read_operator_discovery(h)) {
+            if discovery_pid_alive(d.pid, via_wsl)
                 && std::net::TcpStream::connect(format!("127.0.0.1:{}", d.port)).is_ok()
             {
                 return Ok(d);
