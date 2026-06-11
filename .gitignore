@@ -7,6 +7,10 @@ src-tauri/gen/
 # Bundled sidecar (produced by bin/build-desktop-sidecar.sh on every build)
 src-tauri/sidecar/
 
+# WSL rootfs tarball (~250-400 MB, produced by scripts/build-rootfs.sh per
+# release; bundled as a Tauri resource — never committed)
+src-tauri/resources/papercup-runtime.tar.gz
+
 # Node
 node_modules/
 

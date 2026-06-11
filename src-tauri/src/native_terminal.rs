@@ -1435,6 +1435,11 @@ pub mod swiftterm_embed {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 out.push(dir.join("libPapercuspTermShim.dylib"));
+                // Bundled app: the build drops the dylib into src-tauri/resources/,
+                // which tauri-bundler ships under Contents/Resources (layout varies
+                // by bundler version — probe both).
+                out.push(dir.join("../Resources/resources/libPapercuspTermShim.dylib"));
+                out.push(dir.join("../Resources/libPapercuspTermShim.dylib"));
                 // cargo target/<profile>/ → the repo's src-tauri/, where the
                 // SwiftPM package builds its release output (dev workflow).
                 out.push(

@@ -39,6 +39,9 @@ set -euo pipefail
 DEFAULT_USER="papercup"
 if ! id "$DEFAULT_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$DEFAULT_USER"
+  # Minimal images ship without sudo — the dir appears only when the
+  # package installs (added to the apt list below); create it now.
+  mkdir -p /etc/sudoers.d
   echo "$DEFAULT_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/papercup
   chmod 0440 /etc/sudoers.d/papercup
 fi
@@ -67,18 +70,29 @@ apt-get install -y --no-install-recommends \
   unzip \
   python3 \
   python3-pip \
+  sudo \
   postgresql-client \
-  overmind \
   tmux \
+  xz-utils \
   ripgrep
 
-# Node + pnpm via fnm (faster + reproducible than nvm).
-if ! command -v fnm >/dev/null 2>&1; then
-  curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-  export PATH="$HOME/.local/share/fnm:$PATH"
-  fnm install "${NODE_VERSION:-22}"
-  fnm default "${NODE_VERSION:-22}"
-fi
+# overmind is not in the Ubuntu archive — fetch the release binary.
+OVERMIND_VERSION="${OVERMIND_VERSION:-2.5.1}"
+curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_VERSION}/overmind-v${OVERMIND_VERSION}-linux-amd64.gz" \
+  | gunzip > /usr/local/bin/overmind
+chmod +x /usr/local/bin/overmind
+overmind --version
+
+# Node into /usr/local — it must be on the DEFAULT non-login PATH: the
+# desktop spawns `wsl.exe --exec node` (no shell, no profile read), and
+# appendWindowsPath=false above leaves PATH = /usr/local/bin:/usr/bin:…
+# Shim/profile installs (fnm, nvm) are invisible there.
+NODE_MAJOR="${NODE_VERSION:-22}"
+NODE_TARBALL="$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" \
+  | awk '/node-v[0-9.]+-linux-x64\.tar\.xz$/{print $2; exit}')"
+curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${NODE_TARBALL}" \
+  | tar -xJ -C /usr/local --strip-components=1
+node --version
 
 # pnpm
 npm install -g "pnpm@${PNPM_VERSION:-9.15.0}"
