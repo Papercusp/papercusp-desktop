@@ -55,6 +55,14 @@ trap 'rm -f "$TARBALL"' EXIT
 # -h dereferences symlinks (node_modules/.bin shims) — Windows tar can't
 # create them. Keep sidecar/**/node_modules (runtime deps); drop only the
 # desktop repo's own toolchain node_modules.
+#
+# Windows payload trims (NSIS hard-caps the installer datablock at ~2 GiB —
+# the full 2.4 GB payload dies in makensis with "error mmapping datablock"):
+#   - sidecar/code-server (447 MB): main.rs spawn_code_server already
+#     falls back gracefully when it's absent on Windows.
+#   - sidecar/bin/omp (485 MB): OMP integration is Windows-unsupported in
+#     v1 (desktop-app-install-integration-2026-05-23 D-002; the endpoint
+#     short-circuits with windows_not_supported_in_v1).
 tar -czhf "$TARBALL" \
   --exclude='.git' \
   --exclude='papercusp-desktop/node_modules' \
@@ -62,6 +70,8 @@ tar -czhf "$TARBALL" \
   --exclude='src-tauri/target' \
   --exclude='src-tauri/sidecar.tmp.*' \
   --exclude='src-tauri/sidecar.lock*' \
+  --exclude='src-tauri/sidecar/code-server' \
+  --exclude='src-tauri/sidecar/bin/omp' \
   -C "$ROOT/.." papercusp-desktop
 ls -lh "$TARBALL"
 
