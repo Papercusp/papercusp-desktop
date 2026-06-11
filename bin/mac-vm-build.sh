@@ -24,9 +24,12 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
 fi
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
 
-# pg_dump for the optional seed-bake leg of the sidecar build.
-for d in "$HOME/postgres-bin" "$HOME/local/pgsql/bin" /usr/local/opt/libpq/bin; do
-  [[ -x "$d/pg_dump" ]] && export PATH="$d:$PATH" && break
+# PG client tools (pg_dump/psql/pg_dumpall) for the sidecar's snapshot
+# subsystem wiring. Gate on pg_dumpall — the rarest of the three; the
+# VM's hand-curated ~/postgres-bin has only pg_dump/psql and must not
+# win the PATH race over a complete libpq keg (brew install libpq).
+for d in /usr/local/opt/libpq/bin /opt/homebrew/opt/libpq/bin "$HOME/postgres-bin" "$HOME/local/pgsql/bin"; do
+  [[ -x "$d/pg_dumpall" ]] && export PATH="$d:$PATH" && break
 done
 
 cd "$ROOT"

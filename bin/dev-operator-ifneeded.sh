@@ -65,9 +65,9 @@ echo "[tauri] starting operator dev server on :$PORT"
 # single kill target (`kill -- -$GROUP`). Do NOT trust `$!` as the group id:
 # util-linux setsid only execs in place when the spawned pid is not already
 # a group leader — when it FORKS instead, `$!` is the exited setsid and the
-# group kill silently no-ops, orphaning the stack (observed live 2026-06-11:
-# session leader 18 pids past `$!`). The inner shell's `$$` IS the session
-# leader in both cases, so it reports the true group through a pidfile.
+# group kill silently no-ops, orphaning the stack. The inner shell's `$$` IS
+# the session leader in both cases, so it reports the true group through a
+# pidfile instead of assuming the exec-in-place fast path.
 GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
 setsid bash -c 'echo "$$" > "$1"; shift; eval "$1"' _ "$GROUP_FILE" "$DEV_CMD" &
 CHILD=$!

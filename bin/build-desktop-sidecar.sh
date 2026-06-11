@@ -278,13 +278,16 @@ fi
 # 'require-addon'"). BFS each native package's package.json `dependencies`.
 echo "→ copying externalized native deps + their dependency closure into the sidecar"
 nat_copied=0; nat_missing=0
-declare -A _seen=()
+# Visited-set as a space-delimited string, NOT `declare -A` — macOS ships
+# bash 3.2 (no associative arrays) and this script must run on the mac
+# build VM (mac-desktop-release-readiness-2026-06-11).
+_seen=" "
 copy_pkg_closure() {
   local queue=("$1")
   while [[ ${#queue[@]} -gt 0 ]]; do
     local cur="${queue[0]}"; queue=("${queue[@]:1}")
-    [[ -n "${_seen[$cur]:-}" ]] && continue
-    _seen[$cur]=1
+    case "$_seen" in *" $cur "*) continue ;; esac
+    _seen="${_seen}${cur} "
     [[ -e "$SIDECAR_DIR/node_modules/$cur" ]] && continue
     local src=""
     for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
@@ -837,7 +840,9 @@ GH_VERSION="${GH_VERSION:-2.92.0}"
 gh_archive=""
 gh_inner_dir=""
 case "$target_os" in
-  linux)   gh_archive="gh_${GH_VERSION}_linux_${target_arch}.tar.gz";  gh_inner_dir="gh_${GH_VERSION}_linux_${target_arch}" ;;
+  # gh names its linux x86_64 asset "amd64" (not "x64") — x64 404s silently.
+  linux)   _gh_arch="$target_arch"; [[ "$target_arch" == "x64" ]] && _gh_arch="amd64"
+           gh_archive="gh_${GH_VERSION}_linux_${_gh_arch}.tar.gz";  gh_inner_dir="gh_${GH_VERSION}_linux_${_gh_arch}" ;;
   darwin)  case "$target_arch" in
              x64)   gh_archive="gh_${GH_VERSION}_macOS_amd64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_amd64" ;;
              arm64) gh_archive="gh_${GH_VERSION}_macOS_arm64.zip";   gh_inner_dir="gh_${GH_VERSION}_macOS_arm64" ;;
