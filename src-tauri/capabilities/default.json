@@ -3,6 +3,9 @@
   "identifier": "default",
   "description": "Default permissions for the Papercusp desktop shell.",
   "windows": ["main", "papercusp-perf-recorder-*", "ws-*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "core:window:default",
