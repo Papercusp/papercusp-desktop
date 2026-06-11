@@ -127,6 +127,20 @@ fn read_persisted_target() -> Option<u16> {
     TARGETS.iter().any(|(_, _, p)| *p == port).then_some(port)
 }
 
+/// EI-296 escape hatch: `PAPERCUSP_DEV_API_TARGET=<port>` pins BOTH the
+/// content webview and /api to an arbitrary localhost operator — an isolated
+/// test stack or a fault proxy — bypassing the fixed TARGETS allowlist.
+/// Runtime-only by design: it is NEVER written to the shared
+/// desktop-build-target.json, so a test launch can't repoint peers' (or the
+/// owner's) next launch. Ports <1024 are rejected as obviously wrong.
+fn env_api_target() -> Option<u16> {
+    parse_api_target(std::env::var("PAPERCUSP_DEV_API_TARGET").ok())
+}
+
+fn parse_api_target(raw: Option<String>) -> Option<u16> {
+    raw?.trim().parse::<u16>().ok().filter(|p| *p >= 1024)
+}
+
 fn write_persisted_target(name: &str, port: u16) {
     let Some(path) = persisted_target_path() else { return };
     if let Some(dir) = path.parent() {
@@ -372,11 +386,23 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         .staging_committed_ms
         .map(|t| format!("({})", fmt_age(now_ms, Some(t))))
         .unwrap_or_default();
+    // Healthy sync states collapse to a compact "✓ <countdown>"; anything
+    // else keeps the status word in full.
+    let sync = match snap.git_sync_status.as_deref() {
+        Some("synced") | Some("nothing") => {
+            format!("sync ✓ {}", fmt_in(now_ms, snap.git_sync_next_ms))
+        }
+        other => format!(
+            "sync {}, next {}",
+            other.unwrap_or("?"),
+            fmt_in(now_ms, snap.git_sync_next_ms)
+        ),
+    };
     // sync precedes gate: the line ellipsizes at the right, and "when is the
     // next sync" must survive truncation (a red gate still shows in the
     // leading verdict).
     format!(
-        "tip{}: {} · staging {} · main {}{} · live {}{} · sync {}, next {} · {}",
+        "tip{}: {} · staging {} · main {}{} · live {}{} · {} · {}",
         tip_age,
         change_verdict(snap),
         sha(&snap.staging_sha),
@@ -384,8 +410,7 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         standing(snap.main_behind, "gate", snap.gate_next_ms),
         sha(&snap.deployed_sha),
         standing(snap.deployed_behind, "deploy", snap.deploy_next_ms),
-        snap.git_sync_status.clone().unwrap_or_else(|| "?".into()),
-        fmt_in(now_ms, snap.git_sync_next_ms),
+        sync,
         gate,
     )
 }
@@ -492,12 +517,19 @@ fn compose_status_markup(snap: &StatusSnapshot, now_ms: i64) -> String {
             sha(&snap.deployed_sha),
             standing(snap.deployed_behind, "deploy", snap.deploy_next_ms),
         ),
-        format!(
-            "{} {}{}",
-            span(C_DIM, "sync"),
-            span(C_DIM, &esc(&snap.git_sync_status.clone().unwrap_or_else(|| "?".into()))),
-            span(C_MUTE, &format!(", next {}", fmt_in(now_ms, snap.git_sync_next_ms))),
-        ),
+        match snap.git_sync_status.as_deref() {
+            Some("synced") | Some("nothing") => format!(
+                "{}{}",
+                span(C_GOOD, "sync ✓"),
+                span(C_MUTE, &format!(" {}", fmt_in(now_ms, snap.git_sync_next_ms))),
+            ),
+            other => format!(
+                "{} {}{}",
+                span(C_DIM, "sync"),
+                span_b(C_BAD, &esc(other.unwrap_or("?"))),
+                span(C_MUTE, &format!(", next {}", fmt_in(now_ms, snap.git_sync_next_ms))),
+            ),
+        },
         gate,
     ];
     parts.join(&span(C_SEP, " · "))
@@ -534,6 +566,17 @@ fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) 
     // Should be impossible (switch_to sets both) — guard regardless.
     let diverged = spa_port.map(|p| api_port_for_target(p) != api).unwrap_or(false);
     let warn = fallback_mismatch || diverged;
+    // Aligned + same build: one origin, one sha — don't say it twice. The
+    // duplicated form ate ~200px of bar width and crowded out the status
+    // line's sync segment.
+    if !warn {
+        if let Some(p) = spa_port {
+            let spa_sha = snap.health.get(&p).and_then(|h| h.sha.clone());
+            if p == api && spa_sha.as_deref() == Some(api_sha.as_str()) {
+                return (format!("SPA+API :{api} {owner} {api_sha}"), false);
+            }
+        }
+    }
     let line = format!(
         "{spa} · API :{api} {owner} {api_sha}{}",
         if fallback_mismatch {
@@ -728,6 +771,25 @@ fn install_rail_signal(window: &tauri::WebviewWindow) {
 /// Either way, point /api at the EFFECTIVE build (EI-190): the persisted
 /// target when restored, else the default the webview actually shows.
 fn apply_persisted_target(window: &tauri::WebviewWindow) {
+    // EI-296: an explicit env target outranks the persisted selection. /api is
+    // pinned even when the content navigation fails (the target may be a
+    // fault proxy that is deliberately down mid-test); nothing is persisted.
+    if let Some(port) = env_api_target() {
+        if !port_reachable(port) {
+            eprintln!("[dev-wrapper] PAPERCUSP_DEV_API_TARGET :{port} is not reachable — pinning /api anyway, keeping default content");
+        } else {
+            let url = format!("http://127.0.0.1:{port}/");
+            match url::Url::parse(&url)
+                .map_err(|e| e.to_string())
+                .and_then(|u| window.navigate(u).map_err(|e| e.to_string()))
+            {
+                Ok(()) => println!("[dev-wrapper] PAPERCUSP_DEV_API_TARGET :{port} — content + /api pinned (not persisted)"),
+                Err(e) => eprintln!("[dev-wrapper] PAPERCUSP_DEV_API_TARGET :{port} navigate failed: {e}"),
+            }
+        }
+        retarget_api(window, port);
+        return;
+    }
     let effective = 'restore: {
         let Some(port) = read_persisted_target() else { break 'restore 3070 };
         if window.url().ok().and_then(|u| u.port()) == Some(port) {
@@ -861,7 +923,7 @@ mod tests {
         let line = compose_status(&snap(), 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 −2 (gate in 10m) · live bbbb2222 −3 (deploy in 5m) · sync synced, next in 2m · gate ✓ 5m ago"
+            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 −2 (gate in 10m) · live bbbb2222 −3 (deploy in 5m) · sync ✓ in 2m · gate ✓ 5m ago"
         );
     }
 
@@ -873,7 +935,7 @@ mod tests {
         let line = compose_status(&s, 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "tip(5m): live on :3070 ✓ · staging aaaa1111 · main bbbb2222 ✓ latest · live bbbb2222 ✓ latest · sync synced, next in 2m · gate ✓ 5m ago"
+            "tip(5m): live on :3070 ✓ · staging aaaa1111 · main bbbb2222 ✓ latest · live bbbb2222 ✓ latest · sync ✓ in 2m · gate ✓ 5m ago"
         );
     }
 
@@ -919,6 +981,12 @@ mod tests {
         // error (with markup-significant chars escaped)
         let err = StatusSnapshot { error: Some("a<b&c".into()), ..Default::default() };
         assert_eq!(strip_markup(&compose_status_markup(&err, now)), compose_status(&err, now));
+        // unhealthy sync keeps the status word in both forms
+        let mut conflict = snap();
+        conflict.git_sync_status = Some("conflict".into());
+        let plain = compose_status(&conflict, now);
+        assert!(plain.contains("sync conflict, next in 2m"), "{plain}");
+        assert_eq!(strip_markup(&compose_status_markup(&conflict, now)), plain);
     }
 
     #[test]
@@ -992,6 +1060,19 @@ mod tests {
         let (line, warn) = compose_skew(&snap(), Some(3170));
         assert!(warn, "{line}");
         assert!(line.contains("DIVERGED"), "{line}");
+    }
+
+    #[test]
+    fn parse_api_target_accepts_custom_ports_and_rejects_junk() {
+        // EI-296: arbitrary localhost operator ports are allowed (the whole
+        // point — iso stacks / fault proxies live outside TARGETS) …
+        assert_eq!(parse_api_target(Some("3271".into())), Some(3271));
+        assert_eq!(parse_api_target(Some(" 18080 ".into())), Some(18080));
+        // … but unset / empty / non-numeric / privileged-port values are not.
+        assert_eq!(parse_api_target(None), None);
+        assert_eq!(parse_api_target(Some(String::new())), None);
+        assert_eq!(parse_api_target(Some("staging".into())), None);
+        assert_eq!(parse_api_target(Some("80".into())), None);
     }
 
     #[test]
