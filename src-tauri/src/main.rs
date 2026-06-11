@@ -417,6 +417,127 @@ mod discovery_tests {
     }
 }
 
+#[cfg(test)]
+mod helper_tests {
+    use super::{bundled_path_env, read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode};
+
+    // ── url_encode (RFC 3986 component encoding) ────────────────────────────
+
+    #[test]
+    fn url_encode_passes_unreserved_through() {
+        assert_eq!(url_encode("abcXYZ019.-_~"), "abcXYZ019.-_~");
+        assert_eq!(url_encode(""), "");
+    }
+
+    #[test]
+    fn url_encode_escapes_reserved_with_uppercase_hex() {
+        assert_eq!(url_encode("a b"), "a%20b");
+        assert_eq!(url_encode("ws/id?x=1&y=2"), "ws%2Fid%3Fx%3D1%26y%3D2");
+        assert_eq!(url_encode("a:b#c"), "a%3Ab%23c");
+        assert_eq!(url_encode("100%"), "100%25");
+    }
+
+    #[test]
+    fn url_encode_encodes_utf8_per_byte() {
+        // 'é' = 0xC3 0xA9 in UTF-8 — each byte percent-encoded.
+        assert_eq!(url_encode("é"), "%C3%A9");
+        assert_eq!(url_encode("日"), "%E6%97%A5");
+    }
+
+    // ── bundled PATH assembly ───────────────────────────────────────────────
+
+    #[test]
+    fn bundled_path_env_prepends_the_sidecar_bin_dir() {
+        let dir = std::path::Path::new("/opt/papercusp/sidecar");
+        let path = bundled_path_env(dir);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let expected_prefix = format!("{}{}", dir.join("bin").to_string_lossy(), sep);
+        assert!(
+            path.starts_with(&expected_prefix),
+            "PATH must start with the bundled bin dir: {path}"
+        );
+    }
+
+    // ── endpoint-ipc discovery file parsing ─────────────────────────────────
+
+    /// Fresh temp dir per test — same pattern as the endpoint_ipc
+    /// synthetic-server test (no tempfile dev-dep in this crate).
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "papercusp-desktop-test-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_dev_ipc_socket_parses_socket_path() {
+        let dir = temp_dir("ipc-sock");
+        let file = dir.join("endpoint-ipc.json");
+        std::fs::write(&file, r#"{"socketPath":"/tmp/papercusp/ipc.sock","pid":42}"#).unwrap();
+        assert_eq!(
+            read_dev_ipc_socket(&file),
+            Some("/tmp/papercusp/ipc.sock".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_dev_ipc_socket_rejects_missing_or_malformed() {
+        let dir = temp_dir("ipc-bad");
+        // Missing file.
+        assert_eq!(read_dev_ipc_socket(&dir.join("nope.json")), None);
+        // Malformed JSON (half-written discovery file).
+        let truncated = dir.join("truncated.json");
+        std::fs::write(&truncated, r#"{"socketPath":"/tmp/x"#).unwrap();
+        assert_eq!(read_dev_ipc_socket(&truncated), None);
+        // Missing key.
+        let nokey = dir.join("nokey.json");
+        std::fs::write(&nokey, r#"{"pid":42}"#).unwrap();
+        assert_eq!(read_dev_ipc_socket(&nokey), None);
+        // Wrong type.
+        let wrongtype = dir.join("wrongtype.json");
+        std::fs::write(&wrongtype, r#"{"socketPath":42}"#).unwrap();
+        assert_eq!(read_dev_ipc_socket(&wrongtype), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_port_discovery_prefers_the_port_file_then_falls_back() {
+        let dir = temp_dir("ipc-port");
+        std::fs::write(
+            dir.join("endpoint-ipc.3170.json"),
+            r#"{"socketPath":"/tmp/staging.sock"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("endpoint-ipc.json"),
+            r#"{"socketPath":"/tmp/legacy.sock"}"#,
+        )
+        .unwrap();
+        // Port with its own file → the per-port socket (EI-190).
+        assert_eq!(
+            read_dev_ipc_socket_for_port(&dir, 3170),
+            Some("/tmp/staging.sock".to_string())
+        );
+        // Port without one → the legacy singleton.
+        assert_eq!(
+            read_dev_ipc_socket_for_port(&dir, 3070),
+            Some("/tmp/legacy.sock".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_port_discovery_returns_none_when_nothing_published() {
+        let dir = temp_dir("ipc-empty");
+        assert_eq!(read_dev_ipc_socket_for_port(&dir, 3070), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Build the Command that actually runs the sidecar. On Windows with
 /// WSL Ready we wrap node in `wsl.exe --distribution papercup-runtime
 /// --cd <wsl-cwd> --exec node …`. Otherwise we run node natively.
