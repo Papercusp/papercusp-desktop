@@ -318,12 +318,14 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
 /// HTML+JS: polls the failed URI once a second (any HTTP response counts —
 /// an error status still proves the origin is back) and navigates to it on
 /// recovery; a manual "Retry now" button covers schemes where fetch can't
-/// poll. The URI is embedded as a JSON string literal so quoting in the
-/// failed URL can't escape the script context.
+/// poll. The URI is embedded as a JSON string literal, with `<` further
+/// escaped to `<`: JSON alone leaves `</script>` intact inside the
+/// literal, which would still terminate the script element.
 #[cfg(target_os = "linux")]
 fn recovery_page_html(failing_uri: &str) -> String {
     let uri_js = serde_json::to_string(failing_uri)
-        .unwrap_or_else(|_| "\"/\"".to_string());
+        .unwrap_or_else(|_| "\"/\"".to_string())
+        .replace('<', "\\u003c");
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>Papercusp — reconnecting</title><style>
   html,body{{height:100%;margin:0;background:#101216;color:#d6dae2;font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}
@@ -408,6 +410,23 @@ mod tests {
     fn t(input: &str, expected: &str) {
         let got = windows_path_to_wsl(&PathBuf::from(input));
         assert_eq!(got, expected, "input={:?}", input);
+    }
+
+    /// EI-239: the recovery page embeds the failed URI as a JSON string
+    /// literal — quoting in the URL must not escape the script context.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_page_embeds_uri_safely() {
+        let html = super::recovery_page_html("http://127.0.0.1:3170/adv?ws=x");
+        assert!(html.contains(r#"const TARGET = "http://127.0.0.1:3170/adv?ws=x";"#));
+        assert!(html.contains("Retry now"));
+
+        let hostile = super::recovery_page_html(r#"http://x/"</script><script>alert(1)"#);
+        // The quote is JSON-escaped and `<` is unicode-escaped, so neither a
+        // raw </script> nor a raw <script> from the URI survives in the HTML.
+        assert!(!hostile.contains("</script><script>alert"));
+        assert!(hostile.contains(r#"\""#));
+        assert!(hostile.contains(r"</script"));
     }
 
     #[test]

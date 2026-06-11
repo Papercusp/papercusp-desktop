@@ -1,0 +1,81 @@
+# Coord injection protocol — the positional [coord+N] block + single-source schema
+URL: /internal/docs/agent-insights/coord-injection-protocol
+
+How the continuous [coord] push surface is encoded. One coord-schema module drives both the server-side injection renderer and the psu-prompt legend; the cc/omp hooks are dumb pipes. Read before touching render.ts glyphs, the COORD_LEGEND, or the coord hooks.
+
+## The idea
+
+The `[coord …]` blocks injected after **every** psu tool call are the highest-
+leverage token surface in the system — pushed continuously, not pulled. A coord
+line has **one fixed schema, identical every injection**, with the operator
+(renderer) and the model (reader) both ours. So the schema does not belong on the
+wire: it is declared **once, out-of-band, in the psu prompt** (the `## Coord
+injection protocol` legend), and only VALUES travel — a positional line
+`<glyph> <handle> <text>`. Plan: `token-efficient-coord-injection-2026-06-06`.
+
+Measured cut vs the legacy format: **−70%** (5-message block) to **−80%**
+(single message) — most of it from killing the per-injection footer, the
+double-UUID, and the per-block header.
+
+## The pieces (one source of truth)
+
+`packages/operator-core/lib/coord-schema.ts` is the **single source**:
+
+* **`COORD_LEGEND`** — `lineType → { glyph, name }`, keyed by the lifecycle
+  category (`intent`/`completion`/`claim`/`window`/`handoff`/`finding`) plus the
+  base `CoordKind`s. Glyphs are **1-token ASCII** (`>` `*` `+` `#` `<` `!` `-`
+  `^` `=` `.` `~`) — emoji (`▶ ↪ ⚠`) tokenize to 2–3 tokens, pure waste here.
+* **`glyphFor(entry)`** — the glyph for one entry: its lifecycle category if it
+  has one (keyed on the **`lifecycle`** envelope field that `coord:emit` stamps —
+  NOT `category`, which is reserved for ambient tags), else its `kind`.
+* **`shortHandle(from)`** — `su-ab53332d-…` → `ab533`; shown ONCE per line.
+* **`renderInjection(entries)`** (Projection 1, the wire) — the `[coord+N]`
+  block: capping + overflow count, digest-notify coalescing, latest-per-peer
+  intent collapse, no header, no footer.
+* **`renderCoordLegend()`** (Projection 2, the prompt) — the once-per-session
+  legend (grammar + glyph key + the relocated footer), spliced into the psu
+  playbook at `<!-- PAPERCUSP-SU:COORD-LEGEND -->` by `renderSuPlaybook`.
+
+Because the wire and the legend **both derive from `COORD_LEGEND`**, they cannot
+desync — the anti-desync test (`coord-schema.test.ts`) asserts every glyph
+`renderInjection` can emit is documented in the legend. A positional format can't
+self-correct a schema mismatch (no inline header), so this is load-bearing.
+
+## How a delta flows
+
+1. A lifecycle event (`work_items:complete`, `coord:declare-intent`, …) emits a
+   coord message via `coord:emit`, stamped `auto:true` + `lifecycle:'<category>'`.
+   `render.ts` produces **glyph-free, sender-free** prose (the glyph + handle are
+   presentation, added downstream — P-003/P-010).
+2. The cc/omp hook calls `coord:inbox { since_ts: <cursor> }`. The handler
+   computes `injection = renderInjection(entries)` server-side and returns it
+   alongside `entries`.
+3. The hook is a **dumb pipe**: it echoes `result.injection` into its envelope
+   (Claude `additionalContext` / OMP `<system-reminder type="coord">`) and
+   advances the cursor from `summary.newest_ts`. All formatting/capping/collapse
+   is server-side — one edit re-tunes every client.
+
+## Rules when you touch this
+
+* **Never hardcode a glyph.** Add/change it in `COORD_LEGEND`; the renderer +
+  legend both read it, and the anti-desync test enforces coverage.
+* **`render.ts` stays glyph-free + sender-free.** The stored summary is content
+  only; `renderInjection` adds the glyph (from the line type) and the handle
+  (once). Re-baking either double-emits it on every injection.
+* **The glyph keys on `lifecycle`, not `category`.** `coord:emit` stamps the
+  lifecycle category on the envelope's `lifecycle` field; `category` holds ambient
+  tags (`service-health`) that `coord:inbox` default-excludes. (`categorizeCoordMessage`
+  is unaffected by the glyph-strip — it short-circuits on the `lifecycle`/`auto`
+  flag before any glyph-sniffing.)
+* **Hooks are dumb pipes.** Keep only transport + the per-launch cursor. Do NOT
+  re-add formatting/capping/footers client-side — that's the divergence this
+  replaced (the cc + omp footers had already drifted apart).
+* **The footer lives once, in the prompt legend** — not per injection.
+* **The legend is in BOTH prompt pipelines** (`renderSuPlaybook` for psu +
+  `assembleRolePrompt` for role agents). Don't assume coord injection is
+  psu-only: the coord hook lives in the GLOBAL `~/.claude/settings.json` and
+  `bootstrap-role` sets `PAPERCUSP_SID`, so **Claude role agents receive
+  injection too** — they need the legend to read the positional format (the
+  pre-positional prose was self-describing; this format isn't). Codex role homes
+  omit the coord hook (the hook is added only for the SU `coordSid`), so codex
+  roles don't inject — but the legend is harmless accurate guidance for them.

@@ -66,14 +66,31 @@ SIDECAR_FINAL_DIR="$SIDECAR_DIR"
 SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
 exec 9>"$SIDECAR_FINAL_DIR.lock"
-if ! flock -n 9; then
-  echo "→ another build-desktop-sidecar.sh holds $SIDECAR_FINAL_DIR.lock — waiting for it"
-  flock 9
+SIDECAR_LOCKDIR=""
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    echo "→ another build-desktop-sidecar.sh holds $SIDECAR_FINAL_DIR.lock — waiting for it"
+    flock 9
+  fi
+else
+  # macOS ships no flock(1) — same EI-160 serialization via a mkdir
+  # spinlock with stale-PID reclaim.
+  SIDECAR_LOCKDIR="$SIDECAR_FINAL_DIR.lockdir"
+  while ! mkdir "$SIDECAR_LOCKDIR" 2>/dev/null; do
+    holder="$(cat "$SIDECAR_LOCKDIR/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$SIDECAR_LOCKDIR"
+      continue
+    fi
+    echo "→ another build-desktop-sidecar.sh holds $SIDECAR_LOCKDIR — waiting for it"
+    sleep 5
+  done
+  echo "$$" > "$SIDECAR_LOCKDIR/pid"
 fi
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
-# Clean the temp tree on any exit; after the publish rename it no longer
-# exists and this is a no-op.
-trap 'rm -rf "$SIDECAR_TMP_DIR"' EXIT
+# Clean the temp tree (and the darwin lockdir) on any exit; after the
+# publish rename the tmp half is a no-op.
+trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"}' EXIT
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a

@@ -1,0 +1,46 @@
+# Agent kickoffs
+URL: /internal/docs/agents/kickoffs
+
+How a UI button can launch an agent session pre-loaded with a task-specific brief.
+
+A **kickoff** is a curated, task-specific system-prompt brief layered on top of the engineer-collaborator playbook when the operator UI spawns a power-user agent session. The button that launches the session names a *kind*; the server writes the matching brief into a temp file and hands its path to the `psu` launcher via `--launch-context=<path>` (P-032). `psu` passes the file to the per-agent `*-su` wrapper, which layers it onto the engineer playbook. The launched session opens already framed for the task.
+
+Per [`plans-newbutton-and-subharness-scope-2026-05-25`](/internal/docs/plans/plans-newbutton-and-subharness-scope-2026-05-25), kickoffs ride the launch-context / system-prompt channel — they are not first-user messages. This keeps them in scope for the whole conversation and matches the existing engineer-collaborator brief and PTY feature-pi brief.
+
+## Built-in kinds
+
+| Kind       | Brief                                        | Launched from                                                                                    |
+| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `new-plan` | `apps/operator/prompts/kickoffs/new-plan.md` | "New plan" button on PlansClient (`/adv/plans` + `/admin/plans`)                                 |
+| `feature`  | Inline-rendered from `harness_features` row  | PTY feature-pi spawn (in-app TUI pane) — uses the same factory but doesn't ride the launch route |
+
+The `feature` kind is *not* in the launch-route allowlist — it's only reachable through the in-process PTY spawn path, where the harness/feature ids are already authenticated.
+
+## Adding a new kickoff kind
+
+Three small edits:
+
+1. **Author the brief.** Drop a markdown file at `apps/operator/prompts/kickoffs/<kind>.md`. Plain prose; if you need server-supplied context (e.g. an active harness slug) reference it as `{{harness_context}}` (or invent a new placeholder) and substitute in the renderer.
+
+2. **Add a body renderer.** In `packages/operator-core/lib/agent-kickoff/prompt-file.ts`, extend the `KickoffKind` type and the `KickoffCtx` discriminated union with the new kind, then add a `renderXxxBody(ctx)` function dispatched from `renderKickoffBody`. For brief-file kinds the renderer just `readFileSync`s the curated MD (from `apps/operator/prompts/kickoffs/`) and stamps in the context. For data-driven kinds (like `feature`) the renderer builds the body from PG / files.
+
+3. **Allowlist the kind.** In `packages/operator-core/lib/agent-kickoff/kickoff-kind.ts`, add the kind to `KICKOFF_KIND_ALLOW` (the allowlist + `validateKickoffKind` validator moved here from the retired `console-launch` route in P-032). The omp/kickoff launch now rides `packages/operator-core/lib/endpoint-route/routes/adv/launch-su.ts`, which calls `validateKickoffKind` and `buildKickoffPromptFile`, then hands the file to `psu` via `--launch-context`.
+
+The launch refuses any kind not in `KICKOFF_KIND_ALLOW`; the brief body is curated in-repo and never accepted as a free-text payload (D-003).
+
+## What gets emitted on the wire
+
+The launch oneliner (`launch-su.ts`) ends up shaped like:
+
+```
+exec psu --no-picker --agent=omp --harness=<slug> --no-plan \
+  --launch-context=/dev/shm/papercusp-kickoff-aBcDeF/new-plan.md
+```
+
+`psu` resolves the engineer playbook + coord wiring itself per agent; the kickoff file rides `--launch-context`. Every token is run through `shellEscape` so whitespace in the temp dir name survives. The brief file is GC'd 30 seconds after creation (`setTimeout(..., 30_000)` in `prompt-file.ts`) — long enough for the launcher to read it, short enough that it doesn't accumulate.
+
+## Why a separate system-prompt brief, not a first-user message
+
+A first-user message would mingle with the user's actual input and get trimmed first under context compaction. The system-prompt channel frames the whole session — "you are a plan-creation interviewer" stays in scope after the user replies, and the engineer-collaborator brief is already there with the same shape.
+
+See [`plans-newbutton-and-subharness-scope-2026-05-25`](/internal/docs/plans/plans-newbutton-and-subharness-scope-2026-05-25) decisions D-001 (system-prompt channel) and D-002 (shared factory) for the full reasoning.

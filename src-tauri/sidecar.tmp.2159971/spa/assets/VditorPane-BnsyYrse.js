@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./MarkdownEditor-CUUezpkD.js";var n=e();function r({value:e,onChange:r}){return(0,n.jsx)(`div`,{style:{height:`100%`,background:`#15181c`},children:(0,n.jsx)(t,{value:e,onChange:r,mode:`ir`,outline:`left`})})}export{r as default};

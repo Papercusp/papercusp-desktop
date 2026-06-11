@@ -19,8 +19,12 @@
 #   5. Pushes the version-bump commit + tag to origin
 #   6. Creates GitHub Release with all artifacts attached
 #
-# Skipped vs GH-Actions flow:
-#   - macOS  : needs a Mac + Apple Developer cert
+# Optional platform legs:
+#   - macOS  : WITH_MAC=1 — drives the macOS build VM over SSH
+#              (universal binary, UNSIGNED by Apple — D-002/D-006 of
+#              mac-desktop-release-readiness-2026-06-11; updater
+#              artifacts are still minisign-signed). VM must be up
+#              (SSH :2222, see /internal/docs/build-system/vms).
 #   - Windows: cross-compile is possible but requires setup; left as
 #              an opt-in via WITH_WINDOWS=1
 #   - arm64  : ditto via WITH_ARM64=1
@@ -43,6 +47,9 @@ KEY_FILE="${HOME}/.papercusp/signing/papercusp.key"
 KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
+WITH_MAC="${WITH_MAC:-0}"
+MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -p 2222 -o BatchMode=yes aviweiss@127.0.0.1)
+MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
   echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
@@ -156,6 +163,45 @@ if [[ "$WITH_ARM64" == "1" ]]; then
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
+if [[ "$WITH_MAC" == "1" ]]; then
+  echo "==> building macOS universal on the build VM"
+  if ! "${MAC_VM_SSH[@]}" 'true' 2>/dev/null; then
+    echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"
+    exit 1
+  fi
+  PAPERCUP_TREE="$(cd "$ROOT/.." && pwd)"
+  echo "    rsync tree → VM:$MAC_VM_BUILD_DIR"
+  rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
+    --exclude '.turbo' --exclude '.next' \
+    -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
+    "$PAPERCUP_TREE/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
+  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
+  "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "
+    cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || exit 1
+    npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
+    export TAURI_SIGNING_PRIVATE_KEY_PATH=\$HOME/.papercusp-updater.key
+    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+    bash bin/mac-vm-build.sh
+  "'
+  MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
+  MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+  mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
+  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/dmg/*.dmg" "$MAC_OUT/dmg/" || true
+  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz" \
+    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz.sig" "$MAC_OUT/macos/" || true
+  mac_found=0
+  for f in "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
+    [[ -f "$f" ]] && ARTIFACTS+=("$f") && mac_found=1
+  done
+  if [[ "$mac_found" != "1" ]]; then
+    echo "ERROR: WITH_MAC=1 but no mac artifacts came back from the VM"
+    exit 1
+  fi
+  bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*.dmg
+fi
 
 echo "==> generating latest.json"
 LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
@@ -192,6 +238,11 @@ for art in artifacts:
     if "aarch64" in str(art) and art.suffix == ".AppImage":
         sig = art.with_suffix(".AppImage.sig")
         add("linux-aarch64", art, sig)
+    # macOS universal .app.tar.gz serves BOTH darwin arches (D-006)
+    if art.name.endswith(".app.tar.gz"):
+        sig = pathlib.Path(str(art) + ".sig")
+        add("darwin-x86_64", art, sig)
+        add("darwin-aarch64", art, sig)
 
 manifest = {
     "version": version,

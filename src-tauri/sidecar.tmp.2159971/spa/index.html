@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+  <head><script>window.__PAPERCUSP_FLAGS__={"flags":{"papercusp-cloudflare-publish":false,"papercusp-harness-phases":true,"papercusp-design":true,"papercusp-testing":false,"papercusp-inbox-durable-escalations":true,"papercusp-improvement-auto-implement":true,"papercusp-video-channels":true,"papercusp-voice-channels":true,"papercusp-the-hive":true,"papercusp-blueprint-aware-settings":true,"papercusp-prompt-studio":true,"papercusp-hive-agent-tabs":true,"papercusp-inference-gateway":false,"papercusp-claude-cred-sync":true,"papercusp-oracle":false},"evaluatedAt":1781163518701,"source":"defaults"};</script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Papercusp Operator</title>
+    <script>
+      (() => {
+        const suppress =
+          location.origin === 'http://localhost:3070'
+          || location.origin === 'http://127.0.0.1:3070'
+          || location.origin === 'http://localhost:4173'
+          || location.origin === 'http://127.0.0.1:4173';
+        if (!suppress) return;
+
+        try {
+          const originalReload = location.reload.bind(location);
+          const originalAssign = location.assign.bind(location);
+          const originalReplace = location.replace.bind(location);
+          // Stash the genuine reload FIRST — before the reload/assign/replace
+          // overrides below, which can throw on some webviews (WebKitGTK) and
+          // would otherwise abort this block before the escape hatch is set,
+          // leaving hardReload() (lib/hard-reload.ts) with no working reload.
+          Object.defineProperty(window, '__papercuspOriginalReload', {
+            configurable: true,
+            value: originalReload,
+          });
+          const softNavigate = (target, replace) => {
+            try {
+              const next = new URL(String(target), location.href);
+              if (next.origin !== location.origin) return false;
+              const href = `${next.pathname}${next.search}${next.hash}`;
+              if (replace) history.replaceState({}, '', href);
+              else history.pushState({}, '', href);
+              window.dispatchEvent(new PopStateEvent('popstate'));
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          Object.defineProperty(location, 'reload', {
+            configurable: true,
+            value: () => {
+              console.info('[Papercusp] JS reload suppressed on static desktop host — use Cmd/Ctrl+R for manual refresh.');
+            },
+          });
+          Object.defineProperty(location, 'assign', {
+            configurable: true,
+            value: (target) => {
+              if (softNavigate(target, false)) return;
+              originalAssign(target);
+            },
+          });
+          Object.defineProperty(location, 'replace', {
+            configurable: true,
+            value: (target) => {
+              if (softNavigate(target, true)) return;
+              originalReplace(target);
+            },
+          });
+          document.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const anchor = target.closest('a[href]');
+            if (!(anchor instanceof HTMLAnchorElement)) return;
+            if (event.defaultPrevented) return;
+            if (event.button !== 0) return;
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            if (anchor.hasAttribute('download')) return;
+            if (anchor.target === '_blank') return;
+            if (softNavigate(anchor.href, false)) {
+              event.preventDefault();
+            }
+          }, true);
+        } catch {
+          // Best effort — some browsers disallow redefining location methods.
+        }
+      })();
+    </script>
+    <!--
+      Color theme (pre-paint).
+
+      Mirrors apps/operator/app/layout.tsx's themeBootstrapScript. This SPA is
+      client-rendered, so without this the page would paint frost then flip to
+      the saved theme once React mounts the selector. Sets data-theme on <html>
+      synchronously from the wsLocalKey-scoped value (pc:ws:<id>:papercusp.theme),
+      using the same getBrowserWorkspaceId() resolution as lib/theme.ts so this
+      read and the React lib always agree on the key. Frost is the :root default.
+    -->
+    <script>
+      (() => {
+        const KEY = 'papercusp.theme';
+        const DEFAULT = 'frost';
+        const wsId = () => {
+          try { if (window.__PAPERCUSP_WS__ && String(window.__PAPERCUSP_WS__).trim()) return window.__PAPERCUSP_WS__; } catch (e) {}
+          try { const ws = new URL(window.location.href).searchParams.get('ws'); if (ws && ws.trim()) return ws; } catch (e) {}
+          return 'default';
+        };
+        const valid = (v) => typeof v === 'string' && (v === 'frost' || v === 'black' || v === 'honeycomb' || (v.indexOf('custom:') === 0 && v.length > 7));
+        try {
+          // PG is the source of truth: the host injects window.__PAPERCUSP_PREFS__
+          // .theme_id from the user profile (see bin/host-spa.ts). Prefer it; the
+          // localStorage cache is the fallback (dev origins without injection /
+          // offline). Frost is the :root default.
+          const injected = (window.__PAPERCUSP_PREFS__ && window.__PAPERCUSP_PREFS__.theme_id) || null;
+          const cacheKey = 'pc:ws:' + wsId() + ':' + KEY;
+          let id = valid(injected) ? injected : window.localStorage.getItem(cacheKey);
+          if (!valid(id)) id = DEFAULT;
+          document.documentElement.dataset.theme = id;
+          // Seed the per-device cache from the injected value so the React lib's
+          // synchronous readActiveTheme() agrees with the painted theme even if
+          // this device's cache was stale/empty.
+          if (valid(injected)) { try { window.localStorage.setItem(cacheKey, injected); } catch (e) {} }
+        } catch (e) {
+          document.documentElement.dataset.theme = DEFAULT;
+        }
+        // Re-inject the cached custom-theme CSS (written by applyCustomThemes in
+        // lib/theme.ts) so a `custom:<id>` active theme paints correctly pre-fetch.
+        try {
+          const css = window.localStorage.getItem('pc:ws:' + wsId() + ':papercusp.customThemesCss');
+          if (css) {
+            const st = document.createElement('style');
+            st.id = 'pc-custom-themes';
+            st.textContent = css;
+            document.head.appendChild(st);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <!--
+      Visual-effects mode (pre-paint).
+
+      Mirrors apps/operator/app/layout.tsx's visualEffectsBootstrapScript.
+      Sets data-visual-effects + data-visual-effects-mode on <html> before
+      React mounts, so intro/ambient animations don't flash on at full
+      strength when the saved mode is 'minimal' (or 'system' under
+      prefers-reduced-motion). Reads the wsLocalKey-scoped value
+      (pc:ws:<id>:papercusp.visualEffectsMode) with the same
+      getBrowserWorkspaceId() resolution lib/visual-effects.ts uses, so this
+      read and the React lib always agree on the key. 'full' is the fallback.
+    -->
+    <script>
+      (() => {
+        const KEY = 'papercusp.visualEffectsMode';
+        const REDUCED = '(prefers-reduced-motion: reduce)';
+        const wsId = () => {
+          try { if (window.__PAPERCUSP_WS__ && String(window.__PAPERCUSP_WS__).trim()) return window.__PAPERCUSP_WS__; } catch (e) {}
+          try { const ws = new URL(window.location.href).searchParams.get('ws'); if (ws && ws.trim()) return ws; } catch (e) {}
+          return 'default';
+        };
+        try {
+          // PG source of truth via host injection (see bin/host-spa.ts); the
+          // localStorage cache is the fallback.
+          const injected = (window.__PAPERCUSP_PREFS__ && window.__PAPERCUSP_PREFS__.visual_effects_mode) || null;
+          const cacheKey = 'pc:ws:' + wsId() + ':' + KEY;
+          let mode = injected || window.localStorage.getItem(cacheKey);
+          if (mode !== 'system' && mode !== 'full' && mode !== 'minimal') mode = 'system';
+          const reduced = mode === 'system'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia(REDUCED).matches;
+          const effective = mode === 'minimal' || reduced ? 'minimal' : 'full';
+          document.documentElement.dataset.visualEffects = effective;
+          document.documentElement.dataset.visualEffectsMode = mode;
+          if (injected) { try { window.localStorage.setItem(cacheKey, mode); } catch (e) {} }
+        } catch (e) {
+          document.documentElement.dataset.visualEffects = 'full';
+          document.documentElement.dataset.visualEffectsMode = 'system';
+        }
+      })();
+    </script>
+    <!--
+      Operator-chat sidebar width reservation: REMOVED (native-terminal-desktop
+      D-011 / P-016 / D-017). The web operator chat is OFF by default behind
+      the TESTING flag (the desktop chat is the terminal-native pui dock), and
+      flags are unknowable pre-paint — the old unconditional body-start
+      bootstrap kept adding `has-op-chat` + `--op-chat-w` with the sidebar
+      never mounting, leaving a permanent blank left column. The sidebar now
+      reserves its own space when it actually mounts (OperatorChatSidebar
+      sets the class/var + carries the padding rules in OP_CHAT_SIDEBAR_CSS);
+      the one-frame layout shift on first paint only ever affects
+      TESTING-flag sessions. Guarded by
+      src/lib/index-html-no-op-chat-reservation.test.ts — do not re-add.
+    -->
+    <script type="module" crossorigin src="/assets/index-EmaONiVT.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/chunk-CMxvf4Kt.js">
+    <link rel="modulepreload" crossorigin href="/assets/preload-helper-B_k_wMTD.js">
+    <link rel="modulepreload" crossorigin href="/assets/operator-voice-audio-FZa4WNZQ.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-C1Wm8aMI.js">
+    <link rel="modulepreload" crossorigin href="/assets/browser-workspace-AWq1Xprv.js">
+    <link rel="modulepreload" crossorigin href="/assets/profile-pref-BX83HuOO.js">
+    <link rel="modulepreload" crossorigin href="/assets/hotkeys-JSrCpBjh.js">
+    <link rel="modulepreload" crossorigin href="/assets/SyncContext-DIxztLg9.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-1aQumieq.js">
+    <link rel="modulepreload" crossorigin href="/assets/jsx-runtime-sLPvdpSW.js">
+    <link rel="modulepreload" crossorigin href="/assets/use-create-data-CLsao0r4.js">
+    <link rel="modulepreload" crossorigin href="/assets/__vite-browser-external-C3Gx4706.js">
+    <link rel="modulepreload" crossorigin href="/assets/types-HiMWUb5q.js">
+    <link rel="modulepreload" crossorigin href="/assets/resilient-event-source-DB8lSvOI.js">
+    <link rel="modulepreload" crossorigin href="/assets/client-Bt8lfgly.js">
+    <link rel="modulepreload" crossorigin href="/assets/useLexicon-Dp7lEXPY.js">
+    <link rel="modulepreload" crossorigin href="/assets/createLucideIcon-Bq4a7IPy.js">
+    <link rel="modulepreload" crossorigin href="/assets/with-selector-Cx9j9d7R.js">
+    <link rel="modulepreload" crossorigin href="/assets/users-CIw34qxv.js">
+    <link rel="modulepreload" crossorigin href="/assets/square-YLKiVI1E.js">
+    <link rel="modulepreload" crossorigin href="/assets/check-7QUJyo7o.js">
+    <link rel="modulepreload" crossorigin href="/assets/chevron-right-OQ6shWOP.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-dom-BuIDZ5lO.js">
+    <link rel="modulepreload" crossorigin href="/assets/chat-cards-DtO2LoNM.js">
+    <link rel="modulepreload" crossorigin href="/assets/LazyDetails-DkEQQ9A5.js">
+    <link rel="modulepreload" crossorigin href="/assets/MarkdownEditor-CUUezpkD.js">
+    <link rel="modulepreload" crossorigin href="/assets/aria-live-bus-D8xDVFMV.js">
+    <link rel="modulepreload" crossorigin href="/assets/whisper-DkDj6rqq.js">
+    <link rel="modulepreload" crossorigin href="/assets/voice-leader-DNlP95qk.js">
+    <link rel="modulepreload" crossorigin href="/assets/voice-prefs-client-ChHNX-ZQ.js">
+    <link rel="modulepreload" crossorigin href="/assets/operator-converse-tags-DFcldw9l.js">
+    <link rel="modulepreload" crossorigin href="/assets/wake-word-DzLvnV2t.js">
+    <link rel="modulepreload" crossorigin href="/assets/voice-mode-3u2zLg1k.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-B6QtTKmw.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-Cy9e2uEc.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-DjuwZ1SG.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-xQzroSej.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-DNw7FQHt.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-BKCunpUL.js">
+    <link rel="modulepreload" crossorigin href="/assets/Checkbox-g0eq7fh-.js">
+    <link rel="modulepreload" crossorigin href="/assets/floating-ui.dom-QqGooS2M.js">
+    <link rel="modulepreload" crossorigin href="/assets/floating-ui.react-dom-BIOSk68C.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-tj7No9UA.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-BT2AY6ik.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CnXNq11S.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-B_xEPI-d.js">
+    <link rel="modulepreload" crossorigin href="/assets/Tooltip-Cs0UWpqD.js">
+    <link rel="modulepreload" crossorigin href="/assets/AdminOps-Cu0i6qI2.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CcY72VL8.js">
+    <link rel="modulepreload" crossorigin href="/assets/FeaturesAdmin-BqBUtXz5.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-zC0Y-qD22.js">
+    <link rel="modulepreload" crossorigin href="/assets/es2015-DfLpBJue.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-Bm1kceuZ2.js">
+    <link rel="modulepreload" crossorigin href="/assets/useConfirmDialog-L0z82RMa.js">
+    <link rel="modulepreload" crossorigin href="/assets/core-D7rMrqfI.js">
+    <link rel="modulepreload" crossorigin href="/assets/loader-circle-CcGMR16S.js">
+    <link rel="modulepreload" crossorigin href="/assets/send-CEaCqA2y.js">
+    <link rel="modulepreload" crossorigin href="/assets/ChatPanel-CEHBpvyW.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-1nceUUih.js">
+    <link rel="modulepreload" crossorigin href="/assets/chevron-down-ByjoEuHY.js">
+    <link rel="modulepreload" crossorigin href="/assets/Select-D7SgNvcr.js">
+    <link rel="modulepreload" crossorigin href="/assets/dynamic-BXfyXQF6.js">
+    <link rel="modulepreload" crossorigin href="/assets/zod-HP4jqIXB.js">
+    <link rel="modulepreload" crossorigin href="/assets/src-DAkS6_jU.js">
+    <link rel="modulepreload" crossorigin href="/assets/parse-stream-BrNtbPpb.js">
+    <link rel="modulepreload" crossorigin href="/assets/configure-Cnk_tsQ8.js">
+    <link rel="modulepreload" crossorigin href="/assets/x-BrjI5Ev0.js">
+    <link rel="modulepreload" crossorigin href="/assets/src-whCR7Gdy.js">
+    <link rel="modulepreload" crossorigin href="/assets/RichGrid-MkcJrkaz.js">
+    <link rel="modulepreload" crossorigin href="/assets/queryClient-j25Oe07k.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CSRU-AuW.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-CQ0rgSfK.js">
+    <link rel="modulepreload" crossorigin href="/assets/index.esm-BsP7w517.js">
+    <link rel="modulepreload" crossorigin href="/assets/handle-CBCQkoAp.js">
+    <link rel="modulepreload" crossorigin href="/assets/lib-DLCklsZN.js">
+    <link rel="modulepreload" crossorigin href="/assets/lib-DTlBBOqa.js">
+    <link rel="modulepreload" crossorigin href="/assets/lib-CGRVxsAJ.js">
+    <link rel="modulepreload" crossorigin href="/assets/fast-deep-equal-Dcq5VDmq.js">
+    <link rel="modulepreload" crossorigin href="/assets/flask-conical-EDe--xyl.js">
+    <link rel="modulepreload" crossorigin href="/assets/terminal-fgNHooU2.js">
+    <link rel="modulepreload" crossorigin href="/assets/chevron-left-DP1TdhHw.js">
+    <link rel="modulepreload" crossorigin href="/assets/network-DRmzCv9-.js">
+    <link rel="modulepreload" crossorigin href="/assets/pencil-BYej0AWQ.js">
+    <link rel="modulepreload" crossorigin href="/assets/plus-hxTMsSwF.js">
+    <link rel="modulepreload" crossorigin href="/assets/settings-2-BBMEXL_R.js">
+    <link rel="modulepreload" crossorigin href="/assets/trash-2-G27QP56o.js">
+    <link rel="modulepreload" crossorigin href="/assets/syntax-C_xNmy8x.js">
+    <link rel="modulepreload" crossorigin href="/assets/lib-Dp7KDnIN.js">
+    <link rel="modulepreload" crossorigin href="/assets/client-i-a-n3ya.js">
+    <link rel="modulepreload" crossorigin href="/assets/agent-config-constants-CmHU5nf3.js">
+    <link rel="modulepreload" crossorigin href="/assets/client-navigation-D39d93QA.js">
+    <link rel="modulepreload" crossorigin href="/assets/registry-rd_I6jBu.js">
+    <link rel="modulepreload" crossorigin href="/assets/defs-BObdZz8Q.js">
+    <link rel="modulepreload" crossorigin href="/assets/harness-shared-config-types-DMS_qYd7.js">
+    <link rel="modulepreload" crossorigin href="/assets/operator-shared-state-PM6_4xyE.js">
+    <link rel="stylesheet" crossorigin href="/assets/use-create-data-HsnoWA2r.css">
+    <link rel="stylesheet" crossorigin href="/assets/AdminOps-BcpDuBCC.css">
+    <link rel="stylesheet" crossorigin href="/assets/useConfirmDialog-2bHtXJ77.css">
+    <link rel="stylesheet" crossorigin href="/assets/ChatPanel-CwpH7fEN.css">
+    <link rel="stylesheet" crossorigin href="/assets/src-CEi7ZzcD.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-BBQm9VHi.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
