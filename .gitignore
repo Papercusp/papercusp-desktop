@@ -5,7 +5,17 @@ src-tauri/target/
 src-tauri/gen/
 
 # Bundled sidecar (produced by bin/build-desktop-sidecar.sh on every build)
+# — including the EI-160 atomic-publish temp trees + lock artifacts a live
+# or interrupted build leaves next to it (117MB node binaries; git-sync
+# must never sweep them).
 src-tauri/sidecar/
+src-tauri/sidecar.tmp.*/
+src-tauri/sidecar.lock
+src-tauri/sidecar.lockdir/
+
+# macOS term shim build output (SwiftPM; rebuilt per build)
+src-tauri/macos-term-shim/.build/
+src-tauri/resources/libPapercuspTermShim.dylib
 
 # WSL rootfs tarball (~250-400 MB, produced by scripts/build-rootfs.sh per
 # release; bundled as a Tauri resource — never committed)

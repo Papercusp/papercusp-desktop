@@ -189,9 +189,19 @@ pub static SELECTED_API_PORT: std::sync::atomic::AtomicU16 =
 /// (every operator boot publishes it since the per-port change), falling
 /// back to the legacy last-writer-wins singleton for an operator that
 /// hasn't restarted since the change shipped.
+///
+/// EI-296: the singleton fallback applies ONLY to the fixed dev-box
+/// operators (:3070/:3170) — it is "whichever operator booted last". A
+/// CUSTOM target (the PAPERCUSP_DEV_API_TARGET escape hatch, e.g. an
+/// isolated test stack or fault proxy) must never silently dial another
+/// operator's socket: it either publishes its own per-port file or is
+/// reached over HTTP at exactly that port.
 fn read_dev_ipc_socket_for_port(papercusp_dir: &std::path::Path, port: u16) -> Option<String> {
-    read_dev_ipc_socket(&papercusp_dir.join(format!("endpoint-ipc.{port}.json")))
-        .or_else(|| read_dev_ipc_socket(&papercusp_dir.join("endpoint-ipc.json")))
+    let per_port = read_dev_ipc_socket(&papercusp_dir.join(format!("endpoint-ipc.{port}.json")));
+    if per_port.is_some() || !matches!(port, 3070 | 3170) {
+        return per_port;
+    }
+    read_dev_ipc_socket(&papercusp_dir.join("endpoint-ipc.json"))
 }
 
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
@@ -617,6 +627,19 @@ mod helper_tests {
         assert_eq!(
             read_dev_ipc_socket_for_port(&dir, 3070),
             Some("/tmp/legacy.sock".to_string())
+        );
+        // EI-296: a CUSTOM port (escape-hatch target) must NOT inherit the
+        // singleton — that would silently dial another operator's socket.
+        assert_eq!(read_dev_ipc_socket_for_port(&dir, 3271), None);
+        // …but a custom port WITH its own per-port file is honored.
+        std::fs::write(
+            dir.join("endpoint-ipc.3271.json"),
+            r#"{"socketPath":"/tmp/iso.sock"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_dev_ipc_socket_for_port(&dir, 3271),
+            Some("/tmp/iso.sock".to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,4 +1,0 @@
-pg_dump: copy (from system PATH) (/usr/bin/pg_dump)
-psql: copy (from system PATH) (/usr/bin/psql)
-pg_dumpall: copy (from system PATH) (/usr/bin/pg_dumpall)
-pg_restore: copy (from system PATH) (/usr/bin/pg_restore)
