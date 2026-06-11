@@ -1958,6 +1958,9 @@ pub fn run() {
             // call a respawn-sidecar command (TODO) once WSL transitions
             // to Ready, or we just rely on a manual app restart.
             let via_wsl = should_route_via_wsl(&app.handle());
+            // Publish for AppHandle-less call sites (native pty routes its
+            // commands through wsl.exe when the sidecar does).
+            wsl_setup::set_route_active(via_wsl);
             #[cfg(target_os = "windows")]
             {
                 let status = wsl_setup::detect(&app.handle());

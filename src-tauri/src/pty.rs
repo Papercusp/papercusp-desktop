@@ -111,16 +111,64 @@ fn spawn_internal(
         })
         .map_err(|e| format!("openpty: {}", e))?;
 
-    let mut cmd = CommandBuilder::new(opts.command.clone());
-    for arg in &opts.args {
-        cmd.arg(arg);
-    }
-    if let Some(cwd) = opts.cwd.as_deref() {
-        cmd.cwd(cwd);
-    }
-    for (k, v) in &opts.env {
-        cmd.env(k, v);
-    }
+    // Windows + WSL-routed sidecar: the whole agent environment (operator,
+    // harness, runtimes, the user's HOME with cwd paths like /home/papercup)
+    // lives INSIDE the papercup-runtime distro — a pty spawned on the
+    // Windows side would run System32 bash.exe into the DEFAULT distro (or
+    // plain Windows), the wrong target for every wizard install/login and
+    // PiPanel session. Wrap the command through wsl.exe instead. Spec env
+    // vars can't cross wsl.exe without WSLENV plumbing — none of the wizard
+    // specs set any today; log if one ever does.
+    #[cfg(target_os = "windows")]
+    let via_wsl = crate::wsl_setup::detect_ready_cached();
+    #[cfg(target_os = "windows")]
+    let mut cmd = if via_wsl {
+        if !opts.env.is_empty() {
+            eprintln!(
+                "[pty] WARNING: dropping {} env var(s) on the wsl.exe boundary",
+                opts.env.len()
+            );
+        }
+        let mut c = CommandBuilder::new("wsl.exe");
+        c.arg("--distribution");
+        c.arg(crate::wsl_setup::DISTRO_NAME_PUB);
+        if let Some(cwd) = opts.cwd.as_deref() {
+            c.arg("--cd");
+            c.arg(cwd);
+        }
+        c.arg("--");
+        c.arg(opts.command.clone());
+        for arg in &opts.args {
+            c.arg(arg);
+        }
+        c
+    } else {
+        let mut c = CommandBuilder::new(opts.command.clone());
+        for arg in &opts.args {
+            c.arg(arg);
+        }
+        if let Some(cwd) = opts.cwd.as_deref() {
+            c.cwd(cwd);
+        }
+        for (k, v) in &opts.env {
+            c.env(k, v);
+        }
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = CommandBuilder::new(opts.command.clone());
+        for arg in &opts.args {
+            c.arg(arg);
+        }
+        if let Some(cwd) = opts.cwd.as_deref() {
+            c.cwd(cwd);
+        }
+        for (k, v) in &opts.env {
+            c.env(k, v);
+        }
+        c
+    };
     cmd.env("TERM", "xterm-256color");
 
     let child = slave

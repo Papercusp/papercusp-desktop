@@ -42,6 +42,19 @@ const DISTRO_NAME: &str = "papercup-runtime";
 #[cfg(target_os = "windows")]
 pub const DISTRO_NAME_PUB: &str = DISTRO_NAME;
 
+/// Whether the sidecar is being routed through WSL this session — set once
+/// by setup() (from `should_route_via_wsl`) so AppHandle-less call sites
+/// (the native pty spawn) can route their commands into the distro too.
+static WSL_ROUTE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_route_active(active: bool) {
+    WSL_ROUTE_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn detect_ready_cached() -> bool {
+    WSL_ROUTE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // Filename of the rootfs tarball shipped as a Tauri resource. Built in
 // CI by running our bootstrap script inside an Ubuntu container then
 // `tar -czf papercup-runtime.tar.gz /`. See
@@ -563,9 +576,38 @@ pub fn wsl_bootstrap(_app: tauri::AppHandle) -> Result<String, String> {
 /// the sidecar through `wsl.exe`. Frontend calls this immediately
 /// after `wsl_bootstrap` succeeds and a follow-up `wsl_status` returns
 /// Ready.
+///
+/// Windows: do NOT use `app.restart()` directly — when the app was
+/// launched inside a job object (the NSIS installer's "run app" checkbox,
+/// Task Scheduler, some corporate launchers), the job kills the relaunched
+/// child the moment this process exits, leaving the user on a dead app
+/// (found live 2026-06-11, runs 11/13: onboarding completed but the
+/// restarted instance vanished). Spawn the new instance with
+/// CREATE_BREAKAWAY_FROM_JOB first; fall back to a plain spawn, then to
+/// app.restart().
 #[tauri::command]
 #[specta::specta]
 pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        if let Ok(exe) = std::env::current_exe() {
+            let spawned = std::process::Command::new(&exe)
+                .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP)
+                .spawn()
+                .or_else(|_| {
+                    // Job may not permit breakaway — a plain spawn still
+                    // survives parent exit unless the job kills by tree.
+                    std::process::Command::new(&exe).spawn()
+                });
+            if spawned.is_ok() {
+                app.exit(0);
+                return Ok(());
+            }
+        }
+    }
     app.restart();
 }
 
