@@ -53,7 +53,11 @@ set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
-DEB="${1:-$DESKTOP_DIR/src-tauri/target/release/bundle/deb/Papercusp_0.0.1_amd64.deb}"
+# Default to the NEWEST built .deb (version-agnostic — the desktop version is
+# bumped by the release lanes, so a pinned 0.0.1 path goes stale). An explicit
+# $1 still wins.
+DEB_DEFAULT="$(ls -t "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1)"
+DEB="${1:-${DEB_DEFAULT:-$DESKTOP_DIR/src-tauri/target/release/bundle/deb/Papercusp_0.0.1_amd64.deb}}"
 MODE="${HIVE_SMOKE_MODE:-auto}"
 SIDECAR_SRC="${PAPERCUSP_SMOKE_SIDECAR_DIR:-$DESKTOP_DIR/src-tauri/sidecar}"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
