@@ -46,13 +46,35 @@ The auto-updater route (`/api/updates/manifest` in the operator) reads from thes
 |---|---|---|
 | Linux x86_64 | ✓ always | — |
 | Linux arm64 | optional | `WITH_ARM64=1 bin/release-local.sh …` (needs `cross` set up) |
-| Windows x86_64 | optional | `WITH_WINDOWS=1 bin/release-local.sh …` (needs `cross` set up) |
-| macOS universal | ✗ | requires a Mac + Apple Developer cert; not buildable from Linux |
+| Windows x86_64 | optional | `WITH_WINDOWS=1 bin/release-local.sh …` (builds natively on the local Windows VM) |
+| macOS universal | optional | `WITH_MAC=1 bin/release-local.sh …` (builds natively on the local Mac VM) |
 
-For macOS you have three options:
-- Skip macOS during alpha. Acceptable: `latest.json` won't list a darwin entry, the updater will say "no compatible asset" on Macs.
-- Borrow / rent a Mac for builds. Run `bin/release-local.sh` there; it works.
-- Pay for a hosted Mac runner (BuildJet, MacStadium). Out of scope of this repo.
+### Windows (NSIS, built on the Windows VM)
+
+`WITH_WINDOWS=1` does NOT cross-compile — it drives a native MSVC build on
+the local QEMU Windows 11 VM via `bin/build-windows-on-vm.sh` (the old
+`x86_64-pc-windows-gnu` cross lane never worked and MSVC is Tauri's
+supported Windows story). Plan + decisions:
+`windows-desktop-release-readiness-2026-06-11`.
+
+Per-release prereqs (the script checks all of these and fails early):
+
+1. **VM booted** — `~/windows-vm/boot-windows.sh` (ssh `-p 2223`, key
+   `~/.ssh/papercup-vm-win`; spice `:5931`; qemu monitor
+   `qemu-monitor.sock` — a black screen + dead ssh usually means
+   `paused (io-error)`: check `info status`, then `cont`).
+2. **Sidecar built** — `bin/build-desktop-sidecar.sh` (release-local.sh
+   does this anyway).
+3. **WSL rootfs tarball** — `scripts/build-rootfs.sh` (docker; ~250 MB
+   output at `src-tauri/resources/papercup-runtime.tar.gz`, gitignored).
+   The Windows app imports this as the `papercup-runtime` WSL2 distro on
+   first run — an installer built without it cannot onboard.
+
+The artifact is the NSIS `*-setup.exe` (+ minisign `.sig`); MSI is not
+built by default. Artifacts land in
+`src-tauri/target/windows-vm/bundle/nsis/` on the host. The Windows app is
+unsigned (no Authenticode cert yet) — SmartScreen will warn on install;
+revisit before public distribution.
 
 ## Verify a build
 

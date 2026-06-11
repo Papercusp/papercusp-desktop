@@ -150,11 +150,21 @@ for f in "$LINUX_BUNDLE"/deb/*.deb "$LINUX_BUNDLE"/appimage/*.AppImage \
 done
 
 if [[ "$WITH_WINDOWS" == "1" ]]; then
-  echo "==> building Windows x86_64 (cross via cross-rs)"
-  (cd "$ROOT" && npx --yes -p @tauri-apps/cli@latest tauri build --target x86_64-pc-windows-gnu)
-  for f in "$ROOT"/src-tauri/target/x86_64-pc-windows-gnu/release/bundle/{msi,nsis}/*.{msi,exe,sig}; do
-    [[ -f "$f" ]] && ARTIFACTS+=("$f")
+  echo "==> building Windows x86_64 (natively on the Windows VM)"
+  # Native MSVC build on the local QEMU Windows 11 VM — the old
+  # x86_64-pc-windows-gnu cross-compile never worked and is outside
+  # Tauri's supported Windows (MSVC) story. Mirrors the WITH_MAC lane.
+  # See plan windows-desktop-release-readiness-2026-06-11 (D-001) and
+  # bin/build-windows-on-vm.sh for prereqs (VM booted, rootfs built).
+  bash "$ROOT/bin/build-windows-on-vm.sh"
+  win_found=0
+  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/nsis/*; do
+    [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
   done
+  if [[ "$win_found" != "1" ]]; then
+    echo "ERROR: WITH_WINDOWS=1 but no windows artifacts came back from the VM"
+    exit 1
+  fi
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
@@ -232,7 +242,13 @@ for art in artifacts:
     if art.suffix == ".AppImage":
         sig = art.with_suffix(art.suffix + ".sig")
         add("linux-x86_64", art, sig)
-    if art.name.endswith("-amd64.msi"):
+    # Windows — NSIS setup.exe is the v1 artifact (plan
+    # windows-desktop-release-readiness-2026-06-11 D-003); MSI kept as
+    # fallback for an opportunistic WiX build.
+    if art.name.endswith("-setup.exe"):
+        sig = pathlib.Path(str(art) + ".sig")
+        add("windows-x86_64", art, sig)
+    elif art.name.endswith(".msi") and "windows-x86_64" not in platforms:
         sig = art.with_suffix(".msi.sig")
         add("windows-x86_64", art, sig)
     if "aarch64" in str(art) and art.suffix == ".AppImage":

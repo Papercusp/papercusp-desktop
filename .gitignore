@@ -30,3 +30,7 @@ node_modules/
 # Editor
 .vscode/
 .idea/
+
+# Sidecar-extraction temp dirs (per-pid, created at app launch; >100MB —
+# git-sync must never sweep them)
+src-tauri/sidecar.tmp.*/
