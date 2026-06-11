@@ -71,6 +71,7 @@ apt-get install -y --no-install-recommends \
   python3 \
   python3-pip \
   sudo \
+  gnupg \
   postgresql-client \
   tmux \
   xz-utils \
@@ -82,6 +83,17 @@ curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_V
   | gunzip > /usr/local/bin/overmind
 chmod +x /usr/local/bin/overmind
 overmind --version
+
+# kopia — the backup engine ("Enabled by default" per the Setup Wizard);
+# without it the Backups feature is unavailable in the Windows runtime.
+# Official APT repo per kopia.io/docs/installation.
+curl -fsSL https://kopia.io/signing-key \
+  | gpg --dearmor -o /usr/share/keyrings/kopia-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/kopia-keyring.gpg] http://packages.kopia.io/apt/ stable main" \
+  > /etc/apt/sources.list.d/kopia.list
+apt-get update
+apt-get install -y --no-install-recommends kopia
+kopia --version
 
 # Node into /usr/local — it must be on the DEFAULT non-login PATH: the
 # desktop spawns `wsl.exe --exec node` (no shell, no profile read), and
