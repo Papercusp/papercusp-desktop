@@ -1966,6 +1966,29 @@ pub fn run() {
                         "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes (detect: {:?})",
                         status
                     );
+                    // Clean machine: nothing serves the conf's frontendDist
+                    // URL, so point the window at the custom-protocol origin —
+                    // with no sidecar port known the handler serves the
+                    // BUNDLED SPA statics, which renders WslOnboardingGate
+                    // (the onboarding UI lives in the SPA's __root; without
+                    // this the window sits on a connection-refused page and
+                    // onboarding is unreachable — D-009).
+                    if custom_protocol::enabled() {
+                        if let Some(window) = app.get_webview_window("main") {
+                            match custom_protocol::APP_ORIGIN.parse() {
+                                Ok(u) => {
+                                    if let Err(e) = window.navigate(u) {
+                                        eprintln!(
+                                            "[papercusp-desktop] onboarding navigate failed: {e}"
+                                        );
+                                    }
+                                }
+                                Err(e) => eprintln!(
+                                    "[papercusp-desktop] APP_ORIGIN did not parse: {e}"
+                                ),
+                            }
+                        }
+                    }
                     return Ok(());
                 }
             }

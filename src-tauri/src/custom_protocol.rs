@@ -71,17 +71,94 @@ pub const APP_ORIGIN: &str = "http://papercusp.localhost";
 /// Resolve the upstream loopback base this handler forwards to.
 ///   - Packaged: the spawned sidecar's picked port (`SidecarState.port`).
 ///   - Dev / no-sidecar: `PAPERCUSP_CUSTOM_PROTOCOL_UPSTREAM` override, else
-///     the dev-nohmr Hono host on :3070 (what `npm run dev` serves).
-fn upstream_base(app: &tauri::AppHandle) -> String {
+///     (dev builds only) the dev-nohmr Hono host on :3070.
+///   - Packaged with NO sidecar yet (Windows pre-onboarding): None — the
+///     handler serves the BUNDLED SPA statics instead (see serve_bundled_spa).
+fn upstream_base(app: &tauri::AppHandle) -> Option<String> {
     if let Some(state) = app.try_state::<SidecarState>() {
         if let Ok(guard) = state.port.lock() {
             if let Some(port) = *guard {
-                return format!("http://127.0.0.1:{}", port);
+                return Some(format!("http://127.0.0.1:{}", port));
             }
         }
     }
-    std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_UPSTREAM")
-        .unwrap_or_else(|_| "http://127.0.0.1:3070".to_string())
+    if let Ok(upstream) = std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_UPSTREAM") {
+        return Some(upstream);
+    }
+    if cfg!(debug_assertions) {
+        return Some("http://127.0.0.1:3070".to_string());
+    }
+    None
+}
+
+/// Serve the webview straight off the bundled SPA dist (sidecar/spa/**) —
+/// the pre-operator path. On a clean Windows machine the sidecar can't
+/// spawn until WSL onboarding finishes, but the onboarding UI
+/// (WslOnboardingGate, mounted in the SPA's __root) needs the SPA rendered
+/// to exist. Statics come from disk; /api/* answers 503 so the frontend
+/// sees clean fetch failures instead of HTML-shaped JSON. (D-009)
+fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
+    use tauri::Manager;
+    if path.starts_with("/api/") || path == "/api" {
+        return error_response(503, "papercusp: operator not running yet (pre-onboarding)");
+    }
+    let spa_root = match app
+        .path()
+        .resolve("sidecar/spa", tauri::path::BaseDirectory::Resource)
+    {
+        Ok(p) => p,
+        Err(e) => return error_response(500, &format!("papercusp: no bundled spa: {e}")),
+    };
+    // Normalize + reject traversal. Windows ALSO treats `\` as a separator
+    // and `join` with an absolute/drive path REPLACES the base, so reject
+    // those shapes outright, then enforce containment on the canonicalized
+    // path (covers symlinks). Bare "/" and unknown extension-less paths
+    // (SPA routes) fall back to index.html.
+    let rel = path.trim_start_matches('/');
+    if rel.split(['/', '\\']).any(|seg| seg == ".." || seg.contains(':'))
+        || std::path::Path::new(rel).is_absolute()
+    {
+        return error_response(400, "papercusp: bad path");
+    }
+    let spa_root_canon = match std::fs::canonicalize(&spa_root) {
+        Ok(p) => p,
+        Err(e) => return error_response(500, &format!("papercusp: spa root unreadable: {e}")),
+    };
+    let mut file = spa_root.join(rel);
+    // Nonexistent path = SPA route → index.html; an existing path must
+    // canonicalize INSIDE the spa root.
+    if rel.is_empty() || !file.is_file() {
+        file = spa_root.join("index.html");
+    }
+    match std::fs::canonicalize(&file) {
+        Ok(canon) if canon.starts_with(&spa_root_canon) => {}
+        Ok(_) => return error_response(400, "papercusp: bad path"),
+        Err(e) => return error_response(404, &format!("papercusp: {e}")),
+    }
+    let body = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(e) => return error_response(404, &format!("papercusp: {e}")),
+    };
+    let mime = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "json" | "map" => "application/json",
+        "wasm" => "application/wasm",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    Response::builder()
+        .status(200)
+        .header("content-type", mime)
+        .body(body)
+        .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"))
 }
 
 /// Async URI-scheme handler. Forwards the request to the loopback base on a
@@ -95,13 +172,16 @@ pub fn handle(ctx: UriSchemeContext<'_, Wry>, request: Request<Vec<u8>>, respond
 }
 
 fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
-    let base = upstream_base(app);
     // papercusp://localhost/<path>?<query>  →  <base>/<path>?<query>
     let path_and_query = request
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
+    let Some(base) = upstream_base(app) else {
+        let path = request.uri().path().to_string();
+        return serve_bundled_spa(app, &path);
+    };
     let target = format!("{}{}", base, path_and_query);
 
     let client = match reqwest::blocking::Client::builder()

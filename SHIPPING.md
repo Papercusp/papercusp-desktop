@@ -49,6 +49,27 @@ The auto-updater route (`/api/updates/manifest` in the operator) reads from thes
 | Windows x86_64 | optional | `WITH_WINDOWS=1 bin/release-local.sh …` (builds natively on the local Windows VM) |
 | macOS universal | optional | `WITH_MAC=1 bin/release-local.sh …` (builds natively on the local Mac VM) |
 
+### macOS (universal .dmg + updater .app.tar.gz, built on the Mac VM)
+
+`WITH_MAC=1` drives a native build on the local QEMU macOS Sonoma VM
+(SSH :2222) via `bin/mac-vm-build.sh`: SwiftTerm term-shim (universal
+dylib) → sidecar (darwin binaries) → `tauri build --target
+universal-apple-darwin`. The GUI binary is universal; the sidecar is
+x86_64 and runs under Rosetta 2 on Apple silicon (one-time
+`softwareupdate --install-rosetta` — say so in release notes). Plan +
+decisions: `mac-desktop-release-readiness-2026-06-11` (esp. D-006).
+
+VM prereqs (one-time, already on the VM): Xcode CLT, nvm Node 22,
+`brew install libpq pgvector` (pg client tools + the vector extension —
+the build FAILS without pgvector since a fresh DB cannot boot without
+it). VM ops: `systemctl --user start papercup-vm-mac.service`;
+recovery runbook: the `mac-vm-qmp-recovery` agent insight.
+
+The bundle is NOT Apple-signed/notarized (alpha decision D-002): first
+launch needs right-click → Open, or
+`xattr -dr com.apple.quarantine /Applications/Papercusp.app`. Updater
+payloads are still minisign-signed.
+
 ### Windows (NSIS, built on the Windows VM)
 
 `WITH_WINDOWS=1` does NOT cross-compile — it drives a native MSVC build on
