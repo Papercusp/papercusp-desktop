@@ -976,19 +976,23 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             base, app_base
         );
         // Packaged builds load the conf's frontendDist URL (:3070) as the
-        // INITIAL document — nothing serves it on a user machine, so the
-        // webview sits on a connection-refused error page and the bootstrap
-        // inject above lands in a document that never polls it (the stuck
+        // INITIAL document — nothing serves it on a user machine (the stuck
         // "Could not connect" window of linux-test-vm D-010; reproduced on
-        // Windows 2026-06-11). Once the operator is discovered, point the
-        // window at the real app base directly; the eval loop below then
-        // feeds the SPA document its markers.
+        // Windows 2026-06-11). setup() navigates to the app origin
+        // immediately, where the custom protocol serves bundled statics
+        // until this discovery completes. Now that the operator is live:
+        //   - already on the app origin (the statics session) → reload, so
+        //     the SPA boots fresh against the proxied operator instead of
+        //     sitting on dead 503'd /api fetches;
+        //   - anywhere else (custom protocol off / odd state) → navigate.
         let already_on_app = window
             .url()
             .ok()
             .map(|u| u.as_str().starts_with(&app_base))
             .unwrap_or(false);
-        if !already_on_app {
+        if already_on_app {
+            let _ = window.eval("location.reload()");
+        } else {
             match app_base.parse() {
                 Ok(parsed) => {
                     if let Err(e) = window.navigate(parsed) {
@@ -1969,6 +1973,31 @@ pub fn run() {
             // Publish for AppHandle-less call sites (native pty routes its
             // commands through wsl.exe when the sidecar does).
             wsl_setup::set_route_active(via_wsl);
+
+            // Point the window at the custom-protocol origin IMMEDIATELY —
+            // never show the conf's frontendDist URL (:3070), which nothing
+            // serves on a user machine: it renders a connection-refused page
+            // for the whole 60-90s boot, and its own Refresh button reloads
+            // the dead URL, stranding the user there permanently (reported
+            // live 2026-06-11). Pre-discovery the handler serves the BUNDLED
+            // SPA statics (D-009: renders WslOnboardingGate / a booting
+            // shell); once serve is discovered, finish_boot reloads the
+            // document against the live proxy.
+            if custom_protocol::enabled() {
+                if let Some(window) = app.get_webview_window("main") {
+                    match custom_protocol::APP_ORIGIN.parse() {
+                        Ok(u) => {
+                            if let Err(e) = window.navigate(u) {
+                                eprintln!("[papercusp-desktop] app-origin navigate failed: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[papercusp-desktop] APP_ORIGIN did not parse: {e}")
+                        }
+                    }
+                }
+            }
+
             #[cfg(target_os = "windows")]
             {
                 let status = wsl_setup::detect(&app.handle());
@@ -1977,29 +2006,6 @@ pub fn run() {
                         "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes (detect: {:?})",
                         status
                     );
-                    // Clean machine: nothing serves the conf's frontendDist
-                    // URL, so point the window at the custom-protocol origin —
-                    // with no sidecar port known the handler serves the
-                    // BUNDLED SPA statics, which renders WslOnboardingGate
-                    // (the onboarding UI lives in the SPA's __root; without
-                    // this the window sits on a connection-refused page and
-                    // onboarding is unreachable — D-009).
-                    if custom_protocol::enabled() {
-                        if let Some(window) = app.get_webview_window("main") {
-                            match custom_protocol::APP_ORIGIN.parse() {
-                                Ok(u) => {
-                                    if let Err(e) = window.navigate(u) {
-                                        eprintln!(
-                                            "[papercusp-desktop] onboarding navigate failed: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => eprintln!(
-                                    "[papercusp-desktop] APP_ORIGIN did not parse: {e}"
-                                ),
-                            }
-                        }
-                    }
                     return Ok(());
                 }
             }
