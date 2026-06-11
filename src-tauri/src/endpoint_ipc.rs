@@ -848,10 +848,15 @@ mod tests {
         use std::time::Duration;
         use tokio::net::UnixListener;
 
-        let tmp = std::env::temp_dir().join(format!(
-            "papercusp-ipc-rust-test-{}-{}.sock",
+        // Keep the socket path short: unix sockets cap at SUN_LEN (~104
+        // bytes on macOS), and darwin's temp_dir() is a long
+        // /var/folders/... path — the old verbose name + full uuid blew
+        // the cap and UnixListener::bind failed only on macOS. /tmp is
+        // valid on every unix (a symlink to /private/tmp on darwin).
+        let tmp = std::path::PathBuf::from(format!(
+            "/tmp/pcipc-{}-{}.sock",
             std::process::id(),
-            uuid::Uuid::new_v4()
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
         ));
         let _ = std::fs::remove_file(&tmp);
 

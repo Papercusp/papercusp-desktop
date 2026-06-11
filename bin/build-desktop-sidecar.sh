@@ -1144,6 +1144,13 @@ fi
 # delete the retired tree. Renames on one filesystem are atomic, so a
 # concurrent reader sees only complete-old or complete-new — never the
 # half-written dir the old in-place rm -rf/cp produced.
+# Normalize owner-write on the whole tree: sources copied from brew kegs
+# (libpq tools, pgvector dylib) arrive 0444/0555, and tauri-build's
+# per-target resource copy then EACCESes overwriting its own previous
+# read-only copy on every REBUILD (whack-a-mole class: pg_dumpall, then
+# vector.dylib — kill it wholesale).
+chmod -R u+w "$SIDECAR_DIR"
+
 # NB: plain `mv src dst` (no GNU-only -T) — both renames have a
 # guaranteed-absent destination, so BSD/macOS mv does the same rename(2)
 # and never falls into move-INTO-directory mode.
