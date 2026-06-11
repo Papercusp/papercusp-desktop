@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Papercusp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "identifier": "com.papercusp.desktop",
   "build": {
     "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
@@ -32,7 +32,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "msi", "nsis", "deb", "rpm"],
+    "targets": [
+      "app",
+      "dmg",
+      "msi",
+      "nsis",
+      "deb",
+      "rpm"
+    ],
     "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "Open-source autonomous-harness framework",
