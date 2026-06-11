@@ -65,7 +65,10 @@ echo "--- tauri build (universal-apple-darwin) ---"
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
   echo "WARN: no TAURI_SIGNING_PRIVATE_KEY[_PATH] in env — updater artifacts will be unsigned/fail"
 fi
-npx tauri build --target universal-apple-darwin --bundles app,dmg
+# CI=true → tauri-bundler passes --skip-jenkins to bundle_dmg.sh, skipping
+# the AppleScript Finder-styling step that times out headless (-1712 over
+# SSH on the VM). The DMG just gets default icon layout.
+CI=true npx tauri build --target universal-apple-darwin --bundles app,dmg
 
 echo "--- artifacts ---"
 ls -la src-tauri/target/universal-apple-darwin/release/bundle/dmg/ 2>/dev/null || true
