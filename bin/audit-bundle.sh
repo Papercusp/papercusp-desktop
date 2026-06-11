@@ -33,6 +33,14 @@ REGEX_NEEDLES=(
   'phc_[A-Za-z0-9_]{30,}'
 )
 
+# The ONE deliberately-public projectKey every build ships
+# (packages/operator-core/lib/posthog-public-defaults.ts): an
+# anonymous-capture client credential, bundled so a user's opt-in alone
+# enables telemetry. It is NOT a leak — mask it before the regex scan so
+# any OTHER phc_/phx_ key (esp. write-side phx_ personal keys) still
+# FAILS. Keep in sync with POSTHOG_PUBLIC_DEFAULTS.projectKey.
+PUBLIC_PROJECT_KEY='phc_tnwKu5QTgaHi6hyrHwA3EUQFKhskJES4c4zAzHCUrPFv'
+
 # Soft-warn needles: signals that posthog-js (the browser SDK) is in the
 # bundle. Today it's dynamic-imported only when the user opts into
 # telemetry (default off), so its presence is not a privacy leak per se.
@@ -69,9 +77,17 @@ scan_path() {
     fi
   done
   for re in "${REGEX_NEEDLES[@]}"; do
-    if grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null \
-        | grep -vE "$exclude_re" \
-        | head -5 | grep -q .; then
+    # A file matches only if it contains a key OTHER than the public
+    # projectKey: strip the allowed key from each candidate file's
+    # content before re-testing the regex.
+    local hit=""
+    while IFS= read -r f; do
+      if sed "s/$PUBLIC_PROJECT_KEY//g" "$f" 2>/dev/null | grep -qE -- "$re"; then
+        hit="$f"
+        break
+      fi
+    done < <(grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null | grep -vE "$exclude_re" | head -20)
+    if [[ -n "$hit" ]]; then
       matches+=("regex:$re")
     fi
   done
@@ -96,9 +112,12 @@ scan_path() {
       echo "  - found: $m" >&2
       if [[ "$m" == regex:* ]]; then
         local re="${m#regex:}"
-        grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null \
-          | grep -vE "$exclude_re" \
-          | head -3 | sed 's|^|      |' >&2
+        # List only files still matching after the public-key mask.
+        while IFS= read -r f; do
+          if sed "s/$PUBLIC_PROJECT_KEY//g" "$f" 2>/dev/null | grep -qE -- "$re"; then
+            echo "      $f" >&2
+          fi
+        done < <(grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null | grep -vE "$exclude_re" | head -20)
       else
         grep -rlF --binary-files=text -- "$m" "$path" 2>/dev/null \
           | grep -vE "$exclude_re" \

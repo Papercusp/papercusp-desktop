@@ -1873,13 +1873,11 @@ pub fn run() {
             let via_wsl = should_route_via_wsl(&app.handle());
             #[cfg(target_os = "windows")]
             {
-                let need_wsl = !matches!(
-                    wsl_setup::detect(&app.handle()).state,
-                    wsl_setup::WslState::Ready
-                );
-                if need_wsl {
+                let status = wsl_setup::detect(&app.handle());
+                if !matches!(status.state, wsl_setup::WslState::Ready) {
                     println!(
-                        "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes"
+                        "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes (detect: {:?})",
+                        status
                     );
                     return Ok(());
                 }

@@ -347,10 +347,17 @@ mod imp {
     }
 
     pub fn run_bootstrap(app: &tauri::AppHandle) -> Result<String, String> {
+        // --user root: the rootfs bakes /etc/wsl.conf default=papercup, so a
+        // bare `wsl -d` runs as that user — and bootstrap writes /etc/* and
+        // apt-installs, which die with Permission denied as non-root
+        // (found live 2026-06-11: "/opt/papercup/bootstrap: line 16:
+        // /etc/wsl.conf: Permission denied").
         let out = wsl_command()
             .args([
                 "--distribution",
                 DISTRO_NAME,
+                "--user",
+                "root",
                 "--",
                 "/opt/papercup/bootstrap",
             ])

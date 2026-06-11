@@ -576,6 +576,12 @@ case "$_pgv_os" in
         pgv_lib_src="$pg_prefix/lib/postgresql/vector.dylib"
         pgv_ext_src="$pg_prefix/share/postgresql@18/extension"
       fi
+      # Modern pgvector keg layout: per-PG-version subdirs under the
+      # pgvector keg itself (opt/pgvector/lib/postgresql@18/vector.dylib).
+      if [[ ! -f "$pgv_lib_src" ]] && pgv_prefix=$(brew --prefix pgvector 2>/dev/null); then
+        pgv_lib_src="$pgv_prefix/lib/postgresql@18/vector.dylib"
+        pgv_ext_src="$pgv_prefix/share/postgresql@18/extension"
+      fi
       pgv_lib_ext="dylib"
     fi
     ;;
@@ -590,18 +596,24 @@ if [[ -n "${pgv_lib_src:-}" ]]; then
     for plat_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native; do
       [[ -d "$plat_dir" ]] || continue
       mkdir -p "$plat_dir/lib/postgresql" "$plat_dir/share/postgresql/extension"
-      cp -u "$pgv_lib_src" "$plat_dir/lib/postgresql/"
-      cp -u "$pgv_ext_src"/vector*.sql "$plat_dir/share/postgresql/extension/"
-      cp -u "$pgv_ext_src/vector.control" "$plat_dir/share/postgresql/extension/"
+      # cp -f, not GNU-only -u: BSD/macOS cp has no -u.
+      cp -f "$pgv_lib_src" "$plat_dir/lib/postgresql/"
+      cp -f "$pgv_ext_src"/vector*.sql "$plat_dir/share/postgresql/extension/"
+      cp -f "$pgv_ext_src/vector.control" "$plat_dir/share/postgresql/extension/"
       pgvector_copied=$((pgvector_copied + 1))
     done
     echo "  ✓ pgvector copied into $pgvector_copied embedded-postgres tree(s) (lib.${pgv_lib_ext} + sql + control)"
   else
-    echo "  ⚠ pgvector not found at $pgv_lib_src (build host missing pgvector); mem0 will use in-memory fallback"
+    # HARD ERROR, not the old "mem0 in-memory fallback" warning: the
+    # baseline schema CREATEs vector-typed columns, so a fresh-DB boot of a
+    # bundle without pgvector dies fatally ('type "public.vector" does not
+    # exist') — proven on the first mac DMG first-launch (2026-06-11).
+    echo "ERROR: pgvector not found at $pgv_lib_src — a bundle without it cannot boot a fresh database"
     case "$_pgv_os" in
       linux)  echo "    Install: sudo apt install postgresql-18-pgvector" ;;
       darwin) echo "    Install: brew install pgvector  (requires postgresql@18 keg)" ;;
     esac
+    exit 1
   fi
 fi
 
