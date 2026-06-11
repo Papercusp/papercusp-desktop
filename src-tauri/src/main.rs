@@ -2024,6 +2024,28 @@ pub fn run() {
                         "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes (detect: {:?})",
                         status
                     );
+                    // Reload-proof finalize watcher: the gate requests the
+                    // post-onboarding restart only when ITS page observed the
+                    // PendingBootstrap→Ready transition — a ref that any
+                    // document reload wipes (the sync-connectivity recovery
+                    // reload landed mid-bootstrap on the first strict clean
+                    // pass and stranded the user on a Ready-but-no-sidecar
+                    // app, found live 2026-06-11). Watch from the SHELL
+                    // instead: when detect() flips Ready, run the same
+                    // finalize (breakaway restart). wsl_finalize_ready's
+                    // atomic guard makes gate+watcher double-fire safe.
+                    let watcher_handle = app.handle().clone();
+                    std::thread::spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        let status = wsl_setup::detect(&watcher_handle);
+                        if matches!(status.state, wsl_setup::WslState::Ready) {
+                            println!(
+                                "[papercusp-desktop] WSL became Ready post-boot — restarting to spawn the sidecar"
+                            );
+                            let _ = wsl_setup::wsl_finalize_ready(watcher_handle.clone());
+                            return;
+                        }
+                    });
                     return Ok(());
                 }
             }

@@ -588,6 +588,15 @@ pub fn wsl_bootstrap(_app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 #[specta::specta]
 pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
+    // Idempotency guard: the finalize can be requested by BOTH the gate (on
+    // its observed PendingBootstrap→Ready transition) and the Rust-side
+    // deferred-boot watcher in main.rs (the reload-proof safety net) —
+    // whichever fires first wins, the other becomes a no-op instead of
+    // spawning a second instance.
+    static FINALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FINALIZED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
