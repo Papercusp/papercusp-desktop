@@ -516,10 +516,26 @@ pub fn wsl_import(_app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use tauri::Manager;
+        // The conf's `resources: ["resources/*"]` glob PRESERVES the
+        // directory, so the tarball installs at <resource-root>/resources/…
+        // — resolving the bare filename pointed one level too high (found
+        // live 2026-06-11, run 10: "rootfs tarball not found"). Try the
+        // real layout first, keep the bare name as a fallback for any
+        // future flat layout.
         let tarball = _app
             .path()
-            .resolve(ROOTFS_FILENAME, tauri::path::BaseDirectory::Resource)
-            .map_err(|e| format!("resolve rootfs: {}", e))?;
+            .resolve(
+                format!("resources/{}", ROOTFS_FILENAME),
+                tauri::path::BaseDirectory::Resource,
+            )
+            .ok()
+            .filter(|p| p.exists())
+            .or_else(|| {
+                _app.path()
+                    .resolve(ROOTFS_FILENAME, tauri::path::BaseDirectory::Resource)
+                    .ok()
+            })
+            .ok_or_else(|| "resolve rootfs: no resource dir".to_string())?;
         return imp::import_rootfs(&_app, &tarball);
     }
     #[cfg(not(target_os = "windows"))]
