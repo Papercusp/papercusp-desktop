@@ -761,36 +761,7 @@ pub fn start_bridge(
 
             let window_label = eval_req.window.as_deref().unwrap_or("main");
             if let Some(window) = app_handle.get_webview_window(window_label) {
-                // Build JS that evaluates the expression, then calls back into Rust
-                // via __TAURI__.core.invoke() to deliver the result.
-                let callback_js = format!(
-                    r#"
-                    (async () => {{
-                        try {{
-                            let __result = await eval({js});
-                            if (typeof __result === "undefined") {{
-                                __result = null;
-                            }} else if (typeof __result === "object" && __result !== null) {{
-                                __result = JSON.stringify(__result);
-                            }} else if (typeof __result !== "string") {{
-                                __result = String(__result);
-                            }}
-                            await window.__TAURI__.core.invoke("__dev_bridge_result", {{
-                                id: {id},
-                                value: __result
-                            }});
-                        }} catch(e) {{
-                            await window.__TAURI__.core.invoke("__dev_bridge_result", {{
-                                id: {id},
-                                value: "ERROR: " + e.message
-                            }});
-                        }}
-                    }})();
-                    "#,
-                    js = serde_json::to_string(&eval_req.js).unwrap(),
-                    id = serde_json::to_string(&request_id).unwrap(),
-                );
-
+                let callback_js = build_eval_callback_js(&eval_req.js, &request_id);
                 let _ = window.eval(&callback_js);
 
                 // Wait for the result with a 5-second timeout. Poison
@@ -939,6 +910,47 @@ fn collect_declared_capabilities(app: &AppHandle) -> Vec<CapabilityEntry> {
     out
 }
 
+/// Build the JS evaluated in the webview for an `/eval` request: run the
+/// expression, normalize the result to a string-or-null, and deliver it back
+/// to Rust via the `__dev_bridge_result` command. Pure — the user-supplied
+/// `js` and the `request_id` are embedded as JSON string literals so quotes,
+/// backslashes and newlines in the payload can't escape into the wrapper.
+///
+/// SECURITY: the `eval` here is the dev bridge's entire purpose — arbitrary
+/// JS execution for local diagnostic agents. It is debug-tool surface only:
+/// the server binds 127.0.0.1, every request is gated on the random
+/// per-session token (mode-0600-equivalent /tmp token file), and the bridge
+/// is not part of the shipped production app's request path.
+fn build_eval_callback_js(js: &str, request_id: &str) -> String {
+    format!(
+        r#"
+        (async () => {{
+            try {{
+                let __result = await eval({js});
+                if (typeof __result === "undefined") {{
+                    __result = null;
+                }} else if (typeof __result === "object" && __result !== null) {{
+                    __result = JSON.stringify(__result);
+                }} else if (typeof __result !== "string") {{
+                    __result = String(__result);
+                }}
+                await window.__TAURI__.core.invoke("__dev_bridge_result", {{
+                    id: {id},
+                    value: __result
+                }});
+            }} catch(e) {{
+                await window.__TAURI__.core.invoke("__dev_bridge_result", {{
+                    id: {id},
+                    value: "ERROR: " + e.message
+                }});
+            }}
+        }})();
+        "#,
+        js = serde_json::to_string(js).unwrap(),
+        id = serde_json::to_string(request_id).unwrap(),
+    )
+}
+
 /// Build a `/devtools` response for the current platform. v1 emits useful
 /// hints rather than always producing a hot inspector URL — Safari attach on
 /// macOS requires UI activation, Windows WebView2 needs a launch-time arg.
@@ -992,5 +1004,146 @@ mod tests {
     fn pid_alive_false_for_an_unused_high_pid() {
         // Well above any realistic pid_max (and positive as i32) → ESRCH → false.
         assert_eq!(pid_alive(2_000_000_000), Some(false));
+    }
+
+    // ── LogBuffer ring semantics ────────────────────────────────────────────
+
+    fn entry(msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp: 0,
+            level: "info".to_string(),
+            target: "test".to_string(),
+            message: msg.to_string(),
+            source: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn log_buffer_caps_at_1000_dropping_oldest() {
+        let buf = LogBuffer::new();
+        for i in 0..1003 {
+            buf.push(entry(&i.to_string()));
+        }
+        let drained = buf.drain();
+        assert_eq!(drained.len(), 1000);
+        // The three OLDEST entries (0,1,2) were evicted; order is preserved.
+        assert_eq!(drained[0].message, "3");
+        assert_eq!(drained[999].message, "1002");
+    }
+
+    #[test]
+    fn log_buffer_drain_empties_and_preserves_order() {
+        let buf = LogBuffer::new();
+        buf.push(entry("a"));
+        buf.push(entry("b"));
+        let first = buf.drain();
+        assert_eq!(
+            first.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(buf.drain().is_empty(), "drain consumes the buffer");
+    }
+
+    // ── Sidecar registry snapshots ──────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_registry_snapshot_reports_liveness_per_record() {
+        let registry = Arc::new(SidecarRegistry::new());
+        register_sidecar(&registry, "self", std::process::id(), Some("/bin/x".into()), vec!["--a".into()]);
+        register_sidecar(&registry, "dead", 2_000_000_000, None, vec![]);
+        // Re-registering a name is allowed — both entries are reported.
+        register_sidecar(&registry, "self", std::process::id(), None, vec![]);
+
+        let snap = registry.snapshot();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0].name, "self");
+        assert_eq!(snap[0].alive, Some(true));
+        assert_eq!(snap[0].exe.as_deref(), Some("/bin/x"));
+        assert_eq!(snap[0].args, vec!["--a".to_string()]);
+        assert_eq!(snap[1].name, "dead");
+        assert_eq!(snap[1].alive, Some(false));
+        assert_eq!(snap[2].name, "self");
+    }
+
+    // ── Tracing capture layer (drives MessageVisitor) ───────────────────────
+
+    #[test]
+    fn bridge_log_layer_captures_formatted_events() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let buffer = Arc::new(LogBuffer::new());
+        let subscriber =
+            tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("hello {}", 42);
+            tracing::warn!("uh oh");
+        });
+        let entries = buffer.drain();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].level, "info");
+        assert_eq!(entries[0].message, "hello 42");
+        assert_eq!(entries[0].source, "rust");
+        assert!(entries[0].timestamp > 0);
+        assert_eq!(entries[1].level, "warn");
+        assert_eq!(entries[1].message, "uh oh");
+    }
+
+    #[test]
+    fn bridge_log_layer_strips_debug_quotes_from_message() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let buffer = Arc::new(LogBuffer::new());
+        let subscriber =
+            tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            // `?` records the message field via Debug — `"quoted"` with quotes —
+            // which MessageVisitor::record_debug strips back off.
+            tracing::info!(message = ?"quoted");
+        });
+        let entries = buffer.drain();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "quoted");
+    }
+
+    // ── /eval callback JS builder ───────────────────────────────────────────
+
+    #[test]
+    fn eval_callback_js_embeds_payload_as_json_literals() {
+        let js = build_eval_callback_js("document.title", "req-1");
+        assert!(js.contains(r#"await eval("document.title")"#));
+        assert!(js.contains(r#"id: "req-1""#));
+        assert!(js.contains("__dev_bridge_result"));
+    }
+
+    #[test]
+    fn eval_callback_js_escapes_hostile_payloads() {
+        // Quotes / backslashes / newlines must stay INSIDE the JSON string
+        // literal — a raw embedding would let the payload escape the wrapper.
+        let hostile = "alert(\"x\");\n\\evil";
+        let js = build_eval_callback_js(hostile, "id\"2");
+        assert!(js.contains(r#""alert(\"x\");\n\\evil""#), "got: {js}");
+        assert!(js.contains(r#""id\"2""#));
+        // No unescaped newline from the payload inside the eval(...) call.
+        let eval_line = js.lines().find(|l| l.contains("await eval(")).unwrap();
+        assert!(eval_line.contains(r#"\n"#));
+    }
+
+    // ── /devtools platform response ─────────────────────────────────────────
+
+    #[test]
+    fn devtools_response_is_consistent_for_this_platform() {
+        let resp = devtools_response();
+        // Whatever the env says, a URL is advertised iff inspectable.
+        // (On macOS inspectable instead tracks debug_assertions and url stays
+        // None, so the invariant is url.is_some() → inspectable.)
+        if resp.url.is_some() {
+            assert!(resp.inspectable);
+        }
+        assert!(!resp.hint.is_empty());
+        #[cfg(target_os = "linux")]
+        assert_eq!(resp.platform, "webkitgtk");
+        #[cfg(target_os = "macos")]
+        assert_eq!(resp.platform, "wkwebview");
+        #[cfg(target_os = "windows")]
+        assert_eq!(resp.platform, "webview2");
     }
 }

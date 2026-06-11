@@ -655,6 +655,187 @@ mod tests {
     fn rejects_non_ready_lines() {
         assert_eq!(parse_ipc_ready_line("some other log\n"), None);
         assert_eq!(parse_ipc_ready_line(""), None);
+        // The prefix match is exact — leading whitespace / partial prefixes
+        // are NOT the handshake line.
+        assert_eq!(parse_ipc_ready_line(" PAPERCUSP_IPC_READY socket=/x"), None);
+        assert_eq!(parse_ipc_ready_line("PAPERCUSP_IPC_READY"), None);
+    }
+
+    #[test]
+    fn ready_line_tolerates_crlf_and_no_newline() {
+        assert_eq!(
+            parse_ipc_ready_line("PAPERCUSP_IPC_READY socket=/tmp/a.sock\r\n"),
+            Some("/tmp/a.sock")
+        );
+        assert_eq!(
+            parse_ipc_ready_line("PAPERCUSP_IPC_READY socket=/tmp/a.sock"),
+            Some("/tmp/a.sock")
+        );
+    }
+
+    // ── EndpointEvent wire shape ────────────────────────────────────────────
+    //
+    // The webview hook (ipc-stream.ts) switches on `kind` and reads these
+    // exact field names — a serde rename would silently break the frontend.
+
+    #[test]
+    fn endpoint_event_serializes_with_snake_case_kind_tags() {
+        let event = EndpointEvent::Event {
+            name: "delta".into(),
+            data: serde_json::json!({ "text": "hi" }),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({ "kind": "event", "name": "delta", "data": { "text": "hi" } })
+        );
+
+        let binary = EndpointEvent::Binary { name: "audio".into(), data: "AQID".into() };
+        assert_eq!(
+            serde_json::to_value(&binary).unwrap(),
+            serde_json::json!({ "kind": "binary", "name": "audio", "data": "AQID" })
+        );
+
+        let done = EndpointEvent::Done { result: serde_json::json!({ "ok": true }) };
+        assert_eq!(
+            serde_json::to_value(&done).unwrap(),
+            serde_json::json!({ "kind": "done", "result": { "ok": true } })
+        );
+
+        let error = EndpointEvent::Error { code: "quota".into(), message: "over".into() };
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({ "kind": "error", "code": "quota", "message": "over" })
+        );
+    }
+
+    #[test]
+    fn endpoint_event_round_trips_through_serde() {
+        let original = EndpointEvent::Error { code: "c".into(), message: "m".into() };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: EndpointEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            EndpointEvent::Error { code, message } => {
+                assert_eq!(code, "c");
+                assert_eq!(message, "m");
+            }
+            other => panic!("round-trip changed variant: {other:?}"),
+        }
+    }
+
+    // ── Server envelope parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn event_json_envelope_parses_server_payload() {
+        let env: EventJsonEnvelope = serde_json::from_slice(
+            br#"{"id":7,"name":"delta","data":{"text":"hi"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.id, 7);
+        assert_eq!(env.name, "delta");
+        assert_eq!(env.data, serde_json::json!({ "text": "hi" }));
+    }
+
+    #[test]
+    fn done_and_error_envelopes_parse_server_payloads() {
+        let done: DoneEnvelope =
+            serde_json::from_slice(br#"{"id":3,"result":{"content":[]}}"#).unwrap();
+        assert_eq!(done.id, 3);
+        assert_eq!(done.result, serde_json::json!({ "content": [] }));
+
+        let err: ErrorEnvelope = serde_json::from_slice(
+            br#"{"id":9,"error":{"code":"role_gate","message":"denied"}}"#,
+        )
+        .unwrap();
+        assert_eq!(err.id, 9);
+        assert_eq!(err.error.code, "role_gate");
+        assert_eq!(err.error.message, "denied");
+    }
+
+    #[test]
+    fn envelopes_reject_malformed_payloads() {
+        // Missing id — the reader loop must skip these, never panic.
+        assert!(serde_json::from_slice::<EventJsonEnvelope>(
+            br#"{"name":"delta","data":1}"#
+        )
+        .is_err());
+        // id of the wrong JSON type.
+        assert!(serde_json::from_slice::<EventJsonEnvelope>(
+            br#"{"id":"7","name":"delta","data":1}"#
+        )
+        .is_err());
+        // Error envelope with a flat (non-nested) error shape.
+        assert!(serde_json::from_slice::<ErrorEnvelope>(
+            br#"{"id":1,"code":"x","message":"y"}"#
+        )
+        .is_err());
+        // Outright garbage.
+        assert!(serde_json::from_slice::<DoneEnvelope>(b"not json").is_err());
+        assert!(serde_json::from_slice::<DoneEnvelope>(b"").is_err());
+    }
+
+    // ── CallSink send paths (capturing Channel, no webview needed) ──────────
+
+    /// A CallSink whose Channel captures every serialized body it forwards.
+    fn capturing_sink() -> (CallSink, Arc<std::sync::Mutex<Vec<String>>>) {
+        let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let sink_captured = captured.clone();
+        let channel = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                sink_captured.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        (
+            CallSink {
+                channel,
+                events_sent: AtomicU64::new(0),
+                overflowed: AtomicBool::new(false),
+            },
+            captured,
+        )
+    }
+
+    #[test]
+    fn call_sink_forwards_events_under_cap() {
+        let (sink, captured) = capturing_sink();
+        for i in 0..3 {
+            assert!(sink.try_send_event(EndpointEvent::Event {
+                name: format!("e{i}"),
+                data: serde_json::Value::Null,
+            }));
+        }
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[0].contains("\"e0\""));
+        assert!(bodies[2].contains("\"e2\""));
+    }
+
+    #[test]
+    fn call_sink_emits_one_overflow_error_then_drops_but_terminal_still_lands() {
+        let (sink, captured) = capturing_sink();
+        // Pre-position the counter one below the cap so the test doesn't
+        // loop 10k sends: the next send is the last allowed one.
+        sink.events_sent.store(PER_CALL_EVENT_CAP - 1, Ordering::Relaxed);
+
+        let ev = || EndpointEvent::Event { name: "delta".into(), data: serde_json::Value::Null };
+        assert!(sink.try_send_event(ev()), "last under-cap event forwards");
+        // Cap trip: returns false but emits exactly ONE backpressure error.
+        assert!(!sink.try_send_event(ev()));
+        // Everything after is dropped silently — no further bodies.
+        assert!(!sink.try_send_event(ev()));
+        assert!(!sink.try_send_event(ev()));
+
+        {
+            let bodies = captured.lock().unwrap();
+            assert_eq!(bodies.len(), 2, "one event + one overflow error, nothing more");
+            assert!(bodies[1].contains("backpressure_overflow"), "got: {}", bodies[1]);
+        }
+
+        // Terminal events bypass the cap — the consumer must learn the call ended.
+        sink.send_terminal(EndpointEvent::Done { result: serde_json::Value::Null });
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[2].contains("\"done\""));
     }
 
     /// End-to-end-ish: spin up a Node-server-equivalent on a Unix socket

@@ -2305,4 +2305,181 @@ mod tests {
             );
         }
     }
+
+    // ── P-015 draggable split — vertical docks ──────────────────────────────
+
+    #[test]
+    fn dragging_boundary_edge_resizes_top_dock() {
+        // Top dock: the boundary is the GUI's TOP edge. Dragging it DOWN by 100
+        // (GUI shrinks from the top, bottom edge fixed at 900) makes room above
+        // → the top-docked terminal GROWS by 100.
+        let a = Rect { x: 0, y: 300, w: 1200, h: 600 }; // top=300 bottom=900
+        let b = Rect { x: 0, y: 400, w: 1200, h: 500 }; // top=400 bottom=900
+        assert_eq!(resized_extent(DockSide::Top, a, b, 250, 100, 2000), 350);
+        // Dragging it back UP shrinks the terminal.
+        let c = Rect { x: 0, y: 250, w: 1200, h: 650 }; // top=250 bottom=900
+        assert_eq!(resized_extent(DockSide::Top, a, c, 250, 100, 2000), 200);
+    }
+
+    #[test]
+    fn dragging_boundary_edge_resizes_bottom_dock() {
+        // Bottom dock: the boundary is the GUI's BOTTOM edge. Dragging it UP by
+        // 100 (GUI shrinks from the bottom, top edge fixed at 0) makes room
+        // below → the bottom-docked terminal GROWS by 100.
+        let a = Rect { x: 0, y: 0, w: 1200, h: 600 }; // top=0 bottom=600
+        let b = Rect { x: 0, y: 0, w: 1200, h: 500 }; // top=0 bottom=500
+        assert_eq!(resized_extent(DockSide::Bottom, a, b, 250, 100, 2000), 350);
+    }
+
+    #[test]
+    fn dragging_far_edge_leaves_vertical_split_untouched() {
+        // Bottom dock: the GUI's TOP edge is the far edge — dragging it only
+        // moves the far edge; the split is unchanged.
+        let a = Rect { x: 0, y: 100, w: 1200, h: 500 }; // top=100 bottom=600
+        let b = Rect { x: 0, y: 50, w: 1200, h: 550 }; //  top=50  bottom=600
+        assert_eq!(resized_extent(DockSide::Bottom, a, b, 250, 100, 2000), 250);
+    }
+
+    // ── D-012 classification — vertical docks + tolerance boundaries ────────
+
+    #[test]
+    fn classify_seam_and_outer_drag_bottom_dock() {
+        // Bottom-docked sibling (below the GUI): seam = its TOP edge.
+        let t = Rect { x: 0, y: 600, w: 1200, h: 400 };
+        // Seam dragged up 100 → terminal grows to 500.
+        let seam = Rect { x: 0, y: 500, w: 1200, h: 500 };
+        assert_eq!(
+            classify_sibling_change(DockSide::Bottom, t, seam, 8, 40),
+            SiblingDelta::SeamResize { extent: 500 }
+        );
+        // Outer (bottom) edge dragged down 80, seam anchored → OuterResize.
+        let outer = Rect { x: 0, y: 600, w: 1200, h: 480 };
+        assert_eq!(
+            classify_sibling_change(DockSide::Bottom, t, outer, 8, 40),
+            SiblingDelta::OuterResize { extent: 480 }
+        );
+        // A big horizontal (cross-axis) departure is a Jump even with the
+        // dock-axis edges intact.
+        let cross = Rect { x: 300, y: 600, w: 1200, h: 400 };
+        assert_eq!(
+            classify_sibling_change(DockSide::Bottom, t, cross, 8, 40),
+            SiblingDelta::Jump
+        );
+    }
+
+    #[test]
+    fn classify_seam_drag_top_dock() {
+        // Top-docked sibling (above the GUI): seam = its BOTTOM edge (y+h).
+        let t = Rect { x: 0, y: 0, w: 1200, h: 300 };
+        let a = Rect { x: 0, y: 0, w: 1200, h: 380 }; // seam dragged down 80
+        assert_eq!(
+            classify_sibling_change(DockSide::Top, t, a, 8, 40),
+            SiblingDelta::SeamResize { extent: 380 }
+        );
+    }
+
+    #[test]
+    fn classify_outer_drag_right_dock() {
+        // Right-docked sibling: outer = its RIGHT edge (x+w).
+        let t = Rect { x: 1200, y: 0, w: 400, h: 800 };
+        let a = Rect { x: 1200, y: 0, w: 490, h: 800 }; // outer dragged right 90
+        assert_eq!(
+            classify_sibling_change(DockSide::Right, t, a, 8, 40),
+            SiblingDelta::OuterResize { extent: 490 }
+        );
+    }
+
+    #[test]
+    fn classify_seam_tolerance_is_a_dead_band() {
+        let t = left_target();
+        // Exactly AT the tolerance → still InPlace (ghostty cell-snap noise).
+        let at_tol = Rect { x: t.x, y: t.y, w: t.w + 8, h: t.h };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, at_tol, 8, 40),
+            SiblingDelta::InPlace
+        );
+        // One px past it → a deliberate drag.
+        let past_tol = Rect { x: t.x, y: t.y, w: t.w + 9, h: t.h };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, past_tol, 8, 40),
+            SiblingDelta::SeamResize { extent: t.w + 9 }
+        );
+    }
+
+    // ── geometry edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn sibling_geometry_clamps_nonpositive_extent() {
+        let m = main_rect();
+        // A zero/negative extent can't produce a zero-width window — X11
+        // rejects those; clamp to 1px.
+        assert_eq!(compute_sibling_geometry(m, DockSide::Right, 0, 0).w, 1);
+        assert_eq!(compute_sibling_geometry(m, DockSide::Left, -50, 0).w, 1);
+        assert_eq!(compute_sibling_geometry(m, DockSide::Bottom, 0, 0).h, 1);
+    }
+
+    #[test]
+    fn sibling_extent_tolerates_inverted_bounds() {
+        // Misconfigured min > max (env knobs are free-form) must not panic
+        // `clamp` — the helper normalizes the bounds.
+        let m = Rect { x: 0, y: 0, w: 2000, h: 800 };
+        let e = sibling_extent(m, DockSide::Right, 0.42, 1200, 480);
+        assert!((480..=1200).contains(&e), "extent {e} outside normalized bounds");
+        // resized_extent normalizes too.
+        let r = resized_extent(DockSide::Right, m, m, 840, 1200, 480);
+        assert!((480..=1200).contains(&r));
+    }
+
+    #[test]
+    fn remaining_strategy_labels_are_stable() {
+        assert_eq!(
+            TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm).label(),
+            "embedded-swiftterm"
+        );
+        assert_eq!(
+            TerminalStrategy::EmbeddedView(EmbedBackend::ConPty).label(),
+            "embedded-conpty"
+        );
+    }
+
+    #[test]
+    fn dock_side_from_env_trims_and_lowercases() {
+        assert_eq!(DockSide::from_env(Some("top")), DockSide::Top);
+        assert_eq!(DockSide::from_env(Some(" Right ")), DockSide::Right);
+        assert_eq!(DockSide::from_env(Some("LEFT")), DockSide::Left);
+        assert_eq!(DockSide::from_env(Some("")), DockSide::Left);
+    }
+
+    // ── D-009 VTE embed pure helpers — edge cases ───────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_hex_parsing_edge_cases() {
+        use vte_embed::parse_hex_rgba;
+        // Uppercase hex digits are valid.
+        let up = parse_hex_rgba("#07101D").expect("uppercase hex");
+        assert!((up.blue - 0x1d as f64 / 255.0).abs() < 1e-9);
+        // Surrounding whitespace is trimmed before the '#'.
+        assert!(parse_hex_rgba(" #07101d ").is_some());
+        // Short form, missing '#', non-hex digits → rejected.
+        assert!(parse_hex_rgba("#fff").is_none());
+        assert!(parse_hex_rgba("07101d").is_none());
+        assert!(parse_hex_rgba("#0g101d").is_none());
+        // Non-ASCII input must be rejected, not panic byte-slicing.
+        assert!(parse_hex_rgba("#ぁぁぁ").is_none());
+        assert!(parse_hex_rgba("").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_split_position_vertical_and_degenerate_fractions() {
+        use vte_embed::initial_split_position;
+        // Vertical docks use the same pane-1/pane-2 rule.
+        assert_eq!(initial_split_position(DockSide::Top, 1000, 0.3), 300);
+        assert_eq!(initial_split_position(DockSide::Bottom, 1000, 0.3), 700);
+        // A fraction past 1.0 clamps to the window; past-0 stays ≥ 1.
+        assert_eq!(initial_split_position(DockSide::Left, 1000, 1.5), 1000);
+        assert_eq!(initial_split_position(DockSide::Right, 1000, 1.5), 1);
+        assert_eq!(initial_split_position(DockSide::Left, 1000, 0.0), 1);
+    }
 }
