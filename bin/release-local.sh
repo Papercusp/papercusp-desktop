@@ -151,8 +151,11 @@ if [[ ! -d "$LINUX_BUNDLE" ]]; then
 fi
 
 ARTIFACTS=()
-for f in "$LINUX_BUNDLE"/deb/*.deb "$LINUX_BUNDLE"/appimage/*.AppImage \
-         "$LINUX_BUNDLE"/appimage/*.AppImage.sig "$LINUX_BUNDLE"/deb/*.deb.sig; do
+# Version-scoped globs: the bundle dir accumulates artifacts across cuts,
+# and an unscoped *.deb swept a stale older-version deb into the
+# desktop-v0.0.2-alpha release (caught + asset deleted, 2026-06-11).
+for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
+         "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
   [[ -f "$f" ]] && ARTIFACTS+=("$f")
 done
 

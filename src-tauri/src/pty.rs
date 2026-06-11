@@ -136,7 +136,13 @@ fn spawn_internal(
             c.arg("--cd");
             c.arg(cwd);
         }
-        c.arg("--");
+        // --exec, NOT `--`: the bare separator re-joins everything after it
+        // into one string and runs it through the distro's default shell,
+        // shredding multi-word args — `bash -c '<multiline script>'` (the
+        // wizard's install/login specs) arrives re-tokenized and executes
+        // garbage (found live 2026-06-11). --exec preserves the arg vector
+        // (same reason make_sidecar_command uses it for serve).
+        c.arg("--exec");
         c.arg(opts.command.clone());
         for arg in &opts.args {
             c.arg(arg);
