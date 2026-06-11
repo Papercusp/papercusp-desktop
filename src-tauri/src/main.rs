@@ -155,7 +155,15 @@ fn isolate_process_group(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0);
+        // CREATE_NO_WINDOW: console children (wsl.exe, node) of this GUI app
+        // otherwise get a VISIBLE console window dropped over the webview
+        // (found live 2026-06-11: a raw wsl.exe console covered the wizard).
+        // The child still owns an (invisible) conhost, so the P-055
+        // CTRL_BREAK_EVENT graceful-kill path keeps working.
+        cmd.creation_flags(
+            windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0
+                | windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
+        );
     }
     #[cfg(not(windows))]
     {
