@@ -961,7 +961,19 @@ fn spawn_serve(
     let harness_dir = sidecar_dir.join("harness");
     let prompts_dir = sidecar_dir.join("prompts");
     let db_sql_dir = sidecar_dir.join("db-sql");
-    let pg_data_dir = shared_state_dir.join("embedded-pg-data");
+    // PG data CANNOT live on DrvFs (/mnt/c) when the sidecar runs in WSL:
+    // postmaster hard-requires a 0700/0750 data dir and DrvFs without the
+    // metadata mount option can't hold one (found live 2026-06-11:
+    // `FATAL: data directory ... has invalid permission`). Fsync-heavy PG
+    // I/O over 9P would also crawl. Route it to the distro's ext4 under the
+    // baked default user instead — forwarded WITHOUT /p translation (it is
+    // already a Linux path). Consequence (documented in SHIPPING.md):
+    // unregistering the distro deletes the database.
+    let pg_data_dir: std::path::PathBuf = if via_wsl {
+        std::path::PathBuf::from("/home/papercup/.papercusp/embedded-pg-data")
+    } else {
+        shared_state_dir.join("embedded-pg-data")
+    };
 
     // Per-workspace isolation: override HOME so serve (and any child process
     // it spawns — claude CLI, git, pi, etc.) sees a workspace-scoped home.
@@ -980,7 +992,7 @@ fn spawn_serve(
             "WSLENV",
             "PATH/l:PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
-             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR/p:\
+             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
              PAPERCUSP_SERVE_UI:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
