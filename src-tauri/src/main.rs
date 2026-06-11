@@ -967,6 +967,35 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
             base, app_base
         );
+        // Packaged builds load the conf's frontendDist URL (:3070) as the
+        // INITIAL document — nothing serves it on a user machine, so the
+        // webview sits on a connection-refused error page and the bootstrap
+        // inject above lands in a document that never polls it (the stuck
+        // "Could not connect" window of linux-test-vm D-010; reproduced on
+        // Windows 2026-06-11). Once the operator is discovered, point the
+        // window at the real app base directly; the eval loop below then
+        // feeds the SPA document its markers.
+        let already_on_app = window
+            .url()
+            .ok()
+            .map(|u| u.as_str().starts_with(&app_base))
+            .unwrap_or(false);
+        if !already_on_app {
+            match app_base.parse() {
+                Ok(parsed) => {
+                    if let Err(e) = window.navigate(parsed) {
+                        eprintln!(
+                            "[papercusp-desktop] navigate to {} failed: {}",
+                            app_base, e
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "[papercusp-desktop] app base {} did not parse: {}",
+                    app_base, e
+                ),
+            }
+        }
         for _ in 0..30 {
             let _ = window.eval(&inject);
             std::thread::sleep(std::time::Duration::from_millis(300));
