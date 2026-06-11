@@ -2158,12 +2158,89 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
     let state: tauri::State<SidecarState> = app_handle.state();
     let maybe_child = state.child.lock().unwrap().take();
     if let Some(mut child) = maybe_child {
-        graceful_kill(&mut child, "serve (operator + embedded-PG)", 8000);
+        // WSL-routed serve: the Child is only the wsl.exe RELAY. No Windows
+        // console signal reaches the Linux-side node (CTRL_BREAK needs a
+        // shared console; a GUI launch has none), so graceful_kill's soft
+        // stage always lapsed into TerminateProcess on the relay — serve
+        // never ran its shutdown handler and embedded PG was left needing
+        // WAL recovery every boot (observed live 2026-06-11, P-010e).
+        // Instead, SIGTERM the Linux pid (from the distro-side
+        // operator.json) through wsl.exe itself. Only when we OWN a live
+        // relay — an already-exited child means `--ensure` reused a foreign
+        // operator that must keep running (Decision C).
+        #[cfg(target_os = "windows")]
+        let wsl_stopped = matches!(child.try_wait(), Ok(None))
+            && wsl_setup::detect_ready_cached()
+            && wsl_graceful_stop_serve(8000);
+        #[cfg(not(target_os = "windows"))]
+        let wsl_stopped = false;
+        if wsl_stopped {
+            // serve is down (host closed, operator.json removed, pg_ctl
+            // stopped); the relay exits by itself — give it a beat, then
+            // make sure it's reaped.
+            let deadline = Instant::now() + Duration::from_millis(2000);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            println!("[papercusp-desktop] serve stopped cleanly inside WSL (pg_ctl stop ran)");
+        } else {
+            graceful_kill(&mut child, "serve (operator + embedded-PG)", 8000);
+        }
     }
     let maybe_cs = state.code_server_child.lock().unwrap().take();
     if let Some(mut child) = maybe_cs {
         graceful_kill(&mut child, "code-server", 2000);
     }
+}
+
+/// Soft-stop the WSL-side serve: read its LINUX pid from the distro-side
+/// operator.json, SIGTERM it inside the distro, and wait up to `grace_ms`
+/// for the pid to vanish (serve's SIGTERM handler closes the host, removes
+/// operator.json, `pg_ctl stop`s embedded PG and releases the cold-start
+/// lock). Returns true only when the pid is confirmed gone — any failure
+/// falls back to the caller's relay-kill path.
+#[cfg(target_os = "windows")]
+fn wsl_graceful_stop_serve(grace_ms: u64) -> bool {
+    let Some(d) = read_operator_discovery(&wsl_sidecar_home_unc()) else {
+        return false;
+    };
+    println!(
+        "[papercusp-desktop] terminating serve inside WSL (linux pid={}, SIGTERM, grace {grace_ms}ms)",
+        d.pid
+    );
+    let sent = Command::new("wsl.exe")
+        .args([
+            "--distribution",
+            wsl_setup::DISTRO_NAME_PUB,
+            "--exec",
+            "kill",
+            "-TERM",
+            &d.pid.to_string(),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !sent {
+        return false;
+    }
+    let deadline = Instant::now() + Duration::from_millis(grace_ms);
+    while Instant::now() < deadline {
+        if !discovery_pid_alive(d.pid, true) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    eprintln!(
+        "[papercusp-desktop] serve (linux pid={}) still alive after grace — falling back to relay kill",
+        d.pid
+    );
+    false
 }
 
 /// Run the exit teardown (native terminal + sidecar children) exactly once.
