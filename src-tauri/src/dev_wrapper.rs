@@ -337,6 +337,10 @@ fn change_verdict(snap: &StatusSnapshot) -> String {
     }
 }
 
+/// Plain-text twin of `compose_status_markup` (the rendered one). Kept as the
+/// readable content spec — the `markup_matches_plain_text_content` test pins
+/// the two together, so edit BOTH when changing the line.
+#[cfg_attr(not(test), allow(dead_code))]
 fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
     if let Some(e) = &snap.error {
         return format!("⚠ {e}");
@@ -368,8 +372,11 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         .staging_committed_ms
         .map(|t| format!("({})", fmt_age(now_ms, Some(t))))
         .unwrap_or_default();
+    // sync precedes gate: the line ellipsizes at the right, and "when is the
+    // next sync" must survive truncation (a red gate still shows in the
+    // leading verdict).
     format!(
-        "tip{}: {} · staging {} · main {}{} · live {}{} · {} · sync {}, next {}",
+        "tip{}: {} · staging {} · main {}{} · live {}{} · sync {}, next {} · {}",
         tip_age,
         change_verdict(snap),
         sha(&snap.staging_sha),
@@ -377,9 +384,9 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         standing(snap.main_behind, "gate", snap.gate_next_ms),
         sha(&snap.deployed_sha),
         standing(snap.deployed_behind, "deploy", snap.deploy_next_ms),
-        gate,
         snap.git_sync_status.clone().unwrap_or_else(|| "?".into()),
         fmt_in(now_ms, snap.git_sync_next_ms),
+        gate,
     )
 }
 
@@ -389,6 +396,113 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
 /// states left are: no discovery file, a STALE (dead-writer) file, the
 /// singleton fallback resolving a DIFFERENT operator than selected, and an
 /// SPA/api divergence that should be impossible (guard).
+// Frost palette for the status-line markup (same values as BAR_CSS / the
+// SPA's semantic tokens).
+const C_DIM: &str = "#b9d4e8"; // --fg-dim: segment labels
+const C_MUTE: &str = "#7f9bb4"; // --fg-mute: countdowns / ages
+const C_SEP: &str = "#4a6076"; // separators
+const C_SHA: &str = "#7dd3fc"; // --accent-strong: shas
+const C_GOOD: &str = "#34d399"; // --good
+const C_WARN: &str = "#fbbf24"; // --warn
+const C_BAD: &str = "#f87171"; // --bad
+
+/// Pango-escape the entities that matter inside markup text.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn span(color: &str, text: &str) -> String {
+    format!("<span foreground=\"{color}\">{text}</span>")
+}
+
+fn span_b(color: &str, text: &str) -> String {
+    format!("<span foreground=\"{color}\" weight=\"bold\">{text}</span>")
+}
+
+/// The Pango-markup twin of `compose_status` — identical text content
+/// (guarded by the strip test below), with semantic color per segment:
+/// green = current/good, amber = behind/waiting, red = failing, sky = shas,
+/// muted = countdowns. This is what the bar label actually renders.
+fn compose_status_markup(snap: &StatusSnapshot, now_ms: i64) -> String {
+    if let Some(e) = &snap.error {
+        return span_b(C_BAD, &esc(&format!("⚠ {e}")));
+    }
+    let sha = |s: &Option<String>| span(C_SHA, &esc(&s.clone().unwrap_or_else(|| "?".into())));
+    let standing = |b: Option<i64>, label: &str, next: Option<i64>| match b {
+        Some(0) => format!(" {}", span_b(C_GOOD, "✓ latest")),
+        Some(n) => format!(
+            " {} {}",
+            span_b(C_WARN, &format!("−{n}")),
+            span(C_MUTE, &format!("({} {})", label, fmt_in(now_ms, next))),
+        ),
+        None => String::new(),
+    };
+    let verdict = change_verdict(snap);
+    let verdict_color = if verdict.starts_with("live on") {
+        C_GOOD
+    } else if verdict.contains("gate red") || verdict.contains("STALLED") {
+        C_BAD
+    } else if verdict == "?" {
+        C_MUTE
+    } else {
+        C_WARN
+    };
+    let gate = if snap.gate_reds > 0 {
+        format!(
+            "{} {}",
+            span_b(
+                C_BAD,
+                &format!(
+                    "gate ✗×{}{}",
+                    snap.gate_reds,
+                    if snap.gate_stalled { " STALLED" } else { "" }
+                ),
+            ),
+            span(C_MUTE, &format!("(retry {})", fmt_in(now_ms, snap.gate_next_ms))),
+        )
+    } else {
+        format!(
+            "{} {}",
+            span(C_GOOD, "gate ✓"),
+            span(C_MUTE, &format!("{} ago", fmt_age(now_ms, snap.gate_last_green_ms))),
+        )
+    };
+    let tip_age = snap
+        .staging_committed_ms
+        .map(|t| span(C_MUTE, &format!("({})", fmt_age(now_ms, Some(t)))))
+        .unwrap_or_default();
+    let parts = [
+        format!(
+            "{}{}{} {}",
+            span(C_DIM, "tip"),
+            tip_age,
+            span(C_DIM, ":"),
+            span_b(verdict_color, &esc(&verdict)),
+        ),
+        format!("{} {}", span(C_DIM, "staging"), sha(&snap.staging_sha)),
+        format!(
+            "{} {}{}",
+            span(C_DIM, "main"),
+            sha(&snap.main_sha),
+            standing(snap.main_behind, "gate", snap.gate_next_ms),
+        ),
+        format!(
+            "{} {}{}",
+            span(C_DIM, "live"),
+            sha(&snap.deployed_sha),
+            standing(snap.deployed_behind, "deploy", snap.deploy_next_ms),
+        ),
+        format!(
+            "{} {}{}",
+            span(C_DIM, "sync"),
+            span(C_DIM, &esc(&snap.git_sync_status.clone().unwrap_or_else(|| "?".into()))),
+            span(C_MUTE, &format!(", next {}", fmt_in(now_ms, snap.git_sync_next_ms))),
+        ),
+        gate,
+    ];
+    parts.join(&span(C_SEP, " · "))
+}
+
 fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) {
     let spa = match spa_port {
         Some(p) => {
@@ -438,12 +552,17 @@ fn compose_skew(snap: &StatusSnapshot, spa_port: Option<u16>) -> (String, bool) 
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
+// Frost-aligned bar chrome (the hex values mirror the SPA's semantic tokens —
+// GTK has no var() system, so they're pinned here): navy surface, sky
+// hairline, 13px text, flat sky-filled active switcher button.
 const BAR_CSS: &str = "
-.pc-dev-wrapper { background-color: #14161a; border-bottom: 1px solid #2a2e36; padding: 1px 8px; }
-.pc-dev-wrapper button { padding: 0px 8px; min-height: 20px; font-size: 11px; }
-.pc-dev-wrapper button.pc-active { background: #2563eb; color: #ffffff; }
-.pc-dev-wrapper label { font-family: monospace; font-size: 11px; color: #9aa4b2; }
-.pc-dev-wrapper label.pc-warn { color: #f59e0b; }
+.pc-dev-wrapper { background-color: #081123; border-bottom: 1px solid rgba(125,211,252,0.30); padding: 4px 10px; }
+.pc-dev-wrapper button { padding: 1px 10px; min-height: 24px; font-size: 12px; background-image: none; background-color: #0d1829; color: #b9d4e8; border: 1px solid rgba(125,211,252,0.22); border-radius: 4px; }
+.pc-dev-wrapper button:hover { background-color: #143049; color: #e7f7ff; }
+.pc-dev-wrapper button.pc-active { background-color: #0ea5e9; color: #051827; font-weight: bold; border-color: #38bdf8; }
+.pc-dev-wrapper button:disabled { color: #56708a; }
+.pc-dev-wrapper label { font-family: monospace; font-size: 13px; color: #b9d4e8; }
+.pc-dev-wrapper label.pc-warn { color: #fbbf24; }
 ";
 
 /// Navigate the content webview to a target build, carrying the current SPA
@@ -563,7 +682,7 @@ fn build_bar(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        status_label.set_text(&compose_status(&snap, now_ms));
+        status_label.set_markup(&compose_status_markup(&snap, now_ms));
         let (skew_text, warn) = compose_skew(&snap, spa_port);
         skew_label.set_text(&skew_text);
         let ctx = skew_label.style_context();
@@ -742,7 +861,7 @@ mod tests {
         let line = compose_status(&snap(), 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 −2 (gate in 10m) · live bbbb2222 −3 (deploy in 5m) · gate ✓ 5m ago · sync synced, next in 2m"
+            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 −2 (gate in 10m) · live bbbb2222 −3 (deploy in 5m) · sync synced, next in 2m · gate ✓ 5m ago"
         );
     }
 
@@ -754,7 +873,7 @@ mod tests {
         let line = compose_status(&s, 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "tip(5m): live on :3070 ✓ · staging aaaa1111 · main bbbb2222 ✓ latest · live bbbb2222 ✓ latest · gate ✓ 5m ago · sync synced, next in 2m"
+            "tip(5m): live on :3070 ✓ · staging aaaa1111 · main bbbb2222 ✓ latest · live bbbb2222 ✓ latest · sync synced, next in 2m · gate ✓ 5m ago"
         );
     }
 
@@ -764,6 +883,58 @@ mod tests {
         s.gate_reds = 2;
         let line = compose_status(&s, 1_000_000 + 5 * 60_000);
         assert!(line.contains("gate ✗×2 (retry in 10m)"), "{line}");
+    }
+
+    /// Strip Pango tags + unescape — the markup line must carry EXACTLY the
+    /// plain line's text, or the two composers have drifted.
+    fn strip_markup(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in s.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    }
+
+    #[test]
+    fn markup_matches_plain_text_content() {
+        let now = 1_000_000 + 5 * 60_000;
+        // behind state
+        let s = snap();
+        assert_eq!(strip_markup(&compose_status_markup(&s, now)), compose_status(&s, now));
+        // all-current state
+        let mut cur = snap();
+        cur.main_behind = Some(0);
+        cur.deployed_behind = Some(0);
+        assert_eq!(strip_markup(&compose_status_markup(&cur, now)), compose_status(&cur, now));
+        // red gate
+        let mut red = snap();
+        red.gate_reds = 2;
+        assert_eq!(strip_markup(&compose_status_markup(&red, now)), compose_status(&red, now));
+        // error (with markup-significant chars escaped)
+        let err = StatusSnapshot { error: Some("a<b&c".into()), ..Default::default() };
+        assert_eq!(strip_markup(&compose_status_markup(&err, now)), compose_status(&err, now));
+    }
+
+    #[test]
+    fn markup_colors_key_segments() {
+        let now = 1_000_000 + 5 * 60_000;
+        let line = compose_status_markup(&snap(), now);
+        // behind counts are bold amber; shas sky; verdict amber.
+        assert!(line.contains("<span foreground=\"#fbbf24\" weight=\"bold\">−2</span>"), "{line}");
+        assert!(line.contains("<span foreground=\"#7dd3fc\">aaaa1111</span>"), "{line}");
+        assert!(line.contains("<span foreground=\"#fbbf24\" weight=\"bold\">awaiting promotion</span>"), "{line}");
+        let mut cur = snap();
+        cur.main_behind = Some(0);
+        cur.deployed_behind = Some(0);
+        let line = compose_status_markup(&cur, now);
+        assert!(line.contains("<span foreground=\"#34d399\" weight=\"bold\">✓ latest</span>"), "{line}");
+        assert!(line.contains("<span foreground=\"#34d399\" weight=\"bold\">live on :3070 ✓</span>"), "{line}");
     }
 
     #[test]
