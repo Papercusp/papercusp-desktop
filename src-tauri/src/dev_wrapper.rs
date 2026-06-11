@@ -50,8 +50,12 @@ use std::time::Duration;
 
 use tauri::Manager;
 
-/// (button label, persisted name, port). The three dev-box builds.
-const TARGETS: [(&str, &str, u16); 3] = [
+/// (button label, persisted name, port). The dev-box builds. `dev :3270` is
+/// the session's OWN working-tree operator (release-pipeline P-010 own-port:
+/// spawned by beforeDevCommand, nothing else restarts it) — the default that
+/// desktop-dev-nohmr pins via PAPERCUSP_DEV_API_TARGET.
+const TARGETS: [(&str, &str, u16); 4] = [
+    ("dev :3270", "dev", 3270),
     ("prod :3070", "prod", 3070),
     ("staging :3170", "staging", 3170),
     ("local :3055", "local", 3055),

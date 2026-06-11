@@ -192,6 +192,12 @@ NATIVE_PKGS=(
   sodium-native udx-native rocksdb-native quickbit-native rabin-native
   simdle-native fs-native-extensions
   bare-fs bare-os bare-url bare-inspect bare-type
+  # ssh2 — its optional sshcrypto.node accel binding only EXISTS where
+  # node-gyp could build it (the mac VM has Xcode; the linux box doesn't
+  # compile it), and esbuild has no .node loader → mac-only bundle error.
+  # Externalize + closure-copy (asn1, bcrypt-pbkdf) like the other natives;
+  # its in-tree try/catch handles an absent binding at runtime.
+  ssh2
 )
 HOST_EXTERNALS=(
   --external:@lydell/*

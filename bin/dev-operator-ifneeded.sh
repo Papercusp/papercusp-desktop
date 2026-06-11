@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # Tauri's `beforeDevCommand` runs unconditionally on every `npm run dev`.
-# If the operator dev stack is already serving on :3055 (e.g. started via
-# `bin/overmind-all start` or an earlier `tauri dev` instance), starting a
-# second one fails with EADDRINUSE and aborts the Tauri build. This wrapper
-# skips the spawn when port 3055 is already bound; the running process
-# becomes the operator backend for this Tauri session.
+#
+# release-pipeline-resilience P-010 (owner-approved OWN-PORT option,
+# 2026-06-10): `npm run dev` must load the LOCAL working tree, not whatever
+# happens to own the shared dev-box ports. The systemd operators own
+# :3070 (green release) and :3170 (fleet staging — restarted by agents at
+# will), so the desktop session gets its OWN working-tree Hono operator on
+# a dedicated port (:3270 by default, PTY WS on :3274) that nothing else
+# restarts. Mirrors papercup-staging-api's invocation (.env.local sourced,
+# background workers/DBOS routines OFF — the green :3070 owns those).
+#
+# If :3270 is already bound (an earlier `tauri dev` session's operator),
+# starting a second one fails with EADDRINUSE and aborts the Tauri build —
+# this wrapper skips the spawn and the running process becomes the operator
+# backend for this Tauri session.
 #
 # EI-142 (P-054): when this wrapper DOES spawn the dev stack, it must also
 # reap it. tauri-cli only kills THIS wrapper process on exit — the
-# npm → node → vite/hono tree it spawned used to be orphaned to PID 1,
-# leaving stale :3055 Vite servers behind after every `tauri dev` session.
+# npm → node → tsx tree it spawned used to be orphaned to PID 1,
+# leaving stale dev servers behind after every `tauri dev` session.
 # The stack now runs in its own process group (setsid) with two layers of
 # reaping:
 #   1. an EXIT/INT/TERM/HUP trap (covers a clean wrapper shutdown), and
@@ -18,10 +27,17 @@
 #      wrapper is gone.
 set -euo pipefail
 
-PORT="${OPERATOR_DEV_PORT:-3055}"
+PORT="${OPERATOR_DEV_PORT:-3270}"
+# PTY WS data plane: +4, not +1 — :3271..:3273 are squatted by dev-box
+# tooling (socat relays); 3274 verified free at authoring.
+PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
+# The working-tree Hono host on the dedicated port. PLAN_RENDER/timers/
+# routines/autoloop stay off — the green/staging operators own background
+# work; this instance only serves the owner's desktop session.
+DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && exec env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=0 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
-DEV_CMD="${OPERATOR_DEV_CMD:-npm --prefix .. run dev:operator}"
+DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
 
 # Detection — prefer ss (always present on Linux), fall back to lsof.
 in_use() {
@@ -45,20 +61,32 @@ if in_use; then
 fi
 
 echo "[tauri] starting operator dev server on :$PORT"
-# New session + process group so the whole npm → node → vite/hono tree is a
-# single kill target (`kill -- -$CHILD`). The backgrounded process is never
-# our group leader, so util-linux setsid execs in place without forking and
-# $! is the group leader's pid. `exec` keeps bash out of the tree.
-setsid bash -c "exec $DEV_CMD" &
+# New session + process group so the whole npm → node → tsx tree is a
+# single kill target (`kill -- -$GROUP`). Do NOT trust `$!` as the group id:
+# util-linux setsid only execs in place when the spawned pid is not already
+# a group leader — when it FORKS instead, `$!` is the exited setsid and the
+# group kill silently no-ops, orphaning the stack (observed live 2026-06-11:
+# session leader 18 pids past `$!`). The inner shell's `$$` IS the session
+# leader in both cases, so it reports the true group through a pidfile.
+GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
+setsid bash -c 'echo "$$" > "$1"; shift; eval "$1"' _ "$GROUP_FILE" "$DEV_CMD" &
 CHILD=$!
+GROUP=""
+for _ in $(seq 1 50); do
+  GROUP="$(cat "$GROUP_FILE" 2>/dev/null || true)"
+  [ -n "$GROUP" ] && break
+  sleep 0.1
+done
+rm -f "$GROUP_FILE"
+GROUP="${GROUP:-$CHILD}"
 
 reap() {
-  kill -TERM -- "-$CHILD" 2>/dev/null || true
+  kill -TERM -- "-$GROUP" 2>/dev/null || true
   for _ in $(seq 1 50); do
-    kill -0 -- "-$CHILD" 2>/dev/null || return 0
+    kill -0 -- "-$GROUP" 2>/dev/null || return 0
     sleep 0.1
   done
-  kill -KILL -- "-$CHILD" 2>/dev/null || true
+  kill -KILL -- "-$GROUP" 2>/dev/null || true
 }
 trap reap EXIT INT TERM HUP
 
@@ -73,8 +101,12 @@ setsid bash -c '
     sleep 0.1
   done
   kill -KILL -- "-$child" 2>/dev/null || true
-' dev-operator-watchdog "$$" "$CHILD" >/dev/null 2>&1 &
+' dev-operator-watchdog "$$" "$GROUP" >/dev/null 2>&1 &
 
 # Block for the dev stack's lifetime (tauri-cli treats a long-running
 # beforeDevCommand as the dev server and pings devUrl for readiness).
-wait "$CHILD"
+# In the forked-setsid case $CHILD exits immediately while the stack lives
+# on in $GROUP — keep blocking on the group so the wrapper's exit (and its
+# EXIT-trap reap) only happens once the stack itself is gone.
+wait "$CHILD" || true
+while kill -0 -- "-$GROUP" 2>/dev/null; do sleep 1; done
