@@ -23,9 +23,17 @@
 #   - bin/build-desktop-sidecar.sh has populated src-tauri/sidecar/
 #   - scripts/build-rootfs.sh has produced src-tauri/resources/papercup-runtime.tar.gz
 #
-# Signing: pass the minisign key through so `createUpdaterArtifacts` can sign.
+# Signing: the updater .sig is produced HOST-SIDE after collection
+# (`tauri signer sign`), never in the VM. Two reasons: (a) the private key
+# never leaves this machine; (b) Windows cannot hold an EMPTY env var —
+# PowerShell `$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""` DELETES the
+# variable, so an empty-passphrase key makes tauri-cli prompt on stdin and
+# hang forever over ssh. The in-VM build therefore runs keyless and is
+# EXPECTED to exit 1 with "A public key has been found, but no private
+# key" AFTER writing the complete installer — the script asserts exactly
+# that outcome.
 #   TAURI_SIGNING_PRIVATE_KEY_PATH (host path, default ~/.papercusp/signing/papercusp.key)
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (optional)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (optional, host-side only)
 
 set -euo pipefail
 
@@ -76,9 +84,7 @@ tar -czhf "$TARBALL" \
 ls -lh "$TARBALL"
 
 echo "==> shipping to VM"
-"${SCP[@]}" "$TARBALL" "$VM_SSH_HOST":'C:/Users/user/papercusp-desktop-build.tar.gz' \
-  2>/dev/null || "${SCP[@]}" "$TARBALL" "scp://$VM_SSH_HOST:$VM_SSH_PORT/C:/Users/user/papercusp-desktop-build.tar.gz"
-"${SCP[@]}" "$KEY_FILE" "$VM_SSH_HOST":'C:/Users/user/papercusp-signing.key'
+"${SCP[@]}" "$TARBALL" "$VM_SSH_HOST":'C:/Users/user/papercusp-desktop-build.tar.gz'
 
 echo "==> extracting in VM ($VM_BUILD_DIR)"
 "${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\Users\\user\\$VM_BUILD_DIR -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
@@ -93,8 +99,6 @@ if (-not (Test-Path \$vcvars)) { \$vcvars = "C:\\Program Files (x86)\\Microsoft 
 cmd /c "\`"\$vcvars\`" && set" | ForEach-Object {
   if (\$_ -match "^(.*?)=(.*)\$") { [System.Environment]::SetEnvironmentVariable(\$matches[1], \$matches[2], "Process") }
 }
-\$env:TAURI_SIGNING_PRIVATE_KEY = "C:\\Users\\user\\papercusp-signing.key"
-\$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "$KEY_PASSWORD"
 Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
 Write-Host "[build] npm install"
 npm install --no-audit --no-fund 2>&1
@@ -108,7 +112,16 @@ rm -f "$BUILD_PS1"
 echo "==> building (this holds the ssh session; first build ~15-25 min)"
 "${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
   | tee /tmp/vm-release-build.log
-grep -q "EXIT=0" /tmp/vm-release-build.log || fail "VM build failed — see /tmp/vm-release-build.log"
+# Keyless in-VM build: the ONLY sanctioned failure is the missing-private-key
+# error AFTER the bundle finished (see the signing note up top). Anything
+# else — or no finished bundle — is a real failure.
+if ! grep -q "Finished.*1 bundle at" /tmp/vm-release-build.log; then
+  fail "VM build produced no bundle — see /tmp/vm-release-build.log"
+fi
+if ! grep -q "EXIT=0" /tmp/vm-release-build.log \
+   && ! grep -q "A public key has been found, but no private key" /tmp/vm-release-build.log; then
+  fail "VM build failed for a reason other than the expected keyless-sign skip — see /tmp/vm-release-build.log"
+fi
 
 echo "==> collecting artifacts"
 OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/nsis"
@@ -118,7 +131,15 @@ NSIS_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/rele
 for name in $("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\nsis\"" | tr -d '\r'); do
   "${SCP[@]}" "$VM_SSH_HOST":"$NSIS_VM_DIR/$name" "$OUT_DIR/$name"
 done
-"${SSH[@]}" 'powershell -NoProfile -Command "Remove-Item C:\Users\user\papercusp-signing.key -ErrorAction SilentlyContinue"'
+
+echo "==> signing updater artifact (host-side)"
+SETUP_EXE="$(ls "$OUT_DIR"/*-setup.exe 2>/dev/null | head -1)"
+[[ -n "$SETUP_EXE" ]] || fail "no *-setup.exe came back from the VM"
+(cd "$ROOT" && npx tauri signer sign \
+  --private-key-path "$KEY_FILE" \
+  --password "$KEY_PASSWORD" \
+  "$SETUP_EXE")
+[[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig"
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"

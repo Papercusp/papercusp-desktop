@@ -48,10 +48,16 @@ chmod 600 "$KEY_FILE"
 chmod 644 "$PUB_FILE"
 
 echo "==> updating tauri.conf.json pubkey"
-# Tauri stores the pubkey base64-encoded with embedded newlines. The
-# generator writes the raw minisign format which the CLI's read-pub
-# step base64-encodes. Easiest is to read the .pub file then encode.
-PUBKEY_B64="$(base64 -w0 < "$PUB_FILE")"
+# The tauri CLI writes the .pub file ALREADY base64-encoded (one line).
+# Re-encoding it here double-encodes and the bundler later dies with
+# "failed to decode pubkey: Missing encoded key in public key" — use the
+# file content verbatim. (Guard: if a raw "untrusted comment:" minisign
+# file shows up from an old CLI, encode it once.)
+if head -1 "$PUB_FILE" | grep -q "^untrusted comment:"; then
+  PUBKEY_B64="$(base64 -w0 < "$PUB_FILE")"
+else
+  PUBKEY_B64="$(tr -d '\n' < "$PUB_FILE")"
+fi
 
 python3 - "$TAURI_CONF" "$PUBKEY_B64" <<'PY'
 import json, sys

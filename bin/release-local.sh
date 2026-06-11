@@ -25,9 +25,13 @@
 #              mac-desktop-release-readiness-2026-06-11; updater
 #              artifacts are still minisign-signed). VM must be up
 #              (SSH :2222, see /internal/docs/build-system/vms).
-#   - Windows: cross-compile is possible but requires setup; left as
-#              an opt-in via WITH_WINDOWS=1
-#   - arm64  : ditto via WITH_ARM64=1
+#   - Windows: WITH_WINDOWS=1 — drives the Windows 11 build VM over SSH
+#              (native MSVC NSIS build, keyless in-VM, .sig signed
+#              host-side — D-001/D-006 of
+#              windows-desktop-release-readiness-2026-06-11; no
+#              Authenticode yet, SmartScreen will warn). VM must be up
+#              (SSH :2223, ~/windows-vm/boot-windows.sh).
+#   - arm64  : cross-compile via WITH_ARM64=1 (needs `cross` set up)
 #
 # Re-run safety: idempotent. If a release for the tag exists, asset
 # uploads use `gh release upload --clobber`.
@@ -128,7 +132,10 @@ echo "==> building sidecar"
 bash "$ROOT/bin/build-desktop-sidecar.sh"
 
 echo "==> building Tauri Linux x86_64 (signed)"
-export TAURI_SIGNING_PRIVATE_KEY_PATH="$KEY_FILE"
+# Tauri v2 reads TAURI_SIGNING_PRIVATE_KEY (value = key content OR a path);
+# the v1-style _PATH variant is silently ignored and the build dies at the
+# updater-artifact signing step ("public key found, but no private key").
+export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
 # Empty passphrase by default. If the user set one at keygen time
 # they should `export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...` before
 # running this script.
@@ -190,7 +197,7 @@ if [[ "$WITH_MAC" == "1" ]]; then
   "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "
     cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || exit 1
     npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
-    export TAURI_SIGNING_PRIVATE_KEY_PATH=\$HOME/.papercusp-updater.key
+    export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
     bash bin/mac-vm-build.sh
   "'

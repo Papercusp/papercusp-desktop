@@ -62,8 +62,13 @@ echo "--- sidecar node arch ---"
 file src-tauri/sidecar/bin/node || true
 
 echo "--- tauri build (universal-apple-darwin) ---"
-if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
-  echo "WARN: no TAURI_SIGNING_PRIVATE_KEY[_PATH] in env — updater artifacts will be unsigned/fail"
+# Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
+# legacy _PATH spelling forward so older callers keep working.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY_PATH"
+fi
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  echo "WARN: no TAURI_SIGNING_PRIVATE_KEY in env — updater artifacts will be unsigned/fail"
 fi
 # CI=true → tauri-bundler passes --skip-jenkins to bundle_dmg.sh, skipping
 # the AppleScript Finder-styling step that times out headless (-1712 over
