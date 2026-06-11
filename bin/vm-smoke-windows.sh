@@ -63,13 +63,29 @@ echo "$BK" | grep -q '"kopia":{"ok":true' || fail "kopia detection not ok: $(ech
 pass "backups 200, kopia ok"
 
 echo "==> 7. agent-tools surface (true loopback)"
-AT="$(wsl_exec sh -c "'tok=\$(cat /home/papercup/.papercusp/superuser-token); curl -s -m 20 -X POST -H \"Authorization: Bearer \$tok\" -H \"Content-Type: application/json\" -d {} http://127.0.0.1:$PORT/api/agent-tools/papercusp/list_workspaces'" )"
-echo "$AT" | grep -q '"workspaces"' || fail "agent-tools list_workspaces failed: ${AT:0:160}"
+# Quoting does NOT survive ssh→cmd→wsl; ship a probe file and run it via the
+# distro's /mnt/c automount (the \\wsl.localhost UNC is flaky from a
+# non-interactive ssh session — insight windows-vm-desktop-testing-workflow).
+PROBE="$(mktemp /tmp/papercusp-vm-probe-XXXX.sh)"
+cat > "$PROBE" <<PROBEEOF
+#!/usr/bin/env bash
+tok=\$(cat /home/papercup/.papercusp/superuser-token)
+curl -s -m 20 -X POST -H "Authorization: Bearer \$tok" -H "Content-Type: application/json" \
+  -d '{}' "http://127.0.0.1:$PORT/api/agent-tools/papercusp/list_workspaces"
+PROBEEOF
+scp -q -i "$VM_SSH_KEY" -P "$VM_SSH_PORT" "$PROBE" "$VM_SSH_HOST":'C:/Users/user/papercusp-smoke-probe.sh'
+rm -f "$PROBE"
+AT="$(wsl_exec bash /mnt/c/Users/user/papercusp-smoke-probe.sh)"
+# The tool result arrives as an MCP content envelope with ESCAPED inner JSON.
+echo "$AT" | grep -q 'workspaces' || fail "agent-tools list_workspaces failed: ${AT:0:160}"
 pass "agent-tools dispatch ok"
 
 echo "==> 8. PG errors in boot log"
-NERR="$("${SSH[@]}" 'powershell -NoProfile -Command "((Get-Content C:\Users\user\papercusp-bk.log -ErrorAction SilentlyContinue) -match \"ERROR\" | Measure-Object).Count"' 2>/dev/null | tr -d '\r[:space:]')"
-[[ "${NERR:-0}" == "0" ]] || fail "$NERR ERROR line(s) in papercusp-bk.log — read them before shipping"
-pass "0 ERROR lines"
+# Match REAL error shapes only: PG's "ERROR:  msg" log prefix and the node-pg
+# error object's severity field. A bare ERROR substring false-positives on
+# DropErrorMsgNonExistent notices, *-error-code.sql migration names, errors=0.
+NERR="$("${SSH[@]}" 'powershell -NoProfile -Command "((Get-Content C:\Users\user\papercusp-bk.log -ErrorAction SilentlyContinue) -match \"ERROR:  |severity: .ERROR.\" | Measure-Object).Count"' 2>/dev/null | tr -d '\r[:space:]')"
+[[ "${NERR:-0}" == "0" ]] || fail "$NERR real ERROR line(s) in papercusp-bk.log — read them before shipping"
+pass "0 real ERROR lines"
 
 echo "ALL SMOKE CHECKS GREEN"

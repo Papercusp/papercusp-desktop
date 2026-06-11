@@ -87,8 +87,13 @@ overmind --version
 # kopia — the backup engine ("Enabled by default" per the Setup Wizard);
 # without it the Backups feature is unavailable in the Windows runtime.
 # Official APT repo per kopia.io/docs/installation.
+# --batch --yes: this script re-runs at FIRST BOOT as /opt/papercup/bootstrap
+# (see header) — the keyring baked at image-build time already exists then,
+# and bare `gpg --dearmor` hangs forever on an interactive "Overwrite? (y/N)"
+# prompt (wedged the Windows first-run live, 2026-06-11). Every step in this
+# script must stay idempotent AND prompt-free.
 curl -fsSL https://kopia.io/signing-key \
-  | gpg --dearmor -o /usr/share/keyrings/kopia-keyring.gpg
+  | gpg --batch --yes --dearmor -o /usr/share/keyrings/kopia-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/kopia-keyring.gpg] http://packages.kopia.io/apt/ stable main" \
   > /etc/apt/sources.list.d/kopia.list
 apt-get update
