@@ -154,6 +154,59 @@ pub(crate) fn parse_default_version(status_output: &str) -> u8 {
         .unwrap_or(0)
 }
 
+/// Decode wsl.exe's own output (--list, --status, error messages).
+///
+/// The Store/MSI WSL honors `WSL_UTF8=1`; the INBOX (Windows-feature) WSL
+/// ignores it and emits UTF-16-LE to pipes. Found live 2026-06-11: on an
+/// inbox-WSL Win11, `--list --quiet` decoded via from_utf8_lossy yields
+/// `"U\0b\0u\0n\0t\0u\0…"`, so the distro name never matches and detect()
+/// reports InstalledNoDistro forever. Sniff the encoding instead of
+/// trusting the env var: real UTF-16-LE ASCII text has a NUL high byte at
+/// every odd index; UTF-8 output never contains NULs.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn decode_wsl_output(raw: &[u8]) -> String {
+    let looks_utf16 = raw.len() >= 2
+        && (raw.starts_with(&[0xFF, 0xFE]) || raw.iter().skip(1).step_by(2).any(|&b| b == 0));
+    if looks_utf16 {
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let s = String::from_utf16_lossy(&units);
+        s.strip_prefix('\u{FEFF}').unwrap_or(&s).to_string()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::decode_wsl_output;
+
+    #[test]
+    fn utf16le_list_output_decodes() {
+        // "Ubuntu\r\npapercup-runtime\r\n" as UTF-16-LE, as inbox WSL emits.
+        let text = "Ubuntu\r\npapercup-runtime\r\n";
+        let raw: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let decoded = decode_wsl_output(&raw);
+        let names: Vec<&str> = decoded.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        assert_eq!(names, vec!["Ubuntu", "papercup-runtime"]);
+    }
+
+    #[test]
+    fn utf16le_with_bom_decodes() {
+        let text = "\u{FEFF}Default Version: 2\r\n";
+        let raw: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_wsl_output(&raw), "Default Version: 2\r\n");
+    }
+
+    #[test]
+    fn utf8_output_passes_through() {
+        assert_eq!(decode_wsl_output(b"Ubuntu\npapercup-runtime\n"), "Ubuntu\npapercup-runtime\n");
+        assert_eq!(decode_wsl_output(b""), "");
+    }
+}
+
 // ─── Windows implementation ─────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -227,7 +280,7 @@ mod imp {
             .ok()
             .filter(|o| o.status.success());
         let Some(out) = out else { return vec![] };
-        String::from_utf8_lossy(&out.stdout)
+        super::decode_wsl_output(&out.stdout)
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
@@ -241,7 +294,7 @@ mod imp {
             .ok()
             .filter(|o| o.status.success());
         let Some(out) = out else { return 0 };
-        super::parse_default_version(&String::from_utf8_lossy(&out.stdout))
+        super::parse_default_version(&super::decode_wsl_output(&out.stdout))
     }
 
     pub(crate) fn detect(app: &tauri::AppHandle) -> WslStatus {
@@ -304,7 +357,7 @@ mod imp {
             .output()
             .map_err(|e| WslOpError::Failed(format!("spawn wsl --install: {}", e)))?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stderr = super::decode_wsl_output(&out.stderr);
             return Err(WslOpError::from_exit("wsl --install", out.status.code(), stderr));
         }
         let mut st = load_state(app);
@@ -340,7 +393,7 @@ mod imp {
             .map_err(|e| format!("spawn wsl --import: {}", e))?;
         if !out.status.success() {
             let code = out.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stderr = super::decode_wsl_output(&out.stderr);
             return Err(format!("wsl --import exit={} stderr={}", code, stderr));
         }
         Ok(())
@@ -363,8 +416,8 @@ mod imp {
             ])
             .output()
             .map_err(|e| format!("spawn wsl bootstrap: {}", e))?;
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let stdout = super::decode_wsl_output(&out.stdout);
+        let stderr = super::decode_wsl_output(&out.stderr);
         if !out.status.success() {
             let code = out.status.code().unwrap_or(-1);
             return Err(format!(
