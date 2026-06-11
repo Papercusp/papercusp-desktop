@@ -46,11 +46,18 @@ pub struct Registry {
     pub workspaces: Vec<Workspace>,
 }
 
-pub fn workspaces_root() -> PathBuf {
-    let home = std::env::var("HOME")
+/// The user's real home dir. Windows sets USERPROFILE, not HOME — resolving
+/// HOME alone falls back to `.` (= System32 when launched via the shell /
+/// task scheduler), which lands every state dir in an access-denied path.
+pub fn real_home() -> PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    home.join(".papercusp-workspaces")
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+pub fn workspaces_root() -> PathBuf {
+    real_home().join(".papercusp-workspaces")
 }
 
 fn registry_path() -> PathBuf {
@@ -69,9 +76,7 @@ pub fn workspace_dir(id: &str) -> PathBuf {
 /// already workspace-scoped via `papercuspRoot()` (P-052), so a shared sidecar
 /// HOME is safe. Returns the process's real HOME, NOT a per-workspace dir.
 pub fn shared_sidecar_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+    real_home()
 }
 
 /// Phase E (P-050 / D-006): the shared embedded-PG (and code-server) data dir.
@@ -97,9 +102,7 @@ pub fn shared_data_dir() -> PathBuf {
 /// symlink and write their own file (we never clobber a real file, only stale
 /// symlinks). Best-effort — failures are logged but don't block creation.
 pub fn link_workspace_credentials(workspace_dir: &PathBuf) -> io::Result<()> {
-    let real_home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let real_home = real_home();
     let ws_claude_dir = workspace_dir.join(".claude");
     fs::create_dir_all(&ws_claude_dir)?;
 
@@ -257,9 +260,7 @@ pub fn ensure_initialized() -> io::Result<Registry> {
 
     // Migrate ~/.papercusp -> workspaces/default/.papercusp if present and
     // the destination doesn't already exist.
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let home = real_home();
     let legacy = home.join(".papercusp");
     let migrated = default_dir.join(".papercusp");
     if legacy.exists() && !migrated.exists() {

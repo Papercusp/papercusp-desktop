@@ -655,7 +655,10 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
   fi
   case "$method" in
     symlink*) ln -sfn "$src" "$SIDECAR_DIR/bin/$tool" ;;
-    copy*)    cp -L "$src" "$SIDECAR_DIR/bin/$tool"; chmod +x "$SIDECAR_DIR/bin/$tool" ;;
+    # chmod 755, not just +x: brew ships these 0555 (read-only) and
+    # tauri-build's resource copy into target/<triple>/release/ then
+    # EACCESes overwriting its own previous read-only copy on rebuild.
+    copy*)    cp -L "$src" "$SIDECAR_DIR/bin/$tool"; chmod 755 "$SIDECAR_DIR/bin/$tool" ;;
   esac
   echo "  $tool: $method ($src)"
   echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
