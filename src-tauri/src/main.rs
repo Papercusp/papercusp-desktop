@@ -1451,6 +1451,18 @@ fn init_native_terminal(app: &tauri::App) {
 }
 
 pub fn run() {
+    // WebKitGTK's DMA-BUF renderer produces stale-tile artifacts on the NVIDIA
+    // proprietary driver (ghost fragments of other surfaces composited into the
+    // webview — webkit#262607, tauri#9394/#14924; seen live on the dev box with
+    // webkit2gtk 2.52 + driver 580). Must be set before any webview exists; an
+    // explicit user value wins.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+        && std::path::Path::new("/proc/driver/nvidia/version").exists()
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     let state = SidecarState {
         child: Mutex::new(None),
         code_server_child: Mutex::new(None),
