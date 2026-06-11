@@ -197,13 +197,16 @@ pub fn resolve_strategy_from_env() -> TerminalStrategy {
     downgrade_unbuilt(select_strategy(info))
 }
 
-/// Serve unbuilt/unavailable Phase-2 backends with the NewWindow fallback so
-/// the cross-platform path is still a real native terminal. The Linux VTE
-/// embed (D-009) IS built — it stays selected whenever the runtime
-/// libvte-2.91 is loadable (it's dlopen'd, not linked, so its absence is a
-/// runtime question); SwiftTerm/ConPTY remain unbuilt (no mac/Windows
-/// toolchain on the dev box). Centralised here so enabling a backend is a
-/// one-line change.
+/// Serve unbuilt/unavailable Phase-2 backends with a fallback. The Linux VTE
+/// embed and the macOS SwiftTerm embed (D-009) ARE built — each stays
+/// selected whenever its runtime library/shim is loadable (both are dlopen'd,
+/// not linked, so absence is a runtime question). ConPTY remains an
+/// unverified force-only spike (see win_embed). The NewWindow fallback is
+/// itself Linux-only (ghostty hosting the dock command) — on mac/Windows a
+/// failed embed downgrades to Disabled instead, so boot doesn't log a
+/// guaranteed launch failure every start (P-020 @
+/// windows-desktop-release-readiness-2026-06-11). Centralised here so
+/// enabling a backend is a one-line change.
 fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
     #[cfg(target_os = "linux")]
     let vte_available = vte_embed::available();
@@ -213,7 +216,13 @@ fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
     let swiftterm_available = swiftterm_embed::available();
     #[cfg(not(target_os = "macos"))]
     let swiftterm_available = false;
-    downgrade_unbuilt_with(s, vte_available, swiftterm_available)
+    let out = downgrade_unbuilt_with(s, vte_available, swiftterm_available, cfg!(target_os = "linux"));
+    if out == TerminalStrategy::Disabled && s != TerminalStrategy::Disabled {
+        println!(
+            "[papercusp-desktop] native-terminal: no embedded backend available on this platform and the new-window launcher is Linux-only — native terminal disabled"
+        );
+    }
+    out
 }
 
 /// The pure policy behind `downgrade_unbuilt` (availability injected for tests).
@@ -221,11 +230,13 @@ fn downgrade_unbuilt_with(
     s: TerminalStrategy,
     vte_available: bool,
     swiftterm_available: bool,
+    new_window_available: bool,
 ) -> TerminalStrategy {
     match s {
         TerminalStrategy::EmbeddedView(EmbedBackend::Vte) if vte_available => s,
         TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm) if swiftterm_available => s,
-        TerminalStrategy::EmbeddedView(_) => TerminalStrategy::NewWindow,
+        TerminalStrategy::EmbeddedView(_) if new_window_available => TerminalStrategy::NewWindow,
+        TerminalStrategy::EmbeddedView(_) => TerminalStrategy::Disabled,
         other => other,
     }
 }
@@ -1907,33 +1918,62 @@ mod tests {
         // survives whenever its runtime library/shim is loadable, and
         // downgrades only when it isn't.
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), true, false),
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::Vte),
+                true,
+                false,
+                true
+            ),
             TerminalStrategy::EmbeddedView(EmbedBackend::Vte)
         );
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::Vte), false, false),
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::Vte),
+                false,
+                false,
+                true
+            ),
             TerminalStrategy::NewWindow
         );
         assert_eq!(
             downgrade_unbuilt_with(
                 TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm),
                 false,
-                true
+                true,
+                false
             ),
             TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
         );
+        // SwiftTerm shim missing on mac: NewWindow is Linux-only, so Disabled
+        // (a guaranteed-to-fail launcher must not run at every boot — P-020).
         assert_eq!(
             downgrade_unbuilt_with(
                 TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm),
                 true,
+                false,
                 false
+            ),
+            TerminalStrategy::Disabled
+        );
+        // ConPTY stays a force-only spike → falls back per platform: NewWindow
+        // where it exists (Linux), Disabled elsewhere (Windows v1 — P-020).
+        assert_eq!(
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
+                true,
+                true,
+                true
             ),
             TerminalStrategy::NewWindow
         );
-        // ConPTY stays unbuilt → NewWindow regardless.
         assert_eq!(
-            downgrade_unbuilt_with(TerminalStrategy::EmbeddedView(EmbedBackend::ConPty), true, true),
-            TerminalStrategy::NewWindow
+            downgrade_unbuilt_with(
+                TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
+                true,
+                true,
+                false
+            ),
+            TerminalStrategy::Disabled
         );
         // The X11 glued path is never downgraded.
         assert_eq!(
