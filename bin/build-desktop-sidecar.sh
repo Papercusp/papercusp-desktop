@@ -1129,11 +1129,14 @@ fi
 # delete the retired tree. Renames on one filesystem are atomic, so a
 # concurrent reader sees only complete-old or complete-new — never the
 # half-written dir the old in-place rm -rf/cp produced.
+# NB: plain `mv src dst` (no GNU-only -T) — both renames have a
+# guaranteed-absent destination, so BSD/macOS mv does the same rename(2)
+# and never falls into move-INTO-directory mode.
 OLD_DIR="$SIDECAR_FINAL_DIR.old.$$"
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
-  mv -T "$SIDECAR_FINAL_DIR" "$OLD_DIR"
+  mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"
 fi
-mv -T "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
+mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
 rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 
