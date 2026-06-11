@@ -110,8 +110,13 @@ EOF
 rm -f "$BUILD_PS1"
 
 echo "==> building (this holds the ssh session; first build ~15-25 min)"
+# 2>&1 BEFORE the pipe: cargo + tauri-cli print progress (including the
+# load-bearing "Finished 1 bundle at:" line) to STDERR, which ssh carries on
+# its own stderr channel — without the merge it bypasses tee and the
+# assertions below see an empty log (bit the first uninterrupted run live,
+# 2026-06-11: bundle finished, lane reported "produced no bundle").
 "${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
-  | tee /tmp/vm-release-build.log
+  2>&1 | tee /tmp/vm-release-build.log
 # Keyless in-VM build: the ONLY sanctioned failure is the missing-private-key
 # error AFTER the bundle finished (see the signing note up top). Anything
 # else — or no finished bundle — is a real failure.
