@@ -283,6 +283,78 @@ fn grant_media_permission<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     });
 }
 
+/// EI-239: a main-frame load failure (operator briefly down during a reload
+/// or full navigation) used to strand the webview on WebKitGTK's raw
+/// "Could not connect" page — where even Ctrl+R after recovery is dead, and
+/// production builds (no dev-wrapper target buttons) had NO recovery short
+/// of restarting the app. Replace it with a bundled retry page that polls
+/// the failed URI and navigates back the moment the origin answers.
+#[cfg(target_os = "linux")]
+fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::WebViewExt;
+        let wv: webkit2gtk::WebView = webview.inner();
+        wv.connect_load_failed(|wv, _event, failing_uri, error| {
+            // Cancellations are NORMAL navigation (a load superseded by a
+            // newer one, a download) — intercepting them would break the app.
+            if error.matches(webkit2gtk::NetworkError::Cancelled)
+                || error.matches(webkit2gtk::PolicyError::FrameLoadInterruptedByPolicyChange)
+            {
+                return false;
+            }
+            eprintln!(
+                "[papercusp-desktop] main-frame load failed for {failing_uri} ({error}) — showing recovery page"
+            );
+            // content_uri = the failed URI so the page keeps that security
+            // origin: its same-origin health poll dials exactly the origin
+            // that died.
+            wv.load_alternate_html(&recovery_page_html(failing_uri), failing_uri, Some(failing_uri));
+            true
+        });
+    });
+}
+
+/// The bundled offline-recovery page (EI-239). Self-contained inline
+/// HTML+JS: polls the failed URI once a second (any HTTP response counts —
+/// an error status still proves the origin is back) and navigates to it on
+/// recovery; a manual "Retry now" button covers schemes where fetch can't
+/// poll. The URI is embedded as a JSON string literal so quoting in the
+/// failed URL can't escape the script context.
+#[cfg(target_os = "linux")]
+fn recovery_page_html(failing_uri: &str) -> String {
+    let uri_js = serde_json::to_string(failing_uri)
+        .unwrap_or_else(|_| "\"/\"".to_string());
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>Papercusp — reconnecting</title><style>
+  html,body{{height:100%;margin:0;background:#101216;color:#d6dae2;font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}
+  .wrap{{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px}}
+  h1{{font-size:17px;font-weight:600;margin:0}}
+  p{{margin:0;color:#8a92a3;max-width:46ch}}
+  button{{margin-top:6px;padding:7px 18px;border-radius:8px;border:1px solid #3a4254;background:#1a1f29;color:#d6dae2;font:inherit;cursor:pointer}}
+  button:hover{{background:#232a38}}
+  .dot{{width:9px;height:9px;border-radius:50%;background:#e0b54a;animation:b 1.2s ease-in-out infinite}}
+  @keyframes b{{50%{{opacity:.25}}}}
+</style></head><body><div class="wrap">
+  <div class="dot"></div>
+  <h1>Papercusp lost its operator process</h1>
+  <p>The window will reconnect automatically as soon as the operator is back. Nothing is lost — this page is polling for it.</p>
+  <button onclick="location.replace(TARGET)">Retry now</button>
+  <script>
+    const TARGET = {uri_js};
+    async function poll() {{
+      try {{
+        await fetch(TARGET, {{ method: 'HEAD', cache: 'no-store' }});
+        location.replace(TARGET);
+      }} catch (_e) {{
+        setTimeout(poll, 1000);
+      }}
+    }}
+    poll();
+  </script>
+</div></body></html>"#
+    )
+}
+
 fn windows_path_to_wsl(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
     // Already a posix-style path? Leave it alone.
@@ -789,6 +861,8 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf)
         // do in browsers.
         #[cfg(target_os = "linux")]
         grant_media_permission(&window);
+        #[cfg(target_os = "linux")]
+        install_load_failure_recovery(&window);
         // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty path
         // (Tauri invoke + events) instead of the operator's HTTP+WS bridge.
         // See apps/operator/lib/pty-tauri.ts and
@@ -1158,6 +1232,8 @@ fn workspaces_open_window(app: AppHandle, id: String) -> Result<(), String> {
     ));
     #[cfg(target_os = "linux")]
     grant_media_permission(&win);
+    #[cfg(target_os = "linux")]
+    install_load_failure_recovery(&win);
     Ok(())
 }
 
@@ -1616,6 +1692,8 @@ pub fn run() {
                     // work without surfacing NotAllowedError on every load.
                     #[cfg(target_os = "linux")]
                     grant_media_permission(&window);
+                    #[cfg(target_os = "linux")]
+                    install_load_failure_recovery(&window);
                 }
 
                 // DEV endpoint-IPC: we don't spawn the sidecar in dev, so
