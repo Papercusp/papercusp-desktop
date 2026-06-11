@@ -57,7 +57,16 @@ pub fn enabled() -> bool {
 }
 
 /// The origin the window is pointed at when `enabled()`.
+///
+/// WebKitGTK (Linux) and WKWebView (macOS) load registered schemes as raw
+/// `papercusp://` URLs; WebView2 (Windows) instead maps them onto
+/// `http://<scheme>.localhost` (`useHttpsScheme: false` default) — a raw
+/// `papercusp://localhost` navigation there silently no-ops and the window
+/// stays on whatever it was showing (found live 2026-06-11, run 8).
+#[cfg(not(target_os = "windows"))]
 pub const APP_ORIGIN: &str = "papercusp://localhost";
+#[cfg(target_os = "windows")]
+pub const APP_ORIGIN: &str = "http://papercusp.localhost";
 
 /// Resolve the upstream loopback base this handler forwards to.
 ///   - Packaged: the spawned sidecar's picked port (`SidecarState.port`).
