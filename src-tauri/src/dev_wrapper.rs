@@ -97,6 +97,11 @@ struct StatusSnapshot {
     gate_stalled: bool,
     gate_last_green_ms: Option<i64>,
     git_sync_status: Option<String>,
+    /// Next scheduled fire times (routines.*.nextFireAtMs) — drive the
+    /// "when does this catch up" countdowns in the status line.
+    git_sync_next_ms: Option<i64>,
+    gate_next_ms: Option<i64>,
+    deploy_next_ms: Option<i64>,
     /// The operator port /api currently targets (EI-190 — follows the switcher).
     api_port: u16,
     /// Which checkout owns the targeted IPC socket: "release" / "staging-tree" / other.
@@ -256,6 +261,16 @@ fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
                 .get("gitSync")
                 .and_then(|s| s.get("lastStatus"))
                 .and_then(|x| x.as_str().map(String::from));
+            if let Some(r) = v.get("routines") {
+                let next = |name: &str| {
+                    r.get(name)
+                        .and_then(|x| x.get("nextFireAtMs"))
+                        .and_then(|x| x.as_i64())
+                };
+                snap.git_sync_next_ms = next("gitSync");
+                snap.gate_next_ms = next("greenCheckpoint");
+                snap.deploy_next_ms = next("releaseTrigger");
+            }
             break;
         }
     }
@@ -280,6 +295,23 @@ fn fmt_age(now_ms: i64, then_ms: Option<i64>) -> String {
         format!("{}h{:02}m", mins / 60, mins % 60)
     } else {
         format!("{}d", mins / (24 * 60))
+    }
+}
+
+/// Future countdown for a scheduled fire time — "in 4m" / "in 1h05m";
+/// "due now" once the time has passed (the routine fires on its next tick).
+fn fmt_in(now_ms: i64, then_ms: Option<i64>) -> String {
+    let Some(t) = then_ms else { return "?".into() };
+    if t <= now_ms {
+        return "due now".into();
+    }
+    let mins = (t - now_ms) / 60_000;
+    if mins < 1 {
+        "in <1m".into()
+    } else if mins < 60 {
+        format!("in {mins}m")
+    } else {
+        format!("in {}h{:02}m", mins / 60, mins % 60)
     }
 }
 
@@ -310,18 +342,24 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         return format!("⚠ {e}");
     }
     let sha = |s: &Option<String>| s.clone().unwrap_or_else(|| "?".into());
-    let behind = |b: Option<i64>| match b {
-        Some(0) | None => String::new(),
-        Some(n) => format!(" (−{n})"),
+    // Per-branch standing: an EXPLICIT at-tip mark (a bare sha used to mean
+    // "current" only by omission), or commits-behind plus when the next
+    // catch-up attempt runs (the gate promotes main; the release deploys live).
+    let standing = |b: Option<i64>, next_label: &str, next_ms: Option<i64>| match b {
+        Some(0) => " ✓ latest".to_string(),
+        Some(n) => format!(" −{n} ({} {})", next_label, fmt_in(now_ms, next_ms)),
+        None => String::new(),
     };
     let gate = if snap.gate_reds > 0 {
         format!(
-            "gate ✗×{}{}",
+            "gate ✗×{}{} (retry {})",
             snap.gate_reds,
-            if snap.gate_stalled { " STALLED" } else { "" }
+            if snap.gate_stalled { " STALLED" } else { "" },
+            fmt_in(now_ms, snap.gate_next_ms),
         )
     } else {
-        format!("gate ✓ {}", fmt_age(now_ms, snap.gate_last_green_ms))
+        // "ago" — a bare duration here kept being misread as a countdown.
+        format!("gate ✓ {} ago", fmt_age(now_ms, snap.gate_last_green_ms))
     };
     // The verdict leads: the status label ellipsizes at the RIGHT on narrow
     // windows, and "is my change live" is the one segment that must never
@@ -331,16 +369,17 @@ fn compose_status(snap: &StatusSnapshot, now_ms: i64) -> String {
         .map(|t| format!("({})", fmt_age(now_ms, Some(t))))
         .unwrap_or_default();
     format!(
-        "tip{}: {} · staging {} · main {}{} · live {}{} · {} · sync {}",
+        "tip{}: {} · staging {} · main {}{} · live {}{} · {} · sync {}, next {}",
         tip_age,
         change_verdict(snap),
         sha(&snap.staging_sha),
         sha(&snap.main_sha),
-        behind(snap.main_behind),
+        standing(snap.main_behind, "gate", snap.gate_next_ms),
         sha(&snap.deployed_sha),
-        behind(snap.deployed_behind),
+        standing(snap.deployed_behind, "deploy", snap.deploy_next_ms),
         gate,
         snap.git_sync_status.clone().unwrap_or_else(|| "?".into()),
+        fmt_in(now_ms, snap.git_sync_next_ms),
     )
 }
 
@@ -678,6 +717,11 @@ mod tests {
             gate_stalled: false,
             gate_last_green_ms: Some(1_000_000),
             git_sync_status: Some("synced".into()),
+            // now in the line tests = 1_000_000 + 5m → gate in 10m,
+            // deploy in 5m, sync in 2m.
+            git_sync_next_ms: Some(1_000_000 + 7 * 60_000),
+            gate_next_ms: Some(1_000_000 + 15 * 60_000),
+            deploy_next_ms: Some(1_000_000 + 10 * 60_000),
             api_port: 3070,
             ipc_owner: Some("release".into()),
             ..Default::default()
@@ -698,8 +742,38 @@ mod tests {
         let line = compose_status(&snap(), 1_000_000 + 5 * 60_000);
         assert_eq!(
             line,
-            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 (−2) · live bbbb2222 (−3) · gate ✓ 5m · sync synced"
+            "tip(5m): awaiting promotion · staging aaaa1111 · main bbbb2222 −2 (gate in 10m) · live bbbb2222 −3 (deploy in 5m) · gate ✓ 5m ago · sync synced, next in 2m"
         );
+    }
+
+    #[test]
+    fn status_line_all_current_marks_latest_explicitly() {
+        let mut s = snap();
+        s.main_behind = Some(0);
+        s.deployed_behind = Some(0);
+        let line = compose_status(&s, 1_000_000 + 5 * 60_000);
+        assert_eq!(
+            line,
+            "tip(5m): live on :3070 ✓ · staging aaaa1111 · main bbbb2222 ✓ latest · live bbbb2222 ✓ latest · gate ✓ 5m ago · sync synced, next in 2m"
+        );
+    }
+
+    #[test]
+    fn status_line_red_gate_shows_retry_countdown() {
+        let mut s = snap();
+        s.gate_reds = 2;
+        let line = compose_status(&s, 1_000_000 + 5 * 60_000);
+        assert!(line.contains("gate ✗×2 (retry in 10m)"), "{line}");
+    }
+
+    #[test]
+    fn countdown_formatting() {
+        assert_eq!(fmt_in(0, Some(4 * 60_000)), "in 4m");
+        assert_eq!(fmt_in(0, Some(65 * 60_000)), "in 1h05m");
+        assert_eq!(fmt_in(0, Some(30_000)), "in <1m");
+        assert_eq!(fmt_in(60_000, Some(60_000)), "due now");
+        assert_eq!(fmt_in(60_000, Some(0)), "due now");
+        assert_eq!(fmt_in(0, None), "?");
     }
 
     #[test]
