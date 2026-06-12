@@ -131,7 +131,10 @@ fi
 echo "==> collecting artifacts"
 OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/nsis"
 mkdir -p "$OUT_DIR"
-rm -f "$OUT_DIR"/*
+# files only — the dir also holds archived prev-version subdirs (e.g.
+# prev-0.0.1/ for the future updater E2E); `rm -f dir/*` dies on them
+# under set -e (bit the first uninterrupted run, 2026-06-12)
+find "$OUT_DIR" -maxdepth 1 -type f -delete
 NSIS_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release/bundle/nsis"
 for name in $("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\nsis\"" | tr -d '\r'); do
   "${SCP[@]}" "$VM_SSH_HOST":"$NSIS_VM_DIR/$name" "$OUT_DIR/$name"
