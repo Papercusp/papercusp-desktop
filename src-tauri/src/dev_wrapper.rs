@@ -440,12 +440,15 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// `text` is PLAIN text — escaping happens here, at the one choke point, so
+/// no call site can leak a markup-significant char (EI-341: "in <1m" reached
+/// the label raw, failed the whole line's parse, and left stale text).
 fn span(color: &str, text: &str) -> String {
-    format!("<span foreground=\"{color}\">{text}</span>")
+    format!("<span foreground=\"{color}\">{}</span>", esc(text))
 }
 
 fn span_b(color: &str, text: &str) -> String {
-    format!("<span foreground=\"{color}\" weight=\"bold\">{text}</span>")
+    format!("<span foreground=\"{color}\" weight=\"bold\">{}</span>", esc(text))
 }
 
 /// The Pango-markup twin of `compose_status` — identical text content
@@ -454,9 +457,9 @@ fn span_b(color: &str, text: &str) -> String {
 /// muted = countdowns. This is what the bar label actually renders.
 fn compose_status_markup(snap: &StatusSnapshot, now_ms: i64) -> String {
     if let Some(e) = &snap.error {
-        return span_b(C_BAD, &esc(&format!("⚠ {e}")));
+        return span_b(C_BAD, &format!("⚠ {e}"));
     }
-    let sha = |s: &Option<String>| span(C_SHA, &esc(&s.clone().unwrap_or_else(|| "?".into())));
+    let sha = |s: &Option<String>| span(C_SHA, &s.clone().unwrap_or_else(|| "?".into()));
     let standing = |b: Option<i64>, label: &str, next: Option<i64>| match b {
         Some(0) => format!(" {}", span_b(C_GOOD, "✓ latest")),
         Some(n) => format!(
@@ -506,7 +509,7 @@ fn compose_status_markup(snap: &StatusSnapshot, now_ms: i64) -> String {
             span(C_DIM, "tip"),
             tip_age,
             span(C_DIM, ":"),
-            span_b(verdict_color, &esc(&verdict)),
+            span_b(verdict_color, &verdict),
         ),
         format!("{} {}", span(C_DIM, "staging"), sha(&snap.staging_sha)),
         format!(
@@ -530,7 +533,7 @@ fn compose_status_markup(snap: &StatusSnapshot, now_ms: i64) -> String {
             other => format!(
                 "{} {}{}",
                 span(C_DIM, "sync"),
-                span_b(C_BAD, &esc(other.unwrap_or("?"))),
+                span_b(C_BAD, other.unwrap_or("?")),
                 span(C_MUTE, &format!(", next {}", fmt_in(now_ms, snap.git_sync_next_ms))),
             ),
         },
@@ -991,6 +994,29 @@ mod tests {
         let plain = compose_status(&conflict, now);
         assert!(plain.contains("sync conflict, next in 2m"), "{plain}");
         assert_eq!(strip_markup(&compose_status_markup(&conflict, now)), plain);
+    }
+
+    /// EI-341: sub-minute countdowns render as "in <1m" — the bare '<' must
+    /// be escaped or the whole line fails Pango parsing and the label keeps
+    /// stale text. None of the other line tests ever produce a sub-minute
+    /// countdown, which is how this escaped the content pin.
+    #[test]
+    fn markup_escapes_sub_minute_countdowns() {
+        let now = 1_000_000 + 5 * 60_000;
+        let mut s = snap();
+        // 30s to every next-fire → every countdown segment renders "in <1m".
+        s.git_sync_next_ms = Some(now + 30_000);
+        s.gate_next_ms = Some(now + 30_000);
+        s.deploy_next_ms = Some(now + 30_000);
+        let markup = compose_status_markup(&s, now);
+        assert!(!markup.contains("<1m"), "raw '<' leaked into markup: {markup}");
+        assert!(markup.contains("&lt;1m"), "{markup}");
+        assert_eq!(strip_markup(&markup), compose_status(&s, now));
+        // red gate exercises the retry-countdown path too
+        s.gate_reds = 1;
+        let markup = compose_status_markup(&s, now);
+        assert!(!markup.contains("<1m"), "raw '<' leaked into markup: {markup}");
+        assert_eq!(strip_markup(&markup), compose_status(&s, now));
     }
 
     #[test]
