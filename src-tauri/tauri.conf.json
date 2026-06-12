@@ -38,7 +38,8 @@
       "msi",
       "nsis",
       "deb",
-      "rpm"
+      "rpm",
+      "appimage"
     ],
     "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
