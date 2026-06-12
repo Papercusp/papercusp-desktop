@@ -130,6 +130,25 @@ Resetting the VM between runs — two tiers:
 Agent-side recipe + sharp edges (schtasks launch, CDP into the webview,
 inbox-WSL gotchas): `/internal/docs/agent-insights/windows-vm-desktop-testing-workflow`.
 
+#### Windows uninstall/reinstall semantics (P-015 findings, verified 2026-06-12)
+
+- **Uninstall** (`uninstall.exe /S`, per-user, no elevation, works headless):
+  removes the app dir + registry uninstall key. It deliberately does **NOT**
+  touch the WSL distro or any in-distro state — the embedded-PG database
+  survives an uninstall. `wsl --unregister papercup-runtime` is the actual
+  data-deletion step (D-007) and is left to the user.
+- **Sharp edge:** if the WSL backend is still running (e.g. after an app
+  crash — a hard kill orphans it), the distro holds the sidecar files open
+  through `/mnt/c`, so their deletions go NTFS delete-pending and the tree
+  only empties when the distro releases the handles (`wsl --terminate` or
+  backend exit). The silent uninstaller reports nothing either way. A normal
+  graceful app close (which SIGTERMs the backend) avoids this entirely.
+- **Reinstall over existing** (same or newer version, `/S` over a live
+  install dir): exit 0, and the next launch **reuses** the registered distro
+  + database — no re-import, no initdb; boot is discovery-only (~25 s vs
+  ~95 s for a true first run). Verified with a marker file + intact wizard
+  state across the cycle.
+
 ## Verify a build
 
 After `bin/release-local.sh` succeeds:
