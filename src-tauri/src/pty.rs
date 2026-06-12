@@ -245,6 +245,9 @@ fn run_reader_loop(
 pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, String> {
     let (id, pid, entry, reader, mut child) = spawn_internal(&opts)?;
 
+    // First-output flag for the WSL watchdog below.
+    let got_output = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Reader thread: pump bytes into the history buffer + emit Tauri
     // events. We don't coalesce here because IPC events are cheap on
     // localhost.
@@ -252,8 +255,10 @@ pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, S
         let app = app.clone();
         let id_for_reader = id.clone();
         let entry_for_reader = entry.clone();
+        let got_output = got_output.clone();
         thread::spawn(move || {
             run_reader_loop(reader, entry_for_reader, move |chunk| {
+                got_output.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = app.emit(
                     "pty-data",
                     PtyDataPayload {
@@ -262,6 +267,40 @@ pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, S
                     },
                 );
             });
+        });
+    }
+
+    // WSL silent-wedge watchdog: the INBOX (pre-Store) WSL's wsl.exe can
+    // hang at the service handshake when spawned under a pseudoconsole —
+    // it never execs the distro command, never writes a byte, never
+    // exits (found live 2026-06-12: the wizard's install pty sat blank
+    // on "Installing…" indefinitely; the same command via pipes works).
+    // Zero bytes AND no exit after 20s is that wedge — kill the child
+    // with an explanation so the UI gets a real exit instead of forever.
+    #[cfg(target_os = "windows")]
+    if crate::wsl_setup::detect_ready_cached() {
+        let app = app.clone();
+        let id_for_dog = id.clone();
+        let entry_for_dog = entry.clone();
+        let got_output = got_output.clone();
+        let mut killer = child.clone_killer();
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_secs(20));
+            if got_output.load(std::sync::atomic::Ordering::Relaxed)
+                || *entry_for_dog.killed.lock().unwrap()
+            {
+                return;
+            }
+            let msg = "\r\n\x1b[31m[papercusp] wsl.exe produced no output for 20s — this matches a known hang in older (inbox) WSL installations when run under a terminal. From an elevated PowerShell run:  wsl --update   then restart Papercusp and retry.\x1b[0m\r\n";
+            let _ = app.emit(
+                "pty-data",
+                PtyDataPayload {
+                    id: id_for_dog.clone(),
+                    data: B64.encode(msg.as_bytes()),
+                },
+            );
+            eprintln!("[pty] watchdog: killing silent wsl.exe pty {}", id_for_dog);
+            let _ = killer.kill();
         });
     }
 
