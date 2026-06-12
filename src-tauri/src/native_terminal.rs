@@ -1174,6 +1174,10 @@ pub mod vte_embed {
     );
     type FnSetSize = unsafe extern "C" fn(terminal: *mut c_void, columns: i64, rows: i64);
     type FnGetCharDim = unsafe extern "C" fn(terminal: *mut c_void) -> i64;
+    type FnTermVoid = unsafe extern "C" fn(terminal: *mut c_void);
+    type FnCopyFormat = unsafe extern "C" fn(terminal: *mut c_void, format: c_int);
+    type FnGetFontScale = unsafe extern "C" fn(terminal: *mut c_void) -> f64;
+    type FnSetFontScale = unsafe extern "C" fn(terminal: *mut c_void, scale: f64);
 
     struct Vte {
         /// Held for the process lifetime — the fn pointers below point into it.
@@ -1184,6 +1188,13 @@ pub mod vte_embed {
         set_size: Option<FnSetSize>,
         char_width: Option<FnGetCharDim>,
         char_height: Option<FnGetCharDim>,
+        paste_clipboard: Option<FnTermVoid>,
+        /// `vte_terminal_copy_clipboard_format` (vte ≥ 0.50); the plain
+        /// deprecated `copy_clipboard` is the fallback for older sonames.
+        copy_clipboard_format: Option<FnCopyFormat>,
+        copy_clipboard: Option<FnTermVoid>,
+        get_font_scale: Option<FnGetFontScale>,
+        set_font_scale: Option<FnSetFontScale>,
     }
 
     // SAFETY: the library handle + C fn pointers are immutable after load and
@@ -1218,6 +1229,26 @@ pub mod vte_embed {
                         l.get::<FnGetCharDim>(b"vte_terminal_get_char_width\0").ok().map(|s| *s);
                     let char_height =
                         l.get::<FnGetCharDim>(b"vte_terminal_get_char_height\0").ok().map(|s| *s);
+                    let paste_clipboard = l
+                        .get::<FnTermVoid>(b"vte_terminal_paste_clipboard\0")
+                        .ok()
+                        .map(|s| *s);
+                    let copy_clipboard_format = l
+                        .get::<FnCopyFormat>(b"vte_terminal_copy_clipboard_format\0")
+                        .ok()
+                        .map(|s| *s);
+                    let copy_clipboard = l
+                        .get::<FnTermVoid>(b"vte_terminal_copy_clipboard\0")
+                        .ok()
+                        .map(|s| *s);
+                    let get_font_scale = l
+                        .get::<FnGetFontScale>(b"vte_terminal_get_font_scale\0")
+                        .ok()
+                        .map(|s| *s);
+                    let set_font_scale = l
+                        .get::<FnSetFontScale>(b"vte_terminal_set_font_scale\0")
+                        .ok()
+                        .map(|s| *s);
                     return Some(Vte {
                         terminal_new,
                         spawn_async,
@@ -1225,6 +1256,11 @@ pub mod vte_embed {
                         set_size,
                         char_width,
                         char_height,
+                        paste_clipboard,
+                        copy_clipboard_format,
+                        copy_clipboard,
+                        get_font_scale,
+                        set_font_scale,
                         _lib: l,
                     });
                 }
@@ -1265,6 +1301,60 @@ pub mod vte_embed {
             // Webview is pane1 → the handle sits at total - extent.
             DockSide::Right | DockSide::Bottom => (total - extent).clamp(1, total.max(1)),
         }
+    }
+
+    /// The chord-bound terminal actions. Raw VTE ships NO default keyboard
+    /// shortcuts — every VTE app (GNOME Terminal, Tilix, …) wires its own —
+    /// so without these the dock has no paste path at all (and the widget's
+    /// built-in middle-click PRIMARY paste is eaten by zellij's mouse
+    /// reporting; only Shift+middle-click bypasses that).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TermAction {
+        PasteClipboard,
+        CopyClipboard,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+    }
+
+    // GDK keyvals (gdk/gdkkeysyms.h): printable keys are their ASCII codes;
+    // the rest are stable X11 keysyms.
+    const KEY_INSERT: u32 = 0xff63;
+    const KEY_KP_INSERT: u32 = 0xff9e;
+    const KEY_KP_ADD: u32 = 0xffab;
+    const KEY_KP_SUBTRACT: u32 = 0xffad;
+    const KEY_KP_0: u32 = 0xffb0;
+
+    /// Map a key chord to its terminal action — the conventional set every
+    /// desktop terminal binds: Ctrl+Shift+V / Shift+Insert paste,
+    /// Ctrl+Shift+C / Ctrl+Insert copy, Ctrl+±/0 zoom. Anything unmapped
+    /// (notably plain Ctrl+C/Ctrl+V) falls through to the pty untouched.
+    /// Pure — unit-tested.
+    pub fn term_action_for_key(keyval: u32, ctrl: bool, shift: bool) -> Option<TermAction> {
+        use TermAction::*;
+        // With Shift held, letter keys report the UPPERCASE keyval; accept
+        // both cases anyway (caps-lock inverts them).
+        match keyval {
+            k if ctrl && shift && (k == 'v' as u32 || k == 'V' as u32) => Some(PasteClipboard),
+            KEY_INSERT | KEY_KP_INSERT if shift && !ctrl => Some(PasteClipboard),
+            k if ctrl && shift && (k == 'c' as u32 || k == 'C' as u32) => Some(CopyClipboard),
+            KEY_INSERT | KEY_KP_INSERT if ctrl && !shift => Some(CopyClipboard),
+            // Ctrl+plus is Ctrl+Shift+equal on US layouts — accept both keyvals.
+            k if ctrl && (k == '+' as u32 || k == '=' as u32 || k == KEY_KP_ADD) => Some(ZoomIn),
+            k if ctrl && !shift && (k == '-' as u32 || k == KEY_KP_SUBTRACT) => Some(ZoomOut),
+            k if ctrl && !shift && (k == '0' as u32 || k == KEY_KP_0) => Some(ZoomReset),
+            _ => None,
+        }
+    }
+
+    /// Zoom bounds + step (multiplicative, GNOME-Terminal-ish). Pure.
+    pub fn next_font_scale(current: f64, action: TermAction) -> f64 {
+        let next = match action {
+            TermAction::ZoomIn => current * 1.1,
+            TermAction::ZoomOut => current / 1.1,
+            _ => 1.0,
+        };
+        next.clamp(0.25, 4.0)
     }
 
     /// Pack a live VTE terminal (hosting `command`) beside the webview inside
@@ -1359,6 +1449,67 @@ pub mod vte_embed {
                         set_size(t, cols, rows);
                     }
                 }
+            });
+        }
+
+        // Standard terminal shortcuts (see `term_action_for_key`): paste /
+        // copy / zoom. Propagation::Stop on a hit so VTE doesn't ALSO feed
+        // the chord to the pty.
+        {
+            let term_addr = term_ptr as usize;
+            term.connect_key_press_event(move |w, ev| {
+                let st = ev.state();
+                let action = term_action_for_key(
+                    *ev.keyval(),
+                    st.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+                    st.contains(gtk::gdk::ModifierType::SHIFT_MASK),
+                );
+                let (Some(action), Some(vte)) = (action, lib()) else {
+                    return glib::Propagation::Proceed;
+                };
+                let t = term_addr as *mut c_void;
+                // SAFETY: the VTE widget outlives the signal (it lives in the
+                // window's tree for the process lifetime); calls are on the
+                // GTK main thread.
+                unsafe {
+                    match action {
+                        TermAction::PasteClipboard => match vte.paste_clipboard {
+                            Some(f) => f(t),
+                            None => return glib::Propagation::Proceed,
+                        },
+                        TermAction::CopyClipboard => {
+                            // No-op without a selection (VTE leaves the
+                            // clipboard untouched), like every terminal.
+                            match (vte.copy_clipboard_format, vte.copy_clipboard) {
+                                (Some(f), _) => f(t, 1), // 1 = VTE_FORMAT_TEXT
+                                (None, Some(f)) => f(t),
+                                (None, None) => return glib::Propagation::Proceed,
+                            }
+                        }
+                        TermAction::ZoomIn | TermAction::ZoomOut | TermAction::ZoomReset => {
+                            let (Some(get), Some(set)) = (vte.get_font_scale, vte.set_font_scale)
+                            else {
+                                return glib::Propagation::Proceed;
+                            };
+                            set(t, next_font_scale(get(t), action));
+                            // Re-drive the explicit grid (the size-allocate
+                            // hook above won't fire — the allocation is
+                            // unchanged, only the cell metrics moved).
+                            if let (Some(set_size), Some(cw_fn), Some(ch_fn)) =
+                                (vte.set_size, vte.char_width, vte.char_height)
+                            {
+                                let alloc = w.allocation();
+                                let (cw, ch) = ((cw_fn)(t), (ch_fn)(t));
+                                if cw > 0 && ch > 0 {
+                                    let cols = (alloc.width() as i64 / cw).max(2);
+                                    let rows = (alloc.height() as i64 / ch).max(2);
+                                    set_size(t, cols, rows);
+                                }
+                            }
+                        }
+                    }
+                }
+                glib::Propagation::Stop
             });
         }
 
@@ -2001,6 +2152,42 @@ mod tests {
         assert_eq!(vte_embed::initial_split_position(DockSide::Right, 2000, 0.42), 1160);
         // Degenerate sizes clamp sanely.
         assert_eq!(vte_embed::initial_split_position(DockSide::Left, 0, 0.42), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_term_shortcuts_map_the_standard_chords() {
+        use vte_embed::{term_action_for_key, TermAction::*};
+        // Shifted letters arrive as their UPPERCASE keyval (both accepted).
+        assert_eq!(term_action_for_key('V' as u32, true, true), Some(PasteClipboard));
+        assert_eq!(term_action_for_key('v' as u32, true, true), Some(PasteClipboard));
+        assert_eq!(term_action_for_key(0xff63, false, true), Some(PasteClipboard)); // Shift+Insert
+        assert_eq!(term_action_for_key(0xff9e, false, true), Some(PasteClipboard)); // Shift+KP_Insert
+        assert_eq!(term_action_for_key('C' as u32, true, true), Some(CopyClipboard));
+        assert_eq!(term_action_for_key(0xff63, true, false), Some(CopyClipboard)); // Ctrl+Insert
+        assert_eq!(term_action_for_key('=' as u32, true, false), Some(ZoomIn));
+        assert_eq!(term_action_for_key('+' as u32, true, true), Some(ZoomIn));
+        assert_eq!(term_action_for_key(0xffab, true, false), Some(ZoomIn)); // Ctrl+KP_Add
+        assert_eq!(term_action_for_key('-' as u32, true, false), Some(ZoomOut));
+        assert_eq!(term_action_for_key('0' as u32, true, false), Some(ZoomReset));
+        // The plain chords MUST pass through to the pty untouched: Ctrl+C is
+        // SIGINT, Ctrl+V is a literal ^V — stealing them breaks the TUIs.
+        assert_eq!(term_action_for_key('c' as u32, true, false), None);
+        assert_eq!(term_action_for_key('v' as u32, true, false), None);
+        assert_eq!(term_action_for_key('v' as u32, false, false), None);
+        assert_eq!(term_action_for_key(0xff63, false, false), None); // bare Insert
+        assert_eq!(term_action_for_key('-' as u32, false, false), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vte_font_scale_steps_and_clamps() {
+        use vte_embed::{next_font_scale, TermAction::*};
+        assert!((next_font_scale(1.0, ZoomIn) - 1.1).abs() < 1e-9);
+        assert!((next_font_scale(1.1, ZoomOut) - 1.0).abs() < 1e-9);
+        assert_eq!(next_font_scale(2.7, ZoomReset), 1.0);
+        assert_eq!(next_font_scale(4.0, ZoomIn), 4.0); // clamped
+        assert_eq!(next_font_scale(0.25, ZoomOut), 0.25); // clamped
     }
 
     #[cfg(target_os = "linux")]

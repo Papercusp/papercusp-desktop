@@ -97,13 +97,46 @@ built by default. Artifacts land in
 unsigned (no Authenticode cert yet) — SmartScreen will warn on install;
 revisit before public distribution.
 
+#### Windows per-release gate: install smoke + snapshot convention
+
+Every Windows artifact gets one clean hands-off pass in the VM before it
+ships (the P-012 shape): **wipe → install the candidate → ONE launch, zero
+touches → WSL import + first-boot bootstrap + finalize restart + fresh
+initdb/migrations → then `bin/vm-smoke-windows.sh` from the host = 8/8
+green**. The smoke probes ssh → distro → app process → serve discovery →
+`/api/health` → backups+kopia (the WSLENV-PATH regression guard) →
+agent-tools loopback → zero PG ERROR lines.
+
+Resetting the VM between runs — two tiers:
+
+- **In-guest wipe (default; fast, keeps the toolchain warm).** Close the
+  app, then from ssh: `wsl --unregister papercup-runtime`, run the NSIS
+  uninstaller (`"%LOCALAPPDATA%\Papercusp\uninstall.exe" /S`, or
+  install-over for the reinstall test), delete leftovers
+  (`%LOCALAPPDATA%\Papercusp`, `%USERPROFILE%\.papercusp`). Note
+  `wsl --unregister` deletes the embedded-PG database with the distro
+  (D-007) — that's the point of the wipe.
+- **qcow2 snapshot restore (when the guest OS itself is suspect).**
+  Internal snapshots on `~/windows-vm/windows_hdd.qcow2`, managed
+  **offline only** — shut the VM down first; `qemu-img snapshot` on a
+  live image corrupts it (and `savevm` via the monitor would write 32 GB
+  of RAM state). `qemu-img snapshot -l|-c <name>|-a <name>
+  windows_hdd.qcow2`. Convention: `pre-release-baseline` = provisioned
+  toolchain (MSVC/rustc/Node/NSIS), no app installed — refresh it
+  deliberately after toolchain upgrades, never casually; transient
+  iteration snapshots are `pre-<tag>-<purpose>` and get deleted
+  (`-d`) once the lane closes.
+
+Agent-side recipe + sharp edges (schtasks launch, CDP into the webview,
+inbox-WSL gotchas): `/internal/docs/agent-insights/windows-vm-desktop-testing-workflow`.
+
 ## Verify a build
 
 After `bin/release-local.sh` succeeds:
 
 ```sh
 # Inspect what landed
-gh release view desktop-v0.0.2 --repo papercupai/papercusp-desktop
+gh release view desktop-v0.0.2-alpha --repo Papercusp/papercusp-desktop
 
 # Test the auto-updater manifest end-to-end against your local operator
 curl 'http://127.0.0.1:3055/api/updates/manifest?target=linux-x86_64&arch=x86_64&current_version=0.0.1'
