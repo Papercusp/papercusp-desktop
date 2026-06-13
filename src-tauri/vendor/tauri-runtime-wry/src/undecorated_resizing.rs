@@ -636,3 +636,62 @@ mod gtk {
     );
   }
 }
+
+// ── PAPERCUSP REGRESSION GUARD (EI-201) ─────────────────────────────────────
+// The undecorated-resizing hit-test runs on EVERY button-1 press / touch, before
+// the is_decorated() check. Upstream walked `webview.parent().parent()` and
+// `.downcast::<gtk::Window>().unwrap()` ("Safe to unwrap unless this is not from
+// tao") — which PANICS the main thread the first time the embedder nests the
+// webview deeper than the stock `webview → GtkBox → GtkWindow` hierarchy. Our
+// native-terminal VTE embed reparents the webview into a GtkPaned, so under a
+// Wayland session (EmbeddedView(Vte)) the very first click was fatal. The fix
+// (above) resolves the real toplevel and downcasts gracefully in BOTH handlers.
+//
+// This is a SOURCE-INVARIANT guard, not a behavioural test: the panic lives in a
+// GTK button-press/touch callback that needs a live display + a reparented
+// webview + a synthetic click to fire — not reproducible headless. So we pin the
+// SHAPE of the fix, which is exactly the regression vector: a `cargo update` /
+// re-vendor or a stray edit silently reintroducing the unwrap. If upstream ships
+// the fix and this vendored copy is dropped, this guard is dropped with it.
+#[cfg(test)]
+mod patch_regression {
+  /// Only the code ABOVE this test module, so the assertions' own string
+  /// literals below cannot satisfy the source scan.
+  fn handler_source() -> &'static str {
+    let full = include_str!("undecorated_resizing.rs");
+    full
+      .split_once("mod patch_regression")
+      .map(|(before, _)| before)
+      .unwrap_or(full)
+  }
+
+  #[test]
+  fn both_handlers_resolve_the_toplevel_gracefully() {
+    let src = handler_source();
+    // Both the button-press AND the touch handler must walk to the real
+    // toplevel (correct at any nesting depth, incl. the VTE GtkPaned).
+    assert!(
+      src.matches(".toplevel()").count() >= 2,
+      "EI-201: expected both hit-test handlers to resolve via .toplevel()"
+    );
+    // …and downcast fallibly, never panicking.
+    assert!(
+      src.matches(".downcast::<gtk::Window>().ok()").count() >= 2,
+      "EI-201: expected both handlers to downcast the toplevel with .ok(), not .unwrap()"
+    );
+  }
+
+  #[test]
+  fn the_panicking_unwrap_is_gone() {
+    let src = handler_source();
+    assert!(
+      !src.contains(".downcast::<gtk::Window>().unwrap()"),
+      "EI-201: the undecorated-resizing hit-test must NOT unwrap the window \
+       downcast — it panics the main thread when the webview is reparented"
+    );
+    assert!(
+      !src.contains("Safe to unwrap unless this is not from tao"),
+      "EI-201: the upstream panicking codepath/comment has been reintroduced"
+    );
+  }
+}
