@@ -637,6 +637,7 @@ mod gtk {
   }
 }
 
+// PAPERCUSP_EI201_GUARD_SENTINEL — source scanned for the fix shape stops here.
 // ── PAPERCUSP REGRESSION GUARD (EI-201) ─────────────────────────────────────
 // The undecorated-resizing hit-test runs on EVERY button-1 press / touch, before
 // the is_decorated() check. Upstream walked `webview.parent().parent()` and
@@ -660,7 +661,7 @@ mod patch_regression {
   fn handler_source() -> &'static str {
     let full = include_str!("undecorated_resizing.rs");
     full
-      .split_once("mod patch_regression")
+      .split_once("PAPERCUSP_EI201_GUARD_SENTINEL")
       .map(|(before, _)| before)
       .unwrap_or(full)
   }
