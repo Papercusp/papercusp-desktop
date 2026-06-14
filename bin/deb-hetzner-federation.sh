@@ -243,17 +243,14 @@ EOF
 printf '%s' "$b_join" | grep -q '"ok":true' && echo "✓ B joined as $B_MEMBER_SLUG" || echo "✗ B join failed: $(printf '%s' "$b_join" | head -c 200)"
 MEMBER_SLUG="$A_MEMBER_SLUG"
 
-# from-repo/join-link publish the binding + announce on the DIRECTORY, but the federation
-# SWARM-join happens at boot (boot-all → resolveHiveSwarmBinding → hive-pubkey topic). So
-# restart both sidecars (pgdata preserved → hive registry + binding + clones survive) to
-# actually join the federation swarm — the same reason the shared.json run needed a restart.
-fed_log "restart both sidecars → boot-all resolves the hive binding + joins the hive-pubkey swarm"
-restart_sidecar a; restart_sidecar b
-fed_wait_boot a 50 || { echo "A reboot failed: $FED_BOOT_ERR"; drv_exec a <<<"tail -20 /home/pcusp/serve.log"; exit 5; }
-fed_wait_boot b 50 || { echo "B reboot failed: $FED_BOOT_ERR"; drv_exec b <<<"tail -20 /home/pcusp/serve.log"; exit 5; }
-fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
-echo "--- A [swarm] joined topics (diag) ---"; drv_exec a <<<"grep -aE '\[swarm\]|joined topic|hive_pubkey|resolveHive|federate' /home/pcusp/serve.log | tail -6"
-echo "--- B [swarm] joined topics (diag) ---"; drv_exec b <<<"grep -aE '\[swarm\]|joined topic|hive_pubkey|resolveHive|federate' /home/pcusp/serve.log | tail -6"
+# NO RESTART (EI-521 isolation): join-link's boot_federate step already boots the
+# federation substrate (drain + read-merge + swarm) at join time. A restart KILLS that
+# substrate and boot-all does NOT re-boot joined members (attempted=0) — that was the
+# run5 failure. So just give boot_federate's swarm a moment to peer-connect + drain.
+fed_log "boot_federate booted the substrate at join — wait for peer_connect + drain (NO restart)"
+sleep 12
+echo "--- A [swarm]/drain diag ---"; drv_exec a <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
+echo "--- B [swarm]/drain diag ---"; drv_exec b <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
 
 fed_log "wait swarm peer discovery over the PUBLIC DHT (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
