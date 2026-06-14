@@ -317,6 +317,35 @@ fed_merge_assert() {
   echo 0; return 1
 }
 
+# fed_plan_part_merge_assert <src> <dst> <slug> [tries]
+# Per-PART plan federation (plan-federation-regrain-2026-06-13 P-008 / D-004): the
+# NEW `plan-parts` tableTag (mig 270/271 + projections/harness-plan-parts.ts) must
+# federate cross-machine over the real holepunch wire, just like features do. This
+# is the direct analog of fed_merge_assert: INSERT a part origin='local' on src
+# (the mig-271 capture trigger enqueues it) and poll dst for the same part arriving
+# origin='remote' (dst's harness-plan-parts projection applied it). A plain-ASCII
+# body keeps the SQL shell-safe (no markdown/backtick quoting hazards). The recompose
+# into harness_plans.content + the merge/no-clobber semantics are proven single-box
+# on real PG (plan-part-federation-cutover.integration.test.ts, 7/7); THIS proves
+# the remaining rung — the table federates across two genuinely-separate machines.
+# Echoes 1 (merged) or 0.
+fed_plan_part_merge_assert() {
+  local src="$1" dst="$2" slug="$3" tries="${4:-30}" i row ts ws_src
+  ts="$(date +%s)000"
+  # The federated feature row (from fed_merge_assert, run earlier) carries the
+  # frame's resolved workspace_id — reuse it so the part INSERT matches the
+  # capture trigger + RLS binding. harness_plan_parts.workspace_id is NOT NULL.
+  ws_src="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$ws_src" ] || { echo 0; return 1; }
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws_src','$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$dst" "SELECT origin||'|'||body FROM harness_shared.harness_plan_parts WHERE harness_slug='$slug' AND plan_slug='ppfed-$src' AND part_key='item:P-001';" 2>/dev/null | tr -d '[:space:]')"
+    [ "$row" = "remote|xmerge-proof-from-$src" ] && { echo 1; return 0; }
+    sleep 3
+  done
+  echo 0; return 1
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # fed_cleanup_scoped <work> — kill FED_KILL_PIDS + every process whose cmdline

@@ -160,6 +160,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -197,6 +198,15 @@ ab="$(fed_merge_assert a b "$SLUG" F-A2B "from ${FRAME_USER[a]}" todo 30 || true
 fed_log "B→A MERGE"
 ba="$(fed_merge_assert b a "$SLUG" F-B2A "from ${FRAME_USER[b]}" in-progress 30 || true)"
 [ "$ba" = 1 ] && echo "✓ B→A: F-B2A federated into A as origin=remote" || echo "✗ B→A failed"
+
+# plan-federation-regrain P-008/D-004: the NEW per-part plan-federation table
+# (flag papercusp-plan-part-federation ON in both sidecars) must federate
+# cross-machine over the same wire. A→B then B→A, distinct plan slugs per dir.
+fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A"
+ppab="$(fed_plan_part_merge_assert a b "$SLUG" 30 || true)"
+[ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed"
+ppba="$(fed_plan_part_merge_assert b a "$SLUG" 30 || true)"
+[ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed"
 
 # ── 7. report ─────────────────────────────────────────────────────────────────
 fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
