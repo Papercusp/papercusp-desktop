@@ -274,6 +274,18 @@ ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 30 || true)"
 ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 30 || true)"
 [ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
 
+# EI-521 WS-DIAG: on merge-fail, dump workspace_ids to settle product-bug vs probe-artifact —
+# does the undrained outbox row's workspace_id match the member's boot workspace (the drain's
+# WHERE workspace_id = handle.workspaceId)?
+if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
+  fed_log "WS-DIAG (EI-521): workspace_id alignment between capture + drain"
+  echo "--- A: undrained outbox (id|table_name|workspace_id) ---"; drv_psql a "SELECT id||'|'||table_name||'|'||workspace_id FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
+  echo "--- A: feature rows (harness_slug|workspace_id|origin) ---"; drv_psql a "SELECT harness_slug||'|'||workspace_id||'|'||origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null
+  echo "--- A: registry (slug|workspace_id) ---"; drv_psql a "SELECT slug||'|'||workspace_id FROM harness_shared.harness_registry;" 2>/dev/null
+  # (boot workspace = the registry workspace_id above; no serve.log token-grep — avoids
+  #  echoing credential-shaped strings to diagnostic logs, security review MEDIUM)
+fi
+
 # ── 7. report ─────────────────────────────────────────────────────────────────
 fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
 if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
