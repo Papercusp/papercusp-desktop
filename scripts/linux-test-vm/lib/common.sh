@@ -29,6 +29,10 @@ VM_USER="${PAPERCUSP_TESTVM_USER:-tester}"
 # ── Per-instance port map ──────────────────────────────────────────────────
 # Existing box VMs use SSH 2222/2223, SPICE 5930/5931 — we start past them.
 # Returns "<ssh_port> <spice_port> <operator_fwd_port>" for an instance name.
+# Bases are env-overridable (VM_SSH_BASE / VM_SPICE_BASE / VM_OP_BASE) — set
+# VM_OP_BASE when the default operator-forward range (3072-3074) collides with a
+# live host operator. (The green release operator binds BOTH :3070 and :3073, so
+# the default fed-a op-forward 3073 fails `qemu hostfwd` when that operator is up.)
 ports_for() {
   local name="$1" idx
   case "$name" in
@@ -37,7 +41,7 @@ ports_for() {
     fed-b) idx=2 ;;
     *)     idx=9 ;;   # ad-hoc instances share a high slot; override via env if needed
   esac
-  echo "$((2224 + idx)) $((5932 + idx)) $((3072 + idx))"
+  echo "$(( ${VM_SSH_BASE:-2224} + idx )) $(( ${VM_SPICE_BASE:-5932} + idx )) $(( ${VM_OP_BASE:-3072} + idx ))"
 }
 
 # ── Per-instance file paths ────────────────────────────────────────────────
