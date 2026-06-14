@@ -215,36 +215,33 @@ fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api 
 # binding + admits) run CROSS-MACHINE — the only config with BOTH the binding (admission)
 # AND real holepunch (same-box can't punch; the shared.json shortcut lacked the binding).
 REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
-fed_log "A: POST hives/from-repo ($REPO_URL) — create + publish binding + announce"
-a_create="$(drv_exec a <<EOF
+fed_log "A: POST hives/from-repo ($REPO_URL) → resolve the hive memberLink (handles create OR existing — the repo's hive persists gist-backed across runs)"
+a_resp="$(drv_exec a <<EOF
 curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
-echo "A create → $(printf '%s' "$a_create" | head -c 220)"
-HIVE_SLUG="$(printf '%s' "$a_create" | python3 -c 'import json,sys;print(json.load(sys.stdin)["created"]["hiveSlug"])' 2>/dev/null)"
-MEMBER_SLUG="$(printf '%s' "$a_create" | python3 -c 'import json,sys;print(json.load(sys.stdin)["created"]["memberSlug"])' 2>/dev/null)"
-[ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ] || { echo "✗ A hive create failed — body: $(printf '%s' "$a_create" | head -c 400)"; exit 6; }
-echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG'"
-
-fed_log "B: discover '$HIVE_SLUG' via the directory (public DHT) → memberLink → join-link"
-MEMBER_LINK=""
-for i in $(seq 1 40); do
-  b_offer="$(drv_exec b <<EOF
-curl -s -m 60 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","visibility":"public","runTests":false,"shallow":true}'
+echo "A from-repo → $(printf '%s' "$a_resp" | head -c 200)"
+A_LINK="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+ml=(d.get("existing",{}).get("hive",{}).get("memberLinks") or d.get("created",{}).get("memberLinks") or [])
+print(ml[0] if ml else "")' 2>/dev/null)"
+[ -n "$A_LINK" ] || { echo "✗ A could not resolve a hive memberLink — body: $(printf '%s' "$a_resp" | head -c 400)"; exit 6; }
+echo "✓ A resolved hive link ${A_LINK:0:56}…"
+# Both peers JOIN the SAME hive via A's EXACT memberLink — guarantees the same hive-pubkey
+# topic (no rediscovery ambiguity / stale-hive split) AND publishes BOTH bindings (admission).
+A_MEMBER_SLUG="amem-$SLUG"; B_MEMBER_SLUG="bmem-$SLUG"
+fed_log "A + B both join the same hive (A=$A_MEMBER_SLUG, B=$B_MEMBER_SLUG)"
+a_join="$(drv_exec a <<EOF
+curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"$A_MEMBER_SLUG","harnessLinkUrl":"$A_LINK"}'
 EOF
 )"
-  MEMBER_LINK="$(printf '%s' "$b_offer" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("existing",{}).get("hive",{}).get("memberLinks") or [""])[0])' 2>/dev/null)"
-  [ -n "$MEMBER_LINK" ] && break
-  sleep 3
-done
-[ -n "$MEMBER_LINK" ] || { echo "✗ B never discovered A's hive via the directory (~120s) — body: $(printf '%s' "$b_offer" | head -c 300)"; exit 6; }
-echo "✓ B discovered + got memberLink (${MEMBER_LINK:0:56}…)"
+printf '%s' "$a_join" | grep -q '"ok":true' && echo "✓ A joined as $A_MEMBER_SLUG" || echo "✗ A join failed: $(printf '%s' "$a_join" | head -c 200)"
 b_join="$(drv_exec b <<EOF
-curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"joined-$MEMBER_SLUG","harnessLinkUrl":"$MEMBER_LINK"}'
+curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"$B_MEMBER_SLUG","harnessLinkUrl":"$A_LINK"}'
 EOF
 )"
-echo "B join → $(printf '%s' "$b_join" | head -c 220)"
-printf '%s' "$b_join" | grep -q '"ok":true' && echo "✓ B joined hive" || echo "✗ B join failed"
+printf '%s' "$b_join" | grep -q '"ok":true' && echo "✓ B joined as $B_MEMBER_SLUG" || echo "✗ B join failed: $(printf '%s' "$b_join" | head -c 200)"
+MEMBER_SLUG="$A_MEMBER_SLUG"
 
 # from-repo/join-link publish the binding + announce on the DIRECTORY, but the federation
 # SWARM-join happens at boot (boot-all → resolveHiveSwarmBinding → hive-pubkey topic). So
@@ -266,8 +263,8 @@ fed_log "A→B MERGE (hive, slug-agnostic probe; A member='$MEMBER_SLUG')"
 probe_ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 30 || true)"
 ab=0; [ "${probe_ab%% *}" = 1 ] && ab=1
 [ "$ab" = 1 ] && echo "✓ A→B: F-A2B federated into B as origin=remote (landed slug='${probe_ab#* }')" || echo "✗ A→B failed (probe=$probe_ab)"
-fed_log "B→A MERGE (hive, slug-agnostic probe; B joined='joined-$MEMBER_SLUG')"
-probe_ba="$(fed_hive_merge_probe b a "joined-$MEMBER_SLUG" F-B2A 30 || true)"
+fed_log "B→A MERGE (hive, slug-agnostic probe; B member='$B_MEMBER_SLUG')"
+probe_ba="$(fed_hive_merge_probe b a "$B_MEMBER_SLUG" F-B2A 30 || true)"
 ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 [ "$ba" = 1 ] && echo "✓ B→A: F-B2A federated into A as origin=remote (landed slug='${probe_ba#* }')" || echo "✗ B→A failed (probe=$probe_ba)"
 
@@ -277,7 +274,7 @@ ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A (hive member slugs)"
 ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 30 || true)"
 [ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed (probe=$ppab)"
-ppba="$(fed_plan_part_merge_assert b a "joined-$MEMBER_SLUG" 30 || true)"
+ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 30 || true)"
 [ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
 
 # ── 7. report ─────────────────────────────────────────────────────────────────
