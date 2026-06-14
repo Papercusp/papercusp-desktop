@@ -299,9 +299,24 @@ elif [ "$offer_ok" = 1 ]; then
   echo "✗ offer carries no memberLinks — join leg cannot run"
 fi
 
+# ── 5. POST-JOIN MERGE probe (hive-federation-cross-machine-merge P-001) ──────────
+# The open question: does a write FEDERATE after a hive join? (No existing test goes
+# past join.) Write a feature on A's member harness; poll B for it (origin=remote, any
+# slug — the hive model may remap harness_slug across peers). Same-box answers it for $0.
+hive_merge_ok=0; landed_slug=""
+if [ "$join_ok" = 1 ]; then
+  log "POST-JOIN MERGE probe: write F-HIVE1 on A (member='$MEMBER_SLUG') → poll B (origin=remote, any slug)"
+  probe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE1 40 || true)"
+  if [ "${probe%% *}" = 1 ]; then hive_merge_ok=1; landed_slug="${probe#* }"; fi
+  [ "$hive_merge_ok" = 1 ] && echo "✓ POST-JOIN MERGE: F-HIVE1 federated A→B (landed under harness_slug='$landed_slug')" \
+                           || echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
+else
+  echo "· POST-JOIN MERGE probe skipped (join did not complete)"
+fi
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)"
+echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  post-join-merge=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)"
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ]; then
   echo "OVERALL: PASS — create-from-repo → discover → join-offer → join proven end-to-end ($RUN_MODE mode)"
   exit 0

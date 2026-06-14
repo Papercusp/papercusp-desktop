@@ -346,6 +346,24 @@ fed_plan_part_merge_assert() {
   echo 0; return 1
 }
 
+# fed_hive_merge_probe <src> <dst> <src_slug> <fid> [tries]
+# Post-JOIN merge probe for the hive model (hive-federation-cross-machine-merge P-001).
+# Slug-AGNOSTIC on the dst side: the hive federation may key/remap harness_slug across
+# peers (member vs joined slug), so we INSERT a feature on src's harness and poll dst
+# for that feature_id arriving origin='remote' under ANY harness_slug. Answers the open
+# question "does a write federate AFTER a hive join?" Echoes "1 <landed_slug>" or "0".
+fed_hive_merge_probe() {
+  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts
+  ts="$(date +%s)000"
+  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$dst" "SELECT harness_slug FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$row" ] && { echo "1 $row"; return 0; }
+    sleep 3
+  done
+  echo "0"; return 1
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # fed_cleanup_scoped <work> — kill FED_KILL_PIDS + every process whose cmdline
