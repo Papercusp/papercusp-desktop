@@ -339,7 +339,7 @@ fed_plan_part_merge_assert() {
   [ -n "$ws_src" ] || { echo 0; return 1; }
   drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws_src','$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
   for i in $(seq 1 "$tries"); do
-    row="$(drv_psql "$dst" "SELECT origin||'|'||body FROM harness_shared.harness_plan_parts WHERE harness_slug='$slug' AND plan_slug='ppfed-$src' AND part_key='item:P-001';" 2>/dev/null | tr -d '[:space:]')"
+    row="$(drv_psql "$dst" "SELECT origin||'|'||body FROM harness_shared.harness_plan_parts WHERE plan_slug='ppfed-$src' AND part_key='item:P-001';" 2>/dev/null | tr -d '[:space:]')"
     [ "$row" = "remote|xmerge-proof-from-$src" ] && { echo 1; return 0; }
     sleep 3
   done

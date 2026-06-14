@@ -308,8 +308,20 @@ if [ "$join_ok" = 1 ]; then
   log "POST-JOIN MERGE probe: write F-HIVE1 on A (member='$MEMBER_SLUG') → poll B (origin=remote, any slug)"
   probe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE1 40 || true)"
   if [ "${probe%% *}" = 1 ]; then hive_merge_ok=1; landed_slug="${probe#* }"; fi
-  [ "$hive_merge_ok" = 1 ] && echo "✓ POST-JOIN MERGE: F-HIVE1 federated A→B (landed under harness_slug='$landed_slug')" \
-                           || echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
+  if [ "$hive_merge_ok" = 1 ]; then
+    echo "✓ POST-JOIN MERGE: F-HIVE1 federated A→B (landed under harness_slug='$landed_slug')"
+  else
+    echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
+    echo "===== DIAG: localize the post-join merge failure ====="
+    echo "--- A: did the write CAPTURE? (substrate_outbox rows) ---"; drv_psql a "SELECT count(*) AS outbox FROM harness_shared.substrate_outbox;" 2>/dev/null
+    echo "--- A: F-HIVE1 row locally (origin) ---"; drv_psql a "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-HIVE1';" 2>/dev/null
+    echo "--- A: registry harness slugs + shared/hive state ---"; drv_psql a "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
+    echo "--- A [swarm]: topic / announce / peer ---"; grep -aE '\[swarm\]|joined topic|announc|peer_connected|hive_pubkey|resolveHive' "${FED_LOG[a]}" 2>/dev/null | tail -10
+    echo "--- B [swarm]: topic / peer / admit / reject / binding ---"; grep -aE '\[swarm\]|joined topic|peer_connected|admit|reject|binding|verifyAnnounce|read-admission|hive_pubkey' "${FED_LOG[b]}" 2>/dev/null | tail -14
+    echo "--- B: any features at all? (did ANYTHING replicate) ---"; drv_psql b "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null | head
+    echo "--- B: registry harness slugs ---"; drv_psql b "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
+    echo "===== /DIAG ====="
+  fi
 else
   echo "· POST-JOIN MERGE probe skipped (join did not complete)"
 fi

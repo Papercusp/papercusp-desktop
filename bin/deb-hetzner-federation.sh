@@ -210,50 +210,63 @@ echo "✓ isolated by construction (separate cloud machines)"
 fed_log "A: PG=${FED_PG[a]} sc=${FED_SC[a]} | B: PG=${FED_PG[b]} sc=${FED_SC[b]}"
 
 fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
-# plan-federation-regrain P-008 / EI-504: the per-harness share/finalize endpoint was
-# RETIRED (comb-retire-per-harness-sharing-2026-06-11), but boot-all STILL reads
-# .papercusp/shared.json → defaultResolveSwarmBinding → gh:<repo_id> topic. So write
-# shared.json directly (synthetic repo id 918273645, identical on both → same derived
-# topic) + restart each sidecar so boot-all joins the swarm — the SAME mechanism the
-# retired endpoint drove, minus the dead HTTP leg. Both peers keep slug=$SLUG → clean merge.
-TOPIC=$(printf 'papercusp-substrate-v1:gh:918273645' | sha256sum | cut -d' ' -f1)
-CREATED="$(date +%s)000"
-SHARED_JSON="{\"topic\":\"$TOPIC\",\"github_remote\":\"https://github.com/papercupai/$SLUG\",\"github_repository_id\":918273645,\"claim_status\":\"unclaimed\",\"privacy\":\"shared-private\",\"created_at\":$CREATED,\"schema_version\":1}"
-SHARED_B64="$(printf '%s' "$SHARED_JSON" | base64 -w0)"
-fed_log "register project + write .papercusp/shared.json (synthetic gh:918273645) on both (topic=${TOPIC:0:16}…)"
-drv_exec a <<<'runuser -u pcusp -- mkdir -p /home/pcusp/fed' ; drv_exec b <<<'runuser -u pcusp -- mkdir -p /home/pcusp/fed'
-fed_register_project a "$SLUG" /home/pcusp/fed proj-a
-fed_register_project b "$SLUG" /home/pcusp/fed proj-b
-for inst in a b; do
-  drv_exec "$inst" <<EOF
-runuser -u pcusp -- bash -c 'mkdir -p /home/pcusp/fed/proj-$inst/.papercusp && echo $SHARED_B64 | base64 -d > /home/pcusp/fed/proj-$inst/.papercusp/shared.json && echo wrote-shared-json-$inst'
+# hive-federation-cross-machine-merge D-002: the REAL merge test is the HIVE flow
+# (from-repo publishes A's attestation binding + announces; join-link publishes B's
+# binding + admits) run CROSS-MACHINE — the only config with BOTH the binding (admission)
+# AND real holepunch (same-box can't punch; the shared.json shortcut lacked the binding).
+REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
+fed_log "A: POST hives/from-repo ($REPO_URL) — create + publish binding + announce"
+a_create="$(drv_exec a <<EOF
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","visibility":"public","runTests":false,"shallow":true}'
 EOF
+)"
+echo "A create → $(printf '%s' "$a_create" | head -c 220)"
+HIVE_SLUG="$(printf '%s' "$a_create" | python3 -c 'import json,sys;print(json.load(sys.stdin)["created"]["hiveSlug"])' 2>/dev/null)"
+MEMBER_SLUG="$(printf '%s' "$a_create" | python3 -c 'import json,sys;print(json.load(sys.stdin)["created"]["memberSlug"])' 2>/dev/null)"
+[ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ] || { echo "✗ A hive create failed — body: $(printf '%s' "$a_create" | head -c 400)"; exit 6; }
+echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG'"
+
+fed_log "B: discover '$HIVE_SLUG' via the directory (public DHT) → memberLink → join-link"
+MEMBER_LINK=""
+for i in $(seq 1 40); do
+  b_offer="$(drv_exec b <<EOF
+curl -s -m 60 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","visibility":"public","runTests":false,"shallow":true}'
+EOF
+)"
+  MEMBER_LINK="$(printf '%s' "$b_offer" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("existing",{}).get("hive",{}).get("memberLinks") or [""])[0])' 2>/dev/null)"
+  [ -n "$MEMBER_LINK" ] && break
+  sleep 3
 done
-restart_sidecar a; restart_sidecar b
-fed_log "re-wait boot + api after restart (substrate now joins the gh:918273645 swarm)"
-fed_wait_boot a 50 || { echo "A reboot failed: $FED_BOOT_ERR"; drv_exec a <<<"tail -25 /home/pcusp/serve.log"; exit 5; }
-fed_wait_boot b 50 || { echo "B reboot failed: $FED_BOOT_ERR"; drv_exec b <<<"tail -25 /home/pcusp/serve.log"; exit 5; }
-fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
+[ -n "$MEMBER_LINK" ] || { echo "✗ B never discovered A's hive via the directory (~120s) — body: $(printf '%s' "$b_offer" | head -c 300)"; exit 6; }
+echo "✓ B discovered + got memberLink (${MEMBER_LINK:0:56}…)"
+b_join="$(drv_exec b <<EOF
+curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"joined-$MEMBER_SLUG","harnessLinkUrl":"$MEMBER_LINK"}'
+EOF
+)"
+echo "B join → $(printf '%s' "$b_join" | head -c 220)"
+printf '%s' "$b_join" | grep -q '"ok":true' && echo "✓ B joined hive" || echo "✗ B join failed"
 
 fed_log "wait swarm peer discovery over the PUBLIC DHT (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
-[ "$disc" = 1 ] && echo "✓ .deb sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~90s"
+[ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~90s"
 
-fed_log "A→B MERGE"
-ab="$(fed_merge_assert a b "$SLUG" F-A2B "from ${FRAME_USER[a]}" todo 30 || true)"
-[ "$ab" = 1 ] && echo "✓ A→B: F-A2B federated into B as origin=remote" || echo "✗ A→B failed"
-fed_log "B→A MERGE"
-ba="$(fed_merge_assert b a "$SLUG" F-B2A "from ${FRAME_USER[b]}" in-progress 30 || true)"
-[ "$ba" = 1 ] && echo "✓ B→A: F-B2A federated into A as origin=remote" || echo "✗ B→A failed"
+fed_log "A→B MERGE (hive, slug-agnostic probe; A member='$MEMBER_SLUG')"
+probe_ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 30 || true)"
+ab=0; [ "${probe_ab%% *}" = 1 ] && ab=1
+[ "$ab" = 1 ] && echo "✓ A→B: F-A2B federated into B as origin=remote (landed slug='${probe_ab#* }')" || echo "✗ A→B failed (probe=$probe_ab)"
+fed_log "B→A MERGE (hive, slug-agnostic probe; B joined='joined-$MEMBER_SLUG')"
+probe_ba="$(fed_hive_merge_probe b a "joined-$MEMBER_SLUG" F-B2A 30 || true)"
+ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
+[ "$ba" = 1 ] && echo "✓ B→A: F-B2A federated into A as origin=remote (landed slug='${probe_ba#* }')" || echo "✗ B→A failed (probe=$probe_ba)"
 
 # plan-federation-regrain P-008/D-004: the NEW per-part plan-federation table
 # (flag papercusp-plan-part-federation ON in both sidecars) must federate
 # cross-machine over the same wire. A→B then B→A, distinct plan slugs per dir.
-fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A"
-ppab="$(fed_plan_part_merge_assert a b "$SLUG" 30 || true)"
-[ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed"
-ppba="$(fed_plan_part_merge_assert b a "$SLUG" 30 || true)"
-[ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed"
+fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A (hive member slugs)"
+ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 30 || true)"
+[ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed (probe=$ppab)"
+ppba="$(fed_plan_part_merge_assert b a "joined-$MEMBER_SLUG" 30 || true)"
+[ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
 
 # ── 7. report ─────────────────────────────────────────────────────────────────
 fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
