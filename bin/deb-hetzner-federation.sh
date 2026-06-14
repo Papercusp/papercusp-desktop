@@ -37,7 +37,11 @@ set +u   # federation-asserts.sh + the dynamic FED_*/FRAME_* assoc arrays are
          # `local`); common.sh left -u on, which tripped provision→setup handoff.
 
 # ── args / config ─────────────────────────────────────────────────────────────
-LOCS="ash,ash"; STYPE="cpx31"; DEB=""; KEEP_UP=0; IMAGE="ubuntu-22.04"
+# IMAGE must match the .deb's target ABI: the bundled embedded-PG pgvector
+# vector.so needs GLIBC_2.38, so ubuntu-22.04 (glibc 2.35) fails embedded-PG init
+# with "type public.vector does not exist". The .deb targets ubuntu-24.04 (its apt
+# Depends are all t64 packages); the linux-test-vm golden image is 24.04 too. (EI-503)
+LOCS="ash,ash"; STYPE="cpx31"; DEB=""; KEEP_UP=0; IMAGE="ubuntu-24.04"
 for arg in "$@"; do case "$arg" in
   --locs=*) LOCS="${arg#--locs=}" ;;
   --type=*) STYPE="${arg#--type=}" ;;
@@ -213,8 +217,8 @@ fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
 if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   for inst in a b; do echo "[$inst] $(drv_exec "$inst" <<<"grep -E '\[swarm\]' /home/pcusp/serve.log 2>/dev/null | tail -5")"; done
 fi
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ]; then
-  echo "OVERALL: PASS — the SHIPPED .deb federates cross-machine (2 separate Hetzner VMs, real public DHT)"; exit 0
+echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$([ "$ppab" = 1 ] && echo PASS || echo FAIL)  plan-part B→A=$([ "$ppba" = 1 ] && echo PASS || echo FAIL)"
+if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$ppab" = 1 ] && [ "$ppba" = 1 ]; then
+  echo "OVERALL: PASS — the SHIPPED .deb federates cross-machine incl. per-part plans (2 separate Hetzner VMs, real public DHT)"; exit 0
 fi
 echo "OVERALL: INCOMPLETE — see [swarm] diagnostics + /home/pcusp/serve.log on each frame"; exit 6
