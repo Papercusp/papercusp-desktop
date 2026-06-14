@@ -1092,7 +1092,8 @@ fn spawn_serve(
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
-             PAPERCUSP_SERVE_UI:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
+             PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
+             PAPERCUSP_DBOS_ORCHESTRATOR:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
              PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
         );
@@ -1115,6 +1116,15 @@ fn spawn_serve(
         .env("PAPERCUSP_SERVE_UI", "1")
         .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
         .env("PAPERCUSP_DESKTOP", "1")
+        // Autonomous loop (packaged-build fix): the DBOS routines engine +
+        // orchestrator must be ON in the shipped sidecar — without these the
+        // operator boots normally but schedules NO work (the loop is silently
+        // off; only the dev `.env.local` set them). Placement is still gated to
+        // STARTED hives, so a fresh install with no started hive runs the loop
+        // but places nothing.
+        .env("PAPERCUSP_DBOS_ENABLE", "1")
+        .env("PAPERCUSP_DBOS_ROUTINES", "1")
+        .env("PAPERCUSP_DBOS_ORCHESTRATOR", "1")
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
         .env("PAPERCUSP_SHARED_OPERATOR", "1")
