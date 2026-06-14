@@ -58,6 +58,10 @@ source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 # $1 still wins.
 DEB_DEFAULT="$(ls -t "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1)"
 DEB="${1:-${DEB_DEFAULT:-$DESKTOP_DIR/src-tauri/target/release/bundle/deb/Papercusp_0.0.1_amd64.deb}}"
+# Resolve to an ABSOLUTE path — resolve_mode (auto) `cd`s into a tmp dir before
+# `dpkg-deb --fsys-tarfile "$DEB"`, so a relative $1 silently extracts nothing,
+# fails the from-repo gate, and degrades to SIDECAR even when the .deb is fine.
+DEB="$(readlink -f "$DEB" 2>/dev/null || echo "$DEB")"
 MODE="${HIVE_SMOKE_MODE:-auto}"
 SIDECAR_SRC="${PAPERCUSP_SMOKE_SIDECAR_DIR:-$DESKTOP_DIR/src-tauri/sidecar}"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
