@@ -172,6 +172,33 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
 sleep 1; echo "launched as pcusp"
 EOF
 }
+
+# EI-504: relaunch a sidecar WITHOUT wiping pgdata/.papercusp — used after writing
+# .papercusp/shared.json so boot-all re-reads it (defaultResolveSwarmBinding) and the
+# substrate joins the gh-binding Hyperswarm topic. Preserves the registered project +
+# embedded-PG so the harness + its shared.json survive the restart.
+restart_sidecar() {  # <inst>
+  local inst="$1" ip="${FRAME_IP[$inst]}"
+  fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads shared.json → swarm join"
+  hssh "$ip" "HONO=$HONO_PORT PG=$PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
+set -e
+H=/home/pcusp
+pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2
+SIDE=/usr/lib/Papercusp/sidecar
+set -a; . "$H/fed.env"; set +a
+cd "$SIDE"
+env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
+  PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+  PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
+  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
+  PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
+  PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
+  GH_TOKEN="${GH_TOKEN:-}" \
+  setsid nohup ./bin/node ./serve.mjs --ensure > "$H/serve.log" 2>&1 < /dev/null &
+sleep 1; echo "relaunched as pcusp (no wipe)"
+EOF
+}
 setup_frame a || exit 4
 setup_frame b || exit 4
 
@@ -183,14 +210,30 @@ echo "✓ isolated by construction (separate cloud machines)"
 fed_log "A: PG=${FED_PG[a]} sc=${FED_SC[a]} | B: PG=${FED_PG[b]} sc=${FED_SC[b]}"
 
 fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
+# plan-federation-regrain P-008 / EI-504: the per-harness share/finalize endpoint was
+# RETIRED (comb-retire-per-harness-sharing-2026-06-11), but boot-all STILL reads
+# .papercusp/shared.json → defaultResolveSwarmBinding → gh:<repo_id> topic. So write
+# shared.json directly (synthetic repo id 918273645, identical on both → same derived
+# topic) + restart each sidecar so boot-all joins the swarm — the SAME mechanism the
+# retired endpoint drove, minus the dead HTTP leg. Both peers keep slug=$SLUG → clean merge.
 TOPIC=$(printf 'papercusp-substrate-v1:gh:918273645' | sha256sum | cut -d' ' -f1)
-STATE="{\"topic\":\"$TOPIC\",\"github_repository_id\":918273645,\"github_remote\":\"https://github.com/${FRAME_USER[a]}/$SLUG\",\"privacy\":\"shared-private\"}"
-fed_log "register + share write-free on both (topic=${TOPIC:0:16}…)"
+CREATED="$(date +%s)000"
+SHARED_JSON="{\"topic\":\"$TOPIC\",\"github_remote\":\"https://github.com/papercupai/$SLUG\",\"github_repository_id\":918273645,\"claim_status\":\"unclaimed\",\"privacy\":\"shared-private\",\"created_at\":$CREATED,\"schema_version\":1}"
+SHARED_B64="$(printf '%s' "$SHARED_JSON" | base64 -w0)"
+fed_log "register project + write .papercusp/shared.json (synthetic gh:918273645) on both (topic=${TOPIC:0:16}…)"
 drv_exec a <<<'runuser -u pcusp -- mkdir -p /home/pcusp/fed' ; drv_exec b <<<'runuser -u pcusp -- mkdir -p /home/pcusp/fed'
 fed_register_project a "$SLUG" /home/pcusp/fed proj-a
 fed_register_project b "$SLUG" /home/pcusp/fed proj-b
-echo "A: $(fed_share_finalize a "$SLUG" "$STATE" | grep -oE '"state":"[a-z-]+"|"bindingPublished":[a-z]+' | tr '\n' ' ')"
-echo "B: $(fed_share_finalize b "$SLUG" "$STATE" | grep -oE '"state":"[a-z-]+"|"bindingPublished":[a-z]+' | tr '\n' ' ')"
+for inst in a b; do
+  drv_exec "$inst" <<EOF
+runuser -u pcusp -- bash -c 'mkdir -p /home/pcusp/fed/proj-$inst/.papercusp && echo $SHARED_B64 | base64 -d > /home/pcusp/fed/proj-$inst/.papercusp/shared.json && echo wrote-shared-json-$inst'
+EOF
+done
+restart_sidecar a; restart_sidecar b
+fed_log "re-wait boot + api after restart (substrate now joins the gh:918273645 swarm)"
+fed_wait_boot a 50 || { echo "A reboot failed: $FED_BOOT_ERR"; drv_exec a <<<"tail -25 /home/pcusp/serve.log"; exit 5; }
+fed_wait_boot b 50 || { echo "B reboot failed: $FED_BOOT_ERR"; drv_exec b <<<"tail -25 /home/pcusp/serve.log"; exit 5; }
+fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
 
 fed_log "wait swarm peer discovery over the PUBLIC DHT (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
