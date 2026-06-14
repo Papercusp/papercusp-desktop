@@ -119,6 +119,18 @@ drv_psql() {   # SQL goes over stdin — robust against nested quoting
 # ── cleanup ─────────────────────────────────────────────────────────────────
 cleanup() {
   fed_log "cleanup (scoped to $WORK)"
+  # --keep-up is a DEBUGGING flag — rescue the per-instance host/local app logs
+  # the diagnosis needs BEFORE fed_cleanup_scoped rm -rf's $WORK. (VM-side logs
+  # live in the guest, which --keep-up leaves running, reachable via vm_ssh.)
+  if [ "$KEEP_UP" = 1 ]; then
+    local dest="${PAPERCUSP_FED_LOGS_DIR:-/tmp/vm-fed-logs}/$SLUG" i
+    mkdir -p "$dest"
+    for i in a b; do
+      [ "${FED_KIND[$i]:-}" = local ] && [ -f "${FED_LOG[$i]:-/nonexistent}" ] \
+        && cp "${FED_LOG[$i]}" "$dest/$i.log" 2>/dev/null || true
+    done
+    log "--keep-up: preserved host/local instance logs → $dest"
+  fi
   fed_cleanup_scoped "$WORK"
   if [ "$KEEP_UP" = 0 ]; then
     local n
