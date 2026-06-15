@@ -275,26 +275,33 @@ if [ "$discover_ok" = 1 ]; then
                           || echo "✗ offer source/hive mismatch (source=$B_SOURCE hive=$B_OFFER_HIVE)"
 fi
 
-# ── 4. B accepts: join via each offered memberLink ──────────────────────────────
+# ── 4. B accepts: the REAL hive Join (POST /api/discovery/join-hive) ─────────────
+# This is what the directory panel's "Join" drives — joinHiveAsView, which
+# composes the per-member join-link mechanic AND materializes the joiner-side
+# hive VIEW (the remote_hive registry entry + hive_slug on every member + the
+# remote hive identity row). That materialization is what re-keys the joiner
+# onto the OWNER's Hive-pubkey topic so federation actually crosses. Joining the
+# bare per-member /api/harness/join-link directly (the old smoke) skips the view,
+# leaving the member on the gh:<repo_id> topic while the owner sits on the
+# Hive-pubkey topic — different topics, no merge (EI-681).
 join_ok=0; clone_ok=0
 N_OFFER_LINKS="$(jget "$OFFER_LINKS_JSON" "len(d)")"
 if [ "$offer_ok" = 1 ] && [ -n "$N_OFFER_LINKS" ] && [ "$N_OFFER_LINKS" -ge 1 ]; then
   echo "✓ offer carries $N_OFFER_LINKS memberLink(s)"
-  join_ok=1; clone_ok=1
-  for idx in $(seq 0 $((N_OFFER_LINKS - 1))); do
-    LINK="$(jget "$OFFER_LINKS_JSON" "d[$idx]")"
-    JSLUG="joined-$MEMBER_SLUG"; [ "$idx" -gt 0 ] && JSLUG="$JSLUG-$((idx + 1))"
-    log "B ($P_B_USER): join offered link #$((idx + 1)) as '$JSLUG'"
-    join_resp="$(curl -s -m 310 -X POST "http://127.0.0.1:${FED_SC[b]}/api/harness/join-link" \
-      -H 'content-type: application/json' \
-      -d "{\"slug\":\"$JSLUG\",\"harnessLinkUrl\":\"$LINK\"}")"
-    echo "B join → $(echo "$join_resp" | head -c 400)"
-    J_OK="$(jget "$join_resp" "d['ok']")"
-    J_CLONE="$(jget "$join_resp" "d['state']['steps']['clone_repo']['status']")"
-    [ "$J_OK" = "True" ] && echo "✓ join '$JSLUG' ok:true" || { echo "✗ join '$JSLUG' failed"; join_ok=0; }
-    [ "$J_CLONE" = "done" ] && echo "✓ join '$JSLUG' clone_repo step done (read-only clone of the fixture repo)" \
-                            || { echo "✗ join '$JSLUG' clone_repo step != done (got: $J_CLONE)"; clone_ok=0; }
-  done
+  log "B ($P_B_USER): JOIN the hive '$HIVE_SLUG' via /api/discovery/join-hive ($N_OFFER_LINKS link(s))"
+  join_resp="$(curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[b]}/api/discovery/join-hive" \
+    -H 'content-type: application/json' \
+    -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":$OFFER_LINKS_JSON}")"
+  echo "B join-hive → $(echo "$join_resp" | head -c 500)"
+  J_OK="$(jget "$join_resp" "d.get('ok')")"
+  N_MEM="$(jget "$join_resp" "len(d.get('members') or [])")"
+  N_MEM_OK="$(jget "$join_resp" "sum(1 for m in (d.get('members') or []) if m.get('ok'))")"
+  if [ "$J_OK" = "True" ] && [ -n "$N_MEM_OK" ] && [ "$N_MEM_OK" -ge 1 ]; then
+    join_ok=1; clone_ok=1
+    echo "✓ join-hive ok:true — $N_MEM_OK/$N_MEM member(s) joined (view materialized: remote_hive + hive_slug + identity)"
+  else
+    echo "✗ join-hive failed (ok=$J_OK members_ok=$N_MEM_OK/$N_MEM)"
+  fi
 elif [ "$offer_ok" = 1 ]; then
   echo "✗ offer carries no memberLinks — join leg cannot run"
 fi
