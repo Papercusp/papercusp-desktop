@@ -194,6 +194,20 @@ if [ "$links_ok" = 1 ]; then
     -d "{\"slug\":\"$SLUG\",\"harnessLinkUrl\":\"$B_LINK\"}")"
   echo "B join → $(echo "$join_resp" | head -c 300)"
   echo "$join_resp" | grep -q '"ok":true' && join_ok=1
+  # The join-link HTTP response can come back blank/spurious for a slow join
+  # (gist publish + git clone + substrate boot + DHT announce, routinely >30s —
+  # see join-link.ts timeoutSec comment) even though the substrate JOINED
+  # server-side. Don't gate the merge on that fragile single response: fall back
+  # to the ground truth — did B's substrate actually join the harness topic?
+  if [ "$join_ok" != 1 ]; then
+    log "join-link HTTP response not ok:true — polling B's [swarm] join ground-truth for $SLUG"
+    for _i in $(seq 1 40); do
+      if grep -qE "\[swarm\] joined topic .* harness=$SLUG" "${FED_LOG[b]}" 2>/dev/null; then
+        join_ok=1; echo "✓ B substrate joined the harness topic for $SLUG (HTTP response was blank/slow — see join-link.ts)"; break
+      fi
+      sleep 3
+    done
+  fi
   if [ "$join_ok" = 1 ]; then
     log "wait for swarm discovery between A and B on the harness topic"
     disc="$(fed_wait_discovery a b strict 60 || true)"
