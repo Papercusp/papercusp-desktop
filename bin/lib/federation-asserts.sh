@@ -206,6 +206,11 @@ EOF
       "")     sleep 3 ;;
       *)      pg=${out%% *}; sc=${out##* }
               FED_PG[$inst]="$pg"; FED_SC[$inst]="$sc"
+              # Populate the per-instance DSN here (was only set by the directory
+              # smoke's explicit lines) so drv_psql / fed_merge_assert work in
+              # EVERY smoke + mode — incl. the from-repo smoke's sidecar mode,
+              # where FED_DB was unbound and crashed the post-join merge probe.
+              [ -n "${FED_DB[$inst]:-}" ] || FED_DB[$inst]="postgresql://harness_admin:harness_admin_pwd@localhost:${pg}/papercusp"
               return 0 ;;
     esac
   done
