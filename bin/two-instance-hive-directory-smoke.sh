@@ -213,8 +213,14 @@ if [ "$links_ok" = 1 ]; then
     disc="$(fed_wait_discovery a b strict 60 || true)"
     [ "$disc" = 1 ] && echo "✓ peers discovered each other" || echo "⚠ no peer_connected in ~90s"
     log "A→B: INSERT feature on A → expect origin=remote in B (federation through a directory-discovered join)"
-    fed_ok="$(fed_merge_assert a b "$SLUG" F-DIR2B "joined via directory" todo 30 || true)"
-    [ "$fed_ok" = 1 ] && echo "✓ FEDERATED: F-DIR2B landed in B as origin=remote" || echo "✗ F-DIR2B not in B after ~90s"
+    fed_ok="$(fed_merge_assert a b "$SLUG" F-DIR2B "joined via directory" todo 100 || true)"
+    # EI-681 diagnostics: localize a federation stall (capture vs workspace_id-stamp vs drain vs apply).
+    echo "  [diag] A feature row : $(drv_psql a "SELECT origin||'|ws='||COALESCE(workspace_id,'<empty>')||'|fed_ts='||COALESCE(fed_ts::text,'NULL') FROM harness_shared.harness_features_consolidated WHERE harness_slug='$SLUG' AND feature_id='F-DIR2B';" 2>/dev/null | tr -d '\n')"
+    echo "  [diag] A outbox row  : $(drv_psql a "SELECT 'ws='||COALESCE(workspace_id,'<empty>')||'|drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated' AND key='F-DIR2B';" 2>/dev/null | tr -d '\n')"
+    echo "  [diag] A booted-harness ws: $(drv_psql a "SELECT DISTINCT workspace_id FROM harness_shared.harness_features_consolidated WHERE harness_slug='$SLUG';" 2>/dev/null | tr -d '\n')"
+    echo "  [diag] B feature row : $(drv_psql b "SELECT COALESCE(origin,'?')||'|ws='||COALESCE(workspace_id,'<empty>') FROM harness_shared.harness_features_consolidated WHERE harness_slug='$SLUG' AND feature_id='F-DIR2B';" 2>/dev/null | tr -d '\n' | head -c 80)"
+    echo "  [diag] B undrained-outbox(any): $(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE drained_at IS NULL;" 2>/dev/null | tr -d '\n')"
+    [ "$fed_ok" = 1 ] && echo "✓ FEDERATED: F-DIR2B landed in B as origin=remote" || echo "✗ F-DIR2B not in B after ~300s"
   fi
 fi
 
