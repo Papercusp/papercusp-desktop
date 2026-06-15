@@ -240,10 +240,23 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # bundles the full host graph clean (17.5MB host.mjs, valid ESM) with the
 # externals below — esbuild inlines workspace + hoisted deps alike, so the
 # monorepo dep-hoist is a non-issue.
+# --define:__PAPERCUSP_BUNDLED_SIDECAR__=true (EI-650): in this single-file
+# bundle EVERY inlined module shares ONE import.meta.url (serve.mjs's own),
+# which equals process.argv[1] — so a library-CLI's naive self-exec guard
+# (`import.meta.url === pathToFileURL(process.argv[1]).href` and the
+# `file://${process.argv[1]}` / `fileURLToPath(import.meta.url) === argv[1]`
+# spellings) fires for EVERY bundled CLI at boot, each running main()+
+# process.exit() and killing the operator before it serves. The CJS
+# `require.main === module` idiom is already neutralised by the dummy `module`
+# in HOST_BANNER; this define is the symmetric fix for the ESM idiom — library
+# CLIs guard with isCliEntry() (operator-core/lib/util/cli-entry.ts), which
+# returns false when this define is present, so only the real entry (serve.ts,
+# which does NOT use the helper) boots.
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
+  --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
   "${HOST_EXTERNALS[@]}")
 if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
@@ -415,12 +428,24 @@ rm -f /tmp/harness-files.txt
 # (run.sh was retired — see harness commit 4b7e162 "retire run.sh — the TS
 # orchestrator is the only driver"; the iteration driver is now
 # @papercusp/orchestrator, so the legacy run.sh is no longer bundled.)
-for required in prompts templates; do
+#
+# The top-level `prompts/` dir was RETIRED by the deterministic-blueprints
+# migration — role spawn prompts now live PER-BLUEPRINT at
+# `blueprints/<bp>/prompts/<role>.md` (the `find -type f` copy above brings them
+# over with the rest of `blueprints/`). So require `blueprints` (+ `templates`)
+# and assert a representative role prompt actually landed, instead of the stale
+# top-level `prompts/` dir.
+for required in blueprints templates; do
   if [[ ! -e "$HARNESS_DST/$required" ]]; then
     echo "ERROR: harness bundle missing $required at $HARNESS_DST"
     exit 1
   fi
 done
+if [[ ! -f "$HARNESS_DST/blueprints/base/prompts/queen.md" ]]; then
+  echo "ERROR: harness bundle missing per-blueprint prompts (blueprints/base/prompts/queen.md) at $HARNESS_DST"
+  echo "  Role spawn prompts moved under blueprints/<bp>/prompts/ — the harness copy did not bring them over."
+  exit 1
+fi
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
 # Bundle the @papercusp/orchestrator entry bins as self-contained esbuild .mjs,
