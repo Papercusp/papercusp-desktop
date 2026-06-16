@@ -32,9 +32,14 @@ PORT="${OPERATOR_DEV_PORT:-3270}"
 # tooling (socat relays); 3274 verified free at authoring.
 PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # The working-tree Hono host on the dedicated port. PLAN_RENDER/timers/
-# routines/autoloop stay off — the green/staging operators own background
-# work; this instance only serves the owner's desktop session.
-DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && exec env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=0 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+# autoloop stay off — the green/staging operators own those. DBOS ROUTINES is
+# ON (owner-enabled 2026-06-16): the desktop runs the claim-guarded routines
+# tick (hive watchdogs + Queen wake), so the Queen can execute on this HEALTHY
+# operator when :3070 is saturated. SAFE because claimDueRoutine's conditional
+# next_fire_at advance guarantees single-fire across operators — no double
+# git-sync/deploy. AUTOLOOP stays OFF (not claim-guarded → would double-drive
+# the pipeline). Revert PAPERCUSP_DBOS_ROUTINES=0 to restore request-only.
+DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && exec env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
