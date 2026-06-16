@@ -320,7 +320,14 @@ if [ "$join_ok" = 1 ]; then
   else
     echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
     echo "===== DIAG: localize the post-join merge failure ====="
+    echo "--- drv_psql connectivity probe (errors VISIBLE) ---"
+    echo "  A FED_DB=${FED_DB[a]:-<unset>}"
+    echo "  A conn: $(drv_psql a "SELECT 'conn_ok'::text;" 2>&1 | tr '\n' ' ' | head -c 200)"
+    echo "  B conn: $(drv_psql b "SELECT 'conn_ok'::text;" 2>&1 | tr '\n' ' ' | head -c 200)"
     echo "--- A: did the write CAPTURE? (substrate_outbox rows) ---"; drv_psql a "SELECT count(*) AS outbox FROM harness_shared.substrate_outbox;" 2>/dev/null
+    echo "--- A: was F-HIVE1 DRAINED to the log? (drained_at) ---"; drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text||' ws='||COALESCE(workspace_id,'<none>') FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated';" 2>/dev/null | tr '\n' ' '; echo
+    echo "--- A: ADMISSION events (peer_admitted / peer_rejected / announce) ---"; grep -aE 'peer_admitted|peer_rejected|announce_rejected|admit|reject|onAnnounce' "${FED_LOG[a]}" 2>/dev/null | tail -6 | tr '\n' '|'; echo
+    echo "--- B: ADMISSION events (peer_admitted / peer_rejected / announce) ---"; grep -aE 'peer_admitted|peer_rejected|announce_rejected|admit|reject|onAnnounce|verifyBinding|read-admission' "${FED_LOG[b]}" 2>/dev/null | tail -6 | tr '\n' '|'; echo
     echo "--- A: F-HIVE1 row locally (origin) ---"; drv_psql a "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-HIVE1';" 2>/dev/null
     echo "--- A: registry harness slugs + shared/hive state ---"; drv_psql a "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
     echo "--- A [swarm]: topic / announce / peer ---"; grep -aE '\[swarm\]|joined topic|announc|peer_connected|hive_pubkey|resolveHive' "${FED_LOG[a]}" 2>/dev/null | tail -10
