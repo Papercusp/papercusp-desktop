@@ -320,29 +320,13 @@ if [ "$join_ok" = 1 ]; then
   else
     echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
     echo "===== DIAG: localize the post-join merge failure ====="
-    echo "--- drv_psql connectivity probe (errors VISIBLE) ---"
-    echo "  A FED_DB=${FED_DB[a]:-<unset>}"
-    echo "  A conn: $(drv_psql a "SELECT 'conn_ok'::text;" 2>&1 | tr '\n' ' ' | head -c 200)"
-    echo "  B conn: $(drv_psql b "SELECT 'conn_ok'::text;" 2>&1 | tr '\n' ' ' | head -c 200)"
-    echo "--- A: did the write CAPTURE? (substrate_outbox rows) ---"; drv_psql a "SELECT count(*) AS outbox FROM harness_shared.substrate_outbox;" 2>/dev/null
-    echo "--- A: was F-HIVE1 DRAINED to the log? (drained_at) ---"; drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text||' ws='||COALESCE(workspace_id,'<none>') FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated';" 2>/dev/null | tr '\n' ' '; echo
-    echo "--- A: ADMISSION events (peer_admitted / peer_rejected / announce) ---"; grep -aE 'peer_admitted|peer_rejected|announce_rejected|admit|reject|onAnnounce' "${FED_LOG[a]}" 2>/dev/null | tail -6 | tr '\n' '|'; echo
-    echo "--- B: ADMISSION events (peer_admitted / peer_rejected / announce) ---"; grep -aE 'peer_admitted|peer_rejected|announce_rejected|admit|reject|onAnnounce|verifyBinding|read-admission' "${FED_LOG[b]}" 2>/dev/null | tail -6 | tr '\n' '|'; echo
-    echo "--- A: F-HIVE1 row locally (origin) ---"; drv_psql a "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-HIVE1';" 2>/dev/null
-    echo "--- A: registry harness slugs + shared/hive state ---"; drv_psql a "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
-    echo "--- A [swarm]: topic / announce / peer ---"; grep -aE '\[swarm\]|joined topic|announc|peer_connected|hive_pubkey|resolveHive' "${FED_LOG[a]}" 2>/dev/null | tail -10
-    echo "--- B [swarm]: topic / peer / admit / reject / binding ---"; grep -aE '\[swarm\]|joined topic|peer_connected|admit|reject|binding|verifyAnnounce|read-admission|hive_pubkey' "${FED_LOG[b]}" 2>/dev/null | tail -14
+    echo "--- A: was F-HIVE1 DRAINED to the log? (drained_at) ---"; drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated';" 2>/dev/null | tr '\n' ' '; echo
     echo "--- B: any features at all? (did ANYTHING replicate) ---"; drv_psql b "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null | head
-    echo "--- B: registry harness slugs ---"; drv_psql b "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
-    echo "--- EI-681 instrumentation (resolve + 2b/2c + boot join) from B's log ---"
-    grep -aE '\[ei681-diag\]|\[swarm\] (joined topic|join FAILED)' "${FED_LOG[b]}" 2>/dev/null | tail -30 | sed 's/^/    B| /'
-    echo "--- EI-681 instrumentation from A's log ---"
-    grep -aE '\[ei681-diag\]|\[swarm\] (joined topic|join FAILED)' "${FED_LOG[a]}" 2>/dev/null | tail -12 | sed 's/^/    A| /'
-    echo "--- EI-681 joiner re-key chain (why B stays on gh:repo_id) ---"
-    echo "  B hives identity rows (did join-hive 2b write the remote pubkey?): $(drv_psql b "SELECT home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.hives;" 2>/dev/null | tr '\n' ' ')"
-    echo "  B registry payload (hive_slug + remote_hive per project): $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | head -c 700)"
-    echo "  B [swarm] re-key / reboot / resolveHive trace: $(grep -aiE 'reboot|re-key|rekey|resolveHive|hiveHomeSlug|hive binding|resolveHiveSwarm' "${FED_LOG[b]}" 2>/dev/null | tail -6 | tr '\n' '|')"
-    echo "  A hive pubkey announced + B discovered-hive pubkey: A=$(drv_psql a "SELECT encode(public_key,'base64') FROM harness_shared.hives LIMIT 1;" 2>/dev/null | tr -d '[:space:]' | head -c 20)… | Bcache=$(drv_psql b "SELECT payload::text FROM harness_shared.hive_directory_cache;" 2>/dev/null | grep -oE 'hivePubkey[^,]{0,40}' | head -1)"
+    echo "--- A [swarm]: joined topic / peer_connected (is A on the hive topic?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[a]}" 2>/dev/null | tail -6
+    echo "--- B [swarm]: joined topic / peer_connected (same topic as A?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[b]}" 2>/dev/null | tail -6
+    echo "--- B re-key state: hives identity row + remote_hive (did join-hive 2b/2c run?) ---"
+    echo "  B hives identity: $(drv_psql b "SELECT home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.hives;" 2>/dev/null | tr '\n' ' ')"
+    echo "  B registry remote_hive: $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | grep -oE 'remote_hive[^,]{0,12}' | head -3 | tr '\n' ' ')"
     echo "===== /DIAG ====="
   fi
 else
