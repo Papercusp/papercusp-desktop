@@ -327,6 +327,10 @@ if [ "$join_ok" = 1 ]; then
     echo "--- B [swarm]: topic / peer / admit / reject / binding ---"; grep -aE '\[swarm\]|joined topic|peer_connected|admit|reject|binding|verifyAnnounce|read-admission|hive_pubkey' "${FED_LOG[b]}" 2>/dev/null | tail -14
     echo "--- B: any features at all? (did ANYTHING replicate) ---"; drv_psql b "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null | head
     echo "--- B: registry harness slugs ---"; drv_psql b "SELECT harness_slug FROM harness_shared.harness_registry;" 2>/dev/null | tr '\n' ' '; echo
+    echo "--- EI-681 instrumentation (resolveHiveSwarmBinding + join 2b/2c) from B's log ---"
+    grep -aE '\[ei681-diag\]' "${FED_LOG[b]}" 2>/dev/null | tail -20 | sed 's/^/    B| /'
+    echo "--- EI-681 instrumentation from A's log ---"
+    grep -aE '\[ei681-diag\]' "${FED_LOG[a]}" 2>/dev/null | tail -8 | sed 's/^/    A| /'
     echo "--- EI-681 joiner re-key chain (why B stays on gh:repo_id) ---"
     echo "  B hives identity rows (did join-hive 2b write the remote pubkey?): $(drv_psql b "SELECT home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.hives;" 2>/dev/null | tr '\n' ' ')"
     echo "  B registry payload (hive_slug + remote_hive per project): $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | head -c 700)"
