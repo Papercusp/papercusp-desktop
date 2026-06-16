@@ -310,15 +310,17 @@ fi
 # The open question: does a write FEDERATE after a hive join? (No existing test goes
 # past join.) Write a feature on A's member harness; poll B for it (origin=remote, any
 # slug — the hive model may remap harness_slug across peers). Same-box answers it for $0.
-hive_merge_ok=0; landed_slug=""
+hive_merge_ok=0; hive_rev_ok=0; hive_cont_ok=0; landed_slug=""
 if [ "$join_ok" = 1 ]; then
-  log "POST-JOIN MERGE probe: write F-HIVE1 on A (member='$MEMBER_SLUG') → poll B (origin=remote, any slug)"
+  # (5a) FORWARD owner→joiner: write F-HIVE1 on A, poll B (origin=remote, any
+  # slug — the hive model may remap harness_slug across peers).
+  log "POST-JOIN MERGE (A→B): write F-HIVE1 on A (member='$MEMBER_SLUG') → poll B (origin=remote)"
   probe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE1 40 || true)"
   if [ "${probe%% *}" = 1 ]; then hive_merge_ok=1; landed_slug="${probe#* }"; fi
   if [ "$hive_merge_ok" = 1 ]; then
-    echo "✓ POST-JOIN MERGE: F-HIVE1 federated A→B (landed under harness_slug='$landed_slug')"
+    echo "✓ A→B: F-HIVE1 federated owner→joiner (landed under harness_slug='$landed_slug')"
   else
-    echo "✗ POST-JOIN MERGE: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
+    echo "✗ A→B: F-HIVE1 never reached B — the hive merge does NOT apply a peer's writes after join (probe=$probe)"
     echo "===== DIAG: localize the post-join merge failure ====="
     echo "--- A: was F-HIVE1 DRAINED to the log? (drained_at) ---"; drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated';" 2>/dev/null | tr '\n' ' '; echo
     echo "--- B: any features at all? (did ANYTHING replicate) ---"; drv_psql b "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null | head
@@ -329,15 +331,35 @@ if [ "$join_ok" = 1 ]; then
     echo "  B registry remote_hive: $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | grep -oE 'remote_hive[^,]{0,12}' | head -3 | tr '\n' ' ')"
     echo "===== /DIAG ====="
   fi
+
+  # (5b) REVERSE joiner→owner: write F-HIVE2 on B, poll A. Proves the hive
+  # federates BIDIRECTIONALLY. The EI-681 re-key fix made the OWNER serve its
+  # log core to the joiner; this confirms the JOINER also serves its log to the
+  # owner (no residual asymmetry — both sides serve after the in-place re-key).
+  log "POST-JOIN MERGE (B→A): write F-HIVE2 on B → poll A (origin=remote)"
+  rprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-HIVE2 40 || true)"
+  if [ "${rprobe%% *}" = 1 ]; then hive_rev_ok=1; fi
+  [ "$hive_rev_ok" = 1 ] \
+    && echo "✓ B→A: F-HIVE2 federated joiner→owner (bidirectional)" \
+    || echo "✗ B→A: F-HIVE2 never reached A — federation is one-directional (probe=$rprobe)"
+
+  # (5c) CONTINUOUS: a SECOND forward write must also cross — federation is a
+  # LIVE stream, not a one-shot replay at join time.
+  log "POST-JOIN MERGE (A→B #2): write F-HIVE3 on A → poll B (continuous federation)"
+  cprobe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE3 40 || true)"
+  if [ "${cprobe%% *}" = 1 ]; then hive_cont_ok=1; fi
+  [ "$hive_cont_ok" = 1 ] \
+    && echo "✓ A→B #2: F-HIVE3 federated (continuous — federation is live, not one-shot)" \
+    || echo "✗ A→B #2: F-HIVE3 never reached B — federation stalls after the first op (probe=$cprobe)"
 else
-  echo "· POST-JOIN MERGE probe skipped (join did not complete)"
+  echo "· POST-JOIN MERGE probes skipped (join did not complete)"
 fi
 
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  post-join-merge=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)"
-if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ]; then
-  echo "OVERALL: PASS — create-from-repo → discover → join-offer → join proven end-to-end ($RUN_MODE mode)"
+echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
+if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
+  echo "OVERALL: PASS — create-from-repo → discover → join → BIDIRECTIONAL + continuous hive federation proven end-to-end ($RUN_MODE mode)"
   exit 0
 else
   DBG="/tmp/hive-fromrepo-smoke-debug-$$"
