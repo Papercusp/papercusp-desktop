@@ -319,6 +319,19 @@ copy_pkg_closure() {
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
 
+# rrule is loaded at runtime via `createRequire(import.meta.url)('rrule')` in
+# operator-core/lib/harness/routines/schedule-next.ts (rrule's CJS build sets
+# __esModule:true with NO `default`, so every static-import form diverges between
+# the tsx dev host and the esbuild bundle — createRequire is the only form that
+# works in both). esbuild can't see a dynamic createRequire, so it never inlines
+# rrule, and it is pure-JS (not in NATIVE_PKGS) so it was never copied either —
+# the bundled operator then crashed at boot with `Cannot find module 'rrule'`
+# (EMBEDDED_PG_FAILED). Copy rrule + its dep closure (tslib) so the runtime
+# createRequire('rrule') from sidecar/serve.mjs resolves.
+echo "→ copying createRequire runtime dep rrule (+ closure) into the sidecar"
+copy_pkg_closure rrule
+echo "  rrule closure copied ($nat_copied total package(s), $nat_missing missing)"
+
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
 # sets — see those files' root-resolution comments.
