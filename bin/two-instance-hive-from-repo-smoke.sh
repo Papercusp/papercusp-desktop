@@ -355,6 +355,42 @@ else
   echo "· POST-JOIN MERGE probes skipped (join did not complete)"
 fi
 
+# ── 5.5 A-003 MEMBERSHIP-CROSSING witness (opt-in: A003_MEMBERSHIP_PROBE=1) ────────
+# The signal steps 5a–5c MISS: do the hive-HOME-grained tables (hive_settings /
+# hive_members) federate to the joiner? Every prior content-matrix A-003 witness
+# showed "28 content types PASS but hive_settings/hive_members cross in ZERO
+# directions" — the live release blocker. This is the gate for the C-001 re-key
+# (shared-hive-rekey-2026-06-19): the epoch + epoch-key-distribution rows ride
+# exactly this hive-home→joiner path. PASS here = A-003 GREEN on the real binary.
+if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  log "A-003 MEMBERSHIP witness (hive-home='$HIVE_SLUG')"
+  a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$a003_ws" ] && a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$a003_ws" ] && a003_ws="default"
+  echo "  A hive_settings: $(drv_psql a "SELECT setting_key||'/'||origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+  echo "  A hive_members:  $(drv_psql a "SELECT github_user_id||'/'||origin FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+  bf_set="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  bf_mem="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  echo "A003-BACKFILL: hive_settings_remote_on_B=${bf_set:-0}  hive_members_remote_on_B=${bf_mem:-0}"
+  a003_ts="$(date +%s)000"; a003_key="a003-witness-$a003_ts"
+  drv_psql a "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,origin,created_at,updated_at) VALUES ('$a003_ws','$HIVE_SLUG','$a003_key','\"probe\"','local',$a003_ts,$a003_ts);" >/dev/null 2>&1
+  log "A-003 incremental: wrote hive_settings[$a003_key] on A (ws=$a003_ws) → poll B for origin=remote (<=60s)"
+  a003_cross=0
+  for i in $(seq 1 20); do
+    r="$(drv_psql b "SELECT origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='$a003_key';" 2>/dev/null | tr -d '[:space:]')"
+    [ "$r" = "remote" ] && { a003_cross=1; break; }
+    sleep 3
+  done
+  if [ "$a003_cross" = 1 ]; then
+    echo "A003-HIVE-SETTINGS-CROSS=PASS  (incremental hive_settings federated owner->joiner — A-003 GREEN on the binary)"
+  else
+    echo "A003-HIVE-SETTINGS-CROSS=FAIL  (A's new hive_settings row never reached B as origin=remote — A-003 RED)"
+    echo "  DIAG A outbox(hive_settings,$a003_key): $(drv_psql a "SELECT 'drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_settings' AND key='$a003_key';" 2>/dev/null | tr '\n' ' ')"
+    echo "  DIAG B settings: $(drv_psql b "SELECT setting_key||'/'||origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+    echo "  DIAG B [A-003] admit: $(grep -aE '\[A-003\] slug-filter' "${FED_LOG[b]}" 2>/dev/null | grep -iF "$HIVE_SLUG" | tail -4 | tr '\n' '|')"
+  fi
+fi
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
 echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
