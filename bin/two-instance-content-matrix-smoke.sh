@@ -1,32 +1,26 @@
 #!/usr/bin/env bash
 # two-instance-content-matrix-smoke.sh — Lane A (shared-hive-release-testing):
-# the FULL live multi-peer federation proof on the REAL packaged binary.
+# the FULL live federation proof on the REAL packaged binary, 2 DISTINCT peers.
 #
-# What the from-repo smoke proves (create→publish→join→FEATURE federation) this
-# extends to the brief's complete matrix:
-#   1. owner create+publish a PUBLIC hive  (+ a separate INVITE hive)
-#   2. B joins via the CURRENT flow (POST /api/discovery/join-hive) — the
-#      joiner-resolves-its-own-topic path; assert A & B land on the SAME
-#      derive-swarm-topic hex (the topic-split-bug home)
-#   3. per-content-type bidirectional sync matrix A<->B: every federated table
-#      ({type x direction}: write origin='local' on src -> capture trigger ->
-#      peer-log -> projection applies origin='remote' on dst within a bounded poll)
-#   4. 3rd peer C joins LATE -> full backfill of PRE-EXISTING content
-#   5. NEGATIVE: C BEFORE it joins (running, on the testnet DHT, not joined)
-#      must see ZERO of the hive's rows  (isolation)
+# Covers every brief-A scenario with a 2-peer SEQUENCED design (A=owner papercupai,
+# B=joiner aviynw) — no 3rd peer, because this box has only 2 gh identities and a
+# 3rd instance reusing the OWNER's identity corrupts admission (B aggregates the
+# wrong same-identity log → nothing crosses; observed, see findings A-NOTE). The
+# sequencing (A writes content BEFORE B joins) tests TRUE backfill without a 3rd peer:
 #
-# REAL BINARY: extracts the .deb and launches usr/bin/papercusp-desktop under
-# vglrun+Xvfb (fed_local_launch). It injects luxon into the extracted sidecar
-# node_modules (the A-001 build fix, mirrored: build-desktop-sidecar.sh now does
-# `copy_pkg_closure luxon`) so the bundle boots — without it serve.mjs throws
-# `Cannot find module 'luxon'` -> EMBEDDED_PG_FAILED (the shipped .deb's bug).
+#   1. A create+publish a PUBLIC hive (+ a separate INVITE hive).
+#   2. A SEEDS pre-existing content (one row per federated type, origin='local').
+#   3. NEGATIVE: B (running, NOT joined) sees ZERO of the hive's content (isolation).
+#   4. B joins via the CURRENT flow (POST /api/discovery/join-hive); assert A & B
+#      land on the SAME derive-swarm-topic hex (joiner-resolves-its-own-topic path).
+#   5. BACKFILL: B receives the PRE-EXISTING (pre-join) content (origin='remote').
+#   6. INCREMENTAL matrix A<->B: new writes each direction, per type, origin='remote'.
 #
-# Leaves the trio RUNNING (stable WORK dir + stop.sh) so the live-instance lanes
-# (Brief E/G) can reuse the window. Tear down with $WORK/stop.sh.
+# REAL BINARY: extracts the .deb, injects luxon into the extracted sidecar (A-001
+# build fix) so it boots, launches usr/bin/papercusp-desktop under vglrun+Xvfb.
+# Pass the luxon-repacked .deb to skip the inject. Leaves the pair UP for lanes E/G.
 #
 # Usage: bin/two-instance-content-matrix-smoke.sh [path/to/Papercusp_*.deb]
-#   PAPERCUSP_SMOKE_DISPLAY=N   headless Xvfb display (default 152)
-#   HIVE_SMOKE_REPO_URL=...     fixture repo (default octocat/Hello-World)
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
@@ -37,17 +31,17 @@ DEB="$(readlink -f "$DEB" 2>/dev/null || echo "$DEB")"
 LUXON_SRC="$REPO_DIR/node_modules/luxon"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-$REPO_DIR/apps/operator}"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
+INV_REPO_URL="${HIVE_INVITE_REPO_URL:-https://github.com/octocat/Spoon-Knife}"
 CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
-DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-152}"
+DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-154}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
-P_C_USER="${P_C_USER:-papercupai}"   # only 2 gh identities; C = papercupai 2nd device (fresh HOME)
 
 WORK="${PAPERCUSP_MATRIX_WORK:-$HOME/.papercusp-lane-a-fed}"
 rm -rf "$WORK" 2>/dev/null; mkdir -p "$WORK"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
-declare -A FED_LOG=( [a]="$WORK/inst-a.log" [b]="$WORK/inst-b.log" [c]="$WORK/inst-c.log" )
-declare -A AHOME=( [a]="$WORK/inst-a" [b]="$WORK/inst-b" [c]="$WORK/inst-c" )
+declare -A FED_LOG=( [a]="$WORK/inst-a.log" [b]="$WORK/inst-b.log" )
+declare -A AHOME=( [a]="$WORK/inst-a" [b]="$WORK/inst-b" )
 NONCE="$(date +%s)"
 log() { printf '\n=== %s ===\n' "$*"; }
 jget() { printf '%s' "$1" | python3 -c "
@@ -58,201 +52,136 @@ try: print($2)
 except Exception: pass
 " 2>/dev/null; }
 
-# ── tokens ────────────────────────────────────────────────────────────────────
 A_TOKEN="$(gh auth token --user "$P_A_USER" 2>/dev/null)" || true
 B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
-C_TOKEN="$(gh auth token --user "$P_C_USER" 2>/dev/null)" || true
 [ -n "$A_TOKEN" ] && [ -n "$B_TOKEN" ] || { echo "FATAL: need gh tokens for $P_A_USER + $P_B_USER"; exit 1; }
 
-# ── extract + A-001 luxon fix + integrity ──────────────────────────────────────
 log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" || exit 1
 SIDE="$PKG/usr/lib/Papercusp/sidecar"
-if [ ! -d "$SIDE/node_modules/luxon" ]; then
-  echo "→ A-001 fix: injecting luxon into the extracted sidecar (the shipped .deb omits it)"
-  cp -aL "$LUXON_SRC" "$SIDE/node_modules/luxon" || { echo "FATAL: could not inject luxon from $LUXON_SRC"; exit 1; }
-  echo "  luxon files: $(find "$SIDE/node_modules/luxon" -type f | wc -l)"
-else
-  echo "  luxon already present in .deb (rebuilt) — no injection needed"
-fi
+[ -d "$SIDE/node_modules/luxon" ] || { echo "→ A-001 fix: injecting luxon"; cp -aL "$LUXON_SRC" "$SIDE/node_modules/luxon" || exit 1; }
 fed_clobber_check "$PKG" || exit 2
 fed_assert_deb_swarm_support "$PKG" || exit 2
 fed_fresh_display "$DISPLAY_NUM" "$WORK" || exit 1
-
-# ── local testnet DHT ──────────────────────────────────────────────────────────
 BOOTSTRAP="$(fed_start_testnet_dht "$OPERATOR_DIR" "$WORK")" || exit 3
 echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 
-# ── launch A (owner) + B (joiner) + C (late joiner / negative) ─────────────────
-log "launch A($P_A_USER) + B($P_B_USER) + C($P_C_USER 2nd device) [REAL BINARY, :$DISPLAY_NUM]"
+log "launch A($P_A_USER, owner) + B($P_B_USER, joiner) [REAL BINARY, :$DISPLAY_NUM]"
 fed_local_launch "${AHOME[a]}" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 fed_local_launch "${AHOME[b]}" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-fed_local_launch "${AHOME[c]}" "${FED_LOG[c]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$C_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-
-for inst in a b c; do
-  fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }
-done
-log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]} | C: sc=${FED_SC[c]} pg=${FED_PG[c]}"
-fed_wait_api a 30 && fed_wait_api b 30 && fed_wait_api c 30 || { echo "FATAL: a sidecar API never came up"; exit 4; }
-
-# stable env + stop.sh for the Brief E/G handoff (instances LEFT RUNNING)
-cat > "$WORK/instances.env" <<EOF
-# Lane A live trio (real binary). hiveSlug/memberSlug printed in the run log.
-A_IDENTITY=$P_A_USER  A_SIDECAR=http://127.0.0.1:${FED_SC[a]}  A_PG=${FED_PG[a]}  A_LOG=${FED_LOG[a]}
-B_IDENTITY=$P_B_USER  B_SIDECAR=http://127.0.0.1:${FED_SC[b]}  B_PG=${FED_PG[b]}  B_LOG=${FED_LOG[b]}
-C_IDENTITY=$P_C_USER  C_SIDECAR=http://127.0.0.1:${FED_SC[c]}  C_PG=${FED_PG[c]}  C_LOG=${FED_LOG[c]}
-DHT=$BOOTSTRAP  DISPLAY=:$DISPLAY_NUM  WORK=$WORK
-EOF
-printf '#!/usr/bin/env bash\npkill -9 -f "%s" 2>/dev/null || true\necho "Lane A trio torn down (%s)"\n' "$WORK" "$WORK" > "$WORK/stop.sh"
-chmod +x "$WORK/stop.sh"
+for inst in a b; do fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }; done
+log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]}"
+fed_wait_api a 30 && fed_wait_api b 30 || { echo "FATAL: sidecar API never came up"; exit 4; }
 
 dsn() { echo "postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp"; }
 q() { psql "$(dsn "$1")" -tA -c "$2" 2>/dev/null | tr -d '\r'; }
 sc() { echo "http://127.0.0.1:${FED_SC[$1]}"; }
 
-# ── 1. A: create + publish PUBLIC hive (from-repo, the current flow) ────────────
-log "A: POST /api/harness/hives/from-repo ($REPO_URL, public)"
+cat > "$WORK/instances.env" <<EOF
+A_IDENTITY=$P_A_USER  A_SIDECAR=http://127.0.0.1:${FED_SC[a]}  A_PG=${FED_PG[a]}  A_LOG=${FED_LOG[a]}
+B_IDENTITY=$P_B_USER  B_SIDECAR=http://127.0.0.1:${FED_SC[b]}  B_PG=${FED_PG[b]}  B_LOG=${FED_LOG[b]}
+DHT=$BOOTSTRAP  DISPLAY=:$DISPLAY_NUM  WORK=$WORK
+EOF
+printf '#!/usr/bin/env bash\npkill -9 -f "%s" 2>/dev/null||true\necho stopped\n' "$WORK" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
+
+# ── 1. create + publish ──────────────────────────────────────────────────────
+log "A: create+publish PUBLIC hive ($REPO_URL)"
 a_resp="$(curl -s -m 610 -X POST "$(sc a)/api/harness/hives/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
-HIVE_SLUG="$(jget "$a_resp" "d['created']['hiveSlug']")"
-SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
-A_ANN="$(jget "$a_resp" "d['publish']['announced']")"
-[ -n "$HIVE_SLUG" ] && [ -n "$SLUG" ] && echo "✓ public hive='$HIVE_SLUG' member='$SLUG' announced=$A_ANN" \
-  || { echo "✗ public create failed: $(echo "$a_resp" | head -c 400)"; exit 6; }
-
-# 1b. a SEPARATE invite hive — confirm the link carries a topic
-log "A: create a separate INVITE hive (visibility=invite)"
-inv_resp="$(curl -s -m 610 -X POST "$(sc a)/api/harness/hives/from-repo" -H 'content-type: application/json' \
-  -d "{\"githubUrl\":\"https://github.com/octocat/Spoon-Knife\",\"visibility\":\"invite\",\"runTests\":false,\"shallow\":true}")"
-INV_SLUG="$(jget "$inv_resp" "d['created']['hiveSlug']")"
-INV_LINK="$(jget "$inv_resp" "(d['created'].get('memberLinks') or d.get('publish',{}).get('memberLinks') or [''])[0]")"
-INV_VIS="$(jget "$inv_resp" "d['created'].get('visibility') or d.get('visibility')")"
-if [ -n "$INV_SLUG" ]; then
-  echo "✓ invite hive='$INV_SLUG' vis=$INV_VIS link=$(printf '%s' "$INV_LINK" | head -c 60)…"
-  echo "$INV_LINK" | grep -q 'topic=' && echo "✓ invite member link carries topic=" || echo "△ invite link has no topic= field (check $WORK/inst-a.log)"
+HIVE_SLUG="$(jget "$a_resp" "d['created']['hiveSlug']")"; SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
+[ -n "$HIVE_SLUG" ] && [ -n "$SLUG" ] && echo "✓ public hive='$HIVE_SLUG' member='$SLUG' announced=$(jget "$a_resp" "d['publish']['announced']")" \
+  || { echo "✗ create failed: $(echo "$a_resp" | head -c 300)"; exit 6; }
+if [ -z "${SKIP_INVITE:-}" ]; then
+  log "A: create separate INVITE hive ($INV_REPO_URL)"
+  inv="$(curl -s -m 610 -X POST "$(sc a)/api/harness/hives/from-repo" -H 'content-type: application/json' \
+    -d "{\"githubUrl\":\"$INV_REPO_URL\",\"visibility\":\"invite\",\"runTests\":false,\"shallow\":true}")"
+  INV_SLUG="$(jget "$inv" "d['created']['hiveSlug']")"
+  INV_TOPIC="$(q a "SELECT payload::text FROM harness_shared.harness_registry WHERE payload::text LIKE '%$INV_SLUG%' LIMIT 1;" | grep -oE 'topic[^,]{0,80}' | head -1)"
+  [ -n "$INV_SLUG" ] && echo "✓ invite hive='$INV_SLUG' (topic carrier: ${INV_TOPIC:-see inst-a.log})" || echo "△ invite hive create: $(echo "$inv" | head -c 200)"
 else
-  echo "△ invite hive create returned: $(echo "$inv_resp" | head -c 300)"
+  echo "· SKIP_INVITE set — single-hive run (isolating the 2nd-hive variable)"
 fi
 
-# ── 2. B discovers + joins (current flow) ───────────────────────────────────────
-log "B: poll /api/discovery/hives for '$HIVE_SLUG' then join-hive"
-B_ROW=""; for i in $(seq 1 40); do
-  B_ROW="$(jget "$(curl -s -m 10 "$(sc b)/api/discovery/hives")" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"
-  [ -n "$B_ROW" ] && break; sleep 3
-done
-[ -n "$B_ROW" ] && echo "✓ B discovered '$HIVE_SLUG'" || { echo "✗ B never discovered the hive"; exit 6; }
-LINKS="$(jget "$B_ROW" "json.dumps(d.get('memberLinks') or [])")"
-join_resp="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-hive" -H 'content-type: application/json' \
-  -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":$LINKS}")"
-J_OK="$(jget "$join_resp" "d.get('ok')")"
-[ "$J_OK" = "True" ] && echo "✓ B join-hive ok (view materialized + re-keyed onto hive topic)" \
-  || { echo "✗ B join-hive failed: $(echo "$join_resp" | head -c 300)"; exit 6; }
+WS_A="$(q a "SELECT DISTINCT workspace_id FROM harness_shared.harness_features_consolidated LIMIT 1;")"; [ -z "$WS_A" ] && WS_A=default
+WS_B="$(q b "SELECT DISTINCT workspace_id FROM harness_shared.harness_registry LIMIT 1;")"; [ -z "$WS_B" ] && WS_B=default
+echo "  member=$SLUG hiveHome=$HIVE_SLUG WS_A=$WS_A WS_B=$WS_B"
 
-# topic-equality: A & B must be on the SAME swarm topic (derive-swarm-topic hex)
-sleep 5
-A_TOPICS="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[a]}" 2>/dev/null | grep -oE '[0-9a-f]{8,}' | sort -u)"
-B_TOPICS="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[b]}" 2>/dev/null | grep -oE '[0-9a-f]{8,}' | sort -u)"
-SHARED_TOPIC="$(comm -12 <(echo "$A_TOPICS") <(echo "$B_TOPICS") | head -1)"
-[ -n "$SHARED_TOPIC" ] && echo "✓ TOPIC-EQUAL: A & B both on swarm topic ${SHARED_TOPIC:0:20}… (joiner resolved owner topic)" \
-  || echo "△ could not confirm a shared [swarm] topic hex from logs (federation below is the real proof)"
+# ── per-type SQL (origin='local' write on src; poll dst for origin='remote') ────
+# ins_<type> <ws> <tag> ; poll_<type> <tag>  — $SLUG harness-scoped, $HIVE_SLUG hive-scoped.
+TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plans plan-parts item-assignments presence hive-settings hive-members}"
+ins() { local ty="$1" ws="$2" t="$3" nid; [ "$t" = ba ] && nid=2 || nid=1
+  case "$ty" in
+   features) echo "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$SLUG','F-MX-$t','mx','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);";;
+   conversations) echo "INSERT INTO harness_shared.coord_conversations (workspace_id,id,kind,scope,harness_slug,asker_id,title,body,state,created_at,updated_at,origin) VALUES ('$ws','conv-MX-$t','discussion','harness','$SLUG','tester','mx','b-$t','open',now(),now(),'local');";;
+   messages) echo "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,ts,origin) VALUES ('$ws','messages','tester','msg-MX-$t','{\"summary\":\"mx $t\",\"to\":[\"x\"]}'::jsonb,'$SLUG',now(),'local');";;
+   threads) echo "INSERT INTO harness_shared.coord_threads (workspace_id,thread_id,parent_kind,parent_ref,title,created_by,created_at,post_count,harness_slug,origin) VALUES ('$ws','thr-MX-$t','conversation','conv-MX-$t','mx','tester',now(),0,'$SLUG','local');";;
+   thread-posts) echo "INSERT INTO harness_shared.coord_thread_posts (workspace_id,thread_id,author_id,body,created_at,post_msg_id,harness_slug,origin) VALUES ('$ws','thr-MX-$t','tester','pb $t',now(),'post-MX-$t','$SLUG','local');";;
+   plans) echo "INSERT INTO harness_shared.harness_plans (workspace_id,harness_slug,plan_slug,content,content_hash,title,status,supersedes,archived,is_legacy,origin) VALUES ('$ws','$SLUG','plan-mx-$t','# mx $t','h$t','MX','draft','{}',false,false,'local');";;
+   plan-parts) echo "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws','$SLUG','ppmx-$t','item:P-001','item','pb $t',1,${NONCE}000,'tester',false,'local');";;
+   item-assignments) echo "INSERT INTO harness_shared.plan_item_assignments (workspace_id,harness_slug,plan_slug,item_id,assignee_name,assigned_by_user,assigned_ts,strategy,note,origin) VALUES ('$ws','$SLUG','plan-mx-$t','P-00$nid','agent-x','tester',now(),'coding','mx','local');";;
+   presence) echo "INSERT INTO harness_shared.shared_presence (workspace_id,harness_slug,github_user_id,machine_label,device_pubkey,intent,current_view,last_seen_at,schema_version,hive_slug) VALUES ('$ws','$SLUG',9999$nid,'mx-$t','pk-MX-$t','mx','v',now(),1,'$HIVE_SLUG');";;
+   hive-settings) echo "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,created_at,updated_at,origin) VALUES ('$ws','$HIVE_SLUG','mxk-$t','\"mx-$t\"',${NONCE}000,${NONCE}000,'local');";;
+   hive-members) echo "INSERT INTO harness_shared.hive_members (workspace_id,hive_home_slug,github_user_id,github_username,device_attestations,revoked_pubkeys,binding_status,origin) VALUES ('$ws','$HIVE_SLUG',8888$nid,'mxu$t','[]'::jsonb,'{}'::text[],'bound','local');";;
+  esac; }
+poll() { local ty="$1" t="$2" nid; [ "$t" = ba ] && nid=2 || nid=1
+  case "$ty" in
+   features) echo "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin='remote' LIMIT 1;";;
+   conversations) echo "SELECT origin FROM harness_shared.coord_conversations WHERE id='conv-MX-$t' AND origin='remote' LIMIT 1;";;
+   messages) echo "SELECT origin FROM harness_shared.coord_event_log WHERE msg_id='msg-MX-$t' AND origin='remote' LIMIT 1;";;
+   threads) echo "SELECT origin FROM harness_shared.coord_threads WHERE thread_id='thr-MX-$t' AND origin='remote' LIMIT 1;";;
+   thread-posts) echo "SELECT origin FROM harness_shared.coord_thread_posts WHERE post_msg_id='post-MX-$t' AND origin='remote' LIMIT 1;";;
+   plans) echo "SELECT origin FROM harness_shared.harness_plans WHERE plan_slug='plan-mx-$t' AND origin='remote' LIMIT 1;";;
+   plan-parts) echo "SELECT origin FROM harness_shared.harness_plan_parts WHERE plan_slug='ppmx-$t' AND part_key='item:P-001' AND origin='remote' LIMIT 1;";;
+   item-assignments) echo "SELECT origin FROM harness_shared.plan_item_assignments WHERE plan_slug='plan-mx-$t' AND item_id='P-00$nid' AND origin='remote' LIMIT 1;";;
+   presence) echo "SELECT 'present' FROM harness_shared.shared_presence WHERE device_pubkey='pk-MX-$t' LIMIT 1;";;
+   hive-settings) echo "SELECT origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='mxk-$t' AND origin='remote' LIMIT 1;";;
+   hive-members) echo "SELECT origin FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=8888$nid AND origin='remote' LIMIT 1;";;
+  esac; }
+tbl() { case "$1" in features)echo harness_features_consolidated;;conversations)echo coord_conversations;;messages)echo coord_event_log;;threads)echo coord_threads;;thread-posts)echo coord_thread_posts;;plans)echo harness_plans;;plan-parts)echo harness_plan_parts;;item-assignments)echo plan_item_assignments;;presence)echo shared_presence;;hive-settings)echo hive_settings;;hive-members)echo hive_members;;esac; }
 
-# resolve workspace ids (federated writes need the instance's own workspace_id)
-WS_A="$(q a "SELECT workspace_id FROM harness_shared.harness_registry WHERE slug='$SLUG' LIMIT 1;")"
-WS_B="$(q b "SELECT workspace_id FROM harness_shared.harness_registry WHERE slug='$SLUG' LIMIT 1;")"
-[ -z "$WS_A" ] && WS_A="$(q a "SELECT DISTINCT workspace_id FROM harness_shared.substrate_outbox LIMIT 1;")"
-[ -z "$WS_B" ] && WS_B="$(q b "SELECT DISTINCT workspace_id FROM harness_shared.harness_registry LIMIT 1;")"
-echo "  WS_A=$WS_A  WS_B=$WS_B  member=$SLUG  hiveHome=$HIVE_SLUG"
-
-# ── 3. per-content-type bidirectional matrix ────────────────────────────────────
 MATRIX=""
-# probe <label> <table> <src> <dst> <key_desc> <insert_sql> <poll_sql>
-#   insert_sql runs on src (origin='local'); poll_sql on dst returns origin (or 'present').
-probe() {
-  local label="$1" table="$2" src="$3" dst="$4" kdesc="$5" ins="$6" poll="$7" tries=22 i row cap t0 t1
-  if ! psql "$(dsn "$src")" -tA -c "$ins" >/dev/null 2>"$WORK/ins.err"; then
-    printf '  ✗ %-16s %s->%s SETUP-FAIL: %s\n' "$label" "$src" "$dst" "$(head -1 "$WORK/ins.err" | head -c 90)"
-    MATRIX+="| $label | $src→$dst | SETUP-FAIL |\n"; return
-  fi
-  cap="$(q "$src" "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='$table';")"
-  t0="$(date +%s%3N)"
-  for i in $(seq 1 $tries); do
-    row="$(psql "$(dsn "$dst")" -tA -c "$poll" 2>/dev/null | tr -d '[:space:]')"
-    [ -n "$row" ] && { t1="$(date +%s%3N)"; printf '  ✓ %-16s %s->%s  origin=%s in %sms (outbox=%s)\n' "$label" "$src" "$dst" "$row" "$((t1-t0))" "$cap"; MATRIX+="| $label | $src→$dst | PASS ($row, $((t1-t0))ms) |\n"; return; }
-    sleep 3
-  done
-  printf '  ✗ %-16s %s->%s  NEVER crossed (src outbox=%s)\n' "$label" "$src" "$dst" "$cap"
-  MATRIX+="| $label | $src→$dst | FAIL (outbox=$cap) |\n"
-}
+write_all() { local src="$1" ws="$2" t="$3" ty; for ty in $TYPES; do
+  psql "$(dsn "$src")" -tA -c "$(ins "$ty" "$ws" "$t")" >/dev/null 2>"$WORK/ins.err" || echo "  ⚠ $ty $src write SETUP-FAIL: $(head -1 "$WORK/ins.err"|head -c 80)"; done; }
+check_all() { local dst="$1" t="$2" phase="$3" src="$4" ty row cap tries=24 i; for ty in $TYPES; do
+  cap="$(q "$src" "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='$(tbl "$ty")';")"
+  row=""; for i in $(seq 1 $tries); do row="$(psql "$(dsn "$dst")" -tA -c "$(poll "$ty" "$t")" 2>/dev/null | tr -d '[:space:]')"; [ -n "$row" ] && break; sleep 3; done
+  if [ -n "$row" ]; then printf '  ✓ %-16s %s %s=%s\n' "$ty" "$phase" "$row" "ok"; MATRIX+="| $ty | $phase | PASS ($row) |\n"
+  else printf '  ✗ %-16s %s NEVER crossed (src outbox=%s)\n' "$ty" "$phase" "$cap"; MATRIX+="| $ty | $phase | FAIL (outbox=$cap) |\n"; fi; done; }
 
-run_matrix() {  # <src> <dst> <ws_src> <tag>
-  local s="$1" d="$2" ws="$3" t="$4" nid
-  [ "$t" = ab ] && nid=1 || nid=2   # numeric github_user_id suffix (must be int)
-  probe features harness_features_consolidated "$s" "$d" feature_id \
-    "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$SLUG','F-MX-$t','mx feat','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);" \
-    "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin='remote' LIMIT 1;"
-  probe conversations coord_conversations "$s" "$d" id \
-    "INSERT INTO harness_shared.coord_conversations (workspace_id,id,kind,scope,harness_slug,asker_id,title,body,state,created_at,updated_at,origin) VALUES ('$ws','conv-MX-$t','discussion','harness','$SLUG','tester','mx','body-$t','open',now(),now(),'local');" \
-    "SELECT origin FROM harness_shared.coord_conversations WHERE id='conv-MX-$t' AND origin='remote' LIMIT 1;"
-  probe messages coord_event_log "$s" "$d" msg_id \
-    "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,ts,origin) VALUES ('$ws','messages','tester','msg-MX-$t','{\"summary\":\"mx $t\",\"to\":[\"x\"]}'::jsonb,'$SLUG',now(),'local');" \
-    "SELECT origin FROM harness_shared.coord_event_log WHERE msg_id='msg-MX-$t' AND origin='remote' LIMIT 1;"
-  probe threads coord_threads "$s" "$d" thread_id \
-    "INSERT INTO harness_shared.coord_threads (workspace_id,thread_id,parent_kind,parent_ref,title,created_by,created_at,post_count,harness_slug,origin) VALUES ('$ws','thr-MX-$t','conversation','conv-MX-$t','mx thread','tester',now(),0,'$SLUG','local');" \
-    "SELECT origin FROM harness_shared.coord_threads WHERE thread_id='thr-MX-$t' AND origin='remote' LIMIT 1;"
-  probe thread-posts coord_thread_posts "$s" "$d" post_msg_id \
-    "INSERT INTO harness_shared.coord_thread_posts (workspace_id,thread_id,author_id,body,created_at,post_msg_id,harness_slug,origin) VALUES ('$ws','thr-MX-$t','tester','post body $t',now(),'post-MX-$t','$SLUG','local');" \
-    "SELECT origin FROM harness_shared.coord_thread_posts WHERE post_msg_id='post-MX-$t' AND origin='remote' LIMIT 1;"
-  probe plans harness_plans "$s" "$d" plan_slug \
-    "INSERT INTO harness_shared.harness_plans (workspace_id,harness_slug,plan_slug,content,content_hash,title,status,supersedes,archived,is_legacy,origin) VALUES ('$ws','$SLUG','plan-mx-$t','# mx plan $t','hash$t','MX plan','draft','{}',false,false,'local');" \
-    "SELECT origin FROM harness_shared.harness_plans WHERE plan_slug='plan-mx-$t' AND origin='remote' LIMIT 1;"
-  probe plan-parts harness_plan_parts "$s" "$d" "plan_slug:part_key" \
-    "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws','$SLUG','ppmx-$t','item:P-001','item','part body $t',1,${NONCE}000,'tester',false,'local');" \
-    "SELECT origin FROM harness_shared.harness_plan_parts WHERE plan_slug='ppmx-$t' AND part_key='item:P-001' AND origin='remote' LIMIT 1;"
-  probe item-assignments plan_item_assignments "$s" "$d" "plan_slug:item_id" \
-    "INSERT INTO harness_shared.plan_item_assignments (workspace_id,harness_slug,plan_slug,item_id,assignee_name,assigned_by_user,assigned_ts,strategy,note,origin) VALUES ('$ws','$SLUG','plan-mx-$t','P-00$t','agent-x','tester',now(),'coding','mx','local');" \
-    "SELECT origin FROM harness_shared.plan_item_assignments WHERE plan_slug='plan-mx-$t' AND item_id='P-00$t' AND origin='remote' LIMIT 1;"
-  probe presence shared_presence "$s" "$d" "gh/machine" \
-    "INSERT INTO harness_shared.shared_presence (workspace_id,harness_slug,github_user_id,machine_label,device_pubkey,intent,current_view,last_seen_at,schema_version,hive_slug) VALUES ('$ws','$SLUG',9999$nid,'mx-machine-$t','pk-mx-$t','mx intent','mx view',now(),1,'$HIVE_SLUG');" \
-    "SELECT 'present' FROM harness_shared.shared_presence WHERE device_pubkey='pk-mx-$t' LIMIT 1;"
-  probe hive-settings hive_settings "$s" "$d" setting_key \
-    "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,created_at,updated_at,origin) VALUES ('$ws','$HIVE_SLUG','mx-key-$t','\"mx-$t\"',now(),now(),'local');" \
-    "SELECT origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='mx-key-$t' AND origin='remote' LIMIT 1;"
-  probe hive-members hive_members "$s" "$d" github_user_id \
-    "INSERT INTO harness_shared.hive_members (workspace_id,hive_home_slug,github_user_id,github_username,device_attestations,revoked_pubkeys,binding_status,origin) VALUES ('$ws','$HIVE_SLUG',8888$nid,'mxuser$t','[]'::jsonb,'{}'::text[],'bound','local');" \
-    "SELECT origin FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=8888$nid AND origin='remote' LIMIT 1;"
-}
+# ── 2. seed pre-existing content on A (for the backfill test) ───────────────────
+log "A: SEED pre-existing content (one row per type, BEFORE B joins)"; write_all a "$WS_A" seed
+echo "  seeded $(echo $TYPES | wc -w) types on A"
 
-log "MATRIX A→B"; run_matrix a b "$WS_A" "ab"
-log "MATRIX B→A"; run_matrix b a "$WS_B" "ba"
+# ── 3. NEGATIVE: B has not joined → must see ZERO ───────────────────────────────
+log "NEGATIVE: B (not joined) must see ZERO hive content"
+NF="$(q b "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id LIKE 'F-MX-%';")"
+NC="$(q b "SELECT count(*) FROM harness_shared.coord_conversations WHERE id LIKE 'conv-MX-%';")"
+NEG=$([ "${NF:-1}" = 0 ] && [ "${NC:-1}" = 0 ] && echo PASS || echo "FAIL(f=$NF c=$NC)")
+echo "  negative-isolation=$NEG"
 
-# ── 4+5. negative isolation (C pre-join) then late-join backfill ────────────────
-log "NEGATIVE: C has NOT joined — must see ZERO hive content"
-C_FEATS="$(q c "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id LIKE 'F-MX-%' OR feature_id LIKE 'F-HIVE%';")"
-C_CONVS="$(q c "SELECT count(*) FROM harness_shared.coord_conversations WHERE id LIKE 'conv-MX-%';")"
-[ "${C_FEATS:-0}" = "0" ] && [ "${C_CONVS:-0}" = "0" ] && echo "✓ NEGATIVE: C (non-member) sees 0 hive features + 0 conversations" \
-  || echo "✗ NEGATIVE LEAK: C sees feats=$C_FEATS convs=$C_CONVS without joining (S0)"
+# ── 4. B joins (current flow) + topic-equality ──────────────────────────────────
+log "B: discover + join-hive '$HIVE_SLUG'"
+BR=""; for i in $(seq 1 40); do BR="$(jget "$(curl -s -m 10 "$(sc b)/api/discovery/hives")" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"; [ -n "$BR" ] && break; sleep 3; done
+LINKS="$(jget "$BR" "json.dumps(d.get('memberLinks') or [])")"
+jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-hive" -H 'content-type: application/json' -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":${LINKS:-[]}}")"
+[ "$(jget "$jr" "d.get('ok')")" = True ] && echo "✓ B joined" || { echo "✗ B join failed: $(echo "$jr"|head -c 200)"; exit 6; }
+sleep 5
+AT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[a]}"|grep -oE '[0-9a-f]{8,}'|sort -u)"
+BT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[b]}"|grep -oE '[0-9a-f]{8,}'|sort -u)"
+ST="$(comm -12 <(echo "$AT") <(echo "$BT")|head -1)"
+TEQ=$([ -n "$ST" ] && echo "PASS (${ST:0:16}…)" || echo UNCONFIRMED); echo "  topic-equal=$TEQ"
 
-log "BACKFILL: C joins LATE → must receive PRE-EXISTING content"
-C_ROW=""; for i in $(seq 1 40); do
-  C_ROW="$(jget "$(curl -s -m 10 "$(sc c)/api/discovery/hives")" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"
-  [ -n "$C_ROW" ] && break; sleep 3
-done
-C_LINKS="$(jget "$C_ROW" "json.dumps(d.get('memberLinks') or [])")"
-cj="$(curl -s -m 610 -X POST "$(sc c)/api/discovery/join-hive" -H 'content-type: application/json' -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":${C_LINKS:-[]}}")"
-echo "C join-hive → $(echo "$cj" | head -c 160)"
-bf_ok=0
-for i in $(seq 1 30); do
-  n="$(q c "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-ab' AND origin='remote';")"
-  [ "${n:-0}" -ge 1 ] && { bf_ok=1; break; }
-  sleep 3
-done
-[ "$bf_ok" = 1 ] && echo "✓ BACKFILL: C received pre-existing F-MX-ab (origin=remote) after late join" \
-  || echo "✗ BACKFILL: C did NOT receive pre-existing content after late join"
+# ── 5. BACKFILL: B receives the pre-existing (pre-join) content ─────────────────
+log "BACKFILL: B must receive A's PRE-EXISTING seed content (origin=remote)"; check_all b seed backfill a
+BACKFILL_TABLE="$MATRIX"; MATRIX=""
+
+# ── 6. INCREMENTAL matrix both directions (post-join) ───────────────────────────
+log "INCREMENTAL A→B"; write_all a "$WS_A" ab; check_all b ab "incr-A→B" a
+log "INCREMENTAL B→A"; write_all b "$WS_B" ba; check_all a ba "incr-B→A" b
 
 # ── report ──────────────────────────────────────────────────────────────────────
-log "MATRIX RESULT (member=$SLUG hive=$HIVE_SLUG)"
-printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
-echo
-echo "negative-isolation=$([ "${C_FEATS:-1}" = 0 ] && [ "${C_CONVS:-1}" = 0 ] && echo PASS || echo FAIL)  late-backfill=$([ "$bf_ok" = 1 ] && echo PASS || echo FAIL)  topic-equal=$([ -n "$SHARED_TOPIC" ] && echo PASS || echo UNCONFIRMED)"
-echo
-echo "Instances LEFT RUNNING for Brief E/G. Ports: $WORK/instances.env  ·  STOP: $WORK/stop.sh"
+log "RESULT (member=$SLUG hive=$HIVE_SLUG)"
+echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_TABLE"
+echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
+echo; echo "negative-isolation=$NEG  topic-equal=$TEQ"
+echo "Pair LEFT RUNNING for Brief E/G. Ports: $WORK/instances.env  ·  STOP: $WORK/stop.sh"
