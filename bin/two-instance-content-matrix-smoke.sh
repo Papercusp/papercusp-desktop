@@ -161,8 +161,9 @@ echo "  negative-isolation=$NEG"
 
 # ── 4. B joins (current flow) + topic-equality ──────────────────────────────────
 log "B: discover + join-hive '$HIVE_SLUG'"
-BR=""; for i in $(seq 1 40); do BR="$(jget "$(curl -s -m 10 "$(sc b)/api/discovery/hives")" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"; [ -n "$BR" ] && break; sleep 3; done
-LINKS="$(jget "$BR" "json.dumps(d.get('memberLinks') or [])")"
+BR=""; RESP=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do RESP="$(curl -s -m 10 "$(sc b)/api/discovery/hives")"; BR="$(jget "$RESP" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'), None))")"; [ -n "$BR" ] && [ "$BR" != "null" ] && break; sleep 3; done
+echo "  [discovery] B saw rows=$(jget "$RESP" "len(d.get('rows') or [])"); target '$HIVE_SLUG' match=$([ -n "$BR" ] && [ "$BR" != "null" ] && echo Y || echo N) after ${DISCOVERY_RETRIES:-40} tries"
+LINKS="$(jget "${BR:-null}" "json.dumps((d or {}).get('memberLinks') or [])" 2>/dev/null || echo '[]')"
 jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-hive" -H 'content-type: application/json' -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":${LINKS:-[]}}")"
 [ "$(jget "$jr" "d.get('ok')")" = True ] && echo "✓ B joined" || { echo "✗ B join failed: $(echo "$jr"|head -c 200)"; exit 6; }
 sleep 5
