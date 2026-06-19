@@ -332,6 +332,18 @@ echo "→ copying createRequire runtime dep rrule (+ closure) into the sidecar"
 copy_pkg_closure rrule
 echo "  rrule closure copied ($nat_copied total package(s), $nat_missing missing)"
 
+# luxon — IDENTICAL createRequire gotcha as rrule above. schedule-next.ts loads
+# `createRequire(import.meta.url)('luxon')` (DST-correct schedule math; landed
+# 2026-06-17 in 5472dec3c, the scheduled-plans EI-1368/136 fixes — which did NOT
+# add this copy line). esbuild can't see the dynamic createRequire, luxon is
+# pure-JS (no deps, not in NATIVE_PKGS) so it was never copied → the packaged
+# operator crashed at boot with `Cannot find module 'luxon'` (EMBEDDED_PG_FAILED),
+# i.e. the .deb did not boot at all. Copy luxon so the runtime createRequire('luxon')
+# from sidecar/serve.mjs resolves. (shared-hive-release-testing Lane A, A-001.)
+echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
+copy_pkg_closure luxon
+echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"
+
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
 # sets — see those files' root-resolution comments.
