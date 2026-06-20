@@ -320,7 +320,7 @@ if [ "$join_ok" = 1 ]; then
   # (5a) FORWARD owner→joiner: write F-HIVE1 on A, poll B (origin=remote, any
   # slug — the hive model may remap harness_slug across peers).
   log "POST-JOIN MERGE (A→B): write F-HIVE1 on A (member='$MEMBER_SLUG') → poll B (origin=remote)"
-  probe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE1 40 || true)"
+  probe="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-HIVE1 ${MERGE_PROBE_SEC:-40} || true)"
   if [ "${probe%% *}" = 1 ]; then hive_merge_ok=1; landed_slug="${probe#* }"; fi
   if [ "$hive_merge_ok" = 1 ]; then
     echo "✓ A→B: F-HIVE1 federated owner→joiner (landed under harness_slug='$landed_slug')"
