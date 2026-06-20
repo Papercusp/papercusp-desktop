@@ -493,29 +493,49 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   [ "${unbanprobe%% *}" = 1 ] && ak_unban_ok=1
   echo "  AK unban teeth (B's op lands again): $([ "$ak_unban_ok" = 1 ] && echo PASS || echo "FAIL ($unbanprobe)")"
 
-  # ── RE-KEY block (P-008, ee7e9's spec) ──
-  # K0 — B received its join-time epoch keys over the wire (the grant seams worked).
+  # ── RE-KEY block (P-008 — DEVICE-FILTERED key-level cut; ee7e9's reframe, su-9140a 2026-06-20) ──
+  # The C-001 read-cut is provable from hive_epoch_keys ALONE — that projection is hive-home-grained
+  # (A-003-PROVEN to federate A→B), so the cut needs ZERO content federation and is ORTHOGONAL to
+  # WI-259 (the from-repo member-harness CONTENT stall). The cut = B's DEVICE has no wrapped key at the
+  # post-revoke epoch. NB every hive_epoch_keys row (all members' per-device sealed blobs) federates to
+  # B; B just can't UNWRAP the ones not sealed to its device — so the cut is the ABSENCE of a B_DEV row,
+  # not the absence of rows. B_DEV (the cut-off device) is derived from A's AUTHORITATIVE member-set
+  # diff: A wrapped epoch-CUR to {A,B} but epoch-NEW only to the REMAINING ({A}), so
+  # B_DEV = A(epoch=CUR devices) EXCEPT A(epoch=NEW devices). Earlier F-CTRL/F-CUT content probes
+  # conflated the cut with WI-259's content stall (false-RED); this is the true, independent proof.
+
+  # K0 — B received join-time epoch keys over the wire (origin=remote ⇒ the grant + federation worked).
   b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$b_keys" ] && [ "$b_keys" -ge 1 ] && rk_keys_ok=1
   echo "  K0 join-keys (B has wrapped epoch keys origin=remote): $([ "$rk_keys_ok" = 1 ] && echo "PASS ($b_keys)" || echo "FAIL ($b_keys)")"
 
-  # K1 CONTROL — B reads pre-revoke content (has the key → decrypts).
-  ctrl="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-CTRL 40 || true)"
-  [ "${ctrl%% *}" = 1 ] && rk_ctrl_ok=1
-  echo "  K1 CONTROL (B reads pre-revoke F-CTRL): $([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo "FAIL ($ctrl)")"
+  # CURRENT (pre-revoke) epoch on A = the max minted epoch (-1 ⇒ the grant never fired = K0 upstream fail).
+  CUR_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
 
-  # K2 REVOKE — A revokes B → epoch advance + re-key remaining (NOT B).
+  # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
   mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1
   sleep 4
-  epoch_after="$(drv_psql a "SELECT value FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='epoch';" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$epoch_after" ] && rk_revoke_ok=1
-  echo "  K2 REVOKE (A revokes B, epoch advanced): $([ "$rk_revoke_ok" = 1 ] && echo "PASS (epoch=$epoch_after)" || echo "FAIL (no epoch row)")"
+  NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  { [ -n "$CUR_EPOCH" ] && [ -n "$NEW_EPOCH" ] && [ "$NEW_EPOCH" -gt "$CUR_EPOCH" ]; } 2>/dev/null && rk_revoke_ok=1
+  echo "  K2 REVOKE (A revokes B, epoch advanced $CUR_EPOCH→$NEW_EPOCH): $([ "$rk_revoke_ok" = 1 ] && echo "PASS" || echo "FAIL (epoch did not advance)")"
 
-  # K3 CUT — A writes F-CUT under the NEW epoch → B can't decrypt → never projects.
-  cut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-CUT 40 || true)"
-  b_cut="$(drv_psql b "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-CUT' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  [ "${cut%% *}" != 1 ] && [ "$b_cut" = 0 ] && rk_cut_ok=1
-  echo "  K3 CUT (B CANNOT read post-revoke F-CUT — the C-001 read-cut): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B read F-CTRL, can't read F-CUT)" || echo "FAIL (cut=$cut b_count=$b_cut)")"
+  # B_DEV — the cut-off device = A's CUR-epoch member devices EXCEPT A's NEW-epoch (remaining) devices.
+  # In a 2-member hive this is exactly B's device (A stays a member ⇒ A_DEV is in both epochs, excluded).
+  B_DEV="$(drv_psql a "SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH EXCEPT SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+
+  # K1 CONTROL — B's DEVICE held a key at the pre-revoke epoch (it COULD derive current content).
+  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$B_DEV" ] && [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && rk_ctrl_ok=1
+  echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=$k1_bdev B_DEV=${B_DEV:0:12})")"
+
+  # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
+  # WHILE the NEW epoch DID federate to B for the REMAINING members (so the 0 is a true cut, not a
+  # federation miss) and A holds the NEW epoch rows. This IS the C-001 read-cut — key-level, device-filtered.
+  k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
+  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
+  a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$B_DEV" ] && [ "$k3_bdev" = 0 ] && [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ] && [ -n "$a_new" ] && [ "$a_new" -ge 1 ] && rk_cut_ok=1
+  echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)" || echo "FAIL (B_DEV-new=$k3_bdev remaining-on-B=$k3_remaining A-new=$a_new)")"
 fi
 
 # ── report ──────────────────────────────────────────────────────────────────────
@@ -524,7 +544,7 @@ echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$
 if [ "$witness_ran" = 1 ]; then
   echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)"
   if [ "$ak_default_ok" = 1 ] && [ "$ak_ban_ok" = 1 ] && [ "$ak_unban_ok" = 1 ] && [ "$rk_keys_ok" = 1 ] && [ "$rk_ctrl_ok" = 1 ] && [ "$rk_revoke_ok" = 1 ] && [ "$rk_cut_ok" = 1 ]; then
-    echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (B reads pre-revoke F-CTRL, can't read post-revoke F-CUT) proven on the binary"
+    echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (key-level, device-filtered: B's device HAD the pre-revoke epoch key, has NO post-revoke epoch key while remaining members were re-keyed) proven on the binary"
   else
     echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK diagnostics above"
   fi
