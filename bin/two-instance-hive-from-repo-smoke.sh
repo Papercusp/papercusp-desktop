@@ -461,7 +461,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
       -H 'content-type: application/json' \
       -H 'accept: application/json, text/event-stream' \
       ${tok:+-H "Authorization: Bearer $tok"} \
-      -d "{\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
   }
 
   # (su-9140a, C-001 construction) The natural from-repo join leaves the OWNER with NO hive_members row
