@@ -175,16 +175,21 @@ fi
 BOOTSTRAP="$(fed_start_testnet_dht "$OPERATOR_DIR" "$WORK")" || exit 3
 echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 
+# Witness: propagate the re-key flag to BOTH instances when set in this rig's env (per-flag
+# override, wins; no global PostHog flip → no fleet blip). Empty array ⇒ no-op when unset
+# (the rig stays a plain smoke). Required for the P-008 re-key cut + the live AK content leg.
+REKEY_ENV=(); [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ] && REKEY_ENV=(PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY="$PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY")
+
 # ── launch two isolated instances with distinct identities ─────────────────────
 log "launch A ($P_A_USER) + B ($P_B_USER) [$RUN_MODE]"
 if [ "$RUN_MODE" = deb ]; then
-  fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-  fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+  fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
+  fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
 else
   A_HONO="$(pick_free_port 18071)"; A_PG="$(pick_free_port 18532)"
-  sc_launch "$A_HOME" "${FED_LOG[a]}" "$A_HONO" "$A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+  sc_launch "$A_HOME" "${FED_LOG[a]}" "$A_HONO" "$A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
   B_HONO="$(pick_free_port $((A_HONO + 1)))"; B_PG="$(pick_free_port $((A_PG + 100)))"
-  sc_launch "$B_HOME" "${FED_LOG[b]}" "$B_HONO" "$B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+  sc_launch "$B_HOME" "${FED_LOG[b]}" "$B_HONO" "$B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
 fi
 
 fed_wait_boot a 60 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 4; }
@@ -391,9 +396,97 @@ if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   fi
 fi
 
+# ── 6. FOLDED LIVE WITNESS — owner-enforcement (AK) + re-key CUT (P-008) ──────────
+# Opt-in: WITNESS_PROBE=1. Runs ONLY after a successful join (B is an admitted,
+# federating member). flag-on (PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1) must be set in
+# THIS rig's env so the launchers propagate it to both instances (content then rides
+# epoch encrypt/decrypt — required for the K3 cut + the live decrypt→EN-4 order).
+#
+# ASSUMPTIONS FLAGGED FOR ee7e9 REVIEW (before firing):
+#  (a) mcp_call shape: POST /api/mcp?superuser=1&client=<id> JSON-RPC tools/call. The
+#      sidecar instance must accept superuser=1 (auth: open in the test sidecar, or a
+#      bearer — confirm). Used for hive:ban_member + substrate:revoke_contributor.
+#  (b) K2 epoch-advance read: epoch lives in hive_settings setting_key LIKE '%epoch%'
+#      (per your spec) — confirm the actual key/column.
+#  (c) SCOPE (tight, this run): AK default-off + ban(revoke:false)+unban-teeth + your
+#      re-key K0-K3. AK rate/takedown/content = FOLLOW-UP (rate/content need the
+#      claim-gated POST /api/hive/:id/policy route; A=papercupai isn't repo-admin on the
+#      octocat fixture → seed claim_status or use a papercupai-owned repo for those).
+ak_default_ok=0; ak_ban_ok=0; ak_unban_ok=0
+rk_keys_ok=0; rk_ctrl_ok=0; rk_revoke_ok=0; rk_cut_ok=0; witness_ran=0
+if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  witness_ran=1
+  log "═══ FOLDED LIVE WITNESS (AK enforcement + P-008 re-key cut) ═══"
+  WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$WS_ID" ] && WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$B_GH_ID" ] && B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
+  echo "  witness vars: WS=$WS_ID  B_GH_ID=$B_GH_ID  HIVE=$HIVE_SLUG  MEMBER=$MEMBER_SLUG"
+
+  # MCP-over-HTTP tool call to an instance (JSON-RPC; superuser context needs &client).
+  mcp_call() {
+    local inst="$1" tool="$2" args="$3"
+    curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1&client=witness" \
+      -H 'content-type: application/json' \
+      -d "{\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
+  }
+
+  # AK0 — default-off control: B writes F-AK0 → lands on A (no policy yet).
+  ak0="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AK0 40 || true)"
+  [ "${ak0%% *}" = 1 ] && ak_default_ok=1
+  echo "  AK0 default-off control (B→A, no policy): $([ "$ak_default_ok" = 1 ] && echo PASS || echo "FAIL ($ak0)")"
+
+  # AK ban (P-MOD / EN-4, policy-only revoke:false → B stays admitted, ops dropped by ban).
+  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"revoke\":false}" >/dev/null 2>&1
+  sleep 3
+  banprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKBAN 40 || true)"
+  akban_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-AKBAN' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  [ "${banprobe%% *}" != 1 ] && [ "$akban_a" = 0 ] && ak_ban_ok=1
+  echo "  AK ban (B's op DROPPED on A, EN-4): $([ "$ak_ban_ok" = 1 ] && echo PASS || echo "FAIL (probe=$banprobe A_count=$akban_a)")"
+
+  # AK teeth — unban → B's next write lands again (proves the ban gate was load-bearing).
+  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"restore\":true}" >/dev/null 2>&1
+  sleep 3
+  unbanprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKUNBAN 40 || true)"
+  [ "${unbanprobe%% *}" = 1 ] && ak_unban_ok=1
+  echo "  AK unban teeth (B's op lands again): $([ "$ak_unban_ok" = 1 ] && echo PASS || echo "FAIL ($unbanprobe)")"
+
+  # ── RE-KEY block (P-008, ee7e9's spec) ──
+  # K0 — B received its join-time epoch keys over the wire (the grant seams worked).
+  b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$b_keys" ] && [ "$b_keys" -ge 1 ] && rk_keys_ok=1
+  echo "  K0 join-keys (B has wrapped epoch keys origin=remote): $([ "$rk_keys_ok" = 1 ] && echo "PASS ($b_keys)" || echo "FAIL ($b_keys)")"
+
+  # K1 CONTROL — B reads pre-revoke content (has the key → decrypts).
+  ctrl="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-CTRL 40 || true)"
+  [ "${ctrl%% *}" = 1 ] && rk_ctrl_ok=1
+  echo "  K1 CONTROL (B reads pre-revoke F-CTRL): $([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo "FAIL ($ctrl)")"
+
+  # K2 REVOKE — A revokes B → epoch advance + re-key remaining (NOT B).
+  mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1
+  sleep 4
+  epoch_after="$(drv_psql a "SELECT value FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key LIKE '%epoch%';" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$epoch_after" ] && rk_revoke_ok=1
+  echo "  K2 REVOKE (A revokes B, epoch advanced): $([ "$rk_revoke_ok" = 1 ] && echo "PASS (epoch=$epoch_after)" || echo "FAIL (no epoch row)")"
+
+  # K3 CUT — A writes F-CUT under the NEW epoch → B can't decrypt → never projects.
+  cut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-CUT 40 || true)"
+  b_cut="$(drv_psql b "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-CUT' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  [ "${cut%% *}" != 1 ] && [ "$b_cut" = 0 ] && rk_cut_ok=1
+  echo "  K3 CUT (B CANNOT read post-revoke F-CUT — the C-001 read-cut): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B read F-CTRL, can't read F-CUT)" || echo "FAIL (cut=$cut b_count=$b_cut)")"
+fi
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
 echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
+if [ "$witness_ran" = 1 ]; then
+  echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)"
+  if [ "$ak_default_ok" = 1 ] && [ "$ak_ban_ok" = 1 ] && [ "$ak_unban_ok" = 1 ] && [ "$rk_keys_ok" = 1 ] && [ "$rk_ctrl_ok" = 1 ] && [ "$rk_revoke_ok" = 1 ] && [ "$rk_cut_ok" = 1 ]; then
+    echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (B reads pre-revoke F-CTRL, can't read post-revoke F-CUT) proven on the binary"
+  else
+    echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK diagnostics above"
+  fi
+fi
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
   echo "OVERALL: PASS — create-from-repo → discover → join → BIDIRECTIONAL + continuous hive federation proven end-to-end ($RUN_MODE mode)"
   exit 0
