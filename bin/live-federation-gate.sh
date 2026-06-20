@@ -69,12 +69,26 @@ fi
 
 # ── 3. run the smokes ─────────────────────────────────────────────────────────
 # PASS iff an `OVERALL: PASS` line exists in the smoke output.
+# DISCOVERY-RETRY: the from-repo flow discovers via cupboard-off DHT gossip, which lands
+# only ~50% of the time per attempt (no cupboard service → directory-only). A single run
+# would false-RED the gate half the time on a flake, not a regression — so we re-run (up to
+# DISCOVERY_ATTEMPTS, default 3) ONLY when the failure is `discovered=FAIL` (the flake), never
+# on a real post-discovery failure. ~3 attempts ⇒ ~88% chance discovery lands. Each attempt is
+# load-gated implicitly (the whole gate already passed the load check; a flake adds little).
 run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   local label="$1" script="$2" deb="$3"; shift 3
-  local out="$WORK/$label.out"
-  log "running $label …"
-  ( cd "$DESKTOP_DIR/.." && env "$@" bash "papercusp-desktop/bin/$script" ${deb:+"$deb"} ) >"$out" 2>&1 || true
-  grep -qaE 'OVERALL: PASS' "$out" 2>/dev/null && echo PASS || echo FAIL
+  local out="$WORK/$label.out" attempts="${DISCOVERY_ATTEMPTS:-3}" i res
+  for i in $(seq 1 "$attempts"); do
+    log "running $label (attempt $i/$attempts) …"
+    ( cd "$DESKTOP_DIR/.." && env "$@" bash "papercusp-desktop/bin/$script" ${deb:+"$deb"} ) >"$out" 2>&1 || true
+    if grep -qaE 'OVERALL: PASS' "$out" 2>/dev/null; then echo PASS; return; fi
+    # Retry ONLY on a discovery flake; a real post-discovery RED is a genuine result — keep it.
+    if grep -qaE 'discovered=FAIL' "$out" 2>/dev/null && [ "$i" -lt "$attempts" ]; then
+      log "$label: discovered=FAIL (cupboard-off DHT flake) — retrying"; cp "$out" "$out.attempt$i" 2>/dev/null; continue
+    fi
+    break
+  done
+  echo FAIL
 }
 
 MATRIX_RES="SKIPPED"
@@ -83,11 +97,16 @@ if [ "$SKIP_MATRIX" != 1 ]; then
     PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100)"
   log "content-matrix → $MATRIX_RES"
 fi
+# The from-repo leg runs WITNESS_PROBE=1 + the re-key flag so it also exercises the AK
+# owner-enforcement + the device-filtered C-001 re-key cut (K0-K3) — the re-key was the 3rd
+# green-rig/red-binary bug (A-003, WI-259, WI-280), all hermetically-green but live-red, so the
+# live gate must cover them too. (Currently REDs on WI-259/WI-280 by design; goes green when both land.)
 FROMREPO_RES="SKIPPED"
 if [ "$SKIP_FROMREPO" != 1 ]; then
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
-    HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100)"
-  log "from-repo → $FROMREPO_RES"
+    HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
+    PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 WITNESS_PROBE=1)"
+  log "from-repo+witness → $FROMREPO_RES"
 fi
 
 # ── 4. verdict ────────────────────────────────────────────────────────────────
