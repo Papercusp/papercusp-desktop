@@ -199,6 +199,18 @@ fed_assert_isolated a b || exit 5
 fed_wait_api a 30 || { echo "A sidecar API never came up"; exit 4; }
 fed_wait_api b 30 || { echo "B sidecar API never came up"; exit 4; }
 
+# (re-key witness, su-9140a 2026-06-19): the env recipe PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 does NOT
+# engage getFlag(HIVE_REKEY) on the packaged binary (verified: owner had 0 hive_epoch_keys). Flip the
+# flag for real via the loopback /api/flags/set route (persists an override getFlag reads + publishes the
+# change) on BOTH instances, BEFORE the create so the owner's epoch initializes with the re-key on. Gated
+# on the same env so non-rekey runs are untouched.
+if [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ]; then
+  for inst in a b; do
+    r="$(curl -s -m 10 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/flags/set" -H 'content-type: application/json' -d '{"key":"papercusp-hive-rekey","enabled":true}' || true)"
+    echo "  [rekey-flag] $inst /api/flags/set papercusp-hive-rekey=true → $r"
+  done
+fi
+
 # ── helpers ─────────────────────────────────────────────────────────────────────
 dir_list() { curl -s -m 10 "http://127.0.0.1:${FED_SC[$1]}/api/discovery/hives"; }
 
