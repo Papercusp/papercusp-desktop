@@ -97,6 +97,21 @@ assert_serve_supports_from_repo() {
       return 1
     }
   done
+  # Re-key witness staleness gate (WITNESS_PROBE / re-key flag only — a plain smoke is
+  # unaffected). The join-time grant SEAMS (Seam 1 upsertHiveMember + Seam 2 boot.ts admit,
+  # "Re-key member-add") landed AFTER the re-key MODULES, so a build can carry
+  # grantEpochKeysToMembers yet never CALL it at join → a joiner gets 0 epoch keys → K0 fails
+  # on a STALE BUILD, not on re-key logic (the 2026-06-20 false-FAIL trap). The from-repo
+  # markers above don't cover this — require the seam marker when the re-key witness is on.
+  if [ "${WITNESS_PROBE:-0}" = 1 ] || [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ]; then
+    for marker in 'Re-key member-add' 'buildHiveRekeyBootDeps'; do
+      grep -qaF "$marker" "$serve" 2>/dev/null || {
+        echo "✗ $label serve.mjs lacks the re-key seam '$marker' — built before the join-time grant seams (c2a63 Seam 1/2, 2026-06-20); rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
+        return 1
+      }
+    done
+    echo "✓ $label serve.mjs carries the re-key grant seams (witness static check)"
+  fi
   echo "✓ $label serve.mjs carries the from-repo backend (static check)"
 }
 
@@ -444,6 +459,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
     tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null || true)"
     curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1&client=witness" \
       -H 'content-type: application/json' \
+      -H 'accept: application/json, text/event-stream' \
       ${tok:+-H "Authorization: Bearer $tok"} \
       -d "{\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
   }
