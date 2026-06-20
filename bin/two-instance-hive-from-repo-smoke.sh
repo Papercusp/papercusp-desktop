@@ -435,13 +435,27 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   [ -z "$B_GH_ID" ] && B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   echo "  witness vars: WS=$WS_ID  B_GH_ID=$B_GH_ID  HIVE=$HIVE_SLUG  MEMBER=$MEMBER_SLUG"
 
-  # MCP-over-HTTP tool call to an instance (JSON-RPC; superuser context needs &client).
+  # MCP-over-HTTP tool call to an instance (JSON-RPC; superuser=1 needs loopback + a valid
+  # bearer). The sidecar ensures $HOME/.papercusp/superuser-token (mode 0600) on boot
+  # (desktop-install/papercusp-files.ts), so each isolated instance HOME carries its own.
   mcp_call() {
-    local inst="$1" tool="$2" args="$3"
+    local inst="$1" tool="$2" args="$3" home tok
+    [ "$inst" = a ] && home="$A_HOME" || home="$B_HOME"
+    tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null || true)"
     curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1&client=witness" \
       -H 'content-type: application/json' \
+      ${tok:+-H "Authorization: Bearer $tok"} \
       -d "{\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
   }
+
+  # (su-9140a, C-001 construction) The natural from-repo join leaves the OWNER with NO hive_members row
+  # for the joiner → the epoch-key grant (on upsertHiveMember) never fires → no encryption → nothing to cut.
+  # Diagnose A's admission state; if a pending-join exists (approval-mode), APPROVE it to fire the grant.
+  echo "  [C-001-setup] PRE: A pending_joins=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_pending_joins;" 2>/dev/null|tr -d '[:space:]') members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
+  dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"decision\":\"approve\"}")"
+  echo "  [C-001-setup] membership_decide(approve B=$B_GH_ID) -> $(echo "$dec" | head -c 240)"
+  sleep 5
+  echo "  [C-001-setup] POST: A members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
 
   # AK0 — default-off control: B writes F-AK0 → lands on A (no policy yet).
   ak0="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AK0 40 || true)"
@@ -457,7 +471,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  AK ban (B's op DROPPED on A, EN-4): $([ "$ak_ban_ok" = 1 ] && echo PASS || echo "FAIL (probe=$banprobe A_count=$akban_a)")"
 
   # AK teeth — unban → B's next write lands again (proves the ban gate was load-bearing).
-  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"restore\":true}" >/dev/null 2>&1
+  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"unban\":true}" >/dev/null 2>&1
   sleep 3
   unbanprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKUNBAN 40 || true)"
   [ "${unbanprobe%% *}" = 1 ] && ak_unban_ok=1
@@ -477,7 +491,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # K2 REVOKE — A revokes B → epoch advance + re-key remaining (NOT B).
   mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1
   sleep 4
-  epoch_after="$(drv_psql a "SELECT value FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key LIKE '%epoch%';" 2>/dev/null | tr -d '[:space:]')"
+  epoch_after="$(drv_psql a "SELECT value FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='epoch';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$epoch_after" ] && rk_revoke_ok=1
   echo "  K2 REVOKE (A revokes B, epoch advanced): $([ "$rk_revoke_ok" = 1 ] && echo "PASS (epoch=$epoch_after)" || echo "FAIL (no epoch row)")"
 
