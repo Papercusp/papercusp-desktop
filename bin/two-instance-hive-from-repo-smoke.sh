@@ -524,15 +524,15 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   B_DEV="$(drv_psql a "SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH EXCEPT SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | head -1 | tr -d '[:space:]')"
 
   # K1 CONTROL — B's DEVICE held a key at the pre-revoke epoch (it COULD derive current content).
-  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
+  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && rk_ctrl_ok=1
   echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=$k1_bdev B_DEV=${B_DEV:0:12})")"
 
   # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
   # WHILE the NEW epoch DID federate to B for the REMAINING members (so the 0 is a true cut, not a
   # federation miss) and A holds the NEW epoch rows. This IS the C-001 read-cut — key-level, device-filtered.
-  k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
-  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV';" 2>/dev/null | tr -d '[:space:]')"
+  k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ "$k3_bdev" = 0 ] && [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ] && [ -n "$a_new" ] && [ "$a_new" -ge 1 ] && rk_cut_ok=1
   echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)" || echo "FAIL (B_DEV-new=$k3_bdev remaining-on-B=$k3_remaining A-new=$a_new)")"
