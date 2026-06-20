@@ -242,9 +242,9 @@ echo "  (cupboard leg outcome: $(jget "$a_resp" "json.dumps(d['publish'].get('cu
 [ "$create_ok" = 1 ] || { echo "cannot continue without a created hive"; exit 6; }
 
 # ── 2. B discovers A's hive via the directory (announce over the testnet) ──────
-log "B ($P_B_USER): poll GET /api/discovery/hives for '$HIVE_SLUG' (≤120s)"
+log "B ($P_B_USER): poll GET /api/discovery/hives for '$HIVE_SLUG' (≤$(( ${DISCOVERY_RETRIES:-40} * 3 ))s)"
 discover_ok=0; links_ok=0; B_ROW=""
-for i in $(seq 1 40); do
+for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
   body="$(dir_list b)"
   B_ROW="$(jget "$body" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"
   [ -n "$B_ROW" ] && { discover_ok=1; break; }
