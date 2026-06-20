@@ -98,19 +98,21 @@ assert_serve_supports_from_repo() {
     }
   done
   # Re-key witness staleness gate (WITNESS_PROBE / re-key flag only — a plain smoke is
-  # unaffected). The join-time grant SEAM (Seam 2 boot.ts admit-grant) landed AFTER the re-key
-  # MODULES, so a build can carry grantEpochKeysToMembers (the function) yet never CALL it at
-  # join → a joiner gets 0 epoch keys → K0 fails on a STALE BUILD, not on re-key logic (the
-  # 2026-06-20 false-FAIL trap). MARKER MUST SURVIVE MINIFICATION: esbuild strips COMMENTS, so
-  # we match the Seam-2 admit-grant CODE STRING `[hive-rekey] grantEpochKeysToMembers on admit`
-  # (a string literal in boot.ts's open-mode admit catch — present only once Seam 2 landed),
-  # NOT the comment. The from-repo markers above don't cover this.
+  # unaffected). The join-time grant SEAM (Seam 2 boot.ts open-mode admit) landed AFTER the re-key
+  # MODULES, so a build can carry grantEpochKeysToMembers (the function) yet never populate membership
+  # at join → a joiner gets 0 epoch keys → K0 fails on a STALE BUILD, not on re-key logic (the
+  # 2026-06-20 false-FAIL trap). MARKER MUST SURVIVE MINIFICATION: esbuild strips COMMENTS, so we match
+  # a CODE STRING from the admit catch. WI-280 (2026-06-20): the open-mode admit seam now ROUTES THROUGH
+  # upsertHiveMember — it INSERTs the joiner into hive_members AND grants (the bare grantEpochKeysToMembers
+  # admit call was replaced, since open-mode auto-admit otherwise never populated hive_members → the
+  # boundary/grant wrap-set was empty → 0 keys). So the marker is the `open-mode admit upsertHiveMember`
+  # string literal in boot.ts's admit catch (present only once the WI-280 membership-population fix landed).
   if [ "${WITNESS_PROBE:-0}" = 1 ] || [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ]; then
-    if ! grep -qaF 'grantEpochKeysToMembers on admit' "$serve" 2>/dev/null; then
-      echo "✗ $label serve.mjs lacks the Seam-2 admit-grant call (string 'grantEpochKeysToMembers on admit') — built before the join-time grant seam (c2a63 Seam 1/2, 2026-06-20); rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
+    if ! grep -qaF 'open-mode admit upsertHiveMember' "$serve" 2>/dev/null; then
+      echo "✗ $label serve.mjs lacks the WI-280 admit-seam membership upsert (string 'open-mode admit upsertHiveMember') — built before the membership-population fix; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
       return 1
     fi
-    echo "✓ $label serve.mjs carries the Seam-2 join-time grant call (witness static check)"
+    echo "✓ $label serve.mjs carries the WI-280 join-time membership+grant seam (witness static check)"
   fi
   echo "✓ $label serve.mjs carries the from-repo backend (static check)"
 }
