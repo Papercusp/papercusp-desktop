@@ -22,7 +22,12 @@
 #   GATE_NO_FILE      (default 0)   — set 1 to skip EI filing (just log the verdict).
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOAD_GATE="${LOAD_GATE:-30}"; REBUILD="${REBUILD:-1}"
+# LOAD_GATE default is CONSERVATIVE (15): the smokes' cupboard-off DHT discovery degrades and
+# false-REDs well BELOW the run-kill threshold (~51), and a gate run itself ADDS ~2 PGs of load —
+# so it must only fire on a genuinely quiet box (a fleet infra storm pushed this box to 94 during
+# a 30-threshold run, which both false-failed AND worsened the contention). Raise it only for a
+# dedicated/idle host. Better to SKIP and retry next window than false-RED or pile onto a busy box.
+LOAD_GATE="${LOAD_GATE:-15}"; REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
 GATE_DISPLAY="${GATE_DISPLAY:-250}"; OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp}"
 GATE_NO_FILE="${GATE_NO_FILE:-0}"

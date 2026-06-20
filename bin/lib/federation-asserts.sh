@@ -375,10 +375,128 @@ fed_hive_merge_probe() {
 # carries THIS run's $work (the packaged instance trees: desktop binary,
 # host.mjs sidecar, embedded-PG, code-server). NEVER a broad
 # `pkill -f papercusp-desktop` — that kills peers' dev desktops.
+# fed_self_and_ancestors — echo " PID PID … " for the current shell + its whole
+# ancestor chain. Used so cleanup never KILLS, and reap never counts as "live", the
+# very process tree doing the cleanup — which legitimately carries $work in its argv
+# (`cleanup-run.sh <WORK>`, the invoking agent shell). Walks /proc PPid (robust to a
+# comm with spaces/parens, unlike `stat` field-4). `$$` stays the main shell pid even
+# inside this command-substitution (bash special-cases it).
+fed_self_and_ancestors() {
+  local cur=$$ out=" $$ "
+  while :; do
+    cur=$(awk '/^PPid:/{print $2}' "/proc/$cur/status" 2>/dev/null)
+    { [ -n "$cur" ] && [ "$cur" -gt 1 ] 2>/dev/null; } || break
+    out+="$cur "
+  done
+  printf '%s' "$out"
+}
+
 fed_cleanup_scoped() {
-  local work="$1" p
-  for p in "${FED_KILL_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true; done
-  pkill -9 -f "$work" 2>/dev/null || true
-  ps -eo pid,args 2>/dev/null | grep -F "$work" | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null || true
+  local work="$1" p pid
+  # Protect the current process + its ancestors: a STANDALONE caller
+  # (`cleanup-run.sh <WORK>`, an agent's shell) carries $work in its OWN argv, so an
+  # unguarded `pkill -f "$work"` would match — and kill — the caller / its shell
+  # mid-cleanup (EI-1739). The in-rig EXIT trap is unaffected (a rig never has
+  # $work in argv — it's a runtime mktemp var).
+  local protect; protect="$(fed_self_and_ancestors)"
+  for p in "${FED_KILL_PIDS[@]:-}"; do
+    [ -n "$p" ] || continue
+    case "$protect" in *" $p "*) continue;; esac
+    kill -9 "$p" 2>/dev/null || true
+  done
+  # Kill every process whose cmdline carries THIS run's $work — except self/ancestors
+  # (above) and the scan pipeline itself (`grep -v grep`).
+  ps -eo pid,args 2>/dev/null | grep -F "$work" | grep -v grep | awk '{print $1}' | while read -r pid; do
+    case "$protect" in *" $pid "*) continue;; esac
+    kill -9 "$pid" 2>/dev/null || true
+  done
   rm -rf "$work" 2>/dev/null || true
+}
+
+# ── EI-1739: safe run-SCOPED cleanup for CONCURRENT rigs ───────────────────────
+# Multiple agents run the two-instance rigs at once. NEVER clean up leftovers with
+# a broad `rm -rf /tmp/<rig>.*` or `pkill -f <rig-name>` — those nuke OTHER agents'
+# LIVE runs mid-flight (the EI-1739 collision: a glob over all runs + a name-wide
+# pkill deleted a sibling's $WORK mid-initdb and killed its processes). Use:
+#   bin/cleanup-run.sh <WORK>   — kill+rm exactly ONE run's $WORK
+#   bin/reap-orphans.sh [--dry-run]  — reap ONLY runs whose processes are gone
+# Both refuse anything that isn't a single per-run rig $WORK dir, so they can never
+# touch a live sibling or a path outside a run sandbox.
+
+# The mktemp -d prefixes every two-instance rig uses (keep in sync if a rig adds one).
+FED_RIG_TMP_PREFIXES=(
+  /tmp/hive-fromrepo-smoke. /tmp/hive-dir-smoke. /tmp/merge-smoke.
+  /tmp/p3-smoke. /tmp/vm-fed. /tmp/deb-hzfed.
+)
+
+# fed_is_rig_work <dir> — true iff <dir> is a REAL per-run rig $WORK: an existing
+# directory that is a known mktemp prefix + a non-empty single-segment suffix.
+# Refuses '', '/', '/tmp', a bare prefix, a nested subpath, or any non-rig path —
+# so a validated caller can never rm/kill outside one run's sandbox.
+fed_is_rig_work() {
+  local work="$1" pfx suf
+  [ -n "$work" ] && [ -d "$work" ] || return 1
+  for pfx in "${FED_RIG_TMP_PREFIXES[@]}"; do
+    suf="${work#"$pfx"}"
+    [ "$work" != "$suf" ] && [ -n "$suf" ] || continue
+    case "$suf" in */*) continue;; *) return 0;; esac  # direct rig dir only, no nesting
+  done
+  return 1
+}
+
+# fed_cleanup_run <work> — the SAFE public cleanup for ONE run's leftovers:
+# validate then fed_cleanup_scoped. Refuses anything that isn't a single rig $WORK.
+fed_cleanup_run() {
+  local work="$1"
+  if ! fed_is_rig_work "$work"; then
+    echo "fed_cleanup_run: refusing '$work' — not a per-run rig \$WORK dir (never broad-glob; pass one /tmp/<rig>.XXXXXX)" >&2
+    return 2
+  fi
+  fed_log "cleanup-run (scoped to $work)" >&2
+  fed_cleanup_scoped "$work"
+}
+
+# fed_reap_orphans [--dry-run] [--min-age-min N] — reap ONLY dead rig runs: a $WORK
+# is reaped iff (a) NO live process references it (`pgrep -f "$dir"` empty) AND (b)
+# it is older than N minutes (default 5 — protects a run still in its startup window
+# before it has spawned anything). A live sibling always has referencing processes,
+# so it is NEVER touched. Safe to run anytime, concurrently, by anyone.
+fed_reap_orphans() {
+  local dry=0 min_age=5 d suf reaped=0 skipped=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1;;
+      --min-age-min) shift; min_age="$1";;
+      *) echo "fed_reap_orphans: unknown arg '$1'" >&2; return 2;;
+    esac
+    shift
+  done
+  local protect; protect="$(fed_self_and_ancestors)"
+  local prev_nullglob; prev_nullglob="$(shopt -p nullglob)"; shopt -s nullglob
+  local pfx pp live
+  for pfx in "${FED_RIG_TMP_PREFIXES[@]}"; do
+    for d in "$pfx"*; do
+      [ -d "$d" ] || continue
+      fed_is_rig_work "$d" || continue
+      # live iff some process OUTSIDE our own tree references $d (a real instance);
+      # exclude self+ancestors so the reaper / invoking agent shell — which may carry
+      # $d in its argv — never false-flags a dead run as 'live'.
+      live=0
+      for pp in $(pgrep -f -- "$d" 2>/dev/null); do
+        case "$protect" in *" $pp "*) continue;; esac
+        live=1; break
+      done
+      if [ "$live" = 1 ]; then
+        skipped=$((skipped+1)); echo "skip  (live)  $d" >&2; continue
+      fi
+      if [ -z "$(find "$d" -maxdepth 0 -mmin +"$min_age" 2>/dev/null)" ]; then
+        skipped=$((skipped+1)); echo "skip  (young) $d" >&2; continue
+      fi
+      if [ "$dry" = 1 ]; then echo "REAP  (dry)   $d" >&2
+      else echo "REAP          $d" >&2; fed_cleanup_scoped "$d"; fi
+      reaped=$((reaped+1))
+    done
+  done
+  eval "$prev_nullglob"
+  echo "fed_reap_orphans: reaped=$reaped skipped=$skipped (min_age=${min_age}m)" >&2
 }
