@@ -33,19 +33,19 @@ set -euo pipefail
 #                                    Papercusp/papercusp clone is no longer
 #                                    used by this script.
 #
-# Override locations with PAPERCUP_ROOT / PAPERCUSP_ROOT if your layout
+# Override locations with REPO_ROOT / PAPERCUSP_ROOT if your layout
 # differs (e.g. CI clones into a flat workspace dir).
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PAPERCUP_ROOT="${PAPERCUP_ROOT:-$ROOT/..}"
-PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$PAPERCUP_ROOT/libs/papercusp}"
-WEB_DIR="$PAPERCUP_ROOT/apps/operator"
+REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
+PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
+WEB_DIR="$REPO_ROOT/apps/operator"
 SIDECAR_DIR="$ROOT/src-tauri/sidecar"
 
 if [[ ! -d "$WEB_DIR" ]]; then
   echo "ERROR: papercup/apps/operator not found at $WEB_DIR"
-  echo "       Set PAPERCUP_ROOT to the path of your Papercusp/papercup clone."
+  echo "       Set REPO_ROOT to the path of your Papercusp/papercup clone."
   exit 1
 fi
 if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
@@ -135,7 +135,7 @@ ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart su
 echo "  apps/operator/node_modules/@papercusp/ contents:"
 ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
 
-VITE_DIR="$PAPERCUP_ROOT/apps/operator-vite"
+VITE_DIR="$REPO_ROOT/apps/operator-vite"
 if [[ ! -d "$VITE_DIR" ]]; then
   echo "ERROR: apps/operator-vite not found at $VITE_DIR"
   exit 1
@@ -144,7 +144,7 @@ echo "→ installing operator-vite deps"
 (cd "$VITE_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
 echo "→ building operator-vite SPA (vite build → dist/)"
-(cd "$PAPERCUP_ROOT" && npm --workspace @papercusp/operator-vite run build)
+(cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)
 if [[ ! -f "$VITE_DIR/dist/index.html" ]]; then
   echo "ERROR: expected $VITE_DIR/dist/index.html after the Vite build"
   exit 1
@@ -268,7 +268,7 @@ fi
 # Search every node_modules the monorepo might have hoisted them into.
 echo "→ copying externalized native deps (node-pty) into the sidecar"
 npt_count=0
-for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
+for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
   for nptdir in "$base/@lydell"/node-pty*; do
     [[ -d "$nptdir" ]] || continue
     name="$(basename "$nptdir")"
@@ -303,7 +303,7 @@ copy_pkg_closure() {
     _seen="${_seen}${cur} "
     [[ -e "$SIDECAR_DIR/node_modules/$cur" ]] && continue
     local src=""
-    for base in "$WEB_DIR/node_modules" "$PAPERCUP_ROOT/node_modules" "$ROOT/node_modules"; do
+    for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
       [[ -d "$base/$cur" ]] && { src="$base/$cur"; break; }
     done
     if [[ -z "$src" ]]; then
@@ -784,7 +784,7 @@ for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   src_prebuilds=""
   for cand in \
     "$WEB_DIR/node_modules/@lydell/$pkg_name/prebuilds" \
-    "$PAPERCUP_ROOT/node_modules/@lydell/$pkg_name/prebuilds" \
+    "$REPO_ROOT/node_modules/@lydell/$pkg_name/prebuilds" \
     "$ROOT/node_modules/@lydell/$pkg_name/prebuilds"; do
     if [[ -d "$cand" ]]; then
       src_prebuilds="$cand"
