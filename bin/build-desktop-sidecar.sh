@@ -837,6 +837,18 @@ echo "→ bundling framework DDL"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 
+# Bundle the @papercusp/locks (papercusp_su side-DB) migrations. EI-2669:
+# @papercusp/locks is esbuild-BUNDLED into serve.mjs (not externalized), so its
+# su-lock-store resolves SQL_DIR = dirname(import.meta.url)/sql = <sidecar>/sql.
+# esbuild inlines only JS, never the package's sibling src/sql/*.sql, so without
+# this copy the packaged git-sync lock infra ENOENTs on scandir '<sidecar>/sql'
+# and git-sync (repo-content sync for hive members) is degraded on EVERY hive.
+# These are the LOCK schema (001-bootstrap … 015-…), a distinct set from the
+# framework DDL above — they must land at sidecar/sql/, NOT db-sql/.
+echo "→ bundling @papercusp/locks DDL"
+mkdir -p "$SIDECAR_DIR/sql"
+cp "$PAPERCUSP_ROOT/packages/locks/src/sql/"*.sql "$SIDECAR_DIR/sql/"
+
 # Bundle the sidecar preload script. Loaded via `node --require` before
 # server.js to strip Node 22+'s partial localStorage stub (see file
 # header for full reasoning).
