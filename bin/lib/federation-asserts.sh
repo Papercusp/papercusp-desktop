@@ -247,9 +247,17 @@ EOF
   return 1
 }
 
-# ── share (swarm-topic join) ────────────────────────────────────────────────
+# ── share (swarm-topic join) — RETIRED per-harness path ──────────────────────
+# fed_register_project + fed_share_finalize drive the PER-HARNESS sharing
+# endpoints (/api/harness/projects + /api/harness/<slug>/share/finalize), RETIRED
+# by comb-retire-per-harness-sharing-2026-06-11 when per-harness sharing became the
+# HIVE model — share/finalize now 404s, so a rig that calls these sets up NO hive
+# (substrate attempted=0 → no [swarm] → merges fail). Kept only for the legacy
+# smokes that still reference them; NEW federation-setup uses the fed_hive_*
+# helpers below (create-from-repo → discover → join-hive). See vm-federation.sh §9
+# and two-instance-hive-from-repo-smoke.sh.
 
-# fed_register_project <inst> <slug> <parent_dir> <folder>
+# fed_register_project <inst> <slug> <parent_dir> <folder>  [RETIRED — see above]
 # Register a harness project (the share endpoint needs a registered harness).
 fed_register_project() {
   local inst="$1" slug="$2" parent="$3" folder="$4"
@@ -268,6 +276,65 @@ fed_share_finalize() {
 curl -s -m 90 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/$slug/share/finalize" \
   -H 'content-type: application/json' \
   -d '{"state":$state_json}' | head -c 400
+EOF
+}
+
+# ── hive publish / join (the CURRENT federation-setup) ───────────────────────
+# Replaces the retired register+share/finalize step. A creates a hive from a real
+# PUBLIC GitHub repo (clone + blueprint + hive home + member + AUTO-PUBLISH on the
+# directory topic — visibility is DERIVED from repo privacy, so a public repo
+# announces publicly; the route ignores a client `visibility` field). B discovers
+# A's announce over the wire and JOINS as a hive, which re-keys B onto the owner's
+# Hive-pubkey topic so writes actually federate (EI-681). Every probe goes THROUGH
+# drv_exec — a packaged instance binds 127.0.0.1, reachable only from inside its
+# own machine.
+
+# fed_json <json> <python-expr over `d`> — host-side JSON probe for a drv_exec
+# curl response (the curl runs IN the instance; the parse runs on the driver host,
+# which has python3). Prints the expression's value, or nothing on any error.
+fed_json() {
+  printf '%s' "$1" | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+try: print($2)
+except Exception: pass
+" 2>/dev/null
+}
+
+# fed_hive_create_from_repo <inst> <repo_url> [extra_json_fields]
+# POST /api/harness/hives/from-repo — clone + blueprint + hive home + member +
+# auto-publish. runTests:false + shallow keep it light (route timeoutSec is 600).
+# Echoes the raw JSON: { ok, created:{hiveSlug,memberSlug}, publish:{announced}, … }.
+fed_hive_create_from_repo() {
+  local inst="$1" repo="$2" extra="${3:-}"
+  drv_exec "$inst" <<EOF
+curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/hives/from-repo" \
+  -H 'content-type: application/json' \
+  -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true$extra}'
+EOF
+}
+
+# fed_hive_dir_row <inst> <hiveId> — GET /api/discovery/hives; echo the matching
+# row's JSON (incl. memberLinks[]) or nothing if that hive isn't listed yet.
+fed_hive_dir_row() {
+  local inst="$1" hive="$2" body
+  body="$(drv_exec "$inst" <<EOF
+curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/hives"
+EOF
+)"
+  fed_json "$body" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$hive'))"
+}
+
+# fed_hive_join <inst> <hiveId> <memberLinks_json_array> — POST /api/discovery/join-hive.
+# memberLinks must be a JSON array string (e.g. '["pear://…"]'). Echoes the raw
+# JSON: { ok, members:[{ok,…}], … }.
+fed_hive_join() {
+  local inst="$1" hive="$2" links="$3"
+  drv_exec "$inst" <<EOF
+curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-hive" \
+  -H 'content-type: application/json' \
+  -d '{"hiveId":"$hive","memberLinks":$links}'
 EOF
 }
 

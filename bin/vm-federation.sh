@@ -69,7 +69,10 @@ done
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercup/apps/operator}"
-SYNTH_REPO_ID="${PAPERCUSP_FED_REPO_ID:-918273645}"
+# Real PUBLIC repo for the hive create-from-repo step (the retired share/finalize
+# path used a synthetic repo id; the hive model clones a real repo). Override with
+# PAPERCUSP_FED_REPO_URL. Needs VM→github egress (slirp user-net provides NAT).
+REPO_URL="${PAPERCUSP_FED_REPO_URL:-https://github.com/octocat/Hello-World}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-149}"   # only used by --vms=1's host instance
 WORK="$(mktemp -d /tmp/vm-fed.XXXXXX)"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
@@ -319,29 +322,79 @@ else
   fed_assert_isolated a b || exit 5
 fi
 
-# ── 9. register + share write-free on both (same synthetic repo id) ─────────
-TOPIC=$(printf 'papercusp-substrate-v1:gh:%s' "$SYNTH_REPO_ID" | sha256sum | cut -d' ' -f1)
-STATE="{\"topic\":\"$TOPIC\",\"github_repository_id\":$SYNTH_REPO_ID,\"github_remote\":\"https://github.com/${FED_USER[a]}/$SLUG\",\"privacy\":\"shared-private\"}"
-fed_log "register + share write-free on both (topic=${TOPIC:0:16}…)"
+# ── 9. create-from-repo on A (auto-publish) → discover → join on B ──────────
+# The per-harness /share/finalize step was RETIRED (comb-retire-per-harness-
+# sharing-2026-06-11 → the HIVE model). Current federation-setup: A creates a hive
+# from a real PUBLIC repo (from-repo clones + blueprints + builds the hive home +
+# member and AUTO-PUBLISHES on the directory topic), B discovers A's announce over
+# the wire, then JOINS as a hive — the join re-keys B onto the owner's Hive-pubkey
+# topic so writes actually federate (EI-681). Mirrors two-instance-hive-from-repo-
+# smoke.sh over the vm/local drv_exec vtable.
+fed_log "create-from-repo on A → discover → join on B (repo=$REPO_URL)"
 fed_wait_api a || echo "⚠ A sidecar API not ready (proceeding)"
 fed_wait_api b || echo "⚠ B sidecar API not ready (proceeding)"
-parent_for() { [ "${FED_KIND[$1]}" = vm ] && echo /home/tester/fed || echo "$WORK"; }
-fed_register_project a "$SLUG" "$(parent_for a)" proj-a
-fed_register_project b "$SLUG" "$(parent_for b)" proj-b
-echo "A: $(fed_share_finalize a "$SLUG" "$STATE" | grep -oE '"bindingPublished":[a-z]+|"state":"[a-z-]+"' | tr '\n' ' ')"
-echo "B: $(fed_share_finalize b "$SLUG" "$STATE" | grep -oE '"bindingPublished":[a-z]+|"state":"[a-z-]+"' | tr '\n' ' ')"
+
+a_resp="$(fed_hive_create_from_repo a "$REPO_URL")"
+echo "A create → $(printf '%s' "$a_resp" | head -c 400)"
+HIVE_SLUG="$(fed_json "$a_resp" "d['created']['hiveSlug']")"
+MEMBER_SLUG="$(fed_json "$a_resp" "d['created']['memberSlug']")"
+A_ANNOUNCED="$(fed_json "$a_resp" "d['publish']['announced']")"
+if [ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ]; then
+  echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG' (publish.announced=$A_ANNOUNCED)"
+else
+  echo "✗ A from-repo create failed — body above"; drv_exec a <<<"tail -25 $(drv_applog a)"; exit 6
+fi
+
+# B discovers A's hive over the wire (proves the directory announce crossed) and
+# reads its memberLinks; fall back to A's OWN listing if the announce hasn't landed
+# in B's directory yet — the join + merge legs then still prove federation
+# independent of the directory-announce projection.
+fed_log "B: poll GET /api/discovery/hives for '$HIVE_SLUG' (~$(( ${DISCOVERY_RETRIES:-40} * 3 ))s)"
+MEMBER_LINKS="[]"; links_via="directory(B)"
+for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
+  brow="$(fed_hive_dir_row b "$HIVE_SLUG")"
+  if [ -n "$brow" ]; then
+    MEMBER_LINKS="$(fed_json "$brow" "json.dumps(d.get('memberLinks') or [])")"
+    [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ] && break
+  fi
+  sleep 3
+done
+if [ -z "$MEMBER_LINKS" ] || [ "$MEMBER_LINKS" = "[]" ]; then
+  arow="$(fed_hive_dir_row a "$HIVE_SLUG")"
+  MEMBER_LINKS="$(fed_json "$arow" "json.dumps(d.get('memberLinks') or [])")"
+  links_via="local(A-fallback)"
+fi
+if [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ]; then
+  echo "✓ memberLinks resolved via $links_via: $(fed_json "$MEMBER_LINKS" 'len(d)') link(s)"
+else
+  echo "✗ no memberLinks from B's discovery OR A's local listing — cannot join"; exit 6
+fi
+
+fed_log "B: JOIN '$HIVE_SLUG' via POST /api/discovery/join-hive"
+join_resp="$(fed_hive_join b "$HIVE_SLUG" "$MEMBER_LINKS")"
+echo "B join-hive → $(printf '%s' "$join_resp" | head -c 400)"
+J_OK="$(fed_json "$join_resp" "d.get('ok')")"
+N_MEM_OK="$(fed_json "$join_resp" "sum(1 for m in (d.get('members') or []) if m.get('ok'))")"
+if [ "$J_OK" = "True" ] && [ "${N_MEM_OK:-0}" -ge 1 ] 2>/dev/null; then
+  echo "✓ B joined hive '$HIVE_SLUG' ($N_MEM_OK member(s) — view materialized, re-keyed onto owner topic)"
+else
+  echo "✗ B join-hive failed (ok=$J_OK members_ok=$N_MEM_OK) — body above"; drv_exec b <<<"tail -25 $(drv_applog b)"; exit 6
+fi
 
 # ── 10. discovery ([swarm] peer_connected across a real network hop) ────────
 fed_log "wait for swarm peer discovery + admission (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
 [ "$disc" = 1 ] && echo "✓ peers discovered each other across machines" || echo "⚠ no peer_connected in ~90s"
 
-# ── 11. the bidirectional MERGE gate ────────────────────────────────────────
-fed_log "A→B: INSERT feature on A (origin=local) → expect origin=remote in B"
-ab="$(fed_merge_assert a b "$SLUG" F-A2B "from ${FED_USER[a]}" todo 30 || true)"
+# ── 11. the bidirectional MERGE gate (slug-agnostic hive probe) ─────────────
+# The hive model may remap harness_slug across peers, so poll the dst for the
+# feature_id under ANY slug (fed_hive_merge_probe), seeded on the src's member
+# harness ($MEMBER_SLUG). Same bidirectional proof as the pre-hive rig.
+fed_log "A→B: write F-A2B on A's member ($MEMBER_SLUG, origin=local) → expect origin=remote in B"
+ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 30 || true)"; ab="${ab%% *}"
 [ "$ab" = 1 ] && echo "✓ A→B MERGE: F-A2B federated into B as origin=remote" || echo "✗ A→B: F-A2B not in B after ~90s"
-fed_log "B→A: INSERT feature on B → expect origin=remote in A"
-ba="$(fed_merge_assert b a "$SLUG" F-B2A "from ${FED_USER[b]}" in-progress 30 || true)"
+fed_log "B→A: write F-B2A on B → expect origin=remote in A"
+ba="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-B2A 30 || true)"; ba="${ba%% *}"
 [ "$ba" = 1 ] && echo "✓ B→A MERGE: F-B2A federated into A as origin=remote" || echo "✗ B→A: F-B2A not in A after ~90s"
 
 # ── 12. report ──────────────────────────────────────────────────────────────
