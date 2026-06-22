@@ -50,15 +50,36 @@ use std::time::Duration;
 
 use tauri::Manager;
 
-/// (button label, persisted name, port). The dev-box builds. `dev :3270` is
-/// the session's OWN working-tree operator (release-pipeline P-010 own-port:
-/// spawned by beforeDevCommand, nothing else restarts it) — the default that
-/// desktop-dev-nohmr pins via PAPERCUSP_DEV_API_TARGET.
-const TARGETS: [(&str, &str, u16); 4] = [
-    ("dev :3270", "dev", 3270),
-    ("prod :3070", "prod", 3070),
-    ("staging :3170", "staging", 3170),
-    ("local :3055", "local", 3055),
+/// (button label, persisted name, port, hover tooltip). The dev-box builds.
+/// `dev :3270` is the session's OWN working-tree operator (release-pipeline
+/// P-010 own-port: spawned by beforeDevCommand, nothing else restarts it) — the
+/// default that desktop-dev-nohmr pins via PAPERCUSP_DEV_API_TARGET. The
+/// tooltip is shown on hover to explain what each build target serves.
+const TARGETS: [(&str, &str, u16, &str); 4] = [
+    (
+        "dev :3270",
+        "dev",
+        3270,
+        "Dev operator (:3270) — this desktop session's OWN working-tree build, spawned with the dev shell and restarted by nothing else. /api also targets :3270. The default target.",
+    ),
+    (
+        "prod :3070",
+        "prod",
+        3070,
+        "Production operator (:3070) — the deployed green-`main` release build (what the release pipeline auto-ships). /api targets :3070.",
+    ),
+    (
+        "staging :3170",
+        "staging",
+        3170,
+        "Staging operator (:3170) — the shared integration-tree build (latest `staging`, ahead of the green release). /api targets :3170.",
+    ),
+    (
+        "local :3055",
+        "local",
+        3055,
+        "Local Vite SPA (:3055) — the hot-reloading dev frontend with no operator of its own; its /api proxies to the :3070 release operator.",
+    ),
 ];
 
 /// Status-poll cadence. 30s is deliberate: it matches VersionBadge's
@@ -128,7 +149,7 @@ fn read_persisted_target() -> Option<u16> {
     let txt = std::fs::read_to_string(persisted_target_path()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let port = v.get("port")?.as_u64()? as u16;
-    TARGETS.iter().any(|(_, _, p)| *p == port).then_some(port)
+    TARGETS.iter().any(|(_, _, p, _)| *p == port).then_some(port)
 }
 
 /// EI-296 escape hatch: `PAPERCUSP_DEV_API_TARGET=<port>` pins BOTH the
@@ -231,7 +252,7 @@ fn gather(client: &reqwest::blocking::Client) -> StatusSnapshot {
         ..StatusSnapshot::default()
     };
 
-    for (_, _, port) in TARGETS {
+    for (_, _, port, _) in TARGETS {
         let reachable = port_reachable(port);
         let sha = if reachable {
             fetch_json(client, &format!("http://127.0.0.1:{port}/api/desktop/version"))
@@ -683,8 +704,9 @@ fn build_bar(
     bar.style_context().add_class("pc-dev-wrapper");
 
     let mut buttons: Vec<(gtk::Button, u16)> = Vec::new();
-    for (label, name, port) in TARGETS {
+    for (label, name, port, tooltip) in TARGETS {
         let btn = gtk::Button::with_label(label);
+        btn.set_tooltip_text(Some(tooltip));
         let win = window.clone();
         btn.connect_clicked(move |_| switch_to(&win, name, port));
         bar.pack_start(&btn, false, false, 0);
