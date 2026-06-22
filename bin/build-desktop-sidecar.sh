@@ -192,6 +192,15 @@ NATIVE_PKGS=(
   sodium-native udx-native rocksdb-native quickbit-native rabin-native
   simdle-native fs-native-extensions
   bare-fs bare-os bare-url bare-inspect bare-type
+  # better-sqlite3 — REQUIRED addon (native-addon-preflight.ts DEFAULT_REQUIRED_ADDONS;
+  # mem0's store). Loaded via dynamic require('better-sqlite3') (the boot preflight
+  # test-load + mem0), so esbuild never sees it statically → it was neither inlined
+  # nor copied, and the packaged operator FAILed the addon preflight at boot with
+  # "Cannot find module 'better-sqlite3'" (2-machine release rig, EI-2634).
+  # Externalize + closure-copy brings the package incl. its build/Release/
+  # better_sqlite3.node binding + bindings/prebuild-install — same pattern as the
+  # natives above. (shared-hive-public-release-2026-06-22 BUG-2.)
+  better-sqlite3
   # ssh2 — its optional sshcrypto.node accel binding only EXISTS where
   # node-gyp could build it (the mac VM has Xcode; the linux box doesn't
   # compile it), and esbuild has no .node loader → mac-only bundle error.
