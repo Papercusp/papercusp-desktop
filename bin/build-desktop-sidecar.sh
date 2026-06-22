@@ -232,6 +232,28 @@ HOST_EXTERNALS=(
   # embedded-postgres-server below, where bare-specifier resolution from
   # serve.mjs finds it.
   --external:@papercusp/embedded-postgres-server
+  # @opentelemetry/* SDK packages — @dbos-inc/dbos-sdk lazily require()s these
+  # at RUNTIME (telemetry/traces.js installTraceContextManager + exporters.js)
+  # and ONLY behind `if (globalParams.tracingEnabled)` / a configured OTLP
+  # exporter. The operator never enables DBOS OTLP tracing, so that require
+  # path is dead at runtime. They are NOT installed (only @opentelemetry/api +
+  # semantic-conventions are — those resolve + bundle fine), so without these
+  # externals esbuild hard-fails "Could not resolve" and the sidecar build dies
+  # (blocked every .deb build on staging HEAD, 2026-06-22). Externalize them —
+  # same pattern as cpu-features above: the guarded require never runs, so an
+  # absent module is harmless. If DBOS OTLP tracing is ever enabled in the
+  # bundled sidecar, install these as real deps instead of externalizing.
+  # (shared-hive-public-release-2026-06-22 P0 build-integrity fix.)
+  --external:@opentelemetry/context-async-hooks
+  --external:@opentelemetry/core
+  --external:@opentelemetry/resources
+  --external:@opentelemetry/sdk-trace-base
+  --external:@opentelemetry/sdk-trace-node
+  --external:@opentelemetry/sdk-logs
+  --external:@opentelemetry/sdk-metrics
+  --external:@opentelemetry/exporter-trace-otlp-proto
+  --external:@opentelemetry/exporter-logs-otlp-proto
+  --external:@opentelemetry/exporter-metrics-otlp-proto
 )
 for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # esbuild pinned to 0.25.x — the repo's hoisted esbuild is 0.17.x, which
