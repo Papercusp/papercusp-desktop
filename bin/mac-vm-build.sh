@@ -32,6 +32,18 @@ for d in /usr/local/opt/libpq/bin /opt/homebrew/opt/libpq/bin "$HOME/postgres-bi
   [[ -x "$d/pg_dumpall" ]] && export PATH="$d:$PATH" && break
 done
 
+# ── Build knobs (test-iteration speed-ups; defaults preserve the RELEASE path) ──
+#   MAC_BUILD_TARGET — rust target triple. Default 'universal-apple-darwin'
+#     (x86_64 + arm64, for shipping). Set 'x86_64-apple-darwin' for a faster
+#     single-arch TEST build on the x86_64 VM — halves the cargo step (#2).
+#   PAPERCUSP_REUSE_SIDECAR — '1' SKIPS the ~1.2GB sidecar rebuild and reuses the
+#     existing src-tauri/sidecar (#1). ONLY safe when your change does NOT touch
+#     the sidecar (operator-core / serve.mjs / the Vite SPA / prompts) — i.e. a
+#     Rust/desktop-only iteration. Default '0' (always rebuild — correct for
+#     releases + any operator change).
+MAC_BUILD_TARGET="${MAC_BUILD_TARGET:-universal-apple-darwin}"
+PAPERCUSP_REUSE_SIDECAR="${PAPERCUSP_REUSE_SIDECAR:-0}"
+
 cd "$ROOT"
 echo "===== mac build start $(date) (root: $ROOT) ====="
 df -h "$HOME" | tail -1
@@ -57,7 +69,11 @@ else
 fi
 
 echo "--- sidecar (darwin $(uname -m)) ---"
-bash bin/build-desktop-sidecar.sh
+if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" && -d src-tauri/sidecar/apps ]]; then
+  echo "    PAPERCUSP_REUSE_SIDECAR=1 — reusing existing src-tauri/sidecar (skipping the ~1.2GB rebuild)"
+else
+  bash bin/build-desktop-sidecar.sh
+fi
 echo "--- sidecar node arch ---"
 file src-tauri/sidecar/bin/node || true
 
@@ -72,26 +88,38 @@ SIDECAR="$ROOT/src-tauri/sidecar"
 mkdir -p "$SIDECAR/bin"
 # 1. pui binary (apps/tui) — native release build.
 ( cd "$REPO/apps/tui" && cargo build --release )
-PUI_BIN="$(find "$REPO/apps/tui/target/release" "$REPO/target/release" -maxdepth 1 -name pui -type f 2>/dev/null | head -1)"
+# Existence-checked candidates (NOT `find` over maybe-missing dirs — under
+# `set -eo pipefail` a missing path arg makes find non-zero → pipefail → exit).
+PUI_BIN=""
+for _c in "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
+  [[ -f "$_c" ]] && PUI_BIN="$_c" && break
+done
 [[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
 cp "$PUI_BIN" "$SIDECAR/bin/pui"; chmod 755 "$SIDECAR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 # 2. companion zellij plugin (wasm32-wasip1) — API version-coupled to zellij 0.44.3.
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
 ( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
-WASM="$(find "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release" "$REPO/target/wasm32-wasip1/release" -maxdepth 1 -name '*.wasm' -type f 2>/dev/null | head -1)"
+WASM=""
+for _c in "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
+  [[ -f "$_c" ]] && WASM="$_c" && break
+done
 [[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
 cp "$WASM" "$SIDECAR/pui-companion.wasm"
 echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
 # 3. zellij 0.44.3 — the plugin API is version-coupled; must match EXACTLY.
 ZJ_VER=0.44.3
 case "$(uname -m)" in arm64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
-curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_ARCH}-apple-darwin.tar.gz" | tar -xz -C "$SIDECAR/bin"
-[[ -x "$SIDECAR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} not fetched"; exit 1; }
-chmod 755 "$SIDECAR/bin/zellij"
-echo "    ✓ zellij ${ZJ_VER} (${ZJ_ARCH}) → sidecar/bin/zellij"
+if [[ -x "$SIDECAR/bin/zellij" ]] && "$SIDECAR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
+  echo "    ✓ zellij ${ZJ_VER} already bundled — skipping download"
+else
+  curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_ARCH}-apple-darwin.tar.gz" | tar -xz -C "$SIDECAR/bin"
+  [[ -x "$SIDECAR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} not fetched"; exit 1; }
+  chmod 755 "$SIDECAR/bin/zellij"
+  echo "    ✓ zellij ${ZJ_VER} (${ZJ_ARCH}) → sidecar/bin/zellij"
+fi
 
-echo "--- tauri build (universal-apple-darwin) ---"
+echo "--- tauri build ($MAC_BUILD_TARGET) ---"
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
 # legacy _PATH spelling forward so older callers keep working.
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
@@ -103,9 +131,9 @@ fi
 # CI=true → tauri-bundler passes --skip-jenkins to bundle_dmg.sh, skipping
 # the AppleScript Finder-styling step that times out headless (-1712 over
 # SSH on the VM). The DMG just gets default icon layout.
-CI=true npx tauri build --target universal-apple-darwin --bundles app,dmg
+CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg
 
-echo "--- artifacts ---"
-ls -la src-tauri/target/universal-apple-darwin/release/bundle/dmg/ 2>/dev/null || true
-ls -la src-tauri/target/universal-apple-darwin/release/bundle/macos/ 2>/dev/null || true
+echo "--- artifacts ($MAC_BUILD_TARGET) ---"
+ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/" 2>/dev/null || true
+ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/macos/" 2>/dev/null || true
 echo "===== mac build done $(date) ====="
