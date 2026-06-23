@@ -250,20 +250,23 @@ const SENTINEL_PREFIX: &str = ".papercup-console-active";
 
 fn build_env_exports(env: &HashMap<String, String>) -> String {
     let mut parts = Vec::with_capacity(env.len() + 1);
-    // Prepend our scripts dir to PATH if the operator sent one — keeps
-    // `papercup status` callable without an absolute path.
-    if let Some(scripts) = env.get("PAPERCUSP_SCRIPTS_DIR") {
-        parts.push(format!(
-            "export PATH={}:${{PATH}}",
-            shell_escape_single(scripts)
-        ));
+    // Prepend our shim dir (psu/ptool, ~/.papercusp/bin) and the bundled scripts
+    // dir to PATH if the operator sent them — keeps `papercup`/`psu`/`ptool`
+    // callable without an absolute path. Bin dir first so a user shim wins over a
+    // same-named bundled script (psu-in-desktop-builds-2026-06-23 A2b).
+    let mut path_prepend: Vec<String> = Vec::new();
+    if let Some(bin) = env.get("PAPERCUSP_BIN_DIR") {
+        path_prepend.push(shell_escape_single(bin));
     }
+    if let Some(scripts) = env.get("PAPERCUSP_SCRIPTS_DIR") {
+        path_prepend.push(shell_escape_single(scripts));
+    }
+    if !path_prepend.is_empty() {
+        parts.push(format!("export PATH={}:${{PATH}}", path_prepend.join(":")));
+    }
+    // Export every var itself (including PAPERCUSP_BIN_DIR / PAPERCUSP_SCRIPTS_DIR,
+    // which are valid bash names) so scripts can introspect them.
     for (k, v) in env {
-        if k == "PAPERCUSP_SCRIPTS_DIR" {
-            // Still export the var itself so scripts can introspect it.
-            parts.push(format!("export {}={}", k, shell_escape_single(v)));
-            continue;
-        }
         // Skip names that aren't safe bash identifiers.
         if !is_valid_env_name(k) {
             continue;
@@ -652,6 +655,23 @@ mod tests {
         let e = envelope("/x");
         let out = build_launcher_oneliner(&e);
         assert!(out.contains("export PATH='/path/to/scripts':${PATH}"));
+    }
+
+    #[test]
+    fn bin_dir_prepended_before_scripts_dir() {
+        // psu-in-desktop-builds-2026-06-23 A2b: ~/.papercusp/bin (the psu/ptool
+        // shims) goes on PATH ahead of the bundled scripts dir, so `psu` is
+        // runnable and a user shim wins over a same-named bundled script.
+        let mut e = envelope("/x");
+        e.env.insert(
+            "PAPERCUSP_BIN_DIR".to_string(),
+            "/home/u/.papercusp/bin".to_string(),
+        );
+        let out = build_launcher_oneliner(&e);
+        assert!(
+            out.contains("export PATH='/home/u/.papercusp/bin':'/path/to/scripts':${PATH}"),
+            "bin dir not prepended ahead of scripts dir: {out}"
+        );
     }
 
     #[test]

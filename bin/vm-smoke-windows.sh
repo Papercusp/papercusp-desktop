@@ -16,6 +16,10 @@
 #   7. agent-tools HTTP surface answers from true loopback (superuser
 #      bearer; Windows→WSL traffic is NOT loopback — §"sharp edges")
 #   8. zero PG ERROR lines in the boot log (fresh-DB schema gaps etc.)
+#   9. psu superuser CLI installed: the ~/.papercusp/bin/psu shim is present +
+#      executable and points at a real bundled launcher (psu-in-desktop-builds
+#      A1/A2). A live `psu --agent=claude` would block on the interactive CLI,
+#      so this verifies the bundle+shim are in place, not a full agent launch.
 #
 # Exit 0 = all green; first failure exits 1 with the failing check named.
 
@@ -87,5 +91,25 @@ echo "==> 8. PG errors in boot log"
 NERR="$("${SSH[@]}" 'powershell -NoProfile -Command "((Get-Content C:\Users\user\papercusp-bk.log -ErrorAction SilentlyContinue) -match \"ERROR:  |severity: .ERROR.\" | Measure-Object).Count"' 2>/dev/null | tr -d '\r[:space:]')"
 [[ "${NERR:-0}" == "0" ]] || fail "$NERR real ERROR line(s) in papercusp-bk.log — read them before shipping"
 pass "0 real ERROR lines"
+
+echo "==> 9. psu superuser CLI installed (psu-in-desktop-builds A1/A2)"
+# Ship a probe file (same reason as check 7 — quoting does not survive
+# ssh→cmd→wsl). Verifies installPapercuspFiles wrote the shim on boot (A2) AND
+# that it points at a real, non-empty bundled launcher (A1). Non-interactive:
+# does NOT exec the agent CLI (that would hang the smoke).
+PSUPROBE="$(mktemp /tmp/papercusp-vm-psuprobe-XXXX.sh)"
+cat > "$PSUPROBE" <<'PSUEOF'
+#!/usr/bin/env bash
+shim=/home/papercup/.papercusp/bin/psu
+[[ -x "$shim" ]] || { echo "PSU_FAIL: shim missing or not executable at $shim"; exit 1; }
+launcher=$(grep -oE 'exec node "[^"]+"' "$shim" | sed -E 's/.*"(.*)".*/\1/')
+[[ -n "$launcher" && -s "$launcher" ]] || { echo "PSU_FAIL: launcher target missing/empty: '$launcher'"; exit 1; }
+echo "PSU_OK $launcher"
+PSUEOF
+scp -q -i "$VM_SSH_KEY" -P "$VM_SSH_PORT" "$PSUPROBE" "$VM_SSH_HOST":'C:/Users/user/papercusp-psu-probe.sh'
+rm -f "$PSUPROBE"
+PSUOUT="$(wsl_exec bash /mnt/c/Users/user/papercusp-psu-probe.sh)"
+echo "$PSUOUT" | grep -q '^PSU_OK' || fail "psu CLI not installed: ${PSUOUT:0:200}"
+pass "psu shim + bundled launcher present (${PSUOUT#PSU_OK })"
 
 echo "ALL SMOKE CHECKS GREEN"
