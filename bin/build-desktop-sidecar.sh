@@ -294,6 +294,46 @@ if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   exit 1
 fi
 
+# psu + ptool — the superuser CLI launcher and the defineTool CLI. Ship them in
+# the runtime so an end user can open a superuser agent session from the app
+# (psu-in-desktop-builds-2026-06-23 A1). esbuild-bundles each into a
+# SELF-CONTAINED ESM file the SAME way serve.mjs is built: @inquirer/prompts
+# (the picker) and @modelcontextprotocol/sdk (ptool's transport) are inlined, so
+# the shipped runtime needs NO operator node_modules tree for them. node-pty is
+# the only external — psu-pty-host.mjs `require()`s @lydell/node-pty LAZILY (only
+# on the pty-host path), so it resolves from sidecar/node_modules at runtime just
+# like serve.mjs, and the common launch path never touches it.
+#
+# Two deliberate differences from the serve.mjs recipe:
+#   * NO --define:__PAPERCUSP_BUNDLED_SIDECAR__=true. That define makes
+#     isCliEntry() return false to stop inlined library-CLIs self-exec'ing inside
+#     serve.mjs. psu/ptool ARE the real entrypoints — they MUST run main() when
+#     invoked, so the define must be absent.
+#   * Only --external:@lydell/* (psu/ptool don't pull the holepunch native stack).
+# The ~/.papercusp/bin/{psu,ptool} shims that `exec node` these are written on
+# boot by installPapercuspFiles() (papercup CLAUDE.md desktop-install path; A2).
+echo "→ esbuild-bundling psu + ptool → $SIDECAR_DIR/scripts/"
+mkdir -p "$SIDECAR_DIR/scripts"
+# pairs of <output-name>:<source-stem> (source lives at $WEB_DIR/scripts/<stem>.mjs)
+for _psu_cli in psu:psu-launcher ptool:ptool; do
+  _psu_out="${_psu_cli%%:*}"
+  _psu_src="${_psu_cli##*:}"
+  if [[ ! -f "$WEB_DIR/scripts/$_psu_src.mjs" ]]; then
+    echo "ERROR: $WEB_DIR/scripts/$_psu_src.mjs not found — psu cannot ship"
+    exit 1
+  fi
+  (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
+    --bundle --platform=node --format=esm --target=node22 \
+    --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
+    --banner:js="$HOST_BANNER" \
+    "--external:@lydell/*")
+  if [[ ! -f "$SIDECAR_DIR/scripts/$_psu_out.mjs" ]]; then
+    echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/$_psu_out.mjs"
+    exit 1
+  fi
+done
+echo "  bundled psu.mjs + ptool.mjs"
+
 # Copy the externalized native deps. esbuild inlined everything else, so
 # this is a tiny tree — node-pty + its platform-binary sub-package(s).
 # Search every node_modules the monorepo might have hoisted them into.
