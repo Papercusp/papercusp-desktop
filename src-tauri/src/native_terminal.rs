@@ -614,6 +614,12 @@ impl GhosttySpec {
             "--gtk-single-instance=false".to_string(),
             "--quit-after-last-window-closed=true".to_string(),
             "--confirm-close-surface=false".to_string(),
+            // Thin left/right padding strip ghostty (NOT zellij) owns: zellij only
+            // captures mouse inside its terminal grid, so this strip lets a drag on
+            // the dock's edge reach the WM / desktop-glue resize (D-012) instead of
+            // being swallowed by zellij content — restores edge drag-resize WITHOUT
+            // pane frames (owner ask 2026-06-22 — keep the slim look + resizable).
+            "--window-padding-x=8".to_string(),
         ];
         // Custom background only when set; empty ⇒ the user's default Ghostty
         // config bg (owner ask 2026-06-22 — plain native look).
