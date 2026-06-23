@@ -32,6 +32,10 @@
 
 use std::sync::Mutex;
 
+// The desktop's matched dock background. No longer the DEFAULT (owner ask
+// 2026-06-22 — the dock now inherits the user's plain Ghostty config bg); kept as
+// the value to restore via PAPERCUSP_NATIVE_TERMINAL_BG, and used by tests.
+#[allow(dead_code)]
 const BLUE_FROST_TERMINAL_BG: &str = "#07101d";
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -560,8 +564,9 @@ pub struct GhosttySpec {
     pub class: String,
     /// WM_CLASS *instance* — unique so we can find the window deterministically.
     pub instance: String,
-    /// Background hex (e.g. "#07101d"), matched to the GUI theme so there's no
-    /// visual seam.
+    /// Background hex (e.g. "#07101d"). EMPTY ⇒ omit `--background` so the dock
+    /// inherits the user's default Ghostty config bg (owner ask 2026-06-22 — plain
+    /// native look; accepts a slight color seam vs the GUI window).
     pub background: String,
     /// The command Ghostty hosts. Normally `["pui", "chat"]` (the chat dock).
     pub command: Vec<String>,
@@ -578,8 +583,10 @@ impl GhosttySpec {
     pub fn dock() -> GhosttySpec {
         let class = std::env::var("PAPERCUSP_NATIVE_TERMINAL_CLASS")
             .unwrap_or_else(|_| "com.papercusp.desktop".to_string());
-        let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG")
-            .unwrap_or_else(|_| BLUE_FROST_TERMINAL_BG.to_string());
+        // Empty default ⇒ omit --background so the dock inherits the user's Ghostty
+        // config bg (owner ask 2026-06-22). Set PAPERCUSP_NATIVE_TERMINAL_BG (e.g.
+        // BLUE_FROST_TERMINAL_BG "#07101d") to restore the matched/seamless look.
+        let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG").unwrap_or_default();
         let bin = std::env::var("PAPERCUSP_GHOSTTY_BIN").unwrap_or_else(|_| "ghostty".to_string());
         let command = match std::env::var("PAPERCUSP_NATIVE_TERMINAL_CMD") {
             Ok(s) if !s.trim().is_empty() => {
@@ -607,8 +614,12 @@ impl GhosttySpec {
             "--gtk-single-instance=false".to_string(),
             "--quit-after-last-window-closed=true".to_string(),
             "--confirm-close-surface=false".to_string(),
-            format!("--background={}", self.background),
         ];
+        // Custom background only when set; empty ⇒ the user's default Ghostty
+        // config bg (owner ask 2026-06-22 — plain native look).
+        if !self.background.is_empty() {
+            a.push(format!("--background={}", self.background));
+        }
         // `-e <cmd...>` MUST be last — ghostty treats everything after it as the
         // hosted command line.
         a.push("-e".to_string());
@@ -1934,12 +1945,14 @@ impl NativeTerminal {
         let spec = GhosttySpec::dock();
         // Same hosted command + shared class (so taskbars still group it), but
         // keep decorations + skip the glue knobs.
-        let mut argv = vec![
-            format!("--class={}", spec.class),
-            format!("--background={}", spec.background),
+        let mut argv = vec![format!("--class={}", spec.class)];
+        if !spec.background.is_empty() {
+            argv.push(format!("--background={}", spec.background));
+        }
+        argv.extend([
             "--gtk-single-instance=false".to_string(),
             "-e".to_string(),
-        ];
+        ]);
         argv.extend(spec.command.iter().cloned());
         let mut cmd = std::process::Command::new(&spec.bin);
         cmd.args(argv);
