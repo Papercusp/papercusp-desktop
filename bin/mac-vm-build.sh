@@ -61,6 +61,36 @@ bash bin/build-desktop-sidecar.sh
 echo "--- sidecar node arch ---"
 file src-tauri/sidecar/bin/node || true
 
+# ── chat dock: bundle pui + companion wasm + zellij (WI-668) ──────────────
+# The docked terminal runs `pui chat` (zellij with the pui-companion plugin).
+# None of these ship by default → the dock is a blank pane in a packaged app.
+# Drop them into the sidecar so native_terminal.rs (prepare_dock_env) can put
+# pui+zellij on PATH and point PUI_COMPANION_WASM at the bundled plugin.
+echo "--- chat dock: pui + companion wasm + zellij 0.44.3 ---"
+REPO="$(cd "$ROOT/.." && pwd)"
+SIDECAR="$ROOT/src-tauri/sidecar"
+mkdir -p "$SIDECAR/bin"
+# 1. pui binary (apps/tui) — native release build.
+( cd "$REPO/apps/tui" && cargo build --release )
+PUI_BIN="$(find "$REPO/apps/tui/target/release" "$REPO/target/release" -maxdepth 1 -name pui -type f 2>/dev/null | head -1)"
+[[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
+cp "$PUI_BIN" "$SIDECAR/bin/pui"; chmod 755 "$SIDECAR/bin/pui"
+echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
+# 2. companion zellij plugin (wasm32-wasip1) — API version-coupled to zellij 0.44.3.
+rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
+( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
+WASM="$(find "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release" "$REPO/target/wasm32-wasip1/release" -maxdepth 1 -name '*.wasm' -type f 2>/dev/null | head -1)"
+[[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
+cp "$WASM" "$SIDECAR/pui-companion.wasm"
+echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
+# 3. zellij 0.44.3 — the plugin API is version-coupled; must match EXACTLY.
+ZJ_VER=0.44.3
+case "$(uname -m)" in arm64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
+curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_ARCH}-apple-darwin.tar.gz" | tar -xz -C "$SIDECAR/bin"
+[[ -x "$SIDECAR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} not fetched"; exit 1; }
+chmod 755 "$SIDECAR/bin/zellij"
+echo "    ✓ zellij ${ZJ_VER} (${ZJ_ARCH}) → sidecar/bin/zellij"
+
 echo "--- tauri build (universal-apple-darwin) ---"
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
 # legacy _PATH spelling forward so older callers keep working.

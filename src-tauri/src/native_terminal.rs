@@ -1660,6 +1660,34 @@ pub mod swiftterm_embed {
         lib().is_some()
     }
 
+    /// Make the bundled chat-dock binaries (`pui`, `zellij`) discoverable and
+    /// point `pui` at the bundled companion plugin BEFORE the shim spawns
+    /// `pui chat`. The SwiftTerm child inherits THIS process's environment (the
+    /// shim's C ABI carries no env), so we prepend the bundled `sidecar/bin` to
+    /// PATH and set PUI_COMPANION_WASM here. Without this the dock is a blank
+    /// pane in a packaged app (nothing is on PATH). Once-guarded + idempotent;
+    /// a no-op in a dev/unbundled layout where the files aren't found.
+    /// (chat-dock bundling, WI-668.)
+    fn prepare_dock_env() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let Ok(exe) = std::env::current_exe() else { return };
+            let Some(dir) = exe.parent() else { return };
+            // Bundled mac layout: Contents/MacOS/<exe> → Contents/Resources/sidecar.
+            let sidecar = dir.join("../Resources/sidecar");
+            if let Ok(bin) = sidecar.join("bin").canonicalize() {
+                let cur = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("PATH", format!("{}:{}", bin.display(), cur));
+            }
+            if std::env::var_os("PUI_COMPANION_WASM").is_none() {
+                if let Ok(wasm) = sidecar.join("pui-companion.wasm").canonicalize() {
+                    std::env::set_var("PUI_COMPANION_WASM", wasm);
+                }
+            }
+        });
+    }
+
     /// Attach the terminal (hosting `command`) to the left `fraction` of the
     /// Tauri window. `ns_window` is tauri's raw NSWindow pointer. MUST run on
     /// the AppKit main thread.
@@ -1670,6 +1698,7 @@ pub mod swiftterm_embed {
         min_px: i32,
         max_px: i32,
     ) -> Result<(), String> {
+        prepare_dock_env();
         let shim = lib().ok_or("PapercuspTermShim dylib not loadable")?;
         let (exe, rest) = command.split_first().ok_or("empty terminal command")?;
         let exe_c = CString::new(exe.as_str()).map_err(|e| e.to_string())?;
