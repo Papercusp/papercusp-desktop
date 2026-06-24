@@ -295,6 +295,8 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
   --banner:js="$HOST_BANNER" \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
+  --define:process.env.PAPERCUP_DOGFOOD_HIVE_PUBKEY="\"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}\"" \
+  --define:process.env.PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}\"" \
   "${HOST_EXTERNALS[@]}")
 if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
