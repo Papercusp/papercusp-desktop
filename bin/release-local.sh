@@ -217,8 +217,16 @@ if [[ "$WITH_MAC" == "1" ]]; then
   fi
   PAPERCUP_TREE="$(cd "$ROOT/.." && pwd)"
   echo "    rsync tree → VM:$MAC_VM_BUILD_DIR"
+  # --exclude '.mcp.json': bootstrap-role writes a per-launch, SIGNED, host-pinned
+  # `.mcp.json` into the launch cwd (the repo root) for `psu --role` sessions —
+  # gitignored, but rsync would otherwise carry the DEV BOX's copy (pointed at the
+  # dev box's MCP proxy `:9071`) into the VM tree, where claude path-discovers it
+  # and connects to a `:9071` that doesn't exist on the VM → "MCP tools aren't up".
+  # Excluding it (and from --delete) keeps the VM's OWN freshly-written `.mcp.json`
+  # intact while never importing the dev box's. (`.claude` = the user's agent state
+  # / signed creds — likewise host-specific, never belongs in the build tree.)
   rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
-    --exclude '.turbo' --exclude '.next' \
+    --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
     -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
     "$PAPERCUP_TREE/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
   scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
