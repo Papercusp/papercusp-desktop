@@ -69,9 +69,17 @@ else
 fi
 
 echo "--- sidecar (darwin $(uname -m)) ---"
-if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" && -d src-tauri/sidecar/apps ]]; then
-  echo "    PAPERCUSP_REUSE_SIDECAR=1 — reusing existing src-tauri/sidecar (skipping the ~1.2GB rebuild)"
+# REUSE only a real DARWIN sidecar. A host-side `rsync` can clobber the VM's
+# darwin sidecar with the Linux host's `src-tauri/sidecar` (Linux node/binaries)
+# — reusing THAT yields an app that dies with "exec format error" on macOS. Gate
+# on the node being a Mach-O; otherwise rebuild regardless of the flag.
+if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" && -d src-tauri/sidecar/apps ]] \
+   && file src-tauri/sidecar/bin/node 2>/dev/null | grep -q 'Mach-O'; then
+  echo "    PAPERCUSP_REUSE_SIDECAR=1 — reusing existing DARWIN src-tauri/sidecar (skipping the ~1.2GB rebuild)"
 else
+  if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" ]]; then
+    echo "    PAPERCUSP_REUSE_SIDECAR=1 but the sidecar is missing or NOT darwin (an rsync likely clobbered it with the Linux host sidecar) — rebuilding to be safe"
+  fi
   bash bin/build-desktop-sidecar.sh
 fi
 echo "--- sidecar node arch ---"
