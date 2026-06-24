@@ -5266,35 +5266,6 @@ You may have it installed on another user account, but it is not available for t
   }
   .map_err(|e| Error::CreateWebview(Box::new(e)))?;
 
-  // papercusp(ipc-cors-2026-06-24): mark the `ipc` custom scheme CORS-ENABLED on WebKitGTK.
-  // wry registers custom schemes ONLY as `register_uri_scheme_as_secure` (see
-  // wry/src/webkitgtk/web_context.rs::register_uri_scheme) — never CORS-enabled. So when the
-  // frontend is served from a REMOTE origin (Papercusp's frontendDist = http://127.0.0.1:<port>,
-  // not the bundled tauri:// asset protocol), WebKitGTK blocks the cross-origin
-  // `ipc://localhost/<cmd>` invoke fetch with "Fetch API cannot load … due to access control
-  // checks" — even though Tauri's IPC protocol handler already returns
-  // `Access-Control-Allow-Origin: *`. Tauri then silently falls back to postMessage, but the
-  // engine has ALREADY logged a console error on every navigation. Marking the scheme
-  // CORS-enabled lets the fetch SUCCEED: zero console errors AND the IPC custom-protocol fast
-  // path works instead of the postMessage fallback. Trust is unaffected — the handler's
-  // Tauri-Invoke-Key check is the boundary; CORS only governs the browser's fetch.
-  #[cfg(any(
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd"
-  ))]
-  {
-    use webkit2gtk::{SecurityManagerExt, WebContextExt, WebViewExt};
-    if let Some(security_manager) = WebViewExtUnix::webview(&webview)
-      .web_context()
-      .and_then(|ctx| ctx.security_manager())
-    {
-      security_manager.register_uri_scheme_as_cors_enabled("ipc");
-    }
-  }
-
   if kind == WebviewKind::WindowContent {
     #[cfg(any(
       target_os = "linux",

@@ -135,6 +135,14 @@ windows = { version = "0.58", features = [
 # tauri-runtime-wry walks the ancestry safely.
 [patch.crates-io]
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+# Vendored wry (ipc-cors-2026-06-24): upstream wry registers custom URI schemes only as
+# `secure`, never CORS-enabled, so WebKitGTK blocks the cross-origin `ipc://localhost/<cmd>`
+# invoke fetch when the frontend is served from a REMOTE origin (Papercusp loads the operator
+# from http://127.0.0.1:<port>). That logged a console error on every navigation and forced the
+# postMessage fallback. The vendored copy adds `register_uri_scheme_as_cors_enabled` next to the
+# secure registration (see the PAPERCUSP PATCH marker in vendor/wry/src/webkitgtk/web_context.rs).
+# Drop this patch when a released wry registers custom schemes as CORS-enabled.
+wry = { path = "vendor/wry" }
 
 [features]
 default = ["dev-wrapper"]
