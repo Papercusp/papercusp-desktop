@@ -171,7 +171,7 @@ sc_launch() {
         setsid nohup "$SC_NODE" "$SIDECAR_SRC/serve.mjs" "$WORK" >"$logf" 2>&1 < /dev/null ) &
   FED_KILL_PIDS+=("$!")
 }
-pick_free_port() { local p="$1"; while ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; do p=$((p+1)); done; echo "$p"; }
+pick_free_port() { fed_pick_free_port "$@"; }   # canonical impl lives in federation-asserts.sh (WI-754)
 
 # ── stage the instances (per mode) ──────────────────────────────────────────────
 if [ "$RUN_MODE" = deb ]; then

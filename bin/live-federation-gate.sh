@@ -35,6 +35,24 @@ STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
 log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*"; }
 
+# ── 0. assert-core self-test (WI-754) ──────────────────────────────────────────
+# Hermetic (~2s, synthetic listeners, no .deb): prove the rig's PORT SELF-DISCOVERY
+# logic (fed_probe_sidecar / fed_discover_sidecar_os in federation-asserts.sh)
+# BEFORE spending minutes on heavy smokes. A broken assert core makes every smoke a
+# confusing RED — catch that class here with a clear message. It adds no real load,
+# so it runs on EVERY invocation, ahead of the load gate. (selftest SKIPs cleanly
+# when python3/curl are absent → never a false RED.)
+if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
+  if bash "$DESKTOP_DIR/bin/lib/federation-asserts.selftest.sh" >"$WORK/selftest.log" 2>&1; then
+    log "assert-core self-test PASS (port self-discovery)"
+  else
+    log "assert-core self-test FAILED — federation-asserts.sh port discovery is broken; see $WORK/selftest.log"
+    sed 's/^/  /' "$WORK/selftest.log" >&2
+    echo "GATE: RED (assert-core self-test failed — fix federation-asserts.sh before trusting the smokes)"
+    exit 1
+  fi
+fi
+
 # ── 1. load gate ──────────────────────────────────────────────────────────────
 LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
 if awk "BEGIN{exit !($LOAD1 > $LOAD_GATE)}"; then

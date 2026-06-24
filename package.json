@@ -8,6 +8,7 @@
     "dev": "bin/desktop-dev-nohmr",
     "dev:nohmr": "bin/desktop-dev-nohmr",
     "dev:preview": "bin/desktop-preview-prod",
+    "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "dev:hmr": "tauri dev --config '{\"build\":{\"devUrl\":\"http://localhost:3055\"}}'",
     "build": "tauri build",
     "build:debug": "tauri build --debug",

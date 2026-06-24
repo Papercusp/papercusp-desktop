@@ -304,6 +304,16 @@ EOF
 # pty-ws) 404 that path. All probes go THROUGH drv_exec → driver-agnostic
 # (local / ssh / vm).
 
+# fed_pick_free_port <start> — echo the first free localhost TCP port >= <start>.
+# The ASSIGN side of port self-discovery: hand an instance a known-free port via
+# PAPERCUSP_HONO_PORT / PAPERCUSP_PG_PORT instead of hardcoding one that may
+# collide. Single source for every rig (the from-repo smoke delegates here).
+fed_pick_free_port() {
+  local p="${1:-18000}"
+  while ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; do p=$((p + 1)); done
+  echo "$p"
+}
+
 # fed_probe_sidecar <inst> <port> — true iff <port> answers the sidecar preflight 2xx.
 fed_probe_sidecar() {
   local inst="$1" port="$2" code

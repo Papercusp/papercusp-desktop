@@ -97,6 +97,15 @@ else
   ok "fed_discover_sidecar_os returns 1 when no port in scope answers the sidecar preflight"
 fi
 
+# 4) fed_pick_free_port skips a held port and returns a higher, free one
+held="$SIDE_PORT"   # the sidecar synthetic listener is bound here
+got="$(fed_pick_free_port "$held")"
+if [ "${got:-0}" -gt "$held" ] 2>/dev/null && ! ss -tlnH "sport = :$got" 2>/dev/null | grep -q .; then
+  ok "fed_pick_free_port skipped held :$held → free :$got"
+else
+  bad "fed_pick_free_port returned '$got' for held :$held (expected a higher, free port)"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1
