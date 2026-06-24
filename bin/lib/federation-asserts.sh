@@ -214,6 +214,27 @@ EOF
               return 0 ;;
     esac
   done
+  # PORT SELF-DISCOVERY recovery (WI-754) — the loop timed out without BOTH log
+  # markers. The PG marker is reliable (one PG listener, no competitor); the
+  # SIDECAR marker is the fragile one (it can drift, or lose the log race to
+  # code-server's own 'listening on' line). Before declaring BOOT_TIMEOUT, re-read
+  # PG directly and, if it is up, OS-discover the sidecar port — so a pure
+  # marker-drift on the '[serve] listening' line no longer false-REDs a healthy
+  # boot. Called DIRECTLY (not in $(…)) so the FED_SC fill survives.
+  local pg2
+  pg2="$(drv_exec "$inst" <<EOF
+log="$logf"
+pg=\$(grep -oE 'ready on localhost:[0-9]+ db=papercusp' "\$log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+[ -n "\$pg" ] || pg=\$(grep -oE 'embedded-postgres-server ready on 127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
+echo "\$pg"
+EOF
+)"
+  if [ -n "$pg2" ] && fed_discover_sidecar_os "$inst"; then
+    FED_PG[$inst]="$pg2"
+    [ -n "${FED_DB[$inst]:-}" ] || FED_DB[$inst]="postgresql://harness_admin:harness_admin_pwd@localhost:${pg2}/papercusp"
+    fed_log "fed_wait_boot: $inst recovered via OS port discovery — PG=$pg2 sidecar=${FED_SC[$inst]} (sidecar log marker missing/drifted)" >&2
+    FED_BOOT_ERR=""; return 0
+  fi
   FED_BOOT_ERR="BOOT_TIMEOUT"; return 1
 }
 
@@ -230,21 +251,118 @@ fed_assert_isolated() {
 
 # ── sidecar API readiness ────────────────────────────────────────────────────
 
-# fed_wait_api <inst> [tries] — the boot log's "hono-host listening" line can
-# precede the API actually accepting connections; poll a cheap endpoint until it
-# answers (any HTTP status = up; curl exit 7 = connection refused) so the share/
+# fed_wait_api <inst> [tries] — the boot log's "[serve] listening" line can
+# precede the API actually accepting connections; poll the sidecar preflight until
+# it answers 2xx (the sidecar's GET /api/desktop/preflight contract) so the share/
 # register curls don't race a not-quite-ready sidecar. Returns 1 on timeout.
+#
+# PORT SELF-DISCOVERY hardening (WI-754): the configured FED_SC[inst] can be the
+# WRONG listener — the packaged app runs OTHER http servers (code-server, pty-ws)
+# and code-server's 'HTTP server listening on http://127.0.0.1:N/' can win
+# fed_wait_boot's log-grep race. Those answer 404, not 2xx, so requiring 2xx
+# distinguishes the real sidecar; and when the configured port never answers 2xx,
+# we OS-discover the real one (scoped to THIS instance — never a concurrent
+# sibling's, EI-1739) and adopt it. Must be called DIRECTLY (the FED_SC self-heal
+# would die in a $(…) subshell).
 fed_wait_api() {
-  local inst="$1" tries="${2:-20}" i code
+  local inst="$1" tries="${2:-20}" i code last="000"
   for i in $(seq 1 "$tries"); do
     code="$(drv_exec "$inst" <<EOF
 curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${FED_SC[$inst]}/api/desktop/preflight" 2>/dev/null || echo 000
 EOF
 )"
-    [ -n "$code" ] && [ "$code" != "000" ] && return 0
+    [ -n "$code" ] && last="$code"
+    case "$code" in 2??) return 0 ;; esac   # the sidecar preflight contract = 2xx
     sleep 2
   done
+  # Self-heal: the configured port never answered the preflight with 2xx. Discover
+  # the REAL sidecar port from the OS and adopt it (fed_discover_sidecar_os sets
+  # FED_SC[inst] + confirms 2xx).
+  if fed_discover_sidecar_os "$inst"; then
+    fed_log "fed_wait_api: $inst sidecar self-discovered on :${FED_SC[$inst]} (configured port answered '$last', not 2xx) — recovered" >&2
+    return 0
+  fi
+  if [ "$last" != "000" ]; then
+    # Backward-compat safety net: the configured port answered (just not 2xx) and OS
+    # discovery found nothing better — preserve the pre-hardening liberal acceptance
+    # rather than regress a smoke that used to pass, but say so loudly.
+    fed_log "fed_wait_api: $inst — :${FED_SC[$inst]} answered '$last' (not 2xx) and no other sidecar port resolved; accepting (legacy liberal) — downstream API calls may be unreliable" >&2
+    return 0
+  fi
+  fed_log "fed_wait_api: $inst sidecar never answered on :${FED_SC[$inst]}; instance diagnostics follow:" >&2
+  fed_dump_instance_diag "$inst" >&2
   return 1
+}
+
+# ── PORT SELF-DISCOVERY helpers (WI-754) ─────────────────────────────────────
+# Resolve the sidecar port from the OS instead of trusting a (fragile) log line.
+# Concurrency-safe: candidates are drawn ONLY from THIS instance's own footprint
+# (the listening sockets of the process tree under its unique run dir, plus the
+# 127.0.0.1 ports its OWN app-log mentions), so they can never name a concurrent
+# sibling rig's sidecar (EI-1739). The discriminator is a 2xx on the sidecar-only
+# GET /api/desktop/preflight — the packaged app's OTHER listeners (code-server,
+# pty-ws) 404 that path. All probes go THROUGH drv_exec → driver-agnostic
+# (local / ssh / vm).
+
+# fed_probe_sidecar <inst> <port> — true iff <port> answers the sidecar preflight 2xx.
+fed_probe_sidecar() {
+  local inst="$1" port="$2" code
+  code="$(drv_exec "$inst" <<EOF
+curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${port}/api/desktop/preflight" 2>/dev/null || echo 000
+EOF
+)"
+  case "$code" in 2??) return 0 ;; *) return 1 ;; esac
+}
+
+# fed_discover_sidecar_os <inst> — find the REAL sidecar port from the OS; on
+# success set FED_SC[inst] + return 0, else return 1. MUST be called DIRECTLY (not
+# in $(…) — the FED_SC fill would die in the subshell).
+fed_discover_sidecar_os() {
+  local inst="$1" logf scope cands port
+  logf="$(drv_applog "$inst")"
+  scope="$(dirname "$logf")"   # the run's unique $WORK — a mktemp dir, never shared
+  cands="$(drv_exec "$inst" <<EOF
+scope="$scope"; log="$logf"
+{
+  # (a) listening TCP ports of the process tree scoped to this instance's run dir
+  #     (the sidecar + embedded-PG carry a path under \$scope in their argv). ss
+  #     shows pid only for our own sockets — exactly the instance we launched.
+  if command -v ss >/dev/null 2>&1; then
+    pids=""
+    for d in /proc/[0-9]*; do
+      [ -r "\$d/cmdline" ] || continue
+      if tr '\0' ' ' < "\$d/cmdline" 2>/dev/null | grep -qF "\$scope"; then pids="\$pids \${d#/proc/}"; fi
+    done
+    for pid in \$pids; do
+      ss -tlnpH 2>/dev/null | awk -v p="pid=\$pid," 'index(\$0,p){ n=split(\$4,a,":"); print a[n] }'
+    done
+  fi
+  # (b) any 127.0.0.1:PORT this instance's OWN app-log mentions (unambiguously its own)
+  grep -oE '127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$'
+} | awk 'NF' | awk '!seen[\$0]++'
+EOF
+)"
+  for port in $cands; do
+    case "$port" in ''|*[!0-9]*) continue ;; esac
+    if fed_probe_sidecar "$inst" "$port"; then
+      FED_SC[$inst]="$port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# fed_dump_instance_diag <inst> — the instance's listening TCP ports + app-log
+# tail. The actionable diagnostic that replaces an opaque "API never came up".
+fed_dump_instance_diag() {
+  local inst="$1" logf; logf="$(drv_applog "$inst")"
+  drv_exec "$inst" <<EOF
+log="$logf"
+echo "  [$inst] listening TCP ports:"
+ss -tlnH 2>/dev/null | awk '{print "      "\$4}' | sort -u | head -20
+echo "  [$inst] app-log tail (\$log):"
+tail -15 "\$log" 2>/dev/null | sed 's/^/      /'
+EOF
 }
 
 # ── share (swarm-topic join) — RETIRED per-harness path ──────────────────────
