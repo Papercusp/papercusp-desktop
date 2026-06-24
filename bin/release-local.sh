@@ -128,6 +128,32 @@ cargo.write_text(text)
 print(f"  Cargo.toml → {version}")
 PY
 
+# ── Dogfood version pin (clone-progress + version-pin) ──────────────────────
+# The shipped app clones the `papercusp` dogfood hive from the MONOREPO
+# (github.com/Papercusp/papercup) on first boot. Pin that clone to THIS build's
+# commit so the dogfooded source matches the binary exactly (without it, a fresh
+# install clones whatever `main` is NOW — drift). We:
+#   1. tag the monorepo superproject ($ROOT/.. — papercusp-desktop is a submodule
+#      of it) with the SAME release tag + push it, so the ref exists to clone, and
+#   2. export PAPERCUP_DOGFOOD_REPO_REF=$TAG so build-desktop-sidecar.sh bakes it
+#      into the sidecar (esbuild --define). bootstrap-papercusp-hive reads it.
+# Best-effort: a push failure just means the dogfood clone falls back to `main`.
+MONOREPO="$(cd "$ROOT/.." && pwd)"
+if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
+  export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
+  MONO_SHA="$(git -C "$MONOREPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  echo "==> dogfood pin: tagging monorepo ($MONOREPO @ $MONO_SHA) as $TAG"
+  if git -C "$MONOREPO" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+    echo "    tag $TAG already exists on the monorepo — reusing"
+  else
+    git -C "$MONOREPO" tag "$TAG" || echo "    WARN: could not create monorepo tag $TAG"
+  fi
+  git -C "$MONOREPO" push origin "refs/tags/$TAG" 2>/dev/null \
+    || echo "    WARN: could not push monorepo tag $TAG — dogfood clone will fall back to the default branch (main)"
+else
+  echo "==> dogfood pin: $ROOT/.. is not a git repo — skipping (sidecar bakes no ref → dogfood clone uses main)"
+fi
+
 echo "==> building sidecar"
 bash "$ROOT/bin/build-desktop-sidecar.sh"
 
@@ -202,6 +228,7 @@ if [[ "$WITH_MAC" == "1" ]]; then
     npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
     export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+    export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
     bash bin/mac-vm-build.sh
   "'
   MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"

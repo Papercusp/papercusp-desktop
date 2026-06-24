@@ -283,11 +283,18 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # CLIs guard with isCliEntry() (operator-core/lib/util/cli-entry.ts), which
 # returns false when this define is present, so only the real entry (serve.ts,
 # which does NOT use the helper) boots.
+# --define:process.env.PAPERCUP_DOGFOOD_REPO_REF (clone-progress + version-pin):
+# bake the release's monorepo ref so the shipped app's `papercusp` dogfood hive
+# clones the EXACT version the binary was built from (bootstrap-papercusp-hive's
+# dogfoodRef() reads process.env.PAPERCUP_DOGFOOD_REPO_REF). release-local.sh
+# exports it (= the release tag) + tags the monorepo. Unset (a plain dev sidecar
+# build) bakes "" → the bootstrap falls back to the remote default branch (main).
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
+  --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   "${HOST_EXTERNALS[@]}")
 if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
