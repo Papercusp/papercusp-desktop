@@ -1688,6 +1688,24 @@ pub mod swiftterm_embed {
         });
     }
 
+    /// Absolute path to a bundled dock binary
+    /// (Contents/Resources/sidecar/bin/<name>), canonicalized. None in a
+    /// dev/unbundled layout. SwiftTerm's startProcess posix_spawns the
+    /// executable WITHOUT a PATH search, so the dock command's bare "pui" must
+    /// be resolved to an absolute path or it fails silently → blank pane.
+    /// (zellij — which pui launches itself — is found via the PATH that
+    /// prepare_dock_env sets, since pui inherits the forwarded env.)
+    fn dock_bin_path(name: &str) -> Option<String> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let p = dir
+            .join("../Resources/sidecar/bin")
+            .join(name)
+            .canonicalize()
+            .ok()?;
+        Some(p.to_string_lossy().into_owned())
+    }
+
     /// Attach the terminal (hosting `command`) to the left `fraction` of the
     /// Tauri window. `ns_window` is tauri's raw NSWindow pointer. MUST run on
     /// the AppKit main thread.
@@ -1699,6 +1717,22 @@ pub mod swiftterm_embed {
         max_px: i32,
     ) -> Result<(), String> {
         prepare_dock_env();
+        // SwiftTerm posix_spawns the exe with NO PATH search → resolve a bare
+        // "pui" to its bundled absolute path (else startProcess fails silently
+        // and the pane stays blank). Other commands pass through unchanged.
+        let owned: Vec<String>;
+        let command: &[String] = match command.first() {
+            Some(first) if first == "pui" => match dock_bin_path("pui") {
+                Some(abs) => {
+                    owned = std::iter::once(abs)
+                        .chain(command.iter().skip(1).cloned())
+                        .collect();
+                    &owned
+                }
+                None => command,
+            },
+            _ => command,
+        };
         let shim = lib().ok_or("PapercuspTermShim dylib not loadable")?;
         let (exe, rest) = command.split_first().ok_or("empty terminal command")?;
         let exe_c = CString::new(exe.as_str()).map_err(|e| e.to_string())?;
