@@ -64,6 +64,16 @@ public func pcterm_attach_left(
         let data = Data(bytes: argsBlob, count: Int(argsLen))
         args = data.split(separator: 0).compactMap { String(data: $0, encoding: .utf8) }
     }
-    term.startProcess(executable: String(cString: exe), args: args)
+    // Forward THIS process's environment to the child. SwiftTerm defaults to a
+    // MINIMAL env when `environment` is nil — which omits the bundled-bin PATH +
+    // PUI_COMPANION_WASM that native_terminal::prepare_dock_env sets on the app
+    // process. Without forwarding, `pui` can't find `zellij` on PATH and the
+    // dock pane stays BLANK (chat-dock bundling, WI-668). Ensure the terminal
+    // vars are present regardless of the inherited env.
+    var env = ProcessInfo.processInfo.environment
+    if env["TERM"] == nil { env["TERM"] = "xterm-256color" }
+    if env["COLORTERM"] == nil { env["COLORTERM"] = "truecolor" }
+    let envArray = env.map { "\($0.key)=\($0.value)" }
+    term.startProcess(executable: String(cString: exe), args: args, environment: envArray)
     return Unmanaged.passRetained(term).toOpaque()
 }
