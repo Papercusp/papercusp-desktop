@@ -47,8 +47,12 @@ VM_BUILD_DIR="${VM_BUILD_DIR:-papercup-build-release}"   # under C:\Users\user\
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
-SSH=(ssh -i "$VM_SSH_KEY" -p "$VM_SSH_PORT" -o ConnectTimeout=10 -o ServerAliveInterval=30 "$VM_SSH_HOST")
-SCP=(scp -i "$VM_SSH_KEY" -P "$VM_SSH_PORT" -o ConnectTimeout=10)
+# -o IdentitiesOnly=yes: pin auth to $VM_SSH_KEY only. Without it, a loaded
+# ssh-agent with >5 keys exhausts the server's auth-tries on agent keys first
+# and fails "Too many authentication failures" before the -i key is tried
+# (bit a WI-800 rebuild, 2026-06-25).
+SSH=(ssh -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -p "$VM_SSH_PORT" -o ConnectTimeout=10 -o ServerAliveInterval=30 "$VM_SSH_HOST")
+SCP=(scp -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -P "$VM_SSH_PORT" -o ConnectTimeout=10)
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
