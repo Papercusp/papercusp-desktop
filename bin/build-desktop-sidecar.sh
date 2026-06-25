@@ -1033,9 +1033,19 @@ fi
 
 # MinGit-busybox (Windows only) — provides BOTH `git.exe` and a busybox-
 # backed `bash.exe`, plus the small POSIX util set the harness scripts
-# expect (sed, grep, sort, …). macOS/Linux ship git + bash by default so
-# we skip vendoring there. Tauri main prepends `git/cmd` and `git/usr/bin`
+# expect (sed, grep, sort, …). Tauri main prepends `git/cmd` and `git/usr/bin`
 # to PATH on Windows so all bundled tools resolve by name.
+#
+# ⚠ macOS does NOT ship a working git by default: a fresh, Xcode-CLT-less Mac
+#   has only the `/usr/bin/git` STUB, which on non-interactive invocation prints
+#   "xcode-select: no developer tools were found …" and exits non-zero — so the
+#   dogfood `git clone` fails ("Setting up Papercusp workspace failed", found on
+#   an owner Mac VM 2026-06-25). We currently DON'T vendor git on macOS, so the
+#   wizard now (a) prepends /opt/homebrew/bin to the sidecar PATH (tool-path.ts)
+#   to find a Homebrew git/gh, and (b) surfaces an actionable "run
+#   `xcode-select --install`" hint when git is genuinely absent (clone-github.ts
+#   git_missing). Vendoring a relocatable macOS git is the robust fix — tracked
+#   as a follow-up. Linux ships git via the distro, so we skip vendoring there.
 #
 # We pin to the busybox flavor of MinGit (vs. the full MinGit) because it
 # includes the POSIX shell + utils the harness needs; the regular MinGit
