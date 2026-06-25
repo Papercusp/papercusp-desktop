@@ -170,7 +170,14 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 # Tauri CLI does the platform-native bundling + signing in one shot.
 (cd "$ROOT" && npx --yes -p @tauri-apps/cli@latest tauri build)
 
-LINUX_BUNDLE="$ROOT/src-tauri/target/release/bundle"
+# Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
+# [build] target-dir — this box redirects all builds to ~/.cargo-target since
+# 2026-06-17). Without this, $ROOT/src-tauri/target is stale and the
+# version-scoped globs below miss the freshly-built bundles. (Fix 2026-06-25;
+# same resolution @papercusp/tauri-release-kit uses.)
+CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
 if [[ ! -d "$LINUX_BUNDLE" ]]; then
   echo "ERROR: expected bundles at $LINUX_BUNDLE — Tauri build failed?"
   exit 1
@@ -205,7 +212,7 @@ fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
   (cd "$ROOT" && npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu)
-  for f in "$ROOT"/src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
+  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
