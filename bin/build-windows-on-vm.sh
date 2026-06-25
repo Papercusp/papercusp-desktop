@@ -89,6 +89,61 @@ echo "==> shipping to VM"
 echo "==> extracting in VM ($VM_BUILD_DIR)"
 "${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\Users\\user\\$VM_BUILD_DIR -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
 
+# ── Authenticode signing (WI-792 P-003) — sign the bundled .exe + NSIS installer
+# IFF the owner provides a code-signing cert in env. With NO cert env set,
+# SIGN_PRELUDE is empty and the build is UNSIGNED — byte-identical to before.
+# Full owner runbook: /internal/docs/agent-insights/windows-authenticode-signing-runbook
+# tauri reads bundle.windows.{certificateThumbprint|signCommand,timestampUrl,
+# digestAlgorithm} from tauri.windows.conf.json; we patch it in-VM before the build.
+WINDOWS_SIGN_TIMESTAMP_URL="${WINDOWS_SIGN_TIMESTAMP_URL:-http://timestamp.digicert.com}"
+WINDOWS_SIGN_DIGEST="${WINDOWS_SIGN_DIGEST:-sha256}"
+SIGN_PRELUDE=""
+if [[ -n "${WINDOWS_SIGN_COMMAND:-}" ]]; then
+  # EV / cloud-HSM path (non-exportable key): a custom signer, %1 = file path.
+  SIGN_PRELUDE=$(cat <<PS
+Write-Host "[build] Authenticode: injecting signCommand (EV/cloud-HSM)"
+\$cfgPath = "src-tauri/tauri.windows.conf.json"
+\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
+if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
+\$cfg.bundle.windows | Add-Member -Force signCommand "${WINDOWS_SIGN_COMMAND}"
+\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+PS
+)
+elif [[ -n "${WINDOWS_CERT_PFX_BASE64:-}" ]]; then
+  # OV path: import the PFX into CurrentUser\My, read its thumbprint, patch config.
+  SIGN_PRELUDE=$(cat <<PS
+Write-Host "[build] Authenticode: importing PFX + setting certificateThumbprint"
+[IO.File]::WriteAllBytes("\$env:TEMP\\cs.pfx", [Convert]::FromBase64String("${WINDOWS_CERT_PFX_BASE64}"))
+\$pwd = ConvertTo-SecureString "${WINDOWS_CERT_PASSWORD:-}" -AsPlainText -Force
+\$cert = Import-PfxCertificate -FilePath "\$env:TEMP\\cs.pfx" -CertStoreLocation Cert:\\CurrentUser\\My -Password \$pwd
+Remove-Item "\$env:TEMP\\cs.pfx" -Force
+\$cfgPath = "src-tauri/tauri.windows.conf.json"
+\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
+if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
+\$cfg.bundle.windows | Add-Member -Force certificateThumbprint \$cert.Thumbprint
+\$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
+\$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
+\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+PS
+)
+elif [[ -n "${WINDOWS_CERTIFICATE_THUMBPRINT:-}" ]]; then
+  # Cert already in the VM store (e.g. EV token CSP / cloud-HSM connector).
+  SIGN_PRELUDE=$(cat <<PS
+Write-Host "[build] Authenticode: setting certificateThumbprint (cert already in store)"
+\$cfgPath = "src-tauri/tauri.windows.conf.json"
+\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
+if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
+\$cfg.bundle.windows | Add-Member -Force certificateThumbprint "${WINDOWS_CERTIFICATE_THUMBPRINT}"
+\$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
+\$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
+\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+PS
+)
+else
+  echo "==> Authenticode: no WINDOWS_CERT_*/WINDOWS_SIGN_* env set — building UNSIGNED."
+  echo "    A PUBLIC release MUST be signed: /internal/docs/agent-insights/windows-authenticode-signing-runbook"
+fi
+
 echo "==> writing build script"
 BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
 cat > "$BUILD_PS1" <<EOF
@@ -102,6 +157,7 @@ cmd /c "\`"\$vcvars\`" && set" | ForEach-Object {
 Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
 Write-Host "[build] npm install"
 npm install --no-audit --no-fund 2>&1
+${SIGN_PRELUDE}
 Write-Host "[build] tauri build --bundles nsis"
 npx tauri build --bundles nsis 2>&1
 Write-Host "[build] EXIT=\$LASTEXITCODE"
