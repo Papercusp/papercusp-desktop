@@ -12,7 +12,7 @@
     "dev:hmr": "tauri dev --config '{\"build\":{\"devUrl\":\"http://localhost:3055\"}}'",
     "build": "tauri build",
     "build:debug": "tauri build --debug",
-    "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '\u2713 tauri-bindings.ts regenerated'"
+    "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '✓ tauri-bindings.ts regenerated'"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0"
