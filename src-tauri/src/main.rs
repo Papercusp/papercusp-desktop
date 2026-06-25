@@ -489,6 +489,23 @@ mod tests {
     fn mixed_separators() {
         t(r"C:\foo/bar\baz", "/mnt/c/foo/bar/baz");
     }
+
+    #[test]
+    fn spaces_in_username_preserved() {
+        // WI-792 P-004 / alpha P-010g (spaces-in-username path-translation edge):
+        // a Windows username with spaces must survive translation INTACT. The
+        // translated path is passed to wsl.exe as a SINGLE argv element by
+        // make_sidecar_command (`.args([…, &cwd_wsl, …])`, NOT a shell string),
+        // so an embedded space does not split the argument — the only requirement
+        // is that translation leave the space untouched. This guards that.
+        t(
+            r"C:\Users\First Last\AppData\Local\Papercusp",
+            "/mnt/c/Users/First Last/AppData/Local/Papercusp",
+        );
+        t(r"C:\Users\Ada Lovelace\.papercusp", "/mnt/c/Users/Ada Lovelace/.papercusp");
+        // mixed separators + spaces together
+        t(r"C:\Users\Jane Doe/work\repo", "/mnt/c/Users/Jane Doe/work/repo");
+    }
 }
 
 #[cfg(test)]
