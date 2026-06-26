@@ -206,7 +206,7 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
   # Tauri's supported Windows (MSVC) story. Mirrors the WITH_MAC lane.
   # See plan windows-desktop-release-readiness-2026-06-11 (D-001) and
   # bin/build-windows-on-vm.sh for prereqs (VM booted, rootfs built).
-  bash "$ROOT/bin/build-windows-on-vm.sh"
+  PAPERCUSP_BUILD_SHA="$BUILD_SHA" bash "$ROOT/bin/build-windows-on-vm.sh"
   win_found=0
   for f in "$ROOT"/src-tauri/target/windows-vm/bundle/nsis/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1

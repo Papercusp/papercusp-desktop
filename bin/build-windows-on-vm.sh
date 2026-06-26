@@ -162,6 +162,10 @@ Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
 Write-Host "[build] npm install"
 npm install --no-audit --no-fund 2>&1
 ${SIGN_PRELUDE}
+# Build provenance: baked via option_env!("PAPERCUSP_BUILD_SHA") (main.rs) so
+# the operator's /api/health self-reports the commit. Empty when unset.
+\$env:PAPERCUSP_BUILD_SHA = "${PAPERCUSP_BUILD_SHA:-}"
+Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
 Write-Host "[build] tauri build --bundles nsis"
 npx tauri build --bundles nsis 2>&1
 Write-Host "[build] EXIT=\$LASTEXITCODE"
