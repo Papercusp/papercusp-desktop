@@ -1105,7 +1105,7 @@ fn spawn_serve(
     if via_wsl {
         cmd.env(
             "WSLENV",
-            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_HARNESS_DIR/p:\
+            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
@@ -1129,6 +1129,16 @@ fn spawn_serve(
         .env("PAPERCUSP_BIND_HOST", "127.0.0.1")
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_ENV", "production")
+        // Build provenance: baked at compile time via option_env! when the
+        // build exports PAPERCUSP_BUILD_SHA (e.g. bin/mac-vm-build.sh), then
+        // forwarded so the operator's /api/health self-reports the git sha it
+        // was built from (build-info.ts). Empty string when unset → build-info
+        // falls back to git rev-parse (null in a packaged, .git-less app). This
+        // makes "what commit is this build?" answerable on any shipped build.
+        .env(
+            "PAPERCUSP_BUILD_SHA",
+            option_env!("PAPERCUSP_BUILD_SHA").unwrap_or(""),
+        )
         // The desktop webview consumes the SPA — keep the UI mounted (serve
         // alone defaults it OFF for headless use; Decision E).
         .env("PAPERCUSP_SERVE_UI", "1")

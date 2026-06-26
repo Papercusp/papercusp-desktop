@@ -38,5 +38,9 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
 fn main() {
     ensure_sidecar_placeholder(Path::new(env!("CARGO_MANIFEST_DIR")));
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");
+    // Build provenance: rebuild main.rs when the build sets a new git sha so
+    // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it
+    // to /api/health). Without this, cargo's cache would freeze a stale sha.
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_BUILD_SHA");
     tauri_build::build()
 }

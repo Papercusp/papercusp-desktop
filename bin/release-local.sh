@@ -54,6 +54,13 @@ WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
 MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -p 2222 -o BatchMode=yes aviweiss@127.0.0.1)
 MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
+# Build provenance: the short git sha of the staging tree we're packaging.
+# Exported into every build leg so option_env!("PAPERCUSP_BUILD_SHA") (main.rs)
+# bakes it in, and the operator's /api/health self-reports the commit. The VM
+# build trees are rsynced WITHOUT .git, so they can't self-derive it — it MUST
+# be passed in from here, where .git is present.
+BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+echo "==> build provenance: PAPERCUSP_BUILD_SHA=${BUILD_SHA:-<unknown>}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
   echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
@@ -168,7 +175,7 @@ export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # Tauri CLI does the platform-native bundling + signing in one shot.
-(cd "$ROOT" && npx --yes -p @tauri-apps/cli@latest tauri build)
+(cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build)
 
 # Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
 # [build] target-dir — this box redirects all builds to ~/.cargo-target since
@@ -211,7 +218,7 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
-  (cd "$ROOT" && npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu)
+  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu)
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
@@ -243,6 +250,7 @@ if [[ "$WITH_MAC" == "1" ]]; then
     npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
     export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+    export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
     export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
     export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
     export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'
