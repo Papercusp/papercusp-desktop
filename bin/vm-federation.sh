@@ -68,7 +68,7 @@ done
 [ -n "$DEB" ] || DEB="$(default_deb)"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
-OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercup/apps/operator}"
+OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercusp/apps/operator}"
 # Real PUBLIC repo for the hive create-from-repo step (the retired share/finalize
 # path used a synthetic repo id; the hive model clones a real repo). Override with
 # PAPERCUSP_FED_REPO_URL. Needs VM→github egress (slirp user-net provides NAT).

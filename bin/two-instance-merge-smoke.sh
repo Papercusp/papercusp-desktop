@@ -42,7 +42,7 @@ DEB="${1:-$(dirname "$0")/../src-tauri/target/release/bundle/deb/Papercusp_0.0.1
 SYNTH_REPO_ID="${2:-918273645}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
-OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercup/apps/operator}"
+OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercusp/apps/operator}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-148}"
 WORK="$(mktemp -d /tmp/merge-smoke.XXXXXX)"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"

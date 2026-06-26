@@ -28,7 +28,7 @@ DEB="${1:-$DESKTOP_DIR/src-tauri/target/release/bundle/deb/Papercusp_0.0.1_amd64
 DISP="${PAPERCUSP_INTERACTIVE_DISPLAY:-0}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
-OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercup/apps/operator}"
+OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercusp/apps/operator}"
 SYNTH_REPO_ID="${SYNTH_REPO_ID:-918273645}"
 
 # Stable work dir (NOT mktemp) so the stop command can always find the processes.

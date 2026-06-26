@@ -25,7 +25,7 @@ set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
-REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercup}"
+REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
 DEB="${1:-/home/marsh-office/.cargo-target/release/bundle/deb/Papercusp_0.0.2_amd64.deb}"
 DEB="$(readlink -f "$DEB" 2>/dev/null || echo "$DEB")"
 LUXON_SRC="$REPO_DIR/node_modules/luxon"

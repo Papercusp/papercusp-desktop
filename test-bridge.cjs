@@ -1,4 +1,4 @@
-const WebSocket = require('/home/marsh-office/papercupai-workspace/papercup/node_modules/ws');
+const WebSocket = require('/home/marsh-office/papercupai-workspace/papercusp/node_modules/ws');
 const TOKEN = 'PsPitoBOaHKwrxXxqCUkZiMDylMUpfG5';
 const PORT = 43379;
 const tries = [
