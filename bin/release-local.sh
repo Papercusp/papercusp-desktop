@@ -244,6 +244,8 @@ if [[ "$WITH_MAC" == "1" ]]; then
     export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
     export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
+    export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
+    export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'
     bash bin/mac-vm-build.sh
   "'
   MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
