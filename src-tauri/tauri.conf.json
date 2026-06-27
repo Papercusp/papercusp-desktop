@@ -67,7 +67,8 @@
     "linux": {
       "deb": {
         "depends": [],
-        "postInstallScript": "deb/postinstall.sh"
+        "postInstallScript": "deb/postinstall.sh",
+        "postRemoveScript": "deb/postremove.sh"
       },
       "appimage": {
         "bundleMediaFramework": false
