@@ -1513,11 +1513,51 @@ fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
     }
 }
 
+/// Make the bundled chat-dock binaries (`pui`, `zellij`) discoverable + point
+/// `pui` at the bundled companion plugin, so the dock (`pui chat` = zellij + the
+/// pui-companion plugin) works from a PACKAGED app. Every dock launcher — the
+/// Linux glued/new-window `ghostty -e pui chat` AND the macOS SwiftTerm embed —
+/// spawns its child inheriting THIS process's env, so we prepend the bundled
+/// `sidecar/bin` to PATH and set PUI_COMPANION_WASM here. The sidecar dir is
+/// resolved via Tauri's CROSS-PLATFORM Resource resolver (the mac `.app`
+/// Contents/Resources layout and the Linux `.deb`/AppImage layout differ), so it
+/// works on every target. Idempotent (run-once) + a no-op in a dev/unbundled
+/// layout where the files aren't found. (linux-chat-dock-parity-2026-06-27 —
+/// macOS previously did this in swiftterm_embed::prepare_dock_env, which never
+/// ran on Linux, so the Linux dock stayed a blank pane even once the binaries shipped.)
+fn prepare_dock_env(app: &AppHandle) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let Ok(sidecar) = app
+            .path()
+            .resolve("sidecar", tauri::path::BaseDirectory::Resource)
+        else {
+            return;
+        };
+        let bin = sidecar.join("bin");
+        if bin.is_dir() {
+            let cur = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{}", bin.display(), cur));
+        }
+        if std::env::var_os("PUI_COMPANION_WASM").is_none() {
+            let wasm = sidecar.join("pui-companion.wasm");
+            if wasm.is_file() {
+                std::env::set_var("PUI_COMPANION_WASM", wasm);
+            }
+        }
+    });
+}
+
 /// Launch the native terminal per the resolved strategy. Shared by setup() and
 /// the toggle command. For the glued path, the X11 window is resolved + first-
 /// glued on a background thread so this never blocks.
 fn start_native_terminal(app: &AppHandle) {
     use native_terminal::TerminalStrategy;
+    // Ensure the bundled dock binaries (pui/zellij) are on PATH + PUI_COMPANION_WASM
+    // is set BEFORE any launcher spawns `pui chat` — cross-platform (was mac-only,
+    // so the Linux dock never found them). Idempotent; no-op in dev/unbundled.
+    prepare_dock_env(app);
     let strategy = app.state::<native_terminal::NativeTerminal>().strategy;
     match strategy {
         TerminalStrategy::GluedGhosttyX11 => {

@@ -1291,6 +1291,57 @@ else
   fi
 fi
 
+# ── chat dock: pui + companion wasm + zellij 0.44.3 (cross-platform) ─────────
+# The desktop chat dock runs `pui chat` (zellij hosting the pui-companion plugin).
+# This was mac-ONLY (in bin/mac-vm-build.sh), so a packaged LINUX app shipped NONE
+# of these → the dock was a blank pane (the pui/zellij binaries simply weren't
+# bundled). Bundling them here (the shared sidecar builder, run by every platform's
+# build) — OS-aware on the zellij triple — gives Linux parity. native_terminal.rs's
+# cross-platform dock-env prep then puts sidecar/bin on PATH + points
+# PUI_COMPANION_WASM at the bundled plugin. (linux-chat-dock-parity-2026-06-27.)
+echo "→ chat dock: pui + companion wasm + zellij 0.44.3"
+REPO="$(cd "$ROOT/.." && pwd)"
+mkdir -p "$SIDECAR_DIR/bin"
+# 1. pui (apps/tui) — native release build for the host triple.
+( cd "$REPO/apps/tui" && cargo build --release )
+# Existence-checked candidates (NOT `find` over a maybe-missing dir — under
+# `set -eo pipefail` a missing path arg makes find non-zero → exit).
+PUI_BIN=""
+for _c in "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
+  [[ -f "$_c" ]] && PUI_BIN="$_c" && break
+done
+[[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
+cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
+echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
+# 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
+rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
+( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
+WASM=""
+for _c in "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
+  [[ -f "$_c" ]] && WASM="$_c" && break
+done
+[[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
+cp "$WASM" "$SIDECAR_DIR/pui-companion.wasm"
+echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
+# 3. zellij 0.44.3 — the plugin API is version-coupled; must match EXACTLY.
+#    OS-aware triple: Linux uses the STATIC musl build (libc-independent → portable
+#    across distros); macOS uses apple-darwin (matching bin/mac-vm-build.sh).
+ZJ_VER=0.44.3
+case "$(uname -m)" in arm64|aarch64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
+case "$(uname -s)" in
+  Linux*)  ZJ_TRIPLE="${ZJ_ARCH}-unknown-linux-musl" ;;
+  Darwin*) ZJ_TRIPLE="${ZJ_ARCH}-apple-darwin" ;;
+  *)       echo "ERROR: zellij bundling: unsupported OS $(uname -s)"; exit 1 ;;
+esac
+if [[ -x "$SIDECAR_DIR/bin/zellij" ]] && "$SIDECAR_DIR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
+  echo "    ✓ zellij ${ZJ_VER} already present — skipping download"
+else
+  curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_TRIPLE}.tar.gz" | tar -xz -C "$SIDECAR_DIR/bin"
+  [[ -x "$SIDECAR_DIR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} (${ZJ_TRIPLE}) not fetched"; exit 1; }
+  chmod 755 "$SIDECAR_DIR/bin/zellij"
+  echo "    ✓ zellij ${ZJ_VER} (${ZJ_TRIPLE}) → sidecar/bin/zellij"
+fi
+
 # ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
 # Retire the old bundle via rename, rename the temp build into place, then
 # delete the retired tree. Renames on one filesystem are atomic, so a
