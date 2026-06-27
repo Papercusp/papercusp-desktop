@@ -1302,12 +1302,19 @@ fi
 echo "→ chat dock: pui + companion wasm + zellij 0.44.3"
 REPO="$(cd "$ROOT/.." && pwd)"
 mkdir -p "$SIDECAR_DIR/bin"
+# Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config.toml
+# `[build] target-dir` — this box redirects ALL builds to ~/.cargo-target, so the
+# built binaries are NOT under <crate>/target/. Same resolution release-local.sh
+# uses; empty string on failure → the standard in-crate paths below still match).
+CARGO_TGT="$(cd "$REPO/apps/tui" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
 # 1. pui (apps/tui) — native release build for the host triple.
 ( cd "$REPO/apps/tui" && cargo build --release )
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
-# `set -eo pipefail` a missing path arg makes find non-zero → exit).
+# `set -eo pipefail` a missing path arg makes find non-zero → exit). The resolved
+# CARGO_TGT comes first (covers the target-dir redirect); then the standard
+# in-crate / workspace target dirs (non-redirected boxes, e.g. the mac VM).
 PUI_BIN=""
-for _c in "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
+for _c in "$CARGO_TGT/release/pui" "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
   [[ -f "$_c" ]] && PUI_BIN="$_c" && break
 done
 [[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
@@ -1317,7 +1324,7 @@ echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
 ( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
 WASM=""
-for _c in "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
+for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
   [[ -f "$_c" ]] && WASM="$_c" && break
 done
 [[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
