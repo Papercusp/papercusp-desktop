@@ -223,9 +223,16 @@ EOF
 echo "A from-repo → $(printf '%s' "$a_resp" | head -c 200)"
 A_LINK="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
-ml=(d.get("existing",{}).get("hive",{}).get("memberLinks") or d.get("created",{}).get("memberLinks") or [])
+# memberLinks may live in: existing.hive.memberLinks (re-publish / directory offer),
+# created.memberLinks (older shape), OR publish.memberLinks (WI-931: a freshly-created
+# hives response is {created:{...}, publish:{memberLinks,hivePubkey}} — publish is a
+# SIBLING of created, _create_from_repo.ts:120-125). Check all of them.
+ml=(d.get("existing",{}).get("hive",{}).get("memberLinks")
+    or d.get("created",{}).get("memberLinks")
+    or d.get("publish",{}).get("memberLinks")
+    or [])
 print(ml[0] if ml else "")' 2>/dev/null)"
-[ -n "$A_LINK" ] || { echo "✗ A could not resolve a hive memberLink — body: $(printf '%s' "$a_resp" | head -c 400)"; exit 6; }
+[ -n "$A_LINK" ] || { echo "✗ A could not resolve a hive memberLink — FULL body: $(printf '%s' "$a_resp" | head -c 1500)"; exit 6; }
 echo "✓ A resolved hive link ${A_LINK:0:56}…"
 # Both peers JOIN the SAME hive via A's EXACT memberLink — guarantees the same hive-pubkey
 # topic (no rediscovery ambiguity / stale-hive split) AND publishes BOTH bindings (admission).
