@@ -148,6 +148,19 @@ export DISPLAY=:0
 export XAUTHORITY="$HOME/.Xauthority"
 for _ in $(seq 1 30); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 1; done
 xdpyinfo -display :0 >/dev/null 2>&1 || { echo "X :0 not ready (see ~/startx.log)"; exit 1; }
+# Anti-split-brain (shared-hive-member-content-federation D-024): a desktop/operator
+# from a PRIOR boot can survive (`vmctl status` shows app:stopped if only the GUI proc
+# died, while the orphaned sidecar/operator keeps serving). Launching on top of it
+# creates DUPLICATE operators → a stale boot set + incoherent federation (hours to
+# diagnose). Reap any survivors before launching so there is exactly ONE operator.
+if pgrep -f papercusp-desktop >/dev/null 2>&1 || pgrep -f serve.mjs >/dev/null 2>&1; then
+  echo "reaping stale papercusp processes before launch (anti split-brain)…"
+  pkill -9 -f papercusp-desktop 2>/dev/null
+  pkill -9 -f 'serve.mjs' 2>/dev/null
+  pkill -9 -f 'code-server' 2>/dev/null
+  pkill -9 -f 'embedded-postgres' 2>/dev/null
+  sleep 4
+fi
 echo "launching with DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"
 setsid bash -c 'exec /usr/bin/papercusp-desktop' >"$HOME/papercusp-app.log" 2>&1 </dev/null &
 sleep 1; echo "started; log → ~/papercusp-app.log"
@@ -257,6 +270,14 @@ cmd_status() {
     if vm_ssh "$name" true 2>/dev/null; then
       echo "ssh:        reachable"
       echo "app:        $(vm_ssh "$name" 'pgrep -f [p]apercusp-desktop >/dev/null && echo running || echo stopped' 2>/dev/null)"
+      # split-brain visibility (D-024): >1 desktop = duplicate launch; serve.mjs>0 with
+      # "app: stopped" = an orphaned operator survived the GUI's death (reap before
+      # relaunch — `vmctl launch` now auto-reaps). One healthy operator = 1 desktop +
+      # a couple serve.mjs (operator + sidecar), so judge by the desktop count.
+      local ndesk nsrv
+      ndesk="$(vm_ssh "$name" 'pgrep -cf [p]apercusp-desktop 2>/dev/null || echo 0' 2>/dev/null)"
+      nsrv="$(vm_ssh "$name" 'pgrep -cf [s]erve.mjs 2>/dev/null || echo 0' 2>/dev/null)"
+      echo "procs:      desktop=${ndesk:-?} serve.mjs=${nsrv:-?}$([ "${ndesk:-0}" -gt 1 ] 2>/dev/null && echo '  ⚠ DUPLICATE desktop — split-brain')"
       # operator runs on a DYNAMIC port — parse it from the app log, don't assume :3070.
       local op; op="$(vm_ssh "$name" "grep -oE '\[serve\] listening on http://127\.0\.0\.1:[0-9]+|sidecar ready on :[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null)"
       if [ -n "$op" ] && op_responds "$name" "$op"; then
