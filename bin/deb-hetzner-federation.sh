@@ -275,11 +275,11 @@ if [ "$disc" != 1 ]; then
 fi
 
 fed_log "A→B MERGE (hive, slug-agnostic probe; A member='$MEMBER_SLUG')"
-probe_ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 30 || true)"
+probe_ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 80 || true)"
 ab=0; [ "${probe_ab%% *}" = 1 ] && ab=1
 [ "$ab" = 1 ] && echo "✓ A→B: F-A2B federated into B as origin=remote (landed slug='${probe_ab#* }')" || echo "✗ A→B failed (probe=$probe_ab)"
 fed_log "B→A MERGE (hive, slug-agnostic probe; B member='$B_MEMBER_SLUG')"
-probe_ba="$(fed_hive_merge_probe b a "$B_MEMBER_SLUG" F-B2A 30 || true)"
+probe_ba="$(fed_hive_merge_probe b a "$B_MEMBER_SLUG" F-B2A 80 || true)"
 ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 [ "$ba" = 1 ] && echo "✓ B→A: F-B2A federated into A as origin=remote (landed slug='${probe_ba#* }')" || echo "✗ B→A failed (probe=$probe_ba)"
 
@@ -287,17 +287,17 @@ ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 # (flag papercusp-plan-part-federation ON in both sidecars) must federate
 # cross-machine over the same wire. A→B then B→A, distinct plan slugs per dir.
 fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A (hive member slugs)"
-ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 30 || true)"
+ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 80 || true)"
 [ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed (probe=$ppab)"
-ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 30 || true)"
+ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 80 || true)"
 [ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
 
 # D-042 COMMS: the cross-machine COMMUNICATION system (coord feed / coord_event_log)
 # must federate over the SAME peer-log wire as content. A→B then B→A, harness-scoped.
 fed_log "COORD-COMMS MERGE (coord_event_log feed) A→B + B→A (hive member slugs)"
-cab="$(fed_coord_merge_probe a b "$MEMBER_SLUG" A2B 30 || true)"
+cab="$(fed_coord_merge_probe a b "$MEMBER_SLUG" A2B 80 || true)"
 [ "$cab" = 1 ] && echo "✓ coord A→B: comm event federated into B as origin=remote" || echo "✗ coord A→B failed (probe=$cab)"
-cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 30 || true)"
+cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 80 || true)"
 [ "$cba" = 1 ] && echo "✓ coord B→A: comm event federated into A as origin=remote" || echo "✗ coord B→A failed (probe=$cba)"
 
 # EI-521 WS-DIAG: on merge-fail, dump workspace_ids to settle product-bug vs probe-artifact —
@@ -309,6 +309,11 @@ if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   echo "--- A: booted-harness workspaceId/slug (the drain's WHERE key — does it match the outbox above?) ---"; drv_exec a <<<"grep -aoE 'bootHarness[^ ]* (ws|workspace)[=:][^ ]+ (slug|harness)[=:][^ ]+|wireOutbox.*slug[=:][^ ]+|startOutboxDrain.*[a-z]' /home/pcusp/serve.log 2>/dev/null | tail -10; echo '(drain-wiring lines:)'; grep -aE 'ensureRelocatedSendSideWired|wireOutbox|outbox wiring|startOutboxDrain|\[outbox-drain\]|relocated send-side|drain wired' /home/pcusp/serve.log 2>/dev/null | tail -15"
   echo "--- A: feature rows (harness_slug|workspace_id|origin) ---"; drv_psql a "SELECT harness_slug||'|'||workspace_id||'|'||origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null
   echo "--- A: registry (slug|workspace_id) ---"; drv_psql a "SELECT slug||'|'||workspace_id FROM harness_shared.harness_registry;" 2>/dev/null
+  # D-051: send-side drain now WORKS (A content rows get drained_at). Does the content REACH B?
+  # Dump B's received content (origin=remote = federated). If present → federation works (probe
+  # window was just too short); if absent → receive-side (replicate/merge/project) is the gap.
+  echo "--- B: received content (table|harness_slug|workspace_id|origin) — origin=remote means federated ---"; drv_psql b "SELECT table_name||'|'||harness_slug||'|'||workspace_id||'|'||origin FROM (SELECT 'features' table_name, harness_slug, workspace_id, origin FROM harness_shared.harness_features_consolidated UNION ALL SELECT 'plan_parts', harness_slug, workspace_id, origin FROM harness_shared.harness_plan_parts UNION ALL SELECT 'coord_event', COALESCE(harness_slug,'∅'), workspace_id, origin FROM harness_shared.coord_event_log WHERE harness_slug IS NOT NULL) x ORDER BY 1;" 2>/dev/null
+  echo "--- B: undrained-or-not outbox (id|table|harness_slug|workspace_id|drained) ---"; drv_psql b "SELECT id||'|'||table_name||'|'||COALESCE(harness_slug,'∅')||'|'||workspace_id||'|d='||COALESCE(drained_at::text,'NULL') FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
   # (boot workspace = the registry workspace_id above; no serve.log token-grep — avoids
   #  echoing credential-shaped strings to diagnostic logs, security review MEDIUM)
   # EI-521 drain-loop diag (D-031): the SEND-side drain is wired (substrate-sidecar-host
