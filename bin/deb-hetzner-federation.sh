@@ -305,7 +305,8 @@ cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 30 || true)"
 # WHERE workspace_id = handle.workspaceId)?
 if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   fed_log "WS-DIAG (EI-521): workspace_id alignment between capture + drain"
-  echo "--- A: undrained outbox (id|table_name|workspace_id) ---"; drv_psql a "SELECT id||'|'||table_name||'|'||workspace_id FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
+  echo "--- A: undrained outbox (id|table_name|harness_slug|workspace_id|drained_at) ---"; drv_psql a "SELECT id||'|'||table_name||'|'||COALESCE(harness_slug,'∅')||'|'||workspace_id||'|d='||COALESCE(drained_at::text,'NULL') FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
+  echo "--- A: booted-harness workspaceId/slug (the drain's WHERE key — does it match the outbox above?) ---"; drv_exec a <<<"grep -aoE 'bootHarness[^ ]* (ws|workspace)[=:][^ ]+ (slug|harness)[=:][^ ]+|wireOutbox.*slug[=:][^ ]+|startOutboxDrain.*[a-z]' /home/pcusp/serve.log 2>/dev/null | tail -10; echo '(drain-wiring lines:)'; grep -aE 'ensureRelocatedSendSideWired|wireOutbox|outbox wiring|startOutboxDrain|\[outbox-drain\]|relocated send-side|drain wired' /home/pcusp/serve.log 2>/dev/null | tail -15"
   echo "--- A: feature rows (harness_slug|workspace_id|origin) ---"; drv_psql a "SELECT harness_slug||'|'||workspace_id||'|'||origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null
   echo "--- A: registry (slug|workspace_id) ---"; drv_psql a "SELECT slug||'|'||workspace_id FROM harness_shared.harness_registry;" 2>/dev/null
   # (boot workspace = the registry workspace_id above; no serve.log token-grep — avoids
