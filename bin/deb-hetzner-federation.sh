@@ -291,6 +291,13 @@ if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   echo "--- A: registry (slug|workspace_id) ---"; drv_psql a "SELECT slug||'|'||workspace_id FROM harness_shared.harness_registry;" 2>/dev/null
   # (boot workspace = the registry workspace_id above; no serve.log token-grep — avoids
   #  echoing credential-shaped strings to diagnostic logs, security review MEDIUM)
+  # EI-521 drain-loop diag (D-031): the SEND-side drain is wired (substrate-sidecar-host
+  #  handleBootHarness → wireOutboxForHarness → startOutboxDrain) but the outbox is undrained.
+  #  These prefixed lines carry NO credentials (slugs + counts only) — safe to echo.
+  for inst in a b; do
+    echo "--- $inst: outbox-drain / sidecar-host wiring lines (serve.log) ---"
+    drv_exec "$inst" <<<"grep -aE '\[outbox-drain\]|\[substrate-sidecar-host\]|wireOutbox|startOutboxDrain|boot_federate|drain' /home/pcusp/serve.log 2>/dev/null | tail -25"
+  done
 fi
 
 # ── 7. report ─────────────────────────────────────────────────────────────────
