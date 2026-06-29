@@ -537,7 +537,8 @@ fed_plan_part_merge_assert() {
   # capture trigger + RLS binding. harness_plan_parts.workspace_id is NOT NULL.
   ws_src="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$ws_src" ] || { echo 0; return 1; }
-  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws_src','$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
+  # D-050: workspace_id = the operator's REAL workspace (from product-written hive_members), not '$ws_src'/'default'.
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'$ws_src'),'$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT origin||'|'||body FROM harness_shared.harness_plan_parts WHERE plan_slug='ppfed-$src' AND part_key='item:P-001';" 2>/dev/null | tr -d '[:space:]')"
     [ "$row" = "remote|xmerge-proof-from-$src" ] && { echo 1; return 0; }
@@ -555,7 +556,10 @@ fed_plan_part_merge_assert() {
 fed_hive_merge_probe() {
   local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts
   ts="$(date +%s)000"
-  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
+  # D-050: write under the operator's REAL workspace (the harness drains WHERE workspace_id=its
+  # boot workspace, e.g. 'papercusp-workspace'); the bare INSERT defaulted to 'default' → mismatch
+  # → never drained. Resolve it from the product-written hive_members (correct workspace).
+  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT harness_slug FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo "1 $row"; return 0; }
@@ -574,7 +578,8 @@ fed_hive_merge_probe() {
 fed_coord_merge_probe() {
   local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid
   mid="COMM-${tag}-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('default','messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"comm federation probe\"}'::jsonb,'$sslug','local');" >/dev/null
+  # D-050: workspace_id = the operator's REAL workspace (matches where the harness drains), not 'default'.
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"comm federation probe\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo 1; return 0; }
