@@ -1997,8 +1997,13 @@ pub fn run() {
                 // drives its own sidecar on a dynamic port / papercusp://
                 // origin where the fixed :3070/:3170/:3055 targets are
                 // meaningless.
+                // RETIRED (dogfood-silent-canonical-hive-join D-019): the native GTK dev-wrapper
+                // bar is superseded by the cross-platform in-webview EnvSwitcherBar (env switching +
+                // the ported pipeline stats + the release button, shown on every platform). To avoid
+                // the double-bar, the native bar is now OPT-IN — it inits ONLY when
+                // PAPERCUSP_DEV_WRAPPER=1 is set explicitly (was: on unless =0). Default = off.
                 #[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
-                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() != Some("0") {
+                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() == Some("1") {
                     dev_wrapper::init(app);
                 }
 
