@@ -259,9 +259,20 @@ sleep 12
 echo "--- A [swarm]/drain diag ---"; drv_exec a <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
 echo "--- B [swarm]/drain diag ---"; drv_exec b <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
 
-fed_log "wait swarm peer discovery over the PUBLIC DHT (~90s)"
-disc="$(fed_wait_discovery a b strict 30 || true)"
-[ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~90s"
+fed_log "wait swarm peer discovery over the PUBLIC DHT (~210s — sidecar-process swarm boot adds latency; longer window rules out DHT timing vs a real peering bug, D-043)"
+disc="$(fed_wait_discovery a b strict 70 || true)"
+[ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~210s"
+if [ "$disc" != 1 ]; then
+  # D-043 DISC-DIAG: the sidecar JOINED its topic but did not peer. Dump the swarm/DHT
+  # detail (announce/lookup/holepunch/bootstrap/flush) on BOTH frames to settle
+  # 'joined-but-not-peering' = real sidecar-process transport bug vs public-DHT timing.
+  # Slugs + transport tokens only; no credentials.
+  fed_log "DISC-DIAG (D-043): sidecar swarm/DHT state — why joined-but-not-peering"
+  for inst in a b; do
+    echo "--- $inst: swarm/dht detail (serve.log) ---"
+    drv_exec "$inst" <<<"grep -aE '\[swarm\]|joined topic|peer_connected|announce|lookup|holepunch|dht|bootstrap|flush|server|client' /home/pcusp/serve.log 2>/dev/null | tail -35"
+  done
+fi
 
 fed_log "A→B MERGE (hive, slug-agnostic probe; A member='$MEMBER_SLUG')"
 probe_ab="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-A2B 30 || true)"
@@ -280,6 +291,14 @@ ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 30 || true)"
 [ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed (probe=$ppab)"
 ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 30 || true)"
 [ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
+
+# D-042 COMMS: the cross-machine COMMUNICATION system (coord feed / coord_event_log)
+# must federate over the SAME peer-log wire as content. A→B then B→A, harness-scoped.
+fed_log "COORD-COMMS MERGE (coord_event_log feed) A→B + B→A (hive member slugs)"
+cab="$(fed_coord_merge_probe a b "$MEMBER_SLUG" A2B 30 || true)"
+[ "$cab" = 1 ] && echo "✓ coord A→B: comm event federated into B as origin=remote" || echo "✗ coord A→B failed (probe=$cab)"
+cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 30 || true)"
+[ "$cba" = 1 ] && echo "✓ coord B→A: comm event federated into A as origin=remote" || echo "✗ coord B→A failed (probe=$cba)"
 
 # EI-521 WS-DIAG: on merge-fail, dump workspace_ids to settle product-bug vs probe-artifact —
 # does the undrained outbox row's workspace_id match the member's boot workspace (the drain's
@@ -305,8 +324,8 @@ fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
 if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   for inst in a b; do echo "[$inst] $(drv_exec "$inst" <<<"grep -E '\[swarm\]' /home/pcusp/serve.log 2>/dev/null | tail -5")"; done
 fi
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$([ "$ppab" = 1 ] && echo PASS || echo FAIL)  plan-part B→A=$([ "$ppba" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$ppab" = 1 ] && [ "$ppba" = 1 ]; then
-  echo "OVERALL: PASS — the SHIPPED .deb federates cross-machine incl. per-part plans (2 separate Hetzner VMs, real public DHT)"; exit 0
+echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$([ "$ppab" = 1 ] && echo PASS || echo FAIL)  plan-part B→A=$([ "$ppba" = 1 ] && echo PASS || echo FAIL)  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
+if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$ppab" = 1 ] && [ "$ppba" = 1 ] && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+  echo "OVERALL: PASS — the .deb federates cross-machine incl. per-part plans AND coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"; exit 0
 fi
 echo "OVERALL: INCOMPLETE — see [swarm] diagnostics + /home/pcusp/serve.log on each frame"; exit 6

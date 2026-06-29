@@ -564,6 +564,25 @@ fed_hive_merge_probe() {
   echo "0"; return 1
 }
 
+# fed_coord_merge_probe <src> <dst> <sslug> <tag> <tries> → "1" / "0"
+# Proves the cross-machine COMMUNICATION path (D-042): authors a HARNESS-SCOPED
+# coord_event_log row (the coord feed) on src with origin='local' so the mig-150
+# capture trigger federates it over THAT member's peer-log (the SAME wire as
+# content), then polls dst for the same globally-unique msg_id at origin='remote'.
+# Body shape mirrors a real coord message ({kind,text}) so the coord-message
+# projection applies it. Distinct from content (features/plans) — this is comms.
+fed_coord_merge_probe() {
+  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid
+  mid="COMM-${tag}-$(date +%s)"
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('default','messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"comm federation probe\"}'::jsonb,'$sslug','local');" >/dev/null
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$dst" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$row" ] && { echo 1; return 0; }
+    sleep 3
+  done
+  echo 0; return 1
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # fed_cleanup_scoped <work> — kill FED_KILL_PIDS + every process whose cmdline
