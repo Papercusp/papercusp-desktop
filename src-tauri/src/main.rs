@@ -1525,6 +1525,118 @@ fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
 /// layout where the files aren't found. (linux-chat-dock-parity-2026-06-27 —
 /// macOS previously did this in swiftterm_embed::prepare_dock_env, which never
 /// ran on Linux, so the Linux dock stayed a blank pane even once the binaries shipped.)
+/// Fixed logical height (px) of the persistent env-bar chrome strip.
+const ENV_BAR_HEIGHT: f64 = 32.0;
+
+/// Persistent env-bar chrome (plan persistent-env-bar-chrome-webview-2026-06-30).
+/// Adds a fixed top-strip webview ("envbar") that renders EnvSwitcherBar OUTSIDE
+/// the navigable `main` content webview, so switching envs (which navigates
+/// `main`) can never unmount it. Cross-platform — it's a webview. Requires the
+/// tauri `unstable` feature (Window::add_child). Best-effort: any failure leaves
+/// the content webview full-window (no bar) rather than breaking the app.
+fn install_env_chrome(app: &tauri::App) {
+    // The content webview shares the "main" label with its window; set_bounds is
+    // a Webview method (not WebviewWindow), so fetch it as a Webview.
+    let Some(content) = app.get_webview("main") else {
+        eprintln!("[env-chrome] no 'main' content webview — skipping bar");
+        return;
+    };
+    let Some(window) = app.get_window("main") else {
+        eprintln!("[env-chrome] no 'main' window — skipping bar");
+        return;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (w, h) = match window.inner_size() {
+        Ok(sz) => {
+            let lg = sz.to_logical::<f64>(scale);
+            (lg.width, lg.height)
+        }
+        Err(e) => {
+            eprintln!("[env-chrome] inner_size failed: {e}");
+            return;
+        }
+    };
+
+    // Offset the existing content webview down so the bar sits above it.
+    let _ = content.set_bounds(tauri::Rect {
+        position: tauri::LogicalPosition::new(0.0_f64, ENV_BAR_HEIGHT).into(),
+        size: tauri::LogicalSize::new(w, (h - ENV_BAR_HEIGHT).max(1.0)).into(),
+    });
+
+    // The bar loads the SPA's chrome route on the SAME origin the content uses
+    // (dev: devUrl; prod: papercusp://). EnvSwitcherBar already fetches its own
+    // /api/desktop/dev-operators + git-pipeline from that origin.
+    let bar_url = match content.url() {
+        Ok(mut u) => {
+            u.set_path("/");
+            u.set_query(Some("chrome=env-bar"));
+            u.set_fragment(None);
+            tauri::WebviewUrl::External(u)
+        }
+        Err(_) => tauri::WebviewUrl::App("index.html".into()),
+    };
+
+    let builder = tauri::webview::WebviewBuilder::new("envbar", bar_url);
+    if let Err(e) = window.add_child(
+        builder,
+        tauri::LogicalPosition::new(0.0_f64, 0.0_f64),
+        tauri::LogicalSize::new(w, ENV_BAR_HEIGHT),
+    ) {
+        eprintln!("[env-chrome] add_child failed ({e}); restoring full content webview");
+        let _ = content.set_bounds(tauri::Rect {
+            position: tauri::LogicalPosition::new(0.0_f64, 0.0_f64).into(),
+            size: tauri::LogicalSize::new(w, h).into(),
+        });
+        return;
+    }
+    eprintln!("[env-chrome] env-bar webview installed ({ENV_BAR_HEIGHT}px top strip)");
+
+    // The bar (a separate webview) requests an env switch via this event; we
+    // navigate the CONTENT webview (keeping its current path/query), never the
+    // bar — that is what makes the bar survive the switch.
+    {
+        use tauri::Listener;
+        let h = app.handle().clone();
+        app.listen_any("papercusp:env-switch", move |event| {
+            let origin = serde_json::from_str::<serde_json::Value>(event.payload())
+                .ok()
+                .and_then(|v| v.get("origin").and_then(|s| s.as_str()).map(str::to_string));
+            let Some(origin) = origin else { return };
+            let Some(content) = h.get_webview("main") else { return };
+            let Ok(cur) = content.url() else { return };
+            let q = cur.query().map(|q| format!("?{q}")).unwrap_or_default();
+            let target = format!("{}{}{}", origin.trim_end_matches('/'), cur.path(), q);
+            if let Ok(url) = target.parse() {
+                let _ = content.navigate(url);
+            }
+        });
+    }
+
+    // Keep the bar a fixed top strip + content filling the rest on resize.
+    let handle = app.handle().clone();
+    window.on_window_event(move |ev| {
+        if let tauri::WindowEvent::Resized(_) = ev {
+            let Some(win) = handle.get_window("main") else { return };
+            let sc = win.scale_factor().unwrap_or(1.0);
+            if let Ok(sz) = win.inner_size() {
+                let lg = sz.to_logical::<f64>(sc);
+                if let Some(bar) = handle.get_webview("envbar") {
+                    let _ = bar.set_bounds(tauri::Rect {
+                        position: tauri::LogicalPosition::new(0.0_f64, 0.0_f64).into(),
+                        size: tauri::LogicalSize::new(lg.width, ENV_BAR_HEIGHT).into(),
+                    });
+                }
+                if let Some(c) = handle.get_webview("main") {
+                    let _ = c.set_bounds(tauri::Rect {
+                        position: tauri::LogicalPosition::new(0.0_f64, ENV_BAR_HEIGHT).into(),
+                        size: tauri::LogicalSize::new(lg.width, (lg.height - ENV_BAR_HEIGHT).max(1.0)).into(),
+                    });
+                }
+            }
+        }
+    });
+}
+
 fn prepare_dock_env(app: &AppHandle) {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -1909,6 +2021,11 @@ pub fn run() {
             // (X11) / native terminal and register the glue hook, in both dev
             // and prod. Visual-only; the terminal coordinates via the substrate.
             init_native_terminal(app);
+
+            // Persistent env-bar chrome (plan persistent-env-bar-chrome-webview):
+            // a top-strip webview hosting EnvSwitcherBar OUTSIDE the navigable
+            // `main` content webview, so an env switch can never unmount it.
+            install_env_chrome(app);
 
             if is_dev {
                 // In dev mode we trust the developer (or beforeDevCommand's
