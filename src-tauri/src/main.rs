@@ -2056,11 +2056,6 @@ pub fn run() {
             // and prod. Visual-only; the terminal coordinates via the substrate.
             init_native_terminal(app);
 
-            // Persistent env-bar chrome (plan persistent-env-bar-chrome-webview):
-            // a top-strip webview hosting EnvSwitcherBar OUTSIDE the navigable
-            // `main` content webview, so an env switch can never unmount it.
-            install_env_chrome(app);
-
             if is_dev {
                 // In dev mode we trust the developer (or beforeDevCommand's
                 // dev-operator-ifneeded.sh) to run the operator dev stack
