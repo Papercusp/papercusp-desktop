@@ -26,11 +26,12 @@
 
 mod custom_protocol;
 mod dev_bridge;
-// Dev wrapper — the build switcher + pipeline-status bar OUTSIDE the
-// switchable SPA builds (desktop-build-switcher-wrapper-2026-06-09).
-// Feature-gated so a real-production build compiles none of it (D-005).
-#[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
-mod dev_wrapper;
+// Env-switch plumbing — the desktop-side source of truth + /api routing for the
+// cross-platform in-webview EnvSwitcherBar and its native backstop. Replaces the
+// retired Linux-only GTK dev-wrapper bar and the chrome-webview experiment.
+// Compiled on every platform (list_envs is a registered command); it returns no
+// envs in a packaged single-operator build, so it's inert there.
+mod env_switch;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod native_console;
@@ -187,7 +188,7 @@ fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
 /// EI-190: the operator PORT the desktop's /api endpoint-IPC currently
 /// targets. Default :3070 (the green release operator — today's implicit
 /// behavior made explicit). The dev wrapper's build switcher stores the
-/// mapped target here (`dev_wrapper::api_port_for_target`) and resets the
+/// mapped target here (`env_switch::api_port_for_target`) and resets the
 /// IPC client so /api follows the selected build instead of riding
 /// whichever operator last rewrote the singleton discovery file.
 pub static SELECTED_API_PORT: std::sync::atomic::AtomicU16 =
@@ -1835,6 +1836,7 @@ pub fn run() {
             endpoint_ipc::endpoint_invoke,
             endpoint_ipc::endpoint_cancel,
             dev_bridge::__dev_bridge_result,
+            env_switch::list_envs,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
@@ -1900,6 +1902,11 @@ pub fn run() {
                 {
                     handle.flush_for_page_load();
                 }
+                // Make /api follow whatever env the webview navigated to — the
+                // in-webview bar's window.location switch + the native backstop +
+                // a manual reload all land here, so /api retargets with NO bar in
+                // the loop (replaces the GTK bar's switch_to retarget).
+                env_switch::retarget_for_url(webview.app_handle(), payload.url());
             }
         })
         .setup(|app| {
@@ -1988,24 +1995,18 @@ pub fn run() {
                     });
                 }
 
-                // Dev wrapper (desktop-build-switcher-wrapper-2026-06-09):
-                // the native build-switcher + pipeline-status bar around the
-                // content webview, plus the document-start dev-rail signal.
-                // AFTER the endpoint-IPC manage above — init retargets /api
-                // to the persisted build (EI-190), which needs the managed
-                // handle to reset. Dev-only by design: the packaged app
-                // drives its own sidecar on a dynamic port / papercusp://
-                // origin where the fixed :3070/:3170/:3055 targets are
-                // meaningless.
-                // RETIRED (dogfood-silent-canonical-hive-join D-019): the native GTK dev-wrapper
-                // bar is superseded by the cross-platform in-webview EnvSwitcherBar (env switching +
-                // the ported pipeline stats + the release button, shown on every platform). To avoid
-                // the double-bar, the native bar is now OPT-IN — it inits ONLY when
-                // PAPERCUSP_DEV_WRAPPER=1 is set explicitly (was: on unless =0). Default = off.
-                #[cfg(all(feature = "dev-wrapper", target_os = "linux"))]
-                if std::env::var("PAPERCUSP_DEV_WRAPPER").ok().as_deref() == Some("1") {
-                    dev_wrapper::init(app);
-                }
+                // Env-switch startup (env_switch::init): install the dev-rail
+                // signal + restore the persisted env target. AFTER the
+                // endpoint-IPC manage above — it retargets /api to the persisted
+                // build (EI-190), which needs the managed handle to reset.
+                // Dev-only by design: the packaged app drives its own sidecar on
+                // a dynamic port / papercusp:// origin where the fixed
+                // :3070/:3170/:3055 targets are meaningless. The VISIBLE bar is
+                // the in-webview EnvSwitcherBar (fed by the list_envs command);
+                // the native menu + global-shortcut backstop (install_backstop)
+                // is the unkillable escape hatch.
+                env_switch::init(app);
+                env_switch::install_backstop(app);
 
                 return Ok(());
             }
