@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# deb-hetzner-rig.sh — REUSABLE Hetzner cross-machine federation rig lib.
+#
+# Extracted from bin/deb-hetzner-federation.sh (the 2-frame .deb federation proof)
+# so the live-matrix scenarios (federation-release-hardening Briefs 2-7) can each be
+# a SMALL scenario script that `source`s this lib + bin/lib/federation-asserts.sh,
+# provisions N frames, joins them to ONE hive, then drives + asserts — WITHOUT
+# copy-pasting the ~250 lines of provision/install/join machinery or colliding on a
+# single shared file.
+#
+# Topology: this lib generalizes the old hardcoded a=owner + b=joiner to an
+# ARBITRARY frame array RIG_FRAMES=(a b c …). Frame `a` is the OWNER (it runs
+# hives/from-repo + surfaces the hiveId/hivePubkey/memberLink); every frame
+# (owner included) then JOINs the SAME hive via POST /api/discovery/join-hive
+# (joinHiveAsView re-keys it onto the owner's hive-pubkey topic — EI-681). A
+# scenario picks the frame count + per-frame gh identity + region.
+#
+# ── COST-SAFETY (the load-bearing invariant — read before editing) ────────────
+# A leaked Hetzner server BILLS REAL MONEY, so the teardown is belt-and-braces and
+# MUST hold for ANY frame count:
+#   • EVERY provisioned server id is appended to $RIG_SERVERS_FILE INSIDE
+#     rig_create_server, BEFORE the create returns and BEFORE any install — so even
+#     a crash between "POST /servers succeeded" and "frame fully set up" still
+#     leaves a destroyable record on disk.
+#   • rig_install_exit_trap installs an EXIT trap (rig_cleanup) that reads
+#     $RIG_SERVERS_FILE line-by-line and DELETEs every id, retrying up to 6× and
+#     confirming each is GONE (HTTP 404). It does NOT depend on RIG_FRAMES, the
+#     FRAME_* arrays, or how far setup got — purely the on-disk id list. So N
+#     frames cannot leak: each create wrote its id before doing anything billable,
+#     and the trap destroys the whole file regardless of where a failure happened.
+#   • A scenario MUST call rig_install_exit_trap EXACTLY ONCE, right after
+#     rig_init, BEFORE rig_provision. (rig_init creates the empty servers file;
+#     the trap is then armed before the first create can run.)
+#
+# ── nounset (`set +u`) regime ─────────────────────────────────────────────────
+# The consuming rigs run under `set +u` (federation-asserts.sh + the dynamic
+# assoc arrays are nounset-hostile). This lib is written to be SAFE under either
+# -u or +u: every assoc-array read that might be unset uses ${arr[$k]:-}, and the
+# globals are `declare`d up front. Do not introduce a bare ${arr[$k]} on a key that
+# may be absent.
+#
+# ── What a scenario uses ──────────────────────────────────────────────────────
+#   source common.sh; source federation-asserts.sh; source deb-hetzner-rig.sh
+#   rig_init                              # creds, work dir, servers file, frame map
+#   rig_install_exit_trap                 # ARM auto-destroy (once, before provision)
+#   rig_gate_artifact "$DEB"             # extract + clobber + swarm-support gates
+#   rig_set_identity a papercupai         # per-frame gh identity (resolves GH_TOKEN)
+#   rig_set_identity b aviynw
+#   rig_set_identity c aviynw
+#   rig_provision                         # create all RIG_FRAMES servers (records ids)
+#   rig_setup_frame <inst>                # install .deb + launch headless sidecar
+#   rig_wait_frame_ready <inst>           # embedded-PG + sidecar API up
+#   rig_owner_publish_hive a "$REPO_URL" # owner from-repo → RIG_HIVE_ID/PUBKEY/LINK
+#   rig_join_hive <inst>                  # join a frame to the hive (sets MEMBER_SLUG)
+#   rig_driver_run <inst> -- <cmd…>       # arbitrary SSH command on a frame
+#   rig_write_content / rig_read_content / rig_read_roster
+#   rig_kill_sidecar / rig_restart_sidecar
+#   rig_assert_absent  (NEGATIVE assert: a row does NOT arrive within a timeout)
+#   … plus the fed_* asserts from federation-asserts.sh (merge / plan-part / coord).
+#
+# This lib does NOT call rig_cleanup directly and never decides overall pass/fail —
+# the scenario owns its exit code (behavior parity with the pre-refactor rigs).
+
+# ── globals (declared once; safe under set -u) ────────────────────────────────
+declare -gA FRAME_ID FRAME_IP FRAME_USER FRAME_TOKEN FRAME_MEMBER_SLUG
+declare -ga RIG_FRAMES
+declare -g RIG_TOKEN RIG_SSH_KEY_ID RIG_SSH_IDENTITY
+declare -g RIG_STYPE RIG_IMAGE RIG_HONO_PORT RIG_PG_PORT
+declare -g RIG_WORK RIG_PKG RIG_SLUG RIG_SERVERS_FILE RIG_KEEP_UP
+declare -g RIG_HIVE_ID RIG_HIVE_PUBKEY RIG_HIVE_LINK RIG_REPO_URL
+RIG_FRAMES=()
+RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
+
+# ── rig_init [STYPE] [IMAGE] ──────────────────────────────────────────────────
+# Resolve creds + ports, make the run work dir, create the (empty) servers file.
+# Idempotent fields default to the historical rig values. Must run before anything
+# else; rig_install_exit_trap must run immediately after (before rig_provision).
+rig_init() {
+  RIG_STYPE="${1:-${RIG_STYPE:-cpx31}}"
+  # IMAGE must match the .deb's target ABI: bundled embedded-PG pgvector vector.so
+  # needs GLIBC_2.38 → ubuntu-24.04 (ubuntu-22.04/glibc-2.35 fails embedded-PG init
+  # with "type public.vector does not exist"). EI-503.
+  RIG_IMAGE="${2:-${RIG_IMAGE:-ubuntu-24.04}}"
+  RIG_HONO_PORT="${RIG_HONO_PORT:-39070}"
+  RIG_PG_PORT="${RIG_PG_PORT:-39532}"
+
+  RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
+  [ -n "$RIG_TOKEN" ] || { echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token)" >&2; return 1; }
+  RIG_SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-113417406}"
+  RIG_SSH_IDENTITY="${HETZNER_SSH_IDENTITY:-$HOME/.ssh/papercusp-latitude-frame}"
+
+  RIG_WORK="$(mktemp -d /tmp/deb-hzfed.XXXXXX)"
+  RIG_PKG="$RIG_WORK/pkg"
+  RIG_SLUG="hzdeb${RIG_WORK##*.}"
+  RIG_SERVERS_FILE="$RIG_WORK/servers"; : > "$RIG_SERVERS_FILE"
+  RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
+  echo "rig_init: work=$RIG_WORK slug=$RIG_SLUG type=$RIG_STYPE image=$RIG_IMAGE" >&2
+}
+
+# ── Hetzner API + SSH helpers ─────────────────────────────────────────────────
+rig_hz()  { curl -s -m 40 -H "Authorization: Bearer $RIG_TOKEN" "$@"; }
+rig_ssh() { local ip="$1"; shift; ssh -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 \
+  -o ServerAliveInterval=15 "root@$ip" "$@"; }
+rig_scp() { local ip="$1" src="$2" dst="$3"; scp -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$src" "root@$ip:$dst"; }
+
+# rig_create_server <name> <loc> → echo "<id> <ip>"
+# COST-SAFETY: appends <id> to $RIG_SERVERS_FILE the instant the POST succeeds,
+# BEFORE waiting for boot or doing anything billable. The EXIT trap destroys every
+# id in that file, so a crash anywhere after this point still cleans up.
+rig_create_server() {
+  local name="$1" loc="$2" resp id
+  resp="$(rig_hz -X POST 'https://api.hetzner.cloud/v1/servers' -H 'content-type: application/json' \
+    -d "{\"name\":\"$name\",\"server_type\":\"$RIG_STYPE\",\"image\":\"$RIG_IMAGE\",\"location\":\"$loc\",\"ssh_keys\":[$RIG_SSH_KEY_ID]}")"
+  id="$(printf '%s' "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("server",{}).get("id") or "")' 2>/dev/null)"
+  [ -n "$id" ] || { echo "FATAL create $name: $resp" >&2; return 1; }
+  echo "$id" >> "$RIG_SERVERS_FILE"   # cost-safety: record BEFORE waiting/installing
+  local i ip status
+  for i in $(seq 1 60); do
+    resp="$(rig_hz "https://api.hetzner.cloud/v1/servers/$id")"
+    status="$(printf '%s' "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin)["server"]["status"])' 2>/dev/null)"
+    ip="$(printf '%s' "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin)["server"]["public_net"]["ipv4"]["ip"])' 2>/dev/null)"
+    [ "$status" = "running" ] && [ -n "$ip" ] && { echo "$id $ip"; return 0; }
+    sleep 5
+  done
+  echo "FATAL $name not running" >&2; return 1
+}
+rig_delete_server() { rig_hz -X DELETE "https://api.hetzner.cloud/v1/servers/$1" >/dev/null 2>&1; }
+rig_server_gone()   { local code; code="$(rig_hz -o /dev/null -w '%{http_code}' "https://api.hetzner.cloud/v1/servers/$1")"; [ "$code" = "404" ]; }
+
+# ── teardown: the EXIT-trap auto-destroy (N-frame correct) ────────────────────
+# Reads ONLY $RIG_SERVERS_FILE — never RIG_FRAMES / the FRAME_* arrays — so it
+# destroys every server that was ever created, regardless of how many frames there
+# are or where setup failed. Each id is DELETEd (retry ×6) and confirmed GONE (404).
+rig_cleanup() {
+  fed_log "cleanup — DESTROY all frames (ends billing)"
+  local id i
+  if [ "${RIG_KEEP_UP:-0}" = 1 ]; then
+    echo "  --keep-up: leaving $(tr '\n' ' ' < "$RIG_SERVERS_FILE" 2>/dev/null)" >&2
+  else
+    while read -r id; do [ -n "$id" ] || continue
+      for i in 1 2 3 4 5 6; do rig_delete_server "$id"; rig_server_gone "$id" && { echo "  destroyed $id"; break; }; sleep 5; done
+      rig_server_gone "$id" || echo "  ⚠ $id may still BILL — destroy manually (DELETE /v1/servers/$id)"
+    done < "$RIG_SERVERS_FILE"
+  fi
+  rm -rf "$RIG_WORK" 2>/dev/null
+}
+
+# rig_install_exit_trap — ARM the auto-destroy. Call ONCE, right after rig_init,
+# BEFORE rig_provision, so the trap is live before the first server is created.
+rig_install_exit_trap() { trap rig_cleanup EXIT; }
+
+# ── artifact gates (reuse the assert core) ────────────────────────────────────
+# rig_gate_artifact <deb> — extract + clobber + swarm-support; sets RIG_PKG.
+rig_gate_artifact() {
+  local deb="$1"
+  fed_log "artifact: $deb"
+  fed_extract_deb "$deb" "$RIG_PKG" || return 2
+  fed_clobber_check "$RIG_PKG" || return 2
+  fed_assert_deb_swarm_support "$RIG_PKG" || return 2
+}
+
+# ── identities ────────────────────────────────────────────────────────────────
+# rig_set_identity <inst> <gh-user> — register a frame in RIG_FRAMES (idempotent),
+# set its gh identity + resolve its GH_TOKEN. Multiple frames MAY share a gh user
+# (e.g. two members both on aviynw) — that's a real multi-device topology.
+rig_set_identity() {
+  local inst="$1" ghuser="$2" tok
+  case " ${RIG_FRAMES[*]} " in *" $inst "*) : ;; *) RIG_FRAMES+=("$inst") ;; esac
+  FRAME_USER[$inst]="$ghuser"
+  tok="$(gh auth token --user "$ghuser" 2>/dev/null)"
+  [ -n "$tok" ] || { echo "FATAL: need a gh token for '$ghuser' (frame $inst)" >&2; return 1; }
+  FRAME_TOKEN[$inst]="$tok"
+}
+
+# ── provision ─────────────────────────────────────────────────────────────────
+# rig_provision <loc1> [loc2 …] — create one server per frame in RIG_FRAMES, in
+# order. Each loc maps positionally to RIG_FRAMES[i]; if fewer locs than frames
+# are given, the LAST loc is reused for the rest (so `rig_provision ash` puts every
+# frame in ash). Records each id (rig_create_server) before doing anything billable.
+rig_provision() {
+  local locs=("$@") i inst loc out
+  [ "${#RIG_FRAMES[@]}" -gt 0 ] || { echo "FATAL: no frames — call rig_set_identity first" >&2; return 1; }
+  [ "${#locs[@]}" -gt 0 ] || locs=("ash")
+  fed_log "provision ${#RIG_FRAMES[@]} Hetzner $RIG_STYPE (frames: ${RIG_FRAMES[*]})"
+  for i in "${!RIG_FRAMES[@]}"; do
+    inst="${RIG_FRAMES[$i]}"
+    loc="${locs[$i]:-${locs[$(( ${#locs[@]} - 1 ))]}}"
+    out="$(rig_create_server "$RIG_SLUG-$inst" "$loc")" || return 3
+    read -r FRAME_ID[$inst] FRAME_IP[$inst] <<<"$out"
+    echo "  $inst=${FRAME_ID[$inst]}@${FRAME_IP[$inst]} ($loc)"
+  done
+}
+
+# ── driver vtable: SSH into each frame by public IP ───────────────────────────
+# These are the THREE federation-asserts.sh primitives, overridden for the Hetzner
+# SSH driver. A scenario sources this lib AFTER federation-asserts.sh so these win.
+drv_exec()   { rig_ssh "${FRAME_IP[$1]}" 'bash -s'; }
+drv_applog() { echo "/home/pcusp/serve.log"; }
+drv_psql()   { printf '%s\n' "$2" | rig_ssh "${FRAME_IP[$1]}" \
+                 "psql 'postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp' -tA"; }
+
+# ── generic SSH "driver" helper (the primitive briefs 2-7 build on) ───────────
+# rig_driver_run <inst> -- <cmd> [args…]   run an arbitrary command on a frame as
+#   root (the install/system context). Everything after `--` is the command.
+# rig_driver_run <inst> <<<'script'       (no `--`) run a bash script from stdin
+#   as root (same as drv_exec but explicit). Use rig_pcusp_run for the pcusp user.
+rig_driver_run() {
+  local inst="$1"; shift
+  if [ "${1:-}" = "--" ]; then shift; rig_ssh "${FRAME_IP[$inst]}" "$@";
+  else rig_ssh "${FRAME_IP[$inst]}" 'bash -s'; fi
+}
+# rig_pcusp_run <inst> — run a bash script (stdin) as the pcusp user with the
+# sidecar env loaded (HONO/PG ports exported). The faithful context for sidecar ops.
+rig_pcusp_run() {
+  local inst="$1"
+  rig_ssh "${FRAME_IP[$inst]}" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT runuser -u pcusp -- bash -s"
+}
+
+# ── install .deb + launch the headless sidecar on each frame ──────────────────
+# rig_setup_frame <inst> — wait sshd, install the gated .deb + driver prereqs,
+# create the pcusp user, write its fed.env (GH_TOKEN), launch serve.mjs headless on
+# the PUBLIC DHT (fresh data dir). Identical recipe to the 2-frame rig's setup_frame.
+# Requires: rig_gate_artifact ran (the .deb path is the gated DEB); RIG_DEB set.
+declare -g RIG_DEB
+rig_setup_frame() {
+  local inst="$1"; local ip="${FRAME_IP[$inst]}"
+  [ -n "${RIG_DEB:-}" ] || { echo "FATAL: RIG_DEB unset — set it to the gated .deb path before rig_setup_frame" >&2; return 1; }
+  fed_log "[$inst] wait sshd @ $ip"
+  local i; for i in $(seq 1 40); do rig_ssh "$ip" true 2>/dev/null && break; sleep 5; done
+  rig_ssh "$ip" true 2>/dev/null || { echo "FATAL ssh $inst"; return 1; }
+  fed_log "[$inst] install .deb (fresh-install dep resolution) + driver prereqs"
+  rig_scp "$ip" "$RIG_DEB" /tmp/Papercusp.deb || return 1
+  rig_ssh "$ip" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq
+    apt-get install -y -qq /tmp/Papercusp.deb >/dev/null 2>&1 || apt-get install -y -qq --fix-broken >/dev/null 2>&1
+    command -v gh >/dev/null && command -v psql >/dev/null || apt-get install -y -qq gh postgresql-client >/dev/null 2>&1
+    test -f /usr/lib/Papercusp/sidecar/serve.mjs && echo deb-ok' | grep -q deb-ok || { echo "FATAL install $inst"; return 1; }
+  fed_log "[$inst] launch headless serve.mjs as non-root pcusp (PUBLIC DHT, identity ${FRAME_USER[$inst]})"
+  # embedded-postgres REFUSES to initdb as root (Hetzner's ubuntu image logs in as
+  # root); the .deb is a desktop app that runs as a normal user, so launch the
+  # sidecar under a dedicated `pcusp` user via runuser — faithful to real usage.
+  printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
+    | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
+        umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
+set -e
+H=/home/pcusp   # explicit — don't trust runuser's HOME handling
+pkill -u pcusp -f 'serve.mjs --ensure' 2>/dev/null || true; sleep 1
+rm -rf "$H/pgdata" "$H/.papercusp" "$H/.papercusp-workspaces"; mkdir -p "$H/pgdata" "$H/fed"
+SIDE=/usr/lib/Papercusp/sidecar
+set -a; . "$H/fed.env"; set +a
+cd "$SIDE"
+env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
+  PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+  PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
+  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
+  PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
+  PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
+  GH_TOKEN="${GH_TOKEN:-}" \
+  setsid nohup ./bin/node ./serve.mjs --ensure > "$H/serve.log" 2>&1 < /dev/null &
+sleep 1; echo "launched as pcusp"
+EOF
+}
+
+# rig_setup_all — rig_setup_frame for EVERY frame in RIG_FRAMES (in order).
+rig_setup_all() {
+  local inst
+  for inst in "${RIG_FRAMES[@]}"; do rig_setup_frame "$inst" || return 4; done
+}
+
+# ── kill / restart sidecar (the offline/restart primitives, Briefs 4+5) ───────
+# rig_kill_sidecar <inst> — stop the pcusp serve.mjs WITHOUT wiping pgdata (the
+# "take this member offline" primitive: reconnect/catch-up + restart-durability).
+rig_kill_sidecar() {
+  local inst="$1" ip="${FRAME_IP[$inst]}"
+  fed_log "[$inst] kill sidecar (preserve pgdata — member goes offline)"
+  rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2; pgrep -u pcusp -f 'serve.mjs' >/dev/null && echo 'STILL-RUNNING' || echo 'sidecar stopped'\""
+}
+
+# rig_restart_sidecar <inst> — relaunch serve.mjs WITHOUT wiping pgdata/.papercusp
+# (EI-504): boot-all re-reads the registered project + shared.json + the hive join
+# and rejoins the swarm. Used after a kill (Brief 4) and as the cold-restart probe
+# (Brief 5). Same env block as rig_setup_frame, minus the rm -rf.
+rig_restart_sidecar() {
+  local inst="$1" ip="${FRAME_IP[$inst]}"
+  fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
+set -e
+H=/home/pcusp
+pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2
+SIDE=/usr/lib/Papercusp/sidecar
+set -a; . "$H/fed.env"; set +a
+cd "$SIDE"
+env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
+  PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+  PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
+  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
+  PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
+  PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
+  GH_TOKEN="${GH_TOKEN:-}" \
+  setsid nohup ./bin/node ./serve.mjs --ensure > "$H/serve.log" 2>&1 < /dev/null &
+sleep 1; echo "relaunched as pcusp (no wipe)"
+EOF
+}
+
+# ── boot / API readiness (thin wrappers over the assert core) ─────────────────
+# rig_wait_frame_ready <inst> [boot_tries] — embedded-PG + sidecar up (fed_wait_boot),
+# then API answering 2xx (fed_wait_api). fed_wait_boot/fed_wait_api MUST be called
+# directly (not in $(…)) so their FED_PG/FED_SC fills survive — this wrapper does so.
+rig_wait_frame_ready() {
+  local inst="$1" tries="${2:-50}"
+  fed_wait_boot "$inst" "$tries" || { echo "✗ $inst boot failed: ${FED_BOOT_ERR:-?}"; drv_exec "$inst" <<<"tail -25 /home/pcusp/serve.log"; return 5; }
+  echo "  $inst: PG=${FED_PG[$inst]} sc=${FED_SC[$inst]}"
+  fed_wait_api "$inst" || echo "⚠ $inst api not ready"
+}
+# rig_wait_all_ready [boot_tries] — rig_wait_frame_ready for every frame.
+rig_wait_all_ready() {
+  local inst; for inst in "${RIG_FRAMES[@]}"; do rig_wait_frame_ready "$inst" "${1:-50}" || return 5; done
+}
+
+# ── owner publishes the hive (from-repo) → resolve hiveId/pubkey/memberLink ───
+# rig_owner_publish_hive <owner-inst> <repo_url> — POST hives/from-repo on the
+# owner, then resolve the THREE fields /api/discovery/join-hive needs
+# ({ hiveId, hivePubkey, memberLinks }) from whichever response shape came back
+# (fresh-create vs existing). Sets RIG_HIVE_ID / RIG_HIVE_PUBKEY / RIG_HIVE_LINK.
+rig_owner_publish_hive() {
+  local owner="$1" repo="${2:-https://github.com/octocat/Hello-World}" a_resp fields
+  RIG_REPO_URL="$repo"
+  fed_log "[$owner=OWNER] POST hives/from-repo ($repo) → resolve hive memberLink + hiveId + hivePubkey"
+  a_resp="$(drv_exec "$owner" <<EOF
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true}'
+EOF
+)"
+  echo "[$owner] from-repo → $(printf '%s' "$a_resp" | head -c 200)"
+  # The fields live in different shapes:
+  #   fresh-create → {created:{hiveSlug}, publish:{memberLinks,hivePubkey}} (WI-931)
+  #   existing     → {existing:{hive:{hiveId,memberLinks,hivePubkey}}}
+  fields="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+ex=d.get("existing",{}).get("hive",{}) or {}
+cr=d.get("created",{}) or {}
+pub=d.get("publish",{}) or {}
+ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
+print(ml[0] if ml else "")
+print(ex.get("hiveId") or cr.get("hiveSlug") or "")
+print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")' 2>/dev/null)"
+  { read -r RIG_HIVE_LINK; read -r RIG_HIVE_ID; read -r RIG_HIVE_PUBKEY; } <<<"$fields"
+  [ -n "$RIG_HIVE_LINK" ] || { echo "✗ $owner could not resolve a hive memberLink — body: $(printf '%s' "$a_resp" | head -c 1200)"; return 6; }
+  [ -n "$RIG_HIVE_ID" ]   || { echo "✗ $owner could not resolve hiveId — body: $(printf '%s' "$a_resp" | head -c 1200)"; return 6; }
+  echo "✓ $owner resolved hive link ${RIG_HIVE_LINK:0:56}… hiveId=$RIG_HIVE_ID hivePubkey=${RIG_HIVE_PUBKEY:0:12}…"
+  [ -n "$RIG_HIVE_PUBKEY" ] || echo "⚠ $owner surfaced NO hivePubkey — joiners will skip identity-materialize (no re-key → no federation)."
+}
+
+# join-hive member-slug reader (first ok member's slug).
+rig_join_member_slug() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+ms=[m for m in d.get("members",[]) if m.get("ok") and m.get("slug")]
+print(ms[0]["slug"] if ms else "")' 2>/dev/null
+}
+
+# rig_join_hive <inst> — JOIN <inst> to the published hive via /api/discovery/join-hive
+# (joinHiveAsView: boots the member substrate AND re-keys it onto the owner's
+# hive-pubkey topic — EI-681). Sets FRAME_MEMBER_SLUG[$inst]. hivePubkey is passed
+# EXPLICITLY (a joiner's local discovery is empty). Requires rig_owner_publish_hive.
+rig_join_hive() {
+  local inst="$1" resp slug
+  [ -n "${RIG_HIVE_ID:-}" ] || { echo "FATAL: no hive published — call rig_owner_publish_hive first" >&2; return 1; }
+  fed_log "[$inst] JOIN hive via /api/discovery/join-hive (hiveId=$RIG_HIVE_ID)"
+  resp="$(drv_exec "$inst" <<EOF
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
+EOF
+)"
+  slug="$(rig_join_member_slug "$resp")"
+  FRAME_MEMBER_SLUG[$inst]="$slug"
+  if printf '%s' "$resp" | grep -q '"ok":true' && [ -n "$slug" ]; then
+    echo "✓ $inst joined hive (member=$slug)"; return 0
+  fi
+  echo "✗ $inst join-hive failed: $(printf '%s' "$resp" | head -c 300)"; return 1
+}
+
+# rig_join_all <owner-inst> — join EVERY frame in RIG_FRAMES to the hive (owner
+# included — the owner also joins its own hive as a VIEW, matching the 2-frame rig
+# where A self-joins). Returns non-zero if any join fails.
+rig_join_all() {
+  local owner="$1" inst rc=0
+  for inst in "${RIG_FRAMES[@]}"; do rig_join_hive "$inst" || rc=1; done
+  return "$rc"
+}
+
+# rig_wait_swarm <instA> <instB> [tries] — wait for [swarm] peer_connected between
+# two frames over the public DHT (thin fed_wait_discovery strict wrapper). The
+# sidecar-process swarm boot adds latency, so the default window is generous.
+rig_wait_swarm() {
+  local a="$1" b="$2" tries="${3:-70}" disc
+  fed_log "wait swarm peer discovery $a↔$b over the PUBLIC DHT (~$(( tries * 3 ))s)"
+  disc="$(fed_wait_discovery "$a" "$b" strict "$tries" || true)"
+  [ "$disc" = 1 ] && { echo "✓ $a↔$b peer_connected across machines"; return 0; }
+  echo "⚠ no $a↔$b peer_connected in ~$(( tries * 3 ))s"; return 1
+}
+
+# ── scenario content primitives (write / read) ────────────────────────────────
+# These give scenario scripts a uniform way to author + read federated rows under
+# the operator's REAL workspace (the harness drains WHERE workspace_id = its boot
+# workspace — a bare INSERT defaulting to 'default' never drains; D-050).
+
+# rig_write_content <inst> <harness_slug> <feature_id> [title] [status]
+# INSERT a feature row origin='local' on <inst> (the capture trigger federates it).
+# Echoes the feature_id written. The analog the fed_*_merge probes also use.
+rig_write_content() {
+  local inst="$1" slug="$2" fid="$3" title="${4:-rig write}" status="${5:-todo}" ts
+  ts="$(date +%s)000"
+  drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'$slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null
+  echo "$fid"
+}
+
+# rig_read_content <inst> <feature_id> — echo "<harness_slug>|<origin>" for the
+# row with this feature_id on <inst> (empty if absent). origin='remote' = federated.
+rig_read_content() {
+  local inst="$1" fid="$2"
+  drv_psql "$inst" "SELECT harness_slug||'|'||origin FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]'
+}
+
+# rig_read_roster <inst> — echo the hive_members roster on <inst>, one row per
+# line as "<github_user_id>|<binding_status>|<#device_attestations>". The decisive
+# receive-side state (empty roster → decideMemberContentOp drops every peer op).
+rig_read_roster() {
+  local inst="$1"
+  drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.hive_members ORDER BY github_user_id;" 2>/dev/null
+}
+
+# ── NEGATIVE assertion (the Brief 3 revocation / security primitive) ──────────
+# rig_assert_absent <inst> <feature_id> [tries] — assert a feature row does NOT
+# arrive on <inst> within tries×3s. The inverse of fed_*_merge_assert: it WAITS
+# the full window and PASSES iff the row never shows up (a revoked/banned member
+# must NOT receive post-revoke content). Echoes 1 (correctly absent) or 0 (it
+# arrived — a leak). Because a negative is only meaningful after enough time, this
+# always waits the full window before declaring absence (no early-out on success).
+rig_assert_absent() {
+  local inst="$1" fid="$2" tries="${3:-20}" i row
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$inst" "SELECT 1 FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$row" = "1" ]; then echo 0; return 1; fi   # arrived → negative assert FAILS
+    sleep 3
+  done
+  echo 1; return 0   # never arrived within the window → correctly absent
+}
+
+# rig_assert_row_absent <inst> <sql-predicate> [tries] — generic negative assert:
+# PASS iff `SELECT 1 FROM … WHERE <predicate>` stays empty for the full window.
+# <predicate> is a complete SQL boolean over any harness_shared table joined inline,
+# e.g. "harness_shared.coord_event_log WHERE msg_id='X' AND origin='remote'". Lets
+# briefs negative-assert coord/plan-part rows too, not just features.
+rig_assert_row_absent() {
+  local inst="$1" pred="$2" tries="${3:-20}" i row
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$inst" "SELECT 1 FROM $pred LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$row" = "1" ]; then echo 0; return 1; fi
+    sleep 3
+  done
+  echo 1; return 0
+}
