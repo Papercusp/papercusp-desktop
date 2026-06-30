@@ -163,7 +163,7 @@ cd "$SIDE"
 env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
-  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
@@ -190,7 +190,7 @@ cd "$SIDE"
 env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
-  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
@@ -379,6 +379,7 @@ if [ "$ab" != 1 ] || [ "$ba" != 1 ] || [ "$ppab" != 1 ] || [ "$ppba" != 1 ] || [
     # the rekey-timing race cause (pair-notifier late-open gap vs sentKeys suppression vs
     # delivery loss). The A-frame (owner) lines AFTER B rekeys are the load-bearing ones.
     echo "--- $inst: announce-channel debug (open/sent/recv + pair + onAnnounce + log_core_key) ---"; drv_exec "$inst" <<<"grep -aE 'announceDebug|open topic|sent fresh|sent static|recv topic|onAnnounce|log_core_key|\bpair\(|admitAnnouncedPeer|openRemoteLog' /home/pcusp/serve.log 2>/dev/null | tail -40"
+    echo "--- $inst: [A-003] admit-chain trace (su-a5793 PAPERCUSP_A003_TRACE: owner-resolve/owner-admit/member-guard/slug-filter/hiveHomeSlug/rekey) ---"; drv_exec "$inst" <<<"grep -aE '\[A-003\]' /home/pcusp/serve.log 2>/dev/null | tail -60"
   done
 fi
 

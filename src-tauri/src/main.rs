@@ -1543,16 +1543,25 @@ fn relayout_env_chrome(app: &AppHandle) {
     }
     eprintln!("[env-chrome] relayout: window {w}x{h} (scale {scale}) → bar(0,0 {w}x{ENV_BAR_HEIGHT}) content(0,{ENV_BAR_HEIGHT} {w}x{})", (h - ENV_BAR_HEIGHT).max(1.0));
     if let Some(bar) = app.get_webview("envbar") {
-        let _ = bar.set_bounds(tauri::Rect {
+        let set_res = bar.set_bounds(tauri::Rect {
             position: tauri::LogicalPosition::new(0.0_f64, 0.0_f64).into(),
             size: tauri::LogicalSize::new(w, ENV_BAR_HEIGHT).into(),
         });
+        eprintln!(
+            "[env-chrome] PROOF envbar(add_child): set_bounds(0,0 {w}x{ENV_BAR_HEIGHT}) -> {set_res:?}; bounds() reads back = {:?}",
+            bar.bounds()
+        );
     }
     if let Some(c) = app.get_webview("main") {
-        let _ = c.set_bounds(tauri::Rect {
+        let set_res = c.set_bounds(tauri::Rect {
             position: tauri::LogicalPosition::new(0.0_f64, ENV_BAR_HEIGHT).into(),
             size: tauri::LogicalSize::new(w, (h - ENV_BAR_HEIGHT).max(1.0)).into(),
         });
+        eprintln!(
+            "[env-chrome] PROOF content(conf 'main'): set_bounds(0,{ENV_BAR_HEIGHT} {w}x{}) -> {set_res:?}; bounds() reads back = {:?}",
+            (h - ENV_BAR_HEIGHT).max(1.0),
+            c.bounds()
+        );
     }
 }
 
