@@ -527,7 +527,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # the cut. So we only treat a post-revoke non-arrival (K4b) as a TRUE content cut when THIS control
   # proves content federation A→B is healthy this run; otherwise K4b is INCONCLUSIVE (never false-RED),
   # and the WI-259-orthogonal device-filtered key-level K3-CUT remains the governing release proof.
-  rkctrl="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCTRL 40 || true)"
+  rkctrl="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCTRL ${RKCUT_PROBE_TRIES:-20} || true)"
   [ "${rkctrl%% *}" = 1 ] && rk_content_ctrl_ok=1
   echo "  K4a CONTENT CONTROL (B reads pre-revoke encrypted content F-RKCTRL): $([ "$rk_content_ctrl_ok" = 1 ] && echo "PASS (content federation A→B healthy ⇒ K4b will assert the cut)" || echo "INCONCLUSIVE (content A→B unhealthy this run — WI-259; key-level K3-CUT governs)")"
 
@@ -566,7 +566,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # C-001 read-cut at the CONTENT layer (decrypt-fail) — the inverse of the old live witness where B
   # kept reading. WI-259-safe: only ASSERTED when K4a established healthy content federation A→B this
   # run; else INCONCLUSIVE (the device-filtered key-level K3-CUT is the governing release proof).
-  rkcut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCUT 40 || true)"
+  rkcut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCUT ${RKCUT_PROBE_TRIES:-20} || true)"
   rkcut_on_b="${rkcut%% *}"   # 1 ⇒ B READ post-revoke content (a C-001 BREACH if K4a passed); else 0
   rkcut_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-RKCUT';" 2>/dev/null | tr -d '[:space:]')"
   if [ "$rk_content_ctrl_ok" = 1 ]; then
