@@ -303,7 +303,7 @@ cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 80 || true)"
 # EI-521 WS-DIAG: on merge-fail, dump workspace_ids to settle product-bug vs probe-artifact —
 # does the undrained outbox row's workspace_id match the member's boot workspace (the drain's
 # WHERE workspace_id = handle.workspaceId)?
-if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
+if [ "$ab" != 1 ] || [ "$ba" != 1 ] || [ "$ppab" != 1 ] || [ "$ppba" != 1 ] || [ "${cab:-0}" != 1 ] || [ "${cba:-0}" != 1 ]; then
   fed_log "WS-DIAG (EI-521): workspace_id alignment between capture + drain"
   echo "--- A: undrained outbox (id|table_name|harness_slug|workspace_id|drained_at) ---"; drv_psql a "SELECT id||'|'||table_name||'|'||COALESCE(harness_slug,'∅')||'|'||workspace_id||'|d='||COALESCE(drained_at::text,'NULL') FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
   echo "--- A: booted-harness workspaceId/slug (the drain's WHERE key — does it match the outbox above?) ---"; drv_exec a <<<"grep -aoE 'bootHarness[^ ]* (ws|workspace)[=:][^ ]+ (slug|harness)[=:][^ ]+|wireOutbox.*slug[=:][^ ]+|startOutboxDrain.*[a-z]' /home/pcusp/serve.log 2>/dev/null | tail -10; echo '(drain-wiring lines:)'; grep -aE 'ensureRelocatedSendSideWired|wireOutbox|outbox wiring|startOutboxDrain|\[outbox-drain\]|relocated send-side|drain wired' /home/pcusp/serve.log 2>/dev/null | tail -15"
@@ -314,6 +314,17 @@ if [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   # window was just too short); if absent → receive-side (replicate/merge/project) is the gap.
   echo "--- B: received content (table|harness_slug|workspace_id|origin) — origin=remote means federated ---"; drv_psql b "SELECT table_name||'|'||harness_slug||'|'||workspace_id||'|'||origin FROM (SELECT 'features' table_name, harness_slug, workspace_id, origin FROM harness_shared.harness_features_consolidated UNION ALL SELECT 'plan_parts', harness_slug, workspace_id, origin FROM harness_shared.harness_plan_parts UNION ALL SELECT 'coord_event', COALESCE(harness_slug,'∅'), workspace_id, origin FROM harness_shared.coord_event_log WHERE harness_slug IS NOT NULL) x ORDER BY 1;" 2>/dev/null
   echo "--- B: undrained-or-not outbox (id|table|harness_slug|workspace_id|drained) ---"; drv_psql b "SELECT id||'|'||table_name||'|'||COALESCE(harness_slug,'∅')||'|'||workspace_id||'|d='||COALESCE(drained_at::text,'NULL') FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
+  # RECEIVE-SIDE DIAG (from-repo-seed root cause, run20): the joiner applies 0 origin=remote rows
+  # because its hive_directory_cache is empty → ownerDeviceForTopic null → no owner-log bootstrap-
+  # admit → 0 hive_members roster → decideMemberContentOp drops/defers every peer op. Dump the three
+  # receive-side states on BOTH frames so a fail is unambiguous (cache empty? roster empty? announce
+  # never processed?). hive_directory_cache may be encrypted (payload_ct) — report row-existence +
+  # column-non-null flags + (if plaintext) hive count, so the dump is encryption-agnostic.
+  for inst in a b; do
+    echo "--- $inst: hive_members roster (github_user_id|binding_status|#device_attest) ---"; drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.hive_members ORDER BY github_user_id;" 2>/dev/null
+    echo "--- $inst: hive_directory_cache (workspace_id|plain?|ct?|#hives) — empty = root cause ---"; drv_psql "$inst" "SELECT workspace_id||'|plain='||(payload IS NOT NULL)||'|ct='||(payload_ct IS NOT NULL)||'|hives='||COALESCE(jsonb_array_length(payload->'hives'),-1) FROM harness_shared.hive_directory_cache;" 2>/dev/null
+    echo "--- $inst: announce/directory/bootstrap-admit activity (serve.log; counts+slugs only, no creds) ---"; drv_exec "$inst" <<<"grep -aoE 'verifyHiveAnnounce|hive-announce|hiveDirectory|hive_directory|ownerDeviceForTopic|bootstrap.?admit|loadHiveOwnerDevice|resolveSameHiveMember|\[announce\]' /home/pcusp/serve.log 2>/dev/null | sort | uniq -c | tail -20"
+  done
   # (boot workspace = the registry workspace_id above; no serve.log token-grep — avoids
   #  echoing credential-shaped strings to diagnostic logs, security review MEDIUM)
   # EI-521 drain-loop diag (D-031): the SEND-side drain is wired (substrate-sidecar-host
