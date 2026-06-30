@@ -143,11 +143,6 @@ tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 # agent-insights/tauri-ipc-cors-remote-origin-webkitgtk. No wry vendoring needed.
 
 [features]
-default = ["dev-wrapper"]
+default = []
 custom-protocol = ["tauri/custom-protocol"]
 devtools = []
-# Dev-box control bar (build switcher + pipeline status + the dev-rail
-# runtime signal) — desktop-build-switcher-wrapper-2026-06-09. Default-ON so
-# every dev-box build carries it; a REAL production build must pass
-# `--no-default-features` so none of it ships (D-005).
-dev-wrapper = []

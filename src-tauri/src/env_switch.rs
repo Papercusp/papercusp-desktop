@@ -220,9 +220,6 @@ pub fn navigate_to_env(window: &tauri::WebviewWindow, port: u16) {
     }
 }
 
-/// The ports the native backstop cycles/jumps to, in display order.
-pub const BACKSTOP_PORTS: [u16; 4] = [3270, 3070, 3170, 3055];
-
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -318,6 +315,61 @@ pub fn init(app: &tauri::App) {
     };
     install_rail_signal(&window);
     apply_persisted_target(&window);
+}
+
+/// The unkillable escape hatch: a native app menu ("Env") with one accelerated
+/// item per target. Native chrome — it survives a content build that
+/// white-screens (the in-webview bar can't paint then, but this still switches
+/// you out). Discoverable (the user can SEE + click it) AND keyboard-driven
+/// (CmdOrCtrl+Shift+1..4). No global-shortcut plugin / ACL needed; menu
+/// accelerators fire while the app is focused, which is exactly when you're
+/// staring at a broken build. Dev-only (called from setup's dev path).
+pub fn install_backstop(app: &tauri::App) {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let mut sb = SubmenuBuilder::new(app, "Env");
+    let mut built_any = false;
+    for (idx, (label, _name, port, tooltip)) in TARGETS.iter().enumerate() {
+        match MenuItemBuilder::with_id(format!("env:{port}"), format!("{label} :{port}"))
+            .accelerator(format!("CmdOrCtrl+Shift+{}", idx + 1))
+            .build(app)
+        {
+            Ok(item) => {
+                let _ = tooltip; // tooltips aren't surfaced on menu items; kept on the bar
+                sb = sb.item(&item);
+                built_any = true;
+            }
+            Err(e) => eprintln!("[env-switch] backstop menu item :{port} failed: {e}"),
+        }
+    }
+    if !built_any {
+        return;
+    }
+    let menu = match sb.build().and_then(|submenu| MenuBuilder::new(app).item(&submenu).build()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[env-switch] backstop menu build failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = app.set_menu(menu) {
+        eprintln!("[env-switch] backstop set_menu failed: {e}");
+        return;
+    }
+    app.on_menu_event(move |app_handle, event| {
+        let Some(port) = event
+            .id()
+            .as_ref()
+            .strip_prefix("env:")
+            .and_then(|s| s.parse::<u16>().ok())
+        else {
+            return;
+        };
+        if let Some(window) = app_handle.get_webview_window("main") {
+            navigate_to_env(&window, port);
+        }
+    });
+    println!("[env-switch] native env backstop menu installed (Env → CmdOrCtrl+Shift+1..4)");
 }
 
 #[cfg(test)]
