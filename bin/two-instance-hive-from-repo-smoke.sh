@@ -443,6 +443,10 @@ fi
 #      octocat fixture → seed claim_status or use a papercupai-owned repo for those).
 ak_default_ok=0; ak_ban_ok=0; ak_unban_ok=0
 rk_keys_ok=0; rk_ctrl_ok=0; rk_revoke_ok=0; rk_cut_ok=0; witness_ran=0
+# P-008 CONTENT-level cut (the work-item's literal assertion). rk_content_applicable=1 only
+# when the K4a pre-revoke content control proves content federation A→B is healthy THIS run
+# (else WI-259 stalls content → K4b is INCONCLUSIVE, never a false-RED; the key-level K3 governs).
+rk_content_ctrl_ok=0; rk_content_cut_ok=0; rk_content_applicable=0
 if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   witness_ran=1
   log "═══ FOLDED LIVE WITNESS (AK enforcement + P-008 re-key cut) ═══"
@@ -514,6 +518,19 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # CURRENT (pre-revoke) epoch on A = the max minted epoch (-1 ⇒ the grant never fired = K0 upstream fail).
   CUR_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
 
+  # ── K4a CONTENT CONTROL (pre-revoke, P-008 CONTENT-level) — the data-plane companion to K1.
+  # A authors an ENCRYPTED content feature (F-RKCTRL) under the CURRENT epoch; B — still a member
+  # holding the CUR-epoch key (K1) — must MATERIALIZE it origin=remote, i.e. B can READ pre-revoke
+  # content at the CONTENT layer (the decrypt gate succeeds). This is also the WI-259 GATE for K4b:
+  # the earlier content-based design (findings-K) false-RED'd because the scopedApply cross-member
+  # guard (WI-259) silently drops A's member-slug content op, so F-RKCTRL never crossed REGARDLESS of
+  # the cut. So we only treat a post-revoke non-arrival (K4b) as a TRUE content cut when THIS control
+  # proves content federation A→B is healthy this run; otherwise K4b is INCONCLUSIVE (never false-RED),
+  # and the WI-259-orthogonal device-filtered key-level K3-CUT remains the governing release proof.
+  rkctrl="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCTRL 40 || true)"
+  [ "${rkctrl%% *}" = 1 ] && rk_content_ctrl_ok=1
+  echo "  K4a CONTENT CONTROL (B reads pre-revoke encrypted content F-RKCTRL): $([ "$rk_content_ctrl_ok" = 1 ] && echo "PASS (content federation A→B healthy ⇒ K4b will assert the cut)" || echo "INCONCLUSIVE (content A→B unhealthy this run — WI-259; key-level K3-CUT governs)")"
+
   # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
   mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1
   sleep 4
@@ -538,17 +555,43 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ "$k3_bdev" = 0 ] && [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ] && [ -n "$a_new" ] && [ "$a_new" -ge 1 ] && rk_cut_ok=1
   echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)" || echo "FAIL (B_DEV-new=$k3_bdev remaining-on-B=$k3_remaining A-new=$a_new)")"
+
+  # ── K4b CONTENT CUT (post-revoke, P-008 — the work-item's LITERAL assertion) ──────────────────
+  # The data-plane consequence of the key-level K3 cut: owner A authors NEW content (F-RKCUT) AFTER
+  # the revoke (encrypted under epoch=$NEW_EPOCH). The REMAINING member (owner A) holds it (reads +
+  # retains it origin='local'). The cut-off member B — which K3 just proved STILL RECEIVES post-revoke
+  # federation (the remaining members' epoch-$NEW_EPOCH key rows crossed to B: remaining-on-B=$k3_remaining)
+  # yet holds NO epoch-$NEW_EPOCH key for its OWN device — must NOT be able to read F-RKCUT: the decrypt
+  # gate DEFERS the ciphertext forever, so F-RKCUT never materializes origin=remote on B. That is the
+  # C-001 read-cut at the CONTENT layer (decrypt-fail) — the inverse of the old live witness where B
+  # kept reading. WI-259-safe: only ASSERTED when K4a established healthy content federation A→B this
+  # run; else INCONCLUSIVE (the device-filtered key-level K3-CUT is the governing release proof).
+  rkcut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCUT 40 || true)"
+  rkcut_on_b="${rkcut%% *}"   # 1 ⇒ B READ post-revoke content (a C-001 BREACH if K4a passed); else 0
+  rkcut_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-RKCUT';" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$rk_content_ctrl_ok" = 1 ]; then
+    rk_content_applicable=1
+    # The content cut holds iff B did NOT read F-RKCUT AND the remaining member (A) DOES hold it.
+    [ "$rkcut_on_b" != 1 ] && [ -n "$rkcut_on_a" ] && [ "$rkcut_on_a" -ge 1 ] && rk_content_cut_ok=1
+    echo "  K4b CONTENT CUT (B can NO LONGER read post-revoke content F-RKCUT; remaining member A reads it): $([ "$rk_content_cut_ok" = 1 ] && echo "PASS (B-read=no, A-has=$rkcut_on_a)" || { [ "$rkcut_on_b" = 1 ] && echo "FAIL — C-001 BREACH: B READ post-revoke content F-RKCUT" || echo "FAIL (remaining member A lacks F-RKCUT, A-has=${rkcut_on_a:-0})"; })"
+  else
+    echo "  K4b CONTENT CUT: INCONCLUSIVE (K4a did not establish healthy content federation A→B this run — WI-259; device-filtered key-level K3-CUT is the governing release proof)"
+  fi
 fi
 
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
 echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
 if [ "$witness_ran" = 1 ]; then
-  echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)"
-  if [ "$ak_default_ok" = 1 ] && [ "$ak_ban_ok" = 1 ] && [ "$ak_unban_ok" = 1 ] && [ "$rk_keys_ok" = 1 ] && [ "$rk_ctrl_ok" = 1 ] && [ "$rk_revoke_ok" = 1 ] && [ "$rk_cut_ok" = 1 ]; then
-    echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (key-level, device-filtered: B's device HAD the pre-revoke epoch key, has NO post-revoke epoch key while remaining members were re-keyed) proven on the binary"
+  CONTENT_CUT_REPORT="$([ "$rk_content_applicable" = 1 ] && { [ "$rk_content_cut_ok" = 1 ] && echo PASS || echo FAIL; } || echo INCONCLUSIVE)"
+  echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)  K4-CONTENT-CUT=$CONTENT_CUT_REPORT"
+  # The CONTENT cut gates OVERALL only when APPLICABLE (K4a established healthy content federation):
+  # applicable+pass strengthens the proof; applicable+fail is a C-001 BREACH (must fail); not-applicable
+  # (WI-259 stalled content this run) never blocks — the device-filtered key-level K3-CUT governs.
+  if [ "$ak_default_ok" = 1 ] && [ "$ak_ban_ok" = 1 ] && [ "$ak_unban_ok" = 1 ] && [ "$rk_keys_ok" = 1 ] && [ "$rk_ctrl_ok" = 1 ] && [ "$rk_revoke_ok" = 1 ] && [ "$rk_cut_ok" = 1 ] && { [ "$rk_content_applicable" != 1 ] || [ "$rk_content_cut_ok" = 1 ]; }; then
+    echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (key-level, device-filtered: B's device HAD the pre-revoke epoch key, has NO post-revoke epoch key while remaining members were re-keyed)$([ "$rk_content_applicable" = 1 ] && echo " + the CONTENT-level cut (B read pre-revoke content, can NO LONGER read post-revoke content; remaining member A reads it)" || echo "") proven on the binary"
   else
-    echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK diagnostics above"
+    echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK/K4 diagnostics above"
   fi
 fi
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
