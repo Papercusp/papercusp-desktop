@@ -2006,7 +2006,6 @@ pub fn run() {
                 // the native menu + global-shortcut backstop (install_backstop)
                 // is the unkillable escape hatch.
                 env_switch::init(app);
-                env_switch::install_backstop(app);
 
                 return Ok(());
             }
