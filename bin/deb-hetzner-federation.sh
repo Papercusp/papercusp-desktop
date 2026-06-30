@@ -221,44 +221,81 @@ curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo
 EOF
 )"
 echo "A from-repo → $(printf '%s' "$a_resp" | head -c 200)"
-A_LINK="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
+# Resolve A's hive memberLink + hiveId + hivePubkey from the from-repo response —
+# /api/discovery/join-hive needs ALL THREE ({ hiveId, hivePubkey, memberLinks }).
+# The fields live in different shapes:
+#   fresh-create → {created:{hiveSlug}, publish:{memberLinks,hivePubkey}} (WI-931:
+#                  publish is a SIBLING of created, _create_from_repo.ts:582-597)
+#   existing     → {existing:{hive:{hiveId,memberLinks,hivePubkey}}} (re-publish /
+#                  directory join-offer, lookup-hive-for-repo HiveHit:44-50)
+# The directory hiveId == the hive HOME slug (== created.hiveSlug, e.g. <repo>-hive).
+A_HIVE_FIELDS="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
-# memberLinks may live in: existing.hive.memberLinks (re-publish / directory offer),
-# created.memberLinks (older shape), OR publish.memberLinks (WI-931: a freshly-created
-# hives response is {created:{...}, publish:{memberLinks,hivePubkey}} — publish is a
-# SIBLING of created, _create_from_repo.ts:120-125). Check all of them.
-ml=(d.get("existing",{}).get("hive",{}).get("memberLinks")
-    or d.get("created",{}).get("memberLinks")
-    or d.get("publish",{}).get("memberLinks")
-    or [])
-print(ml[0] if ml else "")' 2>/dev/null)"
+ex=d.get("existing",{}).get("hive",{}) or {}
+cr=d.get("created",{}) or {}
+pub=d.get("publish",{}) or {}
+ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
+print(ml[0] if ml else "")
+print(ex.get("hiveId") or cr.get("hiveSlug") or "")
+print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")' 2>/dev/null)"
+{ read -r A_LINK; read -r HIVE_ID; read -r HIVE_PUBKEY; } <<<"$A_HIVE_FIELDS"
 [ -n "$A_LINK" ] || { echo "✗ A could not resolve a hive memberLink — FULL body: $(printf '%s' "$a_resp" | head -c 1500)"; exit 6; }
-echo "✓ A resolved hive link ${A_LINK:0:56}…"
+[ -n "$HIVE_ID" ] || { echo "✗ A could not resolve hiveId (required for join-hive) — FULL body: $(printf '%s' "$a_resp" | head -c 1500)"; exit 6; }
+echo "✓ A resolved hive link ${A_LINK:0:56}… hiveId=$HIVE_ID hivePubkey=${HIVE_PUBKEY:0:12}…"
+# hivePubkey is the load-bearing input for joinHiveAsView's identity-materialize → re-key path.
+# On the JOINER local discovery is empty, so defaultResolveHivePubkey resolves null — if we don't
+# pass it explicitly the identity write is skipped and the member never re-keys onto the owner
+# topic. Warn loudly (non-fatal: the receive-side diagnostics still run) if A failed to surface it.
+[ -n "$HIVE_PUBKEY" ] || echo "⚠ A surfaced NO hivePubkey — joinHiveAsView will skip identity-materialize on the joiner (no re-key → no federation). Check publish.hivePubkey / existing.hive.hivePubkey in the from-repo body above."
 # D-007 diag: does the member link carry the owner binding (hive_pubkey + owner_device_pubkey
 # + owner_github_user_id + attestation_gist_id)? If absent, the joiner can't seed
 # hive_directory_cache at join → bootstrap-admit can't fire (the receive-side fix is a no-op).
 echo "D-007 A_LINK owner-binding params present: $(printf '%s' "$A_LINK" | grep -oE 'hive_pubkey|owner_device_pubkey|owner_github_user_id|attestation_gist_id' | sort -u | tr '\n' ' ')"
-# Both peers JOIN the SAME hive via A's EXACT memberLink — guarantees the same hive-pubkey
-# topic (no rediscovery ambiguity / stale-hive split) AND publishes BOTH bindings (admission).
-A_MEMBER_SLUG="amem-$SLUG"; B_MEMBER_SLUG="bmem-$SLUG"
-fed_log "A + B both join the same hive (A=$A_MEMBER_SLUG, B=$B_MEMBER_SLUG)"
+# REAL hive-join flow (4250638d root cause): BOTH peers join via POST /api/discovery/join-hive,
+# NOT /api/harness/join-link. join-link alone creates ONLY a member harness — it never boots a
+# hive VIEW, so on the JOINER the hive VIEW's substrate (which runs the hive_members roster
+# projection + the owner-log bootstrap-admit) never materializes → empty roster →
+# decideMemberContentOp drops ALL the owner's federated content. join-hive (joinHiveAsView):
+#   (1) calls handleJoinLink per member — boot_federate boots the member substrate AND the
+#       D-007 owner-binding seed still fires;
+#   (2) materializes the repo-less hive VIEW + the OWNER's Hive identity (from hivePubkey); and
+#   (3) RE-KEYS each joined member IN PLACE onto the owner's hive-pubkey topic (EI-681) — the
+#       only path that lands the joiner on the owner's topic WITH a populated roster.
+# hivePubkey is passed EXPLICITLY because the joiner's local discovery is empty (it never caught
+# A's announce — the whole bug), so joinHiveAsView's defaultResolveHivePubkey would resolve null
+# and skip the identity write → no re-key → no federation. The joined member slug is DERIVED
+# internally (kebab of the repo name; on A the from-repo member is reported already_registered),
+# so read it back from the JoinHiveResult.members[] rather than naming it.
+join_hive_member_slug() {  # <join-hive-response-json> → first ok member's slug
+  printf '%s' "$1" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+ms=[m for m in d.get("members",[]) if m.get("ok") and m.get("slug")]
+print(ms[0]["slug"] if ms else "")' 2>/dev/null
+}
+fed_log "A + B both JOIN THE HIVE via /api/discovery/join-hive (hiveId=$HIVE_ID) — materialize VIEW + rekey members onto the owner topic"
 a_join="$(drv_exec a <<EOF
-curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"$A_MEMBER_SLUG","harnessLinkUrl":"$A_LINK"}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
 EOF
 )"
-printf '%s' "$a_join" | grep -q '"ok":true' && echo "✓ A joined as $A_MEMBER_SLUG" || echo "✗ A join failed: $(printf '%s' "$a_join" | head -c 200)"
+A_MEMBER_SLUG="$(join_hive_member_slug "$a_join")"
+{ printf '%s' "$a_join" | grep -q '"ok":true' && [ -n "$A_MEMBER_SLUG" ]; } \
+  && echo "✓ A joined hive (member=$A_MEMBER_SLUG)" || echo "✗ A join-hive failed: $(printf '%s' "$a_join" | head -c 300)"
 b_join="$(drv_exec b <<EOF
-curl -s -m 310 -X POST http://127.0.0.1:${FED_SC[b]}/api/harness/join-link -H 'content-type: application/json' -d '{"slug":"$B_MEMBER_SLUG","harnessLinkUrl":"$A_LINK"}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[b]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
 EOF
 )"
-printf '%s' "$b_join" | grep -q '"ok":true' && echo "✓ B joined as $B_MEMBER_SLUG" || echo "✗ B join failed: $(printf '%s' "$b_join" | head -c 200)"
+B_MEMBER_SLUG="$(join_hive_member_slug "$b_join")"
+{ printf '%s' "$b_join" | grep -q '"ok":true' && [ -n "$B_MEMBER_SLUG" ]; } \
+  && echo "✓ B joined hive (member=$B_MEMBER_SLUG)" || echo "✗ B join-hive failed: $(printf '%s' "$b_join" | head -c 300)"
 MEMBER_SLUG="$A_MEMBER_SLUG"
 
-# NO RESTART (EI-521 isolation): join-link's boot_federate step already boots the
-# federation substrate (drain + read-merge + swarm) at join time. A restart KILLS that
-# substrate and boot-all does NOT re-boot joined members (attempted=0) — that was the
-# run5 failure. So just give boot_federate's swarm a moment to peer-connect + drain.
-fed_log "boot_federate booted the substrate at join — wait for peer_connect + drain (NO restart)"
+# NO RESTART (EI-521 isolation): join-hive's per-member boot_federate already boots the
+# federation substrate (drain + read-merge + swarm) at join time, and joinHiveAsView then
+# RE-KEYS it IN PLACE onto the owner's hive-pubkey topic (no reboot — a reboot breaks the
+# owner's corestore serving). A restart KILLS that substrate and boot-all does NOT re-boot
+# joined members (attempted=0) — that was the run5 failure. So just give the swarm a moment
+# to peer-connect + drain.
+fed_log "join-hive booted + re-keyed the substrate at join — wait for peer_connect + drain (NO restart)"
 sleep 12
 echo "--- A [swarm]/drain diag ---"; drv_exec a <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
 echo "--- B [swarm]/drain diag ---"; drv_exec b <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate|attempted=' /home/pcusp/serve.log | tail -8"
