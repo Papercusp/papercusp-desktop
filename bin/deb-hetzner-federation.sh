@@ -234,6 +234,10 @@ ml=(d.get("existing",{}).get("hive",{}).get("memberLinks")
 print(ml[0] if ml else "")' 2>/dev/null)"
 [ -n "$A_LINK" ] || { echo "✗ A could not resolve a hive memberLink — FULL body: $(printf '%s' "$a_resp" | head -c 1500)"; exit 6; }
 echo "✓ A resolved hive link ${A_LINK:0:56}…"
+# D-007 diag: does the member link carry the owner binding (hive_pubkey + owner_device_pubkey
+# + owner_github_user_id + attestation_gist_id)? If absent, the joiner can't seed
+# hive_directory_cache at join → bootstrap-admit can't fire (the receive-side fix is a no-op).
+echo "D-007 A_LINK owner-binding params present: $(printf '%s' "$A_LINK" | grep -oE 'hive_pubkey|owner_device_pubkey|owner_github_user_id|attestation_gist_id' | sort -u | tr '\n' ' ')"
 # Both peers JOIN the SAME hive via A's EXACT memberLink — guarantees the same hive-pubkey
 # topic (no rediscovery ambiguity / stale-hive split) AND publishes BOTH bindings (admission).
 A_MEMBER_SLUG="amem-$SLUG"; B_MEMBER_SLUG="bmem-$SLUG"
