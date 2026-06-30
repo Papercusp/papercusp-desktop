@@ -645,7 +645,7 @@ fed_cleanup_scoped() {
 # The mktemp -d prefixes every two-instance rig uses (keep in sync if a rig adds one).
 FED_RIG_TMP_PREFIXES=(
   /tmp/hive-fromrepo-smoke. /tmp/hive-dir-smoke. /tmp/merge-smoke.
-  /tmp/p3-smoke. /tmp/vm-fed. /tmp/deb-hzfed.
+  /tmp/p3-smoke. /tmp/vm-fed. /tmp/deb-hzfed. /tmp/deb-hzfast.
 )
 
 # fed_is_rig_work <dir> — true iff <dir> is a REAL per-run rig $WORK: an existing
