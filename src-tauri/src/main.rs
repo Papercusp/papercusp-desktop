@@ -1528,6 +1528,34 @@ fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
 /// Fixed logical height (px) of the persistent env-bar chrome strip.
 const ENV_BAR_HEIGHT: f64 = 32.0;
 
+/// Pin the `envbar` webview to a fixed top strip and size the `main` content
+/// webview to fill the rest, reading the CURRENT window size. Idempotent — called
+/// at install, on resize, and once deferred (the size at setup is often the
+/// pre-show default, which is why a one-shot install sizing renders wrong).
+fn relayout_env_chrome(app: &AppHandle) {
+    let Some(window) = app.get_window("main") else { return };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Ok(sz) = window.inner_size() else { return };
+    let lg = sz.to_logical::<f64>(scale);
+    let (w, h) = (lg.width, lg.height);
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+    eprintln!("[env-chrome] relayout: window {w}x{h} (scale {scale}) → bar(0,0 {w}x{ENV_BAR_HEIGHT}) content(0,{ENV_BAR_HEIGHT} {w}x{})", (h - ENV_BAR_HEIGHT).max(1.0));
+    if let Some(bar) = app.get_webview("envbar") {
+        let _ = bar.set_bounds(tauri::Rect {
+            position: tauri::LogicalPosition::new(0.0_f64, 0.0_f64).into(),
+            size: tauri::LogicalSize::new(w, ENV_BAR_HEIGHT).into(),
+        });
+    }
+    if let Some(c) = app.get_webview("main") {
+        let _ = c.set_bounds(tauri::Rect {
+            position: tauri::LogicalPosition::new(0.0_f64, ENV_BAR_HEIGHT).into(),
+            size: tauri::LogicalSize::new(w, (h - ENV_BAR_HEIGHT).max(1.0)).into(),
+        });
+    }
+}
+
 /// Persistent env-bar chrome (plan persistent-env-bar-chrome-webview-2026-06-30).
 /// Adds a fixed top-strip webview ("envbar") that renders EnvSwitcherBar OUTSIDE
 /// the navigable `main` content webview, so switching envs (which navigates
@@ -1612,28 +1640,25 @@ fn install_env_chrome(app: &tauri::App) {
         });
     }
 
-    // Keep the bar a fixed top strip + content filling the rest on resize.
+    // Layout NOW (the size at setup is often the pre-show default — the cause of
+    // the first wrong render), again shortly after the window settles, and on
+    // every resize. relayout_env_chrome reads the CURRENT size each time.
     let handle = app.handle().clone();
-    window.on_window_event(move |ev| {
-        if let tauri::WindowEvent::Resized(_) = ev {
-            let Some(win) = handle.get_window("main") else { return };
-            let sc = win.scale_factor().unwrap_or(1.0);
-            if let Ok(sz) = win.inner_size() {
-                let lg = sz.to_logical::<f64>(sc);
-                if let Some(bar) = handle.get_webview("envbar") {
-                    let _ = bar.set_bounds(tauri::Rect {
-                        position: tauri::LogicalPosition::new(0.0_f64, 0.0_f64).into(),
-                        size: tauri::LogicalSize::new(lg.width, ENV_BAR_HEIGHT).into(),
-                    });
-                }
-                if let Some(c) = handle.get_webview("main") {
-                    let _ = c.set_bounds(tauri::Rect {
-                        position: tauri::LogicalPosition::new(0.0_f64, ENV_BAR_HEIGHT).into(),
-                        size: tauri::LogicalSize::new(lg.width, (lg.height - ENV_BAR_HEIGHT).max(1.0)).into(),
-                    });
-                }
+    relayout_env_chrome(&handle);
+    {
+        let h = handle.clone();
+        window.on_window_event(move |ev| {
+            if let tauri::WindowEvent::Resized(_) = ev {
+                relayout_env_chrome(&h);
             }
-        }
+        });
+    }
+    // Deferred re-layout to catch the settled window size.
+    let h2 = handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let h3 = h2.clone();
+        let _ = h2.run_on_main_thread(move || relayout_env_chrome(&h3));
     });
 }
 
