@@ -194,32 +194,6 @@ pub fn list_envs(window: tauri::WebviewWindow) -> Vec<EnvInfo> {
         .collect()
 }
 
-/// Navigate the content webview to an env by port, carrying the current SPA
-/// route + query (matches the old `switch_to`). Used by the native menu +
-/// global-shortcut backstop; `/api` retargets via on_page_load →
-/// `retarget_for_url`, so this is just the navigation.
-pub fn navigate_to_env(window: &tauri::WebviewWindow, port: u16) {
-    let path_q = window
-        .url()
-        .ok()
-        .map(|u| {
-            let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
-            format!("{}{}", u.path(), q)
-        })
-        .unwrap_or_else(|| "/".into());
-    let target = format!("http://127.0.0.1:{port}{path_q}");
-    match url::Url::parse(&target) {
-        Ok(u) => {
-            if let Err(e) = window.navigate(u) {
-                eprintln!("[env-switch] backstop navigate to {target} failed: {e}");
-            } else {
-                println!("[env-switch] backstop switched content webview → {target}");
-            }
-        }
-        Err(e) => eprintln!("[env-switch] bad backstop url {target}: {e}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -315,61 +289,6 @@ pub fn init(app: &tauri::App) {
     };
     install_rail_signal(&window);
     apply_persisted_target(&window);
-}
-
-/// The unkillable escape hatch: a native app menu ("Env") with one accelerated
-/// item per target. Native chrome — it survives a content build that
-/// white-screens (the in-webview bar can't paint then, but this still switches
-/// you out). Discoverable (the user can SEE + click it) AND keyboard-driven
-/// (CmdOrCtrl+Shift+1..4). No global-shortcut plugin / ACL needed; menu
-/// accelerators fire while the app is focused, which is exactly when you're
-/// staring at a broken build. Dev-only (called from setup's dev path).
-pub fn install_backstop(app: &tauri::App) {
-    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-
-    let mut sb = SubmenuBuilder::new(app, "Env");
-    let mut built_any = false;
-    for (idx, (label, _name, port, tooltip)) in TARGETS.iter().enumerate() {
-        match MenuItemBuilder::with_id(format!("env:{port}"), format!("{label} :{port}"))
-            .accelerator(format!("CmdOrCtrl+Shift+{}", idx + 1))
-            .build(app)
-        {
-            Ok(item) => {
-                let _ = tooltip; // tooltips aren't surfaced on menu items; kept on the bar
-                sb = sb.item(&item);
-                built_any = true;
-            }
-            Err(e) => eprintln!("[env-switch] backstop menu item :{port} failed: {e}"),
-        }
-    }
-    if !built_any {
-        return;
-    }
-    let menu = match sb.build().and_then(|submenu| MenuBuilder::new(app).item(&submenu).build()) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[env-switch] backstop menu build failed: {e}");
-            return;
-        }
-    };
-    if let Err(e) = app.set_menu(menu) {
-        eprintln!("[env-switch] backstop set_menu failed: {e}");
-        return;
-    }
-    app.on_menu_event(move |app_handle, event| {
-        let Some(port) = event
-            .id()
-            .as_ref()
-            .strip_prefix("env:")
-            .and_then(|s| s.parse::<u16>().ok())
-        else {
-            return;
-        };
-        if let Some(window) = app_handle.get_webview_window("main") {
-            navigate_to_env(&window, port);
-        }
-    });
-    println!("[env-switch] native env backstop menu installed (Env → CmdOrCtrl+Shift+1..4)");
 }
 
 #[cfg(test)]
