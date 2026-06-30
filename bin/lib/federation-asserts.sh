@@ -265,7 +265,12 @@ fed_assert_isolated() {
 # sibling's, EI-1739) and adopt it. Must be called DIRECTLY (the FED_SC self-heal
 # would die in a $(…) subshell).
 fed_wait_api() {
-  local inst="$1" tries="${2:-20}" i code last="000"
+  # EI-521/run25-26 flake fix: a fresh VM's sidecar needs embedded-PG init + ~400
+  # migrations + (with the join-hive/rekey fix) the owner-bootstrap before preflight
+  # answers 2xx — comfortably past the old 20×2s≈40s, so fed_wait_api timed out +
+  # 'accepted liberally', and from-repo then fired against an un-ready API (empty
+  # response = the run25/26 root cause). Wait up to 60×2s≈120s.
+  local inst="$1" tries="${2:-60}" i code last="000"
   for i in $(seq 1 "$tries"); do
     code="$(drv_exec "$inst" <<EOF
 curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${FED_SC[$inst]}/api/desktop/preflight" 2>/dev/null || echo 000
