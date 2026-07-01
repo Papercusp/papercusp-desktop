@@ -605,6 +605,105 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   fi
 fi
 
+# ── 6.5 MODERATION FEDERATION witness (opt-in: MODERATION_PROBE=1) ─────────────────
+# WI-283 — the moderation surface's live 2-peer DELIVERY witness (takedown + report), the
+# moderation analogue of the A-003 settings/content crossing. Runs ONLY after a successful
+# join (B is a federating member). Independent of WITNESS_PROBE and of C-001/WI-280: BOTH legs
+# ride HIVE-HOME-grained federated tables (hive_policy — the A-003-proven class — and
+# hive_reports), NOT the epoch-key/content path, so neither needs the re-key flag.
+#   LEG 1 TAKEDOWN (owner A → joiner B, hive_policy): A hive:takedown a content ref → B must
+#     receive the RE-SIGNED owner policy origin=remote, policy_version BUMPED, and the ref
+#     present in policy_json.moderation.takedownList. hive:takedown rides the hive KEY
+#     (mutateHivePolicy) — NO claim gate — so it works on the octocat fixture.
+#   LEG 2 REPORT (member B → owner A, hive_reports): with moderation.reportable enabled (owner-
+#     authored + federated), B hive:report the ref → it must federate to A's moderation queue
+#     (hive_reports on A gains the row origin=remote). Enabling reportable is the ONE claim-gated
+#     step (POST /api/hive/:id/policy); papercupai isn't repo-admin on the octocat fixture, so we
+#     SEED the local claim (rig affordance — su-9140a note (c)) then author via the real signed route.
+# Content-free discipline (mirrors the C-001 witness): the takedown PROOF is the SIGNED-LIST delta
+# (policy_version + list membership), not any content payload; BEFORE versions are captured so the
+# federation delta is unambiguous.
+moderation_ran=0; mod_reportable_ok=0; mod_takedown_ok=0; mod_report_ok=0
+if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  moderation_ran=1
+  log "═══ MODERATION FEDERATION witness (WI-283: takedown + report, hive='$HIVE_SLUG') ═══"
+  # Witness vars — resolved independently of the WITNESS_PROBE block so this stands alone.
+  MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  MOD_A_GH_ID="$(gh api "users/$P_A_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
+  MOD_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$MOD_B_GH_ID" ] && MOD_B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
+  CR="F-MODTEST-$(date +%s)"
+  echo "  mod vars: WS=$MOD_WS  A_GH_ID=$MOD_A_GH_ID  B_GH_ID=$MOD_B_GH_ID  contentRef=$CR"
+
+  # ── PREREQ for LEG 2 — enable reporting on the owner-signed policy (done BEFORE the takedown so
+  # the takedown's read-mutate-resign PRESERVES reportable). Seed A's local claim, then author via
+  # the real claim-gated signed route (re-signs + federates). A soft prereq: if it fails, LEG 1
+  # still runs and LEG 2 degrades to INCONCLUSIVE (never a false-FAIL).
+  claimed="$(drv_psql a "UPDATE harness_shared.shared_repo_binding_cache SET claim_status='claimed', claimed_by_github_user_ids=ARRAY[${MOD_A_GH_ID:-0}]::bigint[], claimed_at=now() WHERE harness_slug='$HIVE_SLUG' RETURNING claim_status;" 2>/dev/null | tr -d '[:space:]')"
+  echo "  [reportable] seed A claim (claim_status=${claimed:-<no-binding-row>}, claimant=$MOD_A_GH_ID)"
+  pol="$(curl -s -m 30 -X POST "http://127.0.0.1:${FED_SC[a]}/api/hive/$HIVE_SLUG/policy" -H 'content-type: application/json' -d '{"policy":{"moderation":{"reportable":true}}}')"
+  echo "  [reportable] A POST /api/hive/$HIVE_SLUG/policy reportable=true -> $(echo "$pol" | head -c 220)"
+  echo "$pol" | grep -q '"ok":true' && mod_reportable_ok=1
+  echo "  reportable authored on A (owner-signed): $([ "$mod_reportable_ok" = 1 ] && echo yes || echo "no — LEG 2 will be INCONCLUSIVE (report gate stays off)")"
+
+  # ── LEG 1 — TAKEDOWN (owner A → joiner B; hive_policy, hive-home-grained, A-003 class) ─────────
+  M0_VER="$(drv_psql a "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  B0_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  echo "  [takedown] BEFORE: A policy_version=$M0_VER  B policy_version=$B0_VER"
+  td="$(mcp_call a "hive:takedown" "{\"hive\":\"$HIVE_SLUG\",\"contentRef\":\"$CR\",\"workspace\":\"$MOD_WS\"}")"
+  echo "  [takedown] A hive:takedown($CR) -> $(echo "$td" | head -c 240)"
+  # POLL B for the federated signed-list delta: origin=remote, version bumped past M0_VER, ref present.
+  for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    hit="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND policy_version > $M0_VER AND (policy_json::jsonb->'moderation'->'takedownList') @> to_jsonb('$CR'::text);" 2>/dev/null | tr -d '[:space:]')"
+    [ "$hit" = 1 ] && { mod_takedown_ok=1; break; }
+    sleep 3
+  done
+  B1_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  echo "  MOD-LEG1 TAKEDOWN (B receives owner-signed takedownList origin=remote, v$M0_VER→v$B1_VER, ref present): $([ "$mod_takedown_ok" = 1 ] && echo PASS || echo "FAIL — B did not receive '$CR' on the signed takedownList as origin=remote")"
+  if [ "$mod_takedown_ok" != 1 ]; then
+    echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A outbox(hive_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+  fi
+
+  # ── LEG 2 — REPORT (member B → owner A; hive_reports, member→owner federation, key=report_id) ──
+  # Wait for reportable=true to FEDERATE to B (hive:report reads B's LOCAL federated policy).
+  b_reportable=0
+  if [ "$mod_reportable_ok" = 1 ]; then
+    for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+      r="$(drv_psql b "SELECT (policy_json::jsonb->'moderation'->>'reportable') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+      [ "$r" = "true" ] && { b_reportable=1; break; }
+      sleep 3
+    done
+    echo "  [report] reportable federated to B: $([ "$b_reportable" = 1 ] && echo yes || echo "no (report will no-op → INCONCLUSIVE)")"
+  fi
+  rep="$(mcp_call b "hive:report" "{\"hive\":\"$HIVE_SLUG\",\"targetKind\":\"content\",\"targetRef\":\"$CR\",\"reason\":\"witness-report\",\"workspace\":\"$MOD_WS\"}")"
+  echo "  [report] B hive:report($CR) -> $(echo "$rep" | head -c 220)"
+  # POLL A's moderation queue (hive_reports) for the federated row origin=remote.
+  for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    hit="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND target_ref='$CR' AND reporter_github_user_id=${MOD_B_GH_ID:-0};" 2>/dev/null | tr -d '[:space:]')"
+    [ "$hit" = 1 ] && { mod_report_ok=1; break; }
+    sleep 3
+  done
+  # Secondary confirmation via the owner tool surface (the witness shape's "queue shows it").
+  q="$(mcp_call a "hive:moderation_queue" "{\"hive\":\"$HIVE_SLUG\",\"workspace\":\"$MOD_WS\"}")"
+  if [ "$mod_report_ok" = 1 ]; then
+    echo "  MOD-LEG2 REPORT (B's report federates to A's moderation queue origin=remote): PASS"
+  elif [ "$b_reportable" = 1 ]; then
+    echo "  MOD-LEG2 REPORT (B's report federates to A's moderation queue origin=remote): FAIL — report never reached A as origin=remote"
+  else
+    echo "  MOD-LEG2 REPORT: INCONCLUSIVE — reporting was not enabled/federated to B this run (report no-op'd; NOT a federation miss). Enable moderation.reportable (claim + policy route) and re-run."
+  fi
+  echo "    A hive:moderation_queue -> $(echo "$q" | head -c 240)"
+  if [ "$mod_report_ok" != 1 ] && [ "$b_reportable" = 1 ]; then
+    echo "    DIAG A reports: $(drv_psql a "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B reports(local): $(drv_psql b "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B outbox(hive_reports): $(drv_psql b "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_reports' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+  fi
+fi
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
 echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
@@ -618,6 +717,20 @@ if [ "$witness_ran" = 1 ]; then
     echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (key-level, device-filtered: B's device HAD the pre-revoke epoch key, has NO post-revoke epoch key while remaining members were re-keyed)$([ "$rk_content_applicable" = 1 ] && echo " + the CONTENT-level cut (B read pre-revoke content, can NO LONGER read post-revoke content; remaining member A reads it)" || echo "") proven on the binary"
   else
     echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK/K4 diagnostics above"
+  fi
+fi
+if [ "$moderation_ran" = 1 ]; then
+  MOD_REPORT_LINE="$([ "$mod_report_ok" = 1 ] && echo PASS || { [ "$mod_reportable_ok" = 1 ] && echo FAIL || echo INCONCLUSIVE; })"
+  echo "MODERATION (WI-283): takedown-federates(A→B)=$([ "$mod_takedown_ok" = 1 ] && echo PASS || echo FAIL)  reportable-authored=$([ "$mod_reportable_ok" = 1 ] && echo PASS || echo FAIL)  report-federates(B→A)=$MOD_REPORT_LINE"
+  # LEG 1 (takedown) is the release-governing proof (rides hive_policy, no claim/reportable dep);
+  # LEG 2 (report) only strengthens it, and is INCONCLUSIVE — never a false-FAIL — when reporting
+  # could not be enabled/federated this run (the claim-gated reportable prereq).
+  if [ "$mod_takedown_ok" = 1 ] && [ "$mod_report_ok" = 1 ]; then
+    echo "MODERATION OVERALL: PASS — takedown (owner-signed takedownList crosses A→B origin=remote) + report (member report federates B→A into the owner moderation queue) proven live on the 2-instance rig"
+  elif [ "$mod_takedown_ok" = 1 ] && [ "$mod_reportable_ok" != 1 ]; then
+    echo "MODERATION OVERALL: PARTIAL — takedown federation PROVEN (A→B); report leg INCONCLUSIVE (moderation.reportable could not be enabled this run — see the [reportable] diagnostics)"
+  else
+    echo "MODERATION OVERALL: INCOMPLETE — see the per-leg MOD-LEG results + diagnostics above"
   fi
 fi
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
