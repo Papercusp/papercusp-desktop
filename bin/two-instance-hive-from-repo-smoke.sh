@@ -47,8 +47,19 @@
 #   auto     — deb when the .deb exists AND passes the from-repo gate, else
 #              sidecar (loudly).
 #
+# Opt-in live-witness probes (rider blocks after a successful join; each is independent):
+#   WITNESS_PROBE=1     — owner-enforcement (AK) + P-008 re-key CUT (needs the rekey flag).
+#   A003_MEMBERSHIP_PROBE=1 — hive_settings/hive_members A→B crossing (A-003 gate).
+#   MODERATION_PROBE=1  — WI-283 moderation federation: (LEG1) owner takedown crosses A→B
+#                         via the owner-signed hive_policy.moderation.takedownList, and
+#                         (LEG2) a member report federates B→A into the owner's hive_reports
+#                         moderation queue. Rides the SAME rig/helpers; NOT gated on the
+#                         re-key flag or C-001/WI-280 (both legs ride hive-home-grained
+#                         federated tables, not the epoch-key/content path).
+#
 # Usage:
 #   bin/two-instance-hive-from-repo-smoke.sh [path/to/Papercusp_*.deb]
+#   MODERATION_PROBE=1 bin/two-instance-hive-from-repo-smoke.sh   # + the moderation witness
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
@@ -113,6 +124,18 @@ assert_serve_supports_from_repo() {
       return 1
     fi
     echo "✓ $label serve.mjs carries the WI-280 join-time membership+grant seam (witness static check)"
+  fi
+  # Moderation-witness staleness gate (MODERATION_PROBE only). The EN-3 report backend must be
+  # present or LEG 2 false-FAILs on an OLD build (report route absent → no-op). Marker survives
+  # minification: 'reporting_not_enabled' is a CODE STRING literal in agent-tools/hive/report.ts
+  # (esbuild strips comments but keeps string literals), emitted only once the moderation tools
+  # (hive:takedown / hive:report / hive:moderation_queue) landed.
+  if [ "${MODERATION_PROBE:-0}" = 1 ]; then
+    if ! grep -qaF 'reporting_not_enabled' "$serve" 2>/dev/null; then
+      echo "✗ $label serve.mjs lacks the EN-3 moderation report backend (string 'reporting_not_enabled') — built before the moderation tools; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the moderation witness"
+      return 1
+    fi
+    echo "✓ $label serve.mjs carries the EN-3 moderation backend (witness static check)"
   fi
   echo "✓ $label serve.mjs carries the from-repo backend (static check)"
 }
@@ -248,6 +271,22 @@ except Exception: sys.exit(0)
 try: print($2)
 except Exception: pass
 " 2>/dev/null; }
+
+# mcp_call <inst> <tool> <json-args> — MCP-over-HTTP tool call to an instance (JSON-RPC;
+# superuser=1 needs loopback + a valid bearer). The sidecar ensures
+# $HOME/.papercusp/superuser-token (mode 0600) on boot (desktop-install/papercusp-files.ts),
+# so each isolated instance HOME carries its own. Shared by the WITNESS_PROBE + MODERATION_PROBE
+# rider blocks below.
+mcp_call() {
+  local inst="$1" tool="$2" args="$3" home tok
+  [ "$inst" = a ] && home="$A_HOME" || home="$B_HOME"
+  tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null || true)"
+  curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1&client=witness" \
+    -H 'content-type: application/json' \
+    -H 'accept: application/json, text/event-stream' \
+    ${tok:+-H "Authorization: Bearer $tok"} \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
+}
 
 # ── 1. A creates a PUBLIC hive from the fixture repo ────────────────────────────
 log "A ($P_A_USER): POST /api/harness/hives/from-repo ($REPO_URL, public, runTests:false, shallow)"
@@ -455,20 +494,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$B_GH_ID" ] && B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   echo "  witness vars: WS=$WS_ID  B_GH_ID=$B_GH_ID  HIVE=$HIVE_SLUG  MEMBER=$MEMBER_SLUG"
-
-  # MCP-over-HTTP tool call to an instance (JSON-RPC; superuser=1 needs loopback + a valid
-  # bearer). The sidecar ensures $HOME/.papercusp/superuser-token (mode 0600) on boot
-  # (desktop-install/papercusp-files.ts), so each isolated instance HOME carries its own.
-  mcp_call() {
-    local inst="$1" tool="$2" args="$3" home tok
-    [ "$inst" = a ] && home="$A_HOME" || home="$B_HOME"
-    tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null || true)"
-    curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/mcp?superuser=1&client=witness" \
-      -H 'content-type: application/json' \
-      -H 'accept: application/json, text/event-stream' \
-      ${tok:+-H "Authorization: Bearer $tok"} \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
-  }
+  # (mcp_call is defined once in the shared helpers above — used by this block + MODERATION_PROBE.)
 
   # (su-9140a, C-001 construction) The natural from-repo join leaves the OWNER with NO hive_members row
   # for the joiner → the epoch-key grant (on upsertHiveMember) never fires → no encryption → nothing to cut.
