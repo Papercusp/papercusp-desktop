@@ -747,6 +747,27 @@ if [[ -n "${pgv_lib_src:-}" ]]; then
   fi
 fi
 
+# Fail loudly if pgvector ended up NOT bundled on a platform that requires it.
+# The per-source HARD ERROR above only fires when a source was FOUND but
+# incomplete (brew present, .dylib missing). It does NOT catch the SILENT-SKIP
+# cases: on darwin `pgv_lib_src` is only set inside `if command -v brew`, so a
+# build shell without `brew` on PATH (e.g. a NON-LOGIN shell that never ran
+# path_helper, so /usr/local/bin is absent) leaves it empty → the whole block
+# is skipped with no copy and no error → a bundle ships with no pgvector and
+# dies on first fresh-DB boot ('type "public.vector" does not exist'). This
+# backstop makes that a build failure instead. (Proven live 2026-06-30 on the
+# mac VM: a nohup/non-login test build silently shipped a pgvector-less sidecar.)
+if [[ "$_pgv_os" != "windows" && "${pgvector_copied:-0}" -eq 0 ]]; then
+  echo "ERROR: pgvector was NOT bundled into any embedded-postgres tree on $_pgv_os."
+  echo "       A fresh-DB boot will die fatally with 'type \"public.vector\" does not exist'."
+  case "$_pgv_os" in
+    linux)  echo "       Install: sudo apt install postgresql-18-pgvector" ;;
+    darwin) echo "       Install: brew install pgvector  — AND ensure 'brew' is on PATH for the build shell"
+            echo "                (a non-login shell may lack /usr/local/bin; run the build via 'bash -lc' or 'eval \$(/usr/local/bin/brew shellenv)')" ;;
+  esac
+  exit 1
+fi
+
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
 # subsystem (libs/papercusp-export-state/src/pg-dump.ts) finds them.
 # Replaces the legacy WASM-pg_dump path that went through pglite-server's
