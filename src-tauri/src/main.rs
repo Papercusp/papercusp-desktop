@@ -1857,6 +1857,10 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
+        // Invisible env-switch escape hatch (env_switch::register_backstop_shortcuts):
+        // OS-level shortcuts registered from Rust, no menu bar. Inert until the
+        // dev-path registers shortcuts, so a packaged build carries nothing.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     // MCP bridge for AI coding agents — debug builds only. Lets Claude
@@ -2006,6 +2010,9 @@ pub fn run() {
                 // the native menu + global-shortcut backstop (install_backstop)
                 // is the unkillable escape hatch.
                 env_switch::init(app);
+                // Invisible escape hatch: CmdOrCtrl+Alt+1..4 switch envs even
+                // when the loaded build's own bar + IPC are dead. No menu bar.
+                env_switch::register_backstop_shortcuts(app);
 
                 return Ok(());
             }

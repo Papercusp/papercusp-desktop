@@ -194,6 +194,57 @@ pub fn list_envs(window: tauri::WebviewWindow) -> Vec<EnvInfo> {
         .collect()
 }
 
+/// Navigate the content webview to an env by port, carrying the current SPA
+/// route + query. Driven from RUST (the global-shortcut escape hatch), so it
+/// works even when the loaded build's own bar + IPC are dead; `/api` retargets
+/// via on_page_load → `retarget_for_url`.
+pub fn navigate_to_env(window: &tauri::WebviewWindow, port: u16) {
+    let path_q = window
+        .url()
+        .ok()
+        .map(|u| {
+            let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
+            format!("{}{}", u.path(), q)
+        })
+        .unwrap_or_else(|| "/".into());
+    let target = format!("http://127.0.0.1:{port}{path_q}");
+    match url::Url::parse(&target) {
+        Ok(u) => {
+            if let Err(e) = window.navigate(u) {
+                eprintln!("[env-switch] shortcut navigate to {target} failed: {e}");
+            } else {
+                println!("[env-switch] shortcut switched content webview → {target}");
+            }
+        }
+        Err(e) => eprintln!("[env-switch] bad shortcut url {target}: {e}"),
+    }
+}
+
+/// The INVISIBLE escape hatch (no menu bar): OS-level global shortcuts
+/// `CmdOrCtrl+Alt+1..4` → dev / prod / staging / local, handled in Rust so they
+/// fire even when the switched-to build white-screens or breaks its IPC. Best-
+/// effort — a shortcut the desktop environment already owns just won't register
+/// (logged, not fatal). Dev-only.
+pub fn register_backstop_shortcuts(app: &tauri::App) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    let gs = app.global_shortcut();
+    for (idx, (_, _, port, _)) in TARGETS.iter().enumerate() {
+        let accel = format!("CmdOrCtrl+Alt+{}", idx + 1);
+        let p = *port;
+        let res = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                if let Some(window) = app.get_webview_window("main") {
+                    navigate_to_env(&window, p);
+                }
+            }
+        });
+        match res {
+            Ok(()) => println!("[env-switch] escape-hatch shortcut {accel} → :{p}"),
+            Err(e) => eprintln!("[env-switch] shortcut {accel} not registered (DE may own it): {e}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
