@@ -299,6 +299,21 @@ INSTEOF
     fed_log "[$inst] HOTPATCH sidecar serve.mjs ← $RIG_SERVE_HOTPATCH"
     rig_ssh_wait "$ip" || { echo "FATAL ssh $inst (pre-hotpatch)"; return 1; }
     rig_scp "$ip" "$RIG_SERVE_HOTPATCH" "$(fed_sidecar_dir)/serve.mjs" || { echo "FATAL hotpatch $inst"; return 1; }
+    # WI-1544 schema-drift guard: a hotpatched serve.mjs runs CURRENT-tree code
+    # against the .deb's FROZEN db-sql migrations (the launch pins
+    # PAPERCUSP_PG_SQL_DIR at the sidecar's db-sql), so any migration added
+    # since the .deb build silently never applies on the frames. Sync the
+    # tree's top-level *.sql (the same set build-desktop-sidecar.sh copies)
+    # alongside the hotpatched bundle. Override source: RIG_DBSQL_HOTPATCH.
+    local dbsql="${RIG_DBSQL_HOTPATCH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/libs/papercusp/libs/db/sql}"
+    if [ -d "$dbsql" ]; then
+      fed_log "[$inst] HOTPATCH sidecar db-sql ← $dbsql"
+      (cd "$dbsql" && tar -cf - ./*.sql) \
+        | rig_ssh "$ip" "tar -C \"$(fed_sidecar_dir)/db-sql\" -xf -" \
+        || { echo "FATAL db-sql hotpatch $inst"; return 1; }
+    else
+      fed_log "[$inst] db-sql hotpatch SKIPPED — $dbsql not found"
+    fi
   fi
   fed_log "[$inst] launch headless serve.mjs as non-root pcusp (PUBLIC DHT, identity ${FRAME_USER[$inst]})"
   rig_ssh_wait "$ip" || { echo "FATAL ssh $inst (pre-launch)"; return 1; }

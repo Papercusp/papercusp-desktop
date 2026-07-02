@@ -102,8 +102,12 @@ cat > "$PSUPROBE" <<'PSUEOF'
 #!/usr/bin/env bash
 shim=/home/papercup/.papercusp/bin/psu
 [[ -x "$shim" ]] || { echo "PSU_FAIL: shim missing or not executable at $shim"; exit 1; }
-launcher=$(grep -oE 'exec node "[^"]+"' "$shim" | sed -E 's/.*"(.*)".*/\1/')
-[[ -n "$launcher" && -s "$launcher" ]] || { echo "PSU_FAIL: launcher target missing/empty: '$launcher'"; exit 1; }
+# The shim execs the bundled launcher: newer form `exec "<abs-node>" "<abs-psu.mjs>"`,
+# older form `exec node "<launcher>"`. Extract the bundled launcher (.mjs/.js) and
+# verify it is a real non-empty file — robust to both forms (2026-07-02 parity fix:
+# the old `exec node "…"` regex false-failed on the abs-node shim while psu was fine).
+launcher=$(grep -oE '"[^"]+\.(mjs|js)"' "$shim" | tail -1 | tr -d '"')
+[[ -n "$launcher" && -s "$launcher" ]] || { echo "PSU_FAIL: bundled launcher missing/empty: '$launcher'"; exit 1; }
 echo "PSU_OK $launcher"
 PSUEOF
 scp -q -i "$VM_SSH_KEY" -P "$VM_SSH_PORT" "$PSUPROBE" "$VM_SSH_HOST":'C:/Users/user/papercusp-psu-probe.sh'
