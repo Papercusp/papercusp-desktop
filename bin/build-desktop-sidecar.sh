@@ -375,6 +375,43 @@ nat_copied=0; nat_missing=0
 # bash 3.2 (no associative arrays) and this script must run on the mac
 # build VM (mac-desktop-release-readiness-2026-06-11).
 _seen=" "
+# The bare-*/holepunch native packages (bare-type, bare-fs, bare-os, …) ship
+# npm-published prebuilds for EVERY platform they support — not just desktop
+# (linux/darwin/win32) but android-{ia32,arm,arm64,x64} and ios-{arm64,x64}
+# simulator variants too, each a real Android/iOS ELF/Mach-O binary. A plain
+# `cp -a` brings all of them, which (a) bloats the sidecar ~13x over what one
+# platform needs, and (b) breaks Linux AppImage bundling outright: linuxdeploy
+# walks every ELF file under the AppDir resolving shared-library deps via ldd,
+# and chokes on the Android prebuilds — `ERROR: Could not find dependency:
+# libm.so` (Android's bionic libc has no standalone libm.so; the symbol is
+# folded into libc.so) — which aborts the whole `tauri build --bundles
+# appimage` (WI-807). Prune every closure-copied package's `prebuilds/`
+# down to just this build host's platform-arch dir immediately after copying.
+_bare_node_platform=""
+case "$(uname -s)" in
+  Linux*)               _bare_node_platform="linux" ;;
+  Darwin*)              _bare_node_platform="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) _bare_node_platform="win32" ;;
+esac
+_bare_node_arch=""
+case "$(uname -m)" in
+  x86_64|amd64)  _bare_node_arch="x64" ;;
+  arm64|aarch64) _bare_node_arch="arm64" ;;
+esac
+prune_foreign_prebuilds() {
+  local pkg_dir="$1"
+  [[ -d "$pkg_dir/prebuilds" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
+  local keep="${_bare_node_platform}-${_bare_node_arch}"
+  local pd pd_name pruned=0
+  for pd in "$pkg_dir/prebuilds"/*/; do
+    [[ -d "$pd" ]] || continue
+    pd_name="$(basename "$pd")"
+    [[ "$pd_name" == "$keep" ]] && continue
+    rm -rf "$pd"
+    pruned=$((pruned+1))
+  done
+  [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign-platform prebuilds/ dir(s), kept $keep"
+}
 copy_pkg_closure() {
   local queue=("$1")
   while [[ ${#queue[@]} -gt 0 ]]; do
@@ -391,6 +428,7 @@ copy_pkg_closure() {
     fi
     mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
     cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
+    prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
     local deps; deps=$(node -e "try{const d=require('$src/package.json').dependencies||{};process.stdout.write(Object.keys(d).join(' '))}catch(e){}" 2>/dev/null)
     for d in $deps; do queue+=("$d"); done
