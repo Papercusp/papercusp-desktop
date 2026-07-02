@@ -1299,8 +1299,17 @@ echo "  removed $pl_count PL/* extension files (plpgsql preserved)"
 #   ERROR: Failed to deploy dependencies for existing files
 #   Error [tauri_cli] failed to bundle project
 # Documented in the AppImage debug arc 2026-05-01.
+# NOTE: publishers spell the musl variant TWO different ways — the
+# `-linuxmusl-<arch>` node-gyp-build convention (@lydell/node-pty,
+# @img/sharp) AND the `linux-<arch>-musl` napi-rs convention (e.g.
+# @libsql/linux-x64-musl, pulled in transitively via meridian-host's
+# node_modules). A pattern that only matches the first form misses the
+# second and still crashes linuxdeploy on `libc.musl-x86_64.so.1` (WI-807
+# live repro: meridian-host/node_modules/@libsql/linux-x64-musl/index.node
+# — "Failed to run ldd: exited with code 1"). Match "musl" anywhere in the
+# dir name so both conventions (and any future variant) are caught.
 echo "→ stripping musl-libc native binary variants (incompatible with glibc AppImage)"
-musl_dirs=$(find "$SIDECAR_DIR" -type d \( -name "*-linuxmusl-*" -o -name "*-linuxmusl" \) 2>/dev/null)
+musl_dirs=$(find "$SIDECAR_DIR" -type d -iname "*musl*" 2>/dev/null)
 if [[ -n "$musl_dirs" ]]; then
   while IFS= read -r d; do
     echo "  ✗ removing $d"
