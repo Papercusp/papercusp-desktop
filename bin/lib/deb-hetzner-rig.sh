@@ -304,10 +304,11 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
+  PAPERCUSP_ANNOUNCE_DEBUG=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
-  setsid nohup ./bin/node ./serve.mjs --ensure > "$H/serve.log" 2>&1 < /dev/null &
+  setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
 EOF
 }
@@ -346,10 +347,11 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
+  PAPERCUSP_ANNOUNCE_DEBUG=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
-  setsid nohup ./bin/node ./serve.mjs --ensure > "$H/serve.log" 2>&1 < /dev/null &
+  setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "relaunched as pcusp (no wipe)"
 EOF
 }
