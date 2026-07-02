@@ -42,11 +42,13 @@
 # scenario that needs the banned member federating.
 #
 # ── Live-run reminders (per 8f1ad's fleet protocol) ─────────────────────────────
-#   • Acquire the quota mutex FIRST: locks:acquire_resource ops/hetzner-federation-quota
-#     (serialize live runs on the 2-server cap; release on finish).
+#   • The ops/hetzner-federation-quota mutex is now AUTOMATIC (EI-5884 / WI-1442
+#     fix b): rig_provision (deb-hetzner-rig.sh) acquires it exclusively before
+#     creating any server and rig_cleanup releases it unconditionally on exit —
+#     no manual locks:acquire_resource/release_resource calls needed here.
 #   • --deb must carry the fix: /home/marsh-office/.cargo-target/release/bundle/deb/Papercusp_0.0.2_amd64.deb
 #     (forceReFold==4). `default_deb` may resolve an OLDER bundle — pass --deb explicitly.
-#   • After the run: verify Hetzner servers=0 (the EXIT trap destroys; confirm) + release the lock.
+#   • After the run: verify Hetzner servers=0 (the EXIT trap destroys; confirm).
 #
 # Usage (standalone): bin/deb-hetzner-revocation.sh [--locs=ash,ash] [--type=cpx31] [--deb=PATH] [--with-valid-member] [--keep-up]
 set -uo pipefail

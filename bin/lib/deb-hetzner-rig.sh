@@ -181,11 +181,99 @@ rig_cleanup() {
     done < "$RIG_SERVERS_FILE"
   fi
   rm -rf "$RIG_WORK" 2>/dev/null
+  # EI-5884 / WI-1442 fix (b): release the quota mutex UNCONDITIONALLY (even
+  # under --keep-up, and even on a killed run — this runs from the EXIT trap)
+  # so the next queued run can attempt its own provision. A real Hetzner
+  # server_limit conflict (e.g. --keep-up left both slots occupied) still
+  # surfaces as a genuine resource_limit_exceeded from the API — this mutex
+  # only serializes the CREATE race, it does not model ongoing server count.
+  rig_quota_release
 }
 
 # rig_install_exit_trap — ARM the auto-destroy. Call ONCE, right after rig_init,
 # BEFORE rig_provision, so the trap is live before the first server is created.
 rig_install_exit_trap() { trap rig_cleanup EXIT; }
+
+# ── quota mutex: ops/hetzner-federation-quota (EI-5884 / WI-1442 fix b) ───────
+# The Hetzner project's PERMANENT 2-server cap is shared across EVERY live-brief
+# rig run. Before this fix the "acquire before provisioning" protocol was PROSE
+# ONLY — ops/hetzner-federation-quota was never a registered resource, so
+# locks:acquire_resource returned unknown_resource and concurrent runs raced
+# rig_provision directly (2026-07-01: Brief 3 checked servers=0, then lost the
+# create race to a concurrent run that grabbed both slots in the gap). Now
+# registered (packages/locks/src/sql/016-*.sql); rig_provision acquires it
+# EXCLUSIVELY (retrying while contended) before creating any server, and
+# rig_cleanup releases it unconditionally — a bounded TTL (below) is the
+# liveness backstop: even a hard-killed holder's lease lapses on its own
+# rather than leaving a phantom hold forever.
+RIG_QUOTA_RESOURCE="ops/hetzner-federation-quota"
+RIG_QUOTA_LOCK_ID=""
+OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp}"
+
+# rig_mcp_call <tool-name> <json-args> → echoes the raw JSON-RPC response.
+# Thin curl-JSONRPC helper — same shape live-federation-gate.sh /
+# two-instance-hive-*-smoke.sh already use to reach the operator from bash.
+rig_mcp_call() {
+  local tool="$1" args="$2" client="${RIG_SLUG:-hetzner-rig}-quota"
+  curl -s -m 30 -X POST "${OPERATOR_MCP_URL}?superuser=1&client=$client" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}" \
+    2>/dev/null
+}
+
+# rig_quota_acquire — poll (fixed interval) until this run holds
+# ops/hetzner-federation-quota exclusively, or give up after
+# RIG_QUOTA_MAX_WAIT_SEC (default 30 min — long enough to queue behind a
+# couple of concurrent live briefs without hanging a stuck rig forever). Sets
+# RIG_QUOTA_LOCK_ID on success. `mode:exclusive` with no `wait` is a no-wait
+# check-and-take (locks:acquire_resource's drain-wait is for a SHARED holder
+# draining, not another exclusive holder — irrelevant here since this resource
+# is never taken shared) — so the retry loop lives in bash, not the tool call.
+# BEST-EFFORT: a curl/parse failure logs a WARNING and proceeds unlocked
+# rather than hanging the whole rig forever on an operator hiccup — the
+# per-create fail-fast + exit-trap teardown remain the hard cost-safety net
+# either way.
+rig_quota_acquire() {
+  local max_wait="${RIG_QUOTA_MAX_WAIT_SEC:-1800}" poll="${RIG_QUOTA_POLL_SEC:-20}" waited=0 resp ok lock_id
+  fed_log "quota: acquiring exclusive($RIG_QUOTA_RESOURCE) (queueing behind any concurrent rig run)…"
+  while [ "$waited" -lt "$max_wait" ]; do
+    resp="$(rig_mcp_call locks:acquire_resource "{\"resource\":\"$RIG_QUOTA_RESOURCE\",\"mode\":\"exclusive\",\"reason\":\"rig run $RIG_SLUG\",\"ttl_sec\":3600}")"
+    ok="$(printf '%s' "$resp" | python3 -c '
+import json, sys
+try:
+    env = json.load(sys.stdin)
+    d = json.loads(env["result"]["content"][0]["text"])
+    print("1" if d.get("ok") and d.get("status") == "held" else "0")
+except Exception:
+    print("0")' 2>/dev/null)"
+    if [ "$ok" = "1" ]; then
+      lock_id="$(printf '%s' "$resp" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+d = json.loads(env["result"]["content"][0]["text"])
+print(d.get("lock_id", ""))' 2>/dev/null)"
+      RIG_QUOTA_LOCK_ID="$lock_id"
+      fed_log "quota: acquired ($RIG_QUOTA_LOCK_ID)"
+      return 0
+    fi
+    fed_log "quota: contended or unreachable (waited ${waited}s/${max_wait}s) — retrying in ${poll}s…"
+    sleep "$poll"
+    waited=$((waited + poll))
+  done
+  fed_log "quota: WARNING — could not acquire $RIG_QUOTA_RESOURCE within ${max_wait}s (operator unreachable, or genuinely contended). Proceeding WITHOUT the mutex."
+  return 1
+}
+
+# rig_quota_release — best-effort; call from rig_cleanup so it fires even on a
+# killed run (the EXIT trap runs it unconditionally). No-ops quietly if we
+# never acquired (RIG_QUOTA_LOCK_ID unset — e.g. rig_quota_acquire timed out
+# and we proceeded unlocked, or the caller never called it at all).
+rig_quota_release() {
+  [ -n "$RIG_QUOTA_LOCK_ID" ] || return 0
+  rig_mcp_call locks:release_resource "{\"lock_id\":\"$RIG_QUOTA_LOCK_ID\"}" >/dev/null 2>&1
+  fed_log "quota: released ($RIG_QUOTA_LOCK_ID)"
+  RIG_QUOTA_LOCK_ID=""
+}
 
 # ── artifact gates (reuse the assert core) ────────────────────────────────────
 # rig_gate_artifact <deb> — extract + clobber + swarm-support; sets RIG_PKG.
@@ -236,6 +324,12 @@ rig_provision() {
     return 0
   fi
   [ "${#locs[@]}" -gt 0 ] || locs=("ash")
+  # EI-5884 / WI-1442 fix (b): serialize real Hetzner provisioning against every
+  # OTHER concurrent rig run via the registered quota mutex — best-effort (a
+  # timeout/operator-hiccup logs a WARNING and proceeds unlocked, per
+  # rig_quota_acquire; the per-create fail-fast + exit-trap teardown are the
+  # unconditional cost-safety net regardless).
+  rig_quota_acquire || true
   fed_log "provision ${#RIG_FRAMES[@]} Hetzner $RIG_STYPE (frames: ${RIG_FRAMES[*]})"
   for i in "${!RIG_FRAMES[@]}"; do
     inst="${RIG_FRAMES[$i]}"
