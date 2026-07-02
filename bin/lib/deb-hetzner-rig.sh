@@ -218,6 +218,23 @@ rig_set_identity() {
 rig_provision() {
   local locs=("$@") i inst loc out
   [ "${#RIG_FRAMES[@]}" -gt 0 ] || { echo "FATAL: no frames — call rig_set_identity first" >&2; return 1; }
+  # BYO-frames seam (WI-1544): RIG_FRAME_IPS="ipA ipB …" maps pre-provisioned
+  # hosts (e.g. local sshd containers when Hetzner can't create servers)
+  # positionally onto RIG_FRAMES and skips the Hetzner API entirely. Nothing is
+  # recorded in RIG_SERVERS_FILE, so rig_cleanup destroys nothing — the caller
+  # owns the frames' lifecycle. Pair with RIG_DHT_BOOTSTRAP for same-box frames
+  # (public-DHT NAT hairpinning between co-located peers is not reliable).
+  if [ -n "${RIG_FRAME_IPS:-}" ]; then
+    local ips=($RIG_FRAME_IPS)
+    [ "${#ips[@]}" -ge "${#RIG_FRAMES[@]}" ] || { echo "FATAL: RIG_FRAME_IPS has ${#ips[@]} ips for ${#RIG_FRAMES[@]} frames" >&2; return 1; }
+    fed_log "provision SKIPPED — BYO frames (${RIG_FRAMES[*]}) ← $RIG_FRAME_IPS"
+    for i in "${!RIG_FRAMES[@]}"; do
+      inst="${RIG_FRAMES[$i]}"
+      FRAME_ID[$inst]="byo"; FRAME_IP[$inst]="${ips[$i]}"
+      echo "  $inst=byo@${ips[$i]}"
+    done
+    return 0
+  fi
   [ "${#locs[@]}" -gt 0 ] || locs=("ash")
   fed_log "provision ${#RIG_FRAMES[@]} Hetzner $RIG_STYPE (frames: ${RIG_FRAMES[*]})"
   for i in "${!RIG_FRAMES[@]}"; do
@@ -291,7 +308,7 @@ INSTEOF
   printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
     | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
         umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
 pkill -u pcusp -f 'serve.mjs --ensure' 2>/dev/null || true; sleep 1
@@ -305,6 +322,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DHT_BOOTSTRAP="${DHTB:-}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -335,7 +353,7 @@ rig_kill_sidecar() {
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2
@@ -348,6 +366,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DHT_BOOTSTRAP="${DHTB:-}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
