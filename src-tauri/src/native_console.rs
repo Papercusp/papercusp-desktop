@@ -552,7 +552,8 @@ fn spawn_windows_wsl_new_window(
         // windows-desktop-feature-parity-2026-07-02 P-010: title the window
         // `Papercup — <session_id>` so it can be found + focused by TITLE
         // later (windows-desktop-windows.ts listWindowsByTitle /
-        // focusWindowByTitle, wired through adv-sessions.ts's win32 branch).
+        // focusWindowByTitle, wired through adv-sessions.ts's
+        // isWindowsDesktopHost() branch).
         // --title is a new-tab-command option (wt's implicit default command
         // when none is given), so it's valid alongside -w/--startingDirectory
         // here. --suppressApplicationTitle pins it so a later OSC-0/2 title
