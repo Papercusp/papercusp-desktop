@@ -235,11 +235,17 @@ mod imp {
     }
 
     fn state_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-        use tauri::Manager;
-        let dir = app
-            .path()
-            .app_local_data_dir()
-            .map_err(|e| format!("app_local_data_dir: {}", e))?;
+        // SHARED across the GUI + Server bundles. wsl-state.json carries the
+        // `bootstrapped` flag; the headless Server OWNS the sidecar and reads it,
+        // but onboarding is driven in the GUI. app_local_data_dir() is PER-BUNDLE
+        // (identifiers com.papercusp.gui vs com.papercusp.server), so each bundle
+        // got its OWN file — the Server never saw the GUI's onboarding and sat at
+        // PendingBootstrap forever, never spawning the sidecar. Windows-only:
+        // mac/linux have no WSL onboarding, so the split-state bug was never
+        // exercised there. Store it in the shared data dir both bundles resolve
+        // identically. (2026-07-02 Windows GUI/Server-split parity fix.)
+        let _ = app;
+        let dir = crate::workspaces::shared_data_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
         Ok(dir.join("wsl-state.json"))
     }

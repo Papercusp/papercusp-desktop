@@ -1164,13 +1164,39 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         let _ = bundle_id;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "auto-launch of '{product_name}' is not wired on Windows yet \
-                 (needs the per-bundle install path); please start it from the Start menu"
-            ),
-        ))
+        // Both bundles ship the SAME binary name (papercusp-desktop.exe) but NSIS
+        // installs each to its own per-product dir:
+        //   %LOCALAPPDATA%\<ProductName>\papercusp-desktop.exe
+        // (verified live: "Papercusp GUI" / "Papercusp Server"). Resolve the
+        // sibling by product name and spawn it DETACHED with
+        // CREATE_BREAKAWAY_FROM_JOB so it outlives us even when we were started by
+        // the installer's run-after-install (which lives in a job object that
+        // kills its whole tree — D-010). (2026-07-02 parity fix: previously
+        // unimplemented, so the GUI could not auto-launch the Server and the
+        // Server tray's "Open Papercusp" could not launch the GUI.)
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "LOCALAPPDATA unset")
+            })?;
+        let exe = local.join(product_name).join("papercusp-desktop.exe");
+        if !exe.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("'{product_name}' not installed at {}", exe.display()),
+            ));
+        }
+        std::process::Command::new(&exe)
+            .creation_flags(
+                CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+            )
+            .spawn()
+            .or_else(|_| std::process::Command::new(&exe).spawn())?;
+        Ok(())
     }
 }
 
