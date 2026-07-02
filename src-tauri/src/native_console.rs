@@ -91,6 +91,143 @@ pub async fn console_launch(envelope: ConsoleEnvelope) -> ConsoleLaunchResult {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// windows-desktop-feature-parity-2026-07-02 D-002 — window enumeration + focus
+// as Tauri commands (the D-001 pivot).
+//
+// The operator runs INSIDE the `papercup-runtime` WSL2 distro. A `powershell.exe`
+// it spawns via WSL interop lands in SESSION 0 (the services window-station), from
+// which it sees ZERO interactive Session-1 desktop windows (VM-verified 2026-07-02:
+// its own SessionId is 0 and EnumWindows returns []). So window enum/focus CANNOT
+// be done operator-side. It must run in THIS process (`papercusp-desktop.exe`) — a
+// Session-1 native app that CAN enumerate the interactive desktop. The renderer
+// invokes these commands (in-process IPC, also Session 1); the operator reaches
+// them THROUGH the renderer (focus = user click in /adv; liveness = a periodic
+// renderer push of the window list to the operator's reaper cache).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A visible top-level desktop window. `hwnd` is the raw handle as a decimal
+/// string (opaque to JS — only round-tripped back into `focus_window_by_title`).
+/// Mirrors the TS `WindowsDesktopWindow` shape in windows-desktop-windows.ts.
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindow {
+    pub title: String,
+    pub pid: u32,
+    pub hwnd: String,
+}
+
+/// EnumWindows over visible titled top-level windows, optionally filtered to
+/// titles starting with `prefix`. Windows-only; mirrors win_embed's callback
+/// style (a `Ctx` passed through `LPARAM`).
+#[cfg(target_os = "windows")]
+fn enumerate_windows(prefix: Option<&str>) -> Vec<DesktopWindow> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
+    };
+    struct Ctx {
+        prefix: Option<String>,
+        out: Vec<DesktopWindow>,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        if len <= 0 {
+            return BOOL(1);
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+        if n <= 0 {
+            return BOOL(1);
+        }
+        let title = String::from_utf16_lossy(&buf[..n as usize]);
+        if let Some(p) = &ctx.prefix {
+            if !title.starts_with(p.as_str()) {
+                return BOOL(1);
+            }
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        ctx.out.push(DesktopWindow {
+            title,
+            pid,
+            hwnd: (hwnd.0 as isize).to_string(),
+        });
+        BOOL(1) // keep enumerating
+    }
+    let mut ctx = Ctx {
+        prefix: prefix.map(|s| s.to_string()),
+        out: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
+    }
+    ctx.out
+}
+
+/// Enumerate visible top-level desktop windows, optionally filtered to titles
+/// starting with `prefix` (pass `"Papercup — "` for session terminals). Runs
+/// natively in this Session-1 process — the ONLY place window enumeration works
+/// on Windows (D-002). Returns `[]` on non-Windows (Linux uses the operator's
+/// wmctrl path) so the binding exists cross-platform and is always fail-soft.
+#[tauri::command]
+#[specta::specta]
+pub fn list_windows_by_title(prefix: Option<String>) -> Vec<DesktopWindow> {
+    #[cfg(target_os = "windows")]
+    {
+        enumerate_windows(prefix.as_deref())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = prefix;
+        Vec::new()
+    }
+}
+
+/// Bring the window whose title EXACTLY equals `title` to the foreground
+/// (restoring it first if minimized). USER-INITIATED ONLY — mirrors the
+/// `feedback_e2e_no_focus_steal` memory; never call from an automated driver.
+/// Returns true iff a matching window was found and the foreground call issued.
+/// No-op returning false on non-Windows (Linux focus stays the wmctrl path).
+#[tauri::command]
+#[specta::specta]
+pub fn focus_window_by_title(title: String) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
+        let handle = enumerate_windows(None)
+            .into_iter()
+            .find(|w| w.title == title)
+            .and_then(|w| w.hwnd.parse::<isize>().ok());
+        match handle {
+            Some(h) => {
+                let hwnd = HWND(h as *mut c_void);
+                unsafe {
+                    if IsIconic(hwnd).as_bool() {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    SetForegroundWindow(hwnd).as_bool()
+                }
+            }
+            None => false,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = title;
+        false
+    }
+}
+
 async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, bool), String> {
     // 1. Bootstrap superuser token if needed.
     let bootstrapped = if envelope.needs_superuser_bootstrap {
