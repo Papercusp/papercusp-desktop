@@ -146,10 +146,38 @@ scenario_coord_controlplane() {
   [ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~210s (probes still run; a LOCAL verdict below could be a false negative if the wire never came up — read the BASELINE)"
 
   # ── BASELINE: content feature federates A→B (proves the wire is live) ──────
+  # ADAPTIVE (WI-1378, ported from deb-hetzner-revocation.sh STEP 1): on a fresh
+  # 2-frame join the member's FIRST baseline poll often misses (the no-restart
+  # window). A miss triggers ONE member-sidecar restart re-fold, a swarm re-peer
+  # wait, then a retry write+poll under a NEW timestamped feature id. Only if the
+  # RETRY also misses is the baseline called failed.
   fed_log "BASELINE content merge A→B (slug-agnostic hive probe)"
   probe_base="$(fed_hive_merge_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" F-CTRL-BASE 80 || true)"
   base=0; [ "${probe_base%% *}" = 1 ] && base=1
-  [ "$base" = 1 ] && echo "✓ BASELINE: content federated A→B (wire live)" || echo "✗ BASELINE: content did NOT federate — a LOCAL verdict below may be a false negative (wire down)"
+  if [ "$base" = 1 ]; then
+    echo "✓ BASELINE: content federated A→B (wire live)"
+  else
+    if _ctrl_roster_empty "$MEMBER"; then
+      echo "⚠ baseline miss on F-CTRL-BASE — $MEMBER roster EMPTY (the WI-1378 no-restart gap)"
+    else
+      echo "⚠ baseline miss on F-CTRL-BASE — $MEMBER roster non-empty; re-folding anyway (adaptive retry)"
+    fi
+    echo "↻ re-folding via MEMBER ($MEMBER) sidecar restart, then retrying baseline with a NEW feature id"
+    rig_restart_sidecar "$MEMBER"
+    if rig_wait_frame_ready "$MEMBER" 60; then
+      rig_wait_swarm "$OWNER" "$MEMBER" 70 || echo "⚠ $OWNER↔$MEMBER did not re-peer (retry poll may still land)"
+      FBASE_RETRY="F-CTRL-BASE-R$(date +%s)"
+      probe_base="$(fed_hive_merge_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" "$FBASE_RETRY" 80 || true)"
+      [ "${probe_base%% *}" = 1 ] && base=1
+    else
+      echo "✗ $MEMBER did not come back after the re-fold restart — baseline retry skipped"
+    fi
+    if [ "$base" = 1 ]; then
+      echo "✓ BASELINE (post re-fold): content federated A→B via $FBASE_RETRY (wire live)"
+    else
+      echo "✗ BASELINE: content did NOT federate — a LOCAL verdict below may be a false negative (wire down)"
+    fi
+  fi
 
   # ── POSITIVE probes — the federation-CAPABLE surfaces must cross (harness-scoped)
   fed_log "CONTROL-PLANE POSITIVE probes (harness-scoped coord_event_log surfaces must federate A→B)"
