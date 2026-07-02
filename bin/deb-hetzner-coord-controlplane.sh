@@ -15,6 +15,15 @@
 #       (capture trigger 150-coord-event-log-federation.sql:81-84). A row written
 #       origin='local' on A arrives origin='remote' on B via the peer-log + the
 #       coord-message projection.
+#       ⚠ P-013 COMMS-TIER GATE (cross-machine-coord-parity-and-trust-2026-07-01,
+#       receiver-side, coord-message.ts): the VERIFIED author resolves to a comms
+#       tier (local override → owner-signed policy default → fallback 'message').
+#       Below 'message' ⇒ the row QUARANTINES (coord_quarantine — visible +
+#       grantable, never dropped); a HANDOFF below 'steer' likewise. There is NO
+#       owner special-case — steer is a per-user LOCAL grant that never federates,
+#       so even the hive owner's handoff quarantines until the member grants it.
+#       The scenario probes BOTH legs: ungranted → quarantine; steer-granted →
+#       applies.
 #     • coord_conversations / coord_threads / coord_thread_posts (the ask rail).
 #     • plan_item_assignments (durable assignment). NOT plan_item_claims (the
 #       LEASED claim is authority-mediated, never federated).
@@ -109,6 +118,29 @@ _ctrl_coord_probe() {
   echo 0; return 1
 }
 
+# P-013 comms-tier gate (cross-machine-coord-parity-and-trust-2026-07-01): an
+# UNGRANTED author's handoff must cross the wire but land QUARANTINED on <dst>
+# (coord_quarantine, reason='handoff-below-steer') — visible + grantable, never
+# silently dropped and never applied. The author resolves to the conservative
+# 'message' tier (attestation → no local override → no policy default →
+# FALLBACK_COMMS_TIER), and handoffs need 'steer'.
+# _ctrl_handoff_ungranted_probe <src> <dst> <sslug> <tag> [tries] — insert the
+# handoff on <src>; poll <dst>. Echoes "1 <author_github_user_id>" on quarantine,
+# "2" if it APPLIED (gate did not fire), "0" if neither landed.
+_ctrl_handoff_ungranted_probe() {
+  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i mid q applied
+  mid="CTRL-handoffs-${tag}-$(date +%s)"
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'handoffs','ctrl-probe','$mid','{\"kind\":\"handoffs\",\"text\":\"control-plane handoffs probe (ungranted)\"}'::jsonb,'$sslug','local');" >/dev/null
+  for i in $(seq 1 "$tries"); do
+    q="$(drv_psql "$dst" "SELECT author_github_user_id FROM harness_shared.coord_quarantine WHERE msg_id='$mid' AND reason='handoff-below-steer' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$q" ] && { echo "1 $q"; return 0; }
+    applied="$(drv_psql "$dst" "SELECT 1 FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$applied" ] && { echo 2; return 1; }
+    sleep 3
+  done
+  echo 0; return 1
+}
+
 # _ctrl_roster_empty <inst> — true (0) iff <inst>'s hive_members roster has NO rows
 # (the WI-1378 no-restart symptom that drops every peer op). Mirrors _rv_roster_empty
 # in deb-hetzner-revocation.sh — used as the baseline-miss diagnostic.
@@ -136,7 +168,7 @@ _ctrl_fmt() { [ "$1" = 1 ] && printf '%-11s' "$2" || printf '%-11s' "$3"; }
 scenario_coord_controlplane() {
   local OWNER="${1:-a}" MEMBER="${2:-b}"
   local MEMBER_SLUG="${FRAME_MEMBER_SLUG[$OWNER]}"   # the owner-side slug the probes write under
-  local disc probe_base base FBASE_RETRY p_msg p_esc p_ho sp_rows sp_fed
+  local disc probe_base base FBASE_RETRY p_msg p_esc p_ho p_hoq p_hoq_raw HO_AUTHOR WS_B NOWMS sp_rows sp_fed
   local PWS NTS PRES_OWNER WM_OWNER SUB_MID n_pres n_wm n_sub ALLPASS v
 
   echo "--- A [swarm]/drain diag ---"; drv_exec "$OWNER" <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate' /home/pcusp/serve.log | tail -6"
@@ -185,8 +217,33 @@ scenario_coord_controlplane() {
   [ "$p_msg" = 1 ] && echo "✓ coord MESSAGE (harness-scoped) federated A→B (origin=remote)" || echo "✗ coord MESSAGE did NOT federate A→B"
   p_esc="$(_ctrl_coord_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" escalations e1 60 || true)"
   [ "$p_esc" = 1 ] && echo "✓ coord ESCALATION surface (harness-scoped) federated A→B" || echo "✗ coord ESCALATION surface did NOT federate A→B"
-  p_ho="$(_ctrl_coord_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" handoffs h1 60 || true)"
-  [ "$p_ho" = 1 ] && echo "✓ coord HANDOFF surface (harness-scoped) federated A→B" || echo "✗ coord HANDOFF surface did NOT federate A→B"
+  # ── handoffs: the P-013 comms-tier gate makes this TWO probes ──────────────
+  # (h1) UNGRANTED author → the row crosses the wire but B QUARANTINES it
+  #      (handoff-below-steer): the author resolves to the conservative 'message'
+  #      tier and a handoff needs 'steer'. Applying would be the FAILURE.
+  # (h2) B grants the author 'steer' (a LOCAL comms-trust override — the grant
+  #      never federates, by design) → a fresh handoff must APPLY (origin=remote).
+  p_hoq_raw="$(_ctrl_handoff_ungranted_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" h1 30 || true)"
+  p_hoq=0; HO_AUTHOR=""
+  case "$p_hoq_raw" in
+    "1 "*) p_hoq=1; HO_AUTHOR="${p_hoq_raw#1 }"
+           echo "✓ coord HANDOFF (ungranted author) crossed the wire and QUARANTINED on B (handoff-below-steer, author gh=$HO_AUTHOR)" ;;
+    2)     echo "✗ coord HANDOFF from an UNGRANTED author APPLIED on B — the P-013 steer gate did not fire" ;;
+    *)     echo "✗ coord HANDOFF (ungranted) neither quarantined nor applied on B — wire or capture problem" ;;
+  esac
+  p_ho=0
+  if [ "$p_hoq" = 1 ]; then
+    WS_B="$(drv_psql "$MEMBER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$WS_B" ] || WS_B="default"
+    NOWMS="$(( $(date +%s) * 1000 ))"
+    drv_psql "$MEMBER" "INSERT INTO harness_shared.comms_trust_list (workspace_id,trusted_github_user_id,tier,note,created_ts,updated_ts) VALUES ('$WS_B',$HO_AUTHOR,'steer','ctrl-probe steer grant',$NOWMS,$NOWMS) ON CONFLICT (workspace_id,trusted_github_user_id) DO UPDATE SET tier='steer', updated_ts=$NOWMS;" >/dev/null
+    echo "  granted steer to gh=$HO_AUTHOR on B (local override) — waiting out the 30s tier cache (comms-tier-gate.ts CACHE_TTL_MS)"
+    sleep 35
+    p_ho="$(_ctrl_coord_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" handoffs h2 60 || true)"
+    [ "$p_ho" = 1 ] && echo "✓ coord HANDOFF (steer-granted author) federated A→B and APPLIED (origin=remote)" || echo "✗ coord HANDOFF did NOT apply on B even after the steer grant"
+  else
+    echo "  (skipping the steer-grant leg — no quarantine row to resolve the author id from)"
+  fi
   echo "  NOTE: the coord:escalate/coord:handoff TOOLS do NOT stamp harness_slug (handoffs.ts/escalations.ts),"
   echo "  so despite the surface being federation-capable, the TOOL flows stay LOCAL as-written — the Brief 7 gap."
 
@@ -230,7 +287,8 @@ scenario_coord_controlplane() {
   baseline content A→B          FEDERATED    $(_ctrl_fmt "$base" FEDERATED 'not-fed')  $(_ctrl_verdict "$base" 1)
   coord message (hscoped)       FEDERATED    $(_ctrl_fmt "$p_msg" FEDERATED LOCAL)  $(_ctrl_verdict "$p_msg" 1)
   escalation surface (hscoped)  FEDERATED    $(_ctrl_fmt "$p_esc" FEDERATED LOCAL)  $(_ctrl_verdict "$p_esc" 1)
-  handoff surface (hscoped)     FEDERATED    $(_ctrl_fmt "$p_ho" FEDERATED LOCAL)  $(_ctrl_verdict "$p_ho" 1)
+  handoff, ungranted author     QUARANTINE   $(_ctrl_fmt "$p_hoq" QUARANTINE other)  $(_ctrl_verdict "$p_hoq" 1)
+  handoff, steer-granted        FEDERATED    $(_ctrl_fmt "$p_ho" FEDERATED LOCAL)  $(_ctrl_verdict "$p_ho" 1)
   coord_presence (raw roster)   LOCAL-ONLY   $(_ctrl_fmt "$n_pres" LOCAL FEDERATED)  $(_ctrl_verdict "$n_pres" 1)
   watermark (read cursor)       LOCAL-ONLY   $(_ctrl_fmt "$n_wm" LOCAL FEDERATED)  $(_ctrl_verdict "$n_wm" 1)
   await subscription            LOCAL-ONLY   $(_ctrl_fmt "$n_sub" LOCAL FEDERATED)  $(_ctrl_verdict "$n_sub" 1)
@@ -248,11 +306,15 @@ scenario_coord_controlplane() {
   • events:emit → events:await → LOCAL-ONLY (emit@A cannot fire await@B).
   • coord:handoff / escalate   → GAP: federation-capable surface, but the tools don't stamp
                                  harness_slug → LOCAL as-written. FILE A FIX.
+  • handoff trust boundary     → a handoff row APPLIES on the receiver only from a
+                                 'steer'-granted author (P-013); ungranted authors'
+                                 handoffs quarantine (visible + grantable) — even the
+                                 hive owner's, until the member grants steer locally.
   • watermarks / inbox fan-out → LOCAL-ONLY by design (per-machine).
 MATRIX
 
   ALLPASS=1
-  for v in "$base:1" "$p_msg:1" "$p_esc:1" "$p_ho:1" "$n_pres:1" "$n_wm:1" "$n_sub:1"; do
+  for v in "$base:1" "$p_msg:1" "$p_esc:1" "$p_hoq:1" "$p_ho:1" "$n_pres:1" "$n_wm:1" "$n_sub:1"; do
     [ "${v%%:*}" = "${v##*:}" ] || ALLPASS=0
   done
   if [ "$ALLPASS" = 1 ]; then
