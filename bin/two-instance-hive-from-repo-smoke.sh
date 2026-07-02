@@ -112,15 +112,22 @@ assert_serve_supports_from_repo() {
   # unaffected). The join-time grant SEAM (Seam 2 boot.ts open-mode admit) landed AFTER the re-key
   # MODULES, so a build can carry grantEpochKeysToMembers (the function) yet never populate membership
   # at join → a joiner gets 0 epoch keys → K0 fails on a STALE BUILD, not on re-key logic (the
-  # 2026-06-20 false-FAIL trap). MARKER MUST SURVIVE MINIFICATION: esbuild strips COMMENTS, so we match
-  # a CODE STRING from the admit catch. WI-280 (2026-06-20): the open-mode admit seam now ROUTES THROUGH
-  # upsertHiveMember — it INSERTs the joiner into hive_members AND grants (the bare grantEpochKeysToMembers
-  # admit call was replaced, since open-mode auto-admit otherwise never populated hive_members → the
-  # boundary/grant wrap-set was empty → 0 keys). So the marker is the `open-mode admit upsertHiveMember`
-  # string literal in boot.ts's admit catch (present only once the WI-280 membership-population fix landed).
+  # 2026-06-20 false-FAIL trap). MARKER MUST SURVIVE BUNDLING: esbuild strips COMMENTS but this build
+  # is NOT minified, so a stable function IDENTIFIER survives verbatim too.
+  #
+  # WI-280 (2026-06-20): the open-mode admit seam was first fixed to route through upsertHiveMember
+  # directly (the original marker here was the `open-mode admit upsertHiveMember` string literal from
+  # that commit's catch-block log line). WI-639+WI-1585 (landed after) SUPERSEDED that with a proper
+  # policy-gated seam — admitAnnouncedPeerAsOwner → ownerAdmitOrPend → upsertHiveMember (open/allowlisted
+  # → upsert; approval → federated pending-join; banned → refuse) — and reworded the catch's log line in
+  # the process, silently invalidating the old string-literal marker (false-negative discovered 2026-07-02:
+  # a freshly-rebuilt, functionally-correct sidecar still failed this gate). The marker is now the
+  # `admitAnnouncedPeerAsOwner` function identifier — present only once the WI-280/WI-639/WI-1585
+  # admit-seam wiring has landed (the pre-fix code called a bare grantEpochKeysToMembers with no such
+  # function in the call chain).
   if [ "${WITNESS_PROBE:-0}" = 1 ] || [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ]; then
-    if ! grep -qaF 'open-mode admit upsertHiveMember' "$serve" 2>/dev/null; then
-      echo "✗ $label serve.mjs lacks the WI-280 admit-seam membership upsert (string 'open-mode admit upsertHiveMember') — built before the membership-population fix; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
+    if ! grep -qaF 'admitAnnouncedPeerAsOwner' "$serve" 2>/dev/null; then
+      echo "✗ $label serve.mjs lacks the WI-280/WI-639/WI-1585 admit-seam membership upsert (identifier 'admitAnnouncedPeerAsOwner') — built before the membership-population fix; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
       return 1
     fi
     echo "✓ $label serve.mjs carries the WI-280 join-time membership+grant seam (witness static check)"
