@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Mirror of the TS-side `ConsoleEnvelope` from
-/// apps/operator/lib/console-launcher.ts.
+/// packages/operator-core/lib/console-launcher.ts.
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleEnvelope {
@@ -43,6 +43,26 @@ pub struct ConsoleEnvelope {
     pub mcp_json_contents: String,
     pub greeting_cmd: String,
     pub needs_superuser_bootstrap: bool,
+    /// windows-desktop-feature-parity-2026-07-02 P-010: a fresh UUID minted
+    /// per launch (console-launcher.ts `buildConsoleEnvelope`) — the WINDOW's
+    /// own identity. Every spawner titles the OS window
+    /// `Papercup — <session_id>` (see `window_title_for` below) so a
+    /// launched terminal can be found + focused by TITLE, which matters most
+    /// on Windows: the agent runs inside the `papercup-runtime` WSL2 distro
+    /// while the terminal window is a native Win32 process, so there is no
+    /// Windows window-ancestor for a WSL pid and pid->window mapping is
+    /// structurally impossible — title is the only durable link.
+    pub session_id: String,
+}
+
+/// The window title every OS-native console spawn uses. Kept as one
+/// function so all three spawners (+ the OSC-0 fallback escape in the
+/// launcher one-liner) stay byte-for-byte consistent with each other and
+/// with the `windows-desktop-windows.ts` lookup prefix (`"Papercup — "`,
+/// em dash U+2014 — this is the shared contract other lanes build against;
+/// don't change the format without updating that helper + adv-sessions.ts).
+fn window_title_for(session_id: &str) -> String {
+    format!("Papercup — {session_id}")
 }
 
 #[derive(Debug, Serialize, specta::Type)]
@@ -230,12 +250,23 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     let env_exports = build_env_exports(&envelope.env);
     let greeting = envelope.greeting_cmd.replace('\'', "'\\''");
     let cwd_escaped = shell_escape_single(&envelope.cwd);
+    // OSC-0 title escape: sets the window/tab/conhost title to the same
+    // `Papercup — <session_id>` string the Windows wt.exe spawner also
+    // passes via `--title`. Redundant-by-design belt-and-suspenders — on
+    // Windows this is what titles the window when wt.exe is absent and we
+    // fall back to a bare `wsl.exe` in a fresh conhost (which has no
+    // --title flag of its own, but conhost/ConPTY honor VT title escapes).
+    // Harmless on macOS/Linux (every terminal there honors OSC 0 too).
+    let win_title = window_title_for(&envelope.session_id);
+    let title_quoted = shell_escape_single(&win_title);
     format!(
-        "cd {cwd} && {exports} \
+        "printf '\\033]0;%s\\007' {title} \
+         ; cd {cwd} && {exports} \
          && touch {sentinel_glob}.$ \
          && trap 'rm -f {sentinel_glob}.$' EXIT \
          && ({greet}) ; \
          exec \"${{SHELL:-/bin/bash}}\" -l",
+        title = title_quoted,
         cwd = cwd_escaped,
         exports = env_exports,
         sentinel_glob = SENTINEL_PREFIX,
@@ -518,6 +549,19 @@ fn spawn_windows_wsl_new_window(
     if is_on_path_windows("wt.exe") {
         let mut cmd = std::process::Command::new("wt.exe");
         cmd.arg("-w").arg("new");
+        // windows-desktop-feature-parity-2026-07-02 P-010: title the window
+        // `Papercup — <session_id>` so it can be found + focused by TITLE
+        // later (windows-desktop-windows.ts listWindowsByTitle /
+        // focusWindowByTitle, wired through adv-sessions.ts's win32 branch).
+        // --title is a new-tab-command option (wt's implicit default command
+        // when none is given), so it's valid alongside -w/--startingDirectory
+        // here. --suppressApplicationTitle pins it so a later OSC-0/2 title
+        // change from the shell (a fancy PS1, a nested app) can't clobber it
+        // — MS docs: "If you change the title of a tab and want that title
+        // to persist, you must enable suppressApplicationTitle."
+        let win_title = window_title_for(&envelope.session_id);
+        cmd.arg("--title").arg(&win_title);
+        cmd.arg("--suppressApplicationTitle");
         if let Some(unc) = &cwd_unc {
             cmd.arg("--startingDirectory").arg(unc);
         }
@@ -620,6 +664,7 @@ mod tests {
             mcp_json_contents: "{}".to_string(),
             greeting_cmd: "papercup status".to_string(),
             needs_superuser_bootstrap: false,
+            session_id: "test-session-id".to_string(),
         }
     }
 
@@ -632,6 +677,24 @@ mod tests {
         assert!(out.contains("export PAPERCUSP_WORKSPACE='default'"));
         assert!(out.contains("(papercup status)"));
         assert!(out.contains("exec \"${SHELL:-/bin/bash}\" -l"));
+    }
+
+    #[test]
+    fn window_title_uses_em_dash_prefix() {
+        // Shared contract with windows-desktop-windows.ts's title lookup —
+        // don't change this format without updating that helper +
+        // adv-sessions.ts's win32 branch in the same change.
+        assert_eq!(window_title_for("abc-123"), "Papercup — abc-123");
+    }
+
+    #[test]
+    fn oneliner_emits_osc0_title_escape() {
+        let e = envelope("/x");
+        let out = build_launcher_oneliner(&e);
+        assert!(
+            out.contains("printf '\\033]0;%s\\007' 'Papercup — test-session-id'"),
+            "OSC-0 title escape missing or malformed: {out}"
+        );
     }
 
     #[test]
