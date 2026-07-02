@@ -160,7 +160,12 @@ scenario_revocation_kcut() {
   echo "  owner roster pre-ban: $(printf '%s' "$roster_owner" | tr '\n' ' ')"
 
   # ── STEP 2: BAN the member (owner authority; Hive-wide revoke) ──
+  # Resolve the banned member's github id: gh api (×2 — it flaked INCOMPLETE on a
+  # run where the whole baseline had just passed), then the OWNER's roster row
+  # (offline + deterministic; the roster is populated — step 1 proved it).
   local banned_id; banned_id="$(rig_github_id "${FRAME_USER[$BANNED]}")"
+  [ -n "$banned_id" ] || { sleep 3; banned_id="$(rig_github_id "${FRAME_USER[$BANNED]}")"; }
+  [ -n "$banned_id" ] || banned_id="$(drv_psql "$OWNER" "SELECT github_user_id FROM harness_shared.hive_members WHERE github_username='${FRAME_USER[$BANNED]}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   if [ -z "$banned_id" ]; then echo "  ✗ could not resolve github id for '${FRAME_USER[$BANNED]:-?}'"; echo "OVERALL: INCOMPLETE"; return 2; fi
   fed_log "[2] OWNER bans member '${FRAME_USER[$BANNED]}' (github_id=$banned_id) — Hive-wide revoke"
   local ban_resp; ban_resp="$(rig_ban_member "$OWNER" "$banned_id" hive)"
