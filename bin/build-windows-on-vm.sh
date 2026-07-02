@@ -207,18 +207,31 @@ mkdir -p "$OUT_DIR"
 # under set -e (bit the first uninterrupted run, 2026-06-12)
 find "$OUT_DIR" -maxdepth 1 -type f -delete
 NSIS_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release/bundle/nsis"
-for name in $("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\nsis\"" | tr -d '\r'); do
+# Read one filename per line — a `for name in $(...)` word-SPLITS the space in
+# the GUI/Server split's productNames ("Papercusp GUI_..-setup.exe") and scp's a
+# truncated ".../Papercusp" path (No such file), silently collecting NOTHING
+# (2026-07-02 parity fix). scp uses the SFTP protocol (OpenSSH 9+), which passes
+# the spaced remote path literally, so no extra remote-shell quoting is needed.
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
   "${SCP[@]}" "$VM_SSH_HOST":"$NSIS_VM_DIR/$name" "$OUT_DIR/$name"
-done
+done < <("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\nsis\"" | tr -d '\r\0')
 
-echo "==> signing updater artifact (host-side)"
-SETUP_EXE="$(ls "$OUT_DIR"/*-setup.exe 2>/dev/null | head -1)"
-[[ -n "$SETUP_EXE" ]] || fail "no *-setup.exe came back from the VM"
-(cd "$ROOT" && npx tauri signer sign \
-  --private-key-path "$KEY_FILE" \
-  --password "$KEY_PASSWORD" \
-  "$SETUP_EXE")
-[[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig"
+echo "==> signing updater artifacts (host-side)"
+# The GUI/Server split emits TWO *-setup.exe — sign BOTH. The old `head -1` left
+# the Server bundle's updater artifact unsigned (2026-07-02 parity fix).
+shopt -s nullglob
+SETUP_EXES=("$OUT_DIR"/*-setup.exe)
+shopt -u nullglob
+[[ ${#SETUP_EXES[@]} -gt 0 ]] || fail "no *-setup.exe came back from the VM"
+for SETUP_EXE in "${SETUP_EXES[@]}"; do
+  echo "  signing: $(basename "$SETUP_EXE")"
+  (cd "$ROOT" && npx tauri signer sign \
+    --private-key-path "$KEY_FILE" \
+    --password "$KEY_PASSWORD" \
+    "$SETUP_EXE")
+  [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
+done
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"
