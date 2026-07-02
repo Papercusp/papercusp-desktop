@@ -109,6 +109,14 @@ _ctrl_coord_probe() {
   echo 0; return 1
 }
 
+# _ctrl_roster_empty <inst> — true (0) iff <inst>'s hive_members roster has NO rows
+# (the WI-1378 no-restart symptom that drops every peer op). Mirrors _rv_roster_empty
+# in deb-hetzner-revocation.sh — used as the baseline-miss diagnostic.
+_ctrl_roster_empty() {
+  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null | tr -d '[:space:]')"
+  [ "${n:-0}" = "0" ]
+}
+
 # matrix-report formatters
 _ctrl_verdict() { [ "$1" = "$2" ] && echo "PASS" || echo "FAIL"; }
 _ctrl_fmt() { [ "$1" = 1 ] && printf '%-11s' "$2" || printf '%-11s' "$3"; }
@@ -117,14 +125,18 @@ _ctrl_fmt() { [ "$1" = 1 ] && printf '%-11s' "$2" || printf '%-11s' "$3"; }
 # Reads the rig globals FRAME_MEMBER_SLUG[a|b], FRAME_IP[*], FED_PG[*], FED_SC[*]
 # (filled by rig_owner_publish_hive + rig_join_* + the boot waits). Returns 0 = every
 # flow matched the code-derived expectation, 1 = at least one diverged. NON-INVASIVE
-# (no sidecar kill/restart; the probes only INSERT throwaway timestamped rows).
-# NOTE: the BASELINE probe uses the FIXED feature_id F-CTRL-BASE, so the scenario is
-# one-shot per provisioned rig — a re-run on the SAME frames would PK-collide the
-# baseline row. (Prose labels "A"/"B" assume the canonical `... a b` call.)
+# on the happy path (the probes only INSERT throwaway timestamped rows) — EXCEPT a
+# BASELINE first-poll miss, which triggers ONE adaptive MEMBER-sidecar restart
+# re-fold + retry (the WI-1378 no-restart window; same pattern as
+# deb-hetzner-revocation.sh STEP 1).
+# NOTE: the FIRST baseline probe uses the FIXED feature_id F-CTRL-BASE, so the
+# scenario is one-shot per provisioned rig — a re-run on the SAME frames would
+# PK-collide the baseline row (the adaptive RETRY uses a fresh timestamped id).
+# (Prose labels "A"/"B" assume the canonical `... a b` call.)
 scenario_coord_controlplane() {
   local OWNER="${1:-a}" MEMBER="${2:-b}"
   local MEMBER_SLUG="${FRAME_MEMBER_SLUG[$OWNER]}"   # the owner-side slug the probes write under
-  local disc probe_base base p_msg p_esc p_ho sp_rows sp_fed
+  local disc probe_base base FBASE_RETRY p_msg p_esc p_ho sp_rows sp_fed
   local PWS NTS PRES_OWNER WM_OWNER SUB_MID n_pres n_wm n_sub ALLPASS v
 
   echo "--- A [swarm]/drain diag ---"; drv_exec "$OWNER" <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate' /home/pcusp/serve.log | tail -6"
