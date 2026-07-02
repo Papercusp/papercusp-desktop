@@ -139,7 +139,25 @@ fi
 # CI=true → tauri-bundler passes --skip-jenkins to bundle_dmg.sh, skipping
 # the AppleScript Finder-styling step that times out headless (-1712 over
 # SSH on the VM). The DMG just gets default icon layout.
-CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg
+#
+# Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):
+#   * gui    — base tauri.conf.json          (Papercusp GUI,    com.papercusp.gui)
+#   * server — tauri.server.conf.json override (Papercusp Server, com.papercusp.server)
+# Both share the sidecar payload built above. Each role recompiles the Rust
+# binary because generate_context! bakes the (different) identifier, which is
+# how the runtime picks its role. Distinct productNames → distinct bundle
+# filenames, so they don't clobber. Set PAPERCUSP_BUILD_ROLES="gui" (or
+# "server") to build just one while iterating.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+for role in $PAPERCUSP_BUILD_ROLES; do
+  case "$role" in
+    gui)    role_cfg=() ;             role_label="Papercusp GUI" ;;
+    server) role_cfg=(--config src-tauri/tauri.server.conf.json) ; role_label="Papercusp Server" ;;
+    *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$role' — skipping"; continue ;;
+  esac
+  echo "--- tauri build: $role_label ($MAC_BUILD_TARGET) ---"
+  CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
+done
 
 echo "--- artifacts ($MAC_BUILD_TARGET) ---"
 ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/" 2>/dev/null || true

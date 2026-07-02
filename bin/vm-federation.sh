@@ -169,7 +169,9 @@ fi
 
 # ── 4. VMs up (pristine by default) ─────────────────────────────────────────
 boot_vm() {  # <inst>
-  local inst="$1" name="${FED_VM[$inst]}" idx="${FED_IDX[$inst]}"
+  # split — one `local` evaluates all RHS before assigning, so a combined
+  # `local inst=$1 name=${FED_VM[$inst]}` sees an empty $inst (bad array subscript).
+  local inst="$1"; local name="${FED_VM[$inst]}"; local idx="${FED_IDX[$inst]}"
   if [ "$RESET" = 1 ]; then
     fed_log "reset $name to a pristine overlay"
     "$VMCTL" reset "$name" || die "reset $name failed"
@@ -202,7 +204,7 @@ fi
 
 # ── 5. install the .deb + driver prereqs in each VM ─────────────────────────
 install_vm() {  # <inst>
-  local inst="$1" name="${FED_VM[$inst]}"
+  local inst="$1"; local name="${FED_VM[$inst]}"
   if [ "$INSTALL" = 1 ]; then
     fed_log "install .deb into $name (fresh-install dep resolution)"
     "$VMCTL" install "$name" "$DEB" || die "install failed on $name"

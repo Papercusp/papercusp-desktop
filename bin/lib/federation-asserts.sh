@@ -35,17 +35,35 @@ fed_log() { printf '\n=== %s ===\n' "$*"; }
 # ── .deb extraction + integrity ─────────────────────────────────────────────
 
 # fed_extract_deb <deb> <pkgdir> — extract; assert the desktop binary exists.
+# Also detects + exports FED_APP_DIRNAME (the /usr/lib/<name> install dir): the
+# 2026-07-01 two-role split renamed the GUI productName "Papercusp" → "Papercusp
+# GUI", so the install root is no longer a constant. Every path consumer reads
+# fed_sidecar_dir instead of hardcoding it.
 fed_extract_deb() {
-  local deb="$1" pkg="$2"
+  local deb="$1" pkg="$2" appdir
   [ -f "$deb" ] || { echo "FATAL: .deb not found: $deb"; return 1; }
   mkdir -p "$pkg"; dpkg-deb -x "$deb" "$pkg"
   [ -x "$pkg/usr/bin/papercusp-desktop" ] || { echo "FATAL: binary missing in .deb: $pkg/usr/bin/papercusp-desktop"; return 1; }
+  appdir="$(find "$pkg/usr/lib" -maxdepth 2 -type d -name sidecar 2>/dev/null | head -1)"
+  [ -n "$appdir" ] || { echo "FATAL: no */sidecar dir under $pkg/usr/lib in the .deb"; return 1; }
+  FED_APP_DIRNAME="$(basename "$(dirname "$appdir")")"
+  export FED_APP_DIRNAME
+  echo "  install root: /usr/lib/$FED_APP_DIRNAME"
+}
+
+# fed_sidecar_dir [pkgdir] — the sidecar dir: under a pkg extraction when given,
+# else the ON-TARGET absolute path. Falls back to the legacy 'Papercusp' name if
+# fed_extract_deb has not run.
+fed_sidecar_dir() {
+  if [ -n "${1:-}" ]; then printf '%s/usr/lib/%s/sidecar' "$1" "${FED_APP_DIRNAME:-Papercusp}"
+  else printf '/usr/lib/%s/sidecar' "${FED_APP_DIRNAME:-Papercusp}"; fi
 }
 
 # fed_clobber_check <pkgdir> — the build-clobber defect ships 0-byte sidecar
 # files; a clobbered .deb cannot boot embedded-PG or the operator.
 fed_clobber_check() {
-  local pkg="$1" side="$1/usr/lib/Papercusp/sidecar" clobbered=0 f sz
+  local pkg="$1" side clobbered=0 f sz
+  side="$(fed_sidecar_dir "$1")"
   # SP1 C5 layout: serve.mjs is the boot entry (host.mjs retired); the
   # embedded-postgres-server package ships under sidecar/node_modules so
   # serve.mjs's externalized bare-specifier import resolves.
@@ -73,7 +91,8 @@ fed_clobber_check() {
 # The env-var name and log prefix are literal strings in the esbuild-bundled
 # host.mjs, so a static grep is a reliable version gate.
 fed_assert_deb_swarm_support() {
-  local serve_mjs="$1/usr/lib/Papercusp/sidecar/serve.mjs"
+  local serve_mjs
+  serve_mjs="$(fed_sidecar_dir "$1")/serve.mjs"
   grep -q 'PAPERCUSP_DHT_BOOTSTRAP' "$serve_mjs" 2>/dev/null \
     || { echo "FATAL: .deb too old — serve.mjs lacks PAPERCUSP_DHT_BOOTSTRAP support (swarm.ts, landed 2026-06-02). Rebuild from a current tree."; return 1; }
   grep -q '\[swarm\]' "$serve_mjs" 2>/dev/null \

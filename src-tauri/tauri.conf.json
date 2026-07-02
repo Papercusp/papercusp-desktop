@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Papercusp",
+  "productName": "Papercusp GUI",
   "version": "0.0.2",
-  "identifier": "com.papercusp.desktop",
+  "identifier": "com.papercusp.gui",
   "build": {
     "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
     "beforeBuildCommand": "",
@@ -62,7 +62,8 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "exceptionDomain": "localhost",
-      "entitlements": "entitlements.plist"
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
     },
     "linux": {
       "deb": {

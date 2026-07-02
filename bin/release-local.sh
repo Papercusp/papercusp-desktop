@@ -175,7 +175,17 @@ export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # Tauri CLI does the platform-native bundling + signing in one shot.
-(cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build)
+# Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):
+# GUI (base tauri.conf.json) + Server (tauri.server.conf.json override).
+# Distinct productNames → distinct deb/appimage/rpm filenames; the version-
+# scoped globs below pick up both. PAPERCUSP_BUILD_ROLES="gui" (or "server")
+# builds just one.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+for role in $PAPERCUSP_BUILD_ROLES; do
+  role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
+  echo "==> tauri build (linux x86_64, role=$role)"
+  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build "${role_cfg[@]}")
+done
 
 # Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
 # [build] target-dir — this box redirects all builds to ~/.cargo-target since
@@ -218,7 +228,11 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
-  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu)
+  for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
+    role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
+    echo "==> tauri build (linux arm64, role=$role)"
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
+  done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done

@@ -47,11 +47,18 @@ pub const SCHEME: &str = "papercusp";
 
 /// Whether the window loads `papercusp://localhost` instead of the HTTP base.
 ///
-/// DEFAULT ON (Phase 4 shipped 2026-06-01, after the scheme was live-verified
-/// end-to-end via the dev-shell bridge on GL hardware: off-HTTP origin, SPA
-/// render in a secure context, polyfilled same-origin `/api`). Rollback is a
-/// one-liner for the user: set `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0` to point
-/// the window back at `http://localhost:<port>`.
+/// DEFAULT: **Linux only**. The custom scheme exists to dodge WebKitGTK's
+/// ~6-connection libsoup pool cap (the connection-pool bug this scheme was
+/// built to kill) — a WebKitGTK/Linux problem. macOS `WKWebView` and Windows
+/// `WebView2` have no such cap AND the buffered scheme handler renders a BLANK
+/// webview there (found live 2026-07-01 on macOS: the operator SPA loads fine
+/// over HTTP in Safari + with the scheme off, but never mounts under
+/// `papercusp://` in WKWebView). So default the scheme ON only on Linux and let
+/// the webview ride plain loopback HTTP on macOS/Windows (WKWebView/WebView2
+/// pool many connections fine).
+///
+/// Explicit override wins on every platform: `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1`
+/// forces it on, `=0` forces it off.
 pub fn enabled() -> bool {
     std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() != Some("0")
 }

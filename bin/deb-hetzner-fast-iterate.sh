@@ -192,7 +192,10 @@ EOF
 # lets a hotpatch preserve the registered project + embedded-PG + hive join across
 # the serve.mjs swap. Same env block as setup_frame, minus the rm -rf.
 restart_sidecar() {  # <inst>
-  local inst="$1" ip="${FRAME_IP[$inst]}"
+  # split declarations — a single `local a=$1 b=${arr[$a]}` evaluates all RHS
+  # before any assignment, so ${FRAME_IP[$inst]} would see an empty $inst
+  # ("bad array subscript" + empty ip). Same class as the nat-geo.sh fix.
+  local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all re-reads state → swarm rejoin"
   hssh "$ip" "HONO=$HONO_PORT PG=$PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
 set -e
@@ -279,9 +282,14 @@ do_setup() {
   fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
 
   REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
-  fed_log "A: POST hives/from-repo ($REPO_URL) → resolve hive memberLink + hiveId + hivePubkey"
+  fed_log "A: POST hives/from-repo ($REPO_URL, force) → resolve hive memberLink + hiveId + hivePubkey"
+  # force:true (WI-1331): the test repo already has a hive in the shared public
+  # directory from prior runs, so a non-forced from-repo returns the `existing`
+  # join-offer shape (directory hit → NO memberLinks/hivePubkey) and the setup
+  # FATALs "could not resolve a hive memberLink". force creates a FRESH isolated
+  # hive per run. Same fix as rig_owner_publish_hive in bin/lib/deb-hetzner-rig.sh.
   a_resp="$(drv_exec a <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","visibility":"public","runTests":false,"shallow":true}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","force":true,"visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
   echo "A from-repo → $(printf '%s' "$a_resp" | head -c 200)"

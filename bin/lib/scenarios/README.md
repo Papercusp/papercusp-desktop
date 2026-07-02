@@ -97,3 +97,33 @@ federating 2-node hive.
 
 See **`00-base.sh`** for three working reference scenarios (content / plan-part /
 coord, A↔B) you can copy.
+
+## Running the matrix
+
+The consolidated runner is **`bin/deb-hetzner-matrix.sh`** (federation-release-hardening
+Brief 13).
+
+- **List (no provision, ~free):** `bin/deb-hetzner-matrix.sh --list` — sources every
+  scenario file and prints what's registered, sorted by `<order>`. Confirm your file
+  wired in **before** spending a live run.
+- **Full live run (COSTS REAL MONEY):** `bin/deb-hetzner-matrix.sh [--deb=PATH]` —
+  provisions **2 Hetzner frames ONCE** (a=owner, b=member), publishes + joins one hive,
+  peers the swarm, then runs every registered scenario in `<order>` **in the current
+  shell** (so a scenario's `rig_wait_frame_ready` port re-discovery persists across
+  scenarios), prints a PASS/FAIL matrix, and auto-destroys (EXIT-trap → **servers=0**).
+  Exit 0 = every scenario green.
+  - `--only=id1,id2` runs a subset · `--locs=ash,nbg1` splits regions (Brief 8) ·
+    `--type=cpx31` server type · `--keep-up` leaves frames up (**you** must then destroy
+    them manually).
+  - npm alias: `npm run --prefix papercusp-desktop test:federation:live-matrix`.
+
+## ⚠ CI / cron — opt-in + gated, NEVER on push
+
+A matrix run provisions REAL Hetzner servers (real money) and needs live secrets
+(`HCLOUD_TOKEN`, the SSH identity, `gh` auth for papercupai + aviynw), so it is
+**manual / opt-in only** — do NOT add it to the automatic push/PR CI. The supported
+invocations are the one-command runs above (or the npm alias). If a scheduled
+regression cadence is ever wanted, wire it as a **manual-dispatch** job (never a
+push/PR trigger) that a human fires, with the Hetzner + gh secrets injected at dispatch
+time. `servers=0 after every run` is the invariant the cost-safety EXIT trap enforces —
+never disable it, and never leave a run `--keep-up` in an unattended job.

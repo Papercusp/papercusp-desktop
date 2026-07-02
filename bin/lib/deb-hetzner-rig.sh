@@ -94,16 +94,41 @@ rig_init() {
   RIG_SLUG="hzdeb${RIG_WORK##*.}"
   RIG_SERVERS_FILE="$RIG_WORK/servers"; : > "$RIG_SERVERS_FILE"
   RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
+  # Hetzner recycles the same public IPs run-to-run, so a persisted mux master
+  # from a DESTROYED frame would poison the new frame's connections — start clean.
+  rm -f /tmp/deb-hzfed-mux-* 2>/dev/null || true
   echo "rig_init: work=$RIG_WORK slug=$RIG_SLUG type=$RIG_STYPE image=$RIG_IMAGE" >&2
 }
 
 # ── Hetzner API + SSH helpers ─────────────────────────────────────────────────
 rig_hz()  { curl -s -m 40 -H "Authorization: Bearer $RIG_TOKEN" "$@"; }
+# ControlMaster multiplexing: the rig fires DOZENS of short ssh/scp connections
+# per run at the same 2 recycled IPs, and 3 consecutive 2026-07-01 runs died on
+# transient port-22 connect timeouts mid-run (SYN throttling somewhere on the
+# path). One persistent master per frame makes every later call ride an ALREADY-
+# OPEN connection; ConnectionAttempts retries the initial TCP connect itself.
+RIG_SSH_MUX_OPTS=(-o ControlMaster=auto -o ControlPath=/tmp/deb-hzfed-mux-%r@%h -o ControlPersist=900)
 rig_ssh() { local ip="$1"; shift; ssh -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 \
+  -o ConnectionAttempts=3 "${RIG_SSH_MUX_OPTS[@]}" \
   -o ServerAliveInterval=15 "root@$ip" "$@"; }
+# dst spaces are safe UNquoted: OpenSSH ≥9 scp speaks SFTP (no remote shell), so
+# the path arrives as one literal — and added quotes become literal characters
+# (proven 2026-07-01: "dest open \"'/tmp/…'\"" failed a run). Install roots may
+# contain a space since the 'Papercusp GUI' productName rename.
 rig_scp() { local ip="$1" src="$2" dst="$3"; scp -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$src" "root@$ip:$dst"; }
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 \
+  -o ConnectionAttempts=3 "${RIG_SSH_MUX_OPTS[@]}" "$src" "root@$ip:$dst"; }
+# rig_ssh_wait <ip> [tries] — re-probe connectivity until an ssh no-op succeeds.
+# Fresh Hetzner VMs flap transiently (2026-07-01: a ConnectTimeout at the launch
+# step killed a whole Brief-4 run AFTER the 986MB install had succeeded). A probe
+# is retry-safe where rig_ssh itself is NOT (stdin-fed `bash -s` calls can't be
+# blindly re-run), so callers insert this BEFORE each critical ssh step.
+rig_ssh_wait() {
+  local ip="$1" tries="${2:-12}" i
+  for i in $(seq 1 "$tries"); do rig_ssh "$ip" true 2>/dev/null && return 0; sleep 5; done
+  echo "FATAL: ssh $ip unreachable after $tries probes" >&2; return 1
+}
 
 # rig_create_server <name> <loc> → echo "<id> <ip>"
 # COST-SAFETY: appends <id> to $RIG_SERVERS_FILE the instant the POST succeeds,
@@ -232,30 +257,42 @@ rig_setup_frame() {
   rig_ssh "$ip" true 2>/dev/null || { echo "FATAL ssh $inst"; return 1; }
   fed_log "[$inst] install .deb (fresh-install dep resolution) + driver prereqs"
   rig_scp "$ip" "$RIG_DEB" /tmp/Papercusp.deb || return 1
-  rig_ssh "$ip" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq
-    apt-get install -y -qq /tmp/Papercusp.deb >/dev/null 2>&1 || apt-get install -y -qq --fix-broken >/dev/null 2>&1
-    command -v gh >/dev/null && command -v psql >/dev/null || apt-get install -y -qq gh postgresql-client >/dev/null 2>&1
-    test -f /usr/lib/Papercusp/sidecar/serve.mjs && echo deb-ok' | grep -q deb-ok || { echo "FATAL install $inst"; return 1; }
+  rig_ssh "$ip" "SIDECAR_DIR='$(fed_sidecar_dir)' bash -s" <<'INSTEOF' | grep -q deb-ok || { echo "FATAL install $inst"; return 1; }
+export DEBIAN_FRONTEND=noninteractive; apt-get update -qq
+apt-get install -y -qq /tmp/Papercusp.deb >/dev/null 2>&1 || apt-get install -y -qq --fix-broken >/dev/null 2>&1
+command -v gh >/dev/null && command -v psql >/dev/null || apt-get install -y -qq gh postgresql-client >/dev/null 2>&1
+test -f "$SIDECAR_DIR/serve.mjs" && echo deb-ok
+INSTEOF
+  # RIG_SERVE_HOTPATCH=<local serve.mjs>: overwrite the installed sidecar bundle
+  # BEFORE launch — the "live re-verify via rig hotpatch" lever (WI-1378/Brief-3
+  # flow): rebuild ONLY serve.mjs from the current tree (bin/build-desktop-sidecar.sh's
+  # esbuild step) instead of a full .deb rebuild, and test the fix live.
+  if [ -n "${RIG_SERVE_HOTPATCH:-}" ]; then
+    fed_log "[$inst] HOTPATCH sidecar serve.mjs ← $RIG_SERVE_HOTPATCH"
+    rig_ssh_wait "$ip" || { echo "FATAL ssh $inst (pre-hotpatch)"; return 1; }
+    rig_scp "$ip" "$RIG_SERVE_HOTPATCH" "$(fed_sidecar_dir)/serve.mjs" || { echo "FATAL hotpatch $inst"; return 1; }
+  fi
   fed_log "[$inst] launch headless serve.mjs as non-root pcusp (PUBLIC DHT, identity ${FRAME_USER[$inst]})"
+  rig_ssh_wait "$ip" || { echo "FATAL ssh $inst (pre-launch)"; return 1; }
   # embedded-postgres REFUSES to initdb as root (Hetzner's ubuntu image logs in as
   # root); the .deb is a desktop app that runs as a normal user, so launch the
   # sidecar under a dedicated `pcusp` user via runuser — faithful to real usage.
   printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
     | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
         umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
 pkill -u pcusp -f 'serve.mjs --ensure' 2>/dev/null || true; sleep 1
 rm -rf "$H/pgdata" "$H/.papercusp" "$H/.papercusp-workspaces"; mkdir -p "$H/pgdata" "$H/fed"
-SIDE=/usr/lib/Papercusp/sidecar
+SIDE="${SIDE_DIR:-/usr/lib/Papercusp/sidecar}"
 set -a; . "$H/fed.env"; set +a
 cd "$SIDE"
 env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
-  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -274,7 +311,7 @@ rig_setup_all() {
 # rig_kill_sidecar <inst> — stop the pcusp serve.mjs WITHOUT wiping pgdata (the
 # "take this member offline" primitive: reconnect/catch-up + restart-durability).
 rig_kill_sidecar() {
-  local inst="$1" ip="${FRAME_IP[$inst]}"
+  local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] kill sidecar (preserve pgdata — member goes offline)"
   rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2; pgrep -u pcusp -f 'serve.mjs' >/dev/null && echo 'STILL-RUNNING' || echo 'sidecar stopped'\""
 }
@@ -284,20 +321,20 @@ rig_kill_sidecar() {
 # and rejoins the swarm. Used after a kill (Brief 4) and as the cold-restart probe
 # (Brief 5). Same env block as rig_setup_frame, minus the rm -rf.
 rig_restart_sidecar() {
-  local inst="$1" ip="${FRAME_IP[$inst]}"
+  local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2
-SIDE=/usr/lib/Papercusp/sidecar
+SIDE="${SIDE_DIR:-/usr/lib/Papercusp/sidecar}"
 set -a; . "$H/fed.env"; set +a
 cd "$SIDE"
 env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=production \
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 \
-  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
+  PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   GH_TOKEN="${GH_TOKEN:-}" \
@@ -329,15 +366,27 @@ rig_wait_all_ready() {
 rig_owner_publish_hive() {
   local owner="$1" repo="${2:-https://github.com/octocat/Hello-World}" a_resp fields
   RIG_REPO_URL="$repo"
-  fed_log "[$owner=OWNER] POST hives/from-repo ($repo) → resolve hive memberLink + hiveId + hivePubkey"
+  fed_log "[$owner=OWNER] POST hives/from-repo ($repo, force) → resolve hive memberLink + hiveId + hivePubkey"
+  # WI-1331 (Brief 5 live run): force:true is REQUIRED. The test repo
+  # (octocat/Hello-World) already has a hive registered in the shared PUBLIC
+  # directory from prior runs, so a non-forced from-repo hits the paste-time
+  # lookup (_create_from_repo.ts:345 `if (!opts.force) return {existing}`) and
+  # returns the `existing` JOIN-OFFER shape. For a source:"directory" hit that
+  # shape carries ONLY {hiveId,title,ownerGithubLogin} — NO memberLinks / NO
+  # hivePubkey (those come from the owner, not directory gossip) — so a joiner
+  # can't join it and the rig FATALs "could not resolve a hive memberLink".
+  # force:true skips the early-return and CREATES a FRESH isolated hive per run
+  # (own slug + own hivePubkey → own federation topic), returning the
+  # {created,publish:{memberLinks,hivePubkey}} shape the parse below expects.
   a_resp="$(drv_exec "$owner" <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","force":true,"visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
   echo "[$owner] from-repo → $(printf '%s' "$a_resp" | head -c 200)"
   # The fields live in different shapes:
   #   fresh-create → {created:{hiveSlug}, publish:{memberLinks,hivePubkey}} (WI-931)
-  #   existing     → {existing:{hive:{hiveId,memberLinks,hivePubkey}}}
+  #   existing     → {existing:{hive:{hiveId}}} (directory hit: NO memberLinks —
+  #                  unreachable now that we always force-create fresh)
   fields="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 ex=d.get("existing",{}).get("hive",{}) or {}
@@ -346,8 +395,9 @@ pub=d.get("publish",{}) or {}
 ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
 print(ml[0] if ml else "")
 print(ex.get("hiveId") or cr.get("hiveSlug") or "")
-print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")' 2>/dev/null)"
-  { read -r RIG_HIVE_LINK; read -r RIG_HIVE_ID; read -r RIG_HIVE_PUBKEY; } <<<"$fields"
+print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")
+print(cr.get("memberSlug") or "")' 2>/dev/null)"
+  { read -r RIG_HIVE_LINK; read -r RIG_HIVE_ID; read -r RIG_HIVE_PUBKEY; read -r RIG_OWNER_MEMBER_SLUG; } <<<"$fields"
   [ -n "$RIG_HIVE_LINK" ] || { echo "✗ $owner could not resolve a hive memberLink — body: $(printf '%s' "$a_resp" | head -c 1200)"; return 6; }
   [ -n "$RIG_HIVE_ID" ]   || { echo "✗ $owner could not resolve hiveId — body: $(printf '%s' "$a_resp" | head -c 1200)"; return 6; }
   echo "✓ $owner resolved hive link ${RIG_HIVE_LINK:0:56}… hiveId=$RIG_HIVE_ID hivePubkey=${RIG_HIVE_PUBKEY:0:12}…"
@@ -367,27 +417,57 @@ print(ms[0]["slug"] if ms else "")' 2>/dev/null
 # hive-pubkey topic — EI-681). Sets FRAME_MEMBER_SLUG[$inst]. hivePubkey is passed
 # EXPLICITLY (a joiner's local discovery is empty). Requires rig_owner_publish_hive.
 rig_join_hive() {
-  local inst="$1" resp slug
+  local inst="$1" resp slug try
   [ -n "${RIG_HIVE_ID:-}" ] || { echo "FATAL: no hive published — call rig_owner_publish_hive first" >&2; return 1; }
   fed_log "[$inst] JOIN hive via /api/discovery/join-hive (hiveId=$RIG_HIVE_ID)"
-  resp="$(drv_exec "$inst" <<EOF
+  # 2 attempts with a reconnect probe between: an EMPTY resp means the SSH leg
+  # died (transient flap — hit twice on 2026-07-01), not that the API refused.
+  # Safe to retry: re-join is idempotent (existing view reused, members skipped,
+  # owner self-join is a self_hive no-op).
+  for try in 1 2; do
+    resp="$(drv_exec "$inst" <<EOF
 curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
 EOF
 )"
+    [ -n "$resp" ] && break
+    [ "$try" = 1 ] && { echo "  ⚠ $inst join-hive got an empty response (ssh flap?) — re-probing + retrying once"; rig_ssh_wait "${FRAME_IP[$inst]}" 24 || break; }
+  done
   slug="$(rig_join_member_slug "$resp")"
+  # WI-1422 self-echo guard: the OWNER's self-join is now a NO-OP
+  # ({ok:true, self_hive:true, members:[]}) — the owner's member harness was
+  # already created by from-repo. Take its slug from the publish response.
+  if [ -z "$slug" ] && printf '%s' "$resp" | grep -q '"self_hive":true'; then
+    slug="${RIG_OWNER_MEMBER_SLUG:-}"
+    [ -n "$slug" ] && echo "✓ $inst is the hive OWNER (self-join no-op; member=$slug)"
+  fi
   FRAME_MEMBER_SLUG[$inst]="$slug"
   if printf '%s' "$resp" | grep -q '"ok":true' && [ -n "$slug" ]; then
-    echo "✓ $inst joined hive (member=$slug)"; return 0
+    printf '%s' "$resp" | grep -q '"self_hive":true' || echo "✓ $inst joined hive (member=$slug)"
+    return 0
   fi
   echo "✗ $inst join-hive failed: $(printf '%s' "$resp" | head -c 300)"; return 1
 }
 
-# rig_join_all <owner-inst> — join EVERY frame in RIG_FRAMES to the hive (owner
-# included — the owner also joins its own hive as a VIEW, matching the 2-frame rig
-# where A self-joins). Returns non-zero if any join fails.
+# rig_join_all <owner-inst> — join every NON-owner frame to the hive. The owner
+# NEVER self-joins: its member harness already exists from the from-repo publish
+# (RIG_OWNER_MEMBER_SLUG), and the old self-join-as-a-VIEW call was exactly the
+# WI-1422 self-echo trigger — on a pre-guard .deb it minted a phantom
+# '<hive>-2' remote view and rebound the owner's member harness to it, silently
+# splitting owner→joiner federation (Brief-3 attempts 1-2, 2026-07-01). On a
+# guarded .deb the call is a no-op anyway. Returns non-zero if any join fails.
 rig_join_all() {
   local owner="$1" inst rc=0
-  for inst in "${RIG_FRAMES[@]}"; do rig_join_hive "$inst" || rc=1; done
+  FRAME_MEMBER_SLUG[$owner]="${RIG_OWNER_MEMBER_SLUG:-}"
+  if [ -n "${FRAME_MEMBER_SLUG[$owner]}" ]; then
+    echo "✓ $owner is the hive OWNER (publish-time member=${FRAME_MEMBER_SLUG[$owner]}; no self-join)"
+  else
+    echo "⚠ $owner: no memberSlug in the publish response — falling back to self-join"
+    rig_join_hive "$owner" || rc=1
+  fi
+  for inst in "${RIG_FRAMES[@]}"; do
+    [ "$inst" = "$owner" ] && continue
+    rig_join_hive "$inst" || rc=1
+  done
   return "$rc"
 }
 
@@ -430,6 +510,61 @@ rig_read_content() {
 rig_read_roster() {
   local inst="$1"
   drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.hive_members ORDER BY github_user_id;" 2>/dev/null
+}
+
+# ── revoke / ban (the Brief 3 revocation primitive) ───────────────────────────
+# rig_github_id <gh-login> — resolve a GitHub login to its numeric user id via the
+# public API (driver-side gh; the rig host is gh-authed). The revoke route keys on
+# the STABLE numeric id (not the login), so a scenario turns FRAME_USER[b] into the
+# id to ban. Echoes the id, or nothing on failure.
+rig_github_id() { gh api "users/$1" --jq '.id' 2>/dev/null; }
+
+# rig_ban_member <owner-inst> <target-github-id> [scope]
+#   scope="hive" (DEFAULT) — Hive-wide revoke: POST /api/admin/substrate/revoke-contributor
+#         {hiveSlug=RIG_HIVE_ID}. Authority = the Swarm holding the Hive key (the owner
+#         frame that ran hives/from-repo). Drives revokeHiveContributor → the
+#         revoked_pubkeys admission blocklist AND (once the C-001 re-key advances the
+#         epoch EXCLUDING the target) the epoch K-cut READ cut-off. revoke.live is FALSE
+#         until the next re-key lands — the owner must WRITE post-ban content to trigger
+#         the re-key before the read cut-off bites (see deb-hetzner-revocation.sh).
+#   scope="harness" — single-harness revoke {harnessSlug=owner member slug}, authority =
+#         repo-admin token.
+# Resolves workspaceId from the owner's hive_members. Echoes the raw JSON response
+# ({ok:true,revokedPubkeys,live} on success).
+#
+# AUTH (verified live 2026-07-01): the route is auth:{trust:['verified','trusted']}. A bare
+# localhost curl resolves to 'unverified-loopback' and is REJECTED (403 "trust
+# unverified-loopback not in allowlist"). principalFromSuperuserToken grants trust:'trusted'
+# for a LOOPBACK request carrying `Authorization: Bearer <token>` matching
+# ~/.papercusp/superuser-token. The sidecar runs as user pcusp, so we resolve/ensure
+# /home/pcusp/.papercusp/superuser-token ON the owner frame (as pcusp; generate one mode 0600
+# if absent — the sidecar validates the bearer against the file PER-REQUEST, so a fresh write
+# is honored, and an existing token is reused, never clobbered) and present it as the bearer.
+# The token is never echoed/logged.
+rig_ban_member() {
+  local owner="$1" target_id="$2" scope="${3:-hive}" ws field val resp token
+  [ -n "$target_id" ] || { echo "FATAL rig_ban_member: no target github id" >&2; return 1; }
+  ws="$(drv_psql "$owner" "SELECT workspace_id FROM harness_shared.hive_members LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$ws" ] || ws="default"
+  if [ "$scope" = "harness" ]; then field="harnessSlug"; val="${FRAME_MEMBER_SLUG[$owner]:-}"
+  else field="hiveSlug"; val="${RIG_HIVE_ID:-}"; fi
+  [ -n "$val" ] || { echo "FATAL rig_ban_member: no $field resolved (run rig_owner_publish_hive + rig_join_hive first)" >&2; return 1; }
+  # trust:'trusted' bearer — read (or generate, as pcusp) the sidecar's superuser token so
+  # principalFromSuperuserToken admits the revoke (loopback + matching bearer). Never clobber
+  # an existing token; the sidecar re-reads the file per request so a fresh write is honored.
+  token="$(rig_pcusp_run "$owner" <<'PCUSP' 2>/dev/null | tr -d '[:space:]'
+f=/home/pcusp/.papercusp/superuser-token
+[ -s "$f" ] || { mkdir -p /home/pcusp/.papercusp; head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40 > "$f"; chmod 600 "$f"; }
+cat "$f"
+PCUSP
+)"
+  [ -n "$token" ] || { echo "FATAL rig_ban_member: could not resolve/create the owner superuser-token (the revoke route needs trust:'trusted')" >&2; return 1; }
+  fed_log "[$owner] BAN github_id=$target_id ($scope scope: $field=$val ws=$ws) [su-bearer]"
+  resp="$(drv_exec "$owner" <<EOF
+curl -s -m 120 -X POST "http://127.0.0.1:${FED_SC[$owner]}/api/admin/substrate/revoke-contributor" -H 'content-type: application/json' -H "Authorization: Bearer $token" -d '{"workspaceId":"$ws","$field":"$val","githubUserId":$target_id}'
+EOF
+)"
+  echo "$resp"
 }
 
 # ── NEGATIVE assertion (the Brief 3 revocation / security primitive) ──────────

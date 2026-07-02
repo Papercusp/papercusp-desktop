@@ -166,9 +166,16 @@ ${SIGN_PRELUDE}
 # the operator's /api/health self-reports the commit. Empty when unset.
 \$env:PAPERCUSP_BUILD_SHA = "${PAPERCUSP_BUILD_SHA:-}"
 Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
-Write-Host "[build] tauri build --bundles nsis"
+# Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
+# GUI (base config) + Server (tauri.server.conf.json override). Distinct
+# productNames → distinct *-setup.exe filenames; each recompiles because
+# generate_context! bakes the differing identifier.
+Write-Host "[build] tauri build: Papercusp GUI --bundles nsis"
 npx tauri build --bundles nsis 2>&1
-Write-Host "[build] EXIT=\$LASTEXITCODE"
+Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
+Write-Host "[build] tauri build: Papercusp Server --bundles nsis"
+npx tauri build --bundles nsis --config src-tauri/tauri.server.conf.json 2>&1
+Write-Host "[build] Server EXIT=\$LASTEXITCODE"
 EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
 rm -f "$BUILD_PS1"

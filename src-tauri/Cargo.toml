@@ -15,8 +15,15 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["specta"] }
+# `tray-icon` powers the "Papercusp Server" menubar/tray app (Server role, no
+# main window); cross-platform (macOS status item, Windows notification-area,
+# Linux appindicator). See app_role.rs + the Server branch in setup().
+tauri = { version = "2", features = ["specta", "tray-icon", "devtools"] }
 tauri-plugin-shell = "2"
+# Cross-platform login auto-start for the Server role: macOS LaunchAgent,
+# Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when
+# role=Server so the backend is up (and psu works) before any window opens.
+tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-os = "2"

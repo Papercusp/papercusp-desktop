@@ -24,6 +24,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_role;
 mod custom_protocol;
 mod dev_bridge;
 // Env-switch plumbing — the desktop-side source of truth + /api routing for the
@@ -678,6 +679,42 @@ mod helper_tests {
     }
 }
 
+#[cfg(test)]
+mod macos_bundle_tests {
+    use serde_json::Value;
+    use std::{fs, path::PathBuf};
+
+    fn src_tauri_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn tauri_config_points_macos_bundle_at_info_and_entitlements() {
+        let config_path = src_tauri_dir().join("tauri.conf.json");
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(config_path).expect("read tauri.conf.json"))
+                .expect("parse tauri.conf.json");
+        let mac = &config["bundle"]["macOS"];
+        assert_eq!(mac["entitlements"], "entitlements.plist");
+        assert_eq!(mac["infoPlist"], "Info.plist");
+    }
+
+    #[test]
+    fn info_plist_declares_microphone_usage_description() {
+        let plist = fs::read_to_string(src_tauri_dir().join("Info.plist")).expect("read Info.plist");
+        assert!(plist.contains("NSMicrophoneUsageDescription"));
+        assert!(plist.contains("voice mode"));
+    }
+
+    #[test]
+    fn entitlements_enable_macos_audio_input() {
+        let plist =
+            fs::read_to_string(src_tauri_dir().join("entitlements.plist")).expect("read entitlements");
+        assert!(plist.contains("com.apple.security.device.audio-input"));
+        assert!(plist.contains("<true/>"));
+    }
+}
+
 /// Build the Command that actually runs the sidecar. On Windows with
 /// WSL Ready we wrap node in `wsl.exe --distribution papercup-runtime
 /// --cd <wsl-cwd> --exec node …`. Otherwise we run node natively.
@@ -1030,6 +1067,156 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             let _ = window.eval(&inject);
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
+    }
+}
+
+// ===========================================================================
+// Two-bundle split: GUI (attach) + Server (own the sidecar). See app_role.rs.
+// ===========================================================================
+
+/// Bundle identifiers — MUST match the two tauri configs (tauri.conf.json →
+/// GUI, tauri.server.conf.json → Server).
+const SERVER_BUNDLE_ID: &str = "com.papercusp.server";
+const GUI_BUNDLE_ID: &str = "com.papercusp.gui";
+
+/// GUI role setup: never spawn a sidecar. Point the window at the app origin
+/// (bundled statics / booting shell) immediately, then — off the main thread —
+/// ensure a Papercusp Server is running (auto-launch its bundle if not) and
+/// attach the window to its operator via the shared discovery file. `child`
+/// stays None, so quit never tears the Server down (shutdown_children_once →
+/// kill_sidecar is a no-op).
+fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // The GUI reads the discovery file the Server wrote; on Windows the sidecar
+    // lives inside WSL, so mirror the same routing to find the right path.
+    let via_wsl = should_route_via_wsl(&app.handle());
+    wsl_setup::set_route_active(via_wsl);
+
+    if custom_protocol::enabled() {
+        if let Some(window) = app.get_webview_window("main") {
+            match custom_protocol::APP_ORIGIN.parse() {
+                Ok(u) => {
+                    if let Err(e) = window.navigate(u) {
+                        eprintln!("[papercusp-gui] app-origin navigate failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("[papercusp-gui] APP_ORIGIN did not parse: {e}"),
+            }
+        }
+    }
+
+    let app_handle = app.handle().clone();
+    let workspace_home = workspaces::shared_sidecar_home();
+    std::thread::spawn(move || {
+        ensure_server_running(&app_handle, &workspace_home, via_wsl);
+        // finish_boot polls operator.json (up to 120s — covers a cold Server
+        // boot), wires endpoint-IPC, and navigates the window to the operator.
+        finish_boot(app_handle, workspace_home, via_wsl);
+    });
+    Ok(())
+}
+
+/// If no operator is reachable, launch the sibling "Papercusp Server" bundle.
+/// Does not block on full readiness — finish_boot's poll handles the boot wait.
+fn ensure_server_running(
+    app_handle: &tauri::AppHandle,
+    workspace_home: &std::path::Path,
+    via_wsl: bool,
+) {
+    if wait_for_operator(app_handle, workspace_home, via_wsl, Duration::from_secs(2)).is_ok() {
+        println!("[papercusp-gui] a Papercusp Server is already running — attaching");
+        return;
+    }
+    println!("[papercusp-gui] no Server reachable — launching the Papercusp Server bundle");
+    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+        eprintln!(
+            "[papercusp-gui] could not launch Papercusp Server ({e}); \
+             will keep polling in case it comes up another way"
+        );
+    }
+}
+
+/// Cross-platform "launch the sibling app bundle by identity".
+///   * macOS  — `open -b <bundle-id>`: LaunchServices resolves the installed
+///     .app regardless of where it lives. Solid + used as the primary path.
+///   * Linux  — `gtk-launch <bundle-id>.desktop` (the freedesktop way to start
+///     an installed app by its desktop-entry id), best-effort.
+///   * Windows — NOT yet wired: both bundles ship the SAME binary name
+///     (`papercusp-desktop`), so a sibling-exe launch can't tell them apart —
+///     it needs the per-bundle install path (registry / Start-menu). Until then
+///     the GUI surfaces "start the Server" rather than mis-launching itself.
+///     (Tracked as the Windows-launch follow-up.)
+fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = product_name;
+        Command::new("open").arg("-b").arg(bundle_id).spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = product_name;
+        // The deb/appimage desktop-entry id follows the bundle identifier.
+        Command::new("gtk-launch")
+            .arg(format!("{bundle_id}.desktop"))
+            .spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = bundle_id;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "auto-launch of '{product_name}' is not wired on Windows yet \
+                 (needs the per-bundle install path); please start it from the Start menu"
+            ),
+        ))
+    }
+}
+
+/// Build the Server's tray/menubar icon (the windowless backend's only surface):
+/// open the GUI, or quit (which tears the sidecar down via ExitRequested).
+fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit-server", "Quit Papercusp Server", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("papercusp-server")
+        .tooltip("Papercusp Server")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open-gui" => {
+                if let Err(e) = launch_bundle(GUI_BUNDLE_ID, "Papercusp GUI") {
+                    eprintln!("[papercusp-server] could not launch GUI: {e}");
+                }
+            }
+            "quit-server" => app.exit(0),
+            _ => {}
+        });
+    // Reuse the bundle icon (the Server config still ships icons even with no
+    // window). If absent, some platforms still render a default tray glyph.
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
+/// Register the Server bundle to launch at login (idempotent).
+fn enable_login_autostart(app: &tauri::App) {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    match mgr.is_enabled() {
+        Ok(true) => println!("[papercusp-server] login auto-start already enabled"),
+        Ok(false) => match mgr.enable() {
+            Ok(()) => println!("[papercusp-server] login auto-start enabled"),
+            Err(e) => eprintln!("[papercusp-server] could not enable auto-start: {e}"),
+        },
+        Err(e) => eprintln!("[papercusp-server] auto-start state unknown: {e}"),
     }
 }
 
@@ -1861,7 +2048,15 @@ pub fn run() {
         // OS-level shortcuts registered from Rust, no menu bar. Inert until the
         // dev-path registers shortcuts, so a packaged build carries nothing.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_updater::Builder::new().build());
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Login auto-start for the Server role (enabled only in server_setup).
+        // Cross-platform: macOS LaunchAgent, Windows HKCU Run, Linux XDG
+        // autostart. Registered on both roles (shared Builder) but only the
+        // Server ever calls .enable(), so the GUI carries an inert plugin.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ));
 
     // MCP bridge for AI coding agents — debug builds only. Lets Claude
     // Code / Cursor connect via @hypothesi/tauri-mcp-server and inspect
@@ -1914,12 +2109,21 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let role = app_role::detect(&app.config().identifier);
+            println!(
+                "[papercusp-desktop] role={} (identifier {})",
+                role.label(),
+                app.config().identifier
+            );
             let is_dev = cfg!(debug_assertions);
 
             // Native sibling terminal — resolve strategy + launch the glued
-            // (X11) / native terminal and register the glue hook, in both dev
-            // and prod. Visual-only; the terminal coordinates via the substrate.
-            init_native_terminal(app);
+            // (X11) / native terminal and register the glue hook. It's glued to
+            // a window, so only the GUI (and dev) has one; the windowless Server
+            // skips it. Visual-only; coordinates via the substrate.
+            if is_dev || role.is_gui() {
+                init_native_terminal(app);
+            }
 
             if is_dev {
                 // In dev mode we trust the developer (or beforeDevCommand's
@@ -2017,6 +2221,15 @@ pub fn run() {
                 return Ok(());
             }
 
+            // Packaged builds split into two bundles (one binary, two roles).
+            // GUI: attach to a running Server (auto-launch it if needed); it
+            // never spawns or owns a sidecar, so quit never tears the backend
+            // down. Server: fall through to the sidecar-owning boot below.
+            if role.is_gui() {
+                return gui_setup(app);
+            }
+
+            // ===== Server role: spawn + OWN the operator sidecar. =====
             // Production: spawn the sidecar.
             let port = match find_free_port() {
                 Some(p) => p,
@@ -2173,6 +2386,15 @@ pub fn run() {
 
             let state: tauri::State<SidecarState> = app.state();
             *state.child.lock().unwrap() = Some(serve_child);
+
+            // Server role: tray/menubar presence + login auto-start. The
+            // backend has no window, so the tray both keeps the app alive and
+            // gives the user a place to open the GUI or quit; auto-start means
+            // psu works right after login without opening anything.
+            if let Err(e) = install_server_tray(app) {
+                eprintln!("[papercusp-desktop] tray install failed: {e}");
+            }
+            enable_login_autostart(app);
 
             // (P-053) setup() must NOT block on operator readiness — it runs
             // on the main thread before the event loop starts, so the old
