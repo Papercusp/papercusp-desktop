@@ -135,11 +135,22 @@ rig_ssh_wait() {
 # BEFORE waiting for boot or doing anything billable. The EXIT trap destroys every
 # id in that file, so a crash anywhere after this point still cleans up.
 rig_create_server() {
-  local name="$1" loc="$2" resp id
-  resp="$(rig_hz -X POST 'https://api.hetzner.cloud/v1/servers' -H 'content-type: application/json' \
-    -d "{\"name\":\"$name\",\"server_type\":\"$RIG_STYPE\",\"image\":\"$RIG_IMAGE\",\"location\":\"$loc\",\"ssh_keys\":[$RIG_SSH_KEY_ID]}")"
-  id="$(printf '%s' "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("server",{}).get("id") or "")' 2>/dev/null)"
-  [ -n "$id" ] || { echo "FATAL create $name: $resp" >&2; return 1; }
+  local name="$1" loc="$2" resp id try
+  # The create POST can return an EMPTY body while the server IS created
+  # (observed 2026-07-02: empty response, then 409 "name is already used" on
+  # retry). So: retry the create up to 3×, and on ANY attempt also try to
+  # RECOVER the id by name — covering both the transient-empty and the
+  # created-but-unreported cases without double-provisioning.
+  for try in 1 2 3; do
+    resp="$(rig_hz -X POST 'https://api.hetzner.cloud/v1/servers' -H 'content-type: application/json' \
+      -d "{\"name\":\"$name\",\"server_type\":\"$RIG_STYPE\",\"image\":\"$RIG_IMAGE\",\"location\":\"$loc\",\"ssh_keys\":[$RIG_SSH_KEY_ID]}")"
+    id="$(printf '%s' "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("server",{}).get("id") or "")' 2>/dev/null)"
+    [ -n "$id" ] && break
+    id="$(rig_hz "https://api.hetzner.cloud/v1/servers?name=$name" | python3 -c 'import json,sys;s=json.load(sys.stdin).get("servers",[]);print(s[0]["id"] if s else "")' 2>/dev/null)"
+    [ -n "$id" ] && { echo "  (recovered $name by name after an empty create response)" >&2; break; }
+    [ "$try" = 3 ] && { echo "FATAL create $name: $resp" >&2; return 1; }
+    sleep 5
+  done
   echo "$id" >> "$RIG_SERVERS_FILE"   # cost-safety: record BEFORE waiting/installing
   local i ip status
   for i in $(seq 1 60); do
