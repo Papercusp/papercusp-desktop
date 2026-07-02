@@ -107,7 +107,49 @@ vm_running() {  # vm_running <name>
 
 # Resolve the newest packaged .deb in the desktop bundle output.
 default_deb() {
-  ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1
+  local deb
+  deb="$(ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1)"
+  [ -n "$deb" ] && _warn_if_deb_stale "$deb"
+  printf '%s\n' "$deb"
+}
+
+# _warn_if_deb_stale <deb-path> — default_deb() just auto-picks the NEWEST FILE in
+# the bundle dir, which silently predates any fix landed after the last full .deb
+# build (WI-1334/Brief-8, 2026-07-02: a live Hetzner NAT/geo run burned ~40min
+# reproducing the ALREADY-FIXED WI-1378 roster-empty bug because the only .deb
+# present was built 16 DAYS before the fix commit — nothing told the caller, and
+# per-script "default_deb may resolve an older bundle, pass --deb explicitly"
+# comments on several rigs went unread). Compares the .deb's mtime against the
+# newest commit touching the code that actually feeds the bundle (this repo's
+# HEAD, the outer monorepo's apps/operator, and the libs/papercusp submodule) and
+# WARNs loudly. Never fails the call — a deliberately-older artifact is legitimate
+# (regression tests) — but a caller can no longer be silently bitten without a
+# printed signal pointing at the fix (bin/release-local.sh, or the cheaper
+# bin/build-desktop-sidecar.sh + rig hotpatch for a live re-verify).
+_warn_if_deb_stale() {
+  local deb="$1" deb_ts newest_ts t outer desktop_ts outer_ts papercusp_ts
+  deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
+  desktop_ts="$(git -C "$DESKTOP_REPO" log -1 --format=%ct 2>/dev/null || echo 0)"
+  outer="$DESKTOP_REPO/.."
+  outer_ts=0; papercusp_ts=0
+  if git -C "$outer" rev-parse --show-toplevel >/dev/null 2>&1; then
+    outer_ts="$(git -C "$outer" log -1 --format=%ct -- apps/operator 2>/dev/null || echo 0)"
+    if [ -d "$outer/libs/papercusp/.git" ] || git -C "$outer/libs/papercusp" rev-parse --show-toplevel >/dev/null 2>&1; then
+      papercusp_ts="$(git -C "$outer/libs/papercusp" log -1 --format=%ct 2>/dev/null || echo 0)"
+    fi
+  fi
+  newest_ts="$desktop_ts"
+  for t in "$outer_ts" "$papercusp_ts"; do
+    [ -n "$t" ] && [ "$t" -gt "$newest_ts" ] 2>/dev/null && newest_ts="$t"
+  done
+  if [ -n "$newest_ts" ] && [ "$newest_ts" -gt "$deb_ts" ] 2>/dev/null; then
+    local age_days=$(( (newest_ts - deb_ts) / 86400 ))
+    warn "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
+         "source commit touching the bundle inputs, so it may be missing a landed fix." \
+         "Rebuild (bin/release-local.sh for a full .deb, or bin/build-desktop-sidecar.sh +" \
+         "RIG_SERVE_HOTPATCH for a fast live re-verify) or pass an explicit --deb=PATH." \
+         "(WI-1334/Brief-8, 2026-07-02.)"
+  fi
 }
 
 require_golden() {
