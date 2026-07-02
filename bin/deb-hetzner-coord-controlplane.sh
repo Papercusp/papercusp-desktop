@@ -223,6 +223,10 @@ scenario_coord_controlplane() {
   #      tier and a handoff needs 'steer'. Applying would be the FAILURE.
   # (h2) B grants the author 'steer' (a LOCAL comms-trust override — the grant
   #      never federates, by design) → a fresh handoff must APPLY (origin=remote).
+  # Rerun-safety: a PRIOR run's h2 steer grant persists in B's PG (comms_trust_list
+  # is workspace-scoped, not hive-scoped — a hive re-publish does not clear it) and
+  # would make the ungranted probe falsely APPLY. Drop our own marker rows first.
+  drv_psql "$MEMBER" "DELETE FROM harness_shared.comms_trust_list WHERE note = 'ctrl-probe steer grant';" >/dev/null 2>&1
   p_hoq_raw="$(_ctrl_handoff_ungranted_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" h1 30 || true)"
   p_hoq=0; HO_AUTHOR=""
   case "$p_hoq_raw" in
