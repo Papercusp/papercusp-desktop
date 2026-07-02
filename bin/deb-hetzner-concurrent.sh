@@ -179,12 +179,21 @@ scenario_concurrent_lww() {
   # SAME {title,status,fed_hlc,fed_ts} tuple AND exactly 1 row each. That IS the guarantee: a
   # deterministic LWW winner agreed on both sides, no split-brain, no dup. origin legitimately differs
   # (winner=local on its author, remote on the loser).
-  local converged WINTUPLE ta tb ca cb FINAL_A FINAL_B CNT_A CNT_B O_A O_B phase2_pass
-  converged=0; WINTUPLE=""
+  # WI-1673: a single matched read can be TRANSIENT — with ops still in flight, one peer may
+  # momentarily show the other's side (mid-swap) and match, then flip after we latch. Require a
+  # STABLE window (5 consecutive matched re-reads, 3s apart, streak resets on any mismatch), and
+  # additionally gate the verdict on the FINAL reads below agreeing.
+  local converged WINTUPLE ta tb ca cb FINAL_A FINAL_B CNT_A CNT_B O_A O_B phase2_pass streak
+  converged=0; WINTUPLE=""; streak=0
   for i in $(seq 1 100); do
     ta="$(_cl_read_lww "$OWNER" "$FID_C")"; tb="$(_cl_read_lww "$MEMBER" "$FID_C")"
     ca="$(_cl_count_feat "$OWNER" "$FID_C")"; cb="$(_cl_count_feat "$MEMBER" "$FID_C")"
-    if [ -n "$ta" ] && [ "$ta" = "$tb" ] && [ "$ca" = 1 ] && [ "$cb" = 1 ]; then converged=1; WINTUPLE="$ta"; break; fi
+    if [ -n "$ta" ] && [ "$ta" = "$tb" ] && [ "$ca" = 1 ] && [ "$cb" = 1 ]; then
+      streak=$((streak + 1))
+      if [ "$streak" -ge 5 ]; then converged=1; WINTUPLE="$ta"; break; fi
+    else
+      streak=0
+    fi
     sleep 3
   done
   FINAL_A="$(_cl_read_lww "$OWNER" "$FID_C")"; FINAL_B="$(_cl_read_lww "$MEMBER" "$FID_C")"
@@ -193,8 +202,12 @@ scenario_concurrent_lww() {
   echo "PHASE2 final: a=[$FINAL_A] origin=$O_A count=$CNT_A"
   echo "PHASE2 final: b=[$FINAL_B] origin=$O_B count=$CNT_B"
   phase2_pass=0
-  if [ "$converged" = 1 ]; then
-    phase2_pass=1; echo "✓ PHASE 2 PASS — both peers converged to the SAME LWW winner [$WINTUPLE], byte-identical, 1 row each, no split-brain/dup"
+  if [ "$converged" = 1 ] && [ -n "$FINAL_A" ] && [ "$FINAL_A" = "$FINAL_B" ] && [ "$CNT_A" = 1 ] && [ "$CNT_B" = 1 ]; then
+    phase2_pass=1; echo "✓ PHASE 2 PASS — both peers converged to the SAME LWW winner [$WINTUPLE], stable over 5 re-reads + matching finals, 1 row each, no split-brain/dup"
+  elif [ "$converged" = 1 ]; then
+    echo "✗ PHASE 2 FAIL — stable window matched but FINAL reads diverge (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B) — late-arriving op flipped a peer (WI-1673 signature)"
+    fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
+    for inst in "$OWNER" "$MEMBER"; do echo "--- $inst roster ---"; rig_read_roster "$inst"; done
   else
     echo "✗ PHASE 2 FAIL — no convergence (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B)"
     fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
