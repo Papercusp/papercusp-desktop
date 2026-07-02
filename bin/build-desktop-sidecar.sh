@@ -1260,11 +1260,20 @@ fi
 # IMPORTANT: only strip plperl/plpython/pltcl — DO NOT strip plpgsql,
 # which is the default procedural language and required for ANY pgdata
 # initdb (FATAL: extension "plpgsql" is not available).
+# NOTE: the glob is a SUBSTRING match (*plpython*, not plpython*) — contrib
+# "bridge" extensions like ltree_plpython3.so / hstore_plperl.so / jsonb_
+# plpython3.so link libpython/libperl too but are PREFIXED with the data-type
+# name, not the language, so a prefix-only glob (plpython*) misses them. A
+# missed one still crashes AppImage bundling the same way (WI-807 live repro:
+# `ERROR: Could not find dependency: libpython3.6m.so.1.0` from
+# ltree_plpython3.so, only surfaced after the plpython*-prefixed files were
+# already stripped). plpgsql is safe under substring matching too — it
+# contains none of plperl/plpython/pltcl as a substring.
 echo "→ stripping unused PL/* extensions (plperl, plpython, pltcl) from embedded-postgres"
 pl_count=0
 for ext_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/share/postgresql/extension; do
   [[ -d "$ext_dir" ]] || continue
-  for f in "$ext_dir"/plperl* "$ext_dir"/plpython* "$ext_dir"/pltcl*; do
+  for f in "$ext_dir"/*plperl* "$ext_dir"/*plpython* "$ext_dir"/*pltcl*; do
     [[ -e "$f" ]] || continue
     rm -f "$f"
     pl_count=$((pl_count + 1))
@@ -1272,7 +1281,7 @@ for ext_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/share
 done
 for lib_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/lib/postgresql; do
   [[ -d "$lib_dir" ]] || continue
-  for f in "$lib_dir"/plperl* "$lib_dir"/plpython* "$lib_dir"/pltcl*; do
+  for f in "$lib_dir"/*plperl* "$lib_dir"/*plpython* "$lib_dir"/*pltcl*; do
     [[ -e "$f" ]] || continue
     rm -f "$f"
     pl_count=$((pl_count + 1))
