@@ -157,18 +157,18 @@ done
 
 # ── THE KEY TEST: peer_connected across regions + through B's NAT (holepunch) ──
 fed_log "wait swarm peer_connected a↔b (SUCCESS = holepunch worked cross-region + behind B's NAT)"
-disc="$(fed_wait_discovery a b strict 90 || true)"   # generous window: cross-continent + holepunch adds latency
+disc="$(fed_wait_discovery a b strict 180 || true)"   # generous window: cross-continent + holepunch adds latency (doubled 90→180 tries, try5)
 hp=0; [ "$disc" = 1 ] && hp=1
 [ "$hp" = 1 ] && echo "✓ peer_connected a↔b — holepunch succeeded across [$LOC_A↔$LOC_B]${NAT:+ + NAT=$NAT}" \
              || echo "✗ NO peer_connected in ~270s — holepunch/cross-region peering FAILED (a real Brief-8 finding; see diag)"
 
 # ── content federation A→B and B→A over the NAT/geo topology ──────────────────
 fed_log "A→B MERGE (hive slug-agnostic probe) over the distant/NAT topology"
-probe_ab="$(fed_hive_merge_probe a b "$A_MEMBER_SLUG" F-NAT-A2B 90 || true)"
+probe_ab="$(fed_hive_merge_probe a b "$A_MEMBER_SLUG" F-NAT-A2B 180 || true)"
 ab=0; [ "${probe_ab%% *}" = 1 ] && ab=1
 [ "$ab" = 1 ] && echo "✓ A→B: F-NAT-A2B federated into B origin=remote (slug='${probe_ab#* }')" || echo "✗ A→B failed (probe=$probe_ab)"
 fed_log "B→A MERGE (reverse — the NAT'd member must also PUSH to the owner)"
-probe_ba="$(fed_hive_merge_probe b a "$B_MEMBER_SLUG" F-NAT-B2A 90 || true)"
+probe_ba="$(fed_hive_merge_probe b a "$B_MEMBER_SLUG" F-NAT-B2A 180 || true)"
 ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 [ "$ba" = 1 ] && echo "✓ B→A: F-NAT-B2A federated into A origin=remote (slug='${probe_ba#* }')" || echo "✗ B→A failed (probe=$probe_ba)"
 
