@@ -94,6 +94,15 @@ rig_init() {
   RIG_SLUG="hzdeb${RIG_WORK##*.}"
   RIG_SERVERS_FILE="$RIG_WORK/servers"; : > "$RIG_SERVERS_FILE"
   RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
+  # WI-1442 fix (c) / WI-1628: stamp every server this run creates with the
+  # CREATING AGENT's owner id (a Hetzner label — see rig_create_server below) so
+  # the orphan-frame reaper can resolve whose coord:presence to check before ever
+  # destroying a frame a hard-killed agent left running. Sanitized to Hetzner's
+  # label-value charset ([a-zA-Z0-9_.-], <=63 chars) — PAPERCUSP_SID (su-<uuid>)
+  # already fits; the fallback keeps rig_create_server working (unlabeled) for a
+  # shell that isn't a papercusp agent session, at the cost of the reaper skipping
+  # those frames (no owner to verify — see hetzner-orphan-frame-reaper.ts's safety model).
+  RIG_OWNER_LABEL="$(printf '%s' "${PAPERCUSP_SID:-}" | tr -c 'a-zA-Z0-9_.-' '-' | cut -c1-63)"
   # Hetzner recycles the same public IPs run-to-run, so a persisted mux master
   # from a DESTROYED frame would poison the new frame's connections — start clean.
   rm -f /tmp/deb-hzfed-mux-* 2>/dev/null || true
@@ -141,9 +150,13 @@ rig_create_server() {
   # retry). So: retry the create up to 3×, and on ANY attempt also try to
   # RECOVER the id by name — covering both the transient-empty and the
   # created-but-unreported cases without double-provisioning.
+  # WI-1628: label body fragment — empty ({}) when no owner is resolvable (a shell
+  # outside a papercusp agent session), so create() behaves exactly as before.
+  local labels_json="{}"
+  [ -n "${RIG_OWNER_LABEL:-}" ] && labels_json="{\"pcusp-owner\":\"$RIG_OWNER_LABEL\"}"
   for try in 1 2 3; do
     resp="$(rig_hz -X POST 'https://api.hetzner.cloud/v1/servers' -H 'content-type: application/json' \
-      -d "{\"name\":\"$name\",\"server_type\":\"$RIG_STYPE\",\"image\":\"$RIG_IMAGE\",\"location\":\"$loc\",\"ssh_keys\":[$RIG_SSH_KEY_ID]}")"
+      -d "{\"name\":\"$name\",\"server_type\":\"$RIG_STYPE\",\"image\":\"$RIG_IMAGE\",\"location\":\"$loc\",\"ssh_keys\":[$RIG_SSH_KEY_ID],\"labels\":$labels_json}")"
     id="$(printf '%s' "$resp" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("server",{}).get("id") or "")' 2>/dev/null)"
     [ -n "$id" ] && break
     id="$(rig_hz "https://api.hetzner.cloud/v1/servers?name=$name" | python3 -c 'import json,sys;s=json.load(sys.stdin).get("servers",[]);print(s[0]["id"] if s else "")' 2>/dev/null)"
