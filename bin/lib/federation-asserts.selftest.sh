@@ -120,6 +120,22 @@ else
   ok "fed_local_launch_sidecar rejects empty ports"
 fi
 
+# 6) ambient-env neutralization (the 2026-07-03 P-002 layer-4 class): fleet
+#    shells carry PAPERCUSP_DHT_HOST=<bridge-ip> and PAPERCUSP_DHT_BOOTSTRAP=
+#    <bridge-ip:port>; a launcher that INHERITS either swarm-binds/bootstraps
+#    loopback smokes on the bridge → 0 peer dials. Static guard: every local
+#    launcher must force-empty BOTH (trailing "$@" still lets callers opt in).
+for fn in fed_local_launch fed_local_launch_sidecar; do
+  body="$(declare -f "$fn")"
+  for var in PAPERCUSP_DHT_HOST PAPERCUSP_DHT_BOOTSTRAP; do
+    if printf '%s\n' "$body" | grep -q "${var}= "; then
+      ok "$fn force-empties ambient $var"
+    else
+      bad "$fn no longer force-empties ambient $var (P-002 layer-4 regression)"
+    fi
+  done
+done
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1

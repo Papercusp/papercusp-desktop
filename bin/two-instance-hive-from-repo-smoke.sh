@@ -189,6 +189,8 @@ sc_launch() {
         PATH="$SIDECAR_SRC/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+        PAPERCUSP_DHT_HOST= \
+        PAPERCUSP_DHT_BOOTSTRAP= \
         PAPERCUSP_HONO_PORT="$hono_port" PAPERCUSP_PG_PORT="$pg_port" \
         PAPERCUSP_PG_DATA_DIR="$home/.papercusp/embedded-pg-data" \
         PAPERCUSP_PG_SQL_DIR="$SIDECAR_SRC/db-sql" \
