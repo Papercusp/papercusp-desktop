@@ -36,8 +36,9 @@
 #   LOCAL-ONLY — never crosses machines (per-machine PG / in-process):
 #     • coord_presence (the RAW per-session roster — distinct from shared_presence).
 #     • coord_watermarks (per-agent read cursor).
-#     • coord_subscriptions + the events/await store & pump — an events:emit on A
-#       CANNOT fire an events:await registered on B (engine.ts over local org PG).
+#     • event_awaits (the events:await store, mig 163; the old coord_subscriptions
+#       table was DROPPED in mig 127) & the pump — an events:emit on A CANNOT fire
+#       an events:await registered on B (engine.ts over local org PG).
 #     • plan_item_claims (leased claim), inbox fan-out delivery copies (each
 #       machine regenerates deliveries from its OWN subscriptions).
 #
@@ -59,8 +60,9 @@
 #   POSITIVE (must FEDERATE): a harness-scoped coord message / escalation / handoff
 #            row written on A arrives origin='remote' on B (the wire is capable);
 #            a fed: presence row for A shows up in B's shared_presence.
-#   NEGATIVE (must stay LOCAL): coord_presence (raw), coord_watermarks, and a
-#            coord_subscriptions (await) row written on A must NEVER appear on B.
+#   NEGATIVE (must stay LOCAL): coord_presence (raw), coord_watermarks, and an
+#            event_awaits (await) row written on A must NEVER appear on B —
+#            each probe first proves its row LANDED on A (non-vacuousness guard).
 #   BASELINE: a content feature federates A→B (so a NEGATIVE means "not federated",
 #            not "wire down").
 #
@@ -265,23 +267,47 @@ scenario_coord_controlplane() {
   [ -n "$PWS" ] || PWS="default"
   NTS="$(date +%s)"
 
+  # _ctrl_row_on_a <pred> — echoes 1 iff the probe row EXISTS on A. The
+  # non-vacuousness guard (2026-07-03, WI-1510 residual): an absence-assert on B
+  # proves NOTHING when the write on A silently failed (rig_assert_row_absent
+  # swallows query errors, so even a dropped table "passes").
+  _ctrl_row_on_a() { drv_psql "$OWNER" "SELECT 1 FROM $1 LIMIT 1;" 2>/dev/null | tr -d '[:space:]'; }
+
   # coord_presence: the RAW per-session roster (distinct from shared_presence). Table-local.
   PRES_OWNER="ctrl-presence-$NTS"
   drv_psql "$OWNER" "INSERT INTO harness_shared.coord_presence (owner_id,owner_label,workspace_id,source,intent) VALUES ('$PRES_OWNER','ctrl','$PWS','ctrl-probe','control-plane presence probe');" >/dev/null
-  n_pres="$(rig_assert_row_absent "$MEMBER" "harness_shared.coord_presence WHERE owner_id='$PRES_OWNER'" 18 || true)"
-  [ "$n_pres" = 1 ] && echo "✓ coord_presence (raw) stayed LOCAL to A — cross-machine visibility comes via shared_presence, not this table" || echo "✗ coord_presence leaked to B (unexpected)"
+  if [ "$(_ctrl_row_on_a "harness_shared.coord_presence WHERE owner_id='$PRES_OWNER'")" != 1 ]; then
+    n_pres=0; echo "✗ PRESENCE probe row never landed on A (schema drift?) — refusing a vacuous verdict"
+  else
+    n_pres="$(rig_assert_row_absent "$MEMBER" "harness_shared.coord_presence WHERE owner_id='$PRES_OWNER'" 18 || true)"
+    [ "$n_pres" = 1 ] && echo "✓ coord_presence (raw) stayed LOCAL to A — cross-machine visibility comes via shared_presence, not this table" || echo "✗ coord_presence leaked to B (unexpected)"
+  fi
 
   # coord_watermarks: per-agent read cursor. Local-only by design.
   WM_OWNER="ctrl-wm-$NTS"
   drv_psql "$OWNER" "INSERT INTO harness_shared.coord_watermarks (workspace_id,owner_id,surfaces) VALUES ('$PWS','$WM_OWNER','{\"messages\":\"$NTS\"}'::jsonb);" >/dev/null
-  n_wm="$(rig_assert_row_absent "$MEMBER" "harness_shared.coord_watermarks WHERE owner_id='$WM_OWNER'" 18 || true)"
-  [ "$n_wm" = 1 ] && echo "✓ WATERMARK stayed LOCAL to A — read cursors are per-machine" || echo "✗ WATERMARK leaked to B (unexpected)"
+  if [ "$(_ctrl_row_on_a "harness_shared.coord_watermarks WHERE owner_id='$WM_OWNER'")" != 1 ]; then
+    n_wm=0; echo "✗ WATERMARK probe row never landed on A (schema drift?) — refusing a vacuous verdict"
+  else
+    n_wm="$(rig_assert_row_absent "$MEMBER" "harness_shared.coord_watermarks WHERE owner_id='$WM_OWNER'" 18 || true)"
+    [ "$n_wm" = 1 ] && echo "✓ WATERMARK stayed LOCAL to A — read cursors are per-machine" || echo "✗ WATERMARK leaked to B (unexpected)"
+  fi
 
-  # coord_subscriptions: events:await registry ⇒ emit@A cannot fire await@B.
-  SUB_MID="ctrl-sub-$NTS"
-  drv_psql "$OWNER" "INSERT INTO harness_shared.coord_subscriptions (msg_id,workspace_id,owner_id,pattern,trigger) VALUES ('$SUB_MID','$PWS','ctrl-await','ctrl:probe:$NTS','ctrl-probe');" >/dev/null
-  n_sub="$(rig_assert_row_absent "$MEMBER" "harness_shared.coord_subscriptions WHERE msg_id='$SUB_MID'" 18 || true)"
-  [ "$n_sub" = 1 ] && echo "✓ AWAIT-SUBSCRIPTION stayed LOCAL to A — emit@A cannot fire await@B" || echo "✗ AWAIT-SUBSCRIPTION leaked to B (unexpected)"
+  # event_awaits: the events:await registry (harness_shared.event_awaits, mig 163)
+  # ⇒ emit@A cannot fire await@B. The pre-2026-07-03 probe INSERTed into
+  # coord_subscriptions — DROPPED in mig 127 — so the INSERT errored and the
+  # absence-assert "passed" against a nonexistent table: a VACUOUS verdict
+  # (WI-1510 residual). Class fix: every negative probe must prove its row
+  # LANDED on A before asserting absence on B (_ctrl_row_on_a below).
+  SUB_KEY="ctrl:await:$NTS"
+  drv_psql "$OWNER" "INSERT INTO harness_shared.event_awaits (workspace_id,subscriber_id,event_key,policy,note,expires_ts) VALUES ('$PWS','ctrl-await','$SUB_KEY','notify','control-plane negative probe',now() + interval '15 minutes');" >/dev/null
+  if [ "$(_ctrl_row_on_a "harness_shared.event_awaits WHERE event_key='$SUB_KEY'")" != 1 ]; then
+    n_sub=0
+    echo "✗ AWAIT probe row never landed on A (schema drift?) — refusing a vacuous verdict"
+  else
+    n_sub="$(rig_assert_row_absent "$MEMBER" "harness_shared.event_awaits WHERE event_key='$SUB_KEY'" 18 || true)"
+    [ "$n_sub" = 1 ] && echo "✓ AWAIT-SUBSCRIPTION (event_awaits) stayed LOCAL to A — emit@A cannot fire await@B" || echo "✗ AWAIT-SUBSCRIPTION leaked to B (unexpected)"
+  fi
 
   # ── MATRIX report ────────────────────────────────────────────────────────
   fed_log "BRIEF 7 COORD CONTROL-PLANE MATRIX (live, 2 machines)"
