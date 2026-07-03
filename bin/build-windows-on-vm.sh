@@ -75,6 +75,16 @@ trap 'rm -f "$TARBALL"' EXIT
 #   - sidecar/bin/omp (485 MB): OMP integration is Windows-unsupported in
 #     v1 (desktop-app-install-integration-2026-05-23 D-002; the endpoint
 #     short-circuits with windows_not_supported_in_v1).
+# Serialize the pack against build-desktop-sidecar.sh's atomic sidecar publish:
+# that script holds an flock on src-tauri/sidecar.lock for its whole build and
+# finishes with an atomic rename of sidecar.tmp.<pid> → sidecar/. In a shared
+# tree a CONCURRENT fleet sidecar build renaming sidecar/ mid-tar makes tar die
+# "file changed as we read it" (STAGE2_FAILED exit=1, observed 2026-07-03 with
+# two agents building at once). Taking the SAME lock blocks the tar until any
+# in-flight publish completes AND blocks a new publish from starting until the
+# read is done, so the tree is stable across the whole pack. flock creates the
+# lock file if absent (harmless — it's excluded from the tarball below).
+flock "$ROOT/src-tauri/sidecar.lock" \
 tar -czhf "$TARBALL" \
   --exclude='.git' \
   --exclude='papercusp-desktop/node_modules' \

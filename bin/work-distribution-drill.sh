@@ -127,9 +127,16 @@ H_WS="x-papercusp-workspace: $WS"
 log "create + publish PUBLIC hive ($REPO_URL)"
 resp="$(curl -s -m 610 -X POST "$SC/api/harness/hives/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
+# Two OK shapes: fresh 'created', or 'existing' — the identity+repo hive anchor
+# persists ACROSS instance homes (earlier same-identity smoke runs registered
+# hello-world-hive), so a fresh home can get { ok:true, existing:{ hive:{ hiveId } } }.
 HIVE_SLUG="$(jget "$resp" "d['created']['hiveSlug']")"
+HIVE_PATH="created"
+if [ -z "$HIVE_SLUG" ]; then
+  HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['hiveId']")"; HIVE_PATH="existing"
+fi
 [ -n "$HIVE_SLUG" ] || { echo "✗ hive create failed: $(echo "$resp" | head -c 300)"; exit 6; }
-echo "  hive=$HIVE_SLUG"
+echo "  hive=$HIVE_SLUG (path=$HIVE_PATH)"
 
 # ── LEG G: grant Delegate ────────────────────────────────────────────────────
 log "LEG G — grant Delegate to fleet '$DRILL_FLEET'"
