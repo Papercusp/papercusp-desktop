@@ -127,26 +127,31 @@ fed_fresh_display() {
 # ── local testnet DHT (deterministic discovery without the public DHT) ──────
 
 # fed_start_testnet_dht <operator_dir> <work> [advertise_host]
-# Spins a hyperdht/testnet on the host. With no advertise_host it binds 127.0.0.1
-# and uses 3 nodes (same-box loopback discovery — all reachable on loopback). With
-# an advertise_host (the fed-bridge IP 10.77.0.1) it binds 0.0.0.0 and runs a
-# SINGLE node advertised on that host: a multi-node testnet's secondary nodes
-# advertise host-internal (127.0.0.1) addresses the VMs cannot reach over the
-# bridge, so a VM peer's DHT lookups to them fail and holepunch coordination
-# stalls (peers join the topic but never peer_connect). One reachable node on the
-# bridge IP is sufficient to coordinate two peers + announces it cleanly.
+# Spins a hyperdht/testnet on the host — ALWAYS 3 nodes. A single-node testnet
+# can NEVER work (WI-1910 root cause): dht-rpc sends announce commits only to
+# closestReplies and bootstrap nodes never take commits, so a bootstrap-only DHT
+# stores zero announces — joins print green, lookups return [], zero dials.
+# Minimum viable testnet = bootstrap + ≥2 storage nodes (createTestnet(3)).
+# With no advertise_host it binds 127.0.0.1 (same-box loopback discovery). With
+# an advertise_host (a VM-bridge IP) all nodes bind 0.0.0.0 and the bootstrap
+# is advertised on that host — the shape live-proven by
+# papercup-isolated-dht.service (172.31.44.1, tower↔VM federation flowing).
+# (The pre-WI-1910 claim that bridge secondaries advertise 127.0.0.1 doesn't
+# match current testnet.js — bindHost is 0.0.0.0 whenever host≠127.0.0.1. If a
+# bridge rig ever shows secondaries advertising an unreachable addr, fall back
+# to the containerized 3-node shape in local-matrix.sh.)
 # Echoes the bootstrap list (host:port,…); appends the node pid to FED_KILL_PIDS.
 fed_start_testnet_dht() {
   local operator_dir="$1" work="$2" host="${3:-}"
-  fed_log "spin local testnet DHT (hyperdht/testnet${host:+, single node advertised on $host})" >&2
+  fed_log "spin local testnet DHT (hyperdht/testnet, 3 nodes${host:+, advertised on $host})" >&2
   # $work rides argv as a cleanup marker: killing the launching subshell pid
   # orphans the node child, but fed_cleanup_scoped's `grep -F "$work"` over
   # ps args catches it (the pre-refactor smokes leaked these DHT nodes).
   ( cd "$operator_dir" && PAPERCUSP_DHT_HOST="$host" node --input-type=module -e '
       import createTestnet from "hyperdht/testnet.js";
       const host = process.env.PAPERCUSP_DHT_HOST || undefined;
-      // host-advertised (bridge) → 1 reachable node; loopback → 3 (all reachable).
-      const t = await createTestnet(host ? 1 : 3, host ? { host } : {});
+      // ALWAYS 3 nodes — a bootstrap-only testnet can never store an announce (WI-1910).
+      const t = await createTestnet(3, host ? { host } : {});
       console.log("BOOTSTRAP=" + t.bootstrap.map(b => b.host + ":" + b.port).join(","));
       console.error("[testnet] nodes=" + t.nodes.length + " bootstrap=" + JSON.stringify(t.bootstrap));
       process.stdin.resume();
