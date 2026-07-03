@@ -254,8 +254,11 @@ scenario_replication_liveness_soak() {
   if [ "$rc" = 0 ]; then
     local frame hits
     for frame in "$OWNER" "$MEMBER"; do
-      hits="$(echo "grep -c 'replication_stalled\|replication_frozen' \$(ls /home/pcusp/serve.log 2>/dev/null) 2>/dev/null || echo 0" | drv_exec "$frame" | tail -1 | tr -d '[:space:]')"
-      if [ "${hits:-0}" != "0" ] && [ -n "${hits:-}" ]; then
+      # $(drv_applog "$frame") resolves LOCALLY to the frame's app-log path
+      # (/home/pcusp/serve.log on the rig driver); the grep runs remotely.
+      hits="$(printf '%s\n' "grep -c 'replication_stalled\|replication_frozen' '$(drv_applog "$frame")' 2>/dev/null; true" \
+        | drv_exec "$frame" 2>/dev/null | tail -1 | tr -d '[:space:]')"
+      if [ -n "${hits:-}" ] && [ "${hits}" != "0" ]; then
         echo "  ✗ detector-noise: frame '$frame' logged $hits replication stall event(s) during a soak whose probes all passed — false positive, fix the detector"
         rc=1
       else

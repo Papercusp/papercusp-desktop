@@ -50,7 +50,11 @@ GATE_DISPLAY="${GATE_DISPLAY:-250}"; OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http:
 GATE_NO_FILE="${GATE_NO_FILE:-0}"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
-log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*"; }
+# log → STDERR. Load-bearing (P-013 validation run 2026-07-03): run_smoke's result is read
+# via $(command substitution); with log on stdout the captured value became
+# "log-line\nPASS|FAIL", so `[ "$RES" = FAIL ]` could NEVER match and a genuine
+# content-matrix FAIL was silently MASKED out of the verdict. journald captures both streams.
+log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
 
 # ── state + staleness (P-013): a gate that silently skips forever LOOKS green. ──
 # last-green/last-run live in a tiny ops state dir. Deliberately a FILE, not PG: the gate
@@ -66,8 +70,16 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
   local resp
   resp="$(curl -s -m 30 -X POST "$OPERATOR_MCP_URL" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercup\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]}}}" 2>/dev/null || true)"
-  log "EI filing → ${resp:0:200}"
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercusp\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]}}}" 2>/dev/null || true)"
+  # Verify the filing actually landed (P-013: the 2026-07-03 red filed against harness
+  # "papercup" + got an SSE ':stream-open' preamble back and NO work item was created —
+  # a silent-miss on the gate's core contract). An SSE body carries the JSON in data: lines.
+  if printf '%s' "$resp" | grep -qa '"id":"WI-'; then
+    log "EI filed OK → $(printf '%s' "$resp" | grep -oa '"id":"WI-[0-9]*"' | head -1)"
+  else
+    log "EI filing DID NOT CONFIRM (no WI id in response) — resp head: ${resp:0:200}"
+    log "EI filing FALLBACK: verdict + logs remain in $WORK and journald; file manually if this red is real."
+  fi
 }
 check_staleness() { # called on every non-GREEN exit path: silence must never look like green
   local green_age_h; green_age_h="$(age_h "$STATE_DIR/last-green")"
@@ -189,8 +201,12 @@ fi
 # Runs the full containerized 8-scenario matrix on a WEEKLY cadence once the one-command
 # wrapper exists (bin/local-matrix.sh, P-002 of shared-hive-p2p-release-readiness-2026-07-03).
 # Contract: exit 0 = matrix green. No-op until the wrapper exists.
+# SEQUENCING (per the plan item: "+ (once green) the local matrix on cadence"): the matrix
+# leg piggybacks ONLY on a window whose content-matrix smoke PASSED — running the heavy,
+# newly-landed matrix on a window whose cheap smoke already failed just burns the box and
+# pollutes the verdict (exactly what the 2026-07-03 validation run showed).
 MATRIXFULL_RES="SKIPPED"
-if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
+if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ "$MATRIX_RES" = PASS ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
   if [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ]; then
     log "running local-matrix (weekly cadence) …"
     if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ) >"$WORK/local-matrix.out" 2>&1; then
