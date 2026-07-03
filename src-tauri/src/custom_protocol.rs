@@ -67,10 +67,29 @@ pub const SCHEME: &str = "papercusp";
 /// ON on every platform — the documented Linux-only intent above was never
 /// implemented, which shipped a blank webview in the packaged macOS app.)
 pub fn enabled() -> bool {
-    match std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() {
+    scheme_default(
+        std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL")
+            .ok()
+            .as_deref(),
+        std::env::consts::OS,
+    )
+}
+
+/// Pure decision behind [`enabled()`]: does the window default to the
+/// `papercusp://` scheme, given an explicit env override and the target OS?
+///
+/// Kept free of `env` / `cfg!` reads so it is unit-testable for EVERY platform
+/// from CI — which builds on Linux and so can NEVER exercise the macOS/Windows
+/// `cfg!` arm directly. The blank-macOS-webview regression (2026-07-01) shipped
+/// precisely because the Linux-only intent lived only in a `cfg!` + a docstring,
+/// with no test the Linux CI host could run. `target_os` takes the values of
+/// [`std::env::consts::OS`] (`"linux"`, `"macos"`, `"windows"`, …), so
+/// `enabled()` stays byte-for-byte equivalent to the old `cfg!(target_os = …)`.
+fn scheme_default(env_override: Option<&str>, target_os: &str) -> bool {
+    match env_override {
         Some("1") => true,
         Some("0") => false,
-        _ => cfg!(target_os = "linux"),
+        _ => target_os == "linux",
     }
 }
 
