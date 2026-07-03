@@ -204,11 +204,18 @@ fed_local_launch_sidecar() {
   mkdir -p "$home/.config" "$home/.papercusp"
   ln -sf "$HOME/.config/gh" "$home/.config/gh"
   ln -sf "$HOME/.gitconfig" "$home/.gitconfig" 2>/dev/null || true
+  # PAPERCUSP_DHT_HOST is force-EMPTIED (→ hyperswarm default binding): fleet
+  # desktop sessions carry an ambient PAPERCUSP_DHT_HOST=<bridge-ip> for the
+  # tower↔VM rig, and a loopback smoke inheriting it binds/advertises the swarm
+  # on the bridge → peers never dial (0 peer_connected fleet-wide, 2026-07-03).
+  # A caller that WANTS a host passes PAPERCUSP_DHT_HOST=<ip> in the trailing
+  # VAR=val args ("$@" below wins over the earlier assignment).
   ( cd "$side"
     env HOME="$home" \
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+        PAPERCUSP_DHT_HOST= \
         PAPERCUSP_HONO_PORT="$hono_port" PAPERCUSP_PG_PORT="$pg_port" \
         PAPERCUSP_PG_DATA_DIR="$home/.papercusp/embedded-pg-data" \
         PAPERCUSP_PG_SQL_DIR="$side/db-sql" \
