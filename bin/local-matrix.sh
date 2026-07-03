@@ -101,10 +101,10 @@ printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${RIG_LOCK_LABEL:-${USER:-?}:local-m
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
   log "teardown: frames + DHT"
-  docker rm -f "$CN_A" "$CN_B" >/dev/null 2>&1 || true
+  docker rm -f "$CN_A" "$CN_B" "$NET-dht" >/dev/null 2>&1 || true
   if [ -f "$STATE_FILE" ]; then
     local pid; pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true   # legacy host-pid DHT state
     rm -f "$STATE_FILE"
   fi
   docker network rm "$NET" >/dev/null 2>&1 || true
@@ -201,36 +201,59 @@ for ip in "$IP_A" "$IP_B"; do
 done
 log "frames ssh-ready"
 
-# ── host-side testnet DHT advertised on the bridge gateway ───────────────────
-# Single node on the gateway ip — a multi-node testnet's secondary nodes
-# advertise 127.0.0.1 addresses the frames cannot reach (same finding as
-# fed_start_testnet_dht in bin/lib/federation-asserts.sh).
+# ── testnet DHT: 3 nodes IN A CONTAINER on the rig bridge (WI-1910 root fix) ──
+# A single-node testnet is broken-BY-CONSTRUCTION for discovery: dht-rpc never
+# COMMITS announces to bootstrap nodes, so a 1-node "DHT" stores nothing and no
+# peer can ever find another — every containerized-rig run failed peer_connect
+# REGARDLESS of deb (WI-1910, root-caused by 85300, thread post 49998). A
+# host-side multi-node testnet is also wrong: on a multi-homed host the
+# non-bootstrap nodes advertise the LAN ip (192.168.x.x), unreachable from the
+# frames (probe: /tmp/wi1910-audit/dht99x3.log). Fix: createTestnet(3,{host})
+# INSIDE a container ON the rig bridge with a static ip — all three nodes bind
+# + advertise that bridge ip, announces commit to the two storage nodes, and
+# frames reach everything as same-bridge c2c traffic (no ufw INPUT dependency).
+DHT_IP="${PCUSP_LOCAL_RIG_DHT_IP:-${GW%.*}.5}"
+DHT_CN="$NET-dht"
+SIDECAR_NODE="$DESKTOP_DIR/src-tauri/sidecar/bin/node"
 BOOTSTRAP=""
 if [ "$REUSE" = 1 ] && [ -f "$STATE_FILE" ]; then
-  pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  if [ -n "$(docker ps -q -f "name=^${DHT_CN}\$")" ]; then
     BOOTSTRAP="$(sed -n 's/^BOOTSTRAP=//p' "$STATE_FILE" | head -1)"
-    log "reuse DHT pid=$pid bootstrap=$BOOTSTRAP"
+    log "reuse DHT container $DHT_CN bootstrap=$BOOTSTRAP"
+  else
+    # stale state (legacy host-pid DHT or dead container) — clean, fall through
+    pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   fi
 fi
 if [ -z "$BOOTSTRAP" ]; then
-  dhtlog="$(mktemp /tmp/pcusp-local-rig-dht.XXXXXX.log)"
-  log "start testnet DHT (single node, advertised on $GW)"
-  ( cd "$OPERATOR_DIR" && PAPERCUSP_DHT_HOST="$GW" node --input-type=module -e '
-      import createTestnet from "hyperdht/testnet.js";
-      const host = process.env.PAPERCUSP_DHT_HOST;
-      const t = await createTestnet(1, { host });
-      console.log("BOOTSTRAP=" + t.bootstrap.map(b => b.host + ":" + b.port).join(","));
-      process.stdin.resume();
-    ' ) >"$dhtlog" 2>&1 &
-  DHT_PID=$!
-  for i in $(seq 1 20); do
-    BOOTSTRAP="$(sed -n 's/^BOOTSTRAP=//p' "$dhtlog" | head -1)"
+  [ -x "$SIDECAR_NODE" ] || { echo "FATAL: sidecar node binary missing at $SIDECAR_NODE (build once: bin/build-desktop-sidecar.sh)" >&2; exit 1; }
+  dhtjs="$(mktemp /tmp/pcusp-local-rig-dht.XXXXXX.cjs)"
+  cat >"$dhtjs" <<'DHTJS'
+const createTestnet = require('/opt/app/node_modules/hyperdht/testnet.js');
+(async () => {
+  const t = await createTestnet(3, { host: process.env.GW });
+  console.log('BOOTSTRAP=' + t.bootstrap.map(b => b.host + ':' + b.port).join(','));
+  for (const n of t.nodes) console.log('node: ' + n.host + ':' + n.port + ' ephemeral=' + n.ephemeral);
+  process.stdin.resume();
+})().catch(e => { console.error('FATAL', e); process.exit(1); });
+DHTJS
+  log "start testnet DHT (3 nodes, containerized @ $DHT_IP — WI-1910 fix)"
+  docker rm -f "$DHT_CN" >/dev/null 2>&1 || true
+  docker run -d -i --name "$DHT_CN" --network "$NET" --ip "$DHT_IP" \
+    -e GW="$DHT_IP" \
+    -v "$ROOT":/opt/app:ro \
+    -v "$SIDECAR_NODE":/usr/local/bin/pcusp-node:ro \
+    -v "$dhtjs":/dht.cjs:ro \
+    --entrypoint /usr/local/bin/pcusp-node \
+    "$IMAGE_TAG" /dht.cjs >/dev/null || { echo "FATAL: DHT container failed to start" >&2; exit 1; }
+  for i in $(seq 1 30); do
+    BOOTSTRAP="$(docker logs "$DHT_CN" 2>/dev/null | sed -n 's/^BOOTSTRAP=//p' | head -1)"
     [ -n "$BOOTSTRAP" ] && break; sleep 1
   done
-  [ -n "$BOOTSTRAP" ] || { echo "FATAL: testnet DHT did not start:" >&2; cat "$dhtlog" >&2; exit 1; }
-  printf 'DHT_PID=%s\nBOOTSTRAP=%s\n' "$DHT_PID" "$BOOTSTRAP" > "$STATE_FILE"
-  log "DHT up pid=$DHT_PID bootstrap=$BOOTSTRAP"
+  [ -n "$BOOTSTRAP" ] || { echo "FATAL: containerized testnet DHT did not start:" >&2; docker logs "$DHT_CN" 2>&1 | tail -20 >&2; exit 1; }
+  printf 'DHT_CONTAINER=%s\nBOOTSTRAP=%s\n' "$DHT_CN" "$BOOTSTRAP" > "$STATE_FILE"
+  log "DHT up container=$DHT_CN bootstrap=$BOOTSTRAP"
 fi
 
 # ── ufw hint (frames → gateway DHT is INPUT-chain traffic on the bridge) ──────
