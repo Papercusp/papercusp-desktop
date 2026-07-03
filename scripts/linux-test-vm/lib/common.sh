@@ -106,9 +106,16 @@ vm_running() {  # vm_running <name>
 }
 
 # Resolve the newest packaged .deb in the desktop bundle output.
+# Two path/name generations (2026-07-03, P-002 shared-hive-p2p-release-readiness):
+# cargo redirects builds to CARGO_TARGET_DIR (~/.cargo-target on the dev box) and
+# the productName rename emits "Papercusp GUI_*.deb" (space included) — the old
+# in-tree "Papercusp_*" glob silently kept resolving an 18-day-stale artifact.
+# Search BOTH locations + BOTH name shapes, newest wins.
 default_deb() {
   local deb
-  deb="$(ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1)"
+  deb="$(ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
+               "${CARGO_TARGET_DIR:-$HOME/.cargo-target}"/release/bundle/deb/Papercusp*_amd64.deb \
+               2>/dev/null | head -1)"
   [ -n "$deb" ] && _warn_if_deb_stale "$deb"
   printf '%s\n' "$deb"
 }
