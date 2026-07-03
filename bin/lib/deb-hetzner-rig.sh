@@ -507,7 +507,22 @@ rig_restart_sidecar() {
 set -e
 H=/home/pcusp
 pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1
-pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true; sleep 2
+pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true
+# shm-race hygiene (WI-183 rig hardening; seen LIVE 2026-07-03 19:46Z frame b):
+# the old pkill + sleep 2 + pid-file-clear UNDER-COVERS the class — PG backends
+# can outlive the 2s grace still ATTACHED to the old SysV segment, and the
+# relaunched postmaster then dies 'pre-existing shared memory block … is still
+# in use' (EMBEDDED_PG_FAILED). So: (a) WAIT until every pcusp postgres has
+# actually EXITED (escalate to SIGKILL once), then (b) reap ALL leftover
+# pcusp-owned SysV shm+sem IDs — no legit PG for this pgdata exists at this
+# point, so anything left is an orphan holding the key the new postmaster wants.
+for i in $(seq 1 20); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
+if pgrep -u pcusp -f 'bin/postgres' >/dev/null; then
+  pkill -9 -u pcusp -f 'bin/postgres' 2>/dev/null || true
+  for i in $(seq 1 10); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
+fi
+for id in $(ipcs -m 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -m "$id" 2>/dev/null || true; done
+for id in $(ipcs -s 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -s "$id" 2>/dev/null || true; done
 # stale-lock hygiene: an orphaned/killed PG can leave postmaster.pid behind;
 # with no live postgres for this pgdata, clear it or the boot dies EMBEDDED_PG_FAILED
 pgrep -u pcusp -f 'bin/postgres' >/dev/null || rm -f "$H/pgdata/postmaster.pid"

@@ -50,10 +50,24 @@ SUBNET="${PCUSP_LOCAL_RIG_SUBNET:-10.99.0.0/24}"
 GW="${PCUSP_LOCAL_RIG_GW:-10.99.0.1}"
 IP_A="${PCUSP_LOCAL_RIG_IP_A:-10.99.0.11}"
 IP_B="${PCUSP_LOCAL_RIG_IP_B:-10.99.0.12}"
-CN_A=pcusp-rig-a; CN_B=pcusp-rig-b
+# Frame/state/lock identity is scoped to the NET (2026-07-03 collision fix):
+# fixed container names made the rig ONE-PER-BOX even across separate bridge
+# networks — a run on a custom net `docker rm -f`'d the default net's LIVE
+# frames BY NAME (and vice versa; the 07-03 cross-lane collision destroyed a
+# kept forensic rig this way). Default net keeps the legacy names/paths so
+# existing runs/docs are untouched; a CUSTOM net gets its own container names,
+# state file, and flock — rigs on distinct nets are independent by construction.
+if [ "$NET" = pcusp-local-rig ]; then
+  CN_A="${PCUSP_LOCAL_RIG_CN_A:-pcusp-rig-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-pcusp-rig-b}"
+  STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/pcusp-local-rig.state}"
+  RIG_LOCK_DEFAULT=/tmp/pcusp-local-rig.lock
+else
+  CN_A="${PCUSP_LOCAL_RIG_CN_A:-$NET-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-$NET-b}"
+  STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/$NET.state}"
+  RIG_LOCK_DEFAULT="/tmp/$NET.lock"
+fi
 IMAGE_TAG=pcusp-local-frame:ubuntu24
 SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
-STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/pcusp-local-rig.state}"
 
 # ── args ──────────────────────────────────────────────────────────────────────
 DEB=""; ONLY=""; KEEP_UP=0; REUSE=0; MODE=run
@@ -72,8 +86,8 @@ log() { echo "[local-matrix] $*" >&2; }
 
 [ "$MODE" = list ] && exec bash "$DESKTOP_DIR/bin/deb-hetzner-matrix.sh" --list
 
-# ── single-tenant lock ────────────────────────────────────────────────────────
-# The rig is ONE-PER-BOX: fixed container names + IPs, a shared bridge network,
+# ── single-tenant lock (per-NET since the 07-03 collision fix) ───────────────
+# The rig is ONE-PER-NET: fixed container names + IPs, a shared bridge network,
 # and a gateway DHT. Without a lock, two concurrent runs mutually destroy each
 # other: provisioning `docker rm -f`s the other run's LIVE frames, and the EXIT
 # trap tears down the shared net/DHT mid-run (2026-07-03 P-004×P-002 collision:
@@ -84,7 +98,7 @@ log() { echo "[local-matrix] $*" >&2; }
 # holder; RIG_LOCK_WAIT_S=0 fails fast (exit 3). The lock releases on process
 # exit (flock fd semantics) — after a --keep-up run the frames stay up but the
 # rig becomes claimable, on purpose (--reuse re-enters; a full run replaces).
-RIG_LOCK="${PCUSP_LOCAL_RIG_LOCK:-/tmp/pcusp-local-rig.lock}"
+RIG_LOCK="${PCUSP_LOCAL_RIG_LOCK:-$RIG_LOCK_DEFAULT}"
 exec 9>>"$RIG_LOCK" || { echo "FATAL: cannot open rig lock $RIG_LOCK" >&2; exit 1; }
 if ! flock -n 9; then
   RIG_LOCK_HOLDER="$(cat "$RIG_LOCK.holder" 2>/dev/null || echo 'unknown holder')"
