@@ -180,15 +180,109 @@ scenario_restart_durability() {
   return 1
 }
 
+# ── P-004 (WI-1840, WI-183 class): replication-liveness RESTART SOAK ────────────
+# shared-hive-p2p-release-readiness-2026-07-03 P-004. The WI-183/P-059 failure is
+# a peer that RE-CONNECTS after a restart (peer_connected both ways) while
+# peer-log replication silently never resumes. One restart passing proves little
+# — the class is intermittent. This soak does N kill/restart cycles (alternating
+# member/owner) and asserts LIVE replication re-establishes EVERY cycle, BOTH
+# directions, within a stated SLA — plus a negative detector-assert: the
+# replication-liveness detector must NOT have fired (no replication_stalled /
+# replication_frozen in serve.log) during a healthy soak.
+#
+# Knobs: RL_SOAK_CYCLES (default 5) · RL_SOAK_SLA_S (default 90 — seconds each
+# direction's probe write may take to land AFTER the restarted frame is ready).
+#
+# Runs on any rig that fills the shared frame globals (Hetzner, RIG_FRAME_IPS
+# local sshd containers, libvirt VM) — the LOCAL rigs are the proof of record
+# per plan decision D-001 (Hetzner access gone).
+scenario_replication_liveness_soak() {
+  local OWNER="${1:-a}" MEMBER="${2:-b}"
+  local cycles="${RL_SOAK_CYCLES:-5}" sla_s="${RL_SOAK_SLA_S:-90}"
+  local tries=$(( (sla_s + 2) / 3 ))   # _rd_poll_remote polls every 3s
+  local oslug="${FRAME_MEMBER_SLUG[$OWNER]:-}" mslug="${FRAME_MEMBER_SLUG[$MEMBER]:-}"
+  local ts; ts="$(date +%s)"
+  local rc=0 i target t0 t1
+
+  fed_log "═══ P-004: replication-liveness soak — $cycles kill/restart cycles, SLA ${sla_s}s/leg ═══"
+  if [ -z "$oslug" ] || [ -z "$mslug" ]; then
+    echo "✗ replication-soak: frames not joined (owner-slug='$oslug' member-slug='$mslug')"
+    echo "OVERALL: INCOMPLETE"; return 1
+  fi
+
+  for i in $(seq 1 "$cycles"); do
+    # Alternate the restart target: odd cycles restart the MEMBER, even the OWNER
+    # (WI-183's repro killed the member; P-059 was dead BOTH directions).
+    if [ $((i % 2)) = 1 ]; then target="$MEMBER"; else target="$OWNER"; fi
+    fed_log "[cycle $i/$cycles] COLD-RESTART frame '$target' → re-peer → probe BOTH directions (SLA ${sla_s}s)"
+    rig_restart_sidecar "$target"
+    if ! rig_wait_frame_ready "$target" 60; then
+      echo "  ✗ cycle $i: frame '$target' did not come back after restart"; rc=1; continue
+    fi
+    rig_wait_swarm "$OWNER" "$MEMBER" 70 \
+      || echo "  ⚠ cycle $i: swarm not re-peered within window (probes below still enforce the SLA)"
+
+    # Leg A: owner → member.
+    local fid_am="F-RLSOAK-${ts}-${i}-AM"
+    t0="$(date +%s)"
+    rig_write_content "$OWNER" "$oslug" "$fid_am" "replication soak c$i owner→member" todo >/dev/null
+    if _rd_poll_remote "$MEMBER" "$fid_am" "$tries" >/dev/null; then
+      t1="$(date +%s)"
+      echo "  ✓ cycle $i A→B: $fid_am landed on member in $((t1 - t0))s (SLA ${sla_s}s)"
+    else
+      echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class)"
+      rc=1
+    fi
+
+    # Leg B: member → owner (the reverse direction P-059 also lost).
+    local fid_ma="F-RLSOAK-${ts}-${i}-MA"
+    t0="$(date +%s)"
+    rig_write_content "$MEMBER" "$mslug" "$fid_ma" "replication soak c$i member→owner" todo >/dev/null
+    if _rd_poll_remote "$OWNER" "$fid_ma" "$tries" >/dev/null; then
+      t1="$(date +%s)"
+      echo "  ✓ cycle $i B→A: $fid_ma landed on owner in $((t1 - t0))s (SLA ${sla_s}s)"
+    else
+      echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class)"
+      rc=1
+    fi
+  done
+
+  # Negative detector-assert: a HEALTHY soak must not have tripped the
+  # replication-liveness detector on either frame. (If a leg above failed, the
+  # detector firing is EXPECTED and this check is skipped — the failure is
+  # already scored; the detector doing its job must not double-count.)
+  if [ "$rc" = 0 ]; then
+    local frame hits
+    for frame in "$OWNER" "$MEMBER"; do
+      hits="$(echo "grep -c 'replication_stalled\|replication_frozen' \$(ls /home/pcusp/serve.log 2>/dev/null) 2>/dev/null || echo 0" | drv_exec "$frame" | tail -1 | tr -d '[:space:]')"
+      if [ "${hits:-0}" != "0" ] && [ -n "${hits:-}" ]; then
+        echo "  ✗ detector-noise: frame '$frame' logged $hits replication stall event(s) during a soak whose probes all passed — false positive, fix the detector"
+        rc=1
+      else
+        echo "  ✓ detector quiet on frame '$frame' (no stall events during healthy soak)"
+      fi
+    done
+  fi
+
+  fed_log "RESULT P-004 replication-liveness soak"
+  if [ "$rc" = 0 ]; then
+    echo "OVERALL: PASS — $cycles kill/restart cycles: live replication re-established BOTH directions within ${sla_s}s every cycle; detector quiet"
+    return 0
+  fi
+  echo "OVERALL: INCOMPLETE — replication-liveness soak had failures (see ✗ lines + serve.log on each frame)"
+  return 1
+}
+
 # ── STANDALONE entrypoint (su-9c3f2 registry contract) — only when run directly ──
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  LOCS="ash,ash"; STYPE="cpx31"; DEB=""; KEEP_UP=0; IMAGE="ubuntu-24.04"
+  LOCS="ash,ash"; STYPE="cpx31"; DEB=""; KEEP_UP=0; IMAGE="ubuntu-24.04"; RUN_SOAK=0
   for arg in "$@"; do case "$arg" in
     --locs=*) LOCS="${arg#--locs=}" ;;
     --type=*) STYPE="${arg#--type=}" ;;
     --deb=*)  DEB="${arg#--deb=}" ;;
     --image=*) IMAGE="${arg#--image=}" ;;
     --keep-up) KEEP_UP=1 ;;
+    --soak) RUN_SOAK=1 ;;   # P-004: run the replication-liveness restart soak too
     -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown arg: $arg" ;;
   esac; done
@@ -222,6 +316,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 
   scenario_restart_durability a b
   rc=$?
+  # P-004: optional replication-liveness soak on the same frames (worst-wins exit).
+  if [ "$RUN_SOAK" = 1 ]; then
+    scenario_replication_liveness_soak a b || rc=1
+  fi
   [ "$rc" = 0 ] && echo "OVERALL: PASS" || echo "OVERALL: INCOMPLETE"
   exit "$rc"
 fi
