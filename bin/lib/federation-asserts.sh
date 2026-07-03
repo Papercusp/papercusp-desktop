@@ -177,6 +177,42 @@ fed_local_launch() {
   FED_KILL_PIDS+=("$!")
 }
 
+# fed_local_launch_sidecar <home> <logf> <sidecar_dir> <hono_port> <pg_port> [VAR=val ...]
+# The PACKAGED-SIDECAR launcher — the two-role split (2026-07-01) made
+# usr/bin/papercusp-desktop a GUI-ONLY role that gtk-launches a separate
+# "Papercusp Server" bundle; in an extracted-pkg smoke no Server app is
+# installed, so the GUI boots NO sidecar and fed_wait_boot times out (found
+# 2026-07-03, P-002 shared-hive-p2p-release-readiness: every GUI-launch smoke
+# BOOT_TIMEOUTed on the fresh .deb). The federating unit is the sidecar
+# (serve.mjs owns embedded-PG + migrations + the Hono host + the substrate) —
+# launch IT directly from the extracted package, mirroring what the Server
+# bundle spawns. Lifted from two-instance-hive-from-repo-smoke.sh's sc_launch.
+# The trailing $FED_SMOKE_SCOPE argv (default $home, which lives under the
+# smoke's $WORK) is the cleanup marker fed_cleanup_scoped greps ps args for.
+fed_local_launch_sidecar() {
+  local home="$1" logf="$2" side="$3" hono_port="$4" pg_port="$5"; shift 5
+  local sc_node="$side/bin/node"; [ -x "$sc_node" ] || sc_node="$(command -v node)"
+  mkdir -p "$home/.config" "$home/.papercusp"
+  ln -sf "$HOME/.config/gh" "$home/.config/gh"
+  ln -sf "$HOME/.gitconfig" "$home/.gitconfig" 2>/dev/null || true
+  ( cd "$side"
+    env HOME="$home" \
+        PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
+        NODE_ENV=production PAPERCUSP_DESKTOP=1 \
+        PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+        PAPERCUSP_HONO_PORT="$hono_port" PAPERCUSP_PG_PORT="$pg_port" \
+        PAPERCUSP_PG_DATA_DIR="$home/.papercusp/embedded-pg-data" \
+        PAPERCUSP_PG_SQL_DIR="$side/db-sql" \
+        PAPERCUSP_HARNESS_DIR="$side/harness" \
+        PAPERCUSP_PROMPTS_DIR="$side/prompts" \
+        PAPERCUSP_DOCS_ROOT="$side/internal-docs" \
+        PAPERCUSP_SPA_DIST="$side/spa" \
+        PAPERCUSP_SERVE_UI=0 \
+        "$@" \
+        setsid nohup "$sc_node" "$side/serve.mjs" "${FED_SMOKE_SCOPE:-$home}" >"$logf" 2>&1 < /dev/null ) &
+  FED_KILL_PIDS+=("$!")
+}
+
 # Local-driver primitives. A script that only runs local instances can use
 # these as-is: FED_LOG[inst]=<host log path>, FED_DB[inst]=<host DSN>.
 declare -gA FED_LOG FED_DB

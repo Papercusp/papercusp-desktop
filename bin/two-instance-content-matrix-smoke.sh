@@ -58,7 +58,7 @@ B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 
 log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" || exit 1
-SIDE="$PKG/usr/lib/Papercusp/sidecar"
+SIDE="$(fed_sidecar_dir "$PKG")"   # dynamic install root (post two-role-split rename)
 [ -d "$SIDE/node_modules/luxon" ] || { echo "→ A-001 fix: injecting luxon"; cp -aL "$LUXON_SRC" "$SIDE/node_modules/luxon" || exit 1; }
 fed_clobber_check "$PKG" || exit 2
 fed_assert_deb_swarm_support "$PKG" || exit 2
