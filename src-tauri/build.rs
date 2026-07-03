@@ -42,5 +42,30 @@ fn main() {
     // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it
     // to /api/health). Without this, cargo's cache would freeze a stale sha.
     println!("cargo:rerun-if-env-changed=PAPERCUSP_BUILD_SHA");
-    tauri_build::build()
+
+    // WI-1976 — allow the renderer to invoke the native-shell app commands.
+    // The operator SPA loads from a REMOTE http origin (http://127.0.0.1:<port>),
+    // and Tauri 2's ACL rejects app-command invoke()s from a non-local origin
+    // ("Command X not allowed by ACL") unless a capability grants them. Because
+    // the commands are registered via tauri-specta's collect_commands! (not the
+    // generate_handler! macro the build script scans), Tauri never generated
+    // their allow-<command> permissions — so there was nothing to grant, and the
+    // ENTIRE invoke surface was dead from the webview (D-002 focus, WI-1675
+    // list_windows push, WI-1882's defer-to-console_launch terminal launch all
+    // silently blocked). Registering them here generates
+    // `allow-console-launch` / `allow-list-windows-by-title` /
+    // `allow-focus-window-by-title` / `allow-window-title-for`, which
+    // capabilities/default.json then grants for the whitelisted remote urls.
+    // KEEP IN SYNC with the invoke-facing entries in main.rs collect_commands![].
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(
+            tauri_build::AppManifest::new().commands(&[
+                "console_launch",
+                "list_windows_by_title",
+                "focus_window_by_title",
+                "window_title_for",
+            ]),
+        ),
+    )
+    .expect("failed to run tauri_build with the app-command manifest (WI-1976)");
 }
