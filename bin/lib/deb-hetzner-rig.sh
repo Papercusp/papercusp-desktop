@@ -85,7 +85,13 @@ rig_init() {
   RIG_PG_PORT="${RIG_PG_PORT:-39532}"
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
-  [ -n "$RIG_TOKEN" ] || { echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token)" >&2; return 1; }
+  # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
+  # is required — Hetzner access is GONE (owner 2026-07-03, D-001 of
+  # shared-hive-p2p-release-readiness-2026-07-03); local frames are the proof of
+  # record. bin/local-matrix.sh is the one-command local bring-up.
+  if [ -z "$RIG_TOKEN" ] && [ -z "${RIG_FRAME_IPS:-}" ]; then
+    echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token) — Hetzner access is gone; for LOCAL frames set RIG_FRAME_IPS (one-command: bin/local-matrix.sh)" >&2; return 1
+  fi
   RIG_SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-113417406}"
   RIG_SSH_IDENTITY="${HETZNER_SSH_IDENTITY:-$HOME/.ssh/papercusp-latitude-frame}"
 
