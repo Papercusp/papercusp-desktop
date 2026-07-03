@@ -123,15 +123,20 @@ rig_hz()  { curl -s -m 40 -H "Authorization: Bearer $RIG_TOKEN" "$@"; }
 # path). One persistent master per frame makes every later call ride an ALREADY-
 # OPEN connection; ConnectionAttempts retries the initial TCP connect itself.
 RIG_SSH_MUX_OPTS=(-o ControlMaster=auto -o ControlPath=/tmp/deb-hzfed-mux-%r@%h -o ControlPersist=900)
-rig_ssh() { local ip="$1"; shift; ssh -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
+rig_ssh() { local ip="$1"; shift; ssh -i "$RIG_SSH_IDENTITY" -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 \
   -o ConnectionAttempts=3 "${RIG_SSH_MUX_OPTS[@]}" \
   -o ServerAliveInterval=15 "root@$ip" "$@"; }
+# ^ IdentitiesOnly: without it a loaded ssh-agent offers its whole keyring before
+# the -i identity and trips the server's MaxAuthTries ("Too many authentication
+# failures") — found 2026-07-03 on the local containerized frames (P-002).
 # dst spaces are safe UNquoted: OpenSSH ≥9 scp speaks SFTP (no remote shell), so
 # the path arrives as one literal — and added quotes become literal characters
 # (proven 2026-07-01: "dest open \"'/tmp/…'\"" failed a run). Install roots may
 # contain a space since the 'Papercusp GUI' productName rename.
-rig_scp() { local ip="$1" src="$2" dst="$3"; scp -i "$RIG_SSH_IDENTITY" -o StrictHostKeyChecking=no \
+rig_scp() { local ip="$1" src="$2" dst="$3"; scp -i "$RIG_SSH_IDENTITY" -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 \
   -o ConnectionAttempts=3 "${RIG_SSH_MUX_OPTS[@]}" "$src" "root@$ip:$dst"; }
 # rig_ssh_wait <ip> [tries] — re-probe connectivity until an ssh no-op succeeds.

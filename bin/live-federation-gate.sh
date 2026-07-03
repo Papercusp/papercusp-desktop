@@ -144,7 +144,7 @@ if [ -z "${GATE_DEB:-}" ]; then
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \
-          && rm -rf pkg/usr/lib/Papercusp/sidecar && cp -r "$DESKTOP_DIR/src-tauri/sidecar" pkg/usr/lib/Papercusp/sidecar \
+          && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$DESKTOP_DIR/src-tauri/sidecar" "$APPDIR/sidecar" \
           && dpkg-deb -b pkg "$GATE_DEB" ) >"$WORK/repack.log" 2>&1 \
         && log "repacked fresh .deb (base=$BASE_DEB)" || { log "repack FAILED ($WORK/repack.log) — skipping content-matrix"; GATE_DEB=""; SKIP_MATRIX=1; }
     else

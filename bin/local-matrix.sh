@@ -142,7 +142,8 @@ fi
 [ "$KEEP_UP" = 1 ] || trap rig_local_teardown EXIT
 
 # wait sshd
-sshprobe() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+sshprobe() { ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
   -o LogLevel=ERROR -o ConnectTimeout=5 "root@$1" true 2>/dev/null; }
 for ip in "$IP_A" "$IP_B"; do
   ok=0

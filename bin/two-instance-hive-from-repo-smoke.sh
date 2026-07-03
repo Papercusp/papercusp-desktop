@@ -156,8 +156,8 @@ resolve_mode() {
       if [ -f "$DEB" ]; then
         # Peek at the packaged serve.mjs without a full extract.
         mkdir -p "$WORK/debpeek"
-        ( cd "$WORK/debpeek" && dpkg-deb --fsys-tarfile "$DEB" 2>/dev/null | tar -x usr/lib/Papercusp/sidecar/serve.mjs 2>/dev/null ) || true
-        if assert_serve_supports_from_repo "$WORK/debpeek/usr/lib/Papercusp/sidecar/serve.mjs" ".deb" >/dev/null 2>&1; then
+        ( cd "$WORK/debpeek" && dpkg-deb --fsys-tarfile "$DEB" 2>/dev/null | tar -x --wildcards 'usr/lib/*/sidecar/serve.mjs' 2>/dev/null ) || true
+        if assert_serve_supports_from_repo "$(find "$WORK/debpeek/usr/lib" -name serve.mjs 2>/dev/null | head -1)" ".deb" >/dev/null 2>&1; then
           rm -rf "$WORK/debpeek"; echo deb; return
         fi
         rm -rf "$WORK/debpeek"
@@ -209,7 +209,7 @@ if [ "$RUN_MODE" = deb ]; then
   fed_extract_deb "$DEB" "$PKG" || exit 1
   fed_clobber_check "$PKG" || exit 2
   fed_assert_deb_swarm_support "$PKG" || exit 2
-  assert_serve_supports_from_repo "$PKG/usr/lib/Papercusp/sidecar/serve.mjs" ".deb" || exit 2
+  assert_serve_supports_from_repo "$(fed_sidecar_dir "$PKG")/serve.mjs" ".deb" || exit 2
   fed_fresh_display "$DISPLAY_NUM" "$WORK" || exit 1
 else
   log "sidecar-bundle fallback: $SIDECAR_SRC (the artifact the .deb ships, minus the Tauri window)"

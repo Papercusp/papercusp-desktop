@@ -54,8 +54,8 @@ log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" || exit 1
 fed_clobber_check "$PKG" || exit 2
 fed_assert_deb_swarm_support "$PKG" || exit 2
-if ! grep -rqs "createDirectoryGossip" "$PKG/usr/lib/Papercusp/sidecar/serve.mjs" 2>/dev/null \
-  && ! grep -rqls "createDirectoryGossip" "$PKG/usr/lib/Papercusp/sidecar" 2>/dev/null | head -1 | grep -q .; then
+if ! grep -rqs "createDirectoryGossip" "$(fed_sidecar_dir "$PKG")/serve.mjs" 2>/dev/null \
+  && ! grep -rqls "createDirectoryGossip" "$(fed_sidecar_dir "$PKG")" 2>/dev/null | head -1 | grep -q .; then
   echo "FATAL: packaged sidecar lacks the directory transport (createDirectoryGossip) — rebuild the .deb from a tree with p2p-hive-directory D-007"
   exit 2
 fi
@@ -69,8 +69,10 @@ echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 
 # ── launch two isolated packaged instances with distinct identities ────────────
 log "launch A ($P_A_USER) + B ($P_B_USER)"
-fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
-fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+# two-role split (2026-07-03, P-002): the GUI binary no longer boots a sidecar in an
+# extracted-pkg smoke — launch the PACKAGED sidecar directly (fed_local_launch_sidecar).
+fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
 
 fed_wait_boot a 50 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 4; }
 fed_wait_boot b 50 || { echo "B boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[b]}"; exit 4; }

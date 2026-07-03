@@ -67,8 +67,10 @@ BOOTSTRAP="$(fed_start_testnet_dht "$OPERATOR_DIR" "$WORK")" || exit 3
 echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 
 log "launch A($P_A_USER, owner) + B($P_B_USER, joiner) [REAL BINARY, :$DISPLAY_NUM]"
-fed_local_launch "${AHOME[a]}" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-fed_local_launch "${AHOME[b]}" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+# two-role split (2026-07-03, P-002): the GUI binary no longer boots a sidecar in an
+# extracted-pkg smoke — launch the PACKAGED sidecar directly (fed_local_launch_sidecar).
+fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$(fed_pick_free_port)" "$(fed_pick_free_port)" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$(fed_pick_free_port)" "$(fed_pick_free_port)" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 for inst in a b; do fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }; done
 log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]}"
 fed_wait_api a 30 && fed_wait_api b 30 || { echo "FATAL: sidecar API never came up"; exit 4; }

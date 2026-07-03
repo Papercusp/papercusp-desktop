@@ -67,8 +67,10 @@ fed_clobber_check "$PKG" || exit 2
 STARTED_XVFB="$(fed_ensure_display "$DISPLAY_NUM" "$WORK")"
 
 # ── 3. launch two isolated packaged instances ──────────────────────────────────
-log "launch instance A ($A_HOME)"; fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM"
-log "launch instance B ($B_HOME)"; fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM"
+# two-role split (2026-07-03, P-002): the GUI binary no longer boots a sidecar in an
+# extracted-pkg smoke — launch the PACKAGED sidecar directly (fed_local_launch_sidecar).
+log "launch instance A ($A_HOME)"; fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)"
+log "launch instance B ($B_HOME)"; fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)"
 
 fed_wait_boot a 40 || { echo "instance A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 3; }
 fed_wait_boot b 40 || { echo "instance B boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[b]}"; exit 3; }
