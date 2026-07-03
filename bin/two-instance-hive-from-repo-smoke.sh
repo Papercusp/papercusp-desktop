@@ -56,6 +56,20 @@
 #                         moderation queue. Rides the SAME rig/helpers; NOT gated on the
 #                         re-key flag or C-001/WI-280 (both legs ride hive-home-grained
 #                         federated tables, not the epoch-key/content path).
+#   ATTESTATION_PROBE=1 — P-008 (shared-hive-p2p-release-readiness) trust-admission live proof:
+#                         (LEG1) membership SEEDING — A attests the joiner B AND B's roster seeds
+#                         the owner origin=remote (the WI-1585 VM-half symptom was an EMPTY B
+#                         roster); (LEG2) SECOND-DEVICE attestation — a 2nd device of the SAME
+#                         github user MERGES into B's member row (union by device_pubkey, no
+#                         clobber — the WI-1585 leg-A fix) via the owner-admit seam; (LEG3)
+#                         WRONG-GH-USER-ID refused-op — B authors a receipt claiming a responder
+#                         that is NOT B → A refuses + bumps p2p_refused_op_counters
+#                         (receipt-apply:responder_mismatch); (LEG4) UNATTESTED/REMOVED-device
+#                         refused-op — after A revokes B, B's receipt can no longer resolve to an
+#                         identity → A refuses + bumps the counter again. Proves "refused-op
+#                         counters exist AND increment on adversarial probes". Rides the SAME
+#                         rig/helpers; independent of the re-key flag (the identity gate is on
+#                         the receipt path, not the epoch/content path).
 #
 # Usage:
 #   bin/two-instance-hive-from-repo-smoke.sh [path/to/Papercusp_*.deb]
@@ -473,6 +487,108 @@ if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   fi
 fi
 
+# ── 5.7 ATTESTATION + REFUSED-OP witness (opt-in: ATTESTATION_PROBE=1) ─────────────
+# P-008 live proof of the trust-admission surface on the 2-node rig (see the header). Four legs,
+# all read-asserting on real federated substrate; independent of WITNESS_PROBE/MODERATION_PROBE.
+# NB hive_members is keyed by hive_home_slug (NOT harness_slug); the refused-op counters live in
+# harness_shared.p2p_refused_op_counters (M15, mig 468) keyed by (workspace_id, harness_slug=hive
+# home, reason) and are bumped by projections/p2p-receipts.ts's receiver-side identity gate.
+att_seed_A_ok=0; att_seed_B_ok=0; att_2dev_ok=0; att_wrong_ok=0; att_removed_ok=0; attestation_ran=0
+att_removed_reason=""
+if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  attestation_ran=1
+  log "═══ ATTESTATION + REFUSED-OP witness (P-008, hive='$HIVE_SLUG') ═══"
+  ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$ATT_WS" ] && ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$ATT_WS" ] && ATT_WS="default"
+  ATT_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$ATT_B_GH_ID" ] && ATT_B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
+  ATT_A_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_A_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$ATT_A_GH_ID" ] && ATT_A_GH_ID="$(gh api "users/$P_A_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
+  echo "  att vars: WS=$ATT_WS  A_GH_ID=$ATT_A_GH_ID  B_GH_ID=$ATT_B_GH_ID"
+
+  # (setup) Under approval mode the from-repo join leaves the OWNER with a PENDING B (no member row
+  # → no device to attest). Approve B first so A carries B's member row + device (the LEG1/2 subject).
+  echo "  [att-setup] PRE A members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')  pending=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_pending_joins WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')"
+  dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
+  echo "  [att-setup] membership_decide(approve B=$ATT_B_GH_ID) -> $(echo "$dec" | head -c 200)"
+  sleep 4
+
+  # ── LEG1 — MEMBERSHIP SEEDING ─────────────────────────────────────────────────────
+  a_bdev="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  { [ -n "$a_bdev" ] && [ "$a_bdev" -ge 1 ]; } 2>/dev/null && att_seed_A_ok=1
+  echo "  LEG1a A ATTESTS B (hive_members row, ≥1 device): $([ "$att_seed_A_ok" = 1 ] && echo "PASS (B devices on A=$a_bdev)" || echo "FAIL (A B-row devices=$a_bdev)")"
+  b_seed=0
+  for i in $(seq 1 20); do
+    b_seed="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+    { [ -n "$b_seed" ] && [ "$b_seed" -ge 1 ]; } 2>/dev/null && break
+    sleep 3
+  done
+  { [ -n "$b_seed" ] && [ "$b_seed" -ge 1 ]; } 2>/dev/null && att_seed_B_ok=1
+  echo "  LEG1b B ROSTER SEEDED (owner federates a hive_members row to B origin=remote): $([ "$att_seed_B_ok" = 1 ] && echo "PASS (remote members on B=$b_seed)" || echo "FAIL (B remote members=$b_seed — WI-1585 VM-half empty-roster class)")"
+
+  # ── LEG2 — SECOND-DEVICE ATTESTATION (merge, no clobber; WI-1585 leg-A) ────────────
+  # Seed a pending-join for user-B carrying a FRESH 2nd device, then owner-approve → approvePendingJoin
+  # → upsertHiveMember MERGES it into B's existing row (union by device_pubkey; device-1 preserved).
+  D1="$(drv_psql a "SELECT (device_attestations->0->>'device_pubkey') FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  D2="att2dev-$(date +%s)-$RANDOM"
+  n_before="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  now_ms="$(date +%s)000"
+  drv_psql a "INSERT INTO harness_shared.hive_pending_joins (workspace_id,harness_slug,github_user_id,github_username,device_attestations,status,requested_at,created_at,updated_at) VALUES ('$ATT_WS','$HIVE_SLUG',$ATT_B_GH_ID,'$P_B_USER','[{\"device_pubkey\":\"$D2\",\"gist_id\":\"att-2dev-probe\",\"gist_url\":\"\",\"device_label\":\"$P_B_USER-dev2\",\"created_at\":$now_ms,\"signature_by_device\":\"\"}]'::jsonb,'pending',$now_ms,$now_ms,$now_ms) ON CONFLICT (workspace_id,harness_slug,github_user_id) DO UPDATE SET device_attestations=EXCLUDED.device_attestations,status='pending',updated_at=EXCLUDED.updated_at;" >/dev/null 2>&1
+  dec2="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
+  echo "  [LEG2] approve 2nd-device pending (D2=${D2:0:16}…) -> $(echo "$dec2" | head -c 160)"
+  sleep 3
+  n_after="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  has_d1=1; [ -n "$D1" ] && has_d1="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D1'));" 2>/dev/null | tr -d '[:space:]')"
+  has_d2="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D2'));" 2>/dev/null | tr -d '[:space:]')"
+  { [ -n "$n_after" ] && [ "$n_after" -ge 2 ] && [ "$has_d1" = 1 ] && [ "$has_d2" = 1 ]; } 2>/dev/null && att_2dev_ok=1
+  echo "  LEG2 SECOND-DEVICE MERGE (B row unions D1+D2, no clobber): $([ "$att_2dev_ok" = 1 ] && echo "PASS (devices $n_before→$n_after; D1 kept=$has_d1 D2 added=$has_d2)" || echo "FAIL (n=$n_before→$n_after D1=$has_d1 D2=$has_d2 — WI-1585 leg-A clobber?)")"
+
+  # ── LEG3 — WRONG-GH-USER-ID refused-op counter ────────────────────────────────────
+  # B authors a receipt claiming responder=A (not B). It federates to A, whose receipts projection
+  # resolves B's attested device→B's gh-id, sees responder-mismatch, REFUSES (row absent) and bumps
+  # p2p_refused_op_counters(reason 'receipt-apply:responder_mismatch').
+  rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$rc_before" ] && rc_before=0
+  RID_WRONG="att-wrong-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
+  drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_WRONG','refusal','work-offer:claim','att wrong-gh probe',${ATT_A_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
+  echo "  [LEG3] B authored receipt $RID_WRONG claiming responder=A($ATT_A_GH_ID) — federating to A…"
+  rc_after=$rc_before
+  for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
+    [ -z "$rc_after" ] && rc_after=0
+    { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    sleep 3
+  done
+  rid_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$HIVE_SLUG' AND receipt_id='$RID_WRONG';" 2>/dev/null | tr -d '[:space:]')"
+  { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null && att_wrong_ok=1
+  echo "  LEG3 WRONG-GH REFUSED-OP (A refuses B's mis-attributed receipt; counter++, row absent): $([ "$att_wrong_ok" = 1 ] && echo "PASS (responder_mismatch $rc_before→$rc_after, row-on-A=$rid_on_a)" || echo "FAIL (counter $rc_before→$rc_after, row-on-A=$rid_on_a)")"
+
+  # ── LEG4 — UNATTESTED/REMOVED-device refused-op counter ───────────────────────────
+  # Revoke B, then B authors a VALID receipt (responder=B). B's device no longer resolves to a member
+  # identity on A → the projection refuses (identity_unresolved / no_author_device) and bumps the
+  # counter. The security property (a removed device's op does NOT apply) is corroborated by row-absent.
+  tot_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$tot_before" ] && tot_before=0
+  rev="$(mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$ATT_WS\",\"githubUserId\":$ATT_B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}")"
+  echo "  [LEG4] A revoke_contributor(B=$ATT_B_GH_ID) -> $(echo "$rev" | head -c 160)"
+  sleep 4
+  RID_REM="att-removed-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
+  drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_REM','refusal','work-offer:claim','att removed-device probe',${ATT_B_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
+  echo "  [LEG4] B (now revoked) authored valid receipt $RID_REM (responder=B) — federating to A…"
+  tot_after=$tot_before
+  for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    tot_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
+    [ -z "$tot_after" ] && tot_after=0
+    { [ "$tot_after" -gt "$tot_before" ]; } 2>/dev/null && break
+    sleep 3
+  done
+  rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$HIVE_SLUG' AND receipt_id='$RID_REM';" 2>/dev/null | tr -d '[:space:]')"
+  att_removed_reason="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+  { [ "$tot_after" -gt "$tot_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null && att_removed_ok=1
+  echo "  LEG4 REMOVED-DEVICE REFUSED-OP (revoked B's receipt refused; counter++, row absent): $([ "$att_removed_ok" = 1 ] && echo "PASS (receipt-apply total $tot_before→$tot_after; reasons: $att_removed_reason; row-on-A=$rem_on_a)" || echo "$([ "$rem_on_a" = 0 ] && echo "PARTIAL (row refused/absent on A but counter $tot_before→$tot_after — op may be dropped at the admission blocklist layer, not the projection counter; security holds)" || echo "FAIL (counter $tot_before→$tot_after row-on-A=$rem_on_a)")")"
+fi
+
 # ── 6. FOLDED LIVE WITNESS — owner-enforcement (AK) + re-key CUT (P-008) ──────────
 # Opt-in: WITNESS_PROBE=1. Runs ONLY after a successful join (B is an admitted,
 # federating member). flag-on (PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1) must be set in
@@ -745,6 +861,16 @@ if [ "$moderation_ran" = 1 ]; then
     echo "MODERATION OVERALL: PARTIAL — takedown federation PROVEN (A→B); report leg INCONCLUSIVE (moderation.reportable could not be enabled this run — see the [reportable] diagnostics)"
   else
     echo "MODERATION OVERALL: INCOMPLETE — see the per-leg MOD-LEG results + diagnostics above"
+  fi
+fi
+if [ "$attestation_ran" = 1 ]; then
+  echo "ATTESTATION (P-008): seed-A-attests-B=$([ "$att_seed_A_ok" = 1 ] && echo PASS || echo FAIL)  seed-B-roster=$([ "$att_seed_B_ok" = 1 ] && echo PASS || echo FAIL)  2nd-device-merge=$([ "$att_2dev_ok" = 1 ] && echo PASS || echo FAIL)  wrong-gh-refused-op=$([ "$att_wrong_ok" = 1 ] && echo PASS || echo FAIL)  removed-device-refused-op=$([ "$att_removed_ok" = 1 ] && echo PASS || echo FAIL)"
+  # Release-governing subset: membership seeding (both directions) + second-device merge + the two
+  # adversarial refused-op counters. LEG4 counter-vs-blocklist nuance is folded into att_removed_ok.
+  if [ "$att_seed_A_ok" = 1 ] && [ "$att_seed_B_ok" = 1 ] && [ "$att_2dev_ok" = 1 ] && [ "$att_wrong_ok" = 1 ] && [ "$att_removed_ok" = 1 ]; then
+    echo "ATTESTATION OVERALL: PASS — second-device attestation + membership seeding proven on the 2-node rig; refused-op counters increment on BOTH adversarial probes (wrong gh-user-id, removed/unattested device)"
+  else
+    echo "ATTESTATION OVERALL: INCOMPLETE — see the per-leg ATTESTATION/LEG results + diagnostics above"
   fi
 fi
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
