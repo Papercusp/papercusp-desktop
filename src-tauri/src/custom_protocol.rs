@@ -58,9 +58,20 @@ pub const SCHEME: &str = "papercusp";
 /// pool many connections fine).
 ///
 /// Explicit override wins on every platform: `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1`
-/// forces it on, `=0` forces it off.
+/// forces it on, `=0` forces it off. With NO override the default is
+/// **Linux-only ON** — macOS `WKWebView` / Windows `WebView2` render the
+/// buffered scheme handler BLANK (found live 2026-07-01 on macOS: the operator
+/// SPA mounts fine over plain loopback HTTP but never mounts under
+/// `papercusp://`), and neither has the WebKitGTK connection-pool cap the scheme
+/// exists to dodge, so they ride HTTP by default. (Before this, the default was
+/// ON on every platform — the documented Linux-only intent above was never
+/// implemented, which shipped a blank webview in the packaged macOS app.)
 pub fn enabled() -> bool {
-    std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() != Some("0")
+    match std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => cfg!(target_os = "linux"),
+    }
 }
 
 /// The origin the window is pointed at when `enabled()`.
