@@ -320,4 +320,53 @@ mod tests {
             "papercusp: upstream error: boom",
         );
     }
+
+    // --- scheme-default regression guard (blank-macOS-webview, 2026-07-01) ---
+    // These assert the invariant that the earlier bug violated: with NO env
+    // override the custom scheme defaults ON *only* on Linux, because macOS
+    // WKWebView / Windows WebView2 render the buffered scheme handler BLANK.
+    // scheme_default() is pure, so CI (which builds on Linux) can exercise the
+    // macOS/Windows arms it could never reach through a raw `cfg!(target_os)`.
+
+    #[test]
+    fn scheme_defaults_to_linux_only() {
+        assert!(
+            scheme_default(None, "linux"),
+            "linux must default the papercusp:// scheme ON (WebKitGTK pool-cap dodge)",
+        );
+        assert!(
+            !scheme_default(None, "macos"),
+            "macOS must default OFF — WKWebView renders papercusp:// blank",
+        );
+        assert!(
+            !scheme_default(None, "windows"),
+            "windows must default OFF — WebView2 renders papercusp:// blank",
+        );
+        assert!(
+            !scheme_default(None, "ios"),
+            "every non-linux target defaults the scheme OFF",
+        );
+    }
+
+    #[test]
+    fn scheme_env_override_wins_on_every_platform() {
+        for os in ["linux", "macos", "windows"] {
+            assert!(
+                scheme_default(Some("1"), os),
+                "PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1 must force the scheme ON on {os}",
+            );
+            assert!(
+                !scheme_default(Some("0"), os),
+                "PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 must force the scheme OFF on {os}",
+            );
+        }
+    }
+
+    #[test]
+    fn scheme_unrecognized_env_falls_through_to_platform_default() {
+        // Anything other than exactly "1" / "0" is ignored → platform default.
+        assert!(scheme_default(Some(""), "linux"));
+        assert!(!scheme_default(Some("true"), "macos"));
+        assert!(!scheme_default(Some("yes"), "windows"));
+    }
 }
