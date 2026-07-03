@@ -106,6 +106,20 @@ else
   bad "fed_pick_free_port returned '$got' for held :$held (expected a higher, free port)"
 fi
 
+# 5) fed_local_launch_sidecar rejects same/empty hono+pg ports (the 2026-07-03
+#    P-002 class: argless fed_pick_free_port x4 handed 18000 to everything and
+#    every instance EADDRINUSE'd at boot — the guard must fail LOUDLY instead)
+if fed_local_launch_sidecar "$WORK/g-home" /dev/null "$WORK" 18000 18000 2>/dev/null; then
+  bad "fed_local_launch_sidecar accepted hono_port == pg_port (18000/18000)"
+else
+  ok "fed_local_launch_sidecar rejects hono_port == pg_port"
+fi
+if fed_local_launch_sidecar "$WORK/g-home" /dev/null "$WORK" "" "" 2>/dev/null; then
+  bad "fed_local_launch_sidecar accepted empty ports"
+else
+  ok "fed_local_launch_sidecar rejects empty ports"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1

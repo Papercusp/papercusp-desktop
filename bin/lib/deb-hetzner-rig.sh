@@ -93,7 +93,14 @@ rig_init() {
     echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token) — Hetzner access is gone; for LOCAL frames set RIG_FRAME_IPS (one-command: bin/local-matrix.sh)" >&2; return 1
   fi
   RIG_SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-113417406}"
-  RIG_SSH_IDENTITY="${HETZNER_SSH_IDENTITY:-$HOME/.ssh/papercusp-latitude-frame}"
+  # BYO seam: an inherited RIG_SSH_IDENTITY (bin/local-matrix.sh exports the
+  # local frames' key ~/.papercusp/local-rig-ssh) WINS — rig_init must NOT
+  # clobber it back to the Hetzner default. The old unconditional overwrite +
+  # IdentitiesOnly=yes in rig_ssh made every BYO run offer ONLY the wrong key
+  # → auth-fail → "FATAL ssh" at the first rig_setup_frame (2026-07-03, P-004
+  # soak runs #2/#3; masked before the IdentitiesOnly fix by a loaded ssh-agent
+  # offering its whole keyring first).
+  RIG_SSH_IDENTITY="${RIG_SSH_IDENTITY:-${HETZNER_SSH_IDENTITY:-$HOME/.ssh/papercusp-latitude-frame}}"
 
   RIG_WORK="$(mktemp -d /tmp/deb-hzfed.XXXXXX)"
   RIG_PKG="$RIG_WORK/pkg"
@@ -400,13 +407,17 @@ rig_setup_frame() {
   [ -n "${RIG_DEB:-}" ] || { echo "FATAL: RIG_DEB unset — set it to the gated .deb path before rig_setup_frame" >&2; return 1; }
   fed_log "[$inst] wait sshd @ $ip"
   local i; for i in $(seq 1 40); do rig_ssh "$ip" true 2>/dev/null && break; sleep 5; done
-  rig_ssh "$ip" true 2>/dev/null || { echo "FATAL ssh $inst"; return 1; }
+  # Final probe WITHOUT the stderr swallow — when it fails, the actual ssh error
+  # (e.g. "Permission denied (publickey)" vs a timeout) must land in the log;
+  # 3 soak runs were mis-diagnosed off a bare "FATAL ssh" (2026-07-03).
+  rig_ssh "$ip" true 2>/dev/null \
+    || { echo "FATAL ssh $inst (identity=$RIG_SSH_IDENTITY) — last error:"; rig_ssh "$ip" true; return 1; }
   fed_log "[$inst] install .deb (fresh-install dep resolution) + driver prereqs"
   rig_scp "$ip" "$RIG_DEB" /tmp/Papercusp.deb || return 1
   rig_ssh "$ip" "SIDECAR_DIR='$(fed_sidecar_dir)' bash -s" <<'INSTEOF' | grep -q deb-ok || { echo "FATAL install $inst"; return 1; }
 export DEBIAN_FRONTEND=noninteractive; apt-get update -qq
 apt-get install -y -qq /tmp/Papercusp.deb >/dev/null 2>&1 || apt-get install -y -qq --fix-broken >/dev/null 2>&1
-command -v gh >/dev/null && command -v psql >/dev/null || apt-get install -y -qq gh postgresql-client >/dev/null 2>&1
+command -v gh >/dev/null && command -v psql >/dev/null && command -v git >/dev/null || apt-get install -y -qq gh postgresql-client git >/dev/null 2>&1
 test -f "$SIDECAR_DIR/serve.mjs" && echo deb-ok
 INSTEOF
   # RIG_SERVE_HOTPATCH=<local serve.mjs>: overwrite the installed sidecar bundle

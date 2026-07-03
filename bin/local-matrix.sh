@@ -146,8 +146,13 @@ if ! docker network inspect "$NET" >/dev/null 2>&1; then
 fi
 
 # ── frame image (ubuntu-24.04 = the .deb's target ABI, EI-503; sshd + root key;
-#    gh/psql/curl pre-baked = what rig_setup_frame installs anyway; webkit
-#    best-effort pre-bake to cut the per-run apt download) ────────────────────
+#    gh/psql/git/curl pre-baked = what rig_setup_frame installs anyway; webkit
+#    best-effort pre-bake to cut the per-run apt download). git is REQUIRED by
+#    the sidecar's hives/from-repo clone (clone_git_missing, found 2026-07-03
+#    P-004 run #4 — Hetzner VMs shipped git; a bare ubuntu:24.04 image doesn't).
+#    After editing this package list: docker rmi pcusp-local-frame:ubuntu24 so
+#    the build-once cache rebuilds (rig_setup_frame's per-run apt also
+#    self-heals a stale image, at per-run cost). ─────────────────────────────
 if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   log "build frame image $IMAGE_TAG (one-time)"
   bctx="$(mktemp -d /tmp/pcusp-frame-img.XXXXXX)"
@@ -157,7 +162,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
-      openssh-server ca-certificates curl gh postgresql-client lsof \
+      openssh-server ca-certificates curl gh git postgresql-client lsof \
  && apt-get install -y -qq libwebkit2gtk-4.1-0 xdg-utils || true
 RUN mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh
 COPY authorized_keys /root/.ssh/authorized_keys
