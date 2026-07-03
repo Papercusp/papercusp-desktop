@@ -35,14 +35,16 @@
 #   GATE_NO_FILE      (default 0)   — set 1 to skip EI filing (just log the verdict).
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# LOAD_GATE default is CORE-AWARE (P-013): max(15, nproc/4). The old absolute 15 never fired on
-# the 128-core fleet box (its busy-floor is ~20-30, so the gate load-skipped EVERY window and the
-# release signal stayed dark) — yet 25% utilization is a fine environment for two sidecar PGs.
-# The empirical rails stay honored: smokes get KILLED ~51+ on 128 cores, and the load-94 mid-run
-# storm that false-failed a 30-threshold run is now handled by the STORM downgrade at verdict time
-# (SKIPPED-STORM, not RED) instead of by an unreachably low admission threshold.
+# LOAD_GATE default is CORE-AWARE (P-013): max(15, 3*nproc/8). The old absolute 15 never fired
+# on the 128-core fleet box, and the first core-aware cut (nproc/4 = 32) STILL sat below the
+# fleet-era operating floor (observed 1-min load 35-46 through 2026-07-03 midday — the 12:37
+# timer run skipped at 36.76 vs gate 32), reproducing the exact "gate never runs" class P-013
+# exists to kill. 3*nproc/8 (= 48 on 128 cores) sits above that floor but below the empirical
+# ~51+ kill zone where smokes start dying. The load-94 mid-run storm that false-failed a
+# 30-threshold run is handled by the STORM downgrade at verdict time (SKIPPED-STORM, not RED)
+# instead of by an unreachably low admission threshold.
 NPROC="$(nproc 2>/dev/null || echo 8)"
-LOAD_GATE="${LOAD_GATE:-$(( NPROC / 4 > 15 ? NPROC / 4 : 15 ))}"
+LOAD_GATE="${LOAD_GATE:-$(( NPROC * 3 / 8 > 15 ? NPROC * 3 / 8 : 15 ))}"
 STORM_GATE="${STORM_GATE:-$(( NPROC * 6 / 10 ))}"
 REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
@@ -123,11 +125,19 @@ fi
 # ── 1. load gate ──────────────────────────────────────────────────────────────
 LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
 if awk "BEGIN{exit !($LOAD1 > $LOAD_GATE)}"; then
-  log "SKIP: 1-min load $LOAD1 > LOAD_GATE $LOAD_GATE — smokes get killed under load; retry next window (not a failure)."
-  check_staleness
-  echo "GATE: SKIPPED (load $LOAD1 > $LOAD_GATE)"; exit 0
+  if [ "${GATE_FORCE:-0}" = 1 ]; then
+    # GATE_FORCE means FORCE (WI-1861 follow-up): a forced run is an ATTENDED validation —
+    # skip only the unattended-admission gate; the mid-run STORM downgrade still protects
+    # the verdict if the box saturates while the smokes run.
+    log "load $LOAD1 > LOAD_GATE $LOAD_GATE but GATE_FORCE=1 — proceeding anyway (storm downgrade still armed)."
+  else
+    log "SKIP: 1-min load $LOAD1 > LOAD_GATE $LOAD_GATE — smokes get killed under load; retry next window (not a failure)."
+    check_staleness
+    echo "GATE: SKIPPED (load $LOAD1 > $LOAD_GATE)"; exit 0
+  fi
+else
+  log "load $LOAD1 OK (<= $LOAD_GATE); proceeding."
 fi
-log "load $LOAD1 OK (<= $LOAD_GATE); proceeding."
 
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────

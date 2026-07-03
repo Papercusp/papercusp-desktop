@@ -69,8 +69,13 @@ STARTED_XVFB="$(fed_ensure_display "$DISPLAY_NUM" "$WORK")"
 # ── 3. launch two isolated packaged instances ──────────────────────────────────
 # two-role split (2026-07-03, P-002): the GUI binary no longer boots a sidecar in an
 # extracted-pkg smoke — launch the PACKAGED sidecar directly (fed_local_launch_sidecar).
-log "launch instance A ($A_HOME)"; fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)"
-log "launch instance B ($B_HOME)"; fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$(fed_pick_free_port)" "$(fed_pick_free_port)"
+# staggered per-instance ports (WI-754 pattern): an ARGLESS fed_pick_free_port
+# returns 18000 for EVERY pre-bind call, so hono==pg and A==B all collided
+# (found 2026-07-03 P-002 rerun r2 — all four smokes EADDRINUSE'd at boot).
+SMK_A_HONO="$(fed_pick_free_port 18071)"; SMK_A_PG="$(fed_pick_free_port 18532)"
+SMK_B_HONO="$(fed_pick_free_port $((SMK_A_HONO + 1)))"; SMK_B_PG="$(fed_pick_free_port $((SMK_A_PG + 100)))"
+log "launch instance A ($A_HOME)"; fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$SMK_A_HONO" "$SMK_A_PG"
+log "launch instance B ($B_HOME)"; fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$SMK_B_HONO" "$SMK_B_PG"
 
 fed_wait_boot a 40 || { echo "instance A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 3; }
 fed_wait_boot b 40 || { echo "instance B boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[b]}"; exit 3; }

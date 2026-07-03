@@ -72,6 +72,32 @@ log() { echo "[local-matrix] $*" >&2; }
 
 [ "$MODE" = list ] && exec bash "$DESKTOP_DIR/bin/deb-hetzner-matrix.sh" --list
 
+# ── single-tenant lock ────────────────────────────────────────────────────────
+# The rig is ONE-PER-BOX: fixed container names + IPs, a shared bridge network,
+# and a gateway DHT. Without a lock, two concurrent runs mutually destroy each
+# other: provisioning `docker rm -f`s the other run's LIVE frames, and the EXIT
+# trap tears down the shared net/DHT mid-run (2026-07-03 P-004×P-002 collision:
+# a peer's teardown killed a soak's freshly provisioned frames inside its
+# wait-sshd window — surfaced as a phantom "FATAL ssh"). flock serializes runs
+# AND --teardown (tearing down under a live run is the same destructive op):
+# a second invocation WAITS up to RIG_LOCK_WAIT_S (default 7200s), logging the
+# holder; RIG_LOCK_WAIT_S=0 fails fast (exit 3). The lock releases on process
+# exit (flock fd semantics) — after a --keep-up run the frames stay up but the
+# rig becomes claimable, on purpose (--reuse re-enters; a full run replaces).
+RIG_LOCK="${PCUSP_LOCAL_RIG_LOCK:-/tmp/pcusp-local-rig.lock}"
+exec 9>>"$RIG_LOCK" || { echo "FATAL: cannot open rig lock $RIG_LOCK" >&2; exit 1; }
+if ! flock -n 9; then
+  RIG_LOCK_HOLDER="$(cat "$RIG_LOCK.holder" 2>/dev/null || echo 'unknown holder')"
+  RIG_LOCK_WAIT="${RIG_LOCK_WAIT_S:-7200}"
+  if [ "$RIG_LOCK_WAIT" = 0 ]; then
+    echo "FATAL: rig busy — held by: $RIG_LOCK_HOLDER (single-tenant; RIG_LOCK_WAIT_S=0 ⇒ fail-fast)" >&2
+    exit 3
+  fi
+  log "rig busy — held by: $RIG_LOCK_HOLDER; waiting up to ${RIG_LOCK_WAIT}s (RIG_LOCK_WAIT_S=0 to fail fast)"
+  flock -w "$RIG_LOCK_WAIT" 9 || { echo "FATAL: rig still busy after ${RIG_LOCK_WAIT}s — held by: $RIG_LOCK_HOLDER" >&2; exit 3; }
+fi
+printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${RIG_LOCK_LABEL:-${USER:-?}:local-matrix $*}" >"$RIG_LOCK.holder"
+
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
   log "teardown: frames + DHT"
@@ -87,6 +113,24 @@ if [ "$MODE" = teardown ]; then rig_local_teardown; echo "torn down."; exit 0; f
 
 command -v docker >/dev/null || { echo "FATAL: docker not found — the containerized rig needs it" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "FATAL: docker daemon unreachable (is the caller in the docker group?)" >&2; exit 1; }
+
+# ── firewall preflight (frames→gateway DHT leg; found live 2026-07-03 P-004) ──
+# The frames reach the host DHT node on the bridge GATEWAY ip. An active ufw
+# with no allow-rule for the rig subnet silently drops exactly that leg (ssh +
+# docker still work, so the miss surfaces much later as DHT bootstrap
+# timeouts). Check it NOW instead of leaving it to the header comment.
+if command -v ufw >/dev/null; then
+  UFW_STATUS="$(sudo -n ufw status 2>/dev/null || true)"
+  if printf '%s' "$UFW_STATUS" | grep -q '^Status: active'; then
+    if ! printf '%s' "$UFW_STATUS" | grep -qF "$SUBNET"; then
+      echo "FATAL: ufw is ACTIVE with no allow-rule for the rig subnet $SUBNET — the frames→gateway DHT leg will be dropped. Fix once:" >&2
+      echo "  sudo ufw allow from $SUBNET comment 'papercusp local-rig frames'" >&2
+      exit 1
+    fi
+  elif [ -z "$UFW_STATUS" ] && systemctl is-active --quiet ufw 2>/dev/null; then
+    log "WARN: ufw service is active but passwordless sudo is unavailable — cannot verify an allow-rule for $SUBNET; if DHT bootstrap times out later, run: sudo ufw allow from $SUBNET"
+  fi
+fi
 
 # ── ssh keypair (the frames' root login — rig contract: ssh -i KEY root@ip) ──
 if [ ! -f "$SSH_KEY" ]; then

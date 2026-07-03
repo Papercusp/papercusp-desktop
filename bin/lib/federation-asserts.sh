@@ -191,6 +191,15 @@ fed_local_launch() {
 # smoke's $WORK) is the cleanup marker fed_cleanup_scoped greps ps args for.
 fed_local_launch_sidecar() {
   local home="$1" logf="$2" side="$3" hono_port="$4" pg_port="$5"; shift 5
+  # Recurrence guard (2026-07-03 P-002): an ARGLESS fed_pick_free_port returns
+  # 18000 for every pre-bind call, so naive "$(fed_pick_free_port)" x4 hands the
+  # SAME port to hono+pg and to A+B -> EADDRINUSE at boot. Ports must be
+  # distinct + non-empty; pick with staggered starts per instance (see
+  # two-instance-hive-from-repo-smoke.sh, WI-754 pattern).
+  if [ -z "$hono_port" ] || [ -z "$pg_port" ] || [ "$hono_port" = "$pg_port" ]; then
+    echo "fed_local_launch_sidecar: hono_port/pg_port must be DISTINCT non-empty (got hono='$hono_port' pg='$pg_port') — use staggered fed_pick_free_port starts (e.g. 18071/18532, B offset from A)" >&2
+    return 1
+  fi
   local sc_node="$side/bin/node"; [ -x "$sc_node" ] || sc_node="$(command -v node)"
   mkdir -p "$home/.config" "$home/.papercusp"
   ln -sf "$HOME/.config/gh" "$home/.config/gh"
