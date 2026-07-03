@@ -53,6 +53,15 @@ SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
 # 13:00 red's EI filing died on exactly this and only the loud fallback saved the verdict.
 GATE_DISPLAY="${GATE_DISPLAY:-250}"; OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp?superuser=1}"
 GATE_NO_FILE="${GATE_NO_FILE:-0}"
+# SUPERUSER BEARER (P-013 follow-up, WI-1841): `?superuser=1` alone is NOT sufficient — the
+# handler also requires `Authorization: Bearer <token>` matching ~/.papercusp/superuser-token
+# (see packages/operator-core/lib/superuser-token.ts). Without it every EI filing 403s with
+# superuser_invalid_bearer/invalid_request_context and silently falls back to log-only (verified
+# live on 2026-07-03: both the 12:03 and a manual repro hit this). GATE_SUPERUSER_TOKEN_PATH lets
+# a non-default install override the path; missing/short token → empty bearer → same graceful
+# fallback as before (never fatal).
+GATE_SUPERUSER_TOKEN_PATH="${GATE_SUPERUSER_TOKEN_PATH:-$HOME/.papercusp/superuser-token}"
+GATE_SUPERUSER_BEARER="$(cat "$GATE_SUPERUSER_TOKEN_PATH" 2>/dev/null | tr -d '[:space:]' || true)"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
 # log → STDERR. Load-bearing (P-013 validation run 2026-07-03): run_smoke's result is read
@@ -73,14 +82,28 @@ jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.std
 file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK logs are the fallback
   [ "$GATE_NO_FILE" = 1 ] && return 0
   local resp
+  local -a auth_hdr=()
+  if [ -n "$GATE_SUPERUSER_BEARER" ]; then
+    auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
+  else
+    log "WARN: no superuser bearer at $GATE_SUPERUSER_TOKEN_PATH — EI filing will 403 (superuser_invalid_bearer); falling back to log-only."
+  fi
   resp="$(curl -s -m 30 -X POST "$OPERATOR_MCP_URL" \
-    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercusp\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]}}}" 2>/dev/null || true)"
   # Verify the filing actually landed (P-013: the 2026-07-03 red filed against harness
   # "papercup" + got an SSE ':stream-open' preamble back and NO work item was created —
-  # a silent-miss on the gate's core contract). An SSE body carries the JSON in data: lines.
-  if printf '%s' "$resp" | grep -qa '"id":"WI-'; then
-    log "EI filed OK → $(printf '%s' "$resp" | grep -oa '"id":"WI-[0-9]*"' | head -1)"
+  # a silent-miss on the gate's core contract). An SSE body carries the JSON in data: lines,
+  # and the tool result is a JSON STRING nested inside that envelope, so its own quotes come
+  # back backslash-escaped (`\"id\":\"WI-123\"`), not bare (`"id":"WI-123"`) — a bare-quote
+  # grep NEVER matches an SSE response and every successful filing still logged as unconfirmed
+  # (WI-1841 verification, 2026-07-03: manually confirmed the work item WAS created — WI-1897 —
+  # while this check said DID NOT CONFIRM). The `\\?` makes each quote's backslash optional so
+  # this matches both the SSE-escaped and a plain-JSON transport.
+  local id_match
+  id_match="$(printf '%s' "$resp" | grep -oaE '\\?"id\\?":\\?"WI-[0-9]+' | head -1)"
+  if [ -n "$id_match" ]; then
+    log "EI filed OK → $(printf '%s' "$id_match" | grep -oaE 'WI-[0-9]+')"
   else
     log "EI filing DID NOT CONFIRM (no WI id in response) — resp head: ${resp:0:200}"
     log "EI filing FALLBACK: verdict + logs remain in $WORK and journald; file manually if this red is real."
