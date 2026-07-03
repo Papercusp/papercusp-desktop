@@ -89,7 +89,10 @@ A_IDENTITY=$P_A_USER  A_SIDECAR=http://127.0.0.1:${FED_SC[a]}  A_PG=${FED_PG[a]}
 B_IDENTITY=$P_B_USER  B_SIDECAR=http://127.0.0.1:${FED_SC[b]}  B_PG=${FED_PG[b]}  B_LOG=${FED_LOG[b]}
 DHT=$BOOTSTRAP  DISPLAY=:$DISPLAY_NUM  WORK=$WORK
 EOF
-printf '#!/usr/bin/env bash\npkill -9 -f "%s" 2>/dev/null||true\necho stopped\n' "$WORK" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
+# stop.sh kills by pgrep MINUS the invoker chain ($$/$PPID): a bare pkill -f "$WORK"
+# also matches the CALLER's argv when an agent runs `bash <lane>/stop.sh` or inlines
+# the path in a shell -c string, killing the invoker mid-script (self-hit 2026-07-03 P-002).
+printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ "$p" = "$PPID" ] || kill -9 "$p" 2>/dev/null; done\necho stopped\n' "$WORK" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
 
 # ── 1. create + publish ──────────────────────────────────────────────────────
 log "A: create+publish PUBLIC hive ($REPO_URL)"
