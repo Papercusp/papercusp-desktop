@@ -131,9 +131,20 @@ fn spawn_code_server(
         .arg(user_data_dir.join("extensions"))
         .env("HOME", &workspace_home_str)
         .env("USERPROFILE", &workspace_home_str)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stdin(Stdio::null());
+    // Same console-less-packaged-app hazard as serve (WI-1707/WI-1781): in a
+    // release build there is NO console, so an inherited stdout/stderr is
+    // /dev/null and every code-server diagnostic is lost — leaving a broken
+    // vscode-server plugin undebuggable. Tee to a rotated on-disk log in release;
+    // keep the inherited `tauri dev` console in debug. Fall back to inherit if the
+    // log can't be prepared so logging never blocks code-server from launching.
+    if cfg!(debug_assertions) {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else if let Some((out, err)) = rotating_log_stdio(workspace_home, "code-server.log") {
+        cmd.stdout(out).stderr(err);
+    } else {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
     isolate_process_group(&mut cmd);
     match cmd.spawn() {
         Ok(child) => Some((child, format!("http://127.0.0.1:{}", port))),
@@ -525,22 +536,50 @@ mod serve_log_tests {
         let _ = fs::remove_dir_all(&home);
 
         // First spawn: creates a fresh logs/serve.log.
-        assert!(super::serve_log_stdio(&home).is_some(), "log setup should succeed");
+        assert!(super::rotating_log_stdio(&home, "serve.log").is_some(), "log setup should succeed");
         // (drop closes the returned Stdio file handles.)
         assert!(logs.join("serve.log").exists());
         // Tag the live log so we can prove rotation moves THIS file next time.
         fs::write(logs.join("serve.log"), b"gen-A").unwrap();
 
         // Second spawn: serve.log(gen-A) → serve.log.1, fresh serve.log.
-        assert!(super::serve_log_stdio(&home).is_some());
+        assert!(super::rotating_log_stdio(&home, "serve.log").is_some());
         assert!(logs.join("serve.log").exists());
         assert_eq!(fs::read(logs.join("serve.log.1")).unwrap(), b"gen-A");
         fs::write(logs.join("serve.log"), b"gen-B").unwrap();
 
         // Third spawn: .1(gen-A) → .2, serve.log(gen-B) → .1.
-        assert!(super::serve_log_stdio(&home).is_some());
+        assert!(super::rotating_log_stdio(&home, "serve.log").is_some());
         assert_eq!(fs::read(logs.join("serve.log.1")).unwrap(), b"gen-B");
         assert_eq!(fs::read(logs.join("serve.log.2")).unwrap(), b"gen-A");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // WI-1781: a second console-less sidecar (code-server) routes through the SAME
+    // helper with a DIFFERENT basename. Its ring must rotate independently of
+    // serve.log (no cross-contamination between the two sidecars' logs).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotating_log_stdio_isolates_basenames() {
+        use std::fs;
+        let home = std::env::temp_dir().join(format!("pcusp-cs-log-{}", std::process::id()));
+        let logs = home.join(".papercusp").join("logs");
+        let _ = fs::remove_dir_all(&home);
+
+        // serve.log gets one generation…
+        assert!(super::rotating_log_stdio(&home, "serve.log").is_some());
+        fs::write(logs.join("serve.log"), b"serve-A").unwrap();
+        // …and code-server.log its own, created fresh alongside it.
+        assert!(super::rotating_log_stdio(&home, "code-server.log").is_some());
+        assert!(logs.join("code-server.log").exists());
+        fs::write(logs.join("code-server.log"), b"cs-A").unwrap();
+
+        // Rotating code-server.log must NOT touch serve.log's live file or ring.
+        assert!(super::rotating_log_stdio(&home, "code-server.log").is_some());
+        assert_eq!(fs::read(logs.join("code-server.log.1")).unwrap(), b"cs-A");
+        assert!(!logs.join("serve.log.1").exists(), "serve.log ring untouched by code-server rotation");
+        assert_eq!(fs::read(logs.join("serve.log")).unwrap(), b"serve-A");
 
         let _ = fs::remove_dir_all(&home);
     }
@@ -1292,18 +1331,25 @@ fn enable_login_autostart(app: &tauri::App) {
 /// migration diagnostic on the floor, leaving a wedged install unbootstrappable
 /// to debug (the exact gap this fixes). Point them at an on-disk log instead.
 ///
-/// Rotation is per-spawn (each Server-app launch / crash-respawn): `serve.log`
-/// → `serve.log.1` → … → `serve.log.5`, dropping the oldest, so history survives
+/// Rotation is per-spawn (each Server-app launch / crash-respawn): `<basename>`
+/// → `<basename>.1` → … → `<basename>.5`, dropping the oldest, so history survives
 /// a respawn without unbounded growth. Returns two `Stdio` handles onto the SAME
 /// fresh file (stdout + a `try_clone`d stderr), or `None` if the log can't be
 /// prepared — the caller then falls back to inherit so logging never blocks the
-/// sidecar from launching.
-fn serve_log_stdio(workspace_home: &std::path::Path) -> Option<(Stdio, Stdio)> {
+/// child from launching.
+///
+/// `basename` is the log file name (e.g. `serve.log`, `code-server.log`) so every
+/// console-less child sidecar can route to its own rotated on-disk log via one
+/// shared helper rather than each re-implementing the rotation (WI-1707/WI-1781).
+fn rotating_log_stdio(
+    workspace_home: &std::path::Path,
+    basename: &str,
+) -> Option<(Stdio, Stdio)> {
     let logs_dir = workspace_home.join(".papercusp").join("logs");
     std::fs::create_dir_all(&logs_dir).ok()?;
-    let base = logs_dir.join("serve.log");
+    let base = logs_dir.join(basename);
     const KEEP: u32 = 5;
-    let rotated = |n: u32| logs_dir.join(format!("serve.log.{n}"));
+    let rotated = |n: u32| logs_dir.join(format!("{basename}.{n}"));
     // Drop the oldest, shift each older file up one, then the live log → .1.
     let _ = std::fs::remove_file(rotated(KEEP));
     for n in (1..KEEP).rev() {
@@ -1331,7 +1377,7 @@ fn serve_log_stdio(workspace_home: &std::path::Path) -> Option<(Stdio, Stdio)> {
 /// stdout/stderr: in a dev build they're inherited (the developer's `tauri dev`
 /// console); in a release (packaged) build — which has NO console — they're
 /// redirected to a rotated <home>/.papercusp/logs/serve.log so boot / PG /
-/// migration diagnostics survive on disk (WI-1707; see serve_log_stdio). The
+/// migration diagnostics survive on disk (WI-1707; see rotating_log_stdio). The
 /// endpoint-IPC handshake is NOT parsed from stdout anymore; the discovery file
 /// (~/.papercusp/endpoint-ipc.json) is the one channel that also covers the
 /// --ensure reuse case, so redirecting stdout is safe.
@@ -1522,7 +1568,7 @@ fn spawn_serve(
     // logging setup never blocks the sidecar from launching.
     if cfg!(debug_assertions) {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    } else if let Some((out, err)) = serve_log_stdio(workspace_home) {
+    } else if let Some((out, err)) = rotating_log_stdio(workspace_home, "serve.log") {
         cmd.stdout(out).stderr(err);
     } else {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
