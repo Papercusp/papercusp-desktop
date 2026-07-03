@@ -243,20 +243,48 @@ if [[ "$WITH_MAC" == "1" ]]; then
     echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"
     exit 1
   fi
-  PAPERCUP_TREE="$(cd "$ROOT/.." && pwd)"
-  echo "    rsync tree → VM:$MAC_VM_BUILD_DIR"
-  # --exclude '.mcp.json': bootstrap-role writes a per-launch, SIGNED, host-pinned
-  # `.mcp.json` into the launch cwd (the repo root) for `psu --role` sessions —
-  # gitignored, but rsync would otherwise carry the DEV BOX's copy (pointed at the
-  # dev box's MCP proxy `:9071`) into the VM tree, where claude path-discovers it
-  # and connects to a `:9071` that doesn't exist on the VM → "MCP tools aren't up".
-  # Excluding it (and from --delete) keeps the VM's OWN freshly-written `.mcp.json`
-  # intact while never importing the dev box's. (`.claude` = the user's agent state
-  # / signed creds — likewise host-specific, never belongs in the build tree.)
+  # WI-1708: build from a COMMIT, not the live working tree. The dev box's
+  # superproject is edited CONCURRENTLY by the whole fleet + git-sync, so rsyncing
+  # "$MONOREPO/" directly snapshots a MOVING target — torn/half-written files and
+  # an internally-inconsistent file set land on the VM (a build that matches no
+  # real commit). Instead materialize a consistent point-in-time snapshot of HEAD
+  # (superproject + every nested submodule — papercusp-desktop is ITSELF a
+  # submodule) via `git archive`, an atomic read of committed objects that is
+  # immune to concurrent working-tree writes, and rsync THAT. Bonus: a tracked-only
+  # archive naturally omits the host-specific junk the old rsync hand-excluded
+  # (.mcp.json / .claude) and the wrong-arch Linux sidecar (mac-vm-build.sh rebuilds
+  # a darwin one anyway).
+  SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-mac-snap.XXXXXX")"
+  echo "    snapshotting HEAD (superproject + submodules) → $SNAP_DIR"
+  git -C "$MONOREPO" archive --format=tar HEAD | tar -x -C "$SNAP_DIR" \
+    || { echo "ERROR: git archive of superproject HEAD failed"; rm -rf "$SNAP_DIR"; exit 1; }
+  # Recurse into every initialized submodule; `$displaypath` is each submodule's
+  # path relative to the top superproject, so `--prefix` lands its tracked content
+  # at the right nested location under the snapshot root. (Canonical recursive-
+  # archive idiom; $displaypath/$SNAP_DIR expand in the right shell via the quoting.)
+  git -C "$MONOREPO" submodule foreach --recursive --quiet \
+    'git archive --format=tar --prefix="$displaypath/" HEAD | tar -x -C "'"$SNAP_DIR"'"' \
+    || { echo "ERROR: git archive of a submodule failed"; rm -rf "$SNAP_DIR"; exit 1; }
+  # Re-apply THIS release's version bump (the only intended local mutation — written
+  # to the live working tree above but NOT yet in HEAD) onto the snapshot, so the VM
+  # builds the release version rather than HEAD's. These 3 tracked manifests are the
+  # complete set the bump touches (see the version-bump python step above).
+  cp "$ROOT/package.json"              "$SNAP_DIR/papercusp-desktop/package.json"
+  cp "$ROOT/src-tauri/tauri.conf.json" "$SNAP_DIR/papercusp-desktop/src-tauri/tauri.conf.json"
+  cp "$ROOT/src-tauri/Cargo.toml"      "$SNAP_DIR/papercusp-desktop/src-tauri/Cargo.toml"
+
+  echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
+  # The excludes are now defense-in-depth on the VM SIDE of --delete: none exist in
+  # the tracked-only snapshot, but excluding them SPARES the VM's existing copies —
+  # node_modules/target/.turbo/.next (so a rebuild reuses them instead of a full
+  # npm install), and .mcp.json/.claude (the VM writes its OWN per-launch .mcp.json;
+  # a dev-box copy points at :9071 which doesn't exist on the VM → "MCP tools aren't
+  # up", so never import or --delete it).
   rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
     --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
     -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
-    "$PAPERCUP_TREE/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
+    "$SNAP_DIR/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
+  rm -rf "$SNAP_DIR"
   scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
     "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
   "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "

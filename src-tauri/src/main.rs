@@ -511,6 +511,42 @@ mod tests {
 }
 
 #[cfg(test)]
+mod serve_log_tests {
+    // WI-1707: the packaged app has no console, so the sidecar's stdout/stderr
+    // must land in a rotated <home>/.papercusp/logs/serve.log. This guards both
+    // that the log is created AND that each spawn shifts the ring correctly
+    // (live log → .1 → .2), so history survives a crash-respawn.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn serve_log_creates_and_rotates() {
+        use std::fs;
+        let home = std::env::temp_dir().join(format!("pcusp-serve-log-{}", std::process::id()));
+        let logs = home.join(".papercusp").join("logs");
+        let _ = fs::remove_dir_all(&home);
+
+        // First spawn: creates a fresh logs/serve.log.
+        assert!(super::serve_log_stdio(&home).is_some(), "log setup should succeed");
+        // (drop closes the returned Stdio file handles.)
+        assert!(logs.join("serve.log").exists());
+        // Tag the live log so we can prove rotation moves THIS file next time.
+        fs::write(logs.join("serve.log"), b"gen-A").unwrap();
+
+        // Second spawn: serve.log(gen-A) → serve.log.1, fresh serve.log.
+        assert!(super::serve_log_stdio(&home).is_some());
+        assert!(logs.join("serve.log").exists());
+        assert_eq!(fs::read(logs.join("serve.log.1")).unwrap(), b"gen-A");
+        fs::write(logs.join("serve.log"), b"gen-B").unwrap();
+
+        // Third spawn: .1(gen-A) → .2, serve.log(gen-B) → .1.
+        assert!(super::serve_log_stdio(&home).is_some());
+        assert_eq!(fs::read(logs.join("serve.log.1")).unwrap(), b"gen-B");
+        assert_eq!(fs::read(logs.join("serve.log.2")).unwrap(), b"gen-A");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
 mod discovery_tests {
     use super::parse_operator_discovery;
 
@@ -1246,6 +1282,45 @@ fn enable_login_autostart(app: &tauri::App) {
     }
 }
 
+/// Prepare rotated stdout+stderr sinks for the sidecar under
+/// `<workspace_home>/.papercusp/logs/serve.log` (WI-1707).
+///
+/// A packaged desktop app is launched with NO controlling console — Finder /
+/// `launchd` / a login-item on macOS, an Explorer / login GUI launch on Windows
+/// — so the parent process's stdout/stderr are already `/dev/null`. An
+/// *inherited* sidecar stdio therefore drops every serve boot / embedded-PG /
+/// migration diagnostic on the floor, leaving a wedged install unbootstrappable
+/// to debug (the exact gap this fixes). Point them at an on-disk log instead.
+///
+/// Rotation is per-spawn (each Server-app launch / crash-respawn): `serve.log`
+/// → `serve.log.1` → … → `serve.log.5`, dropping the oldest, so history survives
+/// a respawn without unbounded growth. Returns two `Stdio` handles onto the SAME
+/// fresh file (stdout + a `try_clone`d stderr), or `None` if the log can't be
+/// prepared — the caller then falls back to inherit so logging never blocks the
+/// sidecar from launching.
+fn serve_log_stdio(workspace_home: &std::path::Path) -> Option<(Stdio, Stdio)> {
+    let logs_dir = workspace_home.join(".papercusp").join("logs");
+    std::fs::create_dir_all(&logs_dir).ok()?;
+    let base = logs_dir.join("serve.log");
+    const KEEP: u32 = 5;
+    let rotated = |n: u32| logs_dir.join(format!("serve.log.{n}"));
+    // Drop the oldest, shift each older file up one, then the live log → .1.
+    let _ = std::fs::remove_file(rotated(KEEP));
+    for n in (1..KEEP).rev() {
+        let _ = std::fs::rename(rotated(n), rotated(n + 1));
+    }
+    let _ = std::fs::rename(&base, rotated(1));
+    // append: `base` was just rotated away so this creates a fresh file; append
+    // (not truncate) is the safe choice if the rename above ever no-ops.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&base)
+        .ok()?;
+    let file2 = file.try_clone().ok()?;
+    Some((Stdio::from(file), Stdio::from(file2)))
+}
+
 /// Spawn the bundled `serve.mjs --ensure` (SP1 C5). serve owns embedded-PG +
 /// the Hono host + the discovery files; this fn just assembles the desktop
 /// environment for it:
@@ -1253,10 +1328,13 @@ fn enable_login_autostart(app: &tauri::App) {
 ///   - the SPA/docs roots (desktop serves the UI: PAPERCUSP_SERVE_UI=1)
 ///   - PG knobs (picked port, shared data dir, bundled migrations dir)
 ///   - the cold-start port hint (PAPERCUSP_HONO_PORT)
-/// stdout/stderr are inherited — boot progress + the smoke-harness grep
-/// lines land in the desktop log. The endpoint-IPC handshake is NOT parsed
-/// from stdout anymore; the discovery file (~/.papercusp/endpoint-ipc.json)
-/// is the one channel that also covers the --ensure reuse case.
+/// stdout/stderr: in a dev build they're inherited (the developer's `tauri dev`
+/// console); in a release (packaged) build — which has NO console — they're
+/// redirected to a rotated <home>/.papercusp/logs/serve.log so boot / PG /
+/// migration diagnostics survive on disk (WI-1707; see serve_log_stdio). The
+/// endpoint-IPC handshake is NOT parsed from stdout anymore; the discovery file
+/// (~/.papercusp/endpoint-ipc.json) is the one channel that also covers the
+/// --ensure reuse case, so redirecting stdout is safe.
 #[allow(clippy::too_many_arguments)]
 fn spawn_serve(
     via_wsl: bool,
@@ -1437,7 +1515,18 @@ fn spawn_serve(
     if ipc_enabled {
         cmd.env("PAPERCUSP_IPC_ENABLE", "1");
     }
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    // Dev build: keep the inherited console (the `tauri dev` terminal). Release
+    // (packaged) build: no console exists, so an inherited stdout/stderr is
+    // /dev/null and every serve diagnostic is lost — tee to a rotated on-disk log
+    // instead (WI-1707). If the log can't be prepared, fall back to inherit so
+    // logging setup never blocks the sidecar from launching.
+    if cfg!(debug_assertions) {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else if let Some((out, err)) = serve_log_stdio(workspace_home) {
+        cmd.stdout(out).stderr(err);
+    } else {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
 
     cmd.spawn()
 }
