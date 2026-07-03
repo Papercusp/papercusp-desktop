@@ -25,6 +25,7 @@
     "allow-console-launch",
     "allow-list-windows-by-title",
     "allow-focus-window-by-title",
-    "allow-window-title-for"
+    "allow-window-title-for",
+    "allow---dev-bridge-result"
   ]
 }

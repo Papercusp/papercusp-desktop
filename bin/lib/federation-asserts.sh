@@ -181,7 +181,14 @@ fed_local_launch() {
     # PAPERCUSP_DHT_HOST / PAPERCUSP_DHT_BOOTSTRAP for the tower↔VM rig; a
     # loopback smoke inheriting them swarm-binds/bootstraps on the bridge →
     # 0 peer dials. Trailing "$@" VAR=val args win for callers that want them.
-    env DISPLAY=":$disp" HOME="$home" PATH="$(dirname "$(command -v node)"):$PATH" \
+    # WI-1666 env-inheritance leg (2026-07-03): agent shells also export
+    # DATABASE_URL / *_DATABASE_URL pointing at the box's SHARED native :5432 —
+    # an "isolated" instance inheriting one reads/writes the tower's PG (how a
+    # fresh from-repo smoke saw a pre-existing hello-world-hive). UNSET them
+    # (env -u, not VAR= — an empty DSN string breaks spawn-mcp downstream).
+    env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
+      -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+      DISPLAY=":$disp" HOME="$home" PATH="$(dirname "$(command -v node)"):$PATH" \
       PAPERCUSP_DHT_HOST= PAPERCUSP_DHT_BOOTSTRAP= "$@" \
       setsid nohup vglrun -d egl0 "$bin" >"$logf" 2>&1 < /dev/null ) &
   FED_KILL_PIDS+=("$!")
@@ -225,7 +232,9 @@ fed_local_launch_sidecar() {
   # VAR=val args ("$@" below wins over the earlier assignment) — all committed
   # smokes already pass DHT_BOOTSTRAP explicitly when they spin a testnet.
   ( cd "$side"
-    env HOME="$home" \
+    env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
+        -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+        HOME="$home" \
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \

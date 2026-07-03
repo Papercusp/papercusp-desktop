@@ -64,6 +64,11 @@ fn main() {
                 "list_windows_by_title",
                 "focus_window_by_title",
                 "window_title_for",
+                // The dev-bridge eval return channel (debug builds). Without this
+                // grant the injected eval JS's invoke() is ACL-rejected from the
+                // remote http origin, so every tauri-agent-tools eval/click/dom
+                // call times out — the fleet-wide "wedged shell" symptom.
+                "__dev_bridge_result",
             ]),
         ),
     )
