@@ -28,15 +28,24 @@
 #                  unflipped pending the P-003 claim-path soak
 #   SPAWN          P-104 offer-executor REQUIRED injections have no production caller
 #   RESULTS D-018  rides SPAWN (foreign-git-sync exists but nothing spawns to exercise it)
-#   METERING       P-205 metering-ledger durable table absent (pure module only)
+#   METERING       P-205 substrate LANDED (mig 483 + metering-store.ts, WI-1938 passed
+#                  07-03) but NO production writer yet — spend rides the owner-gated
+#                  executor leg (WI-1937), contribution rides the soak-gated puller
+#                  (WI-1936); this SKIP flips only when real rows flow
 #   NUDGE          P-303 push-nudge pure module unwired ("deferred to P-305 rig")
 #   FED-REAP       revoke on A → reap on B needs the peer-grants projection-apply hook
 #                  (revocation-reaper.ts deferred #3); the LOCAL reap path is leg R
 #
-# Cross-node (2-node rig) variant: gated today on WI-1910 (swarm discovery dead on the
-# 2026-07-03 deb; fleet-directory projection landed 07-03 so cross-node legs cannot ride
-# the pinned 07-02 deb either). Run single-box now; promote to a matrix scenario when
-# WI-1910 lands.
+# Cross-node (2-node rig) variant: WI-1910 CLOSED 2026-07-03 (leader verdict — connect
+# symptom non-repro on the current deb; the 07-02 pin is lifted). The gate has MOVED to
+# WI-2006: the only genuinely cross-node work-distribution surface (fleet-directory,
+# mig 476 / D-006) landed store + member-side projection but its PUBLISH path is UNWIRED
+# (PgFleetDirectory has zero production callers; scope-roster's `directory?` slot is never
+# injected) — every other leg above is per-machine BY DESIGN (M19 allotments; LOCAL
+# reaper/receipts/metering), so a cross-node run today would only duplicate single-box
+# coverage. Promote to a matrix scenario (record published on frame A materializes,
+# sig-verified, in frame B's p2p_fleet_directory) when WI-2006 wires. Content-layer
+# asserts stay OUT regardless (epoch-key class still red — WI-183).
 #
 # Usage: bin/work-distribution-drill.sh [path/to/Papercusp*_.deb]
 #   KEEP_UP=1        leave the sidecar running for inspection
