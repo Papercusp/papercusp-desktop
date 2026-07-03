@@ -670,7 +670,7 @@ mod macos_ats_tests {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::parse_operator_discovery;
+    use super::{next_operator_port, parse_operator_discovery, OperatorDiscovery};
 
     #[test]
     fn parses_valid_payload() {
@@ -700,6 +700,30 @@ mod discovery_tests {
         assert!(parse_operator_discovery("{}").is_none());
         assert!(parse_operator_discovery(r#"{"port":3070}"#).is_none());
         assert!(parse_operator_discovery(r#"{"pid":3070}"#).is_none());
+    }
+
+    // WI-1869: the operator watcher's re-navigate decision. These run on Linux
+    // CI, where the macOS/Windows dynamic-port restart path they guard can never
+    // be exercised — the exact blind spot that let strand-on-restart ship.
+    #[test]
+    fn watcher_follows_a_port_change() {
+        // Server restart moved the operator :21385 -> :21927 (the live repro).
+        let latest = OperatorDiscovery { port: 21927, pid: 50461 };
+        assert_eq!(next_operator_port(21385, Some(&latest)), Some(21927));
+    }
+
+    #[test]
+    fn watcher_ignores_same_port() {
+        // A same-port bounce (dev box: fixed :3070) is NOT a move — don't churn.
+        let latest = OperatorDiscovery { port: 3070, pid: 999 };
+        assert_eq!(next_operator_port(3070, Some(&latest)), None);
+    }
+
+    #[test]
+    fn watcher_holds_when_discovery_absent() {
+        // operator.json gone / half-written (parse -> None): stay put, don't
+        // navigate to nowhere; wait for the next tick to see a valid operator.
+        assert_eq!(next_operator_port(3070, None), None);
     }
 }
 
@@ -951,6 +975,124 @@ fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorD
     parse_operator_discovery(&txt)
 }
 
+/// WI-1869: given the operator port the webview is CURRENTLY pointed at and the
+/// latest operator.json discovery, decide whether to re-navigate — and to which
+/// port. Returns Some(new_port) iff a discovery is present and names a DIFFERENT
+/// port than the applied one (i.e. a Server restart / sidecar crash-respawn
+/// moved the operator). Pure, so it is unit-tested on Linux CI — the macOS/
+/// Windows dynamic-port path that this guards can never be exercised there,
+/// which is exactly the blind spot that let the strand-on-restart bug ship.
+fn next_operator_port(applied_port: u16, latest: Option<&OperatorDiscovery>) -> Option<u16> {
+    match latest {
+        Some(d) if d.port != applied_port => Some(d.port),
+        _ => None,
+    }
+}
+
+/// Point the main window at the operator on `port`: compute the app origin
+/// (the custom-protocol origin when it's on — Linux default; otherwise the HTTP
+/// loopback base), navigate-or-reload the webview there, and (re-)inject
+/// window.__papercuspBase so the SPA/bootstrap dials the right operator.
+/// `reinject_ticks` re-evals the base injection every 300ms so a page (re)load
+/// racing this thread still receives the port. Shared by the initial attach
+/// (finish_boot) AND the operator watcher (WI-1869) so both stay in lockstep.
+fn point_window_at_operator<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    port: u16,
+    reinject_ticks: u32,
+) {
+    // Use 127.0.0.1, not localhost: WebKitGTK may resolve `localhost` to ::1
+    // while the sidecar binds IPv4 loopback, which fails the bootstrap fetch.
+    let base = format!("http://127.0.0.1:{}", port);
+    // With the custom protocol on (Linux default) the SPA loads off the
+    // `papercusp://localhost` origin; with it off (macOS/Windows) it's the HTTP
+    // base — which on those platforms embeds the dynamic port, so a restart's
+    // new port means a genuinely different app origin to navigate to.
+    let app_base = if custom_protocol::enabled() {
+        custom_protocol::APP_ORIGIN.to_string()
+    } else {
+        base.clone()
+    };
+    // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty path. The page may
+    // (re)load around this thread's timing, dropping __papercuspBase, so re-eval
+    // on a short timer — web/index.html's tick() polls it, so a late set lands.
+    let inject = format!(
+        "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
+        base, app_base
+    );
+    // Already on the app origin (custom-protocol statics session) → reload so
+    // the SPA boots fresh against the live operator instead of sitting on dead
+    // 503'd /api fetches; anywhere else (custom protocol off, or a stale HTTP
+    // port after a restart) → navigate to the current origin.
+    let already_on_app = window
+        .url()
+        .ok()
+        .map(|u| u.as_str().starts_with(&app_base))
+        .unwrap_or(false);
+    if already_on_app {
+        let _ = window.eval("location.reload()");
+    } else {
+        match app_base.parse() {
+            Ok(parsed) => {
+                if let Err(e) = window.navigate(parsed) {
+                    eprintln!("[papercusp-desktop] navigate to {} failed: {}", app_base, e);
+                }
+            }
+            Err(e) => eprintln!("[papercusp-desktop] app base {} did not parse: {}", app_base, e),
+        }
+    }
+    for _ in 0..reinject_ticks {
+        let _ = window.eval(&inject);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// WI-1869: follow the operator across restarts. finish_boot reads operator.json
+/// exactly once at attach; on macOS/Windows the operator takes a NEW dynamic
+/// port on every Server restart / sidecar crash-respawn, so a one-shot discovery
+/// strands the webview on the dead port forever (macOS has no load-failure
+/// recovery at all, and the Linux EI-239 recovery only polls the same dead URI,
+/// which never returns after a port change). This polls operator.json ~every
+/// 1.5s and, when it names a LIVE operator on a different port than the one the
+/// webview is on, re-navigates there — the cross-platform generalization of
+/// EI-239 to dynamic-port moves. Runs for the life of the app on a daemon thread.
+fn spawn_operator_watcher(
+    app_handle: tauri::AppHandle,
+    workspace_home: std::path::PathBuf,
+    via_wsl: bool,
+    initial_port: u16,
+) {
+    std::thread::spawn(move || {
+        let mut applied_port = initial_port;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let latest = read_operator_discovery(&workspace_home);
+            let Some(new_port) = next_operator_port(applied_port, latest.as_ref()) else {
+                continue;
+            };
+            // Guard against a STALE operator.json whose port was reused by an
+            // unrelated process: only follow a discovery whose pid is alive.
+            if let Some(d) = latest.as_ref() {
+                if !discovery_pid_alive(d.pid, via_wsl) {
+                    continue;
+                }
+            }
+            println!(
+                "[papercusp-desktop] operator moved :{} -> :{} — re-navigating the webview (WI-1869)",
+                applied_port, new_port
+            );
+            if let Some(window) = app_handle.get_webview_window("main") {
+                point_window_at_operator(&window, new_port, 10);
+                {
+                    let state: tauri::State<SidecarState> = app_handle.state();
+                    *state.port.lock().unwrap() = Some(new_port);
+                }
+                applied_port = new_port;
+            }
+        }
+    });
+}
+
 /// The sidecar's REAL home when it runs inside WSL, reachable from Windows
 /// via the \\wsl.localhost UNC share. WSLENV `HOME/p` forwarding does NOT
 /// survive WSL session init (it re-sets HOME from /etc/passwd after the
@@ -1151,81 +1293,33 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
     // will poll /api/desktop/preflight on that base, render any
     // missing-prereq UI, then navigate when ready.
     if let Some(window) = app_handle.get_webview_window("main") {
-        // Use 127.0.0.1, not localhost: WebKitGTK may resolve `localhost`
-        // to ::1 while the sidecar binds IPv4 loopback, which fails the
-        // bootstrap's preflight fetch.
-        let base = format!("http://127.0.0.1:{}", port);
-        // Phase 4: the bootstrap polls preflight over `base` (HTTP — it's a
-        // transient pre-app page) but navigates the real app to `app_base`.
-        // With the custom protocol on (default), that's
-        // `papercusp://localhost`, so the operator SPA loads off HTTP; with
-        // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 it's the HTTP `base`.
-        let app_base = if custom_protocol::enabled() {
-            custom_protocol::APP_ORIGIN.to_string()
-        } else {
-            base.clone()
-        };
         // WebKitGTK denies getUserMedia by default; auto-grant so voice /
         // wake-word / elevenlabs work in the shipped build the same way they
         // do in browsers.
         #[cfg(target_os = "linux")]
         grant_media_permission(&window);
+        // EI-239: same-port bounce recovery (Linux-only — the operator port is
+        // fixed on the dev box). Dynamic-port restarts are handled cross-platform
+        // by the operator watcher installed below (WI-1869).
         #[cfg(target_os = "linux")]
         install_load_failure_recovery(&window);
-        // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty path
-        // (Tauri invoke + events) instead of the operator's HTTP+WS bridge.
-        // See apps/operator/lib/pty-tauri.ts and
-        // apps/operator/app/harness/PiPanel.tsx.
-        //
-        // The bootstrap page may (re)load at any point around this thread's
-        // timing, and a single eval can land on a document that a page-load
-        // then replaces, dropping __papercuspBase — the bootstrap would then
-        // poll for a port that never arrives. Re-eval on a short timer so
-        // whichever document is live when the page is ready receives the
-        // port. (web/index.html's tick() polls window.__papercuspBase, so a
-        // late set is picked up.)
-        let inject = format!(
-            "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
-            base, app_base
-        );
-        // Packaged builds load the conf's frontendDist URL (:3070) as the
-        // INITIAL document — nothing serves it on a user machine (the stuck
-        // "Could not connect" window of linux-test-vm D-010; reproduced on
-        // Windows 2026-06-11). setup() navigates to the app origin
-        // immediately, where the custom protocol serves bundled statics
-        // until this discovery completes. Now that the operator is live:
-        //   - already on the app origin (the statics session) → reload, so
-        //     the SPA boots fresh against the proxied operator instead of
-        //     sitting on dead 503'd /api fetches;
-        //   - anywhere else (custom protocol off / odd state) → navigate.
-        let already_on_app = window
-            .url()
-            .ok()
-            .map(|u| u.as_str().starts_with(&app_base))
-            .unwrap_or(false);
-        if already_on_app {
-            let _ = window.eval("location.reload()");
-        } else {
-            match app_base.parse() {
-                Ok(parsed) => {
-                    if let Err(e) = window.navigate(parsed) {
-                        eprintln!(
-                            "[papercusp-desktop] navigate to {} failed: {}",
-                            app_base, e
-                        );
-                    }
-                }
-                Err(e) => eprintln!(
-                    "[papercusp-desktop] app base {} did not parse: {}",
-                    app_base, e
-                ),
-            }
-        }
-        for _ in 0..30 {
-            let _ = window.eval(&inject);
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        }
+        // Point the webview at the freshly-discovered operator: navigate/reload
+        // to the app origin + inject window.__papercuspBase (see the helper).
+        // Packaged builds load the conf's frontendDist URL (:3070) as the INITIAL
+        // document — nothing serves it on a user machine — and setup() already
+        // moved us to the app origin's bundled statics; this re-points at the
+        // now-live operator. reinject_ticks=30 covers a page (re)load racing this
+        // thread during the bootstrap→SPA handoff.
+        point_window_at_operator(&window, port, 30);
     }
+
+    // WI-1869: after the one-shot attach above, KEEP following the operator.
+    // finish_boot reads operator.json exactly once; on macOS/Windows the operator
+    // takes a NEW dynamic port on every Server restart / sidecar crash-respawn,
+    // which would otherwise strand the webview on the dead port forever (macOS
+    // has no load-failure recovery, and the Linux one polls the same dead URI).
+    // The watcher re-navigates to the current operator whenever its port changes.
+    spawn_operator_watcher(app_handle.clone(), workspace_home.clone(), via_wsl, port);
 }
 
 // ===========================================================================
