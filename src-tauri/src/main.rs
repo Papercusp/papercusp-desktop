@@ -583,6 +583,61 @@ mod serve_log_tests {
 
         let _ = fs::remove_dir_all(&home);
     }
+
+    // WI-1803: the app's OWN process (not just its child sidecars) has fd 1/2 at
+    // /dev/null under a console-less packaged launch, so this binary's own boot/
+    // navigation eprintln!s — the ones that pin down the WI-1802 blank page —
+    // were lost. redirect_own_stdio dup2's a rotated on-disk log over stdout AND
+    // stderr. Prove the redirect actually routes BOTH raw fds to gui.log (we
+    // write to the raw fds, not println!, because libtest intercepts
+    // println!/eprintln! via a thread-local sink BEFORE they reach fd 1/2), then
+    // RESTORE the harness's real stdio so its own output isn't clobbered.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn redirect_own_stdio_captures_process_fds() {
+        use std::fs;
+        let home = std::env::temp_dir().join(format!("pcusp-gui-log-{}", std::process::id()));
+        let logs = home.join(".papercusp").join("logs");
+        let _ = fs::remove_dir_all(&home);
+
+        // Save the real stdout/stderr so we can put them back after the swap.
+        let saved_out = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        let saved_err = unsafe { libc::dup(libc::STDERR_FILENO) };
+        assert!(saved_out >= 0 && saved_err >= 0, "dup of real stdio failed");
+
+        super::redirect_own_stdio(&home, "gui.log");
+        let out_msg = b"[[MARK-STDOUT-1803]]\n";
+        let err_msg = b"[[MARK-STDERR-1803]]\n";
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                out_msg.as_ptr() as *const libc::c_void,
+                out_msg.len(),
+            );
+            libc::write(
+                libc::STDERR_FILENO,
+                err_msg.as_ptr() as *const libc::c_void,
+                err_msg.len(),
+            );
+            // Restore the harness's real stdio and drop the saved copies.
+            libc::dup2(saved_out, libc::STDOUT_FILENO);
+            libc::dup2(saved_err, libc::STDERR_FILENO);
+            libc::close(saved_out);
+            libc::close(saved_err);
+        }
+
+        let contents = fs::read_to_string(logs.join("gui.log")).unwrap();
+        assert!(
+            contents.contains("[[MARK-STDOUT-1803]]"),
+            "stdout not redirected to gui.log: {contents:?}"
+        );
+        assert!(
+            contents.contains("[[MARK-STDERR-1803]]"),
+            "stderr not redirected to gui.log: {contents:?}"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
 }
 
 #[cfg(test)]
@@ -1341,10 +1396,18 @@ fn enable_login_autostart(app: &tauri::App) {
 /// `basename` is the log file name (e.g. `serve.log`, `code-server.log`) so every
 /// console-less child sidecar can route to its own rotated on-disk log via one
 /// shared helper rather than each re-implementing the rotation (WI-1707/WI-1781).
-fn rotating_log_stdio(
+/// Rotate `<workspace_home>/.papercusp/logs/<basename>` (…→`.5`, dropping the
+/// oldest) and open a FRESH appendable file for it, returning the open handle.
+///
+/// The shared core of both console-less-stdio sinks: the CHILD-sidecar path
+/// (`rotating_log_stdio`, which wraps this in a `(Stdio, Stdio)` pair) and the
+/// OWN-process path (`redirect_own_stdio`, which `dup2`s this file's fd over
+/// 1/2). Returns `None` if the log dir / file can't be prepared so every caller
+/// can fall back without blocking boot.
+fn rotate_and_open_log(
     workspace_home: &std::path::Path,
     basename: &str,
-) -> Option<(Stdio, Stdio)> {
+) -> Option<std::fs::File> {
     let logs_dir = workspace_home.join(".papercusp").join("logs");
     std::fs::create_dir_all(&logs_dir).ok()?;
     let base = logs_dir.join(basename);
@@ -1358,13 +1421,68 @@ fn rotating_log_stdio(
     let _ = std::fs::rename(&base, rotated(1));
     // append: `base` was just rotated away so this creates a fresh file; append
     // (not truncate) is the safe choice if the rename above ever no-ops.
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&base)
-        .ok()?;
+        .ok()
+}
+
+fn rotating_log_stdio(
+    workspace_home: &std::path::Path,
+    basename: &str,
+) -> Option<(Stdio, Stdio)> {
+    let file = rotate_and_open_log(workspace_home, basename)?;
     let file2 = file.try_clone().ok()?;
     Some((Stdio::from(file), Stdio::from(file2)))
+}
+
+/// Redirect THIS process's OWN stdout+stderr (fd 1 & 2) to a rotated on-disk log
+/// `<workspace_home>/.papercusp/logs/<basename>` — the own-process analogue of
+/// `rotating_log_stdio` (WI-1803).
+///
+/// WI-1707 pointed the CHILD sidecars' (serve / code-server) stdio at on-disk
+/// logs, but the desktop app's OWN process is ALSO launched with no controlling
+/// console (Finder / `launchd` / a login item on macOS), so its inherited fd
+/// 1/2 are `/dev/null`. Every `println!` / `eprintln!` in THIS binary — the
+/// GUI's `gui_setup` + `finish_boot` navigate/boot diagnostics, the Server's
+/// sidecar-spawn errors — was therefore dropped on the floor, leaving a
+/// blank-page GUI (WI-1802) undebuggable on a shipped Mac build. `dup2` the
+/// rotated log's fd over 1 & 2 so those diagnostics land on disk, exactly like
+/// a shell `exec >log 2>&1`.
+///
+/// Best-effort: any failure (no HOME, open error) leaves stdio untouched and
+/// never blocks boot. Unix-only (`dup2`); a packaged Windows GUI has the same
+/// console-less gap but needs a different API (`SetStdHandle`/`freopen`) —
+/// tracked separately. Caller gates this to release builds so `tauri dev` keeps
+/// its inherited terminal console.
+///
+/// Only WIRED IN release builds (the call site is `cfg(not(debug_assertions))`),
+/// so a debug non-test build sees it unused — silence dead_code for exactly that
+/// config; the `serve_log_tests` unit test exercises it under `cfg(test)`.
+#[cfg(unix)]
+#[cfg_attr(all(debug_assertions, not(test)), allow(dead_code))]
+fn redirect_own_stdio(workspace_home: &std::path::Path, basename: &str) {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let Some(file) = rotate_and_open_log(workspace_home, basename) else {
+        return;
+    };
+    // Flush anything Rust buffered against the old fds first (stdout is
+    // block-buffered when 1 isn't a tty), so no stray bytes race the swap.
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is a valid open descriptor. `dup2` atomically points fd 1 & 2
+    // at the log's open file description; Rust's `stdout()`/`stderr()` keep
+    // writing to fd 1/2 (now the log). We `mem::forget` the `File` so its open
+    // description outlives this fn — 1/2 must stay valid for the whole process,
+    // just as an `exec >log 2>&1` redirect persists after the shell returns.
+    unsafe {
+        libc::dup2(fd, libc::STDOUT_FILENO);
+        libc::dup2(fd, libc::STDERR_FILENO);
+    }
+    std::mem::forget(file);
 }
 
 /// Spawn the bundled `serve.mjs --ensure` (SP1 C5). serve owns embedded-PG +
@@ -2273,6 +2391,19 @@ pub fn run() {
         })
         .setup(|app| {
             let role = app_role::detect(&app.config().identifier);
+            // WI-1803: BEFORE any boot diagnostic prints, route THIS process's
+            // own stdout/stderr to a rotated on-disk log in packaged (release)
+            // builds — a Finder/launchd/login-item launch has no console, so
+            // fd 1/2 are /dev/null and every eprintln! below (incl. the GUI
+            // navigate/boot failure that blanks the page — WI-1802) would
+            // otherwise vanish. Role-scoped basename so the GUI and Server
+            // processes don't interleave into one file, and distinct from the
+            // serve.mjs child's serve.log. Dev keeps its inherited terminal.
+            #[cfg(all(unix, not(debug_assertions)))]
+            {
+                let basename = if role.is_gui() { "gui.log" } else { "server-app.log" };
+                redirect_own_stdio(&workspaces::shared_sidecar_home(), basename);
+            }
             println!(
                 "[papercusp-desktop] role={} (identifier {})",
                 role.label(),
