@@ -650,7 +650,12 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # the takedown's read-mutate-resign PRESERVES reportable). Seed A's local claim, then author via
   # the real claim-gated signed route (re-signs + federates). A soft prereq: if it fails, LEG 1
   # still runs and LEG 2 degrades to INCONCLUSIVE (never a false-FAIL).
-  claimed="$(drv_psql a "UPDATE harness_shared.shared_repo_binding_cache SET claim_status='claimed', claimed_by_github_user_ids=ARRAY[${MOD_A_GH_ID:-0}]::bigint[], claimed_at=now() WHERE harness_slug='$HIVE_SLUG' RETURNING claim_status;" 2>/dev/null | tr -d '[:space:]')"
+  # WI-1918: binding rows are MEMBER-slug-keyed (hive-publish-from-repo step 6) — the hive
+  # HOME slug has no row, so the old WHERE harness_slug='$HIVE_SLUG' matched 0 rows and the
+  # gate 403'd hive_unclaimed. The route now accepts claimed MEMBER bindings on the hive
+  # topic (topic-fallback gate); claim ALL binding rows of this hermetic instance (fresh
+  # PG — only this hive's member rows exist), which the fallback finds.
+  claimed="$(drv_psql a "UPDATE harness_shared.shared_repo_binding_cache SET claim_status='claimed', claimed_by_github_user_ids=ARRAY[${MOD_A_GH_ID:-0}]::bigint[], claimed_at=now() RETURNING claim_status;" 2>/dev/null | tr -d '[:space:]')"
   echo "  [reportable] seed A claim (claim_status=${claimed:-<no-binding-row>}, claimant=$MOD_A_GH_ID)"
   pol="$(curl -s -m 30 -X POST "http://127.0.0.1:${FED_SC[a]}/api/hive/$HIVE_SLUG/policy" -H 'content-type: application/json' -d '{"policy":{"moderation":{"reportable":true}}}')"
   echo "  [reportable] A POST /api/hive/$HIVE_SLUG/policy reportable=true -> $(echo "$pol" | head -c 220)"
