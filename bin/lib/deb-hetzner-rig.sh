@@ -488,7 +488,12 @@ rig_setup_all() {
 rig_kill_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] kill sidecar (preserve pgdata — member goes offline)"
-  rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2; pgrep -u pcusp -f 'serve.mjs' >/dev/null && echo 'STILL-RUNNING' || echo 'sidecar stopped'\""
+  # Kill node AND the embedded-postgres children: pkill by 'serve.mjs' matches
+  # only the node process; the postgres backends sometimes survive the parent
+  # and then hold pgdata/postmaster.pid + the PG port, so the NEXT boot dies
+  # with EMBEDDED_PG_FAILED (seen live: m1783106818 cycles 3/5 on frame b).
+  # A real desktop quit takes PG down with it — emulate that, preserve pgdata.
+  rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1; pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true; sleep 2; pgrep -u pcusp -f 'serve.mjs|bin/postgres' >/dev/null && echo 'STILL-RUNNING' || echo 'sidecar stopped'\""
 }
 
 # rig_restart_sidecar <inst> — relaunch serve.mjs WITHOUT wiping pgdata/.papercusp
@@ -501,7 +506,11 @@ rig_restart_sidecar() {
   rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
-pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 2
+pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1
+pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true; sleep 2
+# stale-lock hygiene: an orphaned/killed PG can leave postmaster.pid behind;
+# with no live postgres for this pgdata, clear it or the boot dies EMBEDDED_PG_FAILED
+pgrep -u pcusp -f 'bin/postgres' >/dev/null || rm -f "$H/pgdata/postmaster.pid"
 SIDE="${SIDE_DIR:-/usr/lib/Papercusp/sidecar}"
 set -a; . "$H/fed.env"; set +a
 cd "$SIDE"

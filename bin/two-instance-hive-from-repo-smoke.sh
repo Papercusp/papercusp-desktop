@@ -564,18 +564,26 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null && att_wrong_ok=1
   echo "  LEG3 WRONG-GH REFUSED-OP (A refuses B's mis-attributed receipt; counter++, row absent): $([ "$att_wrong_ok" = 1 ] && echo "PASS (responder_mismatch $rc_before→$rc_after, row-on-A=$rid_on_a)" || echo "FAIL (counter $rc_before→$rc_after, row-on-A=$rid_on_a)")"
 
-  # ── LEG4 — UNATTESTED/REMOVED-device refused-op counter ───────────────────────────
-  # Revoke B, then B authors a VALID receipt (responder=B). B's device no longer resolves to a member
-  # identity on A → the projection refuses (identity_unresolved / no_author_device) and bumps the
-  # counter. The security property (a removed device's op does NOT apply) is corroborated by row-absent.
+  # ── LEG4 — UNATTESTED-device refused-op counter ───────────────────────────────────
+  # The receipts identity gate is ANTI-SPOOF (author must == the claimed responder) — a member
+  # authoring a receipt AS THEMSELVES always passes it, even after revocation (revocation gates
+  # ADMISSION/read, not an immutable self-authored INSERT fact). The "unattested device" adversarial
+  # probe therefore targets the gate's OTHER refusal: an author DEVICE that resolves to NO member
+  # identity → 'identity_unresolved'. Rig affordance: strip B's device attestation on A's hive_members
+  # (B's source-log device is now attested to no member — the unattested-device case), WAIT OUT the
+  # comms-tier device→user cache TTL (30s, PAPERCUSP_COMMS_TIER_CACHE_MS), then B authors a VALID
+  # receipt (responder=B). A resolves the source-log device but it maps to no member → the projection
+  # REFUSES (identity_unresolved), bumps p2p_refused_op_counters, and the row stays absent on A.
   tot_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$tot_before" ] && tot_before=0
-  rev="$(mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$ATT_WS\",\"githubUserId\":$ATT_B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}")"
-  echo "  [LEG4] A revoke_contributor(B=$ATT_B_GH_ID) -> $(echo "$rev" | head -c 160)"
-  sleep 4
-  RID_REM="att-removed-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
-  drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_REM','refusal','work-offer:claim','att removed-device probe',${ATT_B_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
-  echo "  [LEG4] B (now revoked) authored valid receipt $RID_REM (responder=B) — federating to A…"
+  # Strip B's attestation on A (simulate an author device attested to no member) — union preserved for
+  # LEG2's assert already recorded; this is the LAST leg so mutating A's roster is safe.
+  drv_psql a "UPDATE harness_shared.hive_members SET device_attestations='[]'::jsonb WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" >/dev/null 2>&1
+  echo "  [LEG4] stripped B's device attestation on A (B's author device now maps to no member); waiting out the 30s comms-tier cache TTL…"
+  sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default = 30_000; ensure the next resolve rebuilds the device→user map WITHOUT B
+  RID_REM="att-unatt-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
+  drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_REM','refusal','work-offer:claim','att unattested-device probe',${ATT_B_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
+  echo "  [LEG4] B authored valid receipt $RID_REM (responder=B) with its device now unattested on A — federating…"
   tot_after=$tot_before
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
     tot_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
@@ -586,7 +594,7 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$HIVE_SLUG' AND receipt_id='$RID_REM';" 2>/dev/null | tr -d '[:space:]')"
   att_removed_reason="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
   { [ "$tot_after" -gt "$tot_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null && att_removed_ok=1
-  echo "  LEG4 REMOVED-DEVICE REFUSED-OP (revoked B's receipt refused; counter++, row absent): $([ "$att_removed_ok" = 1 ] && echo "PASS (receipt-apply total $tot_before→$tot_after; reasons: $att_removed_reason; row-on-A=$rem_on_a)" || echo "$([ "$rem_on_a" = 0 ] && echo "PARTIAL (row refused/absent on A but counter $tot_before→$tot_after — op may be dropped at the admission blocklist layer, not the projection counter; security holds)" || echo "FAIL (counter $tot_before→$tot_after row-on-A=$rem_on_a)")")"
+  echo "  LEG4 UNATTESTED-DEVICE REFUSED-OP (author device attested to no member → A refuses; counter++, row absent): $([ "$att_removed_ok" = 1 ] && echo "PASS (receipt-apply total $tot_before→$tot_after; reasons: $att_removed_reason; row-on-A=$rem_on_a)" || echo "FAIL (counter $tot_before→$tot_after row-on-A=$rem_on_a reasons: $att_removed_reason)")"
 fi
 
 # ── 6. FOLDED LIVE WITNESS — owner-enforcement (AK) + re-key CUT (P-008) ──────────
