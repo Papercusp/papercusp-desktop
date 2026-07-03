@@ -109,6 +109,21 @@ q() { psql "$DSN" -tA -c "$1" 2>/dev/null | tr -d '\r'; }
 SC="http://127.0.0.1:${FED_SC[a]}"
 echo "  sc=${FED_SC[a]} pg=${FED_PG[a]}"
 
+# ── workspace partition (WI-1564) ────────────────────────────────────────────
+# grant-store REFUSES writes under the 'default' partition (a grant that never
+# federates is dead config; a stranded revocation is a security hole). The
+# product path: the GUI creates a workspace and every window stamps
+# x-papercusp-workspace on its requests — the drill replicates exactly that
+# (run-1 finding: curls without the header resolve 'default' → all writes refused).
+log "create workspace (the GUI onboarding step the drill must replicate)"
+wresp="$(curl -s -m 30 -X POST "$SC/api/workspaces" -H 'content-type: application/json' \
+  -d '{"name":"P-007 Drill"}')"
+WS="$(jget "$wresp" "d.get('id') or (d.get('workspace') or {}).get('id') or ''")"
+[ -n "$WS" ] || WS="$(jget "$wresp" "d['workspaces'][0]['id']")"
+[ -n "$WS" ] || { echo "✗ workspace create failed: $(echo "$wresp" | head -c 300)"; exit 6; }
+echo "  workspace=$WS (writes below stamp x-papercusp-workspace: $WS)"
+H_WS="x-papercusp-workspace: $WS"
+
 log "create + publish PUBLIC hive ($REPO_URL)"
 resp="$(curl -s -m 610 -X POST "$SC/api/harness/hives/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
@@ -118,11 +133,11 @@ echo "  hive=$HIVE_SLUG"
 
 # ── LEG G: grant Delegate ────────────────────────────────────────────────────
 log "LEG G — grant Delegate to fleet '$DRILL_FLEET'"
-g="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' \
+g="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' -H "$H_WS" \
   -d "{\"action\":\"set\",\"hiveSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\",\"preset\":\"delegate\",\"note\":\"P-007 LIVE-2 drill\"}")"
 [ "$(jget "$g" "d.get('ok')")" = "True" ] || { bad "grant-set refused: $(echo "$g" | head -c 300)"; }
 grow="$(q "SELECT workspace_id||'|'||harness_slug||'|'||array_to_string(capabilities,',')||'|'||status||'|'||grantor_epoch||'|'||grantor_github_user_id FROM harness_shared.p2p_peer_grants WHERE grantee_ref='$DRILL_FLEET' AND harness_slug='$HIVE_SLUG';")"
-WS="$(echo "$grow" | cut -d'|' -f1)"; CAPS="$(echo "$grow" | cut -d'|' -f3)"
+CAPS="$(echo "$grow" | cut -d'|' -f3)"
 GSTATUS="$(echo "$grow" | cut -d'|' -f4)"; EPOCH0="$(echo "$grow" | cut -d'|' -f5)"; GRANTOR="$(echo "$grow" | cut -d'|' -f6)"
 if [ "$CAPS" = "chat,steer,work-offer,wake" ] && [ "$GSTATUS" = "active" ]; then
   ok "grant row live: caps expanded '$CAPS' status=active epoch=$EPOCH0 (ws=$WS grantor=$GRANTOR)"
@@ -140,13 +155,13 @@ arows="$(q "SELECT count(*) FROM harness_shared.resource_allotments WHERE fleet_
 # su-35c3b live-verified this on the :3270 integration operator (2026-07-03);
 # the drill re-proves it on the PACKAGED sidecar as a hard assertion.
 log "LEG A — allotment set → row → remove → clean (P-201 two-axis store)"
-as="$(curl -s -m 30 -X POST "$SC/api/agent-mcp/p2p-allotment-set" -H 'content-type: application/json' \
+as="$(curl -s -m 30 -X POST "$SC/api/agent-mcp/p2p-allotment-set" -H 'content-type: application/json' -H "$H_WS" \
   -d "{\"action\":\"set\",\"fleetSlug\":\"$DRILL_FLEET\",\"resourceKind\":\"account\",\"resourceRef\":\"p007-drill-account\",\"sharePct\":25}")"
 [ "$(jget "$as" "d.get('ok')")" = "True" ] || bad "allotment set refused: $(echo "$as" | head -c 200)"
 arow="$(q "SELECT share_pct||'|'||status FROM harness_shared.resource_allotments WHERE fleet_slug='$DRILL_FLEET' AND resource_ref='p007-drill-account';")"
 [ "$arow" = "25|active" ] && ok "allotment row upserted (share_pct=25 status=active)" \
                           || bad "allotment row wrong: '$arow' (want 25|active)"
-curl -s -m 30 -X POST "$SC/api/agent-mcp/p2p-allotment-set" -H 'content-type: application/json' \
+curl -s -m 30 -X POST "$SC/api/agent-mcp/p2p-allotment-set" -H 'content-type: application/json' -H "$H_WS" \
   -d "{\"action\":\"remove\",\"fleetSlug\":\"$DRILL_FLEET\",\"resourceKind\":\"account\",\"resourceRef\":\"p007-drill-account\"}" >/dev/null
 gone="$(q "SELECT count(*) FROM harness_shared.resource_allotments WHERE fleet_slug='$DRILL_FLEET';")"
 [ "$gone" = "0" ] && ok "allotment removed — table left clean" || bad "allotment remove left $gone row(s)"
@@ -161,7 +176,7 @@ fw="$(q "SELECT state FROM harness_shared.p2p_foreign_workspaces WHERE offer_id=
 
 # ── LEG R: revoke → reap + receipt + epoch bump ──────────────────────────────
 log "LEG R — revoke the grant; the reaper must fail-close the in-flight session"
-r="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' \
+r="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' -H "$H_WS" \
   -d "{\"action\":\"revoke\",\"hiveSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\"}")"
 [ "$(jget "$r" "d.get('ok')")" = "True" ] || bad "revoke refused: $(echo "$r" | head -c 300)"
 reaped=""
@@ -185,7 +200,9 @@ gs2="$(q "SELECT status FROM harness_shared.p2p_peer_grants WHERE grantee_ref='$
 
 # ── LEG T: p2p:trace assembles the timeline ──────────────────────────────────
 log "LEG T — p2p:trace (M21 offer-id thread)"
-tr_out="$(cd "$REPO_DIR" && PAPERCUSP_HONO_PORT="${FED_SC[a]}" timeout 60 node scripts/mcp-call.mjs p2p:trace \
+# run-1 finding: mcp-call reads $HOME/.papercusp/superuser-token — must be the
+# DRILL SIDECAR's home (its own token), not the host operator's.
+tr_out="$(cd "$REPO_DIR" && HOME="${AHOME[a]}" PAPERCUSP_HONO_PORT="${FED_SC[a]}" timeout 60 node scripts/mcp-call.mjs p2p:trace \
   "{\"hive\":\"$HIVE_SLUG\",\"offerId\":\"$DRILL_OFFER\"}" --harness "$HIVE_SLUG" --workspace "$WS" 2>&1)"
 if echo "$tr_out" | grep -q "work-offer:reap"; then
   ok "p2p:trace shows the reap receipt for $DRILL_OFFER"
@@ -197,13 +214,18 @@ fi
 
 # ── SKIP census: the unwired legs (release evidence, not silence) ────────────
 log "SKIP census — legs with NO runtime wiring at HEAD (owners: p2p-work-distribution lanes)"
-skipp "OFFER-PUBLISH — P-102 signed-offer store UNBUILT (revocation-reaper.ts deferred #2)"
-skipp "PULL — P-103 standing-puller DORMANT: X11 PULLER_ACTIVATION_LANDED unflipped (gated on P-003 soak)"
-skipp "SPAWN — P-104 offer-executor REQUIRED injections have no production caller"
-skipp "RESULTS(D-018) — rides SPAWN; foreign-git-sync exists but nothing reaches it"
-skipp "METERING — P-205 durable ledger table absent (pure module only)"
-skipp "NUDGE — P-303 push-nudge unwired ('deferred to P-305 rig')"
-skipp "FED-REAP — peer-grants projection-apply hook missing (reaper deferred #3); LOCAL reap proven in LEG R"
+# Reasons agreed with su-35c3b (p2p-work-distribution leader, 2026-07-03 msg mr58yse5):
+# wiring sequence = (1) claim-path soak → flip puller; (2) P-102 store + publish caller;
+# (3) metering table; (4) executor LAST — OWNER-AUTHORITY-GATED (P-105 sandbox unbuilt,
+# 4/5 axes; owner must ring the trust model). The executor gate is the hard line:
+# this drill must NEVER pressure that leg green — SKIP, don't wire.
+skipp "OFFER-PUBLISH — SKIP(P-102 signed-offer store unbuilt; wiring benign, unassigned)"
+skipp "PULL — SKIP(activation gated on claim-path soak: X11 PULLER_ACTIVATION_LANDED unflipped by design)"
+skipp "SPAWN — SKIP(owner-authority: P-105 foreign-work sandbox unbuilt; owner sign-off required — DO NOT WIRE)"
+skipp "RESULTS(D-018) — SKIP(rides SPAWN; foreign-git-sync exists but nothing reaches it)"
+skipp "METERING — SKIP(P-205 durable ledger table absent; needs a migration, not gated)"
+skipp "NUDGE — SKIP(P-303 push-nudge wiring deferred to P-305 rig)"
+skipp "FED-REAP — SKIP(peer-grants projection-apply hook missing, reaper deferred #3); LOCAL reap proven in LEG R"
 
 echo
 echo "════════════════════════════════════════════════════════"

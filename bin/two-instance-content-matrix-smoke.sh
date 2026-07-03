@@ -153,7 +153,10 @@ MATRIX=""
 write_all() { local src="$1" ws="$2" t="$3" ty; for ty in $TYPES; do
   psql "$(dsn "$src")" -tA -c "$(ins "$ty" "$ws" "$t")" >/dev/null 2>"$WORK/ins.err" || echo "  ⚠ $ty $src write SETUP-FAIL: $(head -1 "$WORK/ins.err"|head -c 80)"; done; }
 check_all() { local dst="$1" t="$2" phase="$3" src="$4" ty row cap tries=24 i; for ty in $TYPES; do
-  cap="$(q "$src" "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='$(tbl "$ty")';")"
+  # undrained/total: a growing undrained count = the capture landed in a scope
+  # with NO drain (wrong workspace_id / unbooted harness — the WI-971 class);
+  # 0/N = captured+drained, so a miss is receive-side (latency or apply).
+  cap="$(q "$src" "SELECT count(*) FILTER (WHERE drained_at IS NULL) || '/' || count(*) FROM harness_shared.substrate_outbox WHERE table_name='$(tbl "$ty")';")"
   row=""; for i in $(seq 1 $tries); do row="$(psql "$(dsn "$dst")" -tA -c "$(poll "$ty" "$t")" 2>/dev/null | tr -d '[:space:]')"; [ -n "$row" ] && break; sleep 3; done
   if [ -n "$row" ]; then printf '  ✓ %-16s %s %s=%s\n' "$ty" "$phase" "$row" "ok"; MATRIX+="| $ty | $phase | PASS ($row) |\n"
   else printf '  ✗ %-16s %s NEVER crossed (src outbox=%s)\n' "$ty" "$phase" "$cap"; MATRIX+="| $ty | $phase | FAIL (outbox=$cap) |\n"; fi; done; }
@@ -177,6 +180,20 @@ LINKS="$(jget "${BR:-null}" "json.dumps((d or {}).get('memberLinks') or [])" 2>/
 jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-hive" -H 'content-type: application/json' -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":${LINKS:-[]}}")"
 [ "$(jget "$jr" "d.get('ok')")" = True ] && echo "✓ B joined" || { echo "✗ B join failed: $(echo "$jr"|head -c 200)"; exit 6; }
 sleep 5
+# WS_B RE-DERIVE (2026-07-03, WI-971 differential): the pre-join `LIMIT 1` read can
+# return a meta-only workspace row (e.g. the seeded 'papercusp-workspace' carrying
+# only hiveDirectoryMeta, projects:[]) while the JOIN registers the member under
+# activeWorkspaceId() (= 'default' on a fresh packaged instance). B-side writes
+# stamped with the wrong workspace_id land in a scope with NO booted substrate →
+# captured but NEVER drained → false "incr-B→A NEVER crossed" reds for every
+# workspace_id-bearing table (7/11 types on the 2026-07-03 run; features passed only
+# because its INSERT omits workspace_id → column default 'default'). Re-derive from
+# the registry row that actually CONTAINS the joined member.
+WS_B_JOINED="$(q b "SELECT workspace_id FROM harness_shared.harness_registry WHERE payload->'projects' @> '[{\"slug\":\"$SLUG\"}]'::jsonb LIMIT 1;")"
+if [ -n "$WS_B_JOINED" ] && [ "$WS_B_JOINED" != "$WS_B" ]; then
+  echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (member '$SLUG' registered there)"
+  WS_B="$WS_B_JOINED"
+fi
 AT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[a]}"|grep -oE '[0-9a-f]{8,}'|sort -u)"
 BT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[b]}"|grep -oE '[0-9a-f]{8,}'|sort -u)"
 ST="$(comm -12 <(echo "$AT") <(echo "$BT")|head -1)"
@@ -190,9 +207,24 @@ BACKFILL_TABLE="$MATRIX"; MATRIX=""
 log "INCREMENTAL A→B"; write_all a "$WS_A" ab; check_all b ab "incr-A→B" a
 log "INCREMENTAL B→A"; write_all b "$WS_B" ba; check_all a ba "incr-B→A" b
 
+# ── 6b. BACKFILL LATE-RECHECK: latency vs dead (2026-07-03 differential) ─────────
+# Pre-join (historical) log entries were observed applying MINUTES after the live
+# tail (seed appended 13:26 → applied on B between 13:38 and 14:05 while incr ops
+# crossed in seconds). A ✗ in phase 5 + a ✓ here = backfill-LATE (receive-side
+# catch-up latency, its own bug class); ✗ in both = backfill genuinely dead.
+if printf '%b' "$BACKFILL_TABLE" | grep -q FAIL; then
+  INCR_TABLE="$MATRIX"; MATRIX=""
+  log "BACKFILL LATE-RECHECK (were the phase-5 misses latency or death?)"
+  check_all b seed backfill-late a
+  BACKFILL_LATE_TABLE="$MATRIX"; MATRIX="$INCR_TABLE"
+else
+  BACKFILL_LATE_TABLE=""
+fi
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT (member=$SLUG hive=$HIVE_SLUG)"
 echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_TABLE"
+if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-incremental re-poll — PASS here + FAIL above = latency, not death):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_LATE_TABLE"; fi
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
 echo; echo "negative-isolation=$NEG  topic-equal=$TEQ"
 echo "Pair LEFT RUNNING for Brief E/G. Ports: $WORK/instances.env  ·  STOP: $WORK/stop.sh"
