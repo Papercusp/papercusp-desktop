@@ -82,25 +82,18 @@ fed_wait_boot b 40 || { echo "instance B boot failed: $FED_BOOT_ERR"; tail -20 "
 log "instance A: PG=${FED_PG[a]} sidecar=${FED_SC[a]} | instance B: PG=${FED_PG[b]} sidecar=${FED_SC[b]}"
 fed_assert_isolated a b || exit 4
 
-# ── 4. share a synthetic harness on BOTH (same github_repository_id → same swarm topic) ──
-# The substrate is always-on (Stage 4d). Both instances POST share/finalize with the
-# SAME synthetic repo id so deriveSwarmTopic(sha256("papercusp-substrate-v1:gh:<id>"))
-# matches → they join one swarm. (Requires a registered harness in each workspace;
-# in a clean run, scaffold/select one first. See dogfood docs for the wizard path.)
-log "share synthetic harness on both (topic = sha256(papercusp-substrate-v1:gh:$SYNTH_REPO_ID))"
-STATE="{\"github_repository_id\":$SYNTH_REPO_ID,\"privacy\":\"shared-private\"}"
-echo "A: $(fed_share_finalize a sheets "$STATE" | head -c 300)"
-echo "B: $(fed_share_finalize b sheets "$STATE" | head -c 300)"
+# ── 4. (REMOVED 2026-07-03 P-002) share + discovery steps ──────────────────────
+# The old step-4 POSTed the per-harness share/finalize wire RETIRED 2026-06-11
+# (comb-retire-per-harness-sharing) — it 404s on current builds, so no topic was
+# ever joined and the follow-on discovery poll was a guaranteed-INCONCLUSIVE ⚠.
+# Peer discovery + merge on the CURRENT hive flow are proven by
+# two-instance-hive-from-repo-smoke.sh + two-instance-content-matrix-smoke.sh
+# (both run by bin/live-federation-gate.sh). THIS smoke's value is the packaged
+# BOOT + ISOLATION proof.
 
-# ── 5. verify Hyperswarm peer DISCOVERY ─────────────────────────────────────────
-log "verify swarm peer discovery (poll boot logs for peer_connected, ~60s)"
-discovered="$(fed_wait_discovery a b loose 20 || true)"
-[ "$discovered" = "1" ] && echo "✓ peers discovered each other over Hyperswarm" \
-  || echo "⚠ no peer_connected within 60s (DHT holepunch can be slow; check boot logs)"
-
-# ── 6. report ───────────────────────────────────────────────────────────────────
+# ── 5. report ───────────────────────────────────────────────────────────────────
 log "RESULT"
 echo "Packaged two-instance boot + isolation: PASS (PG A=${FED_PG[a]} B=${FED_PG[b]}, sidecar A=${FED_SC[a]} B=${FED_SC[b]})"
-echo "Swarm peer discovery: $([ "$discovered" = 1 ] && echo PASS || echo INCONCLUSIVE)"
-echo "Federation MERGE: not exercised here — run bin/two-instance-merge-smoke.sh (write-free packaged merge proof)."
+echo "OVERALL: PASS — packaged two-instance boot + isolation proven"
+echo "Federation MERGE/discovery: not exercised here — see two-instance-hive-from-repo-smoke.sh + two-instance-content-matrix-smoke.sh (current hive flow)."
 echo "(cleanup runs on exit)"

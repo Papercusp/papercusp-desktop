@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+#
+# ⛔ RETIRED 2026-07-03 (P-002 shared-hive-p2p-release-readiness, WI-1839).
+# This smoke drives the PER-HARNESS share/finalize wire retired 2026-06-11
+# (comb-retire-per-harness-sharing): POST /api/harness/projects +
+# /api/harness/<slug>/share/finalize 404 on current builds, so the setup joins
+# NO swarm topic and every federation assert times out (no peer_connected).
+# Its coverage lives in the CURRENT-flow smokes the standing gate
+# (bin/live-federation-gate.sh) runs:
+#   - two-instance-hive-from-repo-smoke.sh  (create-from-repo → discover → join;
+#     bidir origin=remote merge, A-003 settings/members, AK admission)
+#   - two-instance-content-matrix-smoke.sh  (hives/from-repo publish → directory
+#     list on B → join-hive; per-table content federation matrix)
+# Kept for reference per the retired-surfaces convention — do NOT extend or
+# re-green; delete the banner only if the per-harness wire is deliberately
+# resurrected. Body below is unreachable.
+echo "RETIRED (2026-07-03 P-002): this smoke tests the per-harness share wire retired 2026-06-11 — superseded by two-instance-hive-from-repo-smoke.sh + two-instance-content-matrix-smoke.sh (see header)." >&2
+exit 0
+# COVERAGE GAP filed on retirement: the B→A SYMMETRIC directory listing
+# (B creates a hive; A lists it) is not asserted by the current-flow smokes
+# — tracked as a work-item to add a B-side create+list leg to content-matrix.
 # two-instance-hive-directory-smoke.sh — packaged P2P HIVE DIRECTORY proof.
 #
 # The directory sibling of two-instance-merge-smoke.sh: two SEPARATELY-PACKAGED
