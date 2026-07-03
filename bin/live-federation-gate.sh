@@ -48,7 +48,10 @@ LOAD_GATE="${LOAD_GATE:-$(( NPROC * 3 / 8 > 15 ? NPROC * 3 / 8 : 15 ))}"
 STORM_GATE="${STORM_GATE:-$(( NPROC * 6 / 10 ))}"
 REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
-GATE_DISPLAY="${GATE_DISPLAY:-250}"; OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp}"
+# ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
+# invalid_request_context (needs harness/workspace/role/run/spawn params or superuser) — the
+# 13:00 red's EI filing died on exactly this and only the loud fallback saved the verdict.
+GATE_DISPLAY="${GATE_DISPLAY:-250}"; OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp?superuser=1}"
 GATE_NO_FILE="${GATE_NO_FILE:-0}"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
@@ -144,7 +147,15 @@ fi
 FAIL_BUILD=0
 if [ -z "${GATE_DEB:-}" ]; then
   if [ "$REBUILD" = 1 ]; then
-    log "rebuilding sidecar from HEAD…"
+    # Build PROVENANCE (WI-1861): the build reads the LIVE shared working tree, not committed
+    # HEAD — a fleet peer's mid-write edit can be captured ("torn-tree build") and produce a
+    # red no commit ever contained (the 11:53 2026-07-03 'blueprint invalid' red is the type
+    # specimen: unreproducible at the next build, byte-identical blueprints). Stamp HEAD + the
+    # dirty-file count so every verdict is attributable and a torn-tree red is diagnosable.
+    GIT_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    GIT_DIRTY="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo '?')"
+    log "rebuilding sidecar from working tree (HEAD=$GIT_HEAD, dirty-files=$GIT_DIRTY)…"
+    echo "head=$GIT_HEAD dirty=$GIT_DIRTY ts=$(date -Is)" >"$WORK/provenance"
     ( cd "$DESKTOP_DIR" && bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
   fi
   grep -qaF 'grantEpochKeysToMembers on admit' "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" 2>/dev/null \
