@@ -640,6 +640,34 @@ mod serve_log_tests {
     }
 }
 
+// WI-1802: the packaged macOS webview dials the operator over PLAINTEXT http on
+// the 127.0.0.1 loopback LITERAL (serve binds 127.0.0.1 only; finish_boot forces
+// the literal over `localhost` because WebKitGTK may resolve `localhost` to ::1).
+// macOS ATS blocks plaintext http by default, and a `localhost`-HOSTNAME
+// exception does NOT cover the 127.0.0.1 IP literal — so ATS silently blocked
+// every operator request and the GUI rendered a blank white page on packaged Mac
+// builds (Linux/webkit2gtk has no ATS, so it only bit the Mac app). The fix is
+// the loopback ATS exception `NSAllowsLocalNetworking` in Info.plist. Guard it so
+// the key can't be dropped back out (re-blanking the Mac app) without failing CI.
+#[cfg(test)]
+mod macos_ats_tests {
+    const INFO_PLIST: &str = include_str!("../Info.plist");
+
+    #[test]
+    fn info_plist_grants_loopback_ats_exception() {
+        assert!(
+            INFO_PLIST.contains("NSAppTransportSecurity"),
+            "Info.plist must declare an ATS policy dict"
+        );
+        assert!(
+            INFO_PLIST.contains("NSAllowsLocalNetworking"),
+            "Info.plist must set NSAllowsLocalNetworking so macOS ATS permits the \
+             http://127.0.0.1:<port> operator loopback the webview dials — without \
+             it the packaged Mac GUI blanks (WI-1802)"
+        );
+    }
+}
+
 #[cfg(test)]
 mod discovery_tests {
     use super::parse_operator_discovery;

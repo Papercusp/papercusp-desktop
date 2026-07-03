@@ -61,7 +61,6 @@
     "homepage": "https://papercuspai.com",
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "exceptionDomain": "localhost",
       "entitlements": "entitlements.plist",
       "infoPlist": "Info.plist"
     },
