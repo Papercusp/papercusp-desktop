@@ -205,6 +205,16 @@ fi
 # DISCOVERY_ATTEMPTS, default 3) ONLY when the failure is `discovered=FAIL` (the flake), never
 # on a real post-discovery failure. ~3 attempts ⇒ ~88% chance discovery lands. Each attempt is
 # load-gated implicitly (the whole gate already passed the load check; a flake adds little).
+# DISPLAY-BUSY (WI-1977): fed_fresh_display (federation-asserts.sh) refuses a busy Xvfb
+# display with `FATAL: :$num busy — set PAPERCUSP_SMOKE_DISPLAY to a free one` rather than
+# ever sharing a peer's display. The gate's own fixed GATE_DISPLAY default (250, +2=252 for
+# from-repo) is ALSO the number a human/agent reproducing a gate red picks when they want an
+# EXACT match (an "evidence pair" left intentionally running for a debugging thread) — so an
+# hourly timer run can collide with a legitimate, long-lived evidence pair that has nothing to
+# do with a real regression. Unlike the discovery flake above, retrying buys nothing (the
+# display stays busy for as long as the OTHER process holds it) — classify it as a resource
+# contention SKIP, never a RED, matching this file's existing storm-downgrade / load-gate-skip
+# philosophy (a busy resource is starvation, not signal).
 run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   local label="$1" script="$2" deb="$3"; shift 3
   local out="$WORK/$label.out" attempts="${DISCOVERY_ATTEMPTS:-3}" i res
@@ -212,6 +222,10 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
     log "running $label (attempt $i/$attempts) …"
     ( cd "$DESKTOP_DIR/.." && env "$@" bash "papercusp-desktop/bin/$script" ${deb:+"$deb"} ) >"$out" 2>&1 || true
     if grep -qaE 'OVERALL: PASS' "$out" 2>/dev/null; then echo PASS; return; fi
+    if grep -qaE 'busy — set PAPERCUSP_SMOKE_DISPLAY to a free one' "$out" 2>/dev/null; then
+      log "$label: display busy (a long-lived pair — likely evidence for another investigation — already holds it) — SKIPPING, not a regression"
+      echo SKIPPED-BUSY; return
+    fi
     # Retry ONLY on a discovery flake; a real post-discovery RED is a genuine result — keep it.
     if grep -qaE 'discovered=FAIL' "$out" 2>/dev/null && [ "$i" -lt "$attempts" ]; then
       log "$label: discovered=FAIL (cupboard-off DHT flake) — retrying"; cp "$out" "$out.attempt$i" 2>/dev/null; continue
@@ -220,6 +234,8 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   done
   echo FAIL
 }
+# True iff a leg's result string is any flavor of "nothing proven" (SKIPPED / SKIPPED-BUSY).
+is_skip_result() { case "$1" in SKIPPED*) return 0 ;; *) return 1 ;; esac; }
 
 MATRIX_RES="SKIPPED"
 if [ "$SKIP_MATRIX" != 1 ]; then
@@ -296,7 +312,9 @@ log "VERDICT: $SUMMARY"
 echo "$(now_s)" >"$STATE_DIR/last-run"
 
 # All legs skipped ⇒ NOT green (the vacuous-pass trap): nothing was proven this window.
-if [ "$MATRIX_RES" = SKIPPED ] && [ "$FROMREPO_RES" = SKIPPED ] && [ "$MATRIXFULL_RES" = SKIPPED ] && [ "$FAIL_BUILD" != 1 ]; then
+# is_skip_result() also matches SKIPPED-BUSY (WI-1977: a display-contention skip is still a
+# skip for this purpose — nothing was proven, whether by load-gate SKIPPED or a busy display).
+if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_result "$MATRIXFULL_RES" && [ "$FAIL_BUILD" != 1 ]; then
   log "all smoke legs SKIPPED — nothing proven; NOT recording a green."
   check_staleness
   echo "GATE: SKIPPED (no legs ran — $SUMMARY)"; exit 0

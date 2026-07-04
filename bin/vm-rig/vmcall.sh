@@ -19,10 +19,13 @@ MCP="${PCUSP_MCP_CALL:-/tmp/mcp-call.mjs}"
 # node: packaged sidecar first (mac app bundle, then linux .deb), else PATH
 NODE="${PCUSP_VM_NODE:-}"
 if [ -z "$NODE" ]; then
+  # EI-7067: the deb install root's product-name segment has varied across builds
+  # ('Papercusp' vs 'Papercusp GUI', per a tauri productName edit) — glob rather
+  # than hardcode one shape so this resolves regardless of which build is installed.
   for cand in \
     '/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node' \
     '/Applications/Papercusp.app/Contents/Resources/sidecar/bin/node' \
-    '/usr/lib/Papercusp/sidecar/bin/node'; do
+    /usr/lib/Papercusp*/sidecar/bin/node; do
     [ -x "$cand" ] && NODE="$cand" && break
   done
   [ -n "$NODE" ] || NODE="$(command -v node)"
