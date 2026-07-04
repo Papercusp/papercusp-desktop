@@ -22,10 +22,47 @@
     "updater:default",
     "process:default",
     "notification:default",
+
+    "allow-workspaces-list",
+    "allow-workspaces-create",
+    "allow-workspaces-rename",
+    "allow-workspaces-delete",
+    "allow-workspaces-switch",
+    "allow-workspaces-open-window",
+
+    "allow-show-attention-notification",
+    "allow-app-version",
+    "allow-check-for-update",
+    "allow-install-update",
+
+    "allow-pty-spawn",
+    "allow-pty-write",
+    "allow-pty-resize",
+    "allow-pty-kill",
+    "allow-pty-history",
+    "allow-pty-is-alive",
+
+    "allow-wsl-status",
+    "allow-wsl-install",
+    "allow-wsl-relaunch-elevated",
+    "allow-wsl-import",
+    "allow-wsl-bootstrap",
+    "allow-wsl-finalize-ready",
+    "allow-wsl-uninstall",
+
     "allow-console-launch",
     "allow-list-windows-by-title",
     "allow-focus-window-by-title",
     "allow-window-title-for",
+
+    "allow-native-terminal-status",
+    "allow-native-terminal-toggle",
+
+    "allow-endpoint-invoke",
+    "allow-endpoint-cancel",
+
+    "allow-list-envs",
+
     "allow---dev-bridge-result"
   ]
 }

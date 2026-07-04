@@ -469,7 +469,35 @@ echo "→ copying operator-vite/dist → sidecar/spa"
 cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"
 echo "→ copying Starlight docs → sidecar/internal-docs"
 if [[ -d "$WEB_DIR/public/internal/docs" ]]; then
-  cp -a "$WEB_DIR/public/internal/docs" "$SIDECAR_DIR/internal-docs"
+  # WI-1998: public/internal/docs is a live docs-sync deploy target
+  # (apps/operator-docs/scripts/postbuild-copy.sh) that republishes via an
+  # atomic rename-swap, not an in-place mutation — so the window this `cp -a`
+  # can lose to has shrunk from "however long a delete+rewrite mirror takes"
+  # to "this cp -a happened to start/traverse during someone else's rename
+  # swap", which is rare but not impossible for a multi-second recursive copy
+  # racing a swap that can land at any instant. A swapped-out old tree isn't
+  # reaped for a couple minutes (see postbuild-copy.sh), so a short retry
+  # picks up either the (still-intact) pre-swap tree a moment earlier or the
+  # (now-published) post-swap tree a moment later — either is a valid
+  # complete docs tree; only the fraction-of-a-second window mid-swap fails.
+  _docs_cp_attempts=5
+  _docs_cp_ok=0
+  for _docs_cp_try in $(seq 1 "$_docs_cp_attempts"); do
+    rm -rf "$SIDECAR_DIR/internal-docs"
+    if cp -a "$WEB_DIR/public/internal/docs" "$SIDECAR_DIR/internal-docs" 2>/tmp/docs-cp-err.$$; then
+      _docs_cp_ok=1
+      break
+    fi
+    echo "  ⚠ Starlight docs copy attempt $_docs_cp_try/$_docs_cp_attempts hit a live docs-sync republish race — retrying"
+    cat /tmp/docs-cp-err.$$ >&2 || true
+    rm -f /tmp/docs-cp-err.$$
+    sleep 1
+  done
+  rm -f /tmp/docs-cp-err.$$
+  if [[ "$_docs_cp_ok" -ne 1 ]]; then
+    echo "ERROR: Starlight docs copy failed $_docs_cp_attempts times (persistent docs-sync race or a real fault, not a one-off) — aborting rather than shipping a partial/missing docs tree"
+    exit 1
+  fi
 else
   echo "  ⚠ $WEB_DIR/public/internal/docs not found — /internal/docs/* will 404 in the bundle"
 fi
