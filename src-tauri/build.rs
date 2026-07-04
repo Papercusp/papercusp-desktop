@@ -115,6 +115,8 @@ fn main() {
             "endpoint_cancel",
             // env switcher
             "list_envs",
+            // docs search palette
+            "open_docs_search_palette",
             // The dev-bridge eval return channel (debug builds). Without this
             // grant the injected eval JS's invoke() is ACL-rejected from the
             // remote http origin, so every tauri-agent-tools eval/click/dom

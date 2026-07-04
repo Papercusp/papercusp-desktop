@@ -62,6 +62,7 @@
     "allow-endpoint-cancel",
 
     "allow-list-envs",
+    "allow-open-docs-search-palette",
 
     "allow---dev-bridge-result"
   ]
