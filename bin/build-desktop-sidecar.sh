@@ -141,6 +141,15 @@ if [[ ! -d "$VITE_DIR" ]]; then
   exit 1
 fi
 echo "→ installing operator-vite deps"
+# NOTE: this is a WORKSPACE-SCOPED install. With --legacy-peer-deps it reconciles
+# the tree against operator-vite's OWN declared deps and PRUNES root-hoisted
+# packages this workspace doesn't declare — even ones the SPA bundle needs
+# transitively. That silently removed `react-responsive-carousel` (a non-optional
+# peerDependency of @glideapps/glide-data-grid, which the SPA pulls in) and broke
+# `vite build` with "Rolldown failed to resolve react-responsive-carousel". The
+# fix: operator-vite explicitly declares that peer in its package.json so this
+# scoped install keeps it hoisted where glide-data-grid resolves it. If you add a
+# component that pulls a new transitive peer into the SPA, declare it here too.
 (cd "$VITE_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
 echo "→ building operator-vite SPA (vite build → dist/)"
