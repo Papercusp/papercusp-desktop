@@ -23,7 +23,12 @@
 #   T   p2p:trace         M21 — the timeline assembles the reap receipt by offer_id
 #
 # UNWIRED legs (SKIP census; owner = p2p-work-distribution-2026-07-02 lanes):
-#   OFFER-PUBLISH  P-102 signed-offer STORE unbuilt (revocation-reaper.ts deferred #2)
+#   OFFER-PUBLISH  WIRED 2026-07-04 (WI-1935): store mig 490 + offer-store.ts +
+#                  projections/work-offers.ts + publish leg offer-store-publish.ts;
+#                  production caller = the D-005 seat-offer hook on resource:delegate
+#                  agent_slot (reaper deferred #2 also wired: host-local offer
+#                  disposition on revocation). Cross-node proof = matrix scenario
+#                  seat_offer (order 56, lib/scenarios/seat-offer.sh).
 #   PULL           P-103 standing-puller DORMANT by design — X11 PULLER_ACTIVATION_LANDED
 #                  unflipped pending the P-003 claim-path soak
 #   SPAWN          P-104 offer-executor REQUIRED injections have no production caller
@@ -235,7 +240,7 @@ log "SKIP census — legs with NO runtime wiring at HEAD (owners: p2p-work-distr
 # (3) metering table; (4) executor LAST — OWNER-AUTHORITY-GATED (P-105 sandbox unbuilt,
 # 4/5 axes; owner must ring the trust model). The executor gate is the hard line:
 # this drill must NEVER pressure that leg green — SKIP, don't wire.
-skipp "OFFER-PUBLISH — SKIP(P-102 signed-offer store unbuilt; wiring benign, unassigned)"
+log  "OFFER-PUBLISH — WIRED (WI-1935 2026-07-04): mig-490 store + publish leg + D-005 seat-offer hook on resource:delegate; verified by matrix scenario seat_offer (order 56) — no longer a SKIP"
 skipp "PULL — SKIP(activation gated on claim-path soak: X11 PULLER_ACTIVATION_LANDED unflipped by design)"
 skipp "SPAWN — SKIP(owner-authority: P-105 foreign-work sandbox unbuilt; owner sign-off required — DO NOT WIRE)"
 skipp "RESULTS(D-018) — SKIP(rides SPAWN; foreign-git-sync exists but nothing reaches it)"
