@@ -333,8 +333,29 @@ MEMBER_SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 A_ANNOUNCED="$(jget "$a_resp" "d['publish']['announced']")"
 A_UNVERIFIED="$(jget "$a_resp" "d['bindingUnverified']")"
 create_ok=0; [ "$A_OK" = "True" ] && [ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ] && create_ok=1
-[ "$create_ok" = 1 ] && echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG' from $REPO_URL" \
-                     || echo "✗ A create failed (ok/created missing) — body above"
+if [ "$create_ok" = 1 ]; then
+  echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG' from $REPO_URL"
+else
+  # EI-7045/EI-7083: 'existing' in the response (instead of 'created') means the
+  # from-repo API took the JOIN-OFFER path, not a hard failure — the fixture repo's
+  # hive is already announced, either by (a) a PRIOR run of this smoke against the
+  # same URL (the anchor persists GitHub-side across local instance-home wipes —
+  # see the REPO_URL comment above), or (b) ANOTHER REACHABLE RIG on the same
+  # testnet DHT running this same fixture concurrently (repeatable whenever ≥2
+  # rigs smoke the same repo on the same box at once). Either way the fix is the
+  # same: point HIVE_SMOKE_REPO_URL at a distinct/disposable repo, not to loosen
+  # this assertion — the downstream publish.announced/bindingUnverified/cupboard
+  # checks below only exist on the CREATE path's response shape, so a join-offer
+  # genuinely can't continue this smoke.
+  EXISTING_KIND="$(jget "$a_resp" "(d.get('existing') or {}).get('kind')")"
+  if [ -n "$EXISTING_KIND" ]; then
+    echo "✗ A create returned an EXISTING '$EXISTING_KIND' (join-offer), not a fresh create — body above"
+    echo "  → this repo's hive is already announced (a prior run of this smoke against $REPO_URL, or another concurrent rig on the same DHT)."
+    echo "  → fix: re-run with HIVE_SMOKE_REPO_URL=<a repo you have not smoked before / no other rig is using>."
+  else
+    echo "✗ A create failed (ok/created missing) — body above"
+  fi
+fi
 announce_ok=0; [ "$A_ANNOUNCED" = "True" ] && announce_ok=1
 [ "$announce_ok" = 1 ] && echo "✓ A publish.announced=true (signed announce on the directory topic, testnet transport)" \
                        || echo "✗ A publish.announced != true (got: $A_ANNOUNCED)"
