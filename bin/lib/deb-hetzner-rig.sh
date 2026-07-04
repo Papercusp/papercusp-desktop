@@ -93,6 +93,14 @@ rig_init() {
   # real desktop runs under a concrete workspace; the rig must too. Pin a concrete
   # id so the frames faithfully exercise the D-005/P-009 delegate→offer path.
   RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-papercusp-workspace}"
+  # The operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_HIVE_HOME_SLUG,
+  # else the 'papercusp' legacy default). A bare frame has NO 'papercusp' project, so
+  # once a concrete workspace is pinned the boot's home-harness validation
+  # (checkHomeHarnessResolves) HARD-FAILS ("home harness 'papercusp' does not resolve …
+  # fire-paths go dark"), destabilising the operator. Point it at the rig's actual
+  # fixture hive (octocat/Hello-World → 'hello-world-hive', registered on both frames)
+  # so boot is clean and dispatcher/overwatch/routines stay live.
+  RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-hello-world-hive}"
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
@@ -462,7 +470,7 @@ INSTEOF
   printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
     | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
         umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
 pkill -u pcusp -f 'serve.mjs --ensure' 2>/dev/null || true; sleep 1
@@ -481,6 +489,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   PAPERCUSP_WORKSPACE_ID="${WSID:-papercusp-workspace}" \
+  PAPERCUSP_HIVE_HOME_SLUG="${HHSLUG:-hello-world-hive}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
@@ -514,7 +523,7 @@ rig_kill_sidecar() {
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1
@@ -551,6 +560,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   PAPERCUSP_WORKSPACE_ID="${WSID:-papercusp-workspace}" \
+  PAPERCUSP_HIVE_HOME_SLUG="${HHSLUG:-hello-world-hive}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "relaunched as pcusp (no wipe)"
