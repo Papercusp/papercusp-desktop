@@ -3037,7 +3037,11 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
 /// falls back to the caller's relay-kill path.
 #[cfg(target_os = "windows")]
 fn wsl_graceful_stop_serve(grace_ms: u64) -> bool {
-    let Some(d) = read_operator_discovery(&wsl_sidecar_home_unc()) else {
+    // Read the distro-side operator.json via `wsl.exe cat` — the same robust
+    // path find_operator_discovery uses. (Was read via the \\wsl.localhost UNC
+    // share, which is unreliable on the VM, so this graceful-stop silently
+    // failed and always fell back to the caller's relay-kill.)
+    let Some(d) = read_operator_discovery_via_wsl() else {
         return false;
     };
     println!(
