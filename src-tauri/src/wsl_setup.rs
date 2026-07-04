@@ -51,6 +51,7 @@ pub fn set_route_active(active: bool) {
     WSL_ROUTE_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(any(target_os = "windows", test))]
 pub fn detect_ready_cached() -> bool {
     WSL_ROUTE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -137,6 +138,7 @@ pub struct WslStatus {
 }
 
 impl WslStatus {
+    #[cfg(any(not(target_os = "windows"), test))]
     fn unsupported() -> Self {
         Self {
             state: WslState::NotSupported,

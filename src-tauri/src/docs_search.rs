@@ -78,9 +78,7 @@ fn serialize_shortcut(accel: &str) -> String {
 fn parse_persisted(txt: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(txt).ok()?;
     let accel = v.get("accelerator")?.as_str()?.to_string();
-    PRESET_SHORTCUTS
-        .contains(&accel.as_str())
-        .then_some(accel)
+    PRESET_SHORTCUTS.contains(&accel.as_str()).then_some(accel)
 }
 
 fn read_persisted_shortcut() -> Option<String> {
@@ -115,10 +113,19 @@ pub fn current_shortcut() -> String {
 /// process), else the Server process's spawned-sidecar port. The Server has no
 /// window, so the sidecar-port fallback is what makes the palette work there.
 fn resolve_base(app: &AppHandle) -> Option<String> {
-    if let Some(base) = app.get_webview_window("main").and_then(|w| w.url().ok()).map(|u| {
-        let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
-        format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or("localhost"), port)
-    }) {
+    if let Some(base) = app
+        .get_webview_window("main")
+        .and_then(|w| w.url().ok())
+        .map(|u| {
+            let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
+            format!(
+                "{}://{}{}",
+                u.scheme(),
+                u.host_str().unwrap_or("localhost"),
+                port
+            )
+        })
+    {
         return Some(base);
     }
     let state: tauri::State<crate::SidecarState> = app.state();

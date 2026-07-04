@@ -690,6 +690,7 @@ fn detect_macos_default_terminal() -> String {
 /// pass right before the user's command. All entries here open a NEW
 /// WINDOW when invoked (not reuse-existing-tab) — flags chosen to make
 /// that explicit where the default would be ambiguous.
+#[cfg(any(target_os = "linux", test))]
 const LINUX_TERMINALS: &[(&str, &[&str])] = &[
     // (binary, args before our command)
     ("gnome-terminal", &["--window", "--"]),
@@ -762,6 +763,7 @@ fn spawn_linux_with(
 
 /// Cheap PATH lookup. We can't pull in the `which` crate without
 /// adding a dep, so this walks $PATH manually. Linux-only.
+#[cfg(not(target_os = "windows"))]
 fn is_on_path(bin: &str) -> bool {
     if bin.contains('/') {
         return std::path::Path::new(bin).exists();
@@ -780,6 +782,7 @@ fn is_on_path(bin: &str) -> bool {
 /// Distro name installed by wsl_setup::wsl_import (the bootstrap flow).
 /// All console launches target this distro — we don't try to detect
 /// the user's other distros because the operator's sidecar runs here.
+#[cfg(target_os = "windows")]
 const WSL_DISTRO: &str = "papercup-runtime";
 
 #[cfg(target_os = "windows")]

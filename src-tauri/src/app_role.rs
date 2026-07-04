@@ -22,9 +22,6 @@ pub enum Role {
 }
 
 impl Role {
-    pub fn is_server(self) -> bool {
-        matches!(self, Role::Server)
-    }
     pub fn is_gui(self) -> bool {
         matches!(self, Role::Gui)
     }

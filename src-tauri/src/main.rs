@@ -1679,14 +1679,18 @@ fn build_docs_shortcut_submenu(
 
 /// Build the full Server tray menu: Open · Docs search shortcut ▸ · — · Quit.
 /// Factored out so the menu-event handler can rebuild it after a rebind.
-fn build_server_tray_menu(
-    app: &tauri::AppHandle,
-) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
     let shortcut = build_docs_shortcut_submenu(app)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit-server", "Quit Papercusp Server", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit-server",
+        "Quit Papercusp Server",
+        true,
+        None::<&str>,
+    )?;
     Menu::with_items(app, &[&open, &shortcut, &sep, &quit])
 }
 

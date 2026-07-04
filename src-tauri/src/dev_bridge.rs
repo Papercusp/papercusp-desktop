@@ -2,7 +2,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
+#[cfg(test)]
 use std::io::{BufRead, BufReader};
+#[cfg(test)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -171,6 +173,7 @@ impl SidecarRegistry {
         }
     }
 
+    #[cfg(test)]
     fn add(&self, record: SidecarRecord) {
         let mut recs = self.records.lock().unwrap();
         recs.push(record);
@@ -217,6 +220,7 @@ fn pid_alive(_pid: u32) -> Option<bool> {
 /// this for free; callers who spawn their own children can register them
 /// here. Idempotent in the sense that re-registering a name is allowed
 /// (both entries will be reported).
+#[cfg(test)]
 pub fn register_sidecar(
     registry: &Arc<SidecarRegistry>,
     name: &str,
@@ -327,6 +331,7 @@ impl tracing::field::Visit for MessageVisitor {
 ///     .with(tracing_subscriber::fmt::layer())
 ///     .init();
 /// ```
+#[cfg(test)]
 pub fn create_log_layer(
     buffer: Arc<LogBuffer>,
 ) -> impl tracing_subscriber::Layer<tracing_subscriber::Registry> {
@@ -338,6 +343,7 @@ pub fn create_log_layer(
 /// Returns the `std::process::Child` handle. If a `SidecarRegistry` is
 /// supplied (recommended), the child is also recorded for `/process` and
 /// `/health` responses; pass `None` to opt out of registry tracking.
+#[cfg(test)]
 pub fn spawn_sidecar_monitored(
     name: &str,
     command: &str,
