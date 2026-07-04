@@ -46,10 +46,10 @@ if [ -f "$SC/scripts/onboard.mjs" ] && [ -x "$SC/bin/node" ]; then
 # papercusp CLI dispatcher — managed by the Papercusp .deb (postinst). Do not edit.
 cmd="\${1:-}"
 case "\$cmd" in
-  setup)    shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
-  onboard)  shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
+  setup)    shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tab=setup "\$@" ;;
   tutorial) shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tutorial "\$@" ;;
-  *) echo "usage: papercusp <setup|tutorial>"; echo "  setup     first-run setup + tutorial (alias: onboard)"; echo "  tutorial  re-open the guided tutorial"; exit 2 ;;
+  onboard)  shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
+  *) echo "usage: papercusp <setup|tutorial>"; echo "  setup     open the Tutorial & Setup shell on the Setup tab"; echo "  tutorial  open the Tutorial & Setup shell on the Tutorial tab"; exit 2 ;;
 esac
 WRAP
   chmod 755 /usr/bin/papercusp
