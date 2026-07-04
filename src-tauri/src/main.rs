@@ -27,6 +27,11 @@
 mod app_role;
 mod custom_protocol;
 mod dev_bridge;
+// Global-hotkey docs-search palette (WI-2648, feature #5): CmdOrCtrl+K opens a
+// small always-on-top window loading Pagefind's own default UI against the
+// already-built operator-docs search index. Registered on every platform +
+// role (unlike env_switch's dev-only backstop) — this is a real feature.
+mod docs_search;
 // Env-switch plumbing — the desktop-side source of truth + /api routing for the
 // cross-platform in-webview EnvSwitcherBar and its native backstop. Replaces the
 // retired Linux-only GTK dev-wrapper bar and the chrome-webview experiment.
@@ -1521,6 +1526,10 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let via_wsl = should_route_via_wsl(&app.handle());
     wsl_setup::set_route_active(via_wsl);
 
+    // WI-2648: CmdOrCtrl+K docs-search palette — packaged-build registration
+    // (the dev path registers it separately, right after env_switch::init).
+    docs_search::register_shortcut(app);
+
     if custom_protocol::enabled() {
         if let Some(window) = app.get_webview_window("main") {
             match custom_protocol::APP_ORIGIN.parse() {
@@ -2650,6 +2659,7 @@ pub fn run() {
             endpoint_ipc::endpoint_cancel,
             dev_bridge::__dev_bridge_result,
             env_switch::list_envs,
+            docs_search::open_docs_search_palette,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
@@ -2873,6 +2883,10 @@ pub fn run() {
                 // Invisible escape hatch: CmdOrCtrl+Alt+1..4 switch envs even
                 // when the loaded build's own bar + IPC are dead. No menu bar.
                 env_switch::register_backstop_shortcuts(app);
+                // WI-2648: CmdOrCtrl+K opens the docs-search palette. Real
+                // feature (not a dev-only escape hatch) — also registered in
+                // gui_setup() for packaged builds.
+                docs_search::register_shortcut(app);
 
                 return Ok(());
             }
