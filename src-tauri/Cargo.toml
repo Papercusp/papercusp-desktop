@@ -24,6 +24,13 @@ tauri-plugin-shell = "2"
 # Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when
 # role=Server so the backend is up (and psu works) before any window opens.
 tauri-plugin-autostart = "2"
+# Single-instance guard (P-009): reject a duplicate launch of the SAME bundle.
+# The plugin keys its OS lock on the app identifier, which is DISTINCT per bundle
+# (com.papercusp.gui vs com.papercusp.server) → per-bundle-identity semantics:
+# two GUIs (or two Servers) collide, but a GUI and a Server coexist. Registered
+# release-only (dev keeps multi-instance for agent-e2e). See main.rs run() +
+# on_second_instance(). Cross-platform: Win named pipe, Linux DBus, macOS socket.
+tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-os = "2"

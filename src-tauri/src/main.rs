@@ -1377,6 +1377,33 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
 const SERVER_BUNDLE_ID: &str = "com.papercusp.server";
 const GUI_BUNDLE_ID: &str = "com.papercusp.gui";
 
+/// P-009 single-instance callback — fires IN THE PRIMARY instance when a second
+/// instance of the SAME bundle is launched (the single-instance plugin closes
+/// the duplicate before it boots). Per-bundle by construction: the OS lock keys
+/// on the app identifier, so this only ever fires for a same-bundle collision
+/// (GUI↔GUI or Server↔Server), never GUI↔Server.
+///   * GUI    — raise/unminimize/focus the existing window (the standard
+///     "you already have Papercusp open" UX; the duplicate just vanishes).
+///   * Server — windowless (tray only); nothing to focus. Rejecting the
+///     duplicate is the whole point — one Server owns the sidecar + its ports.
+///     Just log, so a double-launch is diagnosable.
+/// Only wired in release builds (see run()), so it's dead code in dev.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn on_second_instance(app: &AppHandle, args: Vec<String>, cwd: String) {
+    let role = app_role::detect(&app.config().identifier);
+    println!(
+        "[papercusp-{}] single-instance: rejected a duplicate launch (args={args:?} cwd={cwd})",
+        role.label()
+    );
+    if role.is_gui() {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
 /// GUI role setup: never spawn a sidecar. Point the window at the app origin
 /// (bundled statics / booting shell) immediately, then — off the main thread —
 /// ensure a Papercusp Server is running (auto-launch its bundle if not) and
@@ -2486,7 +2513,24 @@ pub fn run() {
         )
         .ok();
 
-    let builder = tauri::Builder::default()
+    // P-009 single-instance guard — MUST be the FIRST plugin so a duplicate
+    // launch is rejected before any sidecar/window init runs. The plugin keys
+    // its OS lock on the app IDENTIFIER, which is distinct per bundle
+    // (com.papercusp.gui vs com.papercusp.server) → PER-BUNDLE-IDENTITY: two
+    // GUIs (or two Servers) collide — the second is closed and routed to
+    // on_second_instance() in the primary — while a GUI and a Server coexist.
+    // Release-only so agent-e2e can still run a second `npm run dev` shell;
+    // PAPERCUSP_DISABLE_SINGLE_INSTANCE=1 force-disables it in a packaged build.
+    // See app_role.rs + the two-bundle split above.
+    let base = tauri::Builder::default();
+    #[cfg(not(debug_assertions))]
+    let base = if std::env::var_os("PAPERCUSP_DISABLE_SINGLE_INSTANCE").is_some() {
+        base
+    } else {
+        base.plugin(tauri_plugin_single_instance::init(on_second_instance))
+    };
+
+    let builder = base
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
