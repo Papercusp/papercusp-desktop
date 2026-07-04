@@ -34,9 +34,9 @@ WRAP
 done
 
 # ── (1b) `papercusp` dispatcher + the Papercusp Tutorial desktop icon ────────
-# (agent-first-onboarding-2026-07-03 P-014.) `papercusp onboard` runs the
-# terminal concierge; `papercusp tutorial` re-opens the guided tutorial on an
-# already-onboarded machine. The third .desktop entry sits beside the two
+# (agent-first-onboarding-2026-07-03 P-014.) `papercusp setup` (alias `onboard`)
+# runs the terminal concierge; `papercusp tutorial` re-opens the guided tutorial on
+# an already-onboarded machine. The third .desktop entry sits beside the two
 # Tauri-bundled icons (Papercusp Server + Papercusp GUI) and opens the same
 # command in the user's terminal. Guarded like everything else — never fails
 # the install.
@@ -46,9 +46,10 @@ if [ -f "$SC/scripts/onboard.mjs" ] && [ -x "$SC/bin/node" ]; then
 # papercusp CLI dispatcher — managed by the Papercusp .deb (postinst). Do not edit.
 cmd="\${1:-}"
 case "\$cmd" in
+  setup)    shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
   onboard)  shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
   tutorial) shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tutorial "\$@" ;;
-  *) echo "usage: papercusp <onboard|tutorial>"; echo "  onboard   first-run setup + tutorial"; echo "  tutorial  re-open the guided tutorial"; exit 2 ;;
+  *) echo "usage: papercusp <setup|tutorial>"; echo "  setup     first-run setup + tutorial (alias: onboard)"; echo "  tutorial  re-open the guided tutorial"; exit 2 ;;
 esac
 WRAP
   chmod 755 /usr/bin/papercusp
