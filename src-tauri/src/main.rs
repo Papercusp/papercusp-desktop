@@ -1132,7 +1132,7 @@ fn spawn_operator_watcher(
         let mut applied_port = initial_port;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            let latest = read_operator_discovery(&workspace_home);
+            let latest = find_operator_discovery(&workspace_home, via_wsl);
             let Some(new_port) = next_operator_port(applied_port, latest.as_ref()) else {
                 continue;
             };
@@ -1212,19 +1212,14 @@ fn wait_for_operator(
     via_wsl: bool,
     timeout: Duration,
 ) -> Result<OperatorDiscovery, String> {
-    // Candidate discovery homes: the workspace home, plus — when the sidecar
-    // runs inside WSL — the distro user's real home over \\wsl.localhost
-    // (HOME forwarding doesn't survive WSL session init; see
-    // wsl_sidecar_home_unc).
-    #[allow(unused_mut)] // pushed onto only in the cfg(windows) branch
-    let mut homes: Vec<std::path::PathBuf> = vec![workspace_home.to_path_buf()];
-    #[cfg(target_os = "windows")]
-    if via_wsl {
-        homes.push(wsl_sidecar_home_unc());
-    }
+    // Discovery goes through find_operator_discovery: on Windows the sidecar
+    // runs inside WSL and writes operator.json under the distro user's
+    // /home/papercup, which the GUI reads via `wsl.exe cat` (the
+    // `\\wsl.localhost` UNC share is unreliable — see
+    // read_operator_discovery_via_wsl).
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Some(d) = homes.iter().find_map(|h| read_operator_discovery(h)) {
+        if let Some(d) = find_operator_discovery(workspace_home, via_wsl) {
             if discovery_pid_alive(d.pid, via_wsl)
                 && std::net::TcpStream::connect(format!("127.0.0.1:{}", d.port)).is_ok()
             {
