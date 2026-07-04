@@ -488,8 +488,8 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PGBOUNCER="${PGB:-0}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
-  PAPERCUSP_WORKSPACE_ID="${WSID:-papercusp-workspace}" \
-  PAPERCUSP_HIVE_HOME_SLUG="${HHSLUG:-hello-world-hive}" \
+  ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
+  ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
@@ -559,8 +559,8 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PGBOUNCER="${PGB:-0}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
-  PAPERCUSP_WORKSPACE_ID="${WSID:-papercusp-workspace}" \
-  PAPERCUSP_HIVE_HOME_SLUG="${HHSLUG:-hello-world-hive}" \
+  ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
+  ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "relaunched as pcusp (no wipe)"
