@@ -321,13 +321,18 @@ fi
 #   * Only --external:@lydell/* (psu/ptool don't pull the holepunch native stack).
 # The ~/.papercusp/bin/{psu,ptool} shims that `exec node` these are written on
 # boot by installPapercuspFiles() (papercup CLAUDE.md desktop-install path; A2).
-echo "→ esbuild-bundling psu + ptool + onboard → $SIDECAR_DIR/scripts/"
+echo "→ esbuild-bundling psu + ptool + onboard + tutorial-runner → $SIDECAR_DIR/scripts/"
 mkdir -p "$SIDECAR_DIR/scripts"
 # pairs of <output-name>:<source-stem> (source lives at $WEB_DIR/scripts/<stem>.mjs)
 # onboard = the onboarding/tutorial concierge (agent-first-onboarding P-014):
 # shipped so the deb postinst can expose `papercusp onboard|tutorial` + the
 # Papercusp Tutorial desktop icon.
-for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher; do
+# tutorial-runner = the DETERMINISTIC tutorial the concierge launches at handoff
+# (deterministic-onboarding-tutorial-2026-07-04 P-006/P-008). MUST ship next to
+# onboard.mjs: the concierge resolves it via `new URL('./tutorial-runner.mjs',
+# import.meta.url)`, so the output name MUST stay `tutorial-runner`. Without it a
+# packaged build silently falls back to the agentic tutor.
+for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-runner:tutorial-runner; do
   _psu_out="${_psu_cli%%:*}"
   _psu_src="${_psu_cli##*:}"
   if [[ ! -f "$WEB_DIR/scripts/$_psu_src.mjs" ]]; then
@@ -344,7 +349,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher; do
     exit 1
   fi
 done
-echo "  bundled psu.mjs + ptool.mjs + onboard.mjs"
+echo "  bundled psu.mjs + ptool.mjs + onboard.mjs + tutorial-runner.mjs"
 
 # Copy the externalized native deps. esbuild inlined everything else, so
 # this is a tiny tree — node-pty + its platform-binary sub-package(s).
