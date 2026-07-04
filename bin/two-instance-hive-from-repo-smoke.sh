@@ -90,6 +90,18 @@ DEB="$(readlink -f "$DEB" 2>/dev/null || echo "$DEB")"
 MODE="${HIVE_SMOKE_MODE:-auto}"
 SIDECAR_SRC="${PAPERCUSP_SMOKE_SIDECAR_DIR:-$DESKTOP_DIR/src-tauri/sidecar}"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
+# EI-7045 GOTCHA: this repo's hive identity/anchor persists GITHUB-SIDE (that's
+# the whole point of anchoring to a repo) — it survives wiping the LOCAL A_HOME/
+# B_HOME instance dirs. So step 1's `d['ok'] and 'created' in d` assertion below
+# only passes on the FIRST-EVER successful run against this URL; every run after
+# that correctly gets `{existing:...}` back (the from-repo API's intended,
+# idempotent behavior — NOT a bug) and the smoke script false-fails. If step 1
+# starts failing with "existing" in the body, the fixture repo has already been
+# registered by a prior run — either point HIVE_SMOKE_REPO_URL at a disposable
+# repo you haven't smoked before, or de-register the prior hive/anchor for this
+# URL before re-running; don't "fix" this by loosening the assertion to accept
+# `existing` — the downstream publish.announced/bindingUnverified/cupboard
+# assertions only exist on the CREATE path's response shape.
 # Unreachable on purpose: TCP port 9 (discard) on loopback refuses instantly —
 # the live Cupboard worker must never see this smoke (D-004 degraded path).
 CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
