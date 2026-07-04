@@ -33,7 +33,7 @@ WRAP
   fi
 done
 
-# ── (1b) `papercusp` dispatcher + the Papercusp Tutorial desktop icon ────────
+# ── (1b) `papercusp` dispatcher + the Papercusp Tutorial & Setup desktop icon ─
 # (agent-first-onboarding-2026-07-03 P-014.) `papercusp setup` (alias `onboard`)
 # runs the terminal concierge; `papercusp tutorial` re-opens the guided tutorial on
 # an already-onboarded machine. The third .desktop entry sits beside the two
@@ -61,8 +61,8 @@ WRAP
     cat > /usr/share/applications/papercusp-tutorial.desktop <<'DESK'
 [Desktop Entry]
 Type=Application
-Name=Papercusp Tutorial
-Comment=Re-open the guided Papercusp setup + tutorial
+Name=Papercusp Tutorial & Setup
+Comment=Open the guided Papercusp tutorial and setup (tabs for both)
 Exec=/usr/bin/papercusp tutorial
 Icon=papercusp-desktop
 Terminal=true
