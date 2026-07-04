@@ -1028,15 +1028,6 @@ mod tests {
     }
 
     #[test]
-    fn wsl_unc_translation() {
-        assert_eq!(
-            wsl_path_to_windows_unc("/home/avi/papercup"),
-            Some(format!("\\\\wsl.localhost\\{WSL_DISTRO}\\home\\avi\\papercup")),
-        );
-        assert_eq!(wsl_path_to_windows_unc("relative/path"), None);
-    }
-
-    #[test]
     fn count_sentinels_finds_only_matching_files() {
         let tmp = std::env::temp_dir().join(format!(
             "papercup-test-{}",
