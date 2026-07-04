@@ -5,7 +5,10 @@
 set -e
 case "$1" in
   remove|purge)
-    rm -f /usr/bin/psu /usr/bin/ptool
+    rm -f /usr/bin/psu /usr/bin/ptool /usr/bin/papercusp
+    rm -f /usr/share/applications/papercusp-tutorial.desktop
+    command -v update-desktop-database >/dev/null 2>&1 && \
+      update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     ;;
 esac
 exit 0

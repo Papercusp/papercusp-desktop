@@ -321,10 +321,13 @@ fi
 #   * Only --external:@lydell/* (psu/ptool don't pull the holepunch native stack).
 # The ~/.papercusp/bin/{psu,ptool} shims that `exec node` these are written on
 # boot by installPapercuspFiles() (papercup CLAUDE.md desktop-install path; A2).
-echo "→ esbuild-bundling psu + ptool → $SIDECAR_DIR/scripts/"
+echo "→ esbuild-bundling psu + ptool + onboard → $SIDECAR_DIR/scripts/"
 mkdir -p "$SIDECAR_DIR/scripts"
 # pairs of <output-name>:<source-stem> (source lives at $WEB_DIR/scripts/<stem>.mjs)
-for _psu_cli in psu:psu-launcher ptool:ptool; do
+# onboard = the onboarding/tutorial concierge (agent-first-onboarding P-014):
+# shipped so the deb postinst can expose `papercusp onboard|tutorial` + the
+# Papercusp Tutorial desktop icon.
+for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher; do
   _psu_out="${_psu_cli%%:*}"
   _psu_src="${_psu_cli##*:}"
   if [[ ! -f "$WEB_DIR/scripts/$_psu_src.mjs" ]]; then
@@ -341,7 +344,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool; do
     exit 1
   fi
 done
-echo "  bundled psu.mjs + ptool.mjs"
+echo "  bundled psu.mjs + ptool.mjs + onboard.mjs"
 
 # Copy the externalized native deps. esbuild inlined everything else, so
 # this is a tiny tree — node-pty + its platform-binary sub-package(s).

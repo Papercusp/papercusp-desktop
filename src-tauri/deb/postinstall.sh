@@ -33,6 +33,45 @@ WRAP
   fi
 done
 
+# ── (1b) `papercusp` dispatcher + the Papercusp Tutorial desktop icon ────────
+# (agent-first-onboarding-2026-07-03 P-014.) `papercusp onboard` runs the
+# terminal concierge; `papercusp tutorial` re-opens the guided tutorial on an
+# already-onboarded machine. The third .desktop entry sits beside the two
+# Tauri-bundled icons (Papercusp Server + Papercusp GUI) and opens the same
+# command in the user's terminal. Guarded like everything else — never fails
+# the install.
+if [ -f "$SC/scripts/onboard.mjs" ] && [ -x "$SC/bin/node" ]; then
+  cat > /usr/bin/papercusp <<WRAP
+#!/usr/bin/env bash
+# papercusp CLI dispatcher — managed by the Papercusp .deb (postinst). Do not edit.
+cmd="\${1:-}"
+case "\$cmd" in
+  onboard)  shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
+  tutorial) shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tutorial "\$@" ;;
+  *) echo "usage: papercusp <onboard|tutorial>"; echo "  onboard   first-run setup + tutorial"; echo "  tutorial  re-open the guided tutorial"; exit 2 ;;
+esac
+WRAP
+  chmod 755 /usr/bin/papercusp
+
+  # Third icon: reuse the app icon the Tauri bundle installed (papercusp-desktop
+  # is the shared binary/icon name for both bundles). Terminal=true → the DE
+  # opens its default terminal emulator running the concierge.
+  if [ -d /usr/share/applications ]; then
+    cat > /usr/share/applications/papercusp-tutorial.desktop <<'DESK'
+[Desktop Entry]
+Type=Application
+Name=Papercusp Tutorial
+Comment=Re-open the guided Papercusp setup + tutorial
+Exec=/usr/bin/papercusp tutorial
+Icon=papercusp-desktop
+Terminal=true
+Categories=Development;
+DESK
+    command -v update-desktop-database >/dev/null 2>&1 && \
+      update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+  fi
+fi
+
 # ── (2) ghostty — deferred, best-effort ─────────────────────────────────────
 # A postinst CANNOT call apt directly (dpkg holds the apt lock for THIS
 # transaction → deadlock), so defer the PPA-add + install to a detached worker
