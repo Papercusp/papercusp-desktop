@@ -32,6 +32,9 @@ LUXON_SRC="$REPO_DIR/node_modules/luxon"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-$REPO_DIR/apps/operator}"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
 INV_REPO_URL="${HIVE_INVITE_REPO_URL:-https://github.com/octocat/Spoon-Knife}"
+# WI-1873: a THIRD, distinct repo for B's own publish leg (below) — must differ from
+# both A's URLs so the derived hiveSlug can never collide with A's public/invite hives.
+B_REPO_URL="${HIVE_SMOKE_B_REPO_URL:-https://github.com/octocat/git-consortium}"
 CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-154}"
 P_A_USER="${P_A_USER:-papercupai}"
@@ -219,6 +222,28 @@ BT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[b]}"|grep -oE '
 ST="$(comm -12 <(echo "$AT") <(echo "$BT")|head -1)"
 TEQ=$([ -n "$ST" ] && echo "PASS (${ST:0:16}…)" || echo UNCONFIRMED); echo "  topic-equal=$TEQ"
 
+# ── 4b. SYMMETRIC directory listing: B creates+publishes ITS OWN hive; A must
+# discover it via GET /api/discovery/hives (WI-1873 — the one B→A leg left uncovered
+# when two-instance-hive-directory-smoke.sh was retired 2026-07-03/WI-1839; every
+# other leg here already exercises A→B, this is the missing mirror). Independent of
+# steps 1-4 (a distinct repo → a distinct hiveSlug, no join/content interaction).
+if [ -z "${SKIP_B_PUBLISH:-}" ]; then
+  log "B: create+publish its OWN PUBLIC hive ($B_REPO_URL) — symmetric directory check"
+  b_resp="$(curl -s -m 610 -X POST "$(sc b)/api/harness/hives/from-repo" -H 'content-type: application/json' \
+    -d "{\"githubUrl\":\"$B_REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
+  B_HIVE_SLUG="$(jget "$b_resp" "d['created']['hiveSlug']")"
+  if [ -n "$B_HIVE_SLUG" ]; then
+    echo "✓ B public hive='$B_HIVE_SLUG' announced=$(jget "$b_resp" "d['publish']['announced']")"
+    AR=""; ABR=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do AR="$(curl -s -m 10 "$(sc a)/api/discovery/hives")"; ABR="$(jget "$AR" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$B_HIVE_SLUG'), None))")"; [ -n "$ABR" ] && [ "$ABR" != "null" ] && break; sleep 3; done
+    BA_DIR=$([ -n "$ABR" ] && [ "$ABR" != "null" ] && echo PASS || echo "FAIL (A never saw B's hive after ${DISCOVERY_RETRIES:-40} tries)")
+  else
+    echo "✗ B publish failed: $(echo "$b_resp" | head -c 300)"; BA_DIR="FAIL (publish)"
+  fi
+  echo "  B→A directory-listing=$BA_DIR"
+else
+  BA_DIR="SKIPPED"; echo "· SKIP_B_PUBLISH set — B→A directory leg not run"
+fi
+
 # ── 5. BACKFILL: B receives the pre-existing (pre-join) content ─────────────────
 log "BACKFILL: B must receive A's PRE-EXISTING seed content (origin=remote)"; check_all b seed backfill a
 BACKFILL_TABLE="$MATRIX"; MATRIX=""
@@ -246,5 +271,5 @@ log "RESULT (member=$SLUG hive=$HIVE_SLUG)"
 echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_TABLE"
 if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-incremental re-poll — PASS here + FAIL above = latency, not death):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_LATE_TABLE"; fi
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
-echo; echo "negative-isolation=$NEG  topic-equal=$TEQ"
+echo; echo "negative-isolation=$NEG  topic-equal=$TEQ  b-to-a-directory=$BA_DIR"
 echo "Pair LEFT RUNNING for Brief E/G. Ports: $WORK/instances.env  ·  STOP: $WORK/stop.sh"
