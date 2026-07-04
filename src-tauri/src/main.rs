@@ -1828,7 +1828,11 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // tray rebind control lives in the same process that owns the shortcut.
     // (The in-webview `open_docs_search_palette` command still works from here.)
 
-    if custom_protocol::enabled() {
+    // onboarding_origin_enabled(), not enabled(): on Windows the pre-operator
+    // navigate to the bundled-SPA origin is what renders the WslOnboardingGate
+    // (enabled() is Linux-only; post-operator the window still moves to the real
+    // HTTP port via point_window_at_operator so SSE streams natively). WI-2734.
+    if custom_protocol::onboarding_origin_enabled() {
         if let Some(window) = app.get_webview_window("main") {
             match custom_protocol::APP_ORIGIN.parse() {
                 Ok(u) => {
@@ -3111,7 +3115,11 @@ pub fn run() {
     // zero HTTP connections from the webview. Set
     // PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=0 to roll back to the HTTP origin.
     // See custom_protocol.rs + the navigate hook in setup().
-    let builder = if custom_protocol::enabled() {
+    // Register on every platform that serves the bundled-SPA origin — Linux
+    // (steady-state) AND Windows (pre-operator onboarding gate). Gating this on
+    // enabled() (Linux-only) is what left the handler unregistered on Windows,
+    // stranding first-run on the dead :3070 frontendDist (WI-2734).
+    let builder = if custom_protocol::onboarding_origin_enabled() {
         builder.register_asynchronous_uri_scheme_protocol(
             custom_protocol::SCHEME,
             custom_protocol::handle,
@@ -3372,7 +3380,11 @@ pub fn run() {
             // SPA statics (D-009: renders WslOnboardingGate / a booting
             // shell); once serve is discovered, finish_boot reloads the
             // document against the live proxy.
-            if custom_protocol::enabled() {
+            // onboarding_origin_enabled(), not enabled() — see the GUI-role
+            // navigate above: Windows renders the WslOnboardingGate off this
+            // pre-operator origin; the buffered scheme is NOT the steady-state
+            // origin there (that stays the real HTTP port for SSE). WI-2734.
+            if custom_protocol::onboarding_origin_enabled() {
                 if let Some(window) = app.get_webview_window("main") {
                     match custom_protocol::APP_ORIGIN.parse() {
                         Ok(u) => {

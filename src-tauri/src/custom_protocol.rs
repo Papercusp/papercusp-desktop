@@ -93,6 +93,56 @@ fn scheme_default(env_override: Option<&str>, target_os: &str) -> bool {
     }
 }
 
+/// Whether the bundled-SPA custom-protocol origin is used for the **pre-operator**
+/// phase: register the scheme handler, point the window at [`APP_ORIGIN`] before
+/// any operator is up, and serve the bundled onboarding SPA from disk
+/// ([`serve_bundled_spa`]). This is DISTINCT from [`enabled()`], which decides
+/// whether the scheme is ALSO the *steady-state* origin.
+///
+/// DEFAULT: **Linux + Windows**.
+///   - Linux: same as [`enabled()`] — the scheme is the app origin throughout.
+///   - Windows: a fresh machine has NO operator until the user drives the WSL
+///     onboarding gate (`WslOnboardingGate`, `wsl_install`/`import`/`bootstrap`
+///     `#[tauri::command]`s), and that gate lives in the bundled SPA which ONLY
+///     this handler serves pre-operator. WebView2 renders the mapped
+///     `http://papercusp.localhost` origin fine — **verified live 2026-07-04 on
+///     the Windows VM** (WI-2734): the gate rendered ("Papercup setup — Windows"),
+///     0 console errors/exceptions. The earlier "WebView2 renders the scheme
+///     blank" note was over-generalized from macOS WKWebView. WITHOUT this,
+///     the window strands on the dead `:3070` frontendDist, the gate never
+///     renders, WSL never bootstraps, and the GUI FATALs at 120s — the shipped
+///     Windows first-run dead-end.
+///   - macOS: **NO** — WKWebView renders the raw `papercusp://` scheme blank
+///     (verified live 2026-07-01) AND macOS has no long pre-operator onboarding
+///     (the operator spawns natively), so the bundled bootstrap page covers it.
+///
+/// Post-operator the window still navigates to the real loopback HTTP port on
+/// Windows/macOS (see `point_window_at_operator` gated on [`enabled()`]), so
+/// steady-state SSE streams natively rather than through this buffered handler
+/// — which matters on Windows where endpoint-IPC is unavailable (the WSL
+/// operator publishes a Unix socket the Windows host rejects).
+///
+/// Same explicit env override as [`enabled()`]: `=1` forces on, `=0` forces off.
+pub fn onboarding_origin_enabled() -> bool {
+    onboarding_origin_default(
+        std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL")
+            .ok()
+            .as_deref(),
+        std::env::consts::OS,
+    )
+}
+
+/// Pure decision behind [`onboarding_origin_enabled()`] — kept `env`/`cfg!`-free
+/// so CI (which builds on Linux) can exercise the Windows/macOS arms it can never
+/// reach through a raw `cfg!(target_os)`, exactly as [`scheme_default`] does.
+fn onboarding_origin_default(env_override: Option<&str>, target_os: &str) -> bool {
+    match env_override {
+        Some("1") => true,
+        Some("0") => false,
+        _ => matches!(target_os, "linux" | "windows"),
+    }
+}
+
 /// The origin the window is pointed at when `enabled()`.
 ///
 /// WebKitGTK (Linux) and WKWebView (macOS) load registered schemes as raw
@@ -387,5 +437,63 @@ mod tests {
         assert!(scheme_default(Some(""), "linux"));
         assert!(!scheme_default(Some("true"), "macos"));
         assert!(!scheme_default(Some("yes"), "windows"));
+    }
+
+    // --- pre-operator onboarding-origin guard (Windows first-run dead-end, WI-2734) ---
+    // The invariant the shipped bug violated: the bundled-SPA onboarding origin
+    // must be served on Windows (as well as Linux), because a truly-cold Windows
+    // machine renders the WslOnboardingGate ONLY through this handler — the gate
+    // is what bootstraps WSL, which is what lets the operator (and thus the real
+    // app) come up at all. macOS stays OFF (WKWebView renders papercusp:// blank).
+
+    #[test]
+    fn onboarding_origin_defaults_to_linux_and_windows() {
+        assert!(
+            onboarding_origin_default(None, "linux"),
+            "linux serves the bundled-SPA onboarding origin (scheme is the app origin throughout)",
+        );
+        assert!(
+            onboarding_origin_default(None, "windows"),
+            "windows MUST serve the bundled-SPA onboarding origin — else the \
+             WslOnboardingGate never renders and first-run dead-ends (WI-2734)",
+        );
+        assert!(
+            !onboarding_origin_default(None, "macos"),
+            "macOS stays OFF — WKWebView renders papercusp:// blank and it has no \
+             long pre-operator onboarding phase",
+        );
+        assert!(
+            !onboarding_origin_default(None, "ios"),
+            "other targets default OFF",
+        );
+    }
+
+    #[test]
+    fn onboarding_origin_env_override_wins_on_every_platform() {
+        for os in ["linux", "macos", "windows"] {
+            assert!(onboarding_origin_default(Some("1"), os));
+            assert!(!onboarding_origin_default(Some("0"), os));
+        }
+        // Unrecognized value → platform default.
+        assert!(!onboarding_origin_default(Some("true"), "macos"));
+        assert!(onboarding_origin_default(Some("yes"), "windows"));
+    }
+
+    #[test]
+    fn onboarding_origin_is_superset_of_enabled() {
+        // Every platform where the scheme is the steady-state origin (enabled)
+        // must also serve it pre-operator (onboarding). The reverse need not hold
+        // (Windows: onboarding yes, steady-state no).
+        for os in ["linux", "macos", "windows", "ios"] {
+            if scheme_default(None, os) {
+                assert!(
+                    onboarding_origin_default(None, os),
+                    "{os}: enabled() implies onboarding_origin_enabled()",
+                );
+            }
+        }
+        // Windows is the intended asymmetric case.
+        assert!(!scheme_default(None, "windows"));
+        assert!(onboarding_origin_default(None, "windows"));
     }
 }
