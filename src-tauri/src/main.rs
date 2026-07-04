@@ -975,6 +975,72 @@ fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorD
     parse_operator_discovery(&txt)
 }
 
+/// Spawn a short-lived Windows helper (a per-poll `wsl.exe` read) WITHOUT
+/// dropping a visible console window over the webview — same rationale as
+/// isolate_process_group, but these reads are fire-and-forget so they don't
+/// need the process group.
+#[cfg(target_os = "windows")]
+fn no_console_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+}
+
+/// operator.json path INSIDE the WSL distro. The sidecar runs as the distro
+/// user `papercup` (HOME=/home/papercup — WSLENV HOME/p forwarding does not
+/// survive WSL session init), so serve writes discovery here, not under the
+/// forwarded /mnt/c home.
+#[cfg(target_os = "windows")]
+const WSL_OPERATOR_JSON: &str = "/home/papercup/.papercusp/operator.json";
+
+/// Read operator.json the ROBUST way when the sidecar runs inside WSL: shell
+/// into the distro and `cat` the file. The `\\wsl.localhost` UNC share we used
+/// to read through is UNRELIABLE — observed live 2026-07-03 on the Windows VM,
+/// `Test-Path` returned False for every `\\wsl.localhost\<distro>\…` path WHILE
+/// the distro was running and `wsl.exe -e cat` read the same file fine. When the
+/// UNC read fails, wait_for_operator burns its full 120s timeout despite a
+/// healthy operator, and the webview strands on the frontendDist :3070 error
+/// page — the app never shows its UI. This uses the exact mechanism
+/// discovery_pid_alive already relies on, so it works whenever the distro is up.
+#[cfg(target_os = "windows")]
+fn read_operator_discovery_via_wsl() -> Option<OperatorDiscovery> {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args([
+        "--distribution",
+        wsl_setup::DISTRO_NAME_PUB,
+        "-e",
+        "cat",
+        WSL_OPERATOR_JSON,
+    ]);
+    no_console_window(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_operator_discovery(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Unified operator discovery shared by BOTH the initial boot wait and the
+/// long-lived watcher, so the two can never drift. When routed via WSL
+/// (Windows), read through `wsl.exe` (the UNC share is unreliable — see
+/// read_operator_discovery_via_wsl); otherwise read the local filesystem path.
+/// Routing the WATCHER through this (it previously read only the Windows-side
+/// workspace_home, which never holds the WSL operator.json) is what lets it
+/// follow an operator restart on the VM instead of being permanently blind.
+fn find_operator_discovery(
+    workspace_home: &std::path::Path,
+    via_wsl: bool,
+) -> Option<OperatorDiscovery> {
+    #[cfg(target_os = "windows")]
+    if via_wsl {
+        if let Some(d) = read_operator_discovery_via_wsl() {
+            return Some(d);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = via_wsl;
+    read_operator_discovery(workspace_home)
+}
+
 /// WI-1869: given the operator port the webview is CURRENTLY pointed at and the
 /// latest operator.json discovery, decide whether to re-navigate — and to which
 /// port. Returns Some(new_port) iff a discovery is present and names a DIFFERENT
@@ -1093,20 +1159,6 @@ fn spawn_operator_watcher(
     });
 }
 
-/// The sidecar's REAL home when it runs inside WSL, reachable from Windows
-/// via the \\wsl.localhost UNC share. WSLENV `HOME/p` forwarding does NOT
-/// survive WSL session init (it re-sets HOME from /etc/passwd after the
-/// WSLENV merge — found live 2026-06-11), so serve writes operator.json /
-/// state under the distro user's /home/papercup, not the forwarded
-/// /mnt/c home. Discovery polls here when routed via WSL.
-#[cfg(target_os = "windows")]
-fn wsl_sidecar_home_unc() -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(
-        r"\\wsl.localhost\{}\home\papercup",
-        wsl_setup::DISTRO_NAME_PUB
-    ))
-}
-
 /// Liveness probe for a discovery-file pid (signal-0 equivalent: /proc on
 /// Linux, `kill -0` elsewhere). Guards against a STALE operator.json whose
 /// port has since been reused by an unrelated process.
@@ -1118,18 +1170,17 @@ fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
     if via_wsl {
         #[cfg(target_os = "windows")]
         {
-            return Command::new("wsl.exe")
-                .args([
-                    "--distribution",
-                    wsl_setup::DISTRO_NAME_PUB,
-                    "-e",
-                    "test",
-                    "-d",
-                    &format!("/proc/{}", pid),
-                ])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let mut cmd = Command::new("wsl.exe");
+            cmd.args([
+                "--distribution",
+                wsl_setup::DISTRO_NAME_PUB,
+                "-e",
+                "test",
+                "-d",
+                &format!("/proc/{}", pid),
+            ]);
+            no_console_window(&mut cmd);
+            return cmd.status().map(|s| s.success()).unwrap_or(false);
         }
     }
     #[cfg(target_os = "linux")]
