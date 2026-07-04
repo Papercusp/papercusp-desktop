@@ -141,7 +141,21 @@ echo "  member=$SLUG hiveHome=$HIVE_SLUG WS_A=$WS_A WS_B=$WS_B"
 
 # ── per-type SQL (origin='local' write on src; poll dst for origin='remote') ────
 # ins_<type> <ws> <tag> ; poll_<type> <tag>  — $SLUG harness-scoped, $HIVE_SLUG hive-scoped.
-TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plans plan-parts item-assignments presence hive-settings hive-members}"
+#
+# NOTE (WI-2781 et al — content-matrix false-positive RED, 8+ live-federation-gate
+# runs 2026-07-04 14:41-18:54): 'presence' is DELIBERATELY EXCLUDED from the default
+# set. harness_shared.shared_presence is a "log-first" table (migration
+# 214-federated-fed-ts-local-stamp.sql: "Log-first tables (contributors /
+# feature_queue / feature_working_set / shared_presence / harness_feature_prs) are
+# NOT touched — ... they have no capture trigger to re-arm") — it is NOT one of the
+# 11 CDC-captured tables, so a raw SQL INSERT here NEVER produces a
+# harness_shared.substrate_outbox row (src outbox is always literally 0/0, in every
+# direction and phase — this is structural, not a regression). Real cross-machine
+# presence sync (if any) rides presence-gossip.ts's own signed frames, a path this
+# smoke's raw-INSERT method does not exercise. Asserting it here can never pass and
+# was spamming a duplicate WI every gate run. Set MATRIX_TYPES to include it
+# explicitly (e.g. for a one-off manual probe) — it just won't gate on failure.
+TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plans plan-parts item-assignments hive-settings hive-members}"
 ins() { local ty="$1" ws="$2" t="$3" nid; [ "$t" = ba ] && nid=2 || nid=1
   case "$ty" in
    features) echo "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$SLUG','F-MX-$t','mx','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);";;
