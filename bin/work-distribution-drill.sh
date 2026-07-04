@@ -37,14 +37,14 @@
 #                  (revocation-reaper.ts deferred #3); the LOCAL reap path is leg R
 #
 # Cross-node (2-node rig) variant: WI-1910 CLOSED 2026-07-03 (leader verdict — connect
-# symptom non-repro on the current deb; the 07-02 pin is lifted). The gate has MOVED to
-# WI-2006: the only genuinely cross-node work-distribution surface (fleet-directory,
-# mig 476 / D-006) landed store + member-side projection but its PUBLISH path is UNWIRED
-# (PgFleetDirectory has zero production callers; scope-roster's `directory?` slot is never
-# injected) — every other leg above is per-machine BY DESIGN (M19 allotments; LOCAL
-# reaper/receipts/metering), so a cross-node run today would only duplicate single-box
-# coverage. Promote to a matrix scenario (record published on frame A materializes,
-# sig-verified, in frame B's p2p_fleet_directory) when WI-2006 wires. Content-layer
+# symptom non-repro on the current deb; the 07-02 pin is lifted). WI-2006 WIRED
+# 2026-07-04: the fleet-directory PUBLISH leg now authors owner-signed cards on every
+# fleet lifecycle write (p2p/fleet-directory-publish.ts, hooked in agent-fleets-store;
+# the scope-roster `directory?` injection was already live in boot.ts), and the
+# cross-node proof is a REGISTERED MATRIX SCENARIO — bin/lib/scenarios/fleet-directory.sh
+# (fleet:create on frame A → owner-signed card → origin='remote' sig-verified row in
+# frame B's p2p_fleet_directory; run via bin/local-matrix.sh). Every other leg above is
+# per-machine BY DESIGN (M19 allotments; LOCAL reaper/receipts/metering). Content-layer
 # asserts stay OUT regardless (epoch-key class still red — WI-183).
 #
 # Usage: bin/work-distribution-drill.sh [path/to/Papercusp*_.deb]
