@@ -24,6 +24,17 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
 fi
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
 
+# Homebrew on PATH. pgvector (and the libpq keg below) live under Homebrew's
+# prefix, which a NON-login shell does NOT have on PATH — e.g. a detached
+# `nohup bash mac-vm-build.sh` (vs the release flow's `bash -lc`). Without this
+# the sidecar's pgvector-bundling step aborts with "pgvector was NOT bundled …
+# type public.vector does not exist". `brew shellenv` is idempotent, so this is a
+# harmless no-op when a login shell already sourced it. (x86_64: /usr/local;
+# Apple-silicon: /opt/homebrew.)
+for _brew in /usr/local/bin/brew /opt/homebrew/bin/brew; do
+  [[ -x "$_brew" ]] && eval "$("$_brew" shellenv)" && break
+done
+
 # PG client tools (pg_dump/psql/pg_dumpall) for the sidecar's snapshot
 # subsystem wiring. Gate on pg_dumpall — the rarest of the three; the
 # VM's hand-curated ~/postgres-bin has only pg_dump/psql and must not
