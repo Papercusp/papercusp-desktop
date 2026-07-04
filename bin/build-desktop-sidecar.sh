@@ -992,6 +992,38 @@ echo "→ bundling framework DDL"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 
+# ── Pre-migrated PGDATA seed (desktop first-boot fast path) ─────────────────
+# Boot the JUST-BUNDLED embedded-PG ONCE at build time (initdb + apply every
+# migration in db-sql/), cleanly stop, and archive the resulting data dir into
+# db-seed.tar.gz. On a FRESH install the Server extracts this INSTEAD of running
+# the ~11s "initdb + full migration replay" (see embedded-postgres-server
+# src/index.js seedPath handling — measured ~11x faster first-boot; ~13MB gz).
+# Because it runs the SAME bundled binary that ships, the seed is byte-compatible
+# with THIS bundle's platform by construction (no cross-arch seed hazard). It also
+# doubles as a build-time gate that the full migration set applies cleanly on this
+# platform. Skip with PAPERCUSP_BUILD_PG_SEED=0 (then first-boot falls back to the
+# old initdb+replay path — correct, just slow).
+if [[ "${PAPERCUSP_BUILD_PG_SEED:-1}" == "1" ]]; then
+  echo "→ building pre-migrated PGDATA seed (first-boot fast path)"
+  _seed_tmp="$(mktemp -d)"
+  if node "$EMBEDDED_PG_DST/bin/build-seed.mjs" \
+       --data "$_seed_tmp/pgdata" \
+       --sql "$SIDECAR_DIR/db-sql" \
+       --out "$SIDECAR_DIR/db-seed.tar.gz" \
+       --port "${PAPERCUSP_BUILD_PG_SEED_PORT:-5549}"; then
+    echo "→ db-seed.tar.gz staged ($(du -h "$SIDECAR_DIR/db-seed.tar.gz" | cut -f1))"
+  else
+    echo "ERROR: pre-migrated seed build failed — refusing to ship a bundle without a verified schema."
+    echo "  (Set PAPERCUSP_BUILD_PG_SEED=0 to intentionally ship without the first-boot fast path.)"
+    rm -f "$SIDECAR_DIR/db-seed.tar.gz"
+    rm -rf "$_seed_tmp"
+    exit 1
+  fi
+  rm -rf "$_seed_tmp"
+else
+  echo "→ skipping pre-migrated seed (PAPERCUSP_BUILD_PG_SEED=0) — first-boot will initdb + replay migrations"
+fi
+
 # Bundle the @papercusp/locks (papercusp_su side-DB) migrations. EI-2669:
 # @papercusp/locks is esbuild-BUNDLED into serve.mjs (not externalized), so its
 # su-lock-store resolves SQL_DIR = dirname(import.meta.url)/sql = <sidecar>/sql.

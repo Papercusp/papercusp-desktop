@@ -1819,6 +1819,11 @@ fn spawn_serve(
     let harness_dir = sidecar_dir.join("harness");
     let prompts_dir = sidecar_dir.join("prompts");
     let db_sql_dir = sidecar_dir.join("db-sql");
+    // Pre-migrated PGDATA seed (first-boot fast path). Optional: only present when
+    // the bundle was built with PAPERCUSP_BUILD_PG_SEED=1 (the default). serve/
+    // embedded-postgres-server existsSync-checks it and falls back to initdb +
+    // full migration replay when absent, so pointing at a missing path is safe.
+    let db_seed_path = sidecar_dir.join("db-seed.tar.gz");
     // PG data CANNOT live on DrvFs (/mnt/c) when the sidecar runs in WSL:
     // postmaster hard-requires a 0700/0750 data dir and DrvFs without the
     // metadata mount option can't hold one (found live 2026-06-11:
@@ -1862,7 +1867,7 @@ fn spawn_serve(
             "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
-             PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
+             PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
              PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
              PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
              PAPERCUSP_DBOS_ORCHESTRATOR:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
@@ -1947,6 +1952,12 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_PG_SQL_DIR",
             db_sql_dir.to_string_lossy().to_string(),
+        )
+        // Pre-migrated seed archive (first-boot fast path). Safe to set even when
+        // the file is absent — serve existsSync-checks it and falls back to initdb.
+        .env(
+            "PAPERCUSP_PG_SEED_PATH",
+            db_seed_path.to_string_lossy().to_string(),
         )
         .env(
             "PAPERCUSP_IDENTITY_DIR",

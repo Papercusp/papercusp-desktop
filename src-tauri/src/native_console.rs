@@ -847,16 +847,29 @@ fn spawn_windows_wsl_new_window(
         // CREATE_NEW_CONSOLE = 0x00000010 — even when wt is fronted,
         // belt-and-suspenders so we never inherit our parent's console.
         cmd.creation_flags(0x00000010);
-        let child = cmd.spawn().map_err(|e| {
-            format!(
-                "wt.exe spawn failed: {e}. Is the '{WSL_DISTRO}' WSL distro installed? \
-                 Open Papercup's WSL setup wizard to finish onboarding."
-            )
-        })?;
-        return Ok(Some(child.id()));
+        match cmd.spawn() {
+            Ok(child) => return Ok(Some(child.id())),
+            Err(e) => {
+                // wt.exe was ON PATH but launching it FAILED — don't hard-error,
+                // fall through to the bare wsl.exe conhost path below (no Windows
+                // Terminal needed). The classic real-machine cause is an ORPHANED
+                // WindowsApps execution alias: uninstalling the Store "Windows
+                // Terminal" app leaves a 0-byte `wt.exe` reparse point in
+                // %LOCALAPPDATA%\Microsoft\WindowsApps (still on PATH, so
+                // is_on_path_windows sees it), whose execution fails or pops a
+                // Store "how do you want to open this?" dialog. The bare-wsl.exe
+                // fallback still surfaces its own error rather than hanging if WSL
+                // itself is missing.
+                eprintln!(
+                    "[console] wt.exe on PATH but spawn failed ({e}); \
+                     falling back to bare wsl.exe conhost"
+                );
+            }
+        }
     }
 
-    // Fallback: direct wsl.exe in a fresh conhost. Ugly but works on
+    // Fallback: direct wsl.exe in a fresh conhost. Reached when Windows
+    // Terminal is absent OR present-but-unlaunchable (above). Works on
     // older Windows installs without Windows Terminal. Same launch script
     // as the wt path — wsl.exe's tail is re-parsed by the distro shell, so
     // an inline one-liner is just as unsafe here.
