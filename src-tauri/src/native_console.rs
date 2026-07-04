@@ -789,6 +789,27 @@ fn spawn_windows_wsl_new_window(
 ) -> Result<Option<u32>, String> {
     use std::os::windows::process::CommandExt as _;
 
+    // wt.exe splits its command line on every unescaped `;` into SEPARATE
+    // TABS, and wsl.exe (without --exec) re-parses its tail through the
+    // distro's default shell — two independent parsing layers that both
+    // mangle a shell one-liner passed inline. Found live 2026-07-03
+    // (WI-2149): wt split our one-liner at its `;`s, opened a tab titled
+    // " exec " running the fragment after the last one, and the real
+    // greeting/sentinel never ran. Sidestep BOTH layers: write the
+    // one-liner to a transient launch script INSIDE the distro (cfs_write
+    // relays via wsl.exe) and pass only a plain, quote-free path through
+    // wt/wsl. The script self-deletes on start (the unlinked inode stays
+    // readable for the already-running bash).
+    let script_path = console_path_join(
+        &envelope.cwd,
+        &format!(".papercup-console-launch.{}.sh", envelope.session_id),
+    );
+    let script = format!(
+        "#!/bin/bash\n# Transient Papercup console launcher (WI-2149) — self-deletes on start.\nrm -f -- \"$0\"\n{oneliner}\n"
+    );
+    cfs_write(&script_path, &script)
+        .map_err(|e| format!("write console launch script: {e}"))?;
+
     // Map the Linux-side cwd to a Windows UNC for wt.exe's
     // --startingDirectory. Without this, wt opens at C:\ and the user's
     // first action is to `cd` somewhere — defeats the point.
@@ -824,8 +845,8 @@ fn spawn_windows_wsl_new_window(
             .arg(&envelope.cwd)
             .arg("--")
             .arg("bash")
-            .arg("-lc")
-            .arg(oneliner);
+            .arg("-l")
+            .arg(&script_path);
         // CREATE_NEW_CONSOLE = 0x00000010 — even when wt is fronted,
         // belt-and-suspenders so we never inherit our parent's console.
         cmd.creation_flags(0x00000010);
@@ -839,7 +860,9 @@ fn spawn_windows_wsl_new_window(
     }
 
     // Fallback: direct wsl.exe in a fresh conhost. Ugly but works on
-    // older Windows installs without Windows Terminal.
+    // older Windows installs without Windows Terminal. Same launch script
+    // as the wt path — wsl.exe's tail is re-parsed by the distro shell, so
+    // an inline one-liner is just as unsafe here.
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-d")
         .arg(WSL_DISTRO)
@@ -847,8 +870,8 @@ fn spawn_windows_wsl_new_window(
         .arg(&envelope.cwd)
         .arg("--")
         .arg("bash")
-        .arg("-lc")
-        .arg(oneliner);
+        .arg("-l")
+        .arg(&script_path);
     cmd.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
     let child = cmd
         .spawn()
