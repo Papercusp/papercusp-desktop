@@ -97,6 +97,25 @@ built by default. Artifacts land in
 unsigned (no Authenticode cert yet) — SmartScreen will warn on install;
 revisit before public distribution.
 
+#### Fast LOCAL Windows-cfg compile gate (before the VM trip)
+
+The desktop's ~68 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]` regions
+(main.rs, wsl_setup.rs, native_console.rs, pty.rs, …) are invisible to a plain
+`cargo check` on the Linux dev box — so a type/import/borrow error in a
+Windows-only block used to surface only 15-25 min into `build-windows-on-vm.sh`
+on the VM. `bin/check-windows-cfg.sh` compiles that exact surface locally in
+~40 s (~4 s warm) via `cargo xwin check --target x86_64-pc-windows-msvc`
+(cargo-xwin shims the MSVC toolchain so the `ring`/C build scripts that block a
+naive cross-`cargo check` resolve). One-time setup (the script prints the exact
+command if any piece is missing): `rustup target add x86_64-pc-windows-msvc`,
+`sudo apt-get install -y --no-install-recommends clang lld llvm`,
+`cargo install cargo-xwin`. `build-windows-on-vm.sh` runs it as an opt-out
+pre-flight (`SKIP_WINDOWS_CFG_PRECHECK=1` to skip) and aborts before the VM
+trip on a compile error — but skips gracefully (warn + continue) when the local
+toolchain isn't set up, and is deliberately NOT in the green-checkpoint suite
+(it needs the SDK). It is a compile check, not a build — the runnable `.exe` is
+still the VM's job.
+
 #### Windows per-release gate: install smoke + snapshot convention
 
 Every Windows artifact gets one clean hands-off pass in the VM before it

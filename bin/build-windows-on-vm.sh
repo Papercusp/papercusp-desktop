@@ -58,6 +58,24 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 
 [[ -d "$ROOT/src-tauri/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
 [[ -f "$ROOT/src-tauri/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
+
+# Fast LOCAL Windows-cfg compile gate (WI-2215) — catch cfg(windows) Rust
+# errors on THIS box in ~40s (~4s warm) instead of discovering them 15-25 min
+# into the VM build. Opt out with SKIP_WINDOWS_CFG_PRECHECK=1. If the local
+# cargo-xwin toolchain isn't set up (script exits 2), we WARN and continue —
+# the VM build is still the source of truth; the gate is a fast fail-early.
+if [[ "${SKIP_WINDOWS_CFG_PRECHECK:-0}" != "1" ]]; then
+  echo "==> Windows-cfg pre-check (local; skip with SKIP_WINDOWS_CFG_PRECHECK=1)"
+  set +e
+  "$HERE/check-windows-cfg.sh"
+  precheck_rc=$?
+  set -e
+  if [[ "$precheck_rc" -eq 2 ]]; then
+    echo "    (local cargo-xwin gate not set up — see bin/check-windows-cfg.sh; continuing to VM build)" >&2
+  elif [[ "$precheck_rc" -ne 0 ]]; then
+    fail "Windows-cfg pre-check found compile errors (above) — fix before spending a VM build. (SKIP_WINDOWS_CFG_PRECHECK=1 to override.)"
+  fi
+fi
 [[ -f "$KEY_FILE" ]] || fail "signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 "${SSH[@]}" 'cmd /c echo VM-OK' >/dev/null 2>&1 || fail "VM unreachable on :$VM_SSH_PORT — boot it: ~/windows-vm/boot-windows.sh"
 
