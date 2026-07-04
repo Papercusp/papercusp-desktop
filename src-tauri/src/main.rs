@@ -3634,7 +3634,26 @@ pub fn run() {
             // when ExitRequested/Exit followed (P-051). Closing the last
             // window ends the event loop, so ExitRequested → Exit still
             // covers the single-window quit.
-            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            // Safety net for the windowless Server: a window-close-triggered
+            // ExitRequested has `code == None`. The Server is kept alive by its
+            // TRAY, not a window — its only transient window is the docs-search
+            // palette — so vetoing that exit stops the palette's dismissal from
+            // tearing the whole Server (operator + embedded PG) down (WI-2648).
+            // An explicit tray "Quit" calls app.exit(0) → `code == Some(0)` →
+            // falls through to a real teardown. The GUI role keeps the old
+            // behavior (closing its window quits it; it owns no operator).
+            RunEvent::ExitRequested { code, api, .. } => {
+                let is_server = matches!(
+                    app_role::detect(&app_handle.config().identifier),
+                    app_role::Role::Server
+                );
+                if code.is_none() && is_server {
+                    api.prevent_exit();
+                } else {
+                    shutdown_children_once(app_handle);
+                }
+            }
+            RunEvent::Exit => {
                 shutdown_children_once(app_handle);
             }
             _ => {}

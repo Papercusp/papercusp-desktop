@@ -137,7 +137,20 @@ fn resolve_base(app: &AppHandle) -> Option<String> {
 /// Tauri command too (`#[tauri::command]` below) so a future in-webview menu
 /// item / button can trigger the identical path the global shortcut uses.
 pub fn open_palette(app: &AppHandle) {
+    // Reuse the single palette window across presses. It is created once and
+    // then HIDDEN (not destroyed) on close — see the CloseRequested handler
+    // below — so a repeat press just re-shows + focuses it. This is the ONLY
+    // window the windowless Server ever owns, and destroying it is doubly
+    // fatal: (a) the window count drops to 0, firing a window-close
+    // ExitRequested that tears the whole Server (operator + embedded PG) down,
+    // and (b) it tears down the sole GTK frame clock, which crashed webkit2gtk
+    // on GNOME ("GdkWindow unexpectedly destroyed"). Hiding sidesteps both — the
+    // app stays alive, the window persists, and the shortcut keeps working after
+    // the palette is dismissed (WI-2648, reproduced live on GNOME 2026-07-04:
+    // the palette worked exactly once, then "stopped working no matter which key").
     if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.unminimize();
         let _ = existing.set_focus();
         return;
     }
@@ -165,15 +178,19 @@ pub fn open_palette(app: &AppHandle) {
             // Bring it to the front — on the Server process (a windowless
             // background app) the WM does not auto-raise the new window.
             let _ = win.set_focus();
-            // NOTE (WI-2648, found live 2026-07-04): this used to close the
-            // palette on blur (VSCode-style transient popup). On GNOME the
-            // windowless Server can't reliably hold keyboard focus (focus-
-            // stealing prevention), so the blur handler fired the instant the
-            // window opened — the palette flashed and vanished before it was
-            // usable, and the closed-but-not-cleared handle then blocked
-            // reopen ("shortcut does nothing no matter which key"). Keep the
-            // window persistent instead; dismiss via the titlebar close button
-            // or the webview's own Escape handler.
+            // Dismiss = HIDE, not close. The palette is the Server's ONLY
+            // window; closing/destroying it would exit the app (last-window
+            // ExitRequested) and tear down the sole GTK frame clock (a
+            // webkit2gtk crash on GNOME). Intercept the titlebar/Escape close,
+            // veto it, and hide instead — open_palette re-shows this same
+            // window on the next shortcut press (WI-2648).
+            let hide_target = win.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = hide_target.hide();
+                }
+            });
         }
         Err(e) => eprintln!("[docs-search] failed to open palette window: {e}"),
     }
