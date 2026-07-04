@@ -2096,6 +2096,14 @@ fn spawn_serve(
     let harness_dir = sidecar_dir.join("harness");
     let prompts_dir = sidecar_dir.join("prompts");
     let db_sql_dir = sidecar_dir.join("db-sql");
+    // Installer-bundled hive seed (plan hive-seed-bundle-2026-07-04). Optional:
+    // only carries a manifest.json when a release cut a real seed into
+    // src-tauri/seed/ (tauri.conf bundles `seed/**/*`; a dev build ships only the
+    // placeholder README). restore-hive-seed's resolveSeedDir manifest-checks it,
+    // so pointing at a manifest-less dir is safe → unchanged cold join. The TS
+    // side ALSO autodetects this dir from a sibling resource env, so this explicit
+    // pass is belt-and-suspenders, not the sole channel.
+    let seed_dir = sidecar_dir.join("seed");
     // Pre-migrated PGDATA seed (first-boot fast path). Optional: only present when
     // the bundle was built with PAPERCUSP_BUILD_PG_SEED=1 (the default). serve/
     // embedded-postgres-server existsSync-checks it and falls back to initdb +
@@ -2149,7 +2157,7 @@ fn spawn_serve(
              PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
              PAPERCUSP_DBOS_ORCHESTRATOR:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
-             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
+             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
         );
     }
     cmd.env("PATH", &new_path)
@@ -2229,6 +2237,13 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_PG_SQL_DIR",
             db_sql_dir.to_string_lossy().to_string(),
+        )
+        // Installer-bundled hive seed dir (first-boot seed-then-delta-join fast
+        // path). Safe to set when only the placeholder is present — the operator
+        // manifest-checks it (resolveSeedDir) and cold-joins if there's no seed.
+        .env(
+            "PAPERCUSP_SEED_DIR",
+            seed_dir.to_string_lossy().to_string(),
         )
         // Pre-migrated seed archive (first-boot fast path). Safe to set even when
         // the file is absent — serve existsSync-checks it and falls back to initdb.
