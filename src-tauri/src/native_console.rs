@@ -836,9 +836,6 @@ fn spawn_windows_wsl_new_window(
         let win_title = window_title_for(&envelope.session_id);
         cmd.arg("--title").arg(&win_title);
         cmd.arg("--suppressApplicationTitle");
-        if let Some(unc) = &cwd_unc {
-            cmd.arg("--startingDirectory").arg(unc);
-        }
         cmd.arg("wsl.exe")
             .arg("-d")
             .arg(WSL_DISTRO)
@@ -886,22 +883,6 @@ fn spawn_windows_wsl_new_window(
     _oneliner: &str,
 ) -> Result<Option<u32>, String> {
     unreachable!("Windows spawner called on non-Windows build")
-}
-
-/// Translate a Linux path inside the WSL distro to its Windows UNC.
-/// E.g. `/home/avi/papercup` → `\\wsl.localhost\papercup-runtime\home\avi\papercup`.
-/// Returns None if the path doesn't look absolute.
-///
-/// We use `\\wsl.localhost\` (Win10 20H2+) which Windows Terminal accepts
-/// as --startingDirectory. Older Windows uses `\\wsl$\` — if the user is
-/// on that, the spawn still succeeds (wt accepts it), they just see the
-/// path written one way vs. the other.
-fn wsl_path_to_windows_unc(linux_path: &str) -> Option<String> {
-    if !linux_path.starts_with('/') {
-        return None;
-    }
-    let win_path = linux_path.replace('/', "\\");
-    Some(format!("\\\\wsl.localhost\\{WSL_DISTRO}{win_path}"))
 }
 
 #[cfg(target_os = "windows")]
