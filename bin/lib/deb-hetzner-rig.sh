@@ -83,24 +83,24 @@ rig_init() {
   RIG_IMAGE="${2:-${RIG_IMAGE:-ubuntu-24.04}}"
   RIG_HONO_PORT="${RIG_HONO_PORT:-39070}"
   RIG_PG_PORT="${RIG_PG_PORT:-39532}"
-  # The sidecar's workspace partition. A bare `serve.mjs` with no
-  # PAPERCUSP_WORKSPACE_ID falls back to activeWorkspaceId()'s legacy 'default'
-  # global — but 'default' is the UN-FEDERATING partition the product migrated
-  # off (WI-148, mig 295: default→papercusp-workspace) and WI-1564 REFUSES for
-  # federating writes (resolveAllotmentWorkspace / resolveP2pGrantWorkspace return
-  # `undefined` for 'default' → resource:delegate refuses `workspace_unresolved`,
-  # so the seat-offer/spawn-request federation legs silently never author). The
-  # real desktop runs under a concrete workspace; the rig must too. Pin a concrete
-  # id so the frames faithfully exercise the D-005/P-009 delegate→offer path.
-  RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-papercusp-workspace}"
-  # The operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_HIVE_HOME_SLUG,
-  # else the 'papercusp' legacy default). A bare frame has NO 'papercusp' project, so
-  # once a concrete workspace is pinned the boot's home-harness validation
-  # (checkHomeHarnessResolves) HARD-FAILS ("home harness 'papercusp' does not resolve …
-  # fire-paths go dark"), destabilising the operator. Point it at the rig's actual
-  # fixture hive (octocat/Hello-World → 'hello-world-hive', registered on both frames)
-  # so boot is clean and dispatcher/overwatch/routines stay live.
-  RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-hello-world-hive}"
+  # OPT-IN concrete-workspace seam (default EMPTY = legacy behaviour: frames boot
+  # under activeWorkspaceId()'s 'default' global — the baseline the matrix expects).
+  # WHY the seam exists: the seat-offer/spawn-request federation (D-005/P-009) can't
+  # be live-verified under 'default' — WI-1564's resolveAllotmentWorkspace REFUSES
+  # 'default' so resource:delegate returns `workspace_unresolved` and no seat-offer
+  # is ever authored (the local publish leg works fine once a CONCRETE ws is pinned;
+  # proven 2026-07-04). BUT pinning a concrete ws currently REGRESSES the substrate
+  # a→b APPLY (fleet_directory card never materialises on the peer — cause still in
+  # the federation/projection layer, NOT the offer code; tracked as a blocker WI).
+  # So this stays OFF until that federation bug is fixed; then set RIG_WORKSPACE_ID
+  # (any non-'default' id, e.g. papercusp-workspace) to run the faithful path.
+  RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-}"
+  # Operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_HIVE_HOME_SLUG,
+  # else 'papercusp'). NOTE: on a fresh frame NO slug resolves at BOOT (projects are
+  # created/joined post-boot), so the checkHomeHarnessResolves boot-validation warns
+  # regardless — non-fatal (a red herring for the apply regression above). Set only
+  # alongside RIG_WORKSPACE_ID if a future fix makes it matter.
+  RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-}"
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
