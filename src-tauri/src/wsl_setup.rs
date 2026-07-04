@@ -248,6 +248,17 @@ mod imp {
     struct PersistedState {
         install_kicked_off: bool,
         bootstrapped: bool,
+        /// Cross-process guard for the post-onboarding finalize RESTART. The
+        /// per-process `FINALIZED` atomic in `wsl_finalize_ready` only guards a
+        /// single process, but that restart breakaway-SPAWNS a fresh instance
+        /// which can re-enter the same defer→finalize path (its detect() may
+        /// still read not-Ready during WSL warm-up), chaining restart→restart→…
+        /// into the window-cascade loop users hit (WI-2749). Persisting a
+        /// "restart already done" flag here makes the finalize happen AT MOST
+        /// ONCE per onboarding across every spawned instance. Reset to false by
+        /// `run_bootstrap` so a fresh onboarding gets its one restart.
+        #[serde(default)]
+        finalize_restart_done: bool,
     }
 
     fn state_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -293,7 +304,18 @@ mod imp {
     }
 
     fn wsl_command() -> Command {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW (0x0800_0000): the packaged GUI + Server processes are
+        // console-less (the GUI is launched via `start`; the Server via
+        // launch_bundle's DETACHED_PROCESS). wsl.exe spawned from a console-less
+        // parent WITHOUT this flag intermittently returns empty/failure — which
+        // made detect() report NotInstalled / distros:[] on a machine where WSL is
+        // installed AND warm, kicking off the defer→finalize→respawn window-cascade
+        // loop (WI-2749). The working sidecar path (make_sidecar_command) already
+        // sets it; align the management commands here so detect() is reliable.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut c = Command::new("wsl.exe");
+        c.creation_flags(CREATE_NO_WINDOW);
         // wsl.exe by default emits UTF-16-LE; force UTF-8 so we can
         // parse its output without a transcode layer.
         c.env("WSL_UTF8", "1");
@@ -301,25 +323,63 @@ mod imp {
     }
 
     fn wsl_exe_on_path() -> bool {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Prefer the canonical location check: wsl.exe ships in %SystemRoot%\
+        // System32 on every WSL-capable Windows. It's a plain fs::exists — no
+        // child process — so it can't be defeated by the console-less-spawn quirk
+        // that made shelling to `where` flaky from the packaged app (WI-2749: the
+        // app read wsl_exe_available:false while a cmd in the same launch context
+        // resolved it fine).
+        if let Some(sysroot) = std::env::var_os("SystemRoot") {
+            let p = PathBuf::from(sysroot).join("System32").join("wsl.exe");
+            if p.exists() {
+                return true;
+            }
+        }
+        // Fallback: `where wsl.exe`, now with CREATE_NO_WINDOW for the same
+        // console-less-parent reason as wsl_command().
         Command::new("where")
             .arg("wsl.exe")
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
 
     fn list_distros() -> Vec<String> {
-        let out = wsl_command()
-            .args(["--list", "--quiet"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success());
-        let Some(out) = out else { return vec![] };
-        super::decode_wsl_output(&out.stdout)
+        let out = match wsl_command().args(["--list", "--quiet"]).output() {
+            Ok(o) => o,
+            Err(e) => {
+                // Diagnostic (WI-2749): a failed spawn here silently yields [] →
+                // detect() → InstalledNoDistro/NotInstalled → the defer/finalize
+                // loop. Surface it in the boot log (now captured on Windows via
+                // the WI-2762 SetStdHandle redirect).
+                eprintln!("[wsl_setup] list_distros: spawn `wsl --list --quiet` failed: {e}");
+                return vec![];
+            }
+        };
+        if !out.status.success() {
+            eprintln!(
+                "[wsl_setup] list_distros: `wsl --list --quiet` exited {:?} — stdout={:?} stderr={:?}",
+                out.status.code(),
+                super::decode_wsl_output(&out.stdout),
+                super::decode_wsl_output(&out.stderr),
+            );
+            return vec![];
+        }
+        let list: Vec<String> = super::decode_wsl_output(&out.stdout)
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
-            .collect()
+            .collect();
+        if list.is_empty() {
+            eprintln!(
+                "[wsl_setup] list_distros: parsed EMPTY distro list from raw stdout={:?}",
+                super::decode_wsl_output(&out.stdout),
+            );
+        }
+        list
     }
 
     fn read_default_version() -> u8 {
@@ -466,8 +526,25 @@ mod imp {
         }
         let mut st = load_state(app);
         st.bootstrapped = true;
+        // A fresh bootstrap is a fresh onboarding: re-allow the single
+        // post-onboarding finalize RESTART (see finalize_restart_done).
+        st.finalize_restart_done = false;
         save_state(app, &st)?;
         Ok(format!("{}\n{}", stdout, stderr))
+    }
+
+    /// Has the post-onboarding finalize RESTART already fired (persisted,
+    /// cross-process)? Guards the WI-2749 respawn/window-cascade loop.
+    pub(crate) fn finalize_restart_already_done(app: &tauri::AppHandle) -> bool {
+        load_state(app).finalize_restart_done
+    }
+
+    /// Persist that the finalize RESTART has fired, so no other spawned instance
+    /// repeats it (WI-2749).
+    pub(crate) fn mark_finalize_restart_done(app: &tauri::AppHandle) {
+        let mut st = load_state(app);
+        st.finalize_restart_done = true;
+        let _ = save_state(app, &st);
     }
 
     pub fn uninstall(app: &tauri::AppHandle) -> Result<(), String> {
@@ -626,10 +703,25 @@ pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // Cross-process idempotency (WI-2749): the per-process FINALIZED atomic
+        // above only guards THIS process, but this fn breakaway-SPAWNS a fresh
+        // instance that can itself re-enter here (its detect() may still read
+        // not-Ready during WSL warm-up) → restart→restart→… = the window-cascade
+        // loop users saw. A persisted flag makes the restart fire AT MOST ONCE
+        // per onboarding across every spawned instance (reset by run_bootstrap).
+        if imp::finalize_restart_already_done(&app) {
+            println!(
+                "[papercusp-desktop] wsl_finalize_ready: post-onboarding restart already done (persisted) — skipping to avoid a respawn loop"
+            );
+            return Ok(());
+        }
         use std::os::windows::process::CommandExt;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         if let Ok(exe) = std::env::current_exe() {
+            // Persist BEFORE spawning: if the child boots and re-enters this
+            // path before we'd otherwise record it, it must already see "done".
+            imp::mark_finalize_restart_done(&app);
             let spawned = std::process::Command::new(&exe)
                 .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP)
                 .spawn()

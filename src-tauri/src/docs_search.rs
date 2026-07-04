@@ -156,23 +156,24 @@ pub fn open_palette(app: &AppHandle) {
         .min_inner_size(420.0, 320.0)
         .center()
         .always_on_top(true)
+        .focused(true)
         .decorations(true)
         .resizable(true)
         .build()
     {
         Ok(win) => {
-            // Bring it to the front — on the Server process (a background app
-            // with no other windows) the new window isn't auto-focused.
+            // Bring it to the front — on the Server process (a windowless
+            // background app) the WM does not auto-raise the new window.
             let _ = win.set_focus();
-            // Losing focus closes the palette — it's a transient quick-search
-            // popup, not a persistent window (mirrors how CmdOrCtrl+K palettes
-            // behave in VSCode/Slack/Linear).
-            let close_on_blur = win.clone();
-            win.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
-                    let _ = close_on_blur.close();
-                }
-            });
+            // NOTE (WI-2648, found live 2026-07-04): this used to close the
+            // palette on blur (VSCode-style transient popup). On GNOME the
+            // windowless Server can't reliably hold keyboard focus (focus-
+            // stealing prevention), so the blur handler fired the instant the
+            // window opened — the palette flashed and vanished before it was
+            // usable, and the closed-but-not-cleared handle then blocked
+            // reopen ("shortcut does nothing no matter which key"). Keep the
+            // window persistent instead; dismiss via the titlebar close button
+            // or the webview's own Escape handler.
         }
         Err(e) => eprintln!("[docs-search] failed to open palette window: {e}"),
     }
