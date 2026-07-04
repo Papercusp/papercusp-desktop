@@ -807,6 +807,84 @@ mod discovery_tests {
         // navigate to nowhere; wait for the next tick to see a valid operator.
         assert_eq!(next_operator_port(3070, None), None);
     }
+
+    // WI-2667: the watcher's Server-respawn decision. Same Linux-CI blind-spot
+    // rationale as the port-follow tests above — the macOS respawn path that
+    // recovers a dead packaged Server can't run here, so guard the pure decision.
+    use super::{decide_server_supervision, ServerSupervisionAction as A};
+
+    // A live Server just resets the dead counter.
+    #[test]
+    fn supervision_healthy_when_process_alive() {
+        assert_eq!(
+            decide_server_supervision(true, false, 0, 10, 0, 5, false),
+            A::Healthy
+        );
+        // …even if it was flapping a moment ago (dead_count carried in).
+        assert_eq!(
+            decide_server_supervision(true, false, 7, 10, 0, 5, false),
+            A::Healthy
+        );
+    }
+
+    // A dead Server inside its post-respawn boot grace must NOT be respawned
+    // again (double-respawn during boot is the thing the grace prevents).
+    #[test]
+    fn supervision_waits_during_boot_grace() {
+        assert_eq!(
+            decide_server_supervision(false, true, 99, 10, 0, 5, false),
+            A::Wait
+        );
+    }
+
+    // Dead but not yet past the debounce → wait (a normal restart briefly looks
+    // dead as the pid rolls over; don't respawn on a transient gap).
+    #[test]
+    fn supervision_waits_below_debounce_threshold() {
+        assert_eq!(
+            decide_server_supervision(false, false, 9, 10, 0, 5, false),
+            A::Wait
+        );
+    }
+
+    // Dead past the debounce, under the respawn cap → respawn. This is the core
+    // WI-2667 recovery: SIGTERM force-exit left the Server gone, bring it back.
+    #[test]
+    fn supervision_respawns_when_dead_past_threshold() {
+        assert_eq!(
+            decide_server_supervision(false, false, 10, 10, 0, 5, false),
+            A::Respawn
+        );
+        assert_eq!(
+            decide_server_supervision(false, false, 10, 10, 4, 5, false),
+            A::Respawn
+        );
+    }
+
+    // Respawned too many times in the window → give up (a Server that truly
+    // can't boot must not hot-loop `open -b` forever).
+    #[test]
+    fn supervision_gives_up_at_respawn_cap() {
+        assert_eq!(
+            decide_server_supervision(false, false, 10, 10, 5, 5, false),
+            A::GiveUp
+        );
+    }
+
+    // Once given up, the decision latches to Wait until the app restarts —
+    // never Respawn/GiveUp again.
+    #[test]
+    fn supervision_latches_after_give_up() {
+        assert_eq!(
+            decide_server_supervision(false, false, 999, 10, 0, 5, true),
+            A::Wait
+        );
+        // A live process while latched-off is still just Wait (no work to do).
+        assert_eq!(
+            decide_server_supervision(true, false, 0, 10, 0, 5, true),
+            A::Wait
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1165,6 +1243,57 @@ fn next_operator_port(applied_port: u16, latest: Option<&OperatorDiscovery>) -> 
     }
 }
 
+/// WI-2667: what the operator watcher should DO about Server liveness this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerSupervisionAction {
+    /// The Server process is alive — reset the dead counter, nothing to do.
+    Healthy,
+    /// Dead, but still inside the debounce window or a post-respawn boot grace —
+    /// keep waiting (a normal restart briefly looks dead as the pid rolls over).
+    Wait,
+    /// Dead past the debounce and under the respawn cap — relaunch the Server.
+    Respawn,
+    /// Respawned too many times in the window (crash-loop) — latch off and leave
+    /// it to a manual restart rather than hot-looping `open -b` forever.
+    GiveUp,
+}
+
+/// Pure liveness decision for the operator watcher (WI-2667 — packaged operator
+/// dies on SIGTERM and nothing brings it back). Extracted + unit-tested (Cargo)
+/// for the SAME reason `next_operator_port` is: the macOS/Windows respawn path
+/// can't be exercised on Linux CI, and that blind spot is exactly what let the
+/// original strand-on-restart bug ship. Keeping the branching pure means every
+/// arm (debounce, boot grace, crash-loop cap, latched give-up) has a guard.
+///
+/// `dead_count` is the tick's accumulated consecutive-dead count (already
+/// incremented for this tick when dead & not in grace). `open -b` on the
+/// single-instance Server is a no-op when it's actually alive, so a spurious
+/// Respawn is harmless — but the debounce + cap keep it from thrashing.
+fn decide_server_supervision(
+    process_alive: bool,
+    in_boot_grace: bool,
+    dead_count: u32,
+    dead_threshold: u32,
+    respawns_in_window: usize,
+    max_respawns: usize,
+    already_gave_up: bool,
+) -> ServerSupervisionAction {
+    if already_gave_up {
+        // Latched: once we give up we stop respawning until the app restarts.
+        return ServerSupervisionAction::Wait;
+    }
+    if process_alive {
+        return ServerSupervisionAction::Healthy;
+    }
+    if in_boot_grace || dead_count < dead_threshold {
+        return ServerSupervisionAction::Wait;
+    }
+    if respawns_in_window >= max_respawns {
+        return ServerSupervisionAction::GiveUp;
+    }
+    ServerSupervisionAction::Respawn
+}
+
 /// Point the main window at the operator on `port`: compute the app origin
 /// (the custom-protocol origin when it's on — Linux default; otherwise the HTTP
 /// loopback base), navigate-or-reload the webview there, and (re-)inject
@@ -1241,32 +1370,104 @@ fn spawn_operator_watcher(
     via_wsl: bool,
     initial_port: u16,
 ) {
+    // WI-2667 respawn tuning. Tick is 1.5s, so:
+    //   * ~15s of continuous unreachability before a respawn (tolerates a normal
+    //     restart whose pid briefly rolls over — and single-instance makes a
+    //     spurious `open -b` a no-op anyway);
+    //   * a fresh Server gets 30s to boot before we count it dead again;
+    //   * ≤5 respawns per 5-min window, else latch off (a Server that truly
+    //     cannot boot must not hot-loop `open -b`).
+    const DEAD_THRESHOLD_TICKS: u32 = 10;
+    const POST_RESPAWN_GRACE: Duration = Duration::from_secs(30);
+    const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
+    const MAX_RESPAWNS_PER_WINDOW: usize = 5;
+
     std::thread::spawn(move || {
         let mut applied_port = initial_port;
+        // WI-2667 supervision state.
+        let mut consecutive_dead: u32 = 0;
+        let mut grace_until: Option<Instant> = None;
+        let mut respawn_times: Vec<Instant> = Vec::new();
+        let mut gave_up = false;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             let latest = find_operator_discovery(&workspace_home, via_wsl);
-            let Some(new_port) = next_operator_port(applied_port, latest.as_ref()) else {
-                continue;
-            };
-            // Guard against a STALE operator.json whose port was reused by an
-            // unrelated process: only follow a discovery whose pid is alive.
-            if let Some(d) = latest.as_ref() {
-                if !discovery_pid_alive(d.pid, via_wsl) {
-                    continue;
+
+            // --- WI-1869: follow the operator's port across restarts (unchanged) ---
+            if let Some(new_port) = next_operator_port(applied_port, latest.as_ref()) {
+                // Guard against a STALE operator.json whose port was reused by an
+                // unrelated process: only follow a discovery whose pid is alive.
+                let pid_alive = latest
+                    .as_ref()
+                    .map(|d| discovery_pid_alive(d.pid, via_wsl))
+                    .unwrap_or(false);
+                if pid_alive {
+                    println!(
+                        "[papercusp-desktop] operator moved :{} -> :{} — re-navigating the webview (WI-1869)",
+                        applied_port, new_port
+                    );
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        point_window_at_operator(&window, new_port, 10);
+                        {
+                            let state: tauri::State<SidecarState> = app_handle.state();
+                            *state.port.lock().unwrap() = Some(new_port);
+                        }
+                        applied_port = new_port;
+                    }
                 }
             }
-            println!(
-                "[papercusp-desktop] operator moved :{} -> :{} — re-navigating the webview (WI-1869)",
-                applied_port, new_port
-            );
-            if let Some(window) = app_handle.get_webview_window("main") {
-                point_window_at_operator(&window, new_port, 10);
-                {
-                    let state: tauri::State<SidecarState> = app_handle.state();
-                    *state.port.lock().unwrap() = Some(new_port);
+
+            // --- WI-2667: detect a DEAD Server and respawn it ---
+            // `open -b` can only revive an EXITED Server (single-instance dedupes
+            // a launch while it's alive), so the trigger is pid-liveness, which is
+            // precisely the post-force-exit world (SIGTERM → force-exit → pid gone
+            // → respawn → launchd-free crash recovery for the desktop GUI case).
+            let now = Instant::now();
+            let in_boot_grace = grace_until.map(|u| now < u).unwrap_or(false);
+            let process_alive = latest
+                .as_ref()
+                .map(|d| discovery_pid_alive(d.pid, via_wsl))
+                .unwrap_or(false);
+            // Only count a tick as "dead" when it is dead AND we're not inside a
+            // post-respawn boot grace (so a booting Server isn't double-respawned).
+            let dead_count = if !process_alive && !in_boot_grace {
+                consecutive_dead + 1
+            } else {
+                consecutive_dead
+            };
+            respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+            match decide_server_supervision(
+                process_alive,
+                in_boot_grace,
+                dead_count,
+                DEAD_THRESHOLD_TICKS,
+                respawn_times.len(),
+                MAX_RESPAWNS_PER_WINDOW,
+                gave_up,
+            ) {
+                ServerSupervisionAction::Healthy => consecutive_dead = 0,
+                ServerSupervisionAction::Wait => consecutive_dead = dead_count,
+                ServerSupervisionAction::Respawn => {
+                    eprintln!(
+                        "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
+                        (dead_count as u64) * 1500 / 1000
+                    );
+                    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+                        eprintln!("[papercusp-desktop] Server respawn failed: {e}");
+                    }
+                    respawn_times.push(now);
+                    consecutive_dead = 0;
+                    grace_until = Some(now + POST_RESPAWN_GRACE);
                 }
-                applied_port = new_port;
+                ServerSupervisionAction::GiveUp => {
+                    eprintln!(
+                        "[papercusp-desktop] Papercusp Server respawn cap hit ({} in {}s) — the Server \
+                         keeps dying; giving up auto-respawn until the app is restarted (WI-2667)",
+                        MAX_RESPAWNS_PER_WINDOW,
+                        RESPAWN_WINDOW.as_secs()
+                    );
+                    gave_up = true;
+                }
             }
         }
     });
