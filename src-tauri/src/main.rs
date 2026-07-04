@@ -1526,9 +1526,11 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let via_wsl = should_route_via_wsl(&app.handle());
     wsl_setup::set_route_active(via_wsl);
 
-    // WI-2648: CmdOrCtrl+K docs-search palette — packaged-build registration
-    // (the dev path registers it separately, right after env_switch::init).
-    docs_search::register_shortcut(app);
+    // WI-2648: the docs-search palette shortcut is owned by the always-on
+    // SERVER process (registered next to install_server_tray), NOT the GUI —
+    // so the global key works whether or not the GUI window is open, and the
+    // tray rebind control lives in the same process that owns the shortcut.
+    // (The in-webview `open_docs_search_palette` command still works from here.)
 
     if custom_protocol::enabled() {
         if let Some(window) = app.get_webview_window("main") {
@@ -1637,34 +1639,90 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     }
 }
 
-/// Build the Server's tray/menubar icon (the windowless backend's only surface):
-/// open the GUI, or quit (which tears the sidecar down via ExitRequested).
-fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
+/// Menu-id prefix for the tray's docs-search-shortcut preset items
+/// (`docs-shortcut::<accelerator>`), so the menu-event handler can tell a rebind
+/// click from the open/quit items and recover the chosen accelerator.
+const DOCS_SHORTCUT_MENU_PREFIX: &str = "docs-shortcut::";
+
+/// The "Docs search shortcut" submenu: one checkable item per preset, the
+/// active accelerator (docs_search::current_shortcut) checked. Rebuilt after
+/// each rebind so the checkmark tracks the live selection.
+fn build_docs_shortcut_submenu(
+    app: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::Submenu<tauri::Wry>> {
+    use tauri::menu::{CheckMenuItem, IsMenuItem, Submenu};
+    let current = docs_search::current_shortcut();
+    let items: Vec<CheckMenuItem<tauri::Wry>> = docs_search::PRESET_SHORTCUTS
+        .iter()
+        .map(|accel| {
+            CheckMenuItem::with_id(
+                app,
+                format!("{DOCS_SHORTCUT_MENU_PREFIX}{accel}"),
+                *accel,
+                true,
+                current.as_str() == *accel,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items
+        .iter()
+        .map(|i| i as &dyn IsMenuItem<tauri::Wry>)
+        .collect();
+    Submenu::with_items(app, "Docs search shortcut", true, &refs)
+}
+
+/// Build the full Server tray menu: Open · Docs search shortcut ▸ · — · Quit.
+/// Factored out so the menu-event handler can rebuild it after a rebind.
+fn build_server_tray_menu(
+    app: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
+    let shortcut = build_docs_shortcut_submenu(app)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit-server", "Quit Papercusp Server", true, None::<&str>)?;
+    Menu::with_items(app, &[&open, &shortcut, &sep, &quit])
+}
+
+/// Build the Server's tray/menubar icon (the windowless backend's only surface):
+/// open the GUI, change the docs-search shortcut, or quit (which tears the
+/// sidecar down via ExitRequested).
+fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::tray::TrayIconBuilder;
 
-    let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(
-        app,
-        "quit-server",
-        "Quit Papercusp Server",
-        true,
-        None::<&str>,
-    )?;
-    let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
+    let menu = build_server_tray_menu(app.handle())?;
 
     let mut builder = TrayIconBuilder::with_id("papercusp-server")
         .tooltip("Papercusp Server")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "open-gui" => {
+        .on_menu_event(|app, event| {
+            let id = event.id.as_ref();
+            if id == "open-gui" {
                 if let Err(e) = launch_bundle(GUI_BUNDLE_ID, "Papercusp GUI") {
                     eprintln!("[papercusp-server] could not launch GUI: {e}");
                 }
+            } else if id == "quit-server" {
+                app.exit(0);
+            } else if let Some(accel) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
+                // Rebind the docs-search global shortcut live, then rebuild the
+                // tray menu so the checkmark tracks the new selection.
+                match docs_search::rebind_shortcut(app, accel) {
+                    Ok(()) => match build_server_tray_menu(app) {
+                        Ok(menu) => {
+                            if let Some(tray) = app.tray_by_id("papercusp-server") {
+                                let _ = tray.set_menu(Some(menu));
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[papercusp-server] tray menu rebuild failed: {e}")
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[papercusp-server] docs-search rebind to {accel} failed: {e}")
+                    }
+                }
             }
-            "quit-server" => app.exit(0),
-            _ => {}
         });
     // Reuse the bundle icon (the Server config still ships icons even with no
     // window). If absent, some platforms still render a default tray glyph.
@@ -3057,10 +3115,16 @@ pub fn run() {
             let state: tauri::State<SidecarState> = app.state();
             *state.child.lock().unwrap() = Some(serve_child);
 
+            // WI-2648: the always-on Server owns the docs-search palette global
+            // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
+            // GUI is open, and the tray's rebind control (below) is same-process.
+            docs_search::register_shortcut(app);
+
             // Server role: tray/menubar presence + login auto-start. The
             // backend has no window, so the tray both keeps the app alive and
-            // gives the user a place to open the GUI or quit; auto-start means
-            // psu works right after login without opening anything.
+            // gives the user a place to open the GUI, change the docs-search
+            // shortcut, or quit; auto-start means psu works right after login
+            // without opening anything.
             if let Err(e) = install_server_tray(app) {
                 eprintln!("[papercusp-desktop] tray install failed: {e}");
             }
