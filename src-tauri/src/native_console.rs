@@ -810,14 +810,15 @@ fn spawn_windows_wsl_new_window(
     cfs_write(&script_path, &script)
         .map_err(|e| format!("write console launch script: {e}"))?;
 
-    // Map the Linux-side cwd to a Windows UNC for wt.exe's
-    // --startingDirectory. Without this, wt opens at C:\ and the user's
-    // first action is to `cd` somewhere — defeats the point.
-    let cwd_unc = wsl_path_to_windows_unc(&envelope.cwd);
-
     // Prefer Windows Terminal — `-w new` forces a new window every
-    // invocation; --startingDirectory + wsl --cd jointly land the
-    // shell at the right place in both Win + WSL filesystems.
+    // invocation. We deliberately DON'T pass wt --startingDirectory: it
+    // needs a WINDOWS path, and the only Windows view of the WSL cwd is the
+    // \\wsl.localhost UNC — which is UNRELIABLE on real installs (found live
+    // 2026-07-03, WI-2149: an unresolvable --startingDirectory makes wt's
+    // CreateProcess FAIL, so a titled tab opens but the command never runs —
+    // the exact "window appears, psu never starts" symptom). The `wsl.exe
+    // --cd <cwd>` below already lands the shell in the right WSL dir, so
+    // --startingDirectory was only ever cosmetic for wt's own notion of cwd.
     if is_on_path_windows("wt.exe") {
         let mut cmd = std::process::Command::new("wt.exe");
         cmd.arg("-w").arg("new");
