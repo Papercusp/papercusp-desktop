@@ -2121,10 +2121,12 @@ fn rotating_log_stdio(workspace_home: &std::path::Path, basename: &str) -> Optio
 /// a shell `exec >log 2>&1`.
 ///
 /// Best-effort: any failure (no HOME, open error) leaves stdio untouched and
-/// never blocks boot. Unix-only (`dup2`); a packaged Windows GUI has the same
-/// console-less gap but needs a different API (`SetStdHandle`/`freopen`) —
-/// tracked separately. Caller gates this to release builds so `tauri dev` keeps
-/// its inherited terminal console.
+/// never blocks boot. This is the Unix (`dup2`) variant; the packaged Windows
+/// GUI/Server bundles have the SAME console-less gap and get an equivalent
+/// `SetStdHandle` variant below (WI-2749 — the missing Windows boot log made the
+/// post-onboarding sidecar-spawn failure undebuggable on a shipped build).
+/// Caller gates this to release builds so `tauri dev` keeps its inherited
+/// terminal console.
 ///
 /// Only WIRED IN release builds (the call site is `cfg(not(debug_assertions))`),
 /// so a debug non-test build sees it unused — silence dead_code for exactly that
@@ -2150,6 +2152,49 @@ fn redirect_own_stdio(workspace_home: &std::path::Path, basename: &str) {
     unsafe {
         libc::dup2(fd, libc::STDOUT_FILENO);
         libc::dup2(fd, libc::STDERR_FILENO);
+    }
+    std::mem::forget(file);
+}
+
+/// Windows analogue of the Unix `redirect_own_stdio` above (WI-2749). Both
+/// packaged bundles ship `windows_subsystem = "windows"` and are launched from
+/// Explorer / the NSIS run-after-install checkbox / Task Scheduler with NO
+/// console, so `GetStdHandle(STD_OUTPUT/ERROR)` is null and every `println!` /
+/// `eprintln!` in this binary — the GUI boot-navigate diagnostics, the Server's
+/// sidecar-spawn + WSL-route errors, the post-onboarding finalize/respawn
+/// trace — is dropped on the floor, leaving Windows first-run failures (the
+/// operator that never spawns after onboarding) undebuggable on a shipped
+/// build. Point the process's std OUTPUT/ERROR handles at the rotated log via
+/// `SetStdHandle`; Rust's Windows stdio resolves the handle through
+/// `GetStdHandle` on every write, so its output now lands on disk — the
+/// analogue of the Unix `dup2` swap.
+///
+/// Best-effort: any failure (no HOME, open error) leaves stdio untouched and
+/// never blocks boot.
+#[cfg(windows)]
+#[cfg_attr(all(debug_assertions, not(test)), allow(dead_code))]
+fn redirect_own_stdio(workspace_home: &std::path::Path, basename: &str) {
+    use std::io::Write;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    let Some(file) = rotate_and_open_log(workspace_home, basename) else {
+        return;
+    };
+    // Flush anything Rust buffered against the old handles before the swap.
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let handle = HANDLE(file.as_raw_handle() as _);
+    // SAFETY: `handle` is a valid open file handle. `SetStdHandle` points the
+    // process's std OUTPUT/ERROR handles at the log's open file description;
+    // Rust resolves the handle via `GetStdHandle` per write, so subsequent
+    // `println!`/`eprintln!` land there. We `mem::forget` the `File` so its
+    // handle outlives this fn — the std handles must stay valid for the whole
+    // process (mirrors the Unix `mem::forget` + shell `exec >log 2>&1`
+    // persistence).
+    unsafe {
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, handle);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, handle);
     }
     std::mem::forget(file);
 }
@@ -3161,7 +3206,7 @@ pub fn run() {
             // otherwise vanish. Role-scoped basename so the GUI and Server
             // processes don't interleave into one file, and distinct from the
             // serve.mjs child's serve.log. Dev keeps its inherited terminal.
-            #[cfg(all(unix, not(debug_assertions)))]
+            #[cfg(all(not(debug_assertions), any(unix, windows)))]
             {
                 let basename = if role.is_gui() { "gui.log" } else { "server-app.log" };
                 redirect_own_stdio(&workspaces::shared_sidecar_home(), basename);
