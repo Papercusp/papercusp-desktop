@@ -419,6 +419,11 @@ fn recovery_page_html(failing_uri: &str) -> String {
     )
 }
 
+// Only compiled where it is actually used: the production callers live in the
+// `#[cfg(target_os = "windows")]` block of make_sidecar_command, and the unit
+// tests below exercise it on every platform. Without this gate a non-test Linux
+// build (the dev-box default `cargo check`) sees zero callers → dead_code warn.
+#[cfg(any(target_os = "windows", test))]
 fn windows_path_to_wsl(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
     // Already a posix-style path? Leave it alone.
