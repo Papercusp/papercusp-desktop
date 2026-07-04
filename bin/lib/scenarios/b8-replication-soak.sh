@@ -33,6 +33,27 @@ scn_replication_soak() {
   else
     echo "replication-liveness soak FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
+    # ── detector fire-path pin (WI-1840, proven live 2026-07-04 run on kept-up
+    # m1783120511 frames): when the SLA FAILS — replication genuinely dead past
+    # the 90s window — the connected_never_replicated axis MUST have fired on at
+    # least one frame within its 3min grace + the scenario's wait. A silent
+    # detector on a red soak is a DETECTOR regression (the m1783120511 round-1
+    # incident: per-join liveConnectionCount counter blind to pre-join sockets →
+    # swarmConnections=0 → axis disarmed; fixed by reading swarm.connections
+    # .size). This assert makes that class self-announcing instead of needing a
+    # by-hand serve.log autopsy. Grace(180s) < SLA-wait accumulation across both
+    # directions, so by scenario exit the line must exist on a true stall.
+    local frame hit=0
+    for frame in a b; do
+      if drv_exec "$frame" <<<'grep -q "replication-liveness.*replication_stalled" /home/pcusp/serve.log' 2>/dev/null; then
+        hit=1
+      fi
+    done
+    if [ "$hit" = 1 ]; then
+      echo "      ✓ detector fire-path pin: replication_stalled present in serve.log (WI-1840 detector saw the stall)"
+    else
+      echo "      ✗ DETECTOR REGRESSION: soak failed its SLA but NO replication_stalled line on either frame — the WI-1840 detector was blind to a real stall (check lastSwarmConnections via substrate:getReplicationLiveness RPC)"
+    fi
   fi
   return "$rc"
 }
