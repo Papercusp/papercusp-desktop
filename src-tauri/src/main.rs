@@ -885,6 +885,47 @@ mod discovery_tests {
             A::Wait
         );
     }
+
+    // WI-2667 (defect-2 gap): the SERVER-side serve respawn decision. This is the
+    // path the live Mac-VM E2E proved was missing — the operator died, the shell
+    // lived, and nothing (GUI `open -b` no-ops on the live single instance) brought
+    // it back. Same Linux-CI blind-spot rationale: the macOS respawn can't run here.
+    use super::{decide_serve_respawn, ServeRespawnAction as R};
+
+    // Child still running → nothing to do.
+    #[test]
+    fn serve_respawn_healthy_when_child_running() {
+        assert_eq!(decide_serve_respawn(false, false, false, 0, 5), R::Healthy);
+    }
+
+    // Child exited but an operator is reachable anyway (`--ensure` reused a
+    // foreign operator, Decision C) → do NOT double-spawn.
+    #[test]
+    fn serve_respawn_healthy_when_operator_reachable_despite_exit() {
+        assert_eq!(decide_serve_respawn(true, false, true, 0, 5), R::Healthy);
+    }
+
+    // The core WI-2667 recovery: operator child exited, no operator reachable,
+    // under the cap → respawn serve in-process (the case the VM E2E showed dead).
+    #[test]
+    fn serve_respawn_when_child_exited_and_unreachable() {
+        assert_eq!(decide_serve_respawn(true, false, false, 0, 5), R::Respawn);
+        assert_eq!(decide_serve_respawn(true, false, false, 4, 5), R::Respawn);
+    }
+
+    // Shutting down / self-updating → never resurrect the child we killed on
+    // purpose — and that wins even past the respawn cap.
+    #[test]
+    fn serve_respawn_suppressed_when_shutting_down() {
+        assert_eq!(decide_serve_respawn(true, true, false, 0, 5), R::Suppressed);
+        assert_eq!(decide_serve_respawn(true, true, false, 9, 5), R::Suppressed);
+    }
+
+    // Respawned too many times in the window (crash-loop) → give up until restart.
+    #[test]
+    fn serve_respawn_gives_up_at_cap() {
+        assert_eq!(decide_serve_respawn(true, false, false, 5, 5), R::GiveUp);
+    }
 }
 
 #[cfg(test)]
@@ -1292,6 +1333,55 @@ fn decide_server_supervision(
         return ServerSupervisionAction::GiveUp;
     }
     ServerSupervisionAction::Respawn
+}
+
+/// WI-2667 (defect-2 gap): what the SERVER role should do about its OWN
+/// serve.mjs operator child. The GUI-side `open -b` supervisor
+/// (`decide_server_supervision`) can only revive a FULLY-exited Server bundle —
+/// it no-ops on the still-alive single-instance shell. So when the operator
+/// child dies but this Server shell survives (exactly what defect-1's
+/// force-exit produces, and any operator crash), only the Server itself can
+/// bring the operator back — and it must, else the app is cleanly dead with no
+/// recovery (confirmed live on the Mac VM 2026-07-04: 100s, zero auto-recovery).
+/// Pure for the same Linux-CI blind-spot reason as `decide_server_supervision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRespawnAction {
+    /// Child still running, or an operator is reachable anyway (a foreign
+    /// operator `--ensure` reused — Decision C) — nothing to do.
+    Healthy,
+    /// App is quitting or self-updating — never resurrect the child we just
+    /// killed on purpose.
+    Suppressed,
+    /// Child exited and no operator is reachable — respawn serve in-process.
+    Respawn,
+    /// Respawned too many times in the window (crash-loop) — stop until restart.
+    GiveUp,
+}
+
+/// Pure respawn decision for the Server-side serve supervisor (WI-2667).
+///   * `child_exited` — the stored serve `Child` has reaped (`try_wait` → Some).
+///   * `shutting_down` — `SidecarState.shutdown_done` (normal quit) or an
+///     in-flight self-update; suppresses respawn so we don't fight the teardown.
+///   * `operator_reachable` — an operator answers discovery+TCP right now; guards
+///     the Decision-C reuse case (child exited because `--ensure` handed off to a
+///     foreign operator that is serving) so we never double-spawn.
+fn decide_serve_respawn(
+    child_exited: bool,
+    shutting_down: bool,
+    operator_reachable: bool,
+    respawns_in_window: usize,
+    max_respawns: usize,
+) -> ServeRespawnAction {
+    if shutting_down {
+        return ServeRespawnAction::Suppressed;
+    }
+    if !child_exited || operator_reachable {
+        return ServeRespawnAction::Healthy;
+    }
+    if respawns_in_window >= max_respawns {
+        return ServeRespawnAction::GiveUp;
+    }
+    ServeRespawnAction::Respawn
 }
 
 /// Point the main window at the operator on `port`: compute the app origin
@@ -2427,6 +2517,15 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "no update available".to_string())?;
 
     // Kill children before the binary swap so they don't outlive the parent.
+    // WI-2667: flag teardown FIRST so the Server-side serve supervisor sees
+    // `shutdown_done` and does NOT respawn the operator we're about to swap out
+    // from under (the app restarts immediately after the install).
+    {
+        let state: tauri::State<SidecarState> = app.state();
+        state
+            .shutdown_done
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     kill_sidecar(&app);
 
     update
@@ -3339,6 +3438,105 @@ pub fn run() {
 
             let state: tauri::State<SidecarState> = app.state();
             *state.child.lock().unwrap() = Some(serve_child);
+
+            // WI-2667 (defect-2 gap fix): supervise our OWN serve.mjs child. The
+            // GUI-side watcher's `open -b` CANNOT revive an operator that died
+            // while this Server shell is still alive (single-instance dedupes the
+            // launch → no-op), and nothing else reaps/restarts it — proved live on
+            // the Mac VM 2026-07-04 (SIGTERM the operator → 100s, zero recovery, an
+            // unreaped zombie). So the Server watches its child: `try_wait` REAPS
+            // the zombie AND detects the exit, and we respawn serve in-process
+            // (covers the headless-Server-no-GUI case too). Guards: `shutdown_done`
+            // (normal quit / self-update — don't fight the teardown), an
+            // operator-reachability check (don't double-spawn when `--ensure`
+            // reused a foreign operator, Decision C), and a crash-loop cap.
+            {
+                const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
+                const MAX_RESPAWNS_PER_WINDOW: usize = 5;
+                let sup_handle = app.handle().clone();
+                let sup_via_wsl = via_wsl;
+                let sup_port = port;
+                let sup_pg_hint = pg_port_hint;
+                let sup_sidecar = sidecar_dir.clone();
+                let sup_shared = shared_state_dir.clone();
+                let sup_home = workspace_home.clone();
+                let sup_code_url = code_server_url.clone();
+                std::thread::spawn(move || {
+                    let mut respawn_times: Vec<Instant> = Vec::new();
+                    loop {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let state: tauri::State<SidecarState> = sup_handle.state();
+                        let shutting_down = state
+                            .shutdown_done
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        // Detect + REAP an exited serve child (drops the lock before
+                        // the reachability probe, which also locks state.child).
+                        let child_exited = {
+                            let mut guard = state.child.lock().unwrap();
+                            match guard.as_mut() {
+                                Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+                                // No child we own → treat as exited; the
+                                // reachability guard below still gates the respawn.
+                                None => true,
+                            }
+                        };
+                        let operator_reachable = wait_for_operator(
+                            &sup_handle,
+                            &sup_home,
+                            sup_via_wsl,
+                            Duration::from_millis(600),
+                        )
+                        .is_ok();
+                        let now = Instant::now();
+                        respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+                        match decide_serve_respawn(
+                            child_exited,
+                            shutting_down,
+                            operator_reachable,
+                            respawn_times.len(),
+                            MAX_RESPAWNS_PER_WINDOW,
+                        ) {
+                            ServeRespawnAction::Healthy => {}
+                            ServeRespawnAction::Suppressed => return,
+                            ServeRespawnAction::GiveUp => {
+                                eprintln!(
+                                    "[papercusp-desktop] serve.mjs respawn cap hit ({} in {}s) — the \
+                                     operator keeps dying; giving up in-process respawn until the app \
+                                     restarts (WI-2667)",
+                                    MAX_RESPAWNS_PER_WINDOW,
+                                    RESPAWN_WINDOW.as_secs()
+                                );
+                                return;
+                            }
+                            ServeRespawnAction::Respawn => {
+                                eprintln!(
+                                    "[papercusp-desktop] serve.mjs (operator) exited and no operator \
+                                     is reachable — respawning it in-process (WI-2667)"
+                                );
+                                match spawn_serve(
+                                    sup_via_wsl,
+                                    sup_port,
+                                    &sup_sidecar,
+                                    sup_pg_hint,
+                                    &sup_shared,
+                                    &sup_home,
+                                    sup_code_url.as_deref(),
+                                ) {
+                                    Ok(c) => {
+                                        *state.child.lock().unwrap() = Some(c);
+                                        respawn_times.push(now);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[papercusp-desktop] serve.mjs respawn failed: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
 
             // WI-2648: the always-on Server owns the docs-search palette global
             // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
