@@ -503,6 +503,24 @@ mod tests {
         t(r"C:\foo/bar\baz", "/mnt/c/foo/bar/baz");
     }
 
+    /// P-009: the single-instance lock keys on the app IDENTIFIER, so the two
+    /// bundles' identifiers MUST stay distinct — otherwise both bundles would
+    /// share ONE lock and a GUI + a Server would evict each other instead of
+    /// coexisting (the GUI attaching to the sidecar-owning Server). This is the
+    /// load-bearing invariant behind per-bundle-identity single-instance.
+    #[test]
+    fn bundle_ids_are_distinct_for_per_bundle_single_instance() {
+        assert_ne!(
+            super::SERVER_BUNDLE_ID,
+            super::GUI_BUNDLE_ID,
+            "GUI and Server bundle ids must differ or their single-instance locks collapse"
+        );
+        // And each identifier maps to the role on_second_instance() expects.
+        use crate::app_role::{detect, Role};
+        assert_eq!(detect(super::SERVER_BUNDLE_ID), Role::Server);
+        assert_eq!(detect(super::GUI_BUNDLE_ID), Role::Gui);
+    }
+
     #[test]
     fn spaces_in_username_preserved() {
         // WI-792 P-004 / alpha P-010g (spaces-in-username path-translation edge):
