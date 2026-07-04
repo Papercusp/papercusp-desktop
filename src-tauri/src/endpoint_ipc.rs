@@ -53,14 +53,9 @@ pub enum EndpointEvent {
         data: String,
     },
     /// Tool returned successfully.
-    Done {
-        result: serde_json::Value,
-    },
+    Done { result: serde_json::Value },
     /// Dispatch or handler failed (role gate, quota, timeout, throw).
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
 }
 
 /// Wire-shape envelopes used to parse server-emitted JSON payloads.
@@ -249,11 +244,14 @@ impl IpcClient {
         channel: Channel<EndpointEvent>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.in_flight.insert(id, CallSink {
-            channel,
-            events_sent: AtomicU64::new(0),
-            overflowed: std::sync::atomic::AtomicBool::new(false),
-        });
+        self.in_flight.insert(
+            id,
+            CallSink {
+                channel,
+                events_sent: AtomicU64::new(0),
+                overflowed: std::sync::atomic::AtomicBool::new(false),
+            },
+        );
         let req = serde_json::json!({
             "id": id,
             "toolName": tool_name,
@@ -417,9 +415,7 @@ pub struct IpcClientHandle {
 }
 
 impl IpcClientHandle {
-    pub fn new(
-        socket_source: impl Fn() -> Option<PathBuf> + Send + Sync + 'static,
-    ) -> Arc<Self> {
+    pub fn new(socket_source: impl Fn() -> Option<PathBuf> + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             client: Mutex::new(None),
             socket_source: Box::new(socket_source),
@@ -689,19 +685,27 @@ mod tests {
             serde_json::json!({ "kind": "event", "name": "delta", "data": { "text": "hi" } })
         );
 
-        let binary = EndpointEvent::Binary { name: "audio".into(), data: "AQID".into() };
+        let binary = EndpointEvent::Binary {
+            name: "audio".into(),
+            data: "AQID".into(),
+        };
         assert_eq!(
             serde_json::to_value(&binary).unwrap(),
             serde_json::json!({ "kind": "binary", "name": "audio", "data": "AQID" })
         );
 
-        let done = EndpointEvent::Done { result: serde_json::json!({ "ok": true }) };
+        let done = EndpointEvent::Done {
+            result: serde_json::json!({ "ok": true }),
+        };
         assert_eq!(
             serde_json::to_value(&done).unwrap(),
             serde_json::json!({ "kind": "done", "result": { "ok": true } })
         );
 
-        let error = EndpointEvent::Error { code: "quota".into(), message: "over".into() };
+        let error = EndpointEvent::Error {
+            code: "quota".into(),
+            message: "over".into(),
+        };
         assert_eq!(
             serde_json::to_value(&error).unwrap(),
             serde_json::json!({ "kind": "error", "code": "quota", "message": "over" })
@@ -710,7 +714,10 @@ mod tests {
 
     #[test]
     fn endpoint_event_round_trips_through_serde() {
-        let original = EndpointEvent::Error { code: "c".into(), message: "m".into() };
+        let original = EndpointEvent::Error {
+            code: "c".into(),
+            message: "m".into(),
+        };
         let json = serde_json::to_string(&original).unwrap();
         let back: EndpointEvent = serde_json::from_str(&json).unwrap();
         match back {
@@ -726,10 +733,8 @@ mod tests {
 
     #[test]
     fn event_json_envelope_parses_server_payload() {
-        let env: EventJsonEnvelope = serde_json::from_slice(
-            br#"{"id":7,"name":"delta","data":{"text":"hi"}}"#,
-        )
-        .unwrap();
+        let env: EventJsonEnvelope =
+            serde_json::from_slice(br#"{"id":7,"name":"delta","data":{"text":"hi"}}"#).unwrap();
         assert_eq!(env.id, 7);
         assert_eq!(env.name, "delta");
         assert_eq!(env.data, serde_json::json!({ "text": "hi" }));
@@ -742,10 +747,9 @@ mod tests {
         assert_eq!(done.id, 3);
         assert_eq!(done.result, serde_json::json!({ "content": [] }));
 
-        let err: ErrorEnvelope = serde_json::from_slice(
-            br#"{"id":9,"error":{"code":"role_gate","message":"denied"}}"#,
-        )
-        .unwrap();
+        let err: ErrorEnvelope =
+            serde_json::from_slice(br#"{"id":9,"error":{"code":"role_gate","message":"denied"}}"#)
+                .unwrap();
         assert_eq!(err.id, 9);
         assert_eq!(err.error.code, "role_gate");
         assert_eq!(err.error.message, "denied");
@@ -754,20 +758,19 @@ mod tests {
     #[test]
     fn envelopes_reject_malformed_payloads() {
         // Missing id — the reader loop must skip these, never panic.
-        assert!(serde_json::from_slice::<EventJsonEnvelope>(
-            br#"{"name":"delta","data":1}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_slice::<EventJsonEnvelope>(br#"{"name":"delta","data":1}"#).is_err()
+        );
         // id of the wrong JSON type.
         assert!(serde_json::from_slice::<EventJsonEnvelope>(
             br#"{"id":"7","name":"delta","data":1}"#
         )
         .is_err());
         // Error envelope with a flat (non-nested) error shape.
-        assert!(serde_json::from_slice::<ErrorEnvelope>(
-            br#"{"id":1,"code":"x","message":"y"}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_slice::<ErrorEnvelope>(br#"{"id":1,"code":"x","message":"y"}"#)
+                .is_err()
+        );
         // Outright garbage.
         assert!(serde_json::from_slice::<DoneEnvelope>(b"not json").is_err());
         assert!(serde_json::from_slice::<DoneEnvelope>(b"").is_err());
@@ -815,9 +818,13 @@ mod tests {
         let (sink, captured) = capturing_sink();
         // Pre-position the counter one below the cap so the test doesn't
         // loop 10k sends: the next send is the last allowed one.
-        sink.events_sent.store(PER_CALL_EVENT_CAP - 1, Ordering::Relaxed);
+        sink.events_sent
+            .store(PER_CALL_EVENT_CAP - 1, Ordering::Relaxed);
 
-        let ev = || EndpointEvent::Event { name: "delta".into(), data: serde_json::Value::Null };
+        let ev = || EndpointEvent::Event {
+            name: "delta".into(),
+            data: serde_json::Value::Null,
+        };
         assert!(sink.try_send_event(ev()), "last under-cap event forwards");
         // Cap trip: returns false but emits exactly ONE backpressure error.
         assert!(!sink.try_send_event(ev()));
@@ -827,12 +834,22 @@ mod tests {
 
         {
             let bodies = captured.lock().unwrap();
-            assert_eq!(bodies.len(), 2, "one event + one overflow error, nothing more");
-            assert!(bodies[1].contains("backpressure_overflow"), "got: {}", bodies[1]);
+            assert_eq!(
+                bodies.len(),
+                2,
+                "one event + one overflow error, nothing more"
+            );
+            assert!(
+                bodies[1].contains("backpressure_overflow"),
+                "got: {}",
+                bodies[1]
+            );
         }
 
         // Terminal events bypass the cap — the consumer must learn the call ended.
-        sink.send_terminal(EndpointEvent::Done { result: serde_json::Value::Null });
+        sink.send_terminal(EndpointEvent::Done {
+            result: serde_json::Value::Null,
+        });
         let bodies = captured.lock().unwrap();
         assert_eq!(bodies.len(), 3);
         assert!(bodies[2].contains("\"done\""));
@@ -879,17 +896,26 @@ mod tests {
 
             let e1 = serde_json::to_vec(&serde_json::json!({
                 "id": id, "name": "delta", "data": { "text": "hi" }
-            })).unwrap();
+            }))
+            .unwrap();
             let e2 = serde_json::to_vec(&serde_json::json!({
                 "id": id, "name": "delta", "data": { "text": "there" }
-            })).unwrap();
+            }))
+            .unwrap();
             let done_payload = serde_json::to_vec(&serde_json::json!({
                 "id": id, "result": { "content": [{ "type": "text", "text": "hi there" }] }
-            })).unwrap();
+            }))
+            .unwrap();
 
-            w.write_all(&encode_frame(FrameType::EventJson, &e1).unwrap()).await.unwrap();
-            w.write_all(&encode_frame(FrameType::EventJson, &e2).unwrap()).await.unwrap();
-            w.write_all(&encode_frame(FrameType::Done, &done_payload).unwrap()).await.unwrap();
+            w.write_all(&encode_frame(FrameType::EventJson, &e1).unwrap())
+                .await
+                .unwrap();
+            w.write_all(&encode_frame(FrameType::EventJson, &e2).unwrap())
+                .await
+                .unwrap();
+            w.write_all(&encode_frame(FrameType::Done, &done_payload).unwrap())
+                .await
+                .unwrap();
             // Hold the socket open briefly so the client has time to read.
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
@@ -904,18 +930,27 @@ mod tests {
         let mut stream = tokio::net::UnixStream::connect(&server_path).await.unwrap();
         let req = serde_json::to_vec(&serde_json::json!({
             "id": 1u64, "toolName": "synth", "input": {}
-        })).unwrap();
-        stream.write_all(&encode_frame(FrameType::Request, &req).unwrap()).await.unwrap();
+        }))
+        .unwrap();
+        stream
+            .write_all(&encode_frame(FrameType::Request, &req).unwrap())
+            .await
+            .unwrap();
 
         let mut dec = FrameDecoder::new();
         let mut buf = [0u8; 4096];
         loop {
             let n = stream.read(&mut buf).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             dec.push(&buf[..n]).unwrap();
             let frames = dec.drain();
             if frames.iter().any(|f| f.frame_type == FrameType::Done) {
-                let events: Vec<_> = frames.iter().filter(|f| f.frame_type == FrameType::EventJson).collect();
+                let events: Vec<_> = frames
+                    .iter()
+                    .filter(|f| f.frame_type == FrameType::EventJson)
+                    .collect();
                 assert_eq!(events.len(), 2);
                 let p0: serde_json::Value = serde_json::from_slice(&events[0].payload).unwrap();
                 assert_eq!(p0["data"]["text"], "hi");

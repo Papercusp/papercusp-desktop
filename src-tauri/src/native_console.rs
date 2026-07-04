@@ -756,9 +756,7 @@ fn spawn_linux_with(
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {bin}: {e}"))?;
+    let child = cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))?;
     Ok(Some(child.id()))
 }
 
@@ -768,7 +766,9 @@ fn is_on_path(bin: &str) -> bool {
     if bin.contains('/') {
         return std::path::Path::new(bin).exists();
     }
-    let Some(path) = std::env::var_os("PATH") else { return false; };
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|d| {
         let candidate = d.join(bin);
         candidate.exists()
@@ -807,8 +807,7 @@ fn spawn_windows_wsl_new_window(
     let script = format!(
         "#!/bin/bash\n# Transient Papercup console launcher (WI-2149) — self-deletes on start.\nrm -f -- \"$0\"\n{oneliner}\n"
     );
-    cfs_write(&script_path, &script)
-        .map_err(|e| format!("write console launch script: {e}"))?;
+    cfs_write(&script_path, &script).map_err(|e| format!("write console launch script: {e}"))?;
 
     // Prefer Windows Terminal — `-w new` forces a new window every
     // invocation. We deliberately DON'T pass wt --startingDirectory: it
@@ -887,7 +886,9 @@ fn spawn_windows_wsl_new_window(
 
 #[cfg(target_os = "windows")]
 fn is_on_path_windows(bin: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else { return false; };
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&path).any(|d| {
         // On Windows PATHEXT matters but for known .exe names we can
         // skip that — we only check well-known commands by full name.
@@ -1029,10 +1030,8 @@ mod tests {
 
     #[test]
     fn count_sentinels_finds_only_matching_files() {
-        let tmp = std::env::temp_dir().join(format!(
-            "papercup-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("papercup-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&tmp).unwrap();
         let tmp_s = tmp.to_str().unwrap();
         // None yet.

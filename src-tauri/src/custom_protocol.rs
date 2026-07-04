@@ -152,7 +152,9 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
     // path (covers symlinks). Bare "/" and unknown extension-less paths
     // (SPA routes) fall back to index.html.
     let rel = path.trim_start_matches('/');
-    if rel.split(['/', '\\']).any(|seg| seg == ".." || seg.contains(':'))
+    if rel
+        .split(['/', '\\'])
+        .any(|seg| seg == ".." || seg.contains(':'))
         || std::path::Path::new(rel).is_absolute()
     {
         return error_response(400, "papercusp: bad path");
@@ -201,7 +203,11 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
 /// Async URI-scheme handler. Forwards the request to the loopback base on a
 /// worker thread (blocking HTTP client) and responds when it returns, so the
 /// webview's UI thread is never blocked.
-pub fn handle(ctx: UriSchemeContext<'_, Wry>, request: Request<Vec<u8>>, responder: UriSchemeResponder) {
+pub fn handle(
+    ctx: UriSchemeContext<'_, Wry>,
+    request: Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
     let app = ctx.app_handle().clone();
     std::thread::spawn(move || {
         responder.respond(forward(&app, request));
@@ -230,9 +236,17 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
         Err(e) => return error_response(502, &format!("papercusp: client init failed: {e}")),
     };
 
-    let debug = std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_DEBUG").ok().as_deref() == Some("1");
+    let debug = std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_DEBUG")
+        .ok()
+        .as_deref()
+        == Some("1");
     if debug {
-        eprintln!("[custom_protocol] {} {} → {}", request.method().as_str(), path_and_query, target);
+        eprintln!(
+            "[custom_protocol] {} {} → {}",
+            request.method().as_str(),
+            path_and_query,
+            target
+        );
     }
 
     let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
@@ -263,7 +277,12 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
             let headers = up.headers().clone();
             let body = up.bytes().map(|b| b.to_vec()).unwrap_or_default();
             if debug {
-                eprintln!("[custom_protocol]   ← {} {} ({} bytes)", status, path_and_query, body.len());
+                eprintln!(
+                    "[custom_protocol]   ← {} {} ({} bytes)",
+                    status,
+                    path_and_query,
+                    body.len()
+                );
             }
 
             let mut builder = Response::builder().status(status);

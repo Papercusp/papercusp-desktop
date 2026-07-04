@@ -162,7 +162,14 @@ impl WslStatus {
 pub(crate) fn parse_default_version(status_output: &str) -> u8 {
     status_output
         .lines()
-        .filter_map(|line| line.rsplit(':').next().unwrap_or(line).trim().parse::<u8>().ok())
+        .filter_map(|line| {
+            line.rsplit(':')
+                .next()
+                .unwrap_or(line)
+                .trim()
+                .parse::<u8>()
+                .ok()
+        })
         .next_back()
         .unwrap_or(0)
 }
@@ -202,7 +209,11 @@ mod decode_tests {
         let text = "Ubuntu\r\npapercup-runtime\r\n";
         let raw: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let decoded = decode_wsl_output(&raw);
-        let names: Vec<&str> = decoded.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let names: Vec<&str> = decoded
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         assert_eq!(names, vec!["Ubuntu", "papercup-runtime"]);
     }
 
@@ -215,7 +226,10 @@ mod decode_tests {
 
     #[test]
     fn utf8_output_passes_through() {
-        assert_eq!(decode_wsl_output(b"Ubuntu\npapercup-runtime\n"), "Ubuntu\npapercup-runtime\n");
+        assert_eq!(
+            decode_wsl_output(b"Ubuntu\npapercup-runtime\n"),
+            "Ubuntu\npapercup-runtime\n"
+        );
         assert_eq!(decode_wsl_output(b""), "");
     }
 }
@@ -377,7 +391,11 @@ mod imp {
             .map_err(|e| WslOpError::Failed(format!("spawn wsl --install: {}", e)))?;
         if !out.status.success() {
             let stderr = super::decode_wsl_output(&out.stderr);
-            return Err(WslOpError::from_exit("wsl --install", out.status.code(), stderr));
+            return Err(WslOpError::from_exit(
+                "wsl --install",
+                out.status.code(),
+                stderr,
+            ));
         }
         let mut st = load_state(app);
         st.install_kicked_off = true;
@@ -505,9 +523,10 @@ pub fn wsl_relaunch_elevated(_app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("current_exe: {}", e))?;
-        let exe_str = exe.to_str().ok_or_else(|| "exe path not utf8".to_string())?;
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+        let exe_str = exe
+            .to_str()
+            .ok_or_else(|| "exe path not utf8".to_string())?;
         // PowerShell `Start-Process -Verb RunAs` triggers the UAC prompt.
         Command::new("powershell.exe")
             .args([
@@ -730,7 +749,9 @@ mod tests {
 
     #[test]
     fn wsl_state_error_inlines_message_next_to_kind() {
-        let j = to_json(&WslState::Error { message: "bootstrap exit=1".into() });
+        let j = to_json(&WslState::Error {
+            message: "bootstrap exit=1".into(),
+        });
         assert_eq!(
             j,
             serde_json::json!({ "kind": "Error", "message": "bootstrap exit=1" })
@@ -754,7 +775,9 @@ mod tests {
             WslState::InstalledNoDistro,
             WslState::PendingBootstrap,
             WslState::Ready,
-            WslState::Error { message: "boom".into() },
+            WslState::Error {
+                message: "boom".into(),
+            },
         ];
         for state in states {
             let j = to_json(&state);

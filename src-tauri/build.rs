@@ -26,8 +26,7 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
                 atomically.\n";
     std::fs::write(sidecar.join("PLACEHOLDER-README.txt"), note)
         .expect("write sidecar placeholder");
-    std::fs::write(db_sql.join("PLACEHOLDER-README.txt"), note)
-        .expect("write db-sql placeholder");
+    std::fs::write(db_sql.join("PLACEHOLDER-README.txt"), note).expect("write db-sql placeholder");
     println!(
         "cargo:warning=src-tauri/sidecar/ has no serve.mjs — placeholder created so the \
          build can proceed. Dev is fine (the sidecar is never spawned); DO NOT package \
@@ -71,59 +70,57 @@ fn main() {
     // collect_commands!, this list, and the capability grants diverge. When you
     // add/remove a collect_commands! entry, update THIS list + the capability
     // in the same change (the test tells you exactly what drifted).
-    tauri_build::try_build(
-        tauri_build::Attributes::new().app_manifest(
-            tauri_build::AppManifest::new().commands(&[
-                // workspaces (WorkspaceSwitcher / HarnessWorkspacesButton)
-                "workspaces_list",
-                "workspaces_create",
-                "workspaces_rename",
-                "workspaces_delete",
-                "workspaces_switch",
-                "workspaces_open_window",
-                // attention / update chip
-                "show_attention_notification",
-                "app_version",
-                "check_for_update",
-                "install_update",
-                // pty (desktop terminals)
-                "pty_spawn",
-                "pty_write",
-                "pty_resize",
-                "pty_kill",
-                "pty_history",
-                "pty_is_alive",
-                // WSL setup wizard
-                "wsl_status",
-                "wsl_install",
-                "wsl_relaunch_elevated",
-                "wsl_import",
-                "wsl_bootstrap",
-                "wsl_finalize_ready",
-                "wsl_uninstall",
-                // native console / window control (WI-1976 originals)
-                "console_launch",
-                "list_windows_by_title",
-                "focus_window_by_title",
-                // window_title_for is a plain Rust helper, not a #[tauri::command];
-                // its grant is an inert orphan kept for continuity (harmless).
-                "window_title_for",
-                // native terminal toggle
-                "native_terminal_status",
-                "native_terminal_toggle",
-                // endpoint IPC transport (currently no live JS caller, but
-                // collect_commands! exposes it, so grant to stay in sync)
-                "endpoint_invoke",
-                "endpoint_cancel",
-                // env switcher
-                "list_envs",
-                // The dev-bridge eval return channel (debug builds). Without this
-                // grant the injected eval JS's invoke() is ACL-rejected from the
-                // remote http origin, so every tauri-agent-tools eval/click/dom
-                // call times out — the fleet-wide "wedged shell" symptom.
-                "__dev_bridge_result",
-            ]),
-        ),
-    )
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            // workspaces (WorkspaceSwitcher / HarnessWorkspacesButton)
+            "workspaces_list",
+            "workspaces_create",
+            "workspaces_rename",
+            "workspaces_delete",
+            "workspaces_switch",
+            "workspaces_open_window",
+            // attention / update chip
+            "show_attention_notification",
+            "app_version",
+            "check_for_update",
+            "install_update",
+            // pty (desktop terminals)
+            "pty_spawn",
+            "pty_write",
+            "pty_resize",
+            "pty_kill",
+            "pty_history",
+            "pty_is_alive",
+            // WSL setup wizard
+            "wsl_status",
+            "wsl_install",
+            "wsl_relaunch_elevated",
+            "wsl_import",
+            "wsl_bootstrap",
+            "wsl_finalize_ready",
+            "wsl_uninstall",
+            // native console / window control (WI-1976 originals)
+            "console_launch",
+            "list_windows_by_title",
+            "focus_window_by_title",
+            // window_title_for is a plain Rust helper, not a #[tauri::command];
+            // its grant is an inert orphan kept for continuity (harmless).
+            "window_title_for",
+            // native terminal toggle
+            "native_terminal_status",
+            "native_terminal_toggle",
+            // endpoint IPC transport (currently no live JS caller, but
+            // collect_commands! exposes it, so grant to stay in sync)
+            "endpoint_invoke",
+            "endpoint_cancel",
+            // env switcher
+            "list_envs",
+            // The dev-bridge eval return channel (debug builds). Without this
+            // grant the injected eval JS's invoke() is ACL-rejected from the
+            // remote http origin, so every tauri-agent-tools eval/click/dom
+            // call times out — the fleet-wide "wedged shell" symptom.
+            "__dev_bridge_result",
+        ]),
+    ))
     .expect("failed to run tauri_build with the app-command manifest (WI-1976)");
 }

@@ -32,9 +32,9 @@ mod dev_bridge;
 // retired Linux-only GTK dev-wrapper bar and the chrome-webview experiment.
 // Compiled on every platform (list_envs is a registered command); it returns no
 // envs in a packaged single-operator build, so it's inert there.
-mod env_switch;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
+mod env_switch;
 mod native_console;
 mod native_terminal;
 mod pty;
@@ -194,7 +194,29 @@ fn isolate_process_group(cmd: &mut Command) {
 fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
     let txt = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-    v.get("socketPath")?.as_str().map(|s| s.to_string())
+    let socket_path = v.get("socketPath")?.as_str()?.trim();
+    if endpoint_ipc_socket_path_supported_for_target(socket_path, cfg!(target_os = "windows")) {
+        Some(socket_path.to_string())
+    } else {
+        None
+    }
+}
+
+fn endpoint_ipc_socket_path_supported_for_target(socket_path: &str, target_windows: bool) -> bool {
+    if socket_path.trim().is_empty() {
+        return false;
+    }
+    let is_windows_pipe = is_windows_named_pipe_path(socket_path);
+    if target_windows {
+        is_windows_pipe
+    } else {
+        !is_windows_pipe
+    }
+}
+
+fn is_windows_named_pipe_path(socket_path: &str) -> bool {
+    let lower = socket_path.to_ascii_lowercase();
+    lower.starts_with("\\\\.\\pipe\\") || lower.starts_with("\\\\?\\pipe\\")
 }
 
 /// EI-190: the operator PORT the desktop's /api endpoint-IPC currently
@@ -236,7 +258,12 @@ fn bundled_path_env(dir: &std::path::Path) -> String {
     let bundled_bin = dir.join("bin");
     let path_sep = if cfg!(windows) { ";" } else { ":" };
     let existing_path = std::env::var("PATH").unwrap_or_default();
-    format!("{}{}{}", bundled_bin.to_string_lossy(), path_sep, existing_path)
+    format!(
+        "{}{}{}",
+        bundled_bin.to_string_lossy(),
+        path_sep,
+        existing_path
+    )
 }
 
 /// (SP1 C5) The embedded-postgres + zero-cache process management that used
@@ -246,7 +273,6 @@ fn bundled_path_env(dir: &std::path::Path) -> String {
 /// The legacy opt-in zero-cache spawn (PAPERCUSP_USE_ZERO_CACHE=1) was
 /// removed outright — the SSE path replaced the Zero WS transport on
 /// desktop 2026-05-07 and the bundle no longer ships zero-cache-server.
-
 
 /// Spawn the Node sidecar from inside the bundled sidecar dir. In dev
 /// (`tauri dev`), we skip this — the developer runs `npm run dev:papercusp`
@@ -298,8 +324,8 @@ fn should_route_via_wsl(_app: &tauri::AppHandle) -> bool {
 #[cfg(target_os = "linux")]
 fn grant_media_permission<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     let _ = window.with_webview(|webview| {
-        use webkit2gtk::WebViewExt;
         use webkit2gtk::glib::ObjectExt;
+        use webkit2gtk::WebViewExt;
         let wv: webkit2gtk::WebView = webview.inner();
         wv.connect_permission_request(|_, req| {
             // Allow audio/video media access requests; pass on everything else.
@@ -420,12 +446,22 @@ fn windows_path_to_wsl(path: &std::path::Path) -> String {
 
     // Drive-letter prefix: `C:/foo` → `/mnt/c/foo`.
     if let Some((drive, after)) = normalized.split_once(':') {
-        if drive.len() == 1 && drive.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+        if drive.len() == 1
+            && drive
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+        {
             let drive_lower = drive.to_lowercase();
             // Ensure the rest starts with `/` (handles `C:foo` weirdly
             // by keeping it relative, though that's not a valid
             // Windows resource path in our context).
-            let after = if after.starts_with('/') { after.to_string() } else { format!("/{}", after) };
+            let after = if after.starts_with('/') {
+                after.to_string()
+            } else {
+                format!("/{}", after)
+            };
             return format!("/mnt/{}{}", drive_lower, after);
         }
     }
@@ -533,9 +569,15 @@ mod tests {
             r"C:\Users\First Last\AppData\Local\Papercusp",
             "/mnt/c/Users/First Last/AppData/Local/Papercusp",
         );
-        t(r"C:\Users\Ada Lovelace\.papercusp", "/mnt/c/Users/Ada Lovelace/.papercusp");
+        t(
+            r"C:\Users\Ada Lovelace\.papercusp",
+            "/mnt/c/Users/Ada Lovelace/.papercusp",
+        );
         // mixed separators + spaces together
-        t(r"C:\Users\Jane Doe/work\repo", "/mnt/c/Users/Jane Doe/work/repo");
+        t(
+            r"C:\Users\Jane Doe/work\repo",
+            "/mnt/c/Users/Jane Doe/work/repo",
+        );
     }
 }
 
@@ -554,7 +596,10 @@ mod serve_log_tests {
         let _ = fs::remove_dir_all(&home);
 
         // First spawn: creates a fresh logs/serve.log.
-        assert!(super::rotating_log_stdio(&home, "serve.log").is_some(), "log setup should succeed");
+        assert!(
+            super::rotating_log_stdio(&home, "serve.log").is_some(),
+            "log setup should succeed"
+        );
         // (drop closes the returned Stdio file handles.)
         assert!(logs.join("serve.log").exists());
         // Tag the live log so we can prove rotation moves THIS file next time.
@@ -596,7 +641,10 @@ mod serve_log_tests {
         // Rotating code-server.log must NOT touch serve.log's live file or ring.
         assert!(super::rotating_log_stdio(&home, "code-server.log").is_some());
         assert_eq!(fs::read(logs.join("code-server.log.1")).unwrap(), b"cs-A");
-        assert!(!logs.join("serve.log.1").exists(), "serve.log ring untouched by code-server rotation");
+        assert!(
+            !logs.join("serve.log.1").exists(),
+            "serve.log ring untouched by code-server rotation"
+        );
         assert_eq!(fs::read(logs.join("serve.log")).unwrap(), b"serve-A");
 
         let _ = fs::remove_dir_all(&home);
@@ -726,14 +774,20 @@ mod discovery_tests {
     #[test]
     fn watcher_follows_a_port_change() {
         // Server restart moved the operator :21385 -> :21927 (the live repro).
-        let latest = OperatorDiscovery { port: 21927, pid: 50461 };
+        let latest = OperatorDiscovery {
+            port: 21927,
+            pid: 50461,
+        };
         assert_eq!(next_operator_port(21385, Some(&latest)), Some(21927));
     }
 
     #[test]
     fn watcher_ignores_same_port() {
         // A same-port bounce (dev box: fixed :3070) is NOT a move — don't churn.
-        let latest = OperatorDiscovery { port: 3070, pid: 999 };
+        let latest = OperatorDiscovery {
+            port: 3070,
+            pid: 999,
+        };
         assert_eq!(next_operator_port(3070, Some(&latest)), None);
     }
 
@@ -747,7 +801,10 @@ mod discovery_tests {
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{bundled_path_env, read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode};
+    use super::{
+        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, read_dev_ipc_socket,
+        read_dev_ipc_socket_for_port, url_encode,
+    };
 
     // ── url_encode (RFC 3986 component encoding) ────────────────────────────
 
@@ -804,12 +861,37 @@ mod helper_tests {
     fn read_dev_ipc_socket_parses_socket_path() {
         let dir = temp_dir("ipc-sock");
         let file = dir.join("endpoint-ipc.json");
-        std::fs::write(&file, r#"{"socketPath":"/tmp/papercusp/ipc.sock","pid":42}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"socketPath":"/tmp/papercusp/ipc.sock","pid":42}"#,
+        )
+        .unwrap();
         assert_eq!(
             read_dev_ipc_socket(&file),
             Some("/tmp/papercusp/ipc.sock".to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn endpoint_ipc_socket_path_support_is_platform_aware() {
+        assert!(endpoint_ipc_socket_path_supported_for_target(
+            "/tmp/papercusp/ipc.sock",
+            false
+        ));
+        assert!(!endpoint_ipc_socket_path_supported_for_target(
+            "/tmp/papercusp/ipc.sock",
+            true
+        ));
+        assert!(endpoint_ipc_socket_path_supported_for_target(
+            "\\\\.\\pipe\\papercusp-12345",
+            true
+        ));
+        assert!(!endpoint_ipc_socket_path_supported_for_target(
+            "\\\\.\\pipe\\papercusp-12345",
+            false
+        ));
+        assert!(!endpoint_ipc_socket_path_supported_for_target("", false));
     }
 
     #[test]
@@ -901,15 +983,16 @@ mod macos_bundle_tests {
 
     #[test]
     fn info_plist_declares_microphone_usage_description() {
-        let plist = fs::read_to_string(src_tauri_dir().join("Info.plist")).expect("read Info.plist");
+        let plist =
+            fs::read_to_string(src_tauri_dir().join("Info.plist")).expect("read Info.plist");
         assert!(plist.contains("NSMicrophoneUsageDescription"));
         assert!(plist.contains("voice mode"));
     }
 
     #[test]
     fn entitlements_enable_macos_audio_input() {
-        let plist =
-            fs::read_to_string(src_tauri_dir().join("entitlements.plist")).expect("read entitlements");
+        let plist = fs::read_to_string(src_tauri_dir().join("entitlements.plist"))
+            .expect("read entitlements");
         assert!(plist.contains("com.apple.security.device.audio-input"));
         assert!(plist.contains("<true/>"));
     }
@@ -935,18 +1018,17 @@ fn make_sidecar_command(
             let preload_wsl = windows_path_to_wsl(preload);
             let server_js_wsl = windows_path_to_wsl(server_js);
             let mut cmd = Command::new("wsl.exe");
-            cmd.env("WSL_UTF8", "1")
-                .args([
-                    "--distribution",
-                    wsl_setup::DISTRO_NAME_PUB,
-                    "--cd",
-                    &cwd_wsl,
-                    "--exec",
-                    "node",
-                    "--require",
-                    &preload_wsl,
-                    &server_js_wsl,
-                ]);
+            cmd.env("WSL_UTF8", "1").args([
+                "--distribution",
+                wsl_setup::DISTRO_NAME_PUB,
+                "--cd",
+                &cwd_wsl,
+                "--exec",
+                "node",
+                "--require",
+                &preload_wsl,
+                &server_js_wsl,
+            ]);
             isolate_process_group(&mut cmd);
             return cmd;
         }
@@ -1122,7 +1204,10 @@ fn point_window_at_operator<R: tauri::Runtime>(
                     eprintln!("[papercusp-desktop] navigate to {} failed: {}", app_base, e);
                 }
             }
-            Err(e) => eprintln!("[papercusp-desktop] app base {} did not parse: {}", app_base, e),
+            Err(e) => eprintln!(
+                "[papercusp-desktop] app base {} did not parse: {}",
+                app_base, e
+            ),
         }
     }
     for _ in 0..reinject_ticks {
@@ -1280,30 +1365,34 @@ fn wait_for_operator(
 /// thread so the main thread reaches the event loop immediately and the
 /// window paints the bootstrap page while serve boots.
 fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
-    let discovery =
-        match wait_for_operator(&app_handle, &workspace_home, via_wsl, Duration::from_secs(120)) {
-            Ok(d) => d,
-            Err(reason) => {
-                eprintln!("[papercusp-desktop] FATAL: {}", reason);
-                // Surface the failure ON the bootstrap page — web/index.html
-                // renders window.__papercuspBootError as a terminal error
-                // state instead of spinning forever. Re-eval for a while:
-                // the page may still be mid-load when this fires (same
-                // re-eval rationale as the success inject below).
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let inject = format!(
+    let discovery = match wait_for_operator(
+        &app_handle,
+        &workspace_home,
+        via_wsl,
+        Duration::from_secs(120),
+    ) {
+        Ok(d) => d,
+        Err(reason) => {
+            eprintln!("[papercusp-desktop] FATAL: {}", reason);
+            // Surface the failure ON the bootstrap page — web/index.html
+            // renders window.__papercuspBootError as a terminal error
+            // state instead of spinning forever. Re-eval for a while:
+            // the page may still be mid-load when this fires (same
+            // re-eval rationale as the success inject below).
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let inject = format!(
                         "window.__papercuspBootError = {}; window.dispatchEvent(new CustomEvent('papercusp:boot-error'));",
                         serde_json::to_string(&reason)
                             .unwrap_or_else(|_| "\"operator boot failed\"".to_string())
                     );
-                    for _ in 0..20 {
-                        let _ = window.eval(&inject);
-                        std::thread::sleep(Duration::from_millis(500));
-                    }
+                for _ in 0..20 {
+                    let _ = window.eval(&inject);
+                    std::thread::sleep(Duration::from_millis(500));
                 }
-                return;
             }
-        };
+            return;
+        }
+    };
     // The REAL port comes from discovery — `serve --ensure` may have reused
     // an already-running operator on a different port than our cold-start
     // hint.
@@ -1336,9 +1425,7 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         tauri::async_runtime::spawn(async move {
             for _ in 0..120 {
                 if handle.warm().await.is_ok() {
-                    println!(
-                        "[papercusp-desktop] endpoint-ipc client connected (discovery file)"
-                    );
+                    println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
                     if let Some(path) = read_dev_ipc_socket(&disc) {
                         let state: tauri::State<SidecarState> = ipc_app_handle.state();
                         *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
@@ -1534,9 +1621,7 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
             ));
         }
         std::process::Command::new(&exe)
-            .creation_flags(
-                CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
-            )
+            .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .spawn()
             .or_else(|_| std::process::Command::new(&exe).spawn())?;
         Ok(())
@@ -1551,7 +1636,13 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit-server", "Quit Papercusp Server", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit-server",
+        "Quit Papercusp Server",
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("papercusp-server")
@@ -1617,10 +1708,7 @@ fn enable_login_autostart(app: &tauri::App) {
 /// OWN-process path (`redirect_own_stdio`, which `dup2`s this file's fd over
 /// 1/2). Returns `None` if the log dir / file can't be prepared so every caller
 /// can fall back without blocking boot.
-fn rotate_and_open_log(
-    workspace_home: &std::path::Path,
-    basename: &str,
-) -> Option<std::fs::File> {
+fn rotate_and_open_log(workspace_home: &std::path::Path, basename: &str) -> Option<std::fs::File> {
     let logs_dir = workspace_home.join(".papercusp").join("logs");
     std::fs::create_dir_all(&logs_dir).ok()?;
     let base = logs_dir.join(basename);
@@ -1641,10 +1729,7 @@ fn rotate_and_open_log(
         .ok()
 }
 
-fn rotating_log_stdio(
-    workspace_home: &std::path::Path,
-    basename: &str,
-) -> Option<(Stdio, Stdio)> {
+fn rotating_log_stdio(workspace_home: &std::path::Path, basename: &str) -> Option<(Stdio, Stdio)> {
     let file = rotate_and_open_log(workspace_home, basename)?;
     let file2 = file.try_clone().ok()?;
     Some((Stdio::from(file), Stdio::from(file2)))
@@ -1811,7 +1896,10 @@ fn spawn_serve(
         // The desktop webview consumes the SPA — keep the UI mounted (serve
         // alone defaults it OFF for headless use; Decision E).
         .env("PAPERCUSP_SERVE_UI", "1")
-        .env("PAPERCUSP_HARNESS_DIR", harness_dir.to_string_lossy().to_string())
+        .env(
+            "PAPERCUSP_HARNESS_DIR",
+            harness_dir.to_string_lossy().to_string(),
+        )
         .env("PAPERCUSP_DESKTOP", "1")
         // Autonomous loop (packaged-build fix): the DBOS routines engine +
         // orchestrator must be ON in the shipped sidecar — without these the
@@ -1827,24 +1915,39 @@ fn spawn_serve(
         .env("PAPERCUSP_SHARED_OPERATOR", "1")
         // Descendants that need the operator's HTTP API (run.sh pg-status
         // helpers etc.) use this; the port is dynamic so env is the channel.
-        .env("PAPERCUSP_OPERATOR_BASE", format!("http://localhost:{}", port_hint))
+        .env(
+            "PAPERCUSP_OPERATOR_BASE",
+            format!("http://localhost:{}", port_hint),
+        )
         // Hono host serves the Vite SPA + Starlight docs from these roots —
         // passed explicitly because a bundled file's __dirname is the sidecar
         // root (see host-spa.ts / host-docs.ts root-resolution comments).
         .env("PAPERCUSP_SPA_DIST", spa_dist.to_string_lossy().to_string())
-        .env("PAPERCUSP_DOCS_ROOT", docs_root.to_string_lossy().to_string())
+        .env(
+            "PAPERCUSP_DOCS_ROOT",
+            docs_root.to_string_lossy().to_string(),
+        )
         // Persona/tools prompt root — explicit because the cwd heuristics in
         // prompt-assembly.ts misfire in the sidecar layout: sidecar/apps/
         // operator/prompts exists (desktop-install playbook only) and would
         // shadow the full sidecar/prompts copy (see promptsDir()).
-        .env("PAPERCUSP_PROMPTS_DIR", prompts_dir.to_string_lossy().to_string())
+        .env(
+            "PAPERCUSP_PROMPTS_DIR",
+            prompts_dir.to_string_lossy().to_string(),
+        )
         // PG knobs (SP1 C5: PG ownership moved into serve). The port is
         // freshly picked per spawn so two desktops on one host don't collide;
         // data lives in the SHARED state dir (one RLS-scoped PG for all
         // workspaces, D-006), migrations ship at sidecar/db-sql.
         .env("PAPERCUSP_PG_PORT", pg_port_hint.to_string())
-        .env("PAPERCUSP_PG_DATA_DIR", pg_data_dir.to_string_lossy().to_string())
-        .env("PAPERCUSP_PG_SQL_DIR", db_sql_dir.to_string_lossy().to_string())
+        .env(
+            "PAPERCUSP_PG_DATA_DIR",
+            pg_data_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "PAPERCUSP_PG_SQL_DIR",
+            db_sql_dir.to_string_lossy().to_string(),
+        )
         .env(
             "PAPERCUSP_IDENTITY_DIR",
             shared_state_dir
@@ -1962,8 +2065,9 @@ fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
     } else {
         let state: tauri::State<SidecarState> = app.state();
         let guard = state.port.lock().map_err(|e| e.to_string())?;
-        guard
-            .ok_or_else(|| "sidecar port not yet known; try again after boot completes".to_string())?
+        guard.ok_or_else(|| {
+            "sidecar port not yet known; try again after boot completes".to_string()
+        })?
     };
     Ok(format!(
         "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}",
@@ -2100,23 +2204,31 @@ fn workspaces_open_window(app: AppHandle, id: String) -> Result<(), String> {
         .and_then(|w| w.url().ok())
         .map(|u| {
             let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
-            format!("{}://{}{}", u.scheme(), u.host_str().unwrap_or("localhost"), port)
+            format!(
+                "{}://{}{}",
+                u.scheme(),
+                u.host_str().unwrap_or("localhost"),
+                port
+            )
         })
         .or_else(|| {
             let state: tauri::State<SidecarState> = app.state();
             let guard = state.port.lock().ok()?;
             (*guard).map(|p| format!("http://localhost:{}", p))
         })
-        .ok_or_else(|| "could not resolve app origin (no main window URL, no sidecar port)".to_string())?;
+        .ok_or_else(|| {
+            "could not resolve app origin (no main window URL, no sidecar port)".to_string()
+        })?;
     let url = format!("{}/harness?ws={}", base, url_encode(&id));
     let parsed = url
         .parse()
         .map_err(|e| format!("bad window url {}: {}", url, e))?;
-    let win = tauri::WebviewWindowBuilder::new(&app, label.clone(), tauri::WebviewUrl::External(parsed))
-        .title(format!("Papercusp — {}", id))
-        .inner_size(1280.0, 800.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let win =
+        tauri::WebviewWindowBuilder::new(&app, label.clone(), tauri::WebviewUrl::External(parsed))
+            .title(format!("Papercusp — {}", id))
+            .inner_size(1280.0, 800.0)
+            .build()
+            .map_err(|e| e.to_string())?;
     // Hand the new window the sidecar base + native PTY mode, exactly like the
     // main window's setup() injection (main.rs ~1463). getBrowserWorkspaceId()
     // reads ?ws= from the URL, so the workspace is known even before this runs.
@@ -2241,7 +2353,10 @@ fn start_native_terminal(app: &AppHandle) {
     let strategy = app.state::<native_terminal::NativeTerminal>().strategy;
     match strategy {
         TerminalStrategy::GluedGhosttyX11 => {
-            if let Err(e) = app.state::<native_terminal::NativeTerminal>().launch_glued() {
+            if let Err(e) = app
+                .state::<native_terminal::NativeTerminal>()
+                .launch_glued()
+            {
                 eprintln!("[papercusp-desktop] native-terminal launch_glued failed: {e}");
                 return;
             }
@@ -2331,7 +2446,9 @@ fn start_native_terminal(app: &AppHandle) {
                 });
             });
             if let Err(e) = res {
-                eprintln!("[papercusp-desktop] native-terminal: VTE embed main-thread hop failed: {e}");
+                eprintln!(
+                    "[papercusp-desktop] native-terminal: VTE embed main-thread hop failed: {e}"
+                );
             }
         }
         // D-009: the macOS embedded SwiftTerm view — a real native terminal
@@ -2341,7 +2458,9 @@ fn start_native_terminal(app: &AppHandle) {
         #[cfg(target_os = "macos")]
         TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::SwiftTerm) => {
             let Some(window) = app.get_webview_window("main") else {
-                eprintln!("[papercusp-desktop] native-terminal: no main window for the SwiftTerm embed");
+                eprintln!(
+                    "[papercusp-desktop] native-terminal: no main window for the SwiftTerm embed"
+                );
                 return;
             };
             let handle = app.clone();
@@ -2394,7 +2513,9 @@ fn start_native_terminal(app: &AppHandle) {
         #[cfg(target_os = "windows")]
         TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::ConPty) => {
             let Some(window) = app.get_webview_window("main") else {
-                eprintln!("[papercusp-desktop] native-terminal: no main window for the ConPTY embed");
+                eprintln!(
+                    "[papercusp-desktop] native-terminal: no main window for the ConPTY embed"
+                );
                 return;
             };
             let Ok(hwnd) = window.hwnd() else {
@@ -2484,8 +2605,8 @@ pub fn run() {
     // and emits a typed `bindings.ts` for the frontend on each debug
     // build. The frontend imports typed wrappers from `@/bindings`
     // instead of stringly-typed `invoke('cmd', ...)`.
-    let specta_builder = tauri_specta::Builder::<tauri::Wry>::new()
-        .commands(tauri_specta::collect_commands![
+    let specta_builder =
+        tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
             workspaces_list,
             workspaces_create,
             workspaces_rename,

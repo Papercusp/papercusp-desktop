@@ -183,9 +183,7 @@ pub fn resolve_strategy_from_env() -> TerminalStrategy {
             "new-window" => return TerminalStrategy::NewWindow,
             "disabled" => return TerminalStrategy::Disabled,
             "embedded-vte" => return TerminalStrategy::EmbeddedView(EmbedBackend::Vte),
-            "embedded-swiftterm" => {
-                return TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
-            }
+            "embedded-swiftterm" => return TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm),
             "embedded-conpty" => return TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
             _ => {}
         }
@@ -220,7 +218,12 @@ fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
     let swiftterm_available = swiftterm_embed::available();
     #[cfg(not(target_os = "macos"))]
     let swiftterm_available = false;
-    let out = downgrade_unbuilt_with(s, vte_available, swiftterm_available, cfg!(target_os = "linux"));
+    let out = downgrade_unbuilt_with(
+        s,
+        vte_available,
+        swiftterm_available,
+        cfg!(target_os = "linux"),
+    );
     if out == TerminalStrategy::Disabled && s != TerminalStrategy::Disabled {
         println!(
             "[papercusp-desktop] native-terminal: no embedded backend available on this platform and the new-window launcher is Linux-only — native terminal disabled"
@@ -534,20 +537,38 @@ pub fn reflow_gui_for_seam(side: DockSide, gui: Rect, sibling: Rect, gap: i32) -
         DockSide::Left => {
             let far = gui.x + gui.w; // anchored right edge
             let x = sibling.x + sibling.w + gap;
-            Rect { x, y: gui.y, w: (far - x).max(1), h: gui.h }
+            Rect {
+                x,
+                y: gui.y,
+                w: (far - x).max(1),
+                h: gui.h,
+            }
         }
         DockSide::Right => {
             // Terminal right of the GUI; the GUI's LEFT edge is anchored.
-            Rect { x: gui.x, y: gui.y, w: (sibling.x - gap - gui.x).max(1), h: gui.h }
+            Rect {
+                x: gui.x,
+                y: gui.y,
+                w: (sibling.x - gap - gui.x).max(1),
+                h: gui.h,
+            }
         }
         DockSide::Top => {
             let far = gui.y + gui.h;
             let y = sibling.y + sibling.h + gap;
-            Rect { x: gui.x, y, w: gui.w, h: (far - y).max(1) }
+            Rect {
+                x: gui.x,
+                y,
+                w: gui.w,
+                h: (far - y).max(1),
+            }
         }
-        DockSide::Bottom => {
-            Rect { x: gui.x, y: gui.y, w: gui.w, h: (sibling.y - gap - gui.y).max(1) }
-        }
+        DockSide::Bottom => Rect {
+            x: gui.x,
+            y: gui.y,
+            w: gui.w,
+            h: (sibling.y - gap - gui.y).max(1),
+        },
     }
 }
 
@@ -589,9 +610,7 @@ impl GhosttySpec {
         let background = std::env::var("PAPERCUSP_NATIVE_TERMINAL_BG").unwrap_or_default();
         let bin = std::env::var("PAPERCUSP_GHOSTTY_BIN").unwrap_or_else(|_| "ghostty".to_string());
         let command = match std::env::var("PAPERCUSP_NATIVE_TERMINAL_CMD") {
-            Ok(s) if !s.trim().is_empty() => {
-                s.split_whitespace().map(|x| x.to_string()).collect()
-            }
+            Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|x| x.to_string()).collect(),
             _ => vec!["pui".to_string(), "chat".to_string()],
         };
         GhosttySpec {
@@ -651,13 +670,23 @@ pub struct GlueConfig {
 impl GlueConfig {
     pub fn from_env() -> GlueConfig {
         let f = |k: &str, d: f32| {
-            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
         };
         let i = |k: &str, d: i32| {
-            std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
         };
         GlueConfig {
-            side: DockSide::from_env(std::env::var("PAPERCUSP_NATIVE_TERMINAL_SIDE").ok().as_deref()),
+            side: DockSide::from_env(
+                std::env::var("PAPERCUSP_NATIVE_TERMINAL_SIDE")
+                    .ok()
+                    .as_deref(),
+            ),
             fraction: f("PAPERCUSP_NATIVE_TERMINAL_FRACTION", 0.42),
             min_px: i("PAPERCUSP_NATIVE_TERMINAL_MIN_PX", 480),
             // Drag ceiling, not the default size (fraction governs that). 1200
@@ -730,7 +759,11 @@ mod x11_glue {
     use x11rb::rust_connection::RustConnection;
 
     fn intern(conn: &RustConnection, name: &[u8]) -> Option<u32> {
-        conn.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom)
+        conn.intern_atom(false, name)
+            .ok()?
+            .reply()
+            .ok()
+            .map(|r| r.atom)
     }
 
     /// A live glue session: the connection + resolved windows + the dock config
@@ -854,7 +887,14 @@ mod x11_glue {
         fn find_by_pid(&self, pid: u32) -> Option<u32> {
             let r = self
                 .conn
-                .get_property(false, self.root, self.net_client_list, AtomEnum::WINDOW, 0, 4096)
+                .get_property(
+                    false,
+                    self.root,
+                    self.net_client_list,
+                    AtomEnum::WINDOW,
+                    0,
+                    4096,
+                )
                 .ok()?
                 .reply()
                 .ok()?;
@@ -923,7 +963,9 @@ mod x11_glue {
             let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
             let _ = self.conn.send_event(false, self.root, mask, event);
             use x11rb::protocol::xproto::ConfigureWindowAux;
-            let aux = ConfigureWindowAux::new().sibling(above).stack_mode(StackMode::ABOVE);
+            let aux = ConfigureWindowAux::new()
+                .sibling(above)
+                .stack_mode(StackMode::ABOVE);
             let _ = self.conn.configure_window(win, &aux);
             let _ = self.conn.flush();
         }
@@ -964,7 +1006,9 @@ mod x11_glue {
             else {
                 return false;
             };
-            let Ok(reply) = cookie.reply() else { return false };
+            let Ok(reply) = cookie.reply() else {
+                return false;
+            };
             reply
                 .value32()
                 .map(|mut it| it.any(|a| a == self.net_wm_state_hidden))
@@ -1001,7 +1045,14 @@ mod x11_glue {
         fn active_window(&self) -> Option<u32> {
             let r = self
                 .conn
-                .get_property(false, self.root, self.net_active_window, AtomEnum::WINDOW, 0, 1)
+                .get_property(
+                    false,
+                    self.root,
+                    self.net_active_window,
+                    AtomEnum::WINDOW,
+                    0,
+                    1,
+                )
                 .ok()?
                 .reply()
                 .ok()?;
@@ -1014,7 +1065,9 @@ mod x11_glue {
         /// when focus sits on an unrelated app we never touch stacking.
         pub fn focus_tick(&mut self) {
             let active = self.active_window();
-            if let Some((win, above)) = partner_to_raise(active, self.last_active, self.gui, self.sibling) {
+            if let Some((win, above)) =
+                partner_to_raise(active, self.last_active, self.gui, self.sibling)
+            {
                 self.restack_above(win, above);
             }
             self.last_active = active;
@@ -1169,7 +1222,7 @@ pub mod vte_embed {
     #[allow(clippy::type_complexity)]
     type FnSpawnAsync = unsafe extern "C" fn(
         terminal: *mut c_void,
-        pty_flags: c_int,         // VtePtyFlags; 0 = VTE_PTY_DEFAULT
+        pty_flags: c_int, // VtePtyFlags; 0 = VTE_PTY_DEFAULT
         working_directory: *const c_char,
         argv: *const *const c_char,
         envv: *const *const c_char,
@@ -1241,11 +1294,18 @@ pub mod vte_embed {
                         .get::<FnSetColors>(b"vte_terminal_set_colors\0")
                         .ok()
                         .map(|s| *s);
-                    let set_size = l.get::<FnSetSize>(b"vte_terminal_set_size\0").ok().map(|s| *s);
-                    let char_width =
-                        l.get::<FnGetCharDim>(b"vte_terminal_get_char_width\0").ok().map(|s| *s);
-                    let char_height =
-                        l.get::<FnGetCharDim>(b"vte_terminal_get_char_height\0").ok().map(|s| *s);
+                    let set_size = l
+                        .get::<FnSetSize>(b"vte_terminal_set_size\0")
+                        .ok()
+                        .map(|s| *s);
+                    let char_width = l
+                        .get::<FnGetCharDim>(b"vte_terminal_get_char_width\0")
+                        .ok()
+                        .map(|s| *s);
+                    let char_height = l
+                        .get::<FnGetCharDim>(b"vte_terminal_get_char_height\0")
+                        .ok()
+                        .map(|s| *s);
                     let paste_clipboard = l
                         .get::<FnTermVoid>(b"vte_terminal_paste_clipboard\0")
                         .ok()
@@ -1415,7 +1475,10 @@ pub mod vte_embed {
         // the terminal on the configured side. The paned handle is the
         // user-draggable split (D-012 bidirectional, for free).
         let children = vbox.children();
-        let webview = children.last().cloned().ok_or("tauri vbox has no children")?;
+        let webview = children
+            .last()
+            .cloned()
+            .ok_or("tauri vbox has no children")?;
         vbox.remove(&webview);
         let orientation = match side {
             DockSide::Left | DockSide::Right => gtk::Orientation::Horizontal,
@@ -1646,7 +1709,10 @@ pub mod swiftterm_embed {
                         Ok(s) => *s,
                         Err(_) => continue,
                     };
-                    return Some(Shim { attach_left, _lib: l });
+                    return Some(Shim {
+                        attach_left,
+                        _lib: l,
+                    });
                 }
             }
             None
@@ -1672,7 +1738,9 @@ pub mod swiftterm_embed {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            let Ok(exe) = std::env::current_exe() else { return };
+            let Ok(exe) = std::env::current_exe() else {
+                return;
+            };
             let Some(dir) = exe.parent() else { return };
             // Bundled mac layout: Contents/MacOS/<exe> → Contents/Resources/sidecar.
             let sidecar = dir.join("../Resources/sidecar");
@@ -1789,9 +1857,8 @@ pub mod win_embed {
     use std::ffi::c_void;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect,
-        GetWindowThreadProcessId, MoveWindow, SetParent, SetWindowLongPtrW, GWL_STYLE, WS_CHILD,
-        WS_VISIBLE,
+        EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowThreadProcessId,
+        MoveWindow, SetParent, SetWindowLongPtrW, GWL_STYLE, WS_CHILD, WS_VISIBLE,
     };
 
     /// First top-level window owned by `pid` (the spawned console).
@@ -1954,8 +2021,11 @@ impl NativeTerminal {
         if !matches!(self.strategy, TerminalStrategy::GluedGhosttyX11) {
             return;
         }
-        let Some(gpid) = self.ghostty_pid() else { return };
-        let mut sess = match x11_glue::GlueSession::connect(gpid, std::process::id(), &self.config) {
+        let Some(gpid) = self.ghostty_pid() else {
+            return;
+        };
+        let mut sess = match x11_glue::GlueSession::connect(gpid, std::process::id(), &self.config)
+        {
             Some(s) => s,
             None => {
                 println!(
@@ -2018,10 +2088,7 @@ impl NativeTerminal {
         if !spec.background.is_empty() {
             argv.push(format!("--background={}", spec.background));
         }
-        argv.extend([
-            "--gtk-single-instance=false".to_string(),
-            "-e".to_string(),
-        ]);
+        argv.extend(["--gtk-single-instance=false".to_string(), "-e".to_string()]);
         argv.extend(spec.command.iter().cloned());
         let mut cmd = std::process::Command::new(&spec.bin);
         cmd.args(argv);
@@ -2116,31 +2183,55 @@ mod tests {
             detect_display_server(None, Some("wayland-0"), Some(":0")),
             DisplayServer::Wayland
         );
-        assert_eq!(detect_display_server(None, None, Some(":0")), DisplayServer::X11);
-        assert_eq!(detect_display_server(None, Some(""), Some("")), DisplayServer::None);
-        assert_eq!(detect_display_server(Some("tty"), None, None), DisplayServer::None);
+        assert_eq!(
+            detect_display_server(None, None, Some(":0")),
+            DisplayServer::X11
+        );
+        assert_eq!(
+            detect_display_server(None, Some(""), Some("")),
+            DisplayServer::None
+        );
+        assert_eq!(
+            detect_display_server(Some("tty"), None, None),
+            DisplayServer::None
+        );
     }
 
     #[test]
     fn strategy_routes_per_os_and_display() {
         assert_eq!(
-            select_strategy(SessionInfo { os: Os::Linux, display: DisplayServer::X11 }),
+            select_strategy(SessionInfo {
+                os: Os::Linux,
+                display: DisplayServer::X11
+            }),
             TerminalStrategy::GluedGhosttyX11
         );
         assert_eq!(
-            select_strategy(SessionInfo { os: Os::Linux, display: DisplayServer::Wayland }),
+            select_strategy(SessionInfo {
+                os: Os::Linux,
+                display: DisplayServer::Wayland
+            }),
             TerminalStrategy::EmbeddedView(EmbedBackend::Vte)
         );
         assert_eq!(
-            select_strategy(SessionInfo { os: Os::Linux, display: DisplayServer::None }),
+            select_strategy(SessionInfo {
+                os: Os::Linux,
+                display: DisplayServer::None
+            }),
             TerminalStrategy::Disabled
         );
         assert_eq!(
-            select_strategy(SessionInfo { os: Os::Mac, display: DisplayServer::None }),
+            select_strategy(SessionInfo {
+                os: Os::Mac,
+                display: DisplayServer::None
+            }),
             TerminalStrategy::EmbeddedView(EmbedBackend::SwiftTerm)
         );
         assert_eq!(
-            select_strategy(SessionInfo { os: Os::Windows, display: DisplayServer::None }),
+            select_strategy(SessionInfo {
+                os: Os::Windows,
+                display: DisplayServer::None
+            }),
             TerminalStrategy::EmbeddedView(EmbedBackend::ConPty)
         );
     }
@@ -2229,11 +2320,20 @@ mod tests {
         assert!(vte_embed::parse_hex_rgba("#28c3").is_none());
 
         // Terminal-left split: handle at the terminal's extent.
-        assert_eq!(vte_embed::initial_split_position(DockSide::Left, 2000, 0.42), 840);
+        assert_eq!(
+            vte_embed::initial_split_position(DockSide::Left, 2000, 0.42),
+            840
+        );
         // Terminal-right split: handle at total - extent.
-        assert_eq!(vte_embed::initial_split_position(DockSide::Right, 2000, 0.42), 1160);
+        assert_eq!(
+            vte_embed::initial_split_position(DockSide::Right, 2000, 0.42),
+            1160
+        );
         // Degenerate sizes clamp sanely.
-        assert_eq!(vte_embed::initial_split_position(DockSide::Left, 0, 0.42), 1);
+        assert_eq!(
+            vte_embed::initial_split_position(DockSide::Left, 0, 0.42),
+            1
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -2241,17 +2341,38 @@ mod tests {
     fn vte_term_shortcuts_map_the_standard_chords() {
         use vte_embed::{term_action_for_key, TermAction::*};
         // Shifted letters arrive as their UPPERCASE keyval (both accepted).
-        assert_eq!(term_action_for_key('V' as u32, true, true), Some(PasteClipboard));
-        assert_eq!(term_action_for_key('v' as u32, true, true), Some(PasteClipboard));
-        assert_eq!(term_action_for_key(0xff63, false, true), Some(PasteClipboard)); // Shift+Insert
-        assert_eq!(term_action_for_key(0xff9e, false, true), Some(PasteClipboard)); // Shift+KP_Insert
-        assert_eq!(term_action_for_key('C' as u32, true, true), Some(CopyClipboard));
-        assert_eq!(term_action_for_key(0xff63, true, false), Some(CopyClipboard)); // Ctrl+Insert
+        assert_eq!(
+            term_action_for_key('V' as u32, true, true),
+            Some(PasteClipboard)
+        );
+        assert_eq!(
+            term_action_for_key('v' as u32, true, true),
+            Some(PasteClipboard)
+        );
+        assert_eq!(
+            term_action_for_key(0xff63, false, true),
+            Some(PasteClipboard)
+        ); // Shift+Insert
+        assert_eq!(
+            term_action_for_key(0xff9e, false, true),
+            Some(PasteClipboard)
+        ); // Shift+KP_Insert
+        assert_eq!(
+            term_action_for_key('C' as u32, true, true),
+            Some(CopyClipboard)
+        );
+        assert_eq!(
+            term_action_for_key(0xff63, true, false),
+            Some(CopyClipboard)
+        ); // Ctrl+Insert
         assert_eq!(term_action_for_key('=' as u32, true, false), Some(ZoomIn));
         assert_eq!(term_action_for_key('+' as u32, true, true), Some(ZoomIn));
         assert_eq!(term_action_for_key(0xffab, true, false), Some(ZoomIn)); // Ctrl+KP_Add
         assert_eq!(term_action_for_key('-' as u32, true, false), Some(ZoomOut));
-        assert_eq!(term_action_for_key('0' as u32, true, false), Some(ZoomReset));
+        assert_eq!(
+            term_action_for_key('0' as u32, true, false),
+            Some(ZoomReset)
+        );
         // The plain chords MUST pass through to the pty untouched: Ctrl+C is
         // SIGINT, Ctrl+V is a literal ^V — stealing them breaks the TUIs.
         assert_eq!(term_action_for_key('c' as u32, true, false), None);
@@ -2283,7 +2404,10 @@ mod tests {
 
     #[test]
     fn strategy_labels_are_stable() {
-        assert_eq!(TerminalStrategy::GluedGhosttyX11.label(), "glued-ghostty-x11");
+        assert_eq!(
+            TerminalStrategy::GluedGhosttyX11.label(),
+            "glued-ghostty-x11"
+        );
         assert_eq!(TerminalStrategy::NewWindow.label(), "new-window");
         assert_eq!(TerminalStrategy::Disabled.label(), "disabled");
         assert_eq!(
@@ -2295,20 +2419,57 @@ mod tests {
     // ── P-005 geometry ──────────────────────────────────────────────────────
 
     fn main_rect() -> Rect {
-        Rect { x: 100, y: 50, w: 1280, h: 800 }
+        Rect {
+            x: 100,
+            y: 50,
+            w: 1280,
+            h: 800,
+        }
     }
 
     #[test]
     fn sibling_docks_flush_on_each_side() {
         let m = main_rect();
         let r = compute_sibling_geometry(m, DockSide::Right, 500, 0);
-        assert_eq!(r, Rect { x: 1380, y: 50, w: 500, h: 800 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 1380,
+                y: 50,
+                w: 500,
+                h: 800
+            }
+        );
         let l = compute_sibling_geometry(m, DockSide::Left, 500, 0);
-        assert_eq!(l, Rect { x: -400, y: 50, w: 500, h: 800 });
+        assert_eq!(
+            l,
+            Rect {
+                x: -400,
+                y: 50,
+                w: 500,
+                h: 800
+            }
+        );
         let b = compute_sibling_geometry(m, DockSide::Bottom, 300, 0);
-        assert_eq!(b, Rect { x: 100, y: 850, w: 1280, h: 300 });
+        assert_eq!(
+            b,
+            Rect {
+                x: 100,
+                y: 850,
+                w: 1280,
+                h: 300
+            }
+        );
         let t = compute_sibling_geometry(m, DockSide::Top, 300, 0);
-        assert_eq!(t, Rect { x: 100, y: -250, w: 1280, h: 300 });
+        assert_eq!(
+            t,
+            Rect {
+                x: 100,
+                y: -250,
+                w: 1280,
+                h: 300
+            }
+        );
     }
 
     #[test]
@@ -2324,10 +2485,18 @@ mod tests {
     fn right_dock_stays_flush_after_move_and_resize() {
         // The defining property of the glue: the terminal's left edge equals the
         // GUI window's right edge, for any GUI geometry.
-        for (x, y, w, h) in [(0, 0, 800, 600), (640, 360, 1600, 900), (-50, 12, 1000, 1000)] {
+        for (x, y, w, h) in [
+            (0, 0, 800, 600),
+            (640, 360, 1600, 900),
+            (-50, 12, 1000, 1000),
+        ] {
             let m = Rect { x, y, w, h };
             let r = compute_sibling_geometry(m, DockSide::Right, 400, 0);
-            assert_eq!(r.x, m.x + m.w, "terminal left edge must touch GUI right edge");
+            assert_eq!(
+                r.x,
+                m.x + m.w,
+                "terminal left edge must touch GUI right edge"
+            );
             assert_eq!(r.y, m.y, "tops aligned");
             assert_eq!(r.h, m.h, "heights matched");
         }
@@ -2335,14 +2504,29 @@ mod tests {
 
     #[test]
     fn extent_is_a_clamped_fraction() {
-        let m = Rect { x: 0, y: 0, w: 1000, h: 800 };
+        let m = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 800,
+        };
         // 42% of width = 420, within [480,1200] clamp → 480 (min wins).
         assert_eq!(sibling_extent(m, DockSide::Right, 0.42, 480, 1200), 480);
         // 42% of a wide window = 840, within bounds → 840.
-        let wide = Rect { x: 0, y: 0, w: 2000, h: 800 };
+        let wide = Rect {
+            x: 0,
+            y: 0,
+            w: 2000,
+            h: 800,
+        };
         assert_eq!(sibling_extent(wide, DockSide::Right, 0.42, 480, 1200), 840);
         // Capped at max.
-        let huge = Rect { x: 0, y: 0, w: 4000, h: 800 };
+        let huge = Rect {
+            x: 0,
+            y: 0,
+            w: 4000,
+            h: 800,
+        };
         assert_eq!(sibling_extent(huge, DockSide::Right, 0.42, 480, 1200), 1200);
         // Bottom dock uses height as the axis.
         assert_eq!(sibling_extent(m, DockSide::Bottom, 0.5, 100, 1000), 400);
@@ -2350,15 +2534,47 @@ mod tests {
 
     #[test]
     fn rects_close_tolerance() {
-        let a = Rect { x: 100, y: 100, w: 500, h: 800 };
+        let a = Rect {
+            x: 100,
+            y: 100,
+            w: 500,
+            h: 800,
+        };
         // identical → close
         assert!(rects_close(a, a, 40));
         // within tol on every axis (cell-snap sized) → close
-        assert!(rects_close(a, Rect { x: 102, y: 98, w: 492, h: 808 }, 40));
+        assert!(rects_close(
+            a,
+            Rect {
+                x: 102,
+                y: 98,
+                w: 492,
+                h: 808
+            },
+            40
+        ));
         // a reset to default origin/size → NOT close (catches the drift)
-        assert!(!rects_close(a, Rect { x: 0, y: 0, w: 800, h: 600 }, 40));
+        assert!(!rects_close(
+            a,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 800,
+                h: 600
+            },
+            40
+        ));
         // just past tol on one axis → not close
-        assert!(!rects_close(a, Rect { x: 100, y: 141, w: 500, h: 800 }, 40));
+        assert!(!rects_close(
+            a,
+            Rect {
+                x: 100,
+                y: 141,
+                w: 500,
+                h: 800
+            },
+            40
+        ));
     }
 
     #[test]
@@ -2378,9 +2594,24 @@ mod tests {
     fn whole_window_move_keeps_extent() {
         // Translating the GUI (both edges shift equally) only TRANSLATES the
         // terminal — the split is unchanged, on every side.
-        let a = Rect { x: 100, y: 50, w: 1280, h: 800 };
-        let b = Rect { x: 300, y: 120, w: 1280, h: 800 }; // moved, same size
-        for side in [DockSide::Left, DockSide::Right, DockSide::Top, DockSide::Bottom] {
+        let a = Rect {
+            x: 100,
+            y: 50,
+            w: 1280,
+            h: 800,
+        };
+        let b = Rect {
+            x: 300,
+            y: 120,
+            w: 1280,
+            h: 800,
+        }; // moved, same size
+        for side in [
+            DockSide::Left,
+            DockSide::Right,
+            DockSide::Top,
+            DockSide::Bottom,
+        ] {
             assert_eq!(resized_extent(side, a, b, 500, 100, 2000), 500, "{side:?}");
         }
     }
@@ -2390,11 +2621,26 @@ mod tests {
         // Left dock: the boundary is the GUI's LEFT edge. Dragging it RIGHT by 120
         // (GUI shrinks from the left, far/right edge fixed at 1500) makes room →
         // the left-docked terminal GROWS by 120.
-        let a = Rect { x: 500, y: 0, w: 1000, h: 800 }; // left=500  right=1500
-        let b = Rect { x: 620, y: 0, w: 880, h: 800 }; //  left=620  right=1500
+        let a = Rect {
+            x: 500,
+            y: 0,
+            w: 1000,
+            h: 800,
+        }; // left=500  right=1500
+        let b = Rect {
+            x: 620,
+            y: 0,
+            w: 880,
+            h: 800,
+        }; //  left=620  right=1500
         assert_eq!(resized_extent(DockSide::Left, a, b, 400, 100, 2000), 520);
         // Dragging the boundary LEFT shrinks the terminal.
-        let c = Rect { x: 420, y: 0, w: 1080, h: 800 }; // left=420  right=1500
+        let c = Rect {
+            x: 420,
+            y: 0,
+            w: 1080,
+            h: 800,
+        }; // left=420  right=1500
         assert_eq!(resized_extent(DockSide::Left, a, c, 400, 100, 2000), 320);
     }
 
@@ -2403,8 +2649,18 @@ mod tests {
         // Right dock: the boundary is the GUI's RIGHT edge. Dragging it LEFT by 120
         // (GUI shrinks from the right, left edge fixed at 0) makes room on the
         // right → the right-docked terminal GROWS by 120.
-        let a = Rect { x: 0, y: 0, w: 1000, h: 800 }; // left=0  right=1000
-        let b = Rect { x: 0, y: 0, w: 880, h: 800 }; //  left=0  right=880
+        let a = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 800,
+        }; // left=0  right=1000
+        let b = Rect {
+            x: 0,
+            y: 0,
+            w: 880,
+            h: 800,
+        }; //  left=0  right=880
         assert_eq!(resized_extent(DockSide::Right, a, b, 400, 100, 2000), 520);
     }
 
@@ -2412,24 +2668,54 @@ mod tests {
     fn dragging_far_edge_leaves_split_untouched() {
         // Left dock: dragging the GUI's FAR (right) edge moves only the far edge;
         // the boundary (left) is fixed → the terminal split is unchanged.
-        let a = Rect { x: 500, y: 0, w: 1000, h: 800 }; // left=500  right=1500
-        let b = Rect { x: 500, y: 0, w: 1200, h: 800 }; // left=500  right=1700
+        let a = Rect {
+            x: 500,
+            y: 0,
+            w: 1000,
+            h: 800,
+        }; // left=500  right=1500
+        let b = Rect {
+            x: 500,
+            y: 0,
+            w: 1200,
+            h: 800,
+        }; // left=500  right=1700
         assert_eq!(resized_extent(DockSide::Left, a, b, 400, 100, 2000), 400);
     }
 
     #[test]
     fn resized_extent_clamps_to_min() {
         // A boundary drag that would shrink the terminal below min is clamped.
-        let a = Rect { x: 500, y: 0, w: 1000, h: 800 }; // left=500  right=1500
-        let b = Rect { x: -100, y: 0, w: 1600, h: 800 }; // boundary −600, right fixed
+        let a = Rect {
+            x: 500,
+            y: 0,
+            w: 1000,
+            h: 800,
+        }; // left=500  right=1500
+        let b = Rect {
+            x: -100,
+            y: 0,
+            w: 1600,
+            h: 800,
+        }; // boundary −600, right fixed
         assert_eq!(resized_extent(DockSide::Left, a, b, 400, 100, 2000), 100);
     }
 
     #[test]
     fn resized_extent_clamps_to_max() {
         // A boundary drag past max is clamped.
-        let a = Rect { x: 0, y: 0, w: 2000, h: 800 }; //  left=0     right=2000
-        let b = Rect { x: 1900, y: 0, w: 100, h: 800 }; // boundary +1900, right fixed
+        let a = Rect {
+            x: 0,
+            y: 0,
+            w: 2000,
+            h: 800,
+        }; //  left=0     right=2000
+        let b = Rect {
+            x: 1900,
+            y: 0,
+            w: 100,
+            h: 800,
+        }; // boundary +1900, right fixed
         assert_eq!(resized_extent(DockSide::Left, a, b, 400, 100, 2000), 2000);
     }
 
@@ -2438,22 +2724,40 @@ mod tests {
     /// A Left-docked sibling target: terminal at x=100..600 (w=500), GUI to its
     /// right at x=600.
     fn left_target() -> Rect {
-        Rect { x: 100, y: 0, w: 500, h: 800 }
+        Rect {
+            x: 100,
+            y: 0,
+            w: 500,
+            h: 800,
+        }
     }
 
     #[test]
     fn classify_in_place_within_tolerances() {
         let t = left_target();
         // Cell-snap sized wiggle on every coordinate stays InPlace.
-        let a = Rect { x: t.x + 3, y: t.y + 10, w: t.w - 6, h: t.h - 12 };
-        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::InPlace);
+        let a = Rect {
+            x: t.x + 3,
+            y: t.y + 10,
+            w: t.w - 6,
+            h: t.h - 12,
+        };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, a, 8, 40),
+            SiblingDelta::InPlace
+        );
     }
 
     #[test]
     fn classify_seam_drag_left_dock() {
         let t = left_target();
         // Seam = right edge (x+w): dragged +120, outer edge anchored.
-        let a = Rect { x: t.x, y: t.y, w: t.w + 120, h: t.h };
+        let a = Rect {
+            x: t.x,
+            y: t.y,
+            w: t.w + 120,
+            h: t.h,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Left, t, a, 8, 40),
             SiblingDelta::SeamResize { extent: 620 }
@@ -2464,7 +2768,12 @@ mod tests {
     fn classify_outer_drag_left_dock() {
         let t = left_target();
         // Outer = left edge: dragged -80 (grow outward), seam anchored.
-        let a = Rect { x: t.x - 80, y: t.y, w: t.w + 80, h: t.h };
+        let a = Rect {
+            x: t.x - 80,
+            y: t.y,
+            w: t.w + 80,
+            h: t.h,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Left, t, a, 8, 40),
             SiblingDelta::OuterResize { extent: 580 }
@@ -2475,8 +2784,16 @@ mod tests {
     fn classify_wholesale_move_is_a_jump() {
         let t = left_target();
         // Both dock-axis edges shifted together = a move/reset → snap back.
-        let a = Rect { x: t.x + 200, y: t.y, w: t.w, h: t.h };
-        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::Jump);
+        let a = Rect {
+            x: t.x + 200,
+            y: t.y,
+            w: t.w,
+            h: t.h,
+        };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, a, 8, 40),
+            SiblingDelta::Jump
+        );
     }
 
     #[test]
@@ -2484,16 +2801,34 @@ mod tests {
         let t = left_target();
         // A big vertical jump (ghostty geometry reset) → Jump even with the
         // dock-axis edges intact.
-        let a = Rect { x: t.x, y: t.y + 300, w: t.w, h: t.h };
-        assert_eq!(classify_sibling_change(DockSide::Left, t, a, 8, 40), SiblingDelta::Jump);
+        let a = Rect {
+            x: t.x,
+            y: t.y + 300,
+            w: t.w,
+            h: t.h,
+        };
+        assert_eq!(
+            classify_sibling_change(DockSide::Left, t, a, 8, 40),
+            SiblingDelta::Jump
+        );
     }
 
     #[test]
     fn classify_seam_drag_right_dock() {
         // Right-docked sibling: terminal right of the GUI; seam = its LEFT edge.
-        let t = Rect { x: 1200, y: 0, w: 400, h: 800 };
+        let t = Rect {
+            x: 1200,
+            y: 0,
+            w: 400,
+            h: 800,
+        };
         // Drag the seam left 100px (terminal grows): x -100, w +100.
-        let a = Rect { x: 1100, y: 0, w: 500, h: 800 };
+        let a = Rect {
+            x: 1100,
+            y: 0,
+            w: 500,
+            h: 800,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Right, t, a, 8, 40),
             SiblingDelta::SeamResize { extent: 500 }
@@ -2543,27 +2878,73 @@ mod tests {
     #[test]
     fn reflow_left_dock_keeps_far_edge_anchored() {
         // GUI at 600..2000; sibling seam dragged from 600 to 720.
-        let gui = Rect { x: 600, y: 0, w: 1400, h: 800 };
-        let sibling = Rect { x: 100, y: 0, w: 620, h: 800 };
+        let gui = Rect {
+            x: 600,
+            y: 0,
+            w: 1400,
+            h: 800,
+        };
+        let sibling = Rect {
+            x: 100,
+            y: 0,
+            w: 620,
+            h: 800,
+        };
         let g = reflow_gui_for_seam(DockSide::Left, gui, sibling, 0);
-        assert_eq!(g, Rect { x: 720, y: 0, w: 1280, h: 800 });
+        assert_eq!(
+            g,
+            Rect {
+                x: 720,
+                y: 0,
+                w: 1280,
+                h: 800
+            }
+        );
         // The pair's combined outer rect is preserved: GUI far edge fixed.
         assert_eq!(g.x + g.w, gui.x + gui.w);
     }
 
     #[test]
     fn reflow_right_dock_keeps_left_edge_anchored() {
-        let gui = Rect { x: 0, y: 0, w: 1200, h: 800 };
+        let gui = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 800,
+        };
         // Sibling (right of GUI) seam dragged left to x=1100.
-        let sibling = Rect { x: 1100, y: 0, w: 500, h: 800 };
+        let sibling = Rect {
+            x: 1100,
+            y: 0,
+            w: 500,
+            h: 800,
+        };
         let g = reflow_gui_for_seam(DockSide::Right, gui, sibling, 0);
-        assert_eq!(g, Rect { x: 0, y: 0, w: 1100, h: 800 });
+        assert_eq!(
+            g,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1100,
+                h: 800
+            }
+        );
     }
 
     #[test]
     fn reflow_honors_the_gap() {
-        let gui = Rect { x: 600, y: 0, w: 1400, h: 800 };
-        let sibling = Rect { x: 100, y: 0, w: 620, h: 800 };
+        let gui = Rect {
+            x: 600,
+            y: 0,
+            w: 1400,
+            h: 800,
+        };
+        let sibling = Rect {
+            x: 100,
+            y: 0,
+            w: 620,
+            h: 800,
+        };
         let g = reflow_gui_for_seam(DockSide::Left, gui, sibling, 4);
         assert_eq!(g.x, 724); // seam + gap
         assert_eq!(g.x + g.w, 2000); // far edge still anchored
@@ -2572,15 +2953,51 @@ mod tests {
     #[test]
     fn reflow_vertical_docks() {
         // Top dock: sibling above; GUI's bottom edge anchored.
-        let gui = Rect { x: 0, y: 400, w: 1200, h: 600 };
-        let sib_top = Rect { x: 0, y: 0, w: 1200, h: 500 };
+        let gui = Rect {
+            x: 0,
+            y: 400,
+            w: 1200,
+            h: 600,
+        };
+        let sib_top = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 500,
+        };
         let g = reflow_gui_for_seam(DockSide::Top, gui, sib_top, 0);
-        assert_eq!(g, Rect { x: 0, y: 500, w: 1200, h: 500 });
+        assert_eq!(
+            g,
+            Rect {
+                x: 0,
+                y: 500,
+                w: 1200,
+                h: 500
+            }
+        );
         // Bottom dock: sibling below; GUI's top edge anchored.
-        let gui2 = Rect { x: 0, y: 0, w: 1200, h: 600 };
-        let sib_bot = Rect { x: 0, y: 550, w: 1200, h: 450 };
+        let gui2 = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 600,
+        };
+        let sib_bot = Rect {
+            x: 0,
+            y: 550,
+            w: 1200,
+            h: 450,
+        };
         let g2 = reflow_gui_for_seam(DockSide::Bottom, gui2, sib_bot, 0);
-        assert_eq!(g2, Rect { x: 0, y: 0, w: 1200, h: 550 });
+        assert_eq!(
+            g2,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1200,
+                h: 550
+            }
+        );
     }
 
     // ── P-004 launch argv ────────────────────────────────────────────────────
@@ -2604,7 +3021,11 @@ mod tests {
         // in order, at the very end.
         let e = argv.iter().position(|a| a == "-e").expect("missing -e");
         assert_eq!(&argv[e + 1..], &["pui".to_string(), "chat".to_string()]);
-        assert_eq!(e, argv.len() - 3, "-e must be immediately before the command");
+        assert_eq!(
+            e,
+            argv.len() - 3,
+            "-e must be immediately before the command"
+        );
     }
 
     #[test]
@@ -2627,11 +3048,26 @@ mod tests {
         // Top dock: the boundary is the GUI's TOP edge. Dragging it DOWN by 100
         // (GUI shrinks from the top, bottom edge fixed at 900) makes room above
         // → the top-docked terminal GROWS by 100.
-        let a = Rect { x: 0, y: 300, w: 1200, h: 600 }; // top=300 bottom=900
-        let b = Rect { x: 0, y: 400, w: 1200, h: 500 }; // top=400 bottom=900
+        let a = Rect {
+            x: 0,
+            y: 300,
+            w: 1200,
+            h: 600,
+        }; // top=300 bottom=900
+        let b = Rect {
+            x: 0,
+            y: 400,
+            w: 1200,
+            h: 500,
+        }; // top=400 bottom=900
         assert_eq!(resized_extent(DockSide::Top, a, b, 250, 100, 2000), 350);
         // Dragging it back UP shrinks the terminal.
-        let c = Rect { x: 0, y: 250, w: 1200, h: 650 }; // top=250 bottom=900
+        let c = Rect {
+            x: 0,
+            y: 250,
+            w: 1200,
+            h: 650,
+        }; // top=250 bottom=900
         assert_eq!(resized_extent(DockSide::Top, a, c, 250, 100, 2000), 200);
     }
 
@@ -2640,8 +3076,18 @@ mod tests {
         // Bottom dock: the boundary is the GUI's BOTTOM edge. Dragging it UP by
         // 100 (GUI shrinks from the bottom, top edge fixed at 0) makes room
         // below → the bottom-docked terminal GROWS by 100.
-        let a = Rect { x: 0, y: 0, w: 1200, h: 600 }; // top=0 bottom=600
-        let b = Rect { x: 0, y: 0, w: 1200, h: 500 }; // top=0 bottom=500
+        let a = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 600,
+        }; // top=0 bottom=600
+        let b = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 500,
+        }; // top=0 bottom=500
         assert_eq!(resized_extent(DockSide::Bottom, a, b, 250, 100, 2000), 350);
     }
 
@@ -2649,8 +3095,18 @@ mod tests {
     fn dragging_far_edge_leaves_vertical_split_untouched() {
         // Bottom dock: the GUI's TOP edge is the far edge — dragging it only
         // moves the far edge; the split is unchanged.
-        let a = Rect { x: 0, y: 100, w: 1200, h: 500 }; // top=100 bottom=600
-        let b = Rect { x: 0, y: 50, w: 1200, h: 550 }; //  top=50  bottom=600
+        let a = Rect {
+            x: 0,
+            y: 100,
+            w: 1200,
+            h: 500,
+        }; // top=100 bottom=600
+        let b = Rect {
+            x: 0,
+            y: 50,
+            w: 1200,
+            h: 550,
+        }; //  top=50  bottom=600
         assert_eq!(resized_extent(DockSide::Bottom, a, b, 250, 100, 2000), 250);
     }
 
@@ -2659,22 +3115,42 @@ mod tests {
     #[test]
     fn classify_seam_and_outer_drag_bottom_dock() {
         // Bottom-docked sibling (below the GUI): seam = its TOP edge.
-        let t = Rect { x: 0, y: 600, w: 1200, h: 400 };
+        let t = Rect {
+            x: 0,
+            y: 600,
+            w: 1200,
+            h: 400,
+        };
         // Seam dragged up 100 → terminal grows to 500.
-        let seam = Rect { x: 0, y: 500, w: 1200, h: 500 };
+        let seam = Rect {
+            x: 0,
+            y: 500,
+            w: 1200,
+            h: 500,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Bottom, t, seam, 8, 40),
             SiblingDelta::SeamResize { extent: 500 }
         );
         // Outer (bottom) edge dragged down 80, seam anchored → OuterResize.
-        let outer = Rect { x: 0, y: 600, w: 1200, h: 480 };
+        let outer = Rect {
+            x: 0,
+            y: 600,
+            w: 1200,
+            h: 480,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Bottom, t, outer, 8, 40),
             SiblingDelta::OuterResize { extent: 480 }
         );
         // A big horizontal (cross-axis) departure is a Jump even with the
         // dock-axis edges intact.
-        let cross = Rect { x: 300, y: 600, w: 1200, h: 400 };
+        let cross = Rect {
+            x: 300,
+            y: 600,
+            w: 1200,
+            h: 400,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Bottom, t, cross, 8, 40),
             SiblingDelta::Jump
@@ -2684,8 +3160,18 @@ mod tests {
     #[test]
     fn classify_seam_drag_top_dock() {
         // Top-docked sibling (above the GUI): seam = its BOTTOM edge (y+h).
-        let t = Rect { x: 0, y: 0, w: 1200, h: 300 };
-        let a = Rect { x: 0, y: 0, w: 1200, h: 380 }; // seam dragged down 80
+        let t = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 300,
+        };
+        let a = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 380,
+        }; // seam dragged down 80
         assert_eq!(
             classify_sibling_change(DockSide::Top, t, a, 8, 40),
             SiblingDelta::SeamResize { extent: 380 }
@@ -2695,8 +3181,18 @@ mod tests {
     #[test]
     fn classify_outer_drag_right_dock() {
         // Right-docked sibling: outer = its RIGHT edge (x+w).
-        let t = Rect { x: 1200, y: 0, w: 400, h: 800 };
-        let a = Rect { x: 1200, y: 0, w: 490, h: 800 }; // outer dragged right 90
+        let t = Rect {
+            x: 1200,
+            y: 0,
+            w: 400,
+            h: 800,
+        };
+        let a = Rect {
+            x: 1200,
+            y: 0,
+            w: 490,
+            h: 800,
+        }; // outer dragged right 90
         assert_eq!(
             classify_sibling_change(DockSide::Right, t, a, 8, 40),
             SiblingDelta::OuterResize { extent: 490 }
@@ -2707,13 +3203,23 @@ mod tests {
     fn classify_seam_tolerance_is_a_dead_band() {
         let t = left_target();
         // Exactly AT the tolerance → still InPlace (ghostty cell-snap noise).
-        let at_tol = Rect { x: t.x, y: t.y, w: t.w + 8, h: t.h };
+        let at_tol = Rect {
+            x: t.x,
+            y: t.y,
+            w: t.w + 8,
+            h: t.h,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Left, t, at_tol, 8, 40),
             SiblingDelta::InPlace
         );
         // One px past it → a deliberate drag.
-        let past_tol = Rect { x: t.x, y: t.y, w: t.w + 9, h: t.h };
+        let past_tol = Rect {
+            x: t.x,
+            y: t.y,
+            w: t.w + 9,
+            h: t.h,
+        };
         assert_eq!(
             classify_sibling_change(DockSide::Left, t, past_tol, 8, 40),
             SiblingDelta::SeamResize { extent: t.w + 9 }
@@ -2736,9 +3242,17 @@ mod tests {
     fn sibling_extent_tolerates_inverted_bounds() {
         // Misconfigured min > max (env knobs are free-form) must not panic
         // `clamp` — the helper normalizes the bounds.
-        let m = Rect { x: 0, y: 0, w: 2000, h: 800 };
+        let m = Rect {
+            x: 0,
+            y: 0,
+            w: 2000,
+            h: 800,
+        };
         let e = sibling_extent(m, DockSide::Right, 0.42, 1200, 480);
-        assert!((480..=1200).contains(&e), "extent {e} outside normalized bounds");
+        assert!(
+            (480..=1200).contains(&e),
+            "extent {e} outside normalized bounds"
+        );
         // resized_extent normalizes too.
         let r = resized_extent(DockSide::Right, m, m, 840, 1200, 480);
         assert!((480..=1200).contains(&r));

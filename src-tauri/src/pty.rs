@@ -73,8 +73,12 @@ pub struct PtySpawnOpts {
     #[serde(default = "default_rows")]
     pub rows: u16,
 }
-fn default_cols() -> u16 { 80 }
-fn default_rows() -> u16 { 24 }
+fn default_cols() -> u16 {
+    80
+}
+fn default_rows() -> u16 {
+    24
+}
 
 #[derive(Debug, Serialize, specta::Type)]
 pub struct PtySpawnResult {
@@ -100,7 +104,16 @@ struct PtyExitPayload {
 /// installs hooks that emit IPC events; tests install their own).
 fn spawn_internal(
     opts: &PtySpawnOpts,
-) -> Result<(String, Option<u32>, Arc<PtyEntry>, Box<dyn Read + Send>, Box<dyn portable_pty::Child + Send + Sync>), String> {
+) -> Result<
+    (
+        String,
+        Option<u32>,
+        Arc<PtyEntry>,
+        Box<dyn Read + Send>,
+        Box<dyn portable_pty::Child + Send + Sync>,
+    ),
+    String,
+> {
     let pty_system = native_pty_system();
     let PtyPair { master, slave } = pty_system
         .openpty(PtySize {
@@ -199,10 +212,7 @@ fn spawn_internal(
         killed: Mutex::new(false),
     });
 
-    REGISTRY
-        .lock()
-        .unwrap()
-        .insert(id.clone(), entry.clone());
+    REGISTRY.lock().unwrap().insert(id.clone(), entry.clone());
 
     Ok((id, pid, entry, reader, child))
 }
@@ -471,13 +481,14 @@ mod tests {
 
     #[test]
     fn spawn_writes_bytes_to_history() {
-        let (id, _entry, rx) =
-            spawn_test(&["-c", "echo PTY_RUST_MARKER && sleep 0.2"]);
+        let (id, _entry, rx) = spawn_test(&["-c", "echo PTY_RUST_MARKER && sleep 0.2"]);
         let acc = wait_for(
             &rx,
-            |a| std::str::from_utf8(a)
-                .map(|s| s.contains("PTY_RUST_MARKER"))
-                .unwrap_or(false),
+            |a| {
+                std::str::from_utf8(a)
+                    .map(|s| s.contains("PTY_RUST_MARKER"))
+                    .unwrap_or(false)
+            },
             Duration::from_secs(2),
         );
         assert!(
@@ -506,9 +517,11 @@ mod tests {
         pty_write(id.clone(), payload).expect("pty_write failed");
         let acc = wait_for(
             &rx,
-            |a| std::str::from_utf8(a)
-                .map(|s| s.contains("GOT_TYPED_RUST"))
-                .unwrap_or(false),
+            |a| {
+                std::str::from_utf8(a)
+                    .map(|s| s.contains("GOT_TYPED_RUST"))
+                    .unwrap_or(false)
+            },
             Duration::from_secs(2),
         );
         assert!(
@@ -523,16 +536,15 @@ mod tests {
 
     #[test]
     fn pty_resize_changes_geometry() {
-        let (id, _entry, rx) = spawn_test(&[
-            "-c",
-            "stty size; sleep 0.3; stty size; sleep 0.1",
-        ]);
+        let (id, _entry, rx) = spawn_test(&["-c", "stty size; sleep 0.3; stty size; sleep 0.1"]);
         // First reading should be 24 80.
         let first = wait_for(
             &rx,
-            |a| std::str::from_utf8(a)
-                .map(|s| s.contains("24 80"))
-                .unwrap_or(false),
+            |a| {
+                std::str::from_utf8(a)
+                    .map(|s| s.contains("24 80"))
+                    .unwrap_or(false)
+            },
             Duration::from_secs(2),
         );
         assert!(
@@ -543,15 +555,15 @@ mod tests {
         pty_resize(id.clone(), 132, 40).expect("pty_resize failed");
         let second = wait_for(
             &rx,
-            |a| std::str::from_utf8(a)
-                .map(|s| s.contains("40 132"))
-                .unwrap_or(false),
+            |a| {
+                std::str::from_utf8(a)
+                    .map(|s| s.contains("40 132"))
+                    .unwrap_or(false)
+            },
             Duration::from_secs(2),
         );
         assert!(
-            std::str::from_utf8(&second)
-                .unwrap()
-                .contains("40 132"),
+            std::str::from_utf8(&second).unwrap().contains("40 132"),
             "expected post-resize 40 132, got: {:?}",
             String::from_utf8_lossy(&second)
         );
@@ -563,10 +575,7 @@ mod tests {
         let (id, _entry, _rx) = spawn_test(&["-c", "sleep 5"]);
         assert!(pty_is_alive(id.clone()), "should be alive before kill");
         pty_kill(id.clone()).expect("pty_kill failed");
-        assert!(
-            !pty_is_alive(id),
-            "should report dead after kill"
-        );
+        assert!(!pty_is_alive(id), "should report dead after kill");
     }
 
     #[test]

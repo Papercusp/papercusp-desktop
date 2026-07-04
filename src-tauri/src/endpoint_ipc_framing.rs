@@ -14,12 +14,12 @@ use std::collections::VecDeque;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
-    Request    = 0x01,
-    EventJson  = 0x02,
-    Done       = 0x03,
-    Error      = 0x04,
-    EventBin   = 0x05,
-    Cancel     = 0x06,
+    Request = 0x01,
+    EventJson = 0x02,
+    Done = 0x03,
+    Error = 0x04,
+    EventBin = 0x05,
+    Cancel = 0x06,
 }
 
 impl FrameType {
@@ -129,7 +129,8 @@ impl FrameDecoder {
                 break;
             }
             // Peek without consuming so we can return cleanly on partial frames.
-            let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+            let len =
+                u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
             if len > MAX_FRAME_BYTES {
                 return Err(FrameError::IncomingTooLarge(len));
             }
@@ -140,9 +141,13 @@ impl FrameDecoder {
             // Now we have a full frame — advance.
             let _ = self.buf.split_to(4); // length
             let type_byte = self.buf.get_u8();
-            let frame_type = FrameType::from_u8(type_byte).ok_or(FrameError::UnknownType(type_byte))?;
+            let frame_type =
+                FrameType::from_u8(type_byte).ok_or(FrameError::UnknownType(type_byte))?;
             let payload = self.buf.split_to(len).to_vec();
-            self.ready.push_back(Frame { frame_type, payload });
+            self.ready.push_back(Frame {
+                frame_type,
+                payload,
+            });
         }
         Ok(())
     }
@@ -188,7 +193,11 @@ mod tests {
 
     #[test]
     fn event_bin_payload_round_trip() {
-        let payload = encode_event_bin_payload(123_456_789_012_345u64, "image_chunk", &[0xde, 0xad, 0xbe, 0xef]);
+        let payload = encode_event_bin_payload(
+            123_456_789_012_345u64,
+            "image_chunk",
+            &[0xde, 0xad, 0xbe, 0xef],
+        );
         let decoded = decode_event_bin_payload(&payload).unwrap();
         assert_eq!(decoded.id, 123_456_789_012_345u64);
         assert_eq!(decoded.name, "image_chunk");
@@ -284,10 +293,7 @@ mod tests {
         let mut dec = FrameDecoder::new();
         // length=0, type=0x99
         let bad = vec![0u8, 0, 0, 0, 0x99];
-        assert!(matches!(
-            dec.push(&bad),
-            Err(FrameError::UnknownType(0x99)),
-        ));
+        assert!(matches!(dec.push(&bad), Err(FrameError::UnknownType(0x99)),));
     }
 
     #[test]
@@ -305,7 +311,8 @@ mod tests {
     #[test]
     fn drain_returns_only_newly_ready_frames() {
         let mut dec = FrameDecoder::new();
-        dec.push(&encode_frame(FrameType::Cancel, b"{\"id\":1}").unwrap()).unwrap();
+        dec.push(&encode_frame(FrameType::Cancel, b"{\"id\":1}").unwrap())
+            .unwrap();
         assert_eq!(dec.drain().len(), 1);
         assert_eq!(dec.drain().len(), 0);
     }

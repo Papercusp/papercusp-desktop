@@ -107,13 +107,19 @@ pub fn link_workspace_credentials(workspace_dir: &PathBuf) -> io::Result<()> {
     fs::create_dir_all(&ws_claude_dir)?;
 
     let pairs: [(PathBuf, PathBuf); 3] = [
-        (real_home.join(".claude.json"), workspace_dir.join(".claude.json")),
+        (
+            real_home.join(".claude.json"),
+            workspace_dir.join(".claude.json"),
+        ),
         (
             real_home.join(".claude").join(".credentials.json"),
             ws_claude_dir.join(".credentials.json"),
         ),
         // git identity (P-051) — at the HOME root, like .claude.json.
-        (real_home.join(".gitconfig"), workspace_dir.join(".gitconfig")),
+        (
+            real_home.join(".gitconfig"),
+            workspace_dir.join(".gitconfig"),
+        ),
     ];
 
     for (src, dst) in pairs.iter() {
@@ -426,8 +432,16 @@ mod tests {
         let reg = Registry {
             current: "a".into(),
             workspaces: vec![
-                Workspace { id: "a".into(), name: "A".into(), created_at: 0 },
-                Workspace { id: "a-2".into(), name: "A2".into(), created_at: 0 },
+                Workspace {
+                    id: "a".into(),
+                    name: "A".into(),
+                    created_at: 0,
+                },
+                Workspace {
+                    id: "a-2".into(),
+                    name: "A2".into(),
+                    created_at: 0,
+                },
             ],
         };
         assert_eq!(unique_id(&reg, "a"), "a-3");

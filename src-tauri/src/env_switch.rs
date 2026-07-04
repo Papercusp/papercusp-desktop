@@ -97,11 +97,16 @@ fn read_persisted_target() -> Option<u16> {
     let txt = std::fs::read_to_string(persisted_target_path()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let port = v.get("port")?.as_u64()? as u16;
-    TARGETS.iter().any(|(_, _, p, _)| *p == port).then_some(port)
+    TARGETS
+        .iter()
+        .any(|(_, _, p, _)| *p == port)
+        .then_some(port)
 }
 
 fn write_persisted_target(name: &str, port: u16) {
-    let Some(path) = persisted_target_path() else { return };
+    let Some(path) = persisted_target_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -240,7 +245,9 @@ pub fn register_backstop_shortcuts(app: &tauri::App) {
         });
         match res {
             Ok(()) => println!("[env-switch] escape-hatch shortcut {accel} → :{p}"),
-            Err(e) => eprintln!("[env-switch] shortcut {accel} not registered (DE may own it): {e}"),
+            Err(e) => {
+                eprintln!("[env-switch] shortcut {accel} not registered (DE may own it): {e}")
+            }
         }
     }
 }
@@ -275,7 +282,9 @@ pub fn apply_persisted_target(window: &tauri::WebviewWindow) {
         return;
     }
     let effective = 'restore: {
-        let Some(port) = read_persisted_target() else { break 'restore 3070 };
+        let Some(port) = read_persisted_target() else {
+            break 'restore 3070;
+        };
         if window.url().ok().and_then(|u| u.port()) == Some(port) {
             break 'restore port;
         }
@@ -322,7 +331,9 @@ fn install_rail_signal(window: &tauri::WebviewWindow) {
                 );
                 ucm.add_script(&script);
             }
-            None => eprintln!("[env-switch] no user_content_manager — dev-rail signal not installed"),
+            None => {
+                eprintln!("[env-switch] no user_content_manager — dev-rail signal not installed")
+            }
         }
     });
 }

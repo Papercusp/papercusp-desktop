@@ -448,8 +448,7 @@ pub fn __dev_bridge_result(
 pub fn start_bridge(
     app: &AppHandle,
 ) -> Result<(u16, Arc<LogBuffer>, Arc<SidecarRegistry>), String> {
-    let server =
-        Server::http("127.0.0.1:0").map_err(|e| format!("Failed to start bridge: {e}"))?;
+    let server = Server::http("127.0.0.1:0").map_err(|e| format!("Failed to start bridge: {e}"))?;
     let port = server
         .server_addr()
         .to_ip()
@@ -523,314 +522,342 @@ pub fn start_bridge(
         // incoming_requests() can simply be called again. (The for-body
         // keeps its original indentation; only the wrapper is new.)
         loop {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        for mut request in server.incoming_requests() {
-            let is_post = request.method().as_str() == "POST";
-            let url = request.url().to_string();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for mut request in server.incoming_requests() {
+                    let is_post = request.method().as_str() == "POST";
+                    let url = request.url().to_string();
 
-            // Handle GET /version (no auth needed). Clients feature-detect
-            // newer endpoints by checking the `endpoints` array.
-            if url == "/version" && request.method().as_str() == "GET" {
-                let resp = VersionResponse {
-                    version: BRIDGE_VERSION.to_string(),
-                    endpoints: vec![
-                        "/eval".to_string(),
-                        "/logs".to_string(),
-                        "/describe".to_string(),
-                        "/version".to_string(),
-                        "/process".to_string(),
-                        "/capabilities".to_string(),
-                        "/devtools".to_string(),
-                        "/health".to_string(),
-                    ],
-                };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            let known_post = matches!(
-                url.as_str(),
-                "/eval" | "/logs" | "/describe" | "/process" | "/capabilities" | "/devtools" | "/health"
-            );
-            if !is_post || !known_post {
-                let _ = request.respond(Response::from_string("Not found").with_status_code(404));
-                continue;
-            }
-
-            // Read body
-            let mut body = String::new();
-            if let Err(_) = request.as_reader().read_to_string(&mut body) {
-                let _ =
-                    request.respond(Response::from_string("Bad request").with_status_code(400));
-                continue;
-            }
-
-            // Handle /logs endpoint
-            if url == "/logs" {
-                let log_req: LogRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-
-                if log_req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-
-                let entries = server_log_buffer.drain();
-                let resp = LogResponse { entries };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /process endpoint — Tauri PID + sidecar registry snapshot.
-            if url == "/process" {
-                let req: AuthedRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-                if req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-                let resp = ProcessResponse {
-                    tauri: TauriProcessInfo {
-                        pid: tauri_pid,
-                        exe: tauri_exe.clone(),
-                        args: tauri_args.clone(),
-                        uptime_ms: start_instant.elapsed().as_millis() as u64,
-                    },
-                    sidecars: server_registry.snapshot(),
-                };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /capabilities endpoint — declared Tauri capability set per window.
-            if url == "/capabilities" {
-                let req: AuthedRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-                if req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-
-                let windows: Vec<String> = app_handle.webview_windows().keys().cloned().collect();
-                let declared = collect_declared_capabilities(&app_handle);
-                let resp = CapabilitiesResponse { declared, windows };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /devtools endpoint — inspector URL or platform hint.
-            if url == "/devtools" {
-                let req: AuthedRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-                if req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-                let resp = devtools_response();
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /health endpoint — quick "is this app sick" check.
-            if url == "/health" {
-                let req: AuthedRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-                if req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-                let sidecars = server_registry.snapshot();
-                let sidecars_alive = sidecars.iter().all(|s| matches!(s.alive, Some(true) | None));
-                let webview_ready = !app_handle.webview_windows().is_empty();
-                let resp = HealthResponse {
-                    uptime_ms: start_instant.elapsed().as_millis() as u64,
-                    webview_ready,
-                    sidecars_alive,
-                    sidecars,
-                };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /describe endpoint
-            if url == "/describe" {
-                let desc_req: DescribeRequest = match serde_json::from_str(&body) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    }
-                };
-
-                if desc_req.token != expected_token {
-                    let _ = request
-                        .respond(Response::from_string("Unauthorized").with_status_code(401));
-                    continue;
-                }
-
-                let windows: Vec<String> = app_handle
-                    .webview_windows()
-                    .keys()
-                    .cloned()
-                    .collect();
-
-                let resp = DescribeResponse {
-                    pid: Some(std::process::id()),
-                    windows: Some(windows),
-                    capabilities: vec![
-                        "eval".to_string(),
-                        "logs".to_string(),
-                        "describe".to_string(),
-                    ],
-                    ..Default::default()
-                };
-
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
-                continue;
-            }
-
-            // Handle /eval endpoint
-            let eval_req: EvalRequest = match serde_json::from_str(&body) {
-                Ok(r) => r,
-                Err(_) => {
-                    let _ = request
-                        .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                    continue;
-                }
-            };
-
-            // Verify token
-            if eval_req.token != expected_token {
-                let _ =
-                    request.respond(Response::from_string("Unauthorized").with_status_code(401));
-                continue;
-            }
-
-            // Evaluate JS in webview via callback pattern
-            let request_id = uuid::Uuid::new_v4().to_string();
-
-            let window_label = eval_req.window.as_deref().unwrap_or("main");
-            if let Some(window) = app_handle.get_webview_window(window_label) {
-                let callback_js = build_eval_callback_js(&eval_req.js, &request_id);
-                let _ = window.eval(&callback_js);
-
-                // Wait for the result with a 5-second timeout. Poison
-                // recovery on both the lock and the Condvar wait (P-057):
-                // one panicked handler must not silently kill eval for the
-                // rest of the session.
-                let mut results = pending
-                    .results
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let deadline = std::time::Duration::from_secs(5);
-                let start = std::time::Instant::now();
-
-                loop {
-                    if let Some(value) = results.remove(&request_id) {
-                        let resp = EvalResponse { result: value };
+                    // Handle GET /version (no auth needed). Clients feature-detect
+                    // newer endpoints by checking the `endpoints` array.
+                    if url == "/version" && request.method().as_str() == "GET" {
+                        let resp = VersionResponse {
+                            version: BRIDGE_VERSION.to_string(),
+                            endpoints: vec![
+                                "/eval".to_string(),
+                                "/logs".to_string(),
+                                "/describe".to_string(),
+                                "/version".to_string(),
+                                "/process".to_string(),
+                                "/capabilities".to_string(),
+                                "/devtools".to_string(),
+                                "/health".to_string(),
+                            ],
+                        };
                         let json = serde_json::to_string(&resp).unwrap();
                         let header =
                             Header::from_bytes("Content-Type", "application/json").unwrap();
-                        let _ =
-                            request.respond(Response::from_string(json).with_header(header));
-                        break;
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
                     }
 
-                    let elapsed = start.elapsed();
-                    if elapsed >= deadline {
-                        // Timeout — clean up and respond with 504
-                        results.remove(&request_id);
-                        let _ = request.respond(
-                            Response::from_string("Eval timeout").with_status_code(504),
-                        );
-                        break;
+                    let known_post = matches!(
+                        url.as_str(),
+                        "/eval"
+                            | "/logs"
+                            | "/describe"
+                            | "/process"
+                            | "/capabilities"
+                            | "/devtools"
+                            | "/health"
+                    );
+                    if !is_post || !known_post {
+                        let _ = request
+                            .respond(Response::from_string("Not found").with_status_code(404));
+                        continue;
                     }
 
-                    let remaining = deadline - elapsed;
-                    let (guard, timeout_result) = pending
-                        .notify
-                        .wait_timeout(results, remaining)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    results = guard;
+                    // Read body
+                    let mut body = String::new();
+                    if let Err(_) = request.as_reader().read_to_string(&mut body) {
+                        let _ = request
+                            .respond(Response::from_string("Bad request").with_status_code(400));
+                        continue;
+                    }
 
-                    if timeout_result.timed_out() && !results.contains_key(&request_id) {
-                        results.remove(&request_id);
-                        let _ = request.respond(
-                            Response::from_string("Eval timeout").with_status_code(504),
-                        );
-                        break;
+                    // Handle /logs endpoint
+                    if url == "/logs" {
+                        let log_req: LogRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+
+                        if log_req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+
+                        let entries = server_log_buffer.drain();
+                        let resp = LogResponse { entries };
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /process endpoint — Tauri PID + sidecar registry snapshot.
+                    if url == "/process" {
+                        let req: AuthedRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+                        if req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+                        let resp = ProcessResponse {
+                            tauri: TauriProcessInfo {
+                                pid: tauri_pid,
+                                exe: tauri_exe.clone(),
+                                args: tauri_args.clone(),
+                                uptime_ms: start_instant.elapsed().as_millis() as u64,
+                            },
+                            sidecars: server_registry.snapshot(),
+                        };
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /capabilities endpoint — declared Tauri capability set per window.
+                    if url == "/capabilities" {
+                        let req: AuthedRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+                        if req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+
+                        let windows: Vec<String> =
+                            app_handle.webview_windows().keys().cloned().collect();
+                        let declared = collect_declared_capabilities(&app_handle);
+                        let resp = CapabilitiesResponse { declared, windows };
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /devtools endpoint — inspector URL or platform hint.
+                    if url == "/devtools" {
+                        let req: AuthedRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+                        if req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+                        let resp = devtools_response();
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /health endpoint — quick "is this app sick" check.
+                    if url == "/health" {
+                        let req: AuthedRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+                        if req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+                        let sidecars = server_registry.snapshot();
+                        let sidecars_alive = sidecars
+                            .iter()
+                            .all(|s| matches!(s.alive, Some(true) | None));
+                        let webview_ready = !app_handle.webview_windows().is_empty();
+                        let resp = HealthResponse {
+                            uptime_ms: start_instant.elapsed().as_millis() as u64,
+                            webview_ready,
+                            sidecars_alive,
+                            sidecars,
+                        };
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /describe endpoint
+                    if url == "/describe" {
+                        let desc_req: DescribeRequest = match serde_json::from_str(&body) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let _ = request.respond(
+                                    Response::from_string("Invalid JSON").with_status_code(400),
+                                );
+                                continue;
+                            }
+                        };
+
+                        if desc_req.token != expected_token {
+                            let _ = request.respond(
+                                Response::from_string("Unauthorized").with_status_code(401),
+                            );
+                            continue;
+                        }
+
+                        let windows: Vec<String> =
+                            app_handle.webview_windows().keys().cloned().collect();
+
+                        let resp = DescribeResponse {
+                            pid: Some(std::process::id()),
+                            windows: Some(windows),
+                            capabilities: vec![
+                                "eval".to_string(),
+                                "logs".to_string(),
+                                "describe".to_string(),
+                            ],
+                            ..Default::default()
+                        };
+
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
+                        continue;
+                    }
+
+                    // Handle /eval endpoint
+                    let eval_req: EvalRequest = match serde_json::from_str(&body) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            let _ = request.respond(
+                                Response::from_string("Invalid JSON").with_status_code(400),
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Verify token
+                    if eval_req.token != expected_token {
+                        let _ = request
+                            .respond(Response::from_string("Unauthorized").with_status_code(401));
+                        continue;
+                    }
+
+                    // Evaluate JS in webview via callback pattern
+                    let request_id = uuid::Uuid::new_v4().to_string();
+
+                    let window_label = eval_req.window.as_deref().unwrap_or("main");
+                    if let Some(window) = app_handle.get_webview_window(window_label) {
+                        let callback_js = build_eval_callback_js(&eval_req.js, &request_id);
+                        let _ = window.eval(&callback_js);
+
+                        // Wait for the result with a 5-second timeout. Poison
+                        // recovery on both the lock and the Condvar wait (P-057):
+                        // one panicked handler must not silently kill eval for the
+                        // rest of the session.
+                        let mut results = pending
+                            .results
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let deadline = std::time::Duration::from_secs(5);
+                        let start = std::time::Instant::now();
+
+                        loop {
+                            if let Some(value) = results.remove(&request_id) {
+                                let resp = EvalResponse { result: value };
+                                let json = serde_json::to_string(&resp).unwrap();
+                                let header =
+                                    Header::from_bytes("Content-Type", "application/json").unwrap();
+                                let _ = request
+                                    .respond(Response::from_string(json).with_header(header));
+                                break;
+                            }
+
+                            let elapsed = start.elapsed();
+                            if elapsed >= deadline {
+                                // Timeout — clean up and respond with 504
+                                results.remove(&request_id);
+                                let _ = request.respond(
+                                    Response::from_string("Eval timeout").with_status_code(504),
+                                );
+                                break;
+                            }
+
+                            let remaining = deadline - elapsed;
+                            let (guard, timeout_result) = pending
+                                .notify
+                                .wait_timeout(results, remaining)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            results = guard;
+
+                            if timeout_result.timed_out() && !results.contains_key(&request_id) {
+                                results.remove(&request_id);
+                                let _ = request.respond(
+                                    Response::from_string("Eval timeout").with_status_code(504),
+                                );
+                                break;
+                            }
+                        }
+                    } else {
+                        let resp = EvalResponse {
+                            result: serde_json::Value::Null,
+                        };
+                        let json = serde_json::to_string(&resp).unwrap();
+                        let header =
+                            Header::from_bytes("Content-Type", "application/json").unwrap();
+                        let _ = request.respond(Response::from_string(json).with_header(header));
                     }
                 }
-            } else {
-                let resp = EvalResponse {
-                    result: serde_json::Value::Null,
-                };
-                let json = serde_json::to_string(&resp).unwrap();
-                let header = Header::from_bytes("Content-Type", "application/json").unwrap();
-                let _ = request.respond(Response::from_string(json).with_header(header));
+            }));
+            match outcome {
+                // incoming_requests() drained — the server socket closed; end
+                // the thread for real.
+                Ok(()) => break,
+                Err(_) => {
+                    eprintln!(
+                        "[dev-bridge] request handler panicked — recovering; the bridge stays up"
+                    );
+                }
             }
-        }
-        }));
-        match outcome {
-            // incoming_requests() drained — the server socket closed; end
-            // the thread for real.
-            Ok(()) => break,
-            Err(_) => {
-                eprintln!(
-                    "[dev-bridge] request handler panicked — recovering; the bridge stays up"
-                );
-            }
-        }
         }
     });
 
@@ -1050,7 +1077,13 @@ mod tests {
     #[test]
     fn sidecar_registry_snapshot_reports_liveness_per_record() {
         let registry = Arc::new(SidecarRegistry::new());
-        register_sidecar(&registry, "self", std::process::id(), Some("/bin/x".into()), vec!["--a".into()]);
+        register_sidecar(
+            &registry,
+            "self",
+            std::process::id(),
+            Some("/bin/x".into()),
+            vec!["--a".into()],
+        );
         register_sidecar(&registry, "dead", 2_000_000_000, None, vec![]);
         // Re-registering a name is allowed — both entries are reported.
         register_sidecar(&registry, "self", std::process::id(), None, vec![]);
@@ -1072,8 +1105,7 @@ mod tests {
     fn bridge_log_layer_captures_formatted_events() {
         use tracing_subscriber::layer::SubscriberExt;
         let buffer = Arc::new(LogBuffer::new());
-        let subscriber =
-            tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
+        let subscriber = tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!("hello {}", 42);
             tracing::warn!("uh oh");
@@ -1092,8 +1124,7 @@ mod tests {
     fn bridge_log_layer_strips_debug_quotes_from_message() {
         use tracing_subscriber::layer::SubscriberExt;
         let buffer = Arc::new(LogBuffer::new());
-        let subscriber =
-            tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
+        let subscriber = tracing_subscriber::registry().with(create_log_layer(buffer.clone()));
         tracing::subscriber::with_default(subscriber, || {
             // `?` records the message field via Debug — `"quoted"` with quotes —
             // which MessageVisitor::record_debug strips back off.
