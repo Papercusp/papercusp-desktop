@@ -44,7 +44,7 @@ scn_seat_offer() {
 
   # 1. OWNER (a): create the fleet the member will delegate seats to.
   out="$(_fdir_mcp_call a 'fleet:create' "{\"name\":\"$slug\",\"description\":\"matrix seat-offer probe $MATRIX_RUN_ID\"}")"
-  if printf '%s' "$out" | grep -Eq '"isError" *: *true|MCP_ERROR|FDIR_NO_TOKEN'; then
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
     echo "seat-offer FAIL — fleet:create on frame a errored: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi
@@ -53,7 +53,7 @@ scn_seat_offer() {
   #    The store write is synchronous; the seat-offer publish is best-effort
   #    fire-and-forget behind it (polled below, never assumed).
   out="$(_fdir_mcp_call b 'resource:delegate' "{\"fleetSlug\":\"$slug\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":2}")"
-  if printf '%s' "$out" | grep -Eq '"isError" *: *true|MCP_ERROR|FDIR_NO_TOKEN'; then
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
     echo "seat-offer FAIL — resource:delegate on frame b errored: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi

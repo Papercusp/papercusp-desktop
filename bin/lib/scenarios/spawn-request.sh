@@ -31,14 +31,14 @@ scn_spawn_request() {
   # 1. OWNER (a): create the fleet — the caller becomes its leader (the
   #    request tool enforces leader-only).
   out="$(_fdir_mcp_call a 'fleet:create' "{\"name\":\"$slug\",\"description\":\"matrix spawn-request probe $MATRIX_RUN_ID\"}")"
-  if printf '%s' "$out" | grep -Eq '"isError" *: *true|MCP_ERROR|FDIR_NO_TOKEN'; then
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
     echo "spawn-request FAIL — fleet:create on frame a errored: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi
 
   # 2. MEMBER (b): delegate 2 haiku·low seats → publishes the seat-offer.
   out="$(_fdir_mcp_call b 'resource:delegate' "{\"fleetSlug\":\"$slug\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":2}")"
-  if printf '%s' "$out" | grep -Eq '"isError" *: *true|MCP_ERROR|FDIR_NO_TOKEN'; then
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
     echo "spawn-request FAIL — resource:delegate on frame b errored: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi
@@ -54,7 +54,7 @@ scn_spawn_request() {
   #    Auto-picks the single open seat-offer; the plan slug is a throwaway
   #    (the tool validates fleet+seat-offer, the plan is honored on spawn only).
   out="$(_fdir_mcp_call a 'fleet:request_remote_spawn' "{\"fleet\":\"$slug\",\"plan\":\"mx-plan-$slug\",\"count\":1}")"
-  if printf '%s' "$out" | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
     echo "spawn-request FAIL — fleet:request_remote_spawn on frame a errored: $(printf '%s' "$out" | tail -c 400)"
     return 1
   fi
