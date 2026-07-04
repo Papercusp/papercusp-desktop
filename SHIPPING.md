@@ -102,10 +102,11 @@ revisit before public distribution.
 Every Windows artifact gets one clean hands-off pass in the VM before it
 ships (the P-012 shape): **wipe → install the candidate → ONE launch, zero
 touches → WSL import + first-boot bootstrap + finalize restart + fresh
-initdb/migrations → then `bin/vm-smoke-windows.sh` from the host = 8/8
+initdb/migrations → then `bin/vm-smoke-windows.sh` from the host = 9/9
 green**. The smoke probes ssh → distro → app process → serve discovery →
 `/api/health` → backups+kopia (the WSLENV-PATH regression guard) →
-agent-tools loopback → zero PG ERROR lines.
+agent-tools loopback → zero PG ERROR lines → psu superuser shim + bundled
+launcher present.
 
 Resetting the VM between runs — two tiers:
 
@@ -129,6 +130,37 @@ Resetting the VM between runs — two tiers:
 
 Agent-side recipe + sharp edges (schtasks launch, CDP into the webview,
 inbox-WSL gotchas): `/internal/docs/agent-insights/windows-vm-desktop-testing-workflow`.
+
+#### Windows feature-parity status (verified 2026-07-04, signed 0.0.2)
+
+Plan `windows-desktop-feature-parity-2026-07-02` — VM-live-verified on the
+running signed 0.0.2 build (28/31 items done):
+
+- **Two-bundle GUI/Server split** — distinct bundle identities
+  (`com.papercusp.gui` / `com.papercusp.server`), distinct installed exes.
+  GUI auto-launches the Server when none is running and attaches; the Server
+  runs **headless** (tray only, no user window) and owns the WSL sidecar.
+- **Single-instance** (`tauri-plugin-single-instance`, release-only) —
+  per-bundle-identity lock: two GUIs (or two Servers) collide, a GUI + a
+  Server coexist. Behavioral PASS_ALL on the VM.
+- **Autostart** — Server registers an HKCU `Run` key (`Papercusp Server`),
+  survives login.
+- **Quit semantics** — closing the GUI window leaves the Server + sidecar
+  **alive** (psu + agents keep working); tray "Quit Papercusp Server" →
+  `app.exit(0)` → `kill_sidecar` SIGTERMs the WSL `serve` pid for a clean PG
+  shutdown (`main.rs` `run()`/`kill_sidecar`).
+- **Terminal launch / message injection / liveness / focus** — the operator
+  + psu run **inside WSL2** (`process.platform === 'linux'` even on Windows),
+  so most of these paths are the same POSIX code as Linux. Window enum/focus
+  is the exception: it MUST run as native Session-1 Tauri commands
+  (`native_console.rs`) — a Session-0 WSL-spawned powershell sees zero
+  interactive windows.
+
+Residuals (attended release-acceptance / minor, not code blockers): the
+`Focus this session` button-click→foreground E2E and a live-credentialed-agent
+functional click-through (both fold into the final attended gate); the
+`wt.exe`-absent fallback (minor edge); and native named-pipe `endpoint-ipc`
+(deferred to WI-1646 — the HTTP fallback carries all traffic today).
 
 #### Windows uninstall/reinstall semantics (P-015 findings, verified 2026-06-12)
 
