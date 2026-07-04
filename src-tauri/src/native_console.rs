@@ -238,15 +238,19 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     };
 
     // 2. Atomic .mcp.json write with backup-restore.
-    let cwd = PathBuf::from(&envelope.cwd);
-    let mcp_path = cwd.join(".mcp.json");
-    let displaced = if mcp_path.exists() {
-        let bak = cwd.join(".mcp.json.papercusp.bak");
+    //    Via the cfs_* console-fs helpers: on Windows `envelope.cwd` is a
+    //    LINUX path inside the WSL distro (where the console will run), so
+    //    every fs op must relay through `wsl.exe` — Windows std::fs against
+    //    it fails with os error 3 (found live 2026-07-03, WI-2149), and the
+    //    \\wsl.localhost mount is unreliable on real installs.
+    let mcp_path = console_path_join(&envelope.cwd, ".mcp.json");
+    let displaced = if cfs_exists(&mcp_path) {
+        let bak = console_path_join(&envelope.cwd, ".mcp.json.papercusp.bak");
         // If a stale bak from a previous unclean exit is sitting there,
         // leave it alone — we'd rather lose our restore than clobber
         // the user's real mcp.json on a botched cleanup.
-        if !bak.exists() {
-            std::fs::rename(&mcp_path, &bak).map_err(|e| format!("backup .mcp.json: {e}"))?;
+        if !cfs_exists(&bak) {
+            cfs_rename(&mcp_path, &bak).map_err(|e| format!("backup .mcp.json: {e}"))?;
             true
         } else {
             // Best effort: archive ours under a unique name. The user
@@ -256,7 +260,7 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     } else {
         false
     };
-    std::fs::write(&mcp_path, &envelope.mcp_json_contents)
+    cfs_write(&mcp_path, &envelope.mcp_json_contents)
         .map_err(|e| format!("write .mcp.json: {e}"))?;
 
     // 3. Build the launcher one-liner (same shape on every OS).
@@ -278,9 +282,9 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     //    we watch for the sentinel files the launcher's bash one-liner
     //    drops in cwd. Cap at 24h so a botched cleanup eventually heals.
     if displaced {
-        let cwd_clone = cwd.clone();
+        let cwd_clone = envelope.cwd.clone();
         let mcp_path_clone = mcp_path.clone();
-        let backup_path = cwd.join(".mcp.json.papercusp.bak");
+        let backup_path = console_path_join(&envelope.cwd, ".mcp.json.papercusp.bak");
         std::thread::spawn(move || {
             watch_and_restore_mcp_json(cwd_clone, mcp_path_clone, backup_path);
         });
@@ -289,7 +293,7 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
         // the .mcp.json we wrote — otherwise it sits in the user's
         // project forever, surprising them later when they `cat .mcp.json`.
         let mcp_path_clone = mcp_path.clone();
-        let cwd_clone = cwd.clone();
+        let cwd_clone = envelope.cwd.clone();
         std::thread::spawn(move || {
             watch_and_remove_mcp_json(cwd_clone, mcp_path_clone);
         });
@@ -302,11 +306,7 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
 /// last papercup-launched shell), restore the prior `.mcp.json` from
 /// the backup. Bounded by a 24h hard timeout so a hung shell doesn't
 /// leak our .mcp.json forever.
-fn watch_and_restore_mcp_json(
-    cwd: PathBuf,
-    mcp_path: PathBuf,
-    backup_path: PathBuf,
-) {
+fn watch_and_restore_mcp_json(cwd: String, mcp_path: String, backup_path: String) {
     if !wait_for_sentinels_to_clear(&cwd) {
         // Hard timeout fired. Restore anyway — better to lose freshness
         // than to leak our config forever.
@@ -315,24 +315,24 @@ fn watch_and_restore_mcp_json(
     // edited .mcp.json in the meantime they lose those edits — but
     // they wrote them into our temporary file, which was always
     // documented as ephemeral.
-    let _ = std::fs::rename(&backup_path, &mcp_path);
+    let _ = cfs_rename(&backup_path, &mcp_path);
 }
 
 /// Same as `watch_and_restore_mcp_json` but for the case where no
 /// prior `.mcp.json` existed — we just remove ours when the last
 /// console exits.
-fn watch_and_remove_mcp_json(cwd: PathBuf, mcp_path: PathBuf) {
+fn watch_and_remove_mcp_json(cwd: String, mcp_path: String) {
     let _cleared = wait_for_sentinels_to_clear(&cwd);
     // On either clean exit OR 24h timeout we remove our file. Leaving
     // it indefinitely would surprise the user; they can rerun the
     // launcher to get it back.
-    let _ = std::fs::remove_file(&mcp_path);
+    cfs_remove(&mcp_path);
 }
 
 /// Poll cwd every 5s for `.papercup-console-active.*` files. Returns
 /// true when the last sentinel went away (clean exit), false on
 /// 24h timeout.
-fn wait_for_sentinels_to_clear(cwd: &std::path::Path) -> bool {
+fn wait_for_sentinels_to_clear(cwd: &str) -> bool {
     use std::time::{Duration, Instant};
     const POLL: Duration = Duration::from_secs(5);
     const HARD_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
@@ -356,7 +356,8 @@ fn wait_for_sentinels_to_clear(cwd: &std::path::Path) -> bool {
     }
 }
 
-fn count_sentinels(cwd: &std::path::Path) -> usize {
+#[cfg(not(target_os = "windows"))]
+fn count_sentinels(cwd: &str) -> usize {
     let Ok(entries) = std::fs::read_dir(cwd) else {
         return 0;
     };
@@ -370,6 +371,119 @@ fn count_sentinels(cwd: &std::path::Path) -> usize {
                 .unwrap_or(false)
         })
         .count()
+}
+
+/// Windows: the sentinels live in the WSL cwd — count them through the distro.
+/// A relay FAILURE conservatively counts as 1 (assume a console is still
+/// alive) so a transient WSL hiccup can't trigger a premature .mcp.json
+/// restore; the 24h hard timeout still bounds the wait.
+#[cfg(target_os = "windows")]
+fn count_sentinels(cwd: &str) -> usize {
+    let script = format!(
+        "ls -1d {}/{}* 2>/dev/null | wc -l",
+        shell_escape_single(cwd),
+        SENTINEL_PREFIX
+    );
+    match wsl_fs(&["bash", "-c", &script], None) {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(1),
+        _ => 1,
+    }
+}
+
+// ── Console-fs helpers ──────────────────────────────────────────────
+// The console's filesystem is OURS on macOS/Linux, but on Windows the
+// console (and the operator that built the envelope) runs INSIDE the WSL
+// distro, so `envelope.cwd` is a Linux path: Windows std::fs against it
+// fails (os error 3), and the \\wsl.localhost mount is unreliable on real
+// installs (see main.rs read_operator_discovery_via_wsl). Every path here
+// is a STRING joined with '/' — correct on all three targets.
+
+fn console_path_join(cwd: &str, name: &str) -> String {
+    format!("{}/{}", cwd.trim_end_matches('/'), name)
+}
+
+/// Run a short-lived fs relay inside the WSL distro, hidden (CREATE_NO_WINDOW),
+/// optionally feeding `stdin` — the transport every cfs_* helper uses on Windows.
+#[cfg(target_os = "windows")]
+fn wsl_fs(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output, String> {
+    use std::io::Write as _;
+    use std::os::windows::process::CommandExt as _;
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.arg("-d").arg(WSL_DISTRO).arg("--").args(args);
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.stdin(if stdin.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("wsl.exe spawn: {e}"))?;
+    if let Some(data) = stdin {
+        let mut si = child.stdin.take().ok_or("wsl.exe stdin unavailable")?;
+        si.write_all(data.as_bytes())
+            .map_err(|e| format!("wsl.exe stdin: {e}"))?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| format!("wsl.exe wait: {e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cfs_exists(path: &str) -> bool {
+    std::path::Path::new(path).exists()
+}
+
+#[cfg(target_os = "windows")]
+fn cfs_exists(path: &str) -> bool {
+    wsl_fs(&["test", "-e", path], None)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cfs_rename(from: &str, to: &str) -> Result<(), String> {
+    std::fs::rename(from, to).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn cfs_rename(from: &str, to: &str) -> Result<(), String> {
+    let out = wsl_fs(&["mv", "-f", from, to], None)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
+    // `cat > path` with the contents on stdin — no quoting pitfalls.
+    let script = format!("cat > {}", shell_escape_single(path));
+    let out = wsl_fs(&["bash", "-c", &script], Some(contents))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cfs_remove(path: &str) {
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(target_os = "windows")]
+fn cfs_remove(path: &str) {
+    let _ = wsl_fs(&["rm", "-f", path], None);
 }
 
 /// Build the bash one-liner the terminal runs as its first command.
@@ -924,16 +1038,17 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
+        let tmp_s = tmp.to_str().unwrap();
         // None yet.
-        assert_eq!(count_sentinels(&tmp), 0);
+        assert_eq!(count_sentinels(tmp_s), 0);
         // Drop two sentinels + an unrelated file.
         std::fs::write(tmp.join(".papercup-console-active.123"), "").unwrap();
         std::fs::write(tmp.join(".papercup-console-active.456"), "").unwrap();
         std::fs::write(tmp.join("README.md"), "").unwrap();
-        assert_eq!(count_sentinels(&tmp), 2);
+        assert_eq!(count_sentinels(tmp_s), 2);
         // Remove one.
         std::fs::remove_file(tmp.join(".papercup-console-active.123")).unwrap();
-        assert_eq!(count_sentinels(&tmp), 1);
+        assert_eq!(count_sentinels(tmp_s), 1);
         std::fs::remove_dir_all(&tmp).ok();
     }
 

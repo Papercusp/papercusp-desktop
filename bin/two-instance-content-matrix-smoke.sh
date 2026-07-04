@@ -38,12 +38,32 @@ P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
 
 WORK="${PAPERCUSP_MATRIX_WORK:-$HOME/.papercusp-lane-a-fed}"
+# WI-2115: this smoke reuses the SAME fixed $WORK (and therefore the same fixed
+# $DISPLAY_NUM) across every invocation, and a run that reaches the end leaves
+# its pair (+ Xvfb) INTENTIONALLY running for follow-on lanes E/G (see header).
+# Nothing ever tears that down automatically — a human/agent must run the OLD
+# $WORK/stop.sh themselves. The unattended periodic gate (live-federation-gate.sh)
+# never does; it just re-runs this script on a timer. Result: the very first
+# completed run's Xvfb permanently squats $DISPLAY_NUM and EVERY subsequent gate
+# run fails fed_fresh_display's busy-refusal forever (observed: an orphan lived
+# 9+ hours and blocked both the periodic gate and a peer's manual WI-2102
+# verification reruns). Reap whatever a PRIOR invocation left behind, with its
+# OWN self-scoped stop.sh (pgrep -f "$WORK", excludes the invoker chain — safe,
+# never a binary-name-pattern kill), BEFORE wiping $WORK out from under it.
+[ -x "$WORK/stop.sh" ] && { "$WORK/stop.sh" >/dev/null 2>&1 || true; }
 rm -rf "$WORK" 2>/dev/null; mkdir -p "$WORK"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
 declare -A FED_LOG=( [a]="$WORK/inst-a.log" [b]="$WORK/inst-b.log" )
 declare -A AHOME=( [a]="$WORK/inst-a" [b]="$WORK/inst-b" )
 NONCE="$(date +%s)"
 log() { printf '\n=== %s ===\n' "$*"; }
+# WI-2115: on a HARD early exit (extract/clobber/display/DHT/boot/API/create/join
+# all `|| exit N` on failure) THIS invocation's own freshly-started Xvfb/DHT/
+# sidecars must not leak — reap exactly what fed_fresh_display/fed_start_testnet_dht
+# etc. appended to FED_KILL_PIDS. A CLEAN full-completion exit (status 0, whatever
+# the content-matrix poll results say) is UNCHANGED: still left running for lanes
+# E/G, per the header note — only the early-abort paths get cleaned.
+trap 'ec=$?; [ "$ec" -ne 0 ] && { log "cleanup on early exit (scoped to $WORK, status=$ec)"; fed_cleanup_scoped "$WORK"; }; exit $ec' EXIT
 jget() { printf '%s' "$1" | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin)
