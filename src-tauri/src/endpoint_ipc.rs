@@ -690,6 +690,32 @@ mod tests {
         }
     }
 
+    // WI-2817: the idle-timeout watchdog's pure staleness decision.
+    #[test]
+    fn idle_timeout_not_yet_stale_under_the_threshold() {
+        assert!(!is_idle_timed_out(1_000, 1_000 + 19_999, 20_000));
+    }
+
+    #[test]
+    fn idle_timeout_stale_exactly_at_the_threshold() {
+        // >= is intentional: a call that has had ZERO activity for exactly
+        // the timeout is treated as wedged, not given one more grace tick.
+        assert!(is_idle_timed_out(1_000, 1_000 + 20_000, 20_000));
+    }
+
+    #[test]
+    fn idle_timeout_stale_well_past_the_threshold() {
+        assert!(is_idle_timed_out(1_000, 1_000 + 60_000, 20_000));
+    }
+
+    #[test]
+    fn idle_timeout_saturates_instead_of_panicking_on_a_clock_oddity() {
+        // now < last_activity (a clock adjustment, or a racy read) must never
+        // underflow/panic — saturating_sub floors at 0, which is never >= a
+        // positive timeout.
+        assert!(!is_idle_timed_out(50_000, 1_000, 20_000));
+    }
+
     #[test]
     fn drain_in_flight_empties_map_and_returns_ids() {
         let map: DashMap<u64, CallSink> = DashMap::new();
