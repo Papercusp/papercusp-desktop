@@ -1943,13 +1943,120 @@ fn ensure_server_running(
         println!("[papercusp-gui] a Papercusp Server is already running — attaching");
         return;
     }
-    println!("[papercusp-gui] no Server reachable — launching the Papercusp Server bundle");
-    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+    // On Linux the app ships as ONE self-contained bundle (a single .deb /
+    // .AppImage). There is no separately-installed "Papercusp Server" bundle to
+    // gtk-launch — the Windows/macOS two-bundle split has no clean Linux
+    // packaging analog (two debs collide on /usr/bin/papercusp-desktop + the
+    // shared icons, and a `gtk-launch com.papercusp.server.desktop` can't resolve
+    // the productName-named "Papercusp Server.desktop" entry anyway). So on Linux
+    // the GUI process spawns + OWNS the operator sidecar itself, exactly like the
+    // Server role does — making a single `apt install` fully functional on a fresh
+    // machine. If a separate Server IS running it was already reached above, so
+    // this only fires when nothing is up. The child goes into SidecarState so the
+    // normal GUI quit path (kill_sidecar) tears embedded-PG + the operator down
+    // cleanly. (WI-2902, 2026-07-05.)
+    #[cfg(target_os = "linux")]
+    {
+        println!(
+            "[papercusp-gui] no Server reachable — self-hosting the operator sidecar (single-bundle Linux)"
+        );
+        if let Err(e) = spawn_self_hosted_sidecar(app_handle, workspace_home, via_wsl) {
+            eprintln!(
+                "[papercusp-gui] could not self-host the operator sidecar ({e}); \
+                 will keep polling in case it comes up another way"
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        println!("[papercusp-gui] no Server reachable — launching the Papercusp Server bundle");
+        if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+            eprintln!(
+                "[papercusp-gui] could not launch Papercusp Server ({e}); \
+                 will keep polling in case it comes up another way"
+            );
+        }
+    }
+}
+
+/// Linux single-bundle self-host: spawn + OWN the operator sidecar from the GUI
+/// process. Mirrors the Server-role boot in run()'s setup (embedded-PG + the Hono
+/// operator + code-server, all inside `serve.mjs --ensure`) MINUS the tray + the
+/// respawn supervisor — so a single `apt install ./papercusp.deb` (or the
+/// AppImage) is fully self-contained on a fresh machine, with no separately
+/// installed "Papercusp Server" bundle required. The `serve.mjs` child is stored
+/// in `SidecarState.child` so the ordinary GUI quit path (`kill_sidecar`) shuts
+/// embedded-PG + the operator down gracefully instead of orphaning postgres.
+#[cfg(target_os = "linux")]
+fn spawn_self_hosted_sidecar(
+    app_handle: &tauri::AppHandle,
+    workspace_home: &std::path::Path,
+    via_wsl: bool,
+) -> std::io::Result<()> {
+    // First-launch ~/.papercusp migration + per-workspace credential homes
+    // (same call the Server role makes before spawning serve).
+    if let Err(e) = workspaces::ensure_initialized() {
         eprintln!(
-            "[papercusp-gui] could not launch Papercusp Server ({e}); \
-             will keep polling in case it comes up another way"
+            "[papercusp-gui] workspace registry init failed: {e} (continuing with shared home)"
         );
     }
+    let sidecar_dir = app_handle
+        .path()
+        .resolve("sidecar", tauri::path::BaseDirectory::Resource)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./sidecar"));
+    let shared_state_dir = workspaces::shared_data_dir();
+    if let Err(e) = std::fs::create_dir_all(&shared_state_dir) {
+        eprintln!(
+            "[papercusp-gui] could not create shared state dir {}: {e}",
+            shared_state_dir.display()
+        );
+    }
+    let port = find_free_port().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no free port available for the operator",
+        )
+    })?;
+    let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
+
+    // Bundled code-server for the vscode-server iframe — optional + None-safe
+    // (mirrors the Server-role boot). A missing binary just disables that panel.
+    let code_server_url: Option<String> = {
+        let cs_dir = sidecar_dir.join("code-server");
+        let user_data_dir = shared_state_dir.join("code-server");
+        let _ = std::fs::create_dir_all(&user_data_dir);
+        match spawn_code_server(&cs_dir, workspace_home, &user_data_dir) {
+            Some((child, url)) => {
+                if let Some(state) = app_handle.try_state::<SidecarState>() {
+                    *state.code_server_child.lock().unwrap() = Some(child);
+                }
+                println!("[papercusp-gui] code-server ready at {url}");
+                Some(url)
+            }
+            None => None,
+        }
+    };
+
+    let child = spawn_serve(
+        via_wsl,
+        port,
+        &sidecar_dir,
+        pg_port_hint,
+        &shared_state_dir,
+        workspace_home,
+        code_server_url.as_deref(),
+    )?;
+
+    if let Some(state) = app_handle.try_state::<SidecarState>() {
+        *state.child.lock().unwrap() = Some(child);
+        *state.port.lock().unwrap() = Some(port);
+    } else {
+        // Managed state missing (should never happen — it's registered on the
+        // builder in run()). Leak the handle so the process survives: std's
+        // Child::drop does NOT kill the process, but being explicit documents it.
+        std::mem::forget(child);
+    }
+    Ok(())
 }
 
 /// Cross-platform "launch the sibling app bundle by identity".
