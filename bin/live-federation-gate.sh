@@ -64,6 +64,13 @@ GATE_SUPERUSER_TOKEN_PATH="${GATE_SUPERUSER_TOKEN_PATH:-$HOME/.papercusp/superus
 GATE_SUPERUSER_BEARER="$(cat "$GATE_SUPERUSER_TOKEN_PATH" 2>/dev/null | tr -d '[:space:]' || true)"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
+# Run-dir retention (WI-3087, 2026-07-05): this gate leaked ~3.5GB per heavy run (the
+# dpkg-deb -R unpacked pkg/ tree + the repacked gate .deb were never cleaned) — 67 dirs /
+# 111GB of /tmp by the time it filled the root disk. Keep only the newest
+# GATE_KEEP_RUNS run dirs (this one included; logs+deb of recent runs stay for EI
+# debugging); pkg/ is additionally removed right after a successful repack below.
+GATE_KEEP_RUNS="${GATE_KEEP_RUNS:-5}"
+ls -dt /tmp/live-fed-gate-* 2>/dev/null | tail -n +$(( GATE_KEEP_RUNS + 1 )) | xargs -r rm -rf --
 # log → STDERR. Load-bearing (P-013 validation run 2026-07-03): run_smoke's result is read
 # via $(command substitution); with log on stdout the captured value became
 # "log-line\nPASS|FAIL", so `[ "$RES" = FAIL ]` could NEVER match and a genuine
@@ -189,7 +196,7 @@ if [ -z "${GATE_DEB:-}" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \
           && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$DESKTOP_DIR/src-tauri/sidecar" "$APPDIR/sidecar" \
-          && dpkg-deb -b pkg "$GATE_DEB" ) >"$WORK/repack.log" 2>&1 \
+          && dpkg-deb -b pkg "$GATE_DEB" && rm -rf pkg ) >"$WORK/repack.log" 2>&1 \
         && log "repacked fresh .deb (base=$BASE_DEB)" || { log "repack FAILED ($WORK/repack.log) — skipping content-matrix"; GATE_DEB=""; SKIP_MATRIX=1; }
     else
       log "no base .deb to repack — skipping content-matrix leg"; SKIP_MATRIX=1
