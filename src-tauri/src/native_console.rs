@@ -465,9 +465,10 @@ fn decode_wsl_bytes(bytes: &[u8]) -> String {
 /// `from_utf8_lossy(stderr)`, so a wsl.exe interop/distro failure — which lands
 /// its message on STDOUT as UTF-16LE and leaves stderr empty — surfaced as a
 /// blank cause (the useless `write .mcp.json: ` this fixes, WI-2955). Surface
-/// the exit code AND both decoded streams. Ungated so the unit test compiles on
-/// Linux; only ever called from `#[cfg(target_os = "windows")]` sites.
-#[cfg(any(target_os = "windows", test))]
+/// the exit code AND both decoded streams. Windows-only (its only callers are the
+/// `#[cfg(windows)]` cfs_* sites); `decode_wsl_bytes` carries the `test` cfg so
+/// its heuristic is unit-covered on the Linux dev box.
+#[cfg(target_os = "windows")]
 fn wsl_relay_error(out: &std::process::Output) -> String {
     let code = out
         .status
