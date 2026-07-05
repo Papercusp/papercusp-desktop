@@ -1674,6 +1674,26 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
     ) {
         Ok(d) => d,
         Err(reason) => {
+            // WI-2749 part 1a: during Windows WSL onboarding the operator
+            // legitimately isn't up yet — WSL install + rootfs import +
+            // `/opt/papercup/bootstrap` + PG initdb/migrations routinely exceed
+            // this 120s wait, and the Server's post-onboarding finalize restart
+            // brings the operator up shortly after. Injecting the scary terminal
+            // boot-error OVER the onboarding gate mid-flow is a FALSE ALARM, so
+            // suppress it while WSL is not yet Ready: the gate UI owns onboarding
+            // progress + errors, and finish_boot re-runs after the finalize
+            // restart (when WSL is Ready) to surface any genuine operator failure.
+            #[cfg(target_os = "windows")]
+            if !matches!(
+                wsl_setup::detect(&app_handle).state,
+                wsl_setup::WslState::Ready
+            ) {
+                println!(
+                    "[papercusp-desktop] operator not up within 120s but WSL onboarding is still in progress — not a boot failure; deferring to the onboarding gate + the post-onboarding restart ({})",
+                    reason
+                );
+                return;
+            }
             eprintln!("[papercusp-desktop] FATAL: {}", reason);
             // Surface the failure ON the bootstrap page — web/index.html
             // renders window.__papercuspBootError as a terminal error

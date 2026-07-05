@@ -248,17 +248,34 @@ mod imp {
     struct PersistedState {
         install_kicked_off: bool,
         bootstrapped: bool,
-        /// Cross-process guard for the post-onboarding finalize RESTART. The
-        /// per-process `FINALIZED` atomic in `wsl_finalize_ready` only guards a
-        /// single process, but that restart breakaway-SPAWNS a fresh instance
-        /// which can re-enter the same defer→finalize path (its detect() may
-        /// still read not-Ready during WSL warm-up), chaining restart→restart→…
-        /// into the window-cascade loop users hit (WI-2749). Persisting a
-        /// "restart already done" flag here makes the finalize happen AT MOST
-        /// ONCE per onboarding across every spawned instance. Reset to false by
-        /// `run_bootstrap` so a fresh onboarding gets its one restart.
+        /// Cross-process guard for the post-onboarding finalize RESTART, keyed
+        /// PER BUNDLE ROLE. The per-process `FINALIZED` atomic in
+        /// `wsl_finalize_ready` only guards a single process, but that restart
+        /// breakaway-SPAWNS a fresh instance which can re-enter the same
+        /// defer→finalize path (its detect() may still read not-Ready during WSL
+        /// warm-up), chaining restart→restart→… into the window-cascade loop
+        /// users hit (WI-2749). Persisting a "restart already done" flag makes
+        /// the finalize happen AT MOST ONCE per onboarding across every spawned
+        /// instance. Reset by `run_bootstrap` so a fresh onboarding gets its one
+        /// restart.
+        ///
+        /// It MUST be per-role: the GUI and Server BOTH call `wsl_finalize_ready`
+        /// (the GUI from the gate's observed Ready transition, the Server from its
+        /// deferred-boot watcher) but need DIFFERENT outcomes — the GUI restart
+        /// re-points the webview at the now-up operator, the SERVER restart is the
+        /// only thing that spawns the sidecar (its main-thread `install_server_tray`
+        /// can't move off the setup thread, so it can't spawn in a watcher thread).
+        /// A single shared flag let whichever fired FIRST (usually the GUI gate)
+        /// suppress the OTHER — so the Server never restarted, never spawned the
+        /// sidecar, and the GUI then hit its 120s FATAL: stranded cold onboarding
+        /// (WI-2749 cold-variant, found live 2026-07-05). Per-role flags let each
+        /// role take its own single restart; the cascade stays bounded because a
+        /// restarted instance boots Ready (CREATE_NO_WINDOW makes detect() reliable
+        /// console-less) and so never re-enters the defer→finalize path.
         #[serde(default)]
-        finalize_restart_done: bool,
+        gui_finalize_restart_done: bool,
+        #[serde(default)]
+        server_finalize_restart_done: bool,
     }
 
     fn state_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -526,24 +543,43 @@ mod imp {
         }
         let mut st = load_state(app);
         st.bootstrapped = true;
-        // A fresh bootstrap is a fresh onboarding: re-allow the single
-        // post-onboarding finalize RESTART (see finalize_restart_done).
-        st.finalize_restart_done = false;
+        // A fresh bootstrap is a fresh onboarding: re-allow BOTH roles' single
+        // post-onboarding finalize RESTART (see the per-role flags above).
+        st.gui_finalize_restart_done = false;
+        st.server_finalize_restart_done = false;
         save_state(app, &st)?;
         Ok(format!("{}\n{}", stdout, stderr))
     }
 
-    /// Has the post-onboarding finalize RESTART already fired (persisted,
-    /// cross-process)? Guards the WI-2749 respawn/window-cascade loop.
-    pub(crate) fn finalize_restart_already_done(app: &tauri::AppHandle) -> bool {
-        load_state(app).finalize_restart_done
+    /// The current process's bundle role (GUI vs Server) — the finalize guard is
+    /// keyed on it so each role takes its OWN single post-onboarding restart.
+    fn is_gui_role(app: &tauri::AppHandle) -> bool {
+        use tauri::Manager;
+        crate::app_role::detect(&app.config().identifier).is_gui()
     }
 
-    /// Persist that the finalize RESTART has fired, so no other spawned instance
-    /// repeats it (WI-2749).
+    /// Has THIS ROLE's post-onboarding finalize RESTART already fired (persisted,
+    /// cross-process)? Guards the WI-2749 respawn/window-cascade loop while still
+    /// letting the GUI and the Server each restart once (they need different
+    /// outcomes — see the per-role flags on `PersistedState`).
+    pub(crate) fn finalize_restart_already_done(app: &tauri::AppHandle) -> bool {
+        let st = load_state(app);
+        if is_gui_role(app) {
+            st.gui_finalize_restart_done
+        } else {
+            st.server_finalize_restart_done
+        }
+    }
+
+    /// Persist that THIS ROLE's finalize RESTART has fired, so no other spawned
+    /// instance of the SAME role repeats it (WI-2749).
     pub(crate) fn mark_finalize_restart_done(app: &tauri::AppHandle) {
         let mut st = load_state(app);
-        st.finalize_restart_done = true;
+        if is_gui_role(app) {
+            st.gui_finalize_restart_done = true;
+        } else {
+            st.server_finalize_restart_done = true;
+        }
         let _ = save_state(app, &st);
     }
 

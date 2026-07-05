@@ -77,7 +77,12 @@
     },
     "windows": {
       "wix": {
-        "language": "en-US"
+        "language": "en-US",
+        "fragmentPaths": ["./windows/fragments/tutorial-shortcut.wxs"],
+        "componentRefs": ["PapercuspTutorialShortcut"]
+      },
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
       }
     }
   },
