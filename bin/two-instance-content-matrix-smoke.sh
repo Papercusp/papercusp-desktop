@@ -143,14 +143,14 @@ printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ 
 # claim/supersede flow") makes every invocation mint a FRESH hive+slug instead of
 # short-circuiting to the existing one, so the smoke is idempotent/rerunnable.
 log "A: create+publish PUBLIC hive ($REPO_URL)"
-a_resp="$(curl -s -m 610 -X POST "$(sc a)/api/harness/hives/from-repo" -H 'content-type: application/json' \
+a_resp="$(curl -s -m 610 -X POST "$(sc a)/api/harness/pots/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
 HIVE_SLUG="$(jget "$a_resp" "d['created']['hiveSlug']")"; SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 [ -n "$HIVE_SLUG" ] && [ -n "$SLUG" ] && echo "✓ public hive='$HIVE_SLUG' member='$SLUG' announced=$(jget "$a_resp" "d['publish']['announced']")" \
   || { echo "✗ create failed: $(echo "$a_resp" | head -c 300)"; exit 6; }
 if [ -z "${SKIP_INVITE:-}" ]; then
   log "A: create separate INVITE hive ($INV_REPO_URL)"
-  inv="$(curl -s -m 610 -X POST "$(sc a)/api/harness/hives/from-repo" -H 'content-type: application/json' \
+  inv="$(curl -s -m 610 -X POST "$(sc a)/api/harness/pots/from-repo" -H 'content-type: application/json' \
     -d "{\"githubUrl\":\"$INV_REPO_URL\",\"visibility\":\"invite\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
   INV_SLUG="$(jget "$inv" "d['created']['hiveSlug']")"
   INV_TOPIC="$(q a "SELECT payload::text FROM harness_shared.harness_registry WHERE payload::text LIKE '%$INV_SLUG%' LIMIT 1;" | grep -oE 'topic[^,]{0,80}' | head -1)"
@@ -276,7 +276,7 @@ TEQ=$([ -n "$ST" ] && echo "PASS (${ST:0:16}…)" || echo UNCONFIRMED); echo "  
 # steps 1-4 (a distinct repo → a distinct hiveSlug, no join/content interaction).
 if [ -z "${SKIP_B_PUBLISH:-}" ]; then
   log "B: create+publish its OWN PUBLIC hive ($B_REPO_URL) — symmetric directory check"
-  b_resp="$(curl -s -m 610 -X POST "$(sc b)/api/harness/hives/from-repo" -H 'content-type: application/json' \
+  b_resp="$(curl -s -m 610 -X POST "$(sc b)/api/harness/pots/from-repo" -H 'content-type: application/json' \
     -d "{\"githubUrl\":\"$B_REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
   B_HIVE_SLUG="$(jget "$b_resp" "d['created']['hiveSlug']")"
   if [ -n "$B_HIVE_SLUG" ]; then

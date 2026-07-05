@@ -282,14 +282,14 @@ do_setup() {
   fed_wait_api a || echo "⚠ A api not ready"; fed_wait_api b || echo "⚠ B api not ready"
 
   REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
-  fed_log "A: POST hives/from-repo ($REPO_URL, force) → resolve hive memberLink + hiveId + hivePubkey"
+  fed_log "A: POST pots/from-repo ($REPO_URL, force) → resolve hive memberLink + hiveId + hivePubkey"
   # force:true (WI-1331): the test repo already has a hive in the shared public
   # directory from prior runs, so a non-forced from-repo returns the `existing`
   # join-offer shape (directory hit → NO memberLinks/hivePubkey) and the setup
   # FATALs "could not resolve a hive memberLink". force creates a FRESH isolated
   # hive per run. Same fix as rig_owner_publish_hive in bin/lib/deb-hetzner-rig.sh.
   a_resp="$(drv_exec a <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","force":true,"visibility":"public","runTests":false,"shallow":true}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/harness/pots/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$REPO_URL","force":true,"visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
   echo "A from-repo → $(printf '%s' "$a_resp" | head -c 200)"

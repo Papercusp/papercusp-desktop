@@ -6,7 +6,7 @@
 # full-app-stack instances on one box, distinct GitHub identities, local
 # testnet DHT (PAPERCUSP_DHT_BOOTSTRAP). The loop proven end-to-end:
 #
-#   1. A: POST /api/harness/hives/from-repo {githubUrl, visibility:public}
+#   1. A: POST /api/harness/pots/from-repo {githubUrl, visibility:public}
 #      → clone + blueprint + hive home + member + AUTO-PUBLISH (P-006/P-007).
 #      Asserted: ok:true, created.hiveSlug/memberSlug, publish.announced:true,
 #      and bindingUnverified:true — both instances point PAPERCUSP_CUPBOARD_URL
@@ -17,7 +17,7 @@
 #      testnet wire + verified), memberLinks intact. (The HTTP projection does
 #      not expose memberRepos — the announce's member_repos leg is proven by
 #      step 3 instead, which can ONLY hit via hiveMatchesRepo(memberRepos).)
-#   3. B: POST the SAME repo URL to /api/harness/hives/from-repo → must get the
+#   3. B: POST the SAME repo URL to /api/harness/pots/from-repo → must get the
 #      JOIN OFFER (existing.kind === 'hive', source === 'directory', NO create,
 #      zero side effects) — the paste-time dedup loop (P-005/P-008).
 #   4. B: accepts — POST /api/harness/join-link per offered memberLink
@@ -33,7 +33,7 @@
 #   deb      — the template path: extract a packaged .deb, launch the desktop
 #              binary twice under Xvfb (two-instance-hive-directory-smoke.sh
 #              mechanics). REQUIRES a .deb built from a tree with the from-repo
-#              backend (hives/from-repo + member_repos) — enforced by a static
+#              backend (pots/from-repo + member_repos) — enforced by a static
 #              grep, exactly like the directory smoke's createDirectoryGossip
 #              gate.
 #   sidecar  — the documented FALLBACK when the on-disk .deb predates the
@@ -124,11 +124,11 @@ B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 [ -n "$A_TOKEN" ] && [ -n "$B_TOKEN" ] || { echo "FATAL: need gh tokens for $P_A_USER + $P_B_USER (gh auth login). Every leg needs A's; B's discovery/offer/join legs need B's."; exit 1; }
 
 # ── from-repo support gate (the directory smoke's static-grep pattern) ─────────
-# An older serve.mjs silently 404s POST /harness/hives/from-repo and announces
+# An older serve.mjs silently 404s POST /harness/pots/from-repo and announces
 # without member_repos (B's offer leg can never hit) — fail fast instead.
 assert_serve_supports_from_repo() {
   local serve="$1" label="$2"
-  for marker in 'hives/from-repo' 'member_repos' 'PAPERCUSP_DHT_BOOTSTRAP' 'createDirectoryGossip'; do
+  for marker in 'pots/from-repo' 'member_repos' 'PAPERCUSP_DHT_BOOTSTRAP' 'createDirectoryGossip'; do
     grep -q "$marker" "$serve" 2>/dev/null || {
       echo "✗ $label serve.mjs lacks '$marker' — built before hive-from-github-url P-003/P-006; rebuild it"
       return 1
@@ -293,7 +293,7 @@ dir_list() { curl -s -m 10 "http://127.0.0.1:${FED_SC[$1]}/api/discovery/hives";
 # shallow + runTests:false keep the create light; route timeoutSec is 600.
 from_repo() {
   local inst="$1"
-  curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/hives/from-repo" \
+  curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/pots/from-repo" \
     -H 'content-type: application/json' \
     -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}"
 }
@@ -324,7 +324,7 @@ mcp_call() {
 }
 
 # ── 1. A creates a PUBLIC hive from the fixture repo ────────────────────────────
-log "A ($P_A_USER): POST /api/harness/hives/from-repo ($REPO_URL, public, runTests:false, shallow)"
+log "A ($P_A_USER): POST /api/harness/pots/from-repo ($REPO_URL, public, runTests:false, shallow)"
 a_resp="$(from_repo a)"
 echo "A create → $(echo "$a_resp" | head -c 600)"
 A_OK="$(jget "$a_resp" "d['ok'] and 'created' in d")"

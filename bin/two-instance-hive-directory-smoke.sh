@@ -9,7 +9,7 @@
 # (bin/live-federation-gate.sh) runs:
 #   - two-instance-hive-from-repo-smoke.sh  (create-from-repo → discover → join;
 #     bidir origin=remote merge, A-003 settings/members, AK admission)
-#   - two-instance-content-matrix-smoke.sh  (hives/from-repo publish → directory
+#   - two-instance-content-matrix-smoke.sh  (pots/from-repo publish → directory
 #     list on B → join-hive; per-table content federation matrix)
 # Kept for reference per the retired-surfaces convention — do NOT extend or
 # re-green; delete the banner only if the per-harness wire is deliberately

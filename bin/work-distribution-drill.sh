@@ -139,7 +139,7 @@ echo "  workspace=$WS (writes below stamp x-papercusp-workspace: $WS)"
 H_WS="x-papercusp-workspace: $WS"
 
 log "create + publish PUBLIC hive ($REPO_URL)"
-resp="$(curl -s -m 610 -X POST "$SC/api/harness/hives/from-repo" -H 'content-type: application/json' \
+resp="$(curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
 # Two OK shapes: fresh 'created', or 'existing' — the identity+repo hive anchor
 # persists ACROSS instance homes (earlier same-identity smoke runs registered

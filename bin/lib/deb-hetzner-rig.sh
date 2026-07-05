@@ -10,7 +10,7 @@
 #
 # Topology: this lib generalizes the old hardcoded a=owner + b=joiner to an
 # ARBITRARY frame array RIG_FRAMES=(a b c …). Frame `a` is the OWNER (it runs
-# hives/from-repo + surfaces the hiveId/hivePubkey/memberLink); every frame
+# pots/from-repo + surfaces the hiveId/hivePubkey/memberLink); every frame
 # (owner included) then JOINs the SAME hive via POST /api/discovery/join-hive
 # (joinHiveAsView re-keys it onto the owner's hive-pubkey topic — EI-681). A
 # scenario picks the frame count + per-frame gh identity + region.
@@ -583,14 +583,14 @@ rig_wait_all_ready() {
 }
 
 # ── owner publishes the hive (from-repo) → resolve hiveId/pubkey/memberLink ───
-# rig_owner_publish_hive <owner-inst> <repo_url> — POST hives/from-repo on the
+# rig_owner_publish_hive <owner-inst> <repo_url> — POST pots/from-repo on the
 # owner, then resolve the THREE fields /api/discovery/join-hive needs
 # ({ hiveId, hivePubkey, memberLinks }) from whichever response shape came back
 # (fresh-create vs existing). Sets RIG_HIVE_ID / RIG_HIVE_PUBKEY / RIG_HIVE_LINK.
 rig_owner_publish_hive() {
   local owner="$1" repo="${2:-https://github.com/octocat/Hello-World}" a_resp fields
   RIG_REPO_URL="$repo"
-  fed_log "[$owner=OWNER] POST hives/from-repo ($repo, force) → resolve hive memberLink + hiveId + hivePubkey"
+  fed_log "[$owner=OWNER] POST pots/from-repo ($repo, force) → resolve hive memberLink + hiveId + hivePubkey"
   # WI-1331 (Brief 5 live run): force:true is REQUIRED. The test repo
   # (octocat/Hello-World) already has a hive registered in the shared PUBLIC
   # directory from prior runs, so a non-forced from-repo hits the paste-time
@@ -603,7 +603,7 @@ rig_owner_publish_hive() {
   # (own slug + own hivePubkey → own federation topic), returning the
   # {created,publish:{memberLinks,hivePubkey}} shape the parse below expects.
   a_resp="$(drv_exec "$owner" <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/hives/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","force":true,"visibility":"public","runTests":false,"shallow":true}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/pots/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","force":true,"visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
   echo "[$owner] from-repo → $(printf '%s' "$a_resp" | head -c 200)"
@@ -746,7 +746,7 @@ rig_github_id() { gh api "users/$1" --jq '.id' 2>/dev/null; }
 # rig_ban_member <owner-inst> <target-github-id> [scope]
 #   scope="hive" (DEFAULT) — Hive-wide revoke: POST /api/admin/substrate/revoke-contributor
 #         {hiveSlug=RIG_HIVE_ID}. Authority = the Swarm holding the Hive key (the owner
-#         frame that ran hives/from-repo). Drives revokeHiveContributor → the
+#         frame that ran pots/from-repo). Drives revokeHiveContributor → the
 #         revoked_pubkeys admission blocklist AND (once the C-001 re-key advances the
 #         epoch EXCLUDING the target) the epoch K-cut READ cut-off. revoke.live is FALSE
 #         until the next re-key lands — the owner must WRITE post-ban content to trigger

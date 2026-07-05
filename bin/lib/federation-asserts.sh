@@ -531,13 +531,13 @@ except Exception: pass
 }
 
 # fed_hive_create_from_repo <inst> <repo_url> [extra_json_fields]
-# POST /api/harness/hives/from-repo — clone + blueprint + hive home + member +
+# POST /api/harness/pots/from-repo — clone + blueprint + hive home + member +
 # auto-publish. runTests:false + shallow keep it light (route timeoutSec is 600).
 # Echoes the raw JSON: { ok, created:{hiveSlug,memberSlug}, publish:{announced}, … }.
 fed_hive_create_from_repo() {
   local inst="$1" repo="$2" extra="${3:-}"
   drv_exec "$inst" <<EOF
-curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/hives/from-repo" \
+curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/pots/from-repo" \
   -H 'content-type: application/json' \
   -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true$extra}'
 EOF
