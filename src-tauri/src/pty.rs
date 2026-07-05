@@ -612,6 +612,21 @@ mod tests {
     }
 
     #[test]
+    fn conpty_handshake_alone_is_not_real_output() {
+        // The wedge signature (WI-3033): exactly the ConPTY cursor-position
+        // query, possibly repeated — never real child output.
+        assert!(!contains_real_output(b""));
+        assert!(!contains_real_output(b"\x1b[6n"));
+        assert!(!contains_real_output(b"\x1b[6n\x1b[6n"));
+        // Anything beyond the handshake is real, wherever it sits.
+        assert!(contains_real_output(b"hello"));
+        assert!(contains_real_output(b"\x1b[6nhello"));
+        assert!(contains_real_output(b"\x1b[2J"));
+        // A handshake split across reads counts as real (documented trade-off).
+        assert!(contains_real_output(b"\x1b["));
+    }
+
+    #[test]
     fn unknown_id_errors_cleanly() {
         let bogus = "00000000-0000-0000-0000-000000000000".to_string();
         assert!(pty_write(bogus.clone(), String::new()).is_err());
