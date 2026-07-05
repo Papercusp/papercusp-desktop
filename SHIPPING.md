@@ -49,6 +49,29 @@ The auto-updater route (`/api/updates/manifest` in the operator) reads from thes
 | Windows x86_64 | optional | `WITH_WINDOWS=1 bin/release-local.sh …` (builds natively on the local Windows VM) |
 | macOS universal | optional | `WITH_MAC=1 bin/release-local.sh …` (builds natively on the local Mac VM) |
 
+### Linux (single self-hosting bundle — NOT the Win/Mac two-bundle split)
+
+On Linux the app ships as **ONE self-contained bundle** (`Papercusp GUI` .deb + .AppImage),
+not the GUI-attaches-to-Server two-bundle split used on Windows/macOS. Rationale + the
+verified fresh-install behavior: WI-2902 (2026-07-05).
+
+- **Self-host.** The GUI, finding no separate "Papercusp Server" running, spawns + owns the
+  operator sidecar itself (`main.rs` `spawn_self_hosted_sidecar`, Linux-gated) — so a single
+  `apt install ./Papercusp\ GUI_*.deb` gives a fully working operator + embedded Postgres. (The
+  two-bundle split has no clean Linux packaging analog: two debs collide on
+  `/usr/bin/papercusp-desktop`, and `gtk-launch com.papercusp.server.desktop` can't resolve the
+  productName-named desktop entry.)
+- **`psu`/`ptool`/`papercusp` on PATH** come from `deb/postinstall.sh`, which resolves the
+  installed sidecar dir by glob (`/usr/lib/Papercusp*/sidecar` — the productName has a space).
+- **AppImage is built by `bin/build-appimage.sh`, NOT tauri's `appimage` target** (WI-2918).
+  tauri's target runs linuxdeploy across the whole AppDir, which crashes ELF-scanning the large
+  self-contained sidecar tree (`Failed to run ldd`). `build-appimage.sh` lets tauri create the
+  complete AppDir (gtk/webkit libs deployed), then packages it with `appimagetool` directly.
+  `release-local.sh` calls it after building `--bundles deb,rpm`.
+- ⚠ **AppImage needs FUSE.** Ubuntu 24.04+ ships no `libfuse2` by default — end users must
+  `sudo apt install libfuse2t64` (or run `./Papercusp*.AppImage --appimage-extract-and-run`).
+  Say so in the Linux release notes. The `.deb` has no such requirement.
+
 ### macOS (universal .dmg + updater .app.tar.gz, built on the Mac VM)
 
 `WITH_MAC=1` drives a native build on the local QEMU macOS Sonoma VM
