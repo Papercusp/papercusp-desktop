@@ -90,8 +90,11 @@ fi
 # PAPERCUSP_SKIP_SEED_CUT=1 reuses the existing/rsync'd seed (a1a71 guidance:
 # rsync the real Tower seed for VM verification, don't cut on the VM).
 cut_release_seed() {
-  if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
-    echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — using existing src-tauri/seed payload"
+  # Fast-iteration mode implies skip-seed-cut: a dev loop testing Rust/UI
+  # changes never needs a fresh 3.77 GB seed (reuses whatever src-tauri/seed
+  # holds). A real release leaves PAPERCUSP_FAST_ITER unset so the cut runs.
+  if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" || "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
+    echo "==> seed: skipping cut (PAPERCUSP_SKIP_SEED_CUT/FAST_ITER) — using existing src-tauri/seed payload"
     [[ -f "$ROOT/src-tauri/seed/manifest.json" ]] || echo "WARN: no seed manifest present; this build will ship the placeholder seed" >&2
     return 0
   fi
@@ -173,8 +176,20 @@ ls -lh "$TARBALL"
 echo "==> shipping to VM"
 "${SCP[@]}" "$TARBALL" "$VM_SSH_HOST":'C:/Users/user/papercusp-desktop-build.tar.gz'
 
-echo "==> extracting in VM ($VM_BUILD_DIR)"
-"${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\Users\\user\\$VM_BUILD_DIR -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
+# Fast-iter (PAPERCUSP_FAST_ITER=1): extract OVER the existing build dir instead
+# of wiping it. The tarball excludes src-tauri/target + node_modules, so those
+# caches SURVIVE across builds → cargo goes incremental (~1-3 min) instead of a
+# cold ~20 min rebuild, and npm install is a near-no-op. tar overwrites every
+# source/sidecar file present in the archive, so correctness is preserved; the
+# only gap vs a clean build is that a source file DELETED in the repo lingers in
+# the VM (harmless for iteration — do a full non-FAST_ITER build for a release).
+if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
+  echo "==> extracting in VM ($VM_BUILD_DIR) — FAST_ITER: over existing dir, caches preserved"
+  "${SSH[@]}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
+else
+  echo "==> extracting in VM ($VM_BUILD_DIR)"
+  "${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\Users\\user\\$VM_BUILD_DIR -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
+fi
 
 # ── Authenticode signing (WI-792 P-003) — sign the bundled .exe + NSIS installer
 # IFF the owner provides a code-signing cert in env. With NO cert env set,
@@ -242,6 +257,26 @@ else
   echo "    A PUBLIC release MUST be signed: /internal/docs/agent-insights/windows-authenticode-signing-runbook"
 fi
 
+# Fast-iter build knobs — all no-ops unless PAPERCUSP_FAST_ITER=1. Injected into
+# the PS1 heredoc below (unquoted <<EOF, so ${VAR} expands; the $-signs inside
+# each value are NOT re-scanned, so PS variables like $LASTEXITCODE survive).
+if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
+  # sccache caches compiled crates across even clean builds; best-effort (only
+  # if it's installed on the VM PATH). Persisted target/ already gives cargo
+  # incremental regardless.
+  FAST_ITER_PRELUDE='if (Get-Command sccache -ErrorAction SilentlyContinue) { $env:RUSTC_WRAPPER = "sccache"; Write-Host "[build] FAST_ITER: RUSTC_WRAPPER=sccache" } else { Write-Host "[build] FAST_ITER: sccache not on VM PATH (skipping; cargo incremental via persisted target still applies)" }'
+  # node_modules persists across FAST_ITER builds — skip the reinstall when it is
+  # already there. Change a dependency? run a full (non-FAST_ITER) build once.
+  NPM_INSTALL_BLOCK='if (Test-Path node_modules) { Write-Host "[build] FAST_ITER: node_modules present — skipping npm install" } else { Write-Host "[build] npm install"; npm install --no-audit --no-fund 2>&1 }'
+  # Dev iteration targets the GUI app — skip the second (Server) bundle, halving
+  # the Rust compile + NSIS pack.
+  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER: skipping Papercusp Server bundle"'
+else
+  FAST_ITER_PRELUDE=''
+  NPM_INSTALL_BLOCK=$'Write-Host "[build] npm install"\nnpm install --no-audit --no-fund 2>&1'
+  SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server --bundles nsis"\nnpx tauri build --bundles nsis --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"'
+fi
+
 echo "==> writing build script"
 BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
 cat > "$BUILD_PS1" <<EOF
@@ -253,8 +288,8 @@ cmd /c "\`"\$vcvars\`" && set" | ForEach-Object {
   if (\$_ -match "^(.*?)=(.*)\$") { [System.Environment]::SetEnvironmentVariable(\$matches[1], \$matches[2], "Process") }
 }
 Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
-Write-Host "[build] npm install"
-npm install --no-audit --no-fund 2>&1
+${FAST_ITER_PRELUDE}
+${NPM_INSTALL_BLOCK}
 ${SIGN_PRELUDE}
 # Build provenance: baked via option_env!("PAPERCUSP_BUILD_SHA") (main.rs) so
 # the operator's /api/health self-reports the commit. Empty when unset.
@@ -272,9 +307,7 @@ Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
 Write-Host "[build] tauri build: Papercusp GUI --bundles nsis"
 npx tauri build --bundles nsis 2>&1
 Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
-Write-Host "[build] tauri build: Papercusp Server --bundles nsis"
-npx tauri build --bundles nsis --config src-tauri/tauri.server.conf.json 2>&1
-Write-Host "[build] Server EXIT=\$LASTEXITCODE"
+${SERVER_BUILD_BLOCK}
 EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
 rm -f "$BUILD_PS1"
