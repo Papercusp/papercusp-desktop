@@ -703,9 +703,18 @@ fn build_external_oneliner(spec: &ExternalConsoleSpec) -> String {
     )
 }
 
-/// Run `spec` in a new external Windows Terminal window (conhost fallback).
-/// Returns the launcher pid when one is observable. Windows-only by design:
-/// on macOS/Linux the embedded pty terminal works and stays the UX.
+/// Run `spec` in a new external NATIVE terminal window.
+///
+///  - Windows: a new Windows Terminal window (conhost fallback) — WI-3033
+///    (the embedded ConPTY path wedges on legacy inbox WSL).
+///  - Linux: a new terminal window — the BUNDLED ghostty first (always shipped
+///    with the desktop, so a barebones install needs no system emulator), then
+///    $TERMINAL / the known-emulator cascade. Owner directive 2026-07-05: the
+///    onboarding tutorial runs in a real native terminal window, not an
+///    embedded webview pane.
+///  - macOS: unchanged (the embedded SwiftTerm pane works and stays the UX).
+///
+/// Returns the launcher pid when one is observable.
 #[tauri::command]
 #[specta::specta]
 pub async fn external_console_run(spec: ExternalConsoleSpec) -> Result<Option<u32>, String> {
@@ -718,11 +727,96 @@ pub async fn external_console_run(spec: ExternalConsoleSpec) -> Result<Option<u3
         );
         spawn_windows_terminal_script(&spec.cwd, &spec.title, &script_name, &oneliner)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let oneliner = build_external_oneliner(&spec);
+        spawn_linux_external_window(&spec, &oneliner)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = spec;
-        Err("external_console_run is Windows-only — use the embedded terminal".to_string())
+        Err("external_console_run is Windows/Linux-only — use the embedded terminal".to_string())
     }
+}
+
+/// Spawn `bash -lc <oneliner>` in a NEW native terminal window on Linux.
+///
+/// Terminal resolution order:
+///  1. `PAPERCUSP_GHOSTTY_BIN` / `ghostty` on PATH — the desktop BUNDLES ghostty
+///     (and `prepare_dock_env` prepends `sidecar/bin` to PATH at boot), so this
+///     works on a barebones install with no system terminal emulator at all
+///     (e.g. the clean-room test VM). Decorated normal window — NOT the
+///     borderless glued dock look.
+///  2. `$TERMINAL`, then the known-emulator cascade — same policy as
+///     `spawn_linux_new_window` (the console_launch path).
+///
+/// The window titles itself via the OSC-0 escape inside the oneliner, so no
+/// per-emulator title flag is needed.
+#[cfg(target_os = "linux")]
+fn spawn_linux_external_window(
+    spec: &ExternalConsoleSpec,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
+    let ghostty = std::env::var("PAPERCUSP_GHOSTTY_BIN").unwrap_or_else(|_| "ghostty".to_string());
+    if is_on_path(&ghostty) {
+        // --gtk-single-instance=false: our own pid owns the window (trackable);
+        // no --window-decoration=false → a regular, decorated native window.
+        return spawn_external_with(
+            &ghostty,
+            &["--gtk-single-instance=false", "-e"],
+            spec,
+            oneliner,
+        );
+    }
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if is_on_path(&term) {
+            return spawn_external_with(&term, &["-e"], spec, oneliner);
+        }
+    }
+    for (bin, args) in LINUX_TERMINALS {
+        if is_on_path(bin) {
+            return spawn_external_with(bin, args, spec, oneliner);
+        }
+    }
+    let tried: Vec<&str> = LINUX_TERMINALS.iter().map(|(b, _)| *b).collect();
+    Err(format!(
+        "no terminal emulator found. Set $TERMINAL or install one of: ghostty, {}",
+        tried.join(", ")
+    ))
+}
+
+/// Spawn helper for `spawn_linux_external_window` — the ExternalConsoleSpec
+/// twin of `spawn_linux_with` (which takes a ConsoleEnvelope).
+#[cfg(target_os = "linux")]
+fn spawn_external_with(
+    bin: &str,
+    args: &[&str],
+    spec: &ExternalConsoleSpec,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.current_dir(&spec.cwd);
+    for (k, v) in &spec.env {
+        if is_valid_env_name(k) {
+            cmd.env(k, v);
+        }
+    }
+    for a in args {
+        cmd.arg(a);
+    }
+    cmd.arg("bash").arg("-lc").arg(oneliner);
+    // Detach stdio so the window outlives whatever spawned it.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))?;
+    println!(
+        "[papercusp-desktop] external-console: spawned {bin} pid={} hosting {:?} (title {:?})",
+        child.id(),
+        spec.command,
+        spec.title,
+    );
+    Ok(Some(child.id()))
 }
 
 /// Run install-standalone-mcp.sh to mint a superuser token. Best-effort
