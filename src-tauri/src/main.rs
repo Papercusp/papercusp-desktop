@@ -380,6 +380,32 @@ fn restore_window_visibility_once<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
     reason: &str,
 ) {
+    #[cfg(target_os = "linux")]
+    {
+        let reason_for_gtk = reason.to_string();
+        let window_for_gtk = window.clone();
+        if let Err(e) = window.run_on_main_thread(move || {
+            use gtk::prelude::*;
+            match window_for_gtk.gtk_window() {
+                Ok(gtk_window) => {
+                    gtk_window.set_skip_taskbar_hint(false);
+                    gtk_window.set_skip_pager_hint(false);
+                    gtk_window.deiconify();
+                    gtk_window.present();
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[papercusp-desktop] window restore ({reason_for_gtk}): gtk_window failed: {e}"
+                    );
+                }
+            }
+        }) {
+            eprintln!(
+                "[papercusp-desktop] window restore ({reason}): main-thread GTK restore failed: {e}"
+            );
+        }
+    }
+
     if let Err(e) = window.unminimize() {
         eprintln!("[papercusp-desktop] window restore ({reason}): unminimize failed: {e}");
     }
