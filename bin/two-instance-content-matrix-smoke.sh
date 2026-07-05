@@ -156,7 +156,16 @@ echo "  member=$SLUG hiveHome=$HIVE_SLUG WS_A=$WS_A WS_B=$WS_B"
 # was spamming a duplicate WI every gate run. Set MATRIX_TYPES to include it
 # explicitly (e.g. for a one-off manual probe) — it just won't gate on failure.
 TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plans plan-parts item-assignments hive-settings hive-members}"
-ins() { local ty="$1" ws="$2" t="$3" nid; [ "$t" = ba ] && nid=2 || nid=1
+# NOTE (WI-2737/2624 et al — hive-members write SETUP-FAIL every single run, not just
+# reruns): `nid` disambiguates the numeric ids embedded in a few fixture rows
+# (hive-members' github_user_id=8888$nid, presence's 9999$nid, item-assignments'
+# P-00$nid). write_all() is called 3x per run with DISTINCT tags (seed, ab, ba) — but
+# the old `[ "$t" = ba ] && nid=2 || nid=1` only ever produced 2 distinct values, so
+# "seed" and "ab" (BOTH on side A, same $ws) collapsed to the SAME nid=1 and collided on
+# hive-members' (workspace_id,hive_home_slug,github_user_id) primary key on every gate
+# run (not a cross-run staleness issue — a same-run collision). Fixed to a 3-way map (one
+# per tag) so every phase within a run gets a distinct numeric id.
+ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
    features) echo "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$SLUG','F-MX-$t','mx','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);";;
    conversations) echo "INSERT INTO harness_shared.coord_conversations (workspace_id,id,kind,scope,harness_slug,asker_id,title,body,state,created_at,updated_at,origin) VALUES ('$ws','conv-MX-$t','discussion','harness','$SLUG','tester','mx','b-$t','open',now(),now(),'local');";;
@@ -170,7 +179,7 @@ ins() { local ty="$1" ws="$2" t="$3" nid; [ "$t" = ba ] && nid=2 || nid=1
    hive-settings) echo "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,created_at,updated_at,origin) VALUES ('$ws','$HIVE_SLUG','mxk-$t','\"mx-$t\"',${NONCE}000,${NONCE}000,'local');";;
    hive-members) echo "INSERT INTO harness_shared.hive_members (workspace_id,hive_home_slug,github_user_id,github_username,device_attestations,revoked_pubkeys,binding_status,origin) VALUES ('$ws','$HIVE_SLUG',8888$nid,'mxu$t','[]'::jsonb,'{}'::text[],'bound','local');";;
   esac; }
-poll() { local ty="$1" t="$2" nid; [ "$t" = ba ] && nid=2 || nid=1
+poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
    features) echo "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin='remote' LIMIT 1;";;
    conversations) echo "SELECT origin FROM harness_shared.coord_conversations WHERE id='conv-MX-$t' AND origin='remote' LIMIT 1;";;
