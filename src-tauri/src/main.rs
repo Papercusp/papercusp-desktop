@@ -2497,7 +2497,20 @@ fn spawn_serve(
     // so pointing at a manifest-less dir is safe → unchanged cold join. The TS
     // side ALSO autodetects this dir from a sibling resource env, so this explicit
     // pass is belt-and-suspenders, not the sole channel.
-    let seed_dir = sidecar_dir.join("seed");
+    //
+    // The seed is a SIBLING of the sidecar dir, not inside it: tauri.conf bundles
+    // `seed/**` and `sidecar/**` as sibling resources, so both the packaged
+    // layouts (Linux .deb `usr/lib/<Product>/seed`, macOS `Contents/Resources/
+    // seed`) AND the dev layout (`src-tauri/seed` next to `src-tauri/sidecar`)
+    // hold it at `<parent-of-sidecar>/seed`. The previous `sidecar_dir.join(
+    // "seed")` pointed INSIDE the sidecar where nothing is bundled, and
+    // resolveSeedDir dead-ended on it → every packaged install silently
+    // cold-joined (full network re-clone) with its multi-GB seed unused (first
+    // seeded Linux .deb E2E, WI-2902 2026-07-05).
+    let seed_dir = sidecar_dir
+        .parent()
+        .map(|p| p.join("seed"))
+        .unwrap_or_else(|| sidecar_dir.join("seed"));
     // Pre-migrated PGDATA seed (first-boot fast path). Optional: only present when
     // the bundle was built with PAPERCUSP_BUILD_PG_SEED=1 (the default). serve/
     // embedded-postgres-server existsSync-checks it and falls back to initdb +

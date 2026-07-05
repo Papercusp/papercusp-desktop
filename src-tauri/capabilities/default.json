@@ -53,6 +53,7 @@
     "allow-console-launch",
     "allow-list-windows-by-title",
     "allow-focus-window-by-title",
+    "allow-external-console-run",
     "allow-window-title-for",
 
     "allow-native-terminal-status",

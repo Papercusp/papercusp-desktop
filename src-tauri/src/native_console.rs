@@ -680,7 +680,7 @@ pub struct ExternalConsoleSpec {
 /// what titles the conhost fallback — wt gets --title too), cd, export the
 /// spec env, exec the command; on non-zero exit hold the window open so
 /// the user can read the error instead of the window vanishing.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn build_external_oneliner(spec: &ExternalConsoleSpec) -> String {
     let title_quoted = shell_escape_single(&spec.title);
     let cwd_escaped = shell_escape_single(&spec.cwd);

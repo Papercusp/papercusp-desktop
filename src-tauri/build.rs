@@ -106,6 +106,9 @@ fn main() {
             "console_launch",
             "list_windows_by_title",
             "focus_window_by_title",
+            // WI-3033: onboarding console routed to an external Windows
+            // Terminal window (the embedded ConPTY path wedges on inbox WSL)
+            "external_console_run",
             // window_title_for is a plain Rust helper, not a #[tauri::command];
             // its grant is an inert orphan kept for continuity (harmless).
             "window_title_for",
