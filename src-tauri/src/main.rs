@@ -982,6 +982,17 @@ mod discovery_tests {
     fn serve_respawn_gives_up_at_cap() {
         assert_eq!(decide_serve_respawn(true, false, false, 5, 5), R::GiveUp);
     }
+
+    // WI-1878 / P-005: the operator-dead notification body must name WHICH
+    // supervisor gave up and the exact attempt/window numbers, so a user (or a
+    // later triager reading a bug report) can tell the two give-up paths apart.
+    #[test]
+    fn operator_dead_notification_body_names_reason_and_counts() {
+        let body = super::operator_dead_notification_body("serve.mjs in-process respawn cap hit", 5, 300);
+        assert!(body.contains("serve.mjs in-process respawn cap hit"));
+        assert!(body.contains('5'));
+        assert!(body.contains("300"));
+    }
 }
 
 #[cfg(test)]
