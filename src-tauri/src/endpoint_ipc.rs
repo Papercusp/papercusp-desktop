@@ -192,6 +192,8 @@ impl CallSink {
     /// true if the event was forwarded; false if it was dropped (cap or
     /// channel error).
     fn try_send_event(&self, event: EndpointEvent) -> bool {
+        // WI-2817: ANY inbound frame is activity — resets the idle-timeout clock.
+        self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
         match decide_backpressure(&self.events_sent, &self.overflowed, PER_CALL_EVENT_CAP) {
             BackpressureDecision::Forward => self.channel.send(event).is_ok(),
             BackpressureDecision::EmitOverflowAndStop => {
@@ -288,6 +290,7 @@ impl IpcClient {
                 channel,
                 events_sent: AtomicU64::new(0),
                 overflowed: std::sync::atomic::AtomicBool::new(false),
+                last_activity_ms: AtomicU64::new(now_ms()),
             },
         );
         let req = serde_json::json!({
@@ -649,6 +652,7 @@ mod tests {
                     channel: Channel::new(|_| Ok(())),
                     events_sent: AtomicU64::new(0),
                     overflowed: AtomicBool::new(false),
+                    last_activity_ms: AtomicU64::new(now_ms()),
                 },
             );
         }
@@ -831,6 +835,7 @@ mod tests {
                 channel,
                 events_sent: AtomicU64::new(0),
                 overflowed: AtomicBool::new(false),
+                last_activity_ms: AtomicU64::new(now_ms()),
             },
             captured,
         )
