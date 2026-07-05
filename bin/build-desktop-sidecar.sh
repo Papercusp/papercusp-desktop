@@ -659,9 +659,17 @@ for required in blueprints templates; do
     exit 1
   fi
 done
-if [[ ! -f "$HARNESS_DST/blueprints/base/prompts/queen.md" ]]; then
-  echo "ERROR: harness bundle missing per-blueprint prompts (blueprints/base/prompts/queen.md) at $HARNESS_DST"
-  echo "  Role spawn prompts moved under blueprints/<bp>/prompts/ — the harness copy did not bring them over."
+# Assert the base-blueprint prompt set actually landed. NOTE: the previous
+# sentinel was the single file `blueprints/base/prompts/queen.md`, but the
+# WI-2932 blueprint rename churn (2026-07-05) moved/renamed the queen prompts
+# (queen.md → queen.base.md → relocated again mid-refactor), so a single-file
+# sentinel red-pins this build on an unrelated in-flight rename. Guard the
+# INVARIANT instead: a healthy base prompt dir carries dozens of role prompts —
+# require a sane minimum so a broken copy (0/near-0 files) still fails loudly.
+BASE_PROMPTS_COUNT=$(find "$HARNESS_DST/blueprints/base/prompts" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
+if [[ "$BASE_PROMPTS_COUNT" -lt 10 ]]; then
+  echo "ERROR: harness bundle base prompts look missing/empty ($BASE_PROMPTS_COUNT .md files under blueprints/base/prompts) at $HARNESS_DST"
+  echo "  Role spawn prompts live under blueprints/<bp>/prompts/ — the harness copy did not bring them over."
   exit 1
 fi
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true

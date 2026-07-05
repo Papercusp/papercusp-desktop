@@ -1,6 +1,0 @@
-# The seed payload is a machine-specific, multi-GB release-build artifact — never
-# committed. Only README.md (+ this file) is tracked so the Tauri resource glob
-# always matches. The cutter (apps/operator/lib/release/cut-seed-cli.ts) writes:
-manifest.json
-git/
-corestore/
