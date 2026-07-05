@@ -3350,6 +3350,7 @@ pub fn run() {
             native_console::console_launch,
             native_console::list_windows_by_title,
             native_console::focus_window_by_title,
+            native_console::external_console_run,
             native_terminal_status,
             native_terminal_toggle,
             endpoint_ipc::endpoint_invoke,

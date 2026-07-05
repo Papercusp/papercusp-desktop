@@ -649,6 +649,82 @@ fn shell_escape_single(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// ─── External console run (WI-3033) ─────────────────────────────────
+// On Windows the embedded xterm path (pty_spawn → portable_pty ConPTY →
+// wsl.exe) wedges on legacy inbox WSL: wsl.exe under ConPTY never execs
+// the distro command (history stays the ConPTY handshake `\x1b[6n`
+// forever). The SAME command renders fine inside a real terminal window
+// (wt.exe / conhost — proven by console_launch, WI-2955). So Windows
+// surfaces that would embed a terminal route the command to an external
+// Windows Terminal window instead, via the same transient-script spawner
+// console_launch uses.
+
+/// A command to run in an external native terminal window. Mirror of the
+/// TS-side spec assembled in OnboardingConsole.tsx (camelCase over the wire).
+#[derive(Debug, Clone, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalConsoleSpec {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Linux path INSIDE the WSL distro (the operator + command live there).
+    pub cwd: String,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Exact window title — the frontend focuses the window by this title
+    /// later (focus_window_by_title), so it must be stable per surface.
+    pub title: String,
+}
+
+/// The bash one-liner the external window runs: title the window (OSC-0,
+/// what titles the conhost fallback — wt gets --title too), cd, export the
+/// spec env, exec the command; on non-zero exit hold the window open so
+/// the user can read the error instead of the window vanishing.
+#[cfg(any(target_os = "windows", test))]
+fn build_external_oneliner(spec: &ExternalConsoleSpec) -> String {
+    let title_quoted = shell_escape_single(&spec.title);
+    let cwd_escaped = shell_escape_single(&spec.cwd);
+    let exports = build_env_exports(&spec.env);
+    let cmd = std::iter::once(&spec.command)
+        .chain(spec.args.iter())
+        .map(|part| shell_escape_single(part))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = if exports.is_empty() {
+        format!("cd {cwd_escaped} && {cmd}")
+    } else {
+        format!("cd {cwd_escaped} && {exports} && {cmd}")
+    };
+    format!(
+        "printf '\\033]0;%s\\007' {title_quoted} ; {body} ; rc=$? ; \
+         if [ $rc -ne 0 ]; then \
+         printf '\\n[papercusp] exited with code %s — press Enter to close\\n' \"$rc\" ; \
+         read -r _ ; fi"
+    )
+}
+
+/// Run `spec` in a new external Windows Terminal window (conhost fallback).
+/// Returns the launcher pid when one is observable. Windows-only by design:
+/// on macOS/Linux the embedded pty terminal works and stays the UX.
+#[tauri::command]
+#[specta::specta]
+pub async fn external_console_run(spec: ExternalConsoleSpec) -> Result<Option<u32>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let oneliner = build_external_oneliner(&spec);
+        let script_name = format!(
+            ".papercup-external-console.{}.sh",
+            uuid::Uuid::new_v4().simple()
+        );
+        spawn_windows_terminal_script(&spec.cwd, &spec.title, &script_name, &oneliner)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = spec;
+        Err("external_console_run is Windows-only — use the embedded terminal".to_string())
+    }
+}
+
 /// Run install-standalone-mcp.sh to mint a superuser token. Best-effort
 /// — if the script isn't bundled (dev env), we tell the user to install
 /// it manually.
@@ -866,6 +942,23 @@ fn spawn_windows_wsl_new_window(
     envelope: &ConsoleEnvelope,
     oneliner: &str,
 ) -> Result<Option<u32>, String> {
+    let win_title = window_title_for(&envelope.session_id);
+    let script_name = format!(".papercup-console-launch.{}.sh", envelope.session_id);
+    spawn_windows_terminal_script(&envelope.cwd, &win_title, &script_name, oneliner)
+}
+
+/// Shared Windows terminal-window spawner: writes `oneliner` as a transient
+/// launch script inside the WSL distro at `<cwd>/<script_name>`, then opens a
+/// new Windows Terminal window (bare-wsl.exe conhost fallback) running it.
+/// Used by console_launch (via spawn_windows_wsl_new_window) and by
+/// external_console_run (WI-3033 embedded-terminal external routing).
+#[cfg(target_os = "windows")]
+fn spawn_windows_terminal_script(
+    cwd: &str,
+    win_title: &str,
+    script_name: &str,
+    oneliner: &str,
+) -> Result<Option<u32>, String> {
     use std::os::windows::process::CommandExt as _;
 
     // wt.exe splits its command line on every unescaped `;` into SEPARATE
@@ -879,10 +972,7 @@ fn spawn_windows_wsl_new_window(
     // relays via wsl.exe) and pass only a plain, quote-free path through
     // wt/wsl. The script self-deletes on start (the unlinked inode stays
     // readable for the already-running bash).
-    let script_path = console_path_join(
-        &envelope.cwd,
-        &format!(".papercup-console-launch.{}.sh", envelope.session_id),
-    );
+    let script_path = console_path_join(cwd, script_name);
     let script = format!(
         "#!/bin/bash\n# Transient Papercup console launcher (WI-2149) — self-deletes on start.\nrm -f -- \"$0\"\n{oneliner}\n"
     );
@@ -901,24 +991,23 @@ fn spawn_windows_wsl_new_window(
         let mut cmd = std::process::Command::new("wt.exe");
         cmd.arg("-w").arg("new");
         // windows-desktop-feature-parity-2026-07-02 P-010: title the window
-        // `Papercup — <session_id>` so it can be found + focused by TITLE
-        // later (windows-desktop-windows.ts listWindowsByTitle /
-        // focusWindowByTitle, wired through adv-sessions.ts's
-        // isWindowsDesktopHost() branch).
+        // (console_launch: `Papercup — <session_id>`) so it can be found +
+        // focused by TITLE later (windows-desktop-windows.ts
+        // listWindowsByTitle / focusWindowByTitle, wired through
+        // adv-sessions.ts's isWindowsDesktopHost() branch).
         // --title is a new-tab-command option (wt's implicit default command
         // when none is given), so it's valid alongside -w/--startingDirectory
         // here. --suppressApplicationTitle pins it so a later OSC-0/2 title
         // change from the shell (a fancy PS1, a nested app) can't clobber it
         // — MS docs: "If you change the title of a tab and want that title
         // to persist, you must enable suppressApplicationTitle."
-        let win_title = window_title_for(&envelope.session_id);
-        cmd.arg("--title").arg(&win_title);
+        cmd.arg("--title").arg(win_title);
         cmd.arg("--suppressApplicationTitle");
         cmd.arg("wsl.exe")
             .arg("-d")
             .arg(WSL_DISTRO)
             .arg("--cd")
-            .arg(&envelope.cwd)
+            .arg(cwd)
             .arg("--")
             .arg("bash")
             .arg("-l")
@@ -956,7 +1045,7 @@ fn spawn_windows_wsl_new_window(
     cmd.arg("-d")
         .arg(WSL_DISTRO)
         .arg("--cd")
-        .arg(&envelope.cwd)
+        .arg(cwd)
         .arg("--")
         .arg("bash")
         .arg("-l")
@@ -1104,6 +1193,65 @@ mod tests {
         assert!(out.contains("export GOOD_NAME="));
         assert!(!out.contains("123BAD"));
         assert!(!out.contains("BAD-DASH"));
+    }
+
+    #[test]
+    fn external_oneliner_exports_env_quotes_args_and_holds_on_failure() {
+        // WI-3033: the onboarding concierge spec — a node script under a
+        // /mnt/c path WITH SPACES, plus the operator URL env the pty path
+        // used to drop.
+        let mut env = HashMap::new();
+        env.insert(
+            "PAPERCUSP_OPERATOR_URL".to_string(),
+            "http://127.0.0.1:49213".to_string(),
+        );
+        let spec = ExternalConsoleSpec {
+            command: "/usr/local/bin/node".to_string(),
+            args: vec![
+                "/mnt/c/Users/User/AppData/Local/Papercusp Server/sidecar/scripts/onboard.mjs"
+                    .to_string(),
+            ],
+            cwd: "/home/papercup".to_string(),
+            env,
+            title: "Papercusp Onboarding".to_string(),
+        };
+        let out = build_external_oneliner(&spec);
+        assert!(
+            out.contains("printf '\\033]0;%s\\007' 'Papercusp Onboarding'"),
+            "OSC-0 title missing: {out}"
+        );
+        assert!(out.contains("cd '/home/papercup'"), "cd missing: {out}");
+        assert!(
+            out.contains("export PAPERCUSP_OPERATOR_URL='http://127.0.0.1:49213'"),
+            "operator URL export missing: {out}"
+        );
+        assert!(
+            out.contains(
+                "'/usr/local/bin/node' '/mnt/c/Users/User/AppData/Local/Papercusp Server/sidecar/scripts/onboard.mjs'"
+            ),
+            "command + space-path arg not single-quoted: {out}"
+        );
+        assert!(
+            out.contains("read -r _"),
+            "hold-window-open on failure missing: {out}"
+        );
+    }
+
+    #[test]
+    fn external_oneliner_omits_exports_segment_when_env_empty() {
+        let spec = ExternalConsoleSpec {
+            command: "htop".to_string(),
+            args: vec![],
+            cwd: "/tmp".to_string(),
+            env: HashMap::new(),
+            title: "T".to_string(),
+        };
+        let out = build_external_oneliner(&spec);
+        assert!(
+            out.contains("cd '/tmp' && 'htop'"),
+            "empty env must not leave a dangling `&&  &&` segment: {out}"
+        );
+        assert!(!out.contains("export "), "no exports expected: {out}");
     }
 
     #[test]
