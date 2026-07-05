@@ -15,7 +15,14 @@ set -e
 # Only on a real install/upgrade configure.
 [ "$1" = "configure" ] || exit 0
 
-SC=/usr/lib/Papercusp/sidecar
+# Resolve the installed sidecar dir. Tauri names the app dir after the bundle's
+# productName ("Papercusp GUI" / "Papercusp Server" — WITH a space), so the old
+# hardcoded /usr/lib/Papercusp/sidecar never matched on a real install and
+# psu/ptool/papercusp were silently never wired to PATH (WI-2902, 2026-07-05).
+# Glob the real path; both bundles carry identical launcher scripts, so the first
+# match is fine. Fall back to the legacy path if the glob finds nothing.
+SC="$(ls -d /usr/lib/Papercusp*/sidecar 2>/dev/null | head -1)"
+[ -n "$SC" ] || SC=/usr/lib/Papercusp/sidecar
 
 # ── (1) psu / ptool → /usr/bin (immediate, deterministic) ───────────────────
 # Thin wrappers that exec the BUNDLED node + launcher (so they work even with no
