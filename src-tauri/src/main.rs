@@ -376,6 +376,36 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
     });
 }
 
+fn restore_window_visibility_once<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    reason: &str,
+) {
+    if let Err(e) = window.unminimize() {
+        eprintln!("[papercusp-desktop] window restore ({reason}): unminimize failed: {e}");
+    }
+    if let Err(e) = window.show() {
+        eprintln!("[papercusp-desktop] window restore ({reason}): show failed: {e}");
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("[papercusp-desktop] window restore ({reason}): set_focus failed: {e}");
+    }
+}
+
+fn restore_window_visibility<R: tauri::Runtime + 'static>(
+    window: &tauri::WebviewWindow<R>,
+    reason: &'static str,
+) {
+    restore_window_visibility_once(window, reason);
+
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in [250_u64, 1_000, 2_500] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            restore_window_visibility_once(&window, reason);
+        }
+    });
+}
+
 /// The bundled offline-recovery page (EI-239). Self-contained inline
 /// HTML+JS: polls the failed URI once a second (any HTTP response counts —
 /// an error status still proves the origin is back) and navigates to it on
@@ -1783,6 +1813,7 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // now-live operator. reinject_ticks=30 covers a page (re)load racing this
         // thread during the bootstrap→SPA handoff.
         point_window_at_operator(&window, port, 30);
+        restore_window_visibility(&window, "operator-ready");
     }
 
     // WI-1869: after the one-shot attach above, KEEP following the operator.
@@ -1823,9 +1854,7 @@ fn on_second_instance(app: &AppHandle, args: Vec<String>, cwd: String) {
     );
     if role.is_gui() {
         if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            restore_window_visibility(&window, "second-instance");
         }
     }
 }
@@ -1854,6 +1883,7 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // HTTP port via point_window_at_operator so SSE streams natively). WI-2734.
     if custom_protocol::onboarding_origin_enabled() {
         if let Some(window) = app.get_webview_window("main") {
+            restore_window_visibility(&window, "gui-setup");
             match custom_protocol::APP_ORIGIN.parse() {
                 Ok(u) => {
                     if let Err(e) = window.navigate(u) {
@@ -3286,6 +3316,7 @@ pub fn run() {
                 // the dev bridge (tauri-agent-tools) or Ctrl+Shift+I; neither
                 // needs the auto-pop.
                 if let Some(window) = app.get_webview_window("main") {
+                    restore_window_visibility(&window, "dev-setup");
                     // `open_devtools` is compiled out in release unless the
                     // tauri `devtools` feature is on (and we don't want
                     // devtools popping in a shipped/release build anyway).
@@ -3468,6 +3499,7 @@ pub fn run() {
             // origin there (that stays the real HTTP port for SSE). WI-2734.
             if custom_protocol::onboarding_origin_enabled() {
                 if let Some(window) = app.get_webview_window("main") {
+                    restore_window_visibility(&window, "server-setup");
                     match custom_protocol::APP_ORIGIN.parse() {
                         Ok(u) => {
                             if let Err(e) = window.navigate(u) {
