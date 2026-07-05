@@ -52,8 +52,16 @@ done
 #     the sidecar (operator-core / serve.mjs / the Vite SPA / prompts) — i.e. a
 #     Rust/desktop-only iteration. Default '0' (always rebuild — correct for
 #     releases + any operator change).
+#   PAPERCUSP_FAST_ITER — '1' skips the updater .app.tar.gz artifacts (a
+#     single-threaded gzip of the multi-GB .app per role) and packs DMGs at
+#     zlib-level=1. Install/launch testing only — NEVER for release artifacts.
+#     Default '0'.
+#   (Cargo target dirs are per-role — src-tauri/target/role-{gui,server} — so
+#    the two roles' builds stay incremental across legs instead of invalidating
+#    each other's leaf compile + link; see the note in the role loop.)
 MAC_BUILD_TARGET="${MAC_BUILD_TARGET:-universal-apple-darwin}"
 PAPERCUSP_REUSE_SIDECAR="${PAPERCUSP_REUSE_SIDECAR:-0}"
+PAPERCUSP_FAST_ITER="${PAPERCUSP_FAST_ITER:-0}"
 
 cd "$ROOT"
 echo "===== mac build start $(date) (root: $ROOT) ====="
@@ -246,15 +254,31 @@ for role in $PAPERCUSP_BUILD_ROLES; do
     server) role_cfg=(--config src-tauri/tauri.server.conf.json) ; role_label="Papercusp Server" ;;
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$role' — skipping"; continue ;;
   esac
-  echo "--- tauri build: $role_label ($MAC_BUILD_TARGET) ---"
-  # PAPERCUSP_BUILD_VERBOSE=1 → tauri --verbose: the bundler only surfaces
-  # bundle_dmg.sh's output at verbose level, and its bare "failed to run
-  # bundle_dmg.sh" is undiagnosable without it (2026-07-05).
+  # Per-role cargo target dir: the roles bake different bundle identifiers
+  # (generate_context!), so a SHARED target dir forces the leaf-crate recompile
+  # + full relink every build as the roles alternate (~9–14 min/leg). One dir
+  # per role keeps each role incremental across legs, at the cost of a one-time
+  # cold compile per role and a second target dir on disk.
+  export CARGO_TARGET_DIR="$PWD/src-tauri/target/role-$role"
+  role_bundle_dir="$CARGO_TARGET_DIR/$MAC_BUILD_TARGET/release/bundle"
+  echo "--- tauri build: $role_label ($MAC_BUILD_TARGET, target dir role-$role) ---"
   verbose_flag=()
   [[ "${PAPERCUSP_BUILD_VERBOSE:-0}" == "1" ]] && verbose_flag=(--verbose)
-  CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}"
-  [[ -d "$BUNDLE_DIR/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
+  fast_cfg=()
+  if [[ "$PAPERCUSP_FAST_ITER" == "1" ]]; then
+    echo "    (PAPERCUSP_FAST_ITER=1 — skipping updater artifacts; NOT a release build)"
+    fast_cfg=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+  fi
+  CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
+  [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
+  # Downstream (release fetch, install verify) reads artifacts from the legacy
+  # shared bundle dir — hardlink the updater artifacts over (same volume, free).
+  mkdir -p "$BUNDLE_DIR/macos"
+  for f in "$role_bundle_dir/macos/$role_label.app.tar.gz" "$role_bundle_dir/macos/$role_label.app.tar.gz.sig"; do
+    if [[ -f "$f" ]]; then ln -f "$f" "$BUNDLE_DIR/macos/" || cp "$f" "$BUNDLE_DIR/macos/"; fi
+  done
 done
+unset CARGO_TARGET_DIR
 
 # ── third icon: "Papercusp Tutorial & Setup.app" baked into the DMGs (WI-2945) ──
 # Parity with the Linux .deb's third .desktop entry + the Windows Start-Menu
@@ -331,22 +355,27 @@ case "$MAC_BUILD_TARGET" in
   *)         DMG_ARCH="$MAC_BUILD_TARGET" ;;
 esac
 mkdir -p "$BUNDLE_DIR/dmg"
+# FAST_ITER packs at zlib-level=1: ~3-5x faster for a few hundred MB of size —
+# fine for install/launch testing, wrong for shipped artifacts.
+dmg_compress=(-format UDZO)
+[[ "$PAPERCUSP_FAST_ITER" == "1" ]] && dmg_compress=(-format UDZO -imagekey zlib-level=1)
 for role in $PAPERCUSP_BUILD_ROLES; do
   case "$role" in
     gui)    main_app="Papercusp GUI.app" ;;
     server) main_app="Papercusp Server.app" ;;
     *) continue ;;
   esac
-  [[ -d "$BUNDLE_DIR/macos/$main_app" ]] || { echo "    ? $main_app missing — skipping DMG pack"; continue; }
+  app_src="$PWD/src-tauri/target/role-$role/$MAC_BUILD_TARGET/release/bundle/macos/$main_app"
+  [[ -d "$app_src" ]] || { echo "    ? $main_app missing at $app_src — skipping DMG pack"; continue; }
   vol="$(basename "$main_app" .app)"
   dmg="$BUNDLE_DIR/dmg/${vol}_${VERSION}_${DMG_ARCH}.dmg"
   echo "--- packing $(basename "$dmg") ($main_app + Tutorial & Setup) ---"
   STAGE="$(mktemp -d "$PWD/src-tauri/target/papercusp-dmg-stage.XXXXXX")"
-  cp -Rc "$BUNDLE_DIR/macos/$main_app" "$STAGE/" 2>/dev/null || cp -R "$BUNDLE_DIR/macos/$main_app" "$STAGE/"
+  cp -Rc "$app_src" "$STAGE/" 2>/dev/null || cp -R "$app_src" "$STAGE/"
   cp -R "$TUT_APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$dmg"
-  "${iopolicy_cmd[@]}" hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov -format UDZO "$dmg"
+  "${iopolicy_cmd[@]}" hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov "${dmg_compress[@]}" "$dmg"
   rm -rf "$STAGE"
   echo "    ✓ $(basename "$dmg")"
 done
@@ -354,4 +383,7 @@ done
 echo "--- artifacts ($MAC_BUILD_TARGET) ---"
 ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/" 2>/dev/null || true
 ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/macos/" 2>/dev/null || true
+for role in $PAPERCUSP_BUILD_ROLES; do
+  ls -la "src-tauri/target/role-$role/$MAC_BUILD_TARGET/release/bundle/macos/" 2>/dev/null || true
+done
 echo "===== mac build done $(date) ====="
