@@ -432,6 +432,63 @@ fn wsl_fs(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output, St
         .map_err(|e| format!("wsl.exe wait: {e}"))
 }
 
+/// Decode bytes emitted by a `wsl.exe` relay. `wsl.exe` writes its OWN
+/// diagnostics (e.g. "There is no distribution with the supplied name" /
+/// "The system cannot find the path specified") as **UTF-16LE**, whereas a
+/// relayed bash command's own output is UTF-8. Detect UTF-16LE via a BOM or a
+/// run of interleaved NUL bytes (ASCII text in UTF-16LE has a NUL every other
+/// byte) and decode accordingly; otherwise UTF-8-lossy. Ungated + pure so it
+/// unit-tests on the Linux dev box (WI-2955).
+#[cfg(any(target_os = "windows", test))]
+fn decode_wsl_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let has_bom = bytes.starts_with(&[0xFF, 0xFE]);
+    // Sample up to the first 16 even-indexed high bytes: mostly-NUL ⇒ UTF-16LE
+    // ASCII. (Odd index holds the low byte of each UTF-16LE code unit.)
+    let sampled: Vec<u8> = bytes.iter().skip(1).step_by(2).take(16).copied().collect();
+    let nul_run = !sampled.is_empty() && sampled.iter().filter(|&&b| b == 0).count() * 2 >= sampled.len();
+    if has_bom || nul_run {
+        let start = if has_bom { 2 } else { 0 };
+        let u16s: Vec<u16> = bytes[start..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s).trim().to_string()
+    } else {
+        String::from_utf8_lossy(bytes).trim().to_string()
+    }
+}
+
+/// Rich error for a failed `wsl.exe` relay. The old sites returned ONLY
+/// `from_utf8_lossy(stderr)`, so a wsl.exe interop/distro failure — which lands
+/// its message on STDOUT as UTF-16LE and leaves stderr empty — surfaced as a
+/// blank cause (the useless `write .mcp.json: ` this fixes, WI-2955). Surface
+/// the exit code AND both decoded streams. Ungated so the unit test compiles on
+/// Linux; only ever called from `#[cfg(target_os = "windows")]` sites.
+#[cfg(any(target_os = "windows", test))]
+fn wsl_relay_error(out: &std::process::Output) -> String {
+    let code = out
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "terminated-by-signal".to_string());
+    let serr = decode_wsl_bytes(&out.stderr);
+    let sout = decode_wsl_bytes(&out.stdout);
+    let mut parts = vec![format!("wsl.exe exit {code}")];
+    if !serr.is_empty() {
+        parts.push(format!("stderr: {serr}"));
+    }
+    if !sout.is_empty() {
+        parts.push(format!("stdout: {sout}"));
+    }
+    if serr.is_empty() && sout.is_empty() {
+        parts.push("(no stdout/stderr — wsl.exe produced no output; distro exec/interop unavailable?)".to_string());
+    }
+    parts.join("; ")
+}
+
 #[cfg(not(target_os = "windows"))]
 fn cfs_exists(path: &str) -> bool {
     std::path::Path::new(path).exists()
@@ -455,7 +512,7 @@ fn cfs_rename(from: &str, to: &str) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        Err(wsl_relay_error(&out))
     }
 }
 
@@ -472,7 +529,7 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        Err(wsl_relay_error(&out))
     }
 }
 
@@ -1079,5 +1136,32 @@ mod tests {
                 "{must_have} missing from LINUX_TERMINALS"
             );
         }
+    }
+
+    #[test]
+    fn decode_wsl_bytes_utf8_utf16_and_empty() {
+        // Empty → empty (no panic on the sampling logic).
+        assert_eq!(decode_wsl_bytes(b""), "");
+        // Plain UTF-8 (a relayed bash command's stderr).
+        assert_eq!(
+            decode_wsl_bytes(b"bash: cannot create file\n"),
+            "bash: cannot create file"
+        );
+        // UTF-16LE WITH BOM — wsl.exe's own diagnostics look like this.
+        let mut bom = vec![0xFFu8, 0xFE];
+        for u in "no distribution".encode_utf16() {
+            bom.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_wsl_bytes(&bom), "no distribution");
+        // UTF-16LE WITHOUT BOM — ASCII gives a NUL every other byte, detected by
+        // the interleaved-NUL heuristic (the exact "blank error" case WI-2955).
+        let mut nobom = Vec::new();
+        for u in "The system cannot find the path specified.".encode_utf16() {
+            nobom.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(
+            decode_wsl_bytes(&nobom),
+            "The system cannot find the path specified."
+        );
     }
 }
