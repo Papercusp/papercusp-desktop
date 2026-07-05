@@ -189,9 +189,24 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 for role in $PAPERCUSP_BUILD_ROLES; do
   role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
-  echo "==> tauri build (linux x86_64, role=$role)"
-  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build "${role_cfg[@]}")
+  echo "==> tauri build (linux x86_64, role=$role) — deb+rpm (AppImage built separately, WI-2918)"
+  # NOTE: appimage is DELIBERATELY excluded here. tauri's own `appimage` target
+  # runs linuxdeploy across the whole AppDir, which crashes ELF-scanning the large
+  # self-contained sidecar tree (`Failed to run ldd`) and would fail this entire
+  # `tauri build`. It is built separately below via bin/build-appimage.sh.
+  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb,rpm "${role_cfg[@]}")
 done
+
+# AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
+# on the sidecar tree (see the note above). build-appimage.sh lets tauri create the
+# complete AppDir, then finishes it with appimagetool (which does not ELF-scan). GUI
+# only — the single self-hosting bundle is the Linux updater artifact.
+if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
+  echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
+  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+     TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+     bash "$ROOT/bin/build-appimage.sh")
+fi
 
 # Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
 # [build] target-dir — this box redirects all builds to ~/.cargo-target since
