@@ -21,6 +21,13 @@ src-tauri/resources/libPapercuspTermShim.dylib
 # release; bundled as a Tauri resource — never committed)
 src-tauri/resources/papercup-runtime.tar.gz
 
+# Seed corestore (~1.9GB of machine-generated corestore DB blobs, 50–195MB
+# each; bundled into the .deb at build time from disk — NEVER committed.
+# 77 of these were accidentally tracked until 2026-07-05 (WI-3065): the
+# >100MB ones can't push (GitHub hard cap) and the 50–99MB ones bloat every
+# clone forever. Provision the seed out-of-band; git must not carry it.)
+src-tauri/seed/
+
 # Node
 node_modules/
 

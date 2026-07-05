@@ -137,6 +137,21 @@ cut_release_seed() {
 }
 cut_release_seed
 
+# WI-3063: NSIS datablocks address with 32-bit offsets — the total UNCOMPRESSED
+# bundle payload (tauri.conf.json resources: sidecar/** + resources/* + seed/**,
+# plus the exe) has a HARD < 4GiB cap. Crossing it makes makensis die minutes
+# into the VM build with the cryptic "Internal compiler error #12345: error
+# mmapping datablock to N" (N = true size mod 2^32). Fail HERE, before the
+# ~10-min pack/ship/compile, with a message that names the real problem.
+# 3.5GiB threshold leaves headroom for the exe + WebView2 bootstrapper + NSIS
+# overhead on top of what du sees.
+payload_kb=$(du -sk --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+payload_cap_kb=$((3584 * 1024)) # 3.5GiB
+if (( payload_kb > payload_cap_kb )); then
+  du -sh --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null || true
+  fail "bundle payload is $((payload_kb / 1024 / 1024))GiB (> 3.5GiB guard) — NSIS hard-caps the datablock at 4GiB (WI-3063). Usual culprit: an oversized seed cut (seed/corestore/db, seed/git/super.bundle). Slim the seed (PAPERCUSP_SEED_CORESTORE=0 / PAPERCUSP_SEED_DEPTH=1) or fix the cut before building."
+fi
+
 echo "==> packing desktop tree"
 TARBALL="$(mktemp /tmp/papercusp-desktop-build-XXXX.tar.gz)"
 trap 'rm -f "$TARBALL"' EXIT
