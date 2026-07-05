@@ -247,7 +247,12 @@ for role in $PAPERCUSP_BUILD_ROLES; do
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$role' — skipping"; continue ;;
   esac
   echo "--- tauri build: $role_label ($MAC_BUILD_TARGET) ---"
-  CI=true "${iopolicy_cmd[@]}" npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
+  # PAPERCUSP_BUILD_VERBOSE=1 → tauri --verbose: the bundler only surfaces
+  # bundle_dmg.sh's output at verbose level, and its bare "failed to run
+  # bundle_dmg.sh" is undiagnosable without it (2026-07-05).
+  verbose_flag=()
+  [[ "${PAPERCUSP_BUILD_VERBOSE:-0}" == "1" ]] && verbose_flag=(--verbose)
+  CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
   found_dmg=0
   for d in "$BUNDLE_DIR"/dmg/*.dmg; do
     [[ -f "$d" ]] || continue
