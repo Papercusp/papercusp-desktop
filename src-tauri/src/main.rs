@@ -1515,6 +1515,17 @@ struct OperatorDeadPayload {
     window_secs: u64,
 }
 
+/// Pure text builder for the `operator-dead` OS notification body — split out
+/// from `notify_operator_dead` so it's unit-testable without a live
+/// `AppHandle` (same Linux-CI-testability rationale as `decide_server_supervision`
+/// / `decide_serve_respawn`: the side-effecting emit/notification calls can't
+/// run in CI, but the content they build can be verified).
+fn operator_dead_notification_body(reason: &str, respawns: usize, window_secs: u64) -> String {
+    format!(
+        "Auto-restart gave up after {respawns} attempts in {window_secs}s ({reason}). Restart the app to recover."
+    )
+}
+
 /// WI-1878 / P-005: surface a LOUD "operator dead" state once auto-respawn
 /// gives up — the part of WI-1878's ask ("at minimum surface a loud
 /// 'operator dead' state") that the WI-2667 respawn/backoff/give-up machinery
@@ -1538,9 +1549,7 @@ fn notify_operator_dead(app_handle: &tauri::AppHandle, reason: &str, respawns: u
         .notification()
         .builder()
         .title("Papercusp operator stopped responding")
-        .body(format!(
-            "Auto-restart gave up after {respawns} attempts in {window_secs}s ({reason}). Restart the app to recover."
-        ))
+        .body(operator_dead_notification_body(reason, respawns, window_secs))
         .show()
     {
         eprintln!("[papercusp-desktop] operator-dead notification failed: {e}");

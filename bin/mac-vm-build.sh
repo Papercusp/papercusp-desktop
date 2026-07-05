@@ -223,7 +223,23 @@ BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
 # multi-role loop the second role silently WIPES the first role's DMG (observed
 # 2026-07-05: the gui+server loop ended with only the Server DMG). Stash each
 # role's DMG as it's produced, restore them all after the loop.
-DMG_STASH="$(mktemp -d /tmp/papercusp-dmg-stash.XXXXXX)"
+# The stash must NOT live in /tmp — macOS clears it at boot, and a mid-build
+# guest reboot (see the AHCI panic note below) then eats the finished DMGs.
+# Same volume as bundle/dmg so the mv is a rename, not a copy.
+mkdir -p src-tauri/target
+DMG_STASH="$(mktemp -d "$PWD/src-tauri/target/papercusp-dmg-stash.XXXXXX")"
+# hdiutil packing a multi-GB DMG (the ~4GB seeded bundle) saturates the virtual
+# AHCI disk hard enough to kernel-panic the build VM: IPI/TLB-flush timeout via
+# the IOAHCIBlockStorage watchdog ComReset path (observed 2026-07-05, Sonoma
+# guest on QEMU/OSX-KVM). Run build+bundle under a gentler IO policy to smooth
+# the write burst. Override with PAPERCUSP_BUILD_IOPOLICY
+# (important|standard|utility|throttle) or =off to disable.
+BUILD_IOPOLICY="${PAPERCUSP_BUILD_IOPOLICY:-utility}"
+iopolicy_cmd=()
+if [[ "$BUILD_IOPOLICY" != "off" ]] && command -v taskpolicy >/dev/null 2>&1; then
+  iopolicy_cmd=(taskpolicy -d "$BUILD_IOPOLICY")
+  echo "    (bundling under IO policy: $BUILD_IOPOLICY)"
+fi
 for role in $PAPERCUSP_BUILD_ROLES; do
   case "$role" in
     gui)    role_cfg=() ;             role_label="Papercusp GUI" ;;
@@ -231,7 +247,7 @@ for role in $PAPERCUSP_BUILD_ROLES; do
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$role' — skipping"; continue ;;
   esac
   echo "--- tauri build: $role_label ($MAC_BUILD_TARGET) ---"
-  CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
+  CI=true "${iopolicy_cmd[@]}" npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
   found_dmg=0
   for d in "$BUNDLE_DIR"/dmg/*.dmg; do
     [[ -f "$d" ]] || continue
