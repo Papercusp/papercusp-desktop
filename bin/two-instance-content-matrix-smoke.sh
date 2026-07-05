@@ -115,7 +115,20 @@ EOF
 # stop.sh kills by pgrep MINUS the invoker chain ($$/$PPID): a bare pkill -f "$WORK"
 # also matches the CALLER's argv when an agent runs `bash <lane>/stop.sh` or inlines
 # the path in a shell -c string, killing the invoker mid-script (self-hit 2026-07-03 P-002).
-printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ "$p" = "$PPID" ] || kill -9 "$p" 2>/dev/null; done\necho stopped\n' "$WORK" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
+#
+# WI-2150 (display-leak part 2): `pgrep -f "$WORK"` NEVER matches the bare
+# `Xvfb :$DISPLAY_NUM -screen 0 1280x1024x24` process fed_fresh_display starts —
+# its argv contains no $WORK substring at all (only the shell-level `>"$work/xvfb.log"`
+# REDIRECT mentions $WORK, which isn't part of Xvfb's own argv/cmdline). So this
+# stop.sh reaped every OTHER scoped process but always left Xvfb running — live-
+# reproduced 2026-07-04: a completed run's Xvfb survived its own stop.sh, and the
+# VERY NEXT invocation (which calls the prior run's stop.sh at top before rm -rf
+# $WORK) hit "FATAL: :$DISPLAY_NUM busy" on Xvfb start. The periodic gate silently
+# downgrades that FATAL to a SKIP (WI-1977), so this was invisibly starving the
+# content-matrix leg on every cycle after the first completed run, forever, until
+# someone noticed. Fix: also kill by the exact display number (trailing space in
+# the pattern so :154 never matches :1540 etc).
+printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ "$p" = "$PPID" ] || kill -9 "$p" 2>/dev/null; done\nfor p in $(pgrep -f "Xvfb %s "); do [ "$p" = "$$" ] || [ "$p" = "$PPID" ] || kill -9 "$p" 2>/dev/null; done\necho stopped\n' "$WORK" ":$DISPLAY_NUM" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
 
 # ── 1. create + publish ──────────────────────────────────────────────────────
 # WI-2150 (fixture poisoning): the from-repo endpoint does a repo→Hive lookup
