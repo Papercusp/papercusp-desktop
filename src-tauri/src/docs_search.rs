@@ -163,16 +163,48 @@ pub fn open_palette(app: &AppHandle) {
         eprintln!("[docs-search] bad palette url {url}");
         return;
     };
-    match tauri::WebviewWindowBuilder::new(app, WINDOW_LABEL, tauri::WebviewUrl::External(parsed))
-        .title("Search docs")
-        .inner_size(640.0, 480.0)
-        .min_inner_size(420.0, 320.0)
-        .center()
-        .always_on_top(true)
-        .focused(true)
-        .decorations(true)
-        .resizable(true)
-        .build()
+    // Base builder. The icon is applied below so the palette carries the SAME
+    // papercup icon as the app/taskbar (owner ask 2026-07-05) instead of a
+    // generic fallback glyph. `default_window_icon()` is the already-decoded
+    // bundle icon; `WebviewWindowBuilder::icon()` returns a Result AND consumes
+    // the builder (unlike the tray builder's `.icon()` in main.rs, which returns
+    // Self), so on the effectively-never error path we log and rebuild an
+    // icon-less builder rather than dropping the palette entirely.
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        WINDOW_LABEL,
+        tauri::WebviewUrl::External(parsed.clone()),
+    )
+    .title("Search docs")
+    .inner_size(640.0, 480.0)
+    .min_inner_size(420.0, 320.0)
+    .center()
+    .always_on_top(true)
+    .focused(true)
+    .decorations(true)
+    .resizable(true);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        match builder.icon(icon) {
+            Ok(b) => builder = b,
+            Err(e) => {
+                eprintln!("[docs-search] could not set palette icon: {e}");
+                builder = tauri::WebviewWindowBuilder::new(
+                    app,
+                    WINDOW_LABEL,
+                    tauri::WebviewUrl::External(parsed),
+                )
+                .title("Search docs")
+                .inner_size(640.0, 480.0)
+                .min_inner_size(420.0, 320.0)
+                .center()
+                .always_on_top(true)
+                .focused(true)
+                .decorations(true)
+                .resizable(true);
+            }
+        }
+    }
+    match builder.build()
     {
         Ok(win) => {
             // Bring it to the front — on the Server process (a windowless
