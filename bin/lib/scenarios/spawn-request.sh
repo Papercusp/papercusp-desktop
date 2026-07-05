@@ -67,8 +67,10 @@ scn_spawn_request() {
 
   # 6. …and MATERIALIZE on b as origin='remote' — the projection verified the
   #    signature on the NEW kind before applying (the P-009 federation proof).
-  if [ "$(_soffer_row_present b "fleet_slug='$slug' AND offer_kind='spawn_request' AND origin='remote'")" != 1 ]; then
-    echo "spawn-request FAIL — spawn_request for $slug never materialized origin='remote' on frame b (new-kind federation/verify leg broken)"
+  #    P-014 hardened bar: also require the receiver-stamped 64-hex substrate
+  #    author_pubkey (unforgeable attribution; a side-writer leaves it NULL/b64).
+  if [ "$(_soffer_row_present b "fleet_slug='$slug' AND offer_kind='spawn_request' AND origin='remote' AND author_pubkey ~ '^[0-9a-f]{64}\$'")" != 1 ]; then
+    echo "spawn-request FAIL — spawn_request for $slug never materialized origin='remote' with substrate attribution on frame b (new-kind federation/verify leg broken)"
     return 1
   fi
 

@@ -41,8 +41,10 @@ EOS
 }
 
 # Bounded row poll: $1=inst $2=predicate → echoes 1 (present) / 0 (absent).
+# 120 tries × 2s = 4min: the initial replicator attach on a fresh rig takes
+# ~2.8min (measured, run m1783165541) — a 90s window false-REDs on it.
 _fdir_row_present() {
-  local inst="$1" pred="$2" tries="${3:-45}" n
+  local inst="$1" pred="$2" tries="${3:-120}" n
   for _ in $(seq 1 "$tries"); do
     n="$(drv_psql "$inst" "SELECT count(*) FROM harness_shared.p2p_fleet_directory WHERE $pred;" 2>/dev/null | tr -d '[:space:]')"
     if [ "$n" != "0" ] && [ -n "$n" ]; then echo 1; return; fi
@@ -83,15 +85,19 @@ scn_fleet_directory() {
     return 1
   fi
 
-  # 4. Content sanity on b: a live (non-archived) v1+ record.
+  # 4. Content sanity on b: a live (non-archived) v1+ record WITH substrate
+  #    attribution (P-014 hardened bar): author_pubkey must be a receiver-stamped
+  #    64-hex substrate LOG key (resolveOpProvenance's remote branch, D-006
+  #    unforgeable) — a git-importer/side-writer leaves it NULL/b64, so this
+  #    clause kills the masking-importer false-green.
   local live
-  live="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_fleet_directory WHERE fleet_slug='$slug' AND origin='remote' AND archived=false AND record_version>=1;" 2>/dev/null | tr -d '[:space:]')"
+  live="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_fleet_directory WHERE fleet_slug='$slug' AND origin='remote' AND archived=false AND record_version>=1 AND author_pubkey ~ '^[0-9a-f]{64}\$';" 2>/dev/null | tr -d '[:space:]')"
   if [ "$live" = "0" ] || [ -z "$live" ]; then
-    echo "fleet-directory FAIL — remote card on b is archived/malformed (expected live record_version>=1)"
+    echo "fleet-directory FAIL — remote card on b is archived/malformed/unattributed (expected live record_version>=1 with a 64-hex substrate author_pubkey)"
     return 1
   fi
 
-  echo "fleet-directory card federated a→b (owner-signed publish on create; sig-verified remote apply; live v1+ card for $slug)"
+  echo "fleet-directory card federated a→b (owner-signed publish on create; sig-verified remote apply; live v1+ substrate-attributed card for $slug)"
   return 0
 }
 

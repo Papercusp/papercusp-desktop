@@ -22,8 +22,10 @@
 # MATRIX_RUN_ID). Order 58: right after the P-009 work-distribution block (55-57).
 
 # Bounded engineer_issues row poll: $1=inst $2=predicate → echoes 1 (present)/0.
+# 120 tries × 2s = 4min: covers the ~2.8min initial replicator attach (measured,
+# run m1783165541) that a 90s window false-REDs on.
 _wi_row_present() {
-  local inst="$1" pred="$2" tries="${3:-45}" n
+  local inst="$1" pred="$2" tries="${3:-120}" n
   for _ in $(seq 1 "$tries"); do
     n="$(drv_psql "$inst" "SELECT count(*) FROM harness_shared.engineer_issues WHERE $pred;" 2>/dev/null | tr -d '[:space:]')"
     if [ "$n" != "0" ] && [ -n "$n" ]; then echo 1; return; fi
@@ -72,11 +74,13 @@ scn_work_item() {
 
   # 4. Content sanity on b: a real workspace-scoped issue with provenance — a live
   #    remote row carrying an issue_id + created_by (a fake INSERT lacks both from
-  #    the verified op).
+  #    the verified op). P-014 hardened bar: author_pubkey must be the
+  #    receiver-stamped 64-hex substrate LOG key (unforgeable, D-006) — kills a
+  #    masking-importer false-green.
   local ok
-  ok="$(drv_psql b "SELECT count(*) FROM harness_shared.engineer_issues WHERE title='$title' AND origin='remote' AND issue_id IS NOT NULL AND created_by IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  ok="$(drv_psql b "SELECT count(*) FROM harness_shared.engineer_issues WHERE title='$title' AND origin='remote' AND issue_id IS NOT NULL AND created_by IS NOT NULL AND author_pubkey ~ '^[0-9a-f]{64}\$';" 2>/dev/null | tr -d '[:space:]')"
   if [ "$ok" = "0" ] || [ -z "$ok" ]; then
-    echo "work-item FAIL — remote work_item on b is malformed (expected a live row with issue_id + created_by)"
+    echo "work-item FAIL — remote work_item on b is malformed/unattributed (expected a live row with issue_id + created_by + 64-hex substrate author_pubkey)"
     return 1
   fi
 

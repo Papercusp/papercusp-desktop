@@ -21,8 +21,10 @@
 # fleet + one offer row, ids suffixed with MATRIX_RUN_ID).
 
 # Bounded offer-row poll: $1=inst $2=predicate → echoes 1 (present) / 0 (absent).
+# 120 tries × 2s = 4min: covers the ~2.8min initial replicator attach (measured,
+# run m1783165541) that a 90s window false-REDs on.
 _soffer_row_present() {
-  local inst="$1" pred="$2" tries="${3:-45}" n
+  local inst="$1" pred="$2" tries="${3:-120}" n
   for _ in $(seq 1 "$tries"); do
     n="$(drv_psql "$inst" "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE $pred;" 2>/dev/null | tr -d '[:space:]')"
     if [ "$n" != "0" ] && [ -n "$n" ]; then echo 1; return; fi
@@ -76,9 +78,11 @@ scn_seat_offer() {
   #    the D-005/M19 privacy contract — the record advertises accountScope only
   #    (an 'auto' delegation must not leak any account ref into the body).
   local live leak
-  live="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' AND origin='remote' AND status='open' AND record_version>=1 AND local_disposition IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+  # P-014 hardened bar: author_pubkey must be a receiver-stamped 64-hex substrate
+  # LOG key (unforgeable, D-006) — kills a masking-importer false-green.
+  live="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' AND origin='remote' AND status='open' AND record_version>=1 AND local_disposition IS NULL AND author_pubkey ~ '^[0-9a-f]{64}\$';" 2>/dev/null | tr -d '[:space:]')"
   if [ "$live" = "0" ] || [ -z "$live" ]; then
-    echo "seat-offer FAIL — remote seat-offer on a is not a live open v1+ record"
+    echo "seat-offer FAIL — remote seat-offer on a is not a live open v1+ substrate-attributed record (origin/author_pubkey check)"
     return 1
   fi
   leak="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' AND origin='remote' AND record_json NOT LIKE '%\"accountScope\":\"auto\"%';" 2>/dev/null | tr -d '[:space:]')"
