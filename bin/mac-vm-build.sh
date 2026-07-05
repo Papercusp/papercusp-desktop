@@ -170,6 +170,91 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
 done
 
+# ── third icon: "Papercusp Tutorial.app" baked into the DMGs (WI-2945) ───────
+# Parity with the Linux .deb's third .desktop entry + the Windows Start-Menu
+# shortcut (WI-2197): a lightweight .app whose executable opens Terminal running
+# `papercusp tutorial`. First-boot provisioning (writeMacTutorialApp,
+# packages/operator-core/lib/desktop-install/papercusp-files.ts) writes the
+# SAME bundle into ~/Applications as a fallback — keep the two in sync, and it
+# skips itself when this baked copy landed in /Applications. Baking it into the
+# DMG makes all THREE icons visible at install time instead of after first boot.
+BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
+TUT_APP="$BUNDLE_DIR/macos/Papercusp Tutorial.app"
+echo "--- generating $TUT_APP ---"
+rm -rf "$TUT_APP"
+mkdir -p "$TUT_APP/Contents/MacOS" "$TUT_APP/Contents/Resources"
+cat > "$TUT_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Papercusp Tutorial</string>
+  <key>CFBundleDisplayName</key><string>Papercusp Tutorial &amp; Setup</string>
+  <key>CFBundleIdentifier</key><string>com.papercusp.tutorial</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>papercusp-tutorial</string>
+  <key>CFBundleIconFile</key><string>icon.icns</string>
+  <key>LSMinimumSystemVersion</key><string>10.15</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+cp src-tauri/icons/icon.icns "$TUT_APP/Contents/Resources/icon.icns" 2>/dev/null \
+  || echo "    (no icon.icns — tutorial app ships with the generic icon)"
+cat > "$TUT_APP/Contents/MacOS/papercusp-tutorial" <<'EXEC'
+#!/bin/bash
+# Papercusp Tutorial launcher — baked at build time (mac-vm-build.sh, WI-2945);
+# first-boot provisioning (papercusp-files.ts writeMacTutorialApp) writes the
+# same bundle to ~/Applications when this one isn't installed. Opens a real
+# Terminal window running `papercusp tutorial` (mirrors native_console.rs
+# spawn_macos_new_window).
+set -e
+TMP="$(mktemp -t papercusp-tutorial).command"
+cat > "$TMP" <<'SCRIPT'
+#!/bin/bash
+export PATH="$HOME/.papercusp/bin:$HOME/.local/bin:$PATH"
+if [ -x "$HOME/.papercusp/bin/papercusp" ]; then
+  exec "$HOME/.papercusp/bin/papercusp" tutorial
+fi
+# CLI not provisioned yet — first Server boot writes it (installPapercuspFiles).
+echo "Papercusp setup hasn't finished yet — launching Papercusp now."
+echo "Give it a minute to finish first-run setup, then open Papercusp Tutorial again."
+open -b com.papercusp.gui 2>/dev/null || open -a "Papercusp GUI" 2>/dev/null || \
+  echo "Could not launch Papercusp — open the Papercusp GUI app first, then retry."
+SCRIPT
+chmod +x "$TMP"
+TERM_APP="Terminal.app"
+[ -d "/Applications/iTerm.app" ] && TERM_APP="iTerm.app"
+open -na "$TERM_APP" "$TMP"
+EXEC
+chmod 755 "$TUT_APP/Contents/MacOS/papercusp-tutorial"
+echo "    ✓ generated"
+
+# Repack each role's DMG to carry the tutorial app beside the main .app.
+# (tauri's bundler admits no extra top-level items, so re-create the DMG:
+# same volname, same app + /Applications symlink, plus the tutorial app.
+# CI=true above already skipped Finder styling, so no layout is lost.)
+for dmg in "$BUNDLE_DIR"/dmg/*.dmg; do
+  [[ -f "$dmg" ]] || continue
+  case "$dmg" in *"Papercusp GUI"*) main_app="Papercusp GUI.app" ;;
+                 *"Papercusp Server"*) main_app="Papercusp Server.app" ;;
+                 *) echo "    ? unknown dmg $dmg — skipping tutorial bake"; continue ;; esac
+  [[ -d "$BUNDLE_DIR/macos/$main_app" ]] || { echo "    ? $main_app missing — skipping"; continue; }
+  vol="$(basename "$main_app" .app)"
+  echo "--- repacking $(basename "$dmg") with Papercusp Tutorial.app ---"
+  STAGE="$(mktemp -d /tmp/papercusp-dmg-stage.XXXXXX)"
+  cp -R "$BUNDLE_DIR/macos/$main_app" "$STAGE/"
+  cp -R "$TUT_APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
+  rm -f "$dmg"
+  hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov -format UDZO -quiet "$dmg"
+  rm -rf "$STAGE"
+  echo "    ✓ $(basename "$dmg") now carries the Tutorial & Setup app"
+done
+
 echo "--- artifacts ($MAC_BUILD_TARGET) ---"
 ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/" 2>/dev/null || true
 ls -la "src-tauri/target/$MAC_BUILD_TARGET/release/bundle/macos/" 2>/dev/null || true
