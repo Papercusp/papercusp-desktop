@@ -196,7 +196,7 @@ ${SIGN_PRELUDE}
 Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
 # Same provenance mechanism for the shipped app VERSION (WI-2644) — see the
 # matching PAPERCUSP_BUILD_VERSION option_env! in main.rs. release-local.sh
-# forwards its own $VERSION arg into this script's env.
+# forwards its own \$VERSION arg into this script's env.
 \$env:PAPERCUSP_BUILD_VERSION = "${PAPERCUSP_BUILD_VERSION:-}"
 Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
 # Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
