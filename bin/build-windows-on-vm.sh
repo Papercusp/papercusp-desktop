@@ -126,9 +126,18 @@ echo "==> extracting in VM ($VM_BUILD_DIR)"
 # SIGN_PRELUDE is empty and the build is UNSIGNED — byte-identical to before.
 # Full owner runbook: /internal/docs/agent-insights/windows-authenticode-signing-runbook
 # tauri reads bundle.windows.{certificateThumbprint|signCommand,timestampUrl,
-# digestAlgorithm} from tauri.windows.conf.json; we patch it in-VM before the build.
+# digestAlgorithm,tsp} from tauri.windows.conf.json; we patch it in-VM before the build.
 WINDOWS_SIGN_TIMESTAMP_URL="${WINDOWS_SIGN_TIMESTAMP_URL:-http://timestamp.digicert.com}"
 WINDOWS_SIGN_DIGEST="${WINDOWS_SIGN_DIGEST:-sha256}"
+# tsp=true → tauri emits the RFC3161 timestamp (signtool `/tr <url> /td <digest>`),
+# the modern standard VERIFIED working here against digicert/sectigo/comodo
+# (2026-07-05 self-signed dry-run). With tsp unset/false, tauri falls back to the
+# LEGACY `/t <url>` timestamp, which RFC3161-only CAs (e.g. SSL.com eSigner, common
+# for EV) reject — so we default ON. Set WINDOWS_SIGN_TSP=false only for a legacy
+# timestamp server that lacks RFC3161. (signCommand/EV custom-signer path handles
+# its own timestamping, so tsp is not injected there.)
+WINDOWS_SIGN_TSP="${WINDOWS_SIGN_TSP:-true}"
+TSP_PS=$([[ "$WINDOWS_SIGN_TSP" == "true" || "$WINDOWS_SIGN_TSP" == "1" ]] && echo '$true' || echo '$false')
 SIGN_PRELUDE=""
 if [[ -n "${WINDOWS_SIGN_COMMAND:-}" ]]; then
   # EV / cloud-HSM path (non-exportable key): a custom signer, %1 = file path.
@@ -155,6 +164,7 @@ if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscu
 \$cfg.bundle.windows | Add-Member -Force certificateThumbprint \$cert.Thumbprint
 \$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
 \$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
+\$cfg.bundle.windows | Add-Member -Force tsp ${TSP_PS}
 \$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
 PS
 )
@@ -168,6 +178,7 @@ if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscu
 \$cfg.bundle.windows | Add-Member -Force certificateThumbprint "${WINDOWS_CERTIFICATE_THUMBPRINT}"
 \$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
 \$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
+\$cfg.bundle.windows | Add-Member -Force tsp ${TSP_PS}
 \$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
 PS
 )

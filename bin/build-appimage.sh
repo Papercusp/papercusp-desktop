@@ -74,7 +74,11 @@ ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$OUT" "$PLUGIN" --appdir "$A
 #    runs unsigned; the .sig only gates auto-update verification.
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   echo "==> signing $OUT (updater)"
-  if npm run tauri -- signer sign --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
+  # `tauri signer sign --private-key` wants the key CONTENT (base64), not a path —
+  # unlike the TAURI_SIGNING_PRIVATE_KEY env that `tauri build` reads (which accepts
+  # either). Resolve a path to its contents so both forms work.
+  _key="$TAURI_SIGNING_PRIVATE_KEY"; [ -f "$_key" ] && _key="$(cat "$_key")"
+  if npm run tauri -- signer sign --private-key "$_key" \
         --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$OUT"; then
     echo "   signed → $OUT.sig"
   else
