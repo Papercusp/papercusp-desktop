@@ -205,9 +205,8 @@ fi
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   echo "WARN: no TAURI_SIGNING_PRIVATE_KEY in env — updater artifacts will be unsigned/fail"
 fi
-# CI=true → tauri-bundler passes --skip-jenkins to bundle_dmg.sh, skipping
-# the AppleScript Finder-styling step that times out headless (-1712 over
-# SSH on the VM). The DMG just gets default icon layout.
+# CI=true → tauri-bundler stays non-interactive (no Finder/AppleScript steps
+# that time out headless over SSH).
 #
 # Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):
 #   * gui    — base tauri.conf.json          (Papercusp GUI,    com.papercusp.gui)
@@ -219,15 +218,16 @@ fi
 # "server") to build just one while iterating.
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
-# tauri's dmg bundler CLEANS bundle/dmg/ at the start of each build, so in a
-# multi-role loop the second role silently WIPES the first role's DMG (observed
-# 2026-07-05: the gui+server loop ended with only the Server DMG). Stash each
-# role's DMG as it's produced, restore them all after the loop.
-# The stash must NOT live in /tmp — macOS clears it at boot, and a mid-build
-# guest reboot (see the AHCI panic note below) then eats the finished DMGs.
-# Same volume as bundle/dmg so the mv is a rename, not a copy.
+# DMGs are packed DIRECTLY by this script (see the pack loop below), NOT by
+# tauri: tauri's create-dmg fork (bundle_dmg.sh) mounts a rw image and
+# detaches it, and that detach hits DiskArbitration timeouts under
+# post-reboot Spotlight indexing (3× on 2026-07-05) — while this script's own
+# repack step was already re-creating every DMG from scratch anyway to add
+# the tutorial app. So tauri builds only the .app (+ updater tar.gz/sig), and
+# a single-invocation `hdiutil create -srcfolder` is the only DMG producer.
+# This also removes the old per-role DMG stash dance (tauri's dmg bundler
+# wiped bundle/dmg at the start of each role's build).
 mkdir -p src-tauri/target
-DMG_STASH="$(mktemp -d "$PWD/src-tauri/target/papercusp-dmg-stash.XXXXXX")"
 # hdiutil packing a multi-GB DMG (the ~4GB seeded bundle) saturates the virtual
 # AHCI disk hard enough to kernel-panic the build VM: IPI/TLB-flush timeout via
 # the IOAHCIBlockStorage watchdog ComReset path (observed 2026-07-05, Sonoma
@@ -252,19 +252,9 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   # bundle_dmg.sh" is undiagnosable without it (2026-07-05).
   verbose_flag=()
   [[ "${PAPERCUSP_BUILD_VERBOSE:-0}" == "1" ]] && verbose_flag=(--verbose)
-  CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
-  found_dmg=0
-  for d in "$BUNDLE_DIR"/dmg/*.dmg; do
-    [[ -f "$d" ]] || continue
-    mv "$d" "$DMG_STASH/" && found_dmg=1
-  done
-  [[ "$found_dmg" == "1" ]] || { echo "ERROR: $role_label build produced no DMG"; exit 1; }
+  CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}"
+  [[ -d "$BUNDLE_DIR/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
 done
-mkdir -p "$BUNDLE_DIR/dmg"
-for d in "$DMG_STASH"/*.dmg; do
-  [[ -f "$d" ]] && mv "$d" "$BUNDLE_DIR/dmg/"
-done
-rmdir "$DMG_STASH" 2>/dev/null || true
 
 # ── third icon: "Papercusp Tutorial & Setup.app" baked into the DMGs (WI-2945) ──
 # Parity with the Linux .deb's third .desktop entry + the Windows Start-Menu
@@ -329,26 +319,36 @@ EXEC
 chmod 755 "$TUT_APP/Contents/MacOS/papercusp-tutorial"
 echo "    ✓ generated"
 
-# Repack each role's DMG to carry the tutorial app beside the main .app.
-# (tauri's bundler admits no extra top-level items, so re-create the DMG:
-# same volname, same app + /Applications symlink, plus the tutorial app.
-# CI=true above already skipped Finder styling, so no layout is lost.)
-for dmg in "$BUNDLE_DIR"/dmg/*.dmg; do
-  [[ -f "$dmg" ]] || continue
-  case "$dmg" in *"Papercusp GUI"*) main_app="Papercusp GUI.app" ;;
-                 *"Papercusp Server"*) main_app="Papercusp Server.app" ;;
-                 *) echo "    ? unknown dmg $dmg — skipping tutorial bake"; continue ;; esac
-  [[ -d "$BUNDLE_DIR/macos/$main_app" ]] || { echo "    ? $main_app missing — skipping"; continue; }
+# Pack each role's DMG: main .app + tutorial app + /Applications symlink, in
+# ONE `hdiutil create -srcfolder` (no rw-image mount/detach — see the note
+# above the role loop). Filename matches what tauri's bundler would produce.
+# The stage lives on the same APFS volume so `cp -c` clones instead of
+# copying the multi-GB seeded .app (falls back to a plain copy elsewhere).
+VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+case "$MAC_BUILD_TARGET" in
+  x86_64-*)  DMG_ARCH="x64" ;;
+  aarch64-*) DMG_ARCH="aarch64" ;;
+  *)         DMG_ARCH="$MAC_BUILD_TARGET" ;;
+esac
+mkdir -p "$BUNDLE_DIR/dmg"
+for role in $PAPERCUSP_BUILD_ROLES; do
+  case "$role" in
+    gui)    main_app="Papercusp GUI.app" ;;
+    server) main_app="Papercusp Server.app" ;;
+    *) continue ;;
+  esac
+  [[ -d "$BUNDLE_DIR/macos/$main_app" ]] || { echo "    ? $main_app missing — skipping DMG pack"; continue; }
   vol="$(basename "$main_app" .app)"
-  echo "--- repacking $(basename "$dmg") with Papercusp Tutorial & Setup.app ---"
-  STAGE="$(mktemp -d /tmp/papercusp-dmg-stage.XXXXXX)"
-  cp -R "$BUNDLE_DIR/macos/$main_app" "$STAGE/"
+  dmg="$BUNDLE_DIR/dmg/${vol}_${VERSION}_${DMG_ARCH}.dmg"
+  echo "--- packing $(basename "$dmg") ($main_app + Tutorial & Setup) ---"
+  STAGE="$(mktemp -d "$PWD/src-tauri/target/papercusp-dmg-stage.XXXXXX")"
+  cp -Rc "$BUNDLE_DIR/macos/$main_app" "$STAGE/" 2>/dev/null || cp -R "$BUNDLE_DIR/macos/$main_app" "$STAGE/"
   cp -R "$TUT_APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   rm -f "$dmg"
-  hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov -format UDZO -quiet "$dmg"
+  "${iopolicy_cmd[@]}" hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov -format UDZO "$dmg"
   rm -rf "$STAGE"
-  echo "    ✓ $(basename "$dmg") now carries the Tutorial & Setup app"
+  echo "    ✓ $(basename "$dmg")"
 done
 
 echo "--- artifacts ($MAC_BUILD_TARGET) ---"
