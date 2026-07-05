@@ -49,7 +49,7 @@ mod wsl_setup;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 /// Minimal RFC 3986 percent-encoding for the path component. Only the
 /// reserved + unsafe set; we avoid pulling in a full url crate dep just
@@ -1498,6 +1498,52 @@ fn point_window_at_operator<R: tauri::Runtime>(
     for _ in 0..reinject_ticks {
         let _ = window.eval(&inject);
         std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// Payload for the `operator-dead` webview event (WI-1878 / critical-process-
+/// supervisor-2026-07-04 P-005). Emitted exactly once per give-up latch (both
+/// `decide_server_supervision` and `decide_serve_respawn` only return GiveUp
+/// once — `already_gave_up`/`return` after — so this never floods the
+/// webview). `reason` distinguishes which supervisor gave up, since the two
+/// watchers cover different roles (GUI-side Server-bundle respawn vs. the
+/// Server's own in-process serve.mjs child respawn).
+#[derive(Debug, Serialize, Clone)]
+struct OperatorDeadPayload {
+    reason: String,
+    respawns: usize,
+    window_secs: u64,
+}
+
+/// WI-1878 / P-005: surface a LOUD "operator dead" state once auto-respawn
+/// gives up — the part of WI-1878's ask ("at minimum surface a loud
+/// 'operator dead' state") that the WI-2667 respawn/backoff/give-up machinery
+/// didn't yet cover (it only logged to stderr, invisible to a GUI user with
+/// no terminal). Emits a webview event (for an in-app persistent banner) AND
+/// raises a native OS notification, so the user finds out even if the window
+/// is backgrounded/minimized. Best-effort: a notification failure is logged,
+/// never fatal — the app is already in a degraded state, we must not panic
+/// trying to report it.
+fn notify_operator_dead(app_handle: &tauri::AppHandle, reason: &str, respawns: usize, window_secs: u64) {
+    let _ = app_handle.emit(
+        "operator-dead",
+        OperatorDeadPayload {
+            reason: reason.to_string(),
+            respawns,
+            window_secs,
+        },
+    );
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title("Papercusp operator stopped responding")
+        .body(format!(
+            "Auto-restart gave up after {respawns} attempts in {window_secs}s ({reason}). Restart the app to recover."
+        ))
+        .show()
+    {
+        eprintln!("[papercusp-desktop] operator-dead notification failed: {e}");
     }
 }
 
