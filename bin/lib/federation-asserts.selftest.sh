@@ -136,6 +136,28 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   done
 done
 
+# 7) Route-cutover guard (WI-2929): the live federation driver runs against the
+# current pot route. A stale /hives/from-repo call hard-404s on current packaged
+# binaries before the matrix can exercise federation at all.
+ROUTE_FILES=(
+  "$DIR/federation-asserts.sh"
+  "$DIR/../two-instance-content-matrix-smoke.sh"
+  "$DIR/../two-instance-hive-from-repo-smoke.sh"
+  "$DIR/../deb-hetzner-fast-iterate.sh"
+  "$DIR/deb-hetzner-rig.sh"
+  "$DIR/../work-distribution-drill.sh"
+)
+route_bad=0
+for file in "${ROUTE_FILES[@]}"; do
+  if grep -q 'hives/from-repo' "$file"; then
+    bad "$(basename "$file") still references retired hives/from-repo route"
+    route_bad=1
+  fi
+done
+if [ "$route_bad" = 0 ]; then
+  ok "live federation scripts use current pots/from-repo route"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1
