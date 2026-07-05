@@ -40,13 +40,11 @@ cd "$(dirname "$0")/.."
 export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-3270}"
 
 # tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
-# Keep the dev window identity separate from the packaged GUI. Mutter can
-# retain a bad Iconic/unmapped state per WM_CLASS; using a dev-only class keeps
-# the owner-facing dev shell out of the packaged app's remembered shell state.
+# We only override devUrl; everything else stays the same.
 #
 # Use 127.0.0.1, NOT localhost: on a box where `localhost` resolves to IPv6
 # ::1 first (getent hosts localhost → ::1) and the operator binds IPv4
 # only (0.0.0.0), a `localhost` devUrl makes WebKitGTK hit ::1, fail, and the
 # webview reload-loops on first load before limping onto IPv4. (Same reason
 # main.rs injects the runtime base as 127.0.0.1.)
-exec npm run tauri -- dev --config '{"build":{"devUrl":"http://127.0.0.1:3270"},"app":{"windows":[{"title":"Papercusp Dev","width":1280,"height":800,"minWidth":800,"minHeight":600,"resizable":true,"fullscreen":false,"center":true,"decorations":true,"dragDropEnabled":false,"windowClassname":"papercusp-dev"}]}}'
+exec npm run tauri -- dev --config '{"build":{"devUrl":"http://127.0.0.1:3270"}}'
