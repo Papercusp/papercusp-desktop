@@ -130,18 +130,16 @@ fn spawn_internal(
     // Windows side would run System32 bash.exe into the DEFAULT distro (or
     // plain Windows), the wrong target for every wizard install/login and
     // PiPanel session. Wrap the command through wsl.exe instead. Spec env
-    // vars can't cross wsl.exe without WSLENV plumbing — none of the wizard
-    // specs set any today; log if one ever does.
+    // vars can't cross wsl.exe without WSLENV plumbing — so thread them
+    // through `/usr/bin/env K=V …` instead: argv entries survive --exec
+    // verbatim (spaces and all). The old code DROPPED spec env here with
+    // only an eprintln warning, which silently broke the onboarding
+    // concierge — its PAPERCUSP_OPERATOR_URL never arrived, so it dialed
+    // the retired :3070 default forever (WI-3033, owner-hit 2026-07-05).
     #[cfg(target_os = "windows")]
     let via_wsl = crate::wsl_setup::detect_ready_cached();
     #[cfg(target_os = "windows")]
     let mut cmd = if via_wsl {
-        if !opts.env.is_empty() {
-            eprintln!(
-                "[pty] WARNING: dropping {} env var(s) on the wsl.exe boundary",
-                opts.env.len()
-            );
-        }
         let mut c = CommandBuilder::new("wsl.exe");
         c.arg("--distribution");
         c.arg(crate::wsl_setup::DISTRO_NAME_PUB);
@@ -156,6 +154,19 @@ fn spawn_internal(
         // garbage (found live 2026-06-11). --exec preserves the arg vector
         // (same reason make_sidecar_command uses it for serve).
         c.arg("--exec");
+        // TERM first (the Windows-side cmd.env("TERM") below cannot cross
+        // the boundary either), then the spec env, then the real command.
+        c.arg("/usr/bin/env");
+        c.arg("TERM=xterm-256color");
+        for (k, v) in &opts.env {
+            // env(1) takes literal K=V argv entries — a key containing '='
+            // (or an empty key) would be misparsed; skip those defensively.
+            if k.is_empty() || k.contains('=') {
+                eprintln!("[pty] WARNING: skipping invalid env name {k:?} at the wsl.exe boundary");
+                continue;
+            }
+            c.arg(format!("{k}={v}"));
+        }
         c.arg(opts.command.clone());
         for arg in &opts.args {
             c.arg(arg);
@@ -286,7 +297,11 @@ pub fn pty_spawn(app: AppHandle, opts: PtySpawnOpts) -> Result<PtySpawnResult, S
         let got_output = got_output.clone();
         thread::spawn(move || {
             run_reader_loop(reader, entry_for_reader, move |chunk| {
-                got_output.store(true, std::sync::atomic::Ordering::Relaxed);
+                // WI-3033: only REAL bytes count — the ConPTY init handshake
+                // alone must not disarm the silent-wedge watchdog below.
+                if contains_real_output(chunk) {
+                    got_output.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = app.emit(
                     "pty-data",
                     PtyDataPayload {
