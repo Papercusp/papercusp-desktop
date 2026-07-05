@@ -1508,7 +1508,7 @@ fn point_window_at_operator<R: tauri::Runtime>(
 /// webview). `reason` distinguishes which supervisor gave up, since the two
 /// watchers cover different roles (GUI-side Server-bundle respawn vs. the
 /// Server's own in-process serve.mjs child respawn).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, serde::Serialize, Clone)]
 struct OperatorDeadPayload {
     reason: String,
     respawns: usize,
@@ -1657,6 +1657,12 @@ fn spawn_operator_watcher(
                          keeps dying; giving up auto-respawn until the app is restarted (WI-2667)",
                         MAX_RESPAWNS_PER_WINDOW,
                         RESPAWN_WINDOW.as_secs()
+                    );
+                    notify_operator_dead(
+                        &app_handle,
+                        "Server bundle respawn cap hit",
+                        MAX_RESPAWNS_PER_WINDOW,
+                        RESPAWN_WINDOW.as_secs(),
                     );
                     gave_up = true;
                 }
@@ -3810,6 +3816,12 @@ pub fn run() {
                                      restarts (WI-2667)",
                                     MAX_RESPAWNS_PER_WINDOW,
                                     RESPAWN_WINDOW.as_secs()
+                                );
+                                notify_operator_dead(
+                                    &sup_handle,
+                                    "serve.mjs in-process respawn cap hit",
+                                    MAX_RESPAWNS_PER_WINDOW,
+                                    RESPAWN_WINDOW.as_secs(),
                                 );
                                 return;
                             }
