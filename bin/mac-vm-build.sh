@@ -218,6 +218,12 @@ fi
 # filenames, so they don't clobber. Set PAPERCUSP_BUILD_ROLES="gui" (or
 # "server") to build just one while iterating.
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
+# tauri's dmg bundler CLEANS bundle/dmg/ at the start of each build, so in a
+# multi-role loop the second role silently WIPES the first role's DMG (observed
+# 2026-07-05: the gui+server loop ended with only the Server DMG). Stash each
+# role's DMG as it's produced, restore them all after the loop.
+DMG_STASH="$(mktemp -d /tmp/papercusp-dmg-stash.XXXXXX)"
 for role in $PAPERCUSP_BUILD_ROLES; do
   case "$role" in
     gui)    role_cfg=() ;             role_label="Papercusp GUI" ;;
@@ -226,18 +232,29 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   esac
   echo "--- tauri build: $role_label ($MAC_BUILD_TARGET) ---"
   CI=true npx tauri build --target "$MAC_BUILD_TARGET" --bundles app,dmg "${role_cfg[@]}"
+  found_dmg=0
+  for d in "$BUNDLE_DIR"/dmg/*.dmg; do
+    [[ -f "$d" ]] || continue
+    mv "$d" "$DMG_STASH/" && found_dmg=1
+  done
+  [[ "$found_dmg" == "1" ]] || { echo "ERROR: $role_label build produced no DMG"; exit 1; }
 done
+mkdir -p "$BUNDLE_DIR/dmg"
+for d in "$DMG_STASH"/*.dmg; do
+  [[ -f "$d" ]] && mv "$d" "$BUNDLE_DIR/dmg/"
+done
+rmdir "$DMG_STASH" 2>/dev/null || true
 
-# ── third icon: "Papercusp Tutorial.app" baked into the DMGs (WI-2945) ───────
+# ── third icon: "Papercusp Tutorial & Setup.app" baked into the DMGs (WI-2945) ──
 # Parity with the Linux .deb's third .desktop entry + the Windows Start-Menu
 # shortcut (WI-2197): a lightweight .app whose executable opens Terminal running
 # `papercusp tutorial`. First-boot provisioning (writeMacTutorialApp,
 # packages/operator-core/lib/desktop-install/papercusp-files.ts) writes the
-# SAME bundle into ~/Applications as a fallback — keep the two in sync, and it
-# skips itself when this baked copy landed in /Applications. Baking it into the
-# DMG makes all THREE icons visible at install time instead of after first boot.
-BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
-TUT_APP="$BUNDLE_DIR/macos/Papercusp Tutorial.app"
+# SAME bundle into ~/Applications as a fallback — keep the two in sync (same
+# canonical name), and it skips itself when this baked copy landed in
+# /Applications. Baking it into the DMG makes all THREE icons visible at
+# install time instead of after first boot.
+TUT_APP="$BUNDLE_DIR/macos/Papercusp Tutorial & Setup.app"
 echo "--- generating $TUT_APP ---"
 rm -rf "$TUT_APP"
 mkdir -p "$TUT_APP/Contents/MacOS" "$TUT_APP/Contents/Resources"
@@ -246,7 +263,7 @@ cat > "$TUT_APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Papercusp Tutorial</string>
+  <key>CFBundleName</key><string>Papercusp Tutorial &amp; Setup</string>
   <key>CFBundleDisplayName</key><string>Papercusp Tutorial &amp; Setup</string>
   <key>CFBundleIdentifier</key><string>com.papercusp.tutorial</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -302,7 +319,7 @@ for dmg in "$BUNDLE_DIR"/dmg/*.dmg; do
                  *) echo "    ? unknown dmg $dmg — skipping tutorial bake"; continue ;; esac
   [[ -d "$BUNDLE_DIR/macos/$main_app" ]] || { echo "    ? $main_app missing — skipping"; continue; }
   vol="$(basename "$main_app" .app)"
-  echo "--- repacking $(basename "$dmg") with Papercusp Tutorial.app ---"
+  echo "--- repacking $(basename "$dmg") with Papercusp Tutorial & Setup.app ---"
   STAGE="$(mktemp -d /tmp/papercusp-dmg-stage.XXXXXX)"
   cp -R "$BUNDLE_DIR/macos/$main_app" "$STAGE/"
   cp -R "$TUT_APP" "$STAGE/"
