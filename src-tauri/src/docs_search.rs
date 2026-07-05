@@ -152,6 +152,16 @@ pub fn open_palette(app: &AppHandle) {
         let _ = existing.show();
         let _ = existing.unminimize();
         let _ = existing.set_focus();
+        // Re-shown = a fresh open from the user's point of view — RELOAD so the
+        // palette picks up the CURRENT served page. The hidden window otherwise
+        // pins whatever HTML existed when it was first created for the app's
+        // whole lifetime: the owner ran an app instance from before the 💬
+        // "Chat with an agent" CTA landed and could never see it, however many
+        // times the shortcut re-opened the (stale) palette (2026-07-05). A
+        // reload here is one local fetch of a static page — imperceptible next
+        // to the show/focus, and clearing the previous query matches
+        // fresh-open semantics anyway.
+        let _ = existing.eval("location.reload()");
         return;
     }
     let Some(base) = resolve_base(app) else {
