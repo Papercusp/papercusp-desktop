@@ -3276,17 +3276,23 @@ pub fn run() {
                     }
                 }
 
-                // Auto-open devtools so the developer can debug the
-                // operator UI without hunting for keyboard shortcuts.
-                // webkit2gtk on Linux doesn't always wire Ctrl+Shift+I
-                // through reliably; opening from Rust is foolproof.
+                // Devtools auto-open is OPT-IN via PAPERCUSP_AUTO_DEVTOOLS=1.
+                // It used to fire unconditionally in debug, but WebKitGTK opens
+                // the Web Inspector ATTACHED — it splits/takes over the main
+                // window — so every dev launch shoved an inspector pane into
+                // the owner's face, and when webview paint was degraded the
+                // inspector chrome was ALL the user saw ("all it says is web
+                // inspector", 2026-07-05, WI-2817 fallout). Agents inspect via
+                // the dev bridge (tauri-agent-tools) or Ctrl+Shift+I; neither
+                // needs the auto-pop.
                 if let Some(window) = app.get_webview_window("main") {
-                    // Auto-open devtools only in debug — `open_devtools` is
-                    // compiled out in release unless the tauri `devtools`
-                    // feature is on (and we don't want devtools popping in a
-                    // shipped/release build anyway).
+                    // `open_devtools` is compiled out in release unless the
+                    // tauri `devtools` feature is on (and we don't want
+                    // devtools popping in a shipped/release build anyway).
                     #[cfg(debug_assertions)]
-                    window.open_devtools();
+                    if std::env::var_os("PAPERCUSP_AUTO_DEVTOOLS").is_some_and(|v| v == "1") {
+                        window.open_devtools();
+                    }
                     // WebKitGTK denies getUserMedia by default; auto-grant
                     // so the operator's voice/wake-word/elevenlabs paths
                     // work without surfacing NotAllowedError on every load.
