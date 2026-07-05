@@ -159,7 +159,10 @@ pub fn open_palette(app: &AppHandle) {
         return;
     };
     let url = format!("{base}/internal/docs/search-palette.html");
-    let Ok(parsed) = url.parse() else {
+    // Explicit type: `parsed` is now also `.clone()`d into a second builder
+    // below, and `.clone()` on an un-annotated binding leaves `url.parse()`'s
+    // target ambiguous (E0282).
+    let Ok(parsed) = url.parse::<url::Url>() else {
         eprintln!("[docs-search] bad palette url {url}");
         return;
     };
