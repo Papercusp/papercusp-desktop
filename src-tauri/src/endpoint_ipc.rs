@@ -307,6 +307,54 @@ impl IpcClient {
             self.alive.store(false, Ordering::Relaxed);
             return Err(e.to_string());
         }
+        // WI-2817: arm the idle-timeout watchdog for this call. The reader
+        // loop's EOF/error path already handles a connection that visibly
+        // DIES; this backstop catches the other case — a connection that
+        // stays open but whose peer never responds (most commonly an
+        // operator/bg-host restart landing between "accepted the socket" and
+        // "actually servicing requests"). If this exact call is still
+        // unresolved after IPC_CALL_IDLE_TIMEOUT_MS of total silence, force
+        // it to the SAME terminal `connection_lost` the reader loop emits on
+        // a real EOF — reusing the existing, already-tested client retry
+        // path rather than inventing a new one — and mark the connection
+        // dead so the NEXT call reconnects instead of piling onto the same
+        // wedged socket.
+        {
+            let in_flight = self.in_flight.clone();
+            let alive = self.alive.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        IPC_WATCHDOG_CHECK_INTERVAL_MS,
+                    ))
+                    .await;
+                    let last_activity = match in_flight.get(&id) {
+                        Some(sink) => sink.last_activity_ms.load(Ordering::Relaxed),
+                        // Already resolved (Done/Error removed it) — nothing to watch.
+                        None => return,
+                    };
+                    if !is_idle_timed_out(last_activity, now_ms(), IPC_CALL_IDLE_TIMEOUT_MS) {
+                        continue;
+                    }
+                    // Still present AND stale — force-fail it. A concurrent
+                    // Done/Error racing this remove is fine: DashMap's
+                    // `remove` only fires if the key is STILL present, so at
+                    // most one of {reader_loop, this watchdog} wins the race
+                    // for a given id.
+                    if let Some((_, sink)) = in_flight.remove(&id) {
+                        sink.send_terminal(EndpointEvent::Error {
+                            code: "connection_lost".to_string(),
+                            message: format!(
+                                "endpoint-ipc call {id} got no response for over {}s — treating the connection as wedged",
+                                IPC_CALL_IDLE_TIMEOUT_MS / 1000
+                            ),
+                        });
+                    }
+                    alive.store(false, Ordering::Relaxed);
+                    return;
+                }
+            });
+        }
         Ok(id)
     }
 
