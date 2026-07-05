@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the Papercusp desktop shell.",
-  "windows": ["main", "papercusp-perf-recorder-*", "ws-*"],
+  "windows": ["main", "papercusp-perf-recorder-*", "ws-*", "docs-search-palette"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

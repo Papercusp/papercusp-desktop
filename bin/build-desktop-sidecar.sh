@@ -1025,8 +1025,30 @@ done
 # them at runtime. The Tauri main passes this dir to serve.mjs
 # (PAPERCUSP_PG_SQL_DIR) which applies the schema on first boot.
 echo "→ bundling framework DDL"
+rm -rf "$SIDECAR_DIR/db-sql"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
+
+# WI-3047 guard: assert what we just copied EXACTLY matches the source tree at
+# this instant (same count, same highest migration number) — cheap defense-in-
+# depth against a partial/failed cp, a stale leftover db-sql/ from a prior
+# build (hence the rm -rf above), or a future refactor that decouples this copy
+# from the seed build below. Root cause of the WI-3047 incident was actually a
+# STALE `libs/papercusp` SUBMODULE checkout (see the freshness check in
+# release-local.sh, which is where that class is actually caught); this check
+# covers the narrower "the tree itself and what got shipped disagree" case so a
+# regression here is a red build, not a silent runtime error a user hits.
+_tree_sql_max="$(ls "$PAPERCUSP_ROOT/libs/db/sql/"*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
+_tree_sql_count="$(ls "$PAPERCUSP_ROOT/libs/db/sql/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
+_shipped_sql_max="$(ls "$SIDECAR_DIR/db-sql/"*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
+_shipped_sql_count="$(ls "$SIDECAR_DIR/db-sql/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
+if [[ -z "$_tree_sql_max" || "$_tree_sql_max" != "$_shipped_sql_max" || "$_tree_sql_count" != "$_shipped_sql_count" ]]; then
+  echo "ERROR: shipped sidecar/db-sql/ (highest=$_shipped_sql_max, count=$_shipped_sql_count) does not match"
+  echo "       the source tree libs/db/sql/ (highest=$_tree_sql_max, count=$_tree_sql_count) — refusing to ship"
+  echo "       a schema that could silently diverge from the tree (WI-3047)."
+  exit 1
+fi
+echo "    ✓ shipped db-sql/ matches the tree (highest migration $_tree_sql_max, $_tree_sql_count files)"
 
 # ── Pre-migrated PGDATA seed (desktop first-boot fast path) ─────────────────
 # Boot the JUST-BUNDLED embedded-PG ONCE at build time (initdb + apply every

@@ -116,6 +116,43 @@ if [[ "$CHANNEL" != "alpha" ]]; then
   fi
 fi
 
+# WI-3047: guard against cutting a release from a STALE `libs/papercusp`
+# submodule checkout — the actual root cause of the 2026-07-05 incident where a
+# seeded Linux .deb shipped the pre-505/506 schema (agent_facts REPLICA
+# IDENTITY sweep failure, the WI-2914 bug 505 fixes). build-desktop-sidecar.sh
+# bakes db-seed.tar.gz from whatever is CURRENTLY checked out under
+# libs/papercusp/libs/db/sql/ — internally consistent by construction, but
+# silently stale if the submodule pointer lags its remote (new migrations
+# merged upstream, never pulled locally). Fail loud on stable/beta; warn on
+# alpha (matches the dirty-tree check's channel split above).
+PAPERCUSP_SUBMODULE_DIR="$(cd "$ROOT/.." && pwd)/libs/papercusp"
+echo "==> checking libs/papercusp submodule freshness (WI-3047)"
+if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  SUBMODULE_BRANCH="$(git -C "$PAPERCUSP_SUBMODULE_DIR" branch --show-current 2>/dev/null || true)"
+  SUBMODULE_BRANCH="${SUBMODULE_BRANCH:-main}"
+  if git -C "$PAPERCUSP_SUBMODULE_DIR" fetch --quiet origin "$SUBMODULE_BRANCH" 2>/dev/null; then
+    SUB_LOCAL_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse HEAD)"
+    SUB_REMOTE_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse "origin/$SUBMODULE_BRANCH")"
+    if [[ "$SUB_LOCAL_SHA" != "$SUB_REMOTE_SHA" ]]; then
+      SUB_BEHIND="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_LOCAL_SHA..$SUB_REMOTE_SHA" 2>/dev/null || echo '?')"
+      SUB_MSG="libs/papercusp is $SUB_BEHIND commit(s) behind origin/$SUBMODULE_BRANCH (local=${SUB_LOCAL_SHA:0:12} remote=${SUB_REMOTE_SHA:0:12}) — a release cut now may ship migrations/code that lag what's already merged (WI-3047 class)."
+      if [[ "$CHANNEL" != "alpha" ]]; then
+        echo "ERROR: $SUB_MSG"
+        echo "       Run: git -C libs/papercusp pull origin $SUBMODULE_BRANCH   (then re-stage the submodule pointer)"
+        exit 1
+      else
+        echo "WARN: $SUB_MSG (continuing — alpha channel)"
+      fi
+    else
+      echo "    ✓ libs/papercusp is up to date with origin/$SUBMODULE_BRANCH (${SUB_LOCAL_SHA:0:12})"
+    fi
+  else
+    echo "WARN: could not fetch libs/papercusp origin/$SUBMODULE_BRANCH — skipping freshness check (offline / network issue?)"
+  fi
+else
+  echo "WARN: $PAPERCUSP_SUBMODULE_DIR is not a git repo — skipping submodule freshness check"
+fi
+
 echo "==> bumping version in manifests"
 python3 - "$VERSION" "$ROOT" <<'PY'
 import json, sys, re, pathlib
