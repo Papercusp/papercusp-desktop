@@ -293,7 +293,12 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
   # Tauri's supported Windows (MSVC) story. Mirrors the WITH_MAC lane.
   # See plan windows-desktop-release-readiness-2026-06-11 (D-001) and
   # bin/build-windows-on-vm.sh for prereqs (VM booted, rootfs built).
-  PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
+  # SKIP the per-build seed cut: release-local already cut src-tauri/seed ONCE
+  # above (cut_release_seed), and build-windows-on-vm.sh now has its own default
+  # cut (mirror of mac-vm-build.sh, WI-3005) — so tell it to REUSE the already-cut
+  # seed instead of re-cutting. Exactly mirrors the WITH_MAC lane's
+  # `export PAPERCUSP_SKIP_SEED_CUT=1` before mac-vm-build.sh.
+  PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
   win_found=0
   for f in "$ROOT"/src-tauri/target/windows-vm/bundle/nsis/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1

@@ -79,6 +79,61 @@ fi
 [[ -f "$KEY_FILE" ]] || fail "signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 "${SSH[@]}" 'cmd /c echo VM-OK' >/dev/null 2>&1 || fail "VM unreachable on :$VM_SSH_PORT — boot it: ~/windows-vm/boot-windows.sh"
 
+# ── Installer hive-seed — mirror of bin/mac-vm-build.sh cut_release_seed (plan
+# hive-seed-bundle-2026-07-04 / WI-3005). Bundling (tauri.conf.json ships
+# `seed/**/*`) and first-run restore (main.rs sets PAPERCUSP_SEED_DIR) are
+# already cross-platform, so ONLY the CUT needs a Windows-lane equivalent — and
+# it runs HERE on the host, NOT in the VM: cut-seed-cli refuses an epoch seal on
+# a box without the live hive keychain (load-don't-mint, WI-1981), which the
+# Windows VM lacks but the owner Tower (this host) has. The cut writes
+# src-tauri/seed/ BEFORE the tar below so it ships in the bundle.
+# PAPERCUSP_SKIP_SEED_CUT=1 reuses the existing/rsync'd seed (a1a71 guidance:
+# rsync the real Tower seed for VM verification, don't cut on the VM).
+cut_release_seed() {
+  if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
+    echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — using existing src-tauri/seed payload"
+    [[ -f "$ROOT/src-tauri/seed/manifest.json" ]] || echo "WARN: no seed manifest present; this build will ship the placeholder seed" >&2
+    return 0
+  fi
+  local repo operator_dir
+  repo="$(cd "$ROOT/.." && pwd)"
+  operator_dir="$repo/apps/operator"
+  [[ -d "$operator_dir" ]] || fail "seed cutter not found at $operator_dir (set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build)"
+  # Option A (WI-2903): full-history git bundle + shared-pot corestore snapshot.
+  # PAPERCUSP_SEED_DEPTH=1 / PAPERCUSP_SEED_CORESTORE=0 are opt-in small/test
+  # escape hatches, never the release default.
+  local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
+  local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
+  local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
+  local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH:-}"
+  local core_args=()
+  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]] && core_args+=(--no-corestore)
+  [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
+  local depth_args=()
+  [[ -n "$seed_depth" ]] && depth_args+=(--depth "$seed_depth")
+  echo "==> seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1})"
+  (
+    cd "$operator_dir"
+    OPATH="$PATH"
+    set -a
+    [[ -f ./.env.local ]] && . ./.env.local
+    set +a
+    export PATH="$OPATH:$PATH"
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$repo" \
+      npx tsx lib/release/cut-seed-cli.ts \
+        --out "$ROOT/src-tauri/seed" \
+        --repo "$repo" \
+        --origin "$seed_origin" \
+        --workspace-id "$seed_workspace" \
+        --hive "$seed_hive" \
+        --rev "$seed_rev" \
+        "${depth_args[@]}" \
+        "${core_args[@]}"
+  ) || fail "seed cut failed (set PAPERCUSP_SKIP_SEED_CUT=1 to build with an existing/placeholder seed)"
+}
+cut_release_seed
+
 echo "==> packing desktop tree"
 TARBALL="$(mktemp /tmp/papercusp-desktop-build-XXXX.tar.gz)"
 trap 'rm -f "$TARBALL"' EXIT
