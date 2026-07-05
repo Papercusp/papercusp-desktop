@@ -106,10 +106,48 @@ struct ErrorPayload {
 /// if a real workload approaches the cap.
 const PER_CALL_EVENT_CAP: u64 = 10_000;
 
+/// WI-2817: an in-flight call gets NO activity (not even a keep-alive EVENT
+/// frame) for this long ⇒ treated as wedged and force-failed with
+/// `connection_lost` (the SAME terminal code `reader_loop`'s EOF path already
+/// emits, so the existing, already-tested `ipc-fetch.ts` transparent retry
+/// handles it with no new client-side logic). 20s comfortably exceeds both a
+/// quick sidecar bounce (~120ms) and a cold embedded-PG + migrations boot
+/// (~11-13s observed, ~3s with the pre-migrated seed fast path — see
+/// WI-2601), so it never trips on a legitimately-slow-but-alive boot.
+///
+/// WHY THIS EXISTS: `IpcClient::is_alive()` only flips false when the reader
+/// loop observes an EOF/read-error on the socket — a connection that stays
+/// OPEN but whose peer process is wedged (e.g. mid-restart, between binding
+/// its new socket and actually servicing requests) never trips that path.
+/// Before this, such a call's `CallSink` just sat in `in_flight` forever:
+/// no Done, no Error, no reconnect — exactly the "hangs on bprogress-busy,
+/// needs manual relaunch" symptom this fixes.
+const IPC_CALL_IDLE_TIMEOUT_MS: u64 = 20_000;
+/// How often the per-call watchdog re-checks staleness. Small relative to
+/// the timeout so the observed hang is bounded to ~timeout + one interval.
+const IPC_WATCHDOG_CHECK_INTERVAL_MS: u64 = 2_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Pure decision fn (testable without a socket/watchdog task): has this call
+/// gone idle-timed-out? Saturating so a clock oddity never underflows/panics.
+fn is_idle_timed_out(last_activity_ms: u64, now_ms: u64, timeout_ms: u64) -> bool {
+    now_ms.saturating_sub(last_activity_ms) >= timeout_ms
+}
+
 struct CallSink {
     channel: Channel<EndpointEvent>,
     events_sent: AtomicU64,
     overflowed: std::sync::atomic::AtomicBool,
+    /// WI-2817: wall-clock ms of the last activity (creation, or any event/
+    /// terminal frame) seen for this call — the idle-timeout watchdog's
+    /// staleness clock.
+    last_activity_ms: AtomicU64,
 }
 
 /// Decision returned by `decide_backpressure` — testable in isolation.
