@@ -267,19 +267,34 @@ if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
   FAST_ITER_PRELUDE='if (Get-Command sccache -ErrorAction SilentlyContinue) { $env:RUSTC_WRAPPER = "sccache"; Write-Host "[build] FAST_ITER: RUSTC_WRAPPER=sccache" } else { Write-Host "[build] FAST_ITER: sccache not on VM PATH (skipping; cargo incremental via persisted target still applies)" }'
   # node_modules persists across FAST_ITER builds — skip the reinstall when it is
   # already there. Change a dependency? run a full (non-FAST_ITER) build once.
-  NPM_INSTALL_BLOCK='if (Test-Path node_modules) { Write-Host "[build] FAST_ITER: node_modules present — skipping npm install" } else { Write-Host "[build] npm install"; npm install --no-audit --no-fund 2>&1 }'
-  # Dev iteration targets the GUI app — skip the second (Server) bundle, halving
-  # the Rust compile + NSIS pack.
-  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER: skipping Papercusp Server bundle"'
+  # ASCII ONLY inside PS1-bound strings: an em dash here once rendered as a
+  # CP-1252 smart quote on the VM and truncated the string mid-line (the BOM
+  # below now also guards this class).
+  NPM_INSTALL_BLOCK='if (Test-Path node_modules) { Write-Host "[build] FAST_ITER: node_modules present - skipping npm install" } else { Write-Host "[build] npm install"; npm install --no-audit --no-fund 2>&1 }'
 else
   FAST_ITER_PRELUDE=''
   NPM_INSTALL_BLOCK=$'Write-Host "[build] npm install"\nnpm install --no-audit --no-fund 2>&1'
+fi
+# Server bundle: built by DEFAULT even in FAST_ITER — the live operator on an
+# installed box runs from the SERVER install's sidecar, so any sidecar/SPA/TS
+# change MUST ship a fresh Server setup.exe (skipping it silently verifies a
+# stale UI — bit the WI-3033 verify, 2026-07-05). Rust-only iterations can opt
+# out with PAPERCUSP_FAST_ITER_GUI_ONLY=1; the skip also DELETES the stale
+# Server artifacts from the VM's nsis dir so the collection step below can't
+# hand back a previous build's Server setup.exe as if fresh.
+if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
+  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\nsis\Papercusp Server*" -ErrorAction SilentlyContinue'
+else
   SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server --bundles nsis"\nnpx tauri build --bundles nsis --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"'
 fi
 
 echo "==> writing build script"
 BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
-cat > "$BUILD_PS1" <<EOF
+# UTF-8 BOM: Windows PowerShell 5.1 decodes BOM-less .ps1 as CP-1252, which
+# mangles any non-ASCII byte into stray smart-quotes/letters (a heredoc em
+# dash became `”` and broke parsing — found live 2026-07-05, WI-3033 build).
+printf '\xEF\xBB\xBF' > "$BUILD_PS1"
+cat >> "$BUILD_PS1" <<EOF
 \$ErrorActionPreference = 'Continue'
 \$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 \$vcvars = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"

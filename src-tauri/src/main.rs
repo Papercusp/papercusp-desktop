@@ -3751,6 +3751,11 @@ pub fn run() {
                     });
                     return Ok(());
                 }
+                // WI-3044: WSL is Ready — refresh the Windows-side `psu`
+                // launcher + user PATH so a bare `psu` works from any
+                // cmd/PowerShell window. Off-thread: it shells out to
+                // powershell.exe and must never hold up boot.
+                std::thread::spawn(wsl_setup::ensure_windows_cli_shims);
             }
             let serve_child = match spawn_serve(
                 via_wsl,
