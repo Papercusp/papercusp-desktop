@@ -2308,7 +2308,7 @@ fn spawn_serve(
     if via_wsl {
         cmd.env(
             "WSLENV",
-            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_HARNESS_DIR/p:\
+            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
@@ -2341,6 +2341,17 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_BUILD_SHA",
             option_env!("PAPERCUSP_BUILD_SHA").unwrap_or(""),
+        )
+        // Same provenance mechanism, for the shipped app VERSION (WI-2644): the
+        // bundled sidecar has no npm_package_version in its env (serve.mjs isn't
+        // invoked by npm), so build-info.ts silently fell back to '0.0.0' on every
+        // real desktop build. release-local.sh / build-windows-on-vm.sh export
+        // PAPERCUSP_BUILD_VERSION (from tauri.conf.json's version) before
+        // cargo build/tauri build; empty string when unset → build-info falls back
+        // to npm_package_version, then '0.0.0'.
+        .env(
+            "PAPERCUSP_BUILD_VERSION",
+            option_env!("PAPERCUSP_BUILD_VERSION").unwrap_or(""),
         )
         // The desktop webview consumes the SPA — keep the UI mounted (serve
         // alone defaults it OFF for headless use; Decision E).

@@ -194,6 +194,11 @@ ${SIGN_PRELUDE}
 # the operator's /api/health self-reports the commit. Empty when unset.
 \$env:PAPERCUSP_BUILD_SHA = "${PAPERCUSP_BUILD_SHA:-}"
 Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
+# Same provenance mechanism for the shipped app VERSION (WI-2644) — see the
+# matching PAPERCUSP_BUILD_VERSION option_env! in main.rs. release-local.sh
+# forwards its own $VERSION arg into this script's env.
+\$env:PAPERCUSP_BUILD_VERSION = "${PAPERCUSP_BUILD_VERSION:-}"
+Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
 # Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
 # GUI (base config) + Server (tauri.server.conf.json override). Distinct
 # productNames → distinct *-setup.exe filenames; each recompiles because

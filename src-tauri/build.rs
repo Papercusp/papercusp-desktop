@@ -41,6 +41,9 @@ fn main() {
     // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it
     // to /api/health). Without this, cargo's cache would freeze a stale sha.
     println!("cargo:rerun-if-env-changed=PAPERCUSP_BUILD_SHA");
+    // Same provenance mechanism for the shipped app VERSION (WI-2644) — see the
+    // matching PAPERCUSP_BUILD_VERSION option_env! + comment in main.rs.
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_BUILD_VERSION");
 
     // WI-1976 / WI-2143 — allow the renderer to invoke the native-shell app commands.
     // The operator SPA loads from a REMOTE http origin (http://127.0.0.1:<port>),

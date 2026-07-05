@@ -61,6 +61,12 @@ MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
 # be passed in from here, where .git is present.
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 echo "==> build provenance: PAPERCUSP_BUILD_SHA=${BUILD_SHA:-<unknown>}"
+# Build provenance: the shipped app VERSION (WI-2644). Same mechanism as
+# PAPERCUSP_BUILD_SHA above — the packaged sidecar has no npm_package_version
+# in its env, so build-info.ts needs this baked in explicitly. Sourced from
+# $VERSION (this script's own CLI arg, semver-validated below) — the exact
+# value this run writes into tauri.conf.json, so they can never drift.
+echo "==> build provenance: PAPERCUSP_BUILD_VERSION=${VERSION}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
   echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
@@ -184,7 +190,7 @@ PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 for role in $PAPERCUSP_BUILD_ROLES; do
   role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
   echo "==> tauri build (linux x86_64, role=$role)"
-  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build "${role_cfg[@]}")
+  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build "${role_cfg[@]}")
 done
 
 # Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
@@ -216,7 +222,7 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
   # Tauri's supported Windows (MSVC) story. Mirrors the WITH_MAC lane.
   # See plan windows-desktop-release-readiness-2026-06-11 (D-001) and
   # bin/build-windows-on-vm.sh for prereqs (VM booted, rootfs built).
-  PAPERCUSP_BUILD_SHA="$BUILD_SHA" bash "$ROOT/bin/build-windows-on-vm.sh"
+  PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
   win_found=0
   for f in "$ROOT"/src-tauri/target/windows-vm/bundle/nsis/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
@@ -231,7 +237,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
   done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
@@ -293,6 +299,7 @@ if [[ "$WITH_MAC" == "1" ]]; then
     export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
     export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
+    export PAPERCUSP_BUILD_VERSION='"$VERSION"'
     export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
     export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
     export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'

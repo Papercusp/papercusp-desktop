@@ -54,6 +54,27 @@ if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   exit 1
 fi
 
+# WI-2644: the packaged sidecar's serve.mjs runs standalone (no `npm run`
+# context), so process.env.npm_package_version is unset at runtime and
+# build-info.ts / serve.ts fall back to their (differing) hardcoded defaults
+# — the installed app's /api/health + UI footer report a fake '0.0.0'/dev
+# version instead of the real shipped one. tauri.conf.json's `version` is the
+# authoritative shipped version (release.config.ts's versionFiles bumps
+# package.json + tauri.conf.json + Cargo.toml together on every release), so
+# read it here and bake it into the bundle via esbuild --define below —
+# same mechanism as the existing PAPERCUP_DOGFOOD_REPO_REF bake.
+PAPERCUSP_DESKTOP_VERSION="$(node -e "try{process.stdout.write(require('$ROOT/src-tauri/tauri.conf.json').version||'')}catch(e){}" 2>/dev/null)"
+# Built as an array (not a bare --define string) so the UNREADABLE case omits
+# the flag ENTIRELY rather than baking an empty string: `?? '0.0.0'`-style
+# fallbacks only trigger on undefined/null, so `--define:...="\"\""` would bake
+# a WORSE empty-string version than today's unset-env fallback.
+VERSION_DEFINE_ARGS=()
+if [[ -n "$PAPERCUSP_DESKTOP_VERSION" ]]; then
+  VERSION_DEFINE_ARGS=(--define:process.env.npm_package_version="\"${PAPERCUSP_DESKTOP_VERSION}\"")
+else
+  echo "WARN: could not read version from $ROOT/src-tauri/tauri.conf.json — sidecar will report its unstamped fallback version"
+fi
+
 # ── EI-160: no concurrent-build clobber (P-056) ─────────────────────────────
 # Two builds racing into the same live SIDECAR_DIR used to interleave
 # rm -rf/cp — a reader (a running `tauri dev`, the federation smoke rigs)
@@ -300,6 +321,12 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # dogfoodRef() reads process.env.PAPERCUP_DOGFOOD_REPO_REF). release-local.sh
 # exports it (= the release tag) + tags the monorepo. Unset (a plain dev sidecar
 # build) bakes "" → the bootstrap falls back to the remote default branch (main).
+# --define:process.env.npm_package_version (WI-2644): bake the real shipped
+# version (read from tauri.conf.json above) so build-info.ts's health endpoint
+# + serve.ts's own VERSION const report the actual installed version instead
+# of their unset-env fallback ('0.0.0' / '0.1.0-dev'). Empty when unreadable
+# (plain dev run outside this script) → both call sites keep their existing
+# fallback, unchanged from today.
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   --outfile="$SIDECAR_DIR/serve.mjs" \
@@ -308,6 +335,7 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_HIVE_PUBKEY="\"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}\"" \
+  "${VERSION_DEFINE_ARGS[@]}" \
   "${HOST_EXTERNALS[@]}")
 if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
