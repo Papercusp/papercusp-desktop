@@ -164,8 +164,56 @@ if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   git -C "$MONOREPO" push origin "refs/tags/$TAG" 2>/dev/null \
     || echo "    WARN: could not push monorepo tag $TAG — dogfood clone will fall back to the default branch (main)"
 else
-  echo "==> dogfood pin: $ROOT/.. is not a git repo — skipping (sidecar bakes no ref → dogfood clone uses main)"
+echo "==> dogfood pin: $ROOT/.. is not a git repo — skipping (sidecar bakes no ref → dogfood clone uses main)"
 fi
+
+cut_release_seed() {
+  if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
+    echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
+    return 0
+  fi
+  local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
+  local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
+  local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
+  local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH:-1}"
+  local operator_dir="$MONOREPO/apps/operator"
+  local seed_out="$ROOT/src-tauri/seed"
+  if [[ ! -d "$operator_dir" ]]; then
+    echo "ERROR: seed cutter not found at $operator_dir"
+    echo "       Set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build."
+    exit 1
+  fi
+  local core_args=()
+  if [[ "${PAPERCUSP_SEED_CORESTORE:-0}" != "1" ]]; then
+    core_args+=(--no-corestore)
+  fi
+  local depth_args=()
+  if [[ -n "$seed_depth" ]]; then
+    depth_args+=(--depth "$seed_depth")
+  fi
+  echo "==> cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-0})"
+  (
+    cd "$operator_dir"
+    OPATH="$PATH"
+    set -a
+    [[ -f ./.env.local ]] && . ./.env.local
+    set +a
+    export PATH="$OPATH:$PATH"
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
+      npx tsx lib/release/cut-seed-cli.ts \
+        --out "$seed_out" \
+        --repo "$MONOREPO" \
+        --origin "$seed_origin" \
+        --workspace-id "$seed_workspace" \
+        --hive "$seed_hive" \
+        --rev "$seed_rev" \
+        "${depth_args[@]}" \
+        "${core_args[@]}"
+  )
+}
+
+cut_release_seed
 
 echo "==> building sidecar"
 bash "$ROOT/bin/build-desktop-sidecar.sh"
@@ -293,6 +341,15 @@ if [[ "$WITH_MAC" == "1" ]]; then
   cp "$ROOT/package.json"              "$SNAP_DIR/papercusp-desktop/package.json"
   cp "$ROOT/src-tauri/tauri.conf.json" "$SNAP_DIR/papercusp-desktop/src-tauri/tauri.conf.json"
   cp "$ROOT/src-tauri/Cargo.toml"      "$SNAP_DIR/papercusp-desktop/src-tauri/Cargo.toml"
+  if [[ -f "$ROOT/src-tauri/seed/manifest.json" ]]; then
+    rm -rf "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
+    mkdir -p "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
+    cp -a "$ROOT/src-tauri/seed/." "$SNAP_DIR/papercusp-desktop/src-tauri/seed/"
+  else
+    echo "ERROR: seed cut did not produce $ROOT/src-tauri/seed/manifest.json"
+    rm -rf "$SNAP_DIR"
+    exit 1
+  fi
 
   echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
   # The excludes are now defense-in-depth on the VM SIDE of --delete: none exist in
@@ -318,6 +375,7 @@ if [[ "$WITH_MAC" == "1" ]]; then
     export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
     export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
     export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'
+    export PAPERCUSP_SKIP_SEED_CUT=1
     bash bin/mac-vm-build.sh
   "'
   MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"

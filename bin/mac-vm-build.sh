@@ -59,6 +59,56 @@ cd "$ROOT"
 echo "===== mac build start $(date) (root: $ROOT) ====="
 df -h "$HOME" | tail -1
 
+cut_release_seed() {
+  if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
+    echo "--- seed: PAPERCUSP_SKIP_SEED_CUT=1 — using existing src-tauri/seed payload ---"
+    [[ -f "$ROOT/src-tauri/seed/manifest.json" ]] || echo "WARN: no seed manifest present; this build will ship the placeholder seed"
+    return 0
+  fi
+  local repo
+  repo="$(cd "$ROOT/.." && pwd)"
+  local operator_dir="$repo/apps/operator"
+  if [[ ! -d "$operator_dir" ]]; then
+    echo "ERROR: seed cutter not found at $operator_dir"
+    echo "       Set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build."
+    exit 1
+  fi
+  local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
+  local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
+  local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
+  local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH:-1}"
+  local core_args=()
+  if [[ "${PAPERCUSP_SEED_CORESTORE:-0}" != "1" ]]; then
+    core_args+=(--no-corestore)
+  fi
+  local depth_args=()
+  if [[ -n "$seed_depth" ]]; then
+    depth_args+=(--depth "$seed_depth")
+  fi
+  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-0}) ---"
+  (
+    cd "$operator_dir"
+    OPATH="$PATH"
+    set -a
+    [[ -f ./.env.local ]] && . ./.env.local
+    set +a
+    export PATH="$OPATH:$PATH"
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$repo" \
+      npx tsx lib/release/cut-seed-cli.ts \
+        --out "$ROOT/src-tauri/seed" \
+        --repo "$repo" \
+        --origin "$seed_origin" \
+        --workspace-id "$seed_workspace" \
+        --hive "$seed_hive" \
+        --rev "$seed_rev" \
+        "${depth_args[@]}" \
+        "${core_args[@]}"
+  )
+}
+
+cut_release_seed
+
 echo "--- term shim (SwiftPM) ---"
 (
   cd src-tauri/macos-term-shim
