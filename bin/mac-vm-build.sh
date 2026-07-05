@@ -73,20 +73,28 @@ cut_release_seed() {
     echo "       Set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build."
     exit 1
   fi
+  # Owner decision 2026-07-05 (WI-2903, option A): the release seed is a FULL-history
+  # git bundle + the shared-pot corestore snapshot. Depth-1/git-only are the opt-in
+  # small/test escape hatches (PAPERCUSP_SEED_DEPTH=1 / PAPERCUSP_SEED_CORESTORE=0),
+  # never the release default. cut-seed-cli refuses an epoch seal on a box without
+  # the live hive keychain (load-don't-mint) and a missing/empty corestore dir.
   local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
   local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
-  local seed_depth="${PAPERCUSP_SEED_DEPTH:-1}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH:-}"
   local core_args=()
-  if [[ "${PAPERCUSP_SEED_CORESTORE:-0}" != "1" ]]; then
+  if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]]; then
     core_args+=(--no-corestore)
+  fi
+  if [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]]; then
+    core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
   fi
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
   fi
-  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-0}) ---"
+  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1}) ---"
   (
     cd "$operator_dir"
     OPATH="$PATH"

@@ -412,7 +412,25 @@ fn wsl_fs(args: &[&str], stdin: Option<&str>) -> Result<std::process::Output, St
     use std::io::Write as _;
     use std::os::windows::process::CommandExt as _;
     let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("-d").arg(WSL_DISTRO).arg("--").args(args);
+    // ROOT-CAUSE FIX (WI-2955): mirror make_sidecar_command's PROVEN-WORKING
+    // operator invocation (main.rs: `--distribution <D> --cd <wsl-cwd> --exec
+    // <cmd>`). The old `-d <D> -- <cmd>` form let wsl.exe DEFAULT the Linux cwd to
+    // the CALLER's translated Windows path (/mnt/c/…). papercup-runtime is a
+    // minimal rootfs (`[interop] appendWindowsPath=false`, no guaranteed /mnt
+    // automount — build-rootfs.sh), so that cwd translation FAILS and wsl.exe
+    // exits non-zero with EMPTY stdout+stderr BEFORE the relayed command runs —
+    // the undiagnosable blank `write .mcp.json:` (the operator's own `--exec node`
+    // never hit this because it always passes `--cd`). `--cd /` pins the cwd to a
+    // path that always exists; `--exec` skips the login-shell tail re-parse. All
+    // callers pass a directly-exec'able argv (`bash -c …`, `mv`, `test`), so
+    // `--exec` is a drop-in. Verified live on the QEMU Win11 VM: the `cat >
+    // <target>` relay returns RC=0 with this form and RC=1/empty without it.
+    cmd.arg("--distribution")
+        .arg(WSL_DISTRO)
+        .arg("--cd")
+        .arg("/")
+        .arg("--exec")
+        .args(args);
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.stdin(if stdin.is_some() {
         std::process::Stdio::piped()
