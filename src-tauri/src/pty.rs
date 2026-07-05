@@ -247,6 +247,24 @@ fn run_reader_loop(
     }
 }
 
+/// True when `bytes` contains anything beyond the ConPTY init handshake.
+/// Windows pseudoconsoles emit `ESC [ 6 n` (a cursor-position query) at
+/// startup before — and regardless of whether — the child writes anything;
+/// treating it as child output let a wedged wsl.exe defeat the silent-wedge
+/// watchdog below AND hid the UI placeholder (WI-3033: permanently blank
+/// terminal with zero guidance). A handshake SPLIT across reads counts as
+/// real output — acceptable: the wedge delivers its 4 bytes in one read,
+/// and a false "real" merely reverts to pre-fix watchdog behavior.
+/// InlinePtyTerminal.tsx `chunkHasRealOutput` mirrors this exactly.
+fn contains_real_output(bytes: &[u8]) -> bool {
+    const HANDSHAKE: &[u8] = b"\x1b[6n";
+    let mut rest = bytes;
+    while rest.starts_with(HANDSHAKE) {
+        rest = &rest[HANDSHAKE.len()..];
+    }
+    !rest.is_empty()
+}
+
 /// Spawn a new native pty and start a reader thread that emits
 /// `pty-data` events as bytes arrive. Returns an id the renderer uses
 /// for subsequent write/resize/kill calls.
