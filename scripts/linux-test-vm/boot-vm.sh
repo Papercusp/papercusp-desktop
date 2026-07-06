@@ -45,7 +45,7 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${OP_PORT}-:3070" \
   -device virtio-net-pci,netdev=net0 \
   "${fed_nic[@]}" \
-  -vga qxl -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
+  -vga "${VM_VGA:-qxl}" -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
   -device virtio-serial-pci \
   -chardev spicevmc,id=spicechannel0,name=vdagent \
   -device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0 \
