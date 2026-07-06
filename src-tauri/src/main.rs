@@ -3763,6 +3763,18 @@ pub fn run() {
             }
 
             // ===== Server role: spawn + OWN the operator sidecar. =====
+            // Invariant (WI-3170 P-003 / WI-2902 co-install footgun): ONLY the
+            // Server role reaches here — the GUI role returned via gui_setup() above
+            // and never spawns/owns an operator. Assert it so a future refactor that
+            // lets a GUI fall through (spawning a competing operator that fights the
+            // Server over PG/ports) fails loudly instead of silently double-owning
+            // the operator. A plain assert! (one enum match at boot) so it holds in
+            // release too — structurally it can never fire (the GUI returned above).
+            assert!(
+                role.owns_operator(),
+                "only the Server role may spawn/own the operator (got role={})",
+                role.label()
+            );
             // Production: spawn the sidecar.
             let port = match find_free_port() {
                 Some(p) => p,

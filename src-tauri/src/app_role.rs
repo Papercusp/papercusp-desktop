@@ -25,6 +25,14 @@ impl Role {
     pub fn is_gui(self) -> bool {
         matches!(self, Role::Gui)
     }
+    /// Only the Server role may spawn/own/supervise the operator sidecar
+    /// (`serve.mjs --ensure` + embedded-PG). The GUI role NEVER does — it
+    /// discovers + attaches to a running Server. This is the invariant behind
+    /// the co-install footgun (WI-3170 P-003 / WI-2902): a co-installed GUI must
+    /// not spawn a competing operator that fights the Server for ports/PG.
+    pub fn owns_operator(self) -> bool {
+        matches!(self, Role::Server)
+    }
     pub fn label(self) -> &'static str {
         match self {
             Role::Server => "server",
@@ -65,5 +73,21 @@ mod tests {
         assert_eq!(detect("com.papercusp.gui"), Role::Gui);
         // Unknown / legacy identifier defaults to the safe GUI role.
         assert_eq!(detect("com.papercusp.desktop"), Role::Gui);
+    }
+
+    // WI-3170 P-003 / WI-2902 co-install footgun: ONLY the Server role may
+    // spawn/own/supervise the operator. A co-installed GUI (even a stale old-build
+    // one — VM forensics showed Server pid 3832 + GUI pid 6476 running together)
+    // must never spawn a competing operator that fights over PG/ports. This pins
+    // the invariant the serve-spawn gate (main.rs) debug_asserts on.
+    #[test]
+    fn only_server_role_owns_operator() {
+        assert!(Role::Server.owns_operator());
+        assert!(!Role::Gui.owns_operator());
+        // …and the GUI bundle id resolves to a role that does NOT own the operator.
+        assert!(!detect("com.papercusp.gui").owns_operator());
+        assert!(detect("com.papercusp.server").owns_operator());
+        // The safe default (unknown identifier ⇒ GUI) also does not own it.
+        assert!(!detect("com.papercusp.desktop").owns_operator());
     }
 }
