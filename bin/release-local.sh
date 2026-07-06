@@ -337,7 +337,9 @@ if [[ "$WITH_WINDOWS" == "1" ]]; then
   # `export PAPERCUSP_SKIP_SEED_CUT=1` before mac-vm-build.sh.
   PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
   win_found=0
-  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/nsis/*; do
+  # bundle/inno since WI-3172: Windows packaging moved NSIS → Inno Setup
+  # (makensis dies at ~2GiB; the full offline seed is ~3.4GB).
+  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
   done
   if [[ "$win_found" != "1" ]]; then

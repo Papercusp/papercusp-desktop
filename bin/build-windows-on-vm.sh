@@ -236,65 +236,51 @@ else
   "${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\Users\\user\\$VM_BUILD_DIR -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\Users\\user\\$VM_BUILD_DIR | Out-Null; tar -xzf C:\\Users\\user\\papercusp-desktop-build.tar.gz -C C:\\Users\\user\\$VM_BUILD_DIR; Remove-Item C:\\Users\\user\\papercusp-desktop-build.tar.gz\""
 fi
 
-# ── Authenticode signing (WI-792 P-003) — sign the bundled .exe + NSIS installer
-# IFF the owner provides a code-signing cert in env. With NO cert env set,
-# SIGN_PRELUDE is empty and the build is UNSIGNED — byte-identical to before.
-# Full owner runbook: /internal/docs/agent-insights/windows-authenticode-signing-runbook
-# tauri reads bundle.windows.{certificateThumbprint|signCommand,timestampUrl,
-# digestAlgorithm,tsp} from tauri.windows.conf.json; we patch it in-VM before the build.
+# ── Authenticode signing (WI-792 P-003) — sign the app .exe (BEFORE Inno packs
+# it) + the Inno setup.exe IFF the owner provides a code-signing cert in env.
+# With NO cert env set, SIGN_PRELUDE is empty and Sign-File is a no-op —
+# UNSIGNED build, byte-identical to before. Full owner runbook:
+# /internal/docs/agent-insights/windows-authenticode-signing-runbook
+# (Pre-Inno this patched tauri.windows.conf.json for the NSIS bundler; the
+# bundler no longer runs on Windows, so signing is a direct signtool/custom
+# command via the Sign-File PS function defined in the build script below.)
 WINDOWS_SIGN_TIMESTAMP_URL="${WINDOWS_SIGN_TIMESTAMP_URL:-http://timestamp.digicert.com}"
 WINDOWS_SIGN_DIGEST="${WINDOWS_SIGN_DIGEST:-sha256}"
-# tsp=true → tauri emits the RFC3161 timestamp (signtool `/tr <url> /td <digest>`),
-# the modern standard VERIFIED working here against digicert/sectigo/comodo
-# (2026-07-05 self-signed dry-run). With tsp unset/false, tauri falls back to the
-# LEGACY `/t <url>` timestamp, which RFC3161-only CAs (e.g. SSL.com eSigner, common
-# for EV) reject — so we default ON. Set WINDOWS_SIGN_TSP=false only for a legacy
-# timestamp server that lacks RFC3161. (signCommand/EV custom-signer path handles
-# its own timestamping, so tsp is not injected there.)
+# RFC3161 timestamp (signtool `/tr <url> /td <digest>`) is the modern standard
+# VERIFIED working here against digicert/sectigo/comodo (2026-07-05 self-signed
+# dry-run); RFC3161-only CAs (e.g. SSL.com eSigner, common for EV) reject the
+# legacy `/t`. Set WINDOWS_SIGN_TSP=false only for a timestamp server that
+# lacks RFC3161. (The signCommand/EV custom-signer path does its own timestamping.)
 WINDOWS_SIGN_TSP="${WINDOWS_SIGN_TSP:-true}"
-TSP_PS=$([[ "$WINDOWS_SIGN_TSP" == "true" || "$WINDOWS_SIGN_TSP" == "1" ]] && echo '$true' || echo '$false')
+if [[ "$WINDOWS_SIGN_TSP" == "true" || "$WINDOWS_SIGN_TSP" == "1" ]]; then
+  SIGNTOOL_TS_ARGS="/tr ${WINDOWS_SIGN_TIMESTAMP_URL} /td ${WINDOWS_SIGN_DIGEST}"
+else
+  SIGNTOOL_TS_ARGS="/t ${WINDOWS_SIGN_TIMESTAMP_URL}"
+fi
 SIGN_PRELUDE=""
 if [[ -n "${WINDOWS_SIGN_COMMAND:-}" ]]; then
   # EV / cloud-HSM path (non-exportable key): a custom signer, %1 = file path.
   SIGN_PRELUDE=$(cat <<PS
-Write-Host "[build] Authenticode: injecting signCommand (EV/cloud-HSM)"
-\$cfgPath = "src-tauri/tauri.windows.conf.json"
-\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
-if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
-\$cfg.bundle.windows | Add-Member -Force signCommand "${WINDOWS_SIGN_COMMAND}"
-\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+Write-Host "[build] Authenticode: custom signCommand (EV/cloud-HSM)"
+\$script:SignCmd = '${WINDOWS_SIGN_COMMAND}'
 PS
 )
 elif [[ -n "${WINDOWS_CERT_PFX_BASE64:-}" ]]; then
-  # OV path: import the PFX into CurrentUser\My, read its thumbprint, patch config.
+  # OV path: import the PFX into CurrentUser\My, sign by its thumbprint.
   SIGN_PRELUDE=$(cat <<PS
-Write-Host "[build] Authenticode: importing PFX + setting certificateThumbprint"
+Write-Host "[build] Authenticode: importing PFX"
 [IO.File]::WriteAllBytes("\$env:TEMP\\cs.pfx", [Convert]::FromBase64String("${WINDOWS_CERT_PFX_BASE64}"))
-\$pwd = ConvertTo-SecureString "${WINDOWS_CERT_PASSWORD:-}" -AsPlainText -Force
-\$cert = Import-PfxCertificate -FilePath "\$env:TEMP\\cs.pfx" -CertStoreLocation Cert:\\CurrentUser\\My -Password \$pwd
+\$pfxpwd = ConvertTo-SecureString "${WINDOWS_CERT_PASSWORD:-}" -AsPlainText -Force
+\$cert = Import-PfxCertificate -FilePath "\$env:TEMP\\cs.pfx" -CertStoreLocation Cert:\\CurrentUser\\My -Password \$pfxpwd
 Remove-Item "\$env:TEMP\\cs.pfx" -Force
-\$cfgPath = "src-tauri/tauri.windows.conf.json"
-\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
-if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
-\$cfg.bundle.windows | Add-Member -Force certificateThumbprint \$cert.Thumbprint
-\$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
-\$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
-\$cfg.bundle.windows | Add-Member -Force tsp ${TSP_PS}
-\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+\$script:SignThumb = \$cert.Thumbprint
 PS
 )
 elif [[ -n "${WINDOWS_CERTIFICATE_THUMBPRINT:-}" ]]; then
   # Cert already in the VM store (e.g. EV token CSP / cloud-HSM connector).
   SIGN_PRELUDE=$(cat <<PS
-Write-Host "[build] Authenticode: setting certificateThumbprint (cert already in store)"
-\$cfgPath = "src-tauri/tauri.windows.conf.json"
-\$cfg = Get-Content \$cfgPath -Raw | ConvertFrom-Json
-if (-not \$cfg.bundle.windows) { \$cfg.bundle | Add-Member -Force windows ([pscustomobject]@{}) }
-\$cfg.bundle.windows | Add-Member -Force certificateThumbprint "${WINDOWS_CERTIFICATE_THUMBPRINT}"
-\$cfg.bundle.windows | Add-Member -Force timestampUrl "${WINDOWS_SIGN_TIMESTAMP_URL}"
-\$cfg.bundle.windows | Add-Member -Force digestAlgorithm "${WINDOWS_SIGN_DIGEST}"
-\$cfg.bundle.windows | Add-Member -Force tsp ${TSP_PS}
-\$cfg | ConvertTo-Json -Depth 20 | Set-Content \$cfgPath
+Write-Host "[build] Authenticode: signing by store thumbprint"
+\$script:SignThumb = "${WINDOWS_CERTIFICATE_THUMBPRINT}"
 PS
 )
 else
@@ -325,12 +311,12 @@ fi
 # change MUST ship a fresh Server setup.exe (skipping it silently verifies a
 # stale UI — bit the WI-3033 verify, 2026-07-05). Rust-only iterations can opt
 # out with PAPERCUSP_FAST_ITER_GUI_ONLY=1; the skip also DELETES the stale
-# Server artifacts from the VM's nsis dir so the collection step below can't
+# Server artifacts from the VM's inno dir so the collection step below can't
 # hand back a previous build's Server setup.exe as if fresh.
 if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
-  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\nsis\Papercusp Server*" -ErrorAction SilentlyContinue'
+  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
 else
-  SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server --bundles nsis"\nnpx tauri build --bundles nsis --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"'
+  SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
 fi
 
 echo "==> writing build script"
@@ -348,9 +334,47 @@ cmd /c "\`"\$vcvars\`" && set" | ForEach-Object {
   if (\$_ -match "^(.*?)=(.*)\$") { [System.Environment]::SetEnvironmentVariable(\$matches[1], \$matches[2], "Process") }
 }
 Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
+# Reclaim disk from prior installer outputs BEFORE building — two full-seed
+# Inno installers are ~2.7GB each and the VM disk is tight.
+Remove-Item -Recurse -Force "src-tauri\target\release\bundle\nsis","src-tauri\target\release\bundle\inno" -ErrorAction SilentlyContinue
+Get-PSDrive C | ForEach-Object { Write-Host "[build] disk free: \$([int](\$_.Free/1MB)) MB" }
 ${FAST_ITER_PRELUDE}
 ${NPM_INSTALL_BLOCK}
 ${SIGN_PRELUDE}
+# Authenticode signer — a no-op unless SIGN_PRELUDE set a thumbprint/command
+# (see the host-side branch above). signtool comes from the VS SDK on PATH
+# (vcvars64 sourced above).
+function Sign-File([string]\$path) {
+  if (\$script:SignCmd) {
+    Write-Host "[build] Authenticode signing (custom): \$path"
+    cmd /c \$script:SignCmd.Replace('%1', \$path)
+    if (\$LASTEXITCODE -ne 0) { Write-Host "[build] AUTHENTICODE SIGN FAILED (\$LASTEXITCODE): \$path" }
+  } elseif (\$script:SignThumb) {
+    Write-Host "[build] Authenticode signing (signtool): \$path"
+    signtool sign /sha1 \$script:SignThumb /fd ${WINDOWS_SIGN_DIGEST} ${SIGNTOOL_TS_ARGS} "\$path"
+    if (\$LASTEXITCODE -ne 0) { Write-Host "[build] AUTHENTICODE SIGN FAILED (\$LASTEXITCODE): \$path" }
+  }
+}
+# Package one role with Inno Setup (WI-3172 — replaces tauri's NSIS bundle;
+# see src-tauri/windows/inno/papercusp.iss for why). Filters the per-file
+# "Compressing:" spam (~50k sidecar files) out of the ssh log.
+function Invoke-Inno([string]\$role, [string]\$appId, [string]\$appName) {
+  \$ver = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+  \$iscc = Join-Path \$env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+  if (-not (Test-Path \$iscc)) { \$iscc = Join-Path \${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe" }
+  if (-not (Test-Path \$iscc)) {
+    Write-Host "[build] ISCC NOT FOUND - provision: winget install --id JRSoftware.InnoSetup"
+    Write-Host "[build] ISCC \$role EXIT=127"
+    return
+  }
+  \$outDir = Join-Path \$PWD "src-tauri\target\release\bundle\inno"
+  New-Item -ItemType Directory -Force \$outDir | Out-Null
+  \$buildRoot = Join-Path \$PWD "src-tauri"
+  Write-Host "[build] ISCC \$role packaging (full seed stored raw; several minutes)"
+  & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" "src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
+  Write-Host "[build] ISCC \$role EXIT=\$LASTEXITCODE"
+  Sign-File (Join-Path \$outDir "\${appName}_\${ver}_x64-setup.exe")
+}
 # Build provenance: baked via option_env!("PAPERCUSP_BUILD_SHA") (main.rs) so
 # the operator's /api/health self-reports the commit. Empty when unset.
 \$env:PAPERCUSP_BUILD_SHA = "${PAPERCUSP_BUILD_SHA:-}"
@@ -363,10 +387,16 @@ Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
 # Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
 # GUI (base config) + Server (tauri.server.conf.json override). Distinct
 # productNames → distinct *-setup.exe filenames; each recompiles because
-# generate_context! bakes the differing identifier.
-Write-Host "[build] tauri build: Papercusp GUI --bundles nsis"
-npx tauri build --bundles nsis 2>&1
+# generate_context! bakes the differing identifier. Each role compiles with
+# --no-bundle (the NSIS bundler is retired on Windows — WI-3172) and is then
+# packaged by Invoke-Inno. NOTE the two roles share one exe path, so each
+# role's ISCC run MUST complete before the next role's cargo build overwrites
+# target\release\papercusp-desktop.exe — keep build→package interleaved.
+Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"
+npx tauri build --no-bundle 2>&1
 Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
+Sign-File "src-tauri\\target\\release\\papercusp-desktop.exe"
+Invoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"
 ${SERVER_BUILD_BLOCK}
 EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
@@ -380,25 +410,29 @@ echo "==> building (this holds the ssh session; first build ~15-25 min)"
 # 2026-06-11: bundle finished, lane reported "produced no bundle").
 "${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
   2>&1 | tee /tmp/vm-release-build.log
-# Keyless in-VM build: the ONLY sanctioned failure is the missing-private-key
-# error AFTER the bundle finished (see the signing note up top). Anything
-# else — or no finished bundle — is a real failure.
-if ! grep -q "Finished.*1 bundle at" /tmp/vm-release-build.log; then
-  fail "VM build produced no bundle — see /tmp/vm-release-build.log"
-fi
-if ! grep -q "EXIT=0" /tmp/vm-release-build.log \
-   && ! grep -q "A public key has been found, but no private key" /tmp/vm-release-build.log; then
-  fail "VM build failed for a reason other than the expected keyless-sign skip — see /tmp/vm-release-build.log"
+# Per-step exit assertions. The cargo compile AND the Inno packaging of each
+# built role must both report EXIT=0 (with --no-bundle there is no in-VM
+# updater signing, so the old "expected keyless exit 1" allowance is gone —
+# any nonzero step is a real failure).
+grep -q '\[build\] GUI EXIT=0' /tmp/vm-release-build.log \
+  || fail "GUI compile failed — see /tmp/vm-release-build.log"
+grep -q '\[build\] ISCC GUI EXIT=0' /tmp/vm-release-build.log \
+  || fail "GUI Inno packaging failed (ISCC nonzero/missing — winget install --id JRSoftware.InnoSetup on the VM if absent) — see /tmp/vm-release-build.log"
+if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+  grep -q '\[build\] Server EXIT=0' /tmp/vm-release-build.log \
+    || fail "Server compile failed — see /tmp/vm-release-build.log"
+  grep -q '\[build\] ISCC Server EXIT=0' /tmp/vm-release-build.log \
+    || fail "Server Inno packaging failed — see /tmp/vm-release-build.log"
 fi
 
 echo "==> collecting artifacts"
-OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/nsis"
+OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/inno"
 mkdir -p "$OUT_DIR"
-# files only — the dir also holds archived prev-version subdirs (e.g.
+# files only — the dir may hold archived prev-version subdirs (e.g.
 # prev-0.0.1/ for the future updater E2E); `rm -f dir/*` dies on them
 # under set -e (bit the first uninterrupted run, 2026-06-12)
 find "$OUT_DIR" -maxdepth 1 -type f -delete
-NSIS_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release/bundle/nsis"
+INNO_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release/bundle/inno"
 # Read one filename per line — a `for name in $(...)` word-SPLITS the space in
 # the GUI/Server split's productNames ("Papercusp GUI_..-setup.exe") and scp's a
 # truncated ".../Papercusp" path (No such file), silently collecting NOTHING
@@ -406,8 +440,19 @@ NSIS_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/rele
 # the spaced remote path literally, so no extra remote-shell quoting is needed.
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
-  "${SCP[@]}" "$VM_SSH_HOST":"$NSIS_VM_DIR/$name" "$OUT_DIR/$name"
-done < <("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\nsis\"" | tr -d '\r\0')
+  "${SCP[@]}" "$VM_SSH_HOST":"$INNO_VM_DIR/$name" "$OUT_DIR/$name"
+done < <("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno\"" | tr -d '\r\0')
+
+# Ground-truth size check: Inno's single-exe limit is ~4GB. Warn near it.
+for f in "$OUT_DIR"/*-setup.exe; do
+  [[ -e "$f" ]] || continue
+  size=$(stat -c%s "$f")
+  if (( size > 4290772992 )); then
+    fail "$(basename "$f") is $((size / 1024 / 1024))MB — exceeds Inno's ~4GB single-exe max; the payload must shrink or move to DiskSpanning (WI-3172)"
+  elif (( size > 3900000000 )); then
+    echo "WARN: $(basename "$f") is $((size / 1024 / 1024))MB — within ~10% of Inno's ~4GB single-exe max (WI-3172)" >&2
+  fi
+done
 
 echo "==> signing updater artifacts (host-side)"
 # The GUI/Server split emits TWO *-setup.exe — sign BOTH. The old `head -1` left
