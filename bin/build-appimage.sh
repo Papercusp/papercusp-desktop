@@ -61,6 +61,44 @@ if [ -n "$ICON_NAME" ] && [ ! -f "$APPDIR/$ICON_NAME.png" ]; then
   if [ -n "$ICON_SRC" ]; then cp "$ICON_SRC" "$APPDIR/$ICON_NAME.png"; echo "   root icon: $ICON_NAME.png (from $ICON_SRC)"; fi
 fi
 
+# 3b. Replace linuxdeploy's compiled AppRun with a robust shell AppRun (WI-2902).
+#     linuxdeploy's ELF AppRun NULL-derefs in libc on some hosts (`segfault at 0,
+#     error 4, in libc.so.6`) — it crashes the launch before the app ever starts,
+#     even though the app BINARY runs fine given LD_LIBRARY_PATH + the WebKitGTK env.
+#     Verified on the clean-room VM 2026-07-06: with this shell AppRun the AppImage
+#     launches, the operator + embedded-PG come up, and the SPA renders. The script
+#     sets the full GTK/WebKit env off $APPDIR (pixbuf loaders, gio TLS modules,
+#     gstreamer, the webkit helper-process path) and execs the binary — the standard
+#     AppImage AppRun pattern. Overwrite in place (the AppDir is a fresh build
+#     artifact; no need to keep the crashing compiled one).
+echo "==> replacing compiled AppRun with shell AppRun (linuxdeploy AppRun segfaults in libc; WI-2902)"
+cat > "$APPDIR/AppRun" <<'APPRUN'
+#!/bin/bash
+# Robust shell AppRun (replaces linuxdeploy's crashing compiled AppRun) — WI-2902.
+HERE="$(dirname "$(readlink -f "${0}")")"
+export APPDIR="${APPDIR:-$HERE}"
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$HERE/usr/bin:$PATH"
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# gdk-pixbuf image loaders
+_pbcache="$(ls "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | head -1)"
+[ -n "$_pbcache" ] && export GDK_PIXBUF_MODULE_FILE="$_pbcache"
+# gio modules (tls etc.)
+for _gio in "$HERE/usr/lib/x86_64-linux-gnu/gio/modules" "$HERE/usr/lib/gio/modules"; do
+  [ -d "$_gio" ] && export GIO_MODULE_DIR="$_gio" && break
+done
+# gstreamer (webkit media)
+[ -d "$HERE/usr/lib/gstreamer-1.0" ] && export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+# WebKitGTK helper-process exec path (network/web process live beside the lib)
+for _wk in "$HERE/usr/libexec/webkit2gtk-4.1" "$HERE/usr/lib/webkit2gtk-4.1" "$HERE/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"; do
+  [ -d "$_wk" ] && export WEBKIT_EXEC_PATH="$_wk" && break
+done
+# single-process webkit sandbox off (AppImage helper processes can't sandbox)
+export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
+exec "$HERE/usr/bin/papercusp-desktop" "$@"
+APPRUN
+chmod +x "$APPDIR/AppRun"
+
 # 4. Locate appimagetool (tauri downloads the linuxdeploy appimage plugin, which
 #    embeds it) and package the AppDir. No ELF scan → no crash.
 PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | head -1)"

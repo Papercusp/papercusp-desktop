@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# Build the Windows x86_64 NSIS installer NATIVELY on the local Windows 11
-# QEMU VM (no cross-compile, no CI — see plan
+# Build the Windows x86_64 INNO SETUP installer NATIVELY on the local
+# Windows 11 QEMU VM (no cross-compile, no CI — see plan
 # windows-desktop-release-readiness-2026-06-11 D-001).
+#
+# WHY INNO, NOT TAURI'S NSIS BUNDLE (WI-3172, 2026-07-06): the owner-mandated
+# FULL offline seed (git super.bundle + hive corestore) puts the payload at
+# ~3.4 GB, and makensis dies packaging it — "Internal compiler error #12345:
+# error mmapping file ... out of range" at a ~2 GiB offset (signed-32-bit
+# datablock limit; BOTH roles failed at ~1.97 GiB). The corestore alone is
+# >2 GiB, so no slimming rescues NSIS; MSI caps lower (~2 GB CAB); a 7z-SFX
+# combined .exe hits the Windows ~2 GB PE-loader limit. Inno Setup 6.5.2+
+# builds a single setup.exe to ~4 GB. Template:
+# src-tauri/windows/inno/papercusp.iss.
 #
 # The old WITH_WINDOWS=1 lane cross-compiled --target x86_64-pc-windows-gnu;
 # that never worked (no cross/mingw toolchain here, and Tauri's supported
@@ -9,29 +19,30 @@
 #
 #   1. Pack the desktop tree (incl. built sidecar + resources) as a tarball
 #   2. scp into the VM, extract to an isolated build dir
-#   3. npm install + `tauri build --bundles nsis` under the MSVC env
+#   3. npm install + `tauri build --no-bundle` + ISCC (Inno) under the MSVC env
 #   4. Copy installer + updater .sig back to
-#      src-tauri/target/windows-vm/bundle/nsis/ for release-local.sh to pick up
+#      src-tauri/target/windows-vm/bundle/inno/ for release-local.sh to pick up
 #
 # Prereqs (one-time, already provisioned on the VM):
 #   - VS 2022 (Community or BuildTools) with C++ workload
 #   - rustup stable-x86_64-pc-windows-msvc
 #   - Node ≥22 on PATH
+#   - Inno Setup 6.5.2+ (winget install --id JRSoftware.InnoSetup) — 6.7.3 provisioned 2026-07-06
 #   - VM booted: ~/windows-vm/boot-windows.sh  (ssh -p 2223, key papercup-vm-win)
 #
 # Prereqs (per release, done by release-local.sh before calling this):
 #   - bin/build-desktop-sidecar.sh has populated src-tauri/sidecar/
 #   - scripts/build-rootfs.sh has produced src-tauri/resources/papercup-runtime.tar.gz
 #
-# Signing: the updater .sig is produced HOST-SIDE after collection
-# (`tauri signer sign`), never in the VM. Two reasons: (a) the private key
-# never leaves this machine; (b) Windows cannot hold an EMPTY env var —
-# PowerShell `$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""` DELETES the
-# variable, so an empty-passphrase key makes tauri-cli prompt on stdin and
-# hang forever over ssh. The in-VM build therefore runs keyless and is
-# EXPECTED to exit 1 with "A public key has been found, but no private
-# key" AFTER writing the complete installer — the script asserts exactly
-# that outcome.
+# Signing:
+#   - Updater .sig (minisign): produced HOST-SIDE after collection
+#     (`tauri signer sign`), never in the VM — the private key never leaves
+#     this machine. NOTE the Windows auto-updater itself is PENDING REWORK
+#     post-Inno-cutover (it expected the NSIS artifact; tracked on WI-3172) —
+#     the .sig is still minted so the artifact chain stays uniform.
+#   - Authenticode: in-VM via WINDOWS_SIGN_*/WINDOWS_CERT_* env (D-004,
+#     owner-gated cert). Signs the app exe BEFORE packaging and the Inno
+#     setup.exe after. Unset ⇒ unsigned build (dev/dogfood).
 #   TAURI_SIGNING_PRIVATE_KEY_PATH (host path, default ~/.papercusp/signing/papercusp.key)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (optional, host-side only)
 
@@ -106,14 +117,17 @@ cut_release_seed() {
   # WHY depth-1 is the WINDOWS default (this DIVERGES from mac-vm-build.sh, which
   # has NO installer size cap): a FULL-HISTORY git bundle of this monorepo is
   # ~1.75GiB; combined with the owner-mandated corestore (~2.3GiB) + slimmed
-  # sidecar (~0.85GiB) + WSL rootfs (~0.24GiB) that is ~5.2GiB — which BLOWS the
-  # NSIS 4GiB datablock cap (WI-3172; the makensis "#12345" death below). A depth-1
-  # bundle is ~76MB (WI-2903), keeping the full offline seed at ~3.5GiB, safely
-  # under the cap. The owner's own WI-3172 spec cites "git super.bundle ~76MB"
-  # (i.e. depth-1), so a shallow seed is the intended/sufficient shape for an
-  # offline dogfood pot — no deep history is needed at first boot (the pot can
-  # fetch history from origin online later). Copy-pasting mac's full-history
-  # default here is the bug that would silently over-cap every real full-seed build.
+  # sidecar (~0.85GiB) + WSL rootfs (~0.24GiB) that is ~5.2GiB. The seed +
+  # rootfs are ENCRYPTED/pre-compressed (stored raw in the installer), so that
+  # payload would push the final Inno setup.exe past its ~4GB single-exe max
+  # (and NSIS before it died at ~2GiB — the makensis "#12345" mmapping error).
+  # A depth-1 bundle is ~76MB (WI-2903), keeping the full offline seed's raw
+  # portion at ~2.5GiB and the final installer ≈2.7GB, safely inside 4GB. The
+  # owner's own WI-3172 spec cites "git super.bundle ~76MB" (i.e. depth-1), so
+  # a shallow seed is the intended/sufficient shape for an offline dogfood
+  # pot — no deep history is needed at first boot (the pot can fetch history
+  # from origin online later). Copy-pasting mac's full-history default here is
+  # the bug that would silently over-cap every real full-seed build.
   # Escape hatch: export PAPERCUSP_SEED_DEPTH= (empty) to force full history.
   local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
   local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
@@ -147,30 +161,25 @@ cut_release_seed() {
 }
 cut_release_seed
 
-# WI-3063: NSIS datablocks address with 32-bit offsets — the total UNCOMPRESSED
-# bundle payload (tauri.conf.json resources: sidecar/** + resources/* + seed/**,
-# plus the exe) has a HARD < 4GiB cap. Crossing it makes makensis die minutes
-# into the VM build with the cryptic "Internal compiler error #12345: error
-# mmapping datablock to N" (N = true size mod 2^32). Fail HERE, before the
-# ~10-min pack/ship/compile, with a message that names the real problem.
-# 3.7GiB threshold (WI-3172): the OWNER-MANDATED full offline seed (git ~76M +
-# corestore ~2.3G) legitimately puts the REAL payload at ~3.5GiB after the
-# meridian removal + spa/internal slim, so the old 3.5GiB guard would
-# FALSE-BLOCK a valid full-seed build. 3.7GiB leaves ~300MiB under the true
-# 4.0GiB NSIS datablock cap for the exe + WebView2 bootstrapper + NSIS overhead
-# that also land in the datablock.
-# WI-3172: measure the REAL SHIPPED payload — the tar below EXCLUDES
-# sidecar/code-server (~447MB) and sidecar/bin/omp (~485MB), so those never
-# reach the NSIS datablock. Counting them (the old du did) over-stated the
-# payload by ~930MB and FALSE-BLOCKED a full-seed build that actually fits
-# (e.g. after the meridian removal + spa/internal slim, full seed ≈ 3.1GB real
-# but ≈ 4.0GB if code-server+omp are miscounted). Exclude them here to match
-# the tar so the guard reflects what makensis actually packs.
-payload_kb=$(du -sk --dereference --exclude=code-server --exclude=omp "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-payload_cap_kb=$((3789 * 1024)) # 3.7GiB (full-seed payload ~3.5GiB; NSIS hard cap 4.0GiB)
-if (( payload_kb > payload_cap_kb )); then
-  du -sh --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null || true
-  fail "bundle payload is $((payload_kb / 1024 / 1024))GiB (> 3.7GiB guard, WI-3172) — NSIS hard-caps the datablock at 4.0GiB (WI-3063). The full offline seed is ~3.5GiB by design, so this means something bloated ABOVE that: check the sidecar (redundant ort-wasm variants, an un-stripped binary) or an unexpectedly-large corestore/git cut before building."
+# WI-3172 payload guard (Inno era). The binding limit is the FINAL setup.exe
+# size: Inno 6.5.2+ supports a single Setup.exe to ~4GB (the Windows max; NSIS
+# before it died at ~2GiB — "#12345 error mmapping"). The seed (encrypted
+# corestore + git bundles) and the WSL rootfs tar.gz are INCOMPRESSIBLE and
+# stored raw ([Files] nocompression), so they translate ~1:1 into installer
+# bytes; the sidecar compresses ~3:1 under lzma2. Guard the raw-stored portion
+# here, before the ~10-min pack/ship/compile: raw (seed+resources) ≤ 3.4GiB
+# leaves ≥400MiB for the compressed sidecar (~0.35GiB) + exe + overhead under
+# the 4GB exe max. The full-seed raw portion is ~2.5GiB by design (corestore
+# ~2.2G + git ~76M + rootfs ~0.25G), so tripping this means an unexpectedly
+# large corestore/git cut — recheck the seed before building. A hard
+# post-collect assertion below also verifies the actual setup.exe size.
+# (sidecar/code-server + sidecar/bin/omp are excluded from the tar and never
+# ship — see the tar excludes below.)
+raw_kb=$(du -sk --dereference "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+raw_cap_kb=$((3482 * 1024)) # 3.4GiB raw-stored cap (full seed ~2.5GiB by design)
+if (( raw_kb > raw_cap_kb )); then
+  du -sh --dereference "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null || true
+  fail "raw-stored payload (seed+resources) is $((raw_kb / 1024 / 1024))GiB (> 3.4GiB guard, WI-3172) — these ship uncompressed inside the Inno setup.exe, which maxes at ~4GB. The full offline seed is ~2.5GiB by design; check for an unexpectedly-large corestore/git cut (full-history git? duplicate snapshot?) before building. PAPERCUSP_SEED_DEPTH= (full history) canNOT fit — see the seed-cut comment above."
 fi
 
 echo "==> packing desktop tree"
