@@ -983,6 +983,17 @@ mod discovery_tests {
         assert_eq!(decide_serve_respawn(true, false, false, 5, 5), R::GiveUp);
     }
 
+    // WI-3170 REPRODUCE (Windows/WSL child-liveness blind spot): the stored serve
+    // `Child` is the wsl.exe WRAPPER, which OUTLIVES the dead WSL-internal node
+    // operator — so `child_exited` stays false even though the operator is durably
+    // gone. The old decider returned Healthy here (`!child_exited` short-circuit),
+    // so the dead operator was NEVER respawned (VM forensics: down ~11 min). With
+    // operator UNREACHABLE past the debounce, the correct action is Respawn.
+    #[test]
+    fn serve_respawn_when_operator_unreachable_despite_live_wrapper_child() {
+        assert_eq!(decide_serve_respawn(false, false, false, 0, 5), R::Respawn);
+    }
+
     // WI-1878 / P-005: the operator-dead notification body must name WHICH
     // supervisor gave up and the exact attempt/window numbers, so a user (or a
     // later triager reading a bug report) can tell the two give-up paths apart.

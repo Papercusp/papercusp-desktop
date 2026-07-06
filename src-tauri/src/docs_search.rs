@@ -152,15 +152,22 @@ pub fn open_palette(app: &AppHandle) {
     // the palette worked exactly once, then "stopped working no matter which key").
     if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
         // WI-3096: TOGGLE, don't blindly re-show. Before this check, a second
-        // shortcut press while the palette was already open+focused just
-        // re-showed + reloaded it in place — there was no way to dismiss it
-        // with the same key that opened it (the ticket's "ctrl+k toggles" UX
-        // expectation). If it's currently visible AND focused, the user is
-        // pressing the shortcut to CLOSE it — hide (never destroy — see the
-        // comment below on why this window is never torn down) and stop.
-        let is_open =
-            existing.is_visible().unwrap_or(false) && existing.is_focused().unwrap_or(false);
-        if is_open {
+        // shortcut press while the palette was already open just re-showed +
+        // reloaded it in place — there was no way to dismiss it with the same
+        // key that opened it (the ticket's "ctrl+k toggles" UX expectation).
+        // Gate on `is_visible()` ALONE, not also `is_focused()`: live-tested
+        // (isolated Xvfb+openbox instance, WI-3096) — is_focused() can read
+        // false even when the X server confirms the window IS the active,
+        // input-focused window (WM_STATE=Normal, IsViewable, and
+        // _NET_ACTIVE_WINDOW all agreeing) — Tauri/GTK's focus-tracking on
+        // X11 does not reliably reflect real focus in every WM. Requiring it
+        // for the toggle meant the second ctrl+k press silently fell through
+        // to re-show+reload instead of closing. is_visible() alone is also
+        // the more correct UX anyway: a palette the user left open (even if
+        // they last interacted with the main window, so the palette itself
+        // isn't the X11-focused window) should still close on a repeat press
+        // — "toggle" means open/closed, not open/closed-only-if-still-focused.
+        if existing.is_visible().unwrap_or(false) {
             let _ = existing.hide();
             return;
         }

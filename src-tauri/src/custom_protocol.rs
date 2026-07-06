@@ -329,6 +329,25 @@ pub fn handle(
 }
 
 fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    // Fix B (WI-2902): serve immutable bundled static assets (the hashed /assets/*
+    // JS/CSS chunks, fonts, images) straight from disk, bypassing the operator
+    // forward below. Under the concurrent chunk burst on initial load / reload
+    // (~100+ hashed chunks at once) that `reqwest::blocking` forward flaked — a
+    // module script failed to load and the SPA error boundary showed the
+    // full-screen "This view hit an error" card on BOTH the .deb and the AppImage.
+    // Bundled chunks are byte-identical to what the operator would serve, so
+    // disk-serving them removes the operator + the flaky forward from the chunk
+    // critical path (and makes chunk loads independent of operator readiness,
+    // subsuming the fresh-boot race Fix A softened). Only GET (assets are never
+    // mutated); index.html / SPA routes / /api* return None here and fall through
+    // to the forward below so any operator-side templating + IPC polyfill stay
+    // intact.
+    if request.method().as_str() == "GET" {
+        if let Some(resp) = try_serve_static_asset(app, request.uri().path()) {
+            return resp;
+        }
+    }
+
     // papercusp://localhost/<path>?<query>  →  <base>/<path>?<query>
     let path_and_query = request
         .uri()
@@ -452,6 +471,36 @@ mod tests {
             String::from_utf8_lossy(r.body()),
             "papercusp: upstream error: boom",
         );
+    }
+
+    // --- Fix B static-asset disk-serve eligibility (release-blocking card, WI-2902) ---
+    // is_static_asset_path is the pure gate that decides whether forward() may
+    // short-circuit a GET to the bundled SPA on disk (removing the flaky operator
+    // forward that surfaced the "This view hit an error" card on reload). The
+    // document root, empty path, and every /api path MUST stay forwarded (index.html
+    // may carry operator templating; /api* rides the IPC polyfill / operator); a
+    // concrete asset/route path is eligible (try_serve_static_asset then requires it
+    // to resolve to a real bundled file, else it too falls through to the forward).
+
+    #[test]
+    fn static_asset_path_serves_concrete_assets_from_disk() {
+        // Hashed chunks + top-level bundled files — the burst that flaked the forward.
+        assert!(is_static_asset_path("/assets/index-a1b2c3.js"));
+        assert!(is_static_asset_path("/assets/index-d4e5f6.css"));
+        assert!(is_static_asset_path("/favicon.ico"));
+        assert!(is_static_asset_path("/fonts/inter.woff2"));
+        assert!(is_static_asset_path("/logo.svg"));
+    }
+
+    #[test]
+    fn static_asset_path_keeps_root_and_api_forwarded() {
+        // These MUST forward: the document root (operator may template index.html),
+        // the empty path, and everything under /api (IPC polyfill / operator).
+        assert!(!is_static_asset_path(""));
+        assert!(!is_static_asset_path("/"));
+        assert!(!is_static_asset_path("/api"));
+        assert!(!is_static_asset_path("/api/health"));
+        assert!(!is_static_asset_path("/api/sync/stream"));
     }
 
     // --- scheme-default regression guard (blank-macOS-webview, 2026-07-01) ---
