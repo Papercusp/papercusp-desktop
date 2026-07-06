@@ -7,6 +7,12 @@
   },
   "bundle": {
     "shortDescription": "Papercusp backend service (operator + federation)",
-    "longDescription": "The Papercusp Server runs the operator sidecar — embedded Postgres, the harness API/IPC, and cross-instance federation — in the menubar/tray, auto-starting at login. It is the backend that psu and the Papercusp GUI attach to; keep it running and agents work whether or not the GUI is open."
+    "longDescription": "The Papercusp Server runs the operator sidecar — embedded Postgres, the harness API/IPC, and cross-instance federation — in the menubar/tray, auto-starting at login. It is the backend that psu and the Papercusp GUI attach to; keep it running and agents work whether or not the GUI is open.",
+    "linux": {
+      "deb": {
+        "conflicts": ["papercusp-gui"],
+        "replaces": ["papercusp-gui"]
+      }
+    }
   }
 }
