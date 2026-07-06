@@ -204,6 +204,21 @@ EOF
   [ -n "$code" ] && [ "$code" != "000" ]
 }
 
+# Resolve the in-guest operator's chosen (DYNAMIC) port. Authoritative source is
+# ~/.papercusp/operator.json (the app writes {port,pid,httpUrl,…} there on boot —
+# `vmctl launch` + the A/B rigs already read it). The old method — grepping
+# papercusp-app.log for a "[serve] listening on …" line — is STALE: the packaged
+# build routes serve.mjs's stdout elsewhere, so the app log only carries the tauri
+# binary's libEGL warnings and the grep found nothing → a false "operator down" on a
+# perfectly healthy install (WI-2902, 2026-07-06). Read operator.json first; keep the
+# log-grep as a fallback for any pre-operator.json build.
+op_port() {  # op_port <name>  → prints the operator port (empty if unknown)
+  local name="$1" p
+  p="$(vm_ssh "$name" "python3 -c \"import json,os;print(json.load(open(os.path.expanduser('~/.papercusp/operator.json')))['port'])\" 2>/dev/null" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$p" ] && { printf '%s\n' "$p"; return 0; }
+  vm_ssh "$name" "grep -oE 'listening on http://127\.0\.0\.1:[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null
+}
+
 cmd_verify() {
   local name="${1:-clean}"
   vm_running "$name" || die "$name is not running. vmctl up $name"
@@ -221,14 +236,17 @@ cmd_verify() {
   if ! vm_ssh "$name" 'pgrep -f [p]apercusp-desktop >/dev/null' 2>/dev/null; then
     log "app not running — launching for verification"; cmd_launch "$name"
   fi
-  # Poll up to 120s for the operator to come up (it picks a DYNAMIC port, not 3070).
-  # Stop early if the embedded-PG spawn fatally fails (no point waiting).
-  log "waiting for embedded Postgres + operator…"
+  # Poll for the operator to come up (it picks a DYNAMIC port, not 3070; read from
+  # operator.json via op_port). Up to 300s: a PRISTINE first boot with the bundled
+  # hive seed restores a ~2GB corestore + runs migrations before serving health, and
+  # was measured at ~3min process-start→health-200 (WI-2902) — 120s was too short and
+  # falsely failed the check. Stop early if the embedded-PG spawn fatally fails.
+  log "waiting for embedded Postgres + operator (cold-seed first boot can take ~3min)…"
   local op="" _i
-  for _i in $(seq 1 24); do
+  for _i in $(seq 1 60); do
     vm_ssh "$name" "cat papercusp-app.log 2>/dev/null" > "$out/app.log" 2>/dev/null || true
     grep -q 'failed to spawn embedded-postgres-server' "$out/app.log" && break
-    op="$(grep -oE '(\[serve\]|hono-host\]) listening on http://127\.0\.0\.1:[0-9]+' "$out/app.log" | grep -oE '[0-9]+$' | tail -1)"
+    op="$(op_port "$name")"
     [ -n "$op" ] && op_responds "$name" "$op" && break
     sleep 5
   done
@@ -278,8 +296,9 @@ cmd_status() {
       ndesk="$(vm_ssh "$name" 'pgrep -cf [p]apercusp-desktop 2>/dev/null || echo 0' 2>/dev/null)"
       nsrv="$(vm_ssh "$name" 'pgrep -cf [s]erve.mjs 2>/dev/null || echo 0' 2>/dev/null)"
       echo "procs:      desktop=${ndesk:-?} serve.mjs=${nsrv:-?}$([ "${ndesk:-0}" -gt 1 ] 2>/dev/null && echo '  ⚠ DUPLICATE desktop — split-brain')"
-      # operator runs on a DYNAMIC port — parse it from the app log, don't assume :3070.
-      local op; op="$(vm_ssh "$name" "grep -oE '\[serve\] listening on http://127\.0\.0\.1:[0-9]+|sidecar ready on :[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null)"
+      # operator runs on a DYNAMIC port — resolve it from operator.json (op_port), not
+      # the app log (the packaged build doesn't log the "listening" line there).
+      local op; op="$(op_port "$name")"
       if [ -n "$op" ] && op_responds "$name" "$op"; then
         echo "operator:   up (port $op)"
       elif [ -n "$op" ]; then

@@ -35,14 +35,44 @@ seed_args=()
 # shellcheck disable=SC2206
 fed_nic=( ${FED_NIC:-} )
 
-log "boot $NAME — ssh:$SSH_PORT spice:127.0.0.1:$SPICE_PORT op:$OP_PORT disk=$(basename "$DISK")"
+# Guard the reset→up (and down→up) race + host port collisions: qemu treats a SPICE
+# bind failure OR a hostfwd bind failure as FATAL — it exits and NO VM boots, so a
+# `vmctl reset clean && vmctl up clean` silently produced a dead VM (WI-2902, seen
+# 2026-07-06). Two distinct causes, two fixes:
+port_free() { ! ss -Hltn 2>/dev/null | awk '{print $4}' | grep -q ":${1}\$"; }
+wait_port_free() {  # bounded wait for a JUST-KILLED VM to release a port it still holds
+  local port="$1" label="$2" i
+  for i in $(seq 1 30); do
+    port_free "$port" && return 0
+    [ "$i" -eq 1 ] && log "port $port ($label) still held by a prior VM — waiting for release…"
+    sleep 1
+  done
+  warn "port $port ($label) still in use after 30s — booting anyway (qemu may abort)"
+}
+# (1) SSH + SPICE must stay the deterministic per-instance values (vm_ssh / `vmctl gui`
+#     look them up via ports_for); if held it's a just-killed VM that will free shortly.
+wait_port_free "$SSH_PORT"   ssh
+wait_port_free "$SPICE_PORT" spice
+# (2) The operator hostfwd (host:$OP_PORT → guest:3070) is a CONVENIENCE for host-side
+#     access only — the in-guest tests (vmctl verify: SSH + in-guest curl + qemu
+#     screendump) never use it. On a busy host the default op-fwd range (3072-3074)
+#     collides with LIVE host services (Tower box) — a persistent holder a wait can't
+#     clear. So DROP just that one hostfwd rule when its port is taken (the VM still
+#     boots) instead of letting qemu abort; set VM_OP_BASE to a free base to reclaim it.
+op_hostfwd=",hostfwd=tcp::${OP_PORT}-:3070"
+if ! port_free "$OP_PORT"; then
+  warn "op-fwd port $OP_PORT in use on host — booting WITHOUT the host→guest operator forward (set VM_OP_BASE to a free base to reclaim it; in-guest tests are unaffected)"
+  op_hostfwd=""
+fi
+
+log "boot $NAME — ssh:$SSH_PORT spice:127.0.0.1:$SPICE_PORT op:${OP_PORT}${op_hostfwd:+ (fwd)} disk=$(basename "$DISK")"
 qemu-system-x86_64 \
   -name "papercusp-testvm-$NAME" \
   -enable-kvm -machine q35,accel=kvm -cpu host \
   -m "$VM_RAM_MB" -smp "$VM_CPUS" \
   -drive "if=virtio,format=qcow2,file=$DISK,cache=writeback,discard=unmap" \
   "${seed_args[@]}" \
-  -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22,hostfwd=tcp::${OP_PORT}-:3070" \
+  -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22${op_hostfwd}" \
   -device virtio-net-pci,netdev=net0 \
   "${fed_nic[@]}" \
   -vga "${VM_VGA:-qxl}" -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
