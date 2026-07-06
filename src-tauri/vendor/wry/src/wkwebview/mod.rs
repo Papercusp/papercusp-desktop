@@ -1360,7 +1360,7 @@ pub fn url_from_webview(webview: &WKWebView) -> Result<String> {
   let Some(url_obj) = (unsafe { webview.URL() }) else {
     return Ok(String::new());
   };
-  let Some(absolute_url) = (unsafe { url_obj.absoluteString() }) else {
+  let Some(absolute_url) = url_obj.absoluteString() else {
     return Ok(String::new());
   };
 
