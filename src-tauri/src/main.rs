@@ -802,6 +802,8 @@ mod macos_ats_tests {
 
 #[cfg(test)]
 mod discovery_tests {
+    use std::time::Duration;
+
     use super::{next_operator_port, parse_operator_discovery, OperatorDiscovery};
 
     #[test]
