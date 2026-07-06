@@ -466,7 +466,8 @@ fn decode_wsl_bytes(bytes: &[u8]) -> String {
     // Sample up to the first 16 even-indexed high bytes: mostly-NUL ⇒ UTF-16LE
     // ASCII. (Odd index holds the low byte of each UTF-16LE code unit.)
     let sampled: Vec<u8> = bytes.iter().skip(1).step_by(2).take(16).copied().collect();
-    let nul_run = !sampled.is_empty() && sampled.iter().filter(|&&b| b == 0).count() * 2 >= sampled.len();
+    let nul_run =
+        !sampled.is_empty() && sampled.iter().filter(|&&b| b == 0).count() * 2 >= sampled.len();
     if has_bom || nul_run {
         let start = if has_bom { 2 } else { 0 };
         let u16s: Vec<u16> = bytes[start..]
@@ -503,7 +504,10 @@ fn wsl_relay_error(out: &std::process::Output) -> String {
         parts.push(format!("stdout: {sout}"));
     }
     if serr.is_empty() && sout.is_empty() {
-        parts.push("(no stdout/stderr — wsl.exe produced no output; distro exec/interop unavailable?)".to_string());
+        parts.push(
+            "(no stdout/stderr — wsl.exe produced no output; distro exec/interop unavailable?)"
+                .to_string(),
+        );
     }
     parts.join("; ")
 }

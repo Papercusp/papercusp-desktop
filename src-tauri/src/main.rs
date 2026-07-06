@@ -946,14 +946,17 @@ mod discovery_tests {
     // path the live Mac-VM E2E proved was missing — the operator died, the shell
     // lived, and nothing (GUI `open -b` no-ops on the live single instance) brought
     // it back. Same Linux-CI blind-spot rationale: the macOS respawn can't run here.
-    use super::{decide_serve_respawn, ServeRespawnAction as R};
+    use super::{decide_serve_respawn, serve_unreachable_respawn_ready, ServeRespawnAction as R};
 
     // Child still running, operator not yet up, debounce not armed (normal boot)
     // → nothing to do. (Args: child_exited, shutting_down, operator_reachable,
     // unreachable_respawn_ready, respawns_in_window, max_respawns.)
     #[test]
     fn serve_respawn_healthy_when_child_running() {
-        assert_eq!(decide_serve_respawn(false, false, false, false, 0, 5), R::Healthy);
+        assert_eq!(
+            decide_serve_respawn(false, false, false, false, 0, 5),
+            R::Healthy
+        );
     }
 
     // Operator reachable is GROUND TRUTH → healthy no matter the Child state.
@@ -961,9 +964,15 @@ mod discovery_tests {
     // operator that is serving) → do NOT double-spawn.
     #[test]
     fn serve_respawn_healthy_when_operator_reachable_despite_exit() {
-        assert_eq!(decide_serve_respawn(true, false, true, false, 0, 5), R::Healthy);
+        assert_eq!(
+            decide_serve_respawn(true, false, true, false, 0, 5),
+            R::Healthy
+        );
         // reachable wins even if the unreachable path were somehow armed.
-        assert_eq!(decide_serve_respawn(true, false, true, true, 0, 5), R::Healthy);
+        assert_eq!(
+            decide_serve_respawn(true, false, true, true, 0, 5),
+            R::Healthy
+        );
     }
 
     // The core WI-2667 recovery: operator child exited, no operator reachable,
@@ -971,8 +980,14 @@ mod discovery_tests {
     // dead). A fully-exited child respawns immediately, debounce or not.
     #[test]
     fn serve_respawn_when_child_exited_and_unreachable() {
-        assert_eq!(decide_serve_respawn(true, false, false, false, 0, 5), R::Respawn);
-        assert_eq!(decide_serve_respawn(true, false, false, false, 4, 5), R::Respawn);
+        assert_eq!(
+            decide_serve_respawn(true, false, false, false, 0, 5),
+            R::Respawn
+        );
+        assert_eq!(
+            decide_serve_respawn(true, false, false, false, 4, 5),
+            R::Respawn
+        );
     }
 
     // Shutting down / self-updating → never resurrect the child we killed on
@@ -980,15 +995,27 @@ mod discovery_tests {
     // path armed.
     #[test]
     fn serve_respawn_suppressed_when_shutting_down() {
-        assert_eq!(decide_serve_respawn(true, true, false, false, 0, 5), R::Suppressed);
-        assert_eq!(decide_serve_respawn(true, true, false, false, 9, 5), R::Suppressed);
-        assert_eq!(decide_serve_respawn(false, true, false, true, 0, 5), R::Suppressed);
+        assert_eq!(
+            decide_serve_respawn(true, true, false, false, 0, 5),
+            R::Suppressed
+        );
+        assert_eq!(
+            decide_serve_respawn(true, true, false, false, 9, 5),
+            R::Suppressed
+        );
+        assert_eq!(
+            decide_serve_respawn(false, true, false, true, 0, 5),
+            R::Suppressed
+        );
     }
 
     // Respawned too many times in the window (crash-loop) → give up until restart.
     #[test]
     fn serve_respawn_gives_up_at_cap() {
-        assert_eq!(decide_serve_respawn(true, false, false, false, 5, 5), R::GiveUp);
+        assert_eq!(
+            decide_serve_respawn(true, false, false, false, 5, 5),
+            R::GiveUp
+        );
     }
 
     // WI-3170 (Windows/WSL child-liveness blind spot): the stored serve `Child` is
@@ -1001,13 +1028,73 @@ mod discovery_tests {
     fn serve_respawn_when_operator_unreachable_past_debounce_despite_live_wrapper_child() {
         // Wrapper Child alive (child_exited=false), operator unreachable past the
         // debounce, under the cap → respawn (the exact bug case).
-        assert_eq!(decide_serve_respawn(false, false, false, true, 0, 5), R::Respawn);
-        assert_eq!(decide_serve_respawn(false, false, false, true, 4, 5), R::Respawn);
+        assert_eq!(
+            decide_serve_respawn(false, false, false, true, 0, 5),
+            R::Respawn
+        );
+        assert_eq!(
+            decide_serve_respawn(false, false, false, true, 4, 5),
+            R::Respawn
+        );
         // The crash-loop cap still applies to this path.
-        assert_eq!(decide_serve_respawn(false, false, false, true, 5, 5), R::GiveUp);
+        assert_eq!(
+            decide_serve_respawn(false, false, false, true, 5, 5),
+            R::GiveUp
+        );
         // But BEFORE the debounce arms (normal boot: serve alive, operator still
         // coming up) we must NOT respawn — that would double-spawn a competing serve.
-        assert_eq!(decide_serve_respawn(false, false, false, false, 0, 5), R::Healthy);
+        assert_eq!(
+            decide_serve_respawn(false, false, false, false, 0, 5),
+            R::Healthy
+        );
+    }
+
+    #[test]
+    fn serve_unreachable_respawn_ready_stays_disarmed_before_first_successful_boot() {
+        let debounce = Duration::from_secs(15);
+        assert!(!serve_unreachable_respawn_ready(
+            true, false, None, debounce
+        ));
+        assert!(!serve_unreachable_respawn_ready(
+            true,
+            false,
+            Some(Duration::from_secs(30)),
+            debounce
+        ));
+    }
+
+    #[test]
+    fn serve_unreachable_respawn_ready_arms_only_after_continuous_debounce_on_wsl() {
+        let debounce = Duration::from_secs(15);
+        assert!(!serve_unreachable_respawn_ready(true, true, None, debounce));
+        assert!(!serve_unreachable_respawn_ready(
+            true,
+            true,
+            Some(Duration::from_secs(14)),
+            debounce
+        ));
+        assert!(serve_unreachable_respawn_ready(
+            true,
+            true,
+            Some(Duration::from_secs(15)),
+            debounce
+        ));
+        assert!(serve_unreachable_respawn_ready(
+            true,
+            true,
+            Some(Duration::from_secs(16)),
+            debounce
+        ));
+    }
+
+    #[test]
+    fn serve_unreachable_respawn_ready_never_arms_off_wsl() {
+        assert!(!serve_unreachable_respawn_ready(
+            false,
+            true,
+            Some(Duration::from_secs(60)),
+            Duration::from_secs(15)
+        ));
     }
 
     // WI-1878 / P-005: the operator-dead notification body must name WHICH
@@ -1015,7 +1102,8 @@ mod discovery_tests {
     // later triager reading a bug report) can tell the two give-up paths apart.
     #[test]
     fn operator_dead_notification_body_names_reason_and_counts() {
-        let body = super::operator_dead_notification_body("serve.mjs in-process respawn cap hit", 5, 300);
+        let body =
+            super::operator_dead_notification_body("serve.mjs in-process respawn cap hit", 5, 300);
         assert!(body.contains("serve.mjs in-process respawn cap hit"));
         assert!(body.contains('5'));
         assert!(body.contains("300"));
@@ -1549,6 +1637,23 @@ fn decide_serve_respawn(
     ServeRespawnAction::Healthy
 }
 
+/// Pure arming gate for WI-3170's Windows/WSL wrapper blind spot. This computes
+/// the `unreachable_respawn_ready` input to `decide_serve_respawn` from the
+/// stateful supervisor loop's latches, keeping the cold-boot/double-spawn guard
+/// testable without a live WSL VM.
+fn serve_unreachable_respawn_ready(
+    via_wsl: bool,
+    ever_reachable: bool,
+    unreachable_elapsed: Option<Duration>,
+    debounce: Duration,
+) -> bool {
+    via_wsl
+        && ever_reachable
+        && unreachable_elapsed
+            .map(|elapsed| elapsed >= debounce)
+            .unwrap_or(false)
+}
+
 /// Point the main window at the operator on `port`: compute the app origin
 /// (the custom-protocol origin when it's on — Linux default; otherwise the HTTP
 /// loopback base), navigate-or-reload the webview there, and (re-)inject
@@ -1644,7 +1749,12 @@ fn operator_dead_notification_body(reason: &str, respawns: usize, window_secs: u
 /// is backgrounded/minimized. Best-effort: a notification failure is logged,
 /// never fatal — the app is already in a degraded state, we must not panic
 /// trying to report it.
-fn notify_operator_dead(app_handle: &tauri::AppHandle, reason: &str, respawns: usize, window_secs: u64) {
+fn notify_operator_dead(
+    app_handle: &tauri::AppHandle,
+    reason: &str,
+    respawns: usize,
+    window_secs: u64,
+) {
     let _ = app_handle.emit(
         "operator-dead",
         OperatorDeadPayload {
@@ -1658,7 +1768,11 @@ fn notify_operator_dead(app_handle: &tauri::AppHandle, reason: &str, respawns: u
         .notification()
         .builder()
         .title("Papercusp operator stopped responding")
-        .body(operator_dead_notification_body(reason, respawns, window_secs))
+        .body(operator_dead_notification_body(
+            reason,
+            respawns,
+            window_secs,
+        ))
         .show()
     {
         eprintln!("[papercusp-desktop] operator-dead notification failed: {e}");
@@ -2800,10 +2914,7 @@ fn spawn_serve(
         // Installer-bundled hive seed dir (first-boot seed-then-delta-join fast
         // path). Safe to set when only the placeholder is present — the operator
         // manifest-checks it (resolveSeedDir) and cold-joins if there's no seed.
-        .env(
-            "PAPERCUSP_SEED_DIR",
-            seed_dir.to_string_lossy().to_string(),
-        )
+        .env("PAPERCUSP_SEED_DIR", seed_dir.to_string_lossy().to_string())
         // Pre-migrated seed archive (first-boot fast path). Safe to set even when
         // the file is absent — serve existsSync-checks it and falls back to initdb.
         .env(
@@ -4023,11 +4134,12 @@ pub fn run() {
                         // Linux/mac the child IS the operator process, so child_exited
                         // is ground truth and we keep the exact existing behavior —
                         // this path never arms there (WI-3170, surgical scope).
-                        let unreachable_respawn_ready = sup_via_wsl
-                            && ever_reachable
-                            && unreachable_since
-                                .map(|t| now.duration_since(t) >= SERVE_UNREACHABLE_DEBOUNCE)
-                                .unwrap_or(false);
+                        let unreachable_respawn_ready = serve_unreachable_respawn_ready(
+                            sup_via_wsl,
+                            ever_reachable,
+                            unreachable_since.map(|t| now.duration_since(t)),
+                            SERVE_UNREACHABLE_DEBOUNCE,
+                        );
                         match decide_serve_respawn(
                             child_exited,
                             shutting_down,

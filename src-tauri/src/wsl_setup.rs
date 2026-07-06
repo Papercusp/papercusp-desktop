@@ -865,7 +865,13 @@ pub fn ensure_windows_cli_shims() {
         return;
     }
     let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(&ps1)
         .creation_flags(CREATE_NO_WINDOW)
         .output();
@@ -930,16 +936,28 @@ mod tests {
         assert!(cmd.contains("--distribution papercup-runtime"));
         assert!(cmd.contains("--cd ~"));
         assert!(cmd.contains("--exec /usr/bin/env TERM=xterm-256color"));
-        assert!(!cmd.contains(" -d "), "short -d form is the WI-2955 trap: {cmd}");
+        assert!(
+            !cmd.contains(" -d "),
+            "short -d form is the WI-2955 trap: {cmd}"
+        );
     }
 
     #[test]
     fn psu_cmd_forwards_args_as_positionals_not_a_reparsed_string() {
         let cmd = windows_psu_cmd_contents();
         // bash -lc '… "$@"' psu %*  — user args land as $1.. verbatim.
-        assert!(cmd.contains(r#"\"$@\""#), "missing \"$@\" forwarding: {cmd}");
-        assert!(cmd.trim_end().ends_with("psu %*"), "missing cmd-side %* tail: {cmd}");
-        assert!(cmd.contains("$HOME/.papercusp/bin/psu"), "missing $HOME shim path: {cmd}");
+        assert!(
+            cmd.contains(r#"\"$@\""#),
+            "missing \"$@\" forwarding: {cmd}"
+        );
+        assert!(
+            cmd.trim_end().ends_with("psu %*"),
+            "missing cmd-side %* tail: {cmd}"
+        );
+        assert!(
+            cmd.contains("$HOME/.papercusp/bin/psu"),
+            "missing $HOME shim path: {cmd}"
+        );
     }
 
     #[test]
@@ -959,8 +977,14 @@ mod tests {
         assert!(WINDOWS_PATH_SETUP_PS1.contains("DoNotExpandEnvironmentNames"));
         assert!(WINDOWS_PATH_SETUP_PS1.contains("ExpandString"));
         assert!(WINDOWS_PATH_SETUP_PS1.contains("SendMessageTimeout"));
-        assert!(WINDOWS_PATH_SETUP_PS1.contains("-notcontains $dir"), "idempotency guard missing");
-        assert!(WINDOWS_PATH_SETUP_PS1.is_ascii(), "ps1 must stay pure ASCII");
+        assert!(
+            WINDOWS_PATH_SETUP_PS1.contains("-notcontains $dir"),
+            "idempotency guard missing"
+        );
+        assert!(
+            WINDOWS_PATH_SETUP_PS1.is_ascii(),
+            "ps1 must stay pure ASCII"
+        );
     }
 
     // ── parse_default_version (extracted from imp::read_default_version) ──

@@ -244,8 +244,7 @@ pub fn open_palette(app: &AppHandle) {
             }
         }
     }
-    match builder.build()
-    {
+    match builder.build() {
         Ok(win) => {
             // Bring it to the front — on the Server process (a windowless
             // background app) the WM does not auto-raise the new window.

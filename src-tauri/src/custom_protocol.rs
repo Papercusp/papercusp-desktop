@@ -287,7 +287,11 @@ fn is_static_asset_path(path: &str) -> bool {
 /// guard the end-to-end wiring — the method check, traversal/containment
 /// enforcement, and the disk read itself — so a refactor could silently drop or
 /// reorder any of that here without a single test failing).
-fn try_serve_static_asset(app: &tauri::AppHandle, method: &str, path: &str) -> Option<Response<Vec<u8>>> {
+fn try_serve_static_asset(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+) -> Option<Response<Vec<u8>>> {
     let spa_root = app
         .path()
         .resolve("sidecar/spa", tauri::path::BaseDirectory::Resource)
@@ -371,7 +375,8 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
     // intact. The method + path gating lives inside try_serve_static_asset /
     // resolve_static_or_forward (WI-3225) — this call site is now unconditional so
     // the short-circuit can't be silently narrowed by touching only this line.
-    if let Some(resp) = try_serve_static_asset(app, request.method().as_str(), request.uri().path()) {
+    if let Some(resp) = try_serve_static_asset(app, request.method().as_str(), request.uri().path())
+    {
         return resp;
     }
 
@@ -700,8 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_static_or_forward_keeps_index_html_and_root_forwarded_even_though_the_file_exists()
-    {
+    fn resolve_static_or_forward_keeps_index_html_and_root_forwarded_even_though_the_file_exists() {
         let root = TempSpaRoot::new("index-forwards");
         // index.html is a REAL file on disk in this fixture, yet the root path and the
         // empty path must still forward (operator-side templating is preserved).
@@ -735,9 +739,7 @@ mod tests {
         let root = TempSpaRoot::new("missing-asset");
         // Path shape is asset-eligible but no such file exists on disk — must forward
         // (the operator may still know how to answer it, or 404 itself).
-        assert!(
-            resolve_static_or_forward(&root.dir, "GET", "/assets/does-not-exist.js").is_none()
-        );
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/assets/does-not-exist.js").is_none());
     }
 
     #[test]
