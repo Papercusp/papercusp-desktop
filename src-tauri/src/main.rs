@@ -4037,6 +4037,10 @@ pub fn run() {
                                     Ok(c) => {
                                         *state.child.lock().unwrap() = Some(c);
                                         respawn_times.push(now);
+                                        // Restart the unreachable streak so the fresh
+                                        // child gets a full debounce to come up before
+                                        // we would respawn again (WI-3170).
+                                        unreachable_since = None;
                                     }
                                     Err(e) => {
                                         eprintln!(

@@ -1333,57 +1333,13 @@ else
   echo "  ⚠ no omp asset for $target_os-$target_arch; pi-coding plugin will require user-installed omp"
 fi
 
-# meridian — routes omp/pi through the user's Claude Max subscription.
-# Bundled at build time so the user doesn't need npm-i it; its
-# transitive dep @anthropic-ai/claude-code (closed-source, Commercial
-# ToS) is stripped here and re-installed at first launch by the
-# desktop's Rust startup. This keeps redistribution clean while still
-# giving users a one-double-click experience after a brief first-run
-# install (~30s on a fast link).
-MERIDIAN_VERSION="${MERIDIAN_VERSION:-1.42.1}"
-MERIDIAN_DIR="$SIDECAR_DIR/meridian-host"
-echo "→ bundling meridian @rynfar/meridian@$MERIDIAN_VERSION → $MERIDIAN_DIR"
-mkdir -p "$MERIDIAN_DIR"
-cat > "$MERIDIAN_DIR/package.json" <<JSON
-{
-  "name": "papercusp-meridian-host",
-  "version": "0.0.0",
-  "private": true,
-  "dependencies": { "@rynfar/meridian": "$MERIDIAN_VERSION" }
-}
-JSON
-if (cd "$MERIDIAN_DIR" && npm install --no-package-lock --omit=dev --silent 2>&1 | tail -5); then
-  # Strip closed-source claude-code from the bundle. First-launch
-  # install on the user's machine pulls it from the official npm
-  # registry (Anthropic-published) into the same node_modules tree, so
-  # the require() path resolves identically.
-  rm -rf "$MERIDIAN_DIR/node_modules/@anthropic-ai/claude-code"
-  rm -rf "$MERIDIAN_DIR/node_modules/@anthropic-ai/claude-agent-sdk"
-  # Tauri's resource bundler enumerates all files at config-time. The
-  # claude-code .bin symlink (`meridian-host/node_modules/.bin/claude`)
-  # is referenced by tauri.conf.json — without a placeholder, cargo
-  # check fails with "resource path doesn't exist". Stub it here so
-  # bundling succeeds; first-launch install (handled by Rust startup)
-  # overwrites with the real binary.
-  # Replace dangling .bin symlinks with stubs (tauri's resource bundler
-  # validates symlink targets — dangles fail cargo check). The first-
-  # launch installer overwrites them with real binaries.
-  mkdir -p "$MERIDIAN_DIR/node_modules/.bin"
-  for stub_name in claude anthropic-ai-sdk; do
-    rm -f "$MERIDIAN_DIR/node_modules/.bin/$stub_name"
-    cat > "$MERIDIAN_DIR/node_modules/.bin/$stub_name" <<'STUB'
-#!/usr/bin/env sh
-echo "claude-code is being installed on first launch — please wait, then retry." >&2
-exit 1
-STUB
-    chmod +x "$MERIDIAN_DIR/node_modules/.bin/$stub_name"
-  done
-  meridian_size=$(du -sh "$MERIDIAN_DIR" 2>/dev/null | awk '{print $1}')
-  echo "  ✓ meridian bundled ($meridian_size; claude-code deferred to first launch)"
-else
-  echo "  ⚠ failed to npm-install meridian; AI agent routing will require user-installed meridian"
-  rm -rf "$MERIDIAN_DIR"
-fi
+# meridian (@rynfar/meridian) DECOMMISSIONED 2026-07-06 (owner directive, WI-3180)
+# — "we are no longer using meridian." It routed omp/pi through the user's Claude
+# Max subscription (local daemon :3456) and cost ~509MB in the sidecar (chiefly its
+# two bundled claude binaries), the single biggest slice of the Windows NSIS-4GiB
+# payload problem (WI-3172). No longer bundled. The first-launch install
+# (setup-pty-commands.ts), the preflight :3456 probe, and the 'omp-meridian'
+# onboarding framework are removed alongside it.
 
 # code-server — github.com/coder/code-server releases. Linux + macOS only;
 # Windows users would have to install separately (code-server upstream
