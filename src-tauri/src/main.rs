@@ -4017,7 +4017,14 @@ pub fn run() {
                         } else if unreachable_since.is_none() {
                             unreachable_since = Some(now);
                         }
-                        let unreachable_respawn_ready = ever_reachable
+                        // Gate to the WSL routing (Windows): that is the ONLY place
+                        // the stored `Child` is a WRAPPER (wsl.exe) that can outlive
+                        // the inner operator, making child_exited unreliable. On
+                        // Linux/mac the child IS the operator process, so child_exited
+                        // is ground truth and we keep the exact existing behavior —
+                        // this path never arms there (WI-3170, surgical scope).
+                        let unreachable_respawn_ready = sup_via_wsl
+                            && ever_reachable
                             && unreachable_since
                                 .map(|t| now.duration_since(t) >= SERVE_UNREACHABLE_DEBOUNCE)
                                 .unwrap_or(false);
