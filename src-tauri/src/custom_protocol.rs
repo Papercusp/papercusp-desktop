@@ -228,7 +228,16 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
         Ok(b) => b,
         Err(e) => return error_response(404, &format!("papercusp: {e}")),
     };
-    let mime = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+    Response::builder()
+        .status(200)
+        .header("content-type", mime_for(&file))
+        .body(body)
+        .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"))
+}
+
+/// MIME type for a bundled static file, by extension.
+fn mime_for(file: &std::path::Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript",
         "css" => "text/css",
@@ -242,12 +251,67 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
         "woff" => "font/woff",
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
-    };
+    }
+}
+
+/// Fix B (WI-2902): is `path` eligible to be served from the bundled SPA on disk
+/// instead of forwarded to the operator? True for concrete asset paths; false for
+/// `/api*`, the document root, and empty — those keep forwarding (index.html may
+/// carry operator-side injection; SPA routes need the served shell). Pure (no
+/// fs/env reads) so CI can exercise it; the actual disk-serve additionally requires
+/// the path to resolve to a real bundled file (see [`try_serve_static_asset`]).
+fn is_static_asset_path(path: &str) -> bool {
+    !(path.is_empty() || path == "/" || path == "/api" || path.starts_with("/api/"))
+}
+
+/// Fix B (WI-2902): serve an EXISTING bundled static file (`sidecar/spa/**`, e.g.
+/// the hashed `/assets/*` JS/CSS chunks, fonts, images) straight from disk. Returns
+/// `None` for `/api`, the root / SPA routes, path traversal, or any path that is not
+/// a real file — those fall through to the operator forward in [`forward`].
+///
+/// WHY: [`forward`] relayed every page/asset load to the operator over
+/// `reqwest::blocking`; under the concurrent chunk burst on initial load / reload
+/// (~100+ hashed chunks at once) that forward flaked, a module script failed, and
+/// the SPA error boundary showed the full-screen "This view hit an error" card on
+/// BOTH the .deb and the AppImage. Bundled chunks are immutable + byte-identical to
+/// what the operator would serve, so disk-serving them removes the operator and the
+/// flaky forward from the chunk-load critical path (and makes chunk loads
+/// independent of operator readiness, subsuming the fresh-boot race Fix A softened).
+/// index.html is deliberately NOT disk-served here — it stays forwarded so any
+/// operator-side templating is preserved; it is a single request, not the burst.
+fn try_serve_static_asset(app: &tauri::AppHandle, path: &str) -> Option<Response<Vec<u8>>> {
+    if !is_static_asset_path(path) {
+        return None;
+    }
+    let spa_root = app
+        .path()
+        .resolve("sidecar/spa", tauri::path::BaseDirectory::Resource)
+        .ok()?;
+    // Normalize + reject traversal / absolute / drive-letter shapes (same rules as
+    // serve_bundled_spa), then enforce containment on the canonicalized path.
+    let rel = path.trim_start_matches('/');
+    if rel
+        .split(['/', '\\'])
+        .any(|seg| seg == ".." || seg.contains(':'))
+        || std::path::Path::new(rel).is_absolute()
+    {
+        return None;
+    }
+    let file = spa_root.join(rel);
+    if !file.is_file() {
+        return None; // SPA route / missing → forward (operator serves index.html)
+    }
+    let spa_root_canon = std::fs::canonicalize(&spa_root).ok()?;
+    let canon = std::fs::canonicalize(&file).ok()?;
+    if !canon.starts_with(&spa_root_canon) {
+        return None; // symlink escape — don't serve
+    }
+    let body = std::fs::read(&canon).ok()?;
     Response::builder()
         .status(200)
-        .header("content-type", mime)
+        .header("content-type", mime_for(&canon))
         .body(body)
-        .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"))
+        .ok()
 }
 
 /// Async URI-scheme handler. Forwards the request to the loopback base on a
