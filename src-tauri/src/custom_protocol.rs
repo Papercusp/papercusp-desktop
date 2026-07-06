@@ -279,14 +279,41 @@ fn is_static_asset_path(path: &str) -> bool {
 /// independent of operator readiness, subsuming the fresh-boot race Fix A softened).
 /// index.html is deliberately NOT disk-served here — it stays forwarded so any
 /// operator-side templating is preserved; it is a single request, not the burst.
-fn try_serve_static_asset(app: &tauri::AppHandle, path: &str) -> Option<Response<Vec<u8>>> {
-    if !is_static_asset_path(path) {
-        return None;
-    }
+///
+/// This is now a thin `tauri::AppHandle`-resolving wrapper around
+/// [`resolve_static_or_forward`] — the app-independent core that actually decides +
+/// performs the disk serve, and that unit tests below exercise directly against a
+/// real temp directory (WI-3225: the pure `is_static_asset_path` gate alone didn't
+/// guard the end-to-end wiring — the method check, traversal/containment
+/// enforcement, and the disk read itself — so a refactor could silently drop or
+/// reorder any of that here without a single test failing).
+fn try_serve_static_asset(app: &tauri::AppHandle, method: &str, path: &str) -> Option<Response<Vec<u8>>> {
     let spa_root = app
         .path()
         .resolve("sidecar/spa", tauri::path::BaseDirectory::Resource)
         .ok()?;
+    resolve_static_or_forward(&spa_root, method, path)
+}
+
+/// The app-independent core of [`try_serve_static_asset`]: given an already-resolved
+/// SPA root, the request method, and the URI path, decide whether the request should
+/// be served straight from disk — and if so, do it. Kept free of `tauri::AppHandle`
+/// (which can't be constructed in a plain unit test without the "test" cargo feature)
+/// so it is directly unit-testable against a real temp directory: real bytes, real
+/// mime types, real traversal/symlink checks, AND the method + path gating order that
+/// [`forward`] relies on to short-circuit the flaky operator forward — not just the
+/// pure boolean [`is_static_asset_path`] gate. `forward()` calls [`try_serve_static_asset`]
+/// unconditionally now (no separate outer `if method == "GET"` guard), so the ONLY way
+/// to silently drop this short-circuit is to delete that one call — a much more visible
+/// change than reordering/loosening a guard inside a larger function.
+fn resolve_static_or_forward(
+    spa_root: &std::path::Path,
+    method: &str,
+    path: &str,
+) -> Option<Response<Vec<u8>>> {
+    if method != "GET" || !is_static_asset_path(path) {
+        return None;
+    }
     // Normalize + reject traversal / absolute / drive-letter shapes (same rules as
     // serve_bundled_spa), then enforce containment on the canonicalized path.
     let rel = path.trim_start_matches('/');
@@ -301,7 +328,7 @@ fn try_serve_static_asset(app: &tauri::AppHandle, path: &str) -> Option<Response
     if !file.is_file() {
         return None; // SPA route / missing → forward (operator serves index.html)
     }
-    let spa_root_canon = std::fs::canonicalize(&spa_root).ok()?;
+    let spa_root_canon = std::fs::canonicalize(spa_root).ok()?;
     let canon = std::fs::canonicalize(&file).ok()?;
     if !canon.starts_with(&spa_root_canon) {
         return None; // symlink escape — don't serve
@@ -341,11 +368,11 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
     // subsuming the fresh-boot race Fix A softened). Only GET (assets are never
     // mutated); index.html / SPA routes / /api* return None here and fall through
     // to the forward below so any operator-side templating + IPC polyfill stay
-    // intact.
-    if request.method().as_str() == "GET" {
-        if let Some(resp) = try_serve_static_asset(app, request.uri().path()) {
-            return resp;
-        }
+    // intact. The method + path gating lives inside try_serve_static_asset /
+    // resolve_static_or_forward (WI-3225) — this call site is now unconditional so
+    // the short-circuit can't be silently narrowed by touching only this line.
+    if let Some(resp) = try_serve_static_asset(app, request.method().as_str(), request.uri().path()) {
+        return resp;
     }
 
     // papercusp://localhost/<path>?<query>  →  <base>/<path>?<query>
@@ -608,5 +635,115 @@ mod tests {
         // Windows is the intended asymmetric case.
         assert!(!scheme_default(None, "windows"));
         assert!(onboarding_origin_default(None, "windows"));
+    }
+
+    // --- resolve_static_or_forward wiring guard (WI-3225) ---
+    // Follow-up to Fix B (the release-blocking "This view hit an error" card,
+    // WI-2902). The tests above only ever exercise the pure boolean
+    // `is_static_asset_path` gate; NOTHING guarded the actual disk-serve wiring —
+    // the method check, the traversal/containment enforcement, or the real file
+    // read — so a future refactor of `forward()` / `try_serve_static_asset()` could
+    // silently drop or reorder any of that without a single test failing (it already
+    // recurred once: Fix A softened fresh-boot but not the reload burst). These
+    // tests exercise `resolve_static_or_forward` — the app-independent core both
+    // `forward()` and `try_serve_static_asset()` now delegate to — against a REAL
+    // temp directory: real bytes, real mime type, real traversal checks, and the
+    // method gate that used to live as a separate `if` in `forward()` itself.
+
+    struct TempSpaRoot {
+        dir: std::path::PathBuf,
+    }
+
+    impl TempSpaRoot {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "papercusp-custom-protocol-test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(dir.join("assets")).expect("create temp spa root");
+            std::fs::write(
+                dir.join("assets").join("index-a1b2c3.js"),
+                b"console.log('hi')",
+            )
+            .expect("write test asset");
+            std::fs::write(dir.join("index.html"), b"<html>real index</html>")
+                .expect("write test index.html");
+            Self { dir }
+        }
+    }
+
+    impl Drop for TempSpaRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn resolve_static_or_forward_serves_an_existing_asset_from_disk_with_its_real_bytes() {
+        let root = TempSpaRoot::new("serves-asset");
+        let resp = resolve_static_or_forward(&root.dir, "GET", "/assets/index-a1b2c3.js")
+            .expect("must serve the real bundled asset from disk");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/javascript",
+        );
+        assert_eq!(String::from_utf8_lossy(resp.body()), "console.log('hi')");
+    }
+
+    #[test]
+    fn resolve_static_or_forward_keeps_index_html_and_root_forwarded_even_though_the_file_exists()
+    {
+        let root = TempSpaRoot::new("index-forwards");
+        // index.html is a REAL file on disk in this fixture, yet the root path and the
+        // empty path must still forward (operator-side templating is preserved).
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/").is_none());
+        assert!(resolve_static_or_forward(&root.dir, "GET", "").is_none());
+    }
+
+    #[test]
+    fn resolve_static_or_forward_keeps_api_paths_forwarded() {
+        let root = TempSpaRoot::new("api-forwards");
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/api").is_none());
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/api/health").is_none());
+    }
+
+    #[test]
+    fn resolve_static_or_forward_never_disk_serves_a_non_get_method_even_for_an_asset_path() {
+        // This is the method gate that used to live as a separate outer `if` in
+        // forward() itself — now it lives inside the tested core, so a refactor that
+        // stops checking the method can't silently start disk-serving mutating verbs.
+        let root = TempSpaRoot::new("non-get-forwards");
+        for method in ["POST", "PUT", "DELETE", "HEAD"] {
+            assert!(
+                resolve_static_or_forward(&root.dir, method, "/assets/index-a1b2c3.js").is_none(),
+                "{method} must forward, never disk-serve",
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_static_or_forward_falls_through_to_forward_for_a_missing_asset() {
+        let root = TempSpaRoot::new("missing-asset");
+        // Path shape is asset-eligible but no such file exists on disk — must forward
+        // (the operator may still know how to answer it, or 404 itself).
+        assert!(
+            resolve_static_or_forward(&root.dir, "GET", "/assets/does-not-exist.js").is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_static_or_forward_rejects_path_traversal_out_of_the_spa_root() {
+        let root = TempSpaRoot::new("traversal");
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/../../etc/passwd").is_none());
+        assert!(resolve_static_or_forward(&root.dir, "GET", "/assets/../../secret").is_none());
     }
 }
