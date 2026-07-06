@@ -1,0 +1,69 @@
+#!/bin/bash
+# Run ON the Mac VM directly (ssh -i ~/.ssh/papercup-vm-mac -p 2222 aviweiss@127.0.0.1 'bash -s' < FILE),
+# or from a checkout already rsynced there (mac-verify-build.sh does this rsync). Idempotent / re-runnable
+# unless noted DESTRUCTIVE below.
+# Isolated fresh-user runtime provisioning test (NON-DISRUPTIVE — touches no running instance).
+# Proves: the fresh DMG's shipped seed is a valid PG18 cluster with locale=C (the fix) and the
+# full migrated schema, i.e. a NEW user's first boot provisions a working DB from it.
+set +e
+DMG="$HOME/papercup-build-mac/papercup/papercusp-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/Papercusp GUI_0.0.2_x64.dmg"
+WORK=/tmp/seedtest.$$
+DATA="$WORK/pgdata"
+SOCK="$WORK/sock"
+mkdir -p "$WORK" "$SOCK"
+
+echo "=== 1. mount fresh DMG ==="
+MNT=$(hdiutil attach "$DMG" -nobrowse -readonly -mountrandom /tmp 2>/dev/null | grep -oE '/tmp/[^ ]+$' | tail -1)
+echo "mount=$MNT"
+APP=$(ls -d "$MNT"/*.app 2>/dev/null | head -1)
+SIDE="$APP/Contents/Resources/sidecar"
+SEED="$SIDE/db-seed.tar.gz"
+echo "seed=$(ls -la "$SEED" 2>/dev/null | awk '{print $5}') bytes"
+
+echo; echo "=== 2. locate bundled postgres binaries ==="
+PGBIN=$(find "$SIDE" -type f -name postgres 2>/dev/null | head -1)
+INITDB=$(find "$SIDE" -type f -name initdb 2>/dev/null | head -1)
+PSQL=$(find "$SIDE" -type f -name psql 2>/dev/null | head -1)
+echo "postgres=$PGBIN"
+echo "psql=$PSQL"
+
+echo; echo "=== 3. unpack seed into clean PGDATA ==="
+tar xzf "$SEED" -C "$WORK" 2>/dev/null
+# seed may unpack as pgdata/ or as bare cluster files — find PG_VERSION
+PGV=$(find "$WORK" -maxdepth 3 -name PG_VERSION 2>/dev/null | head -1)
+DATA=$(dirname "$PGV")
+echo "unpacked cluster dir=$DATA"
+echo "PG_VERSION=$(cat "$PGV" 2>/dev/null)"
+echo "--- locale in postgresql.conf (THE FIX: expect C, not C.UTF-8) ---"
+grep -iE '^\s*(lc_|default_text_search|cluster_name)' "$DATA/postgresql.conf" 2>/dev/null | head
+echo "--- pg_hba local auth method ---"
+grep -vE '^\s*#|^\s*$' "$DATA/pg_hba.conf" 2>/dev/null | head -6
+
+echo; echo "=== 4. start postgres on isolated socket + query migrated schema ==="
+chmod 700 "$DATA" 2>/dev/null
+"$PGBIN" -D "$DATA" -k "$SOCK" -c listen_addresses='' -p 5599 >"$WORK/pg.log" 2>&1 &
+PGPID=$!
+# wait up to 20s for readiness
+for i in $(seq 1 40); do
+  "$PSQL" -h "$SOCK" -p 5599 -U postgres -d postgres -tAc 'SELECT 1' >/dev/null 2>&1 && break
+  # try harness_admin / template1 too
+  "$PSQL" -h "$SOCK" -p 5599 -U harness_admin -d postgres -tAc 'SELECT 1' >/dev/null 2>&1 && break
+  sleep 0.5
+done
+echo "--- pg.log tail ---"; tail -5 "$WORK/pg.log"
+echo "--- try queries (whichever superuser the seed uses) ---"
+for U in postgres harness_admin; do
+  R=$("$PSQL" -h "$SOCK" -p 5599 -U "$U" -d postgres -tAc "select current_user, (select count(*) from harness_shared.schema_migrations)" 2>&1)
+  echo "user=$U -> $R"
+done
+echo "--- databases present ---"
+"$PSQL" -h "$SOCK" -p 5599 -U postgres -d postgres -tAc "select datname from pg_database order by 1" 2>&1 | head
+
+echo; echo "=== 5. cleanup ==="
+"$PGBIN" -D "$DATA" 2>/dev/null; kill "$PGPID" 2>/dev/null
+# graceful stop
+PGCTL=$(find "$SIDE" -type f -name pg_ctl 2>/dev/null | head -1)
+[ -n "$PGCTL" ] && "$PGCTL" -D "$DATA" -m immediate stop >/dev/null 2>&1
+sleep 1; kill -9 "$PGPID" 2>/dev/null
+hdiutil detach "$MNT" >/dev/null 2>&1 && echo "detached DMG"
+rm -rf "$WORK" && echo "cleaned $WORK"
