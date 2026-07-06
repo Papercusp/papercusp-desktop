@@ -145,7 +145,14 @@ cut_release_seed
 # ~10-min pack/ship/compile, with a message that names the real problem.
 # 3.5GiB threshold leaves headroom for the exe + WebView2 bootstrapper + NSIS
 # overhead on top of what du sees.
-payload_kb=$(du -sk --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+# WI-3172: measure the REAL SHIPPED payload — the tar below EXCLUDES
+# sidecar/code-server (~447MB) and sidecar/bin/omp (~485MB), so those never
+# reach the NSIS datablock. Counting them (the old du did) over-stated the
+# payload by ~930MB and FALSE-BLOCKED a full-seed build that actually fits
+# (e.g. after the meridian removal + spa/internal slim, full seed ≈ 3.1GB real
+# but ≈ 4.0GB if code-server+omp are miscounted). Exclude them here to match
+# the tar so the guard reflects what makensis actually packs.
+payload_kb=$(du -sk --dereference --exclude=code-server --exclude=omp "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
 payload_cap_kb=$((3584 * 1024)) # 3.5GiB
 if (( payload_kb > payload_cap_kb )); then
   du -sh --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null || true

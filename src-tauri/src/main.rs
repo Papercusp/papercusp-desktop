@@ -948,50 +948,66 @@ mod discovery_tests {
     // it back. Same Linux-CI blind-spot rationale: the macOS respawn can't run here.
     use super::{decide_serve_respawn, ServeRespawnAction as R};
 
-    // Child still running → nothing to do.
+    // Child still running, operator not yet up, debounce not armed (normal boot)
+    // → nothing to do. (Args: child_exited, shutting_down, operator_reachable,
+    // unreachable_respawn_ready, respawns_in_window, max_respawns.)
     #[test]
     fn serve_respawn_healthy_when_child_running() {
-        assert_eq!(decide_serve_respawn(false, false, false, 0, 5), R::Healthy);
+        assert_eq!(decide_serve_respawn(false, false, false, false, 0, 5), R::Healthy);
     }
 
-    // Child exited but an operator is reachable anyway (`--ensure` reused a
-    // foreign operator, Decision C) → do NOT double-spawn.
+    // Operator reachable is GROUND TRUTH → healthy no matter the Child state.
+    // Covers the Decision-C case (child exited because `--ensure` reused a foreign
+    // operator that is serving) → do NOT double-spawn.
     #[test]
     fn serve_respawn_healthy_when_operator_reachable_despite_exit() {
-        assert_eq!(decide_serve_respawn(true, false, true, 0, 5), R::Healthy);
+        assert_eq!(decide_serve_respawn(true, false, true, false, 0, 5), R::Healthy);
+        // reachable wins even if the unreachable path were somehow armed.
+        assert_eq!(decide_serve_respawn(true, false, true, true, 0, 5), R::Healthy);
     }
 
     // The core WI-2667 recovery: operator child exited, no operator reachable,
-    // under the cap → respawn serve in-process (the case the VM E2E showed dead).
+    // under the cap → respawn serve in-process (the case the Mac-VM E2E showed
+    // dead). A fully-exited child respawns immediately, debounce or not.
     #[test]
     fn serve_respawn_when_child_exited_and_unreachable() {
-        assert_eq!(decide_serve_respawn(true, false, false, 0, 5), R::Respawn);
-        assert_eq!(decide_serve_respawn(true, false, false, 4, 5), R::Respawn);
+        assert_eq!(decide_serve_respawn(true, false, false, false, 0, 5), R::Respawn);
+        assert_eq!(decide_serve_respawn(true, false, false, false, 4, 5), R::Respawn);
     }
 
     // Shutting down / self-updating → never resurrect the child we killed on
-    // purpose — and that wins even past the respawn cap.
+    // purpose — and that wins even past the respawn cap and with the Windows
+    // path armed.
     #[test]
     fn serve_respawn_suppressed_when_shutting_down() {
-        assert_eq!(decide_serve_respawn(true, true, false, 0, 5), R::Suppressed);
-        assert_eq!(decide_serve_respawn(true, true, false, 9, 5), R::Suppressed);
+        assert_eq!(decide_serve_respawn(true, true, false, false, 0, 5), R::Suppressed);
+        assert_eq!(decide_serve_respawn(true, true, false, false, 9, 5), R::Suppressed);
+        assert_eq!(decide_serve_respawn(false, true, false, true, 0, 5), R::Suppressed);
     }
 
     // Respawned too many times in the window (crash-loop) → give up until restart.
     #[test]
     fn serve_respawn_gives_up_at_cap() {
-        assert_eq!(decide_serve_respawn(true, false, false, 5, 5), R::GiveUp);
+        assert_eq!(decide_serve_respawn(true, false, false, false, 5, 5), R::GiveUp);
     }
 
-    // WI-3170 REPRODUCE (Windows/WSL child-liveness blind spot): the stored serve
-    // `Child` is the wsl.exe WRAPPER, which OUTLIVES the dead WSL-internal node
-    // operator — so `child_exited` stays false even though the operator is durably
-    // gone. The old decider returned Healthy here (`!child_exited` short-circuit),
-    // so the dead operator was NEVER respawned (VM forensics: down ~11 min). With
-    // operator UNREACHABLE past the debounce, the correct action is Respawn.
+    // WI-3170 (Windows/WSL child-liveness blind spot): the stored serve `Child` is
+    // the wsl.exe WRAPPER, which OUTLIVES the dead WSL-internal node operator — so
+    // `child_exited` stays false even though the operator is durably gone. Once the
+    // operator has been UNREACHABLE past the debounce (unreachable_respawn_ready),
+    // respawn REGARDLESS of child_exited. The OLD decider returned Healthy here, so
+    // the dead operator was NEVER respawned (VM forensics: down ~11 min).
     #[test]
-    fn serve_respawn_when_operator_unreachable_despite_live_wrapper_child() {
-        assert_eq!(decide_serve_respawn(false, false, false, 0, 5), R::Respawn);
+    fn serve_respawn_when_operator_unreachable_past_debounce_despite_live_wrapper_child() {
+        // Wrapper Child alive (child_exited=false), operator unreachable past the
+        // debounce, under the cap → respawn (the exact bug case).
+        assert_eq!(decide_serve_respawn(false, false, false, true, 0, 5), R::Respawn);
+        assert_eq!(decide_serve_respawn(false, false, false, true, 4, 5), R::Respawn);
+        // The crash-loop cap still applies to this path.
+        assert_eq!(decide_serve_respawn(false, false, false, true, 5, 5), R::GiveUp);
+        // But BEFORE the debounce arms (normal boot: serve alive, operator still
+        // coming up) we must NOT respawn — that would double-spawn a competing serve.
+        assert_eq!(decide_serve_respawn(false, false, false, false, 0, 5), R::Healthy);
     }
 
     // WI-1878 / P-005: the operator-dead notification body must name WHICH
