@@ -149,6 +149,19 @@ pub fn open_palette(app: &AppHandle) {
     // the palette is dismissed (WI-2648, reproduced live on GNOME 2026-07-04:
     // the palette worked exactly once, then "stopped working no matter which key").
     if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
+        // WI-3096: TOGGLE, don't blindly re-show. Before this check, a second
+        // shortcut press while the palette was already open+focused just
+        // re-showed + reloaded it in place — there was no way to dismiss it
+        // with the same key that opened it (the ticket's "ctrl+k toggles" UX
+        // expectation). If it's currently visible AND focused, the user is
+        // pressing the shortcut to CLOSE it — hide (never destroy — see the
+        // comment below on why this window is never torn down) and stop.
+        let is_open =
+            existing.is_visible().unwrap_or(false) && existing.is_focused().unwrap_or(false);
+        if is_open {
+            let _ = existing.hide();
+            return;
+        }
         let _ = existing.show();
         let _ = existing.unminimize();
         let _ = existing.set_focus();
