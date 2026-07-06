@@ -4021,8 +4021,9 @@ pub fn run() {
                             }
                             ServeRespawnAction::Respawn => {
                                 eprintln!(
-                                    "[papercusp-desktop] serve.mjs (operator) exited and no operator \
-                                     is reachable — respawning it in-process (WI-2667)"
+                                    "[papercusp-desktop] operator unreachable and not recovering \
+                                     (serve child_exited={child_exited}) — respawning serve.mjs \
+                                     in-process (WI-2667 / WI-3170 Windows wrapper blind spot)"
                                 );
                                 match spawn_serve(
                                     sup_via_wsl,
