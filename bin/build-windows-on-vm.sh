@@ -102,14 +102,24 @@ cut_release_seed() {
   repo="$(cd "$ROOT/.." && pwd)"
   operator_dir="$repo/apps/operator"
   [[ -d "$operator_dir" ]] || fail "seed cutter not found at $operator_dir (set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build)"
-  # Option A (WI-2903): full-history git bundle + shared-pot corestore snapshot.
-  # PAPERCUSP_SEED_DEPTH=1 / PAPERCUSP_SEED_CORESTORE=0 are opt-in small/test
-  # escape hatches, never the release default.
+  # Windows seed = DEPTH-1 (shallow) git bundle + shared-pot corestore snapshot.
+  # WHY depth-1 is the WINDOWS default (this DIVERGES from mac-vm-build.sh, which
+  # has NO installer size cap): a FULL-HISTORY git bundle of this monorepo is
+  # ~1.75GiB; combined with the owner-mandated corestore (~2.3GiB) + slimmed
+  # sidecar (~0.85GiB) + WSL rootfs (~0.24GiB) that is ~5.2GiB — which BLOWS the
+  # NSIS 4GiB datablock cap (WI-3172; the makensis "#12345" death below). A depth-1
+  # bundle is ~76MB (WI-2903), keeping the full offline seed at ~3.5GiB, safely
+  # under the cap. The owner's own WI-3172 spec cites "git super.bundle ~76MB"
+  # (i.e. depth-1), so a shallow seed is the intended/sufficient shape for an
+  # offline dogfood pot — no deep history is needed at first boot (the pot can
+  # fetch history from origin online later). Copy-pasting mac's full-history
+  # default here is the bug that would silently over-cap every real full-seed build.
+  # Escape hatch: export PAPERCUSP_SEED_DEPTH= (empty) to force full history.
   local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
   local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
-  local seed_depth="${PAPERCUSP_SEED_DEPTH:-}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH-1}"
   local core_args=()
   [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]] && core_args+=(--no-corestore)
   [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
