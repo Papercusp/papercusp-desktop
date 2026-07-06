@@ -514,13 +514,18 @@ echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing
 # sets — see those files' root-resolution comments.
 echo "→ copying operator-vite/dist → sidecar/spa"
 cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"
-# WI-3172: the Vite dist is a wholesale copy of web/public, so any stale
-# `<name>.old.<pid>` dir the docs-sync atomic-swap (operator-docs postbuild-copy.sh)
-# left un-reaped in public/internal/ rides in as spa/internal/<name>.old.<pid> and
-# SHIPS as dead weight. Found live 2026-07-06: spa/internal/docs.old.2116786 =
-# 146MB of garbage bundled into the installer, pushing the Windows payload toward
-# the NSIS 4GiB datablock cap (WI-3063). Purge stale swap leftovers from the
-# copied SPA — a `*.old.<digits>` dir is never live content.
+# WI-3172 / WI-3063 — trim dead weight from the copied SPA so the Windows payload
+# clears the NSIS 4GiB datablock cap WITHOUT dropping the offline seed. The Vite
+# dist is a wholesale copy of web/public, which bundles the whole Starlight site
+# under dist/internal/docs — but /internal/docs/* is served by the DEDICATED
+# docsRoutes (bin/host-docs.ts, from PAPERCUSP_DOCS_ROOT = sidecar/internal-docs),
+# registered BEFORE the SPA catch-all (bin/host-spa.ts is the final `*` fallback).
+# So spa/internal/docs is NEVER served — it's a 147MB byte-for-byte duplicate of
+# sidecar/internal-docs. It also carries any stale `<name>.old.<pid>` dir the
+# docs-sync atomic-swap (operator-docs postbuild-copy.sh) left un-reaped in
+# public/internal/ (found live 2026-07-06: spa/internal/docs.old.2116786 = 146MB
+# of pure garbage). Drop the duplicate + purge stale swap leftovers (~293MB).
+rm -rf "$SIDECAR_DIR/spa/internal/docs"
 find "$SIDECAR_DIR/spa" -depth -type d -name '*.old.[0-9]*' -prune -exec rm -rf {} + 2>/dev/null || true
 echo "→ copying Starlight docs → sidecar/internal-docs"
 if [[ -d "$WEB_DIR/public/internal/docs" ]]; then
