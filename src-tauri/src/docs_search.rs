@@ -31,6 +31,8 @@
 //! additive, not load-bearing).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 /// The palette window's label — stable so `get_webview_window` can find + focus
@@ -243,11 +245,35 @@ pub fn open_palette(app: &AppHandle) {
             // veto it, and hide instead — open_palette re-shows this same
             // window on the next shortcut press (WI-2648).
             let hide_target = win.clone();
-            win.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // WI-3096: click-away dismiss. Guarded by `has_focused_once` so a
+            // spurious blur fired during window creation/mapping (some
+            // WM/compositor combinations deliver an initial Focused(false)
+            // before the window has ever actually been shown to the user)
+            // can't hide the palette before it's even been seen — only a
+            // REAL loss of focus, after it was genuinely focused at least
+            // once, dismisses it.
+            let has_focused_once = Arc::new(AtomicBool::new(false));
+            win.on_window_event(move |event| match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // Dismiss = HIDE, not close. The palette is the Server's
+                    // ONLY window; closing/destroying it would exit the app
+                    // (last-window ExitRequested) and tear down the sole GTK
+                    // frame clock (a webkit2gtk crash on GNOME). Intercept the
+                    // titlebar/Escape close, veto it, and hide instead —
+                    // open_palette re-shows this same window on the next
+                    // shortcut press (WI-2648).
                     api.prevent_close();
                     let _ = hide_target.hide();
                 }
+                tauri::WindowEvent::Focused(true) => {
+                    has_focused_once.store(true, Ordering::Relaxed);
+                }
+                tauri::WindowEvent::Focused(false) => {
+                    if has_focused_once.load(Ordering::Relaxed) {
+                        let _ = hide_target.hide();
+                    }
+                }
+                _ => {}
             });
         }
         Err(e) => eprintln!("[docs-search] failed to open palette window: {e}"),
