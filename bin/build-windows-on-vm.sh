@@ -143,8 +143,12 @@ cut_release_seed
 # into the VM build with the cryptic "Internal compiler error #12345: error
 # mmapping datablock to N" (N = true size mod 2^32). Fail HERE, before the
 # ~10-min pack/ship/compile, with a message that names the real problem.
-# 3.5GiB threshold leaves headroom for the exe + WebView2 bootstrapper + NSIS
-# overhead on top of what du sees.
+# 3.7GiB threshold (WI-3172): the OWNER-MANDATED full offline seed (git ~76M +
+# corestore ~2.3G) legitimately puts the REAL payload at ~3.5GiB after the
+# meridian removal + spa/internal slim, so the old 3.5GiB guard would
+# FALSE-BLOCK a valid full-seed build. 3.7GiB leaves ~300MiB under the true
+# 4.0GiB NSIS datablock cap for the exe + WebView2 bootstrapper + NSIS overhead
+# that also land in the datablock.
 # WI-3172: measure the REAL SHIPPED payload — the tar below EXCLUDES
 # sidecar/code-server (~447MB) and sidecar/bin/omp (~485MB), so those never
 # reach the NSIS datablock. Counting them (the old du did) over-stated the
@@ -153,10 +157,10 @@ cut_release_seed
 # but ≈ 4.0GB if code-server+omp are miscounted). Exclude them here to match
 # the tar so the guard reflects what makensis actually packs.
 payload_kb=$(du -sk --dereference --exclude=code-server --exclude=omp "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
-payload_cap_kb=$((3584 * 1024)) # 3.5GiB
+payload_cap_kb=$((3789 * 1024)) # 3.7GiB (full-seed payload ~3.5GiB; NSIS hard cap 4.0GiB)
 if (( payload_kb > payload_cap_kb )); then
   du -sh --dereference "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null || true
-  fail "bundle payload is $((payload_kb / 1024 / 1024))GiB (> 3.5GiB guard) — NSIS hard-caps the datablock at 4GiB (WI-3063). Usual culprit: an oversized seed cut (seed/corestore/db, seed/git/super.bundle). Slim the seed (PAPERCUSP_SEED_CORESTORE=0 / PAPERCUSP_SEED_DEPTH=1) or fix the cut before building."
+  fail "bundle payload is $((payload_kb / 1024 / 1024))GiB (> 3.7GiB guard, WI-3172) — NSIS hard-caps the datablock at 4.0GiB (WI-3063). The full offline seed is ~3.5GiB by design, so this means something bloated ABOVE that: check the sidecar (redundant ort-wasm variants, an un-stripped binary) or an unexpectedly-large corestore/git cut before building."
 fi
 
 echo "==> packing desktop tree"
