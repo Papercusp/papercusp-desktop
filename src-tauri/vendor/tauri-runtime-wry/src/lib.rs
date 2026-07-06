@@ -3906,13 +3906,22 @@ fn handle_user_message<T: UserEvent>(
           }
           // Getters
           WebviewMessage::Url(tx) => {
-            tx.send(
-              webview
-                .url()
-                .map(|u| u.parse().expect("invalid webview URL"))
-                .map_err(|_| Error::FailedToSendMessage),
-            )
-            .unwrap();
+            // PAPERCUSP PATCH (WI-3139): wry's url_from_webview() unwraps
+            // WKWebView.URL(), which is nil until the first navigation commits.
+            // That `.unwrap()` runs HERE on the main event-loop thread, so on a
+            // fast relaunch (webview URL still nil) it panic-crashes the whole
+            // macOS GUI — reproduced 3/3 relaunches. Contain it: a nil-URL panic
+            // (or an unparseable URL — dropping the old `.expect("invalid webview
+            // URL")`, a second latent crash) degrades to FailedToSendMessage
+            // instead of aborting the event loop. Unwind strategy is in effect
+            // (no panic=abort), so catch_unwind reliably contains it. Remove when
+            // a released wry returns Err on a nil URL.
+            let url = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| webview.url()))
+              .ok()
+              .and_then(|r| r.ok())
+              .and_then(|u| u.parse().ok())
+              .ok_or(Error::FailedToSendMessage);
+            tx.send(url).unwrap();
           }
 
           WebviewMessage::Cookies(tx) => {

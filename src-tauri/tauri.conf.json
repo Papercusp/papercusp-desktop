@@ -68,6 +68,8 @@
     "linux": {
       "deb": {
         "depends": [],
+        "conflicts": ["papercusp-server"],
+        "replaces": ["papercusp-server"],
         "postInstallScript": "deb/postinstall.sh",
         "postRemoveScript": "deb/postremove.sh"
       },
