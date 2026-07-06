@@ -3928,6 +3928,14 @@ pub fn run() {
             {
                 const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
                 const MAX_RESPAWNS_PER_WINDOW: usize = 5;
+                // WI-3170: how long the operator must be CONTINUOUSLY unreachable
+                // (while our serve `Child` still looks alive — on Windows the Child
+                // is the wsl.exe WRAPPER, which outlives a dead inner node) before
+                // we respawn it. Only armed AFTER the operator has come up once this
+                // session (see `ever_reachable`), so a slow cold boot (serve.mjs
+                // alive, initdb + migration replay not yet serving) never trips it
+                // and double-spawns a competing serve.
+                const SERVE_UNREACHABLE_DEBOUNCE: Duration = Duration::from_secs(15);
                 let sup_handle = app.handle().clone();
                 let sup_via_wsl = via_wsl;
                 let sup_port = port;
@@ -3938,6 +3946,12 @@ pub fn run() {
                 let sup_code_url = code_server_url.clone();
                 std::thread::spawn(move || {
                     let mut respawn_times: Vec<Instant> = Vec::new();
+                    // WI-3170: start of the current continuous-unreachable streak
+                    // (None while reachable), and whether the operator has EVER been
+                    // reachable this session — the latter arms the child-alive
+                    // respawn path only post-boot so a slow cold boot can't trip it.
+                    let mut unreachable_since: Option<Instant> = None;
+                    let mut ever_reachable = false;
                     loop {
                         std::thread::sleep(Duration::from_millis(1500));
                         let state: tauri::State<SidecarState> = sup_handle.state();
@@ -3964,10 +3978,26 @@ pub fn run() {
                         .is_ok();
                         let now = Instant::now();
                         respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+                        // WI-3170: track the continuous-unreachable streak. The
+                        // child-alive-but-unreachable respawn path (the Windows/WSL
+                        // wrapper blind spot) only arms once the operator has served
+                        // at least once this session, so a slow cold first boot can
+                        // never double-spawn a competing serve.
+                        if operator_reachable {
+                            unreachable_since = None;
+                            ever_reachable = true;
+                        } else if unreachable_since.is_none() {
+                            unreachable_since = Some(now);
+                        }
+                        let unreachable_respawn_ready = ever_reachable
+                            && unreachable_since
+                                .map(|t| now.duration_since(t) >= SERVE_UNREACHABLE_DEBOUNCE)
+                                .unwrap_or(false);
                         match decide_serve_respawn(
                             child_exited,
                             shutting_down,
                             operator_reachable,
+                            unreachable_respawn_ready,
                             respawn_times.len(),
                             MAX_RESPAWNS_PER_WINDOW,
                         ) {
