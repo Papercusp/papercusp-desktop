@@ -995,6 +995,56 @@ mod discovery_tests {
     }
 }
 
+// WI-2902: readiness must be HTTP-RESPONSIVE, not just TCP-connectable — a
+// first-boot operator binds its port ~20s before its starved event loop can
+// answer, and gating on TCP-accept re-pointed the webview at a server that then
+// failed every SPA chunk fetch (the fatal "Importing a module script failed"
+// card). These pin operator_http_ready's contract: a server that COMPLETES an
+// HTTP round-trip reads ready; a refused/absent one does not.
+#[cfg(test)]
+mod http_ready_tests {
+    use super::operator_http_ready;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn ready_when_operator_answers_http() {
+        // A listener that completes ONE HTTP round-trip stands in for a
+        // responsive operator whose event loop is serving requests.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf); // drain the request; content irrelevant
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: application/json\r\n\r\nok",
+                );
+                let _ = sock.flush();
+            }
+        });
+        assert!(
+            operator_http_ready(port),
+            "a server that answers an HTTP request must read as ready",
+        );
+        let _ = h.join();
+    }
+
+    #[test]
+    fn not_ready_when_nothing_listens() {
+        // A port with nothing listening → connection refused → NOT ready, fast
+        // (never a hang): bind to reserve an ephemeral port, then drop it.
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+            l.local_addr().unwrap().port()
+        };
+        assert!(
+            !operator_http_ready(port),
+            "a refused connection must read as NOT ready",
+        );
+    }
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::{
@@ -1729,11 +1779,51 @@ fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
     }
 }
 
+/// Whether the operator at `port` can actually SERVE requests — not merely
+/// ACCEPT a TCP connection.
+///
+/// WI-2902: on a fresh first boot the operator BINDS its HTTP port ~20s before
+/// its event loop stops being starved by the heavy synchronous boot work
+/// (embedded-PG seed extract + initdb / post-seed migrations, swarm peer
+/// connect). During that window a `TcpStream::connect` succeeds but every HTTP
+/// request HANGS. Declaring the operator "ready" on mere TCP-connectability made
+/// `finish_boot` set `SidecarState.port` (which flips the `papercusp://` scheme
+/// handler from serving the bundled SPA off DISK to FORWARDING every asset/route
+/// chunk to the still-starving operator) and re-point the webview at it — so the
+/// SPA's dynamic-import chunks fetched a server that couldn't answer, and the
+/// desktop dead-ended on the fatal "This view hit an error / Importing a module
+/// script failed" card (measured live: port bound ~36s, first HTTP response
+/// ~46s, fully responsive ~55s).
+///
+/// A short-timeout HTTP probe returns true only once the event loop is actually
+/// servicing requests (ANY completed HTTP response — even a 4xx — proves it; a
+/// starved loop times out instead), which my measurements show coincides with
+/// reliable static-chunk serving. Until then the window keeps serving the
+/// bundled SPA from disk over `papercusp://` (`serve_bundled_spa`), so first
+/// boot shows the onboarding UI, never a chunk-load card. Accepting any response
+/// (not requiring 200) means a genuinely-up operator can never be falsely held
+/// "not ready" into the 120s boot-timeout by a non-2xx health route. The probe
+/// dials `127.0.0.1:port` exactly like the old TCP check, so it carries the same
+/// loopback/WSL reachability assumptions — no platform regression.
+fn operator_http_ready(port: u16) -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(2000))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client
+        .get(format!("http://127.0.0.1:{}/api/health", port))
+        .send()
+        .is_ok()
+}
+
 /// Poll operator.json until it names a live, reachable operator (pid alive +
-/// TCP accept), the serve child dies, or the timeout lapses. This is the
-/// embedder's whole boot wait: serve owns PG startup + migrations + host
-/// boot internally, so first boot (initdb + full migration replay) can
-/// legitimately take a while.
+/// HTTP-responsive — see `operator_http_ready`, NOT mere TCP-accept), the serve
+/// child dies, or the timeout lapses. This is the embedder's whole boot wait:
+/// serve owns PG startup + migrations + host boot internally, so first boot
+/// (initdb + full migration replay) can legitimately take a while.
 ///
 /// (P-053) Runs on the finish_boot worker thread — NEVER on the Tauri
 /// setup/main thread, where this poll used to freeze the unpainted window
@@ -1752,9 +1842,12 @@ fn wait_for_operator(
     let start = Instant::now();
     while start.elapsed() < timeout {
         if let Some(d) = find_operator_discovery(workspace_home, via_wsl) {
-            if discovery_pid_alive(d.pid, via_wsl)
-                && std::net::TcpStream::connect(format!("127.0.0.1:{}", d.port)).is_ok()
-            {
+            // Readiness = HTTP-responsive, not just TCP-connectable. The port
+            // binds ~20s before the starved-event-loop operator can serve its
+            // own SPA chunks; gating on TCP-accept re-pointed the webview at a
+            // server that then failed every chunk fetch → the fatal card
+            // (WI-2902, see operator_http_ready).
+            if discovery_pid_alive(d.pid, via_wsl) && operator_http_ready(d.port) {
                 return Ok(d);
             }
         }
