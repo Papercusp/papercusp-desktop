@@ -69,7 +69,17 @@ WizardStyle=modern
 Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"
 Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
+; SEED IS SERVER-BUNDLE-ONLY (WI-3234). On Windows the GUI role NEVER restores a
+; seed: main.rs ensure_server_running() either ATTACHES to a running Papercusp
+; Server or launch_bundle()s it — only the SERVER role owns the seed-restoring
+; sidecar (self-hosting is Linux-single-bundle only). Shipping the ~2.1 GB seed
+; in BOTH bundles is pure dead weight AND made two installs need ~6.9 GB, which
+; overran the disk mid-GUI-install (1.78 GB free) → the GUI files never landed →
+; its Start-Menu shortcut pointed at a missing exe → "GUI doesn't launch". Guard
+; the seed to the Server bundle so the GUI installer is ~0.5 GB (exe+sidecar).
+#if AppId == "com.papercusp.server"
 Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs createallsubdirs nocompression
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\papercusp-desktop.exe"
