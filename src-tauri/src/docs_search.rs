@@ -167,6 +167,11 @@ pub fn open_palette(app: &AppHandle) {
         // they last interacted with the main window, so the palette itself
         // isn't the X11-focused window) should still close on a repeat press
         // — "toggle" means open/closed, not open/closed-only-if-still-focused.
+        eprintln!(
+            "[docs-search] DEBUG toggle check: is_visible={:?} is_focused={:?}",
+            existing.is_visible(),
+            existing.is_focused()
+        );
         if existing.is_visible().unwrap_or(false) {
             let _ = existing.hide();
             return;

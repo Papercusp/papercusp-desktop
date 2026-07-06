@@ -1474,8 +1474,10 @@ fn decide_server_supervision(
 /// Pure for the same Linux-CI blind-spot reason as `decide_server_supervision`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServeRespawnAction {
-    /// Child still running, or an operator is reachable anyway (a foreign
-    /// operator `--ensure` reused — Decision C) — nothing to do.
+    /// Operator reachable (ground truth), or the child is still running and the
+    /// operator has not yet been unreachable long enough to count as dead —
+    /// nothing to do. (Reachable-despite-child-exit covers the Decision-C
+    /// `--ensure` foreign-operator reuse case.)
     Healthy,
     /// App is quitting or self-updating — never resurrect the child we just
     /// killed on purpose.
@@ -1486,30 +1488,49 @@ enum ServeRespawnAction {
     GiveUp,
 }
 
-/// Pure respawn decision for the Server-side serve supervisor (WI-2667).
+/// Pure respawn decision for the Server-side serve supervisor (WI-2667, WI-3170).
 ///   * `child_exited` — the stored serve `Child` has reaped (`try_wait` → Some).
+///     UNRELIABLE on Windows: `spawn_serve` stores the wsl.exe WRAPPER as the
+///     `Child`, and the wrapper can OUTLIVE the dead WSL-internal node operator,
+///     so `child_exited` stays false while the operator is durably gone (WI-3170).
 ///   * `shutting_down` — `SidecarState.shutdown_done` (normal quit) or an
 ///     in-flight self-update; suppresses respawn so we don't fight the teardown.
-///   * `operator_reachable` — an operator answers discovery+TCP right now; guards
-///     the Decision-C reuse case (child exited because `--ensure` handed off to a
-///     foreign operator that is serving) so we never double-spawn.
+///   * `operator_reachable` — an operator answers discovery+TCP right now. This is
+///     the GROUND-TRUTH liveness signal: if it answers we are healthy no matter
+///     what the (possibly-wrapper) `Child` says. Also covers the Decision-C reuse
+///     case (child exited because `--ensure` handed off to a foreign operator).
+///   * `unreachable_respawn_ready` — the operator has been continuously UNREACHABLE
+///     past the supervisor's debounce AND had come up at least once this session
+///     (so a slow cold boot never trips it). This closes the Windows/WSL blind
+///     spot: respawn a durably-dead operator even when the wrapper `Child` is
+///     still alive (`child_exited` == false).
 fn decide_serve_respawn(
     child_exited: bool,
     shutting_down: bool,
     operator_reachable: bool,
+    unreachable_respawn_ready: bool,
     respawns_in_window: usize,
     max_respawns: usize,
 ) -> ServeRespawnAction {
     if shutting_down {
         return ServeRespawnAction::Suppressed;
     }
-    if !child_exited || operator_reachable {
+    // Operator answering discovery+health is ground truth — healthy regardless of
+    // the stored `Child` (on Windows it is the wsl.exe wrapper, which lies).
+    if operator_reachable {
         return ServeRespawnAction::Healthy;
     }
-    if respawns_in_window >= max_respawns {
-        return ServeRespawnAction::GiveUp;
+    // Operator is UNREACHABLE. Respawn if the child fully exited (Linux/mac:
+    // definitive death) OR it has been unreachable past the debounce (Windows/WSL:
+    // wrapper `Child` alive but inner node dead). Otherwise it is still coming up
+    // — wait (the `unreachable_respawn_ready` arming keeps us off a normal boot).
+    if child_exited || unreachable_respawn_ready {
+        if respawns_in_window >= max_respawns {
+            return ServeRespawnAction::GiveUp;
+        }
+        return ServeRespawnAction::Respawn;
     }
-    ServeRespawnAction::Respawn
+    ServeRespawnAction::Healthy
 }
 
 /// Point the main window at the operator on `port`: compute the app origin
