@@ -238,12 +238,6 @@ pub fn open_palette(app: &AppHandle) {
             // Bring it to the front — on the Server process (a windowless
             // background app) the WM does not auto-raise the new window.
             let _ = win.set_focus();
-            // Dismiss = HIDE, not close. The palette is the Server's ONLY
-            // window; closing/destroying it would exit the app (last-window
-            // ExitRequested) and tear down the sole GTK frame clock (a
-            // webkit2gtk crash on GNOME). Intercept the titlebar/Escape close,
-            // veto it, and hide instead — open_palette re-shows this same
-            // window on the next shortcut press (WI-2648).
             let hide_target = win.clone();
             // WI-3096: click-away dismiss. Guarded by `has_focused_once` so a
             // spurious blur fired during window creation/mapping (some
