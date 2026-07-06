@@ -605,6 +605,22 @@ if [[ -f "$COORD_HOOK_SRC" ]]; then
   cp -a "$COORD_HOOK_SRC" "$COORD_HOOK_DST"
 fi
 
+# Same reason: the Claude/Codex CC hooks (statusline-fleet + lock/coord/activity/
+# lifecycle/objective-title/bash-gate/workitem-nudge) under
+# apps/operator/scripts/hooks/cc/ are read at runtime by
+# lib/desktop-install/papercusp-files.ts (installClaudeHooks → ~/.papercusp/hooks/cc/
+# + merged into ~/.claude/settings.json). esbuild doesn't trace them, so copy the
+# runtime scripts explicitly. Without them the packaged Mac/Windows app installs NO
+# Claude statusline/lock/coord hooks (EI-8191: "blank bottom statusline", lock
+# enforcement silently off). Only the *.sh scripts — skip __tests__/ and *.tmp scratch.
+CC_HOOK_SRC_DIR="$WEB_DIR/scripts/hooks/cc"
+if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
+  CC_HOOK_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/cc"
+  echo "→ copying cc hooks → sidecar/apps/operator/scripts/hooks/cc/"
+  mkdir -p "$CC_HOOK_DST_DIR"
+  cp -a "$CC_HOOK_SRC_DIR"/*.sh "$CC_HOOK_DST_DIR"/
+fi
+
 # Same reason: lib/desktop-install/papercusp-files.ts resolves the
 # playbook source via <operatorAppRoot>/prompts/papercusp-su.tools.md.
 # In production the operator app root lives at sidecar/apps/operator/,
