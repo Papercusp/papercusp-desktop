@@ -549,6 +549,26 @@ else
   echo "  ⚠ $WEB_DIR/public/internal/docs not found — /internal/docs/* will 404 in the bundle"
 fi
 
+# docs-qa retrieval grounding (2026-07-05). The tutorial/palette "Ask a question"
+# (packages/operator-core/.../desktop/docs-qa.ts → @papercusp/docs-engine searchDocs)
+# reads the SOURCE Starlight .mdx tree via _repo-paths.DOCS_CONTENT_ROOT — NOT the
+# rendered public/internal/docs copied above. In a packaged sidecar, findRepoRoot()
+# walks up from cwd (= the sidecar dir), finds no repo, and falls back to cwd, so
+# DOCS_CONTENT_ROOT resolves to <sidecar>/apps/operator-docs/src/content/docs. Ship the
+# source tree THERE so retrieveDocsContext returns real blocks and the answer is grounded
+# (cites /internal/docs/...) instead of hallucinating. Without this the retrieval returns
+# zero blocks in EVERY packaged install → the deflecting "I can't define that" answers the
+# owner hit on 2026-07-05.
+_docs_src="$WEB_DIR/../operator-docs/src/content/docs"
+if [[ -d "$_docs_src" ]]; then
+  echo "→ copying Starlight docs SOURCE tree → sidecar/apps/operator-docs/src/content/docs (docs-qa grounding)"
+  mkdir -p "$SIDECAR_DIR/apps/operator-docs/src/content"
+  rm -rf "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+  cp -a "$_docs_src" "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+else
+  echo "  ⚠ $_docs_src not found — docs-qa (tutorial/palette Ask) will be UNGROUNDED in the bundle"
+fi
+
 # Operator prompts — some endpoint-route handlers read apps/operator/prompts/
 # at runtime. esbuild doesn't trace runtime fs reads, so copy them explicitly.
 if [[ -d "$WEB_DIR/prompts" ]]; then
