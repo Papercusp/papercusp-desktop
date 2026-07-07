@@ -81,16 +81,20 @@ cut_release_seed() {
     echo "       Set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build."
     exit 1
   fi
-  # Owner decision 2026-07-05 (WI-2903, option A): the release seed is a FULL-history
-  # git bundle + the shared-pot corestore snapshot. Depth-1/git-only are the opt-in
-  # small/test escape hatches (PAPERCUSP_SEED_DEPTH=1 / PAPERCUSP_SEED_CORESTORE=0),
-  # never the release default. cut-seed-cli refuses an epoch seal on a box without
-  # the live hive keychain (load-don't-mint) and a missing/empty corestore dir.
+  # Owner directive 2026-07-07 (supersedes WI-2903 option A's full-history
+  # default): release seeds ship DEPTH-1 — a one-commit snapshot of --rev, not
+  # the ~1.75GiB full-history bundle. Full history stays on GitHub; first-boot
+  # fetch back-fills it from origin when online. This matches
+  # build-windows-on-vm.sh (which needed depth-1 anyway for the 4GB installer
+  # cap). Escape hatch: export PAPERCUSP_SEED_DEPTH= (empty) forces full
+  # history. Git-only stays opt-in via PAPERCUSP_SEED_CORESTORE=0. cut-seed-cli
+  # refuses an epoch seal on a box without the live hive keychain
+  # (load-don't-mint) and a missing/empty corestore dir.
   local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
   local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
-  local seed_depth="${PAPERCUSP_SEED_DEPTH:-}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH-1}"
   local core_args=()
   if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]]; then
     core_args+=(--no-corestore)

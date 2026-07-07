@@ -209,16 +209,19 @@ cut_release_seed() {
     echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
     return 0
   fi
-  # Owner decision 2026-07-05 (WI-2903, option A): the release seed is a FULL-history
-  # git bundle + the shared-pot corestore snapshot. Depth-1/git-only are opt-in
-  # escape hatches (PAPERCUSP_SEED_DEPTH=1 / PAPERCUSP_SEED_CORESTORE=0). The cut
-  # runs HERE on the owner box — cut-seed-cli refuses an epoch seal without the
-  # live hive keychain (load-don't-mint) and refuses a missing corestore dir.
+  # Owner directive 2026-07-07 (supersedes WI-2903 option A's full-history
+  # default): release seeds ship DEPTH-1 — a one-commit snapshot of --rev, not
+  # the ~1.75GiB full-history bundle. Full history stays on GitHub; first-boot
+  # fetch back-fills it from origin when online. Escape hatch: export
+  # PAPERCUSP_SEED_DEPTH= (empty) forces full history; git-only stays opt-in
+  # via PAPERCUSP_SEED_CORESTORE=0. The cut runs HERE on the owner box —
+  # cut-seed-cli refuses an epoch seal without the live hive keychain
+  # (load-don't-mint) and refuses a missing corestore dir.
   local seed_hive="${PAPERCUSP_SEED_HIVE:-papercusp}"
   local seed_workspace="${PAPERCUSP_SEED_WORKSPACE_ID:-papercusp-workspace}"
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
-  local seed_depth="${PAPERCUSP_SEED_DEPTH:-}"
+  local seed_depth="${PAPERCUSP_SEED_DEPTH-1}"
   local operator_dir="$MONOREPO/apps/operator"
   local seed_out="$ROOT/src-tauri/seed"
   if [[ ! -d "$operator_dir" ]]; then

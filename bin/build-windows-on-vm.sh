@@ -114,8 +114,10 @@ cut_release_seed() {
   operator_dir="$repo/apps/operator"
   [[ -d "$operator_dir" ]] || fail "seed cutter not found at $operator_dir (set PAPERCUSP_SKIP_SEED_CUT=1 only for a deliberate placeholder build)"
   # Windows seed = DEPTH-1 (shallow) git bundle + shared-pot corestore snapshot.
-  # WHY depth-1 is the WINDOWS default (this DIVERGES from mac-vm-build.sh, which
-  # has NO installer size cap): a FULL-HISTORY git bundle of this monorepo is
+  # Depth-1 is now the release default EVERYWHERE (owner directive 2026-07-07:
+  # trim git history from release builds, full history stays on GitHub —
+  # mac-vm-build.sh + release-local.sh align). Windows additionally NEEDS it
+  # for the installer size cap: a FULL-HISTORY git bundle of this monorepo is
   # ~1.75GiB; combined with the owner-mandated corestore (~2.3GiB) + slimmed
   # sidecar (~0.85GiB) + WSL rootfs (~0.24GiB) that is ~5.2GiB. The seed +
   # rootfs are ENCRYPTED/pre-compressed (stored raw in the installer), so that
