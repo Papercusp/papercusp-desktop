@@ -110,6 +110,20 @@ declare -a EXCLUDES=(
   --exclude='./.DS_Store' --exclude='*/.DS_Store'
 )
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
+# GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
+# flags above are GNU dialect — macOS bsdtar rejects --owner outright and
+# matches excludes subtly differently (a silent-content bug, not a loud one).
+# On macOS: brew install gnu-tar → gtar.
+TAR_BIN=tar
+if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  if command -v gtar >/dev/null 2>&1; then
+    TAR_BIN=gtar
+  else
+    echo "ERROR: GNU tar required (macOS: brew install gnu-tar) — bsdtar's --owner/exclude dialect differs" >&2
+    exit 1
+  fi
+fi
+command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH (macOS: brew install zstd)" >&2; exit 1; }
 # The shared tree is edited by the whole fleet WHILE this multi-minute tar
 # runs; GNU tar exits 1 for "file changed as we read it" — a warning (the
 # entry is still written), not corruption. Under set -e/pipefail that exit 1
@@ -117,7 +131,7 @@ zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
 # (the changed-file warnings stay visible on stderr); exit ≥2 and any zstd
 # failure remain fatal.
 set +e +o pipefail
-tar --numeric-owner --owner=0 --group=0 \
+"$TAR_BIN" --numeric-owner --owner=0 --group=0 \
   "${EXCLUDES[@]}" \
   -C "$MONO" -cf - . \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
