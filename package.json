@@ -15,6 +15,7 @@
     "build": "tauri build",
     "build:debug": "tauri build --debug",
     "build:archived": "bash bin/build-and-archive-deb.sh",
+    "test:config": "node --test test/tauri-config-resources.test.js",
     "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '✓ tauri-bindings.ts regenerated'"
   },
   "devDependencies": {
