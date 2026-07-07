@@ -3816,17 +3816,75 @@ fn init_native_terminal(app: &tauri::App) {
     start_native_terminal(app.handle());
 }
 
+/// A hardware GL render node (`/dev/dri/renderD*`) — its ABSENCE means software
+/// rendering (llvmpipe) or a GPU with no render capability (QXL / virtio in a VM,
+/// or headless), where WebKitGTK's DMA-BUF renderer wedges Xorg. A missing
+/// `/dev/dri` directory ⇒ no render node.
+#[cfg(target_os = "linux")]
+fn linux_has_dri_render_node() -> bool {
+    std::fs::read_dir("/dev/dri")
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("renderD")))
+        })
+        .unwrap_or(false)
+}
+
+/// Whether to force `WEBKIT_DISABLE_DMABUF_RENDERER=1`. The DMA-BUF renderer
+/// misbehaves in two Linux GPU situations: the NVIDIA proprietary driver
+/// (stale-tile artifacts) and software rendering with no hardware render node
+/// (X-server wedge / black screen on a VM — WI-3282). Pure so it's unit-tested.
+fn should_disable_dmabuf(nvidia_present: bool, software_render: bool) -> bool {
+    nvidia_present || software_render
+}
+
+#[cfg(test)]
+mod dmabuf_render_tests {
+    use super::should_disable_dmabuf;
+
+    #[test]
+    fn disables_on_nvidia_or_software_render() {
+        // NVIDIA proprietary driver → stale-tile artifacts → disable.
+        assert!(should_disable_dmabuf(true, false));
+        // Software render / no hardware render node (VM, llvmpipe) → X wedge → disable.
+        assert!(should_disable_dmabuf(false, true));
+        // Both → disable.
+        assert!(should_disable_dmabuf(true, true));
+        // A real hardware GL render node and no NVIDIA → keep the fast DMA-BUF path.
+        assert!(!should_disable_dmabuf(false, false));
+    }
+}
+
 pub fn run() {
-    // WebKitGTK's DMA-BUF renderer produces stale-tile artifacts on the NVIDIA
-    // proprietary driver (ghost fragments of other surfaces composited into the
-    // webview — webkit#262607, tauri#9394/#14924; seen live on the dev box with
-    // webkit2gtk 2.52 + driver 580). Must be set before any webview exists; an
-    // explicit user value wins.
+    // WebKitGTK's DMA-BUF renderer misbehaves on two Linux GPU situations, so we
+    // force it off (before any webview exists — an explicit user value always
+    // wins) when either applies:
+    //   (a) the NVIDIA proprietary driver — stale-tile artifacts (ghost fragments
+    //       of other surfaces composited into the webview; webkit#262607,
+    //       tauri#9394/#14924; dev box, webkit2gtk 2.52 + driver 580); and
+    //   (b) SOFTWARE rendering with no hardware GL render node (llvmpipe, or a QXL
+    //       / virtio GPU in a VM, or headless) — there the DMA-BUF path drove Xorg
+    //       to 93% and WEDGED the X server (black, frozen, uninteractable) even
+    //       after killing every app process (WI-3282, owner's clean Linux VM). The
+    //       absence of /dev/dri/renderD* is the software-render signal.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-        && std::path::Path::new("/proc/driver/nvidia/version").exists()
-    {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+        let software_render = !linux_has_dri_render_node();
+        if should_disable_dmabuf(nvidia, software_render) {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            // On a genuinely GPU-less box also drop accelerated compositing — there
+            // is no hardware accel to lose and it forecloses the rest of the
+            // GL-compositing X-wedge class. NOT done on the NVIDIA path (a real GPU
+            // is present — disabling compositing there would be a perf regression),
+            // and LIBGL_ALWAYS_SOFTWARE is deliberately NOT forced (a no-op under
+            // llvmpipe, and it would cripple a real GPU).
+            if software_render
+                && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
+            {
+                std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            }
+        }
     }
 
     let state = SidecarState {
