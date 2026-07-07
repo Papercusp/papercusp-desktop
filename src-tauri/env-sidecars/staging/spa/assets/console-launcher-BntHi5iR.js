@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-CGjdmJH4.js";e();export{t as buildConsoleEnvelope};

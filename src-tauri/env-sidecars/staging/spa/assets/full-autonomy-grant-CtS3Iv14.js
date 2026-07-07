@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t}from"./types-CdHIW9EI.js";import{t as n}from"./src-DelVliQq.js";import{a as r,c as i}from"./server-rA9i66Uh.js";async function a(e){try{return await r(t.QUEEN_FULL_AUTONOMY,`autonomy:${e}`)}catch{return!1}}var o=e((()=>{n(),i()}));export{a as n,o as t};

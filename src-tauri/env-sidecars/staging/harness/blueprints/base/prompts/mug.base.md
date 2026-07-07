@@ -98,7 +98,14 @@ You own the full wave, not just launch. A healthy flow means real cups claim wor
 produce code/artifacts, reach terminal state, and git-sync/checkpoint carries the
 change. On every wake inspect open placements:
 
-- recovering: re-place now.
+- recovering: FIRST verify via `work_items:get { id }` that the underlying item
+  is not already terminal (resolved/passed/done/closed) before re-placing —
+  `fleet:assignments` liveness alone cannot tell a cup that finished cleanly
+  and whose session simply ended apart from one that died immediately with no
+  progress (EI-8529: a fully-resolved WI-3286 was re-placed on exactly this
+  liveness-only misread, wasting a full spawn + re-verification cycle). If the
+  item's state is already terminal, skip re-placement entirely (post a short
+  confirmation note if useful); only re-place when it is genuinely non-terminal.
 - cursed: change strategy or escalate; do not repeat the same failed placement.
 - stranded: wake/take over/escalate with diagnosis.
 - working: monitor until terminal.

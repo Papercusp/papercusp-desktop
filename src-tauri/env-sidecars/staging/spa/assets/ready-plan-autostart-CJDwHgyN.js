@@ -1,0 +1,31 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t}from"./types-DpojiHk_.js";import{t as n}from"./src-IyG-iRKL.js";import{a as r,c as i}from"./server-Dl8wHwHt.js";import{q as a,t as o}from"./src-DTtGQmae.js";import{n as s,t as c}from"./flag-distinct-id-BZ5cCTSq.js";import{c as l,o as u}from"./inbox-wake-CiWyz6WX.js";import{at as d,nt as f,st as p}from"./issues-engineer-CazOEGh1.js";import{p as m,u as h}from"./source-B2JH3vIj.js";import{_ as g,f as _,x as v}from"./work-items-3_nlouf4.js";import{n as y,r as b,t as x}from"./convert-BT7Zc8_Y.js";import{i as S,o as C}from"./started-B1fWO4dM.js";import{c as w,f as T,p as E}from"./watchdog-BJA1RPsO.js";import{g as D,l as O}from"./placement-watchdog-CqLww8TU.js";function k(e){let t=(e.text??``).replace(/\s+/g,` `).trim(),n=t.length>0?t:e.id;return n.length>j?`${n.slice(0,j-1)}…`:n}function A(e){let t=new Set(e.existingPromotedItemIds);return e.openItems.filter(e=>!t.has(e.id)).map(t=>({kind:`feature`,harness:e.harness,title:k(t),sourcePlanSlug:e.planSlug,sourcePlanItemIds:[t.id]}))}var j,M=e((()=>{j=200}));function N(e){return e!==`done`&&e!==`dropped`}async function P(e){if(!await r(t.PLAN_WORKITEM_PROMOTION,s()))return{promoted:0,skipped:0,flagOff:!0};let n=await m(e.planSlug,{harnessSlug:e.harnessSlug,workspaceId:e.workspaceId});if(!n)return{promoted:0,skipped:0};let i=(n.row.items.length>0?n.row.items.map(e=>({id:e.id,status:e.status,text:e.text??``})):n.parsed.items.map(e=>({id:e.id,status:e.storedStatus,text:e.text??``}))).filter(e=>N(e.status)).map(e=>({id:e.id,text:e.text}));if(i.length===0)return{promoted:0,skipped:0};let a=await b(),o=i.map(e=>e.id).filter(t=>a.has(p(e.planSlug,t))),c=A({planSlug:e.planSlug,harness:e.harnessSlug,openItems:i,existingPromotedItemIds:o}),l=new Map(i.map(e=>[e.id,e.text])),u=0;for(let t of c){let n=t.sourcePlanItemIds[0],r={plan_slug:e.planSlug,item_id:n,harness_slug:e.harnessSlug},i=await _({kind:t.kind,title:t.title,summary:l.get(n)??void 0,harness:t.harness,sourcePlanSlug:t.sourcePlanSlug,payload:{plan_item:r},createdBy:e.createdBy});await v(i.id,{kind:f,ref:p(e.planSlug,n)},x,{harness:i.harness??void 0,by:e.createdBy}),u++}return{promoted:u,skipped:i.length-u}}var F=e((()=>{i(),n(),c(),h(),g(),d(),y(),M()}));function I(){return{}.PAPERCUSP_SCOUT_READY_AUTOSTART!==`0`}function L(e){let t=[],n=[];for(let r of e)(r.hasOpenItems?t:n).push(r);return{startable:t,itemless:n}}async function R(e,t,n,r={}){return(await e`
+    SELECT plan_slug, title,
+           (content ~ ('- [*][*]P-[0-9]+[*][*] ' || chr(96) || '(todo|wip)' || chr(96))) AS has_open_items
+      FROM harness_shared.harness_plans
+     WHERE workspace_id = ${t}
+       AND harness_slug = ${n}
+       AND status = 'ready'
+       AND archived = false
+       AND (op_status IS NULL OR op_status <> 'started')
+       AND content LIKE ${`%
+origin: scout
+%`}
+     ORDER BY updated_at ASC
+     LIMIT ${r.limit??20}`).map(e=>({planSlug:e.plan_slug,title:e.title,hasOpenItems:!!e.has_open_items}))}async function z(e,t){let n=new Date().toISOString(),r=await e`
+    UPDATE harness_shared.harness_plans AS p
+       SET op_status     = 'started',
+           op_started_at = COALESCE(p.op_started_at, ${n}),
+           op_updated_at = ${n}
+      FROM (
+        SELECT plan_slug, op_status AS prev_op_status
+          FROM harness_shared.harness_plans
+         WHERE workspace_id = ${t.workspaceId}
+           AND harness_slug = ${t.installSlug}
+           AND plan_slug    = ${t.planSlug}
+           FOR UPDATE
+      ) prev
+     WHERE p.workspace_id = ${t.workspaceId}
+       AND p.harness_slug = ${t.installSlug}
+       AND p.plan_slug    = prev.plan_slug
+    RETURNING prev.prev_op_status`;if(!(r.length>0&&r[0].prev_op_status!==`started`))return{transitioned:!1,promoted:0,flagOff:!1};let i=await P({workspaceId:t.workspaceId,harnessSlug:t.installSlug,planSlug:t.planSlug,createdBy:`scout-ready-autostart`});return{transitioned:!0,promoted:i.promoted,flagOff:i.flagOff===!0}}async function B(e,t,n){let r=n.slice(0,5).map(e=>`• ${e.planSlug}${e.title?` — ${e.title}`:``}`).join(`
+`);await l([t],{summary:`Scout ready-plan autostart: ${n.length} RATIFIED scout plan(s) have NO open items, so they cannot start (nothing to promote to work_items). Decompose each into 1–5 concrete items (plans:add-item) — the autostart sweep then starts it and promotes the items into your surveyable frontier automatically. Do not leave a ratified plan itemless (that is the plan-rail dead end, WI-1574).\n\n${r}`,payload:{kind:`scout-ready-decompose`,slugs:n.map(e=>e.planSlug)},source:`scout-ready-decompose`,workspaceId:e})}async function V(){let e=[];if(!I())return e;try{let t=await C();if(t.length===0)return e;let{sql:n}=a();for(let{workspaceId:r,installSlug:i}of t)try{let t=await R(n,r,i);if(t.length===0)continue;let{startable:a,itemless:o}=L(t);for(let t of a)try{let a=await z(n,{workspaceId:r,installSlug:i,planSlug:t.planSlug});e.push({workspaceId:r,installSlug:i,outcome:a.transitioned?`started`:`skipped`,planSlug:t.planSlug,promoted:a.promoted,reason:a.transitioned?a.flagOff?`auto-started BUT promotion no-oped: PLAN_WORKITEM_PROMOTION flag is OFF — items will NOT reach the Queen until it is flipped`:`auto-started ratified scout plan; promoted ${a.promoted} item(s)`:`already started (race)`})}catch(n){e.push({workspaceId:r,installSlug:i,outcome:`error`,planSlug:t.planSlug,reason:n instanceof Error?n.message:String(n)})}if(o.length>0&&!(await T(r,i,1,`scout-ready-decompose`)>0)){let t=await D(n,r,i);t&&(await B(r,t,o),await E({workspaceId:r,installSlug:i,source:`scout-ready-decompose`,reason:`${o.length} ratified itemless scout plan(s): ${o.slice(0,5).map(e=>e.planSlug).join(`, `)}`,wakeAt:null}),e.push({workspaceId:r,installSlug:i,outcome:`decompose-nudged`,reason:`${o.length} itemless ready plan(s)`}))}}catch(t){e.push({workspaceId:r,installSlug:i,outcome:`error`,reason:t instanceof Error?t.message:String(t)})}}catch(e){console.warn(`[scout-ready-autostart] sweep failed: ${e instanceof Error?e.message:e}`)}return e}e((()=>{o(),S(),O(),w(),u(),F()}))();export{V as scoutReadyAutostartSweep};

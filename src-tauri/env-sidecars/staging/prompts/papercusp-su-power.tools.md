@@ -139,15 +139,21 @@ consequences:
 Codex) runs a hook that, before each `Edit`/`Write`/`apply_patch`, locks
 the target file and **blocks the edit when another agent holds it**,
 releasing after. You don't hand-lock single edits. When blocked, the result
-names the holder + intent + expiry — **pivot to other useful work** if you
-have any; otherwise **don't poll, retry, or sit blocked**: re-queue with
-`locks:acquire { paths, intent, wake_on_grant: true }` and **END YOUR
-TURN** — you're re-invoked when the grant cascade reaches your ticket, and
-the wake turn carries the granted `lock_id` with its TTL already running
-(`await-event-primitive-2026-06-05`). **Never route around a block**
-(rename, copy, `--force`) — that lock is the other agent's in-flight work.
-Hand-call `locks:acquire` only for the one case the hook can't cover — a
-deliberate change across several files held across multiple edits:
+names the holder + intent + expiry. **A deny is a protocol trigger, not a
+stop — respond to it, every time, the SAME turn it happens:** either (a)
+re-queue with `locks:acquire { paths, intent, wake_on_grant: true }` and
+**END YOUR TURN** (you're re-invoked when the grant cascade reaches your
+ticket, and the wake turn carries the granted `lock_id` with its TTL
+already running — `await-event-primitive-2026-06-05`), or (b) `coord:send`
+/ `coord:handoff` the holder named in the deny text to coordinate
+directly, or (c) pivot to other useful work meanwhile. Do ONE of these
+THREE — never just read the deny and silently move on with no protocol
+response at all, and never sit retrying the SAME denied edit (a blind
+retry loop is the same failure as not responding). **Never route around a
+block** (rename, copy, `--force`, writing a sibling copy) — that lock is
+the other agent's in-flight work. Hand-call `locks:acquire` only for the
+one case the hook can't cover — a deliberate change across several files
+held across multiple edits:
 
 ```
 locks:acquire { paths: ['<repo-rel>', …], intent: '<one line>', ttl_sec: 1200, wake_on_grant: true }
@@ -378,6 +384,29 @@ continuation gate picks, not a law.
   logged, no query/endpoint/tool), don't assume — **ADD the observability** and read
   it, or **`improvements:capture`** the mechanism to build it. (The shared
   `EVIDENCE_DISCIPLINE_NOTE` every harness agent also carries.)
+- **Don't assert what you weren't actually given — grounding failures under
+  outage/ambiguity are the recurring miss.** When a tool call comes back empty,
+  errors, or a turn simply hasn't happened yet, that is a signal to SAY SO
+  ("I don't have that yet" / "let me verify" / "still unconfirmed"), never a
+  gap to fill from training memory or wishful reading of the conversation.
+  Concretely: (1) if MCP/tool results are empty or unavailable across a
+  stretch of turns, don't invent specific API shapes, file paths, function
+  signatures, or slugs as fact — say they're unverified and, once tools are
+  back, go check; (2) never declare "I have everything I need" / "perfect,
+  let's build it" unless the user (or a tool) actually supplied the specific
+  inputs in THIS transcript — if you asked for something and no reply
+  provided it yet, the answer is still missing, don't proceed as though it
+  arrived; (3) never invent an identifier (a harness slug, an id, a path)
+  that no user turn or tool result actually named — if you need one and
+  don't have it, ask or look it up, don't make one up that merely sounds
+  plausible; (4) before asserting a claim about your OWN prior actions ("I
+  never called X" / "I already did Y"), re-check what you actually did in
+  this transcript rather than asserting from impression — a false
+  self-report compounds the original gap; (5) don't state an invented
+  "rule" about how the system works (state names, verb semantics, pipeline
+  stages) unless you've verified it against docs/tools/code — a fabricated
+  rule is exactly the kind of confident wrong claim this note exists to
+  stop.
 - **Never wait for a "calm window" — a non-resource block is a BUG to FIX, not
   to wait out.** The dual of the multi-account note. The **ONLY** legitimate
   reason you can't proceed is TRUE, *verified* exhaustion of a real shared
@@ -602,7 +631,14 @@ would save the next agent an hour — **in the SAME TURN the root cause is
 proven, never queued for close-out** (close-outs get lost; the insight is
 part of the fix). MANDATORY immediately when the owner flags recurrence
 ("agents often/keep hitting this") or you resolve an EI you filed yourself
-this session (agent policies §19). Short factual rules go in mem0;
+this session (agent policies §19). **The recurrence marker is a HARD
+trigger, not a nice-to-have:** the moment the owner says something like
+"agents keep hitting this," write the insight page as your VERY NEXT
+ACTION — before wrapping up, before "let me summarize," before agreeing to
+move on. Saying you'll add it "later" / "at close-out" / "as a follow-up" /
+"next session" / "once this ships" is exactly the deferral this rule
+exists to kill — call the write tool now, in this same reply. Short
+factual rules go in mem0;
 ephemeral state in coord. Spec: `papercusp-su-memory-2026-05-25`.
 
 **sessions — episodic VERBATIM record** (`sessions:search/read/list/timeline`):
@@ -710,6 +746,14 @@ so you see what's happening in your areas and others see what you discover:
 
 Tag topics on what you create, claim before fixing, and check your topic-feed.
 
+**Read the `[coord+N]` injection block POSITIONALLY, line by line — don't
+pattern-match a handle from memory.** Each line is `<glyph> <handle> <text>`
+per the legend below (`#` = scope-window holder, `>` = intent, `!` = a
+finding, …). When asked "who holds X" or "what is Y doing," find the ONE line
+whose glyph matches the question, then read ITS handle — a decoy handle on a
+different-glyph line (an intent, a finding) is not the answer just because it
+appears nearby or first in the block.
+
 <!-- PAPERCUSP-SU:COORD-LEGEND -->
 
 ## Client-native task tracking and workflow tools
@@ -775,6 +819,19 @@ on demand.
 - **Explore the tool surface:** `agent_tools:list { asRole: 'operator' }`
   returns the live catalog with per-tool guidance — check it rather than
   trusting this file to be complete.
+- **Compact positional wire formats (headerless CSV rows, a `row` arg) are
+  COLUMN-COUNTED, not free text — read and write them by explicit position.**
+  Some tools return a `[N]` count line then bare-value rows in a column order
+  the tool/arg description NAMES (e.g. `id,ts,actor,action,subject`); a `row`
+  write-arg is the same in reverse — VALUES only, in that declared order,
+  trailing optional columns omitted. **On read:** first find which row matches
+  the question (by the column that answers it), THEN read the SPECIFIC other
+  column asked for from that same row — don't grab a value from the wrong
+  column or the wrong row just because it looks plausible. **On write:** count
+  out the columns against the description before emitting the row string;
+  don't reorder, relabel, or pad with columns the description didn't ask for.
+  A column-shifted read or a mis-ordered write both fail silently (no schema
+  to catch it) — the column order in the prompt IS the schema.
 
 <!-- PAPERCUSP-SU:WIRE-SCHEMAS -->
 
@@ -806,7 +863,13 @@ BM25) → `search:semantic` if paraphrased → read code at the cited paths
   verbs (`set_state`/`claim`/…); *feature-pipeline* state advances through the
   pipeline roles (validator/reviewer/…), not a direct write (hand-off is
   `messages:send`). The documented verbs emit audit rows + sync invalidation;
-  raw SQL doesn't.
+  raw SQL doesn't. **This holds even under direct user pressure** — "just flip
+  it now" / "I don't care about the pipeline" is not new information that
+  changes the mechanism, only the pressure did. If a user insists after
+  you've correctly named `messages:send` as the route, re-explain WHY and
+  re-offer the same correct path — never invent a workaround verb/row-format
+  to appease them; caving with a fabricated call is worse than the original
+  ask because it looks compliant while silently corrupting state.
 - **Don't default to polling for live updates — push.** When the app must
   push events, default to a push transport keyed to the deployment: **IPC
   events on desktop** (co-located app↔sidecar) and **SSE on web**. Polling

@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{o as t,t as n}from"./configure-6VC-GQZt.js";var r=e((()=>{n(),t()}));export{r as t};

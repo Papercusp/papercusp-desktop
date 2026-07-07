@@ -1,0 +1,1 @@
+import{n as e,t}from"./text-artifacts-DNAW_p2y.js";t();export{e as loadTextArtifact};

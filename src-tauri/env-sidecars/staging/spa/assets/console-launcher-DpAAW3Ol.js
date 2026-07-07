@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-CCPI14xa.js";e();export{t as buildConsoleEnvelope};
