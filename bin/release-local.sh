@@ -271,8 +271,8 @@ bash "$ROOT/bin/stage-env-sidecars.sh"
 # WI-3308 / same plan: the "all-5-buttons" dogfood bundle — stage a PRE-installed
 # runnable monorepo tree as sidecar/source.tar.zst so the dev(:3270)/local(:3055)
 # env buttons run from SOURCE on an install (no npm/npx needed; the bundled node
-# runs the tree's own tsx/vite). OPT-IN via PAPERCUSP_STAGE_SOURCE=1 until the
-# Rust first-boot extract + launcher spawn change (WI-3306) land + VM-verify.
+# runs the tree's own tsx/vite). DEFAULT-ON since VM-verified end-to-end on Linux
+# (WI-3308, 2026-07-07); opt out with PAPERCUSP_STAGE_SOURCE=0 for a smaller build.
 bash "$ROOT/bin/stage-source-tree.sh"
 
 echo "==> building Tauri Linux x86_64 (signed)"

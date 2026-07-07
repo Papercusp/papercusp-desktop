@@ -18,10 +18,11 @@
 # source drop); tauri copying ~9GB uncompressed through its resource pipeline is
 # slow; and node_modules `.bin/*` symlinks survive `tar` but not tauri's copy.
 #
-# OPT-IN while the end-to-end is being wired (Rust first-boot extract +
-# b0fbf's launcher spawn-command change, WI-3306): set PAPERCUSP_STAGE_SOURCE=1.
-# Flips to default-on once dev+local are VM-verified (WI-3308) — a finished
-# feature never ships dark.
+# DEFAULT-ON since the all-5-buttons dogfood bundle is VM-verified end-to-end on
+# Linux (WI-3308, 2026-07-07: dev:3270 + local:3055 spawn from the extracted tree;
+# Windows WI-3306 / Mac WI-3307 mirror the same seams) — a finished feature never
+# ships dark. Opt OUT with PAPERCUSP_STAGE_SOURCE=0 (e.g. a deliberately smaller
+# build with only the 3 bundled-sidecar buttons).
 #
 # Runs AFTER bin/build-desktop-sidecar.sh (needs a fresh src-tauri/sidecar/) and
 # BEFORE `tauri build` (so the existing `sidecar/**/*` resources glob in
@@ -34,8 +35,8 @@ ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
 MONO="$(cd "$ROOT/.." && pwd)"                  # monorepo root (apps/, libs/, node_modules/)
 SIDECAR="$ROOT/src-tauri/sidecar"
 
-if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" != "1" ]]; then
-  echo "==> stage-source-tree: skipped (set PAPERCUSP_STAGE_SOURCE=1 to bundle the dev/local runnable source tree — WI-3308)"
+if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" != "1" ]]; then
+  echo "==> stage-source-tree: skipped (PAPERCUSP_STAGE_SOURCE=0 — building without the dev/local runnable source tree; only the 3 bundled-sidecar buttons will work — WI-3308)"
   exit 0
 fi
 
