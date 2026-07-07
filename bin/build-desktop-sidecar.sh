@@ -771,6 +771,37 @@ if [[ "$tmpl_count" -lt 1 ]]; then
 fi
 echo "  ✓ $tmpl_count first-party templates bundled → $TEMPLATES_DST"
 
+# Bundle the first-party rubrics (local-first-party-rubric-bundling-2026-07-07) —
+# same design as the templates block above: self-describing dirs (listing.json +
+# rubric.json + METHOD.md) resolved at runtime from the bundled layer via
+# PAPERCUSP_RUBRICS_DIR (Tauri main.rs → <resources>/sidecar/rubrics; dev falls
+# back to the in-repo rubrics/ dir) and SEEDED into the workspace rubric store on
+# first use, so a fresh install has the standard rubrics on day one.
+RUBRICS_SRC="$REPO_ROOT/rubrics"
+RUBRICS_DST="$SIDECAR_DIR/rubrics"
+echo "→ copying first-party rubrics from $RUBRICS_SRC"
+if [[ ! -d "$RUBRICS_SRC" ]]; then
+  echo "ERROR: first-party rubrics dir not found at $RUBRICS_SRC"
+  exit 1
+fi
+mkdir -p "$RUBRICS_DST"
+( cd "$RUBRICS_SRC" && find . -type f \
+    -not -path "./node_modules/*" \
+    -not -path "*/.git/*" ) > /tmp/rubric-files.txt
+while IFS= read -r f; do
+  rel="${f#./}"
+  mkdir -p "$RUBRICS_DST/$(dirname "$rel")"
+  cp "$RUBRICS_SRC/$rel" "$RUBRICS_DST/$rel"
+done < /tmp/rubric-files.txt
+rm -f /tmp/rubric-files.txt
+# Sanity: the first-party set + their self-describing listing.json actually landed.
+rubric_count=$(find "$RUBRICS_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
+if [[ "$rubric_count" -lt 1 ]]; then
+  echo "ERROR: no first-party rubric listing.json landed at $RUBRICS_DST"
+  exit 1
+fi
+echo "  ✓ $rubric_count first-party rubrics bundled → $RUBRICS_DST"
+
 # Bundle the @papercusp/orchestrator entry bins as self-contained esbuild .mjs,
 # shipped as a SIBLING of harness/ (sidecar/orchestrator/bin/*.mjs) — the path
 # harnessPath('../orchestrator/bin/...') + the preflight harness check resolve to.
