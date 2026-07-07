@@ -55,8 +55,7 @@
     "resources": [
       "sidecar/**/*",
       "sidecar/db-sql/*",
-      "resources/*",
-      "seed/**/*"
+      "resources/*"
     ],
     "publisher": "Papercusp",
     "homepage": "https://papercuspai.com",
