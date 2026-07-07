@@ -1416,21 +1416,25 @@ echo "→ bundling sidecar preload"
 cp "$ROOT/bin/sidecar-preload.js" "$SIDECAR_DIR/sidecar-preload.js"
 
 # ---------------------------------------------------------------------------
-# Bundle external binaries — omp (Pi) and code-server.
+# Bundle external binaries — node + gh.
 #
-# These are the runtime dependencies the @papercupai/pi-coding and
-# @papercupai/vscode-server plugins require. Vendoring them here means
-# desktop installs work out of the box without users having to install
-# Pi via brew or code-server via apt.
+# omp (Pi) is NO LONGER bundled (owner directive 2026-07-07): the desktop app
+# uses the omp installed on the USER's machine. There is a first-run install
+# procedure for it (setup-pty-commands buildFrameworkInstallSpec lands omp at
+# ~/.papercusp/bin/omp; the onboarding wizard drives it), and both detection
+# (preflight-binaries detectOmp) and launch (psu spawns bare `omp`, resolved
+# via the terminal's PATH which prepends ~/.papercusp/bin + ~/.local/bin) find
+# that local install. Bundling a second 485MB copy just shadowed the user's own
+# and bloated the installer.
 #
-# Layout under the sidecar:
-#   sidecar/bin/omp[.exe]            ← Pi CLI; Tauri prepends sidecar/bin to PATH
-#   sidecar/code-server/bin/code-server  ← code-server entry; Tauri spawns it
+# code-server is NO LONGER bundled either (owner directive 2026-07-07): the app
+# no longer uses the vscode-in-the-browser panel, so the ~447MB code-server
+# tarball is dead weight. Its Tauri spawn is removed in main.rs.
 #
-# We pick the binary matching the target platform/arch the build host
-# is running on. CI runs the desktop build under `tauri build` on a
-# matrix of macos-{14,13}, ubuntu-22.04, and windows-2022, so each
-# matrix leg picks the right asset.
+# What remains bundled here: node (the sidecar runtime) + gh (git ops). We pick
+# the binary matching the target platform/arch the build host is running on. CI
+# runs the desktop build under `tauri build` on a matrix of macos-{14,13},
+# ubuntu-22.04, and windows-2022, so each matrix leg picks the right asset.
 # ---------------------------------------------------------------------------
 target_os=""
 target_arch=""
@@ -1447,12 +1451,12 @@ case "$(uname -m)" in
 esac
 echo "→ bundling external binaries for $target_os-$target_arch"
 
-# OMP_DIR / BIN_DIR — destination for bundled CLIs (node, omp, gh). Tauri
-# prepends this dir to the sidecar's PATH on spawn (see main.rs PATH
-# munging) so the sidecar finds them without a user-side install. Hoisted
-# here from below because the Node download block referenced OMP_DIR
-# before its old in-place definition under `set -u`, killing the build
-# with 'OMP_DIR: unbound variable'.
+# BIN_DIR (historically OMP_DIR) — destination for bundled CLIs (node, gh).
+# Tauri prepends this dir to the sidecar's PATH on spawn (see main.rs PATH
+# munging) so the sidecar finds them without a user-side install. Hoisted here
+# from below because the Node download block referenced it before its old
+# in-place definition under `set -u`, killing the build with 'OMP_DIR: unbound
+# variable'. Name kept as OMP_DIR to avoid churning the node/gh copy lines.
 OMP_DIR="$SIDECAR_DIR/bin"
 mkdir -p "$OMP_DIR"
 
@@ -1591,75 +1595,15 @@ if [[ "$target_os" == "windows" ]]; then
   fi
 fi
 
-# omp (Pi) — github.com/can1357/oh-my-pi releases. Latest tag has
-# omp-{darwin,linux,windows}-{x64,arm64}[.exe] assets.
-OMP_VERSION="${OMP_VERSION:-v14.5.14}"
-# OMP_DIR is now hoisted above; mkdir is idempotent.
-omp_asset=""
-omp_dst=""
-case "$target_os" in
-  darwin)  omp_asset="omp-darwin-${target_arch}";    omp_dst="$OMP_DIR/omp" ;;
-  linux)   omp_asset="omp-linux-${target_arch}";     omp_dst="$OMP_DIR/omp" ;;
-  windows) omp_asset="omp-windows-x64.exe";          omp_dst="$OMP_DIR/omp.exe" ;;
-esac
-if [[ -n "$omp_asset" ]]; then
-  echo "→ downloading omp $OMP_VERSION → $omp_asset"
-  if curl -fsSL "https://github.com/can1357/oh-my-pi/releases/download/$OMP_VERSION/$omp_asset" -o "$omp_dst"; then
-    chmod +x "$omp_dst"
-    echo "  ✓ omp at $omp_dst ($(du -h "$omp_dst" | awk '{print $1}'))"
-  else
-    echo "  ⚠ failed to download omp; pi-coding plugin will fall back to system PATH"
-    rm -f "$omp_dst"
-  fi
-else
-  echo "  ⚠ no omp asset for $target_os-$target_arch; pi-coding plugin will require user-installed omp"
-fi
+# omp (Pi) is NOT bundled — the desktop app uses the user's locally-installed
+# omp (owner directive 2026-07-07). See the header comment above for the
+# detection + launch path that finds it. meridian was decommissioned earlier
+# (2026-07-06, WI-3180) for the same "use the local install, not a bundled
+# copy" reason.
 
-# meridian (@rynfar/meridian) DECOMMISSIONED 2026-07-06 (owner directive, WI-3180)
-# — "we are no longer using meridian." It routed omp/pi through the user's Claude
-# Max subscription (local daemon :3456) and cost ~509MB in the sidecar (chiefly its
-# two bundled claude binaries), the single biggest slice of the Windows NSIS-4GiB
-# payload problem (WI-3172). No longer bundled. The first-launch install
-# (setup-pty-commands.ts), the preflight :3456 probe, and the 'omp-meridian'
-# onboarding framework are removed alongside it.
-
-# code-server — github.com/coder/code-server releases. Linux + macOS only;
-# Windows users would have to install separately (code-server upstream
-# does not ship a native Windows binary).
-CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-4.117.0}"
-CS_DIR="$SIDECAR_DIR/code-server"
-cs_asset=""
-case "$target_os" in
-  linux)  case "$target_arch" in
-            x64)   cs_asset="code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" ;;
-            arm64) cs_asset="code-server-${CODE_SERVER_VERSION}-linux-arm64.tar.gz" ;;
-          esac ;;
-  darwin) case "$target_arch" in
-            x64)   cs_asset="code-server-${CODE_SERVER_VERSION}-macos-amd64.tar.gz" ;;
-            arm64) cs_asset="code-server-${CODE_SERVER_VERSION}-macos-arm64.tar.gz" ;;
-          esac ;;
-esac
-if [[ -n "$cs_asset" ]]; then
-  echo "→ downloading code-server $CODE_SERVER_VERSION → $cs_asset"
-  cs_tarball="/tmp/$cs_asset"
-  if curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/$cs_asset" -o "$cs_tarball"; then
-    rm -rf "$CS_DIR"
-    mkdir -p "$CS_DIR"
-    tar -xzf "$cs_tarball" -C "$CS_DIR" --strip-components=1
-    rm -f "$cs_tarball"
-    if [[ -x "$CS_DIR/bin/code-server" ]]; then
-      echo "  ✓ code-server at $CS_DIR ($(du -sh "$CS_DIR" | awk '{print $1}'))"
-    else
-      echo "  ⚠ code-server tarball extracted but bin/code-server is missing"
-      rm -rf "$CS_DIR"
-    fi
-  else
-    echo "  ⚠ failed to download code-server; vscode-server plugin will fall back to localhost:8082"
-    rm -f "$cs_tarball"
-  fi
-else
-  echo "  ⚠ no code-server build for $target_os-$target_arch (upstream doesn't ship Windows); vscode-server plugin will require external code-server"
-fi
+# code-server is NOT bundled — the vscode-in-the-browser panel is retired
+# (owner directive 2026-07-07). The Tauri spawn is removed in main.rs; nothing
+# reads sidecar/code-server anymore.
 
 # Strip embedded-postgres language extensions that link to system libs we
 # don't ship (libpython3.6, libperl5.26, libtcl). These are PL/Python,

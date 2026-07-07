@@ -15,9 +15,10 @@
 //      operator.json on the way down).
 //
 // Rust retains: webview, endpoint-IPC client, the papercusp:// custom
-// protocol, window management, PTY, workspace HOME isolation, the update
-// checker, and the bundled code-server spawn. Everything PG/operator
-// process-management moved INTO serve.
+// protocol, window management, PTY, workspace HOME isolation, and the update
+// checker. Everything PG/operator process-management moved INTO serve.
+// (code-server is retired — owner directive 2026-07-07 — no longer bundled or
+// spawned.)
 //
 // The same `serve.mjs` is what we'd run in a cloud container — no shell-out
 // into platform-specific tooling here.
@@ -73,7 +74,6 @@ struct SidecarState {
     /// --ensure reused an operator another process owns (we then must NOT
     /// kill it on exit — it isn't ours).
     child: Mutex<Option<Child>>,
-    code_server_child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
     /// Endpoint-IPC socket path resolved from the operator's
     /// `~/.papercusp/endpoint-ipc.json` discovery file (written by
@@ -85,79 +85,6 @@ struct SidecarState {
     /// terminal+sidecar teardown again. `shutdown_children_once` swaps this
     /// to make the teardown idempotent.
     shutdown_done: std::sync::atomic::AtomicBool,
-}
-
-/// Spawn the bundled code-server (vscode-in-the-browser). The
-/// @papercupai/vscode-server plugin iframes whatever URL its config
-/// resolves to (default http://localhost:8082), so we bind the bundled
-/// instance to a free local port, run with auth disabled (loopback-
-/// only), and surface the URL via PAPERCUSP_CODE_SERVER_URL so the
-/// operator's contributions resolver can use it as the default for
-/// `iframeUrlConfigKey: codeServerUrl`.
-///
-/// Returns (child, url) on success, or None if the bundled binary is
-/// missing (e.g. Windows builds, where upstream code-server doesn't
-/// ship).
-fn spawn_code_server(
-    code_server_dir: &std::path::Path,
-    workspace_home: &std::path::Path,
-    user_data_dir: &std::path::Path,
-) -> Option<(Child, String)> {
-    let bin = if cfg!(windows) {
-        code_server_dir.join("bin").join("code-server.cmd")
-    } else {
-        code_server_dir.join("bin").join("code-server")
-    };
-    if !bin.exists() {
-        println!(
-            "[papercusp-desktop] no bundled code-server at {} — vscode-server plugin will need an external install",
-            bin.display()
-        );
-        return None;
-    }
-    let port = find_free_port()?;
-    let bind = format!("127.0.0.1:{}", port);
-    println!(
-        "[papercusp-desktop] spawning code-server bin={} bind={}",
-        bin.display(),
-        bind
-    );
-    let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let mut cmd = Command::new(&bin);
-    cmd.arg("--bind-addr")
-        .arg(&bind)
-        .arg("--auth")
-        .arg("none")
-        .arg("--disable-telemetry")
-        .arg("--disable-update-check")
-        .arg("--user-data-dir")
-        .arg(user_data_dir)
-        .arg("--extensions-dir")
-        .arg(user_data_dir.join("extensions"))
-        .env("HOME", &workspace_home_str)
-        .env("USERPROFILE", &workspace_home_str)
-        .stdin(Stdio::null());
-    // Same console-less-packaged-app hazard as serve (WI-1707/WI-1781): in a
-    // release build there is NO console, so an inherited stdout/stderr is
-    // /dev/null and every code-server diagnostic is lost — leaving a broken
-    // vscode-server plugin undebuggable. Tee to a rotated on-disk log in release;
-    // keep the inherited `tauri dev` console in debug. Fall back to inherit if the
-    // log can't be prepared so logging never blocks code-server from launching.
-    if cfg!(debug_assertions) {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    } else if let Some((out, err)) = rotating_log_stdio(workspace_home, "code-server.log") {
-        cmd.stdout(out).stderr(err);
-    } else {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    }
-    isolate_process_group(&mut cmd);
-    match cmd.spawn() {
-        Ok(child) => Some((child, format!("http://127.0.0.1:{}", port))),
-        Err(e) => {
-            eprintln!("[papercusp-desktop] failed to spawn code-server: {}", e);
-            None
-        }
-    }
 }
 
 fn find_free_port() -> Option<u16> {
@@ -685,31 +612,31 @@ mod serve_log_tests {
         let _ = fs::remove_dir_all(&home);
     }
 
-    // WI-1781: a second console-less sidecar (code-server) routes through the SAME
-    // helper with a DIFFERENT basename. Its ring must rotate independently of
-    // serve.log (no cross-contamination between the two sidecars' logs).
+    // WI-1781: rotating_log_stdio is basename-keyed — a second logfile routed
+    // through the SAME helper must rotate independently of serve.log (no
+    // cross-contamination between distinct log basenames).
     #[cfg(target_os = "linux")]
     #[test]
     fn rotating_log_stdio_isolates_basenames() {
         use std::fs;
-        let home = std::env::temp_dir().join(format!("pcusp-cs-log-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("pcusp-aux-log-{}", std::process::id()));
         let logs = home.join(".papercusp").join("logs");
         let _ = fs::remove_dir_all(&home);
 
         // serve.log gets one generation…
         assert!(super::rotating_log_stdio(&home, "serve.log").is_some());
         fs::write(logs.join("serve.log"), b"serve-A").unwrap();
-        // …and code-server.log its own, created fresh alongside it.
-        assert!(super::rotating_log_stdio(&home, "code-server.log").is_some());
-        assert!(logs.join("code-server.log").exists());
-        fs::write(logs.join("code-server.log"), b"cs-A").unwrap();
+        // …and a second logfile its own, created fresh alongside it.
+        assert!(super::rotating_log_stdio(&home, "aux.log").is_some());
+        assert!(logs.join("aux.log").exists());
+        fs::write(logs.join("aux.log"), b"aux-A").unwrap();
 
-        // Rotating code-server.log must NOT touch serve.log's live file or ring.
-        assert!(super::rotating_log_stdio(&home, "code-server.log").is_some());
-        assert_eq!(fs::read(logs.join("code-server.log.1")).unwrap(), b"cs-A");
+        // Rotating aux.log must NOT touch serve.log's live file or ring.
+        assert!(super::rotating_log_stdio(&home, "aux.log").is_some());
+        assert_eq!(fs::read(logs.join("aux.log.1")).unwrap(), b"aux-A");
         assert!(
             !logs.join("serve.log.1").exists(),
-            "serve.log ring untouched by code-server rotation"
+            "serve.log ring untouched by aux.log rotation"
         );
         assert_eq!(fs::read(logs.join("serve.log")).unwrap(), b"serve-A");
 
@@ -2727,24 +2654,6 @@ fn spawn_self_hosted_sidecar(
     })?;
     let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
 
-    // Bundled code-server for the vscode-server iframe — optional + None-safe
-    // (mirrors the Server-role boot). A missing binary just disables that panel.
-    let code_server_url: Option<String> = {
-        let cs_dir = sidecar_dir.join("code-server");
-        let user_data_dir = shared_state_dir.join("code-server");
-        let _ = std::fs::create_dir_all(&user_data_dir);
-        match spawn_code_server(&cs_dir, workspace_home, &user_data_dir) {
-            Some((child, url)) => {
-                if let Some(state) = app_handle.try_state::<SidecarState>() {
-                    *state.code_server_child.lock().unwrap() = Some(child);
-                }
-                println!("[papercusp-gui] code-server ready at {url}");
-                Some(url)
-            }
-            None => None,
-        }
-    };
-
     let child = spawn_serve(
         via_wsl,
         port,
@@ -2752,7 +2661,6 @@ fn spawn_self_hosted_sidecar(
         pg_port_hint,
         &shared_state_dir,
         workspace_home,
-        code_server_url.as_deref(),
     )?;
 
     if let Some(state) = app_handle.try_state::<SidecarState>() {
@@ -2768,7 +2676,6 @@ fn spawn_self_hosted_sidecar(
             pg_port_hint,
             shared_state_dir,
             workspace_home.to_path_buf(),
-            code_server_url,
         );
     } else {
         // Managed state missing (should never happen — it's registered on the
@@ -3124,7 +3031,6 @@ fn spawn_serve(
     pg_port_hint: u16,
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
-    code_server_url: Option<&str>,
 ) -> std::io::Result<Child> {
     println!(
         "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}",
@@ -3232,7 +3138,7 @@ fn spawn_serve(
              PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
              PAPERCUSP_DBOS_ORCHESTRATOR:PAPERCUSP_PROVISION_ENV_OPERATORS:\
              HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
-             PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
+             PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
              PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
              PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR",
         );
@@ -3405,12 +3311,6 @@ fn spawn_serve(
         cmd.env("PAPERCUSP_USE_EMBEDDED_PG", v);
     }
 
-    // Surface the bundled code-server URL so the operator's contributions
-    // resolver can use it as the iframe default for @papercupai/vscode-server.
-    if let Some(url) = code_server_url {
-        cmd.env("PAPERCUSP_CODE_SERVER_URL", url);
-    }
-
     // Endpoint IPC opt-in (default ON — it dodges WebKitGTK's ~6-connection
     // libsoup cap for the webview's SSE/fetch traffic). runBootstrap inside
     // serve starts the IPC server and writes endpoint-ipc.json; we read the
@@ -3466,7 +3366,6 @@ fn spawn_serve_supervisor(
     pg_port_hint: u16,
     shared_state_dir: std::path::PathBuf,
     workspace_home: std::path::PathBuf,
-    code_server_url: Option<String>,
 ) {
     const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
     const MAX_RESPAWNS_PER_WINDOW: usize = 5;
@@ -3485,7 +3384,6 @@ fn spawn_serve_supervisor(
     let sup_sidecar = sidecar_dir;
     let sup_shared = shared_state_dir;
     let sup_home = workspace_home;
-    let sup_code_url = code_server_url;
     std::thread::spawn(move || {
         let mut respawn_times: Vec<Instant> = Vec::new();
         // WI-3170: start of the current continuous-unreachable streak
@@ -3662,7 +3560,6 @@ fn spawn_serve_supervisor(
                         sup_pg_hint,
                         &sup_shared,
                         &sup_home,
-                        sup_code_url.as_deref(),
                     ) {
                         Ok(c) => {
                             *state.child.lock().unwrap() = Some(c);
@@ -4333,7 +4230,6 @@ pub fn run() {
 
     let state = SidecarState {
         child: Mutex::new(None),
-        code_server_child: Mutex::new(None),
         port: Mutex::new(None),
         endpoint_ipc_socket: Mutex::new(None),
         shutdown_done: std::sync::atomic::AtomicBool::new(false),
@@ -4692,25 +4588,6 @@ pub fn run() {
             // HARNESS_*_DATABASE_URL env) passes through inside spawn_serve.
             let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
 
-            // Spawn the bundled code-server so the @papercupai/vscode-server
-            // plugin's iframe has something to point at without the user
-            // having to install code-server separately. URL is surfaced to
-            // the sidecar via PAPERCUSP_CODE_SERVER_URL.
-            let code_server_url: Option<String> = {
-                let cs_dir = sidecar_dir.join("code-server");
-                let user_data_dir = shared_state_dir.join("code-server");
-                let _ = std::fs::create_dir_all(&user_data_dir);
-                match spawn_code_server(&cs_dir, &workspace_home, &user_data_dir) {
-                    Some((child, url)) => {
-                        let state: tauri::State<SidecarState> = app.state();
-                        *state.code_server_child.lock().unwrap() = Some(child);
-                        println!("[papercusp-desktop] code-server ready at {}", url);
-                        Some(url)
-                    }
-                    None => None,
-                }
-            };
-
             // On Windows the harness needs POSIX, so we route the sidecar
             // through `wsl.exe --distribution papercup-runtime` once the
             // user has finished the WslOnboardingGate. Until then we
@@ -4797,7 +4674,6 @@ pub fn run() {
                 pg_port_hint,
                 &shared_state_dir,
                 &workspace_home,
-                code_server_url.as_deref(),
             ) {
                 Ok(c) => c,
                 Err(e) => {
@@ -4820,7 +4696,6 @@ pub fn run() {
                 pg_port_hint,
                 shared_state_dir.clone(),
                 workspace_home.clone(),
-                code_server_url.clone(),
             );
 
             // WI-2648: the always-on Server owns the docs-search palette global
@@ -5021,10 +4896,6 @@ fn kill_sidecar(app_handle: &tauri::AppHandle) {
         } else {
             graceful_kill(&mut child, "serve (operator + embedded-PG)", 8000);
         }
-    }
-    let maybe_cs = state.code_server_child.lock().unwrap().take();
-    if let Some(mut child) = maybe_cs {
-        graceful_kill(&mut child, "code-server", 2000);
     }
 }
 
