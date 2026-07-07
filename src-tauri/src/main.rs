@@ -872,15 +872,17 @@ mod discovery_tests {
     use super::{decide_server_supervision, ServerSupervisionAction as A};
 
     // A live Server just resets the dead counter.
+    // (Args: process_alive, server_shell_alive, in_boot_grace, dead_count,
+    // dead_threshold, respawns_in_window, max_respawns, already_gave_up.)
     #[test]
     fn supervision_healthy_when_process_alive() {
         assert_eq!(
-            decide_server_supervision(true, false, 0, 10, 0, 5, false),
+            decide_server_supervision(true, false, false, 0, 10, 0, 5, false),
             A::Healthy
         );
         // …even if it was flapping a moment ago (dead_count carried in).
         assert_eq!(
-            decide_server_supervision(true, false, 7, 10, 0, 5, false),
+            decide_server_supervision(true, false, false, 7, 10, 0, 5, false),
             A::Healthy
         );
     }
@@ -890,7 +892,7 @@ mod discovery_tests {
     #[test]
     fn supervision_waits_during_boot_grace() {
         assert_eq!(
-            decide_server_supervision(false, true, 99, 10, 0, 5, false),
+            decide_server_supervision(false, false, true, 99, 10, 0, 5, false),
             A::Wait
         );
     }
@@ -900,7 +902,7 @@ mod discovery_tests {
     #[test]
     fn supervision_waits_below_debounce_threshold() {
         assert_eq!(
-            decide_server_supervision(false, false, 9, 10, 0, 5, false),
+            decide_server_supervision(false, false, false, 9, 10, 0, 5, false),
             A::Wait
         );
     }
@@ -910,11 +912,11 @@ mod discovery_tests {
     #[test]
     fn supervision_respawns_when_dead_past_threshold() {
         assert_eq!(
-            decide_server_supervision(false, false, 10, 10, 0, 5, false),
+            decide_server_supervision(false, false, false, 10, 10, 0, 5, false),
             A::Respawn
         );
         assert_eq!(
-            decide_server_supervision(false, false, 10, 10, 4, 5, false),
+            decide_server_supervision(false, false, false, 10, 10, 4, 5, false),
             A::Respawn
         );
     }
@@ -924,24 +926,84 @@ mod discovery_tests {
     #[test]
     fn supervision_gives_up_at_respawn_cap() {
         assert_eq!(
-            decide_server_supervision(false, false, 10, 10, 5, 5, false),
+            decide_server_supervision(false, false, false, 10, 10, 5, 5, false),
             A::GiveUp
         );
     }
 
-    // Once given up, the decision latches to Wait until the app restarts —
-    // never Respawn/GiveUp again.
+    // WI-3270 (b): give-up is a BACKOFF, not a terminal latch — the old
+    // latch-until-app-restart is exactly what left the VM dead until a manual
+    // Server restart.
     #[test]
-    fn supervision_latches_after_give_up() {
+    fn supervision_gives_up_then_recovers() {
+        // While the respawn window is still saturated, a latched give-up holds
+        // (and never re-notifies — GiveUp only fires on the transition).
         assert_eq!(
-            decide_server_supervision(false, false, 999, 10, 0, 5, true),
+            decide_server_supervision(false, false, false, 999, 10, 5, 5, true),
             A::Wait
         );
-        // A live process while latched-off is still just Wait (no work to do).
+        // Window drained → retry (the slow-retry tier; the caller clears the latch).
         assert_eq!(
-            decide_server_supervision(true, false, 0, 10, 0, 5, true),
-            A::Wait
+            decide_server_supervision(false, false, false, 999, 10, 0, 5, true),
+            A::Respawn
         );
+        // The Server coming back while latched reads Healthy (caller clears latch).
+        assert_eq!(
+            decide_server_supervision(true, false, false, 0, 10, 0, 5, true),
+            A::Healthy
+        );
+    }
+
+    // WI-3270 (c): operator dead but the Server SHELL is alive (fresh
+    // heartbeat) — launching the bundle is a guaranteed single-instance no-op,
+    // so the watcher must defer and never burn a respawn-cap slot, no matter
+    // how long the operator has been dead or how saturated the window is.
+    #[test]
+    fn supervision_defers_to_live_shell_instead_of_burning_the_cap() {
+        assert_eq!(
+            decide_server_supervision(false, true, false, 999, 10, 0, 5, false),
+            A::DeferToShell
+        );
+        assert_eq!(
+            decide_server_supervision(false, true, false, 999, 10, 5, 5, false),
+            A::DeferToShell
+        );
+        // A latched give-up defers too (the shell may still recover it).
+        assert_eq!(
+            decide_server_supervision(false, true, false, 999, 10, 5, 5, true),
+            A::DeferToShell
+        );
+        // A live operator process wins over the shell signal.
+        assert_eq!(
+            decide_server_supervision(true, true, false, 0, 10, 0, 5, false),
+            A::Healthy
+        );
+    }
+
+    // WI-3270 (c): the shell-heartbeat freshness rule + JSON round-trip guard
+    // the defer-to-shell signal (the live write/read sides need two processes,
+    // which Linux CI can't exercise — same blind-spot rationale as above).
+    use super::{shell_heartbeat_fresh, ServerShellHeartbeat};
+
+    #[test]
+    fn shell_heartbeat_freshness_boundary() {
+        let max = Duration::from_secs(10);
+        assert!(shell_heartbeat_fresh(100, 100, max));
+        assert!(shell_heartbeat_fresh(100, 110, max)); // exactly max age: fresh
+        assert!(!shell_heartbeat_fresh(100, 111, max)); // past it: stale
+        assert!(shell_heartbeat_fresh(110, 100, max)); // future ts (clock skew): fresh
+    }
+
+    #[test]
+    fn shell_heartbeat_json_round_trip() {
+        let hb = ServerShellHeartbeat {
+            pid: 4242,
+            ts: 1_720_000_000,
+        };
+        let body = serde_json::to_string(&hb).unwrap();
+        let back: ServerShellHeartbeat = serde_json::from_str(&body).unwrap();
+        assert_eq!(back.pid, 4242);
+        assert_eq!(back.ts, 1_720_000_000);
     }
 
     // WI-2667 (defect-2 gap): the SERVER-side serve respawn decision. This is the
@@ -1109,6 +1171,9 @@ mod discovery_tests {
         assert!(body.contains("serve.mjs in-process respawn cap hit"));
         assert!(body.contains('5'));
         assert!(body.contains("300"));
+        // WI-3270: give-up now keeps retrying in the background — the user-facing
+        // text must say so (the old "restart the app to recover" implied a wedge).
+        assert!(body.contains("Retries continue"));
     }
 }
 
