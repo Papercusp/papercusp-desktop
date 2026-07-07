@@ -825,6 +825,33 @@ fn windows_psu_cmd_contents() -> String {
     )
 }
 
+/// Contents of the Windows Terminal *fragment extension* that registers a
+/// "Papercusp (psu)" profile (WI-3299). Dropped into
+/// %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Papercusp\ so psu is
+/// one dropdown-pick away in Windows Terminal instead of a default-PowerShell
+/// hop + a typed `psu`. The profile deliberately DELEGATES to the WI-3044
+/// psu.cmd shim (`cmd.exe /c …\psu.cmd`) rather than re-embedding the wsl.exe
+/// invocation: psu.cmd is the single, WI-2955/3033/3295-hardened source of
+/// truth for the `--distribution/--cd/--exec` form + the post-exit terminal-
+/// mode reset, and a duplicated wsl line here would silently drift from it.
+/// Built with serde_json so the `\`-heavy Windows path is escaped correctly.
+///
+/// Notes: Windows Terminal expands `%VAR%` in `commandline`/`startingDirectory`
+/// (and cmd.exe re-expands `%LOCALAPPDATA%` at runtime as a belt-and-suspenders),
+/// and it synthesizes a stable profile GUID from the fragment source + `name`,
+/// so no explicit `guid` is needed for a NEW profile.
+#[cfg(any(target_os = "windows", test))]
+fn windows_terminal_fragment_contents() -> String {
+    serde_json::json!({
+        "profiles": [{
+            "name": "Papercusp (psu)",
+            "commandline": r#"cmd.exe /c "%LOCALAPPDATA%\Papercusp\bin\psu.cmd""#,
+            "startingDirectory": "%USERPROFILE%"
+        }]
+    })
+    .to_string()
+}
+
 /// PowerShell that idempotently appends %LOCALAPPDATA%\Papercusp\bin to the
 /// USER PATH. Reads the raw registry value (DoNotExpandEnvironmentNames) and
 /// writes back ExpandString so existing %VAR% entries survive — the naive
@@ -894,6 +921,27 @@ pub fn ensure_windows_cli_shims() {
             String::from_utf8_lossy(&o.stderr)
         ),
         Err(e) => eprintln!("[papercusp-desktop] cli-shims: spawn powershell: {e}"),
+    }
+
+    // WI-3299: register a Windows Terminal profile ("Papercusp (psu)") via a
+    // fragment extension so the manual `psu` path skips the default-PowerShell
+    // hop. Best-effort + last (never blocks the psu.cmd/PATH shims above);
+    // rewritten every Ready boot so upgrades refresh it and a deleted one
+    // self-heals. WT ignores the dir entirely when it isn't installed.
+    let frag_dir = std::path::Path::new(&local)
+        .join("Microsoft")
+        .join("Windows Terminal")
+        .join("Fragments")
+        .join("Papercusp");
+    match std::fs::create_dir_all(&frag_dir) {
+        Ok(()) => match std::fs::write(
+            frag_dir.join("papercusp.json"),
+            windows_terminal_fragment_contents(),
+        ) {
+            Ok(()) => println!("[papercusp-desktop] cli-shims: Windows Terminal psu profile registered"),
+            Err(e) => eprintln!("[papercusp-desktop] cli-shims: write WT fragment: {e}"),
+        },
+        Err(e) => eprintln!("[papercusp-desktop] cli-shims: create WT fragment dir {frag_dir:?}: {e}"),
     }
 }
 
@@ -1017,6 +1065,58 @@ mod tests {
         let cmd = windows_psu_cmd_contents();
         assert!(cmd.contains("\r\n"));
         assert!(cmd.is_ascii(), "psu.cmd must stay pure ASCII: {cmd}");
+    }
+
+    // ── windows_terminal_fragment_contents (WI-3299) ──
+
+    #[test]
+    fn wt_fragment_is_valid_json_with_a_single_psu_profile() {
+        let frag = windows_terminal_fragment_contents();
+        let v: serde_json::Value =
+            serde_json::from_str(&frag).expect("WT fragment must be valid JSON");
+        let profiles = v
+            .get("profiles")
+            .and_then(|p| p.as_array())
+            .expect("fragment has a `profiles` array");
+        assert_eq!(profiles.len(), 1, "exactly one profile: {frag}");
+        assert_eq!(
+            profiles[0].get("name").and_then(|n| n.as_str()),
+            Some("Papercusp (psu)"),
+            "profile name is the WT-dropdown label: {frag}"
+        );
+    }
+
+    #[test]
+    fn wt_fragment_delegates_to_psu_cmd_never_a_duplicated_wsl_line() {
+        // The whole point of routing through cmd.exe /c …\psu.cmd is that the
+        // wsl invocation lives in ONE place (WI-2955/3033/3295). A wsl.exe line
+        // re-embedded here would silently drift from that hardening.
+        let frag = windows_terminal_fragment_contents();
+        let v: serde_json::Value = serde_json::from_str(&frag).expect("valid JSON");
+        let cl = v["profiles"][0]["commandline"]
+            .as_str()
+            .expect("profile has a `commandline`");
+        assert!(
+            cl.starts_with("cmd.exe /c"),
+            "psu.cmd is a batch file — must run via cmd.exe /c: {cl}"
+        );
+        assert!(
+            cl.contains(r"\Papercusp\bin\psu.cmd"),
+            "commandline must launch the psu.cmd shim: {cl}"
+        );
+        assert!(
+            !frag.contains("wsl.exe") && !frag.contains("--distribution"),
+            "fragment must delegate to psu.cmd, not re-embed the wsl invocation: {frag}"
+        );
+    }
+
+    #[test]
+    fn wt_fragment_is_ascii() {
+        // Same encoding trap as the other generated Windows artifacts.
+        assert!(
+            windows_terminal_fragment_contents().is_ascii(),
+            "WT fragment must stay pure ASCII"
+        );
     }
 
     #[test]
