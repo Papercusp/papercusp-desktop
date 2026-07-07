@@ -1,0 +1,1 @@
+import{a as e,c as t,f as n,i as r,l as i,n as a,o,r as s,s as c,t as l,u}from"./src-Cq_jKirT.js";e();export{l as DEFAULT_WASM_MEMORY_BUDGET_MB,a as KvQuotaError,s as PAPERCUSP_RUNTIME_VERSION,u as TIER_TABLE,r as defineService,o as isDaemonRuntime,c as isIframeSurface,t as isTuiPaneSurface,i as isWasmRuntime,n as lookupTier};

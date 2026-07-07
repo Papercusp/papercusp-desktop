@@ -1,0 +1,1 @@
+var e=new Set;function t(t,n){for(let r of e)r(t,n)}function n(t){return e.add(t),()=>{e.delete(t)}}export{n,t};

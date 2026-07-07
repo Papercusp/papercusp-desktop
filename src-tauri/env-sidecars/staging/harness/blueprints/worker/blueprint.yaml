@@ -1,0 +1,64 @@
+# The `worker` blueprint — worker-chunk-loop-operator-hosted-2026-06-14 (P-003,
+# = deterministic-blueprints-migration-2026-06-13 P-142).
+#
+# The coding WORKER's chunk loop as an operator-hosted DETERMINISTIC program
+# blueprint: one gateless step that fires the registered `worker:chunk-loop` op,
+# which PORTS `runWorkerChunkLoop()` into the operator process (up-front chunk
+# planning, per-chunk file locks, the L1 typecheck gate, replan-strikes,
+# escalate-to-debugger) instead of the bash/subprocess `invoke-once` worker path.
+# Like the migrated learning loops (negative-space / iq-battery), it is a
+# program-mode spine with NO gate ⇒ a deterministic PIPELINE: the single step runs
+# to completion, "resolving" means "the chunk loop ran". The op maps the
+# `ChunkLoopOutcome` (completed / planning_failed / escalated / aborted) into its
+# bound result so the coding director can route the next turn off it.
+#
+# The worker agent is spawned INTERNALLY by the op's `invoke()` calls (the same
+# governed model the subprocess ran), NOT as a spine `role` — so this is NOT a
+# `spawn-roles` hybrid and declares no agent roles (the iq-battery pattern, D-013).
+#
+# NO scheduled trigger: unlike the cadence loops, this is fired by the coding
+# director's NEXT_WORKER dispatch when the `papercusp-worker-chunk-loop-blueprint`
+# flag is ON (P-004, DEFAULT-OFF — the staged-rollout gate, D-003). OFF ⇒ the
+# subprocess worker path is unchanged. Wiring the director dispatch + the
+# dark-launch is the converging "enable" step (NOT this blueprint).
+id: worker
+extends: base
+version: 0.1.0
+description: >-
+  Operator-hosted coding worker: run one feature's chunk loop (plan → per-chunk
+  acquire/implement/typecheck-gate → commit / replan / escalate) as a deterministic
+  program step. The durable-program port of the subprocess chunk-loop worker.
+
+# Operates ON an existing coding feature (the director passes `payload.featureId`);
+# the deterministic pipeline does NOT mint a work-item row, but the schema requires
+# the field — `feature` is the coding work-item kind.
+workItem:
+  kind: feature
+  idPrefix: F
+
+# Program-mode spine: one deterministic step, NO gate ⇒ deterministic pipeline.
+# `payload.featureId` is the feature the director is dispatching the worker for.
+# A whole-string `{{ payload.featureId }}` that is unset interpolates to undefined
+# → the op's required `featureId` arg rejects (a worker run with no feature IS an
+# error) — so a misconfigured fire fails loud rather than silently no-opping.
+spine:
+  steps:
+    - id: chunk-loop
+      op: worker:chunk-loop
+      args:
+        featureId: "{{ payload.featureId }}"
+      bind: chunkLoop
+
+knobs:
+  harnessKind: coding
+  # The worker edits the project repo in a scratch worktree + commits chunks, so
+  # it needs a repo checkout (the op resolves it via resolveProject().path).
+  requiresRepo: true
+
+# No agent roles (the worker model is spawned INTERNALLY by the op's invoke()
+# calls, not by a spine edge) and no agent-tool deps — the step calls a registered
+# function. No triggers — fired by the coding director's NEXT_WORKER dispatch when
+# the staged-rollout flag is on, not on a cadence.
+dependencies:
+  tools: []
+  plugins: []

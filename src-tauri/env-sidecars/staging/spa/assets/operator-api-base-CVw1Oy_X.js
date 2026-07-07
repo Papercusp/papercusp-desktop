@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(){return{}.PAPERCUSP_OPERATOR_BASE??`http://localhost:${{}.PAPERCUSP_HONO_PORT??`3070`}`}var n=e((()=>{}));export{t as n,n as t};

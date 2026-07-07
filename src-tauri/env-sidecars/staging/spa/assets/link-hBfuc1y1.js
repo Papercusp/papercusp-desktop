@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./link-CCrlx5uS.js";var n=e();function r({href:e,prefetch:r,legacyBehavior:i,passHref:a,as:o,...s}){return(0,n.jsx)(t,{to:e,...s})}export{r as t};

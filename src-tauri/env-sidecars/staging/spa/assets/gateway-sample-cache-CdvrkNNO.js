@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t,i as n,r}from"./gateway-wedge-CX_XkbrV.js";function i(e,n){let i=r(e,void 0,n),c=o!==void 0&&e.totalRequests===o.totalRequests;i.saturated&&c?s===void 0&&(s=o):s=void 0;let l=r(e,s,n,{minFreezeMs:a});return o=t(e,n),l}var a,o,s;e((()=>{n(),a=6e4}))();export{i as readGatewayWedge};

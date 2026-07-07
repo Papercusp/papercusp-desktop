@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./MarkdownEditor-DWTiwTyZ.js";var n=e(),r=[`headings`,`bold`,`italic`,`strike`,`|`,`list`,`ordered-list`,`check`,`quote`,`|`,`code`,`inline-code`,`link`,`table`,`|`,`edit-mode`,`preview`,`export`],i=[];function a(e){return(0,n.jsx)(t,{...e,outline:!1,toolbar:e.readOnly?i:r})}export{a as t};

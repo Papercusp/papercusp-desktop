@@ -1,0 +1,1 @@
+import{l as e,o as t}from"./console-spawn-M_03wmNu.js";t();export{e as spawnConsole};

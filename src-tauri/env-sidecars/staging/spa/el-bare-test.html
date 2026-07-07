@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>EL Conv AI bare test</title>
+  <style>
+    body { font-family: ui-monospace, Menlo, monospace; padding: 32px; max-width: 720px; margin: 0 auto; line-height: 1.5; }
+    button { font: inherit; padding: 8px 16px; cursor: pointer; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; max-height: 400px; }
+    .ok { color: #16a34a; } .fail { color: #dc2626; } .note { color: #666; }
+  </style>
+</head>
+<body>
+<h1>EL Conv AI bare test</h1>
+<p>Bypasses the entire operator app. Mints a token from the operator's
+bootstrap endpoint, opens a Conversation directly via <code>@elevenlabs/client</code>,
+and logs every event. Use to disambiguate "EL itself is broken on this
+machine" from "our integration has a bug."</p>
+
+<p><button id="start">Start session</button>
+<button id="stop" disabled>Stop</button></p>
+
+<pre id="log">click "Start session" to begin…</pre>
+
+<script type="module">
+  // jsdelivr's +esm endpoint pre-resolves bare imports against the
+  // npm registry. Pin to 1.4.0 to match our app's installed version.
+  const { Conversation } = await import('https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.4.0/+esm')
+    .catch((e) => { document.getElementById('log').textContent = 'CDN load failed: ' + e.message; throw e; });
+
+  const log = document.getElementById('log');
+  const startBtn = document.getElementById('start');
+  const stopBtn = document.getElementById('stop');
+  let conv = null;
+  let connectedAt = 0;
+
+  function append(line, cls = '') {
+    const ts = new Date().toLocaleTimeString();
+    const span = cls ? `<span class="${cls}">${line}</span>` : line;
+    log.innerHTML += `[${ts}] ${span}\n`;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  startBtn.addEventListener('click', async () => {
+    log.innerHTML = '';
+    append('=== bare EL test starting ===');
+
+    // 1. Mint a token from the operator's bootstrap endpoint.
+    append('minting token via /api/agent-mcp/operator-elevenlabs-bootstrap …');
+    let token, agentId;
+    try {
+      const r = await fetch('/api/agent-mcp/operator-elevenlabs-bootstrap');
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        append(`mint failed: HTTP ${r.status} — ${body.slice(0, 300)}`, 'fail');
+        return;
+      }
+      ({ conversationToken: token, agentId } = await r.json());
+      append(`token: ${token.slice(0, 30)}… (len ${token.length})`, 'ok');
+      append(`agentId: ${agentId}`);
+    } catch (e) {
+      append(`mint threw: ${e.message}`, 'fail');
+      return;
+    }
+
+    // 2. Open the session — NO clientTools, NO overrides. Maximum
+    //    minimal config so we can isolate the failure mode.
+    append('opening Conversation.startSession … (this can take 10-15s)');
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    try {
+      conv = await Conversation.startSession({
+        conversationToken: token,
+        connectionType: 'webrtc',
+        textOnly: false,
+        clientTools: {},
+        onConnect: ({ conversationId }) => {
+          connectedAt = Date.now();
+          append(`onConnect — conversationId: ${conversationId}`, 'ok');
+        },
+        onDisconnect: (details) => {
+          const aliveMs = connectedAt ? Date.now() - connectedAt : 0;
+          append(`onDisconnect — aliveMs=${aliveMs}, details=${JSON.stringify(details)}`, aliveMs < 5000 ? 'fail' : '');
+        },
+        onMessage: ({ message, source }) => {
+          append(`onMessage[${source}]: ${String(message).slice(0, 200)}`, 'ok');
+        },
+        onError: (msg) => {
+          append(`onError: ${msg}`, 'fail');
+        },
+        onModeChange: (mode) => append(`onModeChange: ${JSON.stringify(mode)}`, 'note'),
+        onStatusChange: (status) => append(`onStatusChange: ${JSON.stringify(status)}`, 'note'),
+      });
+      append('Conversation.startSession resolved', 'ok');
+      append('Now SPEAK something. The agent will reply if audio is flowing.');
+    } catch (e) {
+      append(`startSession threw: ${e.message}`, 'fail');
+      conv = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    if (conv) {
+      try { await conv.endSession(); } catch (e) { append(`stop threw: ${e.message}`, 'fail'); }
+      append('session ended');
+      conv = null;
+    }
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  });
+</script>
+</body>
+</html>

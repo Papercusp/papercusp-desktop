@@ -1,0 +1,1 @@
+import{i as e,o as t}from"./wake-mode-CdHLmT00.js";t();export{e as getDefaultWakeMode};

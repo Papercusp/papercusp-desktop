@@ -1,0 +1,1 @@
+import{r as e,t}from"./bee-wake-efficiency-Dpn_8fbs.js";e();export{t as beeWakeEfficiency};
