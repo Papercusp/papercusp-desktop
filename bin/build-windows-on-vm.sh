@@ -225,17 +225,45 @@ trap 'rm -f "$TARBALL"' EXIT
 # in-flight publish completes AND blocks a new publish from starting until the
 # read is done, so the tree is stable across the whole pack. flock creates the
 # lock file if absent (harmless — it's excluded from the tarball below).
-flock "$ROOT/src-tauri/sidecar.lock" \
-tar -czhf "$TARBALL" \
-  --exclude='.git' \
-  --exclude='papercusp-desktop/node_modules' \
-  --exclude='papercusp-desktop/web/node_modules' \
-  --exclude='src-tauri/target' \
-  --exclude='src-tauri/sidecar.tmp.*' \
-  --exclude='src-tauri/sidecar.lock*' \
-  --exclude='src-tauri/sidecar/code-server' \
-  --exclude='src-tauri/sidecar/bin/omp' \
-  -C "$ROOT/.." papercusp-desktop
+(
+  flock 9
+  # ── env-sidecars/staging (WI-3285 P-004; pinned contract, plan
+  # env-switcher-packaged-all-platforms-2026-07-06) ──
+  # The packaged env switcher spawns <sidecarDir>/env-sidecars/<envId>/serve.mjs.
+  # V1 ships exactly ONE extra bundle: staging — and since THIS build is cut from
+  # the staging tip, the bundle HARDLINKS the primary sidecar's payload (tar
+  # stores hardlinked content once, so the 3.4GiB raw guard and pack time are
+  # unaffected; Inno compresses the extra copy per-file at ISCC time). Staged
+  # OUTSIDE sidecar/ (build-desktop-sidecar.sh's atomic publish REPLACES sidecar/
+  # wholesale — anything inside would be silently wiped) and re-staged fresh on
+  # every pack, inside the same flock, so it can never go stale or race a
+  # publish. Sidecar-shaped per the contract: serve.mjs + spa/ + db-sql/ (+
+  # prompts/harness when present). NO bin/ (the launcher reuses the primary's
+  # node), NO internal-docs (V1 env serves no /internal/docs), NO db-seed (the
+  # env attaches to the primary's embedded PG, EI-126 request-only).
+  ENV_SC="$ROOT/src-tauri/env-sidecars/staging"
+  rm -rf "$ROOT/src-tauri/env-sidecars"
+  mkdir -p "$ENV_SC"
+  cp -al "$ROOT/src-tauri/sidecar/serve.mjs" "$ENV_SC/serve.mjs"
+  cp -al "$ROOT/src-tauri/sidecar/spa" "$ENV_SC/spa"
+  cp -al "$ROOT/src-tauri/sidecar/db-sql" "$ENV_SC/db-sql"
+  for env_sc_extra in prompts harness; do
+    if [[ -d "$ROOT/src-tauri/sidecar/$env_sc_extra" ]]; then
+      cp -al "$ROOT/src-tauri/sidecar/$env_sc_extra" "$ENV_SC/$env_sc_extra"
+    fi
+  done
+  echo "    env-sidecars/staging staged ($(du -sh "$ENV_SC" | cut -f1) apparent, hardlinked — ~0 extra tar bytes)"
+  tar -czhf "$TARBALL" \
+    --exclude='.git' \
+    --exclude='papercusp-desktop/node_modules' \
+    --exclude='papercusp-desktop/web/node_modules' \
+    --exclude='src-tauri/target' \
+    --exclude='src-tauri/sidecar.tmp.*' \
+    --exclude='src-tauri/sidecar.lock*' \
+    --exclude='src-tauri/sidecar/code-server' \
+    --exclude='src-tauri/sidecar/bin/omp' \
+    -C "$ROOT/.." papercusp-desktop
+) 9>>"$ROOT/src-tauri/sidecar.lock"
 ls -lh "$TARBALL"
 
 echo "==> shipping to VM"

@@ -79,6 +79,16 @@ Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesu
 ; the seed to the Server bundle so the GUI installer is ~0.5 GB (exe+sidecar).
 #if AppId == "com.papercusp.server"
 Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs createallsubdirs nocompression
+; Bundled env sidecars (WI-3285; pinned contract, plan
+; env-switcher-packaged-all-platforms-2026-07-06): the packaged env switcher
+; spawns <sidecarDir>\env-sidecars\<envId>\serve.mjs for the non-primary env
+; buttons (V1 ships exactly one: staging; prod falls back to the primary's own
+; serve.mjs in the launcher). Server-bundle-only — the GUI never runs an
+; operator. Staged by build-windows-on-vm.sh OUTSIDE sidecar\ in the build tree
+; (sidecar\ is atomically REPLACED by every sidecar publish, which would wipe
+; anything staged inside it) and mapped under {app}\sidecar here so runtime
+; discovery (dirname(PAPERCUSP_SIDECAR_BIN)/env-sidecars) finds it.
+Source: "{#BuildRoot}\env-sidecars\*"; DestDir: "{app}\sidecar\env-sidecars"; Flags: recursesubdirs createallsubdirs
 #endif
 
 [Icons]
