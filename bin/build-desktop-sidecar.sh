@@ -1069,6 +1069,32 @@ fi
 # dump-less snapshot on spawn failure). Resolve the real binary or fail loud.
 _is_script() { [[ "$(head -c 2 "$1" 2>/dev/null)" == "#!" ]]; }
 
+# WI-3314 (darwin): brew-keg Mach-Os reference absolute /usr/local | /opt/homebrew
+# dylib paths that exist only on Homebrew machines (masked on the build VM, dead
+# on clean targets). Vendor the non-system dylib closure into bin/.pg-lib and
+# rewrite every reference @executable_path-relative (@loader_path between
+# dylibs), then ad-hoc re-sign each mutated Mach-O — install_name_tool
+# invalidates the linker signature, and a stale signature can SIGKILL on load.
+# The darwin twin of the Linux .pg-real/LD_LIBRARY_PATH wrapper above.
+_darwin_vendor_keg_dylibs() {
+  local target="$1" prefix="$2"
+  local libdir="$SIDECAR_DIR/bin/.pg-lib"
+  mkdir -p "$libdir"
+  local dep base
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    base="$(basename "$dep")"
+    if [[ ! -e "$libdir/$base" ]]; then
+      cp -L "$dep" "$libdir/$base"
+      chmod 755 "$libdir/$base"
+      install_name_tool -id "@loader_path/$base" "$libdir/$base"
+      _darwin_vendor_keg_dylibs "$libdir/$base" "@loader_path"
+    fi
+    install_name_tool -change "$dep" "$prefix/$base" "$target"
+  done < <(otool -L "$target" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^(/usr/local|/opt/homebrew)/' || true)
+  codesign --force -s - "$target"
+}
+
 _pg_build_os="$(uname -s)"
 for tool in pg_dump psql pg_dumpall pg_restore; do
   src=""
@@ -1146,6 +1172,9 @@ WRAP
         # EACCESes overwriting its own previous read-only copy on rebuild.
         cp -L "$src" "$SIDECAR_DIR/bin/$tool"
         chmod 755 "$SIDECAR_DIR/bin/$tool"
+        if [[ "$_pg_build_os" == "Darwin" ]]; then
+          _darwin_vendor_keg_dylibs "$SIDECAR_DIR/bin/$tool" "@executable_path/.pg-lib"
+        fi
         # Windows: an .exe copied without its sibling DLLs (libpq.dll, ssl,
         # iconv/intl) still resolves them via PATH on the BUILD host — masked
         # — and breaks on clean machines (WI-3313). Ship the source dir's
