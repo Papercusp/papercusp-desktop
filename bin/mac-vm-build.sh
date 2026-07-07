@@ -266,6 +266,20 @@ done
   || { echo "ERROR: env-sidecars/staging incomplete (need serve.mjs + spa/ + db-sql/)"; exit 1; }
 echo "    ✓ env-sidecars/staging staged ($(du -sh "$ENV_SC" | cut -f1) apparent, clonefile-shared)"
 
+# ── dev/local runnable source tree (WI-3307 all-5-buttons; mirrors
+# build-windows-on-vm.sh + release-local.sh) ────────────────────────────────
+# stage-source-tree.sh self-gates on PAPERCUSP_STAGE_SOURCE=1 (prints a skip
+# line otherwise) and writes src-tauri/sidecar/source.tar.zst; the existing
+# `sidecar/**/*` resources glob sweeps it into the bundle. Unlike Windows this
+# runs on the VM's own sequential checkout, so no sidecar flock is needed
+# (same rationale as the env-sidecars staging above). The archive ships in the
+# SERVER app only — see the per-role stash in the build loop below.
+bash bin/stage-source-tree.sh
+if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]]; then
+  [[ -f src-tauri/sidecar/source.tar.zst ]] \
+    || { echo "ERROR: PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no src-tauri/sidecar/source.tar.zst"; exit 1; }
+fi
+
 echo "--- tauri build ($MAC_BUILD_TARGET) ---"
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
 # legacy _PATH spelling forward so older callers keep working.
@@ -331,6 +345,15 @@ for role in $PAPERCUSP_BUILD_ROLES; do
     echo "    (PAPERCUSP_FAST_ITER=1 — skipping updater artifacts; NOT a release build)"
     fast_cfg=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
   fi
+  # WI-3307 (all-5-buttons): the multi-GB dev/local source bundle ships in the
+  # SERVER app only — Server spawns the operator (main.rs points
+  # PAPERCUSP_SOURCE_ARCHIVE at its OWN sidecar copy), while a GUI copy would
+  # just double the .app + DMG footprint on the disk-tight VM. Stash it out of
+  # sidecar/ for the gui leg; restore for the server leg (+ after the loop).
+  SRC_ZST="src-tauri/sidecar/source.tar.zst"
+  SRC_ZST_STASH="src-tauri/source.tar.zst.role-stash"
+  if [[ "$role" == "gui" && -f "$SRC_ZST" ]]; then mv "$SRC_ZST" "$SRC_ZST_STASH"; fi
+  if [[ "$role" == "server" && -f "$SRC_ZST_STASH" ]]; then mv "$SRC_ZST_STASH" "$SRC_ZST"; fi
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
   # Downstream (release fetch, install verify) reads artifacts from the legacy
@@ -341,6 +364,11 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   done
 done
 unset CARGO_TARGET_DIR
+# WI-3307: if the loop ended with the source archive still stashed (e.g.
+# PAPERCUSP_BUILD_ROLES="gui"), put it back so the sidecar dir stays complete.
+if [[ -f "src-tauri/source.tar.zst.role-stash" ]]; then
+  mv "src-tauri/source.tar.zst.role-stash" "src-tauri/sidecar/source.tar.zst"
+fi
 
 # ── third icon: "Papercusp Tutorial & Setup.app" baked into the DMGs (WI-2945) ──
 # Parity with the Linux .deb's third .desktop entry + the Windows Start-Menu
