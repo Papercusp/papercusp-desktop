@@ -792727,7 +792727,32 @@ function defaultSpawnOperator(entry2, treePath) {
           PAPERCUSP_PROVISION_ENV_OPERATORS: "0",
           // Each child reached by top-level navigation, not the primary's IPC fast path.
           PAPERCUSP_IPC_ENABLE: "0",
-          DBOS__VMID: `desktop-env-${entry2.port}`
+          DBOS__VMID: `desktop-env-${entry2.port}`,
+          // WI-3287 (found live on the first real packaged-Linux verify,
+          // 2026-07-07): this child re-execs the SAME serve.mjs as the primary
+          // under the SAME $HOME. Two things in serve.ts are unconditional and
+          // MUST be told this is a request-only sibling, not another primary:
+          //  1. The cold-start singleton lock (`operator.lock`) is held by the
+          //     primary for its ENTIRE lifetime (released only on shutdown) —
+          //     without PAPERCUSP_ENV_OPERATOR_ID scoping its own lock file,
+          //     this child's boot ALWAYS aborts with "another `serve` holds the
+          //     cold-start lock" the moment the primary is up (which is always,
+          //     by the time this launcher runs). It also keeps this child off
+          //     the primary's operator.json / sticky-port-memory files (those
+          //     must name the primary alone — a reconnecting client or the next
+          //     restart must never be handed an env sidecar's port).
+          //  2. PAPERCUSP_USE_EMBEDDED_PG='0' + the inherited
+          //     HARNESS_ADMIN_DATABASE_URL/HARNESS_DATABASE_URL (already in
+          //     process.env — the primary's own ensurePostgres() stamped them)
+          //     route this child straight to serve.ts's "attach to external
+          //     Postgres" branch, so it NEVER calls startEmbeddedPostgresServer
+          //     (double-initdb against the SAME dataDir) or sweepOrphanPostgres
+          //     — which, on the shared dataDir, would find the primary's own
+          //     live postmaster and KILL it, mistaking it for an orphan. The
+          //     "shared embedded PG, EI-126 request-only" contract only holds
+          //     with this attach-not-manage path.
+          PAPERCUSP_ENV_OPERATOR_ID: entry2.id,
+          PAPERCUSP_USE_EMBEDDED_PG: "0"
         }
       });
       child2.unref();
@@ -1024383,7 +1024408,11 @@ var PAPERCUSP_DIR = join344(homedir92(), ".papercusp");
 var OPERATOR_JSON = join344(PAPERCUSP_DIR, "operator.json");
 var EMBEDDED_PG_JSON = join344(PAPERCUSP_DIR, "embedded-pg.json");
 var SUPERUSER_TOKEN = join344(PAPERCUSP_DIR, "superuser-token");
-var LOCK_PATH = join344(PAPERCUSP_DIR, "operator.lock");
+var ENV_OPERATOR_ID = process.env.PAPERCUSP_ENV_OPERATOR_ID || null;
+function lockFileNameForEnvId(envOperatorId) {
+  return envOperatorId ? `operator.lock.env-${envOperatorId}` : "operator.lock";
+}
+var LOCK_PATH = join344(PAPERCUSP_DIR, lockFileNameForEnvId(ENV_OPERATOR_ID));
 var VERSION13 = getBuildInfo().version;
 function log3(msg2) {
   console.log(`[serve] ${msg2}`);
@@ -1024664,10 +1024693,8 @@ async function main3() {
     ensureToolPathEnv();
   }
   const hostname10 = process.env.PAPERCUSP_BIND_HOST ?? process.env.HOSTNAME ?? "127.0.0.1";
-  const port = await resolveStickyPort(
-    Number(process.env.PAPERCUSP_HONO_PORT ?? process.env.PORT ?? 3070),
-    hostname10
-  );
+  const honoPortHint = Number(process.env.PAPERCUSP_HONO_PORT ?? process.env.PORT ?? 3070);
+  const port = ENV_OPERATOR_ID ? honoPortHint : await resolveStickyPort(honoPortHint, hostname10);
   const httpUrl2 = `http://${hostname10}:${port}`;
   if (ensure) {
     const existing = readOperatorDiscovery();
@@ -1024706,9 +1024733,11 @@ async function main3() {
           server3?.close?.();
         } catch {
         }
-        try {
-          unlinkSync8(OPERATOR_JSON);
-        } catch {
+        if (!ENV_OPERATOR_ID) {
+          try {
+            unlinkSync8(OPERATOR_JSON);
+          } catch {
+          }
         }
         if (pg21) sigintPostmasterSync(resolvedPgDataDir());
         releaseColdStartLock();
@@ -1024734,20 +1024763,22 @@ async function main3() {
     runBootstrap2();
     server3 = serve2({ fetch: handler5, port, hostname: hostname10 }, async (info) => {
       log3(`listening on http://${hostname10}:${info.port} (UI ${process.env.PAPERCUSP_SERVE_UI === "0" ? "OFF" : "ON"})`);
-      const discovery = {
-        httpUrl: httpUrl2,
-        port: info.port,
-        token: readToken(),
-        pid: process.pid,
-        startedAt: Date.now(),
-        version: VERSION13
-      };
-      await writeJsonAtomic(OPERATOR_JSON, discovery);
-      log3(`wrote ${OPERATOR_JSON}`);
-      try {
-        await writeJsonAtomic(OPERATOR_PORT_MEMORY, { port: info.port, updatedAt: Date.now() });
-      } catch (e2) {
-        log3(`could not persist port memory (${e2.message}) \u2014 next restart re-picks`);
+      if (!ENV_OPERATOR_ID) {
+        const discovery = {
+          httpUrl: httpUrl2,
+          port: info.port,
+          token: readToken(),
+          pid: process.pid,
+          startedAt: Date.now(),
+          version: VERSION13
+        };
+        await writeJsonAtomic(OPERATOR_JSON, discovery);
+        log3(`wrote ${OPERATOR_JSON}`);
+        try {
+          await writeJsonAtomic(OPERATOR_PORT_MEMORY, { port: info.port, updatedAt: Date.now() });
+        } catch (e2) {
+          log3(`could not persist port memory (${e2.message}) \u2014 next restart re-picks`);
+        }
       }
     });
   } catch (e2) {
@@ -1024782,6 +1024813,7 @@ if (invokedDirectly) {
 }
 export {
   acquireColdStartLock,
+  lockFileNameForEnvId,
   pidAlive7 as pidAlive,
   portAvailable,
   readOperatorDiscovery,
