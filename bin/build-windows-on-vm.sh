@@ -137,9 +137,28 @@ cut_release_seed() {
   local core_args=()
   [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]] && core_args+=(--no-corestore)
   [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
+  # WI-3244: snapshotting the LIVE per-workspace corestore fails "File descriptor
+  # could not be locked" while the operator/substrate on this box holds it open —
+  # the cutter needs a quiescent store. PAPERCUSP_SEED_REUSE_CORESTORE=1 instead
+  # grafts the ALREADY-CUT corestore from src-tauri/seed onto a fresh git cut
+  # (cut-seed-cli --reuse-corestore, WI-3232): no quiesce, no lock, fresh code
+  # seed. The corestore snapshot is then as old as the last full cut — fine for
+  # dogfood; do a quiesced full cut when the hive STATE itself must be current.
+  if [[ "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" == "1" ]]; then
+    core_args=(--reuse-corestore "$ROOT/src-tauri/seed")
+    [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under PAPERCUSP_SEED_REUSE_CORESTORE=1" >&2
+  fi
+  # WI-3232 (owner: "Full pot, plaintext seed" — alpha dogfood): the installer seed
+  # MUST carry seed/epoch-keys.json or a fresh offline install cannot decrypt the
+  # pot (no admission ever happens). cut-seed-cli emits it only on --emit-epoch-key,
+  # and this script historically never passed it — every epoch-keyed seed so far
+  # came from a manual cut. Opt out for a non-dogfood build with
+  # PAPERCUSP_SEED_EMIT_EPOCH_KEY=0 (ships the hive readable — deliberate here).
+  local emit_args=()
+  [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
+  echo "==> seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0})"
   local depth_args=()
   [[ -n "$seed_depth" ]] && depth_args+=(--depth "$seed_depth")
-  echo "==> seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1})"
   (
     cd "$operator_dir"
     OPATH="$PATH"
@@ -156,8 +175,9 @@ cut_release_seed() {
         --hive "$seed_hive" \
         --rev "$seed_rev" \
         "${depth_args[@]}" \
-        "${core_args[@]}"
-  ) || fail "seed cut failed (set PAPERCUSP_SKIP_SEED_CUT=1 to build with an existing/placeholder seed)"
+        "${core_args[@]}" \
+        "${emit_args[@]}"
+  ) || fail "seed cut failed (PAPERCUSP_SEED_REUSE_CORESTORE=1 grafts the existing corestore when the live store is fd-locked by the running operator; PAPERCUSP_SKIP_SEED_CUT=1 reuses the whole existing seed)"
 }
 cut_release_seed
 

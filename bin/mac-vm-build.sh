@@ -98,11 +98,27 @@ cut_release_seed() {
   if [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]]; then
     core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
   fi
+  # WI-3244 (parity with build-windows-on-vm.sh): the LIVE per-workspace corestore
+  # is fd-locked by the running operator/substrate, so a fresh snapshot fails
+  # "File descriptor could not be locked" without a quiesce.
+  # PAPERCUSP_SEED_REUSE_CORESTORE=1 grafts the ALREADY-CUT corestore from
+  # src-tauri/seed onto a fresh git cut (cut-seed-cli --reuse-corestore, WI-3232).
+  if [[ "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" == "1" ]]; then
+    core_args=(--reuse-corestore "$ROOT/src-tauri/seed")
+    [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under PAPERCUSP_SEED_REUSE_CORESTORE=1" >&2
+  fi
+  # WI-3232 (owner: "Full pot, plaintext seed" — alpha dogfood): without
+  # seed/epoch-keys.json a fresh offline install cannot decrypt the pot, and
+  # cut-seed-cli emits it only on --emit-epoch-key (this script never passed it —
+  # epoch-keyed seeds so far came from manual cuts). Opt out with
+  # PAPERCUSP_SEED_EMIT_EPOCH_KEY=0.
+  local emit_args=()
+  [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
   fi
-  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1}) ---"
+  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0}) ---"
   (
     cd "$operator_dir"
     OPATH="$PATH"
@@ -119,7 +135,8 @@ cut_release_seed() {
         --hive "$seed_hive" \
         --rev "$seed_rev" \
         "${depth_args[@]}" \
-        "${core_args[@]}"
+        "${core_args[@]}" \
+        "${emit_args[@]}"
   )
 }
 
