@@ -221,6 +221,45 @@ else
   echo "    ✓ zellij ${ZJ_VER} (${ZJ_ARCH}) → sidecar/bin/zellij"
 fi
 
+# ── env-sidecars/staging (WI-3285 P-004; pinned contract, plan
+# env-switcher-packaged-all-platforms-2026-07-06) ──────────────────────────
+# The packaged env switcher spawns <sidecarDir>/env-sidecars/<envId>/serve.mjs,
+# discovered via dirname(PAPERCUSP_SIDECAR_BIN) = the installed sidecar dir
+# (env-operator-launcher.ts resolveBundledSidecar). V1 ships exactly ONE extra
+# bundle: staging — and this build is cut from the staging tip, so it clones
+# the just-built primary sidecar's payload. Unlike Windows (packed from the
+# SHARED dev-box tree, so staged outside sidecar/ and mapped in by the Inno
+# .iss), this script runs sequentially on the VM's own checkout AFTER the
+# sidecar publish, so staging INSIDE sidecar/ is stable — the same pattern as
+# the chat-dock files above — and the existing `sidecar/**/*` resources glob
+# (both role confs) bundles it into Contents/Resources with zero tauri.conf /
+# Rust changes. Nesting inside sidecar/ also lets the env serve.mjs resolve
+# the primary's node_modules (createRequire walks up), same as Windows'
+# {app}\sidecar\env-sidecars layout. Sidecar-shaped per the contract:
+# serve.mjs + spa/ + db-sql/ (+ prompts/harness when present). NO bin/ (the
+# launcher reuses the primary's node), NO internal-docs (V1 env serves no
+# /internal/docs), NO db-seed (the env attaches to the primary's embedded PG,
+# EI-126 request-only). APFS clonefile (cp -c) keeps the staged copy ~0 extra
+# bytes on the chronically-tight VM disk; tauri copies real bytes into the
+# .app at bundle time.
+echo "--- env-sidecars/staging (packaged env switcher, P-004) ---"
+env_sc_copy() { # $1=src $2=dst — clonefile when the fs supports it, else copy
+  rm -rf "$2"
+  cp -Rc "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }
+}
+ENV_SC="$SIDECAR/env-sidecars/staging"
+rm -rf "$SIDECAR/env-sidecars"
+mkdir -p "$ENV_SC"
+env_sc_copy "$SIDECAR/serve.mjs" "$ENV_SC/serve.mjs"
+env_sc_copy "$SIDECAR/spa" "$ENV_SC/spa"
+env_sc_copy "$SIDECAR/db-sql" "$ENV_SC/db-sql"
+for env_sc_extra in prompts harness; do
+  [[ -e "$SIDECAR/$env_sc_extra" ]] && env_sc_copy "$SIDECAR/$env_sc_extra" "$ENV_SC/$env_sc_extra"
+done
+[[ -f "$ENV_SC/serve.mjs" && -d "$ENV_SC/spa" && -d "$ENV_SC/db-sql" ]] \
+  || { echo "ERROR: env-sidecars/staging incomplete (need serve.mjs + spa/ + db-sql/)"; exit 1; }
+echo "    ✓ env-sidecars/staging staged ($(du -sh "$ENV_SC" | cut -f1) apparent, clonefile-shared)"
+
 echo "--- tauri build ($MAC_BUILD_TARGET) ---"
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
 # legacy _PATH spelling forward so older callers keep working.
