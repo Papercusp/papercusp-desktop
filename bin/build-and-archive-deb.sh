@@ -53,6 +53,18 @@ fi
 DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"
 ARCHIVE_DIR="$DEB_DIR/archive"
 
+# WI-3287 / env-switcher-packaged-all-platforms-2026-07-06: stage the bundled
+# env-sidecars/staging bundle inside sidecar/ (if a sidecar was already built)
+# so the packaged env switcher has a real staging button — see
+# bin/stage-env-sidecars.sh for the contract. Best-effort: this script does
+# not itself build the sidecar (the documented manual flow does that first),
+# so skip quietly if there's nothing to stage yet.
+if [[ -f "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" ]]; then
+  bash "$DESKTOP_DIR/bin/stage-env-sidecars.sh"
+else
+  echo "NOTE: src-tauri/sidecar/serve.mjs not found — skipping env-sidecars/staging (run bin/build-desktop-sidecar.sh first for a packaged staging button)"
+fi
+
 echo "=== building ($BUILD_CMD) ==="
 ( cd "$DESKTOP_DIR" && eval "$BUILD_CMD" )
 

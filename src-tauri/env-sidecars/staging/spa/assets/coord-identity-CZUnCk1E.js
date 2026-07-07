@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./coord-identity-DpefGfzP.js";e();export{t as scoutCoordOwnerId};

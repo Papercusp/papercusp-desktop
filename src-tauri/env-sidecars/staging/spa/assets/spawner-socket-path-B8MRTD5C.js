@@ -1,1 +1,0 @@
-import{n as e,o as t}from"./chunk-CMxvf4Kt.js";import{t as n}from"./__vite-browser-external-CM3Eme-n.js";function r(){let e={}[o];return e&&e.trim()?e.trim():a.join(i.tmpdir(),`papercusp-spawner-${process.pid}.sock`)}var i,a,o,s=e((()=>{i=t(n(),1),a=t(n(),1),o=`PAPERCUSP_SPAWNER_IPC_SOCKET`}));export{s as n,r,o as t};

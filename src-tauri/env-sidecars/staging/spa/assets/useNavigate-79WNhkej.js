@@ -1,1 +1,0 @@
-import{o as e}from"./chunk-CMxvf4Kt.js";import{t}from"./react-C1Wm8aMI.js";import{o as n,t as r}from"./useRouter-pzuoE0_r.js";var i=e(t(),1);function a(e){let t=r();return i.useCallback(n=>t.navigate({...n,from:n.from??e?.from}),[e?.from,t])}function o(e){let t=r(),o=a(),s=i.useRef(null);return n(()=>{s.current!==e&&(o(e),s.current=e)},[t,e,o]),null}export{a as n,o as t};

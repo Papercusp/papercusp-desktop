@@ -1,1 +1,0 @@
-import{n as e,t}from"./plugin-configs-pg-CFQWal_S.js";t();export{e as loadPluginConfig};

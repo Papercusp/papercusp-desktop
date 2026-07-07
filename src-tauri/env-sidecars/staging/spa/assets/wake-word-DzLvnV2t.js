@@ -1,1 +1,0 @@
-function e(e,t){let n=e.toLowerCase(),r=t.toLowerCase(),i=n.lastIndexOf(r);if(i<0)return{matched:!1,dispatchText:``,trailing:``};let a=e.slice(i+r.length).trim();return a?{matched:!0,dispatchText:/^operator\s+/i.test(a)?a:`operator ${a}`,trailing:a}:{matched:!0,dispatchText:``,trailing:``}}export{e as t};

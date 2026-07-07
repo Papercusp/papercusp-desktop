@@ -1,1 +1,0 @@
-import{a as e,n as t,o as n,r}from"./registry-IMbjaTuk.js";t();export{r as listReactionRules,e as registerReactionRule,n as unregisterReactionRule};

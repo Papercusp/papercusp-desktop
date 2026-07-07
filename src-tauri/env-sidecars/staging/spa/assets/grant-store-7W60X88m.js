@@ -1,7 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./__vite-browser-external-CM3Eme-n.js";import{q as n,t as r}from"./src-DTtGQmae.js";import{t as i}from"./event-log-DlTwD7ps.js";function a(e){if(typeof e!=`object`||!e)return JSON.stringify(e)??`null`;if(Array.isArray(e))return`[`+e.map(e=>e===void 0?`null`:a(e)).join(`,`)+`]`;let t=e,n=Object.keys(t).sort(),r=[];for(let e of n){let n=t[e];n!==void 0&&r.push(JSON.stringify(e)+`:`+a(n))}return`{`+r.join(`,`)+`}`}var o=e((()=>{t(),Buffer.from(`302a300506032b6570032100`,`hex`)})),s,c=e((()=>{s=[`chat`,`steer`,`work-offer`,`wake`,`spawn`,`read-artifacts`],new Set(s)}));function l(e){let t=e?.trim();return t&&t!==`*`&&t!=="default"?t:void 0}async function u(e,t){!Number.isFinite(e.epoch)||e.epoch<=0||await(t??n().sql)`
-    INSERT INTO harness_shared.p2p_grantor_epochs
-      (workspace_id, harness_slug, grantor_github_user_id, high_water_epoch, updated_at)
-    VALUES (${e.workspaceId}, ${e.hiveSlug}, ${e.grantorGithubUserId}, ${e.epoch}, now())
-    ON CONFLICT (workspace_id, harness_slug, grantor_github_user_id)
-    DO UPDATE SET high_water_epoch = GREATEST(harness_shared.p2p_grantor_epochs.high_water_epoch, EXCLUDED.high_water_epoch),
-                  updated_at = now()`}var d=e((()=>{r(),i(),c()}));export{a,c as i,d as n,o,l as r,u as t};

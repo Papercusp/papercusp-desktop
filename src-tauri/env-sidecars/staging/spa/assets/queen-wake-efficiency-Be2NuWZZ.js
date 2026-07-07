@@ -1,1 +1,0 @@
-import{n as e,t}from"./queen-wake-efficiency-_B0cuCCr.js";t();export{e as queenWakeEfficiency};
