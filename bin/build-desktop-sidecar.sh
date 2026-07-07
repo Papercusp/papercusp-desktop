@@ -739,6 +739,38 @@ if [[ "$BASE_PROMPTS_COUNT" -lt 10 ]]; then
 fi
 find "$HARNESS_DST/bin" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
+# Bundle the first-party app-templates (local-first-party-template-bundling-2026-07-07).
+# The `templates:*` verbs resolve the bundled first-party templates from this dir at
+# runtime (packages/operator-core/lib/cupboard/template-store.ts). Tauri's main.rs sets
+# PAPERCUSP_TEMPLATES_DIR -> <resources>/sidecar/templates; a dev checkout with no env
+# falls back to the in-repo templates/ dir. Shipped via tauri.conf.json resources
+# ("sidecar/**/*"). Content only — the per-template checks/*.test.ts are PORTABLE content
+# copied into composed apps, never run in-repo (templates/ is excluded from test discovery).
+TEMPLATES_SRC="$REPO_ROOT/templates"
+TEMPLATES_DST="$SIDECAR_DIR/templates"
+echo "→ copying first-party templates from $TEMPLATES_SRC"
+if [[ ! -d "$TEMPLATES_SRC" ]]; then
+  echo "ERROR: first-party templates dir not found at $TEMPLATES_SRC"
+  exit 1
+fi
+mkdir -p "$TEMPLATES_DST"
+( cd "$TEMPLATES_SRC" && find . -type f \
+    -not -path "./node_modules/*" \
+    -not -path "*/.git/*" ) > /tmp/template-files.txt
+while IFS= read -r f; do
+  rel="${f#./}"
+  mkdir -p "$TEMPLATES_DST/$(dirname "$rel")"
+  cp "$TEMPLATES_SRC/$rel" "$TEMPLATES_DST/$rel"
+done < /tmp/template-files.txt
+rm -f /tmp/template-files.txt
+# Sanity: the first-party set + their self-describing listing.json actually landed.
+tmpl_count=$(find "$TEMPLATES_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
+if [[ "$tmpl_count" -lt 1 ]]; then
+  echo "ERROR: no first-party template listing.json landed at $TEMPLATES_DST"
+  exit 1
+fi
+echo "  ✓ $tmpl_count first-party templates bundled → $TEMPLATES_DST"
+
 # Bundle the @papercusp/orchestrator entry bins as self-contained esbuild .mjs,
 # shipped as a SIBLING of harness/ (sidecar/orchestrator/bin/*.mjs) — the path
 # harnessPath('../orchestrator/bin/...') + the preflight harness check resolve to.
