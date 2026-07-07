@@ -243,25 +243,34 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
     //    every fs op must relay through `wsl.exe` — Windows std::fs against
     //    it fails with os error 3 (found live 2026-07-03, WI-2149), and the
     //    \\wsl.localhost mount is unreliable on real installs.
+    //    WI-3289: an EMPTY mcp_json_contents means "leave the project's
+    //    .mcp.json alone" (buildConsoleEnvelope's skipMcpJson — the agent-
+    //    bridged capability:terminal / fleet:launch-on-plan envelopes).
+    //    Displacing + writing an empty file here would clobber the real one.
     let mcp_path = console_path_join(&envelope.cwd, ".mcp.json");
-    let displaced = if cfs_exists(&mcp_path) {
-        let bak = console_path_join(&envelope.cwd, ".mcp.json.papercusp.bak");
-        // If a stale bak from a previous unclean exit is sitting there,
-        // leave it alone — we'd rather lose our restore than clobber
-        // the user's real mcp.json on a botched cleanup.
-        if !cfs_exists(&bak) {
-            cfs_rename(&mcp_path, &bak).map_err(|e| format!("backup .mcp.json: {e}"))?;
-            true
-        } else {
-            // Best effort: archive ours under a unique name. The user
-            // can sort it out manually.
-            false
-        }
-    } else {
+    let displaced = if envelope.mcp_json_contents.is_empty() {
         false
+    } else {
+        let displaced = if cfs_exists(&mcp_path) {
+            let bak = console_path_join(&envelope.cwd, ".mcp.json.papercusp.bak");
+            // If a stale bak from a previous unclean exit is sitting there,
+            // leave it alone — we'd rather lose our restore than clobber
+            // the user's real mcp.json on a botched cleanup.
+            if !cfs_exists(&bak) {
+                cfs_rename(&mcp_path, &bak).map_err(|e| format!("backup .mcp.json: {e}"))?;
+                true
+            } else {
+                // Best effort: archive ours under a unique name. The user
+                // can sort it out manually.
+                false
+            }
+        } else {
+            false
+        };
+        cfs_write(&mcp_path, &envelope.mcp_json_contents)
+            .map_err(|e| format!("write .mcp.json: {e}"))?;
+        displaced
     };
-    cfs_write(&mcp_path, &envelope.mcp_json_contents)
-        .map_err(|e| format!("write .mcp.json: {e}"))?;
 
     // 3. Build the launcher one-liner (same shape on every OS).
     let oneliner = build_launcher_oneliner(&envelope);
