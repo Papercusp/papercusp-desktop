@@ -959,13 +959,54 @@ mod tests {
             cmd.contains(r#"\"$@\""#),
             "missing \"$@\" forwarding: {cmd}"
         );
+        let wsl_line = cmd
+            .lines()
+            .find(|l| l.starts_with("wsl.exe"))
+            .expect("psu.cmd has a wsl.exe line");
         assert!(
-            cmd.trim_end().ends_with("psu %*"),
-            "missing cmd-side %* tail: {cmd}"
+            wsl_line.trim_end().ends_with("psu %*"),
+            "missing cmd-side %* tail on the wsl line: {cmd}"
         );
         assert!(
             cmd.contains("$HOME/.papercusp/bin/psu"),
             "missing $HOME shim path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn psu_cmd_resets_terminal_modes_after_exit_and_preserves_exit_code() {
+        // WI-3295: a hard-killed TUI (wsl shutdown/crash mid-session) leaves
+        // mouse-tracking / bracketed-paste / hidden-cursor armed in the
+        // surviving console; the reset tail must run AFTER wsl.exe, disable
+        // every mode class, write to stderr (redirected stdout stays clean),
+        // and still return psu's real exit code.
+        let cmd = windows_psu_cmd_contents();
+        for seq in [
+            "[?1049l", // leave alt screen
+            "[!p",     // DECSTR soft reset (DECCKM etc.)
+            "[?1000l", "[?1002l", "[?1003l", "[?1006l", // mouse tracking
+            "[?2004l", // bracketed paste
+            "[?25h",   // show cursor
+            "[0m",     // SGR attributes
+        ] {
+            assert!(cmd.contains(seq), "reset tail missing {seq}: {cmd}");
+        }
+        assert!(
+            cmd.contains("[Console]::Error.Write"),
+            "reset must go to stderr, not stdout: {cmd}"
+        );
+        let wsl_at = cmd.find("wsl.exe").expect("wsl line");
+        let save_at = cmd
+            .find("set PSU_EXIT=%ERRORLEVEL%")
+            .expect("exit-code capture");
+        let reset_at = cmd.find("[?1003l").expect("reset tail");
+        assert!(
+            wsl_at < save_at && save_at < reset_at,
+            "exit code must be captured after wsl.exe and before the reset: {cmd}"
+        );
+        assert!(
+            cmd.trim_end().ends_with("exit /b %PSU_EXIT%"),
+            "psu's exit code must survive the reset tail: {cmd}"
         );
     }
 
