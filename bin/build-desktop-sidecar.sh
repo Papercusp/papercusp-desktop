@@ -1083,6 +1083,15 @@ WRAP
         # EACCESes overwriting its own previous read-only copy on rebuild.
         cp -L "$src" "$SIDECAR_DIR/bin/$tool"
         chmod 755 "$SIDECAR_DIR/bin/$tool"
+        # Windows: an .exe copied without its sibling DLLs (libpq.dll, ssl,
+        # iconv/intl) still resolves them via PATH on the BUILD host — masked
+        # — and breaks on clean machines (WI-3313). Ship the source dir's
+        # DLLs beside the exes: the exe's own dir is first in the Windows
+        # DLL search order, making the tools self-contained.
+        case "$_pg_build_os" in
+          MINGW*|MSYS*|CYGWIN*)
+            cp -n "$(dirname "$src")"/*.dll "$SIDECAR_DIR/bin/" 2>/dev/null || true ;;
+        esac
       fi
       ;;
   esac
@@ -1139,6 +1148,37 @@ if [[ "$_pg_build_os" == "Linux" && -d "$SIDECAR_DIR/bin/.pg-real" ]]; then
       exit 1
     fi
   done
+fi
+
+# ── kopia (snapshot subsystem, WI-3312) ─────────────────────────────────────
+# packages/backup/src/workspace-backup.ts spawns bare `kopia` (KOPIA_BIN ??
+# 'kopia') with sidecar/bin on the operator PATH. It was never bundled: dev
+# boxes have a system kopia so everything worked there, while clean installs
+# got `spawn kopia ENOENT` and every snapshot silently shipped without a
+# kopia backup — same masked-dependency class as the pg_wrapper bug above.
+# kopia is a single fully-static Go binary (Apache-2.0) — vendor it.
+if [[ -x "$SIDECAR_DIR/bin/kopia" ]] && "$SIDECAR_DIR/bin/kopia" --version >/dev/null 2>&1; then
+  echo "  kopia: already bundled ($("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1))"
+else
+  _kopia_src="$(command -v kopia 2>/dev/null || true)"
+  if [[ -z "$_kopia_src" ]]; then
+    echo "ERROR: kopia not found on the build host — required for the bundled snapshot"
+    echo "  subsystem (packages/backup/src/workspace-backup.ts). Install the static"
+    echo "  binary: https://kopia.io/docs/installation/  (apt/brew install kopia)"
+    exit 1
+  fi
+  if _is_script "$_kopia_src"; then
+    echo "ERROR: kopia on PATH ($_kopia_src) is a script shim — refusing to vendor it"
+    exit 1
+  fi
+  cp -L "$_kopia_src" "$SIDECAR_DIR/bin/kopia"
+  chmod 755 "$SIDECAR_DIR/bin/kopia"
+  if ! "$SIDECAR_DIR/bin/kopia" --version >/dev/null 2>&1; then
+    echo "ERROR: bundled kopia fails --version probe as installed"
+    exit 1
+  fi
+  echo "  kopia: copy ($_kopia_src) → $("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1)"
+  echo "kopia: copy (from system PATH) ($_kopia_src)" >> "$SOURCE_NOTE_FILE"
 fi
 
 # NOTE: zero-cache-server is no longer bundled (SP1 C5, 2026-06-06). The
@@ -1701,6 +1741,15 @@ else
   chmod 755 "$SIDECAR_DIR/bin/zellij"
   echo "    ✓ zellij ${ZJ_VER} (${ZJ_TRIPLE}) → sidecar/bin/zellij"
 fi
+
+# ── release-bundle dependency verifier (WI-3315) ────────────────────────────
+# Verifies the bundle against its RUNTIME CONTRACT (manifest of spawned tools,
+# no script shims, linkage closure over bundle libs + base allowlist) BEFORE
+# the atomic publish — a bundle that fails never replaces the last good one.
+# The point: build-host probes are masked (the host has the dev deps), which
+# is exactly how the pg_wrapper psql (WI-3311) and unbundled kopia (WI-3312)
+# shipped broken. See the verifier's header before touching its allowlists.
+"$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR"
 
 # ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
 # Retire the old bundle via rename, rename the temp build into place, then

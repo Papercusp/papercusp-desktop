@@ -59,25 +59,51 @@ OUT="$SIDECAR/source.tar.zst"
 rm -f "$OUT"
 echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 
-# EXCLUDES — heavy or irrelevant to running dev(:3270)/local(:3055):
-#  • .git (7.2G history) — not needed to run.
-#  • papercusp-desktop/ — the Tauri/Rust shell (its own src-tauri/sidecar 2G
-#    self-reference, seed 2.1G, Rust target); the operators never import it and
-#    detectPapercupRoot's markers are at the mono root, not here.
-#  • Rust build targets + OS/editor cruft + logs.
+# EXCLUDES. Two classes:
+#
+# (1) SECRETS / CREDENTIALS — MUST NOT ship (the mono root carries the dev box's
+#     own .env*, .gitconfig, .npmrc, .mcp.json + a nested apps/operator/.env.local).
+#     Even on owner-only dogfood machines, baking creds into a distributable
+#     bundle is wrong + a leak vector if the approach generalizes. Patterns are
+#     ANCHORED to real dotfiles (`/.env.` not `*.env.*`) so a legit source file
+#     like `foo.env.d.ts` is NOT collateral-excluded.
+#
+# (2) HEAVY / IRRELEVANT to running dev(:3270 tsx hono-host)/local(:3055 vite):
+#     .git (7.2G history); papercusp-desktop/ (the Tauri/Rust shell — its own
+#     src-tauri/sidecar 2G self-reference, seed 2.1G, Rust target; the operators
+#     never import it and detectPapercupRoot's markers live at the mono root);
+#     Rust build targets; editor dirs; logs; tsbuildinfo.
+#
 # node_modules IS KEPT — it is the shipped toolchain (tsx/vite + the whole
 # @papercusp/* runtime closure). dist/.next are DELIBERATELY kept: some internal
 # packages resolve their "main" to a built dist/ at runtime, so pruning them
 # would break module resolution.
+declare -a EXCLUDES=(
+  # (1) secrets / credentials — root + nested, anchored to dotfiles
+  --exclude='./.env' --exclude='*/.env'
+  --exclude='./.env.*' --exclude='*/.env.*'
+  --exclude='./.npmrc' --exclude='*/.npmrc'
+  --exclude='./.gitconfig' --exclude='*/.gitconfig'
+  --exclude='./.git-credentials' --exclude='*/.git-credentials'
+  --exclude='./.netrc' --exclude='*/.netrc'
+  --exclude='./.mcp.json' --exclude='./.mcp.json.*'
+  --exclude='*/.mcp.json' --exclude='*/.mcp.json.*'
+  --exclude='./.bashrc' --exclude='./.bash_profile' --exclude='./.bash_history'
+  --exclude='./.profile' --exclude='./.zshrc'
+  # (2) heavy / irrelevant
+  --exclude='./.git'
+  --exclude='./papercusp-desktop'
+  --exclude='./target' --exclude='./.cargo-target'
+  --exclude='*/.turbo'
+  --exclude='./.idea' --exclude='*/.idea'
+  --exclude='./.vscode' --exclude='*/.vscode'
+  --exclude='*.log'
+  --exclude='*.tsbuildinfo'
+  --exclude='./.DS_Store' --exclude='*/.DS_Store'
+)
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
 tar --numeric-owner --owner=0 --group=0 \
-  --exclude='./.git' \
-  --exclude='./papercusp-desktop' \
-  --exclude='./target' \
-  --exclude='./.cargo-target' \
-  --exclude='*/.turbo' \
-  --exclude='*.log' \
-  --exclude='./.DS_Store' \
+  "${EXCLUDES[@]}" \
   -C "$MONO" -cf - . \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
 
