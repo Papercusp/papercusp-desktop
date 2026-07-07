@@ -955,7 +955,11 @@ if [[ "$_pgv_os" != "windows" && "${pgvector_copied:-0}" -eq 0 ]]; then
 fi
 
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
-# subsystem (libs/papercusp-export-state/src/pg-dump.ts) finds them.
+# subsystem (packages/backup/src/hook.ts spawns `pg_dump` by bare name; the
+# legacy libs/papercusp-export-state/src/pg-dump.ts is retired) finds them.
+# NOTE hook.ts DEGRADES SOFTLY on spawn failure — a broken vendored tool means
+# snapshots silently ship WITHOUT the PG dump, which is why the guards below
+# hard-fail the build instead of trusting a runtime error to surface it.
 # Replaces the legacy WASM-pg_dump path that went through pglite-server's
 # /admin/pg-dump endpoint.
 #

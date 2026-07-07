@@ -11,12 +11,10 @@
 # Usage:
 #   fed.sh <a|b> ports                      # show the discovered operator/PG ports
 #   fed.sh <a|b> sql  "<SQL>"               # psql against the VM's embedded PG
-#        ⚠ needs a REAL psql inside the guest. The app's bundled bin/psql is a
-#        broken Debian pg_wrapper (perl shim; dies without PgCommon.pm) and the
-#        golden image installs no client — so on a clean VM this verb (and the
-#        port-discovery psql probe below) FAILS. Fallback: the bundled node+pg
-#        recipe — "Querying the guest's embedded Postgres" in the
-#        linux-vm-desktop-testing-workflow agent-insight.
+#        (uses the guest's psql if on PATH, else the app's bundled
+#        sidecar/bin/psql — real client binaries ship with the app since
+#        2026-07-07; installs built before that shipped a broken pg_wrapper
+#        shim, so on those run a fresh `vmctl install`)
 #   fed.sh <a|b> api  <METHOD> <path> [json-body]   # superuser HTTP route
 #   fed.sh <a|b> mcp  <tool> [json-args]    # superuser MCP tool call
 #   fed.sh <a|b> ssh  <cmd...>              # raw ssh into the VM
@@ -63,6 +61,8 @@ _ssh() { ssh "${SSHOPT[@]}" -p "$sshp" "$SSH_USER@$SSH_HOST" "$@"; }
 _discover() {
   _ssh 'bash -s' <<'REMOTE'
 set -uo pipefail
+# psql: guest PATH first, else the app's bundled client (ships since 2026-07-07)
+PSQL="$(command -v psql || echo '/usr/lib/Papercusp GUI/sidecar/bin/psql')"
 # candidate operator ports: the app log's listening lines, then every LISTENing
 # loopback port (catch a port the log missed / a stale log).
 cands="$(
@@ -78,7 +78,7 @@ done
 pg=""
 for p in $(ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u); do
   [ "$p" = "$op" ] && continue
-  if psql "postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$p/papercusp?connect_timeout=3" -tAc 'select 1' >/dev/null 2>&1; then
+  if "$PSQL" "postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$p/papercusp?connect_timeout=3" -tAc 'select 1' >/dev/null 2>&1; then
     pg="$p"; break
   fi
 done
@@ -120,7 +120,7 @@ case "$cmd" in
   sql)
     _resolve || exit 1
     b64=$(printf '%s' "${1:-}" | base64 -w0)
-    _ssh "echo $b64 | base64 -d | psql 'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$pg/papercusp' -P pager=off 2>&1"
+    _ssh "P=\$(command -v psql || echo '/usr/lib/Papercusp GUI/sidecar/bin/psql'); echo $b64 | base64 -d | \"\$P\" 'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$pg/papercusp' -P pager=off 2>&1"
     ;;
 
   api)

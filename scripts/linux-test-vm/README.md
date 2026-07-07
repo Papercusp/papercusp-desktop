@@ -37,16 +37,16 @@ SPICE 127.0.0.1:5932.
 `vmctl install` defaults to the newest
 `src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb`; pass a path to override.
 
-## Querying the VM's embedded Postgres — there is NO working psql in the guest
+## Querying the VM's embedded Postgres
 
-The packaged app's `sidecar/bin/psql` (and `pg_dump`/`pg_dumpall`/`pg_restore`)
-are Debian `pg_wrapper` perl shims copied from the build host — on a clean
-system they die with `Can't locate PgCommon.pm`, and the embedded-postgres
-native bin is server-only (`initdb`/`pg_ctl`/`postgres`). **`which psql`
-succeeding inside the VM does NOT mean psql works.** Query via the bundled
-node + `pg` module instead — recipe in the `linux-vm-desktop-testing-workflow`
-agent-insight ("Querying the guest's embedded Postgres"); the DSN is in the
-guest's `~/.papercusp/embedded-pg.json`.
+The app bundles real PostgreSQL client tools at
+`/usr/lib/Papercusp GUI/sidecar/bin/` (`psql`, `pg_dump`, `pg_dumpall`,
+`pg_restore`) — self-contained, wired to the embedded libpq. `fed.sh <a|b> sql`
+uses them automatically; the DSN is in the guest's
+`~/.papercusp/embedded-pg.json`. (Installs from builds before 2026-07-07
+shipped a broken `pg_wrapper` shim instead — symptom: `Can't locate
+PgCommon.pm`. Reinstall a fresh .deb, or see the node+pg fallback in the
+`linux-vm-desktop-testing-workflow` agent-insight.)
 
 Tunables via env: `PAPERCUSP_TESTVM_RAM_MB`, `PAPERCUSP_TESTVM_CPUS`,
 `PAPERCUSP_TESTVM_DISK`, `PAPERCUSP_TESTVM_HOME`.
