@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-CgWhu5i_.js";e();export{t as buildConsoleEnvelope};

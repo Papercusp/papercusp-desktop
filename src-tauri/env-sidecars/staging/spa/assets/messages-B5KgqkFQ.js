@@ -1,1 +1,0 @@
-import{A as e,D as t,E as n,M as r,N as i,O as a,T as o,j as s,k as c}from"./inbox-wake-CJxL58zL.js";a();export{o as appendAck,n as drainAndDeliverUserMailbox,t as getMessageById,c as readAckedMsgIds,e as readInbox,s as readOutbox,r as readThread,i as sendMessage};

@@ -1,0 +1,1 @@
+import{s as e}from"./configure-DUrDKNfB.js";import{t}from"./backend-BBqKBuTb.js";t();export{e as getMemoryBackend};
