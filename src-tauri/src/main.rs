@@ -2566,12 +2566,19 @@ fn ensure_server_running(
 
 /// Linux single-bundle self-host: spawn + OWN the operator sidecar from the GUI
 /// process. Mirrors the Server-role boot in run()'s setup (embedded-PG + the Hono
-/// operator + code-server, all inside `serve.mjs --ensure`) MINUS the tray + the
-/// respawn supervisor — so a single `apt install ./papercusp.deb` (or the
-/// AppImage) is fully self-contained on a fresh machine, with no separately
-/// installed "Papercusp Server" bundle required. The `serve.mjs` child is stored
-/// in `SidecarState.child` so the ordinary GUI quit path (`kill_sidecar`) shuts
-/// embedded-PG + the operator down gracefully instead of orphaning postgres.
+/// operator + code-server, all inside `serve.mjs --ensure`) MINUS the tray — so a
+/// single `apt install ./papercusp.deb` (or the AppImage) is fully self-contained
+/// on a fresh machine, with no separately installed "Papercusp Server" bundle
+/// required. The `serve.mjs` child is stored in `SidecarState.child` so the
+/// ordinary GUI quit path (`kill_sidecar`) shuts embedded-PG + the operator down
+/// gracefully instead of orphaning postgres.
+///
+/// WI-1878: this path used to skip the respawn supervisor entirely — a dead
+/// serve.mjs child here (SIGTERM, crash) stayed down until the user manually
+/// quit + reopened the whole app, because nothing else owns or watches this
+/// child on single-bundle Linux. Now shares `spawn_serve_supervisor` with the
+/// Server-role boot path, so a killed operator child gets the same
+/// respawn-with-backoff + crash-loop cap here too.
 #[cfg(target_os = "linux")]
 fn spawn_self_hosted_sidecar(
     app_handle: &tauri::AppHandle,
@@ -2635,6 +2642,18 @@ fn spawn_self_hosted_sidecar(
     if let Some(state) = app_handle.try_state::<SidecarState>() {
         *state.child.lock().unwrap() = Some(child);
         *state.port.lock().unwrap() = Some(port);
+        // WI-1878: this self-hosted child otherwise has no supervisor — wire
+        // it into the same respawn-with-backoff loop the Server role uses.
+        spawn_serve_supervisor(
+            app_handle.clone(),
+            via_wsl,
+            port,
+            sidecar_dir,
+            pg_port_hint,
+            shared_state_dir,
+            workspace_home.to_path_buf(),
+            code_server_url,
+        );
     } else {
         // Managed state missing (should never happen — it's registered on the
         // builder in run()). Leak the handle so the process survives: std's
@@ -3253,6 +3272,253 @@ fn spawn_serve(
     }
 
     cmd.spawn()
+}
+
+/// Spawn the background thread that supervises + respawns a `serve.mjs`
+/// child we OWN, with a debounced-unreachable check + crash-loop cap.
+///
+/// WI-1878: this used to live inline in the Server-role boot path only —
+/// which meant the Linux single-bundle self-host path (`spawn_self_hosted_sidecar`,
+/// used by `npm run dev` / a plain `apt install` with no separate "Papercusp
+/// Server" bundle running) span up `serve.mjs` with NO supervision at all: a
+/// SIGTERM'd or crashed operator child stayed dead until the user manually
+/// quit + reopened the whole app. Extracted so BOTH sidecar-owning boot paths
+/// (Server role, and the Linux GUI self-host) get the same respawn-with-backoff
+/// behavior — see decide_serve_respawn's doc for the state machine itself.
+///
+/// WI-2667 (defect-2 gap fix): supervise our OWN serve.mjs child. The
+/// GUI-side watcher's `open -b` CANNOT revive an operator that died
+/// while this Server shell is still alive (single-instance dedupes the
+/// launch → no-op), and nothing else reaps/restarts it — proved live on
+/// the Mac VM 2026-07-04 (SIGTERM the operator → 100s, zero recovery, an
+/// unreaped zombie). So the Server watches its child: `try_wait` REAPS
+/// the zombie AND detects the exit, and we respawn serve in-process
+/// (covers the headless-Server-no-GUI case too). Guards: `shutdown_done`
+/// (normal quit / self-update — don't fight the teardown), an
+/// operator-reachability check (don't double-spawn when `--ensure`
+/// reused a foreign operator, Decision C), and a crash-loop cap.
+fn spawn_serve_supervisor(
+    app_handle: tauri::AppHandle,
+    via_wsl: bool,
+    port: u16,
+    sidecar_dir: std::path::PathBuf,
+    pg_port_hint: u16,
+    shared_state_dir: std::path::PathBuf,
+    workspace_home: std::path::PathBuf,
+    code_server_url: Option<String>,
+) {
+    const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
+    const MAX_RESPAWNS_PER_WINDOW: usize = 5;
+    // WI-3170: how long the operator must be CONTINUOUSLY unreachable
+    // (while our serve `Child` still looks alive — on Windows the Child
+    // is the wsl.exe WRAPPER, which outlives a dead inner node) before
+    // we respawn it. Only armed AFTER the operator has come up once this
+    // session (see `ever_reachable`), so a slow cold boot (serve.mjs
+    // alive, initdb + migration replay not yet serving) never trips it
+    // and double-spawns a competing serve.
+    const SERVE_UNREACHABLE_DEBOUNCE: Duration = Duration::from_secs(15);
+    let sup_handle = app_handle;
+    let sup_via_wsl = via_wsl;
+    let sup_port = port;
+    let sup_pg_hint = pg_port_hint;
+    let sup_sidecar = sidecar_dir;
+    let sup_shared = shared_state_dir;
+    let sup_home = workspace_home;
+    let sup_code_url = code_server_url;
+    std::thread::spawn(move || {
+        let mut respawn_times: Vec<Instant> = Vec::new();
+        // WI-3170: start of the current continuous-unreachable streak
+        // (None while reachable), and whether the operator has EVER been
+        // reachable this session — the latter arms the child-alive
+        // respawn path only post-boot so a slow cold boot can't trip it.
+        let mut unreachable_since: Option<Instant> = None;
+        let mut ever_reachable = false;
+        // WI-3270 transition latches: the Windows→WSL forward reading
+        // degraded (operator healthy INSIDE the distro, unreachable from
+        // outside) and the give-up notification (once per dead episode).
+        let mut forward_degraded = false;
+        let mut gave_up_notified = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            // WI-3270 (c): refresh the shell-liveness beacon so the
+            // bundle watcher can tell "shell alive, operator dead —
+            // defer" from "shell gone — relaunch the bundle".
+            write_server_shell_heartbeat(&sup_home);
+            let state: tauri::State<SidecarState> = sup_handle.state();
+            let shutting_down = state
+                .shutdown_done
+                .load(std::sync::atomic::Ordering::SeqCst);
+            // Detect + REAP an exited serve child (drops the lock before
+            // the reachability probe, which also locks state.child).
+            let child_exited = {
+                let mut guard = state.child.lock().unwrap();
+                match guard.as_mut() {
+                    Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+                    // No child we own → treat as exited; the
+                    // reachability guard below still gates the respawn.
+                    None => true,
+                }
+            };
+            let outer_reachable = wait_for_operator(
+                &sup_handle,
+                &sup_home,
+                sup_via_wsl,
+                Duration::from_millis(600),
+            )
+            .is_ok();
+            // WI-3270 (a): on Windows the probe above crosses the
+            // Windows→WSL localhost forward, which flakes independently
+            // of operator health. Killing a healthy serve+PG over a
+            // forward flake is the WI-3270 false alarm (it exhausted
+            // both respawn caps and took the whole distro down), so
+            // before treating "unreachable from outside" as death,
+            // re-ask from INSIDE the distro: inner-healthy means the
+            // FORWARD is degraded, not the operator.
+            let inner_reachable = if !outer_reachable && sup_via_wsl {
+                find_operator_discovery(&sup_home, sup_via_wsl)
+                    .map(|d| operator_http_ready_in_distro(d.port))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let operator_reachable = outer_reachable || inner_reachable;
+            // Transition-only forward-degraded logging (WI-3270 (d)).
+            if inner_reachable {
+                if !forward_degraded {
+                    eprintln!(
+                        "[papercusp-desktop] operator HEALTHY inside the distro but \
+                         unreachable from Windows — localhost forward degraded, NOT a \
+                         dead operator; suppressing respawn until the forward recovers \
+                         (WI-3270)"
+                    );
+                    forward_degraded = true;
+                }
+            } else if forward_degraded {
+                if outer_reachable {
+                    eprintln!(
+                        "[papercusp-desktop] Windows→WSL localhost forward recovered \
+                         (WI-3270)"
+                    );
+                } else {
+                    eprintln!(
+                        "[papercusp-desktop] operator no longer answers inside the \
+                         distro either — treating as a real operator death, not a \
+                         forward flake (WI-3270)"
+                    );
+                }
+                forward_degraded = false;
+            }
+            let now = Instant::now();
+            respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+            // WI-3170: track the continuous-unreachable streak. The
+            // child-alive-but-unreachable respawn path (the Windows/WSL
+            // wrapper blind spot) only arms once the operator has served
+            // at least once this session, so a slow cold first boot can
+            // never double-spawn a competing serve.
+            if operator_reachable {
+                unreachable_since = None;
+                ever_reachable = true;
+                gave_up_notified = false;
+            } else if unreachable_since.is_none() {
+                unreachable_since = Some(now);
+                // WI-3270 (d): say WHY the operator reads unreachable,
+                // once per streak — a missing discovery, a dead pid, and
+                // a hung HTTP probe are different failures, and the VM
+                // forensics burned hours re-deriving which one it was.
+                match find_operator_discovery(&sup_home, sup_via_wsl) {
+                    None => eprintln!(
+                        "[papercusp-desktop] operator unreachable: no operator.json \
+                         discovery readable (WI-3270)"
+                    ),
+                    Some(d) => {
+                        let pid_alive = discovery_pid_alive(d.pid, sup_via_wsl);
+                        eprintln!(
+                            "[papercusp-desktop] operator unreachable: discovery pid {} \
+                             on :{} — pid_alive={}, HTTP probe failed (WI-3270)",
+                            d.pid, d.port, pid_alive
+                        );
+                    }
+                }
+            }
+            // Gate to the WSL routing (Windows): that is the ONLY place
+            // the stored `Child` is a WRAPPER (wsl.exe) that can outlive
+            // the inner operator, making child_exited unreliable. On
+            // Linux/mac the child IS the operator process, so child_exited
+            // is ground truth and we keep the exact existing behavior —
+            // this path never arms there (WI-3170, surgical scope).
+            let unreachable_respawn_ready = serve_unreachable_respawn_ready(
+                sup_via_wsl,
+                ever_reachable,
+                unreachable_since.map(|t| now.duration_since(t)),
+                SERVE_UNREACHABLE_DEBOUNCE,
+            );
+            match decide_serve_respawn(
+                child_exited,
+                shutting_down,
+                operator_reachable,
+                unreachable_respawn_ready,
+                respawn_times.len(),
+                MAX_RESPAWNS_PER_WINDOW,
+            ) {
+                ServeRespawnAction::Healthy => {}
+                ServeRespawnAction::Suppressed => return,
+                ServeRespawnAction::GiveUp => {
+                    // WI-3270 (b): do NOT exit the supervisor thread —
+                    // a cap hit is a backoff, not a terminal state (the
+                    // old `return` here is why the VM outage needed a
+                    // manual app restart). respawn_times drains on the
+                    // window, after which decide_serve_respawn resumes
+                    // Respawn — a slow retry tier; on Windows the
+                    // respawn re-boots a dead distro, so this heals the
+                    // whole observed outage class.
+                    if !gave_up_notified {
+                        eprintln!(
+                            "[papercusp-desktop] serve.mjs respawn cap hit ({} in {}s) — \
+                             backing off; will retry once the respawn window drains \
+                             (WI-2667 / WI-3270)",
+                            MAX_RESPAWNS_PER_WINDOW,
+                            RESPAWN_WINDOW.as_secs()
+                        );
+                        notify_operator_dead(
+                            &sup_handle,
+                            "serve.mjs in-process respawn cap hit",
+                            MAX_RESPAWNS_PER_WINDOW,
+                            RESPAWN_WINDOW.as_secs(),
+                        );
+                        gave_up_notified = true;
+                    }
+                }
+                ServeRespawnAction::Respawn => {
+                    eprintln!(
+                        "[papercusp-desktop] operator unreachable and not recovering \
+                         (serve child_exited={child_exited}) — respawning serve.mjs \
+                         in-process (WI-2667 / WI-3170 Windows wrapper blind spot)"
+                    );
+                    match spawn_serve(
+                        sup_via_wsl,
+                        sup_port,
+                        &sup_sidecar,
+                        sup_pg_hint,
+                        &sup_shared,
+                        &sup_home,
+                        sup_code_url.as_deref(),
+                    ) {
+                        Ok(c) => {
+                            *state.child.lock().unwrap() = Some(c);
+                            respawn_times.push(now);
+                            // Restart the unreachable streak so the fresh
+                            // child gets a full debounce to come up before
+                            // we would respawn again (WI-3170).
+                            unreachable_since = None;
+                        }
+                        Err(e) => {
+                            eprintln!("[papercusp-desktop] serve.mjs respawn failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -4382,233 +4648,19 @@ pub fn run() {
             let state: tauri::State<SidecarState> = app.state();
             *state.child.lock().unwrap() = Some(serve_child);
 
-            // WI-2667 (defect-2 gap fix): supervise our OWN serve.mjs child. The
-            // GUI-side watcher's `open -b` CANNOT revive an operator that died
-            // while this Server shell is still alive (single-instance dedupes the
-            // launch → no-op), and nothing else reaps/restarts it — proved live on
-            // the Mac VM 2026-07-04 (SIGTERM the operator → 100s, zero recovery, an
-            // unreaped zombie). So the Server watches its child: `try_wait` REAPS
-            // the zombie AND detects the exit, and we respawn serve in-process
-            // (covers the headless-Server-no-GUI case too). Guards: `shutdown_done`
-            // (normal quit / self-update — don't fight the teardown), an
-            // operator-reachability check (don't double-spawn when `--ensure`
-            // reused a foreign operator, Decision C), and a crash-loop cap.
-            {
-                const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
-                const MAX_RESPAWNS_PER_WINDOW: usize = 5;
-                // WI-3170: how long the operator must be CONTINUOUSLY unreachable
-                // (while our serve `Child` still looks alive — on Windows the Child
-                // is the wsl.exe WRAPPER, which outlives a dead inner node) before
-                // we respawn it. Only armed AFTER the operator has come up once this
-                // session (see `ever_reachable`), so a slow cold boot (serve.mjs
-                // alive, initdb + migration replay not yet serving) never trips it
-                // and double-spawns a competing serve.
-                const SERVE_UNREACHABLE_DEBOUNCE: Duration = Duration::from_secs(15);
-                let sup_handle = app.handle().clone();
-                let sup_via_wsl = via_wsl;
-                let sup_port = port;
-                let sup_pg_hint = pg_port_hint;
-                let sup_sidecar = sidecar_dir.clone();
-                let sup_shared = shared_state_dir.clone();
-                let sup_home = workspace_home.clone();
-                let sup_code_url = code_server_url.clone();
-                std::thread::spawn(move || {
-                    let mut respawn_times: Vec<Instant> = Vec::new();
-                    // WI-3170: start of the current continuous-unreachable streak
-                    // (None while reachable), and whether the operator has EVER been
-                    // reachable this session — the latter arms the child-alive
-                    // respawn path only post-boot so a slow cold boot can't trip it.
-                    let mut unreachable_since: Option<Instant> = None;
-                    let mut ever_reachable = false;
-                    // WI-3270 transition latches: the Windows→WSL forward reading
-                    // degraded (operator healthy INSIDE the distro, unreachable from
-                    // outside) and the give-up notification (once per dead episode).
-                    let mut forward_degraded = false;
-                    let mut gave_up_notified = false;
-                    loop {
-                        std::thread::sleep(Duration::from_millis(1500));
-                        // WI-3270 (c): refresh the shell-liveness beacon so the
-                        // bundle watcher can tell "shell alive, operator dead —
-                        // defer" from "shell gone — relaunch the bundle".
-                        write_server_shell_heartbeat(&sup_home);
-                        let state: tauri::State<SidecarState> = sup_handle.state();
-                        let shutting_down = state
-                            .shutdown_done
-                            .load(std::sync::atomic::Ordering::SeqCst);
-                        // Detect + REAP an exited serve child (drops the lock before
-                        // the reachability probe, which also locks state.child).
-                        let child_exited = {
-                            let mut guard = state.child.lock().unwrap();
-                            match guard.as_mut() {
-                                Some(c) => matches!(c.try_wait(), Ok(Some(_))),
-                                // No child we own → treat as exited; the
-                                // reachability guard below still gates the respawn.
-                                None => true,
-                            }
-                        };
-                        let outer_reachable = wait_for_operator(
-                            &sup_handle,
-                            &sup_home,
-                            sup_via_wsl,
-                            Duration::from_millis(600),
-                        )
-                        .is_ok();
-                        // WI-3270 (a): on Windows the probe above crosses the
-                        // Windows→WSL localhost forward, which flakes independently
-                        // of operator health. Killing a healthy serve+PG over a
-                        // forward flake is the WI-3270 false alarm (it exhausted
-                        // both respawn caps and took the whole distro down), so
-                        // before treating "unreachable from outside" as death,
-                        // re-ask from INSIDE the distro: inner-healthy means the
-                        // FORWARD is degraded, not the operator.
-                        let inner_reachable = if !outer_reachable && sup_via_wsl {
-                            find_operator_discovery(&sup_home, sup_via_wsl)
-                                .map(|d| operator_http_ready_in_distro(d.port))
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
-                        let operator_reachable = outer_reachable || inner_reachable;
-                        // Transition-only forward-degraded logging (WI-3270 (d)).
-                        if inner_reachable {
-                            if !forward_degraded {
-                                eprintln!(
-                                    "[papercusp-desktop] operator HEALTHY inside the distro but \
-                                     unreachable from Windows — localhost forward degraded, NOT a \
-                                     dead operator; suppressing respawn until the forward recovers \
-                                     (WI-3270)"
-                                );
-                                forward_degraded = true;
-                            }
-                        } else if forward_degraded {
-                            if outer_reachable {
-                                eprintln!(
-                                    "[papercusp-desktop] Windows→WSL localhost forward recovered \
-                                     (WI-3270)"
-                                );
-                            } else {
-                                eprintln!(
-                                    "[papercusp-desktop] operator no longer answers inside the \
-                                     distro either — treating as a real operator death, not a \
-                                     forward flake (WI-3270)"
-                                );
-                            }
-                            forward_degraded = false;
-                        }
-                        let now = Instant::now();
-                        respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
-                        // WI-3170: track the continuous-unreachable streak. The
-                        // child-alive-but-unreachable respawn path (the Windows/WSL
-                        // wrapper blind spot) only arms once the operator has served
-                        // at least once this session, so a slow cold first boot can
-                        // never double-spawn a competing serve.
-                        if operator_reachable {
-                            unreachable_since = None;
-                            ever_reachable = true;
-                            gave_up_notified = false;
-                        } else if unreachable_since.is_none() {
-                            unreachable_since = Some(now);
-                            // WI-3270 (d): say WHY the operator reads unreachable,
-                            // once per streak — a missing discovery, a dead pid, and
-                            // a hung HTTP probe are different failures, and the VM
-                            // forensics burned hours re-deriving which one it was.
-                            match find_operator_discovery(&sup_home, sup_via_wsl) {
-                                None => eprintln!(
-                                    "[papercusp-desktop] operator unreachable: no operator.json \
-                                     discovery readable (WI-3270)"
-                                ),
-                                Some(d) => {
-                                    let pid_alive = discovery_pid_alive(d.pid, sup_via_wsl);
-                                    eprintln!(
-                                        "[papercusp-desktop] operator unreachable: discovery pid {} \
-                                         on :{} — pid_alive={}, HTTP probe failed (WI-3270)",
-                                        d.pid, d.port, pid_alive
-                                    );
-                                }
-                            }
-                        }
-                        // Gate to the WSL routing (Windows): that is the ONLY place
-                        // the stored `Child` is a WRAPPER (wsl.exe) that can outlive
-                        // the inner operator, making child_exited unreliable. On
-                        // Linux/mac the child IS the operator process, so child_exited
-                        // is ground truth and we keep the exact existing behavior —
-                        // this path never arms there (WI-3170, surgical scope).
-                        let unreachable_respawn_ready = serve_unreachable_respawn_ready(
-                            sup_via_wsl,
-                            ever_reachable,
-                            unreachable_since.map(|t| now.duration_since(t)),
-                            SERVE_UNREACHABLE_DEBOUNCE,
-                        );
-                        match decide_serve_respawn(
-                            child_exited,
-                            shutting_down,
-                            operator_reachable,
-                            unreachable_respawn_ready,
-                            respawn_times.len(),
-                            MAX_RESPAWNS_PER_WINDOW,
-                        ) {
-                            ServeRespawnAction::Healthy => {}
-                            ServeRespawnAction::Suppressed => return,
-                            ServeRespawnAction::GiveUp => {
-                                // WI-3270 (b): do NOT exit the supervisor thread —
-                                // a cap hit is a backoff, not a terminal state (the
-                                // old `return` here is why the VM outage needed a
-                                // manual app restart). respawn_times drains on the
-                                // window, after which decide_serve_respawn resumes
-                                // Respawn — a slow retry tier; on Windows the
-                                // respawn re-boots a dead distro, so this heals the
-                                // whole observed outage class.
-                                if !gave_up_notified {
-                                    eprintln!(
-                                        "[papercusp-desktop] serve.mjs respawn cap hit ({} in {}s) — \
-                                         backing off; will retry once the respawn window drains \
-                                         (WI-2667 / WI-3270)",
-                                        MAX_RESPAWNS_PER_WINDOW,
-                                        RESPAWN_WINDOW.as_secs()
-                                    );
-                                    notify_operator_dead(
-                                        &sup_handle,
-                                        "serve.mjs in-process respawn cap hit",
-                                        MAX_RESPAWNS_PER_WINDOW,
-                                        RESPAWN_WINDOW.as_secs(),
-                                    );
-                                    gave_up_notified = true;
-                                }
-                            }
-                            ServeRespawnAction::Respawn => {
-                                eprintln!(
-                                    "[papercusp-desktop] operator unreachable and not recovering \
-                                     (serve child_exited={child_exited}) — respawning serve.mjs \
-                                     in-process (WI-2667 / WI-3170 Windows wrapper blind spot)"
-                                );
-                                match spawn_serve(
-                                    sup_via_wsl,
-                                    sup_port,
-                                    &sup_sidecar,
-                                    sup_pg_hint,
-                                    &sup_shared,
-                                    &sup_home,
-                                    sup_code_url.as_deref(),
-                                ) {
-                                    Ok(c) => {
-                                        *state.child.lock().unwrap() = Some(c);
-                                        respawn_times.push(now);
-                                        // Restart the unreachable streak so the fresh
-                                        // child gets a full debounce to come up before
-                                        // we would respawn again (WI-3170).
-                                        unreachable_since = None;
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[papercusp-desktop] serve.mjs respawn failed: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
+            // WI-2667/WI-3170/WI-3270 (respawn-with-backoff), extracted to
+            // spawn_serve_supervisor (WI-1878) so the Linux GUI self-host path
+            // (spawn_self_hosted_sidecar) can share the exact same supervision.
+            spawn_serve_supervisor(
+                app.handle().clone(),
+                via_wsl,
+                port,
+                sidecar_dir.clone(),
+                pg_port_hint,
+                shared_state_dir.clone(),
+                workspace_home.clone(),
+                code_server_url.clone(),
+            );
 
             // WI-2648: the always-on Server owns the docs-search palette global
             // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
