@@ -11,6 +11,12 @@
 # Usage:
 #   fed.sh <a|b> ports                      # show the discovered operator/PG ports
 #   fed.sh <a|b> sql  "<SQL>"               # psql against the VM's embedded PG
+#        ⚠ needs a REAL psql inside the guest. The app's bundled bin/psql is a
+#        broken Debian pg_wrapper (perl shim; dies without PgCommon.pm) and the
+#        golden image installs no client — so on a clean VM this verb (and the
+#        port-discovery psql probe below) FAILS. Fallback: the bundled node+pg
+#        recipe — "Querying the guest's embedded Postgres" in the
+#        linux-vm-desktop-testing-workflow agent-insight.
 #   fed.sh <a|b> api  <METHOD> <path> [json-body]   # superuser HTTP route
 #   fed.sh <a|b> mcp  <tool> [json-args]    # superuser MCP tool call
 #   fed.sh <a|b> ssh  <cmd...>              # raw ssh into the VM
