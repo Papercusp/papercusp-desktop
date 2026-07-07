@@ -337001,6 +337001,7 @@ __export(identity_exports, {
   SUPERUSER_FALLBACK_CLIENT_ID: () => SUPERUSER_FALLBACK_CLIENT_ID,
   deriveAgentRole: () => deriveAgentRole,
   deriveFleetMembership: () => deriveFleetMembership,
+  isEphemeralMcpCallIdentity: () => isEphemeralMcpCallIdentity,
   resolveAgentIdentity: () => resolveAgentIdentity
 });
 function deriveAgentRole(identity2) {
@@ -337026,6 +337027,9 @@ function deriveFleetMembership() {
   if (!slug2) return { fleetSlug: null, fleetRole: null };
   const role = typeof process !== "undefined" ? (process.env?.PAPERCUSP_FLEET_ROLE ?? "").trim() : "";
   return { fleetSlug: slug2, fleetRole: role || "member" };
+}
+function isEphemeralMcpCallIdentity(ownerId) {
+  return Boolean(ownerId) && EPHEMERAL_MCP_CALL_RE.test(ownerId);
 }
 function shortId(id2) {
   if (id2.startsWith("pus-")) return id2.slice(0, 12);
@@ -337093,7 +337097,7 @@ function resolveAgentIdentity(ctx) {
     "resolveAgentIdentity: context carries no power-user / superuser / principal / fleet-spawn / signed-spawn identity \u2014 the caller cannot be attributed (a cup:spawn child must carry its `s-\u2026` spawnId as the signed MCP URL\u2019s client= param, VERIFIED \u2014 a bare unverified client= over the public HTTP path is NOT an identity, EI-318; see fleet/operator-spawn.ts + spawn-mcp.ts; an invoke-route agent must connect over a VERIFIED signed spawn URL with harness=)"
   );
 }
-var COORDINATION_DEFAULT_DOMAIN, ADMIN_COORD_UI_OWNER, SUPERUSER_FALLBACK_CLIENT_ID, UUID_RE;
+var COORDINATION_DEFAULT_DOMAIN, ADMIN_COORD_UI_OWNER, SUPERUSER_FALLBACK_CLIENT_ID, UUID_RE, EPHEMERAL_MCP_CALL_RE;
 var init_identity2 = __esm({
   "../../packages/operator-core/lib/agent-tools/coordination/identity.ts"() {
     "use strict";
@@ -337101,6 +337105,7 @@ var init_identity2 = __esm({
     ADMIN_COORD_UI_OWNER = "pc-admin-coord-ui";
     SUPERUSER_FALLBACK_CLIENT_ID = "su-loopback";
     UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    EPHEMERAL_MCP_CALL_RE = /^mcp-call-\d+$/;
   }
 });
 
@@ -444305,7 +444310,9 @@ async function reclaimCeilingJamDebits(sql4, opts = {}) {
     const startedMs = new Date(c7.started_at).getTime();
     if (isNaN(startedMs) || now2 - startedMs <= minAgeMs) continue;
     const outAt = c7.last_output_at ? new Date(c7.last_output_at).getTime() : null;
-    const streamedRecently = outAt != null && !isNaN(outAt) && now2 - outAt <= silentMs;
+    if (outAt == null) continue;
+    if (isNaN(outAt)) continue;
+    const streamedRecently = now2 - outAt <= silentMs;
     if (streamedRecently) continue;
     jammed.push(c7.spawn_id);
   }
@@ -446041,6 +446048,7 @@ async function fetchFrontierRows(sql4, workspaceId, surveySlugs, limit = 50) {
        AND ${frontierPlacementKindClause(sql4, workspaceId)}
        AND status = 'todo'
        AND (taken_by IS NULL OR taken_by = '')
+       AND ${autoPickableWhereSql(sql4, workspaceId)}
        AND NOT EXISTS (
          SELECT 1 FROM harness_shared.hive_placements p
           WHERE p.workspace_id = f.workspace_id
@@ -446067,6 +446075,7 @@ async function countPlaceableFrontier(sql4, workspaceId, surveySlugs) {
        AND ${frontierPlacementKindClause(sql4, workspaceId)}
        AND status = 'todo'
        AND (taken_by IS NULL OR taken_by = '')
+       AND ${autoPickableWhereSql(sql4, workspaceId)}
        AND NOT EXISTS (
          SELECT 1 FROM harness_shared.hive_placements p
           WHERE p.workspace_id = f.workspace_id
@@ -446243,6 +446252,7 @@ var init_survey = __esm({
     init_src19();
     init_pg_transient_retry();
     init_datatype_frontier_placement();
+    init_work_items_admission();
     init_harness_registry();
     init_source();
     init_plan_start_state();
@@ -447411,12 +447421,16 @@ __export(placement_gather_exports, {
   deriveBeeAliveFromPresence: () => deriveBeeAliveFromPresence,
   gatherFrontier: () => gatherFrontier,
   gatherLiveBees: () => gatherLiveBees,
+  isNonPlaceableWorkItemState: () => isNonPlaceableWorkItemState,
   isPlacementHardBlocked: () => isPlacementHardBlocked,
   loadCursedWorkItemIds: () => loadCursedWorkItemIds,
   partitionTasksByReadiness: () => partitionTasksByReadiness,
   pickBeeRecentActivityMs: () => pickBeeRecentActivityMs,
   workItemToTask: () => workItemToTask
 });
+function isNonPlaceableWorkItemState(state6) {
+  return !!state6 && (TERMINAL_STATES.has(state6) || NON_PLACEABLE_PARK_STATES.has(state6));
+}
 function isPlacementHardBlocked(failCount, breakerThreshold) {
   return failCount >= breakerThreshold;
 }
@@ -447591,8 +447605,11 @@ async function gatherFrontier(opts) {
         skipped.push({ id: id2, reason: `already claimed by ${wi2.assignee}` });
         continue;
       }
-      if (TERMINAL_STATES.has(wi2.state)) {
-        skipped.push({ id: id2, reason: `settled (${wi2.state})` });
+      if (isNonPlaceableWorkItemState(wi2.state)) {
+        skipped.push({
+          id: id2,
+          reason: TERMINAL_STATES.has(wi2.state) ? `settled (${wi2.state})` : `deliberately parked (${wi2.state}) \u2014 not an automatic placement candidate`
+        });
         continue;
       }
       if (!isAutoPickable(wi2.origin, wi2.auditVerdict, wi2.verifiedAuthorGithubUserId, trustedAuthors)) {
@@ -447612,7 +447629,7 @@ async function gatherFrontier(opts) {
   } else {
     const items = await listWorkItems({ harness: opts.harness, limit: Math.min(opts.limit * 3, 500) });
     candidates = items.filter(
-      (wi2) => !wi2.assignee && !TERMINAL_STATES.has(wi2.state) && !cursedIds.has(wi2.id) && isAutoPickable(wi2.origin, wi2.auditVerdict, wi2.verifiedAuthorGithubUserId, trustedAuthors)
+      (wi2) => !wi2.assignee && !isNonPlaceableWorkItemState(wi2.state) && !cursedIds.has(wi2.id) && isAutoPickable(wi2.origin, wi2.auditVerdict, wi2.verifiedAuthorGithubUserId, trustedAuthors)
     ).sort((a2, b5) => {
       const pa2 = a2.priority ?? Number.POSITIVE_INFINITY;
       const pb2 = b5.priority ?? Number.POSITIVE_INFINITY;
@@ -447636,7 +447653,7 @@ async function gatherFrontier(opts) {
   }
   return { tasks: ready, skipped };
 }
-var TERMINAL_STATES, NO_PRESENCE_BEE_BOOTSTRAP_GRACE_MS;
+var TERMINAL_STATES, NON_PLACEABLE_PARK_STATES, NO_PRESENCE_BEE_BOOTSTRAP_GRACE_MS;
 var init_placement_gather = __esm({
   "../../packages/operator-core/lib/fleet/placement-gather.ts"() {
     "use strict";
@@ -447657,6 +447674,7 @@ var init_placement_gather = __esm({
       "dropped",
       "merged"
     ]);
+    NON_PLACEABLE_PARK_STATES = /* @__PURE__ */ new Set(["blocked", "needs-human"]);
     NO_PRESENCE_BEE_BOOTSTRAP_GRACE_MS = 2 * 6e4;
   }
 });
@@ -490152,7 +490170,8 @@ __export(learning_slo_exports, {
   normalizedTriageEntropy: () => normalizedTriageEntropy,
   readMttshSamples: () => readMttshSamples,
   triageEntropyCollector: () => triageEntropyCollector,
-  triageEntropySignalsFromRows: () => triageEntropySignalsFromRows
+  triageEntropySignalsFromRows: () => triageEntropySignalsFromRows,
+  trimStatisticalOutliers: () => trimStatisticalOutliers
 });
 async function darkOrNull(deps5) {
   let armed3 = false;
@@ -490246,13 +490265,30 @@ function medianOf(values2) {
   const mid = Math.floor(s3.length / 2);
   return s3.length % 2 === 1 ? s3[mid] : (s3[mid - 1] + s3[mid]) / 2;
 }
+function quantileOfSorted(sorted, q3) {
+  if (sorted.length === 1) return sorted[0];
+  const pos2 = q3 * (sorted.length - 1);
+  const lo2 = Math.floor(pos2);
+  const hi2 = Math.ceil(pos2);
+  if (lo2 === hi2) return sorted[lo2];
+  return sorted[lo2] + (sorted[hi2] - sorted[lo2]) * (pos2 - lo2);
+}
+function trimStatisticalOutliers(values2) {
+  if (values2.length < 4) return values2;
+  const s3 = [...values2].sort((a2, b5) => a2 - b5);
+  const q1 = quantileOfSorted(s3, 0.25);
+  const q3 = quantileOfSorted(s3, 0.75);
+  const fence = q3 + 1.5 * (q3 - q1);
+  const kept = s3.filter((v9) => v9 <= fence);
+  return kept.length > 0 ? kept : s3;
+}
 function mttshSignalsFromWindows(w3, opts = {}) {
   const minSamples = opts.mttshMinSamples ?? LEARNING_SLO_DEFAULTS.mttshMinSamples;
   const factor = opts.mttshMaxRegressionFactor ?? LEARNING_SLO_DEFAULTS.mttshMaxRegressionFactor;
   const recentDays = opts.mttshRecentDays ?? LEARNING_SLO_DEFAULTS.mttshRecentDays;
   if (w3.recentMs.length < minSamples || w3.baselineMs.length < minSamples) return [];
-  const recent2 = medianOf(w3.recentMs);
-  const baseline = medianOf(w3.baselineMs);
+  const recent2 = medianOf(trimStatisticalOutliers(w3.recentMs));
+  const baseline = medianOf(trimStatisticalOutliers(w3.baselineMs));
   if (baseline <= 0 || recent2 < baseline * factor) return [];
   const fmt2 = (ms3) => `${Math.round(ms3 / 1e3)}s`;
   return [{
@@ -492838,11 +492874,21 @@ function escalationSignalsFromRows(rows) {
 }
 async function collectEscalationSignals(sql4, workspaceId) {
   const rows = await sql4`
-    SELECT harness_slug, phase
-      FROM harness_shared.harness_escalations
-     WHERE workspace_id = ${workspaceId}
-       AND COALESCE(escalation, '') <> ''
-       AND COALESCE(supervisor_notes, '') = ''
+    SELECT e.harness_slug, e.phase
+      FROM harness_shared.harness_escalations e
+     WHERE e.workspace_id = ${workspaceId}
+       AND COALESCE(e.escalation, '') <> ''
+       AND COALESCE(e.supervisor_notes, '') = ''
+       AND NOT (
+         e.phase = ANY(${GREEN_CHECKPOINT_ESCALATION_PHASES})
+         AND NOT EXISTS (
+           SELECT 1 FROM harness_shared.routines r
+            WHERE r.workspace_id = ${workspaceId}
+              AND r.install_slug = e.harness_slug
+              AND r.name = 'green-checkpoint'
+              AND r.active
+         )
+       )
      LIMIT 10`;
   return escalationSignalsFromRows(rows);
 }
@@ -493629,7 +493675,7 @@ function watchdogOptionsFromPayload(payload) {
   }
   return out;
 }
-var SEVERITY_RANK, DEFAULT_SERVICE_HEALTH_MAX_STALE_MS, REAPER_SELF_HEAL_ERROR_SOURCE, RECENT_FIRE_PROOF_MS, EPHEMERAL_BENCHMARK_SLUG_RE, HARNESS_SCOPED_WATCHDOG_SOURCES, _tickLockSql, PAYLOAD_TUNABLE_KEYS;
+var SEVERITY_RANK, DEFAULT_SERVICE_HEALTH_MAX_STALE_MS, REAPER_SELF_HEAL_ERROR_SOURCE, RECENT_FIRE_PROOF_MS, GREEN_CHECKPOINT_ESCALATION_PHASES, EPHEMERAL_BENCHMARK_SLUG_RE, HARNESS_SCOPED_WATCHDOG_SOURCES, _tickLockSql, PAYLOAD_TUNABLE_KEYS;
 var init_watchdog2 = __esm({
   "../../packages/operator-core/lib/harness/improvements/watchdog.ts"() {
     "use strict";
@@ -493651,6 +493697,7 @@ var init_watchdog2 = __esm({
     DEFAULT_SERVICE_HEALTH_MAX_STALE_MS = 2 * 6e4;
     REAPER_SELF_HEAL_ERROR_SOURCE = "dbos-executor-reaper";
     RECENT_FIRE_PROOF_MS = 30 * 60 * 1e3;
+    GREEN_CHECKPOINT_ESCALATION_PHASES = ["green-checkpoint-stall", "green-checkpoint-watchdog"];
     EPHEMERAL_BENCHMARK_SLUG_RE = /(^|[^a-z0-9])(xbench|xbq[a-z0-9]{6}|hiveloop|memcap|memrun)|-instance[_-]|_instance[_-]|deleteme|^e2e-imp|^sb-gym|gym-eval|^bench-|smoke-p[0-9]/i;
     HARNESS_SCOPED_WATCHDOG_SOURCES = /* @__PURE__ */ new Set([
       "stalled-feature",
@@ -495863,12 +495910,12 @@ function embedSession(session2, minEvents = MIN_SESSION_EVENTS) {
     bigrams
   };
 }
-var MIN_SESSION_EVENTS, quantileOfSorted, share, NUMERIC_FEATURES, NUMERIC_FEATURE_KEYS;
+var MIN_SESSION_EVENTS, quantileOfSorted2, share, NUMERIC_FEATURES, NUMERIC_FEATURE_KEYS;
 var init_features = __esm({
   "../../packages/operator-core/lib/fleet-ekg/features.ts"() {
     "use strict";
     MIN_SESSION_EVENTS = 10;
-    quantileOfSorted = (sorted, q3) => {
+    quantileOfSorted2 = (sorted, q3) => {
       if (sorted.length === 0) return 0;
       const pos2 = (sorted.length - 1) * q3;
       const lo2 = Math.floor(pos2);
@@ -495892,9 +495939,9 @@ var init_features = __esm({
         return ok18 + err11 > 0 ? err11 / (ok18 + err11) : 0;
       },
       /** Median gap between consecutive calls, ms — the session's base pace. */
-      medianGapMs: (d2) => quantileOfSorted([...d2.gapsMs].sort((a2, b5) => a2 - b5), 0.5),
+      medianGapMs: (d2) => quantileOfSorted2([...d2.gapsMs].sort((a2, b5) => a2 - b5), 0.5),
       /** p90 gap, ms — stall/think pauses. */
-      p90GapMs: (d2) => quantileOfSorted([...d2.gapsMs].sort((a2, b5) => a2 - b5), 0.9),
+      p90GapMs: (d2) => quantileOfSorted2([...d2.gapsMs].sort((a2, b5) => a2 - b5), 0.9),
       /** Coefficient of variation of gaps — bursty vs steady rhythm. */
       burstiness: (d2) => {
         if (d2.gapsMs.length < 3) return 0;
@@ -720048,7 +720095,10 @@ async function updateWorkItem(id2, patch9, by2, opts = {}) {
   if (!wi2) return { ok: false, reason: "not_found" };
   if (wi2.family !== "issue") return { ok: false, reason: "unsupported_family" };
   const issue2 = await updateIssue(id2, { ...patch9, by: by2 });
-  if (!issue2) return { ok: false, reason: "not_found" };
+  if (issue2 === null) return { ok: false, reason: "not_found" };
+  if ("shrinkGuardTripped" in issue2) {
+    return { ok: false, reason: "body_shrink_guard", existingLength: issue2.existingLength, newLength: issue2.newLength };
+  }
   const refreshed = await getWorkItem(id2, opts.harness);
   return refreshed ? { ok: true, item: refreshed } : { ok: false, reason: "not_found" };
 }
@@ -721817,11 +721867,14 @@ var init_harness_core = __esm({
 // ../../packages/operator-core/lib/issues-engineer.ts
 var issues_engineer_exports = {};
 __export(issues_engineer_exports, {
+  BODY_SHRINK_GUARD_MIN_LENGTH: () => BODY_SHRINK_GUARD_MIN_LENGTH,
+  BODY_SHRINK_GUARD_RETAIN_RATIO: () => BODY_SHRINK_GUARD_RETAIN_RATIO,
   ISSUE_KIND: () => ISSUE_KIND,
   ISSUE_KINDS: () => ISSUE_KINDS,
   ISSUE_SEVERITIES: () => ISSUE_SEVERITIES,
   ISSUE_STATES: () => ISSUE_STATES,
   ISSUE_STORE_KINDS: () => ISSUE_STORE_KINDS,
+  bodyShrinkTripped: () => bodyShrinkTripped,
   claimIssue: () => claimIssue,
   commentIssue: () => commentIssue,
   countIssues: () => countIssues,
@@ -722038,8 +722091,18 @@ async function getIssueDetail(id2) {
     links: out.filter((l2) => l2.rel !== "tagged").map((l2) => ({ rel: l2.rel, dst: l2.dst }))
   };
 }
+function bodyShrinkTripped(existingBody, newBody) {
+  if (!existingBody || existingBody.length < BODY_SHRINK_GUARD_MIN_LENGTH) return null;
+  if (newBody.length >= existingBody.length * BODY_SHRINK_GUARD_RETAIN_RATIO) return null;
+  return { shrinkGuardTripped: true, field: "body", existingLength: existingBody.length, newLength: newBody.length };
+}
 async function updateIssue(id2, patch9) {
   const { sql: sql4 } = getOrgPg();
+  if (patch9.body !== void 0 && !patch9.confirmShrink) {
+    const existing = await getIssue(id2);
+    const tripped = existing ? bodyShrinkTripped(existing.body, patch9.body) : null;
+    if (tripped) return tripped;
+  }
   const rows = await sql4`
     UPDATE harness_shared.engineer_issues SET
       title = ${patch9.title ?? sql4`title`},
@@ -722321,7 +722384,7 @@ async function findIssuesByWatchdogKeys(keys2) {
      ORDER BY updated_at DESC`;
   return rows.map(toIssue);
 }
-var ISSUES_MAX_LIMIT, ISSUE_KIND, ISSUE_SEVERITIES, ISSUE_STATES, ISSUE_KINDS, ISSUE_STORE_KINDS, issuesPerWorkspaceOn, issuesFlagReadAtMs, ISSUES_FLAG_TTL_MS, coordOpts2, tags3, threads2, subs2, links3, ISSUE_COLS, TERMINAL_COMPLETION_EVIDENCE_KEY2, ISSUE_NOTIFY_KINDS;
+var ISSUES_MAX_LIMIT, ISSUE_KIND, ISSUE_SEVERITIES, ISSUE_STATES, ISSUE_KINDS, ISSUE_STORE_KINDS, issuesPerWorkspaceOn, issuesFlagReadAtMs, ISSUES_FLAG_TTL_MS, coordOpts2, tags3, threads2, subs2, links3, ISSUE_COLS, TERMINAL_COMPLETION_EVIDENCE_KEY2, ISSUE_NOTIFY_KINDS, BODY_SHRINK_GUARD_MIN_LENGTH, BODY_SHRINK_GUARD_RETAIN_RATIO;
 var init_issues_engineer = __esm({
   "../../packages/operator-core/lib/issues-engineer.ts"() {
     "use strict";
@@ -722374,6 +722437,8 @@ var init_issues_engineer = __esm({
       commented: "issue_commented",
       resolved: "issue_resolved"
     };
+    BODY_SHRINK_GUARD_MIN_LENGTH = 40;
+    BODY_SHRINK_GUARD_RETAIN_RATIO = 0.15;
   }
 });
 
@@ -729281,7 +729346,7 @@ function renderMemberBaseline(opts) {
     "",
     `You are one of ${count2} parallel worker agent${count2 === 1 ? "" : "s"} in fleet \`${fleetSlug}\`, working plan \`${plan}\`. The session that launched you is your LEADER \u2014 report notable completions and blockers to them.`,
     "",
-    "Your loop, until nothing is claimable: **pull** your next item with `scheduler:get_next` \u2192 **read** it fully (`work_items:get`) \u2192 **classify + act** (real fix / already-fixed-close / genuinely-blocked) \u2192 drive it to a **terminal** state with evidence \u2192 repeat. Pull with `scheduler:get_next`, NOT `work_items:claim_next`: your leader steers WHICH item via your claim-spec (`scheduler:set_claim_spec`); with no spec set it is the same priority/oldest-first order as before and also covers the bug/change/task backlog (shared floors). Do NOT self-prioritize by scanning `work_items:list` \u2014 scheduling is the leader's judgment expressed as your spec, the PICKUP is yours (the bee blackboard model).",
+    "Your loop, until nothing is claimable: **pull** via `scheduler:get_next` (NOT `work_items:claim_next` \u2014 leader steers WHICH item via `scheduler:set_claim_spec`; no spec = default order) \u2192 **read** it (`work_items:get`) \u2192 **classify + act** (fix / already-fixed-close / blocked) \u2192 drive to a **terminal** state with evidence \u2192 repeat. Do NOT self-prioritize by scanning `work_items:list` \u2014 scheduling is the leader's call, PICKUP is yours.",
     "",
     "## Non-negotiables",
     rules2
@@ -729342,18 +729407,20 @@ var init_launch_on_plan = __esm({
     MEMBER_BASELINE_RULES = [
       {
         head: "Already-fixed check FIRST",
-        body: "Before you build anything, spend ~2 min confirming the fix has not already shipped \u2014 read the code/tests, check `git log` and sibling work-items. Re-implementing what a peer already fixed is the single biggest waste of fleet time. If it is already done, close it as already-fixed WITH the evidence you checked (files/tests) \u2014 do not rebuild it."
+        body: "Before building anything, spend ~2 min confirming the fix has not already shipped \u2014 check code/tests, `git log`, sibling work-items. Re-implementing a peer's fix is the single biggest fleet-time waste. If already done, close it as already-fixed WITH the evidence you checked \u2014 do not rebuild it."
       },
       {
         // EI-8318: members were completing exactly ONE item per external wake, then ending
         // their turn with no armed self-wake — the leader became a manual clock, capping
         // fleet throughput at its re-wake cadence instead of draining continuously.
+        // EI-8393: kept tight — this rule is the single biggest driver of the P-013
+        // prompt-bloat budget; trim further before adding anything to it.
         head: "STAY ALIVE across turns \u2014 loop:arm at spawn, not park",
-        body: 'You have no human at your keyboard: as your FIRST action (before or right after your first pull), call `loop:arm { intervalSec, goal }` toward draining your lane. Each wake: self-assign + advance the next claimable item (`scheduler:get_next` \u2192 work it to terminal \u2192 `work_items:complete`) \u2014 the armed loop re-wakes you automatically, so "repeat" in your pull loop below means the NEXT wake, not a hope that someone re-wakes you. `loop:end` ONLY when `scheduler:get_next` returns nothing claimable for your spec (report "queue empty" to your leader) or you are genuinely blocked. Ending a turn with no armed loop IS parking \u2014 you go silent until the leader manually re-wakes you (EI-8318), which caps the WHOLE fleet at the leader\'s wake cadence regardless of remaining backlog.'
+        body: "You have no human at your keyboard: as your FIRST action, call `loop:arm { intervalSec, goal }` to drain your lane. Each wake: pull via `scheduler:get_next` \u2192 work to terminal (`work_items:complete`) \u2192 repeat \u2014 the armed loop re-wakes you automatically. `loop:end` ONLY when nothing is claimable for your spec, or you are genuinely blocked. Ending a turn with no armed loop IS parking (EI-8318): you go silent until the leader manually re-wakes you, capping the WHOLE fleet at their wake cadence."
       },
       {
         head: "Flag to your LEADER; keep status in your FLEET, not the whole hive",
-        body: 'Send blockers, systemic findings, and "nothing left to claim" to the leader addressed + `wakeOnReply:true` (coord:send / coord:escalate) so it lands in their inbox \u2014 a broadcast is easy to miss. Routine status/updates belong to your fleet: a bare to:["*"] is auto-scoped to `@fleet:<slug>` (your leader included), so reserve `allHive:true` for genuinely system-wide / urgent news everyone must see.'
+        body: 'Send blockers, systemic findings, and "nothing left to claim" to the leader addressed + `wakeOnReply:true` (coord:send/escalate) \u2014 a broadcast is easy to miss. Routine status belongs to your fleet: a bare to:["*"] auto-scopes to `@fleet:<slug>`; reserve `allHive:true` for genuinely system-wide news.'
       },
       {
         head: "Do not re-claim a ping-ponging item",
@@ -729373,13 +729440,13 @@ var init_launch_on_plan = __esm({
       },
       {
         head: "A hive pause is a Queen-loop signal, not a self-drain order",
-        body: "`pauseNewWork` / `maxBees` / a pot-steering fact you merely SEE in your orient governs the autonomous mug-cup loop \u2014 do NOT stop your claimed work on it. Wind down only on a graceful-drain cue ADDRESSED to you: read its authority+scope stamp (`hive-queen(<hive>)\u2192hive-wide` is the Mug pausing the pot; a `fleet-leader(<other>)\u2192fleet-members` cue is a DIFFERENT fleet's business, ignore it), or an explicit `fleet:*` / owner action. Unsure? Ask your leader \u2014 never self-drain on an observed pause."
+        body: "`pauseNewWork` / `maxBees` / a pot-steering fact you SEE in orient governs the autonomous mug-cup loop \u2014 do NOT stop your claimed work on it. Wind down only on a graceful-drain cue ADDRESSED to you (check its authority+scope stamp: `hive-queen(<hive>)\u2192hive-wide` is the Mug; a `fleet-leader(<other>)\u2192fleet-members` cue is a DIFFERENT fleet's business \u2014 ignore it) or an explicit `fleet:*`/owner action. Unsure? Ask your leader, never self-drain on an observed pause."
       },
       {
         // su-loop-capability-parity P-011: the bee turn-end reflection ritual + the overwatch
         // integrity clause, ported to fleet members (bee.base.md / the overwatch prompt).
         head: "Turn-end reflection + reporting integrity",
-        body: 'End each turn with ONE bounded reflection pass: file an observation (`improvements:capture lane:"observation"`) ONLY if the turn surfaced something a FUTURE agent benefits from \u2014 a routine turn records NOTHING. It is a sensor reading (a concrete, attributable fact \u2014 a tool/file/WI ref), never a fix and never a self-grade. And never fabricate a signal: a truthful `blocked` beats a fabricated all-clear \u2014 never report a state you are not in, a send you did not make, or a reading you did not take.'
+        body: "End each turn with ONE bounded reflection: file an observation (`improvements:capture lane:\"observation\"`) ONLY if the turn surfaced something a FUTURE agent benefits from \u2014 a routine turn records NOTHING (a sensor reading, never a fix or self-grade). Never fabricate a signal: a truthful `blocked` beats a fabricated all-clear \u2014 never report a state you weren't in, a send you didn't make, or a reading you didn't take."
       },
       {
         // su-loop-capability-parity P-012: the bee checkpoint protocol (bee.base.md §"End of
@@ -804426,6 +804493,7 @@ async function listUnplacedHiveFrontier(sql4, workspaceId, harnessSlug2, limit =
        AND ${frontierPlacementKindClause(sql4, workspaceId)}
        AND status = 'todo'
        AND (taken_by IS NULL OR taken_by = '')
+       AND ${autoPickableWhereSql(sql4, workspaceId)}
      ORDER BY created_ts ASC
      LIMIT ${limit}`;
   return rows.map((r2) => r2.feature_id);
@@ -804454,6 +804522,7 @@ var init_wake_frontier_guard = __esm({
   "../../packages/operator-core/lib/hive/wake-frontier-guard.ts"() {
     "use strict";
     init_datatype_frontier_placement();
+    init_work_items_admission();
     init_placement_watchdog();
   }
 });
@@ -862044,6 +862113,14 @@ async function claimOne(it3, claimerDefault) {
       hint: "Implicit work-item claims require a real per-session or spawn owner. This request arrived as the shared su-loopback fallback, so it was refused before mutating the claim. Reconnect with a client identity or pass an explicit assignee."
     };
   }
+  if (!it3.assignee && isEphemeralMcpCallIdentity(claimerDefault)) {
+    return {
+      ok: false,
+      id: it3.id,
+      error: "ephemeral_mcp_call_identity",
+      hint: 'Refused: this call arrived under scripts/mcp-call.mjs\'s auto-generated fallback identity (mcp-call-<pid>), a one-shot process with no liveness/heartbeat and no fleet cup behind it \u2014 claiming here would silently "place" work that nothing executes (EI-8509). Spawn a real cup (fleet:spawn / bee:spawn) and let IT claim, or pass an explicit `assignee` naming the real agent that will do the work.'
+    };
+  }
   const claimer = it3.assignee ?? claimerDefault;
   const workItem2 = await claimWorkItem(it3.id, claimer, { harness: it3.harness });
   if (workItem2) return { ok: true, id: it3.id, workItem: workItem2 };
@@ -862748,7 +862825,10 @@ var init_update4 = __esm({
       severity: external_exports.enum(["critical", "major", "minor", "nit"]).optional(),
       kind: external_exports.enum(["bug", "change"]).optional().describe("correct a mislabeled work-item kind \u2014 bug = broken (auto-implement-eligible), change = desired improvement (human-gated)"),
       foundDuring: external_exports.string().max(120).nullable().optional(),
-      linkedFeatureId: external_exports.string().max(80).nullable().optional()
+      linkedFeatureId: external_exports.string().max(80).nullable().optional(),
+      confirmShrink: external_exports.boolean().optional().describe(
+        "EI-8497: a `body` edit that would replace a substantial existing body with something far shorter is REJECTED by default (a fat-finger guard \u2014 there's no body revision history to recover from a mis-call). Pass true to confirm a genuinely intended drastic shrink."
+      )
     };
     STATE_FOOTGUN_FIELDS = {
       status: external_exports.unknown().optional(),
@@ -862763,7 +862843,7 @@ var init_update4 = __esm({
     update_default3 = defineTool({
       name: "work_items:update",
       profile: "engineer",
-      description: "Edit one OR many work-items' title / body / severity / kind / found-during / linked feature. Notifies subscribers. Single: { id, \u2026fields }. Many heterogeneous: items:[{ id, \u2026fields }]. Returns { ok, results:[{ ok, id, item? | error }], counts } \u2014 correlate by id; a not-found item never fails the rest. Field-edit is issue-family only (bug/change/task); a feature-family item edits via its pipeline. (State \u2192 work_items:set_state; structural decisions \u2192 work_items:amend; tags \u2192 work_items:tag; comments \u2192 work_items:comment.)",
+      description: "Edit one OR many work-items' title / body / severity / kind / found-during / linked feature. Notifies subscribers. Single: { id, \u2026fields }. Many heterogeneous: items:[{ id, \u2026fields }]. Returns { ok, results:[{ ok, id, item? | error }], counts } \u2014 correlate by id; a not-found item never fails the rest. Field-edit is issue-family only (bug/change/task); a feature-family item edits via its pipeline. A `body` edit that would drastically shrink a substantial existing body is rejected unless confirmShrink:true (EI-8497 fat-finger guard). (State \u2192 work_items:set_state; structural decisions \u2192 work_items:amend; tags \u2192 work_items:tag; comments \u2192 work_items:comment.)",
       guidance: {
         when: "Refine work-item(s) you or someone else filed \u2014 clarify the title/body, re-rate severity, correct a mislabeled kind (bug\u2194change \u2014 the kind picks the auto-implement lane, so keep it honest), or attach the feature that will fix it. Edit several at once via items:[\u2026].",
         notWhen: "Changing lifecycle state (work_items:set_state), recording a structural decision like split/drop (work_items:amend), adding a note (work_items:comment), or routing to a topic (work_items:tag).",
@@ -862799,6 +862879,7 @@ var init_update4 = __esm({
           kind: it3.kind ?? args25.kind,
           foundDuring: it3.foundDuring !== void 0 ? it3.foundDuring : args25.foundDuring,
           linkedFeatureId: it3.linkedFeatureId !== void 0 ? it3.linkedFeatureId : args25.linkedFeatureId,
+          confirmShrink: it3.confirmShrink ?? args25.confirmShrink,
           harness: it3.harness ?? args25.harness
         })) : [
           {
@@ -862809,6 +862890,7 @@ var init_update4 = __esm({
             kind: args25.kind,
             foundDuring: args25.foundDuring,
             linkedFeatureId: args25.linkedFeatureId,
+            confirmShrink: args25.confirmShrink,
             harness: args25.harness
           }
         ];
@@ -862823,12 +862905,20 @@ var init_update4 = __esm({
                 severity: it3.severity,
                 kind: it3.kind,
                 foundDuring: it3.foundDuring,
-                linkedFeatureId: it3.linkedFeatureId
+                linkedFeatureId: it3.linkedFeatureId,
+                confirmShrink: it3.confirmShrink
               },
               ident3.ownerId,
               { harness: it3.harness }
             );
             if (res.ok) return { ok: true, id: it3.id, item: res.item };
+            if (res.reason === "body_shrink_guard") {
+              return {
+                ok: false,
+                id: it3.id,
+                error: `work_item '${it3.id}' body edit REJECTED (EI-8497 fat-finger guard): the existing body is ${res.existingLength} chars and the new one is only ${res.newLength} \u2014 a >85% shrink. If this is genuinely intended, resend with confirmShrink:true.`
+              };
+            }
             return {
               ok: false,
               id: it3.id,
@@ -869212,6 +869302,15 @@ async function setStatusOne(it3, ctx) {
     agentId = null;
   }
   if (agentId?.source === "principal") agentId = null;
+  if (agentId && it3.status === "wip" && isEphemeralMcpCallIdentity(agentId.ownerId)) {
+    return {
+      ok: false,
+      slug: it3.slug,
+      itemId: it3.itemId,
+      error: "ephemeral_mcp_call_identity",
+      hint: "Refused: \u2192wip auto-claims under the caller's identity, and this call arrived as scripts/mcp-call.mjs's auto-generated fallback (mcp-call-<pid>) \u2014 a one-shot process with no heartbeat/liveness and no fleet cup behind it (EI-8509). Spawn a real cup and let IT flip this item to wip."
+    };
+  }
   let claim2 = null;
   if (agentId && it3.status === "wip") {
     const scope = await resolvePlanScope(harnessSlug2 ? { harnessSlug: harnessSlug2 } : {});
@@ -884907,6 +885006,24 @@ var init_claim3 = __esm({
       }),
       async handler(args25, ctx) {
         const id2 = resolveAgentIdentity(ctx);
+        if (isEphemeralMcpCallIdentity(id2.ownerId)) {
+          const list0 = args25.items?.length ? args25.items : args25.itemIds?.length ? args25.itemIds.map((item) => ({ plan: args25.plan, item })) : [{ plan: args25.plan, item: args25.item }];
+          const env3 = await runBulk(
+            list0,
+            async (it3) => ({
+              ok: false,
+              plan: it3.plan,
+              item: it3.item,
+              result: {
+                status: "refused",
+                reason: "ephemeral_mcp_call_identity",
+                hint: `Refused: this call arrived under scripts/mcp-call.mjs's auto-generated fallback identity (mcp-call-<pid>) \u2014 a one-shot process with no liveness/heartbeat and no fleet cup behind it \u2014 claiming here would silently "place" work that nothing executes (EI-8509). Spawn a real cup and let IT claim.`
+              }
+            }),
+            { keyOf: (it3) => ({ plan: it3.plan, item: it3.item }) }
+          );
+          return bulkContent(env3);
+        }
         const ownerUser = bestEffortOwnerUser(ctx);
         const autoConvert = await getFlag(FLAGS.PLAN_ITEM_CLAIM_AUTO_CONVERT, "system").catch(() => false);
         const list14 = args25.items?.length ? args25.items.map((it3) => ({
@@ -885727,19 +885844,23 @@ function leaseReleaseArgs(e2) {
   const stamp = stampOf(e2);
   return { harness: stamp.harness_slug, plan: stamp.plan_slug, item: stamp.item_id };
 }
-var PLAN_ITEM_ID, TERMINAL_STATES3;
+var PLAN_ITEM_ID, TERMINAL_STATES3, COMPLETE_REFLECTABLE;
 var init_reflect_rules = __esm({
   "../../packages/operator-core/lib/plan-items/reflect-rules.ts"() {
     "use strict";
     init_events();
     PLAN_ITEM_ID = /^P-\d{3,}$/;
     TERMINAL_STATES3 = /* @__PURE__ */ new Set(["passed", "resolved", "closed", "done", "deprecated", "dropped"]);
+    COMPLETE_REFLECTABLE = /* @__PURE__ */ new Set(["done", "dropped"]);
     registerReactionRule({
       id: "plan-item-reflect:complete",
       on: "work_items:complete",
-      when: (e2) => Boolean(e2.result?.data?.completion) && stampOf(e2) !== null,
+      when: (e2) => Boolean(e2.result?.data?.completion) && stampOf(e2) !== null && COMPLETE_REFLECTABLE.has(reflectedStatus(workItemOf(e2).state) ?? ""),
       fire: "plans:set-status",
-      args: (e2) => setStatusArgs(e2, "done", "completed"),
+      args: (e2) => {
+        const wi2 = workItemOf(e2);
+        return setStatusArgs(e2, reflectedStatus(wi2.state), wi2.state ? `completed (${wi2.state})` : "completed");
+      },
       onlyOnSuccess: true,
       source: "plan-item-reflect"
     });

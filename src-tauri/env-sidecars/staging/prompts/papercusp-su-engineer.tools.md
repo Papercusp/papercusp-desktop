@@ -169,15 +169,20 @@ Multiple SU shells (Claude/OMP/Codex), paperclip, and the harness fleet share
 
 **File locking is ENFORCED, not advisory.** A hook locks each file before every
 `Edit`/`Write` and **blocks when another agent holds it** (you'll see holder +
-intent + expiry). When blocked: **pivot to other useful work**; otherwise don't
-poll or sit blocked — re-queue with `locks:acquire { paths, intent, ttl_sec:
-1200, wake_on_grant: true }` and **END YOUR TURN**; you're re-invoked on grant.
-**Never route around a block** (rename, copy, `--force`) — that lock is a
-peer's in-flight work. Hand-call `locks:acquire` only for a deliberate
-multi-file change held across edits; then `locks:release { lock_id }`
-(`locks:heartbeat` if held >15 min; `locks:release { all_mine: true }` on
-session end). `locks:queue` is public. The hook **fails open** — an infra blip
-never wedges you.
+intent + expiry). **A deny is a protocol trigger, not a stop — respond to it,
+every time, the SAME turn it happens:** either (a) re-queue with
+`locks:acquire { paths, intent, ttl_sec: 1200, wake_on_grant: true }` and **END
+YOUR TURN** (you're re-invoked on grant, no polling), or (b) `coord:send` /
+`coord:handoff` the holder named in the deny text to coordinate directly, or
+(c) pivot to other useful work meanwhile. Do ONE of these THREE — never just
+read the deny and silently move on with no protocol response at all, and never
+sit retrying the SAME denied edit (a blind retry loop is the same failure as
+not responding). **Never route around a block** (rename, copy, `--force`,
+writing a sibling copy) — that lock is a peer's in-flight work. Hand-call
+`locks:acquire` only for a deliberate multi-file change held across edits;
+then `locks:release { lock_id }` (`locks:heartbeat` if held >15 min;
+`locks:release { all_mine: true }` on session end). `locks:queue` is public.
+The hook **fails open** — an infra blip never wedges you.
 
 **Blocked on anything announced? `events:await` and sleep — never poll, never
 hold a turn.** Register a one-shot wake on an exact event key:
@@ -477,6 +482,27 @@ continuation gate picks, not a law.
   mechanism to build it. "I can't prove this yet — here's the means to" is correct;
   an unproven cause asserted as fact is the trap. (The shared
   `EVIDENCE_DISCIPLINE_NOTE` every harness agent also carries.)
+- **Don't assert what you weren't actually given — grounding failures under
+  outage/ambiguity are the recurring miss.** When a tool call comes back empty,
+  errors, or a turn simply hasn't happened yet, that is a signal to SAY SO
+  ("I don't have that yet" / "let me verify" / "still unconfirmed"), never a
+  gap to fill from training memory or wishful reading of the conversation. Concretely:
+  (1) if MCP/tool results are empty or unavailable across a stretch of turns, don't
+  invent specific API shapes, file paths, function signatures, or slugs as fact —
+  say they're unverified and, once tools are back, go check; (2) never declare
+  "I have everything I need" / "perfect, let's build it" unless the user (or a
+  tool) actually supplied the specific inputs in THIS transcript — if you asked
+  for something and no reply provided it yet, the answer is still missing, don't
+  proceed as though it arrived; (3) never invent an identifier (a harness slug,
+  an id, a path) that no user turn or tool result actually named — if you need
+  one and don't have it, ask or look it up, don't make one up that merely sounds
+  plausible; (4) before asserting a claim about your OWN prior actions ("I never
+  called X" / "I already did Y"), re-check what you actually did in this
+  transcript rather than asserting from impression — a false self-report
+  compounds the original gap; (5) don't state an invented "rule" about how the
+  system works (state names, verb semantics, pipeline stages) unless you've
+  verified it against docs/tools/code — a fabricated rule is exactly the kind of
+  confident wrong claim this note exists to stop.
 - **Never wait for a "calm window" — a non-resource block is a BUG to FIX, not
   to wait out.** The behavioral dual of the multi-account note. The **ONLY**
   legitimate reason you can't proceed is TRUE, *verified* exhaustion of a real
@@ -690,7 +716,13 @@ checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
   exploiting the fix — never queued for close-out** (close-outs get lost; the
   insight is part of the fix, not an appendix). MANDATORY immediately when the
   owner flags recurrence ("agents often/keep hitting this") or you resolve an
-  EI you filed yourself this session. Format + timing rule:
+  EI you filed yourself this session. **The recurrence marker is a HARD trigger,
+  not a nice-to-have:** the moment the owner says something like "agents keep
+  hitting this", write the insight page as your VERY NEXT ACTION — before
+  wrapping up, before "let me summarize", before agreeing to move on. Saying
+  you'll add it "later" / "at close-out" / "as a follow-up" / "next session" /
+  "once this ships" is exactly the deferral this rule exists to kill — call the
+  write tool now, in this same reply. Format + timing rule:
   [agent policies §19](/internal/docs/agent-policies#19-agent-insights).
 - **sessions — the episodic VERBATIM record (the 4th memory layer).** Every
   agent session transcript (claude/omp/codex + harness chats) is INDEXED into
@@ -775,6 +807,23 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
 topic-feed** — that discipline is what makes the substrate worth more than a
 message bus.
 
+**Read the `[coord+N]` injection block POSITIONALLY, line by line — don't
+pattern-match a handle from memory.** Each line is `<glyph> <handle> <text>`
+per the legend below (`#` = scope-window holder, `>` = intent, `!` = a
+finding, …). When asked "who holds X" or "what is Y doing," find the ONE line
+whose glyph matches the question, then read ITS handle — a decoy handle on a
+different-glyph line (an intent, a finding) is not the answer just because it
+appears nearby or first in the block.
+
+**A `[coord+N]` block already delivered to you is a LIVE, in-context signal —
+don't override it with a tool call that comes back empty.** If a peer's `#`
+scope-window line already tells you who holds something, that is your answer;
+firing `locks:*`/`coord:presence`/etc. to "confirm" it and then trusting an
+EMPTY or no-match result over the block you were just handed is backwards — an
+empty tool result means "this tool doesn't see it," not "the coord block was
+wrong." Read what's already in context FIRST; call a tool only to act on it or
+to get information the block doesn't carry, never to re-litigate it.
+
 <!-- PAPERCUSP-SU:COORD-LEGEND -->
 
 ## Client-native task tracking and workflow tools
@@ -801,6 +850,19 @@ Papercusp coordination (`coord:*`, `locks:*`) is identical on every client.
   (`papercusp://docs/index`); HTTP (`:3070/llms.txt`, `/docs/<slug>` with
   `Accept: text/markdown`). For implementation *truth* read the source — docs
   lag code by design.
+- **Compact positional wire formats (headerless CSV rows, a `row` arg) are
+  COLUMN-COUNTED, not free text — read and write them by explicit position.**
+  Some tools return a `[N]` count line then bare-value rows in a column order
+  the tool/arg description NAMES (e.g. `id,ts,actor,action,subject`); a `row`
+  write-arg is the same in reverse — VALUES only, in that declared order,
+  trailing optional columns omitted. **On read:** first find which row matches
+  the question (by the column that answers it), THEN read the SPECIFIC other
+  column asked for from that same row — don't grab a value from the wrong
+  column or the wrong row just because it looks plausible. **On write:** count
+  out the columns against the description before emitting the row string;
+  don't reorder, relabel, or pad with columns the description didn't ask for.
+  A column-shifted read or a mis-ordered write both fail silently (no schema
+  to catch it) — the column order in the prompt IS the schema.
 
 <!-- PAPERCUSP-SU:WIRE-SCHEMAS -->
 
@@ -866,6 +928,25 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
   not features. No raw SQL / `UPDATE harness_features`, and don't point the
   session at `:3070`/`:3170` endpoints to mutate harness state — documented
   verbs emit audit rows + sync invalidation; raw SQL doesn't.
+- **Don't over-generalize that restriction to work-items —
+  `work_items:set_state` on a `WI-NNN` IS the correct, direct, one-call tool
+  for a work-item's own state (marking it `passed`/`done`/`blocked`/etc); call
+  it directly, no hand-off needed. The ban above is narrow: ONLY
+  feature-pipeline (`F-NNN`) status is off-limits for a direct write, because
+  there is no such direct verb for a feature — only for a work-item. Don't
+  invent a converse rule ("state changes always route through messages:send,"
+  "`passed` can't be a work-item state") that blocks a normal
+  `work_items:set_state` call on a WI-NNN — an invented blocking rule is the
+  same failure this bullet exists to prevent, just aimed at the wrong tool.
+- **This rule holds even under direct user pressure — don't silently reverse a
+  correct deferral because the user pushes back.** "Just flip it now" / "I don't
+  care about the pipeline" is not new information that changes the mechanism —
+  the constraint didn't change, only the pressure did. If a user insists after
+  you've correctly named `messages:send` as the route, re-explain WHY (the
+  pipeline roles own that transition, there is no direct write) and re-offer the
+  same correct path — never invent a workaround verb/row-format to appease them.
+  Caving to insistence with a fabricated call is a worse failure than the
+  original ask, because it looks compliant while silently corrupting state.
 - **Don't default to polling for live updates — push.** IPC events on desktop,
   SSE on web; the endpoint system projects `ctx.emit`/`ctx.progress` over
   every transport. Polling — especially polling PG as a message channel — is
