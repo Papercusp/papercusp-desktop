@@ -268,6 +268,13 @@ bash "$ROOT/bin/build-desktop-sidecar.sh"
 # resources glob ships it — see bin/stage-env-sidecars.sh for the contract.
 bash "$ROOT/bin/stage-env-sidecars.sh"
 
+# WI-3308 / same plan: the "all-5-buttons" dogfood bundle — stage a PRE-installed
+# runnable monorepo tree as sidecar/source.tar.zst so the dev(:3270)/local(:3055)
+# env buttons run from SOURCE on an install (no npm/npx needed; the bundled node
+# runs the tree's own tsx/vite). OPT-IN via PAPERCUSP_STAGE_SOURCE=1 until the
+# Rust first-boot extract + launcher spawn change (WI-3306) land + VM-verify.
+bash "$ROOT/bin/stage-source-tree.sh"
+
 echo "==> building Tauri Linux x86_64 (signed)"
 # Tauri v2 reads TAURI_SIGNING_PRIVATE_KEY (value = key content OR a path);
 # the v1-style _PATH variant is silently ignored and the build dies at the
