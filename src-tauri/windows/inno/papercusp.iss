@@ -66,7 +66,18 @@ SetupIconFile={#BuildRoot}\icons\icon.ico
 WizardStyle=modern
 
 [Files]
-Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"
+; ignoreversion (EI/WI-3285, found live 2026-07-07): papercusp-desktop.exe carries
+; PE version info, and Inno's default [Files] behavior SKIPS copying a versioned
+; file when the destination's embedded version is >= the source's — a "don't
+; downgrade a shared DLL" safety feature. AppVersion (tauri.conf.json) does not
+; bump on every iteration build, so two consecutive installs at the same "0.0.2"
+; silently left the OLD exe in place while sidecar/*, resources/*, seed/* (no PE
+; version info, always overwritten) updated fine. Symptom: a fresh install/rebuild
+; behaves like the code never changed (stale WSLENV list, stale env-operator
+; provisioning, etc.) with zero installer error — Setup reports success either way.
+; `ignoreversion` makes the exe follow the same unconditional-overwrite semantics
+; as every other file in this installer.
+Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
 ; SEED IS SERVER-BUNDLE-ONLY (WI-3234). On Windows the GUI role NEVER restores a
