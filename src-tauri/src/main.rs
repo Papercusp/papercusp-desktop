@@ -1526,10 +1526,17 @@ enum ServerSupervisionAction {
     /// Dead, but still inside the debounce window or a post-respawn boot grace —
     /// keep waiting (a normal restart briefly looks dead as the pid rolls over).
     Wait,
+    /// Operator dead but the Server SHELL is provably alive (fresh heartbeat) —
+    /// a bundle launch would single-instance no-op, so never launch (and never
+    /// burn a respawn-cap slot on it); the shell's own serve supervisor is the
+    /// one that can act (WI-3270).
+    DeferToShell,
     /// Dead past the debounce and under the respawn cap — relaunch the Server.
     Respawn,
-    /// Respawned too many times in the window (crash-loop) — latch off and leave
-    /// it to a manual restart rather than hot-looping `open -b` forever.
+    /// Respawned too many times in the window (crash-loop) — back off and
+    /// notify. Recoverable (WI-3270): once the respawn window drains the
+    /// decision returns to Respawn, so a wedged Server keeps getting slow
+    /// retries instead of requiring a manual app restart.
     GiveUp,
 }
 
@@ -1544,8 +1551,11 @@ enum ServerSupervisionAction {
 /// incremented for this tick when dead & not in grace). `open -b` on the
 /// single-instance Server is a no-op when it's actually alive, so a spurious
 /// Respawn is harmless — but the debounce + cap keep it from thrashing.
+/// `server_shell_alive` is the WI-3270 heartbeat signal: the Server SHELL
+/// process is provably up, so a bundle launch can only single-instance no-op.
 fn decide_server_supervision(
     process_alive: bool,
+    server_shell_alive: bool,
     in_boot_grace: bool,
     dead_count: u32,
     dead_threshold: u32,
@@ -1553,18 +1563,33 @@ fn decide_server_supervision(
     max_respawns: usize,
     already_gave_up: bool,
 ) -> ServerSupervisionAction {
-    if already_gave_up {
-        // Latched: once we give up we stop respawning until the app restarts.
-        return ServerSupervisionAction::Wait;
-    }
     if process_alive {
+        // Alive also RECOVERS a latched give-up (WI-3270): something (a manual
+        // launch, the shell's own serve supervisor) brought the Server back —
+        // the caller clears the latch and re-arms auto-respawn.
         return ServerSupervisionAction::Healthy;
+    }
+    if server_shell_alive {
+        // WI-3270 (c): operator dead but the Server shell is alive — launching
+        // the bundle is a guaranteed single-instance no-op, so never burn a
+        // respawn-cap slot on it (that burn is how the watcher gave up on the
+        // Windows VM while the shell held the single-instance lock throughout).
+        return ServerSupervisionAction::DeferToShell;
     }
     if in_boot_grace || dead_count < dead_threshold {
         return ServerSupervisionAction::Wait;
     }
     if respawns_in_window >= max_respawns {
-        return ServerSupervisionAction::GiveUp;
+        // WI-3270 (b): give-up is a BACKOFF, not a terminal latch — notify once
+        // (GiveUp), then hold (Wait) only while the respawn window is still
+        // saturated. respawn_times drains on the window, after which the branch
+        // below resumes Respawn (a slow retry tier), so recovery never requires
+        // a manual app restart.
+        return if already_gave_up {
+            ServerSupervisionAction::Wait
+        } else {
+            ServerSupervisionAction::GiveUp
+        };
     }
     ServerSupervisionAction::Respawn
 }
@@ -1656,6 +1681,105 @@ fn serve_unreachable_respawn_ready(
             .unwrap_or(false)
 }
 
+/// WI-3270 (a): probe the operator from INSIDE the WSL distro. On Windows,
+/// `operator_http_ready` crosses the Windows→WSL localhost port-forward, which
+/// flakes INDEPENDENTLY of operator health (observed live 2026-07-06: operator
+/// + PG fully healthy inside the distro while every Windows-side probe of
+/// 127.0.0.1:<port> failed). Treating such a flake as operator death made the
+/// serve supervisor kill a healthy serve+PG, exhaust both respawn caps, and
+/// take the whole distro down — so before declaring death, re-ask from inside.
+/// Same acceptance rule as `operator_http_ready`: ANY completed HTTP response
+/// proves the event loop is serving (curl exit 0; deliberately no `-f`, a 4xx
+/// still proves liveness).
+fn operator_http_ready_in_distro(port: u16) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("wsl.exe");
+        cmd.args([
+            "--distribution",
+            wsl_setup::DISTRO_NAME_PUB,
+            "--exec",
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-m",
+            "2",
+            &format!("http://127.0.0.1:{}/api/health", port),
+        ]);
+        no_console_window(&mut cmd);
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = port;
+        false
+    }
+}
+
+/// WI-3270 (c): the Server SHELL's liveness beacon. The watcher's
+/// `launch_bundle` can NEVER revive an operator while the Server shell is
+/// still alive — single-instance dedupes the launch into a guaranteed no-op —
+/// yet `decide_server_supervision` keyed only on the OPERATOR pid, so every
+/// such no-op burned a respawn-cap slot until the watcher gave up (observed
+/// live on the Windows VM; macOS `open -b` has the same burn). The Server's
+/// serve supervisor refreshes this file every tick; a FRESH heartbeat tells
+/// the watcher "shell alive — defer to its in-process serve supervisor"
+/// instead of launching.
+const SERVER_SHELL_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ServerShellHeartbeat {
+    pid: u32,
+    ts: u64,
+}
+
+fn server_shell_heartbeat_path(workspace_home: &std::path::Path) -> std::path::PathBuf {
+    workspace_home.join(".papercusp/server-shell-heartbeat.json")
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Written by the Server's serve supervisor each tick (~1.5s). Best-effort: a
+/// failed write only degrades the watcher back to the old (cap-burning)
+/// behavior — it must never take the supervisor down.
+fn write_server_shell_heartbeat(workspace_home: &std::path::Path) {
+    let path = server_shell_heartbeat_path(workspace_home);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let hb = ServerShellHeartbeat {
+        pid: std::process::id(),
+        ts: unix_now_secs(),
+    };
+    if let Ok(body) = serde_json::to_string(&hb) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// Pure freshness rule (unit-tested): a heartbeat no older than the max age
+/// proves the shell alive. Clock skew that puts `ts` in the future still
+/// counts as fresh (saturating); a stale or missing one does not.
+fn shell_heartbeat_fresh(ts: u64, now: u64, max_age: Duration) -> bool {
+    now.saturating_sub(ts) <= max_age.as_secs()
+}
+
+/// Watcher read side: does a fresh heartbeat say the Server shell is up?
+fn server_shell_alive(workspace_home: &std::path::Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(server_shell_heartbeat_path(workspace_home)) else {
+        return false;
+    };
+    let Ok(hb) = serde_json::from_str::<ServerShellHeartbeat>(&body) else {
+        return false;
+    };
+    shell_heartbeat_fresh(hb.ts, unix_now_secs(), SERVER_SHELL_HEARTBEAT_MAX_AGE)
+}
+
 /// Point the main window at the operator on `port`: compute the app origin
 /// (the custom-protocol origin when it's on — Linux default; otherwise the HTTP
 /// loopback base), navigate-or-reload the webview there, and (re-)inject
@@ -1718,12 +1842,13 @@ fn point_window_at_operator<R: tauri::Runtime>(
 }
 
 /// Payload for the `operator-dead` webview event (WI-1878 / critical-process-
-/// supervisor-2026-07-04 P-005). Emitted exactly once per give-up latch (both
-/// `decide_server_supervision` and `decide_serve_respawn` only return GiveUp
-/// once — `already_gave_up`/`return` after — so this never floods the
-/// webview). `reason` distinguishes which supervisor gave up, since the two
-/// watchers cover different roles (GUI-side Server-bundle respawn vs. the
-/// Server's own in-process serve.mjs child respawn).
+/// supervisor-2026-07-04 P-005). Emitted once per operator-dead EPISODE: since
+/// WI-3270 made give-up recoverable (respawns resume when the cap window
+/// drains), GiveUp can recur across retry cycles — the callers gate this
+/// notify on a once-per-episode flag that resets on recovery, so it still
+/// never floods the webview. `reason` distinguishes which supervisor gave up,
+/// since the two watchers cover different roles (GUI-side Server-bundle
+/// respawn vs. the Server's own in-process serve.mjs child respawn).
 #[derive(Debug, serde::Serialize, Clone)]
 struct OperatorDeadPayload {
     reason: String,
@@ -1738,7 +1863,8 @@ struct OperatorDeadPayload {
 /// run in CI, but the content they build can be verified).
 fn operator_dead_notification_body(reason: &str, respawns: usize, window_secs: u64) -> String {
     format!(
-        "Auto-restart gave up after {respawns} attempts in {window_secs}s ({reason}). Restart the app to recover."
+        "Auto-restart backing off after {respawns} failed attempts in {window_secs}s ({reason}). \
+         Retries continue in the background; restart the app to recover immediately."
     )
 }
 
@@ -1815,6 +1941,12 @@ fn spawn_operator_watcher(
         let mut grace_until: Option<Instant> = None;
         let mut respawn_times: Vec<Instant> = Vec::new();
         let mut gave_up = false;
+        // WI-3270 transition latches: defer-to-shell logging (once per streak)
+        // and the operator-dead notification (once per dead episode — give-up
+        // can now recur across retry cycles, the user shouldn't be re-notified
+        // every ~5 minutes).
+        let mut deferred_to_shell = false;
+        let mut dead_notified = false;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             let latest = find_operator_discovery(&workspace_home, via_wsl);
@@ -1862,8 +1994,12 @@ fn spawn_operator_watcher(
                 consecutive_dead
             };
             respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+            // WI-3270 (c): a fresh Server-shell heartbeat means a bundle launch
+            // can only single-instance no-op — read it before deciding.
+            let shell_alive = server_shell_alive(&workspace_home);
             match decide_server_supervision(
                 process_alive,
+                shell_alive,
                 in_boot_grace,
                 dead_count,
                 DEAD_THRESHOLD_TICKS,
@@ -1871,9 +2007,43 @@ fn spawn_operator_watcher(
                 MAX_RESPAWNS_PER_WINDOW,
                 gave_up,
             ) {
-                ServerSupervisionAction::Healthy => consecutive_dead = 0,
-                ServerSupervisionAction::Wait => consecutive_dead = dead_count,
+                ServerSupervisionAction::Healthy => {
+                    consecutive_dead = 0;
+                    deferred_to_shell = false;
+                    dead_notified = false;
+                    if gave_up {
+                        eprintln!(
+                            "[papercusp-desktop] Papercusp Server is back after a respawn give-up — \
+                             re-arming auto-respawn (WI-3270)"
+                        );
+                        gave_up = false;
+                    }
+                }
+                ServerSupervisionAction::Wait => {
+                    consecutive_dead = dead_count;
+                    deferred_to_shell = false;
+                }
+                ServerSupervisionAction::DeferToShell => {
+                    consecutive_dead = dead_count;
+                    if !deferred_to_shell {
+                        eprintln!(
+                            "[papercusp-desktop] operator process dead but the Papercusp Server \
+                             shell is alive (fresh heartbeat) — a bundle launch would \
+                             single-instance no-op, deferring to the Server's own serve supervisor \
+                             instead of burning respawn attempts (WI-3270)"
+                        );
+                        deferred_to_shell = true;
+                    }
+                }
                 ServerSupervisionAction::Respawn => {
+                    if gave_up {
+                        eprintln!(
+                            "[papercusp-desktop] respawn window drained — retrying the Server \
+                             respawn after an earlier give-up (WI-3270)"
+                        );
+                        gave_up = false;
+                    }
+                    deferred_to_shell = false;
                     eprintln!(
                         "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
                         (dead_count as u64) * 1500 / 1000
@@ -1886,18 +2056,22 @@ fn spawn_operator_watcher(
                     grace_until = Some(now + POST_RESPAWN_GRACE);
                 }
                 ServerSupervisionAction::GiveUp => {
+                    deferred_to_shell = false;
                     eprintln!(
                         "[papercusp-desktop] Papercusp Server respawn cap hit ({} in {}s) — the Server \
-                         keeps dying; giving up auto-respawn until the app is restarted (WI-2667)",
+                         keeps dying; backing off until the respawn window drains (WI-2667 / WI-3270)",
                         MAX_RESPAWNS_PER_WINDOW,
                         RESPAWN_WINDOW.as_secs()
                     );
-                    notify_operator_dead(
-                        &app_handle,
-                        "Server bundle respawn cap hit",
-                        MAX_RESPAWNS_PER_WINDOW,
-                        RESPAWN_WINDOW.as_secs(),
-                    );
+                    if !dead_notified {
+                        notify_operator_dead(
+                            &app_handle,
+                            "Server bundle respawn cap hit",
+                            MAX_RESPAWNS_PER_WINDOW,
+                            RESPAWN_WINDOW.as_secs(),
+                        );
+                        dead_notified = true;
+                    }
                     gave_up = true;
                 }
             }
@@ -4093,8 +4267,17 @@ pub fn run() {
                     // respawn path only post-boot so a slow cold boot can't trip it.
                     let mut unreachable_since: Option<Instant> = None;
                     let mut ever_reachable = false;
+                    // WI-3270 transition latches: the Windows→WSL forward reading
+                    // degraded (operator healthy INSIDE the distro, unreachable from
+                    // outside) and the give-up notification (once per dead episode).
+                    let mut forward_degraded = false;
+                    let mut gave_up_notified = false;
                     loop {
                         std::thread::sleep(Duration::from_millis(1500));
+                        // WI-3270 (c): refresh the shell-liveness beacon so the
+                        // bundle watcher can tell "shell alive, operator dead —
+                        // defer" from "shell gone — relaunch the bundle".
+                        write_server_shell_heartbeat(&sup_home);
                         let state: tauri::State<SidecarState> = sup_handle.state();
                         let shutting_down = state
                             .shutdown_done
@@ -4110,13 +4293,55 @@ pub fn run() {
                                 None => true,
                             }
                         };
-                        let operator_reachable = wait_for_operator(
+                        let outer_reachable = wait_for_operator(
                             &sup_handle,
                             &sup_home,
                             sup_via_wsl,
                             Duration::from_millis(600),
                         )
                         .is_ok();
+                        // WI-3270 (a): on Windows the probe above crosses the
+                        // Windows→WSL localhost forward, which flakes independently
+                        // of operator health. Killing a healthy serve+PG over a
+                        // forward flake is the WI-3270 false alarm (it exhausted
+                        // both respawn caps and took the whole distro down), so
+                        // before treating "unreachable from outside" as death,
+                        // re-ask from INSIDE the distro: inner-healthy means the
+                        // FORWARD is degraded, not the operator.
+                        let inner_reachable = if !outer_reachable && sup_via_wsl {
+                            find_operator_discovery(&sup_home, sup_via_wsl)
+                                .map(|d| operator_http_ready_in_distro(d.port))
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        let operator_reachable = outer_reachable || inner_reachable;
+                        // Transition-only forward-degraded logging (WI-3270 (d)).
+                        if inner_reachable {
+                            if !forward_degraded {
+                                eprintln!(
+                                    "[papercusp-desktop] operator HEALTHY inside the distro but \
+                                     unreachable from Windows — localhost forward degraded, NOT a \
+                                     dead operator; suppressing respawn until the forward recovers \
+                                     (WI-3270)"
+                                );
+                                forward_degraded = true;
+                            }
+                        } else if forward_degraded {
+                            if outer_reachable {
+                                eprintln!(
+                                    "[papercusp-desktop] Windows→WSL localhost forward recovered \
+                                     (WI-3270)"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[papercusp-desktop] operator no longer answers inside the \
+                                     distro either — treating as a real operator death, not a \
+                                     forward flake (WI-3270)"
+                                );
+                            }
+                            forward_degraded = false;
+                        }
                         let now = Instant::now();
                         respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
                         // WI-3170: track the continuous-unreachable streak. The
@@ -4127,8 +4352,27 @@ pub fn run() {
                         if operator_reachable {
                             unreachable_since = None;
                             ever_reachable = true;
+                            gave_up_notified = false;
                         } else if unreachable_since.is_none() {
                             unreachable_since = Some(now);
+                            // WI-3270 (d): say WHY the operator reads unreachable,
+                            // once per streak — a missing discovery, a dead pid, and
+                            // a hung HTTP probe are different failures, and the VM
+                            // forensics burned hours re-deriving which one it was.
+                            match find_operator_discovery(&sup_home, sup_via_wsl) {
+                                None => eprintln!(
+                                    "[papercusp-desktop] operator unreachable: no operator.json \
+                                     discovery readable (WI-3270)"
+                                ),
+                                Some(d) => {
+                                    let pid_alive = discovery_pid_alive(d.pid, sup_via_wsl);
+                                    eprintln!(
+                                        "[papercusp-desktop] operator unreachable: discovery pid {} \
+                                         on :{} — pid_alive={}, HTTP probe failed (WI-3270)",
+                                        d.pid, d.port, pid_alive
+                                    );
+                                }
+                            }
                         }
                         // Gate to the WSL routing (Windows): that is the ONLY place
                         // the stored `Child` is a WRAPPER (wsl.exe) that can outlive
@@ -4153,20 +4397,30 @@ pub fn run() {
                             ServeRespawnAction::Healthy => {}
                             ServeRespawnAction::Suppressed => return,
                             ServeRespawnAction::GiveUp => {
-                                eprintln!(
-                                    "[papercusp-desktop] serve.mjs respawn cap hit ({} in {}s) — the \
-                                     operator keeps dying; giving up in-process respawn until the app \
-                                     restarts (WI-2667)",
-                                    MAX_RESPAWNS_PER_WINDOW,
-                                    RESPAWN_WINDOW.as_secs()
-                                );
-                                notify_operator_dead(
-                                    &sup_handle,
-                                    "serve.mjs in-process respawn cap hit",
-                                    MAX_RESPAWNS_PER_WINDOW,
-                                    RESPAWN_WINDOW.as_secs(),
-                                );
-                                return;
+                                // WI-3270 (b): do NOT exit the supervisor thread —
+                                // a cap hit is a backoff, not a terminal state (the
+                                // old `return` here is why the VM outage needed a
+                                // manual app restart). respawn_times drains on the
+                                // window, after which decide_serve_respawn resumes
+                                // Respawn — a slow retry tier; on Windows the
+                                // respawn re-boots a dead distro, so this heals the
+                                // whole observed outage class.
+                                if !gave_up_notified {
+                                    eprintln!(
+                                        "[papercusp-desktop] serve.mjs respawn cap hit ({} in {}s) — \
+                                         backing off; will retry once the respawn window drains \
+                                         (WI-2667 / WI-3270)",
+                                        MAX_RESPAWNS_PER_WINDOW,
+                                        RESPAWN_WINDOW.as_secs()
+                                    );
+                                    notify_operator_dead(
+                                        &sup_handle,
+                                        "serve.mjs in-process respawn cap hit",
+                                        MAX_RESPAWNS_PER_WINDOW,
+                                        RESPAWN_WINDOW.as_secs(),
+                                    );
+                                    gave_up_notified = true;
+                                }
                             }
                             ServeRespawnAction::Respawn => {
                                 eprintln!(
