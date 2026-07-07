@@ -836,6 +836,36 @@ mod discovery_tests {
         assert!(parse_operator_discovery(r#"{"pid":3070}"#).is_none());
     }
 
+    // WI-3282 fix direction 1: cmdline verification guards a recycled pid in a
+    // stale operator.json from false-positively reading as "our live operator".
+    use super::cmdline_looks_like_serve;
+
+    #[test]
+    fn cmdline_check_matches_serve_mjs_and_ts() {
+        assert!(cmdline_looks_like_serve("node /opt/papercusp/sidecar/serve.mjs --ensure"));
+        assert!(cmdline_looks_like_serve(
+            "/usr/bin/tsx apps/operator/bin/serve.ts --ensure"
+        ));
+        // /proc/<pid>/cmdline is NUL-joined; callers replace NUL with a space
+        // before calling this, so a space-joined argv must still match.
+        assert!(cmdline_looks_like_serve("node serve.mjs --ensure"));
+    }
+
+    #[test]
+    fn cmdline_check_rejects_a_recycled_pid_owned_by_something_else() {
+        // The exact class this guards: the OS reassigns a stale operator.json's
+        // pid to an unrelated process (a shell, `cat`, another app) — bare
+        // pid-aliveness would wrongly call this "our operator".
+        assert!(!cmdline_looks_like_serve("/bin/bash -c sleep 100"));
+        assert!(!cmdline_looks_like_serve("cat /home/user/.papercusp/operator.json"));
+        assert!(!cmdline_looks_like_serve(""));
+    }
+
+    #[test]
+    fn cmdline_check_is_case_insensitive() {
+        assert!(cmdline_looks_like_serve("NODE SERVE.MJS --ensure"));
+    }
+
     // WI-1869: the operator watcher's re-navigate decision. These run on Linux
     // CI, where the macOS/Windows dynamic-port restart path they guard can never
     // be exercised — the exact blind spot that let strand-on-restart ship.
@@ -2037,11 +2067,20 @@ fn spawn_operator_watcher(
             if let Some(new_port) = next_operator_port(applied_port, latest.as_ref()) {
                 // Guard against a STALE operator.json whose port was reused by an
                 // unrelated process: only follow a discovery whose pid is alive.
+                // WI-3282: pid-alive alone is NOT enough — a just-respawned operator
+                // can write operator.json the instant it starts listening, before its
+                // event loop is actually servicing requests (the exact WI-2902 starved
+                // -boot window `wait_for_operator` already guards on initial boot via
+                // operator_http_ready). Without the same bar here, a crash-respawn
+                // mid-session could re-navigate the webview to a port that then hangs
+                // every request for the ~20-50s starved window — indistinguishable from
+                // the original "stuck onboarding" bug, just triggered by a later restart
+                // instead of first boot. Require BOTH signals, exactly like the boot path.
                 let pid_alive = latest
                     .as_ref()
                     .map(|d| discovery_pid_alive(d.pid, via_wsl))
                     .unwrap_or(false);
-                if pid_alive {
+                if pid_alive && operator_http_ready(new_port) {
                     println!(
                         "[papercusp-desktop] operator moved :{} -> :{} — re-navigating the webview (WI-1869)",
                         applied_port, new_port
@@ -2161,9 +2200,53 @@ fn spawn_operator_watcher(
     });
 }
 
+/// WI-3282 fix direction 1: does a process cmdline look like OUR serve
+/// process (`serve.mjs` / `serve.ts`), not some unrelated process that
+/// happens to have been assigned a recycled pid? Mirrors serve.ts's own
+/// `acquireColdStartLock` `ownerIsServe` guard (apps/operator/bin/serve.ts) —
+/// a bare "does /proc/<pid> exist" check is defeated by pid reuse, which is
+/// near-certain after enough process churn (this desktop already hit the
+/// identical class on the WSL cold-start lock, per that function's docs).
+/// Pure + unit-tested; `None` (cmdline unreadable — e.g. a flaky WSL UNC
+/// read) means "couldn't check" and the caller should fail OPEN (trust bare
+/// pid-aliveness) rather than wrongly declare a live operator dead.
+fn cmdline_looks_like_serve(cmdline: &str) -> bool {
+    let lower = cmdline.to_ascii_lowercase();
+    lower.contains("serve.mjs") || lower.contains("serve.ts")
+}
+
+/// Best-effort cmdline read for a LOCAL (non-WSL) pid: `/proc/<pid>/cmdline`
+/// on Linux (NUL-separated argv, joined with spaces so the substring check
+/// above matches regardless of arg boundaries), `ps` elsewhere. `None` when
+/// unreadable (process gone mid-read, permission denied, non-Linux `ps`
+/// failure) — callers must treat that as "unknown", not "not serve".
+fn local_process_cmdline(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{}/cmdline", pid))
+            .ok()
+            .map(|s| s.replace('\0', " "))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    }
+}
+
 /// Liveness probe for a discovery-file pid (signal-0 equivalent: /proc on
-/// Linux, `kill -0` elsewhere). Guards against a STALE operator.json whose
-/// port has since been reused by an unrelated process.
+/// Linux, `kill -0` elsewhere), STRENGTHENED (WI-3282) with a cmdline check
+/// so a stale operator.json's pid can't false-positive after the OS recycles
+/// it onto an unrelated process — the same class of bug serve.ts's
+/// `acquireColdStartLock` already guards against on the lock file. Only
+/// tightens the answer (alive-but-not-serve → false); when the cmdline can't
+/// be read at all, falls back to the bare pid-alive answer so a flaky
+/// WSL UNC read (documented on `read_operator_discovery_via_wsl`) can't
+/// wrongly declare a genuinely-live operator dead.
 ///
 /// `via_wsl`: the pid is a LINUX pid inside the papercup-runtime distro —
 /// probe its /proc entry through wsl.exe (`kill` doesn't exist on Windows,
@@ -2182,20 +2265,53 @@ fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
                 &format!("/proc/{}", pid),
             ]);
             no_console_window(&mut cmd);
-            return cmd.status().map(|s| s.success()).unwrap_or(false);
+            if !cmd.status().map(|s| s.success()).unwrap_or(false) {
+                return false;
+            }
+            // Best-effort cmdline check via the same wsl.exe route; a failed
+            // read (UNC flakiness, distro busy) falls back to "alive" per the
+            // fail-open contract above.
+            let mut cat_cmd = Command::new("wsl.exe");
+            cat_cmd.args([
+                "--distribution",
+                wsl_setup::DISTRO_NAME_PUB,
+                "-e",
+                "cat",
+                &format!("/proc/{}/cmdline", pid),
+            ]);
+            no_console_window(&mut cat_cmd);
+            return match cat_cmd.output() {
+                Ok(out) if out.status.success() => {
+                    cmdline_looks_like_serve(&String::from_utf8_lossy(&out.stdout).replace('\0', " "))
+                }
+                _ => true,
+            };
         }
     }
     #[cfg(target_os = "linux")]
     {
-        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+        if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+            return false;
+        }
+        match local_process_cmdline(pid) {
+            Some(cmdline) => cmdline_looks_like_serve(&cmdline),
+            None => true, // couldn't read (raced exit, perms) — fail open
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Command::new("kill")
+        if !Command::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+        {
+            return false;
+        }
+        match local_process_cmdline(pid) {
+            Some(cmdline) => cmdline_looks_like_serve(&cmdline),
+            None => true, // couldn't read (raced exit, perms) — fail open
+        }
     }
 }
 
