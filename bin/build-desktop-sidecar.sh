@@ -147,33 +147,39 @@ trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"}' EXIT
 # └─────────────────────────────────────────────────────────────────────┘
 # ---------------------------------------------------------------------------
 echo "→ building operator-vite SPA + esbuild-bundling the Hono host"
-echo "→ installing operator deps (esbuild resolves the host import graph against these)"
-(cd "$WEB_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
+VITE_DIR="$REPO_ROOT/apps/operator-vite"
+if [[ ! -d "$VITE_DIR" ]]; then
+  echo "ERROR: apps/operator-vite not found at $VITE_DIR"
+  exit 1
+fi
+echo "→ installing operator + operator-vite deps (ONE combined workspace install)"
+# ROOT-CAUSE FIX (2026-07-07, WI-3284): this USED to be two SEPARATE
+# `(cd apps/operator && npm install)` then `(cd apps/operator-vite && npm install)`
+# calls. Each such directory-scoped install reconciles the shared root
+# node_modules against ONLY that one workspace's OWN declared dependency graph
+# and PRUNES anything not in it — so the SECOND call (operator-vite) silently
+# stripped packages the FIRST call (operator) had just hoisted for itself,
+# because npm's dependency graph only follows package.json "dependencies"
+# edges, not Vite's `@` alias (which treats apps/operator/app/** as literal
+# operator-vite source, not a package boundary). Every package reachable ONLY
+# through that alias — @glideapps/glide-data-grid's peers (lodash / marked /
+# react-responsive-carousel), @papercusp/lexicon, @udecode/plate-markdown,
+# dockview (via @papercusp/dock-workbench) — has repeatedly broken `vite
+# build` with "Rolldown failed to resolve <pkg>" this way. Patching
+# apps/operator-vite/package.json one missing package at a time (the old
+# glide-data-grid fix) does not scale — a NEW alias-reachable import from
+# apps/operator always reopens the same hole.
+# FIX: install BOTH workspaces in ONE npm call so npm reconciles against the
+# UNION of their declared dependency graphs — nothing either one needs gets
+# pruned, regardless of which one the vite alias actually resolves through.
+(cd "$REPO_ROOT" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts \
+  --workspace=@papercusp/operator --workspace=@papercusp/operator-vite)
 
 echo "→ verifying workspace deps resolved"
 echo "  apps/operator/node_modules/@restart/ contents:"
 ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart subdir)"
 echo "  apps/operator/node_modules/@papercusp/ contents:"
 ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
-
-VITE_DIR="$REPO_ROOT/apps/operator-vite"
-if [[ ! -d "$VITE_DIR" ]]; then
-  echo "ERROR: apps/operator-vite not found at $VITE_DIR"
-  exit 1
-fi
-echo "→ installing operator-vite deps"
-# NOTE: this is a WORKSPACE-SCOPED install. With --legacy-peer-deps it reconciles
-# the tree against operator-vite's OWN declared deps and PRUNES root-hoisted
-# packages this workspace doesn't declare — including the non-optional peerDeps of
-# transitive packages the SPA bundle needs. @glideapps/glide-data-grid (pulled in
-# by the SPA) declares peers lodash / marked / react-responsive-carousel (+ react /
-# react-dom); this scoped prune silently removed the first three and broke
-# `vite build` with "Rolldown failed to resolve <peer> from .../glide-data-grid".
-# FIX: apps/operator-vite/package.json explicitly declares those peers (pinned to
-# the versions the whole tree already dedupes to — marked@15, not glide's stale ^4
-# peer range) so this scoped install keeps them hoisted where glide resolves them.
-# If a new SPA component pulls a package with unmet peerDeps, declare them there too.
-(cd "$VITE_DIR" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts)
 
 echo "→ building operator-vite SPA (vite build → dist/)"
 (cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)
