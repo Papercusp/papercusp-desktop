@@ -1,1 +1,0 @@
-import{n as e,t}from"./text-artifacts-osyUn_Sq.js";t();export{e as loadTextArtifact};

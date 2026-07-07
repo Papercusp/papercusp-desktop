@@ -1,0 +1,1 @@
+import{n as e,t}from"./urgent-wake-ULq_PoGt.js";t();export{e as requestUrgentHiveWake};

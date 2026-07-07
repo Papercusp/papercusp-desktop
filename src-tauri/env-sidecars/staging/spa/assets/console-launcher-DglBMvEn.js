@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-CuiYn1WV.js";e();export{t as buildConsoleEnvelope};

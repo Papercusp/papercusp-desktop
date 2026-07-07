@@ -1,1 +1,0 @@
-import{i as e,n as t}from"./scout-plan-draft-II1qCdyw.js";e();export{t as createScoutPlanDraft};
