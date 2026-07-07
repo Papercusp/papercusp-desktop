@@ -3177,6 +3177,18 @@ fn spawn_serve(
     } else {
         shared_state_dir.join("embedded-pg-data")
     };
+    // WI-3308: writable extract target for the bundled dev/local runnable source
+    // tree (sidecar/source.tar.zst — the "all-5-buttons" dogfood bundle). Distro-
+    // local on WSL for the SAME reason as PGDATA above (node_modules native bins +
+    // .bin symlinks can't live faithfully on DrvFs /mnt/c); shared across
+    // workspaces on native (it's code, not per-workspace data). serve extracts the
+    // archive here on first boot then sets PAPERCUSP_DEV_SOURCE_ROOT, which the
+    // env-operator launcher's defaultDetectSourceRoot prefers.
+    let dev_source_dir: std::path::PathBuf = if via_wsl {
+        std::path::PathBuf::from("/home/papercup/.papercusp/dev-source")
+    } else {
+        shared_state_dir.join("dev-source")
+    };
 
     // Per-workspace isolation: override HOME so serve (and any child process
     // it spawns — claude CLI, git, pi, etc.) sees a workspace-scoped home.
@@ -3213,7 +3225,8 @@ fn spawn_serve(
              PAPERCUSP_DBOS_ORCHESTRATOR:PAPERCUSP_PROVISION_ENV_OPERATORS:\
              HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
-             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
+             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
+             PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR",
         );
     }
     cmd.env("PATH", &new_path)
@@ -3326,6 +3339,22 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_PG_SEED_PATH",
             db_seed_path.to_string_lossy().to_string(),
+        )
+        // WI-3308: the bundled dev/local runnable source tree + its writable
+        // extract target. Safe to set unconditionally (like PG_SEED_PATH above) —
+        // serve's extractDevSourceTree existsSync-checks the archive and no-ops
+        // when a build shipped without PAPERCUSP_STAGE_SOURCE=1 (no source.tar.zst),
+        // so dev/local stay skipped 'no-source-tree' exactly as before.
+        .env(
+            "PAPERCUSP_SOURCE_ARCHIVE",
+            sidecar_dir
+                .join("source.tar.zst")
+                .to_string_lossy()
+                .to_string(),
+        )
+        .env(
+            "PAPERCUSP_DEV_SOURCE_DIR",
+            dev_source_dir.to_string_lossy().to_string(),
         )
         .env(
             "PAPERCUSP_IDENTITY_DIR",
