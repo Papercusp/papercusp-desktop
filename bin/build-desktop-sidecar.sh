@@ -342,6 +342,16 @@ if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   exit 1
 fi
 
+echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
+  --bundle --platform=node --format=esm --target=node22 \
+  --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
+  --banner:js="$HOST_BANNER")
+if [[ ! -f "$SIDECAR_DIR/mcp-proxy.mjs" ]]; then
+  echo "ERROR: esbuild did not produce $SIDECAR_DIR/mcp-proxy.mjs"
+  exit 1
+fi
+
 # psu + ptool — the superuser CLI launcher and the defineTool CLI. Ship them in
 # the runtime so an end user can open a superuser agent session from the app
 # (psu-in-desktop-builds-2026-06-23 A1). esbuild-bundles each into a
