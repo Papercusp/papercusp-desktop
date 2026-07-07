@@ -93,6 +93,7 @@ done
 echo "snapshot staged: $(du -sh "$SNAP" | cut -f1)"
 
 step "4/6 rsync snapshot -> VM:$VMDIR"
+ssh "${SSH_OPTS[@]}" "$VM" "mkdir -p $VMDIR" || { echo "FATAL: mkdir VMDIR on VM"; exit 1; }
 rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
   --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
   -e "ssh ${SSH_OPTS[*]}" "$SNAP/" "$VM:$VMDIR/" || { echo "FATAL: rsync"; exit 1; }
