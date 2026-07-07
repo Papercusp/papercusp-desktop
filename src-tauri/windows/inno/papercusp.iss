@@ -58,6 +58,17 @@ SolidCompression=no
 LZMAUseSeparateProcess=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; All-5-buttons source bundle (WI-3306/WI-3308): when stage-source-tree.sh has
+; staged the runnable dev/local source tree (sidecar\source.tar.zst, ~2.2 GB
+; zstd, PAPERCUSP_STAGE_SOURCE=1 builds), the Server payload exceeds Inno's
+; ~4 GB single-exe max — span it: a small setup.exe + setup-*.bin slices.
+; Installing then needs the .bin files NEXT TO the exe (build-windows-on-vm.sh
+; collects every file from the output dir, so they travel together). Detected
+; at compile time from the staged file itself — no new /D define to plumb.
+#if AppId == "com.papercusp.server" && FileExists(AddBackslash(BuildRoot) + "sidecar\source.tar.zst")
+DiskSpanning=yes
+DiskSliceSize=2100000000
+#endif
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\papercusp-desktop.exe
@@ -78,7 +89,9 @@ WizardStyle=modern
 ; `ignoreversion` makes the exe follow the same unconditional-overwrite semantics
 ; as every other file in this installer.
 Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Flags: recursesubdirs createallsubdirs
+; source.tar.zst is excluded here: Server-only (see below) — sweeping it into
+; the GUI bundle too would put the GUI installer itself past the ~4 GB max.
+Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
 ; SEED IS SERVER-BUNDLE-ONLY (WI-3234). On Windows the GUI role NEVER restores a
 ; seed: main.rs ensure_server_running() either ATTACHES to a running Papercusp
@@ -100,6 +113,14 @@ Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs crea
 ; anything staged inside it) and mapped under {app}\sidecar here so runtime
 ; discovery (dirname(PAPERCUSP_SIDECAR_BIN)/env-sidecars) finds it.
 Source: "{#BuildRoot}\env-sidecars\*"; DestDir: "{app}\sidecar\env-sidecars"; Flags: recursesubdirs createallsubdirs
+; Runnable dev/local source tree (WI-3306/WI-3308, all-5-buttons dogfood
+; bundle): ONE zstd archive; serve extracts it on first boot to the distro's
+; ext4 (dev-source-extract.ts) and the env-operator launcher runs the
+; dev(:3270)/local(:3055) buttons from that tree. Server-only (the GUI runs no
+; operator) + stored raw (zstd is incompressible under lzma2 — same treatment
+; as seed/resources). Absent on a build without PAPERCUSP_STAGE_SOURCE=1 →
+; entry skipped, dev/local stay 'no-source-tree' exactly as before.
+Source: "{#BuildRoot}\sidecar\source.tar.zst"; DestDir: "{app}\sidecar"; Flags: nocompression skipifsourcedoesntexist
 #endif
 
 [Icons]

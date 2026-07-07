@@ -3136,6 +3136,10 @@ fn spawn_serve(
     let spa_dist = sidecar_dir.join("spa");
     let docs_root = sidecar_dir.join("internal-docs");
     let harness_dir = sidecar_dir.join("harness");
+    // First-party app-templates bundled at sidecar/templates (build-desktop-sidecar.sh);
+    // template-store.ts resolves them via PAPERCUSP_TEMPLATES_DIR (dev falls back to the
+    // in-repo templates/ dir). local-first-party-template-bundling-2026-07-07.
+    let templates_dir = sidecar_dir.join("templates");
     let prompts_dir = sidecar_dir.join("prompts");
     let db_sql_dir = sidecar_dir.join("db-sql");
     // Installer-bundled hive seed (plan hive-seed-bundle-2026-07-04). Optional:
@@ -3216,7 +3220,7 @@ fn spawn_serve(
     if via_wsl {
         cmd.env(
             "WSLENV",
-            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:\
+            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:\
              PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
              PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
@@ -3269,6 +3273,10 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_HARNESS_DIR",
             harness_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "PAPERCUSP_TEMPLATES_DIR",
+            templates_dir.to_string_lossy().to_string(),
         )
         .env("PAPERCUSP_DESKTOP", "1")
         // Autonomous loop (packaged-build fix): the DBOS routines engine +

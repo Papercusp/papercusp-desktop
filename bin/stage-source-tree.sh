@@ -110,10 +110,21 @@ declare -a EXCLUDES=(
   --exclude='./.DS_Store' --exclude='*/.DS_Store'
 )
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
+# The shared tree is edited by the whole fleet WHILE this multi-minute tar
+# runs; GNU tar exits 1 for "file changed as we read it" — a warning (the
+# entry is still written), not corruption. Under set -e/pipefail that exit 1
+# would kill a ~25-min VM build at the pack step, so tolerate exactly exit 1
+# (the changed-file warnings stay visible on stderr); exit ≥2 and any zstd
+# failure remain fatal.
+set +e +o pipefail
 tar --numeric-owner --owner=0 --group=0 \
   "${EXCLUDES[@]}" \
   -C "$MONO" -cf - . \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
+rcs=("${PIPESTATUS[@]}")
+set -e -o pipefail
+(( rcs[0] <= 1 )) || { echo "ERROR: tar failed (exit ${rcs[0]})" >&2; exit 1; }
+(( rcs[1] == 0 )) || { echo "ERROR: zstd failed (exit ${rcs[1]})" >&2; exit 1; }
 
 sz="$(du -h "$OUT" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"

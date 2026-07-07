@@ -227,6 +227,21 @@ trap 'rm -f "$TARBALL"' EXIT
 # lock file if absent (harmless — it's excluded from the tarball below).
 (
   flock 9
+  # ── dev/local runnable source tree (WI-3306/WI-3308 all-5-buttons) ──
+  # stage-source-tree.sh self-gates on PAPERCUSP_STAGE_SOURCE=1 (prints a skip
+  # line otherwise) and writes src-tauri/sidecar/source.tar.zst. Staged INSIDE
+  # this flock: sidecar/ is atomically REPLACED by every sidecar publish, so an
+  # archive staged outside the lock can be silently wiped by a concurrent fleet
+  # build and the pack would ship a 3-button bundle with no error. The archive
+  # is deliberately NOT in the seed+resources raw guard above — papercusp.iss
+  # self-detects it (FileExists) and flips the Server role to DiskSpanning
+  # (setup.exe + *.bin slices), so Inno's ~4GB single-exe max no longer binds.
+  bash "$ROOT/bin/stage-source-tree.sh"
+  if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]]; then
+    [[ -f "$ROOT/src-tauri/sidecar/source.tar.zst" ]] \
+      || fail "PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no src-tauri/sidecar/source.tar.zst"
+    echo "    source.tar.zst staged ($(du -h "$ROOT/src-tauri/sidecar/source.tar.zst" | cut -f1)) — Server role will DiskSpan"
+  fi
   # ── env-sidecars/staging (WI-3285 P-004; pinned contract, plan
   # env-switcher-packaged-all-platforms-2026-07-06) ──
   # The packaged env switcher spawns <sidecarDir>/env-sidecars/<envId>/serve.mjs.
@@ -492,6 +507,8 @@ while IFS= read -r name; do
 done < <("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno\"" | tr -d '\r\0')
 
 # Ground-truth size check: Inno's single-exe limit is ~4GB. Warn near it.
+# (A source-bundled Server build spans instead — its setup.exe is a small stub
+# and never trips this; the payload lives in the *.bin slices asserted below.)
 for f in "$OUT_DIR"/*-setup.exe; do
   [[ -e "$f" ]] || continue
   size=$(stat -c%s "$f")
@@ -501,6 +518,17 @@ for f in "$OUT_DIR"/*-setup.exe; do
     echo "WARN: $(basename "$f") is $((size / 1024 / 1024))MB — within ~10% of Inno's ~4GB single-exe max (WI-3172)" >&2
   fi
 done
+
+# Source-bundled build (WI-3306/WI-3308): DiskSpanning must actually have
+# engaged — the Server payload comes back as setup.exe + setup-*.bin slices.
+# No slices means source.tar.zst never reached the VM build tree (the .iss
+# FileExists gate saw nothing) and the "5-button" build silently shipped
+# 3-button; fail loudly instead. Install note: run the Server setup.exe from
+# the collected dir (or the VM's inno dir) so the .bin slices sit next to it.
+if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]] && ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+  compgen -G "$OUT_DIR/*Server*-setup-*.bin" > /dev/null \
+    || fail "PAPERCUSP_STAGE_SOURCE=1 but no Server setup-*.bin slices came back — DiskSpanning didn't engage (source.tar.zst missing from the VM build tree?)"
+fi
 
 echo "==> signing updater artifacts (host-side)"
 # The GUI/Server split emits TWO *-setup.exe — sign BOTH. The old `head -1` left
