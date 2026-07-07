@@ -9,8 +9,10 @@
 //!
 //!  - `list_envs` (command) — the AUTHORITATIVE env set + reachability, probed
 //!    in Rust. The bar reads THIS, not a routable `/api` fetch, so a misrouted
-//!    `/api` (Trap 5) or a bad target build can NEVER make it self-hide. Dev-only
-//!    (a packaged single-operator build has nothing to switch → returns `[]`).
+//!    `/api` (Trap 5) or a bad target build can NEVER make it self-hide. On the
+//!    dev box it lists all 4 TARGETS (never-hide floor); on a packaged (release)
+//!    build — where "ALL INSTALLS ARE DOGFOOD INSTALLS" and provisioning spawns
+//!    bundled per-branch sidecars — it lists only the REACHABLE envs.
 //!  - `retarget_for_url` (on_page_load) — point `/api` at whatever env the
 //!    webview navigated to + persist it, so the bar's `window.location` switch,
 //!    the native backstop, and manual reloads all retarget `/api` with NO bar in
@@ -172,29 +174,49 @@ pub fn retarget_for_url(app: &tauri::AppHandle, url: &url::Url) {
 // Commands + navigation
 // ---------------------------------------------------------------------------
 
+/// Whether an env button should be surfaced by `list_envs`. On the dev box
+/// (`dev_build`) every TARGET is listed — the never-hide floor; unreachable ones
+/// render greyed. On a packaged (release) build only the envs that are actually
+/// REACHABLE (or the one we're currently on) are listed, so a user install shows
+/// just the envs it genuinely provisions (the bundled per-branch sidecars —
+/// prod/staging) and never paints a ghost `dev`/`local` button for an env that
+/// needs a source tree the package doesn't ship. Pure so it's unit-tested.
+fn env_visible(dev_build: bool, reachable: bool, is_self: bool) -> bool {
+    dev_build || reachable || is_self
+}
+
 /// The canonical env set the in-webview `EnvSwitcherBar` renders — the
 /// AUTHORITATIVE source. The bar reads THIS (never a routable `/api` fetch), so
-/// it can't self-hide on a `/api` routing glitch. Dev-only: a packaged
-/// single-operator build has nothing to switch, so it returns `[]` (the bar then
-/// hides, correctly). Reachability is probed here because Rust can reach the
-/// sibling operators a webview can't (CORS).
+/// it can't self-hide on a `/api` routing glitch. On the dev box it returns all
+/// 4 TARGETS (the never-hide floor — unreachable ones render greyed). On a
+/// packaged (release) build it returns only the REACHABLE envs (+ the one we're
+/// on): "ALL INSTALLS ARE DOGFOOD INSTALLS" (owner, 2026-07-06), so a user
+/// install legitimately runs multiple envs (bundled per-branch sidecars —
+/// prod/staging), but must not paint ghost dev/local buttons for envs that need a
+/// source tree it doesn't ship. Reachability is probed here because Rust can
+/// reach the sibling operators a webview can't (CORS).
 #[tauri::command]
 #[specta::specta]
 pub fn list_envs(window: tauri::WebviewWindow) -> Vec<EnvInfo> {
-    if !cfg!(debug_assertions) {
-        return Vec::new();
-    }
+    let dev_build = cfg!(debug_assertions);
     let cur = window.url().ok().and_then(|u| u.port());
     TARGETS
         .iter()
-        .map(|(label, name, port, tooltip)| EnvInfo {
-            id: (*name).to_string(),
-            label: (*label).to_string(),
-            port: *port,
-            origin: format!("http://127.0.0.1:{port}"),
-            tooltip: (*tooltip).to_string(),
-            reachable: port_reachable(*port),
-            is_self: cur == Some(*port),
+        .filter_map(|(label, name, port, tooltip)| {
+            let reachable = port_reachable(*port);
+            let is_self = cur == Some(*port);
+            if !env_visible(dev_build, reachable, is_self) {
+                return None;
+            }
+            Some(EnvInfo {
+                id: (*name).to_string(),
+                label: (*label).to_string(),
+                port: *port,
+                origin: format!("http://127.0.0.1:{port}"),
+                tooltip: (*tooltip).to_string(),
+                reachable,
+                is_self,
+            })
         })
         .collect()
 }
@@ -372,5 +394,20 @@ mod tests {
         assert_eq!(parse_api_target(Some("  3070 ".into())), Some(3070));
         assert_eq!(parse_api_target(Some("80".into())), None);
         assert_eq!(parse_api_target(None), None);
+    }
+
+    #[test]
+    fn env_visibility_dev_vs_packaged() {
+        // Dev box: the never-hide floor — every env is listed regardless of
+        // reachability (unreachable ones just render greyed in the bar).
+        assert!(env_visible(true, false, false));
+        assert!(env_visible(true, true, false));
+
+        // Packaged (release): only reachable envs, or the one we're on, surface —
+        // so a user install never paints a ghost dev/local button for an env it
+        // can't provision (no source tree ⇒ that sidecar never comes up).
+        assert!(!env_visible(false, false, false)); // unreachable + not self → hidden
+        assert!(env_visible(false, true, false)); // a provisioned bundled sidecar → shown
+        assert!(env_visible(false, false, true)); // the env we're currently on → always shown
     }
 }
