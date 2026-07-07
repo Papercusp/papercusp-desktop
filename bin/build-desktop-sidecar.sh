@@ -983,45 +983,159 @@ fi
 echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
 SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
 > "$SOURCE_NOTE_FILE"
+# The embedded server's major version — vendored client tools must match it
+# (pg_dump cannot dump a server NEWER than itself, so distro-default clients —
+# e.g. Ubuntu 24.04's v16 vs our embedded 18 — are not acceptable sources).
+EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+if [[ -z "$EMBEDDED_PG_MAJOR" ]]; then
+  echo "ERROR: could not determine embedded postgres major version from $EMBEDDED_PG_BIN_DIR/postgres"
+  exit 1
+fi
+
+# NEVER vendor a #!-script as a pg tool. On Debian/Ubuntu `command -v psql`
+# resolves to postgresql-common's perl pg_wrapper DISPATCHER, not the real
+# binary. It works on the build host (wrapper + versioned client both
+# installed there) so every build-time probe passes — then dies on every
+# clean machine (`Can't locate PgCommon.pm`). We shipped ALL FOUR tools as
+# that broken 9.5K shim until 2026-07-07, which silently disabled the PG half
+# of the snapshot subsystem in the packaged app (hook.ts degrades to a
+# dump-less snapshot on spawn failure). Resolve the real binary or fail loud.
+_is_script() { [[ "$(head -c 2 "$1" 2>/dev/null)" == "#!" ]]; }
+
+_pg_build_os="$(uname -s)"
 for tool in pg_dump psql pg_dumpall pg_restore; do
   src=""
-  if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]]; then
+  method=""
+  if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]] && ! _is_script "$EMBEDDED_PG_BIN_DIR/$tool"; then
     src="$EMBEDDED_PG_BIN_DIR/$tool"
     method="symlink (from embedded-postgres)"
-  elif system_path=$(command -v "$tool" 2>/dev/null) && [[ -n "$system_path" ]]; then
+  fi
+  # Debian/Ubuntu: the REAL versioned binaries live under /usr/lib/postgresql/
+  # (pgdg layout). Require the major to match the embedded server exactly.
+  if [[ -z "$src" && "$_pg_build_os" == "Linux" && -x "/usr/lib/postgresql/$EMBEDDED_PG_MAJOR/bin/$tool" ]] \
+      && ! _is_script "/usr/lib/postgresql/$EMBEDDED_PG_MAJOR/bin/$tool"; then
+    src="/usr/lib/postgresql/$EMBEDDED_PG_MAJOR/bin/$tool"
+    method="copy (real binary, pgdg /usr/lib/postgresql/$EMBEDDED_PG_MAJOR/bin)"
+  fi
+  # pg_config bindir (brew libpq keg, pgdg with pg_config on PATH, …).
+  if [[ -z "$src" ]] && command -v pg_config >/dev/null 2>&1; then
+    _pg_bindir="$(pg_config --bindir 2>/dev/null)"
+    if [[ -n "$_pg_bindir" && -x "$_pg_bindir/$tool" ]] && ! _is_script "$_pg_bindir/$tool"; then
+      src="$_pg_bindir/$tool"
+      method="copy (pg_config bindir $_pg_bindir)"
+    fi
+  fi
+  # Last resort: system PATH — but REJECT script shims instead of vendoring them.
+  if [[ -z "$src" ]] && system_path=$(command -v "$tool" 2>/dev/null) && [[ -n "$system_path" ]]; then
+    if _is_script "$system_path"; then
+      echo "ERROR: $tool on PATH ($system_path) is a script shim (Debian pg_wrapper), not a"
+      echo "  real binary. Vendoring it ships a tool that only runs on hosts with a full"
+      echo "  PostgreSQL client install (the 2026-07-07 broken-psql bug class). Install the"
+      echo "  real client matching the embedded server:"
+      echo "    Ubuntu/Debian: apt-get install postgresql-client-$EMBEDDED_PG_MAJOR   (pgdg repo)"
+      exit 1
+    fi
     src="$system_path"
     method="copy (from system PATH)"
   fi
   if [[ -z "$src" ]]; then
     echo "ERROR: $tool not found in embedded-postgres distribution AND not on system PATH"
     echo "  embedded-postgres ships server-only (initdb, pg_ctl, postgres). The build"
-    echo "  host needs PostgreSQL client tools installed for the snapshot subsystem"
-    echo "  to work in the bundled desktop app. Install via:"
+    echo "  host needs PostgreSQL client tools (real binaries, major $EMBEDDED_PG_MAJOR)"
+    echo "  for the snapshot subsystem to work in the bundled desktop app. Install via:"
     echo "    macOS:   brew install libpq && brew link --force libpq"
-    echo "    Ubuntu:  apt-get install postgresql-client"
+    echo "    Ubuntu:  apt-get install postgresql-client-$EMBEDDED_PG_MAJOR   (pgdg repo)"
     echo "    Windows: install PostgreSQL from postgresql.org"
     exit 1
   fi
   case "$method" in
     symlink*) ln -sfn "$src" "$SIDECAR_DIR/bin/$tool" ;;
-    # chmod 755, not just +x: brew ships these 0555 (read-only) and
-    # tauri-build's resource copy into target/<triple>/release/ then
-    # EACCESes overwriting its own previous read-only copy on rebuild.
-    copy*)    cp -L "$src" "$SIDECAR_DIR/bin/$tool"; chmod 755 "$SIDECAR_DIR/bin/$tool" ;;
+    copy*)
+      if [[ "$_pg_build_os" == "Linux" ]]; then
+        # Real pgdg binaries link libpq.so.5 (and psql libreadline.so.8) that a
+        # clean target machine may not have. Ship the binary under bin/.pg-real/
+        # fronted by a sh wrapper whose LD_LIBRARY_PATH points at (a) the
+        # embedded-postgres lib dir — libpq.so.5 plus the openssl-1.1 it links,
+        # already shipped for the server ($ORIGIN/../lib) — and (b) .pg-real/lib
+        # for readline/tinfo copied off the build host. Remaining deps
+        # (zstd/lz4/z/crypto3) are Ubuntu base-system libs.
+        mkdir -p "$SIDECAR_DIR/bin/.pg-real/lib"
+        cp -L "$src" "$SIDECAR_DIR/bin/.pg-real/$tool"
+        chmod 755 "$SIDECAR_DIR/bin/.pg-real/$tool"
+        _emb_lib_rel="${EMBEDDED_PG_BIN_DIR#"$SIDECAR_DIR"/}"   # node_modules/.../native/bin
+        _emb_lib_rel="../${_emb_lib_rel%/bin}/lib"               # ../node_modules/.../native/lib (relative to bin/)
+        cat > "$SIDECAR_DIR/bin/$tool" <<WRAP
+#!/bin/sh
+# Generated by build-desktop-sidecar.sh — vendored PostgreSQL client tool.
+# Real binary in .pg-real/; libs resolved from the embedded-postgres lib dir
+# (libpq + its openssl 1.1) and .pg-real/lib (readline/tinfo).
+d=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+LD_LIBRARY_PATH="\$d/$_emb_lib_rel:\$d/.pg-real/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" exec "\$d/.pg-real/$tool" "\$@"
+WRAP
+        chmod 755 "$SIDECAR_DIR/bin/$tool"
+      else
+        # chmod 755, not just +x: brew ships these 0555 (read-only) and
+        # tauri-build's resource copy into target/<triple>/release/ then
+        # EACCESes overwriting its own previous read-only copy on rebuild.
+        cp -L "$src" "$SIDECAR_DIR/bin/$tool"
+        chmod 755 "$SIDECAR_DIR/bin/$tool"
+      fi
+      ;;
   esac
   echo "  $tool: $method ($src)"
   echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
 done
-# Sanity-check that the bundled binary actually runs
-if ! "$SIDECAR_DIR/bin/pg_dump" --version >/dev/null 2>&1; then
-  echo "ERROR: bundled pg_dump fails --version probe; the binary is not loadable on this host"
-  echo "  This usually means dynamic library mismatch (e.g. system libpq from a different"
-  echo "  PG major version). Resolve by either:"
-  echo "    - building on a host with PG 17/18 client tools matching the server,"
-  echo "    - or vendoring libpq alongside (out of scope for this script)."
-  exit 1
+
+# Linux: psql needs readline+tinfo, which minimal images may lack — bundle them
+# into .pg-real/lib (tiny; resolved via the wrapper's LD_LIBRARY_PATH).
+if [[ "$_pg_build_os" == "Linux" && -d "$SIDECAR_DIR/bin/.pg-real" ]]; then
+  for _lib in libreadline.so.8 libtinfo.so.6; do
+    _libpath="$(ldconfig -p 2>/dev/null | awk -v l="$_lib" '$1==l {print $NF; exit}')"
+    if [[ -n "$_libpath" && -e "$_libpath" ]]; then
+      cp -L "$_libpath" "$SIDECAR_DIR/bin/.pg-real/lib/$_lib"
+    else
+      echo "ERROR: $_lib not found on build host (needed by vendored psql on clean targets)"
+      exit 1
+    fi
+  done
 fi
-echo "  pg_dump probe: $("$SIDECAR_DIR/bin/pg_dump" --version)"
+
+# Sanity-probe every bundled tool AS INSTALLED (i.e. through the wrapper on
+# linux, so the bundled-libs path is what's exercised) — and assert none of
+# them is still a #!-script (the pg_wrapper bug class shipping again).
+for tool in pg_dump psql pg_dumpall pg_restore; do
+  _final="$SIDECAR_DIR/bin/$tool"
+  if [[ "$_pg_build_os" == "Linux" && -e "$SIDECAR_DIR/bin/.pg-real/$tool" ]] && _is_script "$SIDECAR_DIR/bin/.pg-real/$tool"; then
+    echo "ERROR: vendored $tool (.pg-real) is a script shim — refusing to ship it"
+    exit 1
+  fi
+  if [[ "$_pg_build_os" != "Linux" ]] && _is_script "$_final"; then
+    echo "ERROR: bundled $tool is a script shim — refusing to ship it"
+    exit 1
+  fi
+  if ! _probe_out="$("$_final" --version 2>&1)"; then
+    echo "ERROR: bundled $tool fails --version probe; not loadable as installed:"
+    echo "  $_probe_out"
+    echo "  This usually means dynamic library mismatch (e.g. libpq from a different"
+    echo "  PG major version). Build on a host with real PG $EMBEDDED_PG_MAJOR client tools."
+    exit 1
+  fi
+  echo "  $tool probe: $_probe_out"
+done
+# Linux: assert the vendored binaries' NEEDED libs all resolve using ONLY the
+# wrapper's lib path + system dirs — catches a dep that exists on the build
+# host but would never ship (masked-on-build-host bug class).
+if [[ "$_pg_build_os" == "Linux" && -d "$SIDECAR_DIR/bin/.pg-real" ]]; then
+  _emb_lib_dir="${EMBEDDED_PG_BIN_DIR%/bin}/lib"
+  for tool in pg_dump psql pg_dumpall pg_restore; do
+    _missing="$(LD_LIBRARY_PATH="$_emb_lib_dir:$SIDECAR_DIR/bin/.pg-real/lib" ldd "$SIDECAR_DIR/bin/.pg-real/$tool" 2>/dev/null | grep 'not found' || true)"
+    if [[ -n "$_missing" ]]; then
+      echo "ERROR: vendored $tool has unresolved shared libs:"
+      echo "$_missing"
+      exit 1
+    fi
+  done
+fi
 
 # NOTE: zero-cache-server is no longer bundled (SP1 C5, 2026-06-06). The
 # legacy opt-in spawn (PAPERCUSP_USE_ZERO_CACHE=1) was removed from the Rust
