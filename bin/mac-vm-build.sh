@@ -170,6 +170,12 @@ echo "--- sidecar (darwin $(uname -m)) ---"
 if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" && -d src-tauri/sidecar/apps ]] \
    && file src-tauri/sidecar/bin/node 2>/dev/null | grep -q 'Mach-O'; then
   echo "    PAPERCUSP_REUSE_SIDECAR=1 — reusing existing DARWIN src-tauri/sidecar (skipping the ~1.2GB rebuild)"
+  # A REUSED sidecar skipped build-desktop-sidecar.sh and with it the
+  # release-bundle dependency verifier (WI-3315) — run it here so the reuse
+  # fast-path can't ship a bundle with host-masked deps (the pg_wrapper /
+  # unbundled-kopia bug class). Fails the build on violation, same as the
+  # rebuild path.
+  bash bin/verify-sidecar-bundle.sh src-tauri/sidecar
 else
   if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" ]]; then
     echo "    PAPERCUSP_REUSE_SIDECAR=1 but the sidecar is missing or NOT darwin (an rsync likely clobbered it with the Linux host sidecar) — rebuilding to be safe"

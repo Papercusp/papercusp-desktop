@@ -88,8 +88,16 @@ declare -a EXCLUDES=(
   --exclude='./.netrc' --exclude='*/.netrc'
   --exclude='./.mcp.json' --exclude='./.mcp.json.*'
   --exclude='*/.mcp.json' --exclude='*/.mcp.json.*'
-  --exclude='./.bashrc' --exclude='./.bash_profile' --exclude='./.bash_history'
-  --exclude='./.profile' --exclude='./.zshrc'
+  --exclude='./.bashrc' --exclude='*/.bashrc'
+  --exclude='./.bash_profile' --exclude='*/.bash_profile'
+  --exclude='./.bash_history' --exclude='*/.bash_history'
+  --exclude='./.profile' --exclude='*/.profile'
+  --exclude='./.zshrc' --exclude='*/.zshrc'
+  # ssh / cloud credential dirs (never blanket *.pem/*.key — node_modules ships
+  # legit CA bundles + test certs that TLS needs at runtime)
+  --exclude='./.ssh' --exclude='*/.ssh'
+  --exclude='./.aws' --exclude='*/.aws'
+  --exclude='./.gnupg' --exclude='*/.gnupg'
   # (2) heavy / irrelevant
   --exclude='./.git'
   --exclude='./papercusp-desktop'
