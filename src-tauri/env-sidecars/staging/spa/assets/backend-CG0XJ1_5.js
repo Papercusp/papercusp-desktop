@@ -1,0 +1,1 @@
+import{s as e}from"./configure-6VC-GQZt.js";import{t}from"./backend-BOI_A3rX.js";t();export{e as getMemoryBackend};

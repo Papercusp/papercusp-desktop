@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./src-DTtGQmae.js";import{n,s as r}from"./workspace-registry-C3lTKlnO.js";import{f as i,o as a,u as o}from"./carry-note-AA5mcQCF.js";async function s(e){let t=e.workspaceId??n();return!t||!e.harness||!e.workItemId?null:a({scope:i(e.harness,e.workItemId),workspaceId:t})}var c=e((()=>{t(),r(),o()}));export{c as n,s as t};
