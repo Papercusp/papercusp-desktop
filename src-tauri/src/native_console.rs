@@ -588,7 +588,14 @@ fn cfs_remove(path: &str) {
 /// `exec` chains so the env survives without touching rc files.
 fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     let env_exports = build_env_exports(&envelope.env);
-    let greeting = envelope.greeting_cmd.replace('\'', "'\\''");
+    // The greeting travels as a shell-escaped LITERAL that a subshell `eval`s
+    // at runtime — never spliced in as bare syntax. The old bare
+    // `replace('\'', "'\\''")` escaped for a single-quoted context the greeting
+    // was never inside, so any greeting containing a quote produced an
+    // unparseable one-liner (macOS Terminal: `bash: -c: line 0: unexpected EOF
+    // while looking for matching "'"`). Mirrors console-spawn.ts
+    // buildConsoleOneliner — keep the two in lockstep.
+    let greeting = shell_escape_single(&envelope.greeting_cmd);
     let cwd_escaped = shell_escape_single(&envelope.cwd);
     // OSC-0 title escape: sets the window/tab/conhost title to the same
     // `Papercup — <session_id>` string the Windows wt.exe spawner also
@@ -604,7 +611,7 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
          ; cd {cwd} && {exports} \
          && touch {sentinel_glob}.$ \
          && trap 'rm -f {sentinel_glob}.$' EXIT \
-         && ({greet}) ; \
+         && (eval {greet}) ; \
          exec \"${{SHELL:-/bin/bash}}\" -l",
         title = title_quoted,
         cwd = cwd_escaped,
@@ -1221,8 +1228,33 @@ mod tests {
         assert!(out.contains("cd '/some/harness/dir'"));
         assert!(out.contains("export PAPERCUSP_HARNESS_SLUG='sheets'"));
         assert!(out.contains("export PAPERCUSP_WORKSPACE='default'"));
-        assert!(out.contains("(papercup status)"));
+        assert!(out.contains("(eval 'papercup status')"));
         assert!(out.contains("exec \"${SHELL:-/bin/bash}\" -l"));
+    }
+
+    /// A greeting containing single quotes (e.g. fleet:launch-on-plan's
+    /// shq()-quoted launch-context) must survive as an escaped literal — the
+    /// pre-fix bare `replace('\'', "'\\''")` produced an unparseable one-liner
+    /// (macOS Terminal: `unexpected EOF while looking for matching "'"`).
+    #[test]
+    fn oneliner_keeps_quoted_greeting_parseable() {
+        let mut e = envelope("/x");
+        e.greeting_cmd = "psu --context='it'\\''s quoted' --plan=p1".to_string();
+        let out = build_launcher_oneliner(&e);
+        assert!(
+            out.contains(&format!("(eval {})", shell_escape_single(&e.greeting_cmd))),
+            "greeting not carried as a shell-escaped eval literal: {out}"
+        );
+        // The real proof: bash itself must parse the one-liner (`bash -n`
+        // compiles without executing). This is exactly what failed pre-fix.
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("bash")
+                .args(["-n", "-c", &out])
+                .status()
+                .expect("spawn bash -n");
+            assert!(status.success(), "bash cannot parse the one-liner: {out}");
+        }
     }
 
     #[test]
