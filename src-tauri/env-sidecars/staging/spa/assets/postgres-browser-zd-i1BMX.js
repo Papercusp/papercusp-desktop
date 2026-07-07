@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t){throw Error(`postgres is server-only and cannot run in the operator-vite browser bundle`)}var n=e((()=>{}));export{t as n,n as t};

@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";var t,n,r,i,a,o,s=e((()=>{t=`claude-opus-4-8`,n=`claude-haiku-4-5`,r=`claude-sonnet-4-6`,i=`claude-sonnet-4-6`,a=`claude-sonnet-4-6`,o={ideator:t,critic:n,recombine:r,revision:i,experiment:a}}));export{r as a,o as i,a as n,i as o,t as r,s,n as t};

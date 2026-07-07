@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t,n={}){a.set(e,{fn:t,ownSteps:n.ownSteps===!0})}function n(e){return a.get(e)?.fn}function r(e){return a.get(e)}var i,a,o=e((()=>{i=`system:`,a=new Map}));export{t as a,o as i,n,r,i as t};

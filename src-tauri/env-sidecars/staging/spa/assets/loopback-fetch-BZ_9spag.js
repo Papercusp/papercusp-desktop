@@ -1,0 +1,1 @@
+import{a as e,n as t}from"./loopback-fetch-DnroI6Sa.js";t();export{e as loopbackFetch};

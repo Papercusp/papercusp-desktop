@@ -1,0 +1,1 @@
+import{n as e,t}from"./urgent-wake-D6j1xwkd.js";t();export{e as requestUrgentHiveWake};

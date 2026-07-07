@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){return n[e]}var n,r=e((()=>{n={"release-manager":`opus:xhigh`,"merge-resolver":`opus:xhigh`,"release-fixer":`opus:xhigh`,"content-fixer":`sonnet`,worker:`sonnet`,validator:`sonnet`,documenter:`sonnet`,cup:`haiku`,scanner:`haiku`,judge:`haiku`,mug:`sonnet`,kettle:`sonnet`,operator:`sonnet`}}));export{r as n,t as r,n as t};

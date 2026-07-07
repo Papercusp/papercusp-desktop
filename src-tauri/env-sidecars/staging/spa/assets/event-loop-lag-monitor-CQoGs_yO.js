@@ -1,0 +1,1 @@
+import{i as e,n as t}from"./event-loop-lag-monitor-C_j6dX8a.js";e();export{t as cooperativeYield};

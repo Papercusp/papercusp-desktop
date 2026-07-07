@@ -1,0 +1,1 @@
+function e(e){return e&&e.length>0?e[0]._meta:void 0}function t(t){return t?e(t)?.total??t.length:0}function n(e,t){return t!=null&&t>e?`${e} of ${t}`:`${t??e}`}export{t as n,n as t};

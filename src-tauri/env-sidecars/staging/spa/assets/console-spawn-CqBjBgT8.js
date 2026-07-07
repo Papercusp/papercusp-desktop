@@ -1,0 +1,1 @@
+import{l as e,o as t}from"./console-spawn-BXaDeMiL.js";t();export{e as spawnConsole};

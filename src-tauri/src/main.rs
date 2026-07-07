@@ -1503,6 +1503,23 @@ fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorD
     parse_operator_discovery(&txt)
 }
 
+/// The live operator port straight from `$HOME/.papercusp/operator.json` — the
+/// self-heal source for `custom_protocol::upstream_base` when `SidecarState.port`
+/// was never latched (WI-3282). `serve` writes this file when it starts listening
+/// and removes it on clean shutdown, so a present file with a nonzero port means a
+/// live operator. Reading it per `/api` miss (only when the latched port is None)
+/// makes the webview→operator proxy resilient to a boot-discovery / watcher latch
+/// miss instead of dead-ending the whole app on a permanent 503.
+///
+/// HOME-based (matches env_switch's persisted_target_path): on Linux/mac the
+/// operator's workspace HOME is the user's `$HOME`, where it writes the file. This
+/// is a fallback only — on Windows (operator.json lives inside WSL) it returns
+/// None, i.e. no worse than the pre-fix behaviour.
+pub(crate) fn operator_discovery_port_from_home() -> Option<u16> {
+    let home = std::env::var_os("HOME")?;
+    read_operator_discovery(std::path::Path::new(&home)).map(|d| d.port)
+}
+
 /// Spawn a short-lived Windows helper (a per-poll `wsl.exe` read) WITHOUT
 /// dropping a visible console window over the webview — same rationale as
 /// isolate_process_group, but these reads are fire-and-forget so they don't

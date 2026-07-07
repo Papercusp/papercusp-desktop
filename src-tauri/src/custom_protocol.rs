@@ -172,6 +172,17 @@ fn upstream_base(app: &tauri::AppHandle) -> Option<String> {
     if let Ok(upstream) = std::env::var("PAPERCUSP_CUSTOM_PROTOCOL_UPSTREAM") {
         return Some(upstream);
     }
+    // WI-3282 self-heal: SidecarState.port can be left None on a packaged build
+    // when the boot-time discovery poll (or the restart watcher) fails to latch
+    // the port — observed live on the Linux deb: the operator was HEALTHY on its
+    // picked port, but the port was never stored, so upstream_base returned None,
+    // serve_bundled_spa answered every /api with 503, and onboarding hung forever
+    // on "Starting onboarding…". Re-resolve the live port from the operator's
+    // discovery file on each miss (only reached when the fast path above is None),
+    // so /api follows the running operator instead of dead-ending the whole app.
+    if let Some(port) = crate::operator_discovery_port_from_home() {
+        return Some(format!("http://127.0.0.1:{}", port));
+    }
     if cfg!(debug_assertions) {
         return Some("http://127.0.0.1:3070".to_string());
     }

@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){let t=()=>{throw Error(`[node:module shim] require() is unavailable in the browser bundle`)},n=(e=>t());return n.cache=Object.create(null),n.resolve=e=>t(),n.main=void 0,n.extensions=Object.create(null),n}var n=e((()=>{}));export{n,t};

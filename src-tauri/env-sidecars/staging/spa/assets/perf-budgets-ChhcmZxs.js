@@ -1,0 +1,1 @@
+import{a as e,i as t,r as n}from"./perf-budgets-D2jKSwuh.js";t();export{n as evaluatePerfSignals,e as readLatestPerfSignals};

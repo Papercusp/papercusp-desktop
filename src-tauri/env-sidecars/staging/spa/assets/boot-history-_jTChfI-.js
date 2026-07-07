@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t,n,o){for(r.push({ts:a(),workspaceId:e,harnessSlug:t,kind:n,message:o});r.length>i;)r.shift()}var n,r,i,a,o=e((()=>{n=200,r=[],i=n,a=()=>Date.now()}));export{t as n,o as t};
