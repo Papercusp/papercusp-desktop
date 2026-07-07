@@ -3058,7 +3058,8 @@ fn spawn_serve(
              PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
              PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
              PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
-             PAPERCUSP_DBOS_ORCHESTRATOR:HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
+             PAPERCUSP_DBOS_ORCHESTRATOR:PAPERCUSP_PROVISION_ENV_OPERATORS:\
+             HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_CODE_SERVER_URL:PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
              PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p",
         );
@@ -3114,6 +3115,18 @@ fn spawn_serve(
         .env("PAPERCUSP_DBOS_ENABLE", "1")
         .env("PAPERCUSP_DBOS_ROUTINES", "1")
         .env("PAPERCUSP_DBOS_ORCHESTRATOR", "1")
+        // Env-switcher provisioning (packaged-build fix, WI-3284 — same
+        // silently-off class as the DBOS trio above): the install-time
+        // env-operator launcher (host-bootstrap.ts, P-017/D-006) is gated on
+        // this + PAPERCUSP_DESKTOP=1, and NOTHING ever exported it — so no
+        // shipped build provisioned the dev/prod/staging env operators and
+        // the EnvSwitcherBar rendered every env permanently greyed
+        // (owner-reported on the mac build 2026-07-06; owner directive: the
+        // envs SHOULD all run on user builds). The launcher is idempotent +
+        // graceful (skips already-served ports / missing source tree or
+        // toolchain) and every spawned sibling is request-only (EI-126
+        // single-writer), so arming it on every desktop sidecar spawn is safe.
+        .env("PAPERCUSP_PROVISION_ENV_OPERATORS", "1")
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
         .env("PAPERCUSP_SHARED_OPERATOR", "1")
