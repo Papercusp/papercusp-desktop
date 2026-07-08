@@ -308,22 +308,22 @@ print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")' 2>/dev/null)"
   echo "✓ A resolved hive link ${A_LINK:0:56}… hiveId=$HIVE_ID hivePubkey=${HIVE_PUBKEY:0:12}…"
   [ -n "$HIVE_PUBKEY" ] || echo "⚠ A surfaced NO hivePubkey — joiner will skip identity-materialize (no re-key → no federation)."
 
-  fed_log "A + B both JOIN THE HIVE via /api/discovery/join-hive (hiveId=$HIVE_ID)"
+  fed_log "A + B both JOIN THE HIVE via /api/discovery/join-pot (hiveId=$HIVE_ID)"
   a_join="$(drv_exec a <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[a]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
 EOF
 )"
   A_MEMBER_SLUG="$(join_hive_member_slug "$a_join")"
   { printf '%s' "$a_join" | grep -q '"ok":true' && [ -n "$A_MEMBER_SLUG" ]; } \
-    && echo "✓ A joined hive (member=$A_MEMBER_SLUG)" || echo "✗ A join-hive: $(printf '%s' "$a_join" | head -c 300)"
+    && echo "✓ A joined hive (member=$A_MEMBER_SLUG)" || echo "✗ A join-pot: $(printf '%s' "$a_join" | head -c 300)"
   b_join="$(drv_exec b <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[b]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[b]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"hiveId":"$HIVE_ID","hivePubkey":"$HIVE_PUBKEY","memberLinks":["$A_LINK"]}'
 EOF
 )"
   B_MEMBER_SLUG="$(join_hive_member_slug "$b_join")"
   { printf '%s' "$b_join" | grep -q '"ok":true' && [ -n "$B_MEMBER_SLUG" ]; } \
-    && echo "✓ B joined hive (member=$B_MEMBER_SLUG)" || echo "✗ B join-hive: $(printf '%s' "$b_join" | head -c 300)"
-  [ -n "$A_MEMBER_SLUG" ] && [ -n "$B_MEMBER_SLUG" ] || setup_fail "join-hive did not return member slugs for both frames" 6
+    && echo "✓ B joined hive (member=$B_MEMBER_SLUG)" || echo "✗ B join-pot: $(printf '%s' "$b_join" | head -c 300)"
+  [ -n "$A_MEMBER_SLUG" ] && [ -n "$B_MEMBER_SLUG" ] || setup_fail "join-pot did not return member slugs for both frames" 6
 
   # 6. WRITE the durable state (everything --hotpatch / --teardown need)
   {

@@ -2609,7 +2609,7 @@ fn ensure_server_running(
 
 /// Linux single-bundle self-host: spawn + OWN the operator sidecar from the GUI
 /// process. Mirrors the Server-role boot in run()'s setup (embedded-PG + the Hono
-/// operator + code-server, all inside `serve.mjs --ensure`) MINUS the tray — so a
+/// operator, all inside `serve.mjs --ensure`) MINUS the tray — so a
 /// single `apt install ./papercusp.deb` (or the AppImage) is fully self-contained
 /// on a fresh machine, with no separately installed "Papercusp Server" bundle
 /// required. The `serve.mjs` child is stored in `SidecarState.child` so the
@@ -2878,7 +2878,7 @@ fn enable_login_autostart(app: &tauri::App) {
 /// prepared — the caller then falls back to inherit so logging never blocks the
 /// child from launching.
 ///
-/// `basename` is the log file name (e.g. `serve.log`, `code-server.log`) so every
+/// `basename` is the log file name (e.g. `serve.log`) so every
 /// console-less child sidecar can route to its own rotated on-disk log via one
 /// shared helper rather than each re-implementing the rotation (WI-1707/WI-1781).
 /// Rotate `<workspace_home>/.papercusp/logs/<basename>` (…→`.5`, dropping the
@@ -2920,7 +2920,7 @@ fn rotating_log_stdio(workspace_home: &std::path::Path, basename: &str) -> Optio
 /// `<workspace_home>/.papercusp/logs/<basename>` — the own-process analogue of
 /// `rotating_log_stdio` (WI-1803).
 ///
-/// WI-1707 pointed the CHILD sidecars' (serve / code-server) stdio at on-disk
+/// WI-1707 pointed the CHILD sidecar's (serve) stdio at on-disk
 /// logs, but the desktop app's OWN process is ALSO launched with no controlling
 /// console (Finder / `launchd` / a login item on macOS), so its inherited fd
 /// 1/2 are `/dev/null`. Every `println!` / `eprintln!` in THIS binary — the
@@ -4556,13 +4556,13 @@ pub fn run() {
             // workspace. It runs under the real user HOME (`shared_sidecar_home`
             // — where ~/.claude / ~/.gitconfig live); per-workspace credential
             // isolation moves to each spawned CHILD's HOME (P-051, set
-            // operator-side from the job's workspace). The embedded-PG +
-            // code-server data live in a SHARED dir (`shared_data_dir`), NOT
-            // under any one workspace, because the DB is a single RLS-scoped
-            // instance for all workspaces (D-006). `ensure_initialized()` still
-            // runs the first-launch ~/.papercusp migration + provisions each
-            // per-workspace dir's credentials, so the per-spawn HOME flip has
-            // populated credential homes to point at.
+            // operator-side from the job's workspace). The embedded-PG data
+            // lives in a SHARED dir (`shared_data_dir`), NOT under any one
+            // workspace, because the DB is a single RLS-scoped instance for all
+            // workspaces (D-006). `ensure_initialized()` still runs the
+            // first-launch ~/.papercusp migration + provisions each per-workspace
+            // dir's credentials, so the per-spawn HOME flip has populated
+            // credential homes to point at.
             if let Err(e) = workspaces::ensure_initialized() {
                 eprintln!("[papercusp-desktop] workspace registry init failed: {} (continuing with shared home)", e);
             }
@@ -4779,7 +4779,7 @@ pub fn run() {
 ///
 /// SIGTERM lets the Node wrapper run its own SIGTERM handler, which in
 /// turn `pg_ctl stop`s its postgres child cleanly. Same logic applies to
-/// zero-cache (which manages a change-streamer child) and code-server.
+/// zero-cache (which manages a change-streamer child).
 fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
     let pid = child.id();
     println!(

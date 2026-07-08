@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-C5tfs15q.js";e();export{t as buildConsoleEnvelope};

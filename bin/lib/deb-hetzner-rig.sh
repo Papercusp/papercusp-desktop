@@ -11,7 +11,7 @@
 # Topology: this lib generalizes the old hardcoded a=owner + b=joiner to an
 # ARBITRARY frame array RIG_FRAMES=(a b c …). Frame `a` is the OWNER (it runs
 # pots/from-repo + surfaces the hiveId/hivePubkey/memberLink); every frame
-# (owner included) then JOINs the SAME hive via POST /api/discovery/join-hive
+# (owner included) then JOINs the SAME hive via POST /api/discovery/join-pot
 # (joinHiveAsView re-keys it onto the owner's hive-pubkey topic — EI-681). A
 # scenario picks the frame count + per-frame gh identity + region.
 #
@@ -584,7 +584,7 @@ rig_wait_all_ready() {
 
 # ── owner publishes the hive (from-repo) → resolve hiveId/pubkey/memberLink ───
 # rig_owner_publish_hive <owner-inst> <repo_url> — POST pots/from-repo on the
-# owner, then resolve the THREE fields /api/discovery/join-hive needs
+# owner, then resolve the THREE fields /api/discovery/join-pot needs
 # ({ hiveId, hivePubkey, memberLinks }) from whichever response shape came back
 # (fresh-create vs existing). Sets RIG_HIVE_ID / RIG_HIVE_PUBKEY / RIG_HIVE_LINK.
 rig_owner_publish_hive() {
@@ -636,21 +636,21 @@ ms=[m for m in d.get("members",[]) if m.get("ok") and m.get("slug")]
 print(ms[0]["slug"] if ms else "")' 2>/dev/null
 }
 
-# rig_join_hive <inst> — JOIN <inst> to the published hive via /api/discovery/join-hive
+# rig_join_hive <inst> — JOIN <inst> to the published hive via /api/discovery/join-pot
 # (joinHiveAsView: boots the member substrate AND re-keys it onto the owner's
 # hive-pubkey topic — EI-681). Sets FRAME_MEMBER_SLUG[$inst]. hivePubkey is passed
 # EXPLICITLY (a joiner's local discovery is empty). Requires rig_owner_publish_hive.
 rig_join_hive() {
   local inst="$1" resp slug try
   [ -n "${RIG_HIVE_ID:-}" ] || { echo "FATAL: no hive published — call rig_owner_publish_hive first" >&2; return 1; }
-  fed_log "[$inst] JOIN hive via /api/discovery/join-hive (hiveId=$RIG_HIVE_ID)"
+  fed_log "[$inst] JOIN hive via /api/discovery/join-pot (hiveId=$RIG_HIVE_ID)"
   # 2 attempts with a reconnect probe between: an EMPTY resp means the SSH leg
   # died (transient flap — hit twice on 2026-07-01), not that the API refused.
   # Safe to retry: re-join is idempotent (existing view reused, members skipped,
   # owner self-join is a self_hive no-op).
   for try in 1 2; do
     resp="$(drv_exec "$inst" <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-hive -H 'content-type: application/json' -d '{"hiveId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"hiveId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
 EOF
 )"
     [ -n "$resp" ] && break
@@ -669,7 +669,7 @@ EOF
     printf '%s' "$resp" | grep -q '"self_hive":true' || echo "✓ $inst joined hive (member=$slug)"
     return 0
   fi
-  echo "✗ $inst join-hive failed: $(printf '%s' "$resp" | head -c 300)"; return 1
+  echo "✗ $inst join-pot failed: $(printf '%s' "$resp" | head -c 300)"; return 1
 }
 
 # rig_join_all <owner-inst> — join every NON-owner frame to the hive. The owner

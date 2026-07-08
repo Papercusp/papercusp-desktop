@@ -236,6 +236,10 @@ cut_release_seed() {
   if [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]]; then
     core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
   fi
+  # Offline dogfood restores need the bundled epoch keys too. Keep parity with
+  # mac-vm-build.sh; opt out only for diagnostic cuts.
+  local emit_args=()
+  [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
@@ -257,7 +261,8 @@ cut_release_seed() {
         --hive "$seed_hive" \
         --rev "$seed_rev" \
         "${depth_args[@]}" \
-        "${core_args[@]}"
+        "${core_args[@]}" \
+        "${emit_args[@]}"
   )
 }
 

@@ -360124,6 +360124,7 @@ async function recordSpawnPg(sql4, input2) {
   }
 }
 async function finishSpawnPg(sql4, input2) {
+  const outputTail = input2.outputTail ?? null;
   await sql4`
     UPDATE harness_shared.spawned_agents
        SET status = ${input2.status},
@@ -360131,7 +360132,11 @@ async function finishSpawnPg(sql4, input2) {
            duration_ms = (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint,
            exit_code = ${input2.exitCode ?? null},
            error_message = COALESCE(${input2.errorMessage ?? null}, error_message),
-           output_tail = COALESCE(${input2.outputTail ?? null}, output_tail)
+           output_tail = COALESCE(${outputTail}::text, output_tail),
+           last_output_at = CASE
+             WHEN ${outputTail}::text IS NOT NULL THEN GREATEST(COALESCE(last_output_at, now()), now())
+             ELSE last_output_at
+           END
      WHERE workspace_id = ${input2.workspaceId} AND spawn_id = ${input2.spawnId}
   `;
 }
@@ -360500,9 +360505,10 @@ var init_governor2 = __esm({
 
 // ../../packages/operator-core/lib/events/await/pattern.ts
 function isPattern(key12) {
-  return key12.includes("*") || key12.startsWith("@");
+  return typeof key12 === "string" && (key12.includes("*") || key12.startsWith("@"));
 }
 function expandPatternMacro(key12) {
+  if (typeof key12 !== "string") return key12;
   if (!key12.startsWith("@")) return key12;
   const plan = /^@plan:(.+)$/.exec(key12);
   if (plan) return `plan-item:done:${plan[1]}:*`;
@@ -360520,6 +360526,7 @@ function patternToOperatorTest(glob) {
   return { matches: source };
 }
 function keyMatchesPattern(pattern, firedKey) {
+  if (typeof pattern !== "string") return false;
   const glob = expandPatternMacro(pattern);
   if (!glob.includes("*")) return glob === firedKey;
   return evaluateOperatorTest(patternToOperatorTest(glob), firedKey);
@@ -360770,7 +360777,9 @@ async function fireAwaitsForKey(input2) {
        AND fired_at IS NULL AND cancelled_at IS NULL
        AND (once = true OR expires_ts IS NULL OR expires_ts > now())
   `;
-  const matched = patternCandidates.filter((r2) => keyMatchesPattern(r2.event_key, input2.eventKey));
+  const matched = patternCandidates.filter(
+    (r2) => typeof r2.event_key === "string" && keyMatchesPattern(r2.event_key, input2.eventKey)
+  );
   const matchedOnceIds = matched.filter((r2) => (r2.once ?? true) === true).map((r2) => Number(r2.id));
   const matchedStanding = matched.filter((r2) => (r2.once ?? true) === false);
   const claimedPatternRows = matchedOnceIds.length > 0 ? await sql4`
@@ -379337,6 +379346,10 @@ function pgJson(pg21, value) {
 function splitCommand(cmd) {
   return cmd.split(/\s+/).filter(Boolean);
 }
+function nextOuterActivityEchoAt(lastEchoAt, now2, throttleMs = OUTER_ACTIVITY_ECHO_THROTTLE_MS) {
+  if (lastEchoAt === null) return now2;
+  return now2 - lastEchoAt < throttleMs ? null : now2;
+}
 function parseBlueprintLocalRoots(extras) {
   const out = [];
   for (const e2 of extras) {
@@ -380517,7 +380530,18 @@ async function invoke(ctx, role, extras = [], options5 = {}) {
       if (options5.signal.aborted) onAbort();
       else options5.signal.addEventListener("abort", onAbort, { once: true });
     }
+    let lastOuterActivityEchoAt = null;
+    const echoActivityToOuterProcess = () => {
+      const next = nextOuterActivityEchoAt(lastOuterActivityEchoAt, Date.now());
+      if (next === null) return;
+      lastOuterActivityEchoAt = next;
+      try {
+        process.stderr.write("[papercusp:activity]\n");
+      } catch {
+      }
+    };
     child.stdout.on("data", (chunk) => {
+      echoActivityToOuterProcess();
       jsonlChunks.push(chunk);
       const mySeq = chunkSeq;
       const myData = chunk.toString("utf8");
@@ -380544,7 +380568,10 @@ async function invoke(ctx, role, extras = [], options5 = {}) {
       }
       if (advancedSeq) chunkSeq++;
     });
-    child.stderr.on("data", (chunk) => errChunks.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      echoActivityToOuterProcess();
+      errChunks.push(chunk);
+    });
     child.stdin.on("error", (err11) => {
       if (err11.code !== "EPIPE") {
         ctx.log(`  stdin error: ${err11.message}`);
@@ -380737,7 +380764,7 @@ async function invoke(ctx, role, extras = [], options5 = {}) {
     durationMs: outcome.durationMs
   };
 }
-var FLEET_ALLOWED_TOOLS, QUEEN_MCP_TOOL_NAMES, QUEEN_ALLOWED_TOOLS, BEE_MCP_TOOL_NAMES, BEE_ALLOWED_TOOLS, OVERWATCH_MCP_TOOL_NAMES, CORE_MCP_TOOL_NAMES, CORE_ALLOWED_TOOLS, FLEET_DISALLOWED_TOOLS, FLEET_NO_WRITE_ROLES, FLEET_CAPABILITY_REPLACED_TOOLS, FLEET_CAPABILITY_ROLES, FLEET_OMP_CAPABILITY_ALLOWED_TOOLS, FLEET_SANDBOX_DENY_READ, FLEET_SANDBOX_ALLOWED_DOMAINS, FLEET_SANDBOX_CACHE_ROOT, FLEET_SANDBOX_DENY_RULES, SPAWN_ENV_ALL_ROLES_STRIP, SEARCH_PROVIDER_ENV_KEYS, FLEET_PRE_PUSH_HOOK, cachedFleetGitHooksDir;
+var OUTER_ACTIVITY_ECHO_THROTTLE_MS, FLEET_ALLOWED_TOOLS, QUEEN_MCP_TOOL_NAMES, QUEEN_ALLOWED_TOOLS, BEE_MCP_TOOL_NAMES, BEE_ALLOWED_TOOLS, OVERWATCH_MCP_TOOL_NAMES, CORE_MCP_TOOL_NAMES, CORE_ALLOWED_TOOLS, FLEET_DISALLOWED_TOOLS, FLEET_NO_WRITE_ROLES, FLEET_CAPABILITY_REPLACED_TOOLS, FLEET_CAPABILITY_ROLES, FLEET_OMP_CAPABILITY_ALLOWED_TOOLS, FLEET_SANDBOX_DENY_READ, FLEET_SANDBOX_ALLOWED_DOMAINS, FLEET_SANDBOX_CACHE_ROOT, FLEET_SANDBOX_DENY_RULES, SPAWN_ENV_ALL_ROLES_STRIP, SEARCH_PROVIDER_ENV_KEYS, FLEET_PRE_PUSH_HOOK, cachedFleetGitHooksDir;
 var init_invoke = __esm({
   "../../libs/papercusp/packages/orchestrator/src/invoke.ts"() {
     init_session_launch_dirs();
@@ -380755,6 +380782,7 @@ var init_invoke = __esm({
     init_no_subagent_deny();
     init_role_models();
     init_workspace();
+    OUTER_ACTIVITY_ECHO_THROTTLE_MS = 15e3;
     FLEET_ALLOWED_TOOLS = [
       "mcp__papercusp",
       "Read",
@@ -442393,12 +442421,89 @@ function workItemScope(harness, workItemId) {
 function loopScope(harness, ownerId) {
   return `loop:${harness}:${ownerId}`;
 }
+function renderWallLine(w3) {
+  const recheck = (w3.recheck ?? "").trim();
+  const since = w3.sinceMs != null && Number.isFinite(w3.sinceMs) ? ` (since ${new Date(w3.sinceMs).toISOString()})` : "";
+  return `- ${w3.claim.trim()}${recheck ? ` \u2014 re-check: ${recheck}` : ""}${since}`;
+}
+function parseWallLine(line2) {
+  const m4 = /^-\s+(.+?)(?:\s+—\s+re-check:\s+(.+?))?(?:\s+\(since\s+([^)]+)\))?\s*$/.exec(line2);
+  if (!m4) return null;
+  const claim2 = (m4[1] ?? "").trim();
+  if (!claim2) return null;
+  const out = { claim: claim2 };
+  const recheck = (m4[2] ?? "").trim();
+  if (recheck) out.recheck = recheck;
+  if (m4[3]) {
+    const t12 = Date.parse(m4[3]);
+    if (Number.isFinite(t12)) out.sinceMs = t12;
+  }
+  return out;
+}
 function renderCarryNote(fields) {
-  return CARRY_NOTE_SECTIONS.map(({ key: key12, heading: heading3 }) => {
+  const sections = CARRY_NOTE_SECTIONS.map(({ key: key12, heading: heading3 }) => {
     const v9 = (fields[key12] ?? "").trim();
     return v9.length > 0 ? `## ${heading3}
 ${v9}` : null;
-  }).filter((s3) => s3 !== null).join("\n\n");
+  }).filter((s3) => s3 !== null);
+  const walls = (fields.walls ?? []).filter((w3) => (w3.claim ?? "").trim().length > 0);
+  if (walls.length > 0) {
+    sections.push(`## ${CARRY_NOTE_WALLS_HEADING}
+${walls.map(renderWallLine).join("\n")}`);
+  }
+  return sections.join("\n\n");
+}
+function splitCarryNoteWalls(note) {
+  const text35 = (note ?? "").trim();
+  if (!text35) return { body: "", walls: [] };
+  const headingRe = new RegExp(`^##\\s+${CARRY_NOTE_WALLS_HEADING}\\s*$`, "i");
+  const lines = text35.split("\n");
+  const bodyLines = [];
+  const walls = [];
+  let inWalls = false;
+  for (const line2 of lines) {
+    if (headingRe.test(line2)) {
+      inWalls = true;
+      continue;
+    }
+    if (inWalls && /^##\s+/.test(line2)) inWalls = false;
+    if (inWalls) {
+      const w3 = parseWallLine(line2);
+      if (w3) walls.push(w3);
+      continue;
+    }
+    bodyLines.push(line2);
+  }
+  return { body: bodyLines.join("\n").trim(), walls };
+}
+function withCarryNoteWalls(body, walls) {
+  const { body: stripped } = splitCarryNoteWalls(body);
+  const kept = walls.filter((w3) => (w3.claim ?? "").trim().length > 0);
+  if (kept.length === 0) return stripped;
+  const section4 = `## ${CARRY_NOTE_WALLS_HEADING}
+${kept.map(renderWallLine).join("\n")}`;
+  return stripped ? `${stripped}
+
+${section4}` : section4;
+}
+function normalizeWallEntries(entries, prior2, nowMs = Date.now()) {
+  const priorByClaim = new Map(prior2.map((w3) => [w3.claim.trim(), w3]));
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const e2 of entries) {
+    const claim2 = (e2.claim ?? "").trim();
+    if (!claim2 || seen.has(claim2)) continue;
+    seen.add(claim2);
+    const existing = priorByClaim.get(claim2);
+    const recheck = (e2.recheck ?? existing?.recheck ?? "").trim();
+    out.push({
+      claim: claim2,
+      ...recheck ? { recheck } : {},
+      sinceMs: e2.sinceMs ?? existing?.sinceMs ?? nowMs
+    });
+    if (out.length >= CARRY_NOTE_MAX_WALLS) break;
+  }
+  return out;
 }
 function normalizeJournal(v9) {
   if (!v9) return [];
@@ -442522,7 +442627,7 @@ async function getLoopCarryNoteWithMeta(ref2) {
     return { note: null, updatedAtMs: null };
   }
 }
-var CARRY_NOTE_SECTIONS, CARRY_JOURNAL_MAX_ENTRIES, CARRY_JOURNAL_NOTE_MAX_CHARS, CARRY_JOURNAL_TOTAL_MAX_CHARS;
+var CARRY_NOTE_SECTIONS, CARRY_NOTE_WALLS_HEADING, CARRY_NOTE_MAX_WALLS, CARRY_JOURNAL_MAX_ENTRIES, CARRY_JOURNAL_NOTE_MAX_CHARS, CARRY_JOURNAL_TOTAL_MAX_CHARS;
 var init_carry_note = __esm({
   "../../packages/operator-core/lib/carry-note.ts"() {
     "use strict";
@@ -442535,6 +442640,8 @@ var init_carry_note = __esm({
       { key: "insight", heading: "Key insight" },
       { key: "next", heading: "Next action" }
     ];
+    CARRY_NOTE_WALLS_HEADING = "Walls";
+    CARRY_NOTE_MAX_WALLS = 12;
     CARRY_JOURNAL_MAX_ENTRIES = 15;
     CARRY_JOURNAL_NOTE_MAX_CHARS = 600;
     CARRY_JOURNAL_TOTAL_MAX_CHARS = 6e3;
@@ -495302,8 +495409,7 @@ var init_governor7 = __esm({
 function sanitizeCoordText(raw2) {
   return raw2.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ").replace(/https?:\/\/\S+/g, " ").replace(/\S*\/\S*/g, " ").replace(/\b[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|json|mdx?|sql|rs|py|sh|ya?ml|toml|css|html|svg|lock)\b/gi, " ").replace(/\b(?:[A-Z]{1,3}-\d+|FB-\d+|su-[0-9a-f-]+|wf_[a-z0-9-]+|rt_[a-z0-9_]+)\b/g, " ").replace(/\b[\w-]*\d{4}-\d{2}-\d{2}\b/g, " ");
 }
-function extractTerms(rawText) {
-  const text35 = sanitizeCoordText(rawText).toLowerCase();
+function extractTermsFromSanitized(text35) {
   const terms = /* @__PURE__ */ new Set();
   for (const m4 of text35.matchAll(/\b[a-z]{2,}(?:-[a-z]{2,})+\b/g)) {
     const words = m4[0].split("-");
@@ -495413,17 +495519,18 @@ async function aggregateNeologisms(rows, insights, namespaceIndex, asOf, opts = 
   let _dedupN = 0;
   for (const row of rows) {
     if ((++_dedupN & 511) === 0) await yieldToEventLoop3();
-    const key12 = sanitizeCoordText(row.text).toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
+    const lc2 = sanitizeCoordText(row.text).toLowerCase();
+    const key12 = lc2.replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
     const prev = byText.get(key12);
-    if (!prev || row.at > prev.at) byText.set(key12, row);
+    if (!prev || row.at > prev.row.at) byText.set(key12, { row, lc: lc2 });
   }
   let _scanN = 0;
-  for (const row of byText.values()) {
+  for (const { row, lc: lc2 } of byText.values()) {
     if ((++_scanN & 255) === 0) await yieldToEventLoop3();
     const atMs = Date.parse(row.at);
     if (!Number.isFinite(atMs) || atMs > asOfMs) continue;
     const isRecent = atMs >= recentStartMs;
-    for (const term2 of extractTerms(row.text)) {
+    for (const term2 of extractTermsFromSanitized(lc2)) {
       if (isCoveredByNamespace(term2, namespaceIndex)) continue;
       const acc = byTerm.get(term2);
       if (!acc) {
@@ -495448,26 +495555,32 @@ async function aggregateNeologisms(rows, insights, namespaceIndex, asOf, opts = 
     }
   }
   const priorDays = o2.windowDays - o2.recentDays;
-  const insightsLc = insights.map((d2) => ({ slug: d2.slug, lc: d2.text.toLowerCase() }));
   const entries = [];
   let _termN = 0;
   for (const [term2, acc] of byTerm) {
     if ((++_termN & 255) === 0) await yieldToEventLoop3();
     const recentRate = acc.recent / o2.recentDays;
     const priorRate = (acc.prior + 1) / priorDays;
-    const termDash = term2.replace(/ /g, "-");
-    const insightSlugs = insightsLc.filter((d2) => d2.lc.includes(term2) || d2.lc.includes(termDash)).map((d2) => d2.slug);
     entries.push({
       term: term2,
       recentMentions: acc.recent,
       priorMentions: acc.prior,
       distinctSpeakers: acc.speakers.size,
       growth: recentRate / priorRate,
-      insightSlugs,
+      insightSlugs: [],
       firstSeenAt: acc.firstSeenAt,
       lastSeenAt: acc.lastSeenAt,
       exampleText: acc.exampleText.slice(0, 300)
     });
+  }
+  const insightsLc = insights.map((d2) => ({ slug: d2.slug, lc: d2.text.toLowerCase() }));
+  const passers = entries.filter(
+    (e2) => e2.recentMentions >= o2.minRecentMentions && e2.distinctSpeakers >= o2.minSpeakers && e2.growth >= o2.growthFactor
+  ).sort((a2, b5) => score(b5) - score(a2));
+  for (const e2 of passers.slice(0, MAX_CORROBORATED)) {
+    await yieldToEventLoop3();
+    const termDash = e2.term.replace(/ /g, "-");
+    e2.insightSlugs = insightsLc.filter((d2) => d2.lc.includes(e2.term) || d2.lc.includes(termDash)).map((d2) => d2.slug);
   }
   return entries.sort(
     (a2, b5) => score(b5) - score(a2) || b5.growth - a2.growth || (a2.term < b5.term ? -1 : a2.term > b5.term ? 1 : 0)
@@ -495532,7 +495645,7 @@ function neologismOptionsFromPayload(payload) {
   if (maxPerTick !== void 0) out.maxPerTick = maxPerTick;
   return out;
 }
-var STOPWORDS, MIN_WORD_LEN, MAX_TERM_WORDS, GRAMMATICAL_PREFIXES, COMMON_WORDS, DEFAULT_NEOLOGISM_OPTIONS;
+var STOPWORDS, MIN_WORD_LEN, MAX_TERM_WORDS, GRAMMATICAL_PREFIXES, COMMON_WORDS, DEFAULT_NEOLOGISM_OPTIONS, MAX_CORROBORATED;
 var init_miner_core2 = __esm({
   "../../packages/operator-core/lib/neologism/miner-core.ts"() {
     "use strict";
@@ -495566,6 +495679,7 @@ var init_miner_core2 = __esm({
       growthFactor: 3,
       maxPerTick: 2
     };
+    MAX_CORROBORATED = 200;
   }
 });
 
@@ -528864,6 +528978,74 @@ var init_loop_cost_cap = __esm({
   }
 });
 
+// ../../packages/operator-core/lib/harness/routines/loop-wall-nag.ts
+function loopWallNagScope(harness, ownerId) {
+  return `loopnag:${harness}:${ownerId}`;
+}
+function detectOwnerAsk(text35) {
+  const t12 = (text35 ?? "").trim();
+  if (!t12) return null;
+  const lines = t12.split("\n");
+  for (let i2 = lines.length - 1; i2 >= 0; i2--) {
+    const line2 = lines[i2].trim();
+    if (!line2) continue;
+    if (OWNER_ASK_PATTERNS.some((re5) => re5.test(line2))) {
+      return line2.length > LOOP_WALL_NAG_EXCERPT_MAX ? line2.slice(0, LOOP_WALL_NAG_EXCERPT_MAX - 1) + "\u2026" : line2;
+    }
+  }
+  return null;
+}
+async function stashLoopWallNag(ref2, excerpt, nowMs = Date.now(), deps5 = {}) {
+  try {
+    const set3 = deps5.set ?? setCarryNote;
+    await set3(
+      { scope: loopWallNagScope(ref2.harness, ref2.ownerId), workspaceId: DEFAULT_COORD_WORKSPACE },
+      JSON.stringify({ atMs: nowMs, excerpt }),
+      { journal: false }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function takeLoopWallNag(ref2, deps5 = {}) {
+  try {
+    const get57 = deps5.get ?? getCarryNote;
+    const set3 = deps5.set ?? setCarryNote;
+    const scoped = { scope: loopWallNagScope(ref2.harness, ref2.ownerId), workspaceId: DEFAULT_COORD_WORKSPACE };
+    const raw2 = await get57(scoped);
+    if (!raw2) return null;
+    await set3(scoped, null, { journal: false });
+    const parsed = JSON.parse(raw2);
+    if (typeof parsed?.excerpt !== "string" || !parsed.excerpt.trim()) return null;
+    return { atMs: typeof parsed.atMs === "number" ? parsed.atMs : 0, excerpt: parsed.excerpt };
+  } catch {
+    return null;
+  }
+}
+function renderWallNagLine(nag) {
+  return `\u26A0 TURN-SETTLE NAG: your previous turn ended with an owner-ask \u2014 "${nag.excerpt}" \u2014 but you hold NO wall row, so that commitment dissolves at the next context boundary. Commitments are rows, never prose: park it NOW via loop:checkpoint { walls: [{ claim, recheck }] } (or file a blocked work_item), before anything else this wake.`;
+}
+var LOOP_WALL_NAG_EXCERPT_MAX, OWNER_ASK_PATTERNS;
+var init_loop_wall_nag = __esm({
+  "../../packages/operator-core/lib/harness/routines/loop-wall-nag.ts"() {
+    "use strict";
+    init_event_log2();
+    init_carry_note();
+    LOOP_WALL_NAG_EXCERPT_MAX = 200;
+    OWNER_ASK_PATTERNS = [
+      /\bawait(?:ing|s)?\s+(?:the\s+)?owner\b/i,
+      /\bowner(?:'s)?\s+(?:ok|okay|approval|sign-?off|go[- ]ahead|confirmation|decision)\b/i,
+      /\bpending\s+(?:the\s+)?owner\b/i,
+      /\bowner[- ]gated\b/i,
+      /\bneeds?\s+(?:the\s+)?owner(?:'s)?\b/i,
+      /\bask(?:ing)?\s+the\s+owner\b/i,
+      /\bblocked\s+on\s+(?:the\s+)?owner\b/i,
+      /\bwaiting\s+(?:for|on)\s+(?:the\s+)?owner\b/i
+    ];
+  }
+});
+
 // ../../packages/operator-core/lib/agent-tools/search/embedder.ts
 var embedder_exports = {};
 __export(embedder_exports, {
@@ -529128,21 +529310,31 @@ ${clipped}`;
 function isLoopWakeFullForm(fireNumber, hasCheckpoint) {
   return fireNumber <= 1 || fireNumber % LOOP_WAKE_FULL_TEMPLATE_EVERY === 1 || !hasCheckpoint;
 }
+function renderLoopWallsBlock(walls, nowMs = Date.now()) {
+  if (!walls.length) return null;
+  const lines = walls.map((w3) => {
+    const recheck = w3.recheck ? ` \u2014 re-check: ${w3.recheck}` : "";
+    const age = w3.sinceMs != null && Number.isFinite(w3.sinceMs) ? ` (standing ${humanAge(Math.max(0, nowMs - w3.sinceMs))})` : "";
+    return `  \u2022 ${w3.claim}${recheck}${age}`;
+  });
+  return "\u26D4 OPEN WALLS \u2014 owner-gated / pending decisions you are carrying (re-check, do not re-litigate or re-declare resolved; clear a resolved one via loop:checkpoint { walls }):\n" + lines.join("\n");
+}
 function renderLoopWakeText(opts) {
   const block2 = renderLoopCheckpointBlock(opts.checkpoint, {
     updatedAtMs: opts.checkpointUpdatedAtMs,
     nowMs: opts.nowMs,
     intervalSec: opts.intervalSec
   });
+  const wallsBlock = renderLoopWallsBlock(opts.walls ?? [], opts.nowMs);
+  const priority = [opts.wallNagLine || null, wallsBlock].filter((s3) => Boolean(s3));
   if (isLoopWakeFullForm(opts.fireNumber, block2 != null)) {
-    return block2 == null ? opts.kickoff : `${opts.kickoff}
-
-${block2}`;
+    return [opts.kickoff, ...priority, ...block2 ? [block2] : []].join("\n\n");
   }
   const firstLine = opts.kickoff.split("\n").find((l2) => l2.trim().length > 0) ?? opts.kickoff;
   return [
     `${firstLine} (wake #${opts.fireNumber}; short form \u2014 the full loop contract was delivered on wake 1 and repeats every ${LOOP_WAKE_FULL_TEMPLATE_EVERY} wakes)`,
     "",
+    ...priority.flatMap((s3) => [s3, ""]),
     block2,
     "",
     ...opts.recipeLine ? [opts.recipeLine, ""] : [],
@@ -529220,11 +529412,14 @@ async function fireLoopWake(input2, deps5 = {}) {
     ownerId: input2.targetOwnerId,
     workspaceId: input2.workspaceId
   }).catch(() => ({ note: null, updatedAtMs: null }));
-  const hasCheckpoint = Boolean((checkpointMeta.note ?? "").trim());
+  const { body: checkpointBody, walls } = splitCarryNoteWalls(checkpointMeta.note);
+  const takeWallNag = deps5.takeWallNag ?? takeLoopWallNag;
+  const nag = await takeWallNag({ harness: input2.installSlug, ownerId: input2.targetOwnerId }).catch(() => null);
+  const hasCheckpoint = Boolean(checkpointBody.trim());
   let recipeLine = null;
   if (!isLoopWakeFullForm(fireNumber, hasCheckpoint)) {
     const findWakeRecipe = deps5.findWakeRecipe ?? findTopRecipeForWake;
-    const hit = await findWakeRecipe(extractWakeRecipeQuery(checkpointMeta.note, armTimeKickoff), {
+    const hit = await findWakeRecipe(extractWakeRecipeQuery(checkpointBody, armTimeKickoff), {
       sql: input2.sql
     }).catch(() => null);
     if (hit) recipeLine = renderWakeRecipeLine(hit);
@@ -529232,10 +529427,12 @@ async function fireLoopWake(input2, deps5 = {}) {
   const kickoff = renderLoopWakeText({
     kickoff: armTimeKickoff,
     fireNumber,
-    checkpoint: checkpointMeta.note,
+    checkpoint: checkpointBody,
     checkpointUpdatedAtMs: checkpointMeta.updatedAtMs,
     intervalSec: input2.intervalSec,
-    recipeLine
+    recipeLine,
+    walls,
+    wallNagLine: nag ? renderWallNagLine(nag) : null
   });
   const carry = readLoopCarry(input2.payloadTemplate);
   const coldPayload = carry === "cold" ? { carry: "cold", wakeCount: fireNumber, harness: input2.installSlug } : void 0;
@@ -529282,6 +529479,7 @@ var init_loop_fire = __esm({
     init_inbox_wake();
     init_carry_note();
     init_loop_cost_cap();
+    init_loop_wall_nag();
     init_loop_wake_recipe();
     init_loop_dead_man();
     LOOP_WAKE_CHECKPOINT_MAX_CHARS = 3e3;
@@ -693587,6 +693785,7 @@ __export(loop_exports, {
   deactivateLoop: () => deactivateLoop,
   detectDrivenWorkItemId: () => detectDrivenWorkItemId,
   getLoopStatus: () => getLoopStatus,
+  loopRoutineId: () => loopRoutineId,
   loopRoutineName: () => loopRoutineName,
   materializeLoop: () => materializeLoop
 });
@@ -693929,7 +694128,7 @@ function isInfraAwait(eventKey) {
 }
 async function buildCarryBrief(ownerId, opts = {}) {
   const workspaceId = opts.workspaceId ?? activeWorkspaceId() ?? "default";
-  const brief = { ownerId, loop: null, heldItems: [], facts: [], awaits: [], fleet: null };
+  const brief = { ownerId, loop: null, heldItems: [], walls: [], facts: [], awaits: [], fleet: null };
   try {
     const getStatus = opts.getLoopStatusFn ?? (async (id2) => {
       const { getLoopStatus: getLoopStatus2 } = await Promise.resolve().then(() => (init_loop3(), loop_exports));
@@ -693948,6 +694147,7 @@ async function buildCarryBrief(ownerId, opts = {}) {
         carryNote: meta3.note,
         carryNoteUpdatedAtMs: meta3.updatedAtMs
       };
+      brief.walls = splitCarryNoteWalls(meta3.note).walls;
     }
   } catch {
   }
@@ -694009,6 +694209,9 @@ function renderCarryBriefFocus(brief, max2 = CARRY_BRIEF_FOCUS_MAX) {
   const parts = [
     "keep the identity block, the active plan and its open items, unverified claims awaiting owner confirmation, and owner-gated walls"
   ];
+  if (brief.walls.length > 0) {
+    parts.push(`OPEN WALLS (carry verbatim, do not re-declare resolved): ${brief.walls.map((w3) => `"${cap5(w3.claim, 90)}"`).join("; ")}`);
+  }
   if (brief.heldItems.length > 0) {
     const ids = brief.heldItems.map((h3) => h3.id).join(", ");
     parts.push(
@@ -694035,6 +694238,15 @@ function renderCarryBriefFocus(brief, max2 = CARRY_BRIEF_FOCUS_MAX) {
 }
 function renderCarryBriefColdExtras(brief) {
   const sections = [];
+  if (brief.walls.length > 0) {
+    const lines = brief.walls.map(
+      (w3) => `  \u2022 ${w3.claim}${w3.recheck ? ` \u2014 re-check: ${w3.recheck}` : ""}`
+    );
+    sections.push(
+      `\u26D4 OPEN WALLS \u2014 owner-gated commitments you still carry (re-check, do not re-litigate or re-declare resolved; clear via loop:checkpoint { walls }):
+${lines.join("\n")}`
+    );
+  }
   if (brief.heldItems.length > 0) {
     const lines = brief.heldItems.map((h3) => {
       const title = h3.title ? ` \u2014 ${cap5(h3.title, COLD_TITLE_CAP)}` : "";
@@ -793806,98 +794018,9 @@ var init_proxy2 = __esm({
   }
 });
 
-// lib/dev-source-extract.ts
-var dev_source_extract_exports = {};
-__export(dev_source_extract_exports, {
-  escapingLinkIgnore: () => escapingLinkIgnore,
-  extractDevSourceTree: () => extractDevSourceTree,
-  hasPapercupMarkers: () => hasPapercupMarkers2
-});
-import { createReadStream as createReadStream2, existsSync as existsSync106 } from "node:fs";
-import { mkdir as mkdir23 } from "node:fs/promises";
-import { dirname as dirname55, join as join172, resolve as resolve29, sep as sep11 } from "node:path";
-import { pipeline } from "node:stream/promises";
-function hasPapercupMarkers2(root4) {
-  return existsSync106(join172(root4, "apps", "operator", "package.json")) && existsSync106(join172(root4, "libs", "papercusp", "package.json"));
-}
-function escapingLinkIgnore(dir, onSkip) {
-  const root4 = resolve29(dir);
-  return (name3, header) => {
-    const type2 = header?.type;
-    if (type2 !== "symlink" && type2 !== "link") return false;
-    const linkname = header?.linkname ?? "";
-    const dst = type2 === "symlink" ? resolve29(dirname55(name3), linkname) : resolve29(root4, linkname);
-    const inside = dst === root4 || dst.startsWith(root4 + sep11);
-    if (!inside) {
-      onSkip?.(name3, linkname);
-      return true;
-    }
-    return false;
-  };
-}
-async function extractDevSourceTree(opts) {
-  const { archivePath, targetDir, log: log4 = () => {
-  } } = opts;
-  if (!archivePath || !targetDir) return null;
-  if (!existsSync106(archivePath)) {
-    log4(
-      `[dev-source] no bundle at ${archivePath} \u2014 dev/local run from source only on a source-bundled build`
-    );
-    return null;
-  }
-  if (hasPapercupMarkers2(targetDir)) {
-    log4(`[dev-source] tree already present at ${targetDir} (reusing)`);
-    return targetDir;
-  }
-  try {
-    await mkdir23(targetDir, { recursive: true });
-    const makeDecompress = opts.makeDecompress ?? await defaultDecompress();
-    const makeExtract = opts.makeExtract ?? await defaultExtract(log4);
-    log4(`[dev-source] extracting ${archivePath} \u2192 ${targetDir} (first boot; ~2 min)`);
-    await pipeline(createReadStream2(archivePath), makeDecompress(), makeExtract(targetDir));
-    if (!hasPapercupMarkers2(targetDir)) {
-      log4(
-        `[dev-source] extract finished but markers missing at ${targetDir} \u2014 treating as failed (dev/local skip)`
-      );
-      return null;
-    }
-    log4(`[dev-source] tree extracted \u2192 ${targetDir}`);
-    return targetDir;
-  } catch (e2) {
-    log4(`[dev-source] extract failed (non-fatal; dev/local skip): ${e2?.message ?? e2}`);
-    return null;
-  }
-}
-async function defaultDecompress() {
-  const zlib = await import("node:zlib");
-  const make = zlib.createZstdDecompress;
-  if (typeof make !== "function") {
-    throw new Error(
-      "node zlib lacks createZstdDecompress (needs node \u226522.15/24) \u2014 the bundled runtime has it"
-    );
-  }
-  return () => make();
-}
-async function defaultExtract(log4) {
-  const tarfs = await Promise.resolve().then(() => __toESM(require_tar_fs()));
-  const extract = tarfs.extract ?? tarfs.default?.extract;
-  if (typeof extract !== "function") throw new Error("tar-fs extract unavailable");
-  return (dir) => extract(dir, {
-    ignore: escapingLinkIgnore(
-      dir,
-      (name3, linkname) => log4(`[dev-source] skipping out-of-tree link ${name3} \u2192 ${linkname} (unportable; omitted)`)
-    )
-  });
-}
-var init_dev_source_extract = __esm({
-  "lib/dev-source-extract.ts"() {
-    "use strict";
-  }
-});
-
 // ../../packages/operator-core/lib/harness/env-switcher-prefs.ts
 import { readFileSync as readFileSync61, writeFileSync as writeFileSync20, mkdirSync as mkdirSync27 } from "node:fs";
-import { dirname as dirname56 } from "node:path";
+import { dirname as dirname55 } from "node:path";
 function prefsPath(deps5) {
   return deps5.filePath ?? papercuspPath(FILE);
 }
@@ -793919,7 +794042,7 @@ function setEnvEnabled(id2, enabled4, deps5 = {}) {
   const p2 = prefsPath(deps5);
   const ensureDir = deps5.ensureDir ?? ((dir) => void mkdirSync27(dir, { recursive: true }));
   const write = deps5.writeFile ?? ((fp3, data2) => writeFileSync20(fp3, data2));
-  ensureDir(dirname56(p2));
+  ensureDir(dirname55(p2));
   write(p2, `${JSON.stringify(next, null, 2)}
 `);
   return next;
@@ -793941,8 +794064,8 @@ __export(env_tree_prepare_exports, {
   prepareEnvWorktree: () => prepareEnvWorktree
 });
 import { execFile as execFile18 } from "node:child_process";
-import { existsSync as existsSync107 } from "node:fs";
-import { join as join173 } from "node:path";
+import { existsSync as existsSync106 } from "node:fs";
+import { join as join172 } from "node:path";
 function defaultRunGit3(args25, cwd) {
   return new Promise((resolve70) => {
     try {
@@ -793967,12 +794090,12 @@ async function worktreeExists(runGit5, sourceRoot, worktreePath) {
 }
 async function prepareEnvWorktree(entry2, sourceRoot, deps5 = {}) {
   const runGit5 = deps5.runGit ?? defaultRunGit3;
-  const exists2 = deps5.exists ?? existsSync107;
+  const exists2 = deps5.exists ?? existsSync106;
   const baseDir = (deps5.worktreeBaseDir ?? (() => papercuspPath("env-trees")))();
   const log4 = deps5.log ?? ((m4) => console.log(m4));
   if (entry2.id === WORKING_TREE_ENV_ID || entry2.run === "vite") return sourceRoot;
   if (!exists2(sourceRoot)) return null;
-  const worktreePath = join173(baseDir, entry2.id);
+  const worktreePath = join172(baseDir, entry2.id);
   if (await worktreeExists(runGit5, sourceRoot, worktreePath)) {
     log4(`[env-tree] reusing worktree for ${entry2.id} at ${worktreePath}`);
     return worktreePath;
@@ -794022,8 +794145,8 @@ __export(env_operator_launcher_exports, {
   sourceChildEnv: () => sourceChildEnv
 });
 import { spawn as spawn26 } from "node:child_process";
-import { delimiter as delimiter2, dirname as dirname57, join as join174, resolve as resolve30 } from "node:path";
-import { existsSync as existsSync108 } from "node:fs";
+import { delimiter as delimiter2, dirname as dirname56, join as join173, resolve as resolve29 } from "node:path";
+import { existsSync as existsSync107 } from "node:fs";
 function planEnvOperatorLaunch(input2) {
   const specs = input2.specs ?? PROVISIONABLE_ENV_OPERATORS;
   const host2 = input2.host ?? "127.0.0.1";
@@ -794072,7 +794195,7 @@ function defaultSelfPort() {
 function defaultDetectSourceRoot() {
   const extracted = process.env.PAPERCUSP_DEV_SOURCE_ROOT;
   if (extracted && extracted.trim() !== "") {
-    const root4 = resolve30(extracted);
+    const root4 = resolve29(extracted);
     if (hasPapercupMarkers(root4)) return root4;
   }
   return detectPapercupRoot();
@@ -794080,9 +794203,9 @@ function defaultDetectSourceRoot() {
 async function defaultHasToolchain(sourceRoot) {
   if (!sourceRoot) return false;
   try {
-    const entry2 = join174(sourceRoot, "apps", "operator", "bin", "hono-host.ts");
-    if (!existsSync108(entry2)) return false;
-    return existsSync108(join174(sourceRoot, "node_modules", ".bin"));
+    const entry2 = join173(sourceRoot, "apps", "operator", "bin", "hono-host.ts");
+    if (!existsSync107(entry2)) return false;
+    return existsSync107(join173(sourceRoot, "node_modules", ".bin"));
   } catch {
     return false;
   }
@@ -794091,14 +794214,14 @@ function resolveBundledSidecar(envId) {
   try {
     const explicit = process.env.PAPERCUSP_ENV_SIDECARS_DIR;
     const sidecarBin = process.env.PAPERCUSP_SIDECAR_BIN;
-    const sidecarDir = sidecarBin ? dirname57(sidecarBin) : process.argv[1] ? dirname57(process.argv[1]) : null;
-    const baseDir = explicit && explicit.trim() !== "" ? explicit : sidecarDir ? join174(sidecarDir, "env-sidecars") : null;
+    const sidecarDir = sidecarBin ? dirname56(sidecarBin) : process.argv[1] ? dirname56(process.argv[1]) : null;
+    const baseDir = explicit && explicit.trim() !== "" ? explicit : sidecarDir ? join173(sidecarDir, "env-sidecars") : null;
     if (!baseDir) return null;
-    const bundle = join174(baseDir, envId, "serve.mjs");
-    if (existsSync108(bundle)) return bundle;
+    const bundle = join173(baseDir, envId, "serve.mjs");
+    if (existsSync107(bundle)) return bundle;
     if (envId === "prod" && sidecarDir) {
-      const primary = join174(sidecarDir, "serve.mjs");
-      if (existsSync108(primary)) return primary;
+      const primary = join173(sidecarDir, "serve.mjs");
+      if (existsSync107(primary)) return primary;
     }
     return null;
   } catch {
@@ -794106,15 +794229,15 @@ function resolveBundledSidecar(envId) {
   }
 }
 function resolveTsxCli(treePath) {
-  const cli = join174(treePath, "node_modules", "tsx", "dist", "cli.mjs");
-  return existsSync108(cli) ? cli : null;
+  const cli = join173(treePath, "node_modules", "tsx", "dist", "cli.mjs");
+  return existsSync107(cli) ? cli : null;
 }
 function resolveViteCli(treePath) {
   for (const cli of [
-    join174(treePath, "apps", "operator-vite", "node_modules", "vite", "bin", "vite.js"),
-    join174(treePath, "node_modules", "vite", "bin", "vite.js")
+    join173(treePath, "apps", "operator-vite", "node_modules", "vite", "bin", "vite.js"),
+    join173(treePath, "node_modules", "vite", "bin", "vite.js")
   ]) {
-    if (existsSync108(cli)) return cli;
+    if (existsSync107(cli)) return cli;
   }
   return null;
 }
@@ -794122,8 +794245,8 @@ function sourceChildEnv(treePath) {
   const env2 = { PAPERCUSP_INTEGRATION_ROOT: treePath };
   const sidecarBin = process.env.PAPERCUSP_SIDECAR_BIN;
   if (sidecarBin) {
-    const sidecarDir = dirname57(sidecarBin);
-    const dirs = [sidecarDir, join174(sidecarDir, "bin")].filter((d2) => existsSync108(d2));
+    const sidecarDir = dirname56(sidecarBin);
+    const dirs = [sidecarDir, join173(sidecarDir, "bin")].filter((d2) => existsSync107(d2));
     if (dirs.length > 0) env2.PATH = [...dirs, process.env.PATH ?? ""].join(delimiter2);
   }
   return env2;
@@ -794131,9 +794254,9 @@ function sourceChildEnv(treePath) {
 function defaultSpawnOperator(entry2, treePath) {
   try {
     if (entry2.spawnMode === "bundled" && entry2.bundlePath) {
-      const envDir = dirname57(entry2.bundlePath);
-      const spaDir = join174(envDir, "spa");
-      const docsDir = join174(envDir, "internal-docs");
+      const envDir = dirname56(entry2.bundlePath);
+      const spaDir = join173(envDir, "spa");
+      const docsDir = join173(envDir, "internal-docs");
       const child2 = spawn26(process.execPath, [entry2.bundlePath], {
         cwd: envDir,
         detached: true,
@@ -794141,8 +794264,8 @@ function defaultSpawnOperator(entry2, treePath) {
         env: {
           ...process.env,
           PAPERCUSP_HONO_PORT: String(entry2.port),
-          ...existsSync108(spaDir) ? { PAPERCUSP_SPA_DIST: spaDir } : {},
-          ...existsSync108(docsDir) ? { PAPERCUSP_DOCS_ROOT: docsDir } : {},
+          ...existsSync107(spaDir) ? { PAPERCUSP_SPA_DIST: spaDir } : {},
+          ...existsSync107(docsDir) ? { PAPERCUSP_DOCS_ROOT: docsDir } : {},
           // ── EI-126 single-writer safety — the extra envs are request-only siblings ──
           // (shared embedded PG; ONLY the primary runs the background machinery)
           PAPERCUSP_BACKGROUND_WORKERS: "0",
@@ -794189,7 +794312,7 @@ function defaultSpawnOperator(entry2, treePath) {
       if (!viteCli) return null;
       const selfPort = defaultSelfPort();
       const child2 = spawn26(process.execPath, [viteCli], {
-        cwd: join174(treePath, "apps", "operator-vite"),
+        cwd: join173(treePath, "apps", "operator-vite"),
         detached: true,
         stdio: "ignore",
         env: {
@@ -794206,7 +794329,7 @@ function defaultSpawnOperator(entry2, treePath) {
     const tsxCli = resolveTsxCli(treePath);
     const [cmd, args25] = tsxCli ? [process.execPath, [tsxCli, "bin/hono-host.ts"]] : ["npx", ["tsx", "bin/hono-host.ts"]];
     const child = spawn26(cmd, args25, {
-      cwd: join174(treePath, "apps", "operator"),
+      cwd: join173(treePath, "apps", "operator"),
       detached: true,
       stdio: "ignore",
       env: {
@@ -794286,7 +794409,7 @@ async function launchEnvOperators(deps5 = {}) {
     if (spawned.length > 0 && staggerMs > 0) await sleep8(staggerMs);
     let treePath = null;
     if (entry2.spawnMode === "bundled" && entry2.bundlePath) {
-      treePath = dirname57(entry2.bundlePath);
+      treePath = dirname56(entry2.bundlePath);
     } else {
       try {
         treePath = await prepareTree(entry2, sourceRoot);
@@ -794334,6 +794457,95 @@ var init_env_operator_launcher = __esm({
       const t12 = setTimeout(r2, ms3);
       t12.unref?.();
     });
+  }
+});
+
+// lib/dev-source-extract.ts
+var dev_source_extract_exports = {};
+__export(dev_source_extract_exports, {
+  escapingLinkIgnore: () => escapingLinkIgnore,
+  extractDevSourceTree: () => extractDevSourceTree,
+  hasPapercupMarkers: () => hasPapercupMarkers2
+});
+import { createReadStream as createReadStream2, existsSync as existsSync108 } from "node:fs";
+import { mkdir as mkdir23 } from "node:fs/promises";
+import { dirname as dirname57, join as join174, resolve as resolve30, sep as sep11 } from "node:path";
+import { pipeline } from "node:stream/promises";
+function hasPapercupMarkers2(root4) {
+  return existsSync108(join174(root4, "apps", "operator", "package.json")) && existsSync108(join174(root4, "libs", "papercusp", "package.json"));
+}
+function escapingLinkIgnore(dir, onSkip) {
+  const root4 = resolve30(dir);
+  return (name3, header) => {
+    const type2 = header?.type;
+    if (type2 !== "symlink" && type2 !== "link") return false;
+    const linkname = header?.linkname ?? "";
+    const dst = type2 === "symlink" ? resolve30(dirname57(name3), linkname) : resolve30(root4, linkname);
+    const inside = dst === root4 || dst.startsWith(root4 + sep11);
+    if (!inside) {
+      onSkip?.(name3, linkname);
+      return true;
+    }
+    return false;
+  };
+}
+async function extractDevSourceTree(opts) {
+  const { archivePath, targetDir, log: log4 = () => {
+  } } = opts;
+  if (!archivePath || !targetDir) return null;
+  if (!existsSync108(archivePath)) {
+    log4(
+      `[dev-source] no bundle at ${archivePath} \u2014 dev/local run from source only on a source-bundled build`
+    );
+    return null;
+  }
+  if (hasPapercupMarkers2(targetDir)) {
+    log4(`[dev-source] tree already present at ${targetDir} (reusing)`);
+    return targetDir;
+  }
+  try {
+    await mkdir23(targetDir, { recursive: true });
+    const makeDecompress = opts.makeDecompress ?? await defaultDecompress();
+    const makeExtract = opts.makeExtract ?? await defaultExtract(log4);
+    log4(`[dev-source] extracting ${archivePath} \u2192 ${targetDir} (first boot; ~2 min)`);
+    await pipeline(createReadStream2(archivePath), makeDecompress(), makeExtract(targetDir));
+    if (!hasPapercupMarkers2(targetDir)) {
+      log4(
+        `[dev-source] extract finished but markers missing at ${targetDir} \u2014 treating as failed (dev/local skip)`
+      );
+      return null;
+    }
+    log4(`[dev-source] tree extracted \u2192 ${targetDir}`);
+    return targetDir;
+  } catch (e2) {
+    log4(`[dev-source] extract failed (non-fatal; dev/local skip): ${e2?.message ?? e2}`);
+    return null;
+  }
+}
+async function defaultDecompress() {
+  const zlib = await import("node:zlib");
+  const make = zlib.createZstdDecompress;
+  if (typeof make !== "function") {
+    throw new Error(
+      "node zlib lacks createZstdDecompress (needs node \u226522.15/24) \u2014 the bundled runtime has it"
+    );
+  }
+  return () => make();
+}
+async function defaultExtract(log4) {
+  const tarfs = await Promise.resolve().then(() => __toESM(require_tar_fs()));
+  const extract = tarfs.extract ?? tarfs.default?.extract;
+  if (typeof extract !== "function") throw new Error("tar-fs extract unavailable");
+  return (dir) => extract(dir, {
+    ignore: escapingLinkIgnore(
+      dir,
+      (name3, linkname) => log4(`[dev-source] skipping out-of-tree link ${name3} \u2192 ${linkname} (unportable; omitted)`)
+    )
+  });
+}
+var init_dev_source_extract = __esm({
+  "lib/dev-source-extract.ts"() {
+    "use strict";
   }
 });
 
@@ -806072,6 +806284,9 @@ __export(soak_report_exports, {
   DEPLOY_LATENCY_THRESHOLD_MS: () => DEPLOY_LATENCY_THRESHOLD_MS,
   MAX_SOAK_WINDOW_HOURS: () => MAX_SOAK_WINDOW_HOURS,
   MIN_SOAK_WINDOW_HOURS: () => MIN_SOAK_WINDOW_HOURS,
+  POST_COMPACTION_ERROR_MARKER_REGEX: () => POST_COMPACTION_ERROR_MARKER_REGEX,
+  POST_COMPACTION_MARKER_WINDOW_MIN: () => POST_COMPACTION_MARKER_WINDOW_MIN,
+  WAKE_MEAN_CHAR_BUDGET: () => WAKE_MEAN_CHAR_BUDGET,
   computeSoakReport: () => computeSoakReport,
   parseBgHostGlobalJournal: () => parseBgHostGlobalJournal,
   parseBgHostUnitJournal: () => parseBgHostUnitJournal,
@@ -806150,6 +806365,14 @@ function computeSoakReport(input2) {
   } else if (input2.deployLatency.meanMs > DEPLOY_LATENCY_THRESHOLD_MS) {
     reasons.push(`mean deploy latency above ${Math.round(DEPLOY_LATENCY_THRESHOLD_MS / 6e4)}m`);
   }
+  if (input2.contextBurn.meanWakeChars != null && input2.contextBurn.meanWakeChars > WAKE_MEAN_CHAR_BUDGET) {
+    reasons.push(
+      `per-wake injected overhead above budget (mean ${input2.contextBurn.meanWakeChars} chars > ${WAKE_MEAN_CHAR_BUDGET})`
+    );
+  }
+  if (input2.contextBurn.postCompactionErrorMarkers > 0) {
+    reasons.push(`post-compaction error markers in window (${input2.contextBurn.postCompactionErrorMarkers})`);
+  }
   return {
     hiveSlug: input2.hiveSlug,
     surveyScope: input2.surveyScope,
@@ -806163,7 +806386,8 @@ function computeSoakReport(input2) {
     infraCurse: input2.infraCurse,
     escalationBacklog: input2.escalationBacklog,
     gateGreenRatio: input2.gateGreenRatio,
-    deployLatency: input2.deployLatency
+    deployLatency: input2.deployLatency,
+    contextBurn: input2.contextBurn
   };
 }
 function toMs5(v9) {
@@ -806231,7 +806455,9 @@ async function readHiveSoakReport(hiveSlug, opts = {}) {
     curseRows,
     escalationRows,
     pipelineAggRows,
-    pipelineEventRows
+    pipelineEventRows,
+    wakeBurnRows,
+    compactionRows
   ] = await Promise.all([
     probeBgHostTicker(),
     readBgHostJournal(windowHours),
@@ -806302,12 +806528,56 @@ async function readHiveSoakReport(hiveSlug, opts = {}) {
            OR (kind = 'deploy' AND status = 'ok')
          )
        ORDER BY created_at ASC
+    `,
+    // Context burn (P-008), workspace-scoped: the wake meter (event_wake_deliveries,
+    // D-007) carries every queued loop/coord wake's injected summary.
+    sql4`
+      SELECT count(*)::int AS loop_wakes,
+             round(avg(length(summary)))::int AS mean_wake_chars,
+             max(length(summary))::int AS max_wake_chars
+        FROM harness_shared.event_wake_deliveries
+       WHERE workspace_id = ${workspaceId}
+         AND event_key LIKE 'coord:inbox-wake:%'
+         AND created_at >= now() - make_interval(hours => ${windowHours})
+    `,
+    // Requested compactions per owner + the post-compaction error markers: failed
+    // calls matching the hallucinated-schema class within the attribution window
+    // of the SAME owner's compaction.
+    sql4`
+      WITH compactions AS (
+        SELECT coord_owner_id AS owner, invoked_at
+          FROM harness_shared.tool_invocations
+         WHERE workspace_id = ${workspaceId}
+           AND tool_name = 'session:request-compaction'
+           AND status = 'ok'
+           AND invoked_at >= now() - make_interval(hours => ${windowHours})
+      )
+      SELECT (SELECT count(*) FROM compactions)::int AS compactions,
+             (SELECT count(DISTINCT owner) FROM compactions WHERE owner IS NOT NULL)::int AS sessions,
+             (SELECT count(*)
+                FROM harness_shared.tool_invocations ti
+               WHERE ti.workspace_id = ${workspaceId}
+                 AND ti.invoked_at >= now() - make_interval(hours => ${windowHours})
+                 AND ti.status <> 'ok'
+                 AND ti.error_message ~* ${POST_COMPACTION_ERROR_MARKER_REGEX}
+                 AND EXISTS (
+                   SELECT 1
+                     FROM compactions c
+                    WHERE c.owner IS NOT NULL
+                      AND c.owner = ti.coord_owner_id
+                      AND ti.invoked_at >= c.invoked_at
+                      AND ti.invoked_at < c.invoked_at + make_interval(mins => ${POST_COMPACTION_MARKER_WINDOW_MIN})
+                 ))::int AS post_markers
     `
   ]);
   const curse = curseRows[0] ?? { placements_seen: 0, infra_curses: 0 };
   const escalation = escalationRows[0] ?? { open_now: 0, older_open_count: 0, newer_open_count: 0 };
   const pipeline2 = pipelineAggRows[0] ?? { green_total: 0, green_success: 0 };
   const deployLatency = computeDeployLatency(pipelineEventRows);
+  const wakeBurn = wakeBurnRows[0] ?? { loop_wakes: 0, mean_wake_chars: null, max_wake_chars: null };
+  const compaction = compactionRows[0] ?? { compactions: 0, sessions: 0, post_markers: 0 };
+  const meanWakeChars = wakeBurn.mean_wake_chars != null ? Number(wakeBurn.mean_wake_chars) : null;
+  const sessionsCompacting = Number(compaction.sessions ?? 0);
   return computeSoakReport({
     hiveSlug,
     surveyScope: membership2.scope,
@@ -806336,10 +806606,20 @@ async function readHiveSoakReport(hiveSlug, opts = {}) {
       total: Number(pipeline2.green_total ?? 0),
       ratio: Number(pipeline2.green_total ?? 0) > 0 ? Number(pipeline2.green_success ?? 0) / Number(pipeline2.green_total ?? 0) : null
     },
-    deployLatency
+    deployLatency,
+    contextBurn: {
+      loopWakes: Number(wakeBurn.loop_wakes ?? 0),
+      meanWakeChars,
+      maxWakeChars: wakeBurn.max_wake_chars != null ? Number(wakeBurn.max_wake_chars) : null,
+      estMeanWakeTokens: meanWakeChars != null ? Math.round(meanWakeChars / 4) : null,
+      requestedCompactions: Number(compaction.compactions ?? 0),
+      sessionsCompacting,
+      compactionsPerSession: sessionsCompacting > 0 ? Number(compaction.compactions ?? 0) / sessionsCompacting : null,
+      postCompactionErrorMarkers: Number(compaction.post_markers ?? 0)
+    }
   });
 }
-var execFileAsync2, DEFAULT_SOAK_WINDOW_HOURS, MIN_SOAK_WINDOW_HOURS, MAX_SOAK_WINDOW_HOURS, DEPLOY_LATENCY_THRESHOLD_MS;
+var execFileAsync2, DEFAULT_SOAK_WINDOW_HOURS, MIN_SOAK_WINDOW_HOURS, MAX_SOAK_WINDOW_HOURS, DEPLOY_LATENCY_THRESHOLD_MS, WAKE_MEAN_CHAR_BUDGET, POST_COMPACTION_MARKER_WINDOW_MIN, POST_COMPACTION_ERROR_MARKER_REGEX;
 var init_soak_report = __esm({
   "../../packages/operator-core/lib/hive/soak-report.ts"() {
     "use strict";
@@ -806352,6 +806632,9 @@ var init_soak_report = __esm({
     MIN_SOAK_WINDOW_HOURS = 12;
     MAX_SOAK_WINDOW_HOURS = 24;
     DEPLOY_LATENCY_THRESHOLD_MS = 15 * 6e4;
+    WAKE_MEAN_CHAR_BUDGET = 3e3;
+    POST_COMPACTION_MARKER_WINDOW_MIN = 15;
+    POST_COMPACTION_ERROR_MARKER_REGEX = "column .* does not exist|relation .* does not exist|no such column";
   }
 });
 
@@ -824108,11 +824391,11 @@ var init_checkpoint = __esm({
     checkpoint_default = defineTool({
       name: "loop:checkpoint",
       profile: "engineer",
-      description: "Write (or clear) your su AUTO loop's carry-note \u2014 a compressed 'note to my next self' a COLD loop wake (reset / recycle) reconstructs its working state from (your transcript does NOT carry across a cold wake). Pass the structured fields { did, left, insight, next } (rendered to the canonical template) OR a raw { note }. Keyed by the loop's ownerId \u2014 stable across reset/recycle, so a cold successor reads the SAME note. Replace-on-write; blank/null clears. Returns { ok, harness, ownerId, cleared, length }.",
+      description: "Write (or clear) your su AUTO loop's carry-note \u2014 a compressed 'note to my next self' a COLD loop wake (reset / recycle) reconstructs its working state from (your transcript does NOT carry across a cold wake). Pass the structured fields { did, left, insight, next } (rendered to the canonical template) OR a raw { note }. Keyed by the loop's ownerId \u2014 stable across reset/recycle, so a cold successor reads the SAME note. Replace-on-write; blank/null clears \u2014 except { walls } rows (owner-gated commitments): they render into every wake until you pass walls:[]. Returns { ok, harness, ownerId, cleared, length, walls }.",
       guidance: {
         when: "Before you end a turn on a COLD loop (carry:'cold'): persist what the next cold wake needs to continue \u2014 what you did, what is left, the key non-obvious insight, and the single next action. Keep it COMPRESSED (facts, not a transcript). Until the first checkpoint exists a cold loop silently stays WARM (the P-006 no-anchor guard), and a cold loop that stops checkpointing keeps restarting from a stale note.",
         notWhen: "A WARM loop (carry:'warm', the default) carries its live transcript across wakes and needs no carry-note. Not for work-item state \u2014 that is work_items:checkpoint.",
-        chaining: "loop:checkpoint { did, left, insight, next } as the last step before ending a cold-loop turn \u2014 but it is the WEAKEST continuity write: the carry-note is LOST if your session dies. So also refresh work_items:checkpoint { id, checkpoint } (a successor INHERITS it) and facts:assert any durable conclusion (folded into every future orient). Pass { note:'' } to clear a stale note.",
+        chaining: "loop:checkpoint { did, left, insight, next } as the last step before ending a cold-loop turn \u2014 but it is the WEAKEST continuity write: the carry-note is LOST if your session dies. So also refresh work_items:checkpoint { id, checkpoint } (a successor INHERITS it) and facts:assert any durable conclusion.",
         seeAlso: [
           "loop:arm (arm the loop; carry:'cold' opts into the cold lifecycle)",
           "loop:status (inspect the loop, incl. carry mode)",
@@ -824128,11 +824411,19 @@ var init_checkpoint = __esm({
         left: external_exports.string().max(8e3).optional().describe("What remains, in order."),
         insight: external_exports.string().max(8e3).optional().describe("The non-obvious thing a cold successor would waste time re-deriving."),
         next: external_exports.string().max(8e3).optional().describe("The single concrete next action for the next wake."),
+        walls: external_exports.array(
+          external_exports.object({
+            claim: external_exports.string().min(1).max(500).describe("The pending owner-gated action/decision, stated concretely."),
+            recheck: external_exports.string().max(300).optional().describe("A concrete command a successor runs to re-check it.")
+          })
+        ).max(CARRY_NOTE_MAX_WALLS).optional().describe(
+          "Open WALLS (owner-gated commitments) as rows \u2014 rendered into EVERY wake + carry brief until cleared. OMITTED \u21D2 existing walls CARRY FORWARD (a rewrite or note-clear never drops them); pass the full current set to change it; [] clears."
+        ),
         ownerId: external_exports.string().max(120).optional().describe("The loop owner id (default: your own resolved identity). Mirrors loop:arm/end/status."),
         harness: external_exports.string().max(120).optional().describe("Harness the loop is scoped under (default: your session harness / home pot).")
       }).refine(
-        (a2) => a2.note !== void 0 || a2.did !== void 0 || a2.left !== void 0 || a2.insight !== void 0 || a2.next !== void 0,
-        { message: "pass { did, left, insight, next } (any) or { note } \u2014 nothing to write" }
+        (a2) => a2.note !== void 0 || a2.did !== void 0 || a2.left !== void 0 || a2.insight !== void 0 || a2.next !== void 0 || a2.walls !== void 0,
+        { message: "pass { did, left, insight, next } (any), { note }, or { walls } \u2014 nothing to write" }
       ),
       async handler(args25, ctx) {
         const identity2 = resolveAgentIdentity(ctx);
@@ -824155,7 +824446,13 @@ var init_checkpoint = __esm({
           };
         }
         const hasStructured = args25.did !== void 0 || args25.left !== void 0 || args25.insight !== void 0 || args25.next !== void 0;
-        const note = hasStructured ? renderCarryNote({ did: args25.did, left: args25.left, insight: args25.insight, next: args25.next }) : args25.note;
+        const baseNote = hasStructured ? renderCarryNote({ did: args25.did, left: args25.left, insight: args25.insight, next: args25.next }) : args25.note;
+        const prior2 = await getLoopCarryNote({ harness, ownerId }).catch(() => null);
+        const priorParts = splitCarryNoteWalls(prior2);
+        const rawParts = splitCarryNoteWalls(baseNote ?? "");
+        const walls = args25.walls !== void 0 ? normalizeWallEntries(args25.walls, priorParts.walls) : rawParts.walls.length > 0 ? normalizeWallEntries(rawParts.walls, priorParts.walls) : priorParts.walls;
+        const hasNoteWrite = hasStructured || args25.note !== void 0;
+        const note = withCarryNoteWalls(hasNoteWrite ? rawParts.body : priorParts.body, walls);
         const workspaceId = ctx.workspaceId ?? ctx.principal?.workspaceId ?? void 0;
         const stored = await setLoopCarryNote({ harness, ownerId, workspaceId: workspaceId ?? void 0 }, note);
         let continuation;
@@ -824190,6 +824487,7 @@ var init_checkpoint = __esm({
                 ownerId,
                 cleared: stored === null,
                 length: stored?.length ?? 0,
+                walls: walls.length,
                 ...continuation ? { continuation } : {}
               })
             }
@@ -846888,6 +847186,293 @@ var init_whoami = __esm({
               })
             }
           ]
+        };
+      }
+    });
+  }
+});
+
+// ../../packages/operator-core/lib/agent-tools/coordination/rebind-identity.ts
+var rebind_identity_exports = {};
+__export(rebind_identity_exports, {
+  REBIND_FROM_LIVE_WINDOW_MS: () => REBIND_FROM_LIVE_WINDOW_MS,
+  rebindIdentity: () => rebindIdentity
+});
+async function rebindIdentity(from, to2, opts = {}) {
+  const f3 = from.trim();
+  const t12 = to2.trim();
+  const base = { ok: false, from: f3, to: t12, surfaces: [], totalMoved: 0 };
+  if (!f3 || !t12 || f3 === t12) return { ...base, refused: "bad_args" };
+  const sql4 = opts.sql ?? getOrgPg().sql;
+  const now2 = opts.now ?? Date.now();
+  if (!opts.force) {
+    try {
+      const rows = await sql4`
+        SELECT heartbeat_at FROM harness_shared.coord_presence WHERE owner_id = ${f3}
+      `;
+      const beat = rows[0]?.heartbeat_at ? new Date(rows[0].heartbeat_at).getTime() : null;
+      if (beat !== null && now2 - beat < REBIND_FROM_LIVE_WINDOW_MS) {
+        return { ...base, refused: "from_appears_live", fromHeartbeatAgoMs: Math.max(0, now2 - beat) };
+      }
+    } catch {
+    }
+  }
+  const surfaces = [];
+  const run6 = async (surface, fn2) => {
+    const r2 = { surface, moved: 0 };
+    try {
+      await fn2(r2);
+    } catch (err11) {
+      r2.error = err11 instanceof Error ? err11.message : String(err11);
+    }
+    surfaces.push(r2);
+  };
+  await run6("loop-routine", async (r2) => {
+    const loops = await sql4`
+      SELECT id, install_slug FROM harness_shared.routines
+       WHERE target_owner_id = ${f3} AND reschedule_interval_sec IS NOT NULL
+    `;
+    for (const loop of loops) {
+      const newId = loopRoutineId(loop.install_slug, t12);
+      const existing = await sql4`
+        SELECT id FROM harness_shared.routines WHERE id = ${newId}
+      `;
+      if (existing.length > 0) {
+        await sql4`DELETE FROM harness_shared.routines WHERE id = ${loop.id}`;
+        r2.dropped = (r2.dropped ?? 0) + 1;
+      } else {
+        await sql4`
+          UPDATE harness_shared.routines
+             SET id = ${newId},
+                 name = ${loopRoutineName(t12)},
+                 target_owner_id = ${t12},
+                 payload_template = CASE WHEN payload_template IS NULL THEN NULL
+                                         ELSE replace(payload_template::text, ${f3}, ${t12})::jsonb END,
+                 updated_at = now()
+           WHERE id = ${loop.id}
+        `;
+        r2.moved += 1;
+      }
+    }
+  });
+  await run6("carry-note", async (r2) => {
+    const notes = await sql4`
+      SELECT workspace_id, scope, updated_ts FROM harness_shared.carry_notes
+       WHERE (scope LIKE 'loop:%' OR scope LIKE 'loopnag:%') AND scope LIKE ${"%:" + f3}
+    `;
+    for (const note of notes) {
+      if (!OWNER_SCOPE_PREFIXES.some((p2) => note.scope.startsWith(p2)) || !note.scope.endsWith(":" + f3)) continue;
+      const target = note.scope.slice(0, note.scope.length - f3.length) + t12;
+      const clash = await sql4`
+        SELECT updated_ts FROM harness_shared.carry_notes
+         WHERE workspace_id = ${note.workspace_id} AND scope = ${target}
+      `;
+      if (clash.length > 0 && new Date(clash[0].updated_ts).getTime() >= new Date(note.updated_ts).getTime()) {
+        await sql4`DELETE FROM harness_shared.carry_notes
+                   WHERE workspace_id = ${note.workspace_id} AND scope = ${note.scope}`;
+        r2.dropped = (r2.dropped ?? 0) + 1;
+        continue;
+      }
+      if (clash.length > 0) {
+        await sql4`DELETE FROM harness_shared.carry_notes
+                   WHERE workspace_id = ${note.workspace_id} AND scope = ${target}`;
+      }
+      await sql4`
+        UPDATE harness_shared.carry_notes SET scope = ${target}
+         WHERE workspace_id = ${note.workspace_id} AND scope = ${note.scope}
+      `;
+      r2.moved += 1;
+    }
+  });
+  await run6("presence", async (r2) => {
+    const gone = await sql4`
+      DELETE FROM harness_shared.coord_presence WHERE owner_id = ${f3} RETURNING owner_id
+    `;
+    r2.dropped = gone.length;
+  });
+  await run6("fleet-membership", async (r2) => {
+    const latest = await sql4`
+      SELECT workspace_id, owner_label, fleet_slug, fleet_role FROM harness_shared.fleet_membership_events
+       WHERE owner_id = ${f3} ORDER BY id DESC LIMIT 1
+    `;
+    const cur = latest[0];
+    if (!cur?.fleet_slug) return;
+    const toLatest = await sql4`
+      SELECT fleet_slug FROM harness_shared.fleet_membership_events
+       WHERE owner_id = ${t12} ORDER BY id DESC LIMIT 1
+    `;
+    if (toLatest[0]?.fleet_slug !== cur.fleet_slug) {
+      await sql4`
+        INSERT INTO harness_shared.fleet_membership_events (workspace_id, owner_id, owner_label, fleet_slug, fleet_role, event)
+        VALUES (${cur.workspace_id}, ${t12}, ${cur.owner_label}, ${cur.fleet_slug}, ${cur.fleet_role},
+                ${cur.fleet_role === "leader" ? "lead" : "join"})
+      `;
+      r2.appended = (r2.appended ?? 0) + 1;
+    }
+    await sql4`
+      INSERT INTO harness_shared.fleet_membership_events (workspace_id, owner_id, owner_label, fleet_slug, fleet_role, event)
+      VALUES (${cur.workspace_id}, ${f3}, ${cur.owner_label}, NULL, NULL, 'leave')
+    `;
+    r2.appended = (r2.appended ?? 0) + 1;
+  });
+  await run6("fleet-leadership", async (r2) => {
+    const led = await sql4`
+      UPDATE harness_shared.agent_fleets SET leader_owner_id = ${t12}
+       WHERE leader_owner_id = ${f3} RETURNING slug
+    `;
+    r2.moved = led.length;
+  });
+  await run6("claim-spec", async (r2) => {
+    const dropped2 = await sql4`
+      DELETE FROM harness_shared.bee_claim_specs fspec
+       USING harness_shared.bee_claim_specs tspec
+       WHERE fspec.bee_id = ${f3} AND tspec.bee_id = ${t12}
+         AND tspec.workspace_id = fspec.workspace_id
+       RETURNING fspec.bee_id
+    `;
+    r2.dropped = dropped2.length;
+    const moved = await sql4`
+      UPDATE harness_shared.bee_claim_specs SET bee_id = ${t12}
+       WHERE bee_id = ${f3} RETURNING bee_id
+    `;
+    r2.moved = moved.length;
+  });
+  await run6("awaits", async (r2) => {
+    const awaits = await sql4`
+      SELECT id, workspace_id, event_key FROM harness_shared.event_awaits
+       WHERE subscriber_id = ${f3} AND fired_at IS NULL AND cancelled_at IS NULL
+    `;
+    for (const a2 of awaits) {
+      const newKey = a2.event_key.split(f3).join(t12);
+      const dup = await sql4`
+        SELECT id FROM harness_shared.event_awaits
+         WHERE workspace_id = ${a2.workspace_id} AND subscriber_id = ${t12} AND event_key = ${newKey}
+           AND fired_at IS NULL AND cancelled_at IS NULL
+         LIMIT 1
+      `;
+      if (dup.length > 0) {
+        await sql4`UPDATE harness_shared.event_awaits SET cancelled_at = now() WHERE id = ${a2.id}`;
+        r2.cancelled = (r2.cancelled ?? 0) + 1;
+      } else {
+        await sql4`
+          UPDATE harness_shared.event_awaits SET subscriber_id = ${t12}, event_key = ${newKey}
+           WHERE id = ${a2.id}
+        `;
+        r2.moved += 1;
+      }
+    }
+  });
+  await run6("plan-claims", async (r2) => {
+    const moved = await sql4`
+      UPDATE harness_shared.plan_item_claims SET owner = ${t12}
+       WHERE owner = ${f3} RETURNING owner
+    `;
+    r2.moved = moved.length;
+  });
+  await run6("work-claims", async (r2) => {
+    const moved = await sql4`
+      UPDATE harness_shared.work_item_claims SET owner = ${t12}
+       WHERE owner = ${f3} RETURNING owner
+    `;
+    r2.moved = moved.length;
+  });
+  await run6("watermarks", async (r2) => {
+    const dropped2 = await sql4`
+      DELETE FROM harness_shared.coord_watermarks fwm
+       USING harness_shared.coord_watermarks twm
+       WHERE fwm.owner_id = ${f3} AND twm.owner_id = ${t12}
+         AND twm.workspace_id = fwm.workspace_id
+       RETURNING fwm.owner_id
+    `;
+    r2.dropped = dropped2.length;
+    const moved = await sql4`
+      UPDATE harness_shared.coord_watermarks SET owner_id = ${t12}
+       WHERE owner_id = ${f3} RETURNING owner_id
+    `;
+    r2.moved = moved.length;
+  });
+  await run6("held-items", async (r2) => {
+    const moved = await sql4`
+      UPDATE harness_shared.engineer_issues SET assignee = ${t12}
+       WHERE assignee = ${f3} AND state NOT IN ('done', 'resolved', 'deprecated', 'closed')
+       RETURNING issue_id
+    `;
+    r2.moved = moved.length;
+  });
+  await run6("owner-facts", async (r2) => {
+    const dropped2 = await sql4`
+      DELETE FROM harness_shared.agent_facts ffact
+       USING harness_shared.agent_facts tfact
+       WHERE ffact.scope = 'owner' AND ffact.scope_ref = ${f3}
+         AND tfact.scope = 'owner' AND tfact.scope_ref = ${t12}
+         AND tfact.workspace_id = ffact.workspace_id AND tfact.key = ffact.key
+       RETURNING ffact.key
+    `;
+    r2.dropped = dropped2.length;
+    const moved = await sql4`
+      UPDATE harness_shared.agent_facts SET scope_ref = ${t12}
+       WHERE scope = 'owner' AND scope_ref = ${f3} RETURNING key
+    `;
+    r2.moved = moved.length;
+  });
+  const totalMoved = surfaces.reduce(
+    (n6, s3) => n6 + s3.moved + (s3.dropped ?? 0) + (s3.cancelled ?? 0) + (s3.appended ?? 0),
+    0
+  );
+  return {
+    ok: surfaces.every((s3) => !s3.error),
+    from: f3,
+    to: t12,
+    surfaces,
+    totalMoved
+  };
+}
+var REBIND_FROM_LIVE_WINDOW_MS, OWNER_SCOPE_PREFIXES;
+var init_rebind_identity = __esm({
+  "../../packages/operator-core/lib/agent-tools/coordination/rebind-identity.ts"() {
+    "use strict";
+    init_src7();
+    init_loop3();
+    REBIND_FROM_LIVE_WINDOW_MS = 18e4;
+    OWNER_SCOPE_PREFIXES = ["loop:", "loopnag:"];
+  }
+});
+
+// ../../packages/operator-core/lib/agent-tools/coordination/tools/rebind-identity.ts
+var rebind_identity_default;
+var init_rebind_identity2 = __esm({
+  "../../packages/operator-core/lib/agent-tools/coordination/tools/rebind-identity.ts"() {
+    "use strict";
+    init_zod();
+    init_src17();
+    init_identity2();
+    init_roles2();
+    init_rebind_identity();
+    rebind_identity_default = defineTool({
+      name: "coord:rebind-identity",
+      profile: "engineer",
+      description: "Migrate every ownerId-keyed surface from a DEAD predecessor sid to a live one after a relaunch/recovery changed your PAPERCUSP_SID: armed loop routine, loop carry-note (+walls), plan/work-item claims, scheduler claim-spec, standing awaits, fleet membership/leadership, open held work-items, owner-scoped facts. Idempotent \u2014 re-run to finish a partial pass. Refuses while the old sid still shows a fresh presence heartbeat (a live peer) unless force:true. Returns { ok, from, to, surfaces:[{surface,moved,\u2026}], totalMoved }.",
+      guidance: {
+        when: "Your session recovered under a NEW PAPERCUSP_SID (the SessionStart banner names both ids, or coord:whoami disagrees with the id that armed your loop/claims): rebind from the old id to yours, or your loop fires at a dead owner and your carry-note, claims, awaits and held items never follow you.",
+        notWhen: "Both ids belong to LIVE sessions \u2014 this migrates a dead identity, it does not merge two live ones. Routine wake/claim issues without an id change \u2014 that is coord:orient / loop:status territory.",
+        chaining: "After a successful rebind run coord:orient { afterCompaction:true } \u2014 the recovery block re-reads the moved surfaces under your live id.",
+        seeAlso: ["coord:whoami (your resolved identity)", "loop:status (whose id the loop targets)"]
+      },
+      capability: "coord:write",
+      requirePrincipal: false,
+      agentRoles: [...COORD_ROLES],
+      args: external_exports.object({
+        from: external_exports.string().min(1).max(120).describe("The dead predecessor ownerId (sid) whose surfaces to migrate."),
+        to: external_exports.string().min(1).max(120).optional().describe("Target ownerId (default: your own resolved identity)."),
+        force: external_exports.boolean().optional().describe("Override the from-appears-live presence guard \u2014 only after verifying the old session is dead.")
+      }).strict(),
+      async handler(args25, ctx) {
+        const identity2 = resolveAgentIdentity(ctx);
+        const to2 = args25.to ?? identity2.ownerId;
+        const result26 = await rebindIdentity(args25.from, to2, { force: args25.force });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result26) }],
+          ...result26.ok ? {} : { isError: true }
         };
       }
     });
@@ -891758,7 +892343,7 @@ function computeDeathRearmMs(outcome, intervalMs, now2 = Date.now()) {
 }
 async function getLoopRoutineRef(sql4, routineId) {
   const rows = await sql4`
-    SELECT id, name, install_slug, workspace_id, reschedule_interval_sec
+    SELECT id, name, install_slug, workspace_id, reschedule_interval_sec, target_owner_id
       FROM harness_shared.routines
      WHERE id = ${routineId} AND reschedule_interval_sec IS NOT NULL
      LIMIT 1
@@ -891770,7 +892355,8 @@ async function getLoopRoutineRef(sql4, routineId) {
     name: r2.name,
     installSlug: r2.install_slug,
     workspaceId: r2.workspace_id,
-    intervalSec: r2.reschedule_interval_sec == null ? null : Number(r2.reschedule_interval_sec)
+    intervalSec: r2.reschedule_interval_sec == null ? null : Number(r2.reschedule_interval_sec),
+    targetOwnerId: r2.target_owner_id ?? null
   };
 }
 async function rearmLoopAfterDeath(sql4, routineId, delayMs, now2) {
@@ -891791,7 +892377,27 @@ async function handleLoopResumeTurnExit(d2, raw2, deps5 = {}) {
     if (!routineId) return { handled: false };
     const now2 = deps5.now ?? Date.now();
     const outcome = classifyResumeTurnExit(raw2, now2);
-    if (outcome.ok) return { handled: false, routineId };
+    if (outcome.ok) {
+      let nagged = false;
+      try {
+        const excerpt = detectOwnerAsk(raw2.stdoutTail);
+        if (excerpt) {
+          const sql5 = deps5.sql ?? getOrgPg().sql;
+          const ref3 = await getLoopRoutineRef(sql5, routineId);
+          if (ref3?.targetOwnerId) {
+            const getNote = deps5.getLoopCarryNote ?? getLoopCarryNote;
+            const note = await getNote({ harness: ref3.installSlug, ownerId: ref3.targetOwnerId });
+            if (splitCarryNoteWalls(note).walls.length === 0) {
+              const stash = deps5.stashWallNag ?? stashLoopWallNag;
+              nagged = await stash({ harness: ref3.installSlug, ownerId: ref3.targetOwnerId }, excerpt, now2);
+              if (nagged) log2(`loop '${routineId}' turn ended on a row-less owner-ask \u2014 nag stashed for the next wake`);
+            }
+          }
+        }
+      } catch {
+      }
+      return { handled: false, routineId, ...nagged ? { nagged: true } : {} };
+    }
     const sql4 = deps5.sql ?? getOrgPg().sql;
     const recordFire3 = deps5.recordFire ?? recordFire2;
     const ref2 = await getLoopRoutineRef(sql4, routineId);
@@ -891830,6 +892436,8 @@ var init_loop_turn_outcome = __esm({
     init_src7();
     init_workspace_als();
     init_autoloop();
+    init_carry_note();
+    init_loop_wall_nag();
     init_engine3();
     init_resume_turn_outcome();
     log2 = (msg2) => console.warn(`[loop-turn-outcome] ${msg2}`);
@@ -892163,6 +892771,7 @@ var init_agent_tools2 = __esm({
     init_request_remote_spawn();
     init_recolor();
     init_whoami();
+    init_rebind_identity2();
     init_presence5();
     init_roster();
     init_declare_intent();
@@ -894823,6 +895432,7 @@ __export(papercusp_files_exports, {
   renderProjectGuideSection: () => renderProjectGuideSection,
   renderSuPlaybook: () => renderSuPlaybook,
   resolveInstallPaths: () => resolveInstallPaths,
+  resolveShimNode: () => resolveShimNode,
   stripFullOnlyMarkers: () => stripFullOnlyMarkers,
   stripFullOnlySections: () => stripFullOnlySections,
   writeLinuxTutorialDesktopEntry: () => writeLinuxTutorialDesktopEntry
@@ -895025,9 +895635,23 @@ function cliLauncherCandidates(operatorAppRoot, explicitRoot, names) {
   ];
   return names.flatMap((n6) => roots.map((r2) => path52.join(r2, n6)));
 }
+async function resolveShimNode(launcherPath) {
+  const sidecarBin = process.env.PAPERCUSP_SIDECAR_BIN;
+  const execBase = path52.basename(process.execPath).toLowerCase();
+  const execIsNode = execBase === "node" || execBase === "node.exe";
+  const candidates = [
+    sidecarBin ? path52.join(sidecarBin, "node") : "",
+    execIsNode ? process.execPath : "",
+    path52.join(path52.dirname(path52.dirname(launcherPath)), "bin", "node"),
+    path52.join(process.cwd(), "bin", "node")
+  ].filter(Boolean);
+  for (const c7 of candidates) {
+    if (await pathExists(c7)) return c7;
+  }
+  return "node";
+}
 async function writeShim(shimPath, launcherPath, label) {
-  const bundledNode = path52.join(path52.dirname(path52.dirname(launcherPath)), "bin", "node");
-  const nodeCmd = await pathExists(bundledNode) ? bundledNode : "node";
+  const nodeCmd = await resolveShimNode(launcherPath);
   const body = `#!/usr/bin/env bash
 # papercusp ${label} shim \u2014 managed by Papercusp.app (installPapercuspFiles).
 # Refreshed on every boot; do not edit. Execs the bundled Node launcher.
@@ -895039,8 +895663,7 @@ exec ${JSON.stringify(nodeCmd)} ${JSON.stringify(launcherPath)} "$@"
   return true;
 }
 async function writeDispatcherShim(shimPath, launcherPath) {
-  const bundledNode = path52.join(path52.dirname(path52.dirname(launcherPath)), "bin", "node");
-  const nodeCmd = await pathExists(bundledNode) ? bundledNode : "node";
+  const nodeCmd = await resolveShimNode(launcherPath);
   const body = `#!/usr/bin/env bash
 # papercusp CLI dispatcher \u2014 managed by Papercusp.app (installPapercuspFiles).
 # Refreshed on every boot; do not edit.
@@ -905346,9 +905969,15 @@ function runBootstrap() {
     const armEnvOperators = setTimeout(() => {
       void (async () => {
         try {
+          const { launchEnvOperators: launchEnvOperators2 } = await Promise.resolve().then(() => (init_env_operator_launcher(), env_operator_launcher_exports));
+          const first = await launchEnvOperators2();
+          console.log(
+            `[env-operators] bundled pass: spawned=${first.spawned.length} skipped=${first.skipped.length}`
+          );
+          let devSourceRoot = null;
           try {
             const { extractDevSourceTree: extractDevSourceTree2 } = await Promise.resolve().then(() => (init_dev_source_extract(), dev_source_extract_exports));
-            const devSourceRoot = await extractDevSourceTree2({
+            devSourceRoot = await extractDevSourceTree2({
               archivePath: process.env.PAPERCUSP_SOURCE_ARCHIVE,
               targetDir: process.env.PAPERCUSP_DEV_SOURCE_DIR,
               log: (m4) => console.log(m4)
@@ -905360,11 +905989,12 @@ function runBootstrap() {
               e2?.message ?? e2
             );
           }
-          const { launchEnvOperators: launchEnvOperators2 } = await Promise.resolve().then(() => (init_env_operator_launcher(), env_operator_launcher_exports));
-          const res = await launchEnvOperators2();
-          console.log(
-            `[env-operators] provisioning: spawned=${res.spawned.length} skipped=${res.skipped.length}`
-          );
+          if (devSourceRoot) {
+            const second = await launchEnvOperators2();
+            console.log(
+              `[env-operators] source pass: spawned=${second.spawned.length} skipped=${second.skipped.length}`
+            );
+          }
         } catch (e2) {
           console.warn("[env-operators] provisioning failed (non-fatal):", e2?.message ?? e2);
         }
@@ -986781,9 +987411,9 @@ var init_interactive_claude_config = __esm({
     RECOVER_INTENT = "launch-intent.json";
     RECOVER_HOOK_SOURCE = `#!/usr/bin/env node
 // session-recover-hook.mjs \u2014 WI-3280 argv-proof playbook delivery + P-004
-// post-compaction continuity anchor (generated by interactive-claude-config.ts
-// on every session materialize; do not edit).
-import { readFileSync, existsSync } from 'node:fs';
+// post-compaction continuity anchor + P-007 identity rebind (generated by
+// interactive-claude-config.ts on every session materialize; do not edit).
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -986898,6 +987528,53 @@ async function fetchCarryBrief(intent) {
   }
 }
 
+// P-007: identity durability across relaunch. When the LIVE PAPERCUSP_SID
+// differs from the sid recorded at launch, every ownerId-keyed surface (armed
+// loop, loop carry-note + walls, claims, claim-spec, standing awaits, fleet
+// membership, open held work-items, owner facts) is stranded under the dead
+// predecessor id. Auto-rebind via the local operator (idempotent server-side);
+// on refusal/failure surface the one-call manual instruction instead. Returns
+// { rebound, to, text } or null when identities agree / either id is unknown.
+async function rebindIdentityIfChanged(intent) {
+  const live = (process.env.PAPERCUSP_SID || '').trim();
+  const recorded = ((intent && intent.sid) || '').trim();
+  if (!live || !recorded || live === recorded) return null;
+  const head = '\u26A0 IDENTITY CHANGED ACROSS RELAUNCH \u2014 recorded PAPERCUSP_SID ' + recorded + ' \u2192 live ' + live + '. Your armed loop, loop carry-note (+walls), claims, claim-spec, standing awaits, fleet membership and open held work-items were keyed under the OLD id.';
+  const manual = 'Run coord:rebind-identity { from: \\'' + recorded + '\\', to: \\'' + live + '\\' } NOW (add force:true only after coord:presence confirms the old id is dead), then coord:orient { afterCompaction: true }.';
+  const base = (process.env.PAPERCUSP_OPERATOR_URL || 'http://localhost:3070').replace(/\\/+$/, '');
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 4500);
+  try {
+    const res = await fetch(base + '/api/agent-mcp/rebind-identity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: recorded, to: live }),
+      signal: ctl.signal,
+    });
+    const body = res.ok ? await res.json() : null;
+    if (body && body.ok) {
+      const counts = (body.surfaces || [])
+        .map((s) => ({ surface: s.surface, n: (s.moved || 0) + (s.dropped || 0) + (s.cancelled || 0) + (s.appended || 0) }))
+        .filter((s) => s.n > 0)
+        .map((s) => s.surface + ':' + s.n)
+        .join(', ');
+      return {
+        rebound: true,
+        to: live,
+        text: head + ' AUTO-REBOUND to the live id just now: ' + (counts || 'nothing was keyed under the old id') + '. Verify with coord:orient { afterCompaction: true }.',
+      };
+    }
+    if (body && body.refused === 'from_appears_live') {
+      return { rebound: false, to: live, text: head + ' AUTO-REBIND REFUSED \u2014 the old id still shows a LIVE presence heartbeat (another session may hold it). If you are certain it is dead: ' + manual };
+    }
+    return { rebound: false, to: live, text: head + ' Auto-rebind did not complete. ' + manual };
+  } catch {
+    return { rebound: false, to: live, text: head + ' The operator was unreachable for auto-rebind. ' + manual };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // P-004: the post-compaction continuity anchor. The mandate + volatile-claims
 // checklist are static (deliver even with the operator down); the carry brief
 // is the live part.
@@ -986925,6 +987602,17 @@ try {
   try {
     const p = playbookRecovery(intent);
     if (p) parts.push(p);
+  } catch {}
+  try {
+    const rb = await rebindIdentityIfChanged(intent);
+    if (rb) {
+      parts.push(rb.text);
+      // A successful rebind retires the old sid: rewrite the parked intent so
+      // subsequent SessionStarts don't re-fire (the rebind itself is idempotent).
+      if (rb.rebound) {
+        try { writeFileSync(INTENT, JSON.stringify({ ...intent, sid: rb.to }, null, 2), { mode: 0o600 }); } catch {}
+      }
+    }
   } catch {}
   if ((input.source || '') === 'compact') {
     try {
@@ -988395,6 +989083,42 @@ var init_session_recovery_brief = __esm({
       }
     });
     session_recovery_brief_default = [recoveryBrief];
+  }
+});
+
+// ../../packages/operator-core/lib/endpoint-route/routes/agent-mcp/rebind-identity.ts
+var rebind, rebind_identity_default2;
+var init_rebind_identity3 = __esm({
+  "../../packages/operator-core/lib/endpoint-route/routes/agent-mcp/rebind-identity.ts"() {
+    "use strict";
+    init_src17();
+    rebind = defineTool({
+      method: "POST",
+      path: "/agent-mcp/rebind-identity",
+      auth: "loopback",
+      async handler(req) {
+        let body = {};
+        try {
+          body = await req.json();
+        } catch {
+          return Response.json({ ok: false, error: "invalid_json" }, { status: 400 });
+        }
+        const from = typeof body.from === "string" ? body.from.trim() : "";
+        const to2 = typeof body.to === "string" ? body.to.trim() : "";
+        if (!from || !to2) return Response.json({ ok: false, error: "from and to required" }, { status: 400 });
+        try {
+          const { rebindIdentity: rebindIdentity2 } = await Promise.resolve().then(() => (init_rebind_identity(), rebind_identity_exports));
+          const result26 = await rebindIdentity2(from, to2, { force: body.force === true });
+          return Response.json(result26);
+        } catch (err11) {
+          return Response.json(
+            { ok: false, error: err11 instanceof Error ? err11.message : String(err11) },
+            { status: 500 }
+          );
+        }
+      }
+    });
+    rebind_identity_default2 = [rebind];
   }
 });
 
@@ -997001,7 +997725,7 @@ var init_onboarding_launch_context = __esm({
           os: platform(),
           agent,
           workspacePath,
-          appVersion: "0.0.2",
+          appVersion: process.env.npm_package_version ?? process.env.PAPERCUSP_VERSION ?? "dev",
           mode,
           setupStatusJson: JSON.stringify(status2 ?? {}, null, 2),
           tutorialProgressJson: JSON.stringify(wizard?.tutorial_progress ?? {}, null, 2),
@@ -1021316,7 +1022040,7 @@ async function resolveDevOperators(deps5 = {}) {
   const timeoutMs = deps5.timeoutMs ?? 700;
   const selfPort = deps5.selfPort !== void 0 ? deps5.selfPort : detectSelfPort();
   const disabled2 = new Set(deps5.disabledIds ?? []);
-  const hasSourceTree = deps5.hasSourceTree ?? detectPapercupRoot() != null;
+  const hasSourceTree = deps5.hasSourceTree ?? defaultDetectSourceRoot() != null;
   const candidates = (deps5.candidates ?? DEV_OPERATORS).filter(
     (d2) => hasSourceTree || !d2.requiresSourceTree
   );
@@ -1021349,7 +1022073,7 @@ var DEV_OPERATORS;
 var init_dev_operators = __esm({
   "../../packages/operator-core/lib/harness/dev-operators.ts"() {
     "use strict";
-    init_register_papercusp();
+    init_env_operator_launcher();
     DEV_OPERATORS = [
       {
         id: "dev",
@@ -1022465,6 +1023189,7 @@ var init_routes = __esm({
     init_bootstrap_su();
     init_bootstrap_role();
     init_session_recovery_brief();
+    init_rebind_identity3();
     init_decisions2();
     init_delegate_chat();
     init_operator_hindsight2();
@@ -1022719,6 +1023444,7 @@ var init_routes = __esm({
       ...flatten2(bootstrap_su_default),
       ...flatten2(bootstrap_role_default),
       ...flatten2(session_recovery_brief_default),
+      ...flatten2(rebind_identity_default2),
       ...flatten2(decisions_default2),
       ...flatten2(delegate_chat_default),
       ...flatten2(operator_hindsight_default),

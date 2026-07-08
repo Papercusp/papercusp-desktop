@@ -333,8 +333,18 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # of their unset-env fallback ('0.0.0' / '0.1.0-dev'). Empty when unreadable
 # (plain dev run outside this script) → both call sites keep their existing
 # fallback, unchanged from today.
+# --minify-whitespace + --minify-syntax (deliberately NOT --minify-identifiers):
+# strip comments/whitespace and apply safe syntax compaction on every bundle.
+# We do NOT rename identifiers — DBOS registers workflows/steps by function name
+# (fn.name) and some runtime lookups key on class/function names, so
+# identifier-mangling risks breaking workflow registration/recovery. Whitespace +
+# syntax alone cut serve.mjs ~49MB→~35MB with zero behaviour change
+# (install-size-audit 2026-07-07, owner-directed). Full --minify would save a
+# further ~6MB but is left out for that name-dependency risk.
+MINIFY_ARGS=(--minify-whitespace --minify-syntax)
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
+  "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
@@ -351,6 +361,7 @@ fi
 echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
   --bundle --platform=node --format=esm --target=node22 \
+  "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
   --banner:js="$HOST_BANNER")
 if [[ ! -f "$SIDECAR_DIR/mcp-proxy.mjs" ]]; then
@@ -396,6 +407,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
   fi
   (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
     --bundle --platform=node --format=esm --target=node22 \
+    "${MINIFY_ARGS[@]}" \
     --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
     --banner:js="$HOST_BANNER" \
     "--external:@lydell/*")
@@ -543,6 +555,53 @@ cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"
 # of pure garbage). Drop the duplicate + purge stale swap leftovers (~293MB).
 rm -rf "$SIDECAR_DIR/spa/internal/docs"
 find "$SIDECAR_DIR/spa" -depth -type d -name '*.old.[0-9]*' -prune -exec rm -rf {} + 2>/dev/null || true
+# ── ONNX Runtime wasm: prune dead backends + dedup the 3 identical copies ────
+# (install-size-audit 2026-07-07, owner-directed). The SPA ships the ORT wasm
+# runtime in THREE dirs — spa/ (STT/transformers), spa/wake-runtime/ (openwakeword,
+# wasmPaths:'/wake-runtime/') and spa/vad-runtime/ (VAD) — each a full ~79MB set of
+# FOUR backend builds (.wasm 12M + .jsep.wasm 24M + .asyncify.wasm 26M + .jspi.wasm
+# 17M), copied wholesale by setup-{wake,vad}-runtime.sh (glob copy). ~237MB, almost
+# all waste:
+#   • DEAD BACKENDS: the bundled onnxruntime-web (ort.bundle.min.mjs) only ever
+#     constructs the `.jsep` filename, and the app's own chunks reference only
+#     `.jsep.mjs` + plain `.mjs` — NOTHING names `.asyncify` or `.jspi` (the
+#     proxy-worker / JSPI-stack-switching builds this app never enables). So the
+#     .asyncify + .jspi {wasm,mjs} are fetched by no code path → drop them.
+#   • TRIPLICATION: the kept .jsep/.plain files (+ the silero .onnx models) are
+#     BYTE-IDENTICAL across the three dirs. serve.mjs serves them read-only over
+#     HTTP, so replacing the wake-/vad- copies with HARDLINKS to the spa-root copy
+#     ships one physical copy with zero behaviour change (a hardlink IS the file,
+#     served identically; no symlink-follow needed).
+# Net: ~237MB → ~36MB. If a FUTURE change enables ORT proxy/JSPI/WebGPU-only
+# builds, stop pruning the needed variant here.
+echo "→ ONNX wasm: pruning dead backends (.asyncify/.jspi) + deduping the 3 runtime dirs"
+_ort_pruned=0
+_ort_linked=0
+for _ort_dir in "$SIDECAR_DIR/spa" "$SIDECAR_DIR/spa/wake-runtime" "$SIDECAR_DIR/spa/vad-runtime"; do
+  [[ -d "$_ort_dir" ]] || continue
+  for _dead in "$_ort_dir"/ort-wasm-*.asyncify.* "$_ort_dir"/ort-wasm-*.jspi.*; do
+    [[ -e "$_dead" ]] || continue
+    rm -f "$_dead"
+    _ort_pruned=$((_ort_pruned + 1))
+  done
+done
+for _ort_sub in wake-runtime vad-runtime; do
+  _ort_subdir="$SIDECAR_DIR/spa/$_ort_sub"
+  [[ -d "$_ort_subdir" ]] || continue
+  for _f in "$_ort_subdir"/*; do
+    [[ -f "$_f" ]] || continue
+    _canon="$SIDECAR_DIR/spa/$(basename "$_f")"
+    [[ -f "$_canon" ]] || continue
+    [[ "$_f" -ef "$_canon" ]] && continue          # already the same inode
+    cmp -s "$_f" "$_canon" || continue             # only dedup byte-identical files
+    if rm -f "$_f" && ln "$_canon" "$_f" 2>/dev/null; then
+      _ort_linked=$((_ort_linked + 1))
+    else
+      cp -a "$_canon" "$_f"                         # FS without hardlink support — restore a copy
+    fi
+  done
+done
+echo "  ✓ ONNX wasm: pruned $_ort_pruned dead-backend file(s), hardlinked $_ort_linked duplicate(s)"
 echo "→ copying Starlight docs → sidecar/internal-docs"
 if [[ -d "$WEB_DIR/public/internal/docs" ]]; then
   # WI-1998: public/internal/docs is a live docs-sync deploy target
@@ -820,6 +879,7 @@ for b in invoke-once run assemble-prompt get-plan-context; do
   if [[ -f "$ORCH_SRC/bin/$b.ts" ]]; then
     (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
       --bundle --platform=node --format=esm --target=node22 \
+      "${MINIFY_ARGS[@]}" \
       --outfile="$ORCH_DST/bin/$b.mjs")
   fi
 done
@@ -1776,6 +1836,49 @@ else
   [[ -x "$SIDECAR_DIR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} (${ZJ_TRIPLE}) not fetched"; exit 1; }
   chmod 755 "$SIDECAR_DIR/bin/zellij"
   echo "    ✓ zellij ${ZJ_VER} (${ZJ_TRIPLE}) → sidecar/bin/zellij"
+fi
+
+# ── strip debug symbols from bundled native binaries ────────────────────────
+# (install-size-audit 2026-07-07, owner-directed). The vendored Node ships
+# UNSTRIPPED with debug_info (~117MB → ~100MB stripped, i.e. ~17MB of symbol
+# table + debug_info the runtime never needs — node stack traces come from JS,
+# not the C++ symbol table). gh/kopia/zellij already ship stripped by their
+# release process (0 change — the pass is a no-op for them but future-proofs a
+# future unstripped drop-in). Strip each in place SAFELY: back it up, strip, then
+# re-probe it still runs `--version`; if the probe regresses, restore the
+# unstripped copy. (pui is deliberately NOT in the list — it has no `--version`,
+# so its probe can't confirm runnability; leave it untouched rather than guess.)
+# Only the current build host's OS — a linux build can't strip a Mach-O and
+# Windows ships no strip; the desktop is built per-platform so each platform
+# strips its OWN binaries. macOS uses `-S` (debug entries only — a full strip can
+# drop dyld-needed symbols) and the result is re-signed by the later
+# `tauri build` bundling step (strip-then-sign).
+_strip_os="$(uname -s)"
+if command -v strip >/dev/null 2>&1 && [[ "$_strip_os" == "Linux" || "$_strip_os" == "Darwin" ]]; then
+  _strip_flags=(); [[ "$_strip_os" == "Darwin" ]] && _strip_flags=(-S)
+  echo "→ stripping debug symbols from bundled native binaries ($_strip_os)"
+  _strip_saved=0
+  for _sb in node gh kopia zellij; do
+    _sbp="$SIDECAR_DIR/bin/$_sb"
+    [[ -f "$_sbp" ]] || continue
+    # Skip anything that isn't a real native executable (a wrapper/script).
+    if command -v file >/dev/null 2>&1; then
+      case "$(file -b "$_sbp" 2>/dev/null)" in *ELF*|*Mach-O*) ;; *) continue ;; esac
+    fi
+    _before=$(wc -c < "$_sbp")
+    cp -a "$_sbp" "$_sbp.prestrip" || continue
+    if strip "${_strip_flags[@]}" "$_sbp" 2>/dev/null && "$_sbp" --version >/dev/null 2>&1; then
+      _after=$(wc -c < "$_sbp")
+      _strip_saved=$((_strip_saved + _before - _after))
+      rm -f "$_sbp.prestrip"
+      echo "    ✓ $_sb: $((_before/1048576))MB → $((_after/1048576))MB"
+    else
+      # strip failed OR the stripped binary no longer runs — restore the original.
+      mv -f "$_sbp.prestrip" "$_sbp"
+      echo "    ⚠ $_sb: strip skipped (probe regressed) — kept unstripped"
+    fi
+  done
+  echo "  ✓ strip pass reclaimed ~$((_strip_saved/1048576))MB"
 fi
 
 # ── release-bundle dependency verifier (WI-3315) ────────────────────────────

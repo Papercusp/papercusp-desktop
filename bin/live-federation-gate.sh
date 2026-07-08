@@ -175,6 +175,10 @@ fi
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
+if [ -n "${GATE_DEB:-}" ] && [ ! -f "$GATE_DEB" ]; then
+  log "WARN: GATE_DEB=$GATE_DEB does not exist — ignoring stale override and rebuilding/repacking if enabled."
+  GATE_DEB=""
+fi
 if [ -z "${GATE_DEB:-}" ]; then
   if [ "$REBUILD" = 1 ]; then
     # Build PROVENANCE (WI-1861): the build reads the LIVE shared working tree, not committed
@@ -191,7 +195,12 @@ if [ -z "${GATE_DEB:-}" ]; then
   grep -qaF 'grantEpochKeysToMembers on admit' "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" 2>/dev/null \
     || log "WARN: fresh serve.mjs lacks the Seam-2 grant-on-admit string — re-key legs may false-RED."
   if [ "$SKIP_MATRIX" != 1 ] && [ "$FAIL_BUILD" != 1 ]; then
-    BASE_DEB="$(ls -t "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb /tmp/*/Papercusp_integrated.deb 2>/dev/null | head -1)"
+    CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+    BASE_DEB="$(ls -t \
+      "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
+      "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
+      "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
+      /tmp/*/Papercusp_integrated.deb 2>/dev/null | head -1)"
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \

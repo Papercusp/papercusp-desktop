@@ -30,6 +30,13 @@
 # bundle — zero tauri.conf / Rust glob changes needed). src-tauri/sidecar/ is
 # .gitignored, so the multi-GB artifact never reaches git-sync.
 set -euo pipefail
+
+# ── Self-read guard (WI-3306, 2026-07-08): the body runs inside this { } group
+# so bash reads the whole script before executing — a peer editing this
+# shared-tree file during the multi-minute tar below can't corrupt the running
+# shell's read offset. Matching } + exit at EOF. Same guard as the caller,
+# bin/build-windows-on-vm.sh (and bin/mac-vm-build.sh, which also stages here).
+{
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
 MONO="$(cd "$ROOT/.." && pwd)"                  # monorepo root (apps/, libs/, node_modules/)
@@ -144,3 +151,6 @@ set -e -o pipefail
 sz="$(du -h "$OUT" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"
 echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_ROOT points at it (WI-3308)"
+exit 0
+
+}  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──

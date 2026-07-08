@@ -63,9 +63,11 @@ _is_elf()    { [[ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" ==
 # PATH). Consumers, for the record:
 #   pg_dump/psql/pg_dumpall/pg_restore — packages/backup/src/hook.ts,
 #     seed baking, db-tools; kopia — packages/backup/src/workspace-backup.ts;
-#   node — script runners; gh — git identity flows; omp/pui/zellij — chat
-#   dock + agent ptys; papercup — operator console shim.
-REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh omp zellij pui papercup"
+#   node — script runners; gh — git identity flows; pui/zellij — chat dock
+#   + agent ptys; papercup — operator console shim.
+#   omp is deliberately NOT required here: WI-3343 retired the bundled omp
+#   sidecar dependency, and the desktop app resolves the user's installed omp.
+REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
 # whose flags we don't control are not executed).
 probe_args() {

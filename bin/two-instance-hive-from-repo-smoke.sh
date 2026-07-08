@@ -404,7 +404,7 @@ if [ "$discover_ok" = 1 ]; then
                           || echo "✗ offer source/hive mismatch (source=$B_SOURCE hive=$B_OFFER_HIVE)"
 fi
 
-# ── 4. B accepts: the REAL hive Join (POST /api/discovery/join-hive) ─────────────
+# ── 4. B accepts: the REAL hive Join (POST /api/discovery/join-pot) ──────────────
 # This is what the directory panel's "Join" drives — joinHiveAsView, which
 # composes the per-member join-link mechanic AND materializes the joiner-side
 # hive VIEW (the remote_hive registry entry + hive_slug on every member + the
@@ -417,8 +417,8 @@ join_ok=0; clone_ok=0
 N_OFFER_LINKS="$(jget "$OFFER_LINKS_JSON" "len(d)")"
 if [ "$offer_ok" = 1 ] && [ -n "$N_OFFER_LINKS" ] && [ "$N_OFFER_LINKS" -ge 1 ]; then
   echo "✓ offer carries $N_OFFER_LINKS memberLink(s)"
-  log "B ($P_B_USER): JOIN the hive '$HIVE_SLUG' via /api/discovery/join-hive ($N_OFFER_LINKS link(s))"
-  join_resp="$(curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[b]}/api/discovery/join-hive" \
+  log "B ($P_B_USER): JOIN the hive '$HIVE_SLUG' via /api/discovery/join-pot ($N_OFFER_LINKS link(s))"
+  join_resp="$(curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[b]}/api/discovery/join-pot" \
     -H 'content-type: application/json' \
     -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":$OFFER_LINKS_JSON}")"
   echo "B join-hive → $(echo "$join_resp" | head -c 500)"
@@ -427,9 +427,9 @@ if [ "$offer_ok" = 1 ] && [ -n "$N_OFFER_LINKS" ] && [ "$N_OFFER_LINKS" -ge 1 ];
   N_MEM_OK="$(jget "$join_resp" "sum(1 for m in (d.get('members') or []) if m.get('ok'))")"
   if [ "$J_OK" = "True" ] && [ -n "$N_MEM_OK" ] && [ "$N_MEM_OK" -ge 1 ]; then
     join_ok=1; clone_ok=1
-    echo "✓ join-hive ok:true — $N_MEM_OK/$N_MEM member(s) joined (view materialized: remote_hive + hive_slug + identity)"
+    echo "✓ join-pot ok:true — $N_MEM_OK/$N_MEM member(s) joined (view materialized: remote_hive + hive_slug + identity)"
   else
-    echo "✗ join-hive failed (ok=$J_OK members_ok=$N_MEM_OK/$N_MEM)"
+    echo "✗ join-pot failed (ok=$J_OK members_ok=$N_MEM_OK/$N_MEM)"
   fi
 elif [ "$offer_ok" = 1 ]; then
   echo "✗ offer carries no memberLinks — join leg cannot run"
@@ -455,7 +455,7 @@ if [ "$join_ok" = 1 ]; then
     echo "--- B: any features at all? (did ANYTHING replicate) ---"; drv_psql b "SELECT harness_slug,feature_id,origin FROM harness_shared.harness_features_consolidated;" 2>/dev/null | head
     echo "--- A [swarm]: joined topic / peer_connected (is A on the hive topic?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[a]}" 2>/dev/null | tail -6
     echo "--- B [swarm]: joined topic / peer_connected (same topic as A?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[b]}" 2>/dev/null | tail -6
-    echo "--- B re-key state: hives identity row + remote_hive (did join-hive 2b/2c run?) ---"
+    echo "--- B re-key state: hives identity row + remote_hive (did join-pot 2b/2c run?) ---"
     echo "  B hives identity: $(drv_psql b "SELECT home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.hives;" 2>/dev/null | tr '\n' ' ')"
     echo "  B registry remote_hive: $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | grep -oE 'remote_hive[^,]{0,12}' | head -3 | tr '\n' ' ')"
     echo "===== /DIAG ====="

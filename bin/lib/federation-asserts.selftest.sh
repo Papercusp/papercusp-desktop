@@ -125,6 +125,8 @@ fi
 #    <bridge-ip:port>; a launcher that INHERITS either swarm-binds/bootstraps
 #    loopback smokes on the bridge → 0 peer dials. Static guard: every local
 #    launcher must force-empty BOTH (trailing "$@" still lets callers opt in).
+#    They must also force PAPERCUSP_BACKGROUND_WORKERS=1: request-only ambient
+#    mode skips the hyperbee substrate and leaves content-matrix outboxes stuck.
 for fn in fed_local_launch fed_local_launch_sidecar; do
   body="$(declare -f "$fn")"
   for var in PAPERCUSP_DHT_HOST PAPERCUSP_DHT_BOOTSTRAP; do
@@ -134,11 +136,18 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
       bad "$fn no longer force-empties ambient $var (P-002 layer-4 regression)"
     fi
   done
+  if printf '%s\n' "$body" | grep -q 'PAPERCUSP_BACKGROUND_WORKERS=1'; then
+    ok "$fn forces packaged federation background workers on"
+  else
+    bad "$fn no longer forces PAPERCUSP_BACKGROUND_WORKERS=1 (WI-3350 regression)"
+  fi
 done
 
 # 7) Route-cutover guard (WI-2929): the live federation driver runs against the
 # current pot route. A stale /hives/from-repo call hard-404s on current packaged
 # binaries before the matrix can exercise federation at all.
+# WI-3350: the join route likewise moved to /api/discovery/join-pot; stale
+# /join-hive curls hard-404 during the content-matrix B-join step.
 ROUTE_FILES=(
   "$DIR/federation-asserts.sh"
   "$DIR/../two-instance-content-matrix-smoke.sh"
@@ -153,10 +162,50 @@ for file in "${ROUTE_FILES[@]}"; do
     bad "$(basename "$file") still references retired hives/from-repo route"
     route_bad=1
   fi
+  if grep -Eq 'curl .*/api/discovery/join-hive' "$file"; then
+    bad "$(basename "$file") still curls retired discovery/join-hive route"
+    route_bad=1
+  fi
 done
 if [ "$route_bad" = 0 ]; then
-  ok "live federation scripts use current pots/from-repo route"
+  ok "live federation scripts use current pots/from-repo and discovery/join-pot routes"
 fi
+
+# 8) Packaged-deb discovery guard (WI-3344): after the GUI/Server product split,
+# Linux artifacts are named "Papercusp GUI_..._amd64.deb". A stale
+# Papercusp_0.0.2_amd64.deb default made the live gate file content-matrix REDs
+# before the smoke even extracted a package. The gate must ignore missing explicit
+# overrides, and the direct smoke must not keep the retired filename as its default.
+gate_file="$DIR/../live-federation-gate.sh"
+matrix_file="$DIR/../two-instance-content-matrix-smoke.sh"
+verify_file="$DIR/../verify-sidecar-bundle.sh"
+if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
+  ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"
+else
+  bad "live-federation-gate no longer guards missing GATE_DEB overrides (WI-3344 regression)"
+fi
+if grep -q 'Papercusp\\ GUI_' "$gate_file" && grep -q 'Papercusp\\ GUI_' "$matrix_file"; then
+  ok "live federation deb discovery includes the current 'Papercusp GUI' artifact name"
+else
+  bad "live federation deb discovery is missing the current 'Papercusp GUI' artifact glob"
+fi
+if grep -q 'Papercusp_0.0.2_amd64.deb' "$matrix_file"; then
+  bad "content-matrix smoke still carries the retired Papercusp_0.0.2_amd64.deb default"
+else
+  ok "content-matrix smoke no longer carries the retired default deb filename"
+fi
+if grep -q 'OVERALL: PASS' "$matrix_file"; then
+  ok "content-matrix smoke emits the OVERALL verdict live-federation-gate parses"
+else
+  bad "content-matrix smoke no longer emits OVERALL: PASS (live-federation-gate will mark it FAIL)"
+fi
+required_line="$(grep '^REQUIRED_TOOLS=' "$verify_file" || true)"
+case "$required_line" in
+  *" omp "*|*" omp\""*)
+    bad "verify-sidecar-bundle still requires retired bundled omp (WI-3344/WI-3343 regression)" ;;
+  *)
+    ok "verify-sidecar-bundle does not require retired bundled omp" ;;
+esac
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi

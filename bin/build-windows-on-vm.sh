@@ -48,6 +48,17 @@
 
 set -euo pipefail
 
+# ── Self-read guard (WI-3306, 2026-07-08) ───────────────────────────────────
+# The ENTIRE body runs inside this { } brace group, so bash parses the whole
+# script into memory BEFORE executing any of it. This is a shared-tree script
+# the fleet edits WHILE it runs; without the guard bash reads the file
+# incrementally and a peer's mid-run edit shifts the running shell's read offset
+# into changed bytes, corrupting execution — the exact cause of build6b's
+# "line 284: ad: command not found" (EXIT 127, 2026-07-07). The matching } +
+# exit 0 are at EOF. (bin/stage-source-tree.sh, called below, carries the same
+# guard for its own multi-minute tar window.)
+{
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
@@ -195,8 +206,9 @@ cut_release_seed
 # ~2.2G + git ~76M + rootfs ~0.25G), so tripping this means an unexpectedly
 # large corestore/git cut — recheck the seed before building. A hard
 # post-collect assertion below also verifies the actual setup.exe size.
-# (sidecar/code-server + sidecar/bin/omp are excluded from the tar and never
-# ship — see the tar excludes below.)
+# Retired local artifacts (sidecar/code-server + sidecar/bin/omp) are excluded
+# from the tar if a stale local build left them behind — see the tar excludes
+# below.
 raw_kb=$(du -sk --dereference "$ROOT/src-tauri/seed" "$ROOT/src-tauri/resources" 2>/dev/null | awk '{s+=$1} END {print s+0}')
 raw_cap_kb=$((3482 * 1024)) # 3.4GiB raw-stored cap (full seed ~2.5GiB by design)
 if (( raw_kb > raw_cap_kb )); then
@@ -211,13 +223,9 @@ trap 'rm -f "$TARBALL"' EXIT
 # create them. Keep sidecar/**/node_modules (runtime deps); drop only the
 # desktop repo's own toolchain node_modules.
 #
-# Windows payload trims (NSIS hard-caps the installer datablock at ~2 GiB —
-# the full 2.4 GB payload dies in makensis with "error mmapping datablock"):
-#   - sidecar/code-server (447 MB): main.rs spawn_code_server already
-#     falls back gracefully when it's absent on Windows.
-#   - sidecar/bin/omp (485 MB): OMP integration is Windows-unsupported in
-#     v1 (desktop-app-install-integration-2026-05-23 D-002; the endpoint
-#     short-circuits with windows_not_supported_in_v1).
+# Windows payload trims: code-server and sidecar/bin/omp are retired, but older
+# local builds may still have those large gitignored artifacts under sidecar/.
+# Keep excluding them so a stale tree cannot bloat the VM upload.
 # Serialize the pack against build-desktop-sidecar.sh's atomic sidecar publish:
 # that script holds an flock on src-tauri/sidecar.lock for its whole build and
 # finishes with an atomic rename of sidecar.tmp.<pid> → sidecar/. In a shared
@@ -550,3 +558,6 @@ done
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"
+exit 0
+
+}  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──

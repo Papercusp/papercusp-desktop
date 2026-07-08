@@ -11,7 +11,7 @@
 #   1. A create+publish a PUBLIC hive (+ a separate INVITE hive).
 #   2. A SEEDS pre-existing content (one row per federated type, origin='local').
 #   3. NEGATIVE: B (running, NOT joined) sees ZERO of the hive's content (isolation).
-#   4. B joins via the CURRENT flow (POST /api/discovery/join-hive); assert A & B
+#   4. B joins via the CURRENT flow (POST /api/discovery/join-pot); assert A & B
 #      land on the SAME derive-swarm-topic hex (joiner-resolves-its-own-topic path).
 #   5. BACKFILL: B receives the PRE-EXISTING (pre-join) content (origin='remote').
 #   6. INCREMENTAL matrix A<->B: new writes each direction, per type, origin='remote'.
@@ -26,7 +26,14 @@ DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
 REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
-DEB="${1:-/home/marsh-office/.cargo-target/release/bundle/deb/Papercusp_0.0.2_amd64.deb}"
+default_deb() {
+  local cargo_target="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+  ls -t \
+    "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
+    "$cargo_target"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
+    "$cargo_target"/release/bundle/deb/Papercusp_*_amd64.deb 2>/dev/null | head -1
+}
+DEB="${1:-$(default_deb)}"
 DEB="$(readlink -f "$DEB" 2>/dev/null || echo "$DEB")"
 LUXON_SRC="$REPO_DIR/node_modules/luxon"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-$REPO_DIR/apps/operator}"
@@ -243,11 +250,29 @@ NEG=$([ "${NF:-1}" = 0 ] && [ "${NC:-1}" = 0 ] && echo PASS || echo "FAIL(f=$NF 
 echo "  negative-isolation=$NEG"
 
 # ── 4. B joins (current flow) + topic-equality ──────────────────────────────────
-log "B: discover + join-hive '$HIVE_SLUG'"
+log "B: discover + join-pot '$HIVE_SLUG'"
 BR=""; RESP=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do RESP="$(curl -s -m 10 "$(sc b)/api/discovery/hives")"; BR="$(jget "$RESP" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'), None))")"; [ -n "$BR" ] && [ "$BR" != "null" ] && break; sleep 3; done
 echo "  [discovery] B saw rows=$(jget "$RESP" "len(d.get('rows') or [])"); target '$HIVE_SLUG' match=$([ -n "$BR" ] && [ "$BR" != "null" ] && echo Y || echo N) after ${DISCOVERY_RETRIES:-40} tries"
 LINKS="$(jget "${BR:-null}" "json.dumps((d or {}).get('memberLinks') or [])" 2>/dev/null || echo '[]')"
-jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-hive" -H 'content-type: application/json' -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":${LINKS:-[]}}")"
+if [ "$(jget "$LINKS" "len(d)")" = 0 ]; then
+  LINKS="$(jget "$a_resp" "json.dumps(d.get('publish', {}).get('memberLinks') or [])")"
+  echo "  [join] directory row missing memberLinks; using create response publish.memberLinks=$(jget "$LINKS" "len(d)")"
+fi
+HIVE_PUBKEY="$(jget "$a_resp" "d.get('publish', {}).get('hivePubkey') or ''")"
+JOIN_BODY="$(python3 - "$HIVE_SLUG" "${HIVE_PUBKEY:-}" "${LINKS:-[]}" <<'PY'
+import json, sys
+hive, pubkey, links_json = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    links = json.loads(links_json)
+except Exception:
+    links = []
+body = {"hiveId": hive, "memberLinks": links}
+if pubkey:
+    body["hivePubkey"] = pubkey
+print(json.dumps(body))
+PY
+)"
+jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-pot" -H 'content-type: application/json' -d "$JOIN_BODY")"
 [ "$(jget "$jr" "d.get('ok')")" = True ] && echo "✓ B joined" || { echo "✗ B join failed: $(echo "$jr"|head -c 200)"; exit 6; }
 sleep 5
 # WS_B RE-DERIVE (2026-07-03, WI-971 differential): the pre-join `LIMIT 1` read can
@@ -319,4 +344,15 @@ echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase
 if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-incremental re-poll — PASS here + FAIL above = latency, not death):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_LATE_TABLE"; fi
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
 echo; echo "negative-isolation=$NEG  topic-equal=$TEQ  b-to-a-directory=$BA_DIR"
+CONTENT_OVERALL=PASS
+[ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE
+case "$TEQ" in PASS*) ;; *) CONTENT_OVERALL=INCOMPLETE ;; esac
+if printf '%b%b%b' "$BACKFILL_TABLE" "$BACKFILL_LATE_TABLE" "$MATRIX" | grep -q FAIL; then
+  CONTENT_OVERALL=INCOMPLETE
+fi
+if [ "$CONTENT_OVERALL" = PASS ]; then
+  echo "OVERALL: PASS — content federation matrix green (directory mirror: $BA_DIR)"
+else
+  echo "OVERALL: INCOMPLETE — content federation matrix has a failing assertion (directory mirror: $BA_DIR)"
+fi
 echo "Pair LEFT RUNNING for Brief E/G. Ports: $WORK/instances.env  ·  STOP: $WORK/stop.sh"

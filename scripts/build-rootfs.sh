@@ -118,6 +118,27 @@ npm install -g "pnpm@${PNPM_VERSION:-9.15.0}"
 mkdir -p /home/$DEFAULT_USER/papercup
 chown -R "$DEFAULT_USER:$DEFAULT_USER" /home/$DEFAULT_USER
 
+# ── install-size trim (install-size-audit 2026-07-07, owner-directed) ────────
+# Drop content the RUNTIME never needs — package docs, man/info pages, and
+# non-English locale catalogs — plus build/download caches. This deliberately
+# does NOT touch build-essential, /usr/include headers, or any library the
+# native-module rebuilds (better-sqlite3, node-pty via node-gyp) depend on, so
+# no functionality is lost; it only removes reference material + caches, which
+# shrinks the exported rootfs (papercup-runtime.tar.gz) on Windows. Every rm is
+# tolerant of an already-absent path (safe under `set -euo pipefail`).
+rm -rf \
+  /usr/share/doc/* \
+  /usr/share/man/* \
+  /usr/share/info/* \
+  /usr/share/doc-base/* \
+  /usr/share/lintian/* \
+  /root/.npm /root/.cache \
+  /tmp/node-compile-cache
+# Locales: keep C/POSIX + en*, drop the rest.
+find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
+  ! -name 'en*' ! -name 'C*' ! -name 'POSIX' -exec rm -rf {} + 2>/dev/null || true
+npm cache clean --force 2>/dev/null || true
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 

@@ -181,6 +181,9 @@ fed_local_launch() {
     # PAPERCUSP_DHT_HOST / PAPERCUSP_DHT_BOOTSTRAP for the tower↔VM rig; a
     # loopback smoke inheriting them swarm-binds/bootstraps on the bridge →
     # 0 peer dials. Trailing "$@" VAR=val args win for callers that want them.
+    # Packaged federation smokes must also force background workers ON: fleet
+    # shells can export PAPERCUSP_BACKGROUND_WORKERS=0 for request-only hosts,
+    # which skips the hyperbee substrate and leaves content outboxes undrained.
     # WI-1666 env-inheritance leg (2026-07-03): agent shells also export
     # DATABASE_URL / *_DATABASE_URL pointing at the box's SHARED native :5432 —
     # an "isolated" instance inheriting one reads/writes the tower's PG (how a
@@ -189,6 +192,7 @@ fed_local_launch() {
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
       -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
       DISPLAY=":$disp" HOME="$home" PATH="$(dirname "$(command -v node)"):$PATH" \
+      PAPERCUSP_BACKGROUND_WORKERS=1 \
       PAPERCUSP_DHT_HOST= PAPERCUSP_DHT_BOOTSTRAP= "$@" \
       setsid nohup vglrun -d egl0 "$bin" >"$logf" 2>&1 < /dev/null ) &
   FED_KILL_PIDS+=("$!")
@@ -231,6 +235,9 @@ fed_local_launch_sidecar() {
   # PAPERCUSP_DHT_HOST=<ip> / PAPERCUSP_DHT_BOOTSTRAP=<ip:port> in the trailing
   # VAR=val args ("$@" below wins over the earlier assignment) — all committed
   # smokes already pass DHT_BOOTSTRAP explicitly when they spin a testnet.
+  # PAPERCUSP_BACKGROUND_WORKERS is forced ON for the same reason: packaged
+  # content smokes need the in-process hyperbee substrate, and request-only
+  # ambient worker mode makes joins look green while outboxes never drain.
   ( cd "$side"
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
         -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
@@ -238,6 +245,7 @@ fed_local_launch_sidecar() {
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+        PAPERCUSP_BACKGROUND_WORKERS=1 \
         PAPERCUSP_DHT_HOST= \
         PAPERCUSP_DHT_BOOTSTRAP= \
         PAPERCUSP_HONO_PORT="$hono_port" PAPERCUSP_PG_PORT="$pg_port" \
@@ -554,13 +562,13 @@ EOF
   fed_json "$body" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$hive'))"
 }
 
-# fed_hive_join <inst> <hiveId> <memberLinks_json_array> — POST /api/discovery/join-hive.
+# fed_hive_join <inst> <hiveId> <memberLinks_json_array> — POST /api/discovery/join-pot.
 # memberLinks must be a JSON array string (e.g. '["pear://…"]'). Echoes the raw
 # JSON: { ok, members:[{ok,…}], … }.
 fed_hive_join() {
   local inst="$1" hive="$2" links="$3"
   drv_exec "$inst" <<EOF
-curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-hive" \
+curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot" \
   -H 'content-type: application/json' \
   -d '{"hiveId":"$hive","memberLinks":$links}'
 EOF
