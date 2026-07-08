@@ -1,1 +1,0 @@
-import{r as e}from"./configure-BJOl_rd_.js";import{t}from"./backend-v_n1j1Lw.js";t();export{e as getMemoryBackend};
