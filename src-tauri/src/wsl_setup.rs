@@ -410,6 +410,29 @@ mod imp {
         super::parse_default_version(&super::decode_wsl_output(&out.stdout))
     }
 
+    /// Probe whether the registered `papercup-runtime` distro can actually
+    /// START. `wsl --list` reports the REGISTRATION, not the backing disk, so a
+    /// husk whose ext4.vhdx is gone still lists — but starting it fails. Returns
+    /// Some(err) on failure (→ caller re-imports), None if it boots + runs a
+    /// trivial command. (owner-reported 2026-07-08 on 0.0.3-alpha: a stale
+    /// registration from an older `com.papercusp.desktop` build — its per-bundle
+    /// data dir removed — listed fine but died on boot with "Failed to attach
+    /// disk …ext4.vhdx… ERROR_PATH_NOT_FOUND".)
+    fn distro_start_failure() -> Option<String> {
+        let out = wsl_command()
+            .args(["--distribution", DISTRO_NAME, "--user", "root", "--", "true"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => None,
+            Ok(o) => Some(format!(
+                "exit={:?} stderr={}",
+                o.status.code(),
+                super::decode_wsl_output(&o.stderr).trim()
+            )),
+            Err(e) => Some(format!("spawn failed: {e}")),
+        }
+    }
+
     pub(crate) fn detect(app: &tauri::AppHandle) -> WslStatus {
         let exe = wsl_exe_on_path();
         if !exe {
@@ -444,6 +467,28 @@ mod imp {
         }
 
         if !persisted.bootstrapped {
+            // A distro NAME in `wsl --list` does not mean it can START — a
+            // registration can outlive its backing ext4.vhdx (e.g. a husk left
+            // by an OLDER build under the retired single `com.papercusp.desktop`
+            // data dir). Bootstrapping such a husk dies with "Failed to attach
+            // disk …ext4.vhdx… ERROR_PATH_NOT_FOUND" (owner 2026-07-08,
+            // 0.0.3-alpha). Probe by actually starting it; if it can't start,
+            // treat as InstalledNoDistro so onboarding re-imports a fresh distro
+            // (import_rootfs unregisters the husk first). Safe to re-import here:
+            // a not-yet-bootstrapped distro holds no user data. Gated behind
+            // !bootstrapped so a healthy Ready distro is never probed or
+            // re-imported (its data is never at risk).
+            if let Some(err) = distro_start_failure() {
+                eprintln!(
+                    "[wsl_setup] detect: `{DISTRO_NAME}` is registered but failed to start ({err}) — treating as InstalledNoDistro to force a clean re-import"
+                );
+                return WslStatus {
+                    state: WslState::InstalledNoDistro,
+                    wsl_exe_available: true,
+                    distros,
+                    default_version,
+                };
+            }
             return WslStatus {
                 state: WslState::PendingBootstrap,
                 wsl_exe_available: true,
@@ -493,6 +538,17 @@ mod imp {
             return Err(format!("rootfs tarball not found: {}", tarball.display()));
         }
         ensure_wsl2_default();
+        // `wsl --import` fails if the name already exists. We only reach
+        // import_rootfs when the distro is ABSENT or detected BROKEN (a husk
+        // with a missing ext4.vhdx — no usable data to preserve), so clear any
+        // lingering registration first so the fresh import can take the name.
+        // (owner 2026-07-08, 0.0.3-alpha stale-registration bug)
+        if list_distros().iter().any(|d| d == DISTRO_NAME) {
+            eprintln!(
+                "[wsl_setup] import_rootfs: `{DISTRO_NAME}` already registered — unregistering husk before fresh import"
+            );
+            let _ = wsl_command().args(["--unregister", DISTRO_NAME]).output();
+        }
         let out = wsl_command()
             .args([
                 "--import",

@@ -579,14 +579,50 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+const WSL_WRITE_MAX_ATTEMPTS: u32 = 4;
+
+#[cfg(target_os = "windows")]
 fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
-    // `cat > path` with the contents on stdin — no quoting pitfalls.
+    // `cat > path` truncates + rewrites, so the op is IDEMPOTENT and safe to
+    // retry. wsl.exe interop intermittently fails under CONCURRENCY: a
+    // desktop-bridge fleet launch fires N script writes at once and ~1/3 of a
+    // 10-wide batch failed (df2cc 2026-07-08) — either "wsl.exe exit 1" with no
+    // output (surface A), or a separate reader wsl.exe not seeing the file →
+    // bash exits 127 "No such file" (surface B). Retry with per-path-jittered
+    // backoff + a post-write existence check to ride out the transient.
     let script = format!("cat > {}", shell_escape_single(path));
-    let out = wsl_fs(&["bash", "-c", &script], Some(contents))?;
-    if out.status.success() {
+    // Per-path jitter (no rand dep) decorrelates concurrent writers — each has a
+    // unique script path — so their retries don't collide in lockstep.
+    let jitter = path.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64)) % 40;
+    let mut cat_ever_ok = false;
+    let mut last = String::from("cfs_write: no attempt ran");
+    for attempt in 0..WSL_WRITE_MAX_ATTEMPTS {
+        match wsl_fs(&["bash", "-c", &script], Some(contents)) {
+            Ok(out) if out.status.success() => {
+                cat_ever_ok = true;
+                // Surface B: a `cat >` that exits 0 has, under load, still been
+                // followed by a reader that can't see the file. Confirm it
+                // landed before reporting success; otherwise retry.
+                if cfs_exists(path) {
+                    return Ok(());
+                }
+                last =
+                    "write exited 0 but the file was not visible afterward (wsl interop race)"
+                        .to_string();
+            }
+            Ok(out) => last = wsl_relay_error(&out),
+            Err(e) => last = e,
+        }
+        if attempt + 1 < WSL_WRITE_MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis((60u64 << attempt) + jitter));
+        }
+    }
+    // If the write command itself EVER exited 0, trust it (cfs_exists can race
+    // under the same load); only hard-fail when no attempt ever succeeded.
+    if cat_ever_ok {
         Ok(())
     } else {
-        Err(wsl_relay_error(&out))
+        Err(last)
     }
 }
 
@@ -634,8 +670,8 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     format!(
         "printf '\\033]0;%s\\007' {title} \
          ; cd {cwd} && {exports} \
-         && touch {sentinel_glob}.$ \
-         && trap 'rm -f {sentinel_glob}.$' EXIT \
+         && touch {sentinel_glob}.$$ \
+         && trap 'rm -f {sentinel_glob}.$$' EXIT \
          && (eval {greet}) ; \
          exec \"${{SHELL:-/bin/bash}}\" -l",
         title = title_quoted,
@@ -1304,15 +1340,15 @@ mod tests {
     fn oneliner_drops_sentinel_with_trap() {
         let e = envelope("/x");
         let out = build_launcher_oneliner(&e);
-        // Touches sentinel with shell pid suffix
+        // Touches sentinel with shell pid suffix ($$ → <pid>, not a literal $)
         assert!(
-            out.contains("touch .papercup-console-active.$"),
-            "sentinel touch missing: {out}"
+            out.contains("touch .papercup-console-active.$$"),
+            "sentinel touch missing or has a literal (unexpanded) $ suffix: {out}"
         );
         // trap fires on EXIT to clean up
         assert!(
-            out.contains("trap 'rm -f .papercup-console-active.$' EXIT"),
-            "EXIT trap missing: {out}"
+            out.contains("trap 'rm -f .papercup-console-active.$$' EXIT"),
+            "EXIT trap missing or has a literal (unexpanded) $ suffix: {out}"
         );
     }
 
