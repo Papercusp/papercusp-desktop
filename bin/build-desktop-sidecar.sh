@@ -1909,6 +1909,26 @@ OLD_DIR="$SIDECAR_FINAL_DIR.old.$$"
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
   mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"
 fi
+# ── Preserve release-staged OVERLAY artifacts across a republish (WI-3346) ──
+# stage-source-tree.sh (sidecar/source.tar.zst — the all-5-buttons dev-source
+# tree) and stage-env-sidecars.sh (sidecar/env-sidecars/) add files ON TOP of a
+# completed sidecar build; this script does NOT produce them. A concurrent dev
+# `npm run tauri dev` (→ beforeDevCommand → this script) atomically republished
+# the sidecar BETWEEN a release's stage-*.sh and its Linux tauri/appimage
+# resource read, wiping source.tar.zst → the 0.0.3-alpha Linux leg died with
+# "resource path 'sidecar/source.tar.zst' doesn't exist". Since this build
+# didn't create the overlays, carry any present in the OUTGOING tree into the
+# new one so a republish can never clobber a release mid-build. (A slim build
+# that wants them gone: `rm -rf src-tauri/sidecar` first — a fresh tree has no
+# OLD_DIR, so nothing is preserved.)
+if [[ -d "$OLD_DIR" ]]; then
+  for _overlay in source.tar.zst env-sidecars; do
+    if [[ -e "$OLD_DIR/$_overlay" && ! -e "$SIDECAR_TMP_DIR/$_overlay" ]]; then
+      cp -a "$OLD_DIR/$_overlay" "$SIDECAR_TMP_DIR/$_overlay" \
+        && echo "→ preserved release overlay across republish: $_overlay"
+    fi
+  done
+fi
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
 rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"

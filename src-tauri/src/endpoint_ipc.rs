@@ -283,7 +283,41 @@ impl IpcClient {
         input: serde_json::Value,
         channel: Channel<EndpointEvent>,
     ) -> Result<u64, String> {
+        // Allocate the request id, register the sink, and write the frame all
+        // while HOLDING the writer lock, so REQUEST ids reach the server in
+        // strictly-increasing WIRE order.
+        //
+        // WHY (the "Operator connection lost" race): the IPC server enforces a
+        // hard monotonic-id invariant and DESTROYS the entire connection on any
+        // out-of-order REQUEST id (`non-monotonic REQUEST id=N (last=N+1);
+        // closing` — libs/generic/ipc-endpoint-server/src/server.ts). With
+        // `next_id.fetch_add` OUTSIDE the writer lock, two concurrent `invoke`s
+        // on different runtime worker threads race between allocation and the
+        // write: task A allocates id=743, task B allocates id=744, then B wins
+        // the `writer.lock()` race and writes 744 BEFORE A writes 743 — the
+        // server sees 744 then 743, tears down the socket, and the desktop's
+        // live-data channel drops (surfacing, after the OfflineIndicator grace,
+        // as the "actions will not save" banner). The off-by-exactly-one ids in
+        // the logs are the fingerprint of exactly this two-invoke swap.
+        // Allocating the id UNDER the writer lock makes wire order == id order,
+        // closing the race. (`cancel` also takes this lock, so CANCEL frames stay
+        // ordered against REQUESTs too.)
+        let mut w = self.writer.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let req = serde_json::json!({
+            "id": id,
+            "toolName": tool_name,
+            "input": input,
+        });
+        // Build the frame BEFORE registering the sink so a (near-impossible)
+        // serialize/encode error can't leave an orphaned CallSink behind (the
+        // consumed id is harmless — the server only requires ids to INCREASE,
+        // gaps are fine).
+        let bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+        let frame = encode_frame(FrameType::Request, &bytes).map_err(|e| e.to_string())?;
+        // Register the sink before the write so the reader loop can route the
+        // first response frame (we still hold the writer lock, so no response
+        // can arrive until after this write completes anyway).
         self.in_flight.insert(
             id,
             CallSink {
@@ -293,20 +327,18 @@ impl IpcClient {
                 last_activity_ms: AtomicU64::new(now_ms()),
             },
         );
-        let req = serde_json::json!({
-            "id": id,
-            "toolName": tool_name,
-            "input": input,
-        });
-        let bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-        let frame = encode_frame(FrameType::Request, &bytes).map_err(|e| e.to_string())?;
-        let mut w = self.writer.lock().await;
         if let Err(e) = w.write_all(&frame).await {
-            // Socket gone (e.g. operator restarted) — mark dead so the next
-            // call reconnects instead of writing to a broken pipe forever.
+            // Socket gone (e.g. operator restarted) — drop the just-registered
+            // sink and mark dead so the next call reconnects instead of writing
+            // to a broken pipe forever.
+            self.in_flight.remove(&id);
             self.alive.store(false, Ordering::Relaxed);
             return Err(e.to_string());
         }
+        // Release the writer lock now — the idle-timeout watchdog below needs no
+        // socket access, and holding it there would needlessly serialize every
+        // other invoke/cancel behind this call's watchdog setup.
+        drop(w);
         // WI-2817: arm the idle-timeout watchdog for this call. The reader
         // loop's EOF/error path already handles a connection that visibly
         // DIES; this backstop catches the other case — a connection that
@@ -1079,5 +1111,122 @@ mod tests {
 
         let _ = server_task.await;
         let _ = std::fs::remove_file(&server_path);
+    }
+
+    /// Regression guard for the "Operator connection lost" IPC race: many
+    /// concurrent `invoke`s must reach the server with strictly-increasing
+    /// REQUEST ids on the WIRE.
+    ///
+    /// Before the fix, `next_id.fetch_add` sat OUTSIDE the writer lock, so two
+    /// concurrent invokes on different worker threads could allocate 743/744
+    /// and then write them 744-first — the server's monotonic-id gate
+    /// (`non-monotonic REQUEST id=N (last=N+1); closing`) then `socket.destroy()`d
+    /// the whole IPC connection, dropping the desktop's live-data channel. With
+    /// id allocation UNDER the writer lock, wire order == id order, so a server
+    /// enforcing that same check (as this synthetic one does) never trips.
+    ///
+    /// Stress-style: the race is timing-dependent, so we fire enough concurrent
+    /// invokes on a multi-thread runtime to reliably exercise it. The fix makes
+    /// the assertion pass deterministically; a regression that moves allocation
+    /// back outside the lock will (with very high probability) produce a
+    /// non-monotonic pair and fail here.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_invokes_write_ids_in_monotonic_wire_order() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::{Duration, Instant};
+        use tokio::net::UnixListener;
+
+        let tmp = std::path::PathBuf::from(format!(
+            "/tmp/pcipc-mono-{}-{}.sock",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        let listener = UnixListener::bind(&tmp).unwrap();
+
+        const N: usize = 200;
+        let arrival_ids: Arc<StdMutex<Vec<u64>>> = Arc::new(StdMutex::new(Vec::with_capacity(N)));
+        let server_ids = arrival_ids.clone();
+
+        // Synthetic server: accept one connection, decode REQUEST frames, record
+        // each id in ARRIVAL (wire) order. Emits nothing back — the calls stay
+        // in-flight, which is all we need to inspect wire ordering.
+        let server_task = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut r, _w) = tokio::io::split(sock);
+            let mut dec = FrameDecoder::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = match r.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                dec.push(&buf[..n]).unwrap();
+                for frame in dec.drain() {
+                    if frame.frame_type == FrameType::Request {
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        let id = v["id"].as_u64().unwrap();
+                        let mut ids = server_ids.lock().unwrap();
+                        ids.push(id);
+                        if ids.len() >= N {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Let the server reach `accept()` before we dial.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let client = IpcClient::connect(&tmp).await.unwrap();
+
+        // Fire N invokes concurrently across worker threads — this is what
+        // races id allocation against the write.
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.invoke("synth".to_string(), serde_json::json!({}), Channel::new(|_| Ok(())))
+                    .await
+                    .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Wait until the server has recorded all N arrivals (bounded).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if arrival_ids.lock().unwrap().len() >= N {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server only received {} / {N} REQUEST frames",
+                arrival_ids.lock().unwrap().len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let ids = arrival_ids.lock().unwrap().clone();
+        // The invariant the real server enforces: ids strictly increase on the wire.
+        for pair in ids.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "non-monotonic wire order: {} then {} (full: {:?})",
+                pair[0],
+                pair[1],
+                ids
+            );
+        }
+        assert_eq!(ids.len(), N, "every distinct id should have arrived");
+
+        drop(client);
+        let _ = server_task.await;
+        let _ = std::fs::remove_file(&tmp);
     }
 }
