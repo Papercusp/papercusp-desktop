@@ -22,7 +22,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::endpoint_ipc_framing::{
@@ -217,24 +217,125 @@ impl CallSink {
     }
 }
 
-/// Cross-platform stream — Unix domain socket OR Windows named pipe.
-/// Tokio's `UnixStream` and `NamedPipeClient` share `AsyncRead +
-/// AsyncWrite`, but they're separate types — we pick at compile time.
-#[cfg(unix)]
-type IpcStream = tokio::net::UnixStream;
-
-#[cfg(windows)]
-type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
-
-#[cfg(unix)]
-async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
-    tokio::net::UnixStream::connect(path).await
+/// Runtime-selected transport for the endpoint-IPC stream.
+///
+/// A Unix domain socket, a Windows named pipe, and a loopback TCP connection
+/// all satisfy `AsyncRead + AsyncWrite`, but they are distinct concrete types
+/// — and on Windows the choice can NOT be made at compile time: the sidecar
+/// runs inside WSL2, where it is reachable from the Windows host only over
+/// loopback TCP (a Unix socket it creates is invisible to the host, and it
+/// can't create a `\\.\pipe\` named pipe), so a Windows build must be able to
+/// speak EITHER a named pipe (a hypothetical native sidecar) OR TCP (the real
+/// WSL2 sidecar). The variant is therefore chosen at CONNECT time from the
+/// discovered endpoint string. TCP is what finally lights up the `/api`
+/// connection-cap bypass on Windows — WI-3395 / fact
+/// `windows-ipc-bypass-off-wsl2`. Three places classify this same string and
+/// must stay in lockstep: `parse_endpoint`
+/// (libs/generic/ipc-endpoint-server/src/server.ts), the
+/// `endpoint_ipc_socket_path_supported_for_target` guard (main.rs), and
+/// `parse_tcp_endpoint` below.
+enum IpcStream {
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+    #[cfg(windows)]
+    Pipe(tokio::net::windows::named_pipe::NamedPipeClient),
+    Tcp(tokio::net::TcpStream),
 }
 
-#[cfg(windows)]
+// All three inner transports are `Unpin`, so the enum is `Unpin` and
+// `Pin::get_mut` + re-pinning each `&mut inner` is sound. We just forward each
+// poll to whichever variant is live.
+impl AsyncRead for IpcStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            IpcStream::Unix(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            #[cfg(windows)]
+            IpcStream::Pipe(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            IpcStream::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for IpcStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            IpcStream::Unix(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            #[cfg(windows)]
+            IpcStream::Pipe(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            IpcStream::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            IpcStream::Unix(s) => std::pin::Pin::new(s).poll_flush(cx),
+            #[cfg(windows)]
+            IpcStream::Pipe(s) => std::pin::Pin::new(s).poll_flush(cx),
+            IpcStream::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            IpcStream::Unix(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            #[cfg(windows)]
+            IpcStream::Pipe(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            IpcStream::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Classify the discovered endpoint string: `Some("host:port")` for a
+/// `tcp://host:port` address, else `None` (a Unix-socket / named-pipe path).
+/// Mirrors `parse_endpoint` (Node) + `is_tcp_endpoint` (main.rs guard) — the
+/// three must agree on what a TCP endpoint looks like. Handles a bracketed
+/// IPv6 literal too (`tcp://[::1]:8080` → `[::1]:8080`), which
+/// `ToSocketAddrs` for `&str` parses natively.
+fn parse_tcp_endpoint(socket: &str) -> Option<&str> {
+    socket.trim().strip_prefix("tcp://")
+}
+
+/// Dial the endpoint at `socket_path` and return the opened stream. A
+/// `tcp://host:port` path is dialed as loopback TCP on ANY host OS — that is
+/// how the Windows host reaches the WSL2 sidecar (WI-3395). Otherwise the
+/// platform transport is used: a Unix domain socket on unix, a named pipe on
+/// Windows.
 async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    ClientOptions::new().open(path.as_os_str())
+    if let Some(hostport) = path.to_str().and_then(parse_tcp_endpoint) {
+        let stream = tokio::net::TcpStream::connect(hostport).await?;
+        // IPC frames are small + latency-sensitive (a REQUEST then a stream of
+        // events); disable Nagle to match the Unix-socket / named-pipe
+        // transports, which have no such coalescing delay.
+        let _ = stream.set_nodelay(true);
+        return Ok(IpcStream::Tcp(stream));
+    }
+    #[cfg(unix)]
+    {
+        Ok(IpcStream::Unix(tokio::net::UnixStream::connect(path).await?))
+    }
+    #[cfg(windows)]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        Ok(IpcStream::Pipe(ClientOptions::new().open(path.as_os_str())?))
+    }
 }
 
 /// IPC client. Holds the writer half of the multiplex stream + the
@@ -1228,5 +1329,135 @@ mod tests {
         drop(client);
         let _ = server_task.await;
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── WI-3395: TCP-loopback transport (Windows/WSL2) ──────────────────────
+
+    #[test]
+    fn parse_tcp_endpoint_recognizes_tcp_and_rejects_socket_paths() {
+        assert_eq!(
+            parse_tcp_endpoint("tcp://127.0.0.1:35745"),
+            Some("127.0.0.1:35745")
+        );
+        // Bracketed IPv6 literal is preserved for ToSocketAddrs.
+        assert_eq!(parse_tcp_endpoint("tcp://[::1]:8080"), Some("[::1]:8080"));
+        // Surrounding whitespace (a stray discovery-file newline) is trimmed.
+        assert_eq!(
+            parse_tcp_endpoint("  tcp://127.0.0.1:1 "),
+            Some("127.0.0.1:1")
+        );
+        // A Unix socket + a named pipe are NOT tcp endpoints.
+        assert_eq!(
+            parse_tcp_endpoint("/home/u/.papercusp/sockets/1.sock"),
+            None
+        );
+        assert_eq!(parse_tcp_endpoint("\\\\.\\pipe\\papercusp-1"), None);
+        assert_eq!(parse_tcp_endpoint(""), None);
+    }
+
+    /// End-to-end over a real loopback TCP listener: the client dials a
+    /// `tcp://127.0.0.1:<port>` endpoint (exercising `connect_stream`'s TCP
+    /// branch + the `IpcStream::Tcp` AsyncRead/AsyncWrite delegation), invokes
+    /// a synthetic tool, and receives the streamed event + terminal Done via
+    /// its Channel — proving the byte-identical framing runs unchanged over
+    /// TCP. Cross-platform (no `#[cfg]`), so it guards the Windows dial path
+    /// even on a unix CI box.
+    #[tokio::test]
+    async fn connects_and_streams_over_tcp_loopback_end_to_end() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::{Duration, Instant};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Synthetic server: accept one connection, read the REQUEST, emit one
+        // EVENT_JSON + a DONE for its id.
+        let server_task = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = tokio::io::split(sock);
+            let mut dec = FrameDecoder::new();
+            let mut buf = [0u8; 4096];
+            let id = loop {
+                let n = r.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    panic!("client closed before sending a REQUEST");
+                }
+                dec.push(&buf[..n]).unwrap();
+                if let Some(req) = dec
+                    .drain()
+                    .into_iter()
+                    .find(|f| f.frame_type == FrameType::Request)
+                {
+                    let v: serde_json::Value =
+                        serde_json::from_slice(&req.payload).unwrap();
+                    break v["id"].as_u64().unwrap();
+                }
+            };
+            let ev = serde_json::to_vec(&serde_json::json!({
+                "id": id, "name": "delta", "data": { "text": "hi" }
+            }))
+            .unwrap();
+            let done = serde_json::to_vec(&serde_json::json!({
+                "id": id, "result": { "ok": true }
+            }))
+            .unwrap();
+            w.write_all(&encode_frame(FrameType::EventJson, &ev).unwrap())
+                .await
+                .unwrap();
+            w.write_all(&encode_frame(FrameType::Done, &done).unwrap())
+                .await
+                .unwrap();
+            // Keep the socket open long enough for the client to read.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let client = IpcClient::connect(std::path::Path::new(&endpoint))
+            .await
+            .unwrap();
+
+        // A Channel that captures every serialized body it forwards.
+        let captured: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(vec![]));
+        let cap = captured.clone();
+        let channel = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                cap.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        client
+            .invoke("synth".to_string(), serde_json::json!({}), channel)
+            .await
+            .unwrap();
+
+        // Wait for the terminal Done to land (bounded).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if captured.lock().unwrap().iter().any(|s| s.contains("\"done\"")) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no Done received over TCP; got {:?}",
+                captured.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let bodies = captured.lock().unwrap().clone();
+        assert!(
+            bodies
+                .iter()
+                .any(|s| s.contains("\"event\"") && s.contains("hi")),
+            "delta event missing over TCP: {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|s| s.contains("\"done\"")),
+            "terminal Done missing over TCP: {bodies:?}"
+        );
+
+        drop(client);
+        let _ = server_task.await;
     }
 }

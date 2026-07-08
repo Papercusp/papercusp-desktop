@@ -140,8 +140,14 @@ fn endpoint_ipc_socket_path_supported_for_target(socket_path: &str, target_windo
     }
     let is_windows_pipe = is_windows_named_pipe_path(socket_path);
     if target_windows {
-        is_windows_pipe
+        // WI-3395: on Windows the sidecar runs inside WSL2 and reaches the host
+        // over loopback TCP, so a `tcp://` endpoint is the real path; a named
+        // pipe stays valid for a hypothetical native sidecar. A Unix-socket
+        // path is never openable from the Windows host — reject it.
+        is_windows_pipe || is_tcp_endpoint(socket_path)
     } else {
+        // Non-Windows hosts run the sidecar natively: accept a Unix socket (the
+        // usual case) or a `tcp://` loopback endpoint; never a Windows pipe.
         !is_windows_pipe
     }
 }
@@ -149,6 +155,14 @@ fn endpoint_ipc_socket_path_supported_for_target(socket_path: &str, target_windo
 fn is_windows_named_pipe_path(socket_path: &str) -> bool {
     let lower = socket_path.to_ascii_lowercase();
     lower.starts_with("\\\\.\\pipe\\") || lower.starts_with("\\\\?\\pipe\\")
+}
+
+/// A `tcp://host:port` endpoint-IPC address (WI-3395). Emitted by the Node
+/// server's `parse_endpoint` when the sidecar is told to bind loopback TCP
+/// (`PAPERCUSP_IPC_TCP=1` — the WSL2/Windows case). Kept in lockstep with that
+/// classifier and `parse_tcp_endpoint` in endpoint_ipc.rs.
+fn is_tcp_endpoint(socket_path: &str) -> bool {
+    socket_path.trim().to_ascii_lowercase().starts_with("tcp://")
 }
 
 /// EI-190: the operator PORT the desktop's /api endpoint-IPC currently
@@ -1187,8 +1201,8 @@ mod http_ready_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, read_dev_ipc_socket,
-        read_dev_ipc_socket_for_port, url_encode,
+        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, is_tcp_endpoint,
+        read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode,
     };
 
     // ── url_encode (RFC 3986 component encoding) ────────────────────────────
@@ -1277,6 +1291,48 @@ mod helper_tests {
             false
         ));
         assert!(!endpoint_ipc_socket_path_supported_for_target("", false));
+    }
+
+    #[test]
+    fn endpoint_ipc_tcp_endpoint_accepted_on_windows_alongside_pipe() {
+        // WI-3395: the WSL2 sidecar reports a `tcp://` loopback endpoint; the
+        // Windows host guard must accept it (a Unix socket it can't reach).
+        assert!(endpoint_ipc_socket_path_supported_for_target(
+            "tcp://127.0.0.1:35745",
+            true
+        ));
+        // A named pipe is still accepted on Windows (native-sidecar path).
+        assert!(endpoint_ipc_socket_path_supported_for_target(
+            "\\\\.\\pipe\\papercusp-1",
+            true
+        ));
+        // A Unix socket is still rejected on Windows.
+        assert!(!endpoint_ipc_socket_path_supported_for_target(
+            "/tmp/x.sock",
+            true
+        ));
+        // A `tcp://` endpoint is reachable on a non-Windows host too.
+        assert!(endpoint_ipc_socket_path_supported_for_target(
+            "tcp://127.0.0.1:35745",
+            false
+        ));
+        // The classifier itself: scheme-only, trimmed + case-insensitive.
+        assert!(is_tcp_endpoint("tcp://127.0.0.1:0"));
+        assert!(is_tcp_endpoint("  TCP://127.0.0.1:0 "));
+        assert!(!is_tcp_endpoint("/tmp/x.sock"));
+        assert!(!is_tcp_endpoint("\\\\.\\pipe\\papercusp-1"));
+    }
+
+    #[test]
+    fn read_dev_ipc_socket_parses_tcp_endpoint() {
+        let dir = temp_dir("ipc-tcp");
+        let file = dir.join("endpoint-ipc.json");
+        std::fs::write(&file, r#"{"socketPath":"tcp://127.0.0.1:35745","pid":42}"#).unwrap();
+        assert_eq!(
+            read_dev_ipc_socket(&file),
+            Some("tcp://127.0.0.1:35745".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3281,8 +3337,26 @@ fn spawn_serve(
              HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
              PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
              PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
-             PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR",
+             PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
+             PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP",
         );
+        // WI-3395: the sidecar runs INSIDE WSL2 (process.platform==='linux'),
+        // where defaultSocketPath() would otherwise create a UNIX socket the
+        // Windows-native webview host can't open (and can't create a `\\.\pipe\`
+        // named pipe either) → endpoint-IPC silently disabled → `/api` falls
+        // back to the capped WebView2 HTTP stack (fact
+        // `windows-ipc-bypass-off-wsl2`). Tell the sidecar to bind a loopback
+        // TCP port instead (`tcp://127.0.0.1:0`; the resolved port is reported
+        // in endpoint-ipc.json), which WSL2 forwards from 127.0.0.1 to the host
+        // — the same path the operator HTTP port rides. It can't be
+        // self-detected from inside WSL2, so the launcher must set it.
+        //
+        // The two IPC vars are ALSO added to WSLENV above: `PAPERCUSP_IPC_ENABLE`
+        // (set unconditionally below) previously did NOT cross the WSL boundary,
+        // so under the packaged `NODE_ENV=production` the enable gate
+        // (host-bootstrap.ts) was false inside WSL2 and the IPC server never
+        // even STARTED on Windows — the deeper reason the bypass was off.
+        cmd.env("PAPERCUSP_IPC_TCP", "1");
     }
     cmd.env("PATH", &new_path)
         // The bundled bin dir, as its own var: on the WSL route it crosses
