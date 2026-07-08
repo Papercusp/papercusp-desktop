@@ -16,21 +16,75 @@
  * mounts, fixture-controlled tests).
  */
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function packageRoot(): string {
-  // ESM path: paths.ts → import.meta.url → .../libs/papercusp/packages/harness/
-  if (typeof import.meta !== 'undefined' && import.meta.url) {
-    return dirname(fileURLToPath(import.meta.url));
+function hasHarnessAssets(dir: string): boolean {
+  return existsSync(join(dir, 'blueprints', 'base', 'blueprint.yaml'));
+}
+
+function derivedHarnessRoot(repoRoot: string): string {
+  return join(repoRoot, 'libs', 'papercusp', 'packages', 'harness');
+}
+
+export function resolveHarnessPackageRoot(startDirs: string[]): string | null {
+  const seen = new Set<string>();
+  const consider = (dir: string): string | null => {
+    let cur = resolve(dir);
+    const root = parse(cur).root;
+    for (;;) {
+      const direct = cur;
+      if (!seen.has(direct)) {
+        seen.add(direct);
+        if (hasHarnessAssets(direct)) return direct;
+      }
+
+      const derived = derivedHarnessRoot(cur);
+      if (!seen.has(derived)) {
+        seen.add(derived);
+        if (hasHarnessAssets(derived)) return derived;
+      }
+
+      if (cur === root) return null;
+      cur = dirname(cur);
+    }
+  };
+
+  const integ = process.env.PAPERCUSP_INTEGRATION_ROOT?.trim();
+  if (integ) {
+    const derived = derivedHarnessRoot(integ);
+    if (hasHarnessAssets(derived)) return derived;
   }
+
+  for (const dir of startDirs) {
+    const hit = consider(dir);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function packageRoot(): string {
+  // ESM source path: paths.ts → import.meta.url → .../libs/papercusp/packages/harness/.
+  // Bundled host path: esbuild inlines this module into apps/operator/dist-host/*.mjs,
+  // so import.meta.url points at dist-host. Walk upward to the repo root and recover
+  // the real harness package; otherwise built-in blueprint loads look under dist-host.
+  if (typeof import.meta !== 'undefined' && import.meta.url) {
+    const hit = resolveHarnessPackageRoot([dirname(fileURLToPath(import.meta.url)), process.cwd()]);
+    if (hit) return hit;
+  }
+
   // CJS fallback (Next.js sometimes emits CommonJS for server bundles):
   // __dirname will already point at the transpiled location of this file.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cjsDirname = (globalThis as any).__dirname;
-  if (typeof cjsDirname === 'string') return cjsDirname;
+  if (typeof cjsDirname === 'string') {
+    const hit = resolveHarnessPackageRoot([cjsDirname, process.cwd()]);
+    if (hit) return hit;
+    return cjsDirname;
+  }
+
   // Last-ditch fallback: use process.cwd() relative search
-  return resolve(process.cwd(), 'libs/papercusp/packages/harness');
+  return derivedHarnessRoot(process.cwd());
 }
 
 export function harnessRoot(): string {
@@ -39,6 +93,43 @@ export function harnessRoot(): string {
 
 export function harnessPath(...parts: string[]): string {
   return join(harnessRoot(), ...parts);
+}
+
+/**
+ * Every candidate harness package root, in resolution order, deduped:
+ *   1. The primary `harnessRoot()` (honors `PAPERCUSP_HARNESS_DIR` / the bundled
+ *      `dist-host` anchor) — tried FIRST, so common-case resolution is unchanged.
+ *   2. Any DERIVED SOURCE package (`<ancestor>/libs/papercusp/packages/harness`)
+ *      recovered by walking up from the primary root AND `process.cwd()`.
+ *
+ * Why (EI-8628): the bundled host (`apps/operator/bin/bundle-host.sh`) copies the
+ * harness `blueprints/` into `apps/operator/dist-host/blueprints` — a POINT-IN-TIME
+ * snapshot. `packageRoot()` then anchors `harnessRoot()` on `dist-host` (its
+ * `hasHarnessAssets` check only verifies `base/blueprint.yaml`), so a blueprint that
+ * exists in the fresh SOURCE tree but not yet in that STALE bundle makes a lookup
+ * under the primary root alone throw `no built-in blueprint "<id>"` (the routine
+ * `bp-singleton-scout-0` failure that filed EI-8628). Callers that resolve a specific
+ * file (e.g. a built-in blueprint YAML) try these roots in order, so a source-present
+ * blueprint still resolves. A packaged deploy (no `libs/` source on disk) yields just
+ * the primary root — byte-identical to before.
+ */
+export function harnessRootCandidates(): string[] {
+  const roots: string[] = [];
+  const add = (d: string | null | undefined): void => {
+    if (d && !roots.includes(d)) roots.push(d);
+  };
+  add(harnessRoot());
+  for (const start of [harnessRoot(), process.cwd()]) {
+    let cur = resolve(start);
+    const fsRoot = parse(cur).root;
+    for (;;) {
+      const derived = derivedHarnessRoot(cur);
+      if (hasHarnessAssets(derived)) add(derived);
+      if (cur === fsRoot) break;
+      cur = dirname(cur);
+    }
+  }
+  return roots;
 }
 
 /**

@@ -34,6 +34,15 @@
 #                          FRESH corestore snapshot, which needs a quiesced
 #                          operator; 1 forces reuse).
 #   PAPERCUSP_SEED_EMIT_EPOCH_KEY  (default 1 → --emit-epoch-key; 0 opts out)
+#   PAPERCUSP_SEED_SPARSE          (default 1 → --sparse on a FRESH corestore cut:
+#                          ship only the head-snapshot span [snapshotIdx,len), ~40MB
+#                          vs ~2.1GB full history — P-004. Requires the shipped reader
+#                          (SUBSTRATE_LOG_SNAPSHOT, default-ON) to seek the sparse
+#                          start. Applies ONLY to a from-live-store snapshot: a
+#                          --reuse-corestore graft is shipped as-cut (its manifest's
+#                          coreSparseFrom is PRESERVED, so a committed SPARSE seed still
+#                          ships sparse through reuse), and --no-corestore has no core.
+#                          0 forces a FULL-history corestore cut.
 #   PAPERCUSP_SEED_STORE_DIR       (optional explicit live-store dir override)
 #   PAPERCUSP_SEED_REPO            (optional source checkout; default the monorepo)
 #   PAPERCUSP_SEED_FORCE=1         force a (re-)cut even when the committed seed
@@ -115,6 +124,7 @@ STORE_DIR="${PAPERCUSP_SEED_STORE_DIR:-$HOME/.papercusp-workspaces/$SEED_WORKSPA
 # ── corestore mode ──────────────────────────────────────────────────────────
 core_args=()
 want_corestore=1
+fresh_corestore_cut=0   # 1 ONLY on a from-live-store snapshot — the sole mode where --sparse applies
 [[ "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" ]] && { core_args+=(--no-corestore); want_corestore=0; }
 
 if [[ "$want_corestore" == "1" ]]; then
@@ -134,6 +144,7 @@ if [[ "$want_corestore" == "1" ]]; then
         [[ "${PAPERCUSP_SEED_REQUIRED:-0}" == "1" ]] && exit 1; exit 0
       fi
       [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
+      fresh_corestore_cut=1
       ;;
     auto|*)
       # Default: reuse the committed corestore when present (never fd-locks, never
@@ -144,6 +155,7 @@ if [[ "$want_corestore" == "1" ]]; then
         log "corestore: reusing the committed snapshot (auto) — refreshing git + epoch-keys only"
       elif [[ -d "$STORE_DIR" ]]; then
         [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
+        fresh_corestore_cut=1
         log "corestore: no committed snapshot to reuse — cutting FRESH from $STORE_DIR"
       else
         log "corestore: no committed snapshot and no live store $STORE_DIR — not the owner box"
@@ -160,7 +172,14 @@ emit_args=()
 depth_args=()
 [[ -n "$SEED_DEPTH" ]] && depth_args+=(--depth "$SEED_DEPTH")
 
-log "cutting installer seed (hive=$SEED_HIVE rev=$SEED_REV depth=${SEED_DEPTH:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-auto} emit-epoch-key=${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1})"
+# P-004 trim: --sparse ships only the head-snapshot span of a FRESH corestore cut
+# (~40MB vs ~2.1GB). Gated to a from-live-store snapshot only — cut-seed-cli THROWS if
+# --sparse is combined with --no-corestore/--reuse-corestore, and a reused corestore
+# already carries its source's coreSparseFrom.
+sparse_args=()
+[[ "$fresh_corestore_cut" == "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
+
+log "cutting installer seed (hive=$SEED_HIVE rev=$SEED_REV depth=${SEED_DEPTH:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-auto} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0) emit-epoch-key=${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1})"
 
 set +e
 (
@@ -180,6 +199,7 @@ set +e
       --rev "$SEED_REV" \
       "${depth_args[@]}" \
       "${core_args[@]}" \
+      "${sparse_args[@]}" \
       "${emit_args[@]}"
 )
 cut_rc=$?

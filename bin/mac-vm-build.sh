@@ -118,11 +118,17 @@ cut_release_seed() {
   # PAPERCUSP_SEED_EMIT_EPOCH_KEY=0.
   local emit_args=()
   [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
+  # P-004 trim: --sparse ships only the head-snapshot span (~40MB vs ~2.1GB) of a FRESH
+  # corestore cut. Gated OFF for --no-corestore (corestore!=1) AND for reuse=1 (a grafted
+  # corestore is shipped as-cut, preserving its coreSparseFrom) — cut-seed-cli THROWS on
+  # either combination. Default-ON; PAPERCUSP_SEED_SPARSE=0 forces full history.
+  local sparse_args=()
+  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" != "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
   fi
-  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0}) ---"
+  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0)) ---"
   (
     cd "$operator_dir"
     OPATH="$PATH"
@@ -140,6 +146,7 @@ cut_release_seed() {
         --rev "$seed_rev" \
         "${depth_args[@]}" \
         "${core_args[@]}" \
+        "${sparse_args[@]}" \
         "${emit_args[@]}"
   )
 }

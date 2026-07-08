@@ -169,7 +169,13 @@ cut_release_seed() {
   # PAPERCUSP_SEED_EMIT_EPOCH_KEY=0 (ships the hive readable — deliberate here).
   local emit_args=()
   [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
-  echo "==> seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0})"
+  # P-004 trim: --sparse ships only the head-snapshot span (~40MB vs ~2.1GB) of a FRESH
+  # corestore cut. Gated OFF for --no-corestore AND reuse=1 (a grafted corestore ships
+  # as-cut, coreSparseFrom preserved) — cut-seed-cli THROWS on either. Default-ON;
+  # PAPERCUSP_SEED_SPARSE=0 forces full history.
+  local sparse_args=()
+  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" != "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
+  echo "==> seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0))"
   local depth_args=()
   [[ -n "$seed_depth" ]] && depth_args+=(--depth "$seed_depth")
   (
@@ -189,6 +195,7 @@ cut_release_seed() {
         --rev "$seed_rev" \
         "${depth_args[@]}" \
         "${core_args[@]}" \
+        "${sparse_args[@]}" \
         "${emit_args[@]}"
   ) || fail "seed cut failed (PAPERCUSP_SEED_REUSE_CORESTORE=1 grafts the existing corestore when the live store is fd-locked by the running operator; PAPERCUSP_SKIP_SEED_CUT=1 reuses the whole existing seed)"
 }
@@ -290,6 +297,17 @@ trap 'rm -f "$TARBALL"' EXIT
     -C "$ROOT/.." papercusp-desktop
 ) 9>>"$ROOT/src-tauri/sidecar.lock"
 ls -lh "$TARBALL"
+
+# ── Pre-flight: reclaim stale build output so the source extraction can't run the
+# VM's C: drive to zero mid-write. WI-3360 build#7 died exactly this way — C: hit
+# 0 during the tar extract, truncating src-tauri/src/main.rs (and serve.mjs, the
+# bin/* binaries, db-seed) and yielding a bogus Rust "expected item after doc
+# comment" error on the truncated file, NOT a real code fault. The bundle/inno
+# output (~4 GB of installer .bin/.exe) is regenerated every build and already
+# copied back to OUT_DIR, so it is always safe to drop before re-extracting.
+echo "==> pre-flight: reclaiming stale VM build output + asserting free space"
+"${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno' -EA SilentlyContinue; Remove-Item -Force 'C:\\Users\\user\\papercusp-desktop-build.tar.gz' -EA SilentlyContinue; \$f=[math]::Round((Get-PSDrive C).Free/1GB,2); Write-Output ('VM C: free = '+\$f+' GB'); if (\$f -lt 6) { Write-Output 'DISK_TOO_LOW'; exit 1 }\"" \
+  | tr -d '\r' || fail "VM C: has <6 GB free even after reclaiming stale output — free space before rebuilding (WI-3360: a full disk truncates main.rs mid-extract; the extract-over needs the tree + tarball to coexist, so 5.2 GB was observed too low). Quick reclaim: 'powercfg -h off' drops hiberfil.sys (~12 GB on a headless build VM)."
 
 echo "==> shipping to VM"
 "${SCP[@]}" "$TARBALL" "$VM_SSH_HOST":'C:/Users/user/papercusp-desktop-build.tar.gz'

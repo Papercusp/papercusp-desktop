@@ -4,10 +4,10 @@
  * (decouple-agent-prompts-from-release-gate-2026-06-20 P-002 / D-001).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { harnessRoot, promptHarnessRoot } from './paths.js';
+import { harnessRoot, promptHarnessRoot, resolveHarnessPackageRoot } from './paths.js';
 
 describe('promptHarnessRoot — prompt-root override', () => {
   const saved: Record<string, string | undefined> = {};
@@ -33,6 +33,30 @@ describe('promptHarnessRoot — prompt-root override', () => {
     tmps.push(d);
     return d;
   };
+
+  it('resolveHarnessPackageRoot recovers the source harness package from a bundled dist-host start dir', () => {
+    const root = mk();
+    const harness = join(root, 'libs', 'papercusp', 'packages', 'harness');
+    mkdirSync(join(harness, 'blueprints', 'base'), { recursive: true });
+    writeFileSync(join(harness, 'blueprints', 'base', 'blueprint.yaml'), 'id: base\nkind: harness\n');
+    mkdirSync(join(root, 'apps', 'operator', 'dist-host'), { recursive: true });
+    const start = join(root, 'apps', 'operator', 'dist-host');
+    expect(resolveHarnessPackageRoot([start])).toBe(harness);
+  });
+
+  it('resolveHarnessPackageRoot prefers PAPERCUSP_INTEGRATION_ROOT when it has harness assets', () => {
+    const root = mk();
+    const harness = join(root, 'libs', 'papercusp', 'packages', 'harness');
+    mkdirSync(join(harness, 'blueprints', 'base'), { recursive: true });
+    writeFileSync(join(harness, 'blueprints', 'base', 'blueprint.yaml'), 'id: base\nkind: harness\n');
+    process.env.PAPERCUSP_INTEGRATION_ROOT = root;
+    expect(resolveHarnessPackageRoot(['/missing/start'])).toBe(harness);
+  });
+
+  it('resolveHarnessPackageRoot returns null when no candidate has harness assets', () => {
+    const root = mk();
+    expect(resolveHarnessPackageRoot([root])).toBeNull();
+  });
 
   it('UNSET ⇒ returns the explicit fallback (byte-identical to pre-decouple)', () => {
     expect(promptHarnessRoot('/some/fallback')).toBe('/some/fallback');

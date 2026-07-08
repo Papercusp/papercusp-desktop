@@ -1521,6 +1521,53 @@ fn read_operator_discovery_via_wsl() -> Option<OperatorDiscovery> {
     parse_operator_discovery(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Probe whether the WSL distro's exec layer is WEDGED — i.e. `wsl.exe --exec`
+/// no longer returns even for a trivial command. A relentless serve respawn
+/// storm (each respawn is a `wsl.exe --exec node`) can drive the WSL2 interop
+/// into this state, after which EVERY exec (including the respawn itself)
+/// produces a dead child and the operator can never recover — the exact outage
+/// that on the VM required a manual `wsl --terminate` (WI-3360, 2026-07-08:
+/// `wsl -d papercup-runtime -- echo` returned empty until a terminate). Returns
+/// true when a trivial `wsl.exe -e true` cannot exit 0 within `timeout`. std has
+/// no Command timeout, so we spawn + poll try_wait + kill on the deadline.
+#[cfg(target_os = "windows")]
+fn distro_exec_wedged(timeout: Duration) -> bool {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "-e", "true"]);
+    no_console_window(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return true, // can't even spawn wsl.exe → treat as wedged
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return !status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return true; // never returned in time → wedged
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return true,
+        }
+    }
+}
+
+/// Reset a wedged WSL distro so the next serve respawn boots into a fresh VM.
+/// `wsl.exe --terminate <distro>` stops the distro (it cold-boots on the next
+/// exec) WITHOUT unregistering it — no data loss. This is the single action
+/// that clears the interop wedge (WI-3360). Returns true on a clean exit.
+#[cfg(target_os = "windows")]
+fn terminate_distro() -> bool {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["--terminate", wsl_setup::DISTRO_NAME_PUB]);
+    no_console_window(&mut cmd);
+    matches!(cmd.status(), Ok(s) if s.success())
+}
+
 /// Unified operator discovery shared by BOTH the initial boot wait and the
 /// long-lived watcher, so the two can never drift. When routed via WSL
 /// (Windows), read through `wsl.exe` (the UNC share is unreliable — see
@@ -3397,6 +3444,12 @@ fn spawn_serve_supervisor(
         // outside) and the give-up notification (once per dead episode).
         let mut forward_degraded = false;
         let mut gave_up_notified = false;
+        // WI-3360: whether we've already `wsl --terminate`d a WEDGED distro this
+        // outage — one reset per dead episode (cleared when the operator
+        // recovers) so we never terminate-loop a distro that stays down for a
+        // reason a reset can't fix.
+        #[cfg(target_os = "windows")]
+        let mut distro_reset_done = false;
         loop {
             std::thread::sleep(Duration::from_millis(1500));
             // WI-3270 (c): refresh the shell-liveness beacon so the
@@ -3478,6 +3531,12 @@ fn spawn_serve_supervisor(
                 unreachable_since = None;
                 ever_reachable = true;
                 gave_up_notified = false;
+                // WI-3360: recovery = a fresh outage budget; a FUTURE wedge
+                // earns another one-shot `wsl --terminate`.
+                #[cfg(target_os = "windows")]
+                {
+                    distro_reset_done = false;
+                }
             } else if unreachable_since.is_none() {
                 unreachable_since = Some(now);
                 // WI-3270 (d): say WHY the operator reads unreachable,
@@ -3545,6 +3604,45 @@ fn spawn_serve_supervisor(
                             RESPAWN_WINDOW.as_secs(),
                         );
                         gave_up_notified = true;
+                    }
+                    // WI-3360: a cap hit on Windows can mean the WSL distro's
+                    // exec layer is WEDGED — the respawn storm drove the WSL2
+                    // interop into a state where every `wsl.exe --exec` returns
+                    // a dead child, so re-spawning serve into it can NEVER
+                    // recover (the operator stays down until a MANUAL
+                    // `wsl --terminate`, which no end user will know to run —
+                    // the exact VM brick observed 2026-07-08). If a trivial
+                    // exec confirms the wedge, terminate the distro (it
+                    // cold-boots on the next exec, no data loss) and clear the
+                    // respawn window so the VERY NEXT tick respawns serve into a
+                    // FRESH distro. One-shot per outage (distro_reset_done).
+                    #[cfg(target_os = "windows")]
+                    if sup_via_wsl && !distro_reset_done {
+                        if distro_exec_wedged(Duration::from_secs(6)) {
+                            eprintln!(
+                                "[papercusp-desktop] WSL distro exec WEDGED after respawn cap — \
+                                 `wsl --terminate {}` to reset it, then respawning serve into the \
+                                 fresh distro (WI-3360)",
+                                wsl_setup::DISTRO_NAME_PUB
+                            );
+                            if terminate_distro() {
+                                respawn_times.clear();
+                                unreachable_since = None;
+                                gave_up_notified = false;
+                                distro_reset_done = true;
+                            } else {
+                                eprintln!(
+                                    "[papercusp-desktop] `wsl --terminate` failed — will retry \
+                                     next cap window (WI-3360)"
+                                );
+                            }
+                        } else {
+                            // Distro exec is fine; the crash has some other
+                            // cause. Don't terminate a healthy distro (that
+                            // would needlessly kill a working PG); mark done so
+                            // we don't re-probe every tick this outage.
+                            distro_reset_done = true;
+                        }
                     }
                 }
                 ServeRespawnAction::Respawn => {

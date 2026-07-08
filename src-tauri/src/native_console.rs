@@ -228,6 +228,20 @@ pub fn focus_window_by_title(title: String) -> bool {
     }
 }
 
+/// True when an fs-relay error String indicates the source path was missing
+/// (a `mv`/rename whose source vanished under us). Lets the .mcp.json backup
+/// tolerate a concurrent sibling launch racing on the same cwd instead of
+/// hard-failing the whole spawn. Matches the wsl.exe `mv` stderr ("cannot
+/// stat … No such file or directory") and the native std::io ENOENT text.
+fn is_missing_path_err(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.contains("no such file")           // linux/mac std::fs + wsl.exe `mv`
+        || l.contains("cannot stat")     // GNU coreutils `mv` stderr
+        || l.contains("not found")
+        || l.contains("cannot find the file")   // Windows-native ENOENT
+        || l.contains("cannot find the path")
+}
+
 async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, bool), String> {
     // 1. Bootstrap superuser token if needed.
     let bootstrapped = if envelope.needs_superuser_bootstrap {
@@ -257,8 +271,19 @@ async fn launch_inner(envelope: ConsoleEnvelope) -> Result<(Option<u32>, bool, b
             // leave it alone — we'd rather lose our restore than clobber
             // the user's real mcp.json on a botched cleanup.
             if !cfs_exists(&bak) {
-                cfs_rename(&mcp_path, &bak).map_err(|e| format!("backup .mcp.json: {e}"))?;
-                true
+                match cfs_rename(&mcp_path, &bak) {
+                    Ok(()) => true,
+                    // TOCTOU: a concurrent sibling launch in the SAME cwd (a
+                    // bulk capability:terminal call, or a multi-member
+                    // fleet:launch-on-plan) can move/remove .mcp.json between
+                    // our cfs_exists() check above and this rename — the `mv`
+                    // then fails "cannot stat … No such file". A vanished
+                    // source is not a failure: there is nothing to back up, so
+                    // proceed to write ours instead of aborting the whole
+                    // launch (WI-3360 fleet-launch hardening).
+                    Err(e) if is_missing_path_err(&e) => false,
+                    Err(e) => return Err(format!("backup .mcp.json: {e}")),
+                }
             } else {
                 // Best effort: archive ours under a unique name. The user
                 // can sort it out manually.
@@ -1320,6 +1345,21 @@ mod tests {
         assert_eq!(shell_escape_single("simple"), "'simple'");
         assert_eq!(shell_escape_single("a b"), "'a b'");
         assert_eq!(shell_escape_single("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn missing_path_err_detects_vanished_source() {
+        // WI-3360: the .mcp.json backup must treat a raced-away source as
+        // "nothing to back up", not a hard launch failure. These are the
+        // real error strings cfs_rename surfaces on each platform.
+        assert!(is_missing_path_err(
+            "wsl.exe exit 1; stderr: mv: cannot stat '/home/papercup/.papercusp/.mcp.json': No such file or directory"
+        ));
+        assert!(is_missing_path_err("No such file or directory (os error 2)"));
+        assert!(is_missing_path_err("The system cannot find the file specified. (os error 2)"));
+        // A genuine permission / disk error must STILL abort the launch.
+        assert!(!is_missing_path_err("Permission denied (os error 13)"));
+        assert!(!is_missing_path_err("No space left on device"));
     }
 
     #[test]
