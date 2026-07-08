@@ -306,73 +306,49 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 # Distinct productNames → distinct deb/appimage/rpm filenames; the version-
 # scoped globs below pick up both. PAPERCUSP_BUILD_ROLES="gui" (or "server")
 # builds just one.
-PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
-for role in $PAPERCUSP_BUILD_ROLES; do
-  role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
-  echo "==> tauri build (linux x86_64, role=$role) — deb+rpm (AppImage built separately, WI-2918)"
-  # NOTE: appimage is DELIBERATELY excluded here. tauri's own `appimage` target
-  # runs linuxdeploy across the whole AppDir, which crashes ELF-scanning the large
-  # self-contained sidecar tree (`Failed to run ldd`) and would fail this entire
-  # `tauri build`. It is built separately below via bin/build-appimage.sh.
-  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb,rpm "${role_cfg[@]}")
-done
-
-# AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
-# on the sidecar tree (see the note above). build-appimage.sh lets tauri create the
-# complete AppDir, then finishes it with appimagetool (which does not ELF-scan). GUI
-# only — the single self-hosting bundle is the Linux updater artifact.
-if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
-  echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
-  (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-     TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-     bash "$ROOT/bin/build-appimage.sh")
-fi
-
-# Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config
-# [build] target-dir — this box redirects all builds to ~/.cargo-target since
-# 2026-06-17). Without this, $ROOT/src-tauri/target is stale and the
-# version-scoped globs below miss the freshly-built bundles. (Fix 2026-06-25;
-# same resolution @papercusp/tauri-release-kit uses.)
-CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
-LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
-if [[ ! -d "$LINUX_BUNDLE" ]]; then
-  echo "ERROR: expected bundles at $LINUX_BUNDLE — Tauri build failed?"
-  exit 1
-fi
-
-ARTIFACTS=()
-# Version-scoped globs: the bundle dir accumulates artifacts across cuts,
-# and an unscoped *.deb swept a stale older-version deb into the
-# desktop-v0.0.2-alpha release (caught + asset deleted, 2026-06-11).
-for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
-         "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
-  [[ -f "$f" ]] && ARTIFACTS+=("$f")
-done
-
-if [[ "$WITH_WINDOWS" == "1" ]]; then
-  echo "==> building Windows x86_64 (natively on the Windows VM)"
-  # Native MSVC build on the local QEMU Windows 11 VM — the old
-  # x86_64-pc-windows-gnu cross-compile never worked and is outside
-  # Tauri's supported Windows (MSVC) story. Mirrors the WITH_MAC lane.
-  # See plan windows-desktop-release-readiness-2026-06-11 (D-001) and
-  # bin/build-windows-on-vm.sh for prereqs (VM booted, rootfs built).
-  # SKIP the per-build seed cut: release-local already cut src-tauri/seed ONCE
-  # above (cut_release_seed), and build-windows-on-vm.sh now has its own default
-  # cut (mirror of mac-vm-build.sh, WI-3005) — so tell it to REUSE the already-cut
-  # seed instead of re-cutting. Exactly mirrors the WITH_MAC lane's
-  # `export PAPERCUSP_SKIP_SEED_CUT=1` before mac-vm-build.sh.
-  PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
-  win_found=0
-  # bundle/inno since WI-3172: Windows packaging moved NSIS → Inno Setup
-  # (makensis dies at ~2GiB; the full offline seed is ~3.4GB).
-  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
-    [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
+# ── Build ALL THREE platforms CONCURRENTLY (owner request 2026-07-08): Linux is
+# LOCAL (cargo → external ~/.cargo-target, does not mutate the source tree) while
+# Windows + macOS build on their OWN QEMU VMs over SSH, so nothing contends. Each
+# leg is a background subshell → its own log; we join all three below and collect
+# artifacts in the PARENT (a subshell's `ARTIFACTS+=` would not survive the fork).
+LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
+LINUX_PID=""
+echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
+(
+  set -euo pipefail
+  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
+    # rpm DROPPED (2026-07-08): it is never collected (Linux ships deb+AppImage only —
+    # see the collection globs) AND its multi-GB payload compression wedged the
+    # 0.0.3-alpha linux leg for 33min+. deb only.
+    echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb "${role_cfg[@]}")
   done
-  if [[ "$win_found" != "1" ]]; then
-    echo "ERROR: WITH_WINDOWS=1 but no windows artifacts came back from the VM"
-    exit 1
+  # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
+  # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
+  if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
+    echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+       TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+       bash "$ROOT/bin/build-appimage.sh")
   fi
+) >"$LINUX_LEG_LOG" 2>&1 &
+LINUX_PID=$!
+
+WIN_LEG_LOG="/tmp/papercusp-winleg-${TAG}.log"
+MAC_LEG_LOG="/tmp/papercusp-macleg-${TAG}.log"
+WIN_PID=""; MAC_PID=""; MAC_REUSE=0
+if [[ "$WITH_WINDOWS" == "1" ]]; then
+  echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
+  # Native MSVC build on the local QEMU Windows 11 VM (windows-desktop-release-
+  # readiness-2026-06-11 D-001). SKIP the per-build seed cut: release-local already
+  # cut src-tauri/seed ONCE above; build-windows-on-vm.sh REUSES it.
+  (
+    set -euo pipefail
+    PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
+  ) >"$WIN_LEG_LOG" 2>&1 &
+  WIN_PID=$!
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
@@ -385,94 +361,138 @@ if [[ "$WITH_ARM64" == "1" ]]; then
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
-if [[ "$WITH_MAC" == "1" ]]; then
-  echo "==> building macOS universal on the build VM"
-  if ! "${MAC_VM_SSH[@]}" 'true' 2>/dev/null; then
-    echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"
-    exit 1
-  fi
-  # WI-1708: build from a COMMIT, not the live working tree. The dev box's
-  # superproject is edited CONCURRENTLY by the whole fleet + git-sync, so rsyncing
-  # "$MONOREPO/" directly snapshots a MOVING target — torn/half-written files and
-  # an internally-inconsistent file set land on the VM (a build that matches no
-  # real commit). Instead materialize a consistent point-in-time snapshot of HEAD
-  # (superproject + every nested submodule — papercusp-desktop is ITSELF a
-  # submodule) via `git archive`, an atomic read of committed objects that is
-  # immune to concurrent working-tree writes, and rsync THAT. Bonus: a tracked-only
-  # archive naturally omits the host-specific junk the old rsync hand-excluded
-  # (.mcp.json / .claude) and the wrong-arch Linux sidecar (mac-vm-build.sh rebuilds
-  # a darwin one anyway).
-  SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-mac-snap.XXXXXX")"
-  echo "    snapshotting HEAD (superproject + submodules) → $SNAP_DIR"
-  git -C "$MONOREPO" archive --format=tar HEAD | tar -x -C "$SNAP_DIR" \
-    || { echo "ERROR: git archive of superproject HEAD failed"; rm -rf "$SNAP_DIR"; exit 1; }
-  # Recurse into every initialized submodule; `$displaypath` is each submodule's
-  # path relative to the top superproject, so `--prefix` lands its tracked content
-  # at the right nested location under the snapshot root. (Canonical recursive-
-  # archive idiom; $displaypath/$SNAP_DIR expand in the right shell via the quoting.)
-  git -C "$MONOREPO" submodule foreach --recursive --quiet \
-    'git archive --format=tar --prefix="$displaypath/" HEAD | tar -x -C "'"$SNAP_DIR"'"' \
-    || { echo "ERROR: git archive of a submodule failed"; rm -rf "$SNAP_DIR"; exit 1; }
-  # Re-apply THIS release's version bump (the only intended local mutation — written
-  # to the live working tree above but NOT yet in HEAD) onto the snapshot, so the VM
-  # builds the release version rather than HEAD's. These 3 tracked manifests are the
-  # complete set the bump touches (see the version-bump python step above).
-  cp "$ROOT/package.json"              "$SNAP_DIR/papercusp-desktop/package.json"
-  cp "$ROOT/src-tauri/tauri.conf.json" "$SNAP_DIR/papercusp-desktop/src-tauri/tauri.conf.json"
-  cp "$ROOT/src-tauri/Cargo.toml"      "$SNAP_DIR/papercusp-desktop/src-tauri/Cargo.toml"
-  if [[ -f "$ROOT/src-tauri/seed/manifest.json" ]]; then
-    rm -rf "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
-    mkdir -p "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
-    cp -a "$ROOT/src-tauri/seed/." "$SNAP_DIR/papercusp-desktop/src-tauri/seed/"
-  else
-    echo "ERROR: seed cut did not produce $ROOT/src-tauri/seed/manifest.json"
-    rm -rf "$SNAP_DIR"
-    exit 1
-  fi
-
-  echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
-  # The excludes are now defense-in-depth on the VM SIDE of --delete: none exist in
-  # the tracked-only snapshot, but excluding them SPARES the VM's existing copies —
-  # node_modules/target/.turbo/.next (so a rebuild reuses them instead of a full
-  # npm install), and .mcp.json/.claude (the VM writes its OWN per-launch .mcp.json;
-  # a dev-box copy points at :9071 which doesn't exist on the VM → "MCP tools aren't
-  # up", so never import or --delete it).
-  rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
-    --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
-    -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
-    "$SNAP_DIR/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
-  rm -rf "$SNAP_DIR"
-  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
-    "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
-  "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "
-    cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || exit 1
-    npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
-    export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
-    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
-    export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
-    export PAPERCUSP_BUILD_VERSION='"$VERSION"'
-    export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
-    export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
-    export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'
-    export PAPERCUSP_SKIP_SEED_CUT=1
-    bash bin/mac-vm-build.sh
-  "'
-  MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
+if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
+  # SALVAGE PATH (2026-07-08): the mac VM (~9.6GB total) is fundamentally too small
+  # for a universal (dual-arch) build (~8-10GB) and OOM-disk'd mid-build. Instead of
+  # rebuilding, REUSE the good mac artifacts already restored into $MAC_OUT from a
+  # backed-up successful cut. Skip the mac build subshell entirely (MAC_PID stays
+  # empty) AND skip the pre-scp clean; the collection block below fires on MAC_REUSE=1.
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
-  mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
-  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
-    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/dmg/*.dmg" "$MAC_OUT/dmg/" || true
-  scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
-    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz" \
-    "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz.sig" "$MAC_OUT/macos/" || true
+  echo "==> [reuse] PAPERCUSP_REUSE_MAC=1 — skipping mac build; reusing artifacts in $MAC_OUT"
+  mac_reuse_found=0
+  for f in "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
+    [[ -f "$f" ]] && { echo "    reuse: $(basename "$f")"; mac_reuse_found=1; }
+  done
+  if [[ "$mac_reuse_found" != "1" ]]; then
+    echo "ERROR: PAPERCUSP_REUSE_MAC=1 but no mac artifacts in $MAC_OUT — restore the backup there first"; exit 1
+  fi
+  MAC_REUSE=1
+elif [[ "$WITH_MAC" == "1" ]]; then
+  echo "==> [parallel] launching macOS universal build on the mac VM (log: $MAC_LEG_LOG)"
+  (
+    set -euo pipefail
+    if ! "${MAC_VM_SSH[@]}" 'true' 2>/dev/null; then
+      echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"; exit 1
+    fi
+    # WI-1708: build from a COMMIT (git archive HEAD), never the live working tree —
+    # the superproject is edited concurrently by the fleet, so a direct rsync would
+    # snapshot a moving target. git archive is an atomic read of committed objects.
+    SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-mac-snap.XXXXXX")"
+    echo "    snapshotting HEAD (superproject + submodules) → $SNAP_DIR"
+    git -C "$MONOREPO" archive --format=tar HEAD | tar -x -C "$SNAP_DIR" \
+      || { echo "ERROR: git archive of superproject HEAD failed"; rm -rf "$SNAP_DIR"; exit 1; }
+    git -C "$MONOREPO" submodule foreach --recursive --quiet \
+      'git archive --format=tar --prefix="$displaypath/" HEAD | tar -x -C "'"$SNAP_DIR"'"' \
+      || { echo "ERROR: git archive of a submodule failed"; rm -rf "$SNAP_DIR"; exit 1; }
+    # Re-apply THIS release's version bump + freshly-cut seed onto the snapshot (both
+    # are working-tree-only mutations not yet in HEAD).
+    cp "$ROOT/package.json"              "$SNAP_DIR/papercusp-desktop/package.json"
+    cp "$ROOT/src-tauri/tauri.conf.json" "$SNAP_DIR/papercusp-desktop/src-tauri/tauri.conf.json"
+    cp "$ROOT/src-tauri/Cargo.toml"      "$SNAP_DIR/papercusp-desktop/src-tauri/Cargo.toml"
+    if [[ -f "$ROOT/src-tauri/seed/manifest.json" ]]; then
+      rm -rf "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
+      mkdir -p "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
+      cp -a "$ROOT/src-tauri/seed/." "$SNAP_DIR/papercusp-desktop/src-tauri/seed/"
+    else
+      echo "ERROR: seed cut did not produce $ROOT/src-tauri/seed/manifest.json"; rm -rf "$SNAP_DIR"; exit 1
+    fi
+    echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
+    rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
+      --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
+      -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
+      "$SNAP_DIR/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
+    rm -rf "$SNAP_DIR"
+    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+      "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
+    "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "
+      cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || exit 1
+      npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
+      export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
+      export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+      export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
+      export PAPERCUSP_BUILD_VERSION='"$VERSION"'
+      export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
+      export PAPERCUP_DOGFOOD_HIVE_PUBKEY='"${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}"'
+      export PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET='"${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}"'
+      export PAPERCUSP_SKIP_SEED_CUT=1
+      bash bin/mac-vm-build.sh
+    "'
+    MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
+    MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+    mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
+    # Clean stale artifacts FIRST: the mac collection glob is UNSCOPED (app.tar.gz has
+    # no version in its filename), so a prior cut's dmg/app would contaminate this
+    # release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
+    rm -f "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig 2>/dev/null || true
+    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/dmg/*.dmg" "$MAC_OUT/dmg/" || true
+    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz" \
+      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz.sig" "$MAC_OUT/macos/" || true
+  ) >"$MAC_LEG_LOG" 2>&1 &
+  MAC_PID=$!
+fi
+
+# ── JOIN all parallel legs; replay each leg's log; FAIL the release if any failed ──
+join_leg() {  # $1=pid  $2=name  $3=logfile
+  local pid="$1" name="$2" logf="$3"
+  echo "==> joining $name leg (pid $pid)…"
+  if wait "$pid"; then
+    [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
+    echo "==> $name leg SUCCEEDED"
+  else
+    echo "ERROR: $name leg FAILED — full leg log:"
+    [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
+    exit 1
+  fi
+}
+[[ -n "$LINUX_PID" ]] && join_leg "$LINUX_PID" linux "$LINUX_LEG_LOG"
+[[ -n "$WIN_PID"   ]] && join_leg "$WIN_PID"   win   "$WIN_LEG_LOG"
+[[ -n "$MAC_PID"   ]] && join_leg "$MAC_PID"   mac   "$MAC_LEG_LOG"
+
+# ── Collect artifacts in the PARENT, post-join (a subshell's ARTIFACTS+= would not
+# survive the fork). Version-scoped globs so a stale older-version bundle can't
+# sweep in (desktop-v0.0.2-alpha incident 2026-06-11). ──
+ARTIFACTS=()
+CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+if [[ ! -d "$LINUX_BUNDLE" ]]; then
+  echo "ERROR: expected Linux bundles at $LINUX_BUNDLE — Linux leg produced none?"; exit 1
+fi
+for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
+         "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
+  [[ -f "$f" ]] && ARTIFACTS+=("$f")
+done
+if [[ "$WITH_ARM64" == "1" ]]; then
+  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
+    [[ -f "$f" ]] && ARTIFACTS+=("$f")
+  done
+fi
+if [[ -n "$WIN_PID" ]]; then
+  win_found=0
+  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
+    [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
+  done
+  [[ "$win_found" == "1" ]] || { echo "ERROR: WITH_WINDOWS=1 but no windows artifacts came back from the VM"; exit 1; }
+fi
+if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
+  MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
   mac_found=0
   for f in "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && mac_found=1
   done
-  if [[ "$mac_found" != "1" ]]; then
-    echo "ERROR: WITH_MAC=1 but no mac artifacts came back from the VM"
-    exit 1
-  fi
+  [[ "$mac_found" == "1" ]] || { echo "ERROR: WITH_MAC=1 but no mac artifacts $([[ "$MAC_REUSE" == "1" ]] && echo "in $MAC_OUT (reuse)" || echo "came back from the VM")"; exit 1; }
   bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*.dmg
 fi
 

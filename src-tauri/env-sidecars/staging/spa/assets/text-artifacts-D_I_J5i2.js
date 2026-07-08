@@ -1,0 +1,1 @@
+import{n as e,t}from"./text-artifacts-Bfs-3-On.js";t();export{e as loadTextArtifact};

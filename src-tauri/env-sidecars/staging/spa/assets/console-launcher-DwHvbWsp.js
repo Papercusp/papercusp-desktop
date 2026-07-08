@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-Duu_A2Sp.js";e();export{t as buildConsoleEnvelope};

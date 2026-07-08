@@ -567,7 +567,12 @@ shopt -u nullglob
 [[ ${#SETUP_EXES[@]} -gt 0 ]] || fail "no *-setup.exe came back from the VM"
 for SETUP_EXE in "${SETUP_EXES[@]}"; do
   echo "  signing: $(basename "$SETUP_EXE")"
-  (cd "$ROOT" && npx tauri signer sign \
+  # release-local.sh exports TAURI_SIGNING_PRIVATE_KEY (tauri reads it as
+  # --private-key); a newer tauri CLI HARD-REJECTS it alongside --private-key-path
+  # ("cannot be used with"). Strip both signing env vars for this call so ONLY the
+  # explicit --private-key-path is seen (2026-07-08 fix; broke the 0.0.3-alpha win leg).
+  (cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
+    npx tauri signer sign \
     --private-key-path "$KEY_FILE" \
     --password "$KEY_PASSWORD" \
     "$SETUP_EXE")

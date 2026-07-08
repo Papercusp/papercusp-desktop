@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Papercusp GUI",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "identifier": "com.papercusp.gui",
   "build": {
     "beforeDevCommand": "bash bin/dev-operator-ifneeded.sh",
@@ -68,8 +68,12 @@
     "linux": {
       "deb": {
         "depends": [],
-        "conflicts": ["papercusp-server"],
-        "replaces": ["papercusp-server"],
+        "conflicts": [
+          "papercusp-server"
+        ],
+        "replaces": [
+          "papercusp-server"
+        ],
         "postInstallScript": "deb/postinstall.sh",
         "postRemoveScript": "deb/postremove.sh"
       },
@@ -80,8 +84,12 @@
     "windows": {
       "wix": {
         "language": "en-US",
-        "fragmentPaths": ["./windows/fragments/tutorial-shortcut.wxs"],
-        "componentRefs": ["PapercuspTutorialShortcut"]
+        "fragmentPaths": [
+          "./windows/fragments/tutorial-shortcut.wxs"
+        ],
+        "componentRefs": [
+          "PapercuspTutorialShortcut"
+        ]
       },
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"

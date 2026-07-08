@@ -2425,6 +2425,33 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
                 );
                 return;
             }
+            // WI-3381 (owner directive 2026-07-08 — "make this work on all
+            // platforms"): the bundled self/release operator failed to boot.
+            // Before surfacing a dead-end boot error, fall back to the safest
+            // reachable env (prod :3070 → staging :3170) so the user lands on the
+            // deployed release instead of a stranded error page. Only fires when a
+            // fallback env is actually up — a plain single-operator install where
+            // nothing else runs shows the boot-error page exactly as before.
+            // finish_boot is the shared packaged mac/win/linux boot path, so this
+            // covers every platform. point_window_at_operator points BOTH content
+            // and the /api base at the fallback (same mechanism as the success
+            // path); on_page_load → retarget_for_url then pins /api to match.
+            if let Some(fallback_port) = env_switch::reachable_fallback_env() {
+                eprintln!(
+                    "[papercusp-desktop] self/release operator did not boot ({}) — falling back to the safest reachable env :{}",
+                    reason, fallback_port
+                );
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    #[cfg(target_os = "linux")]
+                    {
+                        grant_media_permission(&window);
+                        install_load_failure_recovery(&window);
+                    }
+                    point_window_at_operator(&window, fallback_port, 30);
+                    restore_window_visibility(&window, "fallback-env");
+                }
+                return;
+            }
             eprintln!("[papercusp-desktop] FATAL: {}", reason);
             // Surface the failure ON the bootstrap page — web/index.html
             // renders window.__papercuspBootError as a terminal error
@@ -2834,6 +2861,9 @@ fn build_docs_shortcut_submenu(
 fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
+    // WI-3382 (owner 2026-07-08): launch the `papercusp tutorial` CLI utility in a
+    // native terminal — the tray twin of the "Papercusp Tutorial & setup" icon.
+    let tutorial = MenuItem::with_id(app, "open-tutorial", "Open Tutorial", true, None::<&str>)?;
     let shortcut = build_docs_shortcut_submenu(app)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(
@@ -2843,7 +2873,69 @@ fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::
         true,
         None::<&str>,
     )?;
-    Menu::with_items(app, &[&open, &shortcut, &sep, &quit])
+    Menu::with_items(app, &[&open, &tutorial, &shortcut, &sep, &quit])
+}
+
+/// The spec the tray "Open Tutorial" runs on Linux/Windows: the `papercusp
+/// tutorial` CLI (opens the "Tutorial & Setup" shell on the Tutorial tab) in a
+/// native terminal. `papercusp` is a global CLI on PATH (a login shell resolves
+/// it), so no absolute path is needed. cwd defaults to $HOME; "." keeps it
+/// cwd-agnostic where HOME is unset (papercusp tutorial ignores cwd).
+#[cfg(not(target_os = "macos"))]
+fn tutorial_console_spec() -> native_console::ExternalConsoleSpec {
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    native_console::ExternalConsoleSpec {
+        command: "papercusp".to_string(),
+        args: vec!["tutorial".to_string()],
+        cwd,
+        env: std::collections::HashMap::new(),
+        title: "Papercusp Tutorial".to_string(),
+    }
+}
+
+/// Open the `papercusp tutorial` CLI utility in a NEW native terminal window —
+/// the tray "Open Tutorial" action (WI-3382, owner directive 2026-07-08). Reuses
+/// the same external-terminal launcher the onboarding tutorial uses
+/// (`native_console::external_console_run`) on Linux/Windows; on macOS that command
+/// is unsupported (the onboarding UX there is an embedded pane), so drive
+/// Terminal.app directly.
+fn launch_tutorial_console() {
+    #[cfg(target_os = "macos")]
+    {
+        // external_console_run is Linux/Windows-only — open Terminal.app instead.
+        if let Err(e) = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"Terminal\" to do script \"papercusp tutorial\"")
+            .arg("-e")
+            .arg("tell application \"Terminal\" to activate")
+            .spawn()
+        {
+            eprintln!("[papercusp-server] could not launch tutorial (macOS): {e}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux: a real native terminal via the bundled-ghostty / $TERMINAL cascade.
+        // Windows: a Windows Terminal window running the command inside WSL
+        // (TODO(windows): confirm the WSL cwd for the one-liner on a packaged build).
+        let spec = tutorial_console_spec();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = native_console::external_console_run(spec).await {
+                eprintln!("[papercusp-server] could not launch tutorial: {e}");
+            }
+        });
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod tutorial_console_spec_tests {
+    #[test]
+    fn spec_launches_papercusp_tutorial_in_a_titled_window() {
+        let spec = super::tutorial_console_spec();
+        assert_eq!(spec.command, "papercusp");
+        assert_eq!(spec.args, vec!["tutorial".to_string()]);
+        assert_eq!(spec.title, "Papercusp Tutorial");
+    }
 }
 
 /// Build the Server's tray/menubar icon (the windowless backend's only surface):
@@ -2863,6 +2955,8 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                 if let Err(e) = launch_bundle(GUI_BUNDLE_ID, "Papercusp GUI") {
                     eprintln!("[papercusp-server] could not launch GUI: {e}");
                 }
+            } else if id == "open-tutorial" {
+                launch_tutorial_console();
             } else if id == "quit-server" {
                 app.exit(0);
             } else if let Some(accel) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {

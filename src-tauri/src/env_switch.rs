@@ -140,6 +140,58 @@ fn port_reachable(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
 }
 
+/// Safety-ranked launch-default candidates (WI-3381): the env the webview
+/// already loaded FIRST (on the dev box that's the dev operator the shell
+/// spawned — devUrl `:3270`), then prod `:3070` (the deployed green-`main`
+/// release), then staging `:3170`. De-duped, order preserved. Pure, so the
+/// ranking is unit-tested without sockets.
+///
+/// NOTE: the only caller, `apply_persisted_target`, is DEV-ONLY (main.rs runs
+/// `env_switch::init` inside `if is_dev`). Packaged installs pick their launch
+/// env a different way — content boots to the bundled self operator, marked
+/// `release` by the in-webview bar (WI-3284) — so this ranking never runs there.
+fn ranked_default_candidates(current: Option<u16>) -> Vec<u16> {
+    let mut ranked: Vec<u16> = Vec::with_capacity(3);
+    if let Some(cur) = current {
+        ranked.push(cur);
+    }
+    for p in [3070u16, 3170] {
+        if !ranked.contains(&p) {
+            ranked.push(p);
+        }
+    }
+    ranked
+}
+
+/// The safest env that is actually REACHABLE (see `ranked_default_candidates`),
+/// so the dev shell never strands `/api` on a dead port. Falls back to `:3070`
+/// — the old unconditional default — when nothing answers, so `/api` always has
+/// a definite target. `reachable` is injected for unit tests.
+fn pick_default_target(current: Option<u16>, reachable: impl Fn(u16) -> bool) -> u16 {
+    first_reachable(&ranked_default_candidates(current), reachable).unwrap_or(3070)
+}
+
+/// The first candidate the `reachable` predicate accepts, order preserved, or
+/// `None`. Pure, so both the dev launch-default pick and the packaged boot
+/// fallback share one unit-tested core (no sockets).
+fn first_reachable(candidates: &[u16], reachable: impl Fn(u16) -> bool) -> Option<u16> {
+    candidates.iter().copied().find(|p| reachable(*p))
+}
+
+/// The safest env that is actually up to FALL BACK to — prod `:3070` then
+/// staging `:3170` — when the bundled self/release operator fails to boot, or
+/// `None` when neither answers (the caller then shows the boot-error page).
+/// Pointing content + `/api` here lands the user on the deployed release instead
+/// of a dead-end error page, on every packaged platform (WI-3381, owner
+/// directive 2026-07-08: "make this work on all platforms"). Called from
+/// `finish_boot` (main.rs) — the shared packaged mac/win/linux boot path — so
+/// unlike the dev-only `pick_default_target` this one DOES run in packaged
+/// installs. Self is excluded: it just failed, so only the deployed fixed-port
+/// envs are fallback candidates.
+pub fn reachable_fallback_env() -> Option<u16> {
+    first_reachable(&[3070, 3170], port_reachable)
+}
+
 /// Point `/api` at `target_port`'s operator (EI-190) + drop the live IPC
 /// connection so the next call dials the selected operator's socket.
 fn retarget_api(app: &tauri::AppHandle, target_port: u16) {
@@ -303,16 +355,25 @@ pub fn apply_persisted_target(window: &tauri::WebviewWindow) {
         retarget_api(app, port);
         return;
     }
+    // No explicit override: when there is no reachable persisted selection,
+    // point `/api` at the SAFEST env that is actually UP (self:3270 → prod:3070
+    // → staging:3170) rather than a hardcoded :3070 that won't match the dev
+    // shell's content origin (devUrl :3270) — so `/api` follows the content
+    // instead of stranding on a dead/mismatched port (WI-3381). DEV-ONLY: this
+    // whole fn runs only under `if is_dev`; packaged installs default to
+    // release=self via the boot flow + WI-3284, not this path.
+    let current = window.url().ok().and_then(|u| u.port());
+    let fallback = pick_default_target(current, port_reachable);
     let effective = 'restore: {
         let Some(port) = read_persisted_target() else {
-            break 'restore 3070;
+            break 'restore fallback;
         };
-        if window.url().ok().and_then(|u| u.port()) == Some(port) {
+        if current == Some(port) {
             break 'restore port;
         }
         if !port_reachable(port) {
-            println!("[env-switch] persisted build target :{port} is down — keeping the default");
-            break 'restore 3070;
+            println!("[env-switch] persisted build target :{port} is down — falling back to the safest reachable env :{fallback}");
+            break 'restore fallback;
         }
         let url = format!("http://127.0.0.1:{port}/");
         match url::Url::parse(&url)
@@ -325,7 +386,7 @@ pub fn apply_persisted_target(window: &tauri::WebviewWindow) {
             }
             Err(e) => {
                 eprintln!("[env-switch] could not restore target :{port}: {e}");
-                3070
+                fallback
             }
         }
     };
@@ -394,6 +455,42 @@ mod tests {
         assert_eq!(parse_api_target(Some("  3070 ".into())), Some(3070));
         assert_eq!(parse_api_target(Some("80".into())), None);
         assert_eq!(parse_api_target(None), None);
+    }
+
+    #[test]
+    fn ranked_candidates_put_self_first_then_prod_then_staging() {
+        // The loaded env (self/release) ranks first, then prod, then staging.
+        assert_eq!(ranked_default_candidates(Some(3270)), vec![3270, 3070, 3170]);
+        // A self that IS prod/staging isn't duplicated — order still preserved.
+        assert_eq!(ranked_default_candidates(Some(3070)), vec![3070, 3170]);
+        assert_eq!(ranked_default_candidates(Some(3170)), vec![3170, 3070]);
+        // No loaded port yet → just the fixed prod-then-staging ranking.
+        assert_eq!(ranked_default_candidates(None), vec![3070, 3170]);
+    }
+
+    #[test]
+    fn pick_default_target_picks_safest_reachable() {
+        // Self reachable → boot self/release (the safest, top-ranked env).
+        assert_eq!(pick_default_target(Some(3270), |p| p == 3270), 3270);
+        // Self down, prod up → prod.
+        assert_eq!(pick_default_target(Some(3270), |p| p == 3070), 3070);
+        // Self + prod down, staging up → staging.
+        assert_eq!(pick_default_target(Some(3270), |p| p == 3170), 3170);
+        // Nothing reachable → the old unconditional default :3070 (definite
+        // /api target) rather than a dead self port.
+        assert_eq!(pick_default_target(Some(3270), |_| false), 3070);
+        // No loaded port, prod up → prod.
+        assert_eq!(pick_default_target(None, |p| p == 3070), 3070);
+    }
+
+    #[test]
+    fn first_reachable_returns_first_accepted_in_order() {
+        // Order is preserved — the first accepted candidate wins.
+        assert_eq!(first_reachable(&[3070, 3170], |_| true), Some(3070));
+        assert_eq!(first_reachable(&[3070, 3170], |p| p == 3170), Some(3170));
+        // Nothing reachable → None (the boot fallback then shows the error page).
+        assert_eq!(first_reachable(&[3070, 3170], |_| false), None);
+        assert_eq!(first_reachable(&[], |_| true), None);
     }
 
     #[test]
