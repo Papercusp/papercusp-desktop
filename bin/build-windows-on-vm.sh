@@ -66,6 +66,12 @@ VM_SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
 VM_SSH_PORT="${VM_SSH_PORT:-2223}"
 VM_SSH_HOST="${VM_SSH_HOST:-user@127.0.0.1}"
 VM_BUILD_DIR="${VM_BUILD_DIR:-papercup-build-release}"   # under C:\Users\user\
+# Single-file installer opt-in (owner-directed 2026-07-08): PAPERCUSP_SINGLE_FILE=1
+# passes ISCC /DSingleFile → papercusp.iss omits DiskSpanning → one setup.exe even
+# with the 2.2 GB source tree (for hosting off GitHub, whose assets cap at 2 GiB).
+# Default = spanned <2 GiB slices so the standard GitHub release flow still works.
+SPAN_DEFINE=""
+[[ "${PAPERCUSP_SINGLE_FILE:-0}" == "1" ]] && SPAN_DEFINE='"/DSingleFile" '
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
@@ -462,7 +468,7 @@ function Invoke-Inno([string]\$role, [string]\$appId, [string]\$appName) {
   New-Item -ItemType Directory -Force \$outDir | Out-Null
   \$buildRoot = Join-Path \$PWD "src-tauri"
   Write-Host "[build] ISCC \$role packaging (full seed stored raw; several minutes)"
-  & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" "src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
+  & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" ${SPAN_DEFINE}"src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
   Write-Host "[build] ISCC \$role EXIT=\$LASTEXITCODE"
   Sign-File (Join-Path \$outDir "\${appName}_\${ver}_x64-setup.exe")
 }

@@ -65,7 +65,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Installing then needs the .bin files NEXT TO the exe (build-windows-on-vm.sh
 ; collects every file from the output dir, so they travel together). Detected
 ; at compile time from the staged file itself — no new /D define to plumb.
-#if AppId == "com.papercusp.server" && FileExists(AddBackslash(BuildRoot) + "sidecar\source.tar.zst")
+; SINGLE-FILE OVERRIDE (owner-directed 2026-07-08): pass ISCC /DSingleFile
+; (build-windows-on-vm.sh does so when PAPERCUSP_SINGLE_FILE=1) to FORCE one
+; setup.exe even with the 2.2 GB source tree present — better UX than
+; setup.exe + .bin slices, for hosting OFF GitHub (whose release assets cap at
+; 2 GiB). Default (no define) stays spanned so the standard GitHub flow works.
+#if !Defined(SingleFile) && AppId == "com.papercusp.server" && FileExists(AddBackslash(BuildRoot) + "sidecar\source.tar.zst")
 DiskSpanning=yes
 DiskSliceSize=2100000000
 #endif
