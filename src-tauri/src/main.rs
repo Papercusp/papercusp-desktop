@@ -125,7 +125,16 @@ fn isolate_process_group(cmd: &mut Command) {
 /// restarted operator's new socket.
 fn read_dev_ipc_socket(path: &std::path::Path) -> Option<String> {
     let txt = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    parse_endpoint_ipc_socket(&txt)
+}
+
+/// Parse + target-validate a `socketPath` out of endpoint-ipc.json text.
+/// Shared by the filesystem read (`read_dev_ipc_socket`) and the WSL `cat`
+/// read (`read_endpoint_ipc_socket_via_wsl`) so both classify the endpoint
+/// identically (Windows accepts `\\.\pipe\` or `tcp://`; others accept a unix
+/// socket or `tcp://`).
+fn parse_endpoint_ipc_socket(txt: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(txt).ok()?;
     let socket_path = v.get("socketPath")?.as_str()?.trim();
     if endpoint_ipc_socket_path_supported_for_target(socket_path, cfg!(target_os = "windows")) {
         Some(socket_path.to_string())
@@ -1201,8 +1210,8 @@ mod http_ready_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, is_tcp_endpoint,
-        read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode,
+        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, find_endpoint_ipc_socket,
+        is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode,
     };
 
     // ── url_encode (RFC 3986 component encoding) ────────────────────────────
@@ -1333,6 +1342,30 @@ mod helper_tests {
             Some("tcp://127.0.0.1:35745".to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_endpoint_ipc_socket_reads_workspace_home_when_not_via_wsl() {
+        // WI-3395: the non-WSL path (mac/linux, and the Windows fallback) resolves
+        // the socket from workspace_home/.papercusp/endpoint-ipc.json. The WSL
+        // read is Windows-only + needs a live distro, so it isn't unit-covered
+        // here; this guards the shared filesystem path + the join.
+        let dir = temp_dir("ipc-find");
+        std::fs::create_dir_all(dir.join(".papercusp")).unwrap();
+        std::fs::write(
+            dir.join(".papercusp/endpoint-ipc.json"),
+            r#"{"socketPath":"tcp://127.0.0.1:40001","pid":7}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            find_endpoint_ipc_socket(&dir, false),
+            Some("tcp://127.0.0.1:40001".to_string())
+        );
+        // Missing file → None (client falls back to HTTP, no panic).
+        let empty = temp_dir("ipc-find-empty");
+        assert_eq!(find_endpoint_ipc_socket(&empty, false), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]
@@ -1644,6 +1677,56 @@ fn find_operator_discovery(
     #[cfg(not(target_os = "windows"))]
     let _ = via_wsl;
     read_operator_discovery(workspace_home)
+}
+
+/// The endpoint-IPC discovery file INSIDE the WSL distro. Mirrors
+/// `WSL_OPERATOR_JSON`: the sidecar (running in WSL2) writes it to its
+/// WSL-native `$HOME/.papercusp`, NOT the Windows-side workspace_home the
+/// client reads — see `find_endpoint_ipc_socket` (WI-3395).
+#[cfg(target_os = "windows")]
+const WSL_ENDPOINT_IPC_JSON: &str = "/home/papercup/.papercusp/endpoint-ipc.json";
+
+/// Read the endpoint-IPC `socketPath` from INSIDE the WSL distro via `wsl.exe
+/// -e cat`, exactly like `read_operator_discovery_via_wsl` (the `\\wsl$` UNC
+/// share is unreliable — see that fn). WI-3395: the WSL2 sidecar binds a
+/// `tcp://127.0.0.1:<port>` endpoint and records it in its WSL-native
+/// `~/.papercusp/endpoint-ipc.json`; the Windows host reaches that port via
+/// WSL2 localhost-forwarding (same mechanism as the operator HTTP port).
+#[cfg(target_os = "windows")]
+fn read_endpoint_ipc_socket_via_wsl() -> Option<String> {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args([
+        "--distribution",
+        wsl_setup::DISTRO_NAME_PUB,
+        "-e",
+        "cat",
+        WSL_ENDPOINT_IPC_JSON,
+    ]);
+    no_console_window(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_endpoint_ipc_socket(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Unified endpoint-IPC socket discovery — mirrors `find_operator_discovery`.
+/// On Windows routed via WSL, read the discovery JSON from INSIDE the distro
+/// (the sidecar's WSL-native `~/.papercusp`, cross-filesystem from the Windows
+/// workspace_home), else read the local `workspace_home/.papercusp` path
+/// (mac/linux, plus the non-WSL Windows fallback). WI-3395: without the WSL
+/// read, the Windows client never finds the file the WSL2 sidecar wrote and
+/// `/api` strands on the capped HTTP fallback.
+fn find_endpoint_ipc_socket(workspace_home: &std::path::Path, via_wsl: bool) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    if via_wsl {
+        if let Some(s) = read_endpoint_ipc_socket_via_wsl() {
+            return Some(s);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = via_wsl;
+    read_dev_ipc_socket(&workspace_home.join(".papercusp/endpoint-ipc.json"))
 }
 
 /// WI-1869: given the operator port the webview is CURRENTLY pointed at and the
@@ -2550,18 +2633,24 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
     // polyfill).
     let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
     if ipc_enabled {
-        let disc = workspace_home.join(".papercusp/endpoint-ipc.json");
-        let disc_src = disc.clone();
+        // WI-3395: on Windows the sidecar runs in WSL2 and writes
+        // endpoint-ipc.json to its WSL-native ~/.papercusp — a DIFFERENT
+        // filesystem from `workspace_home`. `find_endpoint_ipc_socket` reads it
+        // from inside the distro when routed via WSL (else the local path), so
+        // the client actually finds the `tcp://` endpoint instead of stranding
+        // /api on the capped HTTP fallback.
+        let disc_home = workspace_home.clone();
         let handle = endpoint_ipc::IpcClientHandle::new(move || {
-            read_dev_ipc_socket(&disc_src).map(std::path::PathBuf::from)
+            find_endpoint_ipc_socket(&disc_home, via_wsl).map(std::path::PathBuf::from)
         });
         app_handle.manage(handle.clone());
         let ipc_app_handle = app_handle.clone();
+        let warm_home = workspace_home.clone();
         tauri::async_runtime::spawn(async move {
             for _ in 0..120 {
                 if handle.warm().await.is_ok() {
                     println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
-                    if let Some(path) = read_dev_ipc_socket(&disc) {
+                    if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
                         let state: tauri::State<SidecarState> = ipc_app_handle.state();
                         *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
                     }
