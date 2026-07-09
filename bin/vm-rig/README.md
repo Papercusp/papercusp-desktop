@@ -1,7 +1,7 @@
 # vm-rig — the tower↔VM federation rig (true kernel + network boundary)
 
 The strongest LOCAL federation proof we have since Hetzner access was lost
-(owner 2026-07-03; D-001 of `shared-hive-p2p-release-readiness-2026-07-03`):
+(owner 2026-07-03; D-001 of `shared-pot-p2p-release-readiness-2026-07-03`):
 the tower's live operator (`:3070`) federating with a **separate OS in a
 QEMU/KVM VM** across a real bridge hop. This is the P-059 drill rig, rescued
 from hand-rolled `/tmp` scripts (which a VM reboot deletes — exactly how the
@@ -63,7 +63,7 @@ that's the last delivery hop, not a federation failure.
   `sudo ufw allow from 172.31.44.0/24`.
 - **Workspace scoping**: author VM-side state under
   `--workspace papercusp-workspace`, NOT `default` — state authored under
-  `default` strands work invisible to the papercusp hive (WI-1564 class).
+  `default` strands work invisible to the papercusp pot (WI-1564 class).
 - **Probe/diag await windows must be ≥600s, and tower calls must hit `:3270`
   (bg-host substrate primary), not `:3070`** (request-only cluster tier) —
   a 200s window expired before replication had actually applied, and calls

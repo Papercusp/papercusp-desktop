@@ -5,7 +5,7 @@ runner (federation-release-hardening Brief 13). The Hetzner project is capped at
 **2 concurrent servers (PERMANENT, owner-confirmed)**, so we do **not** run six
 separate provision→teardown rigs (6 serialized = hours + 6× redundant setup).
 Instead the matrix provisions **2 frames ONCE** (a=owner, b=member), publishes +
-joins one hive, peers the swarm, then runs every contributed scenario in sequence
+joins one pot, peers the swarm, then runs every contributed scenario in sequence
 and prints a PASS/FAIL matrix — one shared live run for all of briefs 3-8.
 
 You (a scenario author) contribute **one file**: `bin/lib/scenarios/<id>.sh`.
@@ -36,13 +36,13 @@ calls each `<fn>` in turn, in the current shell.
 | `RIG_FRAMES=(a b)` | frame `a` = **OWNER**, frame `b` = **MEMBER** (2-frame run) |
 | `FRAME_IP[a]` / `FRAME_IP[b]` | public IPs |
 | `FED_PG[a/b]` / `FED_SC[a/b]` | embedded-PG + sidecar ports |
-| `FRAME_MEMBER_SLUG[a/b]` | each frame's joined hive member slug |
-| `RIG_HIVE_ID` / `RIG_HIVE_PUBKEY` / `RIG_HIVE_LINK` | the published hive |
+| `FRAME_MEMBER_SLUG[a/b]` | each frame's joined pot member slug |
+| `RIG_HIVE_ID` / `RIG_HIVE_PUBKEY` / `RIG_HIVE_LINK` | the published pot |
 | `MATRIX_RUN_ID` | unique-per-run tag — **suffix your ids with it** |
 
-The hive is already published (owner from-repo), all frames joined, and the swarm
+The pot is already published (owner from-repo), all frames joined, and the swarm
 `peer_connected` a↔b **before** your scenario runs. You start from a healthy,
-federating 2-node hive.
+federating 2-node pot.
 
 ### Primitives (sourced: `federation-asserts.sh` + `deb-hetzner-rig.sh`)
 
@@ -107,7 +107,7 @@ Brief 13).
   scenario file and prints what's registered, sorted by `<order>`. Confirm your file
   wired in **before** spending a live run.
 - **Full live run (COSTS REAL MONEY):** `bin/deb-hetzner-matrix.sh [--deb=PATH]` —
-  provisions **2 Hetzner frames ONCE** (a=owner, b=member), publishes + joins one hive,
+  provisions **2 Hetzner frames ONCE** (a=owner, b=member), publishes + joins one pot,
   peers the swarm, then runs every registered scenario in `<order>` **in the current
   shell** (so a scenario's `rig_wait_frame_ready` port re-discovery persists across
   scenarios), prints a PASS/FAIL matrix, and auto-destroys (EXIT-trap → **servers=0**).
