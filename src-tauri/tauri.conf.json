@@ -101,6 +101,9 @@
       "active": true,
       "dangerousInsecureTransportProtocol": true,
       "dialog": false,
+      "windows": {
+        "installerArgs": ["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"]
+      },
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVEM0E3REQ0QTcwODk5NDQKUldSRW1RaW4xSDA2WGZzZVFiRHhaeG5iVXpWRUZxTnpZTG1BNWduQ2RnKzZjQUt1Y3FoMDJCZTUK"
     }
   }

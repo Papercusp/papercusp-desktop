@@ -135,3 +135,19 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\papercusp-desktop.exe"
 ; papercup-runtime distro is registered — same precondition as NSIS-era).
 ; Inno removes it on uninstall automatically (no PREUNINSTALL hook needed).
 Name: "{autoprograms}\Papercusp Tutorial & Setup"; Filename: "{sys}\wsl.exe"; Parameters: "-d papercup-runtime --cd ~ -- bash -l -c ""papercusp tutorial"""; IconFilename: "{app}\papercusp-desktop.exe"; Comment: "Open the guided Papercusp tutorial and setup"
+
+; Auto-update relaunch (desktop-auto-update-operational-2026-07-09): tauri-plugin-
+; updater types every .exe as NSIS and always passes /UPDATE on its command line.
+; Inno ignores unknown switches, but we can READ the raw tail — so when this
+; installer was launched BY the updater (silently, via the app's
+; installerArgs /VERYSILENT in tauri.conf.json > plugins.updater.windows),
+; relaunch the app at the end of the install. A manual first-install (no
+; /UPDATE on the tail) is unaffected.
+[Run]
+Filename: "{app}\papercusp-desktop.exe"; Flags: nowait; Check: IsUpdaterLaunch
+
+[Code]
+function IsUpdaterLaunch(): Boolean;
+begin
+  Result := Pos('/UPDATE', UpperCase(GetCmdTail())) > 0;
+end;
