@@ -1,0 +1,1 @@
+import{r as e,t}from"./engine-BbpjJC59.js";e();export{t as emitSystemEvent};

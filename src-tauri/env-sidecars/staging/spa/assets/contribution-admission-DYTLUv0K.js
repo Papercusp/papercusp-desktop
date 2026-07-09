@@ -1,1 +1,0 @@
-import{r as e,t}from"./contribution-admission-CZMvqyVw.js";t();export{e as isPrAuthorRevoked};

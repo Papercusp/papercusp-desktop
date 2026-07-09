@@ -199,6 +199,58 @@ if grep -q 'OVERALL: PASS' "$matrix_file"; then
 else
   bad "content-matrix smoke no longer emits OVERALL: PASS (live-federation-gate will mark it FAIL)"
 fi
+
+# 8b) RED-EI dedup guard (2026-07-09, EI-8385-class fix): a prior version filed a BRAND
+# NEW work_items:create bug on EVERY hourly RED run — no dedup key, and the title embeds a
+# run timestamp so no similarity guard ever caught the duplicates — piling up 30+ open
+# "live-federation-gate RED: content-matrix failed…" bugs for the SAME unresolved regression
+# over 3 days (WI-3358..WI-3477+). The gate must suppress re-filing within RED_REFILE_H and
+# clear the suppression marker on the next GREEN (never hide a real fix behind stale state).
+if grep -q 'RED_MARKER="\$STATE_DIR/red-ei-filed"' "$gate_file" && grep -q 'red_marker_age_h' "$gate_file"; then
+  ok "live-federation-gate dedups RED EI filings via a red-ei-filed marker"
+else
+  bad "live-federation-gate no longer dedups RED EI filings (duplicate-bug-storm regression)"
+fi
+if grep -q 'rm -f "\$STATE_DIR/stale-ei-filed" "\$STATE_DIR/red-ei-filed"' "$gate_file"; then
+  ok "live-federation-gate clears the RED-EI marker on the next GREEN"
+else
+  bad "live-federation-gate no longer clears red-ei-filed on GREEN (would hide a real fix behind stale suppression)"
+fi
+
+# 8c) PASS-971 downgrade doesn't false-RED on a zero-match grep (2026-07-09 fix, the
+# ACTUAL root cause behind WI-3358/WI-3477 — the RED-EI dedup above only masked the
+# symptom). `grep -c PATTERN FILE || echo 0` ALWAYS prints a count (even "0") but exits
+# 1 when that count is 0, so a zero-match run fired BOTH the printed "0" AND the
+# `|| echo 0` fallback, leaving X_TOTAL/X_OTHER a two-line "0\n0" string that blew up
+# `[ "$X_OTHER" -eq 0 ]` with "integer expression expected" (visible in journalctl) —
+# so a content-matrix FAIL that fully qualified for the documented PASS-971 carve-out
+# was left as a genuine RED on EVERY real run (all 3 checked 2026-07-09). Exercise the
+# gate's actual downgrade snippet (not a re-implementation) against a synthetic
+# zero-X_OTHER fixture and assert it downgrades cleanly with no stderr noise.
+if grep -qE 'grep -ac.*\|\| echo 0' "$gate_file"; then
+  bad "live-federation-gate downgrade logic still uses the 'grep -c ... || echo 0' double-output trap (false-RED regression)"
+else
+  DOWNGRADE_FIXTURE="$(mktemp /tmp/fed-selftest-downgrade.XXXXXX)"
+  { echo '✓ B joined'; echo '  ✗ features         incr-B→A NEVER crossed (src outbox=1/1)'; } >"$DOWNGRADE_FIXTURE"
+  downgrade_snippet="$(awk '/^  if \[ "\$MATRIX_RES" = FAIL \]/{p=1} p{print} p&&/^  fi$/{exit}' "$gate_file")"
+  if [ -z "$downgrade_snippet" ]; then
+    bad "could not extract the PASS-971 downgrade snippet from live-federation-gate.sh (structure changed — update this test)"
+  else
+    DOWNGRADE_STDERR="$(mktemp /tmp/fed-selftest-downgrade-stderr.XXXXXX)"
+    downgrade_result="$(MATRIX_RES=FAIL WORK="$(dirname "$DOWNGRADE_FIXTURE")" bash -c "
+      WORK_FILE='$DOWNGRADE_FIXTURE'
+      $(echo "$downgrade_snippet" | sed "s#\"\$WORK/content-matrix.out\"#\"\$WORK_FILE\"#g")
+      echo \"\$MATRIX_RES\"
+    " 2>"$DOWNGRADE_STDERR")"
+    if [ "$downgrade_result" = "PASS-971" ] && ! grep -q "integer expression expected" "$DOWNGRADE_STDERR"; then
+      ok "PASS-971 downgrade handles a zero-X_OTHER run cleanly (no false-RED, no stderr noise)"
+    else
+      bad "PASS-971 downgrade false-RED regression: result='$downgrade_result' stderr='$(cat "$DOWNGRADE_STDERR")'"
+    fi
+    rm -f "$DOWNGRADE_STDERR"
+  fi
+  rm -f "$DOWNGRADE_FIXTURE"
+fi
 required_line="$(grep '^REQUIRED_TOOLS=' "$verify_file" || true)"
 case "$required_line" in
   *" omp "*|*" omp\""*)

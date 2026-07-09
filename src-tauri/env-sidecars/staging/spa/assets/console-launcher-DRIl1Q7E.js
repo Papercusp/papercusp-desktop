@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-CLX9-5lk.js";e();export{t as buildConsoleEnvelope};

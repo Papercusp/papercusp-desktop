@@ -33,6 +33,17 @@
 #   GATE_DISPLAY      (default 250) — Xvfb display base (matrix uses N, from-repo N+2).
 #   OPERATOR_MCP_URL  (default http://127.0.0.1:3070/api/mcp) — curl-MCP endpoint for EI filing.
 #   GATE_NO_FILE      (default 0)   — set 1 to skip EI filing (just log the verdict).
+#   RED_REFILE_H      (default 24)  — RED-EI dedup window (EI-8385-class fix, 2026-07-09):
+#                                     this gate runs hourly and every prior version filed a
+#                                     BRAND NEW work_items:create bug on every single RED run —
+#                                     30+ duplicate "live-federation-gate RED: content-matrix
+#                                     failed…" bugs piled up over 3 days for the SAME unresolved
+#                                     regression (WI-3358..WI-3477+), because the title embeds a
+#                                     run timestamp so no title-similarity guard ever caught them
+#                                     as duplicates. Mirrors the STALE path's existing
+#                                     stale-ei-filed marker: file once, then suppress re-filing
+#                                     for this window (cleared immediately on the next GREEN, so
+#                                     a genuine fix is never hidden behind a stale suppression).
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # LOAD_GATE default is CORE-AWARE (P-013): max(15, 3*nproc/8). The old absolute 15 never fired
@@ -83,6 +94,7 @@ log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
 STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_DIR"
 GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 GATE_STALE_DAYS="${GATE_STALE_DAYS:-3}"
+RED_REFILE_H="${RED_REFILE_H:-24}"
 now_s() { date +%s 2>/dev/null || echo 0; }
 age_h() { local f="$1"; [ -f "$f" ] || { echo 999999; return; }; echo $(( ( $(now_s) - $(cat "$f" 2>/dev/null || echo 0) ) / 3600 )); }
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$1"; }
@@ -273,8 +285,20 @@ if [ "$SKIP_MATRIX" != 1 ]; then
   # is exactly these signatures — an incr-A→B miss, a create/join fail, or any other ✗
   # stays a genuine RED.
   if [ "$MATRIX_RES" = FAIL ] && grep -qa '✓ B joined' "$WORK/content-matrix.out" 2>/dev/null; then
-    X_TOTAL="$(grep -ac '✗' "$WORK/content-matrix.out" 2>/dev/null || echo 0)"
-    X_OTHER="$(grep -a '✗' "$WORK/content-matrix.out" 2>/dev/null | grep -acvE '(backfill(-late)?|incr-B→A) +NEVER crossed' || echo 0)"
+    # EI-8385-class fix (2026-07-09): `grep -c PATTERN FILE || echo 0` is a classic bash
+    # double-output trap — `grep -c` ALWAYS prints a count (even "0") but exits 1 when
+    # that count is zero, so on a zero-match run BOTH the "0" grep already printed AND
+    # the `|| echo 0` fallback fire, leaving X_TOTAL/X_OTHER as a TWO-LINE "0\n0" string.
+    # `[ "$X_OTHER" -eq 0 ]` then dies with "integer expression expected" (visible in
+    # journalctl as `line N: [: 0\n0: integer expression expected`), the `if` never
+    # matches, and a content-matrix FAIL that fully qualifies for the documented PASS-971
+    # carve-out below is left as a genuine RED every single run — the actual root cause
+    # behind the WI-3358/WI-3477 duplicate-bug-storm this file's RED-EI dedup masked but
+    # never fixed. Use `|| true` (adds no output) + a param-expansion default (covers the
+    # file-missing case, where grep exits 2 with no output at all) so each var is always
+    # exactly one clean integer line.
+    X_TOTAL="$(grep -ac '✗' "$WORK/content-matrix.out" 2>/dev/null || true)"; X_TOTAL="${X_TOTAL:-0}"
+    X_OTHER="$(grep -a '✗' "$WORK/content-matrix.out" 2>/dev/null | grep -acvE '(backfill(-late)?|incr-B→A) +NEVER crossed' || true)"; X_OTHER="${X_OTHER:-0}"
     if [ "$X_TOTAL" -ge 1 ] && [ "$X_OTHER" -eq 0 ]; then
       MATRIX_RES="PASS-971"
       log "content-matrix FAIL downgraded → PASS-971: all $X_TOTAL hard-fails match the documented known-red classes (backfill/backfill-late = WI-1942 latency; incr-B→A = WI-971 fix landed, verify pending); everything else green. NOT a clean pass."
@@ -337,7 +361,7 @@ if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_res
 fi
 
 if [ ${#REDS[@]} -eq 0 ]; then
-  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed"
+  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed"
   echo "GATE: GREEN — $SUMMARY"; exit 0
 fi
 
@@ -354,8 +378,21 @@ fi
 echo "GATE: RED (${REDS[*]}) — $SUMMARY ; logs in $WORK"
 
 # ── 5. file an EI on RED (best-effort curl-MCP; the loud echo + $WORK logs are the fallback) ─
+# Dedup (RED_REFILE_H, see header): only file once per window per still-red condition —
+# this gate runs hourly and an unresolved regression stays red for days, so without this a
+# new bug work-item minted every run buries the ONE that actually needs fixing under dozens
+# of timestamp-only duplicates. Cleared on the next GREEN (above), so a real fix is never
+# hidden behind a stale suppression, and re-fires after RED_REFILE_H even while still red so
+# a forgotten/dropped tracking item doesn't go dark forever.
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
 BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE: a from-repo RED is EXPECTED while WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is open; a content-matrix, local-matrix, or build RED is a NEW regression — investigate."
-file_ei "$TITLE" "$BODY"
+RED_MARKER="$STATE_DIR/red-ei-filed"
+red_marker_age_h="$(age_h "$RED_MARKER")"
+if [ "$red_marker_age_h" -lt "$RED_REFILE_H" ]; then
+  log "RED already tracked (EI filed ${red_marker_age_h}h ago, < RED_REFILE_H ${RED_REFILE_H}h) — skipping duplicate filing. $TITLE"
+else
+  file_ei "$TITLE" "$BODY"
+  echo "$(now_s)" >"$RED_MARKER"
+fi
 check_staleness
 exit 1
