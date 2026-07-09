@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# local-matrix.sh — ONE-COMMAND local containerized 2-node federation matrix.
+# local-matrix.sh — ONE-COMMAND local containerized N-node federation matrix
+# (2-frame by default; --frames=3 for the standing 3-node coverage gap, P-006
+# of p2p-rest-lanes-2026-07-09 / umbrella P-010).
 #
 # Hetzner access is GONE (owner 2026-07-03; D-001 of
 # shared-hive-p2p-release-readiness-2026-07-03). The live federation regression
@@ -8,14 +10,18 @@
 #
 #   1. builds a tiny ubuntu-24.04 + sshd docker image (root pubkey login, the
 #      same contract a Hetzner VM gives the rig: ssh root@ip, apt, runuser),
-#   2. runs 2 frame containers on a dedicated bridge network (fixed IPs),
+#   2. runs 2 (or 3, with --frames=3) frame containers on a dedicated bridge
+#      network (fixed IPs),
 #   3. starts a host-side hyperdht TESTNET node advertised on the bridge
 #      gateway (co-located peers cannot rely on public-DHT NAT hairpinning —
 #      same reason the two-instance smokes use PAPERCUSP_DHT_BOOTSTRAP),
 #   4. execs bin/deb-hetzner-matrix.sh with RIG_FRAME_IPS + RIG_DHT_BOOTSTRAP +
 #      RIG_SSH_IDENTITY set — the WI-1544 BYO-frames seam skips the Hetzner API
 #      entirely (no HCLOUD_TOKEN needed; rig_cleanup destroys nothing — THIS
-#      script owns the frames' lifecycle and tears them down on exit).
+#      script owns the frames' lifecycle and tears them down on exit). With
+#      3 BYO ips, deb-hetzner-matrix.sh auto-registers frame 'c' (2nd member)
+#      IN ADDITION to a=owner/b=member — the live-Hetzner 2-server cap does not
+#      apply here since nothing is provisioned on Hetzner (BYO skips the API).
 #
 # This is the EXACT mode that produced the 8/8 min-bar matrix run m1783013203
 # (2026-07-02, container-grade). For a true kernel/network boundary use the
@@ -23,6 +29,10 @@
 #
 # Usage:
 #   bin/local-matrix.sh                      # full 8-scenario run (needs a built .deb)
+#   bin/local-matrix.sh --frames=3           # 3-node rig (owner + 2 members); the
+#                                            #  8-scenario matrix still runs a/b only,
+#                                            #  PLUS the membership_churn scenario
+#                                            #  which exercises frame c
 #   bin/local-matrix.sh --deb=PATH           # explicit artifact (default: newest bundle;
 #                                            #  a stale-deb warning prints if it predates HEAD)
 #   bin/local-matrix.sh --only=b5_restart,concurrent_lww
@@ -50,6 +60,7 @@ SUBNET="${PCUSP_LOCAL_RIG_SUBNET:-10.99.0.0/24}"
 GW="${PCUSP_LOCAL_RIG_GW:-10.99.0.1}"
 IP_A="${PCUSP_LOCAL_RIG_IP_A:-10.99.0.11}"
 IP_B="${PCUSP_LOCAL_RIG_IP_B:-10.99.0.12}"
+IP_C="${PCUSP_LOCAL_RIG_IP_C:-10.99.0.13}"
 # Frame/state/lock identity is scoped to the NET (2026-07-03 collision fix):
 # fixed container names made the rig ONE-PER-BOX even across separate bridge
 # networks — a run on a custom net `docker rm -f`'d the default net's LIVE
@@ -58,11 +69,11 @@ IP_B="${PCUSP_LOCAL_RIG_IP_B:-10.99.0.12}"
 # existing runs/docs are untouched; a CUSTOM net gets its own container names,
 # state file, and flock — rigs on distinct nets are independent by construction.
 if [ "$NET" = pcusp-local-rig ]; then
-  CN_A="${PCUSP_LOCAL_RIG_CN_A:-pcusp-rig-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-pcusp-rig-b}"
+  CN_A="${PCUSP_LOCAL_RIG_CN_A:-pcusp-rig-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-pcusp-rig-b}"; CN_C="${PCUSP_LOCAL_RIG_CN_C:-pcusp-rig-c}"
   STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/pcusp-local-rig.state}"
   RIG_LOCK_DEFAULT=/tmp/pcusp-local-rig.lock
 else
-  CN_A="${PCUSP_LOCAL_RIG_CN_A:-$NET-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-$NET-b}"
+  CN_A="${PCUSP_LOCAL_RIG_CN_A:-$NET-a}"; CN_B="${PCUSP_LOCAL_RIG_CN_B:-$NET-b}"; CN_C="${PCUSP_LOCAL_RIG_CN_C:-$NET-c}"
   STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/$NET.state}"
   RIG_LOCK_DEFAULT="/tmp/$NET.lock"
 fi
@@ -70,17 +81,19 @@ IMAGE_TAG=pcusp-local-frame:ubuntu24
 SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
 
 # ── args ──────────────────────────────────────────────────────────────────────
-DEB=""; ONLY=""; KEEP_UP=0; REUSE=0; MODE=run
+DEB=""; ONLY=""; KEEP_UP=0; REUSE=0; MODE=run; FRAMES=2
 for arg in "$@"; do case "$arg" in
-  --deb=*)    DEB="${arg#--deb=}" ;;
-  --only=*)   ONLY="${arg#--only=}" ;;
-  --keep-up)  KEEP_UP=1 ;;
-  --reuse)    REUSE=1 ;;
-  --list)     MODE=list ;;
-  --teardown) MODE=teardown ;;
-  -h|--help)  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --deb=*)     DEB="${arg#--deb=}" ;;
+  --only=*)    ONLY="${arg#--only=}" ;;
+  --frames=*)  FRAMES="${arg#--frames=}" ;;
+  --keep-up)   KEEP_UP=1 ;;
+  --reuse)     REUSE=1 ;;
+  --list)      MODE=list ;;
+  --teardown)  MODE=teardown ;;
+  -h|--help)   sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
 esac; done
+case "$FRAMES" in 2|3) : ;; *) echo "FATAL: --frames must be 2 or 3 (got '$FRAMES')" >&2; exit 2 ;; esac
 
 log() { echo "[local-matrix] $*" >&2; }
 
@@ -115,7 +128,7 @@ printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${RIG_LOCK_LABEL:-${USER:-?}:local-m
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
   log "teardown: frames + DHT"
-  docker rm -f "$CN_A" "$CN_B" "$NET-dht" >/dev/null 2>&1 || true
+  docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht" >/dev/null 2>&1 || true
   if [ -f "$STATE_FILE" ]; then
     local pid; pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true   # legacy host-pid DHT state
@@ -191,14 +204,20 @@ fi
 frame_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]; }
 
 # ── provision / reuse frames ─────────────────────────────────────────────────
-if [ "$REUSE" = 1 ] && frame_running "$CN_A" && frame_running "$CN_B"; then
-  log "reuse running frames $CN_A@$IP_A $CN_B@$IP_B"
+REUSE_OK=1
+frame_running "$CN_A" && frame_running "$CN_B" || REUSE_OK=0
+[ "$FRAMES" = 3 ] && { frame_running "$CN_C" || REUSE_OK=0; }
+if [ "$REUSE" = 1 ] && [ "$REUSE_OK" = 1 ]; then
+  log "reuse running frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
 else
   REUSE=0
-  docker rm -f "$CN_A" "$CN_B" >/dev/null 2>&1 || true
-  log "provision frames $CN_A@$IP_A $CN_B@$IP_B"
+  docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true
+  log "provision $FRAMES frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
   docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" "$IMAGE_TAG" >/dev/null || exit 1
   docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" "$IMAGE_TAG" >/dev/null || exit 1
+  if [ "$FRAMES" = 3 ]; then
+    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" "$IMAGE_TAG" >/dev/null || exit 1
+  fi
 fi
 
 # ARM teardown now (frames exist). --keep-up / --reuse leave everything running.
@@ -208,7 +227,8 @@ fi
 sshprobe() { ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
   -o LogLevel=ERROR -o ConnectTimeout=5 "root@$1" true 2>/dev/null; }
-for ip in "$IP_A" "$IP_B"; do
+RIG_IPS=("$IP_A" "$IP_B"); [ "$FRAMES" = 3 ] && RIG_IPS+=("$IP_C")
+for ip in "${RIG_IPS[@]}"; do
   ok=0
   for i in $(seq 1 20); do sshprobe "$ip" && { ok=1; break; }; sleep 2; done
   [ "$ok" = 1 ] || { echo "FATAL: sshd on frame $ip never answered" >&2; exit 1; }
@@ -281,8 +301,9 @@ ARGS=()
 [ -n "$DEB" ]  && ARGS+=("--deb=$DEB")
 [ -n "$ONLY" ] && ARGS+=("--only=$ONLY")
 [ "$KEEP_UP" = 1 ] && ARGS+=("--keep-up")
-log "exec deb-hetzner-matrix.sh ${ARGS[*]:-} (BYO frames: $IP_A $IP_B)"
-RIG_FRAME_IPS="$IP_A $IP_B" \
+FRAME_IPS="$IP_A $IP_B"; [ "$FRAMES" = 3 ] && FRAME_IPS="$IP_A $IP_B $IP_C"
+log "exec deb-hetzner-matrix.sh ${ARGS[*]:-} (BYO frames: $FRAME_IPS)"
+RIG_FRAME_IPS="$FRAME_IPS" \
 RIG_DHT_BOOTSTRAP="$BOOTSTRAP" \
 RIG_SSH_IDENTITY="$SSH_KEY" \
 bash "$DESKTOP_DIR/bin/deb-hetzner-matrix.sh" ${ARGS[@]+"${ARGS[@]}"}

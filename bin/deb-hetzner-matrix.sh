@@ -3,11 +3,22 @@
 # live federation regression matrix.
 #
 # The Hetzner project is capped at 2 concurrent servers (PERMANENT, owner-confirmed),
-# so we do NOT run one provision→teardown rig per brief (6 serialized = hours + 6×
-# redundant setup). Instead this runner provisions **2 frames ONCE** (a=owner,
-# b=member), publishes + joins ONE hive, peers the swarm, then sources every
-# bin/lib/scenarios/*.sh and runs each registered scenario in <order>, printing a
-# PASS/FAIL matrix. One shared live run covers all of briefs 3-8's 2-frame scenarios.
+# so on LIVE Hetzner we do NOT run one provision→teardown rig per brief (6 serialized
+# = hours + 6× redundant setup) and never provision more than 2 frames there.
+# Instead this runner provisions **2 frames ONCE** (a=owner, b=member), publishes +
+# joins ONE hive, peers the swarm, then sources every bin/lib/scenarios/*.sh and runs
+# each registered scenario in <order>, printing a PASS/FAIL matrix. One shared live
+# run covers all of briefs 3-8's 2-frame scenarios.
+#
+# 3-frame mode (P-006 of p2p-rest-lanes-2026-07-09, umbrella P-010): when
+# RIG_FRAME_IPS carries 3 ips (the local containerized rig only — see
+# bin/local-matrix.sh --frames=3; live Hetzner's cap makes this unreachable there),
+# a THIRD frame 'c' (2nd member, gh user P_C_USER) is auto-registered alongside
+# a/b. The 8 registered scenarios still only exercise a/b (unmodified — the
+# content-merge assertions are pairwise by design); frame c additionally joins the
+# hive and is exercised by the standalone membership_churn scenario
+# (bin/lib/scenarios/membership-churn.sh), which is auto-included in the run
+# whenever a 3rd frame is present.
 #
 # It carries the SAME cost-safety the base rig has: every provisioned server id is
 # recorded (rig_create_server) BEFORE anything billable, and the EXIT trap
@@ -118,6 +129,14 @@ IFS=',' read -r LOC_A LOC_B <<<"$LOCS"
 [ -n "$LOC_B" ] || LOC_B="$LOC_A"
 P_A_USER="${P_A_USER:-papercupai}"   # owner
 P_B_USER="${P_B_USER:-aviynw}"       # member
+P_C_USER="${P_C_USER:-$P_B_USER}"    # 2nd member (3-frame mode only; may share b's gh identity — a real multi-device topology)
+
+# 3-frame mode auto-detects off RIG_FRAME_IPS (BYO local rig only — see header).
+FRAME3=0
+if [ -n "${RIG_FRAME_IPS:-}" ]; then
+  read -r -a _BYO_IPS <<<"$RIG_FRAME_IPS"
+  [ "${#_BYO_IPS[@]}" -ge 3 ] && FRAME3=1
+fi
 
 # init + ARM auto-destroy BEFORE any provision (cost-safety)
 RIG_KEEP_UP="$KEEP_UP"
@@ -127,17 +146,23 @@ RIG_DEB="$DEB"
 
 rig_gate_artifact "$DEB" || exit 2
 
-# identities: a=owner, b=member (2-frame — fits the permanent 2-server cap)
+# identities: a=owner, b=member (2-frame — fits the permanent 2-server cap on
+# live Hetzner); +c=2nd member when FRAME3=1 (BYO local rig only).
 rig_set_identity a "$P_A_USER" || exit 1
 rig_set_identity b "$P_B_USER" || exit 1
+[ "$FRAME3" = 1 ] && { rig_set_identity c "$P_C_USER" || exit 1; }
 
-rig_provision "$LOC_A" "$LOC_B" || exit 3
+if [ "$FRAME3" = 1 ]; then
+  rig_provision "$LOC_A" "$LOC_B" "$LOC_B" || exit 3
+else
+  rig_provision "$LOC_A" "$LOC_B" || exit 3
+fi
 rig_setup_all || exit 4
 
-fed_log "wait embedded-PG + operator on both sidecars"
+fed_log "wait embedded-PG + operator on every sidecar"
 rig_wait_all_ready 50 || exit 5
 
-# owner publishes the hive; both frames join it (owner self-joins as a VIEW)
+# owner publishes the hive; every frame joins it (owner self-joins as a VIEW)
 REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
 rig_owner_publish_hive a "$REPO_URL" || exit 6
 rig_join_all a
@@ -146,18 +171,29 @@ rig_join_all a
 fed_log "joined — wait for peer_connect (NO restart)"
 sleep 12
 rig_wait_swarm a b 70 || echo "⚠ a↔b peer_connected NOT confirmed — scenarios may fail"
+if [ "$FRAME3" = 1 ]; then
+  rig_wait_swarm a c 70 || echo "⚠ a↔c peer_connected NOT confirmed — scenarios may fail"
+  rig_wait_swarm b c 70 || echo "⚠ b↔c peer_connected NOT confirmed — membership_churn may fail"
+fi
 
 # unique-per-run tag: scenarios suffix their feature_ids/msg_ids with this.
 MATRIX_RUN_ID="m$(date +%s)"
 export MATRIX_RUN_ID
-echo "✓ frames healthy — MATRIX_RUN_ID=$MATRIX_RUN_ID  (a=owner b=member, 2 machines, public DHT)"
+if [ "$FRAME3" = 1 ]; then
+  echo "✓ frames healthy — MATRIX_RUN_ID=$MATRIX_RUN_ID  (a=owner b=member c=member, 3 machines, public DHT)"
+else
+  echo "✓ frames healthy — MATRIX_RUN_ID=$MATRIX_RUN_ID  (a=owner b=member, 2 machines, public DHT)"
+fi
 
 # source scenarios NOW (frames are live). Registration is top-level; scn_* run below.
 source_scenarios
 
 # resolve the run set (all registered, or the --only subset), in order.
+# membership_churn needs frame c — skip it unless we're in 3-frame mode (and
+# never require the caller to remember to exclude it via --only on a 2-frame run).
 declare -a RUN_IDS=()
 while read -r id; do
+  [ "$id" = membership_churn ] && [ "$FRAME3" != 1 ] && continue
   if [ -n "$ONLY" ]; then case ",$ONLY," in *",$id,"*) RUN_IDS+=("$id") ;; esac
   else RUN_IDS+=("$id"); fi
 done < <(matrix_sorted_ids)
