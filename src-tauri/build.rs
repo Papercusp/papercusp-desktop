@@ -115,6 +115,11 @@ fn main() {
             // native terminal toggle
             "native_terminal_status",
             "native_terminal_toggle",
+            // WI-3388: resizeable/collapsible terminal dock — layout get/set
+            // (registered here to keep the WI-2143 ACL-sync guard green; the
+            // commands are in collect_commands! in main.rs)
+            "terminal_get_layout",
+            "terminal_set_layout",
             // endpoint IPC transport (currently no live JS caller, but
             // collect_commands! exposes it, so grant to stay in sync)
             "endpoint_invoke",

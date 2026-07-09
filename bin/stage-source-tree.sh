@@ -110,6 +110,11 @@ declare -a EXCLUDES=(
   --exclude='./.git'
   --exclude='./papercusp-desktop'
   --exclude='./target' --exclude='./.cargo-target'
+  # per-work-item isolated cargo target dirs (.wiNNNN-cargo-target): multi-GB
+  # build output — one swept into the 2026-07-09 0.0.5 cut and tripled the
+  # source bundle to 7.1G (plus "file changed as we read it" tar churn from
+  # the concurrent build writing it)
+  --exclude='./.wi*-cargo-target' --exclude='./*cargo-target*'
   --exclude='*/.turbo'
   --exclude='./.idea' --exclude='*/.idea'
   --exclude='./.vscode' --exclude='*/.vscode'

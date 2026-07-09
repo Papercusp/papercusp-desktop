@@ -58,6 +58,8 @@
 
     "allow-native-terminal-status",
     "allow-native-terminal-toggle",
+    "allow-terminal-get-layout",
+    "allow-terminal-set-layout",
 
     "allow-endpoint-invoke",
     "allow-endpoint-cancel",
