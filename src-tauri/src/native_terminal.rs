@@ -730,7 +730,7 @@ struct Live {
 /// surface, leaving only the webview's rail control. Persisted as "a
 /// setting" (native window chrome — the owner explicitly ruled out a nuqs
 /// URL param, which the webview's location bar has no reach into anyway).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct TerminalLayout {
     pub fraction: f32,
     pub collapsed: bool,
@@ -1740,7 +1740,9 @@ pub mod vte_embed {
         // Retained by the vbox container from here on — the raw pointer
         // stays valid for the window's lifetime; `apply_layout` re-wraps it
         // (from_glib_none) for each live divider/collapse update (WI-3388).
-        let paned_ptr: usize = paned.to_glib_none().0 as usize;
+        let paned_stash: glib::translate::Stash<'_, *mut gtk::ffi::GtkPaned, gtk::Paned> =
+            paned.to_glib_none();
+        let paned_ptr: usize = paned_stash.0 as usize;
 
         // Drive the terminal grid from the widget allocation EXPLICITLY.
         // Inside this embedding VTE's automatic allocation→grid pipeline
@@ -2817,6 +2819,67 @@ mod tests {
         // the embed dlopens). If this fails the strategy downgrade path is
         // what users without VTE get; the assert documents the dev-box rig.
         assert!(vte_embed::available());
+    }
+
+    // ── WI-3388 layout ──────────────────────────────────────────────────────
+
+    #[test]
+    fn terminal_layout_extent_resolves_fraction_or_collapses_to_zero() {
+        let l = TerminalLayout {
+            fraction: 0.5,
+            collapsed: false,
+        };
+        assert_eq!(l.extent(1000, 100, 900), 500);
+        // Clamped to bounds.
+        assert_eq!(
+            TerminalLayout {
+                fraction: 0.9,
+                collapsed: false
+            }
+            .extent(1000, 100, 400),
+            400
+        );
+        // Collapsed always resolves to 0, regardless of fraction.
+        assert_eq!(
+            TerminalLayout {
+                fraction: 0.5,
+                collapsed: true
+            }
+            .extent(1000, 100, 900),
+            0
+        );
+    }
+
+    #[test]
+    fn load_layout_falls_back_on_missing_or_corrupt_file() {
+        let default = TerminalLayout {
+            fraction: 0.42,
+            collapsed: false,
+        };
+        // Missing file.
+        let missing = std::path::Path::new("/nonexistent/wi-3388/terminal-layout.json");
+        assert_eq!(load_layout(missing, default), default);
+    }
+
+    #[test]
+    fn save_then_load_layout_roundtrips() {
+        let dir = std::env::temp_dir().join(format!(
+            "papercusp-wi3388-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("terminal-layout.json");
+        let layout = TerminalLayout {
+            fraction: 0.33,
+            collapsed: true,
+        };
+        save_layout(&path, layout);
+        let loaded = load_layout(&path, TerminalLayout::default());
+        assert_eq!(loaded, layout);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

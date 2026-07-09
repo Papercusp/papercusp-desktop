@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./FeaturesAdmin-BKAb_pUj.js";import{t as n}from"./AdminShell-Ca5KsTip.js";var r=e();function i(){return(0,r.jsx)(n,{title:`Features`,children:(0,r.jsx)(t,{})})}export{i as component};

@@ -1,0 +1,1 @@
+import{n as e,t}from"./plugin-configs-pg-CImUT2o9.js";t();export{e as loadPluginConfig};

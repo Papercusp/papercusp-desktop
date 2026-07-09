@@ -75,6 +75,33 @@ SPAN_DEFINE=""
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
+# Exe-only fast-deploy mode (EI-8798, 2026-07-09): for a Rust/UI-only change
+# where sidecar/rootfs/seed are byte-identical (FAST_ITER reuses them), the
+# ONLY changed artifact is the ~21MB papercusp-desktop.exe — the full ISCC
+# packaging (several minutes) + the 2.8GB Inno installer + a VERYSILENT
+# reinstall over the VM ssh link (which can get killed mid-extract on a long
+# blocking op, leaving a stuck *_setup.exe.tmp holding file locks) buys
+# nothing for verifying that class of change. PAPERCUSP_EXE_ONLY=1 skips Inno
+# packaging entirely and just scp's the freshly-built, freshly-signed exe(s)
+# back to $OUT_DIR/exe-only/ — copy it over an existing install by hand
+# (Copy-Item -Force over the installed .../papercusp-desktop.exe; no
+# uninstall/reinstall needed since a dependency/resource-only change wasn't
+# made). Optionally push it straight onto a running verify target: set
+# PAPERCUSP_EXE_ONLY_DEPLOY_HOST (+ _PORT/_KEY, default this build VM's) and
+# PAPERCUSP_EXE_ONLY_DEPLOY_PATH (the installed exe's path on that target) to
+# have this script taskkill the app, overwrite the exe, and leave it stopped
+# (relaunch is the caller's job — the install may be GUI or Server-role).
+# A full dependency/resource change still needs a real (non-exe-only) build.
+PAPERCUSP_EXE_ONLY="${PAPERCUSP_EXE_ONLY:-0}"
+EXE_ONLY_DEPLOY_HOST="${PAPERCUSP_EXE_ONLY_DEPLOY_HOST:-}"
+EXE_ONLY_DEPLOY_PATH="${PAPERCUSP_EXE_ONLY_DEPLOY_PATH:-}"
+EXE_ONLY_DEPLOY_PORT="${PAPERCUSP_EXE_ONLY_DEPLOY_PORT:-$VM_SSH_PORT}"
+EXE_ONLY_DEPLOY_KEY="${PAPERCUSP_EXE_ONLY_DEPLOY_KEY:-$VM_SSH_KEY}"
+if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+  echo "==> PAPERCUSP_EXE_ONLY=1: skipping ISCC/Inno packaging — collecting the built exe(s) only"
+  [[ -n "$EXE_ONLY_DEPLOY_HOST" && -z "$EXE_ONLY_DEPLOY_PATH" ]] && fail "PAPERCUSP_EXE_ONLY_DEPLOY_HOST set without PAPERCUSP_EXE_ONLY_DEPLOY_PATH"
+fi
+
 # -o IdentitiesOnly=yes: pin auth to $VM_SSH_KEY only. Without it, a loaded
 # ssh-agent with >5 keys exhausts the server's auth-tries on agent keys first
 # and fails "Too many authentication failures" before the -i key is tried
@@ -413,7 +440,11 @@ fi
 if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
   SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
 else
-  SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
+  if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC Server packaging"\nWrite-Host "[build] ISCC Server EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-Server.exe"'
+  else
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
+  fi
 fi
 
 echo "==> writing build script"
@@ -493,7 +524,15 @@ Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"
 npx tauri build --no-bundle 2>&1
 Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
 Sign-File "src-tauri\\target\\release\\papercusp-desktop.exe"
-Invoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"
+$( if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+cat <<'PSEXE'
+Write-Host "[build] EXE_ONLY: skipping ISCC GUI packaging"
+Write-Host "[build] ISCC GUI EXIT=0"
+Copy-Item -Force "src-tauri\target\release\papercusp-desktop.exe" "src-tauri\target\release\papercusp-desktop-GUI.exe"
+PSEXE
+else
+echo 'Invoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"'
+fi )
 ${SERVER_BUILD_BLOCK}
 EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
@@ -520,6 +559,44 @@ if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
     || fail "Server compile failed — see /tmp/vm-release-build.log"
   grep -q '\[build\] ISCC Server EXIT=0' /tmp/vm-release-build.log \
     || fail "Server Inno packaging failed — see /tmp/vm-release-build.log"
+fi
+
+if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+  echo "==> collecting exe-only artifact(s)"
+  OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/exe-only"
+  mkdir -p "$OUT_DIR"
+  find "$OUT_DIR" -maxdepth 1 -type f -delete
+  VM_RELEASE_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release"
+  COLLECTED=()
+  "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-GUI.exe" "$OUT_DIR/papercusp-desktop-GUI.exe" \
+    && COLLECTED+=(GUI:"$OUT_DIR/papercusp-desktop-GUI.exe")
+  if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+    "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-Server.exe" "$OUT_DIR/papercusp-desktop-Server.exe" \
+      && COLLECTED+=(Server:"$OUT_DIR/papercusp-desktop-Server.exe")
+  fi
+  [[ ${#COLLECTED[@]} -gt 0 ]] || fail "PAPERCUSP_EXE_ONLY=1 but no papercusp-desktop-*.exe came back from the VM"
+  ls -lh "$OUT_DIR"
+
+  if [[ -n "$EXE_ONLY_DEPLOY_HOST" ]]; then
+    DEPLOY_SSH=(ssh -i "$EXE_ONLY_DEPLOY_KEY" -o IdentitiesOnly=yes -p "$EXE_ONLY_DEPLOY_PORT" -o ConnectTimeout=10 "$EXE_ONLY_DEPLOY_HOST")
+    DEPLOY_SCP=(scp -i "$EXE_ONLY_DEPLOY_KEY" -o IdentitiesOnly=yes -P "$EXE_ONLY_DEPLOY_PORT" -o ConnectTimeout=10)
+    # Deploy the FIRST collected role (GUI, unless GUI-only skipped it and only
+    # Server built) — set PAPERCUSP_FAST_ITER_GUI_ONLY=1 alongside this to be
+    # explicit about which role's exe is going out when both were built.
+    DEPLOY_LOCAL="${COLLECTED[0]#*:}"
+    echo "==> EXE_ONLY deploy: pushing $(basename "$DEPLOY_LOCAL") to $EXE_ONLY_DEPLOY_HOST:$EXE_ONLY_DEPLOY_PATH"
+    # Best-effort stop: an in-use exe can't be overwritten on Windows. Ignore
+    # failure (process may not be running, or may be named differently).
+    "${DEPLOY_SSH[@]}" 'taskkill /IM papercusp-desktop.exe /F' >/dev/null 2>&1 || true
+    sleep 2
+    "${DEPLOY_SCP[@]}" "$DEPLOY_LOCAL" "$EXE_ONLY_DEPLOY_HOST":"$EXE_ONLY_DEPLOY_PATH" \
+      || fail "EXE_ONLY deploy: scp to $EXE_ONLY_DEPLOY_HOST:$EXE_ONLY_DEPLOY_PATH failed"
+    echo "==> EXE_ONLY deploy: done — app is STOPPED on $EXE_ONLY_DEPLOY_HOST; relaunch it yourself"
+  else
+    echo "==> EXE_ONLY: no PAPERCUSP_EXE_ONLY_DEPLOY_HOST set — exe(s) left in $OUT_DIR for a manual Copy-Item -Force"
+  fi
+  echo "==> done (exe-only)"
+  exit 0
 fi
 
 echo "==> collecting artifacts"

@@ -1,0 +1,1 @@
+import{n as e,t}from"./queen-wake-efficiency-DEMxyVO7.js";t();export{e as queenWakeEfficiency};

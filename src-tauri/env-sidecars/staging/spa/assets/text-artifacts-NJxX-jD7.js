@@ -1,0 +1,1 @@
+import{n as e,t}from"./text-artifacts-DLClnjCv.js";t();export{e as loadTextArtifact};
