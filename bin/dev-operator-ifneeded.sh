@@ -42,7 +42,13 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # NOTE (WI-3042): no `exec` here — the supervision loop below re-runs this
 # command after a non-zero exit (the memory-watchdog recycle path), and an
 # `exec` would replace the loop shell on the first iteration, killing the loop.
-DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+# NOTE (WI-3556, 2026-07-09): PAPERCUSP_CLUSTER=0 is PINNED. Agent sessions
+# inherit the release host's env (PAPERCUSP_CLUSTER=16 on the 128-core box);
+# without the pin an agent-launched `tauri dev` forked 16 tsx request workers
+# (~500% CPU each → host load >1000). The dev host must be single-process
+# anyway: it carries the PTY WS plane, which is incompatible with clustering
+# (hono-host.ts P3-2 note).
+DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
