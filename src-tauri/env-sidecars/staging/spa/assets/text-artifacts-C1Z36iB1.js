@@ -1,1 +1,0 @@
-import{n as e,t}from"./text-artifacts-Dkj-ethP.js";t();export{e as loadTextArtifact};

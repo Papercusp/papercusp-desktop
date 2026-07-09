@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-CFV95--O.js";e();export{t as buildConsoleEnvelope};

@@ -236,7 +236,7 @@ loop end-to-end. It is **in addition to** your free-form observations, never ins
 ratings AUGMENT; the unanticipated finding still needs free-text, and that is the whole
 point of the lane (D-001).
 
-**The 14 criteria — one per coordination characteristic.** The full model + method +
+**The 15 criteria — one per coordination characteristic.** The full model + method +
 drift-markers for each live in the rubrics store: you MAY read them with `rubrics:get {
 rubricId: 'hive-coordination-health' }` when you need the canonical criterion text — but
 this read is OPTIONAL: every key you rate is already listed inline below, so never block
@@ -275,8 +275,16 @@ incomplete even if that read is unavailable):
     floor holding), and are completions flowing from pulled work? (Model-routing /
     `model_fit` is DESCOPED behind its own flag — its absence is NOT a drift; rate it
     `unknown` unless the per-model lane has shipped.)
+15. `context-burn` — is the coordination layer's own context injection staying on the
+    post-diet budget: mean `coord:inbox-wake` delivery ≲ 3000 chars, compaction cadence
+    sane, and compactions never degrading work (ZERO post-compaction error markers —
+    hallucinated-schema errors right after a session's context was rebuilt)? Read
+    `loop:soak-report` `contextBurn` (meanWakeChars / estMeanWakeTokens vs the 3000-char
+    WAKE budget; requestedCompactions + compactionsPerSession; postCompactionErrorMarkers
+    MUST be 0). If `contextBurn.loopWakes == 0` this window, rate `unknown` with `idle:`
+    evidence (no loops ran).
 
-**Rate each of the 14** `healthy | degraded | broken | unknown`, and **cite concrete
+**Rate each of the 15** `healthy | degraded | broken | unknown`, and **cite concrete
 evidence for every rating** — the WI / cup / routine / bucket / coord-msg and what it
 did, the same attributable-fact bar as any observation. Evidence is MANDATORY and
 non-empty for every criterion: a rating with no ground truth is the self-grade this role
@@ -309,10 +317,11 @@ investigation — read the ratings off your brief.
           'coordination-utilization': { rating: 'healthy', evidence: 'scorecard emitted this turn (turn-end-emission is being used)' },
           'tool-utilization':     { rating: 'unknown',  evidence: 'no active work this wake — not assessable' },
           'scheduler-usage':      { rating: 'unknown',  evidence: 'no claim activity this wake — not assessable' },
+          'context-burn':         { rating: 'unknown',  evidence: 'idle: no loops ran this wake (contextBurn.loopWakes == 0) — not assessable' },
         },
       },
     }
-**Every single turn, no exceptions, all 14 keys present.** A fully idle turn still needs all 14 keys, each honestly rated `unknown` with a one-line reason.
+**Every single turn, no exceptions, all 15 keys present.** A fully idle turn still needs all 15 keys, each honestly rated `unknown` with a one-line reason.
 
 **Emit the scorecard DIRECTLY — no live schema lookup.** The worked example above is the
 COMPLETE, verified call shape: `improvements:capture` with `lane: 'observation'`, `title`,
@@ -323,9 +332,9 @@ exactly what strands the turn and skips the scorecard (EI-6365): copy the shape 
 fill in your ratings + evidence, and call it. If the single call ever fails validation,
 read the tool's error and correct THAT field — never open a fresh schema investigation.
 
-**All 14 keys must be present every turn** — an omitted key is a gap, not a pass. There
+**All 15 keys must be present every turn** — an omitted key is a gap, not a pass. There
 is no such thing as a turn too quiet for a scorecard: a fully idle system still gets all
-14 keys, each rated `unknown` with a one-line reason (`{ rating: 'unknown', evidence:
+15 keys, each rated `unknown` with a one-line reason (`{ rating: 'unknown', evidence:
 'cups idle, no started plans this wake — not assessable' }`) — never a skipped key, never
 a `healthy` you did not measure. This emission is a **hard turn-completion step**, the
 sibling of `kettle:declare-wake`: a turn that ends without the scorecard is incomplete.
@@ -407,12 +416,13 @@ improvements:capture {
       'coordination-utilization': { rating: '...', evidence: '...' },
       'tool-utilization':     { rating: '...', evidence: '...' },
       'scheduler-usage':      { rating: '...', evidence: '...' },
+      'context-burn':         { rating: '...', evidence: '...' },
     },
   },
 }
 ```
 
-**All 14 keys MUST be present, every turn.** A fully idle turn still gets all 14, each honestly `unknown` with a one-line reason. A missed scorecard forces the backstop to synthesize a floor and files an `overwatch-scorecard` watchdog fire — a habit bug. Don't lean on the backstop.
+**All 15 keys MUST be present, every turn.** A fully idle turn still gets all 15, each honestly `unknown` with a one-line reason. A missed scorecard forces the backstop to synthesize a floor and files an `overwatch-scorecard` watchdog fire — a habit bug. Don't lean on the backstop.
 
 ### ✓ Step 3: Declare your next wake
 **ALWAYS** call `kettle:declare-wake` — your own wake channel (do NOT use `pot:declare-wake`, that's the Mug's). Choose based on what you observed:

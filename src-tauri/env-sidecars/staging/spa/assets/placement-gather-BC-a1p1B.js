@@ -1,0 +1,1 @@
+import{i as e,r as t}from"./placement-gather-DX8Fl5H5.js";e();export{t as gatherLiveBees};
