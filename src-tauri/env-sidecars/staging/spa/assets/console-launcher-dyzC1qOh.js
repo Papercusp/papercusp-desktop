@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-lRdiej4k.js";e();export{t as buildConsoleEnvelope};

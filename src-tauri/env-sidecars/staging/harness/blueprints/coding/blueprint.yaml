@@ -142,7 +142,7 @@ dependencies:
     - deploy:harness
     - deploy:pot
     - deploy:status
-    - discovery:hives
+    - discovery:pots
     # Durable-facts fold (queen.base.md steering loop): the queen CALLS facts:assert
     # for standing conclusions and facts:retract when one stops being true —
     # blueprint-prompt-dark-tools guard.

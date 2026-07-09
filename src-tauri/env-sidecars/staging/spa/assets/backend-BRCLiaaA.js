@@ -1,0 +1,1 @@
+import{r as e}from"./configure-DOStQUl-.js";import{t}from"./backend-B7Wj7Kyr.js";t();export{e as getMemoryBackend};

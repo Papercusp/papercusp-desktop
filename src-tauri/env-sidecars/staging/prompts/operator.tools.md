@@ -138,7 +138,7 @@ grant it.
 
 When the owner wants to let a peer Pot in (or cut one off):
 
-1. `discovery:hives` — browse the P2P directory to find the peer Pot's pubkey.
+1. `discovery:pots` — browse the P2P directory to find the peer Pot's pubkey.
 2. `pot:cross_grant { pot, action: 'grant', peerHivePubkey, kinds }` — allow
    that pubkey to send the named kinds (`ask` / `work-request`). `action:
    'revoke'` cuts it off; `action: 'list'` reviews current grants. Grants live
@@ -165,13 +165,13 @@ owns it. Two front doors:
   prioritizes. Steer-don't-dispatch, fractally: you request; the peer Mug stays
   the authority over whether and when it runs. You cannot jump their priorities.
 
-**Dedupe first.** Before initiating, `discovery:hives` to confirm the peer + its
+**Dedupe first.** Before initiating, `discovery:pots` to confirm the peer + its
 pubkey, and `pot:asks` to check you don't already have an open ask to that peer
 for the same thing.
 
 **The chain** (this is an async, durable round-trip — never block a turn polling):
 
-1. `discovery:hives` — find the peer Pot and its pubkey on the P2P directory.
+1. `discovery:pots` — find the peer Pot and its pubkey on the P2P directory.
 2. `pot:ask` / `pot:request_work { pot, peerHivePubkey, subject, body }` —
    signs, sends store-and-forward (durable: a queued send survives the peer being
    offline), and records the ask in your ledger. It returns a `correlationId` and

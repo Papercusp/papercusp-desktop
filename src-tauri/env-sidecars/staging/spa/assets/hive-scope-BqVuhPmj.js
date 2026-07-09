@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{r as t}from"./harness-registry-CttOF-YA.js";function n(e){return`${r}${e}`}var r,i=e((()=>{t(),r=`hive:`}));export{i as n,n as t};
