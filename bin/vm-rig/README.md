@@ -33,19 +33,23 @@ bin/vm-rig/deploy.sh
 bin/vm-rig/diag.sh
 
 # 4. the P-059 acceptance probes
-bin/vm-rig/probe-fwd.sh    # tower→VM : PASS = key in VM coord:feed AND VM events:await fires
-bin/vm-rig/probe-rev.sh    # VM→tower : PASS = key in tower coord:feed AND tower events:await fires
+bin/vm-rig/probe-fwd.sh    # tower→VM : PASS = key in VM coord:feed AND VM events:status shows a wake record created before the 600s await window expired
+bin/vm-rig/probe-rev.sh    # VM→tower : PASS = key in tower coord:feed AND tower events:status shows a wake record created before the 600s await window expired
 ```
 
 P-059 SUCCESS = both probes green AND still green after a VM reboot
-(reboot → re-run `deploy.sh` → re-run both probes).
+(reboot → re-run `deploy.sh` → re-run both probes). Read PASS off each
+probe's `coord:feed` + `events:status` output, NOT off the await `.out`
+outcome line — a headless probe client's own await legitimately reports
+dropped/dead-waiter until P-001 (wake-executor inbox-degrade fix) lands;
+that's the last delivery hop, not a federation failure.
 
 ## Env knobs
 
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `PCUSP_VM_SSH` | `aviweiss@172.31.44.2` | ssh target for the VM end |
-| `PAPERCUSP_HONO_PORT` | `3070` | TOWER operator port (probes' tower end) |
+| `PAPERCUSP_HONO_PORT` | `3270` | TOWER operator port (probes'/diag's tower end) — the **bg-host substrate primary**, which actually holds the in-process events/coord state; `:3070` is the request-only cluster tier and gives false-negative probe results (earlier "probe failures" were this, not a federation defect) |
 | `PCUSP_PROBE_KEY` | unique per run | event key the probes emit/await |
 | `PCUSP_VM_NODE` / `PCUSP_MCP_CALL` | auto | VM-side node binary / mcp-call.mjs path (see `vmcall.sh`) |
 
@@ -60,9 +64,29 @@ P-059 SUCCESS = both probes green AND still green after a VM reboot
 - **Workspace scoping**: author VM-side state under
   `--workspace papercusp-workspace`, NOT `default` — state authored under
   `default` strands work invisible to the papercusp hive (WI-1564 class).
-- The tower end talks to `:3070` (the GREEN release operator). A fix in the
-  staging tree is NOT live there until deployed — `dev:pipeline_position`,
-  force-deploy if the drill needs it.
+- **Probe/diag await windows must be ≥600s, and tower calls must hit `:3270`
+  (bg-host substrate primary), not `:3070`** (request-only cluster tier) —
+  a 200s window expired before replication had actually applied, and calls
+  against `:3070` were reading a tier that doesn't hold the true in-process
+  substrate state. Both looked like federation failures; neither was.
+- **VM bridge NIC re-enumeration**: a VM reboot/update can renumber the
+  bridged NIC (`en1`→`en2` seen in practice) — the static IP binding does
+  NOT follow automatically and must be re-bound with `networksetup` inside
+  the VM, or the VM silently drops off `172.31.44.2` and every ssh/probe
+  call in this rig times out for a reason that looks like the bridge itself
+  is down.
+- **Packaged-app updates lose the `PAPERCUSP_DHT_BOOTSTRAP` LaunchAgent env**:
+  updating the packaged Papercusp Server.app on the VM can wipe/reset the
+  LaunchAgent's environment, dropping `PAPERCUSP_DHT_BOOTSTRAP` — re-verify
+  this env var is still set on the VM's LaunchAgent **after every app
+  update**, or the VM boots isolated (no bootstrap peer) and every probe
+  fails looking like a federation regression.
+- The tower end's **code fix / deploy target** is still `:3070` (the GREEN
+  release operator) — a fix in the staging tree is NOT live there until
+  deployed (`dev:pipeline_position`, force-deploy if the drill needs it).
+  This is separate from the `:3270` substrate-primary port the probes/diag
+  call by default above — `:3070` is where a *code change* lands; `:3270`
+  is which *port* of the running (already-deployed) operator to query.
 
 ## Files
 
@@ -72,7 +96,7 @@ P-059 SUCCESS = both probes green AND still green after a VM reboot
 | `deploy.sh` | push `vmcall.sh` + `scripts/mcp-call.mjs` onto the VM + self-test |
 | `probe-fwd.sh` | tower→VM federated-event probe (from `/tmp/p059-e1c.sh`) |
 | `probe-rev.sh` | VM→tower federated-event probe (from `/tmp/p059-rev2.sh`) |
-| `diag.sh` | tower+VM `hive:status` side-by-side + swarm log (from `/tmp/p059-diag.sh`) |
+| `diag.sh` | tower+VM `dev:dogfood_substrate_status` side-by-side + swarm log (from `/tmp/p059-diag.sh`) |
 
 For the containerized 2-node **matrix** rig see `bin/local-matrix.sh`; for the
 fast single-box smokes see `bin/two-instance-*-smoke.sh`.
