@@ -4328,6 +4328,106 @@ fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
     }
 }
 
+/// WI-3388 — the terminal's current user layout (divider width fraction +
+/// collapsed/rail state). Read on mount by the web UI's `<TerminalDivider>`
+/// so it renders the persisted position instead of flashing a default.
+#[tauri::command]
+#[specta::specta]
+fn terminal_get_layout(
+    nt: tauri::State<native_terminal::NativeTerminal>,
+) -> native_terminal::TerminalLayout {
+    nt.get_layout()
+}
+
+/// WI-3388 — set the terminal's layout (either field optional — pass just
+/// `collapsed` for the rail toggle, or just `fraction` for a divider drag),
+/// persist it, and apply it LIVE to whichever backend is running. A no-op
+/// apply (persisted only) for NewWindow/Disabled — there's no native surface
+/// to resize.
+#[tauri::command]
+#[specta::specta]
+fn terminal_set_layout(
+    app: AppHandle,
+    fraction: Option<f32>,
+    collapsed: Option<bool>,
+) -> Result<native_terminal::TerminalLayout, String> {
+    let nt = app.state::<native_terminal::NativeTerminal>();
+    let resolved = nt.set_layout(fraction, collapsed);
+    apply_terminal_layout_live(&app, resolved);
+    Ok(resolved)
+}
+
+/// Apply `layout` to whichever backend is currently running. The X11 glued
+/// path reads `NativeTerminal`'s shared layout state directly off its own
+/// glue-loop thread (no action needed here beyond the `set_layout` write
+/// above); the embedded views (one window, a native widget/view resized in
+/// place) need an explicit re-layout call on their own main thread, using
+/// the handle each embed stashed at attach time.
+fn apply_terminal_layout_live(app: &AppHandle, layout: native_terminal::TerminalLayout) {
+    let nt = app.state::<native_terminal::NativeTerminal>();
+    match nt.strategy {
+        #[cfg(target_os = "linux")]
+        native_terminal::TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::Vte) => {
+            let Some((paned_ptr, side)) = nt.vte_paned() else {
+                return;
+            };
+            let Some(window) = app.get_webview_window("main") else {
+                return;
+            };
+            let _ = window.run_on_main_thread(move || {
+                native_terminal::vte_embed::apply_layout(paned_ptr, side, layout);
+            });
+        }
+        #[cfg(target_os = "macos")]
+        native_terminal::TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::SwiftTerm) => {
+            let Some((ns_window, term)) = nt.swiftterm_handle() else {
+                return;
+            };
+            let cfg = nt.config.clone();
+            let Some(window) = app.get_webview_window("main") else {
+                return;
+            };
+            let _ = window.run_on_main_thread(move || {
+                if let Err(e) = native_terminal::swiftterm_embed::set_layout(
+                    ns_window as *mut std::ffi::c_void,
+                    term,
+                    layout.fraction,
+                    cfg.min_px,
+                    cfg.max_px,
+                    layout.collapsed,
+                ) {
+                    eprintln!("[papercusp-desktop] native-terminal: set_layout failed: {e}");
+                }
+            });
+        }
+        #[cfg(target_os = "windows")]
+        native_terminal::TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::ConPty) => {
+            let Some((parent, term, webview)) = nt.win_handles() else {
+                return;
+            };
+            let cfg = nt.config.clone();
+            std::thread::spawn(move || {
+                let webview_hwnd = if webview == 0 { None } else { Some(webview) };
+                if let Err(e) = native_terminal::win_embed::set_layout(
+                    parent as *mut std::ffi::c_void,
+                    term,
+                    webview_hwnd,
+                    layout.fraction,
+                    cfg.min_px,
+                    cfg.max_px,
+                    layout.collapsed,
+                ) {
+                    eprintln!("[papercusp-desktop] native-terminal: set_layout failed: {e}");
+                }
+            });
+        }
+        // GluedGhosttyX11: the glue-loop thread reads the shared layout
+        // state every tick (~150ms) and applies it itself — nothing to do
+        // here. NewWindow/Disabled/unbuilt EmbeddedView: no native surface.
+        _ => {}
+    }
+}
+
 /// Make the bundled chat-dock binaries (`pui`, `zellij`) discoverable + point
 /// `pui` at the bundled companion plugin, so the dock (`pui chat` = zellij + the
 /// pui-companion plugin) works from a PACKAGED app. Every dock launcher — the
@@ -4443,19 +4543,32 @@ fn start_native_terminal(app: &AppHandle) {
                     }
                     let spec = native_terminal::GhosttySpec::dock();
                     let cfg = native_terminal::GlueConfig::from_env();
+                    // WI-3388: seed the embed with the PERSISTED fraction
+                    // (not the env-configured default) so a relaunch opens
+                    // at the user's last divider position.
+                    let layout = handle
+                        .state::<native_terminal::NativeTerminal>()
+                        .get_layout();
                     let embedded = match (win.gtk_window(), win.default_vbox()) {
                         (Ok(gtk_win), Ok(vbox)) => native_terminal::vte_embed::embed_into_window(
                             &gtk_win,
                             &vbox,
                             &spec.command,
                             cfg.side,
-                            cfg.fraction,
+                            layout.fraction,
                             &spec.background,
                         ),
                         _ => Err("no gtk window / default vbox".to_string()),
                     };
                     match embedded {
-                        Ok(()) => println!("[papercusp-desktop] native-terminal: VTE view embedded"),
+                        Ok(paned_ptr) => {
+                            println!("[papercusp-desktop] native-terminal: VTE view embedded");
+                            let nt = handle.state::<native_terminal::NativeTerminal>();
+                            nt.set_vte_paned(paned_ptr, cfg.side);
+                            if layout.collapsed {
+                                native_terminal::vte_embed::apply_layout(paned_ptr, cfg.side, layout);
+                            }
+                        }
                         Err(e) => {
                             eprintln!(
                                 "[papercusp-desktop] native-terminal VTE embed failed: {e} — falling back to new-window"
@@ -4498,19 +4611,36 @@ fn start_native_terminal(app: &AppHandle) {
                 let res = win.run_on_main_thread(move || {
                     let spec = native_terminal::GhosttySpec::dock();
                     let cfg = native_terminal::GlueConfig::from_env();
-                    let embedded = match win2.ns_window() {
-                        Ok(ns) => native_terminal::swiftterm_embed::embed_into_window(
-                            ns as *mut std::ffi::c_void,
+                    let layout = handle
+                        .state::<native_terminal::NativeTerminal>()
+                        .get_layout();
+                    let ns_addr: Option<usize> = win2.ns_window().ok().map(|p| p as usize);
+                    let embedded = match ns_addr {
+                        Some(ns_addr) => native_terminal::swiftterm_embed::embed_into_window(
+                            ns_addr as *mut std::ffi::c_void,
                             &spec.command,
-                            cfg.fraction,
+                            layout.fraction,
                             cfg.min_px,
                             cfg.max_px,
                         ),
-                        Err(e) => Err(format!("no ns_window: {e}")),
+                        None => Err("no ns_window".to_string()),
                     };
                     match embedded {
-                        Ok(()) => {
-                            println!("[papercusp-desktop] native-terminal: SwiftTerm view embedded")
+                        Ok(term_handle) => {
+                            println!("[papercusp-desktop] native-terminal: SwiftTerm view embedded");
+                            let nt = handle.state::<native_terminal::NativeTerminal>();
+                            let ns_addr = ns_addr.unwrap_or(0);
+                            nt.set_swiftterm_handle(ns_addr, term_handle);
+                            if layout.collapsed {
+                                let _ = native_terminal::swiftterm_embed::set_layout(
+                                    ns_addr as *mut std::ffi::c_void,
+                                    term_handle,
+                                    layout.fraction,
+                                    cfg.min_px,
+                                    cfg.max_px,
+                                    true,
+                                );
+                            }
                         }
                         Err(e) => {
                             eprintln!(
@@ -4555,16 +4685,35 @@ fn start_native_terminal(app: &AppHandle) {
                 std::thread::sleep(std::time::Duration::from_millis(2000));
                 let spec = native_terminal::GhosttySpec::dock();
                 let cfg = native_terminal::GlueConfig::from_env();
+                let layout = handle
+                    .state::<native_terminal::NativeTerminal>()
+                    .get_layout();
                 match native_terminal::win_embed::embed_into_window(
                     hwnd_addr as *mut std::ffi::c_void,
                     &spec.command,
-                    cfg.fraction,
+                    layout.fraction,
                     cfg.min_px,
                     cfg.max_px,
                 ) {
-                    Ok(pid) => println!(
-                        "[papercusp-desktop] native-terminal: ConPTY console embedded (pid={pid})"
-                    ),
+                    Ok(handles) => {
+                        println!(
+                            "[papercusp-desktop] native-terminal: ConPTY console embedded (pid={})",
+                            handles.pid
+                        );
+                        let nt = handle.state::<native_terminal::NativeTerminal>();
+                        nt.set_win_handles(hwnd_addr as isize, handles.term_hwnd, handles.webview_hwnd);
+                        if layout.collapsed {
+                            let _ = native_terminal::win_embed::set_layout(
+                                hwnd_addr as *mut std::ffi::c_void,
+                                handles.term_hwnd,
+                                handles.webview_hwnd,
+                                layout.fraction,
+                                cfg.min_px,
+                                cfg.max_px,
+                                true,
+                            );
+                        }
+                    }
                     Err(e) => {
                         eprintln!(
                             "[papercusp-desktop] native-terminal ConPTY embed failed: {e} — falling back to new-window"
@@ -4591,7 +4740,19 @@ fn init_native_terminal(app: &tauri::App) {
         "[papercusp-desktop] native-terminal strategy: {}",
         strategy.label()
     );
-    app.manage(native_terminal::NativeTerminal::new(strategy));
+    let nt = native_terminal::NativeTerminal::new(strategy);
+    // WI-3388: load any persisted divider width/collapsed state (a no-op
+    // default on first run) before the terminal launches, so the very first
+    // embed/glue-loop tick already has the user's last layout instead of
+    // flashing the default fraction. Best-effort — an unresolvable config
+    // dir just means layout won't survive relaunch this session.
+    match app.path().app_config_dir() {
+        Ok(dir) => nt.init_layout_persistence(dir.join("terminal-layout.json")),
+        Err(e) => eprintln!(
+            "[papercusp-desktop] native-terminal: no app_config_dir ({e}) — layout won't persist"
+        ),
+    }
+    app.manage(nt);
 
     // The main window must exist before we launch (the glue resolves it by pid).
     if app.get_webview_window("main").is_none() {
@@ -4716,6 +4877,8 @@ pub fn run() {
             native_console::external_console_run,
             native_terminal_status,
             native_terminal_toggle,
+            terminal_get_layout,
+            terminal_set_layout,
             endpoint_ipc::endpoint_invoke,
             endpoint_ipc::endpoint_cancel,
             dev_bridge::__dev_bridge_result,

@@ -707,18 +707,134 @@ struct Live {
     child: std::process::Child,
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// WI-3388 — user-driven layout: draggable divider + collapse-to-rail
+//
+// Owner ask 2026-07-08: every backend rebuilds onto ONE divider mechanism —
+// a draggable divider (in the web UI, at the boundary between the native
+// terminal and the webview) that sets the terminal's width, persisted across
+// relaunch, plus a full collapse to a thin re-open rail. This is layout
+// STATE the backends apply live; the rail's `‹/›` toggle button itself is a
+// web UI element (`<TerminalDivider>`) at the shared edge — collapsing a
+// backend just frees its native screen/widget space back to the GUI so the
+// webview's own edge (now flush) can host the control, exactly the same
+// shape across GluedGhosttyX11 (a real sibling window), the embedded views
+// (one window, native widget/view resized in place), and NewWindow/Disabled
+// (layout is inert — nothing native to resize).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The terminal's user-controlled layout. `fraction` is resolution-
+/// independent (a fraction of the GUI window's docking-axis size, like
+/// `GlueConfig::fraction`) so it's meaningful after a relaunch on a
+/// differently-sized display; `collapsed` fully hides the terminal's native
+/// surface, leaving only the webview's rail control. Persisted as "a
+/// setting" (native window chrome — the owner explicitly ruled out a nuqs
+/// URL param, which the webview's location bar has no reach into anyway).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct TerminalLayout {
+    pub fraction: f32,
+    pub collapsed: bool,
+}
+
+impl TerminalLayout {
+    /// The extent (px) this layout resolves to against a GUI window whose
+    /// docking-axis size is `axis`, given the configured bounds. Collapsed
+    /// always resolves to 0 — the native surface takes no space at all, so
+    /// the GUI (and the webview's own rail control at its now-flush edge)
+    /// gets the full axis back. Pure.
+    pub fn extent(&self, axis: i32, min_px: i32, max_px: i32) -> i32 {
+        if self.collapsed {
+            0
+        } else {
+            (axis as f32 * self.fraction)
+                .round()
+                .clamp(min_px.min(max_px) as f32, max_px.max(min_px) as f32) as i32
+        }
+    }
+}
+
+/// Load the persisted layout from `path`, falling back to `default` on any
+/// error (missing file — first run — or a corrupt/foreign JSON blob; never a
+/// reason to fail terminal startup). Pure over the read.
+fn load_layout(path: &std::path::Path, default: TerminalLayout) -> TerminalLayout {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<TerminalLayout>(&s).ok())
+        .map(|mut l| {
+            l.fraction = l.fraction.clamp(0.05, 0.95);
+            l
+        })
+        .unwrap_or(default)
+}
+
+/// Persist `layout` to `path` (best-effort — a write failure is logged, not
+/// fatal: the in-memory layout still applies for this session).
+fn save_layout(path: &std::path::Path, layout: TerminalLayout) {
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[papercusp-desktop] native-terminal: layout persist dir {dir:?} failed: {e}");
+            return;
+        }
+    }
+    match serde_json::to_string(&layout) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                eprintln!("[papercusp-desktop] native-terminal: layout persist write failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("[papercusp-desktop] native-terminal: layout serialize failed: {e}"),
+    }
+}
+
 pub struct NativeTerminal {
     pub strategy: TerminalStrategy,
     pub config: GlueConfig,
     live: Mutex<Option<Live>>,
+    /// The current user layout, shared with whichever backend loop/handler
+    /// needs to apply it live (the X11 glue-loop thread reads it every
+    /// tick; the embedded-view backends re-read it on each `set_layout`
+    /// call). `None` persist path ⇒ layout still works for this session,
+    /// just doesn't survive relaunch (e.g. no resolvable app-config dir).
+    /// `NativeTerminal` itself is Tauri-managed ('static, shared by
+    /// reference across threads via `State`), so a plain `Mutex` — no `Arc`
+    /// — is enough here.
+    layout: Mutex<TerminalLayout>,
+    persist_path: Mutex<Option<std::path::PathBuf>>,
+    /// Backend-specific live handle so `set_layout` can re-layout an
+    /// already-embedded view without re-attaching it. Linux VTE: the
+    /// `GtkPaned*` as a `usize` (dereferenced only on the GTK main thread).
+    #[cfg(target_os = "linux")]
+    vte_paned: Mutex<Option<(usize, DockSide)>>,
+    /// macOS SwiftTerm: (NSWindow*, retained LocalProcessTerminalView*) as
+    /// `usize`s (dereferenced only on the AppKit main thread).
+    #[cfg(target_os = "macos")]
+    swiftterm_handle: Mutex<Option<(usize, usize)>>,
+    /// Windows ConPTY: (parent HWND, term HWND, webview HWND) as `isize`s
+    /// (HWND is a thin pointer wrapper; Win32 calls are thread-safe by
+    /// window handle, unlike the GTK/AppKit main-thread-only widgets).
+    #[cfg(target_os = "windows")]
+    win_handles: Mutex<Option<(isize, isize, isize)>>,
 }
 
 impl NativeTerminal {
     pub fn new(strategy: TerminalStrategy) -> NativeTerminal {
+        let config = GlueConfig::from_env();
+        let default_layout = TerminalLayout {
+            fraction: config.fraction,
+            collapsed: false,
+        };
         NativeTerminal {
             strategy,
-            config: GlueConfig::from_env(),
+            config,
             live: Mutex::new(None),
+            layout: Mutex::new(default_layout),
+            persist_path: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            vte_paned: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            swiftterm_handle: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            win_handles: Mutex::new(None),
         }
     }
 
@@ -733,6 +849,40 @@ impl NativeTerminal {
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|l| l.child.id()))
+    }
+
+    /// Wire up persistence: load any layout already on disk at `path` (a
+    /// no-op default when there's none yet) and remember `path` for future
+    /// `set_layout` writes. Call once, right after `new`, before launch.
+    pub fn init_layout_persistence(&self, path: std::path::PathBuf) {
+        let loaded = load_layout(&path, *self.layout.lock().unwrap());
+        *self.layout.lock().unwrap() = loaded;
+        *self.persist_path.lock().unwrap() = Some(path);
+    }
+
+    pub fn get_layout(&self) -> TerminalLayout {
+        *self.layout.lock().unwrap()
+    }
+
+    /// Update the layout (either field may be omitted to leave it
+    /// unchanged), persist it, and return the resolved value. Does NOT apply
+    /// it live — the caller (the `terminal_set_layout` command) does that
+    /// per-backend, since only it knows which window/widget handles to hop
+    /// to which main thread.
+    pub fn set_layout(&self, fraction: Option<f32>, collapsed: Option<bool>) -> TerminalLayout {
+        let mut guard = self.layout.lock().unwrap();
+        if let Some(f) = fraction {
+            guard.fraction = f.clamp(0.05, 0.95);
+        }
+        if let Some(c) = collapsed {
+            guard.collapsed = c;
+        }
+        let resolved = *guard;
+        drop(guard);
+        if let Some(path) = self.persist_path.lock().unwrap().clone() {
+            save_layout(&path, resolved);
+        }
+        resolved
     }
 }
 
@@ -807,6 +957,10 @@ mod x11_glue {
         /// Whether the GUI was hidden/iconified last tick — the minimize-follow
         /// baseline (P-005): a transition iconifies/restores the sibling.
         last_gui_hidden: bool,
+        /// Whether the sibling is currently collapsed (WI-3388 — unmapped,
+        /// GUI grown to fill its space). Distinct from `last_gui_hidden`
+        /// (that's the GUI's own iconify state, which collapse-follows too).
+        collapsed: bool,
     }
 
     impl GlueSession {
@@ -855,6 +1009,7 @@ mod x11_glue {
                 gui_settle: 0,
                 last_active: None,
                 last_gui_hidden: false,
+                collapsed: false,
             };
             let mut sibling = None;
             for _ in 0..40 {
@@ -1073,6 +1228,71 @@ mod x11_glue {
             self.last_active = active;
         }
 
+        /// WI-3388: apply an explicit user layout (the webview divider drag
+        /// or the collapse rail) — distinct from the D-012 WM-edge-drag path
+        /// below, which classifies an *observed* geometry departure. This is
+        /// a *command*: fraction/collapsed changed in the shared layout
+        /// state, so pin the sibling (and, on a collapse transition, the
+        /// GUI) to the new target right now. Returns `true` if it acted this
+        /// tick (the caller should skip the normal at-rest/drift flush —
+        /// geometry commands already went out).
+        fn apply_user_layout(&mut self, layout: super::TerminalLayout) -> bool {
+            let fraction_changed = (layout.fraction - self.fraction).abs() > 0.001;
+            let collapse_changed = layout.collapsed != self.collapsed;
+            if !fraction_changed && !collapse_changed {
+                return false;
+            }
+            self.fraction = layout.fraction;
+            let Some(main) = self.geometry(self.gui) else {
+                return false;
+            };
+            if layout.collapsed {
+                // Unmap the sibling and grow the GUI to fill the space it
+                // freed (mirrors the D-012 seam-reflow math with a
+                // zero-extent target).
+                let zero_target = compute_sibling_geometry(main, self.side, 1, self.gap);
+                let grown = reflow_gui_for_seam(self.side, main, zero_target, self.gap);
+                let _ = self.conn.unmap_window(self.sibling);
+                let _ = self.conn.flush();
+                self.move_resize(self.gui, grown.x, grown.y, grown.w, grown.h);
+                self.last_gui = Some(grown);
+                self.gui_settle = 2;
+                self.extent = Some(0);
+                self.last_target = Some(zero_target);
+                self.collapsed = true;
+                return true;
+            }
+            // Expanding (or a plain fraction change while already expanded):
+            // resolve a fresh extent from the (possibly new) fraction against
+            // the CURRENT gui rect.
+            let extent = sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px);
+            self.extent = Some(extent);
+            if self.collapsed {
+                // Was collapsed: remap, then shrink the GUI back to make room
+                // before placing the sibling in the reclaimed band.
+                let _ = self.conn.map_window(self.sibling);
+                let target = compute_sibling_geometry(main, self.side, extent, self.gap);
+                let shrunk = reflow_gui_for_seam(self.side, main, target, self.gap);
+                self.move_resize(self.gui, shrunk.x, shrunk.y, shrunk.w, shrunk.h);
+                self.last_gui = Some(shrunk);
+                self.gui_settle = 2;
+                let t2 = compute_sibling_geometry(shrunk, self.side, extent, self.gap);
+                self.move_resize(self.sibling, t2.x, t2.y, t2.w, t2.h);
+                self.restack_above(self.sibling, self.gui);
+                self.last_target = Some(t2);
+            } else {
+                // Already expanded — just a fraction change (the divider was
+                // dragged in the webview): resize the sibling in place, GUI
+                // untouched (matches the plain-resize tick's target math).
+                let target = compute_sibling_geometry(main, self.side, extent, self.gap);
+                self.move_resize(self.sibling, target.x, target.y, target.w, target.h);
+                self.last_target = Some(target);
+                self.last_gui = Some(main);
+            }
+            self.collapsed = false;
+            true
+        }
+
         /// One glue step: read the GUI geometry and pin the sibling flush to it.
         /// Re-asserts on `force` (warmup), target change (GUI moved), or drift
         /// (the sibling jumped on its own — ghostty occasionally re-applies its
@@ -1081,8 +1301,17 @@ mod x11_glue {
         /// a real reset). The split is BIDIRECTIONAL (D-012): a drag of the
         /// terminal's own seam/outer edge is classified apart from drift and
         /// adopted (a seam drag reflows the GUI) instead of snapped back.
-        /// Returns `(target, changed, drifted)` when it moved.
-        pub fn tick(&mut self, force: bool) -> Option<(Rect, bool, bool)> {
+        /// `layout` is the current WI-3388 user layout (webview divider/rail);
+        /// a change there is applied FIRST and short-circuits the rest of the
+        /// tick. Returns `(target, changed, drifted)` when it moved.
+        pub fn tick(&mut self, force: bool, layout: super::TerminalLayout) -> Option<(Rect, bool, bool)> {
+            if self.apply_user_layout(layout) {
+                return self.last_target.map(|t| (t, true, false));
+            }
+            if self.collapsed {
+                // Nothing to track while collapsed — the sibling is unmapped.
+                return None;
+            }
             /// Drift tolerance: bigger than terminal cell-snap, far smaller
             /// than a real geometry reset.
             const DRIFT_TOL: i32 = 40;
@@ -1445,8 +1674,9 @@ pub mod vte_embed {
         side: DockSide,
         fraction: f32,
         background: &str,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         use gtk::prelude::*;
+        use glib::translate::ToGlibPtr;
 
         let vte = lib().ok_or("libvte-2.91 (gtk3) is not loadable")?;
         // SAFETY: vte_terminal_new returns a floating GtkWidget*.
@@ -1488,13 +1718,16 @@ pub mod vte_embed {
         match side {
             DockSide::Left | DockSide::Top => {
                 // resize=true on BOTH panes keeps allocations proportional on
-                // window resize; shrink=false keeps panes from collapsing to 0.
-                paned.pack1(&term, true, false);
-                paned.pack2(&webview, true, false);
+                // window resize. shrink=true (WI-3388 — was false) lets the
+                // divider go all the way to 0 for a full collapse-to-rail;
+                // the drag itself is still bounded by the divider's own
+                // clamp in the web UI (`<TerminalDivider>`), not by GTK.
+                paned.pack1(&term, true, true);
+                paned.pack2(&webview, true, true);
             }
             DockSide::Right | DockSide::Bottom => {
-                paned.pack1(&webview, true, false);
-                paned.pack2(&term, true, false);
+                paned.pack1(&webview, true, true);
+                paned.pack2(&term, true, true);
             }
         }
         let total = match orientation {
@@ -1504,6 +1737,10 @@ pub mod vte_embed {
         paned.set_position(initial_split_position(side, total, fraction));
         vbox.pack_start(&paned, true, true, 0);
         paned.show_all();
+        // Retained by the vbox container from here on — the raw pointer
+        // stays valid for the window's lifetime; `apply_layout` re-wraps it
+        // (from_glib_none) for each live divider/collapse update (WI-3388).
+        let paned_ptr: usize = paned.to_glib_none().0 as usize;
 
         // Drive the terminal grid from the widget allocation EXPLICITLY.
         // Inside this embedding VTE's automatic allocation→grid pipeline
@@ -1625,7 +1862,32 @@ pub mod vte_embed {
                 std::ptr::null_mut(),
             );
         }
-        Ok(())
+        Ok(paned_ptr)
+    }
+
+    /// Re-layout an already-embedded terminal paned to `layout` — the live
+    /// divider-drag + collapse-to-rail apply (WI-3388). MUST run on the GTK
+    /// main thread. `paned_ptr` is the raw `GtkPaned*` `embed_into_window`
+    /// returned; it stays alive for the window's lifetime (held by the vbox
+    /// container), so re-wrapping it here is safe.
+    pub fn apply_layout(paned_ptr: usize, side: DockSide, layout: super::TerminalLayout) {
+        use gtk::prelude::*;
+        // SAFETY: see the doc comment above — the paned outlives this call.
+        let paned: gtk::Paned =
+            unsafe { glib::translate::from_glib_none(paned_ptr as *mut gtk::ffi::GtkPaned) };
+        let total = match paned.orientation() {
+            gtk::Orientation::Horizontal => paned.allocated_width(),
+            _ => paned.allocated_height(),
+        };
+        let position = if layout.collapsed {
+            match side {
+                DockSide::Left | DockSide::Top => 0,
+                DockSide::Right | DockSide::Bottom => total,
+            }
+        } else {
+            initial_split_position(side, total, layout.fraction)
+        };
+        paned.set_position(position);
     }
 }
 
@@ -1657,9 +1919,22 @@ pub mod swiftterm_embed {
         args_len: i32,
     ) -> *mut c_void;
 
+    /// WI-3388 live re-layout — see `pcterm_set_layout` in Shim.swift.
+    type FnSetLayout = unsafe extern "C" fn(
+        ns_window: *mut c_void,
+        term: *mut c_void,
+        fraction: f64,
+        min_px: f64,
+        max_px: f64,
+        collapsed: bool,
+    ) -> bool;
+
     struct Shim {
         _lib: libloading::Library,
         attach_left: FnAttachLeft,
+        /// `None` on an older shim dylib built before WI-3388 — the divider/
+        /// collapse just becomes a no-op rather than a load failure.
+        set_layout: Option<FnSetLayout>,
     }
     // SAFETY: immutable after load; called only on the AppKit main thread.
     unsafe impl Send for Shim {}
@@ -1709,8 +1984,13 @@ pub mod swiftterm_embed {
                         Ok(s) => *s,
                         Err(_) => continue,
                     };
+                    let set_layout = l
+                        .get::<FnSetLayout>(b"pcterm_set_layout\0")
+                        .ok()
+                        .map(|s| *s);
                     return Some(Shim {
                         attach_left,
+                        set_layout,
                         _lib: l,
                     });
                 }
@@ -1783,7 +2063,7 @@ pub mod swiftterm_embed {
         fraction: f32,
         min_px: i32,
         max_px: i32,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         prepare_dock_env();
         // SwiftTerm posix_spawns the exe with NO PATH search → resolve a bare
         // "pui" to its bundled absolute path (else startProcess fails silently
@@ -1824,7 +2104,61 @@ pub mod swiftterm_embed {
         if handle.is_null() {
             return Err("pcterm_attach_left returned null".into());
         }
-        Ok(())
+        // Kept (was previously discarded) so `set_layout` can re-layout this
+        // exact terminal view later — the shim's retained pointer IS the
+        // handle a live divider-drag/collapse re-targets (WI-3388).
+        Ok(handle as usize)
+    }
+
+    /// Re-layout an already-attached terminal to `layout` — the live
+    /// divider-drag + collapse-to-rail apply (WI-3388). MUST run on the
+    /// AppKit main thread. A no-op (`Ok(())`) on a shim dylib built before
+    /// this landed (`set_layout` unresolved) rather than an error, so an
+    /// unrebuilt dev shim doesn't break the terminal — just the resize.
+    pub fn set_layout(
+        ns_window: *mut c_void,
+        term_handle: usize,
+        fraction: f32,
+        min_px: i32,
+        max_px: i32,
+        collapsed: bool,
+    ) -> Result<(), String> {
+        let shim = lib().ok_or("PapercuspTermShim dylib not loadable")?;
+        let Some(set_layout) = shim.set_layout else {
+            return Ok(());
+        };
+        // SAFETY: ns_window/term_handle are the live pointers `embed_into_window`
+        // returned for this session; the shim only reads them for this call.
+        let ok = unsafe {
+            set_layout(
+                ns_window,
+                term_handle as *mut c_void,
+                fraction as f64,
+                min_px as f64,
+                max_px as f64,
+                collapsed,
+            )
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err("pcterm_set_layout returned false (stale window/terminal handle)".into())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl NativeTerminal {
+    /// Remember the (NSWindow*, retained LocalProcessTerminalView*) handle
+    /// pair (WI-3388) so a later `set_layout` can re-layout it live without
+    /// re-attaching. Set once, right after a successful
+    /// `swiftterm_embed::embed_into_window`.
+    pub fn set_swiftterm_handle(&self, ns_window: usize, term: usize) {
+        *self.swiftterm_handle.lock().unwrap() = Some((ns_window, term));
+    }
+
+    pub fn swiftterm_handle(&self) -> Option<(usize, usize)> {
+        *self.swiftterm_handle.lock().unwrap()
     }
 }
 
@@ -1907,16 +2241,26 @@ pub mod win_embed {
         ctx.found
     }
 
+    /// (console pid — for shutdown kill, term HWND, webview HWND) — the
+    /// handles WI-3388's `set_layout` re-targets on a live divider drag or
+    /// collapse, so the caller doesn't have to re-resolve them.
+    pub struct EmbedHandles {
+        pub pid: u32,
+        pub term_hwnd: isize,
+        pub webview_hwnd: Option<isize>,
+    }
+
     /// Spawn the console hosting `command`, wait for its window, glue it as a
     /// left-band CHILD of `tauri_hwnd` and shrink the WebView2 child to the
-    /// remainder. Returns the console pid (for shutdown kill).
+    /// remainder. Returns the resolved handles (for shutdown kill + a later
+    /// `set_layout`).
     pub fn embed_into_window(
         tauri_hwnd: *mut c_void,
         command: &[String],
         fraction: f32,
         min_px: i32,
         max_px: i32,
-    ) -> Result<u32, String> {
+    ) -> Result<EmbedHandles, String> {
         let parent = HWND(tauri_hwnd);
         let (exe, rest) = command.split_first().ok_or("empty terminal command")?;
         // CREATE_NEW_CONSOLE → the child gets its OWN (ConPTY-backed) console
@@ -1949,16 +2293,77 @@ pub mod win_embed {
             .clamp(min_px.min(max_px), max_px.max(min_px))
             .min(w - 50);
 
+        let webview = find_webview_child(parent);
         unsafe {
             // Child style BEFORE SetParent (Win32 docs ordering).
             SetWindowLongPtrW(term, GWL_STYLE, (WS_CHILD.0 | WS_VISIBLE.0) as isize);
             SetParent(term, parent).map_err(|e| format!("SetParent: {e}"))?;
             let _ = MoveWindow(term, 0, 0, extent, h, true);
-            if let Some(webview) = find_webview_child(parent) {
+            if let Some(webview) = webview {
                 let _ = MoveWindow(webview, extent, 0, w - extent, h, true);
             }
         }
-        Ok(pid)
+        Ok(EmbedHandles {
+            pid,
+            term_hwnd: term.0 as isize,
+            webview_hwnd: webview.map(|w| w.0 as isize),
+        })
+    }
+
+    /// Re-layout the glued console + WebView2 child to `layout` — the live
+    /// divider-drag + collapse-to-rail apply (WI-3388). `collapsed` moves the
+    /// console off-screen-width (0 extent) and grows the webview to fill;
+    /// restoring resolves a fresh extent from `fraction`. UNVERIFIED like the
+    /// rest of this spike (no Windows box to confirm the console actually
+    /// paints — see the module doc) — code-complete, ships gated the same as
+    /// the base embed.
+    pub fn set_layout(
+        parent_hwnd: *mut c_void,
+        term_hwnd: isize,
+        webview_hwnd: Option<isize>,
+        fraction: f32,
+        min_px: i32,
+        max_px: i32,
+        collapsed: bool,
+    ) -> Result<(), String> {
+        let parent = HWND(parent_hwnd);
+        let term = HWND(term_hwnd as *mut c_void);
+        let mut rc = RECT::default();
+        unsafe { GetClientRect(parent, &mut rc) }.map_err(|e| e.to_string())?;
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        let extent = if collapsed {
+            0
+        } else {
+            ((w as f32 * fraction) as i32)
+                .clamp(min_px.min(max_px), max_px.max(min_px))
+                .min(w - 50)
+        };
+        unsafe {
+            let _ = MoveWindow(term, 0, 0, extent, h, true);
+            if let Some(webview_hwnd) = webview_hwnd {
+                let webview = HWND(webview_hwnd as *mut c_void);
+                let _ = MoveWindow(webview, extent, 0, (w - extent).max(1), h, true);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl NativeTerminal {
+    /// Remember the (parent, term, webview) HWNDs (WI-3388) so a later
+    /// `set_layout` can re-layout without re-resolving the window tree. Set
+    /// once, right after a successful `win_embed::embed_into_window`.
+    pub fn set_win_handles(&self, parent: isize, term: isize, webview: Option<isize>) {
+        *self.win_handles.lock().unwrap() = Some((parent, term, webview.unwrap_or(0)));
+    }
+
+    /// (parent, term, webview) — webview is 0 when it was never resolved
+    /// (treat as "no webview HWND to move", matching the embed's own
+    /// `Option`).
+    pub fn win_handles(&self) -> Option<(isize, isize, isize)> {
+        *self.win_handles.lock().unwrap()
     }
 }
 
@@ -1969,6 +2374,17 @@ pub mod win_embed {
 
 #[cfg(target_os = "linux")]
 impl NativeTerminal {
+    /// Remember the embedded VTE paned handle (WI-3388) so a later
+    /// `set_layout` can re-layout it live without re-attaching. Set once,
+    /// right after a successful `vte_embed::embed_into_window`.
+    pub fn set_vte_paned(&self, paned_ptr: usize, side: DockSide) {
+        *self.vte_paned.lock().unwrap() = Some((paned_ptr, side));
+    }
+
+    pub fn vte_paned(&self) -> Option<(usize, DockSide)> {
+        *self.vte_paned.lock().unwrap()
+    }
+
     /// Spawn the borderless Ghostty sibling hosting the chat dock (`pui chat`,
     /// P-013 / D-011). Idempotent
     /// — a no-op if already running. The X11 window is resolved + first-glued
@@ -2056,7 +2472,8 @@ impl NativeTerminal {
             }
             // Warmup re-asserts the placement for the first ~2s so we win
             // ghostty applying its own initial geometry after we placed it.
-            if let Some((t, changed, drifted)) = sess.tick(tick < 12) {
+            let layout = *self.layout.lock().unwrap();
+            if let Some((t, changed, drifted)) = sess.tick(tick < 12, layout) {
                 if debug {
                     println!(
                         "[nt-debug] move -> ({},{},{},{}) changed={changed} drifted={drifted}",

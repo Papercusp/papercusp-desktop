@@ -75,7 +75,15 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22${op_hostfwd}" \
   -device virtio-net-pci,netdev=net0 \
   "${fed_nic[@]}" \
-  -vga "${VM_VGA:-qxl}" -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
+  # VM_VGA default virtio (was qxl until 2026-07-09): Ubuntu 24.04's qxl X DDX
+  # (xserver-xorg-video-qxl) segfaults Xorg in xf86ProbeOutputModes on any
+  # client RandR re-probe — tao/GTK monitor enumeration at Papercusp GUI
+  # startup crash-looped the whole X session (desktop-auto-update-operational
+  # -2026-07-09 P-006 investigation; Xorg.0.log.old backtrace: RRGetInfo →
+  # xf86ProbeOutputModes → xf86DuplicateMode SIGSEGV). virtio-vga uses the
+  # stable in-tree modesetting driver; spice still works. Set VM_VGA=qxl to
+  # reproduce the old behavior (or when a guest lacks virtio_gpu).
+  -vga "${VM_VGA:-virtio}" -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
   -device virtio-serial-pci \
   -chardev spicevmc,id=spicechannel0,name=vdagent \
   -device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0 \

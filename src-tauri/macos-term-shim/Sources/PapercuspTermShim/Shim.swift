@@ -77,3 +77,38 @@ public func pcterm_attach_left(
     term.startProcess(executable: String(cString: exe), args: args, environment: envArray)
     return Unmanaged.passRetained(term).toOpaque()
 }
+
+/// WI-3388: re-layout an already-attached terminal (from `pcterm_attach_left`,
+/// whose retained pointer the Rust side now keeps instead of discarding) to a
+/// new LEFT `fraction`, or fully collapsed (`collapsed == true`, extent 0 —
+/// the terminal view is hidden and the webview takes the full window; the
+/// re-open rail control itself lives in the webview, at its now-flush left
+/// edge). Must be called on the main thread (the Rust side hops via
+/// `run_on_main_thread`, same as the initial attach). Returns false if the
+/// window/terminal pointers are stale (e.g. the window closed).
+@_cdecl("pcterm_set_layout")
+public func pcterm_set_layout(
+    _ nsWindowPtr: UnsafeMutableRawPointer?,
+    _ termPtr: UnsafeMutableRawPointer?,
+    _ fraction: Double,
+    _ minPx: Double,
+    _ maxPx: Double,
+    _ collapsed: Bool
+) -> Bool {
+    guard let nsWindowPtr, let termPtr else { return false }
+    let window = Unmanaged<NSWindow>.fromOpaque(nsWindowPtr).takeUnretainedValue()
+    guard let content = window.contentView else { return false }
+    let term = Unmanaged<LocalProcessTerminalView>.fromOpaque(termPtr).takeUnretainedValue()
+    let bounds = content.bounds
+    let extent: CGFloat = collapsed
+        ? 0
+        : min(max(bounds.width * fraction, minPx), max(maxPx, minPx))
+
+    term.frame = NSRect(x: 0, y: 0, width: extent, height: bounds.height)
+    term.isHidden = collapsed
+    if let webview = findWebView(content) {
+        webview.frame = NSRect(
+            x: extent, y: 0, width: bounds.width - extent, height: bounds.height)
+    }
+    return true
+}
