@@ -584,11 +584,35 @@ if [[ "$CHANNEL" != "stable" ]]; then
   PRERELEASE_FLAG="--prerelease"
 fi
 
+# ── GitHub caps release assets at 2 GiB — an oversized upload fails the WHOLE
+# `gh release upload` batch. Filter oversized artifacts out of the UPLOAD set
+# only: they stay listed in latest.json, and the operator's
+# /api/updates/download serves them from PAPERCUSP_RELEASE_HOST instead
+# (desktop-auto-update-operational-2026-07-09 P-004). ──
+GH_ASSET_CAP=2147483648
+UPLOAD_ARTIFACTS=()
+OVERSIZED=()
+for f in "${ARTIFACTS[@]}"; do
+  sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+  if (( sz >= GH_ASSET_CAP )); then
+    OVERSIZED+=("$f")
+  else
+    UPLOAD_ARTIFACTS+=("$f")
+  fi
+done
+if (( ${#OVERSIZED[@]} > 0 )); then
+  echo "⚠ ${#OVERSIZED[@]} artifact(s) exceed GitHub's 2 GiB asset cap — NOT uploaded to the release:"
+  for f in "${OVERSIZED[@]}"; do
+    echo "    $(basename "$f") ($(du -h "$f" | cut -f1))"
+  done
+  echo "  Host these at PAPERCUSP_RELEASE_HOST — the update manifest falls back there via latest.json."
+fi
+
 if gh release view "$TAG" --repo Papercusp/papercusp-desktop >/dev/null 2>&1; then
   echo "    release exists; uploading artifacts with --clobber"
-  gh release upload "$TAG" "${ARTIFACTS[@]}" "$LATEST_JSON" --repo Papercusp/papercusp-desktop --clobber
+  gh release upload "$TAG" "${UPLOAD_ARTIFACTS[@]}" "$LATEST_JSON" --repo Papercusp/papercusp-desktop --clobber
 else
-  gh release create "$TAG" "${ARTIFACTS[@]}" "$LATEST_JSON" \
+  gh release create "$TAG" "${UPLOAD_ARTIFACTS[@]}" "$LATEST_JSON" \
     --repo Papercusp/papercusp-desktop \
     --title "Papercusp desktop $VERSION ($CHANNEL)" \
     --notes-file "$NOTES_FILE" \

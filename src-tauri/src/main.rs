@@ -4056,9 +4056,25 @@ fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
             "sidecar port not yet known; try again after boot completes".to_string()
         })?
     };
+    // GUI and Server are two products built from this same codebase
+    // (tauri.server.conf.json overlays productName) — release assets are
+    // product-named, so the manifest route scopes asset matching by this
+    // param (desktop-auto-update-operational-2026-07-09 P-003). Without
+    // it the route could hand the GUI a Server installer or vice versa.
+    let product = if app
+        .config()
+        .product_name
+        .as_deref()
+        .map(|n| n.to_ascii_lowercase().contains("server"))
+        .unwrap_or(false)
+    {
+        "server"
+    } else {
+        "gui"
+    };
     Ok(format!(
-        "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}",
-        port
+        "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}&product={}",
+        port, product
     ))
 }
 
@@ -4096,6 +4112,17 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
 #[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
+    // Linux: the plugin's only install path is an AppImage self-swap. On a
+    // .deb install (no APPIMAGE env) the swap fails mid-flight with an opaque
+    // rename/permission error — fail EARLY with the sentinel the UpdateChip
+    // fallback matches (it opens the releases page instead).
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        return Err(
+            "no_compatible_assets: this Linux install is not an AppImage — auto-swap unavailable"
+                .to_string(),
+        );
+    }
     let endpoint = resolve_update_endpoint(&app)?;
     let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
     let updater = app
@@ -5092,6 +5119,20 @@ pub fn run() {
                             println!(
                                 "[papercusp-desktop] WSL became Ready post-boot — spawning the sidecar in-process (no restart, WI-3407)"
                             );
+                            // WI-3407 (serve-spawn leg): `via_wsl` was computed at
+                            // STARTUP (~line 5017) when WSL was InstalledNoDistro, so
+                            // it is FALSE here. Reusing that stale value launches
+                            // serve.mjs with the WINDOWS `node` from the
+                            // `\\?\C:\...\sidecar` cwd, where Node's CJS resolver
+                            // realpathSync-EISDIRs on the bare `C:` drive ref → serve
+                            // crash-loops → operator FATAL@120s (run C, 2026-07-09).
+                            // We only reach this branch BECAUSE WSL is now Ready
+                            // (`status` above), which is exactly should_route_via_wsl's
+                            // Ready predicate, so routing via WSL is unconditionally
+                            // correct — override to true and re-publish the route flag
+                            // for AppHandle-less callers (native pty) before spawning.
+                            let via_wsl = true;
+                            wsl_setup::set_route_active(via_wsl);
                             // WI-3044: WSL is usable now — refresh the Windows
                             // `psu` launcher + PATH off-thread (shells to powershell).
                             std::thread::spawn(wsl_setup::ensure_windows_cli_shims);
