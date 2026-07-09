@@ -3310,6 +3310,70 @@ fn redirect_own_stdio(workspace_home: &std::path::Path, basename: &str) {
 /// (~/.papercusp/endpoint-ipc.json) is the one channel that also covers the
 /// --ensure reuse case, so redirecting stdout is safe.
 #[allow(clippy::too_many_arguments)]
+/// Spawn the operator sidecar (`papercusp serve`) and wire its respawn
+/// supervisor + off-thread boot-wait. Callable from EITHER the Server-role
+/// setup fast path (WSL already Ready / non-Windows) OR the Windows
+/// deferred-boot watcher once WSL flips Ready — the watcher calls this
+/// IN-PROCESS instead of breakaway-restarting a second instance.
+///
+/// WI-3407: the old deferred path spawned a fresh instance (via
+/// `wsl_finalize_ready`) to re-run setup with WSL now Ready. That second
+/// instance raced the STILL-ALIVE deferred Server for the per-bundle
+/// single-instance lock, lost (`on_second_instance` rejected it), and left the
+/// persisted finalize flag latched so no retry ever fired — every pristine
+/// first boot wedged with an empty serve.log + the GUI's 120s operator FATAL.
+/// This process is already the singleton lock holder, so it just spawns the
+/// sidecar itself. Nothing here touches the Tauri main thread (only a process
+/// spawn + `app.state()` + thread spawns), so it is safe off the watcher thread.
+/// The WSL-independent tray / global shortcut / login-autostart are installed by
+/// server setup BEFORE the WSL gate, so this path owns only the sidecar.
+fn bring_up_sidecar(
+    app: &tauri::AppHandle,
+    via_wsl: bool,
+    port: u16,
+    sidecar_dir: std::path::PathBuf,
+    pg_port_hint: u16,
+    shared_state_dir: std::path::PathBuf,
+    workspace_home: std::path::PathBuf,
+) {
+    let serve_child = match spawn_serve(
+        via_wsl,
+        port,
+        &sidecar_dir,
+        pg_port_hint,
+        &shared_state_dir,
+        &workspace_home,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[papercusp-desktop] failed to spawn serve: {}", e);
+            return;
+        }
+    };
+
+    let state: tauri::State<SidecarState> = app.state();
+    *state.child.lock().unwrap() = Some(serve_child);
+
+    // WI-2667/WI-3170/WI-3270 (respawn-with-backoff), shared with the Linux
+    // GUI self-host path (spawn_self_hosted_sidecar).
+    spawn_serve_supervisor(
+        app.clone(),
+        via_wsl,
+        port,
+        sidecar_dir.clone(),
+        pg_port_hint,
+        shared_state_dir.clone(),
+        workspace_home.clone(),
+    );
+
+    // finish_boot waits for operator readiness + wires endpoint-IPC OFF-thread
+    // (P-053): the setup thread / watcher must never block on the ~120s
+    // first-boot initdb + migration replay.
+    let app_handle = app.clone();
+    let workspace_home_bg = workspace_home;
+    std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg, via_wsl));
+}
+
 fn spawn_serve(
     via_wsl: bool,
     port_hint: u16,
@@ -4984,6 +5048,25 @@ pub fn run() {
                 }
             }
 
+            // WSL-INDEPENDENT server setup — install NOW, before the WSL gate,
+            // so the Windows deferred-boot path (pristine first run, WSL not yet
+            // Ready) gets the tray + global shortcut + login-autostart WITHOUT a
+            // restart. The old code ran these only in the post-WSL tail and
+            // reached that tail via a breakaway restart, which raced the
+            // single-instance lock and wedged (WI-3407). None depend on WSL or
+            // the sidecar.
+            // WI-2648: the always-on Server owns the docs-search palette global
+            // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
+            // GUI is open, and the tray's rebind control is same-process.
+            docs_search::register_shortcut(app);
+            // The backend has no window, so the tray both keeps the app alive and
+            // gives the user a place to open the GUI, change the docs-search
+            // shortcut, or quit; auto-start means psu works right after login.
+            if let Err(e) = install_server_tray(app) {
+                eprintln!("[papercusp-desktop] tray install failed: {e}");
+            }
+            enable_login_autostart(app);
+
             #[cfg(target_os = "windows")]
             {
                 let status = wsl_setup::detect(&app.handle());
@@ -4992,25 +5075,35 @@ pub fn run() {
                         "[papercusp-desktop] WSL not Ready — deferring sidecar spawn until onboarding finishes (detect: {:?})",
                         status
                     );
-                    // Reload-proof finalize watcher: the gate requests the
-                    // post-onboarding restart only when ITS page observed the
-                    // PendingBootstrap→Ready transition — a ref that any
-                    // document reload wipes (the sync-connectivity recovery
-                    // reload landed mid-bootstrap on the first strict clean
-                    // pass and stranded the user on a Ready-but-no-sidecar
-                    // app, found live 2026-06-11). Watch from the SHELL
-                    // instead: when detect() flips Ready, run the same
-                    // finalize (breakaway restart). wsl_finalize_ready's
-                    // atomic guard makes gate+watcher double-fire safe.
+                    // Reload-proof finalize watcher: watch from the SHELL (not
+                    // the reloadable gate page) — when detect() flips Ready,
+                    // spawn the sidecar IN-PROCESS. This process is already the
+                    // live singleton Server (holds the single-instance lock), so
+                    // it just does its deferred job. The OLD path breakaway-
+                    // restarted a 2nd instance (wsl_finalize_ready) to re-run
+                    // setup with WSL Ready; that instance lost the single-instance
+                    // race to this still-alive one and left the sidecar unspawned
+                    // forever — every pristine first boot wedged (WI-3407).
                     let watcher_handle = app.handle().clone();
                     std::thread::spawn(move || loop {
                         std::thread::sleep(std::time::Duration::from_secs(10));
                         let status = wsl_setup::detect(&watcher_handle);
                         if matches!(status.state, wsl_setup::WslState::Ready) {
                             println!(
-                                "[papercusp-desktop] WSL became Ready post-boot — restarting to spawn the sidecar"
+                                "[papercusp-desktop] WSL became Ready post-boot — spawning the sidecar in-process (no restart, WI-3407)"
                             );
-                            let _ = wsl_setup::wsl_finalize_ready(watcher_handle.clone());
+                            // WI-3044: WSL is usable now — refresh the Windows
+                            // `psu` launcher + PATH off-thread (shells to powershell).
+                            std::thread::spawn(wsl_setup::ensure_windows_cli_shims);
+                            bring_up_sidecar(
+                                &watcher_handle,
+                                via_wsl,
+                                port,
+                                sidecar_dir,
+                                pg_port_hint,
+                                shared_state_dir,
+                                workspace_home,
+                            );
                             return;
                         }
                     });
@@ -5022,62 +5115,19 @@ pub fn run() {
                 // powershell.exe and must never hold up boot.
                 std::thread::spawn(wsl_setup::ensure_windows_cli_shims);
             }
-            let serve_child = match spawn_serve(
+            // Spawn + wire the operator sidecar. Fast path (WSL already Ready /
+            // non-Windows) runs it inline here; the Windows deferred watcher above
+            // calls the SAME helper in-process once WSL flips Ready — no restart,
+            // no second instance (WI-3407). Tray / shortcut / autostart already ran.
+            bring_up_sidecar(
+                app.handle(),
                 via_wsl,
                 port,
-                &sidecar_dir,
+                sidecar_dir,
                 pg_port_hint,
-                &shared_state_dir,
-                &workspace_home,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[papercusp-desktop] failed to spawn serve: {}", e);
-                    return Ok(());
-                }
-            };
-
-            let state: tauri::State<SidecarState> = app.state();
-            *state.child.lock().unwrap() = Some(serve_child);
-
-            // WI-2667/WI-3170/WI-3270 (respawn-with-backoff), extracted to
-            // spawn_serve_supervisor (WI-1878) so the Linux GUI self-host path
-            // (spawn_self_hosted_sidecar) can share the exact same supervision.
-            spawn_serve_supervisor(
-                app.handle().clone(),
-                via_wsl,
-                port,
-                sidecar_dir.clone(),
-                pg_port_hint,
-                shared_state_dir.clone(),
-                workspace_home.clone(),
+                shared_state_dir,
+                workspace_home,
             );
-
-            // WI-2648: the always-on Server owns the docs-search palette global
-            // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
-            // GUI is open, and the tray's rebind control (below) is same-process.
-            docs_search::register_shortcut(app);
-
-            // Server role: tray/menubar presence + login auto-start. The
-            // backend has no window, so the tray both keeps the app alive and
-            // gives the user a place to open the GUI, change the docs-search
-            // shortcut, or quit; auto-start means psu works right after login
-            // without opening anything.
-            if let Err(e) = install_server_tray(app) {
-                eprintln!("[papercusp-desktop] tray install failed: {e}");
-            }
-            enable_login_autostart(app);
-
-            // (P-053) setup() must NOT block on operator readiness — it runs
-            // on the main thread before the event loop starts, so the old
-            // 120s discovery poll here froze the still-unpainted window for
-            // the whole first boot (initdb + full migration replay) and
-            // risked the macOS unresponsive-app watchdog. finish_boot waits,
-            // wires endpoint-IPC, and feeds the bootstrap page its base — or
-            // a visible failure state — off-thread.
-            let app_handle = app.handle().clone();
-            let workspace_home_bg = workspace_home.clone();
-            std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg, via_wsl));
 
             Ok(())
         })

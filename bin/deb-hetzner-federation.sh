@@ -31,7 +31,7 @@
 #
 # Env / creds:
 #   HCLOUD_TOKEN            Hetzner API token (default: ~/.papercusp/hcloud-token)
-#   HETZNER_SSH_KEY_ID      ssh key id registered in the project (default 113417406)
+#   HETZNER_SSH_KEY_ID      ssh key id registered in the project (default 114898429 — 'papercusp-frame-deploy' on the 2026-07-09 account)
 #   HETZNER_SSH_IDENTITY    matching private key (default ~/.ssh/papercusp-latitude-frame)
 #   gh auth: papercupai + aviynw (per-frame GH_TOKEN identity, like vm-federation.sh)
 #

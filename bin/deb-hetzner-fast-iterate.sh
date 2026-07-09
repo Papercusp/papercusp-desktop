@@ -38,7 +38,7 @@
 #
 # Env / creds (identical to deb-hetzner-federation.sh):
 #   HCLOUD_TOKEN            Hetzner API token   (default ~/.papercusp/hcloud-token)
-#   HETZNER_SSH_KEY_ID      ssh key id          (default 113417406)
+#   HETZNER_SSH_KEY_ID      ssh key id          (default 114898429)
 #   HETZNER_SSH_IDENTITY    private key         (default ~/.ssh/papercusp-latitude-frame)
 #   gh auth: papercupai + aviynw (per-frame GH_TOKEN identity)
 #   PCUSP_FAST_STATE        state-file path     (default /tmp/deb-hzfast-state)
@@ -79,7 +79,7 @@ esac; done
 STATE_FILE="${PCUSP_FAST_STATE:-/tmp/deb-hzfast-state}"
 TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
 [ -n "$TOKEN" ] || die "no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token)"
-SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-113417406}"
+SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-114898429}"
 SSH_IDENTITY="${HETZNER_SSH_IDENTITY:-$HOME/.ssh/papercusp-latitude-frame}"
 P_A_USER="${P_A_USER:-papercupai}"; P_B_USER="${P_B_USER:-aviynw}"
 HONO_PORT=39070; PG_PORT=39532

@@ -328,6 +328,15 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
     `fleet:spawn` / `fleet:launch-on-plan`) takes one of three: a **pool id** → pin via the
     gateway (hard, no failover); **`auto`** → the gateway auto-routes the pool + fails over;
     **`default`** (or omitted) → the system credential, gateway skipped (**the default**).
+    **Do NOT substitute your own capacity read for this default.** A tight/near-walled pool is
+    NOT a reason to preemptively pick `auto` "to get failover" — that is the owner's call, not
+    yours. The default stays the **system account** even when a preflight looks scarce; switching
+    to `auto` or any non-default routing requires the owner's EXPLICIT choice. If you believe
+    auto's failover would genuinely help, SURFACE it as a one-line suggestion in your spawn
+    disclosure (*"…the pool is tight — say `auto` if you want gateway failover"*) and let the
+    owner decide — never silently launch on `auto` because your own capacity check looked tight.
+    (This is the research-desk 2026-07-08 miss: a capacity preflight looked scarce, so the leader
+    self-switched to `auto` the owner never asked for.)
   - **Model** — name what you're spawning with: *"using model `<the default>` — let me know if
     you want a different one."* Override with the `model` (`<modelId>[:<effort>]` spec) or
     `tier` (the named menu) arg.

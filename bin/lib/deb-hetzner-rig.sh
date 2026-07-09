@@ -104,13 +104,15 @@ rig_init() {
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
-  # is required — Hetzner access is GONE (owner 2026-07-03, D-001 of
-  # shared-hive-p2p-release-readiness-2026-07-03); local frames are the proof of
-  # record. bin/local-matrix.sh is the one-command local bring-up.
+  # is required. Hetzner access was gone 2026-07-03→2026-07-09 (D-001 of
+  # shared-hive-p2p-release-readiness-2026-07-03); a NEW Hetzner account is live
+  # since 2026-07-09 — token at ~/.papercusp/hcloud-token, SSH key
+  # 'papercusp-frame-deploy' id 114898429. bin/local-matrix.sh remains the
+  # one-command LOCAL bring-up (no spend).
   if [ -z "$RIG_TOKEN" ] && [ -z "${RIG_FRAME_IPS:-}" ]; then
-    echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token) — Hetzner access is gone; for LOCAL frames set RIG_FRAME_IPS (one-command: bin/local-matrix.sh)" >&2; return 1
+    echo "FATAL: no HCLOUD_TOKEN (or ~/.papercusp/hcloud-token); for LOCAL frames set RIG_FRAME_IPS (one-command: bin/local-matrix.sh)" >&2; return 1
   fi
-  RIG_SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-113417406}"
+  RIG_SSH_KEY_ID="${HETZNER_SSH_KEY_ID:-114898429}"
   # BYO seam: an inherited RIG_SSH_IDENTITY (bin/local-matrix.sh exports the
   # local frames' key ~/.papercusp/local-rig-ssh) WINS — rig_init must NOT
   # clobber it back to the Hetzner default. The old unconditional overwrite +
