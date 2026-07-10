@@ -1,0 +1,17 @@
+import{n as e,o as t}from"./chunk-CMxvf4Kt.js";import{t as n}from"./__vite-browser-external-CM3Eme-n.js";import{q as r,t as i}from"./src-C8OEUO3c.js";import{n as a,t as o}from"./pg-transient-retry-DaH-NVVQ.js";function s(e){return e??r().sql}function c(){return`${(0,h.hostname)()}:${{}.PAPERCUSP_HONO_PORT??`dev`}#${process.pid}`}async function l(e,t){try{let n={...e.detail??{},host:c()};await s(t)`
+      INSERT INTO harness_shared.pipeline_events (workspace_id, install_slug, kind, status, detail)
+      VALUES (${e.workspaceId||`*`}, ${e.installSlug}, ${e.kind}, ${e.status},
+              ${JSON.stringify(n)}::text::jsonb)
+    `}catch(t){console.warn(`[pipeline-events] append failed (${e.kind}/${e.status}): ${t instanceof Error?t.message:t}`)}}function u(e){return{sinceMs:e,gitSync:{total:0,synced:0,nothing:0,conflict:0,error:0},mergeResolver:{total:0,ok:0,failed:0,error:0},greenCheckpoint:{total:0,advanced:0,upToDate:0,notGreen:0,notFastForward:0,createFailed:0},deploy:{total:0,ok:0,rolledBack:0,failed:0,refused:0}}}function d(e,t){let n=u(t);for(let t of e){let e=Number(t.n)||0;t.kind===`git_sync`?(n.gitSync.total+=e,t.status===`synced`?n.gitSync.synced+=e:t.status===`nothing`?n.gitSync.nothing+=e:t.status===`conflict`?n.gitSync.conflict+=e:t.status===`error`&&(n.gitSync.error+=e)):t.kind===`merge_resolver`?(n.mergeResolver.total+=e,t.status===`ok`?n.mergeResolver.ok+=e:t.status===`failed`?n.mergeResolver.failed+=e:t.status===`error`&&(n.mergeResolver.error+=e)):t.kind===`green_checkpoint`?(n.greenCheckpoint.total+=e,t.status===`advanced`?n.greenCheckpoint.advanced+=e:t.status===`up-to-date`?n.greenCheckpoint.upToDate+=e:t.status===`not-green`?n.greenCheckpoint.notGreen+=e:t.status===`not-fast-forward`?n.greenCheckpoint.notFastForward+=e:t.status===`create-failed`&&(n.greenCheckpoint.createFailed+=e)):t.kind===`deploy`&&(n.deploy.total+=e,t.status===`ok`?n.deploy.ok+=e:t.status===`rolled-back`?n.deploy.rolledBack+=e:t.status===`failed`?n.deploy.failed+=e:t.status===`refused`&&(n.deploy.refused+=e))}return n}async function f(e,t,n){let r=Date.now()-t*1e3;try{return d(await a(()=>s(n)`
+        SELECT kind, status, count(*)::int AS n
+          FROM harness_shared.pipeline_events
+         WHERE install_slug = ${e}
+           AND created_at >= now() - make_interval(secs => ${t})
+         GROUP BY kind, status
+      `,{label:`summarizePipelineWindow`}),r)}catch(e){return console.warn(`[pipeline-events] summarize failed: ${e instanceof Error?e.message:e}`),u(r)}}async function p(e,t=25,n){try{return(await a(()=>s(n)`
+        SELECT id::text, kind, status, detail, created_at
+          FROM harness_shared.pipeline_events
+         WHERE install_slug = ${e}
+         ORDER BY created_at DESC
+         LIMIT ${Math.min(Math.max(t,1),200)}
+      `,{label:`recentPipelineEvents`})).map(e=>({id:e.id,kind:e.kind,status:e.status,detail:m(e.detail),createdAtMs:e.created_at instanceof Date?e.created_at.getTime():new Date(e.created_at).getTime()}))}catch(e){return console.warn(`[pipeline-events] recent failed: ${e instanceof Error?e.message:e}`),[]}}function m(e){if(e&&typeof e==`object`)return e;if(typeof e==`string`)try{let t=JSON.parse(e);return t&&typeof t==`object`?t:{}}catch{return{}}return{}}var h,g=e((()=>{h=t(n(),1),i(),o()}));export{f as i,g as n,p as r,l as t};

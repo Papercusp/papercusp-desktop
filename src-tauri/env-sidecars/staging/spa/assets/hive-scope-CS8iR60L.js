@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t}from"./harness-registry-4XlYUozf.js";function n(e){return`${r}${e}`}var r,i=e((()=>{t(),r=`hive:`}));export{i as n,n as t};

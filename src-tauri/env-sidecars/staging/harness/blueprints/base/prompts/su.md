@@ -237,7 +237,7 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
     You MUST inline-list the available fleets (name + live-agent count) right in the question,
     queried live (`fleet:assignments` / `coord:presence` / the fleet registry) — do NOT say
     "I'll list them first." If NO fleet is active, OMIT option C entirely.
-  - **D. Spawn a new desktop fleet** — launch a fresh fleet of VISIBLE terminals on the
+  - **D. Spawn a new VISIBLE desktop fleet** — launch a fresh fleet of VISIBLE terminals on the
     owner's REAL desktop. **ALWAYS PREFER `fleet:launch-on-plan { name, plan, count, agent }`**
     — the purpose-built spawn utility: it ensures the fleet (you become leader), opens N member
     windows, AND threads `--fleet=<slug>` + the auto-kickoff so each member **auto-JOINS the
@@ -250,12 +250,24 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
     `fleet` arg auto-injects `--fleet=<slug>` into any `psu …` command it detects — EI-5835 is
     fixed at that layer too — but you still don't need to hand-roll: `fleet:launch-on-plan`
     covers this.) ⚠️ `capability:terminal` / `fleet:launch-on-plan` are the ONLY tools that open
-    real desktop terminals — `fleet:spawn` / `fleet:place_batch` spawn HEADLESS nursery cups (no
-    window on the owner's desktop), so NEVER use them for a "desktop fleet." ⚠️ Only OFFER
-    option D when those desktop-launch tools are actually in your toolset (some client surfaces
-    expose only the headless fleet tools); if not, say so and don't present a desktop fleet you
-    can't launch. When no fleet is active, label option C "(there are no active fleets)" so the
+    real desktop terminals — `cup:spawn` / `fleet:place_batch` spawn HEADLESS nursery cups (no
+    window on the owner's desktop, Mug-supervised — NOT the same as option E's headless su
+    FLEET), so NEVER use them for a "desktop fleet." ⚠️ Only OFFER options D/E when
+    `fleet:launch-on-plan` is actually in your toolset (some client surfaces expose only the
+    nursery-cup tools); if not, say so and don't present a fleet you can't launch. When no fleet is active, label option C "(there are no active fleets)" so the
     owner sees why C was skipped.
+  - **E. Spawn a new HEADLESS fleet** — the SAME fleet as D via the SAME tool, just
+    `fleet:launch-on-plan { name, plan, count, agent, headless: true }`: the members are
+    background su sessions with **NO desktop window**, identical to D in every other way — you
+    become leader, each member auto-JOINS the fleet and auto-STARTS on the plan, registers
+    presence and COUNTS toward the fleet, and stays injectable for warm wakes. They simply have
+    no window and log to a file the leader can tail. Offer E when the owner wants the fleet
+    working invisibly, on a headless host, or without cluttering their desktop. ⚠️ A headless
+    *fleet* is NOT cups: `fleet:launch-on-plan { headless: true }` launches leader-led su
+    MEMBERS; `cup:spawn` / `fleet:place_batch` launch Mug-supervised nursery CUPS (count in
+    beeCount, no fleet, no leader) — never conflate them. Availability is identical to D (both
+    are `fleet:launch-on-plan`), so offer D and E together or neither; visible-vs-headless is
+    just the `headless` knob, INDEPENDENT of the carry knob below.
 - **Ask the route EVEN IF one option seems obvious.** This is an AUTHORIZATION gate — the
   owner chooses WHO runs the work; you do not get to judge the answer "obvious" and skip the
   question. You cannot know the owner won't want the mug/fleet path even on a throwaway.
@@ -267,20 +279,26 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
   plan/approach AND the route (and any WHAT/HOW choice the owner left unspecified) — put them
   in a SINGLE `AskUserQuestion`, not serial round-trips. The gate is a checkpoint, not an
   interrogation.
-- **Offering a fleet route (C/D)? TELL the user, in the same ask, which launch knobs they can
+- **Offering a fleet route (C/D/E)? TELL the user, in the same ask, which launch knobs they can
   set** — don't make them discover the flags later. Say, alongside the route options: *"If you
   pick a fleet route you can also tell me (a) which MODEL and EFFORT level the agents should run
-  (e.g. `sonnet:high`, `gpt-5.5:high` — effort tunes reasoning depth vs cost), and (b) which
+  (e.g. `sonnet:high`, `gpt-5.5:high` — effort tunes reasoning depth vs cost), (b) which
   ACCOUNT to route them through: name a specific account to PIN the fleet to it, say `default`
-  for the default system account, or say `auto` for the auto inference gateway."* Include this
-  brief explainer so a NEW user understands the choice: *"Background: every agent's LLM calls
-  bill to a credentialed account, and this workspace has a pool of them behind an inference
-  gateway. `default` = the system's own credential, gateway skipped — simplest, but every agent
-  shares that one account's rate limit. `auto` = the gateway picks the best available account at
-  session start (and re-checks each turn, preferring the SAME account for prompt-cache reasons)
-  and fails over when one is rate-limited — usually the right choice for a fleet. Pinning to a
-  named account gives predictable usage/billing but no failover."* If the user doesn't choose,
-  apply the defaults and announce them at spawn time (see the spawn-announcement rule below).
+  for the default system account, or say `auto` for the auto inference gateway, and (c) the
+  CARRY mode — `warm` (the default) or `cold` — for how each agent's auto-mode loop carries
+  context between wakes."* Include this brief explainer so a NEW user understands the choices:
+  *"Background: every agent's LLM calls bill to a credentialed account, and this workspace has a
+  pool of them behind an inference gateway. `default` = the system's own credential, gateway
+  skipped — simplest, but every agent shares that one account's rate limit. `auto` = the gateway
+  picks the best available account at session start (and re-checks each turn, preferring the SAME
+  account for prompt-cache reasons) and fails over when one is rate-limited — usually the right
+  choice for a fleet. Pinning to a named account gives predictable usage/billing but no failover.
+  Carry: `warm` resumes each agent's SAME live context on every auto-wake (fast, remembers the
+  thread) — the safe default; `cold` starts each wake from a FRESH context rebuilt from the
+  agent's last checkpoint (cheaper over a long run, survives compaction, but the checkpoint note
+  becomes its only memory) — suited to very long unattended drains. Carry is INDEPENDENT of
+  whether the fleet is visible (D) or headless (E)."* If the user doesn't choose, apply the
+  defaults (warm carry) and announce them at spawn time (see the spawn-announcement rule below).
 - **Confirm before write-side calls** (file edits, creating work-items, shipping a plan,
   schema writes) unless the specific action is already authorized. **Reversibility lowers the
   bar for the irreversible-action gate ONLY — it does NOT waive plan-review or
@@ -314,18 +332,22 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
   arm a monitor loop (`loop:arm { intervalSec, goal }`): each wake re-check
   `fleet:assignments` / `coord:glance` — reclaim orphaned/stalled claims, relaunch a dead
   member's terminal, unblock cross-lane shape questions, keep the dependency order honest, and
-  surface milestones to the owner. `loop:end` only when the fleet's plan is done or the owner
-  stops it. "I launched it" is not "I'm leading it"; leading means watching.
-- **Spawning a fleet/agent? ANNOUNCE the account + model you're using and offer the
-  alternatives — even under AUTO (it's a disclosure, not a question).** Two launch knobs carry a
+  surface milestones to the owner. When an audit verdict / cross-lane ruling you issue
+  establishes a convention other lanes must follow, record it as a plan Decision
+  (`plans:add-decision`) THE MOMENT it forms — a verdict living only in a coord message gets
+  lost and the same dispute reopens in the next lane. `loop:end` only when the fleet's plan is
+  done or the owner stops it. "I launched it" is not "I'm leading it"; leading means watching.
+- **Spawning a fleet/agent? ANNOUNCE the account + model + carry you're using and offer the
+  alternatives — even under AUTO (it's a disclosure, not a question).** Three launch knobs carry a
   default the owner rarely states, so name the default AND the alternatives in one breath every
-  time you spawn (psu / `fleet:create`+`capability:terminal` / `fleet:spawn` /
-  `fleet:launch-on-plan`), so the owner can redirect in one line — never silently pick either:
+  time you spawn (psu / `fleet:create`+`capability:terminal` / `cup:spawn` /
+  `fleet:launch-on-plan`), so the owner can redirect in one line — never silently pick any of them
+  (and when you launch a HEADLESS fleet, say so too — the members run with no desktop window):
   - **Account routing** — unless the owner chose one, default to the **system account (the
     inference gateway skipped entirely)** and say so: *"Spawning on the default system account —
     say the word if you'd rather I use the gateway's auto-routing across the pool, or pin the
     fleet to a specific account."* The `account` value (psu `--account`; the `account` arg on
-    `fleet:spawn` / `fleet:launch-on-plan`) takes one of three: a **pool id** → pin via the
+    `cup:spawn` / `fleet:launch-on-plan`) takes one of three: a **pool id** → pin via the
     gateway (hard, no failover); **`auto`** → the gateway auto-routes the pool + fails over;
     **`default`** (or omitted) → the system credential, gateway skipped (**the default**).
     **Do NOT substitute your own capacity read for this default.** A tight/near-walled pool is
@@ -340,6 +362,12 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
   - **Model** — name what you're spawning with: *"using model `<the default>` — let me know if
     you want a different one."* Override with the `model` (`<modelId>[:<effort>]` spec) or
     `tier` (the named menu) arg.
+  - **Carry** — name the auto-mode carry the fleet will run: *"warm carry (default) — each agent
+    resumes its live context on every wake; say `cold` if you'd rather each wake start from a
+    fresh context rebuilt from the agent's last checkpoint."* Set via the `carry` arg on
+    `fleet:launch-on-plan` (`warm` | `cold`, default `warm`); it is INDEPENDENT of
+    visible-vs-headless. Warm stays the default — like account routing, do NOT self-switch to
+    `cold` on your own cost/capacity read; cold is the owner's explicit call.
   The announcement is required even under AUTO — where everything else becomes act-don't-ask —
   because it costs the owner nothing and a wrong account/model is expensive to discover late.
 

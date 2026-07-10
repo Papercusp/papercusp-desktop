@@ -1,0 +1,1 @@
+import{n as e,t}from"./text-artifacts-C8sySQpg.js";t();export{e as loadTextArtifact};

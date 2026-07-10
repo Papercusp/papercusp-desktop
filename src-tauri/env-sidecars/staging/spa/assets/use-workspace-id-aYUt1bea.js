@@ -1,0 +1,1 @@
+import{o as e}from"./chunk-CMxvf4Kt.js";import{t}from"./react-C1Wm8aMI.js";import{t as n}from"./browser-workspace-AWq1Xprv.js";var r=e(t());function i(){let[e]=(0,r.useState)(()=>n());return e}export{i as t};

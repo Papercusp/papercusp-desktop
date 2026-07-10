@@ -1,0 +1,1 @@
+import{m as e}from"./configure-CTb_UFoz.js";import{t}from"./backend-D8mA-YBd.js";t();export{e as getMemoryBackend};

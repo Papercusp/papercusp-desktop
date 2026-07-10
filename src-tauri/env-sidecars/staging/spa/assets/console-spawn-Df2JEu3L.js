@@ -1,0 +1,1 @@
+import{s as e,u as t}from"./console-spawn-Bj-7240H.js";e();export{t as spawnConsole};

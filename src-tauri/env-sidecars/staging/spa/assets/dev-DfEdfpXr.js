@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{n as t}from"./Match-CgekO9yI.js";/* empty css            */var n=e();function r(){return(0,n.jsx)(t,{})}export{r as component};

@@ -1,0 +1,1 @@
+import{n as e,t}from"./boot-history-_jTChfI-.js";t();export{e as recordBootEvent};
