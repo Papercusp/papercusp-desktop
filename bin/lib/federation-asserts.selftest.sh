@@ -251,6 +251,72 @@ else
   fi
   rm -f "$DOWNGRADE_FIXTURE"
 fi
+# 8d) run_smoke retries a BOOT-READINESS flake, not just a discovery flake (WI-3734,
+# 2026-07-10): an EMPTY-body "create failed"/"B join failed" (fed_wait_api accepted a
+# sidecar — incl. via its "legacy liberal accept" fallback — before it actually finished
+# booting under load) used to fall through every retry check and kill the whole gate
+# run on attempt 1. Exercise the ACTUAL run_smoke() function (not a re-implementation)
+# against a synthetic "smoke script" stand-in that fails empty-body on its first
+# invocation and passes on its second — assert it retries and returns PASS, and that a
+# GENUINE (non-empty-body) failure is still NOT retried.
+runsmoke_snippet="$(awk '/^run_smoke\(\)/{p=1} p{print} p&&/^}$/{exit}' "$gate_file")"
+if [ -z "$runsmoke_snippet" ]; then
+  bad "could not extract run_smoke() from live-federation-gate.sh (structure changed — update this test)"
+else
+  # run_smoke does: ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/$script" ) — so
+  # the fake layout needs an actual "papercusp-desktop/bin/" child under DESKTOP_DIR's
+  # parent, with DESKTOP_DIR itself pointing at the "papercusp-desktop" dir (absolute,
+  # so it's unambiguous regardless of cwd).
+  RS_ROOT="$(mktemp -d /tmp/fed-selftest-runsmoke.XXXXXX)"
+  RS_BIN_DIR="$RS_ROOT/papercusp-desktop/bin"; mkdir -p "$RS_BIN_DIR"
+  RS_WORK="$(mktemp -d /tmp/fed-selftest-runsmoke-work.XXXXXX)"
+  RS_COUNTER="$RS_WORK/calls"
+  # attempt 1: empty-body create failure (the boot-readiness flake); attempt 2: PASS.
+  cat >"$RS_BIN_DIR/flaky-then-pass.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(( \$(cat "$RS_COUNTER" 2>/dev/null || echo 0) + 1 )); echo "\$n" >"$RS_COUNTER"
+if [ "\$n" -eq 1 ]; then echo '✗ create failed: '; else echo 'OVERALL: PASS'; fi
+EOF
+  chmod +x "$RS_BIN_DIR/flaky-then-pass.sh"
+  # a genuine (non-empty-body) failure must NOT retry — stays FAIL every attempt.
+  cat >"$RS_BIN_DIR/genuine-fail.sh" <<'EOF'
+#!/usr/bin/env bash
+echo '✗ create failed: {"error":"duplicate hive slug"}'
+EOF
+  chmod +x "$RS_BIN_DIR/genuine-fail.sh"
+
+  flaky_result="$(
+    DESKTOP_DIR="$RS_ROOT/papercusp-desktop" WORK="$RS_WORK" DISCOVERY_ATTEMPTS=3 \
+    bash -c "$(cat <<BASH
+log() { :; }
+$runsmoke_snippet
+run_smoke flaky flaky-then-pass.sh ""
+BASH
+)"
+  )"
+  rm -f "$RS_COUNTER"
+  genuine_result="$(
+    DESKTOP_DIR="$RS_ROOT/papercusp-desktop" WORK="$RS_WORK" DISCOVERY_ATTEMPTS=3 \
+    bash -c "$(cat <<BASH
+log() { :; }
+$runsmoke_snippet
+run_smoke genuine genuine-fail.sh ""
+BASH
+)"
+  )"
+  if [ "$flaky_result" = PASS ]; then
+    ok "run_smoke retries an empty-body create/join failure (boot-readiness flake) and recovers to PASS"
+  else
+    bad "run_smoke did not retry the empty-body boot-readiness flake: got '$flaky_result' (expected PASS on attempt 2)"
+  fi
+  if [ "$genuine_result" = FAIL ]; then
+    ok "run_smoke does NOT retry a genuine (non-empty-body) create failure — stays FAIL"
+  else
+    bad "run_smoke incorrectly retried/passed a genuine create failure: got '$genuine_result' (expected FAIL)"
+  fi
+  rm -rf "$RS_ROOT" "$RS_WORK"
+fi
+
 required_line="$(grep '^REQUIRED_TOOLS=' "$verify_file" || true)"
 case "$required_line" in
   *" omp "*|*" omp\""*)

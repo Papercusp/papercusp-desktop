@@ -258,6 +258,23 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
     if grep -qaE 'discovered=FAIL' "$out" 2>/dev/null && [ "$i" -lt "$attempts" ]; then
       log "$label: discovered=FAIL (cupboard-off DHT flake) — retrying"; cp "$out" "$out.attempt$i" 2>/dev/null; continue
     fi
+    # Retry a BOOT-READINESS flake (WI-3734, 2026-07-10): an EMPTY-body "create failed" /
+    # "B join failed" — curl got NO response content at all, not even a JSON error body —
+    # is the signature of firing a live API call against a sidecar that fed_wait_api
+    # accepted (incl. via its "legacy liberal accept" fallback) before it actually
+    # finished booting (embedded-PG init + ~400 migrations under load), NOT a protocol
+    # regression: a genuine create/join failure always returns actual JSON error content
+    # after the colon (see two-instance-content-matrix-smoke.sh:157/276). Confirmed live
+    # on this fleet's high-load box (2026-07-10 12:42 + 13:38 runs): both hit this exact
+    # empty-body signature on attempt 1 and were never retried — this class fell through
+    # every existing safety net (load-gate admission checks only the START load; the
+    # end-of-run STORM downgrade only fires if load is STILL high at verdict time, not
+    # transiently high mid-boot; this discovery-flake retry only matched a different
+    # signature) and reached the gate's verdict as a bare content-matrix=FAIL. Mirrors the
+    # discovery-flake retry above exactly — same rationale, same bounded attempts budget.
+    if grep -qaE '✗ (create|B join) failed: *$' "$out" 2>/dev/null && [ "$i" -lt "$attempts" ]; then
+      log "$label: empty-body create/join failure (sidecar boot-readiness flake, not a protocol regression) — retrying"; cp "$out" "$out.attempt$i" 2>/dev/null; continue
+    fi
     break
   done
   echo FAIL
