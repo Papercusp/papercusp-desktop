@@ -106,7 +106,11 @@ fi
 # ssh-agent with >5 keys exhausts the server's auth-tries on agent keys first
 # and fails "Too many authentication failures" before the -i key is tried
 # (bit a WI-800 rebuild, 2026-06-25).
-SSH=(ssh -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -p "$VM_SSH_PORT" -o ConnectTimeout=10 -o ServerAliveInterval=30 "$VM_SSH_HOST")
+# -o ServerAliveCountMax=20: the default (3) kills the session after 90s of VM
+# unresponsiveness — a host load spike starves the VM's sshd for longer than
+# that and aborted a 0.0.7 release leg mid-build (2026-07-10, load avg >2000).
+# 20 × 30s = 10 min of tolerance before declaring the VM dead.
+SSH=(ssh -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -p "$VM_SSH_PORT" -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "$VM_SSH_HOST")
 SCP=(scp -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -P "$VM_SSH_PORT" -o ConnectTimeout=10)
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
