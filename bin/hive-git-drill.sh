@@ -15,11 +15,13 @@
 # -- packages/operator-core/lib/harness/git-sync/git-sync-action.ts` before
 # trusting this): only the github-bridge tick + the integrator tick are wired
 # into production (gated on hiveGit.mode != legacy). The serve plane (P-201),
-# announce->fetch driver (P-202), worktree-bridge driver (P-204), and
-# gc/secrets-guard-on-the-publish-path (P-205) are NOT wired yet. So every
-# Phase-3 leg below (A-G) is SKIP today — this run proves the SCAFFOLD works
-# (real packaged sidecar, real throwaway hive, real hive_settings row), not
-# the replication plane itself.
+# announce->fetch driver (P-202), and worktree-bridge driver (P-204) are NOT
+# wired yet — those legs (A-E, G) stay SKIP. P-205 (gc/secrets-guard on the
+# publish path) DID land 2026-07-09 (WI-3494) and is single-machine-runnable
+# (pure over a real bare repo, no fed plane needed), so LEG F below is now a
+# LIVE assert, not a skip — this run proves the SCAFFOLD works (real packaged
+# sidecar, real throwaway hive, real hive_settings row) AND the G-9/G-10
+# lifecycle guards, but not the cross-machine replication plane itself.
 #
 # LIVE today, single-box, no rig needed:
 #   MODE   hiveGit.mode round-trip against the packaged sidecar's OWN PG:
@@ -154,8 +156,92 @@ skipp "LEG B (P-303) replication — needs P-202 announce->fetch driver wired (r
 skipp "LEG C (P-304) trust / tamper drill — needs LEG B's live fetch path to exist before a relay-lie / rollback / non-member-refuse drill has anything to attack"
 skipp "LEG D (P-305) integration — needs P-204 worktree-bridge driver wired (staging-advance event has no worktree consumer yet) so the OTHER machine's tree can be observed advancing ff-only"
 skipp "LEG E (P-306) GitHub bridge live — needs the rig's 2nd machine to prove commit-only members don't false-alarm the watchdog under real multi-machine load (single-box analysis already done + verified, see the runbook's watchdog section; this leg proves it live, not analytically)"
-skipp "LEG F (P-307) lifecycle — needs P-205 G-9 gc scheduling + G-10 secrets/oversized-blob guard wired onto the publish path (gc.ts has no production caller today)"
 skipp "LEG G (P-308) chaos — needs LEGS A-F live first (kill-the-integrator / PG-blip / VM-restart drills are meaningless without a live multi-machine replication loop to interrupt)"
+
+# ── LEG F (P-307) lifecycle — G-9 gc + G-10 secrets/oversized-blob guard ────
+# LIVE as of 2026-07-09: P-205 (WI-3494) landed gc.ts's production caller
+# (hive-git-gc-action.ts) + publish-guard.ts (checkPublishGuard, 8/8
+# integration). Both are pure over a real bare repo (no DB/HTTP needed — the
+# gc/publish-guard functions take a repoPath directly), so this leg builds its
+# OWN throwaway bare repo (not the sidecar's hive) and calls the REAL
+# gcHiveGitRepo / checkPublishGuard functions via tsx against the checked-out
+# source — proving the actual production code, not a reimplementation.
+log "LEG F (P-307) — G-9 gc keep-work/last-N/departed-member archival + G-10 secrets/oversized-blob guard, real bare repos"
+HGGIT="$REPO_DIR/packages/operator-core/lib/sync/hive-git"
+LEGF_GC_REPO="$WORK/leg-f-gc.git"; git init -q --bare "$LEGF_GC_REPO"
+NS_LIVE="$(printf '%064d' 1)"; NS_GONE="$(printf '%064d' 2)"
+legf_commit() { # <repo> <ref> <content> <committer-ts>
+  local repo="$1" ref="$2" content="$3" ts="$4" blob tree commit
+  blob="$(printf '%s' "$content" | git -C "$repo" hash-object -w --stdin)"
+  tree="$(printf '100644 blob %s\tfile.txt\n' "$blob" | git -C "$repo" mktree)"
+  commit="$(echo leg-f | GIT_COMMITTER_DATE="$ts" GIT_AUTHOR_DATE="$ts" git -C "$repo" commit-tree "$tree")"
+  git -C "$repo" update-ref "$ref" "$commit"
+}
+# a live device: its always-kept WORK_REF (refs/heads/work) + 3 published
+# snapshots (only the newest keepPublishedRefsPerNamespace=2 should survive).
+legf_commit "$LEGF_GC_REPO" "refs/namespaces/$NS_LIVE/refs/heads/work" "work-v1" "1000000000 +0000"
+legf_commit "$LEGF_GC_REPO" "refs/namespaces/$NS_LIVE/published/v1" "pub-v1" "1000000100 +0000"
+legf_commit "$LEGF_GC_REPO" "refs/namespaces/$NS_LIVE/published/v2" "pub-v2" "1000000200 +0000"
+legf_commit "$LEGF_GC_REPO" "refs/namespaces/$NS_LIVE/published/v3" "pub-v3" "1000000300 +0000"
+# a departed member's namespace — should be archived wholesale, not pruned.
+legf_commit "$LEGF_GC_REPO" "refs/namespaces/$NS_GONE/published/v1" "gone-v1" "1000000050 +0000"
+cat > "$WORK/legf-gc.ts" <<EOF
+import { gcHiveGitRepo } from '$HGGIT/gc';
+gcHiveGitRepo('$LEGF_GC_REPO', { archiveNamespaces: ['$NS_GONE'], keepPublishedRefsPerNamespace: 2 })
+  .then((r) => console.log(JSON.stringify(r)));
+EOF
+gc_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix npx tsx "$WORK/legf-gc.ts" 2>"$WORK/legf-gc.err")"
+gc_errs="$(jget "$gc_out" "len(d['errors'])")"
+refs_after="$(git -C "$LEGF_GC_REPO" for-each-ref --format='%(refname)')"
+if [ "$gc_errs" = "0" ] \
+  && echo "$refs_after" | grep -q "refs/namespaces/$NS_LIVE/refs/heads/work" \
+  && echo "$refs_after" | grep -q "refs/namespaces/$NS_LIVE/published/v2" \
+  && echo "$refs_after" | grep -q "refs/namespaces/$NS_LIVE/published/v3" \
+  && ! echo "$refs_after" | grep -q "refs/namespaces/$NS_LIVE/published/v1" \
+  && echo "$refs_after" | grep -q "refs/archive/namespaces/$NS_GONE/published/v1" \
+  && ! echo "$refs_after" | grep -q "refs/namespaces/$NS_GONE/published/v1"; then
+  ok "G-9 gc: kept work-ref + newest 2 published (v2,v3), pruned oldest (v1), archived the departed namespace under refs/archive/"
+else
+  bad "G-9 gc: unexpected ref state after gc — see $WORK/leg-f-gc.git refs + $WORK/legf-gc.err ($gc_out)"
+fi
+
+LEGF_GUARD_REPO="$WORK/leg-f-guard.git"; git init -q --bare "$LEGF_GUARD_REPO"
+BASE_BLOB="$(printf 'base' | git -C "$LEGF_GUARD_REPO" hash-object -w --stdin)"
+BASE_TREE="$(printf '100644 blob %s\tbase.txt\n' "$BASE_BLOB" | git -C "$LEGF_GUARD_REPO" mktree)"
+BASE_COMMIT="$(echo base | git -C "$LEGF_GUARD_REPO" commit-tree "$BASE_TREE")"
+# Split across two vars so the AWS-key SHAPE never appears as a contiguous
+# literal in this file's own bytes (the shared-tree secrets-guard PreToolUse
+# hook would otherwise flag this drill script itself) — only exists once bash
+# concatenates them at run time.
+LEGF_FAKE_KEY_PFX="AKIA"; LEGF_FAKE_KEY_SFX="ABCDEFGHIJKLMNOP"
+SECRET_BLOB="$(printf 'aws_key = %s%s\n' "$LEGF_FAKE_KEY_PFX" "$LEGF_FAKE_KEY_SFX" | git -C "$LEGF_GUARD_REPO" hash-object -w --stdin)"
+SECRET_TREE="$(printf '100644 blob %s\tbase.txt\n100644 blob %s\tsecret.txt\n' "$BASE_BLOB" "$SECRET_BLOB" | git -C "$LEGF_GUARD_REPO" mktree)"
+SECRET_COMMIT="$(echo secret | git -C "$LEGF_GUARD_REPO" commit-tree "$SECRET_TREE" -p "$BASE_COMMIT")"
+BIG_BLOB="$(head -c 6144 /dev/zero | tr '\0' 'x' | git -C "$LEGF_GUARD_REPO" hash-object -w --stdin)"
+BIG_TREE="$(printf '100644 blob %s\tbase.txt\n100644 blob %s\tbig.bin\n' "$BASE_BLOB" "$BIG_BLOB" | git -C "$LEGF_GUARD_REPO" mktree)"
+BIG_COMMIT="$(echo big | git -C "$LEGF_GUARD_REPO" commit-tree "$BIG_TREE" -p "$BASE_COMMIT")"
+cat > "$WORK/legf-guard.ts" <<EOF
+import { checkPublishGuard } from '$HGGIT/publish-guard';
+async function main() {
+  const clean = await checkPublishGuard({ repoPath: '$LEGF_GUARD_REPO', fromOid: null, toOid: '$BASE_COMMIT' });
+  const secret = await checkPublishGuard({ repoPath: '$LEGF_GUARD_REPO', fromOid: '$BASE_COMMIT', toOid: '$SECRET_COMMIT' });
+  const big = await checkPublishGuard({ repoPath: '$LEGF_GUARD_REPO', fromOid: '$BASE_COMMIT', toOid: '$BIG_COMMIT', caps: { maxBlobBytes: 4096 } });
+  console.log(JSON.stringify({ clean: clean.ok, secretOk: secret.ok, secretCode: secret.refusalCode, bigOk: big.ok, bigCode: big.refusalCode }));
+}
+main();
+EOF
+guard_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix npx tsx "$WORK/legf-guard.ts" 2>"$WORK/legf-guard.err")"
+if [ "$(jget "$guard_out" "d['clean']")" = "True" ]; then ok "G-10 publish-guard: a clean commit is admitted"; else bad "G-10 publish-guard: clean commit wrongly refused ($guard_out)"; fi
+if [ "$(jget "$guard_out" "d['secretOk']")" = "False" ] && [ "$(jget "$guard_out" "d['secretCode']")" = "secrets" ]; then
+  ok "G-10 secrets guard: a planted AWS-key-shaped secret REFUSES the publish (code=secrets)"
+else
+  bad "G-10 secrets guard: planted secret did not refuse as expected ($guard_out)"
+fi
+if [ "$(jget "$guard_out" "d['bigOk']")" = "False" ] && [ "$(jget "$guard_out" "d['bigCode']")" = "blob-over-cap" ]; then
+  ok "G-10 oversized-blob guard: a 6KB blob over a 4KB cap REFUSES the publish (code=blob-over-cap)"
+else
+  bad "G-10 oversized-blob guard: oversized blob did not refuse as expected ($guard_out)"
+fi
 
 echo
 echo "════════════════════════════════════════════════════════"

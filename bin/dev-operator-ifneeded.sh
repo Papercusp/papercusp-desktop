@@ -48,11 +48,16 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # (~500% CPU each → host load >1000). The dev host must be single-process
 # anyway: it carries the PTY WS plane, which is incompatible with clustering
 # (hono-host.ts P3-2 note).
-# NOTE (EI-8818): PAPERCUSP_CLUSTER_WORKERS=0 is ALSO pinned — it takes
-# precedence over PAPERCUSP_CLUSTER in resolveClusterWorkers, and its '1'
-# value means AUTO (profile-recommended count, ~15 on the tower), so an
-# inherited/caller-set CLUSTER_WORKERS silently bypasses the CLUSTER=0 pin
-# (that is exactly how the 2026-07-09 storm recurred an hour after the pin).
+# NOTE (EI-8817/EI-8818): PAPERCUSP_CLUSTER_WORKERS=0 is ALSO pinned — it takes
+# precedence over PAPERCUSP_CLUSTER in resolveClusterWorkers, so an
+# inherited/caller-set CLUSTER_WORKERS silently bypasses the CLUSTER=0 pin above
+# regardless of its value (that is exactly how the 2026-07-09 storm recurred an
+# hour after the CLUSTER=0 pin — a caller had set CLUSTER_WORKERS=1). The '1' ⇒
+# AUTO (~15 workers on the tower) semantics that made THAT specific value land on
+# a fork storm is now fixed in resolveClusterWorkers itself ('1' means exactly one
+# worker) — this explicit =0 pin stays anyway as defense-in-depth: it is still
+# correct for CLUSTER_WORKERS to win over CLUSTER, so an agent that sets
+# CLUSTER_WORKERS to ANY nonzero value here would still shadow this pin.
 DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.

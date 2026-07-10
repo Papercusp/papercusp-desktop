@@ -318,6 +318,15 @@ trap 'rm -f "$TARBALL"' EXIT
     fi
   done
   echo "    env-sidecars/staging staged ($(du -sh "$ENV_SC" | cut -f1) apparent, hardlinked — ~0 extra tar bytes)"
+  # GNU tar exits 1 for "file changed as we read it" — a WARNING (the entry is
+  # still written), not corruption. The flock above serializes SIDECAR publishes,
+  # but other shared-tree writers (e.g. the parallel linux leg of the same cut
+  # re-staging/bundling) can still touch files mid-read; under the script's
+  # set -e that exit 1 killed the ENTIRE win leg silently right here on the
+  # 2026-07-09 desktop-v0.0.5-alpha cut (log ends at the tar warning, no error).
+  # Tolerate exactly rc<=1 (warnings stay visible on stderr); rc>=2 stays fatal —
+  # same policy as stage-source-tree.sh.
+  set +e
   tar -czhf "$TARBALL" \
     --exclude='.git' \
     --exclude='papercusp-desktop/node_modules' \
@@ -328,6 +337,9 @@ trap 'rm -f "$TARBALL"' EXIT
     --exclude='src-tauri/sidecar/code-server' \
     --exclude='src-tauri/sidecar/bin/omp' \
     -C "$ROOT/.." papercusp-desktop
+  tar_rc=$?
+  set -e
+  (( tar_rc <= 1 )) || fail "desktop-tree pack tar failed (exit $tar_rc)"
 ) 9>>"$ROOT/src-tauri/sidecar.lock"
 ls -lh "$TARBALL"
 
