@@ -331,7 +331,18 @@ async function importFromSrc(repoPath: string, srcPath: string, branch: string):
 
 async function main() {
   const sql = postgres('$DSN', { prepare: false });
-  const WS = '$WS'; const POT_SLUG = '$POT_GIT_SLUG'; const REPO_KEY = 'leg-d-repo';
+  // REPO_KEY must be UNIQUE per drill invocation: ensurePotGitRepo() reuses
+  // an existing bare repo keyed only on (POT_SLUG, REPO_KEY) — a hardcoded
+  // literal here left the pot-git bare repo (and its STAGING_REF) PERSISTENT
+  // across runs, since POT_SLUG is stable (the "existing" hive's coords never
+  // change). A leftover STAGING_REF from a prior run silently broke this
+  // run's "first tick, base=null ⇒ staging becomes steerSha directly"
+  // assumption — it fell into the 3-way-merge branch against unrelated
+  // history instead, so stagingIsSteerSha came back false even though
+  // integration genuinely advanced. A fresh key each run reproduces the
+  // intended first-tick scenario every time, matching this leg's own
+  // real-bare-repo-per-run doc comment above.
+  const WS = '$WS'; const POT_SLUG = '$POT_GIT_SLUG'; const REPO_KEY = 'leg-d-repo-$$';
   const repo = await ensurePotGitRepo(POT_SLUG, REPO_KEY);
   const integrator = keypair();
   const memberSteer = keypair();
