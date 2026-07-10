@@ -4164,20 +4164,30 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no update available".to_string())?;
 
-    // Kill children before the binary swap so they don't outlive the parent.
-    // WI-2667: flag teardown FIRST so the Server-side serve supervisor sees
-    // `shutdown_done` and does NOT respawn the operator we're about to swap out
+    // EI-9002 (P-007 linux E2E, 2026-07-10): the update bytes stream through
+    // the sidecar's OWN /api/updates proxy — the download URL captured by
+    // `updater.check()` points at it. Killing the sidecar BEFORE the download
+    // destroys that endpoint mid-fetch (host log: GET 200 → ConnectionResetError),
+    // the update silently no-ops, and the old version keeps running. So tear the
+    // sidecar down in `on_download_finish` — AFTER the payload is fully on hand,
+    // BEFORE the binary swap (children must not outlive the parent across the
+    // swap). WI-2667 still holds: flag `shutdown_done` FIRST so the Server-side
+    // serve supervisor does NOT respawn the operator we're about to swap out
     // from under (the app restarts immediately after the install).
-    {
-        let state: tauri::State<SidecarState> = app.state();
-        state
-            .shutdown_done
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    kill_sidecar(&app);
-
+    let teardown_app = app.clone();
     update
-        .download_and_install(|_chunk, _total| {}, || {})
+        .download_and_install(
+            |_chunk, _total| {},
+            move || {
+                {
+                    let state: tauri::State<SidecarState> = teardown_app.state();
+                    state
+                        .shutdown_done
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                kill_sidecar(&teardown_app);
+            },
+        )
         .await
         .map_err(|e| e.to_string())?;
 
