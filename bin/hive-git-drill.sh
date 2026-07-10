@@ -111,6 +111,28 @@ SIDE="$(fed_sidecar_dir "$PKG")"
 [ -d "$SIDE/node_modules/luxon" ] || { echo "→ A-001 fix: injecting luxon"; cp -aL "$LUXON_SRC" "$SIDE/node_modules/luxon" || exit 1; }
 fed_clobber_check "$PKG" || exit 2
 
+# WI-3969: a stale bundled .deb (db-sql/ behind the repo's libs/papercusp/libs/db/sql/)
+# does NOT fail loudly — the sidecar boots fine, then a leg queries a table a later
+# migration created/renamed and dies mid-run with a misleading "relation does not
+# exist" / "git commit failed" trace, indistinguishable from a real pot-git
+# regression (this is exactly how the LEG D "failure" that filed this WI happened —
+# 18 migrations behind, hives->pots rename mig 557 missing, no real code defect).
+# Fail FAST here, before any leg runs, with the actual diagnosis instead.
+REPO_SQL_DIR="$REPO_DIR/libs/papercusp/libs/db/sql"
+BUNDLED_SQL_DIR="$SIDE/db-sql"
+repo_max_mig="$(ls "$REPO_SQL_DIR"/*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
+bundled_max_mig="$(ls "$BUNDLED_SQL_DIR"/*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
+if [ -n "$repo_max_mig" ] && [ -n "$bundled_max_mig" ] && [ "$bundled_max_mig" -lt "$repo_max_mig" ]; then
+  echo "FATAL: bundled .deb's db-sql/ is STALE — highest migration $bundled_max_mig, repo is at $repo_max_mig ($((repo_max_mig - bundled_max_mig)) migration(s) behind)."
+  echo "  This is a stale TEST ARTIFACT, not a pot-git regression. Rebuild the .deb"
+  echo "  (papercusp-desktop/bin/build-and-archive-deb.sh, or a fresh release build) or"
+  echo "  pass a fresher one explicitly: bin/hive-git-drill.sh /path/to/fresh.deb"
+  echo "  Stale DEB: $DEB"
+  exit 2
+elif [ -n "$repo_max_mig" ] && [ -n "$bundled_max_mig" ]; then
+  echo "  bundled db-sql at migration $bundled_max_mig, repo at $repo_max_mig — fresh, continuing"
+fi
+
 log "spin local testnet DHT (announce stays off the public DHT)"
 BOOTSTRAP="$(fed_start_testnet_dht "$REPO_DIR/apps/operator" "$WORK")" || exit 3
 echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
