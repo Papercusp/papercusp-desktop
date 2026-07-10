@@ -1,0 +1,1 @@
+import{i as e,o as t}from"./wake-mode-D-omLhRM.js";t();export{e as getDefaultWakeMode};

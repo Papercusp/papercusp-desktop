@@ -1,0 +1,1 @@
+import{n as e,t}from"./own-log-fork-guard-Fa9h_zUD.js";e();export{t as attachOwnLogForkListener};
