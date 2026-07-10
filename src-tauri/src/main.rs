@@ -770,7 +770,15 @@ mod macos_ats_tests {
 mod discovery_tests {
     use std::time::Duration;
 
-    use super::{next_operator_port, parse_operator_discovery, OperatorDiscovery};
+    use super::{
+        next_operator_port, operator_boot_timeout, parse_operator_discovery, OperatorDiscovery,
+    };
+
+    #[test]
+    fn wsl_cold_boot_budget_covers_database_recovery() {
+        assert_eq!(operator_boot_timeout(true), Duration::from_secs(600));
+        assert_eq!(operator_boot_timeout(false), Duration::from_secs(120));
+    }
 
     #[test]
     fn parses_valid_payload() {
@@ -2294,12 +2302,39 @@ fn spawn_operator_watcher(
                         gave_up = false;
                     }
                     deferred_to_shell = false;
-                    eprintln!(
-                        "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
-                        (dead_count as u64) * 1500 / 1000
-                    );
-                    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
-                        eprintln!("[papercusp-desktop] Server respawn failed: {e}");
+                    // WI-3686: on Linux there is NO separately-installed "Papercusp
+                    // Server" bundle to gtk-launch — a single .deb/.AppImage ships
+                    // ONE process, and on Linux that process self-hosts its own
+                    // operator sidecar (ensure_server_running/spawn_self_hosted_
+                    // sidecar) under spawn_serve_supervisor's OWN in-process
+                    // respawn-with-backoff (WI-1878). This watcher's job here was
+                    // written for the Windows/macOS two-bundle model, where a dead
+                    // Server process genuinely needs a sibling bundle re-launched.
+                    // On Linux, `gtk-launch com.papercusp.server.desktop` always
+                    // fails (no such .desktop entry — no GUI-only install ships
+                    // one) and this branch would otherwise hot-loop it up to the
+                    // respawn cap every ~15s of unreachability, forever, on any
+                    // GUI-only Linux install. The self-hosted child already has its
+                    // own supervisor; nothing more to do here but log once per
+                    // respawn-cycle and let that supervisor do the actual revival.
+                    #[cfg(target_os = "linux")]
+                    {
+                        eprintln!(
+                            "[papercusp-desktop] Papercusp Server unreachable ~{}s — Linux single-bundle \
+                             install has no separate Server bundle to relaunch; the self-hosted operator's \
+                             own supervisor (spawn_serve_supervisor) owns its respawn (WI-3686)",
+                            (dead_count as u64) * 1500 / 1000
+                        );
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        eprintln!(
+                            "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
+                            (dead_count as u64) * 1500 / 1000
+                        );
+                        if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+                            eprintln!("[papercusp-desktop] Server respawn failed: {e}");
+                        }
                     }
                     respawn_times.push(now);
                     consecutive_dead = 0;
@@ -2484,6 +2519,15 @@ fn operator_http_ready(port: u16) -> bool {
         .is_ok()
 }
 
+/// Cold WSL boots can include distro startup, embedded-PG crash recovery, and
+/// migration replay. The measured Windows repro took 5m51s, so the WSL path
+/// needs a generous hard ceiling instead of the generic 120s desktop budget.
+/// This remains a bounded wait: a genuinely dead sidecar still fails fast in
+/// `wait_for_operator` and a hung one surfaces after ten minutes.
+fn operator_boot_timeout(via_wsl: bool) -> Duration {
+    Duration::from_secs(if via_wsl { 600 } else { 120 })
+}
+
 /// Poll operator.json until it names a live, reachable operator (pid alive +
 /// HTTP-responsive — see `operator_http_ready`, NOT mere TCP-accept), the serve
 /// child dies, or the timeout lapses. This is the embedder's whole boot wait:
@@ -2492,7 +2536,7 @@ fn operator_http_ready(port: u16) -> bool {
 ///
 /// (P-053) Runs on the finish_boot worker thread — NEVER on the Tauri
 /// setup/main thread, where this poll used to freeze the unpainted window
-/// for up to 120s (macOS unresponsive-app watchdog risk).
+/// for up to ten minutes on a cold WSL boot (macOS uses the 120s budget).
 fn wait_for_operator(
     app_handle: &tauri::AppHandle,
     workspace_home: &std::path::Path,
@@ -2538,11 +2582,19 @@ fn wait_for_operator(
         }
         std::thread::sleep(Duration::from_millis(300));
     }
+    let discovery_path = if via_wsl {
+        "/home/papercup/.papercusp/operator.json".to_string()
+    } else {
+        workspace_home
+            .join(".papercusp/operator.json")
+            .display()
+            .to_string()
+    };
     Err(format!(
-        "operator did not become ready within {}s (no live operator.json under {}/.papercusp). \
+        "operator did not become ready within {}s (no live operator.json at {}). \
          Embedded-PG initdb/migrations are the usual first-boot suspects — check the serve logs.",
         timeout.as_secs(),
-        workspace_home.display()
+        discovery_path
     ))
 }
 
@@ -2556,14 +2608,14 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         &app_handle,
         &workspace_home,
         via_wsl,
-        Duration::from_secs(120),
+        operator_boot_timeout(via_wsl),
     ) {
         Ok(d) => d,
         Err(reason) => {
             // WI-2749 part 1a: during Windows WSL onboarding the operator
             // legitimately isn't up yet — WSL install + rootfs import +
             // `/opt/papercup/bootstrap` + PG initdb/migrations routinely exceed
-            // this 120s wait, and the Server's post-onboarding finalize restart
+            // this bounded wait, and the Server's post-onboarding finalize restart
             // brings the operator up shortly after. Injecting the scary terminal
             // boot-error OVER the onboarding gate mid-flow is a FALSE ALARM, so
             // suppress it while WSL is not yet Ready: the gate UI owns onboarding
@@ -2575,7 +2627,7 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
                 wsl_setup::WslState::Ready
             ) {
                 println!(
-                    "[papercusp-desktop] operator not up within 120s but WSL onboarding is still in progress — not a boot failure; deferring to the onboarding gate + the post-onboarding restart ({})",
+                    "[papercusp-desktop] operator not up within the cold-boot budget but WSL onboarding is still in progress — not a boot failure; deferring to the onboarding gate + the post-onboarding restart ({})",
                     reason
                 );
                 return;
