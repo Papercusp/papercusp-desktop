@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# two-instance-content-matrix-smoke.sh — Lane A (shared-hive-release-testing):
+# two-instance-content-matrix-smoke.sh — Lane A (shared-pot-release-testing):
 # the FULL live federation proof on the REAL packaged binary, 2 DISTINCT peers.
 #
 # Covers every brief-A scenario with a 2-peer SEQUENCED design (A=owner papercupai,

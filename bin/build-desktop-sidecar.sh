@@ -532,7 +532,7 @@ echo "  rrule closure copied ($nat_copied total package(s), $nat_missing missing
 # pure-JS (no deps, not in NATIVE_PKGS) so it was never copied → the packaged
 # operator crashed at boot with `Cannot find module 'luxon'` (EMBEDDED_PG_FAILED),
 # i.e. the .deb did not boot at all. Copy luxon so the runtime createRequire('luxon')
-# from sidecar/serve.mjs resolves. (shared-hive-release-testing Lane A, A-001.)
+# from sidecar/serve.mjs resolves. (shared-pot-release-testing Lane A, A-001.)
 echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
 copy_pkg_closure luxon
 echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"

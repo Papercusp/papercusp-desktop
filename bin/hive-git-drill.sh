@@ -117,8 +117,16 @@ echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 
 log "launch sidecar A (single-box stand-in for 'tower')"
 SMK_HONO="$(fed_pick_free_port 18371)"; SMK_PG="$(fed_pick_free_port 19032)"
+# 2026-07-10: a fresh isolated $AHOME has no local HF model cache, so the
+# default embedder (gemma) crashes the WHOLE sidecar process at boot ("Unable
+# to get model file path or buffer" from @huggingface/transformers) before the
+# API ever comes up — unrelated to git-federation; tracked separately under
+# shared-embedding-sidecar-and-enrichment-2026-07-10. This drill exercises
+# pot-git, not memory/embeddings, so disable the embedder rather than block on
+# that other lane's fix.
 fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_HONO" "$SMK_PG" \
-  PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+  PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" \
+  PAPERCUSP_MEMORY_EMBEDDER=disabled
 fed_wait_boot a 80 || { echo "boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[a]}"; exit 4; }
 fed_wait_api a 30 || { echo "FATAL: sidecar API never came up"; exit 4; }
 DSN="postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[a]}/papercusp"
@@ -142,16 +150,32 @@ log "create THROWAWAY test hive ($REPO_URL)"
 # up to 10 minutes if the sidecar is mid-churn (bg-host restart, wedged outbox, …)
 # — a wedged-but-not-dead request looked identical to a hung script. Heartbeat
 # every 20s so that distinction is visible without changing the 610s hard cap.
+# DRILL_SLUG (2026-07-10): request a fresh slug for the FIRST-ever run
+# against a clean workspace. NOTE (corrected 2026-07-10): the lookup step
+# keys purely on githubRepositoryId (the `slug` field is only consulted on
+# the CREATED path's derivation, never on the lookup) — so once a hive for
+# $REPO_URL has EVER been created in this workspace, every later run still
+# takes the "existing" branch regardless of this slug. See POT_GIT_SLUG below
+# for the fix that actually matters: sanitizing whatever comes back (created
+# OR existing) before using it as a pot-git filesystem path component.
+DRILL_SLUG="p301-drill-$$"
 resp="$(fed_run_with_heartbeat "throwaway hive create (cap 610s)" 20 -- \
   curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type: application/json' -H "$H_WS" \
-  -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
+  -d "{\"githubUrl\":\"$REPO_URL\",\"slug\":\"$DRILL_SLUG\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
 HIVE_SLUG="$(jget "$resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # field renamed hiveSlug→potSlug (cup-lexicon-full-rename); accept both for version skew
 HIVE_PATH="created"
 if [ -z "$HIVE_SLUG" ]; then
-  HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['hiveId']")"; HIVE_PATH="existing"
+  HIVE_SLUG="$(jget "$resp" "d['existing']['hive'].get('potId') or d['existing']['hive'].get('hiveId') or ''")"  # field renamed hiveId->potId (cup-lexicon-full-rename); accept both for version skew
+  HIVE_PATH="existing"
 fi
 [ -n "$HIVE_SLUG" ] || { echo "✗ hive create failed: $(echo "$resp" | head -c 300)"; exit 6; }
 echo "  hive=$HIVE_SLUG (path=$HIVE_PATH)"
+# POT_GIT_SLUG: the "existing" branch's hive.potId is a raw GitHub coordinate
+# ("owner/repo") — a `/` fails pot-git storage.ts's assertSafeComponent (a
+# filesystem path component, not a display slug). LEG D needs a path-safe
+# identifier, not necessarily the sidecar's own notion of the hive's slug, so
+# sanitize once here rather than re-deriving it inside the LEG D heredoc.
+POT_GIT_SLUG="${HIVE_SLUG//\//-}"
 
 # ── LEG MODE — hiveGit.mode round-trip against the real packaged instance ───
 # Direct SQL (harness_shared.hive_settings, mig 186) — the same table
@@ -178,14 +202,69 @@ else
   bad "rollback left $rows_left row(s) — mode did not revert"
 fi
 
-# ── SKIP census — the Phase-3 legs (P-302..P-308), owners = the plan's P-201/
-#    P-202/P-204/P-205 wiring lanes + the LIVE-1 rig for the real 2-machine run ──
-log "SKIP census — Phase-3 legs (owners: p2p-git-live-activation-2026-07-09 lanes)"
-skipp "LEG A (P-302) storage + join — needs the LIVE-1 rig (real 2nd machine) AND P-201 serve-plane wiring so a real VM can cold-join via G-8 bootstrap; this scaffold's single sidecar has no peer to join against yet"
-skipp "LEG B (P-303) replication — needs P-202 announce->fetch driver wired (ref-announce-tick.ts has no scheduled caller today) + the rig for a genuine tower<->VM round-trip"
-skipp "LEG C (P-304) trust / tamper drill — needs LEG B's live fetch path to exist before a relay-lie / rollback / non-member-refuse drill has anything to attack"
-skipp "LEG E (P-306) GitHub bridge live — needs the rig's 2nd machine to prove commit-only members don't false-alarm the watchdog under real multi-machine load (single-box analysis already done + verified, see the runbook's watchdog section; this leg proves it live, not analytically)"
-skipp "LEG G (P-308) chaos — needs LEGS A-F live first (kill-the-integrator / PG-blip / VM-restart drills are meaningless without a live multi-machine replication loop to interrupt)"
+# ── run_vitest_leg — shells out to a dedicated pot-git regression suite and
+#    folds its pass/fail into this drill's own PASS/FAIL/SKIP census. Reuses
+#    the REAL checked-in regression tests (real production functions, real
+#    git subprocesses, real ed25519 signing over a real socket duplex) rather
+#    than re-implementing their bodies inline — those files already ARE each
+#    leg's single-box proof (see leg-c-trust-drill.integration.test.ts's own
+#    header for the precedent this follows). `--reporter=json` -> stdout only
+#    (warnings go to stderr) so the summary is cleanly parseable.
+run_vitest_leg() {
+  local leg_label="$1"; shift
+  local json_out
+  json_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix \
+    npx vitest run --config vitest.integration.config.ts --reporter=json "$@" 2>"$WORK/${leg_label// /_}.err")"
+  local total passed failed
+  total="$(jget "$json_out" "d.get('numTotalTests')")"
+  passed="$(jget "$json_out" "d.get('numPassedTests')")"
+  failed="$(jget "$json_out" "d.get('numFailedTests')")"
+  if [ -z "$total" ] || [ "$total" = "0" ]; then
+    bad "$leg_label: vitest produced no parseable result — see $WORK/${leg_label// /_}.err"
+    return
+  fi
+  if [ "$failed" = "0" ]; then
+    ok "$leg_label: $passed/$total tests passed ($*)"
+  else
+    bad "$leg_label: $failed/$total tests FAILED ($*) — see $WORK/${leg_label// /_}.err"
+  fi
+}
+
+# ── LEG A (P-302) storage + join — LIVE as of 2026-07-10: G-8 cold-clone
+# bootstrap (bootstrapFromPeer) is code-complete + already integration-tested
+# over a REAL socket duplex (two local bare repos standing in for "self" and
+# "peer", the identical fetch-transport link LEG B/D use) — the same
+# single-box-stand-in-for-the-other-machine pattern already established for
+# LEG D/F. The genuine gap left for the rig is real network/DHT peer
+# discovery + a real second physical device, not the join mechanics.
+log "LEG A (P-302) — G-8 cold-clone bootstrap: a fresh joiner seeds every namespace a peer holds, over a real socket duplex"
+run_vitest_leg "LEG A" lib/sync/pot-git/bootstrap.integration.test.ts
+
+# ── LEG B (P-303) replication — LIVE as of 2026-07-10: per the WI-3497/3498
+# checkpoints the P-202 announce->fetch driver is code-complete (ref-announce.
+# ts / fetch-transport.ts) and already integration-tested end-to-end (announce
+# -> fetch -> sigrefs accept -> heads reconcile -> mirrored, PLUS the
+# relay-tampered-head refusal) over a real socket duplex against real bare
+# repos. Not yet SCHEDULED as a live production routine (no caller wires
+# runRefAnnouncePublishTick/runRefAnnounceReceiveTick into a routine today) —
+# that scheduling + the genuine tower<->VM round-trip stay rig/P-003 work.
+log "LEG B (P-303) — G-3 announce-driven fetch: announce -> fetch -> sigrefs accept -> heads reconcile -> mirrored, over a real socket duplex"
+run_vitest_leg "LEG B" lib/sync/pot-git/ref-announce.integration.test.ts
+
+# ── LEG C (P-304) trust / tamper drill — LIVE as of 2026-07-10: per the
+# WI-3498 checkpoint this was EXTRACTED into its own file precisely so it
+# could run independent of the rig — it drives the trust-verification layer
+# (sigrefs signature/rollback/reconcile + the scope-serve-gate) directly:
+# a relay lying about a third device's namespace, a rollback replay, and a
+# non-member fetch, all real production code over real bare repos + real
+# ed25519 keys, no network transport or rig needed.
+log "LEG C (P-304) — trust/tamper drill: relay-lie detection, rollback refusal (G-4b), non-member scope-serve-gate refusal"
+run_vitest_leg "LEG C" lib/sync/pot-git/leg-c-trust-drill.integration.test.ts
+
+# ── SKIP census — the two Phase-3 legs still genuinely rig-gated ───────────
+log "SKIP census — legs needing the real LIVE-1 rig (owners: p2p-git-live-activation-2026-07-09 lanes)"
+skipp "LEG E (P-306) GitHub bridge live — needs the rig's 2nd machine to prove commit-only members don't false-alarm the watchdog under REAL multi-machine wall-clock/network timing; the runbook's commit-only-mode watchdog analysis (git-sync-stall-watchdog.ts's commitStale is unaffected by commit-only mode) is static-verified, re-confirmed 2026-07-10, but is explicitly NOT the live proof this leg exists for — no local git-object trick substitutes for real timing skew"
+skipp "LEG G (P-308) chaos — needs LEGS A-F live UNDER ONE GENUINE MULTI-MACHINE RUN first (kill-the-integrator / PG-blip / VM-restart drills are meaningless without a live multi-machine replication loop to interrupt); legs A-D proving their mechanics single-box today is necessary but not sufficient for this leg"
 
 # ── LEG D (P-305) integration — LIVE as of 2026-07-10: P-204 worktree-bridge
 # driver landed (WI-3493, runWorktreeBridgeLeg wired into git-sync-action.ts).
@@ -197,10 +276,21 @@ skipp "LEG G (P-308) chaos — needs LEGS A-F live first (kill-the-integrator / 
 # over the same local mirror (openDuplex omitted because the objects are
 # already local) — the identical precedent worktree-bridge.integration.test.ts
 # itself uses for its own "second machine-view" case; a genuine 2-process /
-# 2-host proof is LEG A/B's job (rig-gated), not this leg's.
+# 2-host proof is P-003's live-rig job, not this leg's (LEG A/B above prove
+# the join/replication MECHANICS single-box the same way; none of A/B/D
+# substitute for the real 2-machine run).
 log "LEG D (P-305) — integrator computes+publishes canonical staging; a non-steer head lands in the REAL PG integration-requests queue with a visible receipt; the OTHER machine's worktree ff-advances and never touches a dirty/locked file"
 LEGD_ROOT="$WORK/leg-d-git-root"; mkdir -p "$LEGD_ROOT"
-cat > "$WORK/leg-d.ts" <<EOF
+# Node/tsx resolve a bare specifier (`import postgres from 'postgres'`) by
+# walking up node_modules from the SCRIPT'S OWN path — never from the process
+# cwd — so a script written under $WORK (outside the repo tree entirely) can
+# never find the repo's hoisted `postgres` package no matter what directory
+# `npx tsx` is invoked FROM. Write it into the repo's own gitignored scratch
+# dir instead (mirrors the existing .papercusp/scratch/leg-c-trust-drill.ts
+# precedent) so the upward walk reaches $REPO_DIR/node_modules/postgres.
+LEGD_SCRATCH_DIR="$REPO_DIR/.papercusp/scratch"; mkdir -p "$LEGD_SCRATCH_DIR"
+LEGD_SCRIPT="$LEGD_SCRATCH_DIR/hive-git-drill-leg-d-$$.ts"
+cat > "$LEGD_SCRIPT" <<EOF
 import postgres from 'postgres';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -231,8 +321,8 @@ async function initWorktree(dir: string): Promise<void> {
 
 async function main() {
   const sql = postgres('$DSN', { prepare: false });
-  const WS = '$WS'; const POT_SLUG = '$HIVE_SLUG'; const REPO_KEY = 'leg-d-repo';
-  const repo = await ensureHiveGitRepo(POT_SLUG, REPO_KEY);
+  const WS = '$WS'; const POT_SLUG = '$POT_GIT_SLUG'; const REPO_KEY = 'leg-d-repo';
+  const repo = await ensurePotGitRepo(POT_SLUG, REPO_KEY);
   const integrator = keypair();
   const memberSteer = keypair();
   const memberBelow = keypair();
@@ -314,7 +404,8 @@ async function main() {
 }
 main().catch((e) => { console.error(e); process.exit(1); });
 EOF
-legd_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix npx tsx "$WORK/leg-d.ts" 2>"$WORK/legd.err")"
+legd_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix npx tsx "$LEGD_SCRIPT" 2>"$WORK/legd.err")"
+rm -f "$LEGD_SCRIPT"
 if [ -z "$legd_out" ]; then
   bad "LEG D: script produced no output — see $WORK/legd.err"
 else
@@ -341,7 +432,6 @@ fi
 # gcHiveGitRepo / checkPublishGuard functions via tsx against the checked-out
 # source — proving the actual production code, not a reimplementation.
 log "LEG F (P-307) — G-9 gc keep-work/last-N/departed-member archival + G-10 secrets/oversized-blob guard, real bare repos"
-HGGIT="$REPO_DIR/packages/operator-core/lib/sync/hive-git"
 LEGF_GC_REPO="$WORK/leg-f-gc.git"; git init -q --bare "$LEGF_GC_REPO"
 NS_LIVE="$(printf '%064d' 1)"; NS_GONE="$(printf '%064d' 2)"
 legf_commit() { # <repo> <ref> <content> <committer-ts>
