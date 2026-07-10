@@ -66,6 +66,19 @@ if ! port_free "$OP_PORT"; then
 fi
 
 log "boot $NAME — ssh:$SSH_PORT spice:127.0.0.1:$SPICE_PORT op:${OP_PORT}${op_hostfwd:+ (fwd)} disk=$(basename "$DISK")"
+# VM_VGA default virtio (was qxl until 2026-07-09): Ubuntu 24.04's qxl X DDX
+# (xserver-xorg-video-qxl) segfaults Xorg in xf86ProbeOutputModes on any
+# client RandR re-probe — tao/GTK monitor enumeration at Papercusp GUI
+# startup crash-looped the whole X session (desktop-auto-update-operational
+# -2026-07-09 P-006 investigation; Xorg.0.log.old backtrace: RRGetInfo →
+# xf86ProbeOutputModes → xf86DuplicateMode SIGSEGV). virtio-vga uses the
+# stable in-tree modesetting driver; spice still works. Set VM_VGA=qxl to
+# reproduce the old behavior (or when a guest lacks virtio_gpu).
+# ⚠ Keep comments OUTSIDE the qemu arg list: a comment line inside a
+# backslash-continued command ENDS the continuation, silently truncating the
+# args (this exact block, when placed mid-command, dropped -vga/-spice/
+# -monitor/-serial/-display/-pidfile/-daemonize — no SPICE, no pidfile, qemu
+# in the foreground; found 2026-07-10).
 qemu-system-x86_64 \
   -name "papercusp-testvm-$NAME" \
   -enable-kvm -machine q35,accel=kvm -cpu host \
@@ -75,14 +88,6 @@ qemu-system-x86_64 \
   -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22${op_hostfwd}" \
   -device virtio-net-pci,netdev=net0 \
   "${fed_nic[@]}" \
-  # VM_VGA default virtio (was qxl until 2026-07-09): Ubuntu 24.04's qxl X DDX
-  # (xserver-xorg-video-qxl) segfaults Xorg in xf86ProbeOutputModes on any
-  # client RandR re-probe — tao/GTK monitor enumeration at Papercusp GUI
-  # startup crash-looped the whole X session (desktop-auto-update-operational
-  # -2026-07-09 P-006 investigation; Xorg.0.log.old backtrace: RRGetInfo →
-  # xf86ProbeOutputModes → xf86DuplicateMode SIGSEGV). virtio-vga uses the
-  # stable in-tree modesetting driver; spice still works. Set VM_VGA=qxl to
-  # reproduce the old behavior (or when a guest lacks virtio_gpu).
   -vga "${VM_VGA:-virtio}" -spice "port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on" \
   -device virtio-serial-pci \
   -chardev spicevmc,id=spicechannel0,name=vdagent \
