@@ -1,1 +1,0 @@
-import{r as e,t}from"./local-announce-identity-BuVweZEA.js";t();export{e as resolveLocalAnnounceIdentity};

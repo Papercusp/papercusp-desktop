@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(){throw Error(`@dbos-inc/dbos-sdk is server-only and cannot run in the operator-vite browser bundle`)}var n,r,i,a=e((()=>{n={get(e,n){return n===Symbol.toPrimitive||n===`toString`?()=>`[dbos-browser-shim]`:t},apply:t,construct:t},r=new Proxy({},n),i=new Proxy(function(){t()},n),new Proxy({},n)}));export{i as n,a as r,r as t};

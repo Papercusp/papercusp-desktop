@@ -1,1 +1,0 @@
-import"./capabilities-BOw6mYHj.js";import{a as e,r as t}from"./src-DwmyzD-M.js";t();export{e as registerPluginTools};

@@ -3,7 +3,7 @@ id: ch6-05-p2p-git
 chapter: 6
 order: 5
 title: Peer-to-peer git — replicating code without a central remote
-docSlugs: system/hive-git-sync
+docSlugs: system/pot-git-sync
 ---
 
 ## Brief

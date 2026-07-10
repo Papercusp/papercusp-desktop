@@ -1,1 +1,0 @@
-import{n as e,o as t}from"./ideators-CP-G562p.js";t();export{e as SCOUT_IDEATOR_MODEL};

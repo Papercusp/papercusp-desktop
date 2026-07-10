@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./SetupWizard-DP3irinq.js";var n=e();function r(){return(0,n.jsx)(t,{mode:`settings`})}export{r as component};

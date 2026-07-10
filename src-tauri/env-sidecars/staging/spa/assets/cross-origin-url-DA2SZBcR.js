@@ -1,1 +1,0 @@
-function e(e){if(typeof window>`u`||typeof window.__TAURI_INTERNALS__?.invoke==`function`)return e;let{protocol:t,hostname:n,port:r}=window.location;if(t!==`http:`&&t!==`https:`)return e;let i=n===`localhost`?`127.0.0.1`:n===`127.0.0.1`?`localhost`:null;return i?`${t}//${i}${r?`:${r}`:``}${e}`:e}export{e as t};

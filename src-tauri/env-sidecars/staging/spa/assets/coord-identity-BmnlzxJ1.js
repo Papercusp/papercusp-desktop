@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){let t=e.trim();if(!t)throw Error(`scoutCoordOwnerId: potSlug is required (a Scout role identity is per-hive)`);return`${n}${t}`}var n,r=e((()=>{n=`blender:`}));export{r as n,t as r,n as t};

@@ -3,7 +3,7 @@ id: ch5-01-git-sync
 chapter: 5
 order: 1
 title: Git sync — nobody commits, everything is committed
-docSlugs: system/hive-git-sync, system/repo-conventions
+docSlugs: system/pot-git-sync, system/repo-conventions
 ---
 
 ## Brief

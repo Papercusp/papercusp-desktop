@@ -175,7 +175,7 @@ for the same thing.
 2. `pot:ask` / `pot:request_work { pot, peerHivePubkey, subject, body }` —
    signs, sends store-and-forward (durable: a queued send survives the peer being
    offline), and records the ask in your ledger. It returns a `correlationId` and
-   an `answeredEvent` key (`cross-hive:answered:<correlationId>`).
+   an `answeredEvent` key (`cross-pot:answered:<correlationId>`).
 3. `events:await { event: <answeredEvent> }` then **END YOUR TURN**. The peer's
    answer/decline arrives through the boundary, transitions the ledger row, and
    fires that event — re-invoking a sleeping Mug with the reply. (`pot:asks`

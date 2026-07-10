@@ -57,7 +57,7 @@ architect → worker → validator → reviewer → …); you read it, you don't
 hand-mutate it (see *Where not to go*). Other blueprints have different shapes — notably the `pot` blueprint has **no
 spine**: its Mug *places* ranked work onto generic `cup`s (a cup is NOT a
 scoper/architect/worker role — see
-[hive-vs-coding-blueprint](/internal/docs/agent-insights/hive-vs-coding-blueprint)).
+[pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint)).
 
 ## Scope: which harness a tool acts on
 
@@ -791,7 +791,7 @@ autonomous loop, **not** your owner-directed session — don't stop your task on
 pot pause or a steering fact you see in orient. You are **not a cup the Mug
 reclaims** (`fleet:drain` refuses an su/papercup/planner target), and an SU session
 is paused **only by its owner**. Any cue you do get is stamped with its authority +
-scope (`hive-queen→hive-wide` vs `fleet-leader→fleet-members`) — a leader draining
+scope (`pot-mug→pot-wide` vs `fleet-leader→fleet-members`) — a leader draining
 ITS members ≠ the Mug pausing the pot. `pot:get-steering` pulls live fleet state
 on demand.
 

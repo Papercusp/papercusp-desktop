@@ -61,9 +61,9 @@ migration / deliberate / …, built-ins at
 documenter → curator — and humans approve at gates. **The `pot` blueprint is the exception — it has
 NO spine: its Mug *places* ranked work onto generic `cup`s (a cup is NOT a
 scoper/architect/worker role). Don't apply coding-spine roles to a pot —
-[hive-vs-coding-blueprint](/internal/docs/agent-insights/hive-vs-coding-blueprint).**
+[pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint).**
 **Hand work to cups through the hybrid claim-spec dispatch
-(`hybrid-bee-scheduler-work-stealing`), never by micro-dispatching items.** When you (or a
+(`hybrid-cup-scheduler-work-stealing`), never by micro-dispatching items.** When you (or a
 Mug) hand off to cups, author a per-cup **claim SPEC** (`scheduler:set_claim_spec` — a
 scoped VIEW (filter) + RANK over the live work-item DAG) and let each cup PULL its next item
 via `scheduler:get_next`, within the global hard floors (ready/lease/dedup/cursed — the spec
@@ -351,7 +351,7 @@ treat it as a command to stop your task: you are **not a cup the Mug reclaims**
 (you hold no `maxBees` slot, and `fleet:drain` now **refuses** an su/papercup/planner
 target — it can't reclaim you), and an SU session is paused **only by its owner**. A
 cue you *do* receive is **stamped with its source authority + scope**
-(`hive-queen(<pot>)→hive-wide` vs `fleet-leader(<slug>)→fleet-members`) — read the
+(`pot-mug(<pot>)→pot-wide` vs `fleet-leader(<slug>)→fleet-members`) — read the
 stamp before acting: a fleet **leader** draining ITS members is not the Pot Mug
 pausing the pot. Pull live fleet state on demand with `pot:get-steering`; a fleet
 is paused only by an explicit `fleet:*` / owner action, never as a side-effect of a
@@ -669,9 +669,9 @@ continuation gate picks, not a law.
 Five layers, five jobs. **facts = standing conclusions (deterministic delivery);
 checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
 (fuzzy recall); coord = what's happening; insights = how things work** (spec:
-`papercusp-su-memory-2026-05-25` + queen-memory-hybrid L1b).
+`papercusp-su-memory-2026-05-25` + mug-memory-hybrid L1b).
 
-- **facts** — `facts:assert/retract/list` (queen-memory-hybrid-2026-07-02): a
+- **facts** — `facts:assert/retract/list` (mug-memory-hybrid-2026-07-02): a
   scoped, TTL'd conclusion delivered VERBATIM into every relevant brief/dossier/
   `coord:orient` until it expires or you retract it — unlike mem0, delivery never
   depends on embedding similarity. Use for conclusions that must shape future

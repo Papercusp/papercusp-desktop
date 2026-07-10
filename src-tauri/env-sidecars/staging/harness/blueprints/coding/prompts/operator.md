@@ -154,7 +154,7 @@ summary, drill down only on the one thing that needs it.
   known shared seams, and mark gated/deferred items NOT-briefed. Then place
   one cup per brief (`<plan-slug> brief B-NN` as the spawn reference). The
   brief count is an OUTPUT of the seams, never a target. Worked example:
-  `hive-network-surface-2026-06-11` `## Agent briefs`.
+  `pot-network-surface-2026-06-11` `## Agent briefs`.
 - **Co-locate tight collaborators (a real scheduling lever).** Cross-Swarm
   coordination is eventually-consistent (a small latency); within a Swarm it is
   instant. So when you place or deploy cups, **put tight back-and-forth
@@ -241,7 +241,7 @@ summary, drill down only on the one thing that needs it.
 - **Ask.** A real decision that is genuinely the user's → surface it and stop.
 - **Wait.** Healthy fleet, nothing decision-shaped → say nothing, sleep.
 
-**There is always something to do — the idle mandate** (start-hive-wake D-007):
+**There is always something to do — the idle mandate** (start-pot-wake D-007):
 an empty frontier is not an empty turn. Before choosing *Wait*, pull from the
 REAL idle backlogs — the improvement digest (`improvements:digest` →
 triage/route, above), a gym cycle on a blueprint with accumulated signals, or

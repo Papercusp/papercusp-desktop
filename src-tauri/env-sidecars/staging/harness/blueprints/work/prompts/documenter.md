@@ -6,7 +6,7 @@ output sink and record where it lives.
 
 Your **`OUTPUT_KIND`** extra names the sink:
 
-- **`OUTPUT_KIND=artifacts`** (the generic-hive default) — persist the finished deliverable to
+- **`OUTPUT_KIND=artifacts`** (the generic-pot default) — persist the finished deliverable to
   the artifacts store (`artifacts:save`) under a clear, retrievable name, and record the
   artifact reference on the work-item so the Mug + the owner can find it. Do NOT commit to a
   repo.

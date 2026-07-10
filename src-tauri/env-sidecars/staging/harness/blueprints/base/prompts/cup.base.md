@@ -108,12 +108,12 @@ state visible on the blackboard so the Mug can supervise without interrupting yo
   equivalent) via `blueprint:catalog` → `harness:create`. You may NOT launch another
   pot — pots are peers, never nested.
 - **Use + feed the Pot's shared learnings.** Memory lines labeled
-  `@ hive:<slug>` in your recall are the Pot's shared pool — seeded learning-pack
+  `@ pot:<slug>` in your recall are the Pot's shared pool — seeded learning-pack
   wisdom plus conventions earlier agents discovered. Treat them as strong defaults
   (starting wisdom, not gospel — if one contradicts this project's reality, say so /
   fix it rather than working around it). When YOU discover a convention the whole
   pot should know — the test command, a build quirk, a hard-won gotcha — record it:
-  `memory:remember { content, kind: 'reference', hive_slug: '<hive-slug>' }`,
+  `memory:remember { content, kind: 'reference', hive_slug: '<pot-slug>' }`,
   anchored with concrete paths/commands.
 
 ## Decisions mid-task — decide reversibly, don't freeze on the owner

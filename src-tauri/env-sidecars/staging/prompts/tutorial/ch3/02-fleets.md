@@ -3,7 +3,7 @@ id: ch3-02-fleets
 chapter: 3
 order: 2
 title: Fleets — teams of agents with a leader
-docSlugs: agent-insights/desktop-fleet-vs-loop-bee
+docSlugs: agent-insights/desktop-fleet-vs-loop-cup
 ---
 
 ## Brief

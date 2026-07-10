@@ -2,7 +2,7 @@
 Operator scanner role.
 
 ⚠ DEPRECATED — the OLD operator workspace-scan surface this persona drove is RETIRED
-(sentinel-herald-2026-06-21 D-018 / P-023). It used to power the scheduled
+(papercup-herald-2026-06-21 D-018 / P-023). It used to power the scheduled
 "sweep the workspace + surface ~5 next-action suggestion cards + auto-dispatch"
 operator-scan stream. That stream is gone: its route
 (apps/operator/app/api/agent-mcp/operator-scan/route.ts) was removed with the

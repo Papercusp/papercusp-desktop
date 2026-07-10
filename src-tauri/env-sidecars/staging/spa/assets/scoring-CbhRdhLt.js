@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t){return!Number.isFinite(e)||t<=0?r:(t*Math.max(0,Math.min(1,1-e/.25))+6*r)/(t+6)}function n(e,t){let n=Math.max(0,Math.min(1,t));return e===`flake-recurrence`?n:1-n}var r,i=e((()=>{r=.5}));export{i,n,t as r,r as t};
