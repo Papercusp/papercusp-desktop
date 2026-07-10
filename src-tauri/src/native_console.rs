@@ -565,12 +565,36 @@ fn cfs_rename(from: &str, to: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn cfs_rename(from: &str, to: &str) -> Result<(), String> {
-    let out = wsl_fs(&["mv", "-f", from, to], None)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(wsl_relay_error(&out))
+    // WI-3746: same wsl.exe-interop-under-concurrency class as cfs_write below
+    // (a 2nd+ fleet member's rename can race a 1st member's already-live,
+    // CPU-heavy session). Retry transient failures with the same backoff
+    // budget, but return a genuine "source vanished" immediately rather than
+    // burning the retry budget — the .mcp.json-backup caller relies on that
+    // outcome coming back promptly to tolerate a concurrent sibling launch
+    // (is_missing_path_err), not after several seconds of retries.
+    let mut last = String::from("cfs_rename: no attempt ran");
+    for attempt in 0..WSL_WRITE_MAX_ATTEMPTS {
+        match wsl_fs(&["mv", "-f", from, to], None) {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                let err = wsl_relay_error(&out);
+                if is_missing_path_err(&err) {
+                    return Err(err);
+                }
+                last = err;
+            }
+            Err(e) => last = e,
+        }
+        if cfs_exists(to) {
+            return Ok(());
+        }
+        if attempt + 1 < WSL_WRITE_MAX_ATTEMPTS {
+            let jitter = to.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64)) % 100;
+            let backoff_ms = (200u64 << attempt).min(2000);
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms + jitter));
+        }
     }
+    Err(last)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -579,7 +603,7 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-const WSL_WRITE_MAX_ATTEMPTS: u32 = 4;
+const WSL_WRITE_MAX_ATTEMPTS: u32 = 7;
 
 #[cfg(target_os = "windows")]
 fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
@@ -590,10 +614,17 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
     // output (surface A), or a separate reader wsl.exe not seeing the file →
     // bash exits 127 "No such file" (surface B). Retry with per-path-jittered
     // backoff + a post-write existence check to ride out the transient.
+    //
+    // WI-3746: the original 4-attempt/~0.5s-total budget was tuned for a brief
+    // interop blip, not for a SECOND member's launch racing a FIRST member's
+    // already-live, CPU-heavy claude/psu session inside the same distro — that
+    // contention can outlast 0.5s. Widened to 7 attempts / ~7s total backoff
+    // (capped exponential) so a fleet launch rides out multi-second contention
+    // instead of hard-failing the 2nd+ concurrent member.
     let script = format!("cat > {}", shell_escape_single(path));
     // Per-path jitter (no rand dep) decorrelates concurrent writers — each has a
     // unique script path — so their retries don't collide in lockstep.
-    let jitter = path.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64)) % 40;
+    let jitter = path.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64)) % 100;
     let mut cat_ever_ok = false;
     let mut last = String::from("cfs_write: no attempt ran");
     for attempt in 0..WSL_WRITE_MAX_ATTEMPTS {
@@ -614,7 +645,8 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
             Err(e) => last = e,
         }
         if attempt + 1 < WSL_WRITE_MAX_ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_millis((60u64 << attempt) + jitter));
+            let backoff_ms = (200u64 << attempt).min(2000);
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms + jitter));
         }
     }
     // If the write command itself EVER exited 0, trust it (cfs_exists can race
