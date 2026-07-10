@@ -160,9 +160,153 @@ log "SKIP census — Phase-3 legs (owners: p2p-git-live-activation-2026-07-09 la
 skipp "LEG A (P-302) storage + join — needs the LIVE-1 rig (real 2nd machine) AND P-201 serve-plane wiring so a real VM can cold-join via G-8 bootstrap; this scaffold's single sidecar has no peer to join against yet"
 skipp "LEG B (P-303) replication — needs P-202 announce->fetch driver wired (ref-announce-tick.ts has no scheduled caller today) + the rig for a genuine tower<->VM round-trip"
 skipp "LEG C (P-304) trust / tamper drill — needs LEG B's live fetch path to exist before a relay-lie / rollback / non-member-refuse drill has anything to attack"
-skipp "LEG D (P-305) integration — needs P-204 worktree-bridge driver wired (staging-advance event has no worktree consumer yet) so the OTHER machine's tree can be observed advancing ff-only"
 skipp "LEG E (P-306) GitHub bridge live — needs the rig's 2nd machine to prove commit-only members don't false-alarm the watchdog under real multi-machine load (single-box analysis already done + verified, see the runbook's watchdog section; this leg proves it live, not analytically)"
 skipp "LEG G (P-308) chaos — needs LEGS A-F live first (kill-the-integrator / PG-blip / VM-restart drills are meaningless without a live multi-machine replication loop to interrupt)"
+
+# ── LEG D (P-305) integration — LIVE as of 2026-07-10: P-204 worktree-bridge
+# driver landed (WI-3493, runWorktreeBridgeLeg wired into git-sync-action.ts).
+# Same standard as LEG F: real production code (runIntegratorTick,
+# runWorktreeBridgeTick, the real G-5c ratify-queue writer) against a real bare
+# hive-git repo AND this drill's own real packaged-sidecar Postgres (the SAME
+# $DSN the LEG MODE round-trip above already proves is live) — never a fake
+# sql, never a reimplementation. "The OTHER machine" is a SEPARATE worktree
+# over the same local mirror (openDuplex omitted because the objects are
+# already local) — the identical precedent worktree-bridge.integration.test.ts
+# itself uses for its own "second machine-view" case; a genuine 2-process /
+# 2-host proof is LEG A/B's job (rig-gated), not this leg's.
+log "LEG D (P-305) — integrator computes+publishes canonical staging; a non-steer head lands in the REAL PG integration-requests queue with a visible receipt; the OTHER machine's worktree ff-advances and never touches a dirty/locked file"
+LEGD_ROOT="$WORK/leg-d-git-root"; mkdir -p "$LEGD_ROOT"
+cat > "$WORK/leg-d.ts" <<EOF
+import postgres from 'postgres';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+process.env.PAPERCUSP_HIVE_GIT_ROOT = '$LEGD_ROOT';
+import { generateEd25519KeypairDer, signWithPrivateKeyDer } from '$HGGIT/../../identity/ed25519';
+import { defaultRunGit, ensureHiveGitRepo, writeNamespaceRef } from '$HGGIT/storage';
+import { WORK_REF, readStaging } from '$HGGIT/integrator';
+import { runIntegratorTick } from '$HGGIT/integrator-tick';
+import { runWorktreeBridgeTick } from '$HGGIT/worktree-bridge-tick';
+import { listIntegrationRequests } from '$HGGIT/integration-requests';
+
+function keypair() {
+  const { privateKeyDer, pubkeyBase64 } = generateEd25519KeypairDer();
+  return { pubkeyBase64, sign: async (bytes: Buffer) => signWithPrivateKeyDer(privateKeyDer, bytes) };
+}
+async function git(args: string[], cwd: string): Promise<string> {
+  const r = await defaultRunGit(args, cwd);
+  if (r.code !== 0) throw new Error(\`git \${args.join(' ')} failed: \${r.stderr}\`);
+  return r.stdout.trim();
+}
+async function initWorktree(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await git(['init', '-q', '-b', 'main'], dir);
+  await git(['config', 'user.name', 't'], dir);
+  await git(['config', 'user.email', 't@t'], dir);
+}
+
+async function main() {
+  const sql = postgres('$DSN', { prepare: false });
+  const WS = '$WS'; const POT_SLUG = '$HIVE_SLUG'; const REPO_KEY = 'leg-d-repo';
+  const repo = await ensureHiveGitRepo(POT_SLUG, REPO_KEY);
+  const integrator = keypair();
+  const memberSteer = keypair();
+  const memberBelow = keypair();
+
+  const src = join('$LEGD_ROOT', 'src');
+  await initWorktree(src);
+  await writeFile(join(src, 'f.txt'), 'steer-v1\n');
+  await git(['add', '.'], src);
+  await git(['commit', '-q', '-m', 'S1'], src);
+  const steerSha = await git(['rev-parse', 'HEAD'], src);
+  await writeNamespaceRef(repo, memberSteer.pubkeyBase64, WORK_REF, steerSha);
+
+  await git(['checkout', '-q', '--orphan', 'below'], src);
+  await writeFile(join(src, 'below.txt'), 'below-v1\n');
+  await git(['add', 'below.txt'], src);
+  await git(['commit', '-q', '-m', 'below'], src);
+  const belowSha = await git(['rev-parse', 'HEAD'], src);
+  await writeNamespaceRef(repo, memberBelow.pubkeyBase64, WORK_REF, belowSha);
+  await git(['checkout', '-q', 'main'], src);
+
+  const out = await runIntegratorTick({
+    potHomeSlug: POT_SLUG, workspaceId: WS, repoKey: REPO_KEY,
+    memberDevicePubkeysBase64: [memberSteer.pubkeyBase64, memberBelow.pubkeyBase64],
+    integratorDevicePubkeyBase64: integrator.pubkeyBase64,
+    epoch: 1, priorSeq: 0, sign: integrator.sign,
+    resolveTier: (dev) => (dev === memberSteer.pubkeyBase64 ? 'steer' : 'message'),
+    deps: { isIntegrator: async () => true, sql },
+  });
+
+  const queued = await listIntegrationRequests({ workspaceId: WS, potSlug: POT_SLUG, repoKey: REPO_KEY }, sql);
+  const receipt = queued.find((q) => q.devicePubkey === memberBelow.pubkeyBase64 && q.headSha === belowSha);
+
+  const otherWt = join('$LEGD_ROOT', 'other-machine-wt');
+  await initWorktree(otherWt);
+  const bridgeOut = await runWorktreeBridgeTick({
+    bareRepoPath: repo, worktreePath: otherWt, pending: [out.announcement!],
+    prior: { epochSeq: null, stagingSha: null }, accept: { expectedDevice: integrator.pubkeyBase64 },
+  });
+  const otherHead = await git(['rev-parse', 'HEAD'], otherWt);
+  const otherContent = await readFile(join(otherWt, 'f.txt'), 'utf8');
+
+  // Second advance while the other worktree has a DIRTY (locked) f.txt.
+  await writeFile(join(src, 'f.txt'), 'steer-v2\n');
+  await git(['add', '.'], src);
+  await git(['commit', '-q', '-m', 'S2'], src);
+  const steerSha2 = await git(['rev-parse', 'HEAD'], src);
+  await writeNamespaceRef(repo, memberSteer.pubkeyBase64, WORK_REF, steerSha2);
+  const out2 = await runIntegratorTick({
+    potHomeSlug: POT_SLUG, workspaceId: WS, repoKey: REPO_KEY,
+    memberDevicePubkeysBase64: [memberSteer.pubkeyBase64, memberBelow.pubkeyBase64],
+    integratorDevicePubkeyBase64: integrator.pubkeyBase64,
+    epoch: 1, priorSeq: 1, sign: integrator.sign,
+    resolveTier: (dev) => (dev === memberSteer.pubkeyBase64 ? 'steer' : 'message'),
+    deps: { isIntegrator: async () => true, sql },
+  });
+  await writeFile(join(otherWt, 'f.txt'), 'locally-edited, uncommitted\n');
+  const dirtyBridgeOut = await runWorktreeBridgeTick({
+    bareRepoPath: repo, worktreePath: otherWt, pending: [out2.announcement!],
+    prior: bridgeOut.watermark, accept: { expectedDevice: integrator.pubkeyBase64 },
+  });
+  const dirtyHeadAfter = await git(['rev-parse', 'HEAD'], otherWt);
+  const dirtyContentAfter = await readFile(join(otherWt, 'f.txt'), 'utf8');
+
+  await sql.end();
+  console.log(JSON.stringify({
+    stagingIsSteerSha: (await readStaging(repo, integrator.pubkeyBase64)) === steerSha,
+    integrationAdvanced: out.integration?.advanced === true,
+    gated: out.gated,
+    receiptFound: !!receipt,
+    receiptState: receipt?.state ?? null,
+    receiptReason: receipt?.reason ?? null,
+    firstAdvanceOutcome: bridgeOut.results[0]?.bridge.outcome,
+    firstAdvanceHeadMatches: otherHead === steerSha,
+    firstAdvanceContent: otherContent,
+    dirtyAdvanceOutcome: dirtyBridgeOut.results[0]?.bridge && 'advance' in dirtyBridgeOut.results[0].bridge ? dirtyBridgeOut.results[0].bridge.advance.outcome : dirtyBridgeOut.results[0]?.bridge.outcome,
+    dirtyHeadUnchanged: dirtyHeadAfter === steerSha,
+    dirtyContentUntouched: dirtyContentAfter === 'locally-edited, uncommitted\n',
+  }));
+}
+main().catch((e) => { console.error(e); process.exit(1); });
+EOF
+legd_out="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix npx tsx "$WORK/leg-d.ts" 2>"$WORK/legd.err")"
+if [ -z "$legd_out" ]; then
+  bad "LEG D: script produced no output — see $WORK/legd.err"
+else
+  [ "$(jget "$legd_out" "d['stagingIsSteerSha']")" = "True" ] && [ "$(jget "$legd_out" "d['integrationAdvanced']")" = "True" ] \
+    && ok "integrator computed + published canonical staging from the steer-tier member's real head (real bare repo)" \
+    || bad "integrator did not publish the expected canonical staging ($legd_out)"
+  [ "$(jget "$legd_out" "d['receiptFound']")" = "True" ] && [ "$(jget "$legd_out" "d['receiptState']")" = "pending" ] && [ "$(jget "$legd_out" "d['receiptReason']")" = "below-steer-tier" ] \
+    && ok "non-steer member's head landed in the REAL Postgres integration-requests queue (pending, below-steer-tier) — visible receipt, never silently merged" \
+    || bad "no visible receipt for the non-steer head in hive_integration_requests ($legd_out)"
+  [ "$(jget "$legd_out" "d['firstAdvanceOutcome']")" = "accepted" ] && [ "$(jget "$legd_out" "d['firstAdvanceHeadMatches']")" = "True" ] && [ "$(jget "$legd_out" "d['firstAdvanceContent']")" = "steer-v1" ] \
+    && ok "the OTHER machine's worktree (a second worktree over the local mirror) ff-advanced to the integrator's published staging" \
+    || bad "the other machine's worktree did not ff-advance as expected ($legd_out)"
+  [ "$(jget "$legd_out" "d['dirtyAdvanceOutcome']")" = "deferred-dirty" ] && [ "$(jget "$legd_out" "d['dirtyHeadUnchanged']")" = "True" ] && [ "$(jget "$legd_out" "d['dirtyContentUntouched']")" = "True" ] \
+    && ok "G-7b: a dirty/locked file on the OTHER machine is NEVER touched — the advance defers instead of clobbering it" \
+    || bad "a dirty/locked file was touched (or the advance did not defer) — see $legd_out"
+fi
 
 # ── LEG F (P-307) lifecycle — G-9 gc + G-10 secrets/oversized-blob guard ────
 # LIVE as of 2026-07-09: P-205 (WI-3494) landed gc.ts's production caller
