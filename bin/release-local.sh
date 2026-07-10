@@ -495,12 +495,12 @@ if [[ "$WITH_ARM64" == "1" ]]; then
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
-if [[ -n "$WIN_PID" ]]; then
+if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
   win_found=0
   for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
   done
-  [[ "$win_found" == "1" ]] || { echo "ERROR: WITH_WINDOWS=1 but no windows artifacts came back from the VM"; exit 1; }
+  [[ "$win_found" == "1" ]] || { echo "ERROR: WITH_WINDOWS=1 but no windows artifacts $([[ "$WIN_REUSE" == "1" ]] && echo "in the inno dir (reuse)" || echo "came back from the VM")"; exit 1; }
 fi
 if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"

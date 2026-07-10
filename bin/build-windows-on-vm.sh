@@ -111,6 +111,18 @@ SCP=(scp -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -P "$VM_SSH_PORT" -o ConnectTime
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+# Content hash of everything that decides whether the Rust binary compiles and
+# what it is. EI-8914: the shared checkout is edited CONCURRENTLY by the whole
+# fleet, so "the tree we gated" and "the tree we packed" are different trees
+# unless we prove otherwise. Cheap enough to call several times.
+rust_src_fingerprint() {
+  {
+    find "$ROOT/src-tauri/src" -type f -name '*.rs' -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum 2>/dev/null
+    sha256sum "$ROOT/src-tauri/Cargo.toml" "$ROOT/src-tauri/Cargo.lock" 2>/dev/null
+    sha256sum "$ROOT"/src-tauri/tauri*.conf.json 2>/dev/null
+  } | sha256sum | cut -d' ' -f1
+}
+
 [[ -d "$ROOT/src-tauri/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
 [[ -f "$ROOT/src-tauri/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
 
@@ -131,6 +143,11 @@ if [[ "${SKIP_WINDOWS_CFG_PRECHECK:-0}" != "1" ]]; then
     fail "Windows-cfg pre-check found compile errors (above) — fix before spending a VM build. (SKIP_WINDOWS_CFG_PRECHECK=1 to override.)"
   fi
 fi
+# Remember exactly WHICH tree that gate passed on. The pack is minutes away
+# (seed cut + a 2.2G zstd source stage sit in between); if a peer edits
+# src-tauri/src in that window the gate's verdict no longer describes what we
+# are about to ship, and we re-gate before packing. EI-8914.
+PRECHECK_FP="$(rust_src_fingerprint)"
 [[ -f "$KEY_FILE" ]] || fail "signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 "${SSH[@]}" 'cmd /c echo VM-OK' >/dev/null 2>&1 || fail "VM unreachable on :$VM_SSH_PORT — boot it: ~/windows-vm/boot-windows.sh"
 
@@ -258,7 +275,7 @@ fi
 
 echo "==> packing desktop tree"
 TARBALL="$(mktemp /tmp/papercusp-desktop-build-XXXX.tar.gz)"
-trap 'rm -f "$TARBALL"' EXIT
+trap 'rm -f "$TARBALL" "$TARBALL.fp"' EXIT
 # -h dereferences symlinks (node_modules/.bin shims) — Windows tar can't
 # create them. Keep sidecar/**/node_modules (runtime deps); drop only the
 # desktop repo's own toolchain node_modules.
@@ -326,20 +343,58 @@ trap 'rm -f "$TARBALL"' EXIT
   # 2026-07-09 desktop-v0.0.5-alpha cut (log ends at the tar warning, no error).
   # Tolerate exactly rc<=1 (warnings stay visible on stderr); rc>=2 stays fatal —
   # same policy as stage-source-tree.sh.
-  set +e
-  tar -czhf "$TARBALL" \
-    --exclude='.git' \
-    --exclude='papercusp-desktop/node_modules' \
-    --exclude='papercusp-desktop/web/node_modules' \
-    --exclude='src-tauri/target' \
-    --exclude='src-tauri/sidecar.tmp.*' \
-    --exclude='src-tauri/sidecar.lock*' \
-    --exclude='src-tauri/sidecar/code-server' \
-    --exclude='src-tauri/sidecar/bin/omp' \
-    -C "$ROOT/.." papercusp-desktop
-  tar_rc=$?
-  set -e
-  (( tar_rc <= 1 )) || fail "desktop-tree pack tar failed (exit $tar_rc)"
+  # ── EI-8914 pack-verify loop ──────────────────────────────────────────────
+  # The flock above only serializes SIDECAR publishes. src-tauri/src is still
+  # live: a peer editing main.rs mid-tar gets packed half-written (and the
+  # tolerated rc==1 "file changed as we read it" warning HIDES it), while an
+  # edit landing between the pre-check and the tar ships code no Windows gate
+  # ever saw. Both were observed on 2026-07-09: a peer's `sweep_orphaned_
+  # sidecars()` call went in with only a `#[cfg(unix)]` definition, so the
+  # windows target was E0425-red for ~90s. That failure would otherwise have
+  # surfaced ~35 min later, on the VM, as "the Windows build is broken".
+  #
+  # Fingerprint → pack → re-fingerprint. If the source moved during the tar,
+  # the tarball may be torn: throw it away and repack. If the source no longer
+  # matches what the Windows gate approved, re-gate before spending the VM.
+  packed_ok=0
+  for pack_attempt in 1 2 3; do
+    fp_pre="$(rust_src_fingerprint)"
+    if [[ "$fp_pre" != "$PRECHECK_FP" ]]; then
+      echo "    src-tauri/src changed since the Windows-cfg gate — re-gating the tree we are about to pack (attempt $pack_attempt/3)"
+      if [[ "${SKIP_WINDOWS_CFG_PRECHECK:-0}" != "1" ]]; then
+        set +e; "$HERE/check-windows-cfg.sh"; regate_rc=$?; set -e
+        (( regate_rc == 0 || regate_rc == 2 )) \
+          || fail "Windows-cfg gate FAILED on the tree about to be packed — a peer edit landed after the early pre-check (EI-8914). Nothing was shipped. Re-run once the tree is green."
+      fi
+      PRECHECK_FP="$fp_pre"
+    fi
+
+    set +e
+    tar -czhf "$TARBALL" \
+      --exclude='.git' \
+      --exclude='papercusp-desktop/node_modules' \
+      --exclude='papercusp-desktop/web/node_modules' \
+      --exclude='src-tauri/target' \
+      --exclude='src-tauri/sidecar.tmp.*' \
+      --exclude='src-tauri/sidecar.lock*' \
+      --exclude='src-tauri/sidecar/code-server' \
+      --exclude='src-tauri/sidecar/bin/omp' \
+      -C "$ROOT/.." papercusp-desktop
+    tar_rc=$?
+    set -e
+    (( tar_rc <= 1 )) || fail "desktop-tree pack tar failed (exit $tar_rc)"
+
+    fp_post="$(rust_src_fingerprint)"
+    if [[ "$fp_pre" == "$fp_post" ]]; then
+      packed_ok=1
+      # Hand the packed tree's identity back across the subshell boundary.
+      printf '%s\n' "$fp_pre" > "$TARBALL.fp"
+      break
+    fi
+    echo "    ⚠ src-tauri/src changed DURING the pack (concurrent peer edit) — the tarball may be torn; repacking (attempt $pack_attempt/3)" >&2
+  done
+  (( packed_ok == 1 )) \
+    || fail "src-tauri/src kept changing under the pack after 3 attempts (EI-8914) — a peer is actively editing. Wait for the tree to quiesce, then re-run."
 ) 9>>"$ROOT/src-tauri/sidecar.lock"
 ls -lh "$TARBALL"
 
@@ -458,6 +513,31 @@ else
     SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
   fi
 fi
+
+# ── EI-8914: DERIVE the provenance label from the tree we actually packed ──
+# `PAPERCUSP_BUILD_SHA` is baked in via option_env! and self-reported by the
+# operator at /api/health. It used to be a caller-supplied constant tied to
+# nothing: the 0.0.5 cut on 2026-07-09 shipped `1a161ab-wi3407` while its
+# packed main.rs was byte-identical to ecea544 — 767 files and ~10k lines
+# apart. A release artifact that lies about its own provenance is worse than
+# one with no label at all. The commit portion is now COMPUTED; callers may
+# only add a human suffix via PAPERCUSP_BUILD_TAG.
+#
+# Note the label can never be a bare commit: the pack snapshots the WORKING
+# TREE, which on this fleet is ~always dirty against HEAD (git-sync commits on
+# a schedule). So say so, with `-dirty`.
+PACKED_FP="$(cat "$TARBALL.fp" 2>/dev/null || echo unknown)"
+_head_sha="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+if ! git -C "$ROOT" diff --quiet HEAD -- src-tauri 2>/dev/null; then
+  _head_sha="${_head_sha}-dirty"
+fi
+if [[ -n "${PAPERCUSP_BUILD_SHA:-}" ]]; then
+  echo "==> ⚠ PAPERCUSP_BUILD_SHA is DEPRECATED (EI-8914): a caller-supplied commit is not tied to the packed bytes." >&2
+  echo "    Demoting '${PAPERCUSP_BUILD_SHA}' to a suffix. Use PAPERCUSP_BUILD_TAG for human context." >&2
+  PAPERCUSP_BUILD_TAG="${PAPERCUSP_BUILD_TAG:-$PAPERCUSP_BUILD_SHA}"
+fi
+PAPERCUSP_BUILD_SHA="${_head_sha}${PAPERCUSP_BUILD_TAG:+-${PAPERCUSP_BUILD_TAG}}"
+echo "==> build provenance: sha=$PAPERCUSP_BUILD_SHA version=${PAPERCUSP_BUILD_VERSION:-<tauri.conf.json>} packed-src=${PACKED_FP:0:16}"
 
 echo "==> writing build script"
 BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
@@ -673,6 +753,32 @@ for SETUP_EXE in "${SETUP_EXES[@]}"; do
     "$SETUP_EXE")
   [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
 done
+
+# EI-8914: an installer must be traceable back to the bytes it was built from.
+# The self-reported /api/health sha is a single string; this records the whole
+# provenance next to the artifacts, including the sha256 of every setup.exe.
+PROVENANCE="$OUT_DIR/build-provenance.json"
+{
+  printf '{\n'
+  printf '  "version": %s,\n'        "\"${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo unknown)}\""
+  printf '  "buildSha": %s,\n'       "\"${PAPERCUSP_BUILD_SHA}\""
+  printf '  "gitHead": %s,\n'        "\"$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)\""
+  printf '  "gitDirty": %s,\n'       "$(git -C "$ROOT" diff --quiet HEAD -- src-tauri 2>/dev/null && echo false || echo true)"
+  printf '  "packedSrcFingerprint": %s,\n' "\"${PACKED_FP:-unknown}\""
+  printf '  "signed": %s,\n'         "$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]] && echo true || echo false)"
+  printf '  "builtAtUtc": %s,\n'     "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+  printf '  "artifacts": [\n'
+  _first=1
+  for f in "$OUT_DIR"/*-setup.exe; do
+    [[ -e "$f" ]] || continue
+    (( _first )) || printf ',\n'; _first=0
+    printf '    { "name": "%s", "bytes": %s, "sha256": "%s" }' \
+      "$(basename "$f")" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+  done
+  printf '\n  ]\n}\n'
+} > "$PROVENANCE"
+echo "==> build provenance written: $PROVENANCE"
+cat "$PROVENANCE"
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"
