@@ -1,0 +1,1 @@
+import{r as e}from"./configure-RQJ0syXn.js";import{t}from"./backend-AhtlI-j2.js";t();export{e as getMemoryBackend};

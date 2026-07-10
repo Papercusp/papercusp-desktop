@@ -141,8 +141,8 @@ printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ 
 # WI-2150 (fixture poisoning): the from-repo endpoint does a repo→Hive lookup
 # FIRST and, on a repeat run against a repo it already registered (e.g. a prior
 # smoke run under the same $P_A_USER identity), returns {ok:true, existing:{...}}
-# — a JOIN OFFER, not a fresh {created:{hiveSlug,...}}. This smoke's predicate
-# only ever reads d['created']['hiveSlug'], so a rerun against an
+# — a JOIN OFFER, not a fresh {created:{potSlug,...}} (field renamed hiveSlug→potSlug).
+# This smoke's predicate only ever reads created potSlug/hiveSlug, so a rerun against an
 # already-registered fixture repo got HIVE_SLUG='' and hard-FAILED at step 1
 # (rerun#4's actual failure mode, gate history in WI-2150). Fix: force:true
 # (already a first-class param on this route/createHiveFromRepo — "create-anyway
@@ -152,14 +152,14 @@ printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ 
 log "A: create+publish PUBLIC hive ($REPO_URL)"
 a_resp="$(curl -s -m 610 -X POST "$(sc a)/api/harness/pots/from-repo" -H 'content-type: application/json' \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
-HIVE_SLUG="$(jget "$a_resp" "d['created']['hiveSlug']")"; SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
+HIVE_SLUG="$(jget "$a_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"; SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 [ -n "$HIVE_SLUG" ] && [ -n "$SLUG" ] && echo "✓ public hive='$HIVE_SLUG' member='$SLUG' announced=$(jget "$a_resp" "d['publish']['announced']")" \
   || { echo "✗ create failed: $(echo "$a_resp" | head -c 300)"; exit 6; }
 if [ -z "${SKIP_INVITE:-}" ]; then
   log "A: create separate INVITE hive ($INV_REPO_URL)"
   inv="$(curl -s -m 610 -X POST "$(sc a)/api/harness/pots/from-repo" -H 'content-type: application/json' \
     -d "{\"githubUrl\":\"$INV_REPO_URL\",\"visibility\":\"invite\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
-  INV_SLUG="$(jget "$inv" "d['created']['hiveSlug']")"
+  INV_SLUG="$(jget "$inv" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"
   INV_TOPIC="$(q a "SELECT payload::text FROM harness_shared.harness_registry WHERE payload::text LIKE '%$INV_SLUG%' LIMIT 1;" | grep -oE 'topic[^,]{0,80}' | head -1)"
   [ -n "$INV_SLUG" ] && echo "✓ invite hive='$INV_SLUG' (topic carrier: ${INV_TOPIC:-see inst-a.log})" || echo "△ invite hive create: $(echo "$inv" | head -c 200)"
 else
@@ -303,7 +303,7 @@ if [ -z "${SKIP_B_PUBLISH:-}" ]; then
   log "B: create+publish its OWN PUBLIC hive ($B_REPO_URL) — symmetric directory check"
   b_resp="$(curl -s -m 610 -X POST "$(sc b)/api/harness/pots/from-repo" -H 'content-type: application/json' \
     -d "{\"githubUrl\":\"$B_REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true,\"force\":true}")"
-  B_HIVE_SLUG="$(jget "$b_resp" "d['created']['hiveSlug']")"
+  B_HIVE_SLUG="$(jget "$b_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"
   if [ -n "$B_HIVE_SLUG" ]; then
     echo "✓ B public hive='$B_HIVE_SLUG' announced=$(jget "$b_resp" "d['publish']['announced']")"
     AR=""; ABR=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do AR="$(curl -s -m 10 "$(sc a)/api/discovery/hives")"; ABR="$(jget "$AR" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$B_HIVE_SLUG'), None))")"; [ -n "$ABR" ] && [ "$ABR" != "null" ] && break; sleep 3; done

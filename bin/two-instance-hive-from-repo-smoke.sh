@@ -8,7 +8,7 @@
 #
 #   1. A: POST /api/harness/pots/from-repo {githubUrl, visibility:public}
 #      → clone + blueprint + hive home + member + AUTO-PUBLISH (P-006/P-007).
-#      Asserted: ok:true, created.hiveSlug/memberSlug, publish.announced:true,
+#      Asserted: ok:true, created.potSlug/memberSlug (potSlug was hiveSlug pre-rename), publish.announced:true,
 #      and bindingUnverified:true — both instances point PAPERCUSP_CUPBOARD_URL
 #      at an unreachable port (the LIVE Cupboard worker is NEVER touched), so
 #      the create must succeed in the documented degraded directory-only mode
@@ -328,7 +328,7 @@ log "A ($P_A_USER): POST /api/harness/pots/from-repo ($REPO_URL, public, runTest
 a_resp="$(from_repo a)"
 echo "A create → $(echo "$a_resp" | head -c 600)"
 A_OK="$(jget "$a_resp" "d['ok'] and 'created' in d")"
-HIVE_SLUG="$(jget "$a_resp" "d['created']['hiveSlug']")"
+HIVE_SLUG="$(jget "$a_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # renamed hiveSlug→potSlug; accept both for skew
 MEMBER_SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 A_ANNOUNCED="$(jget "$a_resp" "d['publish']['announced']")"
 A_UNVERIFIED="$(jget "$a_resp" "d['bindingUnverified']")"
@@ -724,7 +724,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  K4a CONTENT CONTROL (B reads pre-revoke encrypted content F-RKCTRL): $([ "$rk_content_ctrl_ok" = 1 ] && echo "PASS (content federation A→B healthy ⇒ K4b will assert the cut)" || echo "INCONCLUSIVE (content A→B unhealthy this run — WI-259; key-level K3-CUT governs)")"
 
   # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
-  mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"hiveSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1
+  mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"potSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1  # request field renamed hiveSlug→potSlug (revoke-contributor.ts zod refine accepts only potSlug)
   sleep 4
   NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   { [ -n "$CUR_EPOCH" ] && [ -n "$NEW_EPOCH" ] && [ "$NEW_EPOCH" -gt "$CUR_EPOCH" ]; } 2>/dev/null && rk_revoke_ok=1

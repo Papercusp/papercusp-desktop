@@ -144,7 +144,7 @@ resp="$(curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type
 # Two OK shapes: fresh 'created', or 'existing' — the identity+repo hive anchor
 # persists ACROSS instance homes (earlier same-identity smoke runs registered
 # hello-world-hive), so a fresh home can get { ok:true, existing:{ hive:{ hiveId } } }.
-HIVE_SLUG="$(jget "$resp" "d['created']['hiveSlug']")"
+HIVE_SLUG="$(jget "$resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # renamed hiveSlug→potSlug; accept both for skew
 HIVE_PATH="created"
 if [ -z "$HIVE_SLUG" ]; then
   HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['hiveId']")"; HIVE_PATH="existing"
@@ -155,7 +155,7 @@ echo "  hive=$HIVE_SLUG (path=$HIVE_PATH)"
 # ── LEG G: grant Delegate ────────────────────────────────────────────────────
 log "LEG G — grant Delegate to fleet '$DRILL_FLEET'"
 g="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' -H "$H_WS" \
-  -d "{\"action\":\"set\",\"hiveSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\",\"preset\":\"delegate\",\"note\":\"P-007 LIVE-2 drill\"}")"
+  -d "{\"action\":\"set\",\"potSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\",\"preset\":\"delegate\",\"note\":\"P-007 LIVE-2 drill\"}")"
 [ "$(jget "$g" "d.get('ok')")" = "True" ] || { bad "grant-set refused: $(echo "$g" | head -c 300)"; }
 grow="$(q "SELECT workspace_id||'|'||harness_slug||'|'||array_to_string(capabilities,',')||'|'||status||'|'||grantor_epoch||'|'||grantor_github_user_id FROM harness_shared.p2p_peer_grants WHERE grantee_ref='$DRILL_FLEET' AND harness_slug='$HIVE_SLUG';")"
 CAPS="$(echo "$grow" | cut -d'|' -f3)"
@@ -198,7 +198,7 @@ fw="$(q "SELECT state FROM harness_shared.p2p_foreign_workspaces WHERE offer_id=
 # ── LEG R: revoke → reap + receipt + epoch bump ──────────────────────────────
 log "LEG R — revoke the grant; the reaper must fail-close the in-flight session"
 r="$(curl -s -m 60 -X POST "$SC/api/agent-mcp/p2p-grant-set" -H 'content-type: application/json' -H "$H_WS" \
-  -d "{\"action\":\"revoke\",\"hiveSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\"}")"
+  -d "{\"action\":\"revoke\",\"potSlug\":\"$HIVE_SLUG\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$DRILL_FLEET\"}")"
 [ "$(jget "$r" "d.get('ok')")" = "True" ] || bad "revoke refused: $(echo "$r" | head -c 300)"
 reaped=""
 for i in $(seq 1 15); do

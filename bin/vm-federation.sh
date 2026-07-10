@@ -338,7 +338,7 @@ fed_wait_api b || echo "⚠ B sidecar API not ready (proceeding)"
 
 a_resp="$(fed_hive_create_from_repo a "$REPO_URL")"
 echo "A create → $(printf '%s' "$a_resp" | head -c 400)"
-HIVE_SLUG="$(fed_json "$a_resp" "d['created']['hiveSlug']")"
+HIVE_SLUG="$(fed_json "$a_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # renamed hiveSlug→potSlug; accept both for skew
 MEMBER_SLUG="$(fed_json "$a_resp" "d['created']['memberSlug']")"
 A_ANNOUNCED="$(fed_json "$a_resp" "d['publish']['announced']")"
 if [ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ]; then

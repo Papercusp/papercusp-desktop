@@ -104,7 +104,8 @@ echo "  sc=${FED_SC[a]} pg=${FED_PG[a]}"
 
 # ── workspace + throwaway hive (the harness every leg below shares) ─────────
 log "create workspace"
-wresp="$(curl -s -m 30 -X POST "$SC/api/workspaces" -H 'content-type: application/json' \
+wresp="$(fed_run_with_heartbeat "workspace create" 10 -- \
+  curl -s -m 30 -X POST "$SC/api/workspaces" -H 'content-type: application/json' \
   -d '{"name":"P-301 hive-git drill"}')"
 WS="$(jget "$wresp" "d.get('id') or (d.get('workspace') or {}).get('id') or ''")"
 [ -n "$WS" ] || WS="$(jget "$wresp" "d['workspaces'][0]['id']")"
@@ -113,9 +114,14 @@ echo "  workspace=$WS"
 H_WS="x-papercusp-workspace: $WS"
 
 log "create THROWAWAY test hive ($REPO_URL)"
-resp="$(curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type: application/json' -H "$H_WS" \
+# HEARTBEAT (P-307 hardening, leader audit 2026-07-10): -m 610 alone is silent for
+# up to 10 minutes if the sidecar is mid-churn (bg-host restart, wedged outbox, …)
+# — a wedged-but-not-dead request looked identical to a hung script. Heartbeat
+# every 20s so that distinction is visible without changing the 610s hard cap.
+resp="$(fed_run_with_heartbeat "throwaway hive create (cap 610s)" 20 -- \
+  curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type: application/json' -H "$H_WS" \
   -d "{\"githubUrl\":\"$REPO_URL\",\"visibility\":\"public\",\"runTests\":false,\"shallow\":true}")"
-HIVE_SLUG="$(jget "$resp" "d['created']['hiveSlug']")"
+HIVE_SLUG="$(jget "$resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # field renamed hiveSlug→potSlug (cup-lexicon-full-rename); accept both for version skew
 HIVE_PATH="created"
 if [ -z "$HIVE_SLUG" ]; then
   HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['hiveId']")"; HIVE_PATH="existing"

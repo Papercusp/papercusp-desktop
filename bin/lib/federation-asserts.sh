@@ -32,6 +32,38 @@ declare -ga FED_KILL_PIDS
 
 fed_log() { printf '\n=== %s ===\n' "$*"; }
 
+# fed_run_with_heartbeat <label> <heartbeat_interval_sec> -- <command...>
+# Runs <command...> synchronously (stdout+stderr captured, echoed on completion —
+# a `x="$(fed_run_with_heartbeat ...)"` caller works exactly like a bare
+# `x="$(command...)"`) but prints a "still waiting" heartbeat line every
+# <heartbeat_interval_sec> while it runs, so a long-but-not-hung step (a curl
+# against a sidecar mid-churn, an SSH round-trip, …) is never indistinguishable
+# from total silence. Motivated by a P-307 leader audit (2026-07-10): a FULL
+# hive-git-drill.sh run hung >4min with zero output — the culprit was one of the
+# genuinely-silent waits this lib does (fed_wait_boot/fed_wait_api, now
+# heartbeat-instrumented directly; long curl calls like fed_hive_create_from_repo's
+# -m 610 stay silent because the request itself is the whole body). NOT for
+# fed_wait_boot/fed_wait_api themselves — those fill FED_PG/FED_SC globals and
+# MUST run in the current shell (a background subshell here would lose the fill,
+# same hazard as $(…) — see their own doc comments); this helper is for
+# stdout-only commands (curl, etc.) that don't need that.
+# Returns the wrapped command's real exit code (via `wait`).
+fed_run_with_heartbeat() {
+  local label="$1" interval="$2"; shift 2
+  [ "${1:-}" = "--" ] && shift
+  local outf; outf="$(mktemp)"
+  ( "$@" >"$outf" 2>&1 ) & local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$interval"
+    waited=$((waited + interval))
+    kill -0 "$pid" 2>/dev/null && echo "  … still waiting on: $label (${waited}s elapsed)" >&2
+  done
+  wait "$pid"; local rc=$?
+  cat "$outf"; rm -f "$outf"
+  return $rc
+}
+
 # ── .deb extraction + integrity ─────────────────────────────────────────────
 
 # fed_extract_deb <deb> <pkgdir> — extract; assert the desktop binary exists.
@@ -306,7 +338,13 @@ EOF
 )"
     case "$out" in
       PGFAIL) FED_BOOT_ERR="EMBEDDED_PG_FAILED"; return 1 ;;
-      "")     sleep 3 ;;
+      "")     # HEARTBEAT (P-307 hardening, leader audit 2026-07-10): this loop is
+              # silent by default — up to tries*3s (a caller passing tries=80 waits
+              # up to 240s with zero output), which a live drill mistook for a total
+              # hang. Print progress every 5 tries (~15s) so a slow-but-alive boot is
+              # never indistinguishable from a wedged one.
+              [ $((i % 5)) -eq 0 ] && echo "  … still waiting for $inst to boot ($((i * 3))s elapsed, try $i/$tries)" >&2
+              sleep 3 ;;
       *)      pg=${out%% *}; sc=${out##* }
               FED_PG[$inst]="$pg"; FED_SC[$inst]="$sc"
               # Populate the per-instance DSN here (was only set by the directory
@@ -381,6 +419,9 @@ EOF
 )"
     [ -n "$code" ] && last="$code"
     case "$code" in 2??) return 0 ;; esac   # the sidecar preflight contract = 2xx
+    # HEARTBEAT (P-307 hardening, leader audit 2026-07-10): silent otherwise —
+    # up to tries*2s (default 60*2s=120s) with zero output.
+    [ $((i % 5)) -eq 0 ] && echo "  … still waiting for $inst's sidecar preflight (last code=$last, $((i * 2))s elapsed, try $i/$tries)" >&2
     sleep 2
   done
   # Self-heal: the configured port never answered the preflight with 2xx. Discover
@@ -541,7 +582,7 @@ except Exception: pass
 # fed_hive_create_from_repo <inst> <repo_url> [extra_json_fields]
 # POST /api/harness/pots/from-repo — clone + blueprint + hive home + member +
 # auto-publish. runTests:false + shallow keep it light (route timeoutSec is 600).
-# Echoes the raw JSON: { ok, created:{hiveSlug,memberSlug}, publish:{announced}, … }.
+# Echoes the raw JSON: { ok, created:{potSlug,memberSlug}, publish:{announced}, … } (potSlug was hiveSlug pre-rename).
 fed_hive_create_from_repo() {
   local inst="$1" repo="$2" extra="${3:-}"
   drv_exec "$inst" <<EOF
@@ -559,7 +600,7 @@ fed_hive_dir_row() {
 curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/hives"
 EOF
 )"
-  fed_json "$body" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$hive'))"
+  fed_json "$body" "json.dumps(next(r for r in d['rows'] if r['potId']=='$hive'))"
 }
 
 # fed_hive_join <inst> <hiveId> <memberLinks_json_array> — POST /api/discovery/join-pot.
@@ -570,7 +611,7 @@ fed_hive_join() {
   drv_exec "$inst" <<EOF
 curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot" \
   -H 'content-type: application/json' \
-  -d '{"hiveId":"$hive","memberLinks":$links}'
+  -d '{"potId":"$hive","memberLinks":$links}'
 EOF
 }
 

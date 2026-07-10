@@ -610,7 +610,9 @@ EOF
 )"
   echo "[$owner] from-repo → $(printf '%s' "$a_resp" | head -c 200)"
   # The fields live in different shapes:
-  #   fresh-create → {created:{hiveSlug}, publish:{memberLinks,hivePubkey}} (WI-931)
+  #   fresh-create → {created:{potSlug}, publish:{memberLinks,hivePubkey}} (WI-931;
+  #                  field renamed hiveSlug→potSlug by cup-lexicon-full-rename-2026-07-09
+  #                  — accept both so this still works against an older sidecar build)
   #   existing     → {existing:{hive:{hiveId}}} (directory hit: NO memberLinks —
   #                  unreachable now that we always force-create fresh)
   fields="$(printf '%s' "$a_resp" | python3 -c 'import json,sys
@@ -620,7 +622,7 @@ cr=d.get("created",{}) or {}
 pub=d.get("publish",{}) or {}
 ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
 print(ml[0] if ml else "")
-print(ex.get("hiveId") or cr.get("hiveSlug") or "")
+print(ex.get("hiveId") or cr.get("potSlug") or cr.get("hiveSlug") or "")
 print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")
 print(cr.get("memberSlug") or "")' 2>/dev/null)"
   { read -r RIG_HIVE_LINK; read -r RIG_HIVE_ID; read -r RIG_HIVE_PUBKEY; read -r RIG_OWNER_MEMBER_SLUG; } <<<"$fields"
@@ -652,7 +654,7 @@ rig_join_hive() {
   # owner self-join is a self_hive no-op).
   for try in 1 2; do
     resp="$(drv_exec "$inst" <<EOF
-curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"hiveId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
+curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"potId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
 EOF
 )"
     [ -n "$resp" ] && break
@@ -773,7 +775,7 @@ rig_ban_member() {
   ws="$(drv_psql "$owner" "SELECT workspace_id FROM harness_shared.hive_members LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$ws" ] || ws="default"
   if [ "$scope" = "harness" ]; then field="harnessSlug"; val="${FRAME_MEMBER_SLUG[$owner]:-}"
-  else field="hiveSlug"; val="${RIG_HIVE_ID:-}"; fi
+  else field="potSlug"; val="${RIG_HIVE_ID:-}"; fi  # endpoint field renamed hiveSlug→potSlug by cup-lexicon-full-rename-2026-07-09
   [ -n "$val" ] || { echo "FATAL rig_ban_member: no $field resolved (run rig_owner_publish_hive + rig_join_hive first)" >&2; return 1; }
   # trust:'trusted' bearer — read (or generate, as pcusp) the sidecar's superuser token so
   # principalFromSuperuserToken admits the revoke (loopback + matching bearer). Never clobber

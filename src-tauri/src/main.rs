@@ -94,8 +94,19 @@ fn find_free_port() -> Option<u16> {
 /// (P-055) Put a child in its own Windows process group so graceful_kill's
 /// CTRL_BREAK_EVENT targets that child's group instead of ours (without
 /// CREATE_NEW_PROCESS_GROUP the pid isn't a group id and the event would
-/// fan out to our whole console group, including this process). No-op on
-/// non-Windows.
+/// fan out to our whole console group, including this process).
+///
+/// (EI-8894) On Unix (macOS/Linux) this ALSO puts the child in its own
+/// process group (`setpgid(0, 0)` via the stable `process_group(0)` builder
+/// — child pid becomes the new group's pgid). Root cause #1 of EI-8894: a
+/// hard-killed parent (`launchctl kickstart -k`, `pkill -9`, a crash) skips
+/// our own SIGTERM/graceful-shutdown path entirely, and an un-grouped child
+/// has no group boundary a sweep can target — only a same-pid kill (which
+/// nothing sends) reaches it, so it survives as an orphan holding ports/
+/// storage under stale env. A distinct group is a PRECONDITION for any
+/// future/external "kill everything this app ever spawned" sweep (`kill
+/// -TERM -<pgid>`) to work at all; it does not by itself stop an orphan
+/// (see the parent-death self-exit watch in serve.ts for that half).
 fn isolate_process_group(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -110,7 +121,12 @@ fn isolate_process_group(cmd: &mut Command) {
                 | windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
         );
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = cmd;
     }

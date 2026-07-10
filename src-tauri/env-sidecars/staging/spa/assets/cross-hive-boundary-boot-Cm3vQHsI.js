@@ -1,0 +1,1 @@
+import{n as e,t}from"./cross-hive-boundary-boot-DtK8FhfP.js";e();export{t as ensureCrossHiveBoundariesWired};

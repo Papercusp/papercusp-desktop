@@ -300,7 +300,7 @@ cr=d.get("created",{}) or {}
 pub=d.get("publish",{}) or {}
 ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
 print(ml[0] if ml else "")
-print(ex.get("hiveId") or cr.get("hiveSlug") or "")
+print(ex.get("hiveId") or cr.get("potSlug") or cr.get("hiveSlug") or "")
 print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")' 2>/dev/null)"
   { read -r A_LINK; read -r HIVE_ID; read -r HIVE_PUBKEY; } <<<"$A_HIVE_FIELDS"
   [ -n "$A_LINK" ] || setup_fail "A could not resolve a hive memberLink — body: $(printf '%s' "$a_resp" | head -c 800)" 6
