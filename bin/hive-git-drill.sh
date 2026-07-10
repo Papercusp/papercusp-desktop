@@ -11,17 +11,30 @@
 # assert IN THIS SAME FILE — the harness below (sidecar boot, workspace,
 # throwaway hive) is built to stay put; only the leg BODIES change.
 #
-# TODAY'S STATUS (2026-07-09 — re-verify against the runbook doc + `git log -p
-# -- packages/operator-core/lib/harness/git-sync/git-sync-action.ts` before
-# trusting this): only the github-bridge tick + the integrator tick are wired
-# into production (gated on hiveGit.mode != legacy). The serve plane (P-201),
-# announce->fetch driver (P-202), and worktree-bridge driver (P-204) are NOT
-# wired yet — those legs (A-E, G) stay SKIP. P-205 (gc/secrets-guard on the
-# publish path) DID land 2026-07-09 (WI-3494) and is single-machine-runnable
-# (pure over a real bare repo, no fed plane needed), so LEG F below is now a
-# LIVE assert, not a skip — this run proves the SCAFFOLD works (real packaged
-# sidecar, real throwaway hive, real hive_settings row) AND the G-9/G-10
-# lifecycle guards, but not the cross-machine replication plane itself.
+# TODAY'S STATUS (2026-07-10, p2p-live-federation-crack-2026-07-10 P-006
+# re-verify — re-check against the runbook doc + `git log -- packages/
+# operator-core/lib/sync/pot-git/` before trusting this further): the module
+# was renamed lib/sync/hive-git -> lib/sync/pot-git since 2026-07-09 (this
+# script's paths/function names below are kept current with that rename).
+# Per the WI-3497/WI-3498 checkpoints, the P-201 serve plane, P-202 announce
+# ->fetch driver, and P-204 worktree-bridge driver are now CODE-COMPLETE +
+# integration-tested end-to-end over a real socket duplex (real bare repos,
+# real ed25519 signing, real git subprocesses) — they are just not yet
+# SCHEDULED as a live production routine (no caller wires
+# runRefAnnouncePublishTick/runRefAnnounceReceiveTick into a routine today).
+# That means LEGS A, B, C below can now run LIVE, single-box/in-process,
+# using the SAME real production functions the dedicated regression tests
+# already exercise (bootstrap.integration.test.ts / ref-announce.integration.
+# test.ts / leg-c-trust-drill.integration.test.ts) — mirroring exactly how
+# LEG D and LEG F were flipped from skip to live: a second local git
+# worktree/repo stands in for "the other machine", never a reimplementation.
+# LEG E stays SKIP — its remaining gap (real multi-machine wall-clock/network
+# timing under the git-sync-stall-watchdog) is not something a local git
+# object trick can prove; the runbook's own commit-only-mode analysis is
+# static-verified but explicitly NOT the live proof this leg is for. LEG G
+# (chaos) stays SKIP — needs A-F live under one genuine multi-machine run
+# first. P-205 (gc/secrets-guard) DID land 2026-07-09 (WI-3494) so LEG F
+# stays LIVE (unchanged from 2026-07-09).
 #
 # LIVE today, single-box, no rig needed:
 #   MODE   hiveGit.mode round-trip against the packaged sidecar's OWN PG:
@@ -29,16 +42,21 @@
 #          Exercises exactly the rollback lever the runbook documents (the
 #          fail-open coercion itself is unit-tested in hive-git-mode.test.ts;
 #          this proves the STORAGE round-trip against a real packaged instance).
+#   A/B/C  run the dedicated pot-git regression suites in-process (see below).
+#   D/F    real production code against real bare repos this drill builds itself.
 #
-# Two-machine (tower<->VM) legs need the LIVE-1 rig
+# The genuine tower<->VM 2-machine legs still need the LIVE-1 rig
 # (docs/plans/LIVE-1-rig-runbook-2026-07-02.md, owned by the plan leader +
-# su-4dc3befd's WI-1729 lane) — this scaffold boots ONE local packaged
-# instance (single-box, like work-distribution-drill.sh's "single-box live
-# subset") so the harness (workspace + throwaway hive + a real sidecar) exists
-# and is exercised end-to-end today. A genuine 2-node run substitutes the rig
-# for this local instance once P-201/P-202/P-204 land — see
-# two-instance-federation-smoke.sh / bin/vm-federation.sh for the 2-instance
-# and real-VM driver patterns this would graduate to.
+# su-4dc3befd's WI-1729 lane) for real network/DHT peer-discovery conditions —
+# this scaffold boots ONE local packaged instance (single-box, like
+# work-distribution-drill.sh's "single-box live subset") so the harness
+# (workspace + throwaway hive + a real sidecar) exists and is exercised
+# end-to-end today, and legs A-D now separately prove the git-replication
+# MECHANICS single-box via a real local transport stand-in for "the other
+# machine". A genuine 2-node run substitutes the rig for that stand-in once
+# the rig itself is unblocked — see two-instance-federation-smoke.sh /
+# bin/vm-federation.sh for the 2-instance and real-VM driver patterns this
+# would graduate to.
 #
 # Usage: bin/hive-git-drill.sh [path/to/Papercusp*.deb]
 #   KEEP_UP=1   leave the sidecar running for inspection
@@ -47,6 +65,12 @@ DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
 REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
+# lib/sync/hive-git -> lib/sync/pot-git (renamed 2026-07-09/10) — defined once,
+# up front, so every leg below (A/B/C/D/F) sees it; a leg-local redefinition
+# right before its own heredoc is what silently broke LEG D previously (the
+# heredoc expands $HGGIT at *creation* time, and HGGIT was only being set much
+# later, right before LEG F — so LEG D's imports resolved to '/storage' etc.).
+HGGIT="$REPO_DIR/packages/operator-core/lib/sync/pot-git"
 DEB="${1:-}"
 if [ -z "$DEB" ]; then
   DEB="$(ls -t /home/marsh-office/.cargo-target/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null | head -1)"
@@ -183,7 +207,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.PAPERCUSP_HIVE_GIT_ROOT = '$LEGD_ROOT';
 import { generateEd25519KeypairDer, signWithPrivateKeyDer } from '$HGGIT/../../identity/ed25519';
-import { defaultRunGit, ensureHiveGitRepo, writeNamespaceRef } from '$HGGIT/storage';
+import { defaultRunGit, ensurePotGitRepo, writeNamespaceRef } from '$HGGIT/storage';
 import { WORK_REF, readStaging } from '$HGGIT/integrator';
 import { runIntegratorTick } from '$HGGIT/integrator-tick';
 import { runWorktreeBridgeTick } from '$HGGIT/worktree-bridge-tick';
