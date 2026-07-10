@@ -7,9 +7,13 @@ src-tauri/gen/
 # Bundled sidecar (produced by bin/build-desktop-sidecar.sh on every build)
 # — including the EI-160 atomic-publish temp trees + lock artifacts a live
 # or interrupted build leaves next to it (117MB node binaries; git-sync
-# must never sweep them).
+# must never sweep them). The atomic swap renames the current tree aside to
+# sidecar.old.<pid>/ before moving the new one in — those backups are the
+# same >100MB class as the .tmp trees and must be ignored too (git-sync hit
+# the GitHub 100MB cap excluding sidecar.old.55111/bin/node, 2026-07-10).
 src-tauri/sidecar/
 src-tauri/sidecar.tmp.*/
+src-tauri/sidecar.old.*/
 src-tauri/sidecar.lock
 src-tauri/sidecar.lockdir/
 

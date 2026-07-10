@@ -2771,7 +2771,12 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
 // ===========================================================================
 
 /// Bundle identifiers — MUST match the two tauri configs (tauri.conf.json →
-/// GUI, tauri.server.conf.json → Server).
+/// GUI, tauri.server.conf.json → Server). On Linux (single self-hosted
+/// bundle — WI-2902/WI-3686) neither the watcher's respawn arm nor
+/// ensure_server_running ever calls launch_bundle with this id in non-test
+/// builds, so it's allowed dead there; it's still referenced by the
+/// cross-platform unit tests below.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const SERVER_BUNDLE_ID: &str = "com.papercusp.server";
 const GUI_BUNDLE_ID: &str = "com.papercusp.gui";
 
