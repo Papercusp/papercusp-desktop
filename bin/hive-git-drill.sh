@@ -318,6 +318,16 @@ async function initWorktree(dir: string): Promise<void> {
   await git(['config', 'user.name', 't'], dir);
   await git(['config', 'user.email', 't@t'], dir);
 }
+// A commit minted in \`src\` (a separate worktree/repo) only exists in SRC's
+// own object database — writeNamespaceRef(repo, ...) update-refs against
+// the pot-git bare \`repo\`, which has never seen those objects, so it fails
+// with "nonexistent object" unless they're transferred first. Mirrors the
+// real publishToPeer() helper in worktree-bridge.integration.test.ts (the
+// file this leg is explicitly modeled on): fetch the branch from src into
+// repo as a throwaway ref, which pulls the objects along with it.
+async function importFromSrc(repoPath: string, srcPath: string, branch: string): Promise<void> {
+  await git(['fetch', '-q', srcPath, \`+refs/heads/\${branch}:refs/bridge-import/\${branch}\`], repoPath);
+}
 
 async function main() {
   const sql = postgres('$DSN', { prepare: false });
@@ -333,6 +343,7 @@ async function main() {
   await git(['add', '.'], src);
   await git(['commit', '-q', '-m', 'S1'], src);
   const steerSha = await git(['rev-parse', 'HEAD'], src);
+  await importFromSrc(repo, src, 'main');
   await writeNamespaceRef(repo, memberSteer.pubkeyBase64, WORK_REF, steerSha);
 
   await git(['checkout', '-q', '--orphan', 'below'], src);
@@ -340,6 +351,7 @@ async function main() {
   await git(['add', 'below.txt'], src);
   await git(['commit', '-q', '-m', 'below'], src);
   const belowSha = await git(['rev-parse', 'HEAD'], src);
+  await importFromSrc(repo, src, 'below');
   await writeNamespaceRef(repo, memberBelow.pubkeyBase64, WORK_REF, belowSha);
   await git(['checkout', '-q', 'main'], src);
 
@@ -369,6 +381,7 @@ async function main() {
   await git(['add', '.'], src);
   await git(['commit', '-q', '-m', 'S2'], src);
   const steerSha2 = await git(['rev-parse', 'HEAD'], src);
+  await importFromSrc(repo, src, 'main');
   await writeNamespaceRef(repo, memberSteer.pubkeyBase64, WORK_REF, steerSha2);
   const out2 = await runIntegratorTick({
     potHomeSlug: POT_SLUG, workspaceId: WS, repoKey: REPO_KEY,
