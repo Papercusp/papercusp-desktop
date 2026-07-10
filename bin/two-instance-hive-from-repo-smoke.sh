@@ -420,7 +420,7 @@ if [ "$offer_ok" = 1 ] && [ -n "$N_OFFER_LINKS" ] && [ "$N_OFFER_LINKS" -ge 1 ];
   log "B ($P_B_USER): JOIN the hive '$HIVE_SLUG' via /api/discovery/join-pot ($N_OFFER_LINKS link(s))"
   join_resp="$(curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[b]}/api/discovery/join-pot" \
     -H 'content-type: application/json' \
-    -d "{\"hiveId\":\"$HIVE_SLUG\",\"memberLinks\":$OFFER_LINKS_JSON}")"
+    -d "{\"potId\":\"$HIVE_SLUG\",\"memberLinks\":$OFFER_LINKS_JSON}")"  # body field renamed hiveId→potId (join-pot.ts requires potId)
   echo "B join-hive → $(echo "$join_resp" | head -c 500)"
   J_OK="$(jget "$join_resp" "d.get('ok')")"
   N_MEM="$(jget "$join_resp" "len(d.get('members') or [])")"

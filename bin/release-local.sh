@@ -338,8 +338,24 @@ LINUX_PID=$!
 
 WIN_LEG_LOG="/tmp/papercusp-winleg-${TAG}.log"
 MAC_LEG_LOG="/tmp/papercusp-macleg-${TAG}.log"
-WIN_PID=""; MAC_PID=""; MAC_REUSE=0
-if [[ "$WITH_WINDOWS" == "1" ]]; then
+WIN_PID=""; MAC_PID=""; MAC_REUSE=0; WIN_REUSE=0
+if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
+  # SALVAGE PATH (2026-07-09, mirror of PAPERCUSP_REUSE_MAC below): the Windows VM
+  # + target/windows-vm/bundle/inno are SHARED across lanes and clobber each other
+  # (b0fbf windows-parity note) — when a good win 0.0.5 build already exists on the
+  # host (e.g. restored/rescued into the inno dir), skip the VM rebuild entirely and
+  # let the collection block below sweep the existing artifacts (WIN_REUSE=1 keeps
+  # its gate + emptiness check).
+  echo "==> [reuse] PAPERCUSP_REUSE_WIN=1 — skipping windows build; reusing artifacts in $ROOT/src-tauri/target/windows-vm/bundle/inno"
+  win_reuse_found=0
+  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
+    [[ -f "$f" ]] && { echo "    reuse: $(basename "$f")"; win_reuse_found=1; }
+  done
+  if [[ "$win_reuse_found" != "1" ]]; then
+    echo "ERROR: PAPERCUSP_REUSE_WIN=1 but no windows artifacts in $ROOT/src-tauri/target/windows-vm/bundle/inno — restore them there first"; exit 1
+  fi
+  WIN_REUSE=1
+elif [[ "$WITH_WINDOWS" == "1" ]]; then
   echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
   # Native MSVC build on the local QEMU Windows 11 VM (windows-desktop-release-
   # readiness-2026-06-11 D-001). SKIP the per-build seed cut: release-local already
@@ -422,8 +438,8 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
       export PAPERCUSP_BUILD_VERSION='"$VERSION"'
       export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
-      export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-$PAPERCUP_DOGFOOD_HIVE_PUBKEY}"'
-      export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-$PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET}"'
+      export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
+      export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
       export PAPERCUSP_SKIP_SEED_CUT=1
       bash bin/mac-vm-build.sh
     "'

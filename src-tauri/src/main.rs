@@ -2889,6 +2889,10 @@ fn spawn_self_hosted_sidecar(
     })?;
     let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
 
+    // (EI-8894/WI-3633 leg 2) Same boot-time orphan sweep as the Server-role
+    // path (bring_up_sidecar) — this self-hosted-on-Linux path bypasses that
+    // function entirely, so it needs its own call right before spawn_serve.
+    sweep_stale_operator_orphan(workspace_home, via_wsl);
     let child = spawn_serve(
         via_wsl,
         port,
@@ -3352,6 +3356,13 @@ fn bring_up_sidecar(
     shared_state_dir: std::path::PathBuf,
     workspace_home: std::path::PathBuf,
 ) {
+    // (EI-8894/WI-3633 leg 2) Boot-time orphan sweep — belt-and-suspenders
+    // alongside the parent-death self-exit watch (serve.ts), which only
+    // self-terminates a sidecar that is ITSELF still alive and polling its
+    // own ppid. This catches anything that watch missed (an older build, a
+    // crash before it installed) by checking the ONE pid THIS workspace's
+    // operator.json actually names, right before we spawn our own fresh one.
+    sweep_stale_operator_orphan(&workspace_home, via_wsl);
     let serve_child = match spawn_serve(
         via_wsl,
         port,
@@ -5163,6 +5174,11 @@ pub fn run() {
                 "only the Server role may spawn/own the operator (got role={})",
                 role.label()
             );
+            // (EI-8894/WI-3633 leg 2) Boot-time orphan sweep runs later, inside
+            // bring_up_sidecar (right before spawn_serve) — that's the single
+            // choke point both this fast path AND the Windows deferred-WSL
+            // watcher path funnel through, and it's where workspace_home/
+            // via_wsl are actually in scope. See sweep_stale_operator_orphan.
             // Production: spawn the sidecar.
             let port = match find_free_port() {
                 Some(p) => p,
@@ -5415,9 +5431,18 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
     // for one syscall. `Command::kill()` from std would send SIGKILL.
     #[cfg(unix)]
     {
+        // (EI-8894/WI-3633 leg 1) TERM the whole PROCESS GROUP, not just this
+        // pid. `isolate_process_group` (process_group(0)) made this child's
+        // pgid == its own pid at spawn, so `-<pid>` (negative = group form of
+        // kill(2)) reaches this child AND any grandchildren it forked that
+        // never called setsid/setpgid to leave the group (e.g. embedded PG's
+        // postmaster) — not just the direct child. Node's own SIGTERM handler
+        // still runs identically (it's still the same signal, same target
+        // process, just delivered via the group form); this only widens the
+        // blast radius to siblings-in-group that a plain per-pid TERM missed.
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(pid.to_string())
+            .arg(format!("-{pid}"))
             .status();
     }
     #[cfg(windows)]
@@ -5453,6 +5478,17 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
         "[papercusp-desktop] {} pid={} still alive after grace, hard kill",
         label, pid
     );
+    #[cfg(unix)]
+    {
+        // Same group-vs-pid widening as the TERM stage above: a grandchild
+        // that outlived the soft signal (or joined the group after it) still
+        // needs to go down here, not just the direct child `child.kill()`
+        // below reaches.
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .status();
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -5462,6 +5498,181 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
 fn shutdown_native_terminal(app_handle: &tauri::AppHandle) {
     if let Some(nt) = app_handle.try_state::<native_terminal::NativeTerminal>() {
         nt.shutdown();
+    }
+}
+
+/// The four outcomes `sweep_stale_operator_orphan` can reach, factored out as
+/// a PURE decision (no OS calls) so it's unit-testable without a live process
+/// table / network. `sweep_stale_operator_orphan` is the thin OS-facing
+/// wrapper that gathers the three inputs and acts on the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanSweepDecision {
+    /// No operator.json — first boot ever, or a previous instance shut down
+    /// cleanly and removed it. Nothing to sweep.
+    NothingRecorded,
+    /// operator.json named a pid, but it's already gone at the OS level.
+    /// Nothing to kill; the fresh spawn below will overwrite the stale file.
+    AlreadyDead,
+    /// The pid is alive AND HTTP-responsive — this IS the healthy
+    /// `serve --ensure` "Decision C" reuse case (SP1 C5): a still-running,
+    /// currently-serving operator from either this boot or a still-alive
+    /// prior one. Must NEVER be touched.
+    HealthyReuse,
+    /// The pid is alive but NOT HTTP-responsive — a genuinely wedged/zombie
+    /// leftover (the actual WI-3633 bug case): its own parent-death watch
+    /// either never installed (older build) or never ran (crashed before
+    /// install), so it never self-terminated on reparenting. Sweep it.
+    StaleKill,
+}
+
+fn decide_orphan_sweep(
+    discovery: Option<&OperatorDiscovery>,
+    pid_alive: bool,
+    http_ready: bool,
+) -> OrphanSweepDecision {
+    if discovery.is_none() {
+        return OrphanSweepDecision::NothingRecorded;
+    }
+    if !pid_alive {
+        return OrphanSweepDecision::AlreadyDead;
+    }
+    if http_ready {
+        return OrphanSweepDecision::HealthyReuse;
+    }
+    OrphanSweepDecision::StaleKill
+}
+
+/// (EI-8894/WI-3633 leg 2) Boot-time orphan sweep for the workspace's tracked
+/// operator, run once right before we spawn our own fresh sidecar. Belt-and-
+/// suspenders alongside the parent-death self-exit watch in serve.ts (which
+/// only self-terminates a sidecar that is itself still alive and polling its
+/// own ppid): this catches the case that watch missed — a wedged/zombie
+/// leftover from a hard-killed prior Server (`launchctl kickstart -k`,
+/// `pkill -9`, a crash) that skipped both our own SIGTERM path AND (an older
+/// build, or a crash before the watch installed) its own self-exit watch —
+/// so a relaunch doesn't leave it running invisibly forever alongside the new
+/// one, fighting over the port / embedded-PG data-dir lock / stale env.
+///
+/// Deliberately does NOT do a broad process-table scan for any `serve.mjs`.
+/// Live macOS verification (2026-07-09, papercup-vm-mac) found MULTIPLE
+/// legitimately-running `serve.mjs` processes at once — the tracked operator
+/// PLUS a per-env `env-sidecars/staging/serve.mjs` — and BOTH correctly show
+/// PPID==1, because on macOS a launchd/login-item-launched process (this
+/// Server app itself, and by extension any child that outlives its original
+/// spawning instance) NORMALLY reparents to launchd; PPID==1 is NOT itself an
+/// orphan signal on this platform the way it would be under a shell/systemd.
+/// A blind "PPID==1 + serve.mjs" match would have KILLED a live, in-use,
+/// currently-reused operator (`serve --ensure`'s "Decision C" reuse — SP1
+/// C5), a real regression this live check caught before it shipped. Scoping
+/// to exactly the ONE pid `operator.json` names — the SAME discovery record
+/// `wait_for_operator`/Decision-C reuse already trust — and requiring it to
+/// FAIL an HTTP health probe (`operator_http_ready`, the same one
+/// `wait_for_operator` uses) before touching it, makes this sweep structurally
+/// unable to ever kill a healthy, in-use operator: `decide_orphan_sweep`
+/// only reaches `StaleKill` when the pid is alive but NOT serving.
+fn sweep_stale_operator_orphan(workspace_home: &std::path::Path, via_wsl: bool) {
+    let discovery = find_operator_discovery(workspace_home, via_wsl);
+    let pid_alive = discovery
+        .as_ref()
+        .is_some_and(|d| discovery_pid_alive(d.pid, via_wsl));
+    let http_ready = discovery.as_ref().is_some_and(|d| operator_http_ready(d.port));
+    match decide_orphan_sweep(discovery.as_ref(), pid_alive, http_ready) {
+        OrphanSweepDecision::NothingRecorded | OrphanSweepDecision::AlreadyDead => {}
+        OrphanSweepDecision::HealthyReuse => {
+            println!(
+                "[papercusp-server] boot orphan sweep: operator.json pid={} is alive + HTTP-responsive — healthy reuse, leaving it running",
+                discovery.as_ref().map(|d| d.pid).unwrap_or(0)
+            );
+        }
+        OrphanSweepDecision::StaleKill => {
+            let d = discovery.expect("StaleKill only reached with Some(discovery)");
+            println!(
+                "[papercusp-server] boot orphan sweep: operator.json pid={} port={} is alive but NOT HTTP-responsive — stale orphan, killing its process group",
+                d.pid, d.port
+            );
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(format!("-{}", d.pid))
+                    .status();
+                let deadline = Instant::now() + Duration::from_millis(3000);
+                while Instant::now() < deadline && discovery_pid_alive(d.pid, via_wsl) {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(format!("-{}", d.pid))
+                    .status();
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows: the tracked pid may be the WSL-side Linux pid, which
+                // has no POSIX process-group kill available from here. Out of
+                // scope for this Unix-focused leg (WI-3633 is macOS-scoped);
+                // the existing wsl_graceful_stop_serve / TerminateProcess paths
+                // still run on the NEXT owned-child teardown either way.
+                let _ = d;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod orphan_sweep_decision_tests {
+    use super::{decide_orphan_sweep, OperatorDiscovery, OrphanSweepDecision};
+
+    fn disc() -> OperatorDiscovery {
+        OperatorDiscovery { port: 3070, pid: 4242 }
+    }
+
+    #[test]
+    fn no_discovery_file_is_nothing_recorded() {
+        assert_eq!(
+            decide_orphan_sweep(None, false, false),
+            OrphanSweepDecision::NothingRecorded
+        );
+        // pid_alive/http_ready are meaningless without a discovery record —
+        // NothingRecorded wins regardless of what they'd say.
+        assert_eq!(
+            decide_orphan_sweep(None, true, true),
+            OrphanSweepDecision::NothingRecorded
+        );
+    }
+
+    #[test]
+    fn dead_pid_is_already_dead_never_killed() {
+        let d = disc();
+        assert_eq!(
+            decide_orphan_sweep(Some(&d), false, false),
+            OrphanSweepDecision::AlreadyDead
+        );
+        // Even a (nonsensical) http_ready:true with a dead pid stays AlreadyDead
+        // — pid liveness gates before the HTTP check ever matters.
+        assert_eq!(
+            decide_orphan_sweep(Some(&d), false, true),
+            OrphanSweepDecision::AlreadyDead
+        );
+    }
+
+    #[test]
+    fn alive_and_responsive_is_healthy_reuse_never_killed() {
+        // The exact "Decision C" live-reuse case live macOS verification
+        // found — MUST NOT be swept.
+        let d = disc();
+        assert_eq!(
+            decide_orphan_sweep(Some(&d), true, true),
+            OrphanSweepDecision::HealthyReuse
+        );
+    }
+
+    #[test]
+    fn alive_but_unresponsive_is_the_only_kill_case() {
+        let d = disc();
+        assert_eq!(
+            decide_orphan_sweep(Some(&d), true, false),
+            OrphanSweepDecision::StaleKill
+        );
     }
 }
 

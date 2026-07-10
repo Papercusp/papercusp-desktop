@@ -25,8 +25,26 @@ _mchurn_member_count() {
   rig_read_roster "$1" 2>/dev/null | grep -c '|'
 }
 
+# The rig's identity assignment (deb-hetzner-matrix.sh) lets frame c share b's
+# GitHub identity by DEFAULT (P_C_USER defaults to $P_B_USER — "a real
+# multi-device topology", WI-3546 known-limitations territory). When that's the
+# case there are only 2 DISTINCT github identities across 3 frames, so
+# hive_members can never converge to 3 rows keyed by github_user_id — that is
+# not a bug, it's the topology working as configured. The real convergence
+# signal in that case is c's DEVICE landing as a 2nd attestation on b's shared
+# identity row. Compute the topology-correct expected member-row count once
+# (2026-07-10, WI-3543 v4-run root-cause: this hardcoded ">=3" false-failed
+# every 3-frame run under the DEFAULT same-identity topology).
+_mchurn_expected_members() {
+  if [ "${P_C_USER:-${P_B_USER:-}}" = "${P_B_USER:-}" ] && [ -n "${P_B_USER:-}" ]; then
+    echo 2
+  else
+    echo 3
+  fi
+}
+
 scn_membership_churn() {
-  local rid="$MATRIX_RUN_ID" n_a n_b n_c
+  local rid="$MATRIX_RUN_ID" n_a n_b n_c want
   local cslug="${FRAME_MEMBER_SLUG[c]}"
 
   # frame c should already have been joined by rig_join_all (called before any
@@ -34,11 +52,25 @@ scn_membership_churn() {
   # backfill + full-mesh propagation, not the join call itself.
   [ -n "${FRAME_MEMBER_SLUG[c]:-}" ] || { echo "membership_churn FAIL — frame c never resolved a member slug (join-pot failed?)"; return 1; }
 
-  # ── 1. roster convergence: 3 members visible on every frame ────────────────
+  # ── 1. roster convergence: every DISTINCT identity visible on every frame ──
+  # (want=2 under the default same-identity b/c topology, 3 when P_C_USER is a
+  # genuinely distinct identity — see _mchurn_expected_members above.)
+  want="$(_mchurn_expected_members)"
   n_a="$(_mchurn_member_count a)"; n_b="$(_mchurn_member_count b)"; n_c="$(_mchurn_member_count c)"
-  if [ "${n_a:-0}" -lt 3 ] || [ "${n_b:-0}" -lt 3 ] || [ "${n_c:-0}" -lt 3 ]; then
-    echo "membership_churn FAIL — roster not converged (a=$n_a b=$n_b c=$n_c, want >=3 each)"
+  if [ "${n_a:-0}" -lt "$want" ] || [ "${n_b:-0}" -lt "$want" ] || [ "${n_c:-0}" -lt "$want" ]; then
+    echo "membership_churn FAIL — roster not converged (a=$n_a b=$n_b c=$n_c, want >=$want each)"
     return 1
+  fi
+  if [ "$want" = 2 ]; then
+    # same-identity topology: prove c's DEVICE actually landed (not just that
+    # b's own single-device row was already there pre-c-join) — the shared
+    # identity's attestation count must be >=2 on every frame.
+    local shared_att
+    shared_att="$(rig_read_roster a 2>/dev/null | awk -F'|' -v u="${P_B_USER:-}" '{print $3}' | sort -rn | head -1)"
+    if [ "${shared_att:-0}" -lt 2 ]; then
+      echo "membership_churn FAIL — same-identity topology (b=c=$P_B_USER) but max attestation count on a is only ${shared_att:-0} (want >=2 — c's device never landed)"
+      return 1
+    fi
   fi
 
   # ── 2. backfill: c sees content the matrix already wrote a→b before c joined

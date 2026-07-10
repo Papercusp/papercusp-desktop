@@ -266,7 +266,7 @@ try:
     links = json.loads(links_json)
 except Exception:
     links = []
-body = {"hiveId": hive, "memberLinks": links}
+body = {"potId": hive, "memberLinks": links}  # join-pot body field renamed hiveId→potId (join-pot.ts requires potId)
 if pubkey:
     body["hivePubkey"] = pubkey
 print(json.dumps(body))
