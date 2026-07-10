@@ -112,12 +112,21 @@ ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$OUT" "$PLUGIN" --appdir "$A
 #    runs unsigned; the .sig only gates auto-update verification.
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   echo "==> signing $OUT (updater)"
-  # `tauri signer sign --private-key` wants the key CONTENT (base64), not a path —
-  # unlike the TAURI_SIGNING_PRIVATE_KEY env that `tauri build` reads (which accepts
-  # either). Resolve a path to its contents so both forms work.
+  # WI-3823: `tauri signer sign -k/--private-key` wants the key CONTENT (base64), not
+  # a path — unlike the TAURI_SIGNING_PRIVATE_KEY env that `tauri build` reads (which
+  # accepts either). Resolve a path to its contents, but hand the resolved secret to
+  # the CLI via its OWN env-var reading (`tauri signer sign --help` confirms -k/-p both
+  # have `[env: TAURI_SIGNING_PRIVATE_KEY=]` / `[env: TAURI_SIGNING_PRIVATE_KEY_PASSWORD=]`
+  # fallbacks) instead of --private-key/--password on argv. `npm run` ECHOES the fully
+  # resolved script command line before executing it, so a secret on argv here printed
+  # the ENTIRE encrypted private key (+ password) straight into the build log AND was
+  # visible in `ps` for the life of the process. Passing nothing secret on argv removes
+  # the leak at the root; `--silent` (belt-and-suspenders) also suppresses npm's own
+  # `> pkg@version tauri` / `> tauri signer sign …` echo lines entirely (verified: with
+  # --silent, npm prints only the wrapped command's own stdout).
   _key="$TAURI_SIGNING_PRIVATE_KEY"; [ -f "$_key" ] && _key="$(cat "$_key")"
-  if npm run tauri -- signer sign --private-key "$_key" \
-        --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$OUT"; then
+  if TAURI_SIGNING_PRIVATE_KEY="$_key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+        npm run --silent tauri -- signer sign "$OUT"; then
     echo "   signed → $OUT.sig"
   else
     echo "   WARN: signing failed — AppImage is usable but the updater .sig is missing" >&2
