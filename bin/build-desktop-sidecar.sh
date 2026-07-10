@@ -687,13 +687,24 @@ fi
 # + merged into ~/.claude/settings.json). esbuild doesn't trace them, so copy the
 # runtime scripts explicitly. Without them the packaged Mac/Windows app installs NO
 # Claude statusline/lock/coord hooks (EI-8191: "blank bottom statusline", lock
-# enforcement silently off). Only the *.sh scripts — skip __tests__/ and *.tmp scratch.
+# enforcement silently off). The *.sh scripts AND the *.py libs they import — skip
+# __tests__/ and *.tmp scratch.
+#
+# WI-3665: `*.sh` alone is NOT enough. statusline-fleet.sh and posttooluse-objective-title.sh
+# `import pc_tty` (resolved off their own dirname) to find the terminal they may write the
+# fleet-identity title to. A sidecar missing pc_tty.py raises ImportError, the hooks fail
+# OPEN, and the packaged app silently stops setting the terminal title — the same shape as
+# EI-8191, and invisible because fail-open looks exactly like success.
 CC_HOOK_SRC_DIR="$WEB_DIR/scripts/hooks/cc"
 if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
   CC_HOOK_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/cc"
   echo "→ copying cc hooks → sidecar/apps/operator/scripts/hooks/cc/"
   mkdir -p "$CC_HOOK_DST_DIR"
   cp -a "$CC_HOOK_SRC_DIR"/*.sh "$CC_HOOK_DST_DIR"/
+  # nullglob-safe: if a future refactor removes every .py, don't copy a literal '*.py'.
+  for py in "$CC_HOOK_SRC_DIR"/*.py; do
+    [[ -e "$py" ]] && cp -a "$py" "$CC_HOOK_DST_DIR"/
+  done
 fi
 
 # Same reason: lib/desktop-install/papercusp-files.ts resolves the
