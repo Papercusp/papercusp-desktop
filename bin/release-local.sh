@@ -510,6 +510,17 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   done
   [[ "$mac_found" == "1" ]] || { echo "ERROR: WITH_MAC=1 but no mac artifacts $([[ "$MAC_REUSE" == "1" ]] && echo "in $MAC_OUT (reuse)" || echo "came back from the VM")"; exit 1; }
   bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*.dmg
+  # EI-8914 parity: the Windows leg records build-provenance.json (inline in
+  # build-windows-on-vm.sh); the Mac leg never did, so a mac installer was
+  # untraceable to its source and — worst on the PAPERCUSP_REUSE_MAC salvage
+  # path — a SALVAGED artifact inherited THIS cut's version/sha label with no
+  # record of what was actually inside (the LABELED!=PACKED class). Emit the
+  # same provenance (each file's sha256 + a `reused` flag) next to the mac
+  # artifacts. Best-effort: a provenance hiccup must never fail a good release.
+  PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
+    "$MAC_OUT" "$VERSION" "$BUILD_SHA" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
+    "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
+    || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
 fi
 
 echo "==> generating latest.json"
