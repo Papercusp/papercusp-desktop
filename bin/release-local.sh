@@ -538,6 +538,22 @@ def add(platform_key, bin_path, sig_path):
 
 # Linux x86_64 — pick AppImage as the updater format
 for art in artifacts:
+    # WI-3696: latest.json is the GUI product's update-fallback manifest ONLY — a
+    # Server-role artifact must NEVER land in it, on ANY platform. The darwin
+    # (.app.tar.gz) and windows (-setup.exe/.msi) collection globs pull BOTH
+    # roles' bundles out of the SAME output dir (mac-vm-build.sh / build-
+    # windows-on-vm.sh each build "Papercusp GUI" + "Papercusp Server" side by
+    # side), and this loop used to add() unconditionally per matching
+    # extension — so whichever role's file the shell glob happened to iterate
+    # LAST silently overwrote the other's entry. Concretely: "Papercusp
+    # Server.app.tar.gz" sorts after "Papercusp GUI.app.tar.gz" alphabetically,
+    # so it always won, clobbering the darwin entries with a Server artifact
+    # whose signature VALIDATES (it's genuinely signed) — a mac GUI update
+    # falling back to latest.json would silently install Server instead of
+    # GUI. Skip every Server-role artifact up front so only the GUI one is
+    # ever considered, on every platform.
+    if "Server" in art.name:
+        continue
     if art.suffix == ".AppImage":
         sig = art.with_suffix(art.suffix + ".sig")
         add("linux-x86_64", art, sig)
@@ -558,6 +574,19 @@ for art in artifacts:
         sig = pathlib.Path(str(art) + ".sig")
         add("darwin-x86_64", art, sig)
         add("darwin-aarch64", art, sig)
+
+# WI-3696 cut-time assertion: every entry latest.json publishes must genuinely
+# be the GUI product (productName "Papercusp GUI" → every collected filename
+# contains "GUI"; a Server artifact never does, and never should reach here
+# given the skip above — this is a fail-loud backstop against a FUTURE
+# naming/glob regression re-introducing the same silent wrong-product swap).
+for platform_key, entry in platforms.items():
+    if "GUI" not in entry["url"]:
+        raise SystemExit(
+            f"latest.json BUG: {platform_key} entry does not look like the GUI product "
+            f"(url={entry['url']!r}) — refusing to publish a manifest that could ship the "
+            f"wrong app on update (WI-3696)"
+        )
 
 manifest = {
     "version": version,

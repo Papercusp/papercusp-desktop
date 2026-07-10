@@ -151,6 +151,10 @@ windows = { version = "0.58", features = [
 # still carries the unwrap as of 2026-06-09 — drop this patch when a released
 # tauri-runtime-wry walks the ancestry safely.
 [patch.crates-io]
+# tao 0.35.3's Linux raw-device helper calls XDefaultRootWindow(NULL) when
+# XOpenDisplay fails, crashing the whole app. Keep this exact release vendored
+# with the null-display guard in vendor/tao/src/platform_impl/linux/device.rs.
+tao = { path = "vendor/tao" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 # wry 0.55.1 + one local fix (WI-3139): url_from_webview() unwrapped a nil
 # WKWebView.URL() (nil until the first navigation commits). wry's navigation
