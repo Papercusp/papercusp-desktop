@@ -125,6 +125,7 @@ fn main() {
             "app_version",
             "check_for_update",
             "install_update",
+            "revert_to",
             // pty (desktop terminals)
             "pty_spawn",
             "pty_write",

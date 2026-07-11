@@ -34,6 +34,7 @@
     "allow-app-version",
     "allow-check-for-update",
     "allow-install-update",
+    "allow-revert-to",
 
     "allow-pty-spawn",
     "allow-pty-write",
