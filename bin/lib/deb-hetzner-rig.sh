@@ -721,7 +721,7 @@ rig_wait_swarm() {
 rig_write_content() {
   local inst="$1" slug="$2" fid="$3" title="${4:-rig write}" status="${5:-todo}" ts
   ts="$(date +%s)000"
-  drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'$slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null
+  drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'$slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null
   echo "$fid"
 }
 
@@ -737,7 +737,7 @@ rig_read_content() {
 # receive-side state (empty roster → decideMemberContentOp drops every peer op).
 rig_read_roster() {
   local inst="$1"
-  drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.hive_members ORDER BY github_user_id;" 2>/dev/null
+  drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members ORDER BY github_user_id;" 2>/dev/null
 }
 
 # ── revoke / ban (the Brief 3 revocation primitive) ───────────────────────────
@@ -772,7 +772,7 @@ rig_github_id() { gh api "users/$1" --jq '.id' 2>/dev/null; }
 rig_ban_member() {
   local owner="$1" target_id="$2" scope="${3:-hive}" ws field val resp token
   [ -n "$target_id" ] || { echo "FATAL rig_ban_member: no target github id" >&2; return 1; }
-  ws="$(drv_psql "$owner" "SELECT workspace_id FROM harness_shared.hive_members LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  ws="$(drv_psql "$owner" "SELECT workspace_id FROM harness_shared.pot_members LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$ws" ] || ws="default"
   if [ "$scope" = "harness" ]; then field="harnessSlug"; val="${FRAME_MEMBER_SLUG[$owner]:-}"
   else field="potSlug"; val="${RIG_HIVE_ID:-}"; fi  # endpoint field renamed hiveSlug→potSlug by cup-lexicon-full-rename-2026-07-09

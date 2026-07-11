@@ -193,7 +193,7 @@ TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plan
 # P-00$nid). write_all() is called 3x per run with DISTINCT tags (seed, ab, ba) — but
 # the old `[ "$t" = ba ] && nid=2 || nid=1` only ever produced 2 distinct values, so
 # "seed" and "ab" (BOTH on side A, same $ws) collapsed to the SAME nid=1 and collided on
-# hive-members' (workspace_id,hive_home_slug,github_user_id) primary key on every gate
+# hive-members' (workspace_id,pot_home_slug,github_user_id) primary key on every gate
 # run (not a cross-run staleness issue — a same-run collision). Fixed to a 3-way map (one
 # per tag) so every phase within a run gets a distinct numeric id.
 ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
@@ -207,8 +207,8 @@ ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *
    plan-parts) echo "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws','$SLUG','ppmx-$t','item:P-001','item','pb $t',1,${NONCE}000,'tester',false,'local');";;
    item-assignments) echo "INSERT INTO harness_shared.plan_item_assignments (workspace_id,harness_slug,plan_slug,item_id,assignee_name,assigned_by_user,assigned_ts,strategy,note,origin) VALUES ('$ws','$SLUG','plan-mx-$t','P-00$nid','agent-x','tester',now(),'coding','mx','local');";;
    presence) echo "INSERT INTO harness_shared.shared_presence (workspace_id,harness_slug,github_user_id,machine_label,device_pubkey,intent,current_view,last_seen_at,schema_version,hive_slug) VALUES ('$ws','$SLUG',9999$nid,'mx-$t','pk-MX-$t','mx','v',now(),1,'$HIVE_SLUG');";;
-   hive-settings) echo "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,created_at,updated_at,origin) VALUES ('$ws','$HIVE_SLUG','mxk-$t','\"mx-$t\"',${NONCE}000,${NONCE}000,'local');";;
-   hive-members) echo "INSERT INTO harness_shared.hive_members (workspace_id,hive_home_slug,github_user_id,github_username,device_attestations,revoked_pubkeys,binding_status,origin) VALUES ('$ws','$HIVE_SLUG',8888$nid,'mxu$t','[]'::jsonb,'{}'::text[],'bound','local');";;
+   hive-settings) echo "INSERT INTO harness_shared.pot_settings (workspace_id,harness_slug,setting_key,value,created_at,updated_at,origin) VALUES ('$ws','$HIVE_SLUG','mxk-$t','\"mx-$t\"',${NONCE}000,${NONCE}000,'local');";;
+   hive-members) echo "INSERT INTO harness_shared.pot_members (workspace_id,pot_home_slug,github_user_id,github_username,device_attestations,revoked_pubkeys,binding_status,origin) VALUES ('$ws','$HIVE_SLUG',8888$nid,'mxu$t','[]'::jsonb,'{}'::text[],'bound','local');";;
   esac; }
 poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
@@ -221,10 +221,10 @@ poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1
    plan-parts) echo "SELECT origin FROM harness_shared.harness_plan_parts WHERE plan_slug='ppmx-$t' AND part_key='item:P-001' AND origin='remote' LIMIT 1;";;
    item-assignments) echo "SELECT origin FROM harness_shared.plan_item_assignments WHERE plan_slug='plan-mx-$t' AND item_id='P-00$nid' AND origin='remote' LIMIT 1;";;
    presence) echo "SELECT 'present' FROM harness_shared.shared_presence WHERE device_pubkey='pk-MX-$t' LIMIT 1;";;
-   hive-settings) echo "SELECT origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='mxk-$t' AND origin='remote' LIMIT 1;";;
-   hive-members) echo "SELECT origin FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=8888$nid AND origin='remote' LIMIT 1;";;
+   hive-settings) echo "SELECT origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='mxk-$t' AND origin='remote' LIMIT 1;";;
+   hive-members) echo "SELECT origin FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=8888$nid AND origin='remote' LIMIT 1;";;
   esac; }
-tbl() { case "$1" in features)echo harness_features_consolidated;;conversations)echo coord_conversations;;messages)echo coord_event_log;;threads)echo coord_threads;;thread-posts)echo coord_thread_posts;;plans)echo harness_plans;;plan-parts)echo harness_plan_parts;;item-assignments)echo plan_item_assignments;;presence)echo shared_presence;;hive-settings)echo hive_settings;;hive-members)echo hive_members;;esac; }
+tbl() { case "$1" in features)echo harness_features_consolidated;;conversations)echo coord_conversations;;messages)echo coord_event_log;;threads)echo coord_threads;;thread-posts)echo coord_thread_posts;;plans)echo harness_plans;;plan-parts)echo harness_plan_parts;;item-assignments)echo plan_item_assignments;;presence)echo shared_presence;;hive-settings)echo pot_settings;;hive-members)echo pot_members;;esac; }
 
 MATRIX=""
 write_all() { local src="$1" ws="$2" t="$3" ty; for ty in $TYPES; do

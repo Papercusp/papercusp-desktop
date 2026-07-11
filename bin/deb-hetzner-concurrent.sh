@@ -89,7 +89,7 @@ _cl_poll_present() {
   echo 0; return 1
 }
 # _cl_roster_ids <inst> — the frame's hive_members github_user_id set (sorted, comma-joined).
-_cl_roster_ids() { drv_psql "$1" "SELECT COALESCE(string_agg(github_user_id::text,',' ORDER BY github_user_id),'') FROM harness_shared.hive_members;" 2>/dev/null | tr -d '[:space:]'; }
+_cl_roster_ids() { drv_psql "$1" "SELECT COALESCE(string_agg(github_user_id::text,',' ORDER BY github_user_id),'') FROM harness_shared.pot_members;" 2>/dev/null | tr -d '[:space:]'; }
 
 # ── the scenario (operates on already-provisioned+joined frames a=owner, b=member) ─
 # Reads the rig globals FRAME_MEMBER_SLUG[a|b], FRAME_IP[*], FED_PG[*] (filled by

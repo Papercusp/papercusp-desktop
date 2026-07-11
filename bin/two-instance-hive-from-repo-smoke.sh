@@ -456,7 +456,7 @@ if [ "$join_ok" = 1 ]; then
     echo "--- A [swarm]: joined topic / peer_connected (is A on the hive topic?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[a]}" 2>/dev/null | tail -6
     echo "--- B [swarm]: joined topic / peer_connected (same topic as A?) ---"; grep -aE '\[swarm\] (joined topic|peer_connected|join FAILED)' "${FED_LOG[b]}" 2>/dev/null | tail -6
     echo "--- B re-key state: hives identity row + remote_hive (did join-pot 2b/2c run?) ---"
-    echo "  B hives identity: $(drv_psql b "SELECT home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.hives;" 2>/dev/null | tr '\n' ' ')"
+    echo "  B hives identity: $(drv_psql b "SELECT pot_home_slug||':'||octet_length(public_key)||'b' FROM harness_shared.pots;" 2>/dev/null | tr '\n' ' ')"
     echo "  B registry remote_hive: $(drv_psql b "SELECT payload::text FROM harness_shared.harness_registry;" 2>/dev/null | grep -oE 'remote_hive[^,]{0,12}' | head -3 | tr '\n' ' ')"
     echo "===== /DIAG ====="
   fi
@@ -493,20 +493,20 @@ fi
 # exactly this hive-home→joiner path. PASS here = A-003 GREEN on the real binary.
 if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   log "A-003 MEMBERSHIP witness (hive-home='$HIVE_SLUG')"
-  a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$a003_ws" ] && a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$a003_ws" ] && a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$a003_ws" ] && a003_ws="default"
-  echo "  A hive_settings: $(drv_psql a "SELECT setting_key||'/'||origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-  echo "  A hive_members:  $(drv_psql a "SELECT github_user_id||'/'||origin FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-  bf_set="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  bf_mem="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  echo "  A hive_settings: $(drv_psql a "SELECT setting_key||'/'||origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+  echo "  A hive_members:  $(drv_psql a "SELECT github_user_id||'/'||origin FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+  bf_set="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  bf_mem="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   echo "A003-BACKFILL: hive_settings_remote_on_B=${bf_set:-0}  hive_members_remote_on_B=${bf_mem:-0}"
   a003_ts="$(date +%s)000"; a003_key="a003-witness-$a003_ts"
-  drv_psql a "INSERT INTO harness_shared.hive_settings (workspace_id,harness_slug,setting_key,value,origin,created_at,updated_at) VALUES ('$a003_ws','$HIVE_SLUG','$a003_key','\"probe\"','local',$a003_ts,$a003_ts);" >/dev/null 2>&1
+  drv_psql a "INSERT INTO harness_shared.pot_settings (workspace_id,harness_slug,setting_key,value,origin,created_at,updated_at) VALUES ('$a003_ws','$HIVE_SLUG','$a003_key','\"probe\"','local',$a003_ts,$a003_ts);" >/dev/null 2>&1
   log "A-003 incremental: wrote hive_settings[$a003_key] on A (ws=$a003_ws) → poll B for origin=remote (<=60s)"
   a003_cross=0
   for i in $(seq 1 20); do
-    r="$(drv_psql b "SELECT origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='$a003_key';" 2>/dev/null | tr -d '[:space:]')"
+    r="$(drv_psql b "SELECT origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' AND setting_key='$a003_key';" 2>/dev/null | tr -d '[:space:]')"
     [ "$r" = "remote" ] && { a003_cross=1; break; }
     sleep 3
   done
@@ -515,7 +515,7 @@ if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   else
     echo "A003-HIVE-SETTINGS-CROSS=FAIL  (A's new hive_settings row never reached B as origin=remote — A-003 RED)"
     echo "  DIAG A outbox(hive_settings,$a003_key): $(drv_psql a "SELECT 'drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_settings' AND key='$a003_key';" 2>/dev/null | tr '\n' ' ')"
-    echo "  DIAG B settings: $(drv_psql b "SELECT setting_key||'/'||origin FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+    echo "  DIAG B settings: $(drv_psql b "SELECT setting_key||'/'||origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ' | head -c 300)"
     echo "  DIAG B [A-003] admit: $(grep -aE '\[A-003\] slug-filter' "${FED_LOG[b]}" 2>/dev/null | grep -iF "$HIVE_SLUG" | tail -4 | tr '\n' '|')"
   fi
 fi
@@ -523,7 +523,7 @@ fi
 # ── 5.7 ATTESTATION + REFUSED-OP witness (opt-in: ATTESTATION_PROBE=1) ─────────────
 # P-008 live proof of the trust-admission surface on the 2-node rig (see the header). Four legs,
 # all read-asserting on real federated substrate; independent of WITNESS_PROBE/MODERATION_PROBE.
-# NB hive_members is keyed by hive_home_slug (NOT harness_slug); the refused-op counters live in
+# NB hive_members is keyed by pot_home_slug (NOT harness_slug); the refused-op counters live in
 # harness_shared.p2p_refused_op_counters (M15, mig 468) keyed by (workspace_id, harness_slug=hive
 # home, reason) and are bumped by projections/p2p-receipts.ts's receiver-side identity gate.
 att_seed_A_ok=0; att_seed_B_ok=0; att_2dev_ok=0; att_wrong_ok=0; att_removed_ok=0; attestation_ran=0
@@ -531,29 +531,29 @@ att_removed_reason=""
 if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   attestation_ran=1
   log "═══ ATTESTATION + REFUSED-OP witness (P-008, hive='$HIVE_SLUG') ═══"
-  ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$ATT_WS" ] && ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$ATT_WS" ] && ATT_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$ATT_WS" ] && ATT_WS="default"
-  ATT_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  ATT_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$ATT_B_GH_ID" ] && ATT_B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
-  ATT_A_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_A_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  ATT_A_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_A_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$ATT_A_GH_ID" ] && ATT_A_GH_ID="$(gh api "users/$P_A_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   echo "  att vars: WS=$ATT_WS  A_GH_ID=$ATT_A_GH_ID  B_GH_ID=$ATT_B_GH_ID"
 
   # (setup) Under approval mode the from-repo join leaves the OWNER with a PENDING B (no member row
   # → no device to attest). Approve B first so A carries B's member row + device (the LEG1/2 subject).
-  echo "  [att-setup] PRE A members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')  pending=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_pending_joins WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')"
+  echo "  [att-setup] PRE A members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')  pending=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_pending_joins WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')"
   dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [att-setup] membership_decide(approve B=$ATT_B_GH_ID) -> $(echo "$dec" | head -c 200)"
   sleep 4
 
   # ── LEG1 — MEMBERSHIP SEEDING ─────────────────────────────────────────────────────
-  a_bdev="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  a_bdev="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
   { [ -n "$a_bdev" ] && [ "$a_bdev" -ge 1 ]; } 2>/dev/null && att_seed_A_ok=1
   echo "  LEG1a A ATTESTS B (hive_members row, ≥1 device): $([ "$att_seed_A_ok" = 1 ] && echo "PASS (B devices on A=$a_bdev)" || echo "FAIL (A B-row devices=$a_bdev)")"
   b_seed=0
   for i in $(seq 1 20); do
-    b_seed="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+    b_seed="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
     { [ -n "$b_seed" ] && [ "$b_seed" -ge 1 ]; } 2>/dev/null && break
     sleep 3
   done
@@ -563,17 +563,17 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # ── LEG2 — SECOND-DEVICE ATTESTATION (merge, no clobber; WI-1585 leg-A) ────────────
   # Seed a pending-join for user-B carrying a FRESH 2nd device, then owner-approve → approvePendingJoin
   # → upsertHiveMember MERGES it into B's existing row (union by device_pubkey; device-1 preserved).
-  D1="$(drv_psql a "SELECT (device_attestations->0->>'device_pubkey') FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  D1="$(drv_psql a "SELECT (device_attestations->0->>'device_pubkey') FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
   D2="att2dev-$(date +%s)-$RANDOM"
-  n_before="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  n_before="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
   now_ms="$(date +%s)000"
-  drv_psql a "INSERT INTO harness_shared.hive_pending_joins (workspace_id,harness_slug,github_user_id,github_username,device_attestations,status,requested_at,created_at,updated_at) VALUES ('$ATT_WS','$HIVE_SLUG',$ATT_B_GH_ID,'$P_B_USER','[{\"device_pubkey\":\"$D2\",\"gist_id\":\"att-2dev-probe\",\"gist_url\":\"\",\"device_label\":\"$P_B_USER-dev2\",\"created_at\":$now_ms,\"signature_by_device\":\"\"}]'::jsonb,'pending',$now_ms,$now_ms,$now_ms) ON CONFLICT (workspace_id,harness_slug,github_user_id) DO UPDATE SET device_attestations=EXCLUDED.device_attestations,status='pending',updated_at=EXCLUDED.updated_at;" >/dev/null 2>&1
+  drv_psql a "INSERT INTO harness_shared.pot_pending_joins (workspace_id,harness_slug,github_user_id,github_username,device_attestations,status,requested_at,created_at,updated_at) VALUES ('$ATT_WS','$HIVE_SLUG',$ATT_B_GH_ID,'$P_B_USER','[{\"device_pubkey\":\"$D2\",\"gist_id\":\"att-2dev-probe\",\"gist_url\":\"\",\"device_label\":\"$P_B_USER-dev2\",\"created_at\":$now_ms,\"signature_by_device\":\"\"}]'::jsonb,'pending',$now_ms,$now_ms,$now_ms) ON CONFLICT (workspace_id,harness_slug,github_user_id) DO UPDATE SET device_attestations=EXCLUDED.device_attestations,status='pending',updated_at=EXCLUDED.updated_at;" >/dev/null 2>&1
   dec2="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [LEG2] approve 2nd-device pending (D2=${D2:0:16}…) -> $(echo "$dec2" | head -c 160)"
   sleep 3
-  n_after="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
-  has_d1=1; [ -n "$D1" ] && has_d1="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D1'));" 2>/dev/null | tr -d '[:space:]')"
-  has_d2="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D2'));" 2>/dev/null | tr -d '[:space:]')"
+  n_after="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
+  has_d1=1; [ -n "$D1" ] && has_d1="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D1'));" 2>/dev/null | tr -d '[:space:]')"
+  has_d2="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID AND device_attestations @> jsonb_build_array(jsonb_build_object('device_pubkey','$D2'));" 2>/dev/null | tr -d '[:space:]')"
   { [ -n "$n_after" ] && [ "$n_after" -ge 2 ] && [ "$has_d1" = 1 ] && [ "$has_d2" = 1 ]; } 2>/dev/null && att_2dev_ok=1
   echo "  LEG2 SECOND-DEVICE MERGE (B row unions D1+D2, no clobber): $([ "$att_2dev_ok" = 1 ] && echo "PASS (devices $n_before→$n_after; D1 kept=$has_d1 D2 added=$has_d2)" || echo "FAIL (n=$n_before→$n_after D1=$has_d1 D2=$has_d2 — WI-1585 leg-A clobber?)")"
 
@@ -611,7 +611,7 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   [ -z "$tot_before" ] && tot_before=0
   # Strip B's attestation on A (simulate an author device attested to no member) — union preserved for
   # LEG2's assert already recorded; this is the LAST leg so mutating A's roster is safe.
-  drv_psql a "UPDATE harness_shared.hive_members SET device_attestations='[]'::jsonb WHERE hive_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" >/dev/null 2>&1
+  drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" >/dev/null 2>&1
   echo "  [LEG4] stripped B's device attestation on A (B's author device now maps to no member); waiting out the 30s comms-tier cache TTL…"
   sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default = 30_000; ensure the next resolve rebuilds the device→user map WITHOUT B
   RID_REM="att-unatt-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
@@ -655,9 +655,9 @@ rk_content_ctrl_ok=0; rk_content_cut_ok=0; rk_content_applicable=0
 if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   witness_ran=1
   log "═══ FOLDED LIVE WITNESS (AK enforcement + P-008 re-key cut) ═══"
-  WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$WS_ID" ] && WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$WS_ID" ] && WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$B_GH_ID" ] && B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   echo "  witness vars: WS=$WS_ID  B_GH_ID=$B_GH_ID  HIVE=$HIVE_SLUG  MEMBER=$MEMBER_SLUG"
   # (mcp_call is defined once in the shared helpers above — used by this block + MODERATION_PROBE.)
@@ -665,11 +665,11 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # (su-9140a, C-001 construction) The natural from-repo join leaves the OWNER with NO hive_members row
   # for the joiner → the epoch-key grant (on upsertHiveMember) never fires → no encryption → nothing to cut.
   # Diagnose A's admission state; if a pending-join exists (approval-mode), APPROVE it to fire the grant.
-  echo "  [C-001-setup] PRE: A pending_joins=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_pending_joins;" 2>/dev/null|tr -d '[:space:]') members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
+  echo "  [C-001-setup] PRE: A pending_joins=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_pending_joins;" 2>/dev/null|tr -d '[:space:]') members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
   dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [C-001-setup] membership_decide(approve B=$B_GH_ID) -> $(echo "$dec" | head -c 240)"
   sleep 5
-  echo "  [C-001-setup] POST: A members=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
+  echo "  [C-001-setup] POST: A members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
 
   # AK0 — default-off control: B writes F-AK0 → lands on A (no policy yet).
   ak0="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AK0 40 || true)"
@@ -703,12 +703,12 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # conflated the cut with WI-259's content stall (false-RED); this is the true, independent proof.
 
   # K0 — B received join-time epoch keys over the wire (origin=remote ⇒ the grant + federation worked).
-  b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$b_keys" ] && [ "$b_keys" -ge 1 ] && rk_keys_ok=1
   echo "  K0 join-keys (B has wrapped epoch keys origin=remote): $([ "$rk_keys_ok" = 1 ] && echo "PASS ($b_keys)" || echo "FAIL ($b_keys)")"
 
   # CURRENT (pre-revoke) epoch on A = the max minted epoch (-1 ⇒ the grant never fired = K0 upstream fail).
-  CUR_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  CUR_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
 
   # ── K4a CONTENT CONTROL (pre-revoke, P-008 CONTENT-level) — the data-plane companion to K1.
   # A authors an ENCRYPTED content feature (F-RKCTRL) under the CURRENT epoch; B — still a member
@@ -726,25 +726,25 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
   mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"potSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1  # request field renamed hiveSlug→potSlug (revoke-contributor.ts zod refine accepts only potSlug)
   sleep 4
-  NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   { [ -n "$CUR_EPOCH" ] && [ -n "$NEW_EPOCH" ] && [ "$NEW_EPOCH" -gt "$CUR_EPOCH" ]; } 2>/dev/null && rk_revoke_ok=1
   echo "  K2 REVOKE (A revokes B, epoch advanced $CUR_EPOCH→$NEW_EPOCH): $([ "$rk_revoke_ok" = 1 ] && echo "PASS" || echo "FAIL (epoch did not advance)")"
 
   # B_DEV — the cut-off device = A's CUR-epoch member devices EXCEPT A's NEW-epoch (remaining) devices.
   # In a 2-member hive this is exactly B's device (A stays a member ⇒ A_DEV is in both epochs, excluded).
-  B_DEV="$(drv_psql a "SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH EXCEPT SELECT member_device_pubkey FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  B_DEV="$(drv_psql a "SELECT member_device_pubkey FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH EXCEPT SELECT member_device_pubkey FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | head -1 | tr -d '[:space:]')"
 
   # K1 CONTROL — B's DEVICE held a key at the pre-revoke epoch (it COULD derive current content).
-  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && rk_ctrl_ok=1
   echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=$k1_bdev B_DEV=${B_DEV:0:12})")"
 
   # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
   # WHILE the NEW epoch DID federate to B for the REMAINING members (so the 0 is a true cut, not a
   # federation miss) and A holds the NEW epoch rows. This IS the C-001 read-cut — key-level, device-filtered.
-  k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
+  k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ "$k3_bdev" = 0 ] && [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ] && [ -n "$a_new" ] && [ "$a_new" -ge 1 ] && rk_cut_ok=1
   echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)" || echo "FAIL (B_DEV-new=$k3_bdev remaining-on-B=$k3_remaining A-new=$a_new)")"
 
@@ -794,11 +794,11 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   moderation_ran=1
   log "═══ MODERATION FEDERATION witness (WI-283: takedown + report, hive='$HIVE_SLUG') ═══"
   # Witness vars — resolved independently of the WITNESS_PROBE block so this stands alone.
-  MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   MOD_A_GH_ID="$(gh api "users/$P_A_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
-  MOD_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.hive_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  MOD_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$MOD_B_GH_ID" ] && MOD_B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   CR="F-MODTEST-$(date +%s)"
   echo "  mod vars: WS=$MOD_WS  A_GH_ID=$MOD_A_GH_ID  B_GH_ID=$MOD_B_GH_ID  contentRef=$CR"
@@ -820,22 +820,22 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  reportable authored on A (owner-signed): $([ "$mod_reportable_ok" = 1 ] && echo yes || echo "no — LEG 2 will be INCONCLUSIVE (report gate stays off)")"
 
   # ── LEG 1 — TAKEDOWN (owner A → joiner B; hive_policy, hive-home-grained, A-003 class) ─────────
-  M0_VER="$(drv_psql a "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
-  B0_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  M0_VER="$(drv_psql a "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  B0_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   echo "  [takedown] BEFORE: A policy_version=$M0_VER  B policy_version=$B0_VER"
   td="$(mcp_call a "hive:takedown" "{\"hive\":\"$HIVE_SLUG\",\"contentRef\":\"$CR\",\"workspace\":\"$MOD_WS\"}")"
   echo "  [takedown] A hive:takedown($CR) -> $(echo "$td" | head -c 240)"
   # POLL B for the federated signed-list delta: origin=remote, version bumped past M0_VER, ref present.
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
-    hit="$(drv_psql b "SELECT count(*) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND policy_version > $M0_VER AND (policy_json::jsonb->'moderation'->'takedownList') @> to_jsonb('$CR'::text);" 2>/dev/null | tr -d '[:space:]')"
+    hit="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND policy_version > $M0_VER AND (policy_json::jsonb->'moderation'->'takedownList') @> to_jsonb('$CR'::text);" 2>/dev/null | tr -d '[:space:]')"
     [ "$hit" = 1 ] && { mod_takedown_ok=1; break; }
     sleep 3
   done
-  B1_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+  B1_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   echo "  MOD-LEG1 TAKEDOWN (B receives owner-signed takedownList origin=remote, v$M0_VER→v$B1_VER, ref present): $([ "$mod_takedown_ok" = 1 ] && echo PASS || echo "FAIL — B did not receive '$CR' on the signed takedownList as origin=remote")"
   if [ "$mod_takedown_ok" != 1 ]; then
-    echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG A outbox(hive_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
   fi
 
@@ -844,7 +844,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   b_reportable=0
   if [ "$mod_reportable_ok" = 1 ]; then
     for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
-      r="$(drv_psql b "SELECT (policy_json::jsonb->'moderation'->>'reportable') FROM harness_shared.hive_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+      r="$(drv_psql b "SELECT (policy_json::jsonb->'moderation'->>'reportable') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
       [ "$r" = "true" ] && { b_reportable=1; break; }
       sleep 3
     done
@@ -854,7 +854,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  [report] B hive:report($CR) -> $(echo "$rep" | head -c 220)"
   # POLL A's moderation queue (hive_reports) for the federated row origin=remote.
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
-    hit="$(drv_psql a "SELECT count(*) FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND target_ref='$CR' AND reporter_github_user_id=${MOD_B_GH_ID:-0};" 2>/dev/null | tr -d '[:space:]')"
+    hit="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_reports WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND target_ref='$CR' AND reporter_github_user_id=${MOD_B_GH_ID:-0};" 2>/dev/null | tr -d '[:space:]')"
     [ "$hit" = 1 ] && { mod_report_ok=1; break; }
     sleep 3
   done
@@ -869,8 +869,8 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   fi
   echo "    A hive:moderation_queue -> $(echo "$q" | head -c 240)"
   if [ "$mod_report_ok" != 1 ] && [ "$b_reportable" = 1 ]; then
-    echo "    DIAG A reports: $(drv_psql a "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG B reports(local): $(drv_psql b "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.hive_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A reports: $(drv_psql a "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.pot_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B reports(local): $(drv_psql b "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.pot_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG B outbox(hive_reports): $(drv_psql b "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_reports' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
   fi
 fi

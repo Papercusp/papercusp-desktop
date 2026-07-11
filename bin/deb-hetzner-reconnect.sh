@@ -79,7 +79,7 @@ _rc_origin() { rig_read_content "$1" "$2"; }
 _rc_write_planpart() {
   local src="$1" slug="$2" plan_slug="$3" part_key="$4" body="$5" ts
   ts="$(date +%s)000"
-  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'$slug','$plan_slug','$part_key','item','$body',1,$ts,'$src',false,'local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'$slug','$plan_slug','$part_key','item','$body',1,$ts,'$src',false,'local');" >/dev/null
 }
 
 # _rc_poll_planpart <dst> <plan_slug> <part_key> <body> [tries] — PASS iff the part arrives
@@ -98,7 +98,7 @@ _rc_poll_planpart() {
 # origin='local' on <src>. Mirrors fed_coord_merge_probe's INSERT.
 _rc_write_coord() {
   local src="$1" slug="$2" msg_id="$3"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'messages','rc-probe','$msg_id','{\"kind\":\"message\",\"text\":\"reconnect catchup coord probe\"}'::jsonb,'$slug','local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'messages','rc-probe','$msg_id','{\"kind\":\"message\",\"text\":\"reconnect catchup coord probe\"}'::jsonb,'$slug','local');" >/dev/null
 }
 
 # _rc_poll_coord <dst> <msg_id> [tries] — PASS iff the coord event arrives origin='remote'.

@@ -78,7 +78,7 @@ _rv_poll_remote() {
 # _rv_roster_empty <inst> — true (0) iff <inst>'s hive_members roster has NO rows (the
 # WI-1378 no-restart symptom that drops every owner op).
 _rv_roster_empty() {
-  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null | tr -d '[:space:]')"
+  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null | tr -d '[:space:]')"
   [ "${n:-0}" = "0" ]
 }
 
@@ -167,7 +167,7 @@ scenario_revocation_kcut() {
   # (offline + deterministic; the roster is populated — step 1 proved it).
   local banned_id; banned_id="$(rig_github_id "${FRAME_USER[$BANNED]}")"
   [ -n "$banned_id" ] || { sleep 3; banned_id="$(rig_github_id "${FRAME_USER[$BANNED]}")"; }
-  [ -n "$banned_id" ] || banned_id="$(drv_psql "$OWNER" "SELECT github_user_id FROM harness_shared.hive_members WHERE github_username='${FRAME_USER[$BANNED]}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$banned_id" ] || banned_id="$(drv_psql "$OWNER" "SELECT github_user_id FROM harness_shared.pot_members WHERE github_username='${FRAME_USER[$BANNED]}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   if [ -z "$banned_id" ]; then echo "  ✗ could not resolve github id for '${FRAME_USER[$BANNED]:-?}'"; echo "OVERALL: INCOMPLETE"; return 2; fi
   fed_log "[2] OWNER bans member '${FRAME_USER[$BANNED]}' (github_id=$banned_id) — Hive-wide revoke"
   local ban_resp; ban_resp="$(rig_ban_member "$OWNER" "$banned_id" hive)"

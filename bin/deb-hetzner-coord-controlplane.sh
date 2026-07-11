@@ -111,7 +111,7 @@ set +u   # the FED_*/FRAME_* assoc arrays are nounset-hostile
 _ctrl_coord_probe() {
   local src="$1" dst="$2" sslug="$3" surface="$4" tag="$5" tries="${6:-30}" i row mid
   mid="CTRL-${surface}-${tag}-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'$surface','ctrl-probe','$mid','{\"kind\":\"$surface\",\"text\":\"control-plane $surface probe\"}'::jsonb,'$sslug','local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'$surface','ctrl-probe','$mid','{\"kind\":\"$surface\",\"text\":\"control-plane $surface probe\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo 1; return 0; }
@@ -132,7 +132,7 @@ _ctrl_coord_probe() {
 _ctrl_handoff_ungranted_probe() {
   local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i mid q applied
   mid="CTRL-handoffs-${tag}-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default'),'handoffs','ctrl-probe','$mid','{\"kind\":\"handoffs\",\"text\":\"control-plane handoffs probe (ungranted)\"}'::jsonb,'$sslug','local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'handoffs','ctrl-probe','$mid','{\"kind\":\"handoffs\",\"text\":\"control-plane handoffs probe (ungranted)\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     q="$(drv_psql "$dst" "SELECT author_github_user_id FROM harness_shared.coord_quarantine WHERE msg_id='$mid' AND reason='handoff-below-steer' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$q" ] && { echo "1 $q"; return 0; }
@@ -147,7 +147,7 @@ _ctrl_handoff_ungranted_probe() {
 # (the WI-1378 no-restart symptom that drops every peer op). Mirrors _rv_roster_empty
 # in deb-hetzner-revocation.sh — used as the baseline-miss diagnostic.
 _ctrl_roster_empty() {
-  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.hive_members;" 2>/dev/null | tr -d '[:space:]')"
+  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null | tr -d '[:space:]')"
   [ "${n:-0}" = "0" ]
 }
 
@@ -239,7 +239,7 @@ scenario_coord_controlplane() {
   esac
   p_ho=0
   if [ "$p_hoq" = 1 ]; then
-    WS_B="$(drv_psql "$MEMBER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
+    WS_B="$(drv_psql "$MEMBER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$WS_B" ] || WS_B="default"
     NOWMS="$(( $(date +%s) * 1000 ))"
     drv_psql "$MEMBER" "INSERT INTO harness_shared.comms_trust_list (workspace_id,trusted_github_user_id,tier,note,created_ts,updated_ts) VALUES ('$WS_B',$HO_AUTHOR,'steer','ctrl-probe steer grant',$NOWMS,$NOWMS) ON CONFLICT (workspace_id,trusted_github_user_id) DO UPDATE SET tier='steer', updated_ts=$NOWMS;" >/dev/null
@@ -263,7 +263,7 @@ scenario_coord_controlplane() {
 
   # ── NEGATIVE probes — RAW control state must stay LOCAL (never on B) ───────
   fed_log "CONTROL-PLANE NEGATIVE probes (raw presence/watermark/await must stay LOCAL to A)"
-  PWS="$(drv_psql "$OWNER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.hive_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
+  PWS="$(drv_psql "$OWNER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$PWS" ] || PWS="default"
   NTS="$(date +%s)"
 

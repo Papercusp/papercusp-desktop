@@ -52,7 +52,17 @@ KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
-MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -p 2222 -o BatchMode=yes aviweiss@127.0.0.1)
+# P-007 (desktop-build-hardening-tri-platform-2026-07-11): keepalive parity with
+# the Windows leg (build-windows-on-vm.sh:113). ssh's DEFAULT ServerAliveCountMax=3
+# tears the session down after ~90s of VM unresponsiveness — that 90s death is what
+# discarded the 0.0.7 cut mid-build when host-load starvation (WI-3792) stalled the
+# VM. 30s interval × 20 misses tolerates ~10min of unresponsiveness before ssh
+# gives up; IdentitiesOnly pins auth to this key so a loaded agent doesn't offer
+# many keys and trip MaxAuthTries. Reused by every mac ssh/scp/rsync call below.
+MAC_VM_KEEPALIVE=(-o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
+MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -o IdentitiesOnly=yes -p 2222 -o BatchMode=yes "${MAC_VM_KEEPALIVE[@]}" aviweiss@127.0.0.1)
+MAC_VM_SCP=(scp -i "${HOME}/.ssh/papercup-vm-mac" -o IdentitiesOnly=yes -P 2222 -o BatchMode=yes "${MAC_VM_KEEPALIVE[@]}")
+MAC_VM_RSYNC_E="ssh -i ${HOME}/.ssh/papercup-vm-mac -o IdentitiesOnly=yes -p 2222 -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
 # Build provenance: the short git sha of the tree we're packaging, made HONEST
 # per EI-8914 / P-003 (desktop-build-hardening-tri-platform-2026-07-11). This is
@@ -310,13 +320,43 @@ cut_release_seed() {
 
 cut_release_seed
 
+# ── P-006 (desktop-build-hardening-tri-platform-2026-07-11), per D-005 ────────
+# The release cut is the VICTIM of host load, not its cause: WI-3792's 05:20Z
+# 0.0.7 death was runaway staging hono-hosts + the Gemma ONNX all-core spin
+# STARVING the win VM mid-build, not the build overloading the box. So the fix is
+# protect + be polite, NOT throttle the victim:
+#   (1) POLITE LOCAL LEG — the local Linux cargo/tauri compile spins all cores and
+#       runs CONCURRENTLY with the windows+mac VM builds on the SAME host (see the
+#       parallel-legs comment below), so an un-niced local leg can starve its own
+#       sibling qemu VM legs (the 05:20Z failure, self-inflicted). Wrap every local
+#       CPU-heavy step (sidecar esbuild + the tauri compiles) with nice + ionice so
+#       it yields to the CPUWeight-protected critical services and the qemu VM host
+#       processes — that lowered relative priority is what "protect the build FROM
+#       contention" (D-005) means here: the VM legs get scheduled ahead of the
+#       local compile. Disable with PAPERCUSP_RELEASE_NICE=0.
+#   (2) NO SHORT-COMMAND SLOT / NEVER DENIED — export PC_HEAVY_BYPASS=1 so that if
+#       this cut is ever launched under scripts/pc-heavy.sh (or spawns a hooked
+#       heavy child), the WI-3821 admission gate never REFUSES a step when the box
+#       is loaded (a load spike must not kill a cut) and the ~35-min VM builds
+#       never sit in / hold a pc-heavy admission slot tuned for short tsc/vitest
+#       (D-005: give long builds a dedicated lane OR exempt them — exemption IS the
+#       lane). The gate keeps throttling the actual CAUSES (other agents' raw
+#       vitest/tsc/build); it just never throttles this victim.
+export PC_HEAVY_BYPASS=1
+PC_NICE=()
+if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
+  command -v nice   >/dev/null 2>&1 && PC_NICE=(nice -n "${PAPERCUSP_RELEASE_NICE_ADJ:-10}")
+  command -v ionice >/dev/null 2>&1 && PC_NICE=(ionice -c2 -n "${PAPERCUSP_RELEASE_IONICE:-7}" "${PC_NICE[@]}")
+fi
+[[ ${#PC_NICE[@]} -gt 0 ]] && echo "==> local build legs run niced (P-006): ${PC_NICE[*]}"
+
 echo "==> building sidecar"
 # P-004 (desktop-build-hardening-tri-platform-2026-07-11): record the cut-start
 # epoch BEFORE the sidecar build so the freshness stamp it writes is guaranteed
 # >= this — the Windows leg's guard then proves the packed serve.mjs was rebuilt
 # for THIS cut, not a stale leftover.
 export PAPERCUSP_SIDECAR_MIN_EPOCH_SEC="$(date +%s)"
-bash "$ROOT/bin/build-desktop-sidecar.sh"
+"${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"
 # P-004: the exact sha of the serve.mjs we just built — exported so every leg's
 # packer asserts it packs THIS byte-identical sidecar (fail-closed on a
 # concurrent rebuild swapping it mid-cut). Doubles as a self-check that the
@@ -412,7 +452,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     # see the collection globs) AND its multi-GB payload compression wedged the
     # 0.0.3-alpha linux leg for 33min+. deb only.
     echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb "${role_cfg[@]}")
   done
   # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
   # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
@@ -420,7 +460,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
        TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-       bash "$ROOT/bin/build-appimage.sh")
+       "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
   fi
 ) >"$LINUX_LEG_LOG" 2>&1 &
 LINUX_PID=$!
@@ -462,7 +502,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
   done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
@@ -518,24 +558,63 @@ elif [[ "$WITH_MAC" == "1" ]]; then
     echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
     rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
       --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
-      -e "ssh -i ${HOME}/.ssh/papercup-vm-mac -p 2222 -o BatchMode=yes" \
+      -e "$MAC_VM_RSYNC_E" \
       "$SNAP_DIR/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
     rm -rf "$SNAP_DIR"
-    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "${MAC_VM_SCP[@]}" \
       "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
-    "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; bash -lc "
-      cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || exit 1
-      npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; exit 1; }
-      export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
-      export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
-      export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
-      export PAPERCUSP_BUILD_VERSION='"$VERSION"'
-      export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
-      export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
-      export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
-      export PAPERCUSP_SKIP_SEED_CUT=1
-      bash bin/mac-vm-build.sh
-    "'
+    # ── P-007 (desktop-build-hardening-tri-platform-2026-07-11, per D-005): run
+    # the ~35-min build DETACHED on the VM (nohup + a status sentinel) and POLL
+    # for it — so a dropped ssh connection (the 90s-keepalive death that discarded
+    # 0.0.7, or a hard reset the keepalive can't survive) never kills the build.
+    # A poll that fails (ssh flap) is NON-fatal: the detached build keeps running
+    # and we RETRY THE POLL; we NEVER re-invoke the build from scratch (a re-run
+    # doubles the 35 min, it does not save it). macOS has no setsid — nohup +
+    # </dev/null + redirected fds is what detaches it from the ssh channel.
+    # Sentinel ~/mac-release-build.done holds "DONE:<exit-code>".
+    _mac_done="mac-release-build.done"
+    _mac_log="mac-release-build.log"
+    echo "    launching DETACHED mac build on the VM (nohup; sentinel ~/$_mac_done, log ~/$_mac_log)"
+    "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; rm -f "$HOME/'"$_mac_done"'"; nohup bash -lc "
+      status=0
+      cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || status=91
+      if [ \$status -eq 0 ]; then npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; status=92; }; fi
+      if [ \$status -eq 0 ]; then
+        export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
+        export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+        export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
+        export PAPERCUSP_BUILD_VERSION='"$VERSION"'
+        export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
+        export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
+        export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
+        export PAPERCUSP_SKIP_SEED_CUT=1
+        bash bin/mac-vm-build.sh || status=\$?
+      fi
+      echo \"DONE:\$status\" > \"\$HOME/'"$_mac_done"'\"
+    " </dev/null >"$HOME/'"$_mac_log"'" 2>&1 &' </dev/null >/dev/null 2>&1 \
+      || { echo "ERROR: failed to launch the detached mac build over ssh"; exit 1; }
+
+    # Poll the sentinel; an ssh flap here is NON-fatal (retry). Wall-clock timeout
+    # leaves the detached build running for inspection rather than re-invoking it.
+    _mac_timeout="${PAPERCUSP_MAC_BUILD_TIMEOUT_SEC:-3600}"
+    _mac_poll="${PAPERCUSP_MAC_POLL_INTERVAL_SEC:-30}"
+    _mac_t0="$(date +%s)"; _mac_sentinel=""
+    echo "    polling for mac build completion (timeout ${_mac_timeout}s, every ${_mac_poll}s)…"
+    while :; do
+      if (( $(date +%s) - _mac_t0 > _mac_timeout )); then
+        echo "ERROR: mac build did not finish within ${_mac_timeout}s — it is DETACHED and may still be running on the VM (~/$_mac_log). NOT re-invoking (D-005). Raise PAPERCUSP_MAC_BUILD_TIMEOUT_SEC or investigate the VM."; exit 1
+      fi
+      _mac_sentinel="$("${MAC_VM_SSH[@]}" 'cat "$HOME/'"$_mac_done"'" 2>/dev/null' 2>/dev/null || true)"
+      [[ "$_mac_sentinel" == DONE:* ]] && break
+      sleep "$_mac_poll"
+    done
+    if [[ "${_mac_sentinel#DONE:}" != "0" ]]; then
+      echo "ERROR: mac build FAILED on the VM ($_mac_sentinel) — tail of ~/$_mac_log:"
+      "${MAC_VM_SSH[@]}" 'tail -80 "$HOME/'"$_mac_log"'" 2>/dev/null' 2>/dev/null | sed 's/^/  [mac-vm] /' || true
+      exit 1
+    fi
+    echo "    mac build completed OK (detached; survived any ssh flaps) — replaying VM build log:"
+    "${MAC_VM_SSH[@]}" 'cat "$HOME/'"$_mac_log"'" 2>/dev/null' 2>/dev/null | sed 's/^/  [mac-vm] /' || true
     MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
     MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
     mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
@@ -543,9 +622,9 @@ elif [[ "$WITH_MAC" == "1" ]]; then
     # no version in its filename), so a prior cut's dmg/app would contaminate this
     # release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
     rm -f "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig 2>/dev/null || true
-    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "${MAC_VM_SCP[@]}" \
       "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/dmg/*.dmg" "$MAC_OUT/dmg/" || true
-    scp -i "${HOME}/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
+    "${MAC_VM_SCP[@]}" \
       "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz" \
       "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz.sig" "$MAC_OUT/macos/" || true
   ) >"$MAC_LEG_LOG" 2>&1 &

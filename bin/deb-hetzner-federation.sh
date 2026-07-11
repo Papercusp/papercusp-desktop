@@ -187,8 +187,8 @@ if [ "$ab" != 1 ] || [ "$ba" != 1 ] || [ "$ppab" != 1 ] || [ "$ppba" != 1 ] || [
   # because its hive_directory_cache is empty → ownerDeviceForTopic null → no owner-log bootstrap-
   # admit → 0 hive_members roster → decideMemberContentOp drops/defers every peer op.
   for inst in a b; do
-    echo "--- $inst: hive_members roster (github_user_id|binding_status|#device_attest) ---"; drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.hive_members ORDER BY github_user_id;" 2>/dev/null
-    echo "--- $inst: hive_directory_cache (workspace_id|plain?|ct?|#hives) — empty = root cause ---"; drv_psql "$inst" "SELECT workspace_id||'|plain='||(payload IS NOT NULL)||'|ct='||(payload_ct IS NOT NULL)||'|hives='||COALESCE(jsonb_array_length(payload->'hives'),-1) FROM harness_shared.hive_directory_cache;" 2>/dev/null
+    echo "--- $inst: hive_members roster (github_user_id|binding_status|#device_attest) ---"; drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members ORDER BY github_user_id;" 2>/dev/null
+    echo "--- $inst: hive_directory_cache (workspace_id|plain?|ct?|#hives) — empty = root cause ---"; drv_psql "$inst" "SELECT workspace_id||'|plain='||(payload IS NOT NULL)||'|ct='||(payload_ct IS NOT NULL)||'|hives='||COALESCE(jsonb_array_length(payload->'hives'),-1) FROM harness_shared.pot_directory_cache;" 2>/dev/null
     echo "--- $inst: announce/directory/bootstrap-admit activity (serve.log; counts+slugs only, no creds) ---"; drv_exec "$inst" <<<"grep -aoE 'verifyHiveAnnounce|hive-announce|hiveDirectory|hive_directory|ownerDeviceForTopic|bootstrap.?admit|loadHiveOwnerDevice|resolveSameHiveMember|\[announce\]' /home/pcusp/serve.log 2>/dev/null | sort | uniq -c | tail -20"
   done
   # EI-521 drain-loop diag (D-031): the SEND-side drain is wired but the outbox is undrained.
