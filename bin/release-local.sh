@@ -352,6 +352,45 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 # Windows + macOS build on their OWN QEMU VMs over SSH, so nothing contends. Each
 # leg is a background subshell → its own log; we join all three below and collect
 # artifacts in the PARENT (a subshell's `ARTIFACTS+=` would not survive the fork).
+# ── P-005 (desktop-build-hardening-tri-platform-2026-07-11): verify the REUSE
+# salvage path, don't just flag it ──────────────────────────────────────────
+# PAPERCUSP_REUSE_MAC/REUSE_WIN skip a rebuild and ship artifacts SALVAGED from a
+# prior cut — but they get re-labelled with THIS cut's version/sha (baked into
+# the binary at its ORIGINAL build; the provenance emit only stamps reused:true).
+# Salvaging a DIFFERENT version's bytes and shipping them as $VERSION is the
+# LABELED!=PACKED lie. Reuse is only honest for a SAME-VERSION re-cut (e.g. a
+# 0.0.7 cut that failed at a later step, reusing 0.0.7's already-built leg). So
+# before trusting salvaged artifacts, read the prior cut's build-provenance.json
+# (restored alongside them) and FAIL LOUD if its version != $VERSION, or if it's
+# missing (then the true version is unknowable → unsafe to re-label). Run in the
+# reuse blocks BELOW, before the late provenance emit overwrites the file.
+# Overrides: PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1 (no prior provenance) /
+# PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=1 (deliberate cross-version salvage).
+_prov_version() {  # $1 = build-provenance.json path → prints the version string
+  grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/'
+}
+assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
+  local dir="$1" leg="$2"
+  local prov="$dir/build-provenance.json"
+  if [[ "${PAPERCUSP_ALLOW_REUSE_UNVERIFIED:-0}" == "1" ]]; then
+    echo "==> ⚠ PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1 — skipping the $leg reuse-provenance verification (P-005)"
+    return 0
+  fi
+  [[ -f "$prov" ]] || { echo "ERROR: REUSE_$leg but no prior build-provenance.json at $prov — the salvaged bytes' true version is unknown, so re-labelling them $VERSION would be a LABELED!=PACKED lie (P-005). Restore a cut that includes build-provenance.json, or override: PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1."; exit 1; }
+  local prior_ver; prior_ver="$(_prov_version "$prov")"
+  [[ -n "$prior_ver" ]] || { echo "ERROR: could not read a version from $prov — refusing to reuse unverifiable salvaged $leg artifacts (P-005). Override: PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1."; exit 1; }
+  if [[ "$prior_ver" != "$VERSION" ]]; then
+    if [[ "${PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH:-0}" == "1" ]]; then
+      echo "==> ⚠ PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=1 — proceeding despite $leg salvage version mismatch ($prior_ver != $VERSION)"
+    else
+      echo "ERROR: REUSE_$leg salvaged artifacts are version '$prior_ver' but this cut is '$VERSION' — refusing to re-label a DIFFERENT version's bytes as $VERSION (the silent-relabel P-005 kills). Rebuild the $leg leg for $VERSION, or (same-version re-cut only) override: PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=1."
+      exit 1
+    fi
+  else
+    echo "==> ✓ REUSE_$leg provenance verified: salvaged version $prior_ver == cut $VERSION (P-005)"
+  fi
+}
+
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""
 echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
@@ -395,6 +434,8 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
   if [[ "$win_reuse_found" != "1" ]]; then
     echo "ERROR: PAPERCUSP_REUSE_WIN=1 but no windows artifacts in $ROOT/src-tauri/target/windows-vm/bundle/inno — restore them there first"; exit 1
   fi
+  # P-005: refuse to re-label a different version's salvaged windows bytes as $VERSION.
+  assert_reused_provenance "$ROOT/src-tauri/target/windows-vm/bundle/inno" windows
   WIN_REUSE=1
 elif [[ "$WITH_WINDOWS" == "1" ]]; then
   echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
@@ -433,6 +474,8 @@ if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
   if [[ "$mac_reuse_found" != "1" ]]; then
     echo "ERROR: PAPERCUSP_REUSE_MAC=1 but no mac artifacts in $MAC_OUT — restore the backup there first"; exit 1
   fi
+  # P-005: refuse to re-label a different version's salvaged mac bytes as $VERSION.
+  assert_reused_provenance "$MAC_OUT" mac
   MAC_REUSE=1
 elif [[ "$WITH_MAC" == "1" ]]; then
   echo "==> [parallel] launching macOS universal build on the mac VM (log: $MAC_LEG_LOG)"
