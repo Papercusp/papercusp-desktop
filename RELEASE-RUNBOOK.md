@@ -45,6 +45,14 @@ bin/release-local.sh 0.0.8 alpha                 # Linux only
 WITH_MAC=1 WITH_WINDOWS=1 bin/release-local.sh 0.0.8 alpha   # all three
 ```
 
+**Agent lever (preferred): `release:cut`.** The `release:cut` MCP tool is the
+orchestrator over this script — `op:preflight` (go/no-go: signing key + scripts
+present, nothing in flight), `op:run` (fires the cut **detached** so a 35–60 min
+build survives a compaction/relaunch; dry-run unless `confirm:true`; operator role;
+audited), `op:status` (poll it), `op:handoff` (collect the version's signed artifacts
++ sha256 for the owner — §5). It always runs the cut LOCAL-only
+(`PAPERCUSP_PUBLISH_GITHUB=0`), so it can never publish to GitHub.
+
 What the cut does, and the guard behind each step (Phase 1 + Phase 2):
 
 1. **Honest sha (P-003).** `BUILD_SHA` is derived once, centrally, and gets a
