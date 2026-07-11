@@ -2519,6 +2519,164 @@ fn operator_http_ready(port: u16) -> bool {
         .is_ok()
 }
 
+/// P-013 (desktop-build-hardening-tri-platform-2026-07-11): the post-update
+/// self-check verdict. On launch the GUI asks the operator it attached to for
+/// its `/api/health` sha and compares it against THIS build's OWN compile-time
+/// sha (`option_env!("PAPERCUSP_BUILD_SHA")` — the on-disk artifact's own
+/// identity, the same value `emit-build-provenance.sh` records as `buildSha`,
+/// NOT "the latest release"). A mismatch means the running operator is NOT the
+/// one this installed build shipped — the EI-9002 silent no-op update, where a
+/// stale operator survived (e.g. inside WSL) and was adopted instead of
+/// replaced. D-002: keying off the installed build's OWN sha makes this the SAME
+/// invariant that both forward-install AND rollback verify against — a
+/// deliberate downgrade to tag T PASSES when `/api/health` reports T's sha.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateSelfCheck {
+    /// Both shas known and equal — the running operator matches this build.
+    Match,
+    /// Both shas known and different — a stale/foreign operator (EI-9002).
+    Mismatch { baked: String, running: String },
+    /// One side unknown — a dev build with no baked sha, or `/api/health` gave
+    /// no sha (e.g. a Windows→WSL forward flake, WI-3270). We only ASSERT when we
+    /// can actually compare, so a missing side never raises a false mismatch.
+    Skipped,
+}
+
+/// Pure comparison — cargo-testable without a live operator. An empty string is
+/// treated as "unknown" (both `option_env!` and a missing JSON field surface as
+/// empty here); surrounding whitespace is ignored.
+fn evaluate_update_self_check(baked_sha: &str, running_sha: &str) -> UpdateSelfCheck {
+    let baked = baked_sha.trim();
+    let running = running_sha.trim();
+    if baked.is_empty() || running.is_empty() {
+        return UpdateSelfCheck::Skipped;
+    }
+    if baked == running {
+        UpdateSelfCheck::Match
+    } else {
+        UpdateSelfCheck::Mismatch {
+            baked: baked.to_string(),
+            running: running.to_string(),
+        }
+    }
+}
+
+/// Fetch the operator's self-reported build sha from `/api/health` (best-effort;
+/// None on any transport/parse failure — the self-check then Skips rather than
+/// false-alarming). Mirrors `operator_http_ready`'s short-timeout blocking client.
+fn fetch_operator_health_sha(port: u16) -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(2000))
+        .build()
+        .ok()?;
+    let body = client
+        .get(format!("http://127.0.0.1:{}/api/health", port))
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    v.get("sha")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// P-013: run the post-update self-check and, on a genuine mismatch, surface it
+/// to the SPA (a `papercusp:update-mismatch` event + `window.__papercuspUpdateMismatch`)
+/// and the console. Match/Skipped just log. Best-effort and non-fatal — a health
+/// hiccup must never block boot, so callers run this OFF the finish_boot thread.
+fn run_update_self_check<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, port: u16) {
+    let baked = option_env!("PAPERCUSP_BUILD_SHA").unwrap_or("");
+    let running = fetch_operator_health_sha(port).unwrap_or_default();
+    match evaluate_update_self_check(baked, &running) {
+        UpdateSelfCheck::Match => {
+            println!(
+                "[papercusp-desktop] post-update self-check: OK (operator sha {} matches this build)",
+                running
+            );
+        }
+        UpdateSelfCheck::Skipped => {
+            println!(
+                "[papercusp-desktop] post-update self-check: skipped (baked='{}' running='{}')",
+                baked, running
+            );
+        }
+        UpdateSelfCheck::Mismatch { baked, running } => {
+            eprintln!(
+                "[papercusp-desktop] post-update self-check MISMATCH: this build is {} but the running operator reports {} — the update did not replace the running operator (EI-9002). The app is talking to a STALE operator; restarting Papercusp Server is needed.",
+                baked, running
+            );
+            let payload = serde_json::json!({ "expected": baked, "running": running });
+            let inject = format!(
+                "window.__papercuspUpdateMismatch = {}; window.dispatchEvent(new CustomEvent('papercusp:update-mismatch', {{ detail: window.__papercuspUpdateMismatch }}));",
+                serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+            );
+            // Re-eval for a bit — the SPA may still be mid-handoff when this fires
+            // (same rationale as the boot-error inject in finish_boot).
+            for _ in 0..20 {
+                let _ = window.eval(&inject);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod post_update_self_check_tests {
+    use super::{evaluate_update_self_check, UpdateSelfCheck};
+
+    #[test]
+    fn matching_shas_pass() {
+        assert_eq!(
+            evaluate_update_self_check("3cfe4e2-2537dc8", "3cfe4e2-2537dc8"),
+            UpdateSelfCheck::Match
+        );
+    }
+
+    #[test]
+    fn differing_shas_are_a_mismatch_carrying_both() {
+        // EI-9002: this build is new, the adopted operator is stale.
+        assert_eq!(
+            evaluate_update_self_check("newbuild-abc", "staleop-xyz"),
+            UpdateSelfCheck::Mismatch {
+                baked: "newbuild-abc".to_string(),
+                running: "staleop-xyz".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dev_build_with_no_baked_sha_skips() {
+        // option_env!("PAPERCUSP_BUILD_SHA") is unset in a dev build → empty →
+        // never a false mismatch alarm.
+        assert_eq!(evaluate_update_self_check("", "3cfe4e2"), UpdateSelfCheck::Skipped);
+    }
+
+    #[test]
+    fn unreadable_health_sha_skips() {
+        // /api/health gave no sha (e.g. a Windows→WSL forward flake, WI-3270).
+        assert_eq!(evaluate_update_self_check("3cfe4e2", ""), UpdateSelfCheck::Skipped);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_ignored() {
+        assert_eq!(
+            evaluate_update_self_check("  3cfe4e2  ", "3cfe4e2\n"),
+            UpdateSelfCheck::Match
+        );
+    }
+
+    #[test]
+    fn rollback_to_older_tag_passes_d002() {
+        // D-002 non-negotiable acceptance: a deliberate downgrade installs the
+        // OLDER build, whose baked sha == the operator it (re)launches → the
+        // self-check must PASS, not false-alarm on "not the latest".
+        let older = "0.0.6-rollbacksha";
+        assert_eq!(evaluate_update_self_check(older, older), UpdateSelfCheck::Match);
+    }
+}
+
 /// Cold WSL boots can include distro startup, embedded-PG crash recovery, and
 /// migration replay. The measured Windows repro took 5m51s, so the WSL path
 /// needs a generous hard ceiling instead of the generic 120s desktop budget.
@@ -2755,6 +2913,12 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // thread during the bootstrap→SPA handoff.
         point_window_at_operator(&window, port, 30);
         restore_window_visibility(&window, "operator-ready");
+        // P-013: verify the operator we just attached to is the one THIS build
+        // shipped (its /api/health sha == our baked sha) — catching the EI-9002
+        // silent no-op update where a stale operator was adopted. Off-thread so a
+        // mismatch's re-eval surfacing loop never delays the operator watcher below.
+        let window_sc = window.clone();
+        std::thread::spawn(move || run_update_self_check(&window_sc, port));
     }
 
     // WI-1869: after the one-shot attach above, KEEP following the operator.
