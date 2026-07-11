@@ -200,24 +200,31 @@ echo "  hive=$HIVE_SLUG (path=$HIVE_PATH)"
 POT_GIT_SLUG="${HIVE_SLUG//\//-}"
 
 # ── LEG MODE — hiveGit.mode round-trip against the real packaged instance ───
-# Direct SQL (harness_shared.hive_settings, mig 186) — the same table
-# setHiveGitMode/getHiveGitMode read/write; no HTTP route sets this yet
-# (github-bridge-hive-egress-2026-07-02 pattern: activation is structural,
-# there is no admin route or flag for the mode itself).
+# Direct SQL (harness_shared.pot_settings, mig 186 / renamed from hive_settings
+# by mig 557 cup-lexicon-db-rename-phase3, 2026-07-09) — the same table
+# setHiveGitMode/getHiveGitMode (hive-settings-store.ts) read/write; no HTTP
+# route sets this yet (github-bridge-hive-egress-2026-07-02 pattern: activation
+# is structural, there is no admin route or flag for the mode itself).
+# NOTE (WI-4062): this drill's own q() helper redirects psql's stderr to
+# /dev/null, so a stale table name here doesn't error loudly — it just reads
+# back as an empty string / empty count, which is exactly what happened when
+# this still said hive_settings post-557 (mode "reads back ''", rollback
+# "does NOT revert" — both were psql silently failing against a table that no
+# longer existed, not a real hiveGit.mode bug).
 log "LEG MODE — flip hiveGit.mode legacy -> bridged -> rollback -> legacy"
 NOWMS="$(date +%s)000"
-q "INSERT INTO harness_shared.hive_settings (workspace_id, harness_slug, setting_key, value, created_at, updated_at)
+q "INSERT INTO harness_shared.pot_settings (workspace_id, harness_slug, setting_key, value, created_at, updated_at)
    VALUES ('$WS','$HIVE_SLUG','hiveGit.mode','\"bridged\"',$NOWMS,$NOWMS)
    ON CONFLICT (workspace_id, harness_slug, setting_key) DO UPDATE SET value=EXCLUDED.value, updated_at=$NOWMS;" >/dev/null
-modeval="$(q "SELECT value FROM harness_shared.hive_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';")"
+modeval="$(q "SELECT value FROM harness_shared.pot_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';")"
 if [ "$modeval" = '"bridged"' ]; then
   ok "hiveGit.mode row set to bridged ($modeval)"
 else
   bad "hiveGit.mode row wrong after set: '$modeval' (want \"bridged\")"
 fi
 log "LEG MODE — ROLLBACK (delete the row — the documented instant fail-open revert)"
-q "DELETE FROM harness_shared.hive_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';" >/dev/null
-rows_left="$(q "SELECT count(*) FROM harness_shared.hive_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';")"
+q "DELETE FROM harness_shared.pot_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';" >/dev/null
+rows_left="$(q "SELECT count(*) FROM harness_shared.pot_settings WHERE workspace_id='$WS' AND harness_slug='$HIVE_SLUG' AND setting_key='hiveGit.mode';")"
 if [ "$rows_left" = "0" ]; then
   ok "rollback: row deleted — getHiveGitMode now reads 'legacy' (fail-open default, hive-git-mode.ts)"
 else
