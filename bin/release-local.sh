@@ -866,8 +866,33 @@ echo "==> committing version bump"
 git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
 
-echo "==> tagging $TAG"
+echo "==> tagging $TAG (local)"
 git -C "$ROOT" tag -f "$TAG"
+
+# ── ⛔ LOCAL-only by default (RELEASE-RUNBOOK.md → "Releases are LOCAL-only").
+# Owner directive 2026-07-08: "We are no longer using GitHub for our releases —
+# just build the installer locally and I will upload it to the right spot."
+# So this script's original steps 5–6 (push tag to origin, create a GitHub Release
+# with the artifacts) are SUPERSEDED and skipped. The signed artifacts + latest.json
+# on disk are the deliverable; hand the owner the local paths + sha256 (release:cut
+# op:handoff, or §5 of the runbook). Restore the legacy GitHub-publish path only with
+# an explicit PAPERCUSP_PUBLISH_GITHUB=1.
+PUBLISH_GITHUB="${PAPERCUSP_PUBLISH_GITHUB:-0}"
+if [[ "$PUBLISH_GITHUB" != "1" ]]; then
+  echo
+  echo "==> done (LOCAL-only — no GitHub publish; set PAPERCUSP_PUBLISH_GITHUB=1 to restore)"
+  echo "    tag:       $TAG (local, not pushed)"
+  echo "    manifest:  $LATEST_JSON"
+  echo "    artifacts: ${#ARTIFACTS[@]}"
+  echo "    hand-off:  give the owner the local paths + sha256 below (release:cut op:handoff)."
+  for f in "${ARTIFACTS[@]}"; do
+    [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+  done
+  exit 0
+fi
+
+# ── PAPERCUSP_PUBLISH_GITHUB=1 — legacy, SUPERSEDED path: push the tag + publish a
+# GitHub Release. Retained only as an explicit opt-out of the owner's LOCAL-only directive. ──
 git -C "$ROOT" push origin HEAD "$TAG"
 
 echo "==> creating GitHub Release $TAG"
