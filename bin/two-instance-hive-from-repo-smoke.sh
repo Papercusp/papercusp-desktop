@@ -494,12 +494,12 @@ fi
 if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   log "A-003 MEMBERSHIP witness (hive-home='$HIVE_SLUG')"
   a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$a003_ws" ] && a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$a003_ws" ] && a003_ws="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$a003_ws" ] && a003_ws="default"
   echo "  A hive_settings: $(drv_psql a "SELECT setting_key||'/'||origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-  echo "  A hive_members:  $(drv_psql a "SELECT github_user_id||'/'||origin FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+  echo "  A hive_members:  $(drv_psql a "SELECT github_user_id||'/'||origin FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
   bf_set="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  bf_mem="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  bf_mem="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   echo "A003-BACKFILL: hive_settings_remote_on_B=${bf_set:-0}  hive_members_remote_on_B=${bf_mem:-0}"
   a003_ts="$(date +%s)000"; a003_key="a003-witness-$a003_ts"
   drv_psql a "INSERT INTO harness_shared.pot_settings (workspace_id,harness_slug,setting_key,value,origin,created_at,updated_at) VALUES ('$a003_ws','$HIVE_SLUG','$a003_key','\"probe\"','local',$a003_ts,$a003_ts);" >/dev/null 2>&1
@@ -655,9 +655,9 @@ rk_content_ctrl_ok=0; rk_content_cut_ok=0; rk_content_applicable=0
 if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   witness_ran=1
   log "═══ FOLDED LIVE WITNESS (AK enforcement + P-008 re-key cut) ═══"
-  WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$WS_ID" ] && WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$B_GH_ID" ] && B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   echo "  witness vars: WS=$WS_ID  B_GH_ID=$B_GH_ID  HIVE=$HIVE_SLUG  MEMBER=$MEMBER_SLUG"
   # (mcp_call is defined once in the shared helpers above — used by this block + MODERATION_PROBE.)
@@ -794,11 +794,11 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   moderation_ran=1
   log "═══ MODERATION FEDERATION witness (WI-283: takedown + report, hive='$HIVE_SLUG') ═══"
   # Witness vars — resolved independently of the WITNESS_PROBE block so this stands alone.
-  MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$MOD_WS" ] && MOD_WS="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   MOD_A_GH_ID="$(gh api "users/$P_A_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
-  MOD_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE harness_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  MOD_B_GH_ID="$(drv_psql a "SELECT github_user_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_username ILIKE '$P_B_USER' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$MOD_B_GH_ID" ] && MOD_B_GH_ID="$(gh api "users/$P_B_USER" --jq .id 2>/dev/null | tr -d '[:space:]')"
   CR="F-MODTEST-$(date +%s)"
   echo "  mod vars: WS=$MOD_WS  A_GH_ID=$MOD_A_GH_ID  B_GH_ID=$MOD_B_GH_ID  contentRef=$CR"

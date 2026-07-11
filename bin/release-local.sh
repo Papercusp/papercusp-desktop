@@ -504,7 +504,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
     echo "==> tauri build (linux arm64, role=$role)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
   done
-  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
+  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
@@ -700,13 +700,17 @@ PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
   "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
   || echo "WARNING: linux build-provenance.json emit failed (non-fatal) — linux artifacts shipped WITHOUT a provenance record"
 if [[ "$WITH_ARM64" == "1" ]]; then
-  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
+  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
 fi
 if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
   win_found=0
-  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*; do
+  # P-009: version-scope so a stale prior-cut installer left in the SHARED inno
+  # dir (it isn't cleaned between cuts) can't be swept into this release. The Inno
+  # output is "<AppName>_<version>_x64-setup.exe" (+ .sig + any .bin slices), all
+  # carrying _<version>_, so this captures every this-version win artifact.
+  for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
   done
   [[ "$win_found" == "1" ]] || { echo "ERROR: WITH_WINDOWS=1 but no windows artifacts $([[ "$WIN_REUSE" == "1" ]] && echo "in the inno dir (reuse)" || echo "came back from the VM")"; exit 1; }
@@ -714,11 +718,24 @@ fi
 if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
   mac_found=0
-  for f in "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
+  # P-009: version-scope the dmg (named "<Product>_<version>_universal-apple-darwin.dmg")
+  # so a stale prior-version dmg — 0.0.6 AND 0.0.7 dmgs were found coexisting in this
+  # dir — can't be swept in. The .app.tar.gz updater bundle is UNVERSIONED by tauri, so
+  # it rides the pre-collection clean (fresh path) / P-005 verification (reuse) plus the
+  # cross-version-count assertion below.
+  for f in "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && mac_found=1
   done
   [[ "$mac_found" == "1" ]] || { echo "ERROR: WITH_MAC=1 but no mac artifacts $([[ "$MAC_REUSE" == "1" ]] && echo "in $MAC_OUT (reuse)" || echo "came back from the VM")"; exit 1; }
-  bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*.dmg
+  # P-009 pre-collection clean ASSERTION: the .app.tar.gz can't be version-filtered, so
+  # guard against a stale unversioned bundle by asserting there are no MORE of them than
+  # this-version dmgs (tauri emits one dmg + one .app.tar.gz per role).
+  _mac_dmg_n=$(find "$MAC_OUT/dmg" -maxdepth 1 -name "*_${VERSION}_*.dmg" 2>/dev/null | wc -l | tr -d ' ')
+  _mac_tgz_n=$(find "$MAC_OUT/macos" -maxdepth 1 -name "*.app.tar.gz" 2>/dev/null | wc -l | tr -d ' ')
+  if (( _mac_tgz_n > _mac_dmg_n )); then
+    echo "ERROR: mac collection has ${_mac_tgz_n} .app.tar.gz updater bundle(s) but only ${_mac_dmg_n} ${VERSION} .dmg — the UNVERSIONED .app.tar.gz set is contaminated by a prior cut (P-009). Clean $MAC_OUT/macos/ and re-cut, or use PAPERCUSP_REUSE_MAC=1 (provenance-verified salvage)."; exit 1
+  fi
+  bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
   # EI-8914 parity: the Windows leg records build-provenance.json (inline in
   # build-windows-on-vm.sh); the Mac leg never did, so a mac installer was
   # untraceable to its source and — worst on the PAPERCUSP_REUSE_MAC salvage
@@ -728,7 +745,7 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # artifacts. Best-effort: a provenance hiccup must never fail a good release.
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
     "$MAC_OUT" "$VERSION" "$BUILD_SHA" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
-    "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
+    "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
     || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
 fi
 
