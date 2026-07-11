@@ -569,6 +569,11 @@ mod imp {
             let stderr = super::decode_wsl_output(&out.stderr);
             return Err(format!("wsl --import exit={} stderr={}", code, stderr));
         }
+        // Opt the WSL2 VM into mirrored networking BEFORE the distro's first
+        // boot (run_bootstrap), so a fresh install's operator localhost ports
+        // are reachable from Windows without the flaky NAT proxy (WI-3360).
+        // Best-effort; never fails the import.
+        super::ensure_wsl_networking_config();
         Ok(())
     }
 
@@ -957,6 +962,11 @@ pub fn ensure_windows_cli_shims() {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    // Self-heal / upgrade path: ensure mirrored networking on every Ready boot
+    // too (import-time covers only fresh installs). Idempotent — a no-op once
+    // the key is present — and best-effort. WI-3360.
+    ensure_wsl_networking_config();
+
     let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         eprintln!("[papercusp-desktop] cli-shims: LOCALAPPDATA unset — skipping");
         return;
@@ -1028,6 +1038,128 @@ pub fn ensure_windows_cli_shims() {
     }
 }
 
+// ─── WSL2 networking: mirror the host so localhost is reliable (WI-3360) ─────
+//
+// On Windows the operator runs INSIDE the papercup-runtime distro and binds
+// 127.0.0.1:<port>. The Tauri shell + webview reach it across the Windows→WSL
+// boundary. In WSL2's DEFAULT (NAT) networking that crossing is a localhost
+// port-PROXY, and it intermittently drops under load (WI-3270): a perfectly
+// healthy in-distro operator looks dead from Windows, driving the respawn →
+// respawn-cap → distro-wedge storm that leaves the console-launch bridge
+// unregistered and the desktop app disconnected (WI-3360 root cause). MIRRORED
+// networking (WSL 2.0.0+ / Win11 22H2+) puts the distro on the host's network
+// namespace, so 127.0.0.1 is shared bidirectionally with NO NAT proxy to flake.
+// On older WSL the key is parsed-and-ignored — a harmless fallback to NAT.
+//
+// The setting lives in the per-user GLOBAL `%USERPROFILE%\.wslconfig` and
+// affects EVERY WSL2 distro, so we are conservative: only ADD
+// networkingMode=mirrored when the user set NO networkingMode of their own (an
+// explicit choice — even `nat` — is respected). It takes effect on the next
+// `wsl --shutdown` / WSL2-VM restart; we never force one (the app already
+// survives distro restarts via the WI-3270 resilience layer).
+
+/// Pure merge: given the current `.wslconfig` contents (None = no file),
+/// return the contents to WRITE so `[wsl2] networkingMode=mirrored` is present,
+/// or None when the file already specifies a networkingMode (leave it alone).
+/// Never clobbers existing keys/sections. Unit-tested from Linux.
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn wslconfig_with_mirrored(existing: Option<&str>) -> Option<String> {
+    const KEY: &str = "networkingMode";
+    const SECTION: &str = "[wsl2]";
+
+    let Some(existing) = existing else {
+        return Some(format!("{SECTION}\n{KEY}=mirrored\n"));
+    };
+
+    // Single pass: locate the [wsl2] section, whether it already sets
+    // networkingMode, and the index of its last line (to insert after).
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut in_wsl2 = false;
+    let mut wsl2_seen = false;
+    let mut has_key = false;
+    let mut wsl2_last_idx: Option<usize> = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_wsl2 = line.eq_ignore_ascii_case(SECTION);
+            if in_wsl2 {
+                wsl2_seen = true;
+                wsl2_last_idx = Some(i);
+            }
+            continue;
+        }
+        if in_wsl2 {
+            wsl2_last_idx = Some(i);
+            // Skip comments (# or ;) — a commented mode isn't an active setting.
+            if !line.starts_with('#') && !line.starts_with(';') {
+                if let Some((k, _)) = line.split_once('=') {
+                    if k.trim().eq_ignore_ascii_case(KEY) {
+                        has_key = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if has_key {
+        return None; // user has an explicit networkingMode — respect it.
+    }
+
+    if !wsl2_seen {
+        // No [wsl2] section — append one, preserving everything above it.
+        let sep = if existing.is_empty() || existing.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        return Some(format!("{existing}{sep}{SECTION}\n{KEY}=mirrored\n"));
+    }
+
+    // [wsl2] exists but sets no networkingMode — insert the key just after the
+    // section's last line so it lands INSIDE the section.
+    let insert_after = wsl2_last_idx.expect("wsl2_seen implies an index");
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    for (i, l) in lines.iter().enumerate() {
+        out.push((*l).to_string());
+        if i == insert_after {
+            out.push(format!("{KEY}=mirrored"));
+        }
+    }
+    let mut joined = out.join("\n");
+    if existing.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+/// Best-effort: ensure the user's `%USERPROFILE%\.wslconfig` opts into mirrored
+/// networking (see the section header above). Called at distro-import time
+/// (before the distro's first boot — a fresh install gets it immediately) and
+/// on every Ready boot (self-heal / upgrade). Never blocks or fails boot.
+#[cfg(target_os = "windows")]
+pub fn ensure_wsl_networking_config() {
+    let Some(profile) = std::env::var_os("USERPROFILE") else {
+        eprintln!("[papercusp-desktop] wslconfig: USERPROFILE unset — skipping mirrored-networking setup");
+        return;
+    };
+    let path = std::path::Path::new(&profile).join(".wslconfig");
+    let existing = std::fs::read_to_string(&path).ok();
+    match wslconfig_with_mirrored(existing.as_deref()) {
+        None => println!(
+            "[papercusp-desktop] wslconfig: a networkingMode is already set — leaving {} untouched",
+            path.display()
+        ),
+        Some(contents) => match std::fs::write(&path, contents) {
+            Ok(()) => println!(
+                "[papercusp-desktop] wslconfig: ensured [wsl2] networkingMode=mirrored in {} (applies on next `wsl --shutdown` / WSL restart) — WI-3360",
+                path.display()
+            ),
+            Err(e) => eprintln!("[papercusp-desktop] wslconfig: write {}: {e}", path.display()),
+        },
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 //
 // Everything inside `mod imp` shells out to wsl.exe, so what's unit-
@@ -1064,6 +1196,76 @@ mod tests {
 
     fn to_json<T: Serialize>(v: &T) -> serde_json::Value {
         serde_json::to_value(v).expect("serialize")
+    }
+
+    // ── wslconfig_with_mirrored (WI-3360) ──
+
+    #[test]
+    fn wslconfig_none_creates_minimal_mirrored() {
+        let out = wslconfig_with_mirrored(None).expect("a fresh file must be written");
+        assert!(out.contains("[wsl2]"), "{out}");
+        assert!(out.contains("networkingMode=mirrored"), "{out}");
+    }
+
+    #[test]
+    fn wslconfig_respects_an_explicit_networkingmode() {
+        // A user who picked ANY mode (even nat) keeps it — mirrored is a global
+        // setting; we never override an explicit choice.
+        assert_eq!(
+            wslconfig_with_mirrored(Some("[wsl2]\nnetworkingMode=nat\n")),
+            None
+        );
+        // Tolerate whitespace around the `=`.
+        assert_eq!(
+            wslconfig_with_mirrored(Some("[wsl2]\nnetworkingMode = mirrored\n")),
+            None
+        );
+    }
+
+    #[test]
+    fn wslconfig_adds_key_into_existing_wsl2_section_without_clobbering() {
+        let out = wslconfig_with_mirrored(Some("[wsl2]\nmemory=4GB\nprocessors=2\n"))
+            .expect("must add the key");
+        assert!(out.contains("memory=4GB"), "kept existing keys: {out}");
+        assert!(out.contains("processors=2"), "kept existing keys: {out}");
+        assert!(out.contains("networkingMode=mirrored"), "added the key: {out}");
+        // The added key sits inside the [wsl2] section.
+        assert!(
+            out.find("[wsl2]").unwrap() < out.find("networkingMode=mirrored").unwrap(),
+            "networkingMode must be under [wsl2]: {out}"
+        );
+    }
+
+    #[test]
+    fn wslconfig_keeps_key_in_wsl2_when_another_section_follows() {
+        // Insert must not spill past the [wsl2] section into a later one.
+        let out = wslconfig_with_mirrored(Some("[wsl2]\nmemory=4GB\n[boot]\nsystemd=true\n"))
+            .expect("must add the key");
+        let ni = out.find("networkingMode=mirrored").unwrap();
+        let boot = out.find("[boot]").unwrap();
+        assert!(ni < boot, "networkingMode must land before [boot]: {out}");
+    }
+
+    #[test]
+    fn wslconfig_appends_wsl2_section_when_absent() {
+        let out = wslconfig_with_mirrored(Some("[boot]\nsystemd=true\n"))
+            .expect("must append a [wsl2] section");
+        assert!(
+            out.contains("[boot]") && out.contains("systemd=true"),
+            "kept [boot]: {out}"
+        );
+        assert!(
+            out.contains("[wsl2]") && out.contains("networkingMode=mirrored"),
+            "added [wsl2]: {out}"
+        );
+    }
+
+    #[test]
+    fn wslconfig_ignores_a_commented_out_networkingmode() {
+        // A commented mode is not active — still add a live one.
+        let out = wslconfig_with_mirrored(Some("[wsl2]\n# networkingMode=nat\n"))
+            .expect("commented key is not a real setting");
+        assert!(out.contains("networkingMode=mirrored"), "{out}");
     }
 
     // ── windows_psu_cmd_contents (WI-3044) ──
