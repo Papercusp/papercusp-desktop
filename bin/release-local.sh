@@ -490,6 +490,22 @@ for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VER
          "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
   [[ -f "$f" ]] && ARTIFACTS+=("$f")
 done
+# EI-8914 parity (P-001, desktop-build-hardening-tri-platform-2026-07-11): the
+# Windows leg records build-provenance.json (inline in build-windows-on-vm.sh)
+# and the Mac leg does (below, WI-3850), but the Linux leg emitted NOTHING — so a
+# shipped .deb/.AppImage was untraceable to the source it was built from (the
+# LABELED!=PACKED class the whole plan eradicates). Emit the same provenance
+# (each installer's sha256 + gitHead/dirty + buildSha) next to the Linux bundle.
+# Linux always builds FRESH locally (no REUSE_LINUX salvage path) → reused:false.
+# Fingerprint the primary installers (deb + AppImage, both gui+server roles via
+# the version-scoped globs), matching the mac call's primary-artifact scope — the
+# .sig files are signatures over these, covered by the signature dimension (P-010
+# / D-004), not the byte-provenance record. Best-effort: a provenance hiccup must
+# never fail a good release.
+PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
+  "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" false \
+  "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
+  || echo "WARNING: linux build-provenance.json emit failed (non-fatal) — linux artifacts shipped WITHOUT a provenance record"
 if [[ "$WITH_ARM64" == "1" ]]; then
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
