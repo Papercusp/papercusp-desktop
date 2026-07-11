@@ -117,6 +117,15 @@ esac
 
 echo "==> version=$VERSION channel=$CHANNEL tag=$TAG"
 
+# P-016: parity regression gate — fail FAST (before the ~35-min build) if any leg
+# re-forked provenance emission or the centralized honest-sha derivation. Fast +
+# hermetic. Skip with PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK=1 (emergencies only).
+if [[ "${PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK:-0}" != "1" ]]; then
+  echo "==> checking build-provenance parity (P-016)"
+  bash "$ROOT/bin/verify-provenance-parity.sh" \
+    || { echo "ERROR: build-provenance parity gate failed (above) — a leg re-forked provenance. Fix, or PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK=1 to override."; exit 1; }
+fi
+
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "ERROR: signing key not found at $KEY_FILE"
   echo "       Run bin/setup-signing-key.sh first."
