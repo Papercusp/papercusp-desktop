@@ -18,6 +18,9 @@
 #   PROVENANCE_PACKED_SRC_FINGERPRINT — Windows: a hash of the exact tree packed
 #     to the VM (its strongest anti-LABELED!=PACKED signal; Mac/Linux have none).
 #   PROVENANCE_SIGNED (true|false)    — Windows: whether Authenticode was configured.
+#   PROVENANCE_TOOLCHAIN (json)       — the build toolchain as a JSON object
+#     (rustc/node/tauriCli), recorded by the leg whose emitter runs ON the builder
+#     (the Linux leg: host == builder). P-014 reproducibility hygiene.
 #
 # Usage:
 #   emit-build-provenance.sh OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT...
@@ -69,6 +72,13 @@ PROV="$OUT_DIR/build-provenance.json"
   fi
   if [[ -n "${PROVENANCE_SIGNED:-}" ]]; then
     printf '  "signed": %s,\n' "$PROVENANCE_SIGNED"
+  fi
+  # P-014 (repro hygiene): the exact build toolchain, pre-formatted JSON. Populated
+  # by a leg whose emitter runs ON the build machine (Linux: host == builder). The
+  # mac/win legs build on a VM, so their host-side emit leaves this unset rather
+  # than record a misleading HOST toolchain — VM-side capture is a followup.
+  if [[ -n "${PROVENANCE_TOOLCHAIN:-}" ]]; then
+    printf '  "toolchain": %s,\n' "$PROVENANCE_TOOLCHAIN"
   fi
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'

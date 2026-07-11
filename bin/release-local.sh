@@ -52,6 +52,12 @@ KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
+# P-014 (repro hygiene): PIN the Tauri CLI instead of `@latest` (which fetches
+# whatever npm resolves at cut time — a silent reproducibility hole: two cuts of
+# identical source could bundle with different tauri-cli versions). Keep in sync
+# with package.json's @tauri-apps/cli devDependency (^2.1.0 → resolved 2.11.0).
+# One-off override: PAPERCUSP_TAURI_CLI_VERSION=x.y.z.
+TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}"
 # P-007 (desktop-build-hardening-tri-platform-2026-07-11): keepalive parity with
 # the Windows leg (build-windows-on-vm.sh:113). ssh's DEFAULT ServerAliveCountMax=3
 # tears the session down after ~90s of VM unresponsiveness — that 90s death is what
@@ -452,7 +458,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     # see the collection globs) AND its multi-GB payload compression wedged the
     # 0.0.3-alpha linux leg for 33min+. deb only.
     echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}")
   done
   # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
   # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
@@ -502,7 +508,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@latest tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
   done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
@@ -695,6 +701,12 @@ done
 # .sig files are signatures over these, covered by the signature dimension (P-010
 # / D-004), not the byte-provenance record. Best-effort: a provenance hiccup must
 # never fail a good release.
+# P-014: record the host toolchain (host == the Linux builder, so accurate) — rustc,
+# node, and the PINNED tauri-cli — so two cuts of the same gitHead are comparable and
+# a toolchain drift that changes the bytes is visible in the provenance record.
+_tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
+_tc_node="$(node --version 2>/dev/null)"
+PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${_tc_rustc:-unknown}" "${_tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
 PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
   "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" false \
   "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \

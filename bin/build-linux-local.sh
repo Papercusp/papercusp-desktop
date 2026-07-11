@@ -69,7 +69,7 @@ for role in $ROLES; do
   role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
   echo "    -- role=$role  $(date -u +%H:%M:%SZ)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-     npx --yes -p @tauri-apps/cli@latest tauri build --bundles deb "${role_cfg[@]}")
+     npx --yes -p @tauri-apps/cli@"${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" tauri build --bundles deb "${role_cfg[@]}")
 done
 
 if [[ " $ROLES " == *" gui "* ]]; then
