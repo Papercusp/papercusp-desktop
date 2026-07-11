@@ -86,8 +86,16 @@ fn ensure_seed_placeholder(manifest_dir: &Path) {
 }
 
 fn main() {
-    ensure_sidecar_placeholder(Path::new(env!("CARGO_MANIFEST_DIR")));
-    ensure_seed_placeholder(Path::new(env!("CARGO_MANIFEST_DIR")));
+    // Read this at build-script RUN time, not via env! at compile time. The
+    // fleet shares CARGO_TARGET_DIR across the canonical and checkpoint
+    // worktrees; a cached build-script binary with a baked canonical path
+    // otherwise repairs the wrong checkout and leaves the checkpoint's
+    // resource globs missing.
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("Cargo must provide CARGO_MANIFEST_DIR to build.rs");
+    ensure_sidecar_placeholder(&manifest_dir);
+    ensure_seed_placeholder(&manifest_dir);
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");
     // Build provenance: rebuild main.rs when the build sets a new git sha so
     // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it
