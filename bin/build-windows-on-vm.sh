@@ -799,31 +799,25 @@ for SETUP_EXE in "${SETUP_EXES[@]}"; do
   [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
 done
 
-# EI-8914: an installer must be traceable back to the bytes it was built from.
-# The self-reported /api/health sha is a single string; this records the whole
-# provenance next to the artifacts, including the sha256 of every setup.exe.
-PROVENANCE="$OUT_DIR/build-provenance.json"
-{
-  printf '{\n'
-  printf '  "version": %s,\n'        "\"${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo unknown)}\""
-  printf '  "buildSha": %s,\n'       "\"${PAPERCUSP_BUILD_SHA}\""
-  printf '  "gitHead": %s,\n'        "\"$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)\""
-  printf '  "gitDirty": %s,\n'       "$(git -C "$ROOT" diff --quiet HEAD -- src-tauri 2>/dev/null && echo false || echo true)"
-  printf '  "packedSrcFingerprint": %s,\n' "\"${PACKED_FP:-unknown}\""
-  printf '  "signed": %s,\n'         "$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]] && echo true || echo false)"
-  printf '  "builtAtUtc": %s,\n'     "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
-  printf '  "artifacts": [\n'
-  _first=1
-  for f in "$OUT_DIR"/*-setup.exe; do
-    [[ -e "$f" ]] || continue
-    (( _first )) || printf ',\n'; _first=0
-    printf '    { "name": "%s", "bytes": %s, "sha256": "%s" }' \
-      "$(basename "$f")" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
-  done
-  printf '\n  ]\n}\n'
-} > "$PROVENANCE"
-echo "==> build provenance written: $PROVENANCE"
-cat "$PROVENANCE"
+# EI-8914 / P-002: emit provenance via the SHARED bin/emit-build-provenance.sh
+# — one emitter, one JSON schema across all three legs (was an inline duplicate
+# here). The Windows-only fields pass through the PROVENANCE_* env seam:
+#   * packedSrcFingerprint — a hash of the exact tree we packed to the VM (this
+#     leg's strongest anti-LABELED!=PACKED signal; mac/linux don't have it).
+#   * signed — whether Authenticode signing was configured.
+# gitHead/gitDirty now come from the shared emitter over PROVENANCE_GIT_ROOT=$ROOT
+# (whole papercusp-desktop tree, vs the old src-tauri-only diff — strictly more
+# honest, since the packed sidecar comes from outside src-tauri). This leg only
+# ever runs a FRESH build (release-local's REUSE_WIN path skips it), so reused=false.
+PROVENANCE_GIT_ROOT="$ROOT" \
+PROVENANCE_PACKED_SRC_FINGERPRINT="${PACKED_FP:-unknown}" \
+PROVENANCE_SIGNED="$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]] && echo true || echo false)" \
+  bash "$ROOT/bin/emit-build-provenance.sh" \
+    "$OUT_DIR" \
+    "${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo unknown)}" \
+    "${PAPERCUSP_BUILD_SHA}" \
+    false \
+    "$OUT_DIR"/*-setup.exe
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"

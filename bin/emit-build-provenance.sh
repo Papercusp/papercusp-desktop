@@ -10,12 +10,14 @@
 # 0.0.5 win cut on 2026-07-09 shipped sha 1a161ab-wi3407 while its packed bytes
 # were ecea544, ~10k lines apart).
 #
-# Sibling: bin/build-windows-on-vm.sh emits the same JSON shape INLINE (it adds
-# a Windows-only packedSrcFingerprint, computed from the tarball it ships to the
-# VM). This standalone exists so the Mac leg of release-local.sh — which has no
-# such tarball, builds from `git archive HEAD` on the VM, and had NO provenance
-# at all — reaches parity. TODO(generic-first): migrate the Windows call site
-# here (parameterizing the extra field) once this has ridden a live cut.
+# ONE emitter, ONE schema across all three legs (P-002 consolidation): the
+# Linux + Mac legs of release-local.sh call this directly, and the Windows leg
+# (bin/build-windows-on-vm.sh) now calls it too instead of its old inline
+# duplicate. Leg-specific fields ride an optional env seam so a leg that doesn't
+# need them gets byte-identical output:
+#   PROVENANCE_PACKED_SRC_FINGERPRINT — Windows: a hash of the exact tree packed
+#     to the VM (its strongest anti-LABELED!=PACKED signal; Mac/Linux have none).
+#   PROVENANCE_SIGNED (true|false)    — Windows: whether Authenticode was configured.
 #
 # Usage:
 #   emit-build-provenance.sh OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT...
@@ -58,6 +60,16 @@ PROV="$OUT_DIR/build-provenance.json"
   printf '  "reused": %s,\n'      "$REUSED"
   printf '  "gitHead": "%s",\n'   "$GIT_HEAD"
   printf '  "gitDirty": %s,\n'    "$GIT_DIRTY"
+  # Optional leg-specific fields (P-002 consolidation) — emitted only when the
+  # caller sets the env seam, so mac/linux output is byte-unchanged. The Windows
+  # leg passes both: packedSrcFingerprint (a hash of the exact tree it packed to
+  # the VM — its strongest anti-LABELED!=PACKED signal) and signed (Authenticode).
+  if [[ -n "${PROVENANCE_PACKED_SRC_FINGERPRINT:-}" ]]; then
+    printf '  "packedSrcFingerprint": "%s",\n' "$PROVENANCE_PACKED_SRC_FINGERPRINT"
+  fi
+  if [[ -n "${PROVENANCE_SIGNED:-}" ]]; then
+    printf '  "signed": %s,\n' "$PROVENANCE_SIGNED"
+  fi
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'
   _first=1
