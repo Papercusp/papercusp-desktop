@@ -54,7 +54,6 @@
     ],
     "resources": [
       "sidecar/**/*",
-      "sidecar/db-sql/*",
       "resources/*",
       "seed/**/*"
     ],
