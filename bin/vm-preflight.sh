@@ -88,7 +88,9 @@ if [[ "$SKIP_HOST_PGREP" == "1" ]]; then
   host_pgrep_ok=skipped
   note "host VM-process pgrep skipped (--skip-host-pgrep)"
 else
-  if pgrep -f "$HOST_VM_PATTERN" >/dev/null 2>&1; then
+  # Exclude our own process tree so a pattern that happens to appear in this
+  # script's argv (e.g. passed via --host-vm-pattern) cannot self-satisfy the check.
+  if pgrep -f "$HOST_VM_PATTERN" 2>/dev/null | grep -vxF -e "$$" -e "$PPID" | grep -q .; then
     host_pgrep_ok=true
   else
     host_pgrep_ok=false
