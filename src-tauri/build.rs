@@ -15,18 +15,32 @@ use std::path::Path;
 /// `mv -T` publish replaces this placeholder tree wholesale (P-056).
 fn ensure_sidecar_placeholder(manifest_dir: &Path) {
     let sidecar = manifest_dir.join("sidecar");
-    if sidecar.join("serve.mjs").exists() {
+    let db_sql = sidecar.join("db-sql");
+    let has_serve = sidecar.join("serve.mjs").exists();
+    let has_db_sql_entry = std::fs::read_dir(&db_sql)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some();
+    // Validate every resource glob independently. A partially materialized
+    // sidecar can contain serve.mjs while db-sql is absent (the green
+    // checkpoint clean-copy shape); the old early return then let
+    // tauri_build panic on sidecar/db-sql/*.
+    if has_serve && has_db_sql_entry {
         return;
     }
-    let db_sql = sidecar.join("db-sql");
     std::fs::create_dir_all(&db_sql).expect("create sidecar placeholder dirs");
     let note = "Placeholder created by build.rs so the bundle.resources globs match on a\n\
                 fresh checkout (EI-160). Dev builds never spawn the sidecar; for a real\n\
                 bundle run bin/build-desktop-sidecar.sh, which replaces this directory\n\
                 atomically.\n";
-    std::fs::write(sidecar.join("PLACEHOLDER-README.txt"), note)
-        .expect("write sidecar placeholder");
-    std::fs::write(db_sql.join("PLACEHOLDER-README.txt"), note).expect("write db-sql placeholder");
+    if !has_serve {
+        std::fs::write(sidecar.join("PLACEHOLDER-README.txt"), note)
+            .expect("write sidecar placeholder");
+    }
+    if !has_db_sql_entry {
+        std::fs::write(db_sql.join("PLACEHOLDER-README.txt"), note)
+            .expect("write db-sql placeholder");
+    }
     println!(
         "cargo:warning=src-tauri/sidecar/ has no serve.mjs — placeholder created so the \
          build can proceed. Dev is fine (the sidecar is never spawned); DO NOT package \
