@@ -4416,6 +4416,121 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// Build the per-call rollback endpoint for a SPECIFIC release `tag`, targeted at
+/// the operator sidecar's `/api/updates/rollback` route (desktop-update-center-and-
+/// release-tooling P-5 Unit A). Mirrors `resolve_update_endpoint`'s port + product
+/// resolution but points at the rollback route and pins the requested `tag`. It
+/// deliberately passes NO `current_version` — a rollback resolves an explicit tag,
+/// not "is there something newer than me". `{{target}}` / `{{arch}}` are left as
+/// updater placeholders (the plugin substitutes the running platform, exactly as it
+/// does for `resolve_update_endpoint`); the literal `tag` / `product` params pass
+/// through untouched. Duplicating the small port/product block (rather than sharing
+/// it) keeps this new path from being able to regress `install_update`'s lifeline.
+fn resolve_rollback_endpoint(app: &AppHandle, tag: &str) -> Result<String, String> {
+    let port: u16 = if cfg!(debug_assertions) {
+        SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        let state: tauri::State<SidecarState> = app.state();
+        let guard = state.port.lock().map_err(|e| e.to_string())?;
+        guard.ok_or_else(|| {
+            "sidecar port not yet known; try again after boot completes".to_string()
+        })?
+    };
+    let product = if app
+        .config()
+        .product_name
+        .as_deref()
+        .map(|n| n.to_ascii_lowercase().contains("server"))
+        .unwrap_or(false)
+    {
+        "server"
+    } else {
+        "gui"
+    };
+    let encoded_tag: String = url::form_urlencoded::byte_serialize(tag.as_bytes()).collect();
+    Ok(format!(
+        "http://127.0.0.1:{}/api/updates/rollback?tag={}&target={{{{target}}}}&arch={{{{arch}}}}&product={}",
+        port, encoded_tag, product
+    ))
+}
+
+/// Roll the desktop app BACK to an older, already-released `tag` — the Update
+/// Center "Revert" action (desktop-update-center-and-release-tooling P-4). It is the
+/// deliberate-downgrade sibling of `install_update`: the SAME download → plugin
+/// minisign-verify (against the updater pubkey baked into `tauri.conf.json`) →
+/// sidecar-safe teardown → atomic swap → relaunch path, but pointed at
+/// `/api/updates/rollback?tag=…` and with the updater's default "remote must be
+/// NEWER" gate overridden so an OLDER target is accepted (`version_comparator`).
+///
+/// The rollback route (P-5 Unit A) already bounds the tag to the caller's channel
+/// window, so a stable user can't land on an alpha build; here we only need to tell
+/// the plugin to install exactly the release the route resolved. The post-update
+/// self-check (P-013, `run_update_self_check`) keys off the INSTALLED build's OWN
+/// baked `PAPERCUSP_BUILD_SHA`, so after the downgrade the running operator's sha
+/// matches the now-current (older) build — a rollback does not false-alarm (D-002).
+#[tauri::command]
+#[specta::specta]
+async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("revert_to: a target release tag is required".to_string());
+    }
+    // Same Linux constraint as install_update: only an AppImage install can
+    // self-swap; on a .deb the swap fails mid-flight, so fail early with the
+    // sentinel the UpdateChip fallback matches.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        return Err(
+            "no_compatible_assets: this Linux install is not an AppImage — auto-swap unavailable"
+                .to_string(),
+        );
+    }
+    let endpoint = resolve_rollback_endpoint(&app, &tag)?;
+    let url = url::Url::parse(&endpoint).map_err(|e| e.to_string())?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        // Accept the resolved release regardless of version ordering. The default
+        // comparator is `release > current`, which would refuse a downgrade; the
+        // user explicitly asked to revert to THIS tag, and the route already
+        // channel-gated it, so honor it.
+        .version_comparator(|_current, _release| true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("rollback target {tag} is not installable"))?;
+
+    // Identical sidecar-safe teardown to install_update (EI-9002 / WI-2667): the
+    // update bytes stream through the sidecar's OWN /api/updates proxy, so tear the
+    // sidecar down in on_download_finish — AFTER the payload is fully on hand,
+    // BEFORE the binary swap — and flag `shutdown_done` FIRST so the Server-side
+    // serve supervisor does NOT respawn the operator we're about to swap out.
+    let teardown_app = app.clone();
+    update
+        .download_and_install(
+            |_chunk, _total| {},
+            move || {
+                {
+                    let state: tauri::State<SidecarState> = teardown_app.state();
+                    state
+                        .shutdown_done
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                kill_sidecar(&teardown_app);
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // tauri-plugin-process is in scope so we can restart cleanly.
+    app.restart();
+}
+
 #[tauri::command]
 #[specta::specta]
 fn workspaces_list() -> workspaces::Registry {
@@ -5116,6 +5231,7 @@ pub fn run() {
             app_version,
             check_for_update,
             install_update,
+            revert_to,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
