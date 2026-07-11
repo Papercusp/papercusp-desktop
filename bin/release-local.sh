@@ -533,6 +533,27 @@ elif [[ "$WITH_MAC" == "1" ]]; then
     if ! "${MAC_VM_SSH[@]}" 'true' 2>/dev/null; then
       echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"; exit 1
     fi
+    # ── P-008 (desktop-build-hardening-tri-platform-2026-07-11, per D-005 option
+    # 3): FAIL FAST on insufficient VM disk BEFORE the multi-GB rsync + ~20-min
+    # build, instead of OOM-ing mid-build and forcing a manual REUSE_MAC panic. The
+    # mac VM (~9.6GB) is marginal for a universal (dual-arch) build (~8-10GB peak);
+    # if space is short, abort with an actionable message that names the
+    # P-005-provenance-verified salvage path as the FIRST-CLASS fallback — a planned
+    # choice, not a mid-build emergency. Threshold PAPERCUSP_MAC_MIN_FREE_GB (default
+    # 12); PAPERCUSP_MAC_MIN_FREE_GB=0 skips the check entirely.
+    _mac_min_free_gb="${PAPERCUSP_MAC_MIN_FREE_GB:-12}"
+    if (( _mac_min_free_gb > 0 )); then
+      _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
+      if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
+        _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
+        echo "    mac VM free disk: ${_mac_free_gb}GB (universal build needs ~${_mac_min_free_gb}GB)"
+        if (( _mac_free_gb < _mac_min_free_gb )); then
+          echo "ERROR: mac VM has only ${_mac_free_gb}GB free — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB and OOM-disks mid-build (the recurring mac cut emergency). FIX: free space / grow the VM disk, OR cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified prior mac artifacts (the first-class salvage fallback). Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
+        fi
+      else
+        echo "    ⚠ could not read mac VM free disk (got '${_mac_free_kb}') — skipping P-008 disk preflight (non-fatal)"
+      fi
+    fi
     # WI-1708: build from a COMMIT (git archive HEAD), never the live working tree —
     # the superproject is edited concurrently by the fleet, so a direct rsync would
     # snapshot a moving target. git archive is an atomic read of committed objects.
