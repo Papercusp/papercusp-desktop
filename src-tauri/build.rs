@@ -34,8 +34,46 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
     );
 }
 
+/// EI-9412: `src-tauri/seed/` is a gitignored, out-of-band-provisioned directory
+/// (papercusp-desktop/.gitignore: "Provision the seed out-of-band; git must not
+/// carry it.", plan hive-seed-bundle-2026-07-04 / WI-3346). On a fresh or
+/// cleaned checkout (e.g. the green-checkpoint test tree, which is reset+cleaned
+/// every run and never runs `bin/ensure-release-seed.sh`) it is absent, and
+/// `generate_context!`'s `bundle.resources` glob (`seed/**/*`) then panics the
+/// WHOLE build — including a plain `cargo test`/`cargo build`, which never goes
+/// through the Tauri CLI lifecycle (`beforeBuildCommand`) at all — with "glob
+/// pattern seed/**/* path not found or didn't match any files", nothing
+/// pointing at the seed-cut script. This is the exact EI-160 failure shape
+/// (see `ensure_sidecar_placeholder` above) recurring for a second gitignored
+/// resource glob added later without the same guard.
+///
+/// Dev/test builds never read the seed at runtime unless the offline-restore
+/// path is actually exercised, so a placeholder file is enough to compile. A
+/// REAL bundle must still run `bin/ensure-release-seed.sh` first — every
+/// release script (release-local.sh, mac-vm-build.sh, build-windows-on-vm.sh)
+/// already does, and a fresh cut replaces this placeholder tree wholesale.
+fn ensure_seed_placeholder(manifest_dir: &Path) {
+    let seed = manifest_dir.join("seed");
+    if seed.join("manifest.json").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&seed).expect("create seed placeholder dir");
+    let note = "Placeholder created by build.rs so the bundle.resources glob matches on a\n\
+                fresh/cleaned checkout (EI-9412, mirrors EI-160's sidecar placeholder). Dev\n\
+                and test builds never read the seed unless the offline-restore path is\n\
+                exercised; for a real bundle run bin/ensure-release-seed.sh (every release\n\
+                script already does), which replaces this directory wholesale.\n";
+    std::fs::write(seed.join("PLACEHOLDER-README.txt"), note).expect("write seed placeholder");
+    println!(
+        "cargo:warning=src-tauri/seed/ has no manifest.json — placeholder created so the \
+         build can proceed. Dev/test is fine; DO NOT package this tree without running \
+         bin/ensure-release-seed.sh first."
+    );
+}
+
 fn main() {
     ensure_sidecar_placeholder(Path::new(env!("CARGO_MANIFEST_DIR")));
+    ensure_seed_placeholder(Path::new(env!("CARGO_MANIFEST_DIR")));
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");
     // Build provenance: rebuild main.rs when the build sets a new git sha so
     // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it
