@@ -54,12 +54,38 @@ WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
 MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -p 2222 -o BatchMode=yes aviweiss@127.0.0.1)
 MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
-# Build provenance: the short git sha of the staging tree we're packaging.
-# Exported into every build leg so option_env!("PAPERCUSP_BUILD_SHA") (main.rs)
-# bakes it in, and the operator's /api/health self-reports the commit. The VM
-# build trees are rsynced WITHOUT .git, so they can't self-derive it — it MUST
-# be passed in from here, where .git is present.
-BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+# Build provenance: the short git sha of the tree we're packaging, made HONEST
+# per EI-8914 / P-003 (desktop-build-hardening-tri-platform-2026-07-11). This is
+# the SINGLE SOURCE OF TRUTH for PAPERCUSP_BUILD_SHA across all three legs — it
+# flows unchanged into the linux/mac/arm64/windows build envs below AND into
+# every build-provenance.json emit, so option_env!("PAPERCUSP_BUILD_SHA")
+# (main.rs) / the operator's /api/health can never claim a clean commit for a
+# build cut from a modified tree. The VM build trees are rsynced WITHOUT .git, so
+# they can't self-derive it — it MUST be passed in from here, where .git is
+# present.
+#
+# Why the -dirty marker (previously only the Windows leg carried it,
+# build-windows-on-vm.sh): the linux leg compiles the LIVE working tree, and the
+# mac/windows legs overlay THIS release's version-bump (+ freshly-cut seed) onto
+# their source — so a cut is ~never a byte-clean checkout of HEAD, and on this
+# shared fleet checkout the tree is almost always dirty against HEAD (git-sync
+# commits on a schedule). Baking a bare commit UNDER-reports that — the exact
+# LABELED!=PACKED lie P-003 kills. Mark -dirty whenever the desktop tree OR the
+# monorepo superproject (the sidecar is built from apps/operator, so its
+# dirtiness ships too) has uncommitted changes. Over-reporting dirty is the SAFE
+# direction; the per-artifact packedSrcFingerprint (P-014) is what actually
+# distinguishes two dirty cuts. On stable/beta the dirty-tree guard below aborts
+# a dirty desktop tree, so a clean release keeps a bare sha; alpha surfaces it.
+# (Fed this already-honest value, the Windows leg's own derivation reproduces the
+# same label — no divergence.)
+_short_head="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$_short_head" ]] \
+   && { [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]] \
+        || [[ -n "$(git -C "$ROOT/.." status --porcelain 2>/dev/null)" ]]; }; then
+  BUILD_SHA="${_short_head}-dirty"
+else
+  BUILD_SHA="$_short_head"
+fi
 echo "==> build provenance: PAPERCUSP_BUILD_SHA=${BUILD_SHA:-<unknown>}"
 # Build provenance: the shipped app VERSION (WI-2644). Same mechanism as
 # PAPERCUSP_BUILD_SHA above — the packaged sidecar has no npm_package_version
