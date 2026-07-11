@@ -302,7 +302,22 @@ cut_release_seed() {
 cut_release_seed
 
 echo "==> building sidecar"
+# P-004 (desktop-build-hardening-tri-platform-2026-07-11): record the cut-start
+# epoch BEFORE the sidecar build so the freshness stamp it writes is guaranteed
+# >= this — the Windows leg's guard then proves the packed serve.mjs was rebuilt
+# for THIS cut, not a stale leftover.
+export PAPERCUSP_SIDECAR_MIN_EPOCH_SEC="$(date +%s)"
 bash "$ROOT/bin/build-desktop-sidecar.sh"
+# P-004: the exact sha of the serve.mjs we just built — exported so every leg's
+# packer asserts it packs THIS byte-identical sidecar (fail-closed on a
+# concurrent rebuild swapping it mid-cut). Doubles as a self-check that the
+# sidecar build actually produced a serve.mjs.
+PAPERCUSP_EXPECTED_SERVE_SHA="$(sha256sum "$ROOT/src-tauri/sidecar/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
+if [[ -z "$PAPERCUSP_EXPECTED_SERVE_SHA" ]]; then
+  echo "ERROR: sidecar build did not produce src-tauri/sidecar/serve.mjs — cannot proceed"; exit 1
+fi
+export PAPERCUSP_EXPECTED_SERVE_SHA
+echo "==> sidecar freshness (P-004): serve.mjs sha=${PAPERCUSP_EXPECTED_SERVE_SHA:0:12}… cut-epoch=$PAPERCUSP_SIDECAR_MIN_EPOCH_SEC"
 
 # WI-3287 / env-switcher-packaged-all-platforms-2026-07-06: stage the bundled
 # env-sidecars/staging bundle inside sidecar/ so the existing `sidecar/**/*`

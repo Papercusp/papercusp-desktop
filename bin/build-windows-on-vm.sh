@@ -130,6 +130,47 @@ rust_src_fingerprint() {
 [[ -d "$ROOT/src-tauri/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
 [[ -f "$ROOT/src-tauri/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
 
+# ── P-004 (desktop-build-hardening-tri-platform-2026-07-11): sidecar freshness
+# contract — FAIL-CLOSED (D-003) ─────────────────────────────────────────────
+# This script PACKS sidecar/serve.mjs AS-IS (it never rebuilds the sidecar), so
+# a stale serve.mjs left from an older operator build would ship silently — the
+# artifact-level LABELED!=PACKED class (the Rust source is already re-gated above
+# via rust_src_fingerprint; the sidecar was the remaining hole). Verify the
+# packed serve.mjs against the freshness stamp build-desktop-sidecar.sh writes.
+# Fail-closed: on ANY mismatch ABORT rather than ship an unverifiable bundle —
+# never silently auto-rebuild (D-003). Escape hatch: PAPERCUSP_ALLOW_STALE_SIDECAR=1.
+verify_sidecar_freshness() {
+  local sc="$ROOT/src-tauri/sidecar"
+  local stamp="$sc/.sidecar-build-stamp"
+  if [[ "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" == "1" ]]; then
+    echo "==> ⚠ PAPERCUSP_ALLOW_STALE_SIDECAR=1 — skipping the sidecar freshness guard (P-004)"
+    return 0
+  fi
+  [[ -f "$stamp" ]] || fail "sidecar has no freshness stamp ($stamp) — it was built by an old build-desktop-sidecar.sh or hand-assembled. Rebuild: bash bin/build-desktop-sidecar.sh (then re-run). Override: PAPERCUSP_ALLOW_STALE_SIDECAR=1. (P-004)"
+  local want_serve have_serve
+  want_serve="$(grep -oE '"serveSha256"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "$stamp" | grep -oE '[0-9a-f]{64}' | head -1)"
+  have_serve="$(sha256sum "$sc/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want_serve" && -n "$have_serve" ]] || fail "could not compute serve.mjs sha for the freshness guard (stamp=${want_serve:-<none>} packed=${have_serve:-<none>}) — rebuild the sidecar. (P-004)"
+  [[ "$want_serve" == "$have_serve" ]] || fail "packed serve.mjs ($have_serve) does not match its build stamp ($want_serve) — the sidecar tree is stale / corrupt / half-swapped by a concurrent build. Rebuild: bash bin/build-desktop-sidecar.sh. Override: PAPERCUSP_ALLOW_STALE_SIDECAR=1. (LABELED!=PACKED, P-004)"
+  # Cut-scoped freshness: release-local exports the cut-start epoch, so the
+  # sidecar MUST have been (re)built at/after it — i.e. as part of THIS cut, not
+  # a stale leftover from a prior build hours/days ago.
+  if [[ -n "${PAPERCUSP_SIDECAR_MIN_EPOCH_SEC:-}" ]]; then
+    local built_epoch
+    built_epoch="$(grep -oE '"epochSec"[[:space:]]*:[[:space:]]*[0-9]+' "$stamp" | grep -oE '[0-9]+' | head -1)"
+    if [[ "${built_epoch:-0}" -lt "$PAPERCUSP_SIDECAR_MIN_EPOCH_SEC" ]]; then
+      fail "sidecar predates this cut (built epoch ${built_epoch:-0} < cut-start $PAPERCUSP_SIDECAR_MIN_EPOCH_SEC) — it was NOT rebuilt for this release, so it may ship stale operator code. Rebuild: bash bin/build-desktop-sidecar.sh. Override: PAPERCUSP_ALLOW_STALE_SIDECAR=1. (P-004)"
+    fi
+  fi
+  # Byte-exact to the serve.mjs release-local freshly built for THIS cut, when it
+  # drives us — catches a concurrent `tauri dev`/rebuild swapping serve.mjs mid-cut.
+  if [[ -n "${PAPERCUSP_EXPECTED_SERVE_SHA:-}" && "$PAPERCUSP_EXPECTED_SERVE_SHA" != "$have_serve" ]]; then
+    fail "packed serve.mjs ($have_serve) != the sidecar release-local built for this cut ($PAPERCUSP_EXPECTED_SERVE_SHA) — a concurrent sidecar rebuild swapped it mid-cut. Rebuild + re-pack. Override: PAPERCUSP_ALLOW_STALE_SIDECAR=1. (P-004)"
+  fi
+  echo "==> ✓ sidecar freshness verified (serve.mjs ${have_serve:0:12}…, P-004)"
+}
+verify_sidecar_freshness
+
 # Fast LOCAL Windows-cfg compile gate (WI-2215) — catch cfg(windows) Rust
 # errors on THIS box in ~40s (~4s warm) instead of discovering them 15-25 min
 # into the VM build. Opt out with SKIP_WINDOWS_CFG_PRECHECK=1. If the local

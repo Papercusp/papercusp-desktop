@@ -1940,6 +1940,31 @@ if [[ -d "$OLD_DIR" ]]; then
     fi
   done
 fi
+# ── P-004 (desktop-build-hardening-tri-platform-2026-07-11): sidecar freshness
+# stamp ─────────────────────────────────────────────────────────────────────
+# build-windows-on-vm.sh PACKS sidecar/serve.mjs AS-IS (it never rebuilds the
+# sidecar), so a stale serve.mjs — left from an older operator build — could
+# ship none of the operator fixes while the cut still looked green (the
+# artifact-level LABELED!=PACKED class this plan eradicates). Stamp the tree the
+# packers verify against: the sha256 of the serve.mjs (+ mcp-proxy.mjs) we
+# ACTUALLY built, when, and from which monorepo HEAD. Written into the TMP tree
+# so the atomic publish below ships it WITH the bundle it describes. Cheap (two
+# sha256 over the just-built .mjs). The Windows leg's fail-closed guard reads it
+# (P-004 / D-003).
+_stamp_serve_sha="$(sha256sum "$SIDECAR_TMP_DIR/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
+_stamp_proxy_sha="$(sha256sum "$SIDECAR_TMP_DIR/mcp-proxy.mjs" 2>/dev/null | cut -d' ' -f1)"
+_stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+{
+  printf '{\n'
+  printf '  "serveSha256": "%s",\n'    "${_stamp_serve_sha:-}"
+  printf '  "mcpProxySha256": "%s",\n' "${_stamp_proxy_sha:-}"
+  printf '  "builtAtUtc": "%s",\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "epochSec": %s,\n'         "$(date +%s)"
+  printf '  "gitHead": "%s"\n'         "$_stamp_git_head"
+  printf '}\n'
+} > "$SIDECAR_TMP_DIR/.sidecar-build-stamp"
+echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, P-004)"
+
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
 rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
