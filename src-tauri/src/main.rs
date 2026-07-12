@@ -41,6 +41,7 @@ mod docs_search;
 mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod env_switch;
+mod fd_limit;
 mod native_console;
 mod native_terminal;
 mod pty;
@@ -3793,6 +3794,30 @@ fn spawn_serve(
             "PAPERCUSP_BUILD_VERSION",
             option_env!("PAPERCUSP_BUILD_VERSION").unwrap_or(""),
         )
+        // AUTO-UPDATE: where the shipped app looks for releases (WI-4389,
+        // plan desktop-release-hosting-r2-2026-07-12 D-001..D-003).
+        //
+        // Releases are LOCAL-only [owner:Avi 2026-07-08] — never published to
+        // GitHub — so the operator's /api/updates/manifest has nothing to
+        // discover unless it is pointed at the static release host. Without
+        // this, an installed app polls, gets a 204, and the Tauri updater reads
+        // that as "you are up to date" — FOREVER, silently. Baking it into the
+        // shipped env is what makes auto-update work at all on a real install
+        // (the WI-3875 gap: "real Linux installs need this baked into the
+        // shipping operator env").
+        //
+        // ⚠ This value is PERMANENT (D-003). An installed app polls
+        // <host>/latest.json at this baked address forever; changing it strands
+        // every existing install on a URL that no longer answers — and it fails
+        // SILENTLY, because a failed check is indistinguishable from "no update"
+        // to the updater. Only the MANIFEST location is pinned here: the artifact
+        // URLs live inside latest.json and can move per release.
+        //
+        // A runtime env var still wins, so a test build can be pointed at a
+        // staging host without a recompile; otherwise the compile-time bake
+        // (release-local.sh exports it; build.rs has the matching
+        // rerun-if-env-changed so cargo can't freeze a stale value) applies.
+        .env("PAPERCUSP_RELEASE_HOST", baked_release_host())
         // The desktop webview consumes the SPA — keep the UI mounted (serve
         // alone defaults it OFF for headless use; Decision E).
         .env("PAPERCUSP_SERVE_UI", "1")
@@ -5177,6 +5202,13 @@ mod dmabuf_render_tests {
 }
 
 pub fn run() {
+    // Before anything opens an fd or spawns a child: lift the process's fd soft
+    // limit. rlimits are inherited across fork/exec, so this one call covers the
+    // node operator sidecar, the gateway sidecar, embedded PG and the `claude`
+    // CLI. macOS hands a GUI app 256, which the operator (~329 handles) plus
+    // workspace-sized FS watchers blow straight through — EMFILE (WI-4369).
+    fd_limit::raise_fd_limit();
+
     // WebKitGTK's DMA-BUF renderer misbehaves on two Linux GPU situations, so we
     // force it off (before any webview exists — an explicit user value always
     // wins) when either applies:
@@ -5378,6 +5410,9 @@ pub fn run() {
                 let basename = if role.is_gui() { "gui.log" } else { "server-app.log" };
                 redirect_own_stdio(&workspaces::shared_sidecar_home(), basename);
             }
+            // Now that there IS a log, report the fd-limit raise that ran at the
+            // top of run() — before this, a packaged build's fd 1/2 are /dev/null.
+            fd_limit::report();
             println!(
                 "[papercusp-desktop] role={} (identifier {})",
                 role.label(),
