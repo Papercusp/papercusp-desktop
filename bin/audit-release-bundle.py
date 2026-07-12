@@ -79,9 +79,15 @@ FORBIDDEN_PATH = [
      ["pi-sessions"]),
     ("papercusp-state-dir", re.compile(r"(^|/)\.papercusp/"),
      [".papercusp"]),
-    ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+)/"),
+    ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+|\.vite|\.vite-temp)/|(^|/)(junit\.xml|\.modules\.yaml)$"),
      ["scratch", "scratchpad", "test-results", ".agent-tmp", ".vitest-tmp", ".tmp",
-      ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*"]),
+      ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*",
+      # Vite's dep-optimizer cache bakes the absolute build path into every dep it
+      # pre-bundles; junit.xml carries the build hostname. Both are build output.
+      ".vite", ".vite-temp", "junit.xml",
+      # pnpm's metadata file. npm never reads it, and it is a map of absolute paths
+      # into a store that does not exist on any other machine (WI-4427).
+      ".modules.yaml"]),
     ("agent-config", re.compile(r"(^|/)(\.claude|\.harness)/"),
      [".claude", ".harness"]),
     ("vcs", re.compile(r"(^|/)\.git/"),
@@ -131,6 +137,14 @@ BENIGN_ERE = [
     # The ONE deliberately-public key every build ships (posthog-public-defaults.ts):
     # anonymous-capture only, cannot read events. Shipping it is the feature.
     r"phc_tnwKu5QTgaHi6hyrHwA3EUQFKhskJES4c4zAzHCUrPFv",
+    # Third-party vendors' OWN public anon keys, compiled into their npm packages:
+    # mem0ai/dist/* and lost-pixel/dist/constants.js. Not our secrets, and not ours
+    # to rotate. (That these libraries carry live telemetry keys at all is a real
+    # product-privacy question — filed separately — but it is not a leak OF OURS,
+    # and failing our release build on a vendor's key would teach agents to ignore
+    # this gate.)
+    r"phc_hgJkUVJFYtmaJqrvf6CYN67TIQ8yhXAkWzUn9AMU4yX",
+    r"phc_RDNnzvANh1mNm9JKogF9UunG3Ky02YCxWP9gXScKShk",
 ]
 
 
