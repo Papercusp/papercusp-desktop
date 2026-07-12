@@ -83,9 +83,13 @@ echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 #     Rust build targets; editor dirs; logs; tsbuildinfo.
 #
 # node_modules IS KEPT — it is the shipped toolchain (tsx/vite + the whole
-# @papercusp/* runtime closure). dist/.next are DELIBERATELY kept: some internal
-# packages resolve their "main" to a built dist/ at runtime, so pruning them
-# would break module resolution.
+# @papercusp/* runtime closure). dist/ is DELIBERATELY kept: some internal
+# packages resolve their "main" to a built dist/ at runtime, so pruning it
+# would break module resolution. .next is NOT kept (2026-07-11, 0.0.8 cut):
+# apps/operator/.next had grown to 21G (19.5G webpack cache) and bloated the
+# 0.0.8 GUI deb to 9.4GB (0.0.6: 2.9GB) with a ~35G first-boot extract; the
+# standalone Next operator path is RETIRED and nothing in hono-host /
+# host-bootstrap / env-operator-launcher resolves into .next at runtime.
 declare -a EXCLUDES=(
   # (1) secrets / credentials — root + nested, anchored to dotfiles
   --exclude='./.env' --exclude='*/.env'
@@ -115,6 +119,11 @@ declare -a EXCLUDES=(
   # source bundle to 7.1G (plus "file changed as we read it" tar churn from
   # the concurrent build writing it)
   --exclude='./.wi*-cargo-target' --exclude='./*cargo-target*'
+  # Next.js build/cache dirs (WI-4229): apps/operator/.next hit 21G (19.5G
+  # webpack cache) and tripled the 0.0.8 source bundle; the standalone Next
+  # operator is retired and nothing resolves into .next at runtime (dist/ is
+  # the runtime-resolved build output and stays).
+  --exclude='./.next' --exclude='*/.next'
   --exclude='*/.turbo'
   --exclude='./.idea' --exclude='*/.idea'
   --exclude='./.vscode' --exclude='*/.vscode'
