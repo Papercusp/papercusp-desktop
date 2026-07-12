@@ -44,7 +44,11 @@ SSH_PORT="${VM_SSH_PORT:-2223}"
 SSH_HOST="${VM_SSH_HOST:-user@127.0.0.1}"
 DISTRO="${DISTRO:-papercup-runtime}"
 APP_IMAGE="papercusp-desktop.exe"
-HOST_VM_PATTERN='qemu.*(windows|win-|papercup-vm-win)'
+# hv_synic: the win VM's qemu process carries NO -name — only its Hyper-V
+# enlightenment flags (hv_*) identify it, so name-only patterns miss it and the
+# recipe form (which can't pass --host-vm-pattern) failed WI-3270 preflight
+# (live-diagnosed on the 0.0.8 windows verify, 2026-07-11).
+HOST_VM_PATTERN='qemu.*(windows|win-|papercup-vm-win|hv_synic)'
 SKIP_HOST_PGREP=0
 JSON=0
 
