@@ -837,6 +837,7 @@ NOTES_FILE="/tmp/papercusp-notes-${TAG}.md"
 
 python3 - "$VERSION" "$CHANNEL" "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON" "$NOTES_FILE" "${ARTIFACTS[@]}" <<'PY'
 import json, os, sys, pathlib, hashlib
+from urllib.parse import quote, urlsplit
 version, channel, tag, out_path, out_server_path, notes_path = sys.argv[1:7]
 artifacts = [pathlib.Path(p) for p in sys.argv[7:]]
 
@@ -856,7 +857,19 @@ PLACEHOLDER = "papercusp-update-base-unset://SET-PAPERCUSP_UPDATE_BASE_URL"
 
 def repo_url(name: str) -> str:
     base = UPDATE_BASE or PLACEHOLDER
-    return f"{base}/{tag}/{name}"
+    # Percent-encode the FILENAME ONLY. The mac and windows GUI bundles are named
+    # with SPACES ("Papercusp GUI.app.tar.gz", "Papercusp GUI_0.0.8_x64-setup.exe"),
+    # and a url carrying a literal space is rejected by the client outright
+    # (curl: "URL rejected: Malformed input to a URL function") — so the manifest
+    # validates, the minisign signature verifies, and the download still fails.
+    # The updater cannot tell a failed check from a 204, so it reports "up to date"
+    # FOREVER: the LABELED!=PACKED class again. Linux only escaped it because the
+    # AppImage is underscore-named.
+    #
+    # safe="" so the name is fully encoded; the BASE is never touched (it carries
+    # the secret path segment and its slashes must stay slashes). The S3 object key
+    # keeps the RAW name — only this url is encoded, and R2 serves it at the %20 path.
+    return f"{base}/{tag}/{quote(name, safe='')}"
 
 # EI-... (WI-4404): WI-3696 made latest.json GUI-only because the darwin
 # (.app.tar.gz) and windows (-setup.exe/.msi) collection globs pull BOTH
@@ -937,6 +950,25 @@ for platform_key, entry in server_platforms.items():
             f"product (url={entry['url']!r}) — refusing to publish a manifest that could "
             f"ship the wrong app on update (WI-4404)"
         )
+
+# Cut-time assertion: a url a client cannot even parse must never ship. Belt-and-
+# braces behind repo_url()'s quoting, because the failure is SILENT downstream —
+# the download 404s/rejects and the updater renders it as "up to date".
+for label, platforms in (("latest.json", gui_platforms), ("latest-server.json", server_platforms)):
+    for platform_key, entry in platforms.items():
+        url = entry["url"]
+        if " " in url or url != url.strip():
+            raise SystemExit(
+                f"{label} BUG: {platform_key} url contains whitespace ({url!r}) — a client "
+                f"rejects it outright and the updater would silently read the failure as "
+                f"'up to date' (WI-4364)"
+            )
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.path:
+            raise SystemExit(
+                f"{label} BUG: {platform_key} url does not round-trip urlsplit() ({url!r}) "
+                f"— refusing to publish an unfetchable manifest (WI-4364)"
+            )
 
 pub_date = __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
