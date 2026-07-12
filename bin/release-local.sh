@@ -174,14 +174,11 @@ if [[ ! -f "$KEY_FILE" ]]; then
   exit 1
 fi
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "ERROR: 'gh' CLI not on PATH — install from cli.github.com"
-  exit 1
-fi
-if ! gh auth status >/dev/null 2>&1; then
-  echo "ERROR: 'gh' not authenticated — run 'gh auth login'"
-  exit 1
-fi
+# NOTE: there is deliberately NO `gh` CLI preflight here. It used to hard-fail
+# the cut when gh was missing or unauthenticated — dead weight once the GitHub
+# publish leg was removed (2026-07-12), and an active landmine: it blocked a cut
+# on any machine without an authenticated gh (e.g. the mac/windows VM legs, which
+# drive this same script). A local build must never require a GitHub credential.
 
 # Refuse to publish from a dirty tree on stable/beta. On alpha we
 # allow it for fast iteration.
@@ -808,12 +805,27 @@ LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
 NOTES_FILE="/tmp/papercusp-notes-${TAG}.md"
 
 python3 - "$VERSION" "$CHANNEL" "$TAG" "$LATEST_JSON" "$NOTES_FILE" "${ARTIFACTS[@]}" <<'PY'
-import json, sys, pathlib, hashlib
+import json, os, sys, pathlib, hashlib
 version, channel, tag, out_path, notes_path = sys.argv[1:6]
 artifacts = [pathlib.Path(p) for p in sys.argv[6:]]
 
+# Where an updating client DOWNLOADS the artifact from. This used to be
+# hardcoded to github.com/Papercusp/papercusp-desktop/releases/download/... —
+# which became a LIE the moment releases went LOCAL-only (2026-07-12): we never
+# publish there, so every updater client would have chased a 404 against a
+# manifest that looked perfectly valid. A manifest asserting a download URL that
+# does not exist is the LABELED!=PACKED class of bug.
+#
+# The owner uploads the installers by hand and we cannot know the destination at
+# cut time, so it is an INPUT, not a guess: set PAPERCUSP_UPDATE_BASE_URL to the
+# base the artifacts will actually be served from. Unset, we emit an obviously
+# invalid placeholder (never a plausible-but-wrong URL) and the cut warns loudly.
+UPDATE_BASE = os.environ.get("PAPERCUSP_UPDATE_BASE_URL", "").rstrip("/")
+PLACEHOLDER = "papercusp-update-base-unset://SET-PAPERCUSP_UPDATE_BASE_URL"
+
 def repo_url(name: str) -> str:
-    return f"https://github.com/Papercusp/papercusp-desktop/releases/download/{tag}/{name}"
+    base = UPDATE_BASE or PLACEHOLDER
+    return f"{base}/{tag}/{name}"
 
 # Map (platform, arch, ext) → (url, signature). The operator's
 # /api/updates/manifest already converts this latest.json to the
@@ -902,6 +914,17 @@ for a in artifacts:
 pathlib.Path(notes_path).write_text("\n".join(lines) + "\n")
 print(f"manifest: {out_path}")
 print(f"notes:    {notes_path}")
+if not UPDATE_BASE:
+    print(
+        "\n"
+        "  ⚠ WARNING: PAPERCUSP_UPDATE_BASE_URL is unset, so latest.json's download\n"
+        "    URLs are the placeholder " + PLACEHOLDER + "/...\n"
+        "    The INSTALLERS below are complete and shippable — this only affects the\n"
+        "    auto-updater manifest. Before latest.json is SERVED to clients, re-run with\n"
+        "    PAPERCUSP_UPDATE_BASE_URL=<base the artifacts are uploaded to>, or rewrite\n"
+        "    the urls in place. Serving it as-is means every update check fails.\n",
+        file=sys.stderr,
+    )
 PY
 
 echo "==> committing version bump"
