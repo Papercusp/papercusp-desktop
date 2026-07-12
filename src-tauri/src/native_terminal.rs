@@ -819,9 +819,20 @@ pub struct NativeTerminal {
 impl NativeTerminal {
     pub fn new(strategy: TerminalStrategy) -> NativeTerminal {
         let config = GlueConfig::from_env();
+        // WI-3386: a FRESH install (no persisted layout yet — init_layout_persistence
+        // only overrides this once a terminal-layout.json exists) must not silently
+        // reserve config.fraction (42% by default) of the window for the terminal
+        // band before the user ever asked for it. The GUI's own layout (env bar,
+        // release button, …) isn't built to reflow into the remaining ~58% — on a
+        // config.minWidth-class window that pushes right-edge chrome off-screen
+        // (the "webview cut off on the right" report). First launch now shows the
+        // plain webview, full width, matching the other (non-macOS-embedded)
+        // builds; the terminal is still one rail-click away (pcterm_set_layout /
+        // the webview's own re-open control at its flush-left edge) and a user's
+        // OWN choice to open it persists via terminal-layout.json from then on.
         let default_layout = TerminalLayout {
             fraction: config.fraction,
-            collapsed: false,
+            collapsed: true,
         };
         NativeTerminal {
             strategy,

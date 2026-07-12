@@ -660,13 +660,29 @@ fi
 
 # ── JOIN all parallel legs; replay each leg's log; FAIL the release if any failed ──
 join_leg() {  # $1=pid  $2=name  $3=logfile
-  local pid="$1" name="$2" logf="$3"
+  local pid="$1" name="$2" logf="$3" rc=0
   echo "==> joining $name leg (pid $pid)…"
-  if wait "$pid"; then
+  # WI-4230 (0.0.8 false-FAIL): a signal-interrupted `wait` returns >128 (or a
+  # spurious 127) IMMEDIATELY while the leg is still running — the 0.0.8 cut
+  # declared the linux leg FAILED mid-appimagetool, dumped a truncated log, and
+  # exited without provenance/latest.json while the leg finished fine 4min
+  # later. Only accept a verdict once the pid is actually GONE; an interrupted
+  # wait on a live pid re-waits (bash keeps the un-reaped child's status, so the
+  # re-wait returns the leg's true exit code).
+  while :; do
+    if wait "$pid"; then rc=0; else rc=$?; fi
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "    (wait returned rc=$rc but $name leg pid $pid is still alive — interrupted wait; re-waiting)"
+      [[ "$rc" == "127" ]] && sleep 5   # non-child rc: poll instead of hot-spinning
+      continue
+    fi
+    break
+  done
+  if [[ "$rc" == "0" ]]; then
     [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
     echo "==> $name leg SUCCEEDED"
   else
-    echo "ERROR: $name leg FAILED — full leg log:"
+    echo "ERROR: $name leg FAILED (rc=$rc) — full leg log:"
     [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
     exit 1
   fi
