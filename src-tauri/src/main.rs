@@ -3259,8 +3259,18 @@ fn build_docs_shortcut_submenu(
     Submenu::with_items(app, "Docs search shortcut", true, &refs)
 }
 
-/// Build the full Server tray menu: Open · Docs search shortcut ▸ · — · Quit.
-/// Factored out so the menu-event handler can rebuild it after a rebind.
+/// Server-role state for the WI-4404 background update poller: the newest
+/// version the poller has found available, if any. `None` once installed/
+/// consumed. Read by `build_server_tray_menu` to decide whether to show the
+/// "Install Update" item; written by `spawn_server_update_poller`.
+struct ServerUpdateState {
+    pending_version: std::sync::Mutex<Option<String>>,
+}
+
+/// Build the full Server tray menu: Open · [Install Update vX ·] Docs search
+/// shortcut ▸ · — · Quit. Factored out so the menu-event handler can rebuild
+/// it after a rebind, or after the background poller finds/consumes an
+/// update (WI-4404).
 fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let open = MenuItem::with_id(app, "open-gui", "Open Papercusp", true, None::<&str>)?;
@@ -3276,6 +3286,29 @@ fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::
         true,
         None::<&str>,
     )?;
+
+    // WI-4404: the Server has no webview, so it has no UpdateChip — this is
+    // its ONLY update surface. Mirrors the GUI's own stated design ("nothing
+    // installs on its own — every install path is behind a confirm",
+    // UpdateChip.tsx): the poller only ever offers the item; a click IS the
+    // confirm gesture, same as the GUI's confirm+click.
+    let pending: Option<String> = app
+        .try_state::<ServerUpdateState>()
+        .and_then(|s| s.pending_version.lock().ok().and_then(|g| g.clone()));
+    if let Some(version) = pending {
+        let install = MenuItem::with_id(
+            app,
+            "install-update",
+            format!("Install Update (v{version})…"),
+            true,
+            None::<&str>,
+        )?;
+        let sep2 = PredefinedMenuItem::separator(app)?;
+        return Menu::with_items(
+            app,
+            &[&open, &install, &sep2, &tutorial, &shortcut, &sep, &quit],
+        );
+    }
     Menu::with_items(app, &[&open, &tutorial, &shortcut, &sep, &quit])
 }
 
@@ -3362,6 +3395,28 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                 launch_tutorial_console();
             } else if id == "quit-server" {
                 app.exit(0);
+            } else if id == "install-update" {
+                // WI-4404: this click IS the confirm gesture (the Server has no
+                // webview to run UpdateChip's confirm dialog in) — go straight to
+                // install_update, exactly what the GUI does after its own confirm.
+                // install_update ends in app.restart() on success, so nothing after
+                // that point runs; on failure it returns an Err we just log (the
+                // pending-version tray item stays up so the next poll tick or a
+                // retry click can try again).
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    println!("[papercusp-server] update install requested via tray");
+                    if let Err(e) = install_update(app2.clone()).await {
+                        eprintln!("[papercusp-server] tray-triggered update install failed: {e}");
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app2
+                            .notification()
+                            .builder()
+                            .title("Papercusp Server update failed")
+                            .body(format!("{e} — open the tray menu to retry."))
+                            .show();
+                    }
+                });
             } else if let Some(accel) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
                 // Rebind the docs-search global shortcut live, then rebuild the
                 // tray menu so the checkmark tracks the new selection.
@@ -4367,7 +4422,11 @@ fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
     // product-named, so the manifest route scopes asset matching by this
     // param (desktop-auto-update-operational-2026-07-09 P-003). Without
     // it the route could hand the GUI a Server installer or vice versa.
-    let product = if is_server_product(app) { "server" } else { "gui" };
+    let product = if is_server_product(app) {
+        "server"
+    } else {
+        "gui"
+    };
     Ok(format!(
         "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}&product={}",
         port, product
@@ -4464,6 +4523,101 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// WI-4404: the Server product has NO webview, so `check_for_update` /
+/// `install_update` — normally invoked only from UpdateChip.tsx / StepAutoUpdate.tsx
+/// via the JS `invoke()` bridge — had NO caller at all for it. Confirmed via
+/// exhaustive grep: before this, `check_for_update` was referenced only at its own
+/// `#[tauri::command]` decl and in `generate_handler!`. The Server manifest gap
+/// (`latest-server.json`, fixed earlier this item) was necessary but not sufficient:
+/// answering a poll that never happens fixes nothing on its own.
+///
+/// This spawns the poll loop that makes the Server actually check. It deliberately
+/// does NOT auto-install: the GUI's OWN documented design is "nothing installs on
+/// its own — every install path is behind a confirm" (UpdateChip.tsx). An unattended
+/// silent restart of the backend `psu` and every agent session are attached to is a
+/// materially bigger footgun than a stale binary, and no plan/doc states an intent
+/// to auto-restart the Server unattended — so this poller surfaces the result (tray
+/// item + native notification) and leaves the actual install/restart behind the
+/// tray's "Install Update" click (the Server's only available confirm gesture, since
+/// it has no window to run a webview confirm dialog in). A human — or an agent
+/// driving the tray via capability:terminal/OS automation — triggers the swap
+/// explicitly, exactly as the GUI's confirm+click already does.
+///
+/// Runs only when `is_server_product` (the caller gates it further by only calling
+/// this from the Server-only half of `setup()`, but the check is repeated here too
+/// so this fn is safe to call unconditionally from anywhere in the future).
+/// Interval + startup grace are env-overridable for tests/local iteration; errors
+/// (most commonly "sidecar port not yet known" very early in boot) are logged and
+/// retried next tick — this must never panic the Server's setup thread.
+fn spawn_server_update_poller(app: &tauri::App) {
+    let handle = app.handle().clone();
+    if !is_server_product(&handle) {
+        return;
+    }
+    handle.manage(ServerUpdateState {
+        pending_version: std::sync::Mutex::new(None),
+    });
+
+    let grace_secs: u64 = std::env::var("PAPERCUSP_SERVER_UPDATE_POLL_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5 * 60); // 5m: let boot settle before the first check.
+    let interval_secs: u64 = std::env::var("PAPERCUSP_SERVER_UPDATE_POLL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6 * 60 * 60); // 6h: matches typical desktop-app update cadence.
+
+    tauri::async_runtime::spawn(async move {
+        println!(
+            "[papercusp-server] update poller starting — grace={grace_secs}s interval={interval_secs}s"
+        );
+        tokio::time::sleep(Duration::from_secs(grace_secs)).await;
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        loop {
+            ticker.tick().await;
+            // Skip a re-poll while a version is already pending install — no point
+            // re-checking until the operator either installs it or a NEWER one ships;
+            // the manifest would just keep answering the same candidate.
+            let already_pending = handle
+                .try_state::<ServerUpdateState>()
+                .and_then(|s| s.pending_version.lock().ok().map(|g| g.is_some()))
+                .unwrap_or(false);
+            if already_pending {
+                continue;
+            }
+            match check_for_update(handle.clone()).await {
+                Ok(info) if info.available => {
+                    let version = info.new_version.clone().unwrap_or_default();
+                    println!("[papercusp-server] update available: v{version}");
+                    if let Some(state) = handle.try_state::<ServerUpdateState>() {
+                        if let Ok(mut guard) = state.pending_version.lock() {
+                            *guard = Some(version.clone());
+                        }
+                    }
+                    if let Ok(menu) = build_server_tray_menu(&handle) {
+                        if let Some(tray) = handle.tray_by_id("papercusp-server") {
+                            let _ = tray.set_menu(Some(menu));
+                        }
+                    }
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("Papercusp Server update available")
+                        .body(format!(
+                            "v{version} is ready — open the tray menu to install."
+                        ))
+                        .show();
+                }
+                Ok(_) => { /* up to date — nothing to do this tick */ }
+                Err(e) => {
+                    eprintln!("[papercusp-server] update check failed (will retry next tick): {e}");
+                }
+            }
+        }
+    });
+}
+
 /// Build the per-call rollback endpoint for a SPECIFIC release `tag`, targeted at
 /// the operator sidecar's `/api/updates/rollback` route (desktop-update-center-and-
 /// release-tooling P-5 Unit A). Mirrors `resolve_update_endpoint`'s port + product
@@ -4484,7 +4638,11 @@ fn resolve_rollback_endpoint(app: &AppHandle, tag: &str) -> Result<String, Strin
             "sidecar port not yet known; try again after boot completes".to_string()
         })?
     };
-    let product = if is_server_product(app) { "server" } else { "gui" };
+    let product = if is_server_product(app) {
+        "server"
+    } else {
+        "gui"
+    };
     let encoded_tag: String = url::form_urlencoded::byte_serialize(tag.as_bytes()).collect();
     Ok(format!(
         "http://127.0.0.1:{}/api/updates/rollback?tag={}&target={{{{target}}}}&arch={{{{arch}}}}&product={}",
@@ -5688,6 +5846,11 @@ pub fn run() {
                 eprintln!("[papercusp-desktop] tray install failed: {e}");
             }
             enable_login_autostart(app);
+            // WI-4404: the Server has no webview, so nothing ever called
+            // check_for_update for it — this is what actually makes it poll.
+            // See spawn_server_update_poller's doc comment for why it stops at
+            // "surface via the tray", not "auto-install".
+            spawn_server_update_poller(app);
 
             #[cfg(target_os = "windows")]
             {
