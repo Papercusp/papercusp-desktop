@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{h as t}from"./embed-sidecar-spawn-DBQRyW_e.js";import{t as n}from"./configure-C_1rTV6D.js";var r=e((()=>{n(),t()}));export{r as t};

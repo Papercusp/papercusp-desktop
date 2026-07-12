@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-CI2a7Cij.js";e();export{t as buildConsoleEnvelope};

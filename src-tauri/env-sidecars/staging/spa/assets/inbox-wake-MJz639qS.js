@@ -1,0 +1,1 @@
+import{c as e,o as t}from"./inbox-wake-DoHpc_Xs.js";t();export{e as wakeRecipients};
