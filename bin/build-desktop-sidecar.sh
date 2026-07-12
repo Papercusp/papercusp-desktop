@@ -1958,18 +1958,13 @@ fi
 # verify-sidecar-bundle: OK. A metadata stamp must NEVER kill a verified
 # build: prefer sha256sum (linux), fall back to shasum -a 256 (macOS
 # built-in), and yield "" (visible in the stamp JSON) rather than a death if
-# neither/no file exists.
-_stamp_sha256() {
-  local out=""
-  if command -v sha256sum >/dev/null 2>&1; then
-    out="$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" || true
-  elif command -v shasum >/dev/null 2>&1; then
-    out="$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" || true
-  fi
-  printf '%s' "$out"
-}
-_stamp_serve_sha="$(_stamp_sha256 "$SIDECAR_TMP_DIR/serve.mjs")"
-_stamp_proxy_sha="$(_stamp_sha256 "$SIDECAR_TMP_DIR/mcp-proxy.mjs")"
+# neither/no file exists. EI-9905: the helper now lives in
+# bin/lib/portable-sha256.sh so any OTHER script that gains a darwin
+# execution path can reuse it instead of re-deriving this fix.
+# shellcheck source=lib/portable-sha256.sh
+source "$HERE/lib/portable-sha256.sh"
+_stamp_serve_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/serve.mjs")"
+_stamp_proxy_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/mcp-proxy.mjs")"
 _stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 {
   printf '{\n'
