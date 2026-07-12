@@ -45,6 +45,9 @@
 #   --install-cmd CMD              installer command; `__ARTIFACT__` -> remote path
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
 #   --flip-timeout SEC             how long to wait for the flip (default 180)
+#   --install-timeout SEC          budget for the installer step (default 900);
+#                                  a timeout FAILS the run (installer may still
+#                                  be running detached on the VM — no relaunch)
 #   --poll-interval SEC            poll cadence while waiting (default 5)
 #   --json                         emit a machine-readable verdict
 # Exit: 0 = flip happened AND port held (update genuinely replaced the operator
@@ -67,6 +70,10 @@ RELAUNCH_CMD=""
 OPJSON_PATH=""
 FLIP_TIMEOUT="${FLIP_TIMEOUT:-180}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
+# 300s proved too short live (0.0.8: the 479M GUI installer needs ~5min; the
+# 3.4GB Server payload far more) — and a timeout-killed ssh leaves the VM-side
+# installer RUNNING detached, so the step must fail loudly, never barrel on.
+INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-900}"
 JSON=0
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
+    --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:-}"; shift 2 ;;
     --json) JSON=1; shift ;;
     -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
@@ -224,8 +232,17 @@ if [[ ${#FAILURES[@]} -eq 0 ]]; then
   INSTALL_RUN="${INSTALL_CMD//__ARTIFACT__/$REMOTE_Q}"
   # Capture (don't discard) installer output — a swallowed exit code cost a full
   # diagnose cycle on 0.0.8 (locked-file Abort looked like a silent no-op).
-  INSTALL_OUT="$(timeout 300 "${SSH[@]}" "$INSTALL_RUN" 2>&1 | tr -d '\r\0')" \
-    || note "installer exit was non-zero (some silent installers do this; the flip assertion is authoritative)${INSTALL_OUT:+ — output: ${INSTALL_OUT:0:400}}"
+  INSTALL_RC=0
+  INSTALL_OUT="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "$INSTALL_RUN" 2>&1 | tr -d '\r\0')" || INSTALL_RC=$?
+  if [[ "$INSTALL_RC" -eq 124 ]]; then
+    # timeout(1) killed the SSH SESSION, not the VM-side installer — it is very
+    # likely STILL RUNNING detached. Relaunching now re-locks the app files under
+    # it (live-hit on 0.0.8 attempt-4: relaunch mid-install recreated the exact
+    # file-in-use race the taskkill exists to prevent). Fail loudly instead.
+    fail_check "install: timed out after ${INSTALL_TIMEOUT}s (ssh killed; the VM-side installer may still be running detached) — NOT relaunching; re-probe VM process/disk state before any retry, or raise --install-timeout"
+  elif [[ "$INSTALL_RC" -ne 0 ]]; then
+    note "installer exit was non-zero ($INSTALL_RC; some silent installers do this; the flip assertion is authoritative)${INSTALL_OUT:+ — output: ${INSTALL_OUT:0:400}}"
+  fi
 fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─
