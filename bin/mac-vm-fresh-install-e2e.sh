@@ -7,7 +7,18 @@
 #   operator boots (dynamic /api/health 200) · SPA renders (not RouteErrorBoundary) ·
 #   gateway auto-supervised on :8788 (REQ A gold proof) · offline seed provisioned.
 set +e
-BASE="$HOME/papercup-build-mac/papercup/papercusp-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg"
+# Bundle dir differs by build flavor: release builds are universal-apple-darwin,
+# fast-iter test builds are x86_64-apple-darwin. Auto-pick whichever has the
+# NEWEST GUI dmg (override with MAC_E2E_BUNDLE_BASE).
+TGT="$HOME/papercup-build-mac/papercup/papercusp-desktop/src-tauri/target"
+if [ -n "$MAC_E2E_BUNDLE_BASE" ]; then
+  BASE="$MAC_E2E_BUNDLE_BASE"
+else
+  BASE=$(ls -t "$TGT"/universal-apple-darwin/release/bundle/dmg/*GUI*.dmg \
+               "$TGT"/x86_64-apple-darwin/release/bundle/dmg/*GUI*.dmg 2>/dev/null \
+         | head -1 | xargs -I{} dirname {})
+fi
+echo "BASE=$BASE"
 GUIDMG=$(ls -t "$BASE"/*GUI*.dmg 2>/dev/null | head -1)
 SRVDMG=$(ls -t "$BASE"/*Server*.dmg 2>/dev/null | head -1)
 echo "GUIDMG=$(basename "$GUIDMG")  SRVDMG=$(basename "$SRVDMG")"
