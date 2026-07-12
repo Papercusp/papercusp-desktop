@@ -5218,11 +5218,16 @@ mod dmabuf_render_tests {
 }
 
 pub fn run() {
-    // Before anything opens an fd or spawns a child: lift the process's fd soft
-    // limit. rlimits are inherited across fork/exec, so this one call covers the
-    // node operator sidecar, the gateway sidecar, embedded PG and the `claude`
-    // CLI. macOS hands a GUI app 256, which the operator (~329 handles) plus
-    // workspace-sized FS watchers blow straight through — EMFILE (WI-4369).
+    // Before anything opens an fd or spawns a child: lift THIS process's fd soft
+    // limit off the 256 macOS hands a GUI app. rlimits inherit across fork/exec,
+    // so one call here also covers every NON-node child (gateway sidecar,
+    // embedded PG, the `claude` CLI).
+    //
+    // Latent hardening, NOT a fix for an observed crash — WI-4369 was originally
+    // filed claiming an impending operator EMFILE, and that was wrong: node
+    // raises its OWN RLIMIT_NOFILE at startup (to 1048575), so the operator
+    // sidecar was never bounded by 256. See fd_limit.rs for the full correction
+    // and the two traps the implementation dodges.
     fd_limit::raise_fd_limit();
 
     // WebKitGTK's DMA-BUF renderer misbehaves on two Linux GPU situations, so we

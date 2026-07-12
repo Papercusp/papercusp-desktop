@@ -149,8 +149,19 @@ fi
 # Order matters: latest.json is what makes an update VISIBLE to every installed
 # app. Publishing it before the bytes it points at exist would advertise an
 # update that 404s for anyone who checks in the meantime.
+# Skip anything already in the bucket at exactly the local size. These artifacts
+# are ~4 GB each, and the common reason to re-run this script is to complete the
+# HTTPS verification after the custom domain was bound — re-pushing 11 GB to
+# re-learn what we already know is pure waste. (Size, not mtime: a re-cut with the
+# same version but different bytes is a size change in practice, and the manifest's
+# minisign signature is the real integrity gate.)
 for f in "${ARTIFACTS[@]}"; do
   name="$(basename "$f")"
+  local_size="$(stat -c%s "$f")"
+  if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]; then
+    echo "==> already uploaded, skipping $name"
+    continue
+  fi
   echo "==> uploading $name"
   s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
 done
@@ -193,9 +204,14 @@ echo
 echo "==> verifying the public read path (${BASE%/*}/<secret>/latest.json)"
 TMP_MANIFEST="$(mktemp)"
 trap 'rm -f "$TMP_MANIFEST"' EXIT
-HTTP_CODE="$(curl -sS -o "$TMP_MANIFEST" -w '%{http_code}' --max-time 30 "${BASE}/latest.json" 2>/dev/null || echo "000")"
+# NOTE: on a connection-level failure (DNS, TLS, timeout) curl writes "000" via
+# -w AND exits non-zero. Do NOT add a `|| echo "000"` fallback here: that
+# CONCATENATES a second "000" onto curl's, yielding "000000", which then matches
+# neither the unreachable branch nor 200 — and an unbound domain gets reported as
+# a hard failure, i.e. exactly the confusion this two-way split exists to remove.
+HTTP_CODE="$(curl -sS -o "$TMP_MANIFEST" -w '%{http_code}' --max-time 30 "${BASE}/latest.json" 2>/dev/null)" || true
 
-if [[ "$HTTP_CODE" == "000" ]]; then
+if [[ -z "$HTTP_CODE" || "$HTTP_CODE" == "000" ]]; then
   # Could not connect at all — almost always the custom domain is not bound yet
   # (the hostname does not resolve). The upload itself is fine and verified above.
   HOSTNAME_ONLY="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
