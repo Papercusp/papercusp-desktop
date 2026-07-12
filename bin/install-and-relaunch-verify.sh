@@ -107,7 +107,14 @@ case "$PLATFORM" in
   windows)
     REMOTE_DIR="${REMOTE_DIR:-C:/Users/user}"
     OPJSON_PATH="/home/papercup/.papercusp/operator.json"        # distro-side (absolute)
-    INSTALL_CMD="${INSTALL_CMD:-__ARTIFACT__ /VERYSILENT /SUPPRESSMSGBOXES /NORESTART}"
+    # The GUI must be CLOSED before a silent install: Inno's RestartManager
+    # cannot close an app across sessions (ssh session vs console session ->
+    # "Session Mismatch"), so with /SUPPRESSMSGBOXES the file-in-use box is
+    # auto-answered Abort and the whole install rolls back (exit 5 — live-
+    # diagnosed on the 0.0.8 GUI install, 2026-07-11). Killing the GUI does NOT
+    # terminate the WSL-side operator: the stale operator surviving app exit is
+    # exactly the EI-9002 scenario the flip assertion exists to test.
+    INSTALL_CMD="${INSTALL_CMD:-taskkill /f /im $APP_IMAGE >nul 2>&1 & __ARTIFACT__ /VERYSILENT /SUPPRESSMSGBOXES /NORESTART}"
     RELAUNCH_CMD="${RELAUNCH_CMD:-schtasks /run /tn papercusp-e2e}"
     ;;
   mac)
@@ -215,7 +222,10 @@ fi
 # ── 3. INSTALL (does NOT terminate the operator) ────────────────────────────
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
   INSTALL_RUN="${INSTALL_CMD//__ARTIFACT__/$REMOTE_Q}"
-  timeout 300 "${SSH[@]}" "$INSTALL_RUN" >/dev/null 2>&1 || note "installer exit was non-zero (some silent installers do this; the flip assertion is authoritative)"
+  # Capture (don't discard) installer output — a swallowed exit code cost a full
+  # diagnose cycle on 0.0.8 (locked-file Abort looked like a silent no-op).
+  INSTALL_OUT="$(timeout 300 "${SSH[@]}" "$INSTALL_RUN" 2>&1 | tr -d '\r\0')" \
+    || note "installer exit was non-zero (some silent installers do this; the flip assertion is authoritative)${INSTALL_OUT:+ — output: ${INSTALL_OUT:0:400}}"
 fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─
