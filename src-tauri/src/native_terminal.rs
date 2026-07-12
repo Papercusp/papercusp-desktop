@@ -2382,6 +2382,12 @@ pub mod win_embed {
 
 /// Single-quote `s` for bash. The dock's paths routinely contain spaces
 /// (`/mnt/c/Program Files/Papercusp GUI/...`), so nothing here may go unquoted.
+///
+/// Gated to Windows + `test` (the `windows_path_to_wsl` pattern): the only
+/// production caller is the Windows launcher, so an ungated build on the Linux
+/// dev box would warn dead_code — but the tests below must still exercise it
+/// there, which is the whole point of keeping it pure.
+#[cfg(any(target_os = "windows", test))]
 fn sh_squote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
@@ -2394,6 +2400,7 @@ fn sh_squote(s: &str) -> String {
 ///
 /// `exec` replaces the shell so the window's process IS the dock — no stray
 /// parent shell to leak, and closing the window takes zellij down with it.
+#[cfg(any(target_os = "windows", test))]
 fn wsl_dock_oneliner(
     dock_bin_wsl: Option<&str>,
     companion_wasm_wsl: Option<&str>,
@@ -2694,6 +2701,83 @@ impl NativeTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── WI-4448: the Windows chat dock ─────────────────────────────────────
+
+    /// The bundled dock dir is `.../Papercusp GUI/sidecar/bin` — it ALWAYS has a
+    /// space in it. Unquoted, bash would split it and the dock would launch with
+    /// a truncated PATH (and silently fall back to whatever `pui` it could find,
+    /// or none). This is the single most likely way this launcher breaks.
+    #[test]
+    fn dock_oneliner_quotes_paths_containing_spaces() {
+        let got = wsl_dock_oneliner(
+            Some("/mnt/c/Program Files/Papercusp GUI/sidecar/bin"),
+            Some("/mnt/c/Program Files/Papercusp GUI/sidecar/pui-companion.wasm"),
+            &["pui".to_string(), "chat".to_string()],
+        );
+        assert_eq!(
+            got,
+            "export PATH='/mnt/c/Program Files/Papercusp GUI/sidecar/bin':\"$PATH\"; \
+             export PUI_COMPANION_WASM='/mnt/c/Program Files/Papercusp GUI/sidecar/pui-companion.wasm'; \
+             exec 'pui' 'chat'"
+        );
+    }
+
+    /// The bundled binaries must WIN over anything the distro carries: zellij's
+    /// plugin API is version-coupled to the companion wasm we ship, so a distro
+    /// zellij taking precedence would load an incompatible plugin.
+    #[test]
+    fn dock_oneliner_prepends_bundled_bin_to_path() {
+        let got = wsl_dock_oneliner(Some("/mnt/c/app/bin"), None, &["pui".to_string()]);
+        assert!(
+            got.starts_with("export PATH='/mnt/c/app/bin':\"$PATH\""),
+            "bundled bin must be PREPENDED, got: {got}"
+        );
+        assert!(!got.contains("PUI_COMPANION_WASM"));
+    }
+
+    /// An unbundled/dev layout resolves neither path — the dock must still be
+    /// launchable (falling back to whatever `pui` is on the distro PATH) rather
+    /// than emitting `export PATH=:"$PATH"` and poisoning it.
+    #[test]
+    fn dock_oneliner_omits_unresolved_paths_entirely() {
+        let got = wsl_dock_oneliner(None, None, &["pui".to_string(), "chat".to_string()]);
+        assert_eq!(got, "exec 'pui' 'chat'");
+    }
+
+    #[test]
+    fn sh_squote_escapes_embedded_single_quotes() {
+        assert_eq!(sh_squote("it's"), r#"'it'\''s'"#);
+    }
+
+    /// The bug itself: before WI-4448 Windows selected EmbeddedView(ConPty),
+    /// found the spike unavailable, and — because the NewWindow fallback was
+    /// Linux-only — landed on Disabled, i.e. NO dock at all. It must now reach
+    /// NewWindow.
+    #[test]
+    fn windows_conpty_downgrades_to_new_window_not_disabled() {
+        let got = downgrade_unbuilt_with(
+            TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
+            false, // no VTE (not Linux)
+            false, // no SwiftTerm (not macOS)
+            true,  // Windows now HAS a new-window launcher
+        );
+        assert_eq!(got, TerminalStrategy::NewWindow);
+    }
+
+    /// Guard the regression in the other direction: a platform with no embedded
+    /// backend AND no new-window launcher must still resolve to Disabled rather
+    /// than a strategy whose launcher would hard-error on every boot.
+    #[test]
+    fn embedded_without_any_launcher_still_disables() {
+        let got = downgrade_unbuilt_with(
+            TerminalStrategy::EmbeddedView(EmbedBackend::ConPty),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(got, TerminalStrategy::Disabled);
+    }
 
     // ── P-001 detection ────────────────────────────────────────────────────
 
