@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
-# Build + sign + publish a Papercusp desktop release WITHOUT GitHub
-# Actions. Run on this Linux box; produces a Linux x86_64 build by
-# default, with cross-compile hooks for other targets.
+# Build + sign a Papercusp desktop release WITHOUT GitHub Actions. Run on
+# this Linux box; produces a Linux x86_64 build by default, with
+# cross-compile hooks for other targets.
 #
-# Outputs go to a GitHub Release named after the tag. Auth uses your
-# local `gh` CLI session (no PAT needed — this is interactive auth).
+# ⚠ PUBLISHING IS OPT-IN. By default this builds, signs and writes
+# latest.json LOCALLY and stops, printing each artifact + its sha256 so a
+# human uploads them deliberately. Set PAPERCUSP_PUBLISH=1 to create the
+# public GitHub Release (auth = your local interactive `gh` session).
+# Rationale: a GitHub Release is public and effectively irreversible once
+# installed clients see the manifest — the outward-facing half must be the
+# thing you opt INTO. It used to publish unconditionally, so there was no
+# way to cut a build for inspection without shipping it.
 #
 # Usage:
-#   bin/release-local.sh 0.0.2 stable     # tag + channel
-#   bin/release-local.sh 0.0.3 beta
-#   bin/release-local.sh 0.0.4 alpha
+#   bin/release-local.sh 0.0.2 stable                     # LOCAL cut only
+#   PAPERCUSP_PUBLISH=1 bin/release-local.sh 0.0.2 stable # + GitHub Release
 #
 # What it does:
 #   1. Bumps version in package.json + Cargo.toml + tauri.conf.json
 #   2. Builds the sidecar (papercup/apps/operator → src-tauri/sidecar/)
 #   3. cargo + Tauri build (signs with ~/.papercusp/signing/papercusp.key)
 #   4. Generates latest.json manifest
-#   5. Pushes the version-bump commit + tag to origin
-#   6. Creates GitHub Release with all artifacts attached
+#   5. Prints local artifacts + sha256s  (STOPS HERE unless PAPERCUSP_PUBLISH=1)
+#   6. PAPERCUSP_PUBLISH=1 only: creates the GitHub Release with artifacts
+#
+# NOTE: this script does NOT create or push a git tag/commit despite what
+# earlier docs claimed — there is no `git tag`/`git push` in it. The "$TAG"
+# below names the GitHub Release only.
 #
 # Optional platform legs:
 #   - macOS  : WITH_MAC=1 — drives the macOS build VM over SSH
@@ -958,6 +967,34 @@ if (( ${#OVERSIZED[@]} > 0 )); then
   echo "  Host these at PAPERCUSP_RELEASE_HOST — the update manifest falls back there via latest.json."
 fi
 
+# ── PUBLISH IS OPT-IN (PAPERCUSP_PUBLISH=1) ────────────────────────────────
+# Creating a GitHub Release is PUBLIC and effectively irreversible (tags, asset
+# URLs and the update manifest get consumed by installed clients the moment they
+# exist). It used to be the unconditional tail of this script, so merely CUTTING
+# a build to inspect it locally published it — there was no way to build without
+# shipping. That is backwards: the dangerous, outward-facing half must be the
+# thing you opt INTO, not the thing you must remember to suppress.
+#
+# Default now = build + sign + emit latest.json LOCALLY and stop, printing the
+# artifacts and their sha256s so a human can upload them deliberately. Set
+# PAPERCUSP_PUBLISH=1 to actually push the release to GitHub.
+PUBLISH="${PAPERCUSP_PUBLISH:-0}"
+
+if [[ "$PUBLISH" != "1" ]]; then
+  echo
+  echo "==> LOCAL-ONLY cut (PAPERCUSP_PUBLISH is not 1) — nothing was pushed to GitHub."
+  echo "    tag (not created):  $TAG"
+  echo "    latest.json:        $LATEST_JSON"
+  echo "    artifacts (${#ARTIFACTS[@]}):"
+  for f in "${ARTIFACTS[@]}"; do
+    printf '      %s  %s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
+  done
+  echo
+  echo "    To publish deliberately:  PAPERCUSP_PUBLISH=1 $0 $VERSION $CHANNEL"
+  exit 0
+fi
+
+echo "==> PAPERCUSP_PUBLISH=1 — publishing to GitHub (public, hard to undo)"
 if gh release view "$TAG" --repo Papercusp/papercusp-desktop >/dev/null 2>&1; then
   echo "    release exists; uploading artifacts with --clobber"
   gh release upload "$TAG" "${UPLOAD_ARTIFACTS[@]}" "$LATEST_JSON" --repo Papercusp/papercusp-desktop --clobber
