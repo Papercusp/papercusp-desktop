@@ -103,6 +103,21 @@ else
   BUILD_SHA="$_short_head"
 fi
 echo "==> build provenance: PAPERCUSP_BUILD_SHA=${BUILD_SHA:-<unknown>}"
+# Fail-fast on a -dirty cut (0.0.8 drive, 2026-07-11): the release-verify-provenance
+# ship-gate asserts gitDirty==false on EVERY channel — alpha included, since alpha
+# IS the public shipping channel — so a -dirty cut can only produce unshippable
+# bytes; abort at second five, not minute forty. On this shared fleet checkout the
+# cure is: force git-sync, wait for `status --porcelain` to be empty in BOTH the
+# desktop tree and the superproject, re-fire. PAPERCUSP_ALLOW_DIRTY=1 escapes for
+# local dev iteration (the -dirty label itself stays honest, P-003).
+if [[ "$BUILD_SHA" == *-dirty && "${PAPERCUSP_ALLOW_DIRTY:-0}" != "1" ]]; then
+  echo "ERROR: BUILD_SHA is ${BUILD_SHA} — uncommitted changes in the desktop tree or superproject."
+  echo "       A -dirty cut cannot pass the ship-gate (gitDirty must be false), so this run"
+  echo "       would only produce unshippable artifacts. Force git-sync, verify"
+  echo "       'git status --porcelain' is empty in $ROOT AND $ROOT/.., then re-fire."
+  echo "       (PAPERCUSP_ALLOW_DIRTY=1 to build a dirty dev cut anyway.)"
+  exit 1
+fi
 # Build provenance: the shipped app VERSION (WI-2644). Same mechanism as
 # PAPERCUSP_BUILD_SHA above — the packaged sidecar has no npm_package_version
 # in its env, so build-info.ts needs this baked in explicitly. Sourced from

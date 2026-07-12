@@ -320,7 +320,7 @@ fi
 
 echo "==> packing desktop tree"
 TARBALL="$(mktemp /tmp/papercusp-desktop-build-XXXX.tar.gz)"
-trap 'rm -f "$TARBALL" "$TARBALL.fp"' EXIT
+trap 'rm -f "$TARBALL" "$TARBALL.fp" "$TARBALL.totals.log"' EXIT
 # -h dereferences symlinks (node_modules/.bin shims) — Windows tar can't
 # create them. Keep sidecar/**/node_modules (runtime deps); drop only the
 # desktop repo's own toolchain node_modules.
@@ -415,7 +415,14 @@ trap 'rm -f "$TARBALL" "$TARBALL.fp"' EXIT
     fi
 
     set +e
-    tar -czhf "$TARBALL" \
+    # WI-4232: --totals writes the pre-compression byte count to stderr
+    # ("Total bytes written: N") — captured to a log so the disk-preflight
+    # step below can compute the REAL space requirement (the VM extract needs
+    # the tarball + this many uncompressed bytes to coexist, WI-3360) instead
+    # of a stale fixed threshold. Captured to a file rather than `2>&1 |
+    # tee`'d so the tolerated "file changed as we read it" warning (rc<=1,
+    # see above) still reaches stderr live for a human watching the build.
+    tar --totals -czhf "$TARBALL" \
       --exclude='.git' \
       --exclude='papercusp-desktop/node_modules' \
       --exclude='papercusp-desktop/web/node_modules' \
@@ -424,9 +431,10 @@ trap 'rm -f "$TARBALL" "$TARBALL.fp"' EXIT
       --exclude='src-tauri/sidecar.lock*' \
       --exclude='src-tauri/sidecar/code-server' \
       --exclude='src-tauri/sidecar/bin/omp' \
-      -C "$ROOT/.." papercusp-desktop
+      -C "$ROOT/.." papercusp-desktop 2>"$TARBALL.totals.log"
     tar_rc=$?
     set -e
+    cat "$TARBALL.totals.log" >&2
     (( tar_rc <= 1 )) || fail "desktop-tree pack tar failed (exit $tar_rc)"
 
     fp_post="$(rust_src_fingerprint)"
@@ -443,16 +451,47 @@ trap 'rm -f "$TARBALL" "$TARBALL.fp"' EXIT
 ) 9>>"$ROOT/src-tauri/sidecar.lock"
 ls -lh "$TARBALL"
 
-# ── Pre-flight: reclaim stale build output so the source extraction can't run the
-# VM's C: drive to zero mid-write. WI-3360 build#7 died exactly this way — C: hit
-# 0 during the tar extract, truncating src-tauri/src/main.rs (and serve.mjs, the
-# bin/* binaries, db-seed) and yielding a bogus Rust "expected item after doc
-# comment" error on the truncated file, NOT a real code fault. The bundle/inno
-# output (~4 GB of installer .bin/.exe) is regenerated every build and already
-# copied back to OUT_DIR, so it is always safe to drop before re-extracting.
-echo "==> pre-flight: reclaiming stale VM build output + asserting free space"
-"${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno' -EA SilentlyContinue; Remove-Item -Force 'C:\\Users\\user\\papercusp-desktop-build.tar.gz' -EA SilentlyContinue; \$f=[math]::Round((Get-PSDrive C).Free/1GB,2); Write-Output ('VM C: free = '+\$f+' GB'); if (\$f -lt 6) { Write-Output 'DISK_TOO_LOW'; exit 1 }\"" \
-  | tr -d '\r' || fail "VM C: has <6 GB free even after reclaiming stale output — free space before rebuilding (WI-3360: a full disk truncates main.rs mid-extract; the extract-over needs the tree + tarball to coexist, so 5.2 GB was observed too low). Quick reclaim: 'powercfg -h off' drops hiberfil.sys (~12 GB on a headless build VM)."
+# WI-4232: the exact pre-compression size of the packed tree, captured via
+# `tar --totals` during the pack above — used below to compute the VM disk
+# preflight requirement. Deliberately NOT `gzip -l` (its trailer is a 32-bit
+# ISIZE that wraps silently for an archive whose *uncompressed* content
+# exceeds 4GiB — a real risk here since the full offline seed alone is
+# ~2.5GiB and a fat cut's tarball has been observed at 9.1G compressed).
+TAR_UNCOMPRESSED_BYTES="$(grep -oE 'Total bytes written: [0-9]+' "$TARBALL.totals.log" 2>/dev/null | grep -oE '[0-9]+$' || true)"
+rm -f "$TARBALL.totals.log"
+[[ -n "$TAR_UNCOMPRESSED_BYTES" ]] \
+  || fail "could not parse the uncompressed tarball size out of 'tar --totals' output (WI-4232) — cannot compute the VM disk preflight requirement"
+
+# ── Pre-flight: reclaim stale build output, then assert the VM has enough free
+# space for THIS build — not a fixed guess. WI-3360 build#7 died when C: hit 0
+# during the tar extract, truncating src-tauri/src/main.rs (and serve.mjs, the
+# bin/* binaries, db-seed) into a bogus Rust "expected item after doc comment"
+# error, NOT a real code fault. The bundle/inno output (~4 GB of installer
+# .bin/.exe) is regenerated every build and already copied back to OUT_DIR, so
+# it is always safe to drop before re-extracting.
+#
+# WI-4232: a prior version of this check asserted a FIXED "free >= 6GB" —
+# but the real requirement scales with the tarball being shipped (the extract
+# needs the compressed tarball AND its extracted tree to coexist on disk,
+# WI-3360) plus the build's own output. A build with 7.84GB free PASSED the
+# fixed check, then died mid-scp on a 9.1G tarball minutes later. Compute the
+# real number instead: tarball bytes (compressed, coexists with the extracted
+# tree during `tar -xzf`) + extracted bytes (uncompressed, exact — from
+# `tar --totals` above, not guessed) + a payload-independent build headroom
+# (fresh MSVC cargo target dir + npm install + the Inno installer output,
+# ~4GB alone per WI-3172) + slack. Overridable via env for a future build that
+# outgrows the historical headroom.
+BUILD_HEADROOM_GB="${BUILD_HEADROOM_GB:-8}"
+PREFLIGHT_SLACK_GB="${PREFLIGHT_SLACK_GB:-2}"
+TAR_BYTES=$(stat -c%s "$TARBALL")
+REQUIRED_BYTES=$(( TAR_BYTES + TAR_UNCOMPRESSED_BYTES + BUILD_HEADROOM_GB * 1024 * 1024 * 1024 + PREFLIGHT_SLACK_GB * 1024 * 1024 * 1024 ))
+REQUIRED_GB=$(awk "BEGIN { printf \"%.2f\", $REQUIRED_BYTES/1024/1024/1024 }")
+REQUIRED_BREAKDOWN="$(( TAR_BYTES/1024/1024/1024 ))G tarball + $(( TAR_UNCOMPRESSED_BYTES/1024/1024/1024 ))G extract + ${BUILD_HEADROOM_GB}G build headroom + ${PREFLIGHT_SLACK_GB}G slack = ${REQUIRED_GB}G required"
+echo "==> pre-flight: reclaiming stale VM build output + asserting free space ($REQUIRED_BREAKDOWN)"
+VM_FREE_OUTPUT="$("${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno' -EA SilentlyContinue; Remove-Item -Force 'C:\\Users\\user\\papercusp-desktop-build.tar.gz' -EA SilentlyContinue; \$f=[math]::Round((Get-PSDrive C).Free/1GB,2); Write-Output ('VM C: free = '+\$f+' GB'); if (\$f -lt $REQUIRED_GB) { Write-Output 'DISK_TOO_LOW'; exit 1 }\"" \
+  | tr -d '\r')" \
+  || fail "VM C: has <${REQUIRED_GB}GB free even after reclaiming stale output ($REQUIRED_BREAKDOWN — was: $VM_FREE_OUTPUT) — free space before rebuilding (WI-3360: a full disk truncates main.rs mid-extract; the extract needs the tarball + extracted tree to coexist). Quick reclaim: 'powercfg -h off' drops hiberfil.sys (~12 GB on a headless build VM), or delete old version-scoped installers under C:\\Users\\user\\$VM_BUILD_DIR. (WI-4232: this requirement is now computed from the actual tarball size, not a stale fixed 6GB — set BUILD_HEADROOM_GB / PREFLIGHT_SLACK_GB to retune it.)"
+echo "    $VM_FREE_OUTPUT"
 
 echo "==> shipping to VM"
 "${SCP[@]}" "$TARBALL" "$VM_SSH_HOST":'C:/Users/user/papercusp-desktop-build.tar.gz'
