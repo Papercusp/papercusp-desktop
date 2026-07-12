@@ -12,6 +12,7 @@
 # the live counterpart of the retired coding-factory `documenter` step, fired declaratively the
 # same way merge-resolution is fired on `git-sync:conflict`.
 id: doc-steward
+visibility: public
 extends: single-agent
 version: 0.1.0
 description: >-

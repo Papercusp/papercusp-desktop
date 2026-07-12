@@ -1,0 +1,1 @@
+import{E as e}from"./embed-sidecar-spawn-DBQRyW_e.js";import{t}from"./backend-CmCGK2X9.js";t();export{e as getMemoryBackend};

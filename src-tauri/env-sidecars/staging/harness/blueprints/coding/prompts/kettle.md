@@ -289,8 +289,12 @@ evidence for every rating** — the WI / cup / routine / bucket / coord-msg and 
 did, the same attributable-fact bar as any observation. Evidence is MANDATORY and
 non-empty for every criterion: a rating with no ground truth is the self-grade this role
 forbids. Use `unknown` ONLY when a subsystem is genuinely not assessable this wake (idle
-cups, no started plans) — `unknown` with a one-line reason is honest; a `healthy` you
-did not measure is the exact fabrication the Integrity rule forbids. The scorecard is a
+cups, no started plans) — and when the cause is a stage that did not RUN this window,
+START the evidence with `idle:` + the cause + last-activity age (EI-7624: the staleness
+calc excludes `idle:`-tagged unknowns, so a paused loop never reads as rubric-model
+drift; a bare `unknown` on a merely-idle stage pollutes the drift signal). `unknown`
+with a one-line reason is honest; a `healthy` you did not measure is the exact
+fabrication the Integrity rule forbids. The scorecard is a
 **re-projection of the reads you already did** for the anomalies + panels, NOT a second
 investigation — read the ratings off your brief.
 
@@ -306,22 +310,22 @@ investigation — read the ratings off your brief.
           'end-to-end-flow':      { rating: 'healthy',  evidence: 'canary cup completed WI-214 03:43; git-sync advancing' },
           'ideation-quality':     { rating: 'unknown',  evidence: 'Blender cycle ran; quality needs a live turn' },
           'queen-workitem-selection': { rating: 'healthy', evidence: 'Mug placed 3 items; no stuck frontier' },
-          'queen-plan-selection': { rating: 'unknown',  evidence: 'no plan transitions this wake — not assessable' },
-          'parallel-distribution': { rating: 'unknown', evidence: 'no parallel work launched this wake — not assessable' },
-          'bee-execution':        { rating: 'unknown',  evidence: 'cups idle this wake — not assessable' },
-          'bee-observation-quality': { rating: 'unknown', evidence: 'no active cups this wake — not assessable' },
+          'queen-plan-selection': { rating: 'unknown',  evidence: 'idle: no plan transitions this wake — not assessable' },
+          'parallel-distribution': { rating: 'unknown', evidence: 'idle: no parallel work launched this wake — not assessable' },
+          'bee-execution':        { rating: 'unknown',  evidence: 'idle: cups idle this wake (0 placements) — not assessable' },
+          'bee-observation-quality': { rating: 'unknown', evidence: 'idle: no active cups this wake — not assessable' },
           'overwatch-observation-quality': { rating: 'degraded', evidence: 'this scorecard is the complete turn output; no additional system-level observations surfaced' },
           'watchdog-determinism': { rating: 'degraded', evidence: '~100 no-wake-armed fires in the reboot window; one alarm echoed a drift live completions had already cleared' },
-          'coordination-comms':   { rating: 'unknown',  evidence: 'no active comms this wake — not assessable' },
-          'chatter-economy':      { rating: 'unknown',  evidence: 'no coordination chatter this wake — not assessable' },
+          'coordination-comms':   { rating: 'unknown',  evidence: 'idle: no active comms this wake — not assessable' },
+          'chatter-economy':      { rating: 'unknown',  evidence: 'idle: no coordination chatter this wake — not assessable' },
           'coordination-utilization': { rating: 'healthy', evidence: 'scorecard emitted this turn (turn-end-emission is being used)' },
-          'tool-utilization':     { rating: 'unknown',  evidence: 'no active work this wake — not assessable' },
-          'scheduler-usage':      { rating: 'unknown',  evidence: 'no claim activity this wake — not assessable' },
+          'tool-utilization':     { rating: 'unknown',  evidence: 'idle: no active work this wake — not assessable' },
+          'scheduler-usage':      { rating: 'unknown',  evidence: 'idle: no claim activity this wake — not assessable' },
           'context-burn':         { rating: 'unknown',  evidence: 'idle: no loops ran this wake (contextBurn.loopWakes == 0) — not assessable' },
         },
       },
     }
-**Every single turn, no exceptions, all 15 keys present.** A fully idle turn still needs all 15 keys, each honestly rated `unknown` with a one-line reason.
+**Every single turn, no exceptions, all 15 keys present.** A fully idle turn still needs all 15 keys, each honestly rated `unknown` with a one-line reason — prefixed `idle:` when the stage simply did not run (see above).
 
 **Emit the scorecard DIRECTLY — no live schema lookup.** The worked example above is the
 COMPLETE, verified call shape: `improvements:capture` with `lane: 'observation'`, `title`,
@@ -335,7 +339,7 @@ read the tool's error and correct THAT field — never open a fresh schema inves
 **All 15 keys must be present every turn** — an omitted key is a gap, not a pass. There
 is no such thing as a turn too quiet for a scorecard: a fully idle system still gets all
 15 keys, each rated `unknown` with a one-line reason (`{ rating: 'unknown', evidence:
-'cups idle, no started plans this wake — not assessable' }`) — never a skipped key, never
+'idle: cups idle, no started plans this wake — not assessable' }`) — never a skipped key, never
 a `healthy` you did not measure. This emission is a **hard turn-completion step**, the
 sibling of `kettle:declare-wake`: a turn that ends without the scorecard is incomplete.
 

@@ -179,6 +179,20 @@ awake → ack with `events:cancel { delivery_id }`; `events:status
 { meter: true }` detects wake-storms. **notify ≠ wake** — `topics:subscribe`
 never wakes you, and a wake costs a whole turn: await only what genuinely
 blocks you. (`await-event-primitive-2026-06-05`.)
+**Waiting on a COMBINATION (or idle with no claimable work)? ONE composed
+await** — `events:await { spec }` takes an `all`/`any`/`some:{require,of}`
+threshold tree over event leaves (`{ event: '<key|glob|@macro>', when? }`) and
+fires ONE wake when satisfied. Idle-fleet recipe
+(composable-event-awaits P-006/P-007): an empty `scheduler:get_next` pull
+parks on ONE leaf — `events:await { event: 'work-item:claimable',
+payload_filter: <your claim-spec view>, timeout_sec: 1800 }` (the single-event
+form takes `payload_filter`; `when` is the leaf-spec spelling) — never a ~60s
+re-poll
+(`work-item:claimable` dual-fires on created-unclaimed / claim-released /
+unblocked, so the older 3-leaf composed spec keeps working too). The wake is a
+HINT; `scheduler:get_next` on the wake turn stays the authoritative claim
+(re-register on a re-miss). `events:cancel { root_id }` kills a whole tree;
+`events:status` shows `composed_awaits`.
 
 **You're always-armed for inbox-wake.** The operator arms your standing
 `coord:inbox-wake:<self>` watch at SessionStart, so a `coord:send {wake:true,
@@ -253,7 +267,11 @@ runs from the **release checkout** (`papercup-release`), pinned to the green
 does NOT pick up a `lib/**` edit**; it just restarts the same green snapshot.
 To test a server-side edit live, use the **staging operator `:3170`**
 (`papercup-staging-api`, runs from the `staging` tree, no hot-reload):
-`systemctl --user restart papercup-staging-api.service`, then probe `:3170`.
+`dev:restart { target: 'staging', confirm: true }`, then probe `:3170`. Never a
+raw `systemctl --user restart papercup-staging-api.service` — on a
+heavily-parallel fleet that fired every ~5-6min for hours with zero coordination
+(WI-4221); `dev:restart` drains concurrent users first and coalesces a restart
+requested within ~2min of a peer's real one.
 Promotion to `:3070` is AUTOMATIC (staging-branch-pipeline-2026-06-06):
 green-checkpoint (hourly) FFs `main` when `staging` is green; release-trigger
 (≤15 min) then auto-runs the scripted deploy (drain → swap → migrate →
@@ -626,7 +644,11 @@ recalled later — coord rows are timestamped events, not knowledge.
 
 **insights — procedural memory** (the runbook): MDX at
 `apps/operator-docs/src/content/docs/agent-insights/<slug>.mdx`,
-PR-reviewed. Write one short page when you hit something non-obvious that
+PR-reviewed. A PROCEDURAL ordered-steps page is the official **runbook**
+genre — slug `<topic>-runbook`, tag `runbook`, say "runbook" in
+title/description so docs:search ranks it (agent-insights/runbooks-convention);
+a post-mortem lesson is a plain insight. Write one short page when you hit
+something non-obvious that
 would save the next agent an hour — **in the SAME TURN the root cause is
 proven, never queued for close-out** (close-outs get lost; the insight is
 part of the fix). MANDATORY immediately when the owner flags recurrence

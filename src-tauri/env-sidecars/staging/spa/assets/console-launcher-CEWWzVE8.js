@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-C1p56SIS.js";e();export{t as buildConsoleEnvelope};

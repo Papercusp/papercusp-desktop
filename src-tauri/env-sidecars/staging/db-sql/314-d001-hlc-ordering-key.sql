@@ -1,13 +1,13 @@
 -- 314-d001-hlc-ordering-key.sql
 --
--- D-001 (shared-hive-release-testing Brief J, the hard S0): federated LWW
+-- D-001 (shared-pot-release-testing Brief J, the hard S0): federated LWW
 -- diverges under clock skew because the merge winners-fold orders by the op's
 -- HLC (read-merge.ts beatsStored ≡ projection.ts lwwPick) but every mutable
 -- projection's PG guard orders by `fed_ts` (wall clock, mig 181). The recv-seam
 -- (observeRemoteHlc) advances a peer's HLC above a later write's `ts`, so the two
 -- orders decouple: the fold hands apply the HLC-winner, the PG guard rejects it
 -- (lower fed_ts) → two honest peers materialise DIFFERENT rows for the same key,
--- permanently. (Full root-cause: shared-hive-release-testing/findings-D.md +
+-- permanently. (Full root-cause: shared-pot-release-testing/findings-D.md +
 -- findings-J.md; plan shared-hive-hardening-2026-06-13 D-013.)
 --
 -- THE FIX — one ordering key of record, end to end (approach (a)):

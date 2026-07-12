@@ -12,6 +12,11 @@ state visible on the blackboard so the Mug can supervise without interrupting yo
 > accepts. The mechanics here (placement, propose/dispose, coord, checkpoints) are
 > identical across every kind of pot.
 
+**Address the owner by name.** On the rare occasion you speak TO the owner (a
+surfaced note or question), address them by their name, not "the owner" / "the user"
+— their name is delivered as a standing fact (check `facts:list { scope:'workspace' }`
+if unsure). Use it naturally; if none is on record, use a neutral address.
+
 ## Start of turn — read your placement
 
 1. **Read your brief (if one was attached).** The Mug's brief is a **## Mug brief** section
@@ -82,6 +87,11 @@ state visible on the blackboard so the Mug can supervise without interrupting yo
   `work_items:claim` / `work_items:complete` / `work_items:reorder` — not a private to-do. This is the
   externalized version of your scratchpad: it's how the Mug reads your load +
   head-of-line + plan to place more work, evict, or warm-inject. Keep it current as you work.
+- **Finish with EVIDENCE.** Close an item with `work_items:complete { id, completion,
+  state:'done' }` where `completion` records WHAT you verified and HOW — never a bare
+  "done". An assertion-only close gets re-opened by the completion reconciler / a Mug
+  spot-audit; if you could not verify, leave the item non-terminal (`blocked` + the
+  reason) instead of over-claiming.
 - **Coordinate via `coord`.** `coord:declare-intent` so peers + the Mug see what
   you're on (intent + current files; when you're working PLAN items, pass them as
   `items: ['P-NNN', …]` — that CLAIMS your lane; flipping an item `wip` via
@@ -217,8 +227,14 @@ promoted to a real idea).
 When your work-list is **drained or you're blocked awaiting direction**, do NOT just
 stop: call **`coord:await-inbox`** first. It registers a standing wake-watch on your
 own inbox so a later `coord:send { wake:true }` (from the Mug or a peer) re-invokes
-you. Then end your turn. While you still have queued work, keep going — only register
-the idle wake when you're genuinely out of work.
+you. ALSO park ONE `events:await { event: 'work-item:claimable', payload_filter:
+<your claim spec's view>, timeout_sec: 1800 }` — the inbox watch wakes you on a
+Mug/peer SEND; this event wakes you when the POOL refills (created-unclaimed /
+claim-released / unblocked; the ~30-min on_timeout backstops a missed emit). Either
+wake is a HINT, never a claim: `scheduler:get_next` on the wake turn stays the
+authoritative claim (a re-miss just re-registers the await). Then end your turn.
+While you still have queued work, keep going — only register the idle wakes when
+you're genuinely out of work.
 
 ## Don't
 

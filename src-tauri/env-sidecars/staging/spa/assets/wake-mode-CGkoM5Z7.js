@@ -1,0 +1,4 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CgbVJkBN.js";import{s as r}from"./workspace-registry-C3lTKlnO.js";function i(e){return e===`auto`||e===`manual`?e:null}function a(e,t){return e??t??`auto`}async function o(e){let{sql:n}=t();return(await n`SELECT value FROM harness_shared.operator_settings WHERE key = ${e} LIMIT 1`)[0]?.value??null}async function s(){return i(await o(f))??`auto`}async function c(e){return i(await o(p(e)))}async function l(e){return a(await c(e),await s())}async function u(){let{sql:e}=t(),n=await e`
+    SELECT key, value FROM harness_shared.operator_settings
+    WHERE key LIKE 'wake_mode:agent:%'
+  `,r=new Map;for(let e of n){let t=e.key.slice(16),n=i(e.value);t&&n&&r.set(t,n)}return r}var d,f,p,m=e((()=>{n(),r(),d=`auto`,f=`wake_mode:default`,p=e=>`wake_mode:agent:${e}`}));export{c as a,a as c,s as i,i as n,m as o,u as r,l as s,d as t};

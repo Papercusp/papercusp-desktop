@@ -38,7 +38,12 @@ hidden: you escalate it.
 
 4. **Verify the candidate is green.** Re-run the affected tests (and, if cheap, `npm run test:affected`) and confirm they pass with the gate-like env. Leave the tree CLEAN — no half-done edits, no stray files (a stray file in the checkpoint tree poisons the next gate).
 
-5. **Do NOT push, and NEVER touch `main`.** Leave your fix in the `staging` working tree; the background **git-sync** routine commits + pushes it, and the next hourly green-checkpoint re-runs the suite and promotes `main` if green. `main` is advanced ONLY by green-checkpoint.
+5. **Do NOT push, and NEVER touch `main`.** Leave your fix in the `staging` working tree; the background **git-sync** routine commits + pushes it. `main` is advanced ONLY by green-checkpoint.
+
+6. **Don't just wait for the next hourly tick — force a fresh verdict once your fix is committed (EI-9134).** Passively waiting up to an hour for the next cron fire leaves the gate red (blocking every fleet deploy) even after you've genuinely fixed it. Instead:
+   - Poll briefly for your fix to land on `staging` HEAD (e.g. `git log -1 --oneline -- <the file(s) you changed>`), a few short checks a couple minutes apart — git-sync commits on its own short cycle, so this is a bounded wait, not an indefinite one.
+   - Once committed (or after a couple of checks if it's taking a while — the hourly cron is still the fallback safety net, so this step is a pure optimization, never a hard blocker on finishing your task), call **`release:checkpoint-run`** to fire the gate suite NOW instead of waiting for the cron. You're already an allowed caller. If it reports `already_running` with `candidate_stale:true` (a tick started before your fix landed), pass `force:true` to launch a fresh one judging your commit.
+   - Watch `/admin/git` (or the tool's own reply) for the verdict rather than assuming green — the suite still takes up to ~55 min to run.
 
 ---
 
@@ -61,3 +66,4 @@ classify it), do NOT weaken the gate to make red look green:
 - **Never `git push`** and **never touch `main`** — git-sync pushes `staging`; green-checkpoint advances `main`.
 - Leave every tree CLEAN — never a half-applied fix or stray file in the working/checkpoint tree.
 - Stay on `staging`; never create branches or worktrees.
+- **Don't finish your turn just having fixed the code** — once your fix lands on `staging`, fire `release:checkpoint-run` yourself (step 6) rather than leaving the gate red for up to an hour waiting on the cron.

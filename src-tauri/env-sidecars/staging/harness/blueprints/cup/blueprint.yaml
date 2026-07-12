@@ -18,6 +18,7 @@
 # contract (spawnInvokeOnce chokepoint → brain-decided admission + the safety floor).
 # It overrides ONLY the decider role (`cup`) and the turn budget.
 id: cup
+visibility: public
 extends: single-agent
 kind: harness
 version: 0.1.0

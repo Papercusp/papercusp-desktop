@@ -29,3 +29,11 @@ organization rather than a series of goldfish conversations.
 If an agent remembers something wrongly — or you change your mind — just say
 so: memories can be corrected or forgotten, and the correction propagates to
 everyone the same way.
+
+Under the hood, recall is powered by a local embedding model — the default is
+**Harrier-OSS-0.6b**, which gives the best recall on our internal benchmark and
+runs fully on your machine (no API key, nothing leaves your device). If you
+want a lighter footprint, **EmbeddingGemma-300m** uses less resources (~4×
+faster embeds, ~1GB RAM instead of ~2.5GB) with slightly lower recall — switch
+any time in **Settings → User → Memory system**, then run "Re-embed" on the
+Memory page so existing memories follow you to the new model.

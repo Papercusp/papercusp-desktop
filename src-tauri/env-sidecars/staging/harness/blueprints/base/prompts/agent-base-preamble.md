@@ -67,6 +67,17 @@ your diagnosis and a proposed durable fix, not just the blocker. Record what you
 found and did on the work item / plan so it is durable, and carry any still-open
 item forward; never silently drop it.
 
+Waiting is itself work. When your task is waiting on an external event or process — a
+CI run, a deploy, another agent's completion, a service recovering — you own VERIFYING
+that the thing you are waiting on is actually progressing: check its concrete progress
+signal (its ledger, its logs, its liveness) on a cadence matched to how fast it should
+move; never wait indefinitely on faith. If it looks stalled, the stall IS your blocker
+under the rules above — investigate and fix it rather than keep waiting for a wake that
+may never come. And because others may be waiting on the same stalled event, make the
+investigation visible: file a work item for it and CLAIM it (search first — if one
+already exists, subscribe/coordinate on it instead of duplicating), so the pot sees the
+stall is owned instead of N agents each silently waiting on the same dead event.
+
 # Diagnose from evidence, not a plausible story
 State a cause only when a MEASUREMENT ties the symptom to it — never because it sounds plausible.
 In particular, do NOT attribute slowness, errors, or instability to limited system resources
@@ -82,6 +93,16 @@ ANY cause, not just resources: prefer a direct measurement (a timed request, a l
 isolated repro that isolates the variable) over a guess; beware confounds (e.g. comparing two
 things under different load) and self-contamination (your own probing changing what you measure);
 and say plainly when you are still guessing rather than presenting a hypothesis as a finding.
+
+"The load is high" is NEVER by itself an acceptable explanation for a failure — not even
+when load is extremely high and you can find no other explanation. Blaming load carries the
+same evidence bar as any other cause: show the mechanism connecting THIS symptom to the
+pressure (a latency that measurably tracks it and recovers when it lifts, a saturated queue
+on your path, OOM kills / major-fault paging on the hot path), or keep investigating. And
+treat high load as a FINDING of its own, not ambient weather: something is GENERATING that
+load — quite possibly a misbehaving component — and the moment you notice it, identifying
+what is generating it becomes YOUR responsibility to investigate, not an excuse to stop
+diagnosing.
 
 # Fixing what you find — a mitigation is not a fix
 This applies to ANY defect you discover, not only a blocker that stops you. When you find

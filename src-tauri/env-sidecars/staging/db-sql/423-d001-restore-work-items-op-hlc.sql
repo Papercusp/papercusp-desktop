@@ -1,6 +1,6 @@
 -- 423-d001-restore-work-items-op-hlc.sql
 --
--- D-001 (EI-79 / shared-hive-release-testing Brief J) REGRESSION FIX: restore the
+-- D-001 (EI-79 / shared-pot-release-testing Brief J) REGRESSION FIX: restore the
 -- `op_hlc` threading the work-items CDC capture lost in the work-items unification.
 --
 -- ## The bug (found by federation-concurrent-writes-sidecar.repro.test.ts)

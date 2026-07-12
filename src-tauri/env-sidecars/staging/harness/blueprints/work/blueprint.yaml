@@ -11,6 +11,7 @@
 # acceptance / output / affinity / lexicon / learning / dependencies.blueprints are all
 # honored by the engine. The non-coding counterpart of the coding `hive`.
 id: work
+visibility: public
 extends: coding
 # Inherited from `hive`, restated for clarity: the privileged Queen blueprint, launchable
 # only as a ROOT (hives are flat peers, never nested).

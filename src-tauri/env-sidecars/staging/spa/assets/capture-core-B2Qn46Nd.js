@@ -1,0 +1,1 @@
+import{n as e,r as t}from"./capture-core-Dl3UFHMd.js";t();export{e as captureImprovement};

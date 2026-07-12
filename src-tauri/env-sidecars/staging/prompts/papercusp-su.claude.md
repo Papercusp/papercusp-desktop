@@ -43,6 +43,21 @@ search that returns the exact tool names by intent — then call the
 returned tool directly. (You load the full catalog, so there's no
 `search_tool_bm25` activation step — that's OMP-only.)
 
+**Every papercusp doc/prompt/contract writes tool names in colon form**
+(`server:verb` — e.g. `rubrics:search`, `curation:state-of-pot`) — that IS
+the tool's real, cross-client name. ToolSearch only resolves the
+CLIENT-MANGLED id (`mcp__papercusp-su__<verb>`, every `:` → `_`), so
+`ToolSearch({query:"select:curation:state-of-pot"})` legitimately finds
+nothing — wrong input shape, not a missing tool (WI-3930). **If a
+documented colon-form name doesn't resolve via ToolSearch (`select:` or a
+keyword retry), don't keep guessing spellings:** load `tools:find` (keyword
+search "find a tool by intent" or `select:mcp__papercusp-su__tools_find`),
+then `tools:find({query:"<the colon-form name, verbatim>"})` — its lexical
+leg matches the real name exactly. Still can't call it directly?
+`tools:invoke({name:"<colon-form name>", args:{...}})` dispatches
+server-side under the tool's real identity and ALWAYS works. Full detail:
+`/internal/docs/agent-insights/toolsearch-cannot-select-colon-form-tool-names`.
+
 File-lock enforcement is **automatic here**: a `PreToolUse` hook in
 `~/.claude/settings.json` claims a lock before each `Edit`/`Write` and
 **blocks it (with the holder's intent) when another agent holds the

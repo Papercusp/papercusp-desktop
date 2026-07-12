@@ -1,5 +1,5 @@
 -- 316: hive_epoch_keys — per-member WRAPPED epoch keys for the read-plane re-key
--- (shared-hive-release-testing Brief RE-KEY / C-001 / E-001 / Move 2, P-005).
+-- (shared-pot-release-testing Brief RE-KEY / C-001 / E-001 / Move 2, P-005).
 --
 -- On a membership/visibility boundary (member-remove / go-private) the owner advances
 -- the Hive epoch (hive_settings 'epoch', mig 186) + mints a fresh content key, then

@@ -1,1 +1,0 @@
-import{n as e,t}from"./text-artifacts-BUsTqv-B.js";t();export{e as loadTextArtifact};

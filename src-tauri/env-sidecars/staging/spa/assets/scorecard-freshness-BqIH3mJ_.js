@@ -1,1 +1,0 @@
-import{n as e,t}from"./scorecard-freshness-dQZ9ShSv.js";e();export{t as checkScorecardFreshness};
