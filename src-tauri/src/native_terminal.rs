@@ -218,11 +218,16 @@ fn downgrade_unbuilt(s: TerminalStrategy) -> TerminalStrategy {
     let swiftterm_available = swiftterm_embed::available();
     #[cfg(not(target_os = "macos"))]
     let swiftterm_available = false;
+    // WI-4448: the new-window launcher is no longer Linux-only — Windows now has
+    // one (the chat dock in a Windows Terminal window, hosted in the
+    // papercup-runtime WSL distro). Without this, Windows selects
+    // EmbeddedView(ConPty), finds that spike unavailable, and lands on Disabled —
+    // i.e. no dock at all, which is precisely the bug.
     let out = downgrade_unbuilt_with(
         s,
         vte_available,
         swiftterm_available,
-        cfg!(target_os = "linux"),
+        cfg!(any(target_os = "linux", target_os = "windows")),
     );
     if out == TerminalStrategy::Disabled && s != TerminalStrategy::Disabled {
         println!(
@@ -2670,9 +2675,11 @@ impl NativeTerminal {
     }
 }
 
-// Non-Linux: the glued path is X11-only; these are no-ops so main.rs call sites
-// stay platform-free. (Phase 2 embedded views land as their own impls.)
-#[cfg(not(target_os = "linux"))]
+// macOS: the glued path is X11-only and the new-window launcher is ghostty
+// (Linux). macOS gets its dock from the SwiftTerm embedded view, so these stay
+// no-ops and main.rs call sites stay platform-free. Windows is NOT in this set
+// any more — it has a real `launch_new_window` (the WSL chat dock, WI-4448).
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl NativeTerminal {
     pub fn launch_glued(&self) -> Result<(), String> {
         Err("glued terminal is X11-only".into())

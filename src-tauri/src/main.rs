@@ -5022,7 +5022,17 @@ fn prepare_dock_env(app: &AppHandle) {
         let bin = sidecar.join("bin");
         if bin.is_dir() {
             let cur = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var("PATH", format!("{}:{}", bin.display(), cur));
+            // PATH is `;`-separated on Windows — a `:` here would fuse our dir to
+            // the first existing entry and silently discard BOTH.
+            let sep = if cfg!(windows) { ';' } else { ':' };
+            std::env::set_var("PATH", format!("{}{sep}{}", bin.display(), cur));
+            // WI-4448: on Windows the dock runs INSIDE the papercup-runtime WSL
+            // distro, which never sees this (Windows) PATH — build-rootfs.sh sets
+            // `appendWindowsPath=false`. So the launcher needs the bundled bin dir
+            // as a value it can PATH-translate (`windows_path_to_wsl`), not just as
+            // an entry in our own PATH. Exported on every platform: it is plain
+            // provenance for where the dock binaries came from.
+            std::env::set_var("PAPERCUSP_DOCK_BIN", &bin);
         }
         if std::env::var_os("PUI_COMPANION_WASM").is_none() {
             let wasm = sidecar.join("pui-companion.wasm");
