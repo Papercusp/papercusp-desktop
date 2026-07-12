@@ -830,14 +830,15 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
     || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
 fi
 
-echo "==> generating latest.json"
+echo "==> generating latest.json + latest-server.json"
 LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
+LATEST_SERVER_JSON="/tmp/papercusp-latest-server-${TAG}.json"
 NOTES_FILE="/tmp/papercusp-notes-${TAG}.md"
 
-python3 - "$VERSION" "$CHANNEL" "$TAG" "$LATEST_JSON" "$NOTES_FILE" "${ARTIFACTS[@]}" <<'PY'
+python3 - "$VERSION" "$CHANNEL" "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON" "$NOTES_FILE" "${ARTIFACTS[@]}" <<'PY'
 import json, os, sys, pathlib, hashlib
-version, channel, tag, out_path, notes_path = sys.argv[1:6]
-artifacts = [pathlib.Path(p) for p in sys.argv[6:]]
+version, channel, tag, out_path, out_server_path, notes_path = sys.argv[1:7]
+artifacts = [pathlib.Path(p) for p in sys.argv[7:]]
 
 # Where an updating client DOWNLOADS the artifact from. This used to be
 # hardcoded to github.com/Papercusp/papercusp-desktop/releases/download/... —
@@ -857,78 +858,116 @@ def repo_url(name: str) -> str:
     base = UPDATE_BASE or PLACEHOLDER
     return f"{base}/{tag}/{name}"
 
-# Map (platform, arch, ext) → (url, signature). The operator's
-# /api/updates/manifest already converts this latest.json to the
-# Tauri updater's wire format, so what we publish here is the
-# canonical truth.
-platforms = {}
-def add(platform_key, bin_path, sig_path):
-    sig = sig_path.read_text().strip() if sig_path.exists() else ""
-    platforms[platform_key] = {
-        "signature": sig,
-        "url": repo_url(bin_path.name),
-    }
+# EI-... (WI-4404): WI-3696 made latest.json GUI-only because the darwin
+# (.app.tar.gz) and windows (-setup.exe/.msi) collection globs pull BOTH
+# roles' bundles out of the SAME output dir (mac-vm-build.sh / build-
+# windows-on-vm.sh each build "Papercusp GUI" + "Papercusp Server" side by
+# side) — adding both unconditionally into ONE `platforms` dict let whichever
+# role's file the shell glob happened to iterate LAST silently clobber the
+# other's entry (a Server artifact — genuinely signed — served in place of
+# GUI, or vice versa). The fix keeps that hard separation but stops discarding
+# the Server half outright: build the SAME platform-selection logic once per
+# product into its OWN dict/manifest/file (`latest.json` for gui,
+# `latest-server.json` for server) so a `product=server` poll
+# (updates-manifest.ts) finally has something to be served from, instead of
+# always answering `no_candidate` — the "no update path exists for Server"
+# gap WI-4404 identified.
+def build_platforms(artifacts, want_token, reject_token):
+    """want_token/reject_token: substrings that must/must-not appear in the
+    artifact filename — e.g. want='Server', reject='GUI' selects only
+    Server-role bundles for the server manifest (and vice versa for gui)."""
+    platforms = {}
+    def add(platform_key, bin_path, sig_path):
+        sig = sig_path.read_text().strip() if sig_path.exists() else ""
+        platforms[platform_key] = {
+            "signature": sig,
+            "url": repo_url(bin_path.name),
+        }
+    for art in artifacts:
+        if reject_token in art.name:
+            continue
+        # A pre-split bundle (neither role token in the name) is treated as
+        # GUI-role only — never let an unlabeled artifact land in BOTH
+        # manifests. want_token=='' (gui) accepts it; want_token=='Server'
+        # (server) requires the explicit token.
+        if want_token and want_token not in art.name:
+            continue
+        if art.suffix == ".AppImage":
+            sig = art.with_suffix(art.suffix + ".sig")
+            add("linux-x86_64", art, sig)
+        # Windows — NSIS setup.exe is the v1 artifact (plan
+        # windows-desktop-release-readiness-2026-06-11 D-003); MSI kept as
+        # fallback for an opportunistic WiX build.
+        if art.name.endswith("-setup.exe"):
+            sig = pathlib.Path(str(art) + ".sig")
+            add("windows-x86_64", art, sig)
+        elif art.name.endswith(".msi") and "windows-x86_64" not in platforms:
+            sig = art.with_suffix(".msi.sig")
+            add("windows-x86_64", art, sig)
+        if "aarch64" in str(art) and art.suffix == ".AppImage":
+            sig = art.with_suffix(".AppImage.sig")
+            add("linux-aarch64", art, sig)
+        # macOS universal .app.tar.gz serves BOTH darwin arches (D-006)
+        if art.name.endswith(".app.tar.gz"):
+            sig = pathlib.Path(str(art) + ".sig")
+            add("darwin-x86_64", art, sig)
+            add("darwin-aarch64", art, sig)
+    return platforms
 
-# Linux x86_64 — pick AppImage as the updater format
-for art in artifacts:
-    # WI-3696: latest.json is the GUI product's update-fallback manifest ONLY — a
-    # Server-role artifact must NEVER land in it, on ANY platform. The darwin
-    # (.app.tar.gz) and windows (-setup.exe/.msi) collection globs pull BOTH
-    # roles' bundles out of the SAME output dir (mac-vm-build.sh / build-
-    # windows-on-vm.sh each build "Papercusp GUI" + "Papercusp Server" side by
-    # side), and this loop used to add() unconditionally per matching
-    # extension — so whichever role's file the shell glob happened to iterate
-    # LAST silently overwrote the other's entry. Concretely: "Papercusp
-    # Server.app.tar.gz" sorts after "Papercusp GUI.app.tar.gz" alphabetically,
-    # so it always won, clobbering the darwin entries with a Server artifact
-    # whose signature VALIDATES (it's genuinely signed) — a mac GUI update
-    # falling back to latest.json would silently install Server instead of
-    # GUI. Skip every Server-role artifact up front so only the GUI one is
-    # ever considered, on every platform.
-    if "Server" in art.name:
-        continue
-    if art.suffix == ".AppImage":
-        sig = art.with_suffix(art.suffix + ".sig")
-        add("linux-x86_64", art, sig)
-    # Windows — NSIS setup.exe is the v1 artifact (plan
-    # windows-desktop-release-readiness-2026-06-11 D-003); MSI kept as
-    # fallback for an opportunistic WiX build.
-    if art.name.endswith("-setup.exe"):
-        sig = pathlib.Path(str(art) + ".sig")
-        add("windows-x86_64", art, sig)
-    elif art.name.endswith(".msi") and "windows-x86_64" not in platforms:
-        sig = art.with_suffix(".msi.sig")
-        add("windows-x86_64", art, sig)
-    if "aarch64" in str(art) and art.suffix == ".AppImage":
-        sig = art.with_suffix(".AppImage.sig")
-        add("linux-aarch64", art, sig)
-    # macOS universal .app.tar.gz serves BOTH darwin arches (D-006)
-    if art.name.endswith(".app.tar.gz"):
-        sig = pathlib.Path(str(art) + ".sig")
-        add("darwin-x86_64", art, sig)
-        add("darwin-aarch64", art, sig)
+gui_platforms = build_platforms(artifacts, want_token="", reject_token="Server")
+server_platforms = build_platforms(artifacts, want_token="Server", reject_token="GUI")
 
-# WI-3696 cut-time assertion: every entry latest.json publishes must genuinely
-# be the GUI product (productName "Papercusp GUI" → every collected filename
-# contains "GUI"; a Server artifact never does, and never should reach here
-# given the skip above — this is a fail-loud backstop against a FUTURE
-# naming/glob regression re-introducing the same silent wrong-product swap).
-for platform_key, entry in platforms.items():
-    if "GUI" not in entry["url"]:
+# WI-3696/WI-4404 cut-time assertion: every entry each manifest publishes must
+# genuinely be that manifest's product (a fail-loud backstop against a FUTURE
+# naming/glob regression re-introducing a silent wrong-product swap). The GUI
+# manifest's own artifacts don't carry a "GUI" token pre-split, so the GUI
+# check only forbids the OTHER product's token; the Server manifest requires
+# its own token explicitly since Server-role bundles are always name-stamped.
+for platform_key, entry in gui_platforms.items():
+    if "Server" in entry["url"]:
         raise SystemExit(
-            f"latest.json BUG: {platform_key} entry does not look like the GUI product "
+            f"latest.json BUG: {platform_key} entry looks like the Server product "
             f"(url={entry['url']!r}) — refusing to publish a manifest that could ship the "
             f"wrong app on update (WI-3696)"
         )
+for platform_key, entry in server_platforms.items():
+    if "Server" not in entry["url"]:
+        raise SystemExit(
+            f"latest-server.json BUG: {platform_key} entry does not look like the Server "
+            f"product (url={entry['url']!r}) — refusing to publish a manifest that could "
+            f"ship the wrong app on update (WI-4404)"
+        )
+
+pub_date = __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 manifest = {
     "version": version,
     "channel": channel,
     "notes": f"Papercusp desktop {version} ({channel}). See release notes.",
-    "pub_date": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    "platforms": platforms,
+    "pub_date": pub_date,
+    "platforms": gui_platforms,
 }
 pathlib.Path(out_path).write_text(json.dumps(manifest, indent=2) + "\n")
+
+# Only emit latest-server.json when this cut actually produced Server-role
+# artifacts (PAPERCUSP_BUILD_ROLES="gui" builds skip Server entirely) — an
+# empty-platforms manifest would make every Server poll read as "up to date"
+# just as convincingly as no manifest at all, but writing NOTHING here instead
+# leaves the PREVIOUS cut's latest-server.json live on the host (upload-
+# release.sh only uploads what release-local.sh actually produced), so a
+# Server-only build never regresses to a false up-to-date.
+if server_platforms:
+    server_manifest = {
+        "version": version,
+        "channel": channel,
+        "notes": f"Papercusp Server {version} ({channel}). See release notes.",
+        "pub_date": pub_date,
+        "platforms": server_platforms,
+    }
+    pathlib.Path(out_server_path).write_text(json.dumps(server_manifest, indent=2) + "\n")
+else:
+    print("==> no Server-role artifacts in this cut — latest-server.json NOT written "
+          "(the host keeps serving its previous one, if any)")
 
 # Brief release notes
 lines = [
@@ -947,8 +986,8 @@ print(f"notes:    {notes_path}")
 if not UPDATE_BASE:
     print(
         "\n"
-        "  ⚠ WARNING: PAPERCUSP_UPDATE_BASE_URL is unset, so latest.json's download\n"
-        "    URLs are the placeholder " + PLACEHOLDER + "/...\n"
+        "  ⚠ WARNING: PAPERCUSP_UPDATE_BASE_URL is unset, so latest.json's (and\n"
+        "    latest-server.json's, if written) download URLs are the placeholder " + PLACEHOLDER + "/...\n"
         "    The INSTALLERS below are complete and shippable — this only affects the\n"
         "    auto-updater manifest. Before latest.json is SERVED to clients, re-run with\n"
         "    PAPERCUSP_UPDATE_BASE_URL=<base the artifacts are uploaded to>, or rewrite\n"
@@ -979,6 +1018,7 @@ echo
 echo "==> done (LOCAL-only — nothing was pushed to GitHub)"
 echo "    tag:       $TAG (local, not pushed)"
 echo "    manifest:  $LATEST_JSON"
+[[ -f "$LATEST_SERVER_JSON" ]] && echo "    manifest (server): $LATEST_SERVER_JSON"
 echo "    notes:     $NOTES_FILE"
 echo "    artifacts: ${#ARTIFACTS[@]}"
 echo "    hand-off:  give the owner the paths + sha256 below."

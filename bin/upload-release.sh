@@ -103,6 +103,11 @@ s3api_head() {
 # ── What to upload ───────────────────────────────────────────────────────────
 BUNDLE="${PAPERCUSP_BUNDLE_DIR:-${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle}"
 LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
+# WI-4404: the Server product's own manifest. Optional — release-local.sh only
+# writes it when the cut actually produced Server-role artifacts
+# (PAPERCUSP_BUILD_ROLES="gui" skips it entirely), so its absence here is not
+# an error; it just means this upload carries no Server update this time.
+LATEST_SERVER_JSON="/tmp/papercusp-latest-server-${TAG}.json"
 
 if [[ ! -f "$LATEST_JSON" ]]; then
   echo "ERROR: $LATEST_JSON not found — run bin/release-local.sh $VERSION $CHANNEL first." >&2
@@ -114,6 +119,11 @@ fi
 # update and then fail to fetch it. (WI-4364; the operator refuses it too.)
 if grep -q 'papercusp-update-base-unset://' "$LATEST_JSON"; then
   echo "ERROR: $LATEST_JSON still contains PLACEHOLDER urls — it was cut without" >&2
+  echo "       PAPERCUSP_UPDATE_BASE_URL. Regenerate it before uploading (WI-4364)." >&2
+  exit 1
+fi
+if [[ -f "$LATEST_SERVER_JSON" ]] && grep -q 'papercusp-update-base-unset://' "$LATEST_SERVER_JSON"; then
+  echo "ERROR: $LATEST_SERVER_JSON still contains PLACEHOLDER urls — it was cut without" >&2
   echo "       PAPERCUSP_UPDATE_BASE_URL. Regenerate it before uploading (WI-4364)." >&2
   exit 1
 fi
@@ -169,6 +179,14 @@ done
 echo "==> uploading latest.json (LAST — this is what publishes the update)"
 s3 cp "$LATEST_JSON" "s3://${R2_BUCKET}/${KEY_PREFIX}/latest.json" \
   --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+
+if [[ -f "$LATEST_SERVER_JSON" ]]; then
+  echo "==> uploading latest-server.json (publishes the Server product's update — WI-4404)"
+  s3 cp "$LATEST_SERVER_JSON" "s3://${R2_BUCKET}/${KEY_PREFIX}/latest-server.json" \
+    --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+else
+  echo "==> no latest-server.json for this cut — Server product's manifest left as-is"
+fi
 
 # ── Verify what actually landed ──────────────────────────────────────────────
 # Two INDEPENDENT checks, because they can fail for very different reasons and
