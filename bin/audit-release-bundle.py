@@ -174,7 +174,7 @@ def phase_a_paths(bundle, lits):
     names = r.stdout.splitlines()
     hits = []
     for name in names:
-        for rule, rx in FORBIDDEN_PATH:
+        for rule, rx, _globs in FORBIDDEN_PATH:
             if rx.search(name):
                 hits.append((rule, name))
                 break
@@ -251,10 +251,26 @@ def redact(v):
     return f"{v[:8]}…{v[-4:]} (len {len(v)})" if len(v) > 16 else f"{v[:3]}… (len {len(v)})"
 
 
+def print_tar_excludes():
+    """The stager's exclude list, DERIVED from the gate's rules — never re-typed.
+
+    Emits both the `./X` (mono root) and `*/X` (any depth) forms, GNU tar's
+    proven idiom in this repo. Nested is the half the top-level allowlist cannot
+    do: the junk lives inside apps/ and packages/, and some of it is git-tracked.
+    """
+    for _rule, _rx, globs in FORBIDDEN_PATH:
+        for g in globs:
+            print(f"./{g}")
+            print(f"*/{g}")
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
+    if sys.argv[1] == "--tar-excludes":
+        return print_tar_excludes()
     bundle = sys.argv[1]
     if not os.path.isfile(bundle):
         print(f"AUDIT ERROR: no such bundle: {bundle}", file=sys.stderr)

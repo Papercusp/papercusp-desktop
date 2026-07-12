@@ -67,20 +67,29 @@ OUT="$SIDECAR/source.tar.zst"
 rm -f "$OUT"
 echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 
-# EXCLUDES. Two classes:
+# EXCLUDES. Two classes, and only ONE of them is maintained here:
 #
-# (1) SECRETS / CREDENTIALS — MUST NOT ship (the mono root carries the dev box's
-#     own .env*, .gitconfig, .npmrc, .mcp.json + a nested apps/operator/.env.local).
-#     Even on owner-only dogfood machines, baking creds into a distributable
-#     bundle is wrong + a leak vector if the approach generalizes. Patterns are
-#     ANCHORED to real dotfiles (`/.env.` not `*.env.*`) so a legit source file
-#     like `foo.env.d.ts` is NOT collateral-excluded.
+# (1) SECRETS / PRIVACY — NOT maintained here. Derived at run time from
+#     bin/audit-release-bundle.py --tar-excludes, which is also THE GATE that
+#     fails this build if any of it slips through. These used to be two
+#     hand-kept lists of the same knowledge — a denylist here, a regex set
+#     there — and two copies drift by construction. Read the old list as a
+#     postmortem log: cargo-target added after it blew up the 0.0.5 cut, .next
+#     after it tripled 0.0.8, and NOBODY had ever heard of .papercusp/, so 0.0.8
+#     shipped 121 agent session transcripts. Now the exclude and the check that
+#     catches a missed exclude come from ONE rule (WI-4419).
+#
+#     Nested is the half the top-level allowlist below cannot do: the junk sits
+#     INSIDE apps/ and packages/ (packages/operator-core/.papercusp,
+#     apps/operator/test-results, **/.vitest-tmp), and some of it is git-TRACKED
+#     via a .gitignore anchoring bug — so "tracked" was never a safety signal.
 #
 # (2) HEAVY / IRRELEVANT to running dev(:3270 tsx hono-host)/local(:3055 vite):
 #     .git (7.2G history); papercusp-desktop/ (the Tauri/Rust shell — its own
 #     src-tauri/sidecar 2G self-reference, seed 2.1G, Rust target; the operators
 #     never import it and detectPapercupRoot's markers live at the mono root);
-#     Rust build targets; editor dirs; logs; tsbuildinfo.
+#     Rust build targets; editor dirs; logs; tsbuildinfo. Size, not secrecy —
+#     so it stays local, and a miss here is a fat bundle, not a leak.
 #
 # node_modules IS KEPT — it is the shipped toolchain (tsx/vite + the whole
 # @papercusp/* runtime closure). dist/ is DELIBERATELY kept: some internal
@@ -90,28 +99,16 @@ echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 # 0.0.8 GUI deb to 9.4GB (0.0.6: 2.9GB) with a ~35G first-boot extract; the
 # standalone Next operator path is RETIRED and nothing in hono-host /
 # host-bootstrap / env-operator-launcher resolves into .next at runtime.
-declare -a EXCLUDES=(
-  # (1) secrets / credentials — root + nested, anchored to dotfiles
-  --exclude='./.env' --exclude='*/.env'
-  --exclude='./.env.*' --exclude='*/.env.*'
-  --exclude='./.npmrc' --exclude='*/.npmrc'
-  --exclude='./.gitconfig' --exclude='*/.gitconfig'
-  --exclude='./.git-credentials' --exclude='*/.git-credentials'
-  --exclude='./.netrc' --exclude='*/.netrc'
-  --exclude='./.mcp.json' --exclude='./.mcp.json.*'
-  --exclude='*/.mcp.json' --exclude='*/.mcp.json.*'
-  --exclude='./.bashrc' --exclude='*/.bashrc'
-  --exclude='./.bash_profile' --exclude='*/.bash_profile'
-  --exclude='./.bash_history' --exclude='*/.bash_history'
-  --exclude='./.profile' --exclude='*/.profile'
-  --exclude='./.zshrc' --exclude='*/.zshrc'
-  # ssh / cloud credential dirs (never blanket *.pem/*.key — node_modules ships
-  # legit CA bundles + test certs that TLS needs at runtime)
-  --exclude='./.ssh' --exclude='*/.ssh'
-  --exclude='./.aws' --exclude='*/.aws'
-  --exclude='./.gnupg' --exclude='*/.gnupg'
-  # (2) heavy / irrelevant
-  --exclude='./.git'
+declare -a EXCLUDES=()
+# (1) secrets / privacy — from the gate, never re-typed here.
+while IFS= read -r pat; do
+  [[ -n "$pat" ]] && EXCLUDES+=(--exclude="$pat")
+done < <(python3 "$HERE/audit-release-bundle.py" --tar-excludes)
+(( ${#EXCLUDES[@]} > 0 )) \
+  || { echo "ERROR: audit-release-bundle.py --tar-excludes returned nothing — refusing to stage an UNFILTERED tree (WI-4419)" >&2; exit 1; }
+echo "    privacy excludes: ${#EXCLUDES[@]} patterns (derived from the gate's rules)"
+EXCLUDES+=(
+  # (2) heavy / irrelevant — size, not secrecy
   --exclude='./papercusp-desktop'
   --exclude='./target' --exclude='./.cargo-target'
   # per-work-item isolated cargo target dirs (.wiNNNN-cargo-target): multi-GB
