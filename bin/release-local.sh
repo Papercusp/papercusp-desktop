@@ -1,32 +1,34 @@
 #!/usr/bin/env bash
-# Build + sign a Papercusp desktop release WITHOUT GitHub Actions. Run on
-# this Linux box; produces a Linux x86_64 build by default, with
-# cross-compile hooks for other targets.
+# Build + sign a Papercusp desktop release LOCALLY (no GitHub Actions, and —
+# since 2026-07-12 — no GitHub publish at all). Run on this Linux box;
+# produces a Linux x86_64 build by default, with cross-compile hooks for
+# other targets.
 #
-# ⚠ PUBLISHING IS OPT-IN. By default this builds, signs and writes
-# latest.json LOCALLY and stops, printing each artifact + its sha256 so a
-# human uploads them deliberately. Set PAPERCUSP_PUBLISH=1 to create the
-# public GitHub Release (auth = your local interactive `gh` session).
-# Rationale: a GitHub Release is public and effectively irreversible once
-# installed clients see the manifest — the outward-facing half must be the
-# thing you opt INTO. It used to publish unconditionally, so there was no
-# way to cut a build for inspection without shipping it.
+# ⛔ RELEASES ARE LOCAL-ONLY. Owner directive (2026-07-08, restated
+# 2026-07-12): "We are no longer using github for our releases so just build
+# the installer locally and I will upload it to the right spot." The signed
+# artifacts + latest.json on disk ARE the deliverable. This script prints each
+# artifact with its sha256 at the end; hand those to the owner, who uploads.
+# The old GitHub-publish leg (git push origin + gh release create/upload,
+# behind PAPERCUSP_PUBLISH_GITHUB=1) has been DELETED, not merely defaulted
+# off — see the note at the tail. Recover it from git history if that ever
+# reverses.
 #
 # Usage:
-#   bin/release-local.sh 0.0.2 stable                     # LOCAL cut only
-#   PAPERCUSP_PUBLISH=1 bin/release-local.sh 0.0.2 stable # + GitHub Release
+#   bin/release-local.sh 0.0.8 stable     # tag + channel
+#   bin/release-local.sh 0.0.8 beta
 #
 # What it does:
 #   1. Bumps version in package.json + Cargo.toml + tauri.conf.json
 #   2. Builds the sidecar (papercup/apps/operator → src-tauri/sidecar/)
 #   3. cargo + Tauri build (signs with ~/.papercusp/signing/papercusp.key)
-#   4. Generates latest.json manifest
-#   5. Prints local artifacts + sha256s  (STOPS HERE unless PAPERCUSP_PUBLISH=1)
-#   6. PAPERCUSP_PUBLISH=1 only: creates the GitHub Release with artifacts
+#   4. Generates latest.json manifest + release notes
+#   5. Commits the version bump and creates a LOCAL git tag (never pushed)
+#   6. Prints the local artifacts + sha256s, and stops.
 #
-# NOTE: this script does NOT create or push a git tag/commit despite what
-# earlier docs claimed — there is no `git tag`/`git push` in it. The "$TAG"
-# below names the GitHub Release only.
+# NOTE: it DOES `git commit` the version bump and `git tag -f` locally (neither
+# is pushed to origin). It also pushes a dogfood *monorepo* tag — see the
+# PAPERCUP_DOGFOOD_REPO_REF block below; that is a source-pin, not a release.
 #
 # Optional platform legs:
 #   - macOS  : WITH_MAC=1 — drives the macOS build VM over SSH
@@ -909,105 +911,24 @@ git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to com
 echo "==> tagging $TAG (local)"
 git -C "$ROOT" tag -f "$TAG"
 
-# ── ⛔ LOCAL-only by default (RELEASE-RUNBOOK.md → "Releases are LOCAL-only").
-# Owner directive 2026-07-08: "We are no longer using GitHub for our releases —
-# just build the installer locally and I will upload it to the right spot."
-# So this script's original steps 5–6 (push tag to origin, create a GitHub Release
-# with the artifacts) are SUPERSEDED and skipped. The signed artifacts + latest.json
-# on disk are the deliverable; hand the owner the local paths + sha256 (release:cut
-# op:handoff, or §5 of the runbook). Restore the legacy GitHub-publish path only with
-# an explicit PAPERCUSP_PUBLISH_GITHUB=1.
-PUBLISH_GITHUB="${PAPERCUSP_PUBLISH_GITHUB:-0}"
-if [[ "$PUBLISH_GITHUB" != "1" ]]; then
-  echo
-  echo "==> done (LOCAL-only — no GitHub publish; set PAPERCUSP_PUBLISH_GITHUB=1 to restore)"
-  echo "    tag:       $TAG (local, not pushed)"
-  echo "    manifest:  $LATEST_JSON"
-  echo "    artifacts: ${#ARTIFACTS[@]}"
-  echo "    hand-off:  give the owner the local paths + sha256 below (release:cut op:handoff)."
-  for f in "${ARTIFACTS[@]}"; do
-    [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
-  done
-  exit 0
-fi
-
-# ── PAPERCUSP_PUBLISH_GITHUB=1 — legacy, SUPERSEDED path: push the tag + publish a
-# GitHub Release. Retained only as an explicit opt-out of the owner's LOCAL-only directive. ──
-git -C "$ROOT" push origin HEAD "$TAG"
-
-echo "==> creating GitHub Release $TAG"
-# Use --prerelease for alpha + beta so the manifest classifier can
-# scope subscribers correctly.
-PRERELEASE_FLAG=""
-if [[ "$CHANNEL" != "stable" ]]; then
-  PRERELEASE_FLAG="--prerelease"
-fi
-
-# ── GitHub caps release assets at 2 GiB — an oversized upload fails the WHOLE
-# `gh release upload` batch. Filter oversized artifacts out of the UPLOAD set
-# only: they stay listed in latest.json, and the operator's
-# /api/updates/download serves them from PAPERCUSP_RELEASE_HOST instead
-# (desktop-auto-update-operational-2026-07-09 P-004). ──
-GH_ASSET_CAP=2147483648
-UPLOAD_ARTIFACTS=()
-OVERSIZED=()
-for f in "${ARTIFACTS[@]}"; do
-  sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
-  if (( sz >= GH_ASSET_CAP )); then
-    OVERSIZED+=("$f")
-  else
-    UPLOAD_ARTIFACTS+=("$f")
-  fi
-done
-if (( ${#OVERSIZED[@]} > 0 )); then
-  echo "⚠ ${#OVERSIZED[@]} artifact(s) exceed GitHub's 2 GiB asset cap — NOT uploaded to the release:"
-  for f in "${OVERSIZED[@]}"; do
-    echo "    $(basename "$f") ($(du -h "$f" | cut -f1))"
-  done
-  echo "  Host these at PAPERCUSP_RELEASE_HOST — the update manifest falls back there via latest.json."
-fi
-
-# ── PUBLISH IS OPT-IN (PAPERCUSP_PUBLISH=1) ────────────────────────────────
-# Creating a GitHub Release is PUBLIC and effectively irreversible (tags, asset
-# URLs and the update manifest get consumed by installed clients the moment they
-# exist). It used to be the unconditional tail of this script, so merely CUTTING
-# a build to inspect it locally published it — there was no way to build without
-# shipping. That is backwards: the dangerous, outward-facing half must be the
-# thing you opt INTO, not the thing you must remember to suppress.
+# ── ⛔ LOCAL-only. The GitHub publish leg was REMOVED (2026-07-12, WI-desktop-release-0-0-8).
+# Owner directive (2026-07-08, restated 2026-07-12): "We are no longer using github for our
+# releases so just build the installer locally and I will upload it to the right spot."
+# This script therefore builds + signs + writes latest.json and STOPS. The signed artifacts
+# on disk ARE the deliverable; hand the owner the paths + sha256s below.
 #
-# Default now = build + sign + emit latest.json LOCALLY and stop, printing the
-# artifacts and their sha256s so a human can upload them deliberately. Set
-# PAPERCUSP_PUBLISH=1 to actually push the release to GitHub.
-PUBLISH="${PAPERCUSP_PUBLISH:-0}"
-
-if [[ "$PUBLISH" != "1" ]]; then
-  echo
-  echo "==> LOCAL-ONLY cut (PAPERCUSP_PUBLISH is not 1) — nothing was pushed to GitHub."
-  echo "    tag (not created):  $TAG"
-  echo "    latest.json:        $LATEST_JSON"
-  echo "    artifacts (${#ARTIFACTS[@]}):"
-  for f in "${ARTIFACTS[@]}"; do
-    printf '      %s  %s\n' "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" "$f"
-  done
-  echo
-  echo "    To publish deliberately:  PAPERCUSP_PUBLISH=1 $0 $VERSION $CHANNEL"
-  exit 0
-fi
-
-echo "==> PAPERCUSP_PUBLISH=1 — publishing to GitHub (public, hard to undo)"
-if gh release view "$TAG" --repo Papercusp/papercusp-desktop >/dev/null 2>&1; then
-  echo "    release exists; uploading artifacts with --clobber"
-  gh release upload "$TAG" "${UPLOAD_ARTIFACTS[@]}" "$LATEST_JSON" --repo Papercusp/papercusp-desktop --clobber
-else
-  gh release create "$TAG" "${UPLOAD_ARTIFACTS[@]}" "$LATEST_JSON" \
-    --repo Papercusp/papercusp-desktop \
-    --title "Papercusp desktop $VERSION ($CHANNEL)" \
-    --notes-file "$NOTES_FILE" \
-    $PRERELEASE_FLAG
-fi
-
+# There is deliberately NO publish flag. The former PAPERCUSP_PUBLISH_GITHUB=1 opt-out — and
+# the `git push origin HEAD "$TAG"` + `gh release create/upload` it guarded — are DELETED
+# rather than left dormant: a superseded outward-facing path kept "just in case" is exactly
+# the footgun that publishes a release nobody meant to publish. Restore from git history if
+# GitHub releases ever come back.
 echo
-echo "==> done"
-echo "    tag:     $TAG"
-echo "    release: https://github.com/Papercusp/papercusp-desktop/releases/tag/$TAG"
+echo "==> done (LOCAL-only — nothing was pushed to GitHub)"
+echo "    tag:       $TAG (local, not pushed)"
+echo "    manifest:  $LATEST_JSON"
+echo "    notes:     $NOTES_FILE"
 echo "    artifacts: ${#ARTIFACTS[@]}"
+echo "    hand-off:  give the owner the paths + sha256 below."
+for f in "${ARTIFACTS[@]}"; do
+  [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+done
