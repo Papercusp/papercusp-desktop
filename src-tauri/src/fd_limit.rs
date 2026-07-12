@@ -1,22 +1,35 @@
 //! Raise the process's `RLIMIT_NOFILE` soft limit at startup (WI-4369).
 //!
-//! macOS hands a GUI app a **256** fd soft limit. The packaged operator already
-//! holds ~329 open handles on a fresh install, and anything that adds FS
-//! watchers (chokidar / `fs.watch`) scales with the user's workspace size — so a
-//! large workspace trips `EMFILE: too many open files, watch`, which surfaces as
-//! a crash or, worse, a silently-dead watcher. Linux's default (typically 1024+)
-//! hides this on the dev box; it is a mac-only cliff.
+//! macOS hands a GUI app a **256** fd soft limit, and the Rust/Tauri processes
+//! (GUI + Server) sit on it. rlimits are inherited across fork/exec, so raising
+//! ours ONCE at the top of `run()` — before anything opens an fd or forks — lifts
+//! the whole tree, including any NON-node child. That is why this is not bolted
+//! to a single spawn site.
 //!
-//! rlimits are inherited across fork/exec, so raising ours ONCE at startup lifts
-//! the whole process tree — the node operator sidecar, the gateway sidecar,
-//! embedded PG, the `claude` CLI. That is why this runs at the top of `run()`
-//! rather than next to any single spawn site.
+//! **Scope check, so nobody re-files the bug this module was wrongly filed for:**
+//! Node RAISES ITS OWN `RLIMIT_NOFILE` at startup (it binary-searches up to
+//! 1<<20 — with the shell at 256, `node -e` reports soft=1048575). So the node
+//! operator sidecar was never bounded by 256, and an operator holding ~329 open
+//! handles is NOT an impending `EMFILE` — it is proof the cap is already above
+//! 256, since a process capped at 256 cannot hold 329. WI-4369 was originally
+//! filed on that misreading; no `EMFILE` existed in any log. This raise is
+//! therefore **latent hardening for the Rust processes**, not a fix for an
+//! observed crash. Don't oversell it, and don't diagnose a future operator
+//! `EMFILE` as "the 256 limit".
 //!
-//! The trap this module exists to avoid: the obvious "just set soft = hard"
-//! raise FAILS on macOS. launchd gives a GUI app `RLIM_INFINITY` as its hard
-//! limit, `setrlimit` rejects an infinite soft limit with `EINVAL`, and the
-//! process silently stays on 256. The real ceiling is the kernel's
-//! `kern.maxfilesperproc`, which has to be asked for separately.
+//! Two traps, both of which make the "obvious" implementation wrong:
+//!
+//! 1. **`soft = hard` FAILS on macOS.** launchd gives a GUI app `RLIM_INFINITY`
+//!    as its hard limit; `setrlimit` rejects an infinite *soft* value with
+//!    `EINVAL`, and the process silently stays on 256 while you think you fixed
+//!    it. The real ceiling is the kernel's `kern.maxfilesperproc` (122880 on the
+//!    build VM), which must be queried separately via `sysctlbyname`.
+//!
+//! 2. **Raise the SOFT limit ONLY; preserve `rlim_max`.** Setting the hard limit
+//!    too — which is what bash's `ulimit -n N` does — would CLAMP node's startup
+//!    self-raise from 1048575 down to N, leaving the operator with FEWER fds than
+//!    it had before this "fix". That is a regression, and it is guarded by
+//!    `bin/mac-vm-fd-limit-verify.sh` §3.
 
 /// The soft `RLIMIT_NOFILE` we want every Papercusp process tree to run with.
 /// Comfortably above the operator's ~329 baseline plus watcher headroom, and
