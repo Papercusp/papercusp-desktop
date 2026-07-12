@@ -404,6 +404,17 @@ async function main() {
     deps: { isIntegrator: async () => true, sql },
   });
 
+  // WI-4230 fix: capture the FIRST tick's staging check HERE, before the
+  // second tick (out2, below) advances staging again — reading it at the
+  // very end of main() (the original bug) always compared against the STALE
+  // first-tick steerSha after staging had already moved to steerSha2,
+  // guaranteeing a false FAIL regardless of whether the first tick actually
+  // worked. Reproduced live 2026-07-12 (single-box drill run against a
+  // fresh 0.0.8 build): stagingIsSteerSha:false despite integrationAdvanced:
+  // true — this stale-read bug, not a product defect, matching the
+  // 'transient/load-induced' hypothesis in the P-305 plan-item history.
+  const stagingIsSteerSha = (await readStaging(repo, integrator.pubkeyBase64)) === steerSha;
+
   const queued = await listIntegrationRequests({ workspaceId: WS, potSlug: POT_SLUG, repoKey: REPO_KEY }, sql);
   const receipt = queued.find((q) => q.devicePubkey === memberBelow.pubkeyBase64 && q.headSha === belowSha);
 
@@ -441,9 +452,15 @@ async function main() {
 
   await sql.end();
   console.log(JSON.stringify({
-    stagingIsSteerSha: (await readStaging(repo, integrator.pubkeyBase64)) === steerSha,
+    stagingIsSteerSha,
     integrationAdvanced: out.integration?.advanced === true,
     gated: out.gated,
+    // WI-4230: surface the actual error strings, not just the count — a bare
+    // gated.errors:N (or top-level errors.length) with no message is
+    // undiagnosable; print both ticks' errors[] so a future flake carries
+    // its own root cause in the drill output instead of forcing a re-run.
+    errors: out.errors,
+    errors2: out2.errors,
     receiptFound: !!receipt,
     receiptState: receipt?.state ?? null,
     receiptReason: receipt?.reason ?? null,
