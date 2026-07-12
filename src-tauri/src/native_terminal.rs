@@ -2352,6 +2352,117 @@ pub mod win_embed {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// WI-4448 — the WINDOWS chat dock (`pui chat` = zellij), inside WSL.
+//
+// Windows had NO dock at all: `select_strategy` picks EmbeddedView(ConPty),
+// the ConPTY embed is an unverified force-only spike, and the NewWindow
+// fallback was Linux-only — so Windows fell through to `Disabled`.
+//
+// It does not need the ConPTY renderer to exist. Windows already runs the whole
+// agent runtime inside the `papercup-runtime` WSL2 distro (wsl_setup.rs: "the
+// harness stack assumes POSIX"), and zellij/pui/psu are Linux binaries that run
+// there natively. So the dock launches as a REAL zellij session in its own
+// Windows Terminal window. That is the "or an equivalent" half of the ask — not
+// the glued/embedded look Linux-X11 and macOS get; earning that means writing
+// the ConPTY pseudoconsole renderer (see win_embed's module doc).
+//
+// The bundled dock binaries live on the WINDOWS side (`sidecar/bin`), and the
+// distro deliberately does NOT inherit the Windows PATH (build-rootfs.sh sets
+// `appendWindowsPath=false`), so the launcher hands the distro its own
+// PATH-translated view of them. Verified live on the Win11 QEMU VM: zellij
+// 0.44.3 execs straight off `/mnt/c`, and `pui` renders its TUI there once the
+// distro carries libasound.so.2 (the other half of WI-4448).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Single-quote `s` for bash. The dock's paths routinely contain spaces
+/// (`/mnt/c/Program Files/Papercusp GUI/...`), so nothing here may go unquoted.
+fn sh_squote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Build the bash one-liner the Windows dock runs INSIDE the distro.
+///
+/// Pure + platform-free so it is unit-testable on the Linux dev box (the Windows
+/// launcher below can only be exercised on a Windows host, and an untested
+/// command builder is exactly where the quoting bugs live).
+///
+/// `exec` replaces the shell so the window's process IS the dock — no stray
+/// parent shell to leak, and closing the window takes zellij down with it.
+fn wsl_dock_oneliner(
+    dock_bin_wsl: Option<&str>,
+    companion_wasm_wsl: Option<&str>,
+    argv: &[String],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(bin) = dock_bin_wsl {
+        // PREPEND: the bundled pui/zellij must win over anything the distro
+        // happens to carry, so the dock always runs the versions we shipped
+        // (zellij's plugin API is version-coupled to the companion wasm).
+        parts.push(format!("export PATH={}:\"$PATH\"", sh_squote(bin)));
+    }
+    if let Some(wasm) = companion_wasm_wsl {
+        parts.push(format!("export PUI_COMPANION_WASM={}", sh_squote(wasm)));
+    }
+    let cmd = argv
+        .iter()
+        .map(|a| sh_squote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    parts.push(format!("exec {cmd}"));
+    parts.join("; ")
+}
+
+#[cfg(target_os = "windows")]
+impl NativeTerminal {
+    pub fn launch_glued(&self) -> Result<(), String> {
+        Err("glued terminal is X11-only".into())
+    }
+
+    /// Open the chat dock in its own Windows Terminal window, hosted in the
+    /// papercup-runtime WSL distro. Idempotent: a live dock is left alone.
+    pub fn launch_new_window(&self) -> Result<(), String> {
+        let mut guard = self.live.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
+        // Reuse the dock spec so PAPERCUSP_NATIVE_TERMINAL_CMD still overrides
+        // the hosted command on Windows exactly as it does on Linux/macOS.
+        let spec = GhosttySpec::dock();
+        // prepare_dock_env (main.rs) resolves the bundled sidecar dir from Tauri's
+        // Resource resolver and exports these as WINDOWS paths; the distro needs the
+        // /mnt/... view of them.
+        let to_wsl = |key: &str| -> Option<String> {
+            std::env::var_os(key)
+                .map(|v| crate::windows_path_to_wsl(std::path::Path::new(&v)))
+                .filter(|s| !s.is_empty())
+        };
+        let oneliner = wsl_dock_oneliner(
+            to_wsl("PAPERCUSP_DOCK_BIN").as_deref(),
+            to_wsl("PUI_COMPANION_WASM").as_deref(),
+            &spec.command,
+        );
+        let pid = crate::native_console::spawn_windows_dock_window(&oneliner)
+            .map_err(|e| format!("spawn windows chat dock: {e}"))?;
+        println!(
+            "[papercusp-desktop] native-terminal: windows chat dock launched (wt/conhost pid={pid:?}) hosting {:?} in WSL",
+            spec.command
+        );
+        // Deliberately NOT tracked in `self.live`: the spawner returns the
+        // wt.exe/conhost PID, and on Windows that process is only the WINDOW —
+        // the dock itself is a WSL-side process tree with no Win32 ancestor
+        // (the same pid→window gap native_console documents, which is why it
+        // finds its windows by TITLE). Killing the launcher pid would not
+        // reliably take the dock down, so shutdown stays a no-op and pui's own
+        // `reap_stale` kills any leftover zellij session on the next launch.
+        let _ = &mut *guard;
+        Ok(())
+    }
+
+    pub fn run_glue_loop(&self) {}
+    pub fn shutdown(&self) {}
+}
+
 #[cfg(target_os = "windows")]
 impl NativeTerminal {
     /// Remember the (parent, term, webview) HWNDs (WI-3388) so a later

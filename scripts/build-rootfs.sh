@@ -59,6 +59,15 @@ appendWindowsPath=false
 WSLCONF
 
 # Base packages.
+#
+# libasound2t64 is NOT audio support — do not drop it as "WSL has no sound card"
+# (WI-4448). The chat dock's `pui` binary links libasound.so.2 via its voice-mode
+# cpal dependency, so WITHOUT this package pui cannot even be LOADED inside the
+# distro ("error while loading shared libraries") and the Windows dock opens a
+# zellij session whose chat pane is a dead binary — the same blank-pane failure
+# linux-chat-dock-parity-2026-06-27 already fixed once on Linux. The dynamic
+# linker needs the .so present at exec time whether or not a sound device exists.
+# (Ubuntu 24.04 renamed libasound2 → libasound2t64 in the t64 transition.)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -75,7 +84,8 @@ apt-get install -y --no-install-recommends \
   postgresql-client \
   tmux \
   xz-utils \
-  ripgrep
+  ripgrep \
+  libasound2t64
 
 # overmind is not in the Ubuntu archive — fetch the release binary.
 OVERMIND_VERSION="${OVERMIND_VERSION:-2.5.1}"

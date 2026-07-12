@@ -1144,6 +1144,29 @@ fn is_on_path(bin: &str) -> bool {
 #[cfg(target_os = "windows")]
 const WSL_DISTRO: &str = "papercup-runtime";
 
+/// WI-4448 — open the CHAT DOCK (`pui chat` = zellij) in its own Windows
+/// Terminal window, inside the papercup-runtime distro.
+///
+/// The dock is the third caller of `spawn_windows_terminal_script`, and it
+/// reuses it deliberately rather than hand-rolling a `wt.exe` invocation: that
+/// helper already carries two hard-won Windows fixes a fresh launcher would
+/// re-earn the hard way — wt splitting a one-liner on its `;`s into separate
+/// TABS, and `wsl.exe` re-parsing its tail through the login shell (WI-2149) —
+/// plus the conhost fallback for machines with no Windows Terminal.
+///
+/// `/tmp` is the script's home (not `/` or `$HOME`): it always exists and is
+/// always writable by the distro's unprivileged `papercup` user, so the
+/// transient launcher never fails on a permission or missing-dir edge.
+#[cfg(target_os = "windows")]
+pub(crate) fn spawn_windows_dock_window(oneliner: &str) -> Result<Option<u32>, String> {
+    spawn_windows_terminal_script(
+        "/tmp",
+        "Papercup — chat dock",
+        ".papercup-dock-launch.sh",
+        oneliner,
+    )
+}
+
 #[cfg(target_os = "windows")]
 fn spawn_windows_wsl_new_window(
     envelope: &ConsoleEnvelope,
