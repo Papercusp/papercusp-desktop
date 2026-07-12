@@ -59,34 +59,78 @@ import tarfile
 
 # ── PATH rules — the class that actually bit us: a scratch/state dir sweeping in
 # wholesale. Cheap, and applied to every member name.
+#
+# EACH RULE CARRIES ITS OWN TAR GLOBS, and `--tar-excludes` prints them for
+# bin/stage-source-tree.sh to consume. That coupling is the point. These rules
+# used to exist TWICE — once here as regexes, once in the stager as a hand-kept
+# tar --exclude list — and two hand-maintained copies of the same knowledge drift
+# by construction: the stager's list is a postmortem log (cargo-target added after
+# it blew up 0.0.5, .next after it tripled 0.0.8) and it had never heard of
+# .papercusp/, which is how 121 agent transcripts shipped. Now a new rule teaches
+# BOTH the thing that excludes it and the thing that catches it if the exclude
+# misses. A rule with no globs (identity/credential content) is gate-only.
+#
+# The globs are GNU tar's --no-anchored dialect, where `*` matches `/`: the `*/X`
+# form catches X at ANY depth (packages/operator-core/.papercusp), which the
+# top-level allowlist cannot — the junk is nested INSIDE apps/ and packages/,
+# and some of it is git-TRACKED (a .gitignore anchoring bug, fixed by su-a1a71).
 FORBIDDEN_PATH = [
-    ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$")),
-    ("papercusp-state-dir", re.compile(r"(^|/)\.papercusp/")),
-    ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-vitest[^/]*|\.pcv-socktest|\.nx)/")),
-    ("agent-config", re.compile(r"(^|/)(\.claude|\.harness)/")),
-    ("vcs", re.compile(r"(^|/)\.git/")),
-    ("dotenv", re.compile(r"(^|/)\.env(\.|$)")),
-    ("shell-rc", re.compile(r"(^|/)\.(bashrc|bash_profile|bash_history|profile|zshrc|zprofile)$")),
-    ("credential-file", re.compile(r"(^|/)(\.npmrc|\.netrc|\.git-credentials|\.gitconfig|\.mcp\.json.*)$")),
-    ("credential-dir", re.compile(r"(^|/)(\.ssh|\.aws|\.gnupg)/")),
-    ("console-turd", re.compile(r"(^|/)\.papercup-console-active\.")),
-    ("next-build-cache", re.compile(r"(^|/)\.next/")),
+    ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$"),
+     ["pi-sessions"]),
+    ("papercusp-state-dir", re.compile(r"(^|/)\.papercusp/"),
+     [".papercusp"]),
+    ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+)/"),
+     ["scratch", "scratchpad", "test-results", ".agent-tmp", ".vitest-tmp", ".tmp",
+      ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*"]),
+    ("agent-config", re.compile(r"(^|/)(\.claude|\.harness)/"),
+     [".claude", ".harness"]),
+    ("vcs", re.compile(r"(^|/)\.git/"),
+     [".git"]),
+    ("dotenv", re.compile(r"(^|/)\.env(\.|$)"),
+     [".env", ".env.*"]),
+    ("shell-rc", re.compile(r"(^|/)\.(bashrc|bash_profile|bash_history|profile|zshrc|zprofile)$"),
+     [".bashrc", ".bash_profile", ".bash_history", ".profile", ".zshrc", ".zprofile"]),
+    ("credential-file", re.compile(r"(^|/)(\.npmrc|\.netrc|\.git-credentials|\.gitconfig|\.mcp\.json.*)$"),
+     [".npmrc", ".netrc", ".git-credentials", ".gitconfig", ".mcp.json", ".mcp.json.*"]),
+    ("credential-dir", re.compile(r"(^|/)(\.ssh|\.aws|\.gnupg)/"),
+     [".ssh", ".aws", ".gnupg"]),
+    ("console-turd", re.compile(r"(^|/)\.papercup-console-active\."),
+     [".papercup-console-active.*"]),
+    ("next-build-cache", re.compile(r"(^|/)\.next/"),
+     [".next"]),
 ]
 
 # ── CONTENT: real credential VALUES (grep -E, C speed). Not the word "secret".
+#
+# The phx_/phc_ rules absorb bin/audit-bundle.sh, which was a SEPARATE "privacy
+# auditor" release-local.sh already ran on the finished .deb/.dmg — and which
+# could never have caught this leak: it greps the EXTRACTED bundle, where
+# source.tar.zst is still a single zstd blob. It was structurally blind to the
+# 2.7 GB of plaintext inside it. One gate, every leak class, both objects.
 CREDENTIAL_ERE = [
-    ("anthropic-key", r"sk-ant-(api|oat)[0-9]{2}-[A-Za-z0-9_-]{40,}"),
-    ("openai-key", r"sk-(proj-)?[A-Za-z0-9]{40,}"),
-    ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
+    ("anthropic-key", r"\bsk-ant-(api|oat)[0-9]{2}-[A-Za-z0-9_-]{40,}"),
+    ("openai-key", r"\bsk-(proj-)?[A-Za-z0-9]{40,}"),
+    ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
     ("aws-secret-key", r"aws_secret_access_key[[:space:]]*=[[:space:]]*[^[:space:]]{30,}"),
-    ("slack-token", r"xox[abprs]-[A-Za-z0-9-]{20,}"),
+    ("slack-token", r"\bxox[abprs]-[A-Za-z0-9-]{20,}"),
+    # PostHog: phx_ is a WRITE-side personal key (the one that must never ship);
+    # phc_ is an anonymous-capture project key — see BENIGN for the one we ship.
+    ("posthog-personal-key", r"\bphx_[A-Za-z0-9_]{30,}"),
+    ("posthog-project-key", r"\bphc_[A-Za-z0-9_]{30,}"),
 ]
 
-# Documented false positives from the WI-4419 sweep. Keep short and justified —
-# this is NOT a parking lot for findings you would rather not deal with.
+# Documented false positives, each one traced to a real file. This is NOT a
+# parking lot for findings you would rather not deal with: every entry names the
+# thing it is silencing, and if you cannot name it, it is not benign — it is
+# unclassified, and an unclassified finding fails the build.
 BENIGN_ERE = [
     r"AKIAIOSFODNN7EXAMPLE",                        # AWS's own doc placeholder
     r"sk-ant-(api|oat)[0-9]{2}-(test|fake|dummy|example)",
+    # @octokit/auth-token/README.md — the docs' own fake tokens
+    r"gh[pousr]_(PersonalAccessToken|InstallationUserToServer|InstallallationOrActionToken)",
+    # The ONE deliberately-public key every build ships (posthog-public-defaults.ts):
+    # anonymous-capture only, cannot read events. Shipping it is the feature.
+    r"phc_tnwKu5QTgaHi6hyrHwA3EUQFKhskJES4c4zAzHCUrPFv",
 ]
 
 
