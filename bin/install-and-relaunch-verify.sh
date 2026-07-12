@@ -125,9 +125,12 @@ case "$PLATFORM" in
   *) echo "unknown --platform: $PLATFORM (want windows|mac|linux)" >&2; exit 2 ;;
 esac
 REMOTE_ARTIFACT="$REMOTE_DIR/$REMOTE_BASENAME"
-# Real artifacts have spaces ("Papercusp GUI_0.0.7_x64-setup.exe"), so the remote
-# path MUST be quoted for the remote shell (double quotes: cmd.exe-safe on Windows
-# AND bash-safe on mac/linux) — both for the scp target and the install command.
+# Real artifacts have spaces ("Papercusp GUI_0.0.7_x64-setup.exe"). Quoting is
+# needed ONLY where a remote SHELL parses the path (install/relaunch via ssh —
+# double quotes: cmd.exe-safe on Windows AND bash-safe on mac/linux). The scp
+# TARGET must stay UNQUOTED: modern OpenSSH scp defaults to SFTP mode (no remote
+# shell), so embedded quotes are literal and fail `dest open ""C:/...""`
+# (live-repro'd on the 0.0.8 windows verify, 2026-07-11).
 REMOTE_Q="\"$REMOTE_ARTIFACT\""
 
 # ── Resolve expected sha/version from the artifact's own provenance ─────────
@@ -159,7 +162,17 @@ op_exec() {
   fi
 }
 discover_port() { op_exec cat "$OPJSON_PATH" | json_num port; }
-read_health() { op_exec curl -sS -m 5 "http://127.0.0.1:$1/api/health"; }
+# Retry a few times: a single `wsl --exec` flap (transient, empty output) must
+# not abort the whole verify as "no healthy pre-update operator".
+read_health() {
+  local _port="$1" _body="" _i
+  for _i in 1 2 3; do
+    _body="$(op_exec curl -sS -m 5 "http://127.0.0.1:$_port/api/health")"
+    [[ -n "$_body" ]] && break
+    sleep 2
+  done
+  printf '%s' "$_body"
+}
 
 FAILURES=()
 NOTES=()
@@ -195,7 +208,7 @@ if [[ "$SHA_BEFORE" == "$EXPECTED_SHA" ]]; then
 fi
 
 # ── 2. PUSH ─────────────────────────────────────────────────────────────────
-if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$ARTIFACT" "$SSH_HOST:$REMOTE_Q" 2>/dev/null; then
+if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT"; then
   fail_check "push: scp of $REMOTE_BASENAME to $REMOTE_ARTIFACT failed"
 fi
 
