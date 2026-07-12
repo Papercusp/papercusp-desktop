@@ -69,11 +69,22 @@ BENIGN = [
     re.compile(rb"sk-ant-(?:api|oat)[0-9]{2}-(?:test|fake|dummy|example)"),
 ]
 
-# Content scanning is skipped under node_modules: ~322k vendor files, and the
-# PATH rules already cover a credential-shaped file landing there. Scanning it
-# would add minutes and produce only vendor noise. This boundary is deliberate —
-# widen it if a real finding is ever traced to vendored code.
-CONTENT_SKIP_PREFIX = ("./node_modules/", "node_modules/")
+# node_modules gets a REDUCED content scan, not none.
+#
+# The first cut of this file skipped node_modules content entirely (322k vendor
+# files; credential-shaped files there are caught by the PATH rules). That was
+# WRONG, and a peer's mac-side scan proved it: the mac Server bundle leaked the
+# owner's home path in the CONTENT of 7 files and an email in 1, with nothing in
+# the paths and no credentials anywhere. A path-only scan passes that bundle.
+# Absolute build paths get baked into vendored trees constantly — .bin shims,
+# sourcemaps, .package-lock.json, compile caches — so node_modules is exactly
+# where machine identity hides.
+#
+# So: IDENTITY rules (username / home path / hostname) run over node_modules too.
+# The email + credential rules do not — every vendor package.json carries a
+# maintainer address, and that noise would train the reader to ignore the gate.
+# A credential file landing in node_modules is still caught by the PATH rules.
+VENDOR_PREFIX = ("./node_modules/", "node_modules/")
 CONTENT_MAX_BYTES = 8 * 1024 * 1024
 
 
@@ -110,10 +121,10 @@ def main() -> int:
         return 2
 
     ident = identity_rules()
-    # Email is scanned in CONTENT but is far too noisy for PATHS (and for
-    # node_modules content — every package.json has a maintainer address), so it
-    # is applied only to non-vendor content below.
+    # Email is far too noisy for PATHS, and for VENDOR content (every package.json
+    # carries a maintainer address). It applies to non-vendor content only.
     path_ident = [r for r in ident if r[0] != "email-address"]
+    identity_only = path_ident
 
     findings = []   # (rule, member, detail)
     members = 0
@@ -135,15 +146,16 @@ def main() -> int:
 
                 if not m.isfile() or m.size > CONTENT_MAX_BYTES:
                     continue
-                if name.startswith(CONTENT_SKIP_PREFIX):
-                    continue
+                # Vendor: identity only (see VENDOR_PREFIX note). Everything else:
+                # the full rule set.
+                rules = identity_only if name.startswith(VENDOR_PREFIX) else CONTENT + ident
                 f = tf.extractfile(m)
                 if f is None:
                     continue
                 blob = f.read()
                 if b"\0" in blob[:4096]:
                     continue  # binary
-                for rule, rx in CONTENT + ident:
+                for rule, rx in rules:
                     for hit in rx.findall(blob):
                         if any(b.search(hit) for b in BENIGN):
                             continue
