@@ -131,6 +131,55 @@ declare -a EXCLUDES=(
   --exclude='*.tsbuildinfo'
   --exclude='./.DS_Store' --exclude='*/.DS_Store'
 )
+# ── ALLOWLIST (WI-4419). The EXCLUDES above are kept as a second layer for
+# NESTED junk inside an allowed dir (apps/operator/.next, a stray */.env), but
+# they are no longer what decides whether a top-level entry ships.
+#
+# WHY THIS IS AN ALLOWLIST NOW. It used to be `-cf - .` (everything at the mono
+# root, minus exclusions). A denylist can only ever exclude what someone already
+# learned to fear — read the EXCLUDES list as a postmortem log: cargo-target was
+# added after it blew up the 0.0.5 cut, .next after it tripled 0.0.8. Meanwhile
+# NOBODY thought of <mono>/.papercusp/, so the 0.0.8 bundles shipped 53,225
+# untracked files including 121 AGENT SESSION TRANSCRIPTS
+# (.papercusp/pi-sessions/*.jsonl) with the operator's home path in every record
+# (WI-4419). The mono root is a working tree on a busy dev box — .agent-tmp/,
+# .tmp/, scratch/, test-results/, ~140 .papercup-console-active.* turds — and a
+# denylist silently re-opens every single time any tool drops a new one.
+#
+# So: name what the dev(:3270 tsx hono-host) / local(:3055 vite) buttons actually
+# need. Anything not named here does not ship, including things that do not exist
+# yet. Adding a top-level dir to the repo is now a DELIBERATE decision to ship it.
+#
+# NOT shipped, on purpose: .papercusp .agent-tmp .claude .harness .nx .tmp*
+# .vitest-tmp .pcv-socktest scratch scratchpad test-results briefs _retired
+# papercusp-desktop .git .github benchmarks infra deploy — plus every root dotfile
+# (.env* .bashrc .gitconfig .npmrc .mcp.json*), which git happens to TRACK here,
+# so "tracked" was never a safety signal either.
+declare -a INCLUDES=()
+declare -a MISSING=()
+for entry in \
+  package.json package-lock.json tsconfig.base.json .nvmrc \
+  eslint.config.mjs knip.json bunfig.toml .gitignore .gitmodules \
+  CLAUDE.md AGENTS.md BORROWABLE.md \
+  node_modules apps libs packages \
+  tools scripts templates patches design design-tokens rubrics docs bin
+do
+  if [[ -e "$MONO/$entry" ]]; then
+    INCLUDES+=("./$entry")
+  else
+    MISSING+=("$entry")
+  fi
+done
+# The four load-bearing ones — a packaged install has no npm to repair a gap, so
+# a missing one is a silently-broken dev/local button in the field, not a warning.
+for required in node_modules apps libs packages; do
+  [[ -e "$MONO/$required" ]] \
+    || { echo "ERROR: allowlist requires $MONO/$required — refusing to stage a tree the dev/local buttons cannot run" >&2; exit 1; }
+done
+(( ${#MISSING[@]} == 0 )) \
+  || echo "    note: allowlist entries absent from this tree (skipped): ${MISSING[*]}"
+echo "    allowlist: ${#INCLUDES[@]} top-level entries"
+
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
 # GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
 # flags above are GNU dialect — macOS bsdtar rejects --owner outright and
@@ -155,7 +204,7 @@ command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH (macOS: brew 
 set +e +o pipefail
 "$TAR_BIN" --numeric-owner --owner=0 --group=0 \
   "${EXCLUDES[@]}" \
-  -C "$MONO" -cf - . \
+  -C "$MONO" -cf - "${INCLUDES[@]}" \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
 rcs=("${PIPESTATUS[@]}")
 set -e -o pipefail
@@ -165,6 +214,22 @@ set -e -o pipefail
 sz="$(du -h "$OUT" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"
 echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_ROOT points at it (WI-3308)"
+
+# ── THE GATE (WI-4419). Audit what we ACTUALLY produced, not what we meant to.
+# Wired HERE, in the producer, rather than in each of the three callers
+# (release-local.sh / mac-vm-build.sh / build-windows-on-vm.sh) — a gate that
+# each platform has to remember to call is a gate that one platform forgets, and
+# the leak's CONTENTS vary by build host (the mac Server bundle carried the same
+# structural hole with zero transcripts, purely because that box had none). The
+# allowlist decides what we MEAN to ship; this decides what we DID.
+#
+# Fatal by design. If this fires, fix the allowlist above — do not add an
+# exception to make the build pass.
+if ! python3 "$HERE/audit-release-bundle.py" "$OUT"; then
+  echo "" >&2
+  echo "ERROR: release bundle audit FAILED — refusing to package (WI-4419)." >&2
+  exit 1
+fi
 exit 0
 
 }  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──
