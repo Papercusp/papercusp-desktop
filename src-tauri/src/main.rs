@@ -4310,6 +4310,23 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// Is the running bundle the "Papercusp Server" product (vs "Papercusp GUI")?
+/// Resolved from the bundle's `productName` — the same signal the release
+/// pipeline uses to name Server-vs-GUI artifacts (WI-3696), so it stays in
+/// lockstep with what `resolve_update_endpoint`/`resolve_rollback_endpoint`
+/// actually request from the manifest route. (Deliberately NOT
+/// `app_role::detect`, which keys off the bundle *identifier* for a related
+/// but distinct purpose — who owns/spawns the sidecar.) WI-4404: this used to
+/// be duplicated inline at both call sites; centralized so a future product-
+/// name convention change only needs one edit.
+fn is_server_product(app: &AppHandle) -> bool {
+    app.config()
+        .product_name
+        .as_deref()
+        .map(|n| n.to_ascii_lowercase().contains("server"))
+        .unwrap_or(false)
+}
+
 /// Build the per-call updater endpoint targeted at the operator sidecar.
 ///
 /// We don't hardcode a single static URL in `tauri.conf.json` because:
@@ -4350,17 +4367,7 @@ fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
     // product-named, so the manifest route scopes asset matching by this
     // param (desktop-auto-update-operational-2026-07-09 P-003). Without
     // it the route could hand the GUI a Server installer or vice versa.
-    let product = if app
-        .config()
-        .product_name
-        .as_deref()
-        .map(|n| n.to_ascii_lowercase().contains("server"))
-        .unwrap_or(false)
-    {
-        "server"
-    } else {
-        "gui"
-    };
+    let product = if is_server_product(app) { "server" } else { "gui" };
     Ok(format!(
         "http://127.0.0.1:{}/api/updates/manifest?target={{{{target}}}}&arch={{{{arch}}}}&current_version={{{{current_version}}}}&product={}",
         port, product
@@ -4477,17 +4484,7 @@ fn resolve_rollback_endpoint(app: &AppHandle, tag: &str) -> Result<String, Strin
             "sidecar port not yet known; try again after boot completes".to_string()
         })?
     };
-    let product = if app
-        .config()
-        .product_name
-        .as_deref()
-        .map(|n| n.to_ascii_lowercase().contains("server"))
-        .unwrap_or(false)
-    {
-        "server"
-    } else {
-        "gui"
-    };
+    let product = if is_server_product(app) { "server" } else { "gui" };
     let encoded_tag: String = url::form_urlencoded::byte_serialize(tag.as_bytes()).collect();
     Ok(format!(
         "http://127.0.0.1:{}/api/updates/rollback?tag={}&target={{{{target}}}}&arch={{{{arch}}}}&product={}",
