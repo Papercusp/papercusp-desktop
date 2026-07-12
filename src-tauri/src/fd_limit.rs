@@ -289,21 +289,44 @@ mod tests {
         );
     }
 
-    /// The real syscall path is best-effort: it must not panic, and it must not
-    /// leave us WORSE off than we started.
+    /// The real syscall path must ACHIEVE the plan, not merely avoid making
+    /// things worse.
+    ///
+    /// Asserting only "it didn't go down" would pass on the very bug this module
+    /// exists to fix: on macOS a naive `soft = hard` raise returns `EINVAL` and
+    /// silently leaves the process on 256 — the limit didn't drop, and nothing
+    /// was raised either. So we compute the plan from the live limits, run the
+    /// real `setrlimit`, and assert the kernel landed exactly where we asked.
+    /// Run natively on macOS (where the process really does start at 256) this
+    /// is what proves the raise took.
+    #[cfg(unix)]
     #[test]
-    fn raise_is_safe_to_call_and_never_lowers() {
-        let before = current_soft_limit();
+    fn raise_achieves_the_planned_limit() {
+        let (soft_before, hard) = current_limits();
+        let plan = plan_fd_limit(soft_before, hard, kernel_per_process_cap(), DESIRED);
+
         raise_fd_limit();
-        let after = current_soft_limit();
+
+        let (soft_after, _) = current_limits();
+        match plan {
+            FdLimitPlan::AlreadySufficient { .. } => assert_eq!(
+                soft_after, soft_before,
+                "nothing was planned, so nothing should have changed"
+            ),
+            FdLimitPlan::Raise { to, .. } => assert_eq!(
+                soft_after, to,
+                "setrlimit did not land on the planned limit \
+                 (soft {soft_before} -> {soft_after}, wanted {to})"
+            ),
+        }
         assert!(
-            after >= before,
-            "raise_fd_limit lowered the soft limit: {before} -> {after}"
+            soft_after >= soft_before,
+            "raise_fd_limit lowered the soft limit: {soft_before} -> {soft_after}"
         );
     }
 
     #[cfg(unix)]
-    fn current_soft_limit() -> u64 {
+    fn current_limits() -> (u64, u64) {
         let mut lim = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
@@ -313,11 +336,6 @@ mod tests {
             unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) },
             0
         );
-        lim.rlim_cur as u64
-    }
-
-    #[cfg(not(unix))]
-    fn current_soft_limit() -> u64 {
-        0
+        (lim.rlim_cur as u64, lim.rlim_max as u64)
     }
 }
