@@ -1951,8 +1951,25 @@ fi
 # so the atomic publish below ships it WITH the bundle it describes. Cheap (two
 # sha256 over the just-built .mjs). The Windows leg's fail-closed guard reads it
 # (P-004 / D-003).
-_stamp_serve_sha="$(sha256sum "$SIDECAR_TMP_DIR/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
-_stamp_proxy_sha="$(sha256sum "$SIDECAR_TMP_DIR/mcp-proxy.mjs" 2>/dev/null | cut -d' ' -f1)"
+# PORTABLE hashing (WI-4223, 0.0.8 mac cut): macOS ships NO sha256sum — only
+# `shasum` — and under this script's `set -eo pipefail` the bare
+# `sha256sum|cut` pipeline exited 127 and killed the ENTIRE publish, silently
+# (the 2>/dev/null ate bash's "command not found"), right after
+# verify-sidecar-bundle: OK. A metadata stamp must NEVER kill a verified
+# build: prefer sha256sum (linux), fall back to shasum -a 256 (macOS
+# built-in), and yield "" (visible in the stamp JSON) rather than a death if
+# neither/no file exists.
+_stamp_sha256() {
+  local out=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" || true
+  elif command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)" || true
+  fi
+  printf '%s' "$out"
+}
+_stamp_serve_sha="$(_stamp_sha256 "$SIDECAR_TMP_DIR/serve.mjs")"
+_stamp_proxy_sha="$(_stamp_sha256 "$SIDECAR_TMP_DIR/mcp-proxy.mjs")"
 _stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 {
   printf '{\n'
