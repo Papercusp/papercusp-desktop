@@ -92,6 +92,14 @@ export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-whe
 
 s3() { aws s3 --endpoint-url "$ENDPOINT" "$@"; }
 
+# Size of an object in the bucket, or empty if it is not there. Used to prove the
+# bytes landed without depending on the public hostname being bound yet.
+s3api_head() {
+  aws s3api head-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" \
+    --query 'ContentLength' --output text 2>/dev/null || true
+}
+
 # ── What to upload ───────────────────────────────────────────────────────────
 BUNDLE="${PAPERCUSP_BUNDLE_DIR:-${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle}"
 LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
@@ -152,13 +160,55 @@ s3 cp "$LATEST_JSON" "s3://${R2_BUCKET}/${KEY_PREFIX}/latest.json" \
   --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
 
 # ── Verify what actually landed ──────────────────────────────────────────────
-# Trust the served bytes, not the upload's exit code.
+# Two INDEPENDENT checks, because they can fail for very different reasons and
+# collapsing them hides which one broke:
+#
+#   1. STORAGE (S3 endpoint, authenticated) — did the bytes land, intact?
+#      Always available; a failure here means the upload is genuinely broken.
+#   2. PUBLIC READ PATH (https://<host>/…) — can an installed app actually
+#      fetch them? This additionally requires the custom domain to be bound to
+#      the bucket, which is a one-time Cloudflare setup, NOT a property of this
+#      upload. An unbound domain is an expected pre-launch state, not corruption.
 echo
-echo "==> verifying over HTTPS"
+echo "==> verifying storage (S3, authenticated)"
+STORAGE_BAD=0
+for f in "${ARTIFACTS[@]}"; do
+  name="$(basename "$f")"
+  local_size="$(stat -c%s "$f")"
+  remote_size="$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")"
+  if [[ "$remote_size" == "$local_size" ]]; then
+    printf '  ✓ %s (%.2f GB)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
+  else
+    echo "  ✗ $name — local ${local_size}B but remote '${remote_size}'" >&2
+    STORAGE_BAD=1
+  fi
+done
+if [[ "$STORAGE_BAD" != "0" ]]; then
+  echo "ERROR: artifacts did not land intact — NOT a domain problem, the upload is broken." >&2
+  exit 1
+fi
+echo "  ✓ all artifacts present in the bucket at full size"
+
+echo
+echo "==> verifying the public read path (${BASE%/*}/<secret>/latest.json)"
 TMP_MANIFEST="$(mktemp)"
 trap 'rm -f "$TMP_MANIFEST"' EXIT
-if ! curl -fsS "${BASE}/latest.json" -o "$TMP_MANIFEST"; then
-  echo "  ✗ GET ${BASE%/*}/<secret>/latest.json FAILED — is the custom domain bound to the bucket?" >&2
+HTTP_CODE="$(curl -sS -o "$TMP_MANIFEST" -w '%{http_code}' --max-time 30 "${BASE}/latest.json" 2>/dev/null || echo "000")"
+
+if [[ "$HTTP_CODE" == "000" ]]; then
+  # Could not connect at all — almost always the custom domain is not bound yet
+  # (the hostname does not resolve). The upload itself is fine and verified above.
+  HOSTNAME_ONLY="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
+  echo "  ⚠ ${HOSTNAME_ONLY} is not reachable — the artifacts ARE uploaded and intact," >&2
+  echo "    but the R2 bucket is not yet published at this hostname, so installed apps" >&2
+  echo "    cannot download them. One-time setup, in Cloudflare:" >&2
+  echo "      R2 → ${R2_BUCKET} → Settings → Custom Domains → Connect Domain → ${HOSTNAME_ONLY}" >&2
+  echo "    Re-run this script afterwards to complete the verification." >&2
+  exit 2
+fi
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "  ✗ GET latest.json returned HTTP $HTTP_CODE" >&2
   exit 1
 fi
 if ! diff -q "$LATEST_JSON" "$TMP_MANIFEST" >/dev/null; then
@@ -167,9 +217,11 @@ if ! diff -q "$LATEST_JSON" "$TMP_MANIFEST" >/dev/null; then
 fi
 echo "  ✓ latest.json served and byte-identical"
 
-# Spot-check that each artifact URL the manifest advertises is actually fetchable
-# (HEAD only — these are gigabytes). A manifest pointing at a 404 is the exact
-# failure this whole rail exists to prevent.
+# Spot-check that each artifact URL the manifest ADVERTISES is actually fetchable
+# (HEAD only — these are gigabytes). Verifying the bucket is not enough: what
+# matters is that the exact url a client reads out of the manifest resolves to
+# bytes. A manifest pointing at a 404 is the LABELED!=PACKED failure this whole
+# rail exists to prevent.
 python3 - "$TMP_MANIFEST" <<'PY'
 import json, sys, urllib.request
 m = json.load(open(sys.argv[1]))
