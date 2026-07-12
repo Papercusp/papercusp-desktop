@@ -176,7 +176,11 @@ for a in prov_artifacts:
             failures.append(f"artifact {name!r} signature ({sig.name}) does not verify against the embedded pubkey")
     else:
         entry["sigOk"] = "absent"
-        if REQUIRE_SIGNED:
+        if a.get("sig") is True:
+            # WI-4243: the emitter recorded a co-located .sig at build time —
+            # its absence now means the signature was stripped/lost in transit.
+            failures.append(f"artifact {name!r}: provenance records a .sig but none is co-located (signature stripped?)")
+        elif REQUIRE_SIGNED:
             failures.append(f"artifact {name!r} has no .sig and --require-signed was set")
         else:
             notes.append(f"artifact {name!r} has no co-located .sig — signature not checked")
@@ -196,18 +200,24 @@ if LATEST_JSON:
             manifest = None
         if manifest is not None:
             manifest_report = {}
-            all_prov_names = {a.get("name") for a in prov_artifacts}
+            # WI-4243: provenance names may carry a subdir (e.g. "deb/App.deb");
+            # a manifest url only carries the basename — match on basenames.
+            prov_name_by_base = {}
+            for a in prov_artifacts:
+                n = a.get("name") or ""
+                prov_name_by_base.setdefault(n.rsplit("/", 1)[-1], n)
             for platform_key, meta in (manifest.get("platforms") or {}).items():
                 url = (meta or {}).get("url", "")
                 sig_field = ((meta or {}).get("signature", "") or "").strip()
                 base = url.rsplit("/", 1)[-1] if url else ""
+                name = prov_name_by_base.get(base)
                 ok = True
-                if base not in all_prov_names:
+                if name is None:
                     failures.append(f"latest.json[{platform_key}] url {base!r} is not an artifact in this provenance"); ok = False
-                elif base not in verified_names:
+                elif name not in verified_names:
                     failures.append(f"latest.json[{platform_key}] points at {base!r} whose sha256 did not verify"); ok = False
                 else:
-                    disk_sig = sig_content_by_name.get(base)
+                    disk_sig = sig_content_by_name.get(name)
                     if disk_sig is None:
                         failures.append(f"latest.json[{platform_key}] references {base!r} but it has no on-disk .sig to compare"); ok = False
                     elif sig_field != disk_sig:

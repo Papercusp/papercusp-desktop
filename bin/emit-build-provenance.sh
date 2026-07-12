@@ -35,6 +35,14 @@
 #     ARTIFACT...  the shipped files to fingerprint (globs pre-expanded by the
 #                  caller; non-existent paths are skipped)
 #
+# Artifact `name` is the path RELATIVE TO OUT_DIR when the artifact lives under
+# it (e.g. "deb/App_0.0.8_amd64.deb"), else the basename (WI-4243: basenames
+# forced verify-provenance.sh consumers to build symlink stages for the
+# linux/mac subdir layouts). Each artifact also records `sig`: whether a
+# co-located minisign .sig existed AT EMIT TIME — the unambiguous per-artifact
+# answer WI-4243 found missing (the top-level windows `signed` field means
+# Authenticode, NOT minisign, and was being misread).
+#
 # The git head/dirty are read from PROVENANCE_GIT_ROOT (default: $PWD) — the
 # orchestrator's checkout, which (unlike a VM's rsync'd, .git-less tree) can
 # resolve them.
@@ -54,6 +62,13 @@ GIT_DIRTY="$(git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && echo false || e
 
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
 _bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
+
+# Artifact name: relative to OUT_DIR when under it, else basename (see header).
+_OUT_REAL="$(realpath "$OUT_DIR")"
+_name() {
+  local rp; rp="$(realpath "$1")"
+  if [[ "$rp" == "$_OUT_REAL"/* ]]; then printf '%s' "${rp#"$_OUT_REAL"/}"; else basename "$1"; fi
+}
 
 PROV="$OUT_DIR/build-provenance.json"
 {
@@ -86,8 +101,9 @@ PROV="$OUT_DIR/build-provenance.json"
   for f in "$@"; do
     [[ -e "$f" ]] || continue
     (( _first )) || printf ',\n'; _first=0
-    printf '    { "name": "%s", "bytes": %s, "sha256": "%s" }' \
-      "$(basename "$f")" "$(_bytes "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+    printf '    { "name": "%s", "bytes": %s, "sha256": "%s", "sig": %s }' \
+      "$(_name "$f")" "$(_bytes "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" \
+      "$([[ -f "$f.sig" ]] && echo true || echo false)"
   done
   printf '\n  ]\n}\n'
 } > "$PROV"

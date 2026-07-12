@@ -848,6 +848,13 @@ done
 # (whole papercusp-desktop tree, vs the old src-tauri-only diff — strictly more
 # honest, since the packed sidecar comes from outside src-tauri). This leg only
 # ever runs a FRESH build (release-local's REUSE_WIN path skips it), so reused=false.
+# WI-4243: enumerate EVERY distributable — the setup.exe stubs AND the Inno
+# DiskSpanning *-setup-*.bin payload slices (0.0.8 shipped the Server payload
+# in two unhashed .bins; the owner handoff needed manual sha256s). nullglob so
+# a GUI-only build (no slices) passes a clean list.
+shopt -s nullglob
+PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
+shopt -u nullglob
 PROVENANCE_GIT_ROOT="$ROOT" \
 PROVENANCE_PACKED_SRC_FINGERPRINT="${PACKED_FP:-unknown}" \
 PROVENANCE_SIGNED="$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]] && echo true || echo false)" \
@@ -856,7 +863,7 @@ PROVENANCE_SIGNED="$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]
     "${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo unknown)}" \
     "${PAPERCUSP_BUILD_SHA}" \
     false \
-    "$OUT_DIR"/*-setup.exe
+    "${PROV_ARTIFACTS[@]}"
 
 ls -lh "$OUT_DIR"
 echo "==> done — artifacts in $OUT_DIR"
