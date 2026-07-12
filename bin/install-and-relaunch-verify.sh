@@ -123,7 +123,13 @@ case "$PLATFORM" in
     # terminate the WSL-side operator: the stale operator surviving app exit is
     # exactly the EI-9002 scenario the flip assertion exists to test.
     INSTALL_CMD="${INSTALL_CMD:-taskkill /f /im $APP_IMAGE >nul 2>&1 & __ARTIFACT__ /VERYSILENT /SUPPRESSMSGBOXES /NORESTART}"
-    RELAUNCH_CMD="${RELAUNCH_CMD:-schtasks /run /tn papercusp-e2e}"
+    # BOTH apps: papercusp-e2e launches the GUI (shell only); papercusp-server-e2e
+    # launches the Server app — whose startup is the ONLY thing that runs
+    # `serve --ensure` in WSL, i.e. the flip cannot happen without it (0.0.8
+    # live finding: GUI-only relaunch left the stale operator adopted forever).
+    # Both tasks are provisioned on the win VM (papercusp-launch.cmd /
+    # papercusp-server-launch.cmd, console session via schtasks).
+    RELAUNCH_CMD="${RELAUNCH_CMD:-schtasks /run /tn papercusp-e2e & schtasks /run /tn papercusp-server-e2e}"
     ;;
   mac)
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
