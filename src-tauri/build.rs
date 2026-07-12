@@ -104,6 +104,12 @@ fn main() {
     // Same provenance mechanism for the shipped app VERSION (WI-2644) — see the
     // matching PAPERCUSP_BUILD_VERSION option_env! + comment in main.rs.
     println!("cargo:rerun-if-env-changed=PAPERCUSP_BUILD_VERSION");
+    // Same mechanism for the static release host the shipped updater polls
+    // (plan desktop-release-hosting-r2-2026-07-12; see baked_release_host() in
+    // main.rs). Without this rerun key cargo would cache a main.rs compiled with
+    // a STALE (or empty) host and the shipped app would silently poll the wrong
+    // address — the same silent-failure class the release-host work exists to fix.
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_RELEASE_HOST");
 
     // WI-1976 / WI-2143 — allow the renderer to invoke the native-shell app commands.
     // The operator SPA loads from a REMOTE http origin (http://127.0.0.1:<port>),

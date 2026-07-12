@@ -2583,6 +2583,22 @@ fn fetch_operator_health_sha(port: u16) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The static release host this build's operator polls for updates
+/// (plan desktop-release-hosting-r2-2026-07-12; WI-4389/WI-3875).
+///
+/// Precedence: a RUNTIME `PAPERCUSP_RELEASE_HOST` wins (so a test build can be
+/// aimed at a staging host with no recompile), else the COMPILE-TIME bake that
+/// release-local.sh exports. Empty string when neither is set — the operator
+/// treats that as "no release host" and falls back to the legacy GitHub
+/// discovery path, which is exactly today's behavior, so an un-baked dev build
+/// is unaffected.
+fn baked_release_host() -> String {
+    std::env::var("PAPERCUSP_RELEASE_HOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| option_env!("PAPERCUSP_RELEASE_HOST").unwrap_or("").to_string())
+}
+
 /// P-013: run the post-update self-check and, on a genuine mismatch, surface it
 /// to the SPA (a `papercusp:update-mismatch` event + `window.__papercuspUpdateMismatch`)
 /// and the console. Match/Skipped just log. Best-effort and non-fatal — a health
