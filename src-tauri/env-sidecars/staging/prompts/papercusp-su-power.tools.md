@@ -611,17 +611,17 @@ cold-loop-only: ANY state a future you must resume from belongs in a
 checkpoint, never in prose that scrolls away.
 
 > **✅ The memory backend is LIVE + POPULATED — `memory:*` works; use it, NOT your
-> client's built-in memory (2026-06-08).** The active backend is the **HYBRID**
-> (cosine = `harness_shared.memory_canonical` in PG, OpenAI-embedded · lexical = the
-> owner's Claude file store), and the owner's durable memories were migrated in — so
-> `memory:search` returns real hits and the pre-turn injection surfaces them. **Keep
-> durable cross-session memory in `memory:remember` / `memory:search`** — it is the ONE
-> shared canonical store EVERY client (Claude / Codex / OMP) reaches over the same MCP.
-> **Do NOT park durable facts in your client's BUILT-IN memory** (Codex `CODEX_HOME`,
-> OMP hindsight, or hand-written Claude topic files): those are per-client SILOS that
-> never reach the shared store. (Nuance: the Claude file store IS the hybrid's lexical
-> leg, so it is *read* by the hybrid — but still WRITE via `memory:remember`, never by
-> hand-editing topic files, so the canonical cosine leg stays in sync.) Supersedes the
+> client's built-in memory (2026-06-08).** The backend is a **HYBRID** over the ONE
+> PG canonical store (`harness_shared.memory_canonical`): a cosine (semantic) leg and
+> a lexical (exact-identifier) leg, BOTH papercusp code over the same rows
+> (memory-pg-lexical-own-injection-2026-07-13 — the owner's durable memories and the
+> pre-existing Claude topic files are all imported in) — so `memory:search` returns
+> real hits and the pre-turn injection surfaces them. **Keep durable cross-session
+> memory in `memory:remember` / `memory:search`** — it is the ONE shared canonical
+> store EVERY client (Claude / Codex / OMP) reaches over the same MCP. **Do NOT park
+> durable facts in your client's BUILT-IN memory** (Codex `CODEX_HOME`, OMP
+> hindsight, or hand-written Claude topic files): those are per-client SILOS that
+> never reach the shared store, and no recall leg reads them anymore. Supersedes the
 > 2026-06-05 "mem0 unpopulated / treat `memory:*` as a no-op" note.
 
 **Recall is PUSHED to you automatically** (memory-delivery-unification-2026-07-12):

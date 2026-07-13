@@ -1,0 +1,1 @@
+import{f as e,l as t}from"./console-spawn-RIFLljnS.js";t();export{e as spawnConsole};

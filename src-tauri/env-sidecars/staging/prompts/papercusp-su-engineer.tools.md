@@ -718,9 +718,12 @@ checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
 > **✅ `memory:*` is LIVE + POPULATED — use it, NOT your client's built-in
 > memory.** It is the ONE shared canonical store every client (Claude / Codex /
 > OMP) reaches over the same MCP. Do NOT park durable facts in per-client silos
-> (Codex `CODEX_HOME`, OMP hindsight, hand-written Claude topic files — the
-> Claude file store is read as the hybrid's lexical leg, but WRITE via
-> `memory:remember` so the canonical cosine leg stays in sync).
+> (Codex `CODEX_HOME`, OMP hindsight, hand-written Claude topic files). The
+> store no longer depends on any client's files: BOTH recall legs (cosine +
+> lexical) run over the one PG canonical store
+> (memory-pg-lexical-own-injection-2026-07-13 — the pre-existing Claude
+> topic-file memories were imported in), so a hand-written topic file is a
+> stray silo, never a layer.
 
 - **Recall is PUSHED to you automatically** (memory-delivery-unification-2026-07-12):
   session start (initialize prelude), `coord:orient`'s memory fold, work-item
