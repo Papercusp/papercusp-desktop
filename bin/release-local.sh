@@ -668,15 +668,15 @@ elif [[ "$WITH_MAC" == "1" ]]; then
         export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
         export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
         export PAPERCUSP_SKIP_SEED_CUT=1
-        # WI-4389/WI-3875: main.rs bakes the update source via
-        # option_env!(\"PAPERCUSP_RELEASE_HOST\") AT COMPILE TIME, and the compile
-        # happens HERE, on the VM. This export list is the ONLY channel into that
-        # build — the var does NOT cross ssh on its own, and the VM has no
-        # ~/.papercusp/release-host.env for release-local.sh's loader to read. Omit
-        # it and cargo bakes an EMPTY host, so the shipped mac app polls nothing and
-        # the Tauri updater reports \"up to date\" FOREVER. That is precisely the
-        # 0.0.8 defect that forced a full rebuild + manual reinstall; it was invisible
-        # because the manifest, the signature and the installer are all still perfect.
+        # WI-4389/WI-3875: main.rs bakes the update source via option_env! at COMPILE
+        # time, and the compile happens HERE, on the VM. This export list is the ONLY
+        # channel into that build: the var does NOT cross ssh by itself, and the VM has
+        # no ~/.papercusp/release-host.env for the loader above to read. Omit it and
+        # cargo bakes an EMPTY host, so the shipped mac app polls nothing and the Tauri
+        # updater reports up-to-date FOREVER. That is the 0.0.8 defect that forced a
+        # full rebuild + manual reinstall, and it was invisible because the manifest,
+        # the signature and the installer were all still perfect.
+        # (mac-vm-build.sh now GATES on this: it greps the built binary for the host.)
         export PAPERCUSP_RELEASE_HOST='"$PAPERCUSP_RELEASE_HOST"'
         bash bin/mac-vm-build.sh || status=\$?
       fi

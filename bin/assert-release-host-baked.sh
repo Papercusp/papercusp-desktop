@@ -62,9 +62,21 @@ for target in "$@"; do
   # than the one this gate exists to catch.
   bin="$target"
   if [[ -d "$target" ]]; then
-    bin="$(find "$target/Contents/MacOS" -maxdepth 1 -type f -perm -u+x 2>/dev/null | head -1)"
-    if [[ -z "$bin" ]]; then
-      echo "ASSERT ERROR: no executable found in $target/Contents/MacOS" >&2
+    macos_dir="$target/Contents/MacOS"
+    # Prefer the executable named after the bundle ("Papercusp GUI.app" ->
+    # "Papercusp GUI"), which is what Tauri emits from productName; fall back to
+    # the first regular file in MacOS/ (that directory holds only executables).
+    # NOTE: this runs on the mac VM, i.e. BSD find — so NO `-perm -u+x` (the
+    # symbolic form is not portable, and a find that errors here would exit 2 and
+    # spuriously red a 35-minute build, which is worse than the bug being gated).
+    candidate="$macos_dir/$(basename "$target" .app)"
+    if [[ -f "$candidate" ]]; then
+      bin="$candidate"
+    else
+      bin="$(find "$macos_dir" -maxdepth 1 -type f 2>/dev/null | head -1)"
+    fi
+    if [[ -z "$bin" || ! -f "$bin" ]]; then
+      echo "ASSERT ERROR: no executable found in $macos_dir" >&2
       exit 2
     fi
   fi
