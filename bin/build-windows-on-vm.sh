@@ -635,9 +635,9 @@ if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}"
   SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
 else
   if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
-    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC Server packaging"\nWrite-Host "[build] ISCC Server EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-Server.exe"'
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC Server packaging"\nWrite-Host "[build] ISCC Server EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-Server.exe"'
   else
-    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
   fi
 fi
 
@@ -666,6 +666,34 @@ fi
 PAPERCUSP_BUILD_SHA="${_head_sha}${PAPERCUSP_BUILD_TAG:+-${PAPERCUSP_BUILD_TAG}}"
 echo "==> build provenance: sha=$PAPERCUSP_BUILD_SHA version=${PAPERCUSP_BUILD_VERSION:-<tauri.conf.json>} packed-src=${PACKED_FP:0:16}"
 
+# ── WI-4389: the release host must be PACKED, not merely LABELED ─────────────
+# main.rs bakes the update source with option_env!("PAPERCUSP_RELEASE_HOST") at
+# COMPILE time, and the compile happens on the VM over ssh. Env does NOT cross
+# ssh: the var reaches cargo only via the \$env: block in the PS1 below. Omit it
+# and cargo bakes an EMPTY string and the compile SUCCEEDS — the installer works,
+# the bundle is signed, latest.json verifies, and the shipped app polls nothing
+# forever, because the Tauri updater cannot tell a failed check from "no update".
+# That is exactly the 0.0.8 defect, and it was found only by grepping the shipped
+# binary AFTER the fact.
+#
+# The mac leg already gates on this (bin/assert-release-host-baked.sh, called from
+# mac-vm-build.sh) — Windows never got wired to it, so the identical bug could ship
+# here silently. Gate on the BYTES, on the VM, right after each cargo build: the
+# raw exe is what Inno packages, and it never comes back to this host in the normal
+# (non-EXE_ONLY) path, so a host-side grep could not see it.
+#
+# Needle = the host's AUTHORITY only (scheme + secret path stripped) — same rule as
+# assert-release-host-baked.sh, so the secret-bearing path is never echoed into the
+# ssh build log.
+RELEASE_HOST_NEEDLE="${PAPERCUSP_RELEASE_HOST:-}"
+RELEASE_HOST_NEEDLE="${RELEASE_HOST_NEEDLE#*://}"   # strip scheme
+RELEASE_HOST_NEEDLE="${RELEASE_HOST_NEEDLE%%/*}"    # authority only
+if [[ -z "$RELEASE_HOST_NEEDLE" ]]; then
+  echo "==> WARNING: PAPERCUSP_RELEASE_HOST is unset — the Windows build will ship WITHOUT"
+  echo "             an update source. Installers work; auto-update does NOT (the 0.0.8 defect)."
+  echo "             release-local.sh sources ~/.papercusp/release-host.env; a standalone run does not."
+fi
+
 echo "==> writing build script"
 BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
 # UTF-8 BOM: Windows PowerShell 5.1 decodes BOM-less .ps1 as CP-1252, which
@@ -691,6 +719,34 @@ ${SIGN_PRELUDE}
 # Authenticode signer — a no-op unless SIGN_PRELUDE set a thumbprint/command
 # (see the host-side branch above). signtool comes from the VS SDK on PATH
 # (vcvars64 sourced above).
+# WI-4389 gate: prove the release host was PACKED into the bytes cargo just
+# produced. "Set in the env block" is a LABEL; the only evidence it was PACKED is
+# finding it inside the artifact. findstr is binary-safe and streams (the exe is
+# large; ReadAllBytes would double it in RAM). ASCII only in this file.
+function Assert-ReleaseHostBaked([string]\$path) {
+  \$needle = "${RELEASE_HOST_NEEDLE}"
+  if (-not \$needle) {
+    Write-Host "[build] release-host assert: no host configured - nothing to assert (auto-update will NOT work)"
+    return
+  }
+  if (-not (Test-Path \$path)) {
+    Write-Host "[build] RELEASE HOST ASSERT ERROR: no such binary: \$path"
+    exit 1
+  }
+  & findstr /M "/C:\$needle" "\$path" | Out-Null
+  if (\$LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "[build] X RELEASE HOST NOT BAKED: \$path"
+    Write-Host "[build]   Expected the configured host ('\$needle') in the binary's bytes; it is ABSENT."
+    Write-Host "[build]   This build would ship an app that can NEVER reach the update manifest, and it"
+    Write-Host "[build]   would NOT look broken: the installer works, the bundle verifies, and the Tauri"
+    Write-Host "[build]   updater renders a failed check as 'up to date' - PERMANENTLY. (The 0.0.8 defect.)"
+    Write-Host "[build]   CAUSE: PAPERCUSP_RELEASE_HOST absent from the \\\$env: block below -- option_env!"
+    Write-Host "[build]   then bakes an empty string and the compile SUCCEEDS."
+    exit 1
+  }
+  Write-Host "[build] OK release host is BAKED into \$path"
+}
 function Sign-File([string]\$path) {
   if (\$script:SignCmd) {
     Write-Host "[build] Authenticode signing (custom): \$path"
@@ -750,6 +806,7 @@ Write-Host "[build] PAPERCUSP_RELEASE_HOST=\$env:PAPERCUSP_RELEASE_HOST"
 Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"
 npx tauri build --no-bundle 2>&1
 Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
+Assert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"
 Sign-File "src-tauri\\target\\release\\papercusp-desktop.exe"
 $( if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
 cat <<'PSEXE'

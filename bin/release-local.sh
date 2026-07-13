@@ -75,20 +75,16 @@ KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 # Both are the same value today. They are separate knobs on purpose: only the
 # MANIFEST location must be permanent — the artifact URLs live inside latest.json
 # and can move per release without an app update.
-RELEASE_HOST_ENV="${HOME}/.papercusp/release-host.env"
-if [[ -f "$RELEASE_HOST_ENV" ]]; then
-  # shellcheck source=/dev/null
-  set -a; . "$RELEASE_HOST_ENV"; set +a
-fi
-export PAPERCUSP_RELEASE_HOST="${PAPERCUSP_RELEASE_HOST:-}"
-export PAPERCUSP_UPDATE_BASE_URL="${PAPERCUSP_UPDATE_BASE_URL:-$PAPERCUSP_RELEASE_HOST}"
-if [[ -z "$PAPERCUSP_RELEASE_HOST" ]]; then
-  echo "WARNING: no release host configured ($RELEASE_HOST_ENV missing)."
-  echo "         The build will ship WITHOUT an update source: an installed app polls,"
-  echo "         gets nothing, and the Tauri updater reads that as 'up to date' FOREVER."
-  echo "         latest.json's urls will be placeholders. Installers still work."
-  echo "         See plan desktop-release-hosting-r2-2026-07-12."
-fi
+#
+# The loader is a SHARED LIB, not a block here, because this script is not the
+# only entry point: the per-leg producers (build-linux-local.sh, build-windows-on-vm.sh)
+# are run directly all the time, and when they were relying on inheriting these
+# exports FROM here, a direct run baked an EMPTY host and shipped a permanently
+# un-updatable app without a single red line (WI-4389). See lib/release-host.sh.
+# shellcheck source=lib/release-host.sh
+source "$HERE/lib/release-host.sh"
+load_release_host
+RELEASE_HOST_ENV="$PAPERCUSP_RELEASE_HOST_ENV"
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"

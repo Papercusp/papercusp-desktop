@@ -32,6 +32,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT"
 
+# ── Update source. LOAD IT HERE, in the producer (WI-4389) ───────────────────
+# This script used to have no idea PAPERCUSP_RELEASE_HOST existed: it worked only
+# because release-local.sh exported it and the value inherited across the local
+# fork. Run THIS script directly — the normal way to rebuild one leg — and
+# option_env!("PAPERCUSP_RELEASE_HOST") baked an EMPTY STRING, the compile
+# SUCCEEDED, and the .deb shipped an app that polls nothing and reports
+# "up to date" forever. Nothing was red. That is the 0.0.8 defect.
+# shellcheck source=lib/release-host.sh
+source "$HERE/lib/release-host.sh"
+load_release_host
+
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
@@ -64,12 +75,32 @@ bash "$ROOT/bin/stage-source-tree.sh"
 export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
+# cargo's REAL target dir (this box has a global override → ~/.cargo-target, so it
+# is NOT src-tauri/target). Resolved once, up front: both the release-host gate
+# below and the artifact collection at the bottom need it.
+SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
+[[ -n "$SRC_ROOT" ]] || SRC_ROOT="$ROOT/src-tauri/target"
+
 echo "==> [4/5] tauri build --bundles deb (roles: $ROLES)"
 for role in $ROLES; do
   role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
   echo "    -- role=$role  $(date -u +%H:%M:%SZ)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
      npx --yes -p @tauri-apps/cli@"${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" tauri build --bundles deb "${role_cfg[@]}")
+
+  # LABELED != PACKED (WI-4389). A .deb existing says NOTHING about whether the
+  # update source reached the binary: option_env! bakes at compile time and bakes
+  # an empty string SUCCESSFULLY when the var is absent. Gate on the BYTES, here
+  # in the producer, so no caller can forget it.
+  #
+  # Gate the RAW binary, never the .deb/.AppImage — those are compressed archives
+  # (ar+zstd / squashfs), so grepping them would MISS a correctly-baked host and
+  # spuriously red the build. Same reason the mac leg gates the .app's Mach-O and
+  # not the .dmg. Both roles build the single [[bin]] papercusp-desktop, so this
+  # path is rewritten each iteration — which is exactly what we want to check.
+  bash "$HERE/assert-release-host-baked.sh" "$SRC_ROOT/release/papercusp-desktop" \
+    || { echo "ERROR: role=$role — release host not baked; refusing to package a permanently-un-updatable app"; exit 1; }
 done
 
 if [[ " $ROLES " == *" gui "* ]]; then
@@ -80,13 +111,10 @@ if [[ " $ROLES " == *" gui "* ]]; then
 fi
 
 # ── COLLECT: move the finished artifacts under the source tree so all platforms
-# share one location. cargo's real target dir (respects the global override) is
-# resolved via `cargo metadata`; if it already equals src-tauri/target, this is
-# a no-op. Same-filesystem move ⇒ instant rename, no byte copy.
+# share one location. $SRC_ROOT (cargo's real target dir, respecting the global
+# override) was resolved before the build loop; if it already equals
+# src-tauri/target this is a no-op. Same-filesystem move ⇒ instant rename.
 echo "==> collecting Linux artifacts into $DEST_BUNDLE"
-SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
-[[ -n "$SRC_ROOT" ]] || SRC_ROOT="$ROOT/src-tauri/target"
 SRC_BUNDLE="$SRC_ROOT/release/bundle"
 
 collected=()
