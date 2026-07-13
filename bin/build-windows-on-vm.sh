@@ -143,7 +143,9 @@ windows_build_lease_acquire \
 windows_build_cleanup() {
   local status="$?"
   trap - EXIT
-  rm -f "${TARBALL:-}" "${TARBALL:-}.fp" "${TARBALL:-}.totals.log"
+  if [[ -n "${TARBALL:-}" ]]; then
+    rm -f "$TARBALL" "$TARBALL.fp" "$TARBALL.totals.log"
+  fi
   if ! windows_build_lease_release && [[ "$status" == "0" ]]; then
     status=74
   fi

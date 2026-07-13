@@ -64,6 +64,7 @@ _windows_build_lease_release_raw() {
 
 _windows_build_lease_start_heartbeat() {
   local parent_pid="$$"
+  local local_args heartbeat_out
   (
     trap - INT TERM
     while sleep "$_WINDOWS_BUILD_LEASE_HEARTBEAT_SEC"; do
