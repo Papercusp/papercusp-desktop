@@ -240,7 +240,6 @@ REQUIRED_NATIVE_MODULES="
 sharp
 better-sqlite3
 @lydell/node-pty
-onnxruntime-node
 sodium-native
 udx-native
 rocksdb-native
@@ -248,6 +247,18 @@ quickbit-native
 rabin-native
 simdle-native
 fs-native-extensions
+"
+# ADVISORY (reported, never fatal): natives that are LAZILY imported, so a missing
+# one degrades a feature instead of killing boot — and which upstream does not ship
+# for every arch we build on.
+#   onnxruntime-node: upstream ships bin/napi-v6/darwin/**arm64 only** — there is NO
+#   darwin-x64 binding, so on the Intel mac build VM it CANNOT load, ever. It is also
+#   deliberately kept off the boot path (voice-node/kokoro-local.ts: "Dynamic import
+#   keeps onnxruntime-node's native load OFF the operator boot path"). Requiring it
+#   would red every mac cut forever for a condition that is upstream's shape, not our
+#   defect. Report it; never fail on it.
+OPTIONAL_NATIVE_MODULES="
+onnxruntime-node
 "
 echo "[6/6] native modules load under the bundled node"
 NODE_BIN=""
@@ -305,10 +316,17 @@ GUARD_EOF
       echo "$_err" | grep -m2 -E 'ESCAPED_BUNDLE|Error|Could not load|dlopen' | cut -c1-160 | sed 's/^/      /'
     fi
   done
+  for _m in $OPTIONAL_NATIVE_MODULES; do
+    if (cd "$SIDECAR" && PC_SIDECAR_ROOT="$SIDECAR" "$NODE_BIN" "$_guard_js" "$_m") >/dev/null 2>&1; then
+      ok "$_m (advisory) loads"
+    else
+      echo "  ⚠ $_m (advisory): does not load from this bundle — lazily imported, so boot is unaffected; the feature that uses it degrades"
+    fi
+  done
   rm -f "$_guard_js"
   # Vacuity guard: a run where nothing loaded is a broken CHECK, not a clean bundle.
   [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
-  [[ "$FAIL" == 0 ]] && ok "all $_nat_ok native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
+  [[ "$FAIL" == 0 ]] && ok "all $_nat_ok required native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
 fi
 
 echo
