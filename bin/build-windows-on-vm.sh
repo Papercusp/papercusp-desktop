@@ -62,6 +62,18 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
+# ── Update source (WI-4389). This script runs on the LINUX box (it drives the
+# Windows VM over ssh), so it can and must load the host itself. It already
+# EXPORTS it into the VM's $env: block and already GATES the built .exe on the
+# bytes (Assert-ReleaseHostBaked) — but both read PAPERCUSP_RELEASE_HOST from
+# THIS process, which was only ever populated by release-local.sh. Run this
+# script directly (the normal way to retry the Windows leg) and the var was
+# empty: cargo baked an empty host, and the gate's own "no host configured —
+# nothing to assert" branch waved it through. Loading it here closes that.
+# shellcheck source=lib/release-host.sh
+source "$HERE/lib/release-host.sh"
+load_release_host
+
 VM_SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
 VM_SSH_PORT="${VM_SSH_PORT:-2223}"
 VM_SSH_HOST="${VM_SSH_HOST:-user@127.0.0.1}"
