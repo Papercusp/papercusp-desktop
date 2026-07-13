@@ -5568,6 +5568,33 @@ pub fn run() {
         }
     }
 
+    // Expose the `SharedArrayBuffer` global in the WebKitGTK webview (WI-4498).
+    // JavaScriptCore hides the SAB *global constructor* behind this runtime
+    // feature flag and leaves it undefined by DEFAULT — even in a cross-origin
+    // isolated document. Measured in the real webview (webkit2gtk 2.52.3):
+    //   - COOP:same-origin + COEP:require-corp ALONE → self.crossOriginIsolated
+    //     becomes true but `typeof SharedArrayBuffer` stays "undefined", so the
+    //     header-only approach is a dead end here.
+    //   - `JSC_useSharedArrayBuffer=1` → the global is exposed, `new
+    //     SharedArrayBuffer()` works, and cross-thread sharing (Worker +
+    //     Atomics, i.e. emscripten pthreads) works — regardless of COOP/COEP.
+    // This is what threaded onnxruntime-web needs for on-device wake-word
+    // detection (openWakeWord) and Silero VAD; ort 1.24.x ships ONLY threaded
+    // wasm, so without SAB the voice stack is stuck on the crude energy-VAD
+    // fallback. Set before any webview/JSC init (JSC reads JSC_* env at startup);
+    // an explicit user value always wins. Spectre note: browsers gate SAB behind
+    // cross-origin isolation to bound side-channel timing attacks between an
+    // isolated document and untrusted cross-origin embeds — this webview loads
+    // only our own first-party operator content, so there is no cross-origin
+    // victim to protect and app-wide exposure is the right trade for a desktop
+    // shell. Linux/WebKitGTK only: JSC_* env flags are WebKitGTK-specific;
+    // Windows (WebView2/Chromium) and macOS (WKWebView) gate SAB on
+    // crossOriginIsolated the spec way and need COOP/COEP headers instead.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("JSC_useSharedArrayBuffer").is_none() {
+        std::env::set_var("JSC_useSharedArrayBuffer", "1");
+    }
+
     let state = SidecarState {
         child: Mutex::new(None),
         port: Mutex::new(None),
