@@ -794,6 +794,15 @@ fn save_layout(path: &std::path::Path, layout: TerminalLayout) {
 pub struct NativeTerminal {
     pub strategy: TerminalStrategy,
     pub config: GlueConfig,
+    /// D-004 (operator-chat-sidebar-revival P-014): the dock is gated behind
+    /// FLAGS.TESTING. Rust cannot read the flag store (it is client-loaded in
+    /// the webview), so the gate defaults CLOSED and the webview relays the
+    /// resolved flag across the seam via `native_terminal_set_enabled` once
+    /// flags load (and on live flips). Gate closed ⇒ no spawn (boot or
+    /// toggle) and `native_terminal_status` reports `disabled`; all code +
+    /// bundled pui/zellij binaries stay in the app — flag on restores the
+    /// dock exactly.
+    gate_enabled: std::sync::atomic::AtomicBool,
     live: Mutex<Option<Live>>,
     /// The current user layout, shared with whichever backend loop/handler
     /// needs to apply it live (the X11 glue-loop thread reads it every
@@ -831,6 +840,7 @@ impl NativeTerminal {
         NativeTerminal {
             strategy,
             config,
+            gate_enabled: std::sync::atomic::AtomicBool::new(false),
             live: Mutex::new(None),
             layout: Mutex::new(default_layout),
             persist_path: Mutex::new(None),
@@ -845,6 +855,18 @@ impl NativeTerminal {
 
     pub fn is_running(&self) -> bool {
         self.live.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    /// D-004: is the FLAGS.TESTING gate open? Defaults false (dock dark)
+    /// until the webview relays the flag via `native_terminal_set_enabled`.
+    pub fn gate_enabled(&self) -> bool {
+        self.gate_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// D-004: open/close the FLAGS.TESTING gate (webview-relayed).
+    pub fn set_gate_enabled(&self, on: bool) {
+        self.gate_enabled
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// PID of the spawned ghostty process, if running. The glue loop resolves
@@ -2701,6 +2723,32 @@ impl NativeTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── D-004 (operator-chat-sidebar-revival P-014/P-015): the TESTING gate ─
+
+    /// The dock gate must default CLOSED: FLAGS.TESTING is parked/off, and
+    /// the webview relay is the ONLY thing that opens it. A default-open gate
+    /// would spawn the dock at boot before flags load — exactly the behavior
+    /// D-004 retires. (The boot callsite no longer spawns at all; both spawn
+    /// paths — `native_terminal_set_enabled` and `native_terminal_toggle` —
+    /// check this gate first.)
+    #[test]
+    fn dock_gate_defaults_closed_no_spawn() {
+        let nt = NativeTerminal::new(TerminalStrategy::Disabled);
+        assert!(!nt.gate_enabled(), "gate must default CLOSED (flag-off ⇒ no dock spawn)");
+        assert!(!nt.is_running());
+    }
+
+    /// The webview relay opens/closes the gate; both transitions must stick
+    /// (a live /admin/features flip re-relays without an app restart).
+    #[test]
+    fn dock_gate_relay_round_trips() {
+        let nt = NativeTerminal::new(TerminalStrategy::Disabled);
+        nt.set_gate_enabled(true);
+        assert!(nt.gate_enabled());
+        nt.set_gate_enabled(false);
+        assert!(!nt.gate_enabled());
+    }
 
     // ── WI-4448: the Windows chat dock ─────────────────────────────────────
 
