@@ -56,6 +56,27 @@ _windows_build_json_field() {
   ' "$path"
 }
 
+_windows_build_heartbeat_extended() {
+  local lock_id="$1"
+  node -e '
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const o = JSON.parse(raw);
+        process.stdout.write(o?.results?.[0]?.extended === true ? "true" : "false");
+      } catch {
+        // Trimmed MCP responses use TOON. The heartbeat row schema is
+        // results{ok,lock_id,extended,expires_ts}; match our exact lock id so a
+        // different row can never make this lease look healthy.
+        const expected = "true," + process.argv[1] + ",true,";
+        process.stdout.write(raw.split(/\r?\n/).some(line => line.trimStart().startsWith(expected)) ? "true" : "false");
+      }
+    });
+  ' "$lock_id"
+}
+
 _windows_build_lease_release_raw() {
   local args
   args="$(node -e 'process.stdout.write(JSON.stringify({lock_id:process.argv[1]}))' "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID")"
@@ -71,7 +92,7 @@ _windows_build_lease_start_heartbeat() {
       local_args="$(node -e 'process.stdout.write(JSON.stringify({lock_id:process.argv[1],ttl_sec:Number(process.argv[2])}))' \
         "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" "$_WINDOWS_BUILD_LEASE_TTL_SEC")"
       if ! heartbeat_out="$(_windows_build_lease_mcp locks:heartbeat_resource "$local_args" 2>&1)" \
-        || [[ "$(printf '%s' "$heartbeat_out" | _windows_build_json_field results.0.extended 2>/dev/null || true)" != "true" ]]; then
+        || [[ "$(printf '%s' "$heartbeat_out" | _windows_build_heartbeat_extended "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" 2>/dev/null || true)" != "true" ]]; then
         echo "ERROR: Windows VM build lease heartbeat failed; terminating before this process can become a stale writer: $heartbeat_out" >&2
         kill -TERM "$parent_pid" 2>/dev/null || true
         exit 1
