@@ -566,6 +566,8 @@ copy_pkg_closure() {
       [[ -d "$base/$cur" ]] && { src="$base/$cur"; break; }
     done
     if [[ -z "$src" ]]; then
+      # An optionalDep for another platform is SUPPOSED to be absent here — not a defect.
+      [[ $optional -eq 1 ]] && continue
       echo "  ⚠ closure dep '$cur' not found in any node_modules"; nat_missing=$((nat_missing+1)); continue
     fi
     mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
@@ -573,7 +575,7 @@ copy_pkg_closure() {
     prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
     prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
-    local deps; deps=$(node -e "try{const d=require('$src/package.json').dependencies||{};process.stdout.write(Object.keys(d).join(' '))}catch(e){}" 2>/dev/null)
+    local deps; deps=$(node -e "try{const p=require('$src/package.json');const r=Object.keys(p.dependencies||{});const o=Object.keys(p.optionalDependencies||{}).map(n=>'?'+n);process.stdout.write([...r,...o].join(' '))}catch(e){}" 2>/dev/null)
     for d in $deps; do queue+=("$d"); done
   done
 }
