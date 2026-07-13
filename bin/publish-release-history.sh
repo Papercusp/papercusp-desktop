@@ -125,6 +125,19 @@ aws s3 sync "$SITE_DIR/plans" "s3://${R2_BUCKET}/${KEY_PREFIX}/plans" \
   --cache-control 'no-cache, max-age=0' \
   --delete --only-show-errors
 
+# history.json is what the INSTALLED APP's Update Center fetches (the same rail as
+# latest.json). It is not optional: without it every user's update history is empty.
+if [[ -f "$SITE_DIR/history.json" ]]; then
+  echo "==> uploading history.json (the in-app Update Center reads this)"
+  aws s3 cp "$SITE_DIR/history.json" "s3://${R2_BUCKET}/${KEY_PREFIX}/history.json" \
+    --endpoint-url "$ENDPOINT" \
+    --content-type 'application/json' \
+    --cache-control 'no-cache, max-age=0' --only-show-errors
+else
+  echo "ERROR: no history.json in $SITE_DIR — regenerate; the app's Update Center needs it." >&2
+  exit 1
+fi
+
 echo "==> uploading index.html (LAST — this is the page we share)"
 aws s3 cp "$SITE_DIR/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
   --endpoint-url "$ENDPOINT" \
