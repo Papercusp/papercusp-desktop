@@ -781,7 +781,7 @@ function Assert-ReleaseHostBaked([string]\$path) {
     Write-Host "[build]   This build would ship an app that can NEVER reach the update manifest, and it"
     Write-Host "[build]   would NOT look broken: the installer works, the bundle verifies, and the Tauri"
     Write-Host "[build]   updater renders a failed check as 'up to date' - PERMANENTLY. (The 0.0.8 defect.)"
-    Write-Host "[build]   CAUSE: PAPERCUSP_RELEASE_HOST absent from the \\\$env: block below -- option_env!"
+    Write-Host '[build]   CAUSE: PAPERCUSP_RELEASE_HOST absent from the \$env: block below -- option_env!'
     Write-Host "[build]   then bakes an empty string and the compile SUCCEEDS."
     exit 1
   }
