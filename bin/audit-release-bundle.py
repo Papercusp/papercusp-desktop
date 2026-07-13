@@ -128,6 +128,21 @@ FORBIDDEN_PATH = [
     # a leak class we delete rather than scrub.
     ("build-cache", re.compile(r"(^|/)\.cache/"),
      [".cache"]),
+    # Pagefind search-index shards (apps/*/dist/**/pagefind/index/*.pf_index,
+    # apps/operator/public/**/pagefind/**, apps/operator-docs/dist/pagefind/**).
+    # Pagefind TOKENISES the docs it indexes into these binary shards — the
+    # 0.0.9 cut red'd here on `\bAvi\b` ×3, the owner's own git user.name, baked
+    # into en_143e775.pf_index because an internal doc names them (WI-4419). The
+    # shipping markdown itself was clean; only the generated index carried it, and
+    # a .pf_fragment shard would likewise carry the raw home-path of any doc that
+    # cites one. Nothing SERVER-side reads these (client docs-search loads them in
+    # the browser from the built static output; the docs markdown still renders and
+    # search just returns empty until pagefind is re-run) — a generated, regenerable,
+    # not-needed-to-RUN artifact that leaks indexed content, i.e. the .cache/ class:
+    # we delete it, we do not scrub it. Scoped to the .pf_* extensions so the
+    # pagefind NPM TOOL (node_modules/pagefind) and dist package-mains are untouched.
+    ("pagefind-search-index", re.compile(r"\.pf_(index|fragment|meta)$"),
+     ["*.pf_index", "*.pf_fragment", "*.pf_meta"]),
     # Rust/Cargo build target dirs (apps/tui/target, apps/pui-*/target,
     # libs/**/src-tauri/target, …) at ANY depth. A cargo target bakes THIS build
     # box's absolute home path into .rustc_info.json, the *.d dep-files and the
