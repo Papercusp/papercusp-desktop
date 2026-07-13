@@ -1,1 +1,0 @@
-import{c as e,o as t}from"./inbox-wake-BV_w95Jo.js";t();export{e as wakeRecipients};

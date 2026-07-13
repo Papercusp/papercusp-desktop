@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-CMDVVQTH.js";e();export{t as buildConsoleEnvelope};

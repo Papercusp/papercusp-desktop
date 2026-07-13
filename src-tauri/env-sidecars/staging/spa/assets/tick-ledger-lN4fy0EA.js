@@ -1,0 +1,1 @@
+import{r as e,t}from"./tick-ledger-Don2LVZ7.js";t();export{e as readScoutTicks};
