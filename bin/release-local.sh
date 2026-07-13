@@ -626,7 +626,25 @@ elif [[ "$WITH_MAC" == "1" ]]; then
         _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
         echo "    mac VM free disk: ${_mac_free_gb}GB (universal build needs ~${_mac_min_free_gb}GB)"
         if (( _mac_free_gb < _mac_min_free_gb )); then
-          echo "ERROR: mac VM has only ${_mac_free_gb}GB free — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB and OOM-disks mid-build (the recurring mac cut emergency). FIX: free space / grow the VM disk, OR cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified prior mac artifacts (the first-class salvage fallback). Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
+          # WI-4389 durable self-heal for "the recurring mac cut emergency": the cut
+          # itself leaves stale target/debug PROFILE dirs on the VM's PERSISTENT target
+          # tree (the rsync above excludes target/, so it survives every cut) — and a
+          # --release universal build NEVER reads a debug profile (the two roles build
+          # into target/role-{gui,server}/…/release). So reclaim every debug/ dir under
+          # the target and re-measure BEFORE failing: a cut self-heals on the space the
+          # build made stale instead of hard-failing on it. ONLY debug profiles are
+          # removed — never the role-* release incremental caches, never a REUSE_MAC
+          # salvage source. find (not a glob) because the VM shell is zsh with NOMATCH.
+          echo "    ⚠ ${_mac_free_gb}GB < ${_mac_min_free_gb}GB — auto-reclaiming stale target/debug profiles before failing…"
+          "${MAC_VM_SSH[@]}" 'T="$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop/src-tauri/target"; [ -d "$T" ] && find "$T" -maxdepth 3 -type d -name debug -prune -exec rm -rf {} + 2>/dev/null; true' 2>/dev/null || true
+          _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
+          if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
+            _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
+            echo "    mac VM free disk after reclaim: ${_mac_free_gb}GB"
+          fi
+        fi
+        if (( _mac_free_gb < _mac_min_free_gb )); then
+          echo "ERROR: mac VM has only ${_mac_free_gb}GB free (after auto-reclaiming stale debug profiles) — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB and OOM-disks mid-build (the recurring mac cut emergency). FIX: free space / grow the VM disk, OR cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified prior mac artifacts (the first-class salvage fallback). Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
         fi
       else
         echo "    ⚠ could not read mac VM free disk (got '${_mac_free_kb}') — skipping P-008 disk preflight (non-fatal)"
