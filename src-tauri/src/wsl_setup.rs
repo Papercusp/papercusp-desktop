@@ -64,6 +64,36 @@ pub fn detect_ready_cached() -> bool {
 #[cfg(target_os = "windows")]
 const ROOTFS_FILENAME: &str = "papercup-runtime.tar.gz";
 
+// Written beside the tarball by scripts/build-rootfs.sh: the fingerprint of the
+// recipe that produced the SHIPPED rootfs, and the bootstrap that recipe runs.
+#[cfg(any(target_os = "windows", test))]
+const ROOTFS_RECIPE_FILENAME: &str = "papercup-rootfs-recipe";
+#[cfg(target_os = "windows")]
+const ROOTFS_BOOTSTRAP_FILENAME: &str = "papercup-bootstrap.sh";
+
+/// Does the distro need re-provisioning before it can be trusted?
+///
+/// `shipped` is the recipe fingerprint of the rootfs in THIS build; `provisioned`
+/// is the one recorded when the distro was last bootstrapped. They diverge when a
+/// user updates the app: the new build carries a new rootfs recipe, but the distro
+/// on disk was imported by an older one and — until this check existed — was
+/// trusted forever, because a distro that exists and starts looks Ready.
+///
+/// Unknown (`None`) means an install that predates this marker, so we cannot show
+/// the distro matches. Treat that as stale: re-running the bootstrap is idempotent
+/// and cheap, while trusting it is how the rootfs half of a fix silently never
+/// ships. Fail toward doing the work.
+#[cfg(any(target_os = "windows", test))]
+fn distro_needs_reprovision(shipped: Option<&str>, provisioned: Option<&str>) -> bool {
+    match (shipped, provisioned) {
+        // We don't know what we shipped — cannot justify re-provisioning on every
+        // launch, and re-running blind would loop forever with nothing to record.
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(want), Some(have)) => want.trim() != have.trim(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "kind")]
 pub enum WslState {
@@ -249,6 +279,23 @@ mod imp {
     struct PersistedState {
         install_kicked_off: bool,
         bootstrapped: bool,
+        /// Fingerprint of the rootfs recipe that provisioned this distro
+        /// (`resources/papercup-rootfs-recipe`, written by scripts/build-rootfs.sh).
+        ///
+        /// Without it, a distro imported once is trusted forever: `detect()` sees
+        /// a distro that exists and starts, returns Ready, and never asks what is
+        /// INSIDE it. So a fix to the rootfs recipe reaches new installs only —
+        /// every existing user updates the app and keeps a distro provisioned by
+        /// the old recipe. That is how the Windows chat dock would have shipped
+        /// "fixed" and still opened onto a dead `pui` for everyone who already
+        /// had the app.
+        ///
+        /// Absent (older installs, or state we never wrote) ⇒ unknown ⇒ treated as
+        /// stale, which re-runs the idempotent bootstrap. Failing toward
+        /// re-provisioning is the safe direction: the cost is one bootstrap run,
+        /// the cost of the other direction is a silently broken distro.
+        #[serde(default)]
+        rootfs_recipe: Option<String>,
         /// Cross-process guard for the post-onboarding finalize RESTART, keyed
         /// PER BUNDLE ROLE. The per-process `FINALIZED` atomic in
         /// `wsl_finalize_ready` only guards a single process, but that restart

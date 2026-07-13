@@ -229,4 +229,27 @@ _rootfs_sha="$(papercusp_portable_sha256 "$OUT_TARBALL")"
 } > "${OUT_DIR}/.rootfs-build-stamp"
 echo "→ wrote rootfs freshness stamp (recipe ${_recipe_sha:0:12}…, WI-4448)"
 
+# ── Ship the recipe + the bootstrap AS RESOURCES (WI-4478) ────────────
+# The tarball is imported ONLY on a machine with no distro. An existing install
+# keeps the distro it imported months ago, forever — `wsl_setup::detect()` sees a
+# distro that exists and starts, returns Ready, and never looks at what is inside
+# it. So a change made HERE reaches new installs and NOBODY ELSE: every existing
+# user updates the app and keeps a distro provisioned by the OLD recipe.
+#
+# Re-importing would be wrong (it destroys the user's workspaces inside the
+# distro, ~23 GB on our own test VM). The bootstrap is idempotent by
+# construction, so the fix is to RE-RUN THE CURRENT ONE in the existing distro.
+# For that, the app needs two things at runtime that it could not otherwise get:
+#   papercup-rootfs-recipe  — the fingerprint of the recipe the SHIPPED tarball
+#                             was built from, to compare against the one recorded
+#                             inside the distro.
+#   papercup-bootstrap.sh   — the CURRENT bootstrap. Re-running the copy already
+#                             inside the distro (/opt/papercup/bootstrap) is
+#                             useless: that IS the old one.
+# Plain (non-dot) filenames: tauri.conf's `resources/*` glob must actually pick
+# them up, and the .rootfs-build-stamp above is a BUILD-time artifact only.
+printf '%s\n' "$BOOTSTRAP_SH" > "${OUT_DIR}/papercup-bootstrap.sh"
+printf '%s\n' "${_recipe_sha:-}" > "${OUT_DIR}/papercup-rootfs-recipe"
+echo "→ shipped papercup-bootstrap.sh + papercup-rootfs-recipe as resources (WI-4478)"
+
 echo "done. ship it as a Tauri resource."
