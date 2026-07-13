@@ -440,6 +440,24 @@ bash "$ROOT/bin/stage-env-sidecars.sh"
 # (WI-3308, 2026-07-07); opt out with PAPERCUSP_STAGE_SOURCE=0 for a smaller build.
 bash "$ROOT/bin/stage-source-tree.sh"
 
+# ── BOOT GATE (desktop-release-0-0-8) — the sidecar must actually START ────────
+# 0.0.9 shipped a sidecar that could not boot on ANY platform (sharp native
+# missing from the closure copy). FIVE green cuts missed it, because a dev box
+# falls back to a :3070 operator that no user has — so the failure is invisible
+# exactly where we verify. This runs the JUST-STAGED serve.mjs with the bundled
+# node in an isolated root (no ancestor node_modules to lend it a missing native)
+# and FAILS THE CUT if it can't serve — BEFORE we spend ~30min on three platform
+# builds that would pack a DOA sidecar. It validates the LINUX bundle (this build
+# box); win/mac carry their own natives and are proven at install-time (the ARRIVES
+# probe). Opt out only for a deliberate diagnostic cut: PAPERCUSP_SKIP_BOOT_GATE=1.
+if [[ "${PAPERCUSP_SKIP_BOOT_GATE:-0}" != "1" ]]; then
+  echo "==> boot gate: verifying the staged sidecar actually starts (pre-pack)"
+  bash "$ROOT/bin/gate-sidecar-boots.sh" "$ROOT/src-tauri/sidecar" \
+    || { echo "ERROR: staged sidecar failed the boot gate — refusing to pack a DOA bundle. See the boot log above."; exit 1; }
+else
+  echo "==> ⚠ boot gate SKIPPED (PAPERCUSP_SKIP_BOOT_GATE=1) — diagnostic cut only"
+fi
+
 echo "==> building Tauri Linux x86_64 (signed)"
 # Tauri v2 reads TAURI_SIGNING_PRIVATE_KEY (value = key content OR a path);
 # the v1-style _PATH variant is silently ignored and the build dies at the
