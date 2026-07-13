@@ -127,6 +127,32 @@ SCP=(scp -i "$VM_SSH_KEY" -o IdentitiesOnly=yes -P "$VM_SSH_PORT" -o ConnectTime
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+# WI-4642 / P-021: this VM + VM_BUILD_DIR is shared across every agent and
+# every release cut. Acquire the registered host+directory lease BEFORE any
+# destructive preflight, extract, or build. The lease helper heartbeats for a
+# long build, declares a latched release event, and verifies cleanup on every
+# exit/signal. Contention fails here, before either run can touch the VM.
+# shellcheck source=lib/windows-build-resource-lease.sh
+source "$HERE/lib/windows-build-resource-lease.sh"
+windows_build_lease_acquire \
+  "$VM_SSH_HOST" "$VM_SSH_PORT" "$VM_BUILD_DIR" \
+  "Windows desktop build${PAPERCUSP_BUILD_VERSION:+ version=$PAPERCUSP_BUILD_VERSION}" \
+  "${PAPERCUSP_WINDOWS_BUILD_ETA_SEC:-7200}" \
+  || fail "Windows VM/build directory is leased by another run; see locks:list for owner, purpose, ETA, and release event"
+
+windows_build_cleanup() {
+  local status="$?"
+  trap - EXIT
+  rm -f "${TARBALL:-}" "${TARBALL:-}.fp" "${TARBALL:-}.totals.log"
+  if ! windows_build_lease_release && [[ "$status" == "0" ]]; then
+    status=74
+  fi
+  exit "$status"
+}
+trap windows_build_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Content hash of everything that decides whether the Rust binary compiles and
 # what it is. EI-8914: the shared checkout is edited CONCURRENTLY by the whole
 # fleet, so "the tree we gated" and "the tree we packed" are different trees
@@ -375,7 +401,6 @@ fi
 
 echo "==> packing desktop tree"
 TARBALL="$(mktemp /tmp/papercusp-desktop-build-XXXX.tar.gz)"
-trap 'rm -f "$TARBALL" "$TARBALL.fp" "$TARBALL.totals.log"' EXIT
 # -h dereferences symlinks (node_modules/.bin shims) — Windows tar can't
 # create them. Keep sidecar/**/node_modules (runtime deps); drop only the
 # desktop repo's own toolchain node_modules.
