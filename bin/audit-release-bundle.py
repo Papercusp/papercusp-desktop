@@ -143,6 +143,41 @@ FORBIDDEN_PATH = [
     # pagefind NPM TOOL (node_modules/pagefind) and dist package-mains are untouched.
     ("pagefind-search-index", re.compile(r"\.pf_(index|fragment|meta)$"),
      ["*.pf_index", "*.pf_fragment", "*.pf_meta"]),
+    # Internal engineering-docs infra sections — must NOT ship in a PUBLIC desktop
+    # bundle (su-a1a71 decision 2026-07-13, WI-4419). apps/operator-docs is the
+    # "Papercusp Internal" Starlight site (astro.config title), served at
+    # /internal/docs: its build-system/** section documents the build-VM SSH/sudo
+    # creds + admin commands + port maps, and four agent-insights runbooks document
+    # the mac-VM QMP recovery / notarization / e2e pipeline. These shipped in the
+    # 0.0.8 bundle carrying the mac VM's ACTUAL sudo password ('aviweiss') and
+    # loginwindow password ('avraham') — a real public credential leak (owner is
+    # rotating). Per-secret scrubbing is whack-a-mole that re-leaks the instant
+    # someone pastes the real ssh target back in; EXCLUDING the internal-infra doc
+    # CLASS is the root-cause fix. The SAME content is also inlined into the
+    # llms-full.txt / llms-small.txt AGGREGATE bundles (an "llms.txt" concat of the
+    # whole docs site) which a section-exclude alone can't clean — so those drop too.
+    # Every leaking file lives under one of these shapes across ALL of
+    # src/content/docs, dist/, and the served apps/operator/public/internal/docs
+    # copy (verified: this set == the entire aviweiss/avraham footprint in shipping
+    # paths). build-desktop-sidecar.sh:720's docs-qa copy inherits the exclusion
+    # (it copies FROM the already-staged source). (The two vendored
+    # node_modules/*/llms-full.txt this also drops — stream-json, stream-chain — are
+    # npm `files`-array docs, NOT `exports`/`main` runtime entries, so dropping them
+    # breaks nothing.) NONE of these basenames/dirs collide with a vendored RUNTIME
+    # entry (checked: no build-system/ dir and no runbook basename in node_modules).
+    ("internal-build-infra-docs",
+     re.compile(r"(^|/)build-system/"
+                r"|(^|/)(mac-vm-qmp-recovery|mac-vm-e2e-battery"
+                r"|macos-signing-notarization-runbook"
+                r"|federation-public-release-known-limitations"
+                r"|agent-insights-index)\.(mdx|md|html)$"
+                r"|(^|/)(llms-full|llms-small)\.txt$"),
+     ["build-system",
+      "mac-vm-qmp-recovery.*", "mac-vm-e2e-battery.*",
+      "macos-signing-notarization-runbook.*",
+      "federation-public-release-known-limitations.*",
+      "agent-insights-index.*",
+      "llms-full.txt", "llms-small.txt"]),
     # Rust/Cargo build target dirs (apps/tui/target, apps/pui-*/target,
     # libs/**/src-tauri/target, …) at ANY depth. A cargo target bakes THIS build
     # box's absolute home path into .rustc_info.json, the *.d dep-files and the
