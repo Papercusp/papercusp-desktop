@@ -405,6 +405,12 @@ REDS=()
 [ "$MATRIX_RES" = FAIL ] && REDS+=("content-matrix")
 [ "$FROMREPO_RES" = FAIL ] && REDS+=("from-repo")
 [ "$MATRIXFULL_RES" = FAIL ] && REDS+=("local-matrix")
+# EI-11342: a prod-port squat by a rig-owned process invalidates the run AND is itself a
+# red-worthy defect (an instance bound the wrong port ⇒ whatever that instance "proved" is void).
+if [ -s "$GUARD_TRIP_FILE" ]; then
+  REDS+=("prod-port-squat")
+  log "PROD-PORT GUARD tripped during this run (EI-11342): $(tr '\n' '; ' <"$GUARD_TRIP_FILE")"
+fi
 SUMMARY="content-matrix=$MATRIX_RES from-repo=$FROMREPO_RES local-matrix=$MATRIXFULL_RES build=$([ "$FAIL_BUILD" = 1 ] && echo FAIL || echo OK)"
 log "VERDICT: $SUMMARY"
 echo "$(now_s)" >"$STATE_DIR/last-run"
