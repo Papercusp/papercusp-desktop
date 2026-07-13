@@ -251,22 +251,55 @@ if [[ -z "$NODE_BIN" ]]; then
 elif [[ ! -d "$SIDECAR/node_modules" ]]; then
   fail "no node_modules/ in the sidecar — the dependency closure was never copied"
 else
+  # ⚠ A PLAIN `require()` HERE IS VACUOUS — it cannot fail. NODE RESOLVES UPWARD:
+  # the sidecar sits inside the repo, so a native MISSING from the bundle is found
+  # in an ancestor node_modules (papercusp-desktop/node_modules, …) and the broken
+  # bundle greens. Verified: with the bundle's @img/ deleted — the exact 0.0.9
+  # defect — a bare require('sharp') SUCCEEDED from the repo's copy. A user's
+  # machine has no ancestor node_modules, so it dies there instead.
+  #
+  # So enforce the REAL contract — THE BUNDLE IS SELF-CONTAINED — by failing any
+  # resolution that escapes it. This catches the missing native AND the upward
+  # escape, in place, with no isolation copy.
+  _guard_js="$(mktemp "${TMPDIR:-/tmp}/pc-nat-guard-XXXXXX.js")"
+  cat >"$_guard_js" <<'GUARD_EOF'
+const Module = require('module');
+const path = require('path');
+const fs = require('fs');
+const ROOT = fs.realpathSync(process.env.PC_SIDECAR_ROOT) + path.sep;
+const orig = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, ...rest) {
+  const p = orig.call(this, request, parent, ...rest);
+  // Builtins resolve to a bare specifier ("fs", "node:fs") — never absolute.
+  if (path.isAbsolute(p) && !fs.realpathSync(p).startsWith(ROOT)) {
+    const e = new Error('ESCAPED_BUNDLE: "' + request + '" resolved OUTSIDE the bundle -> ' + p);
+    e.code = 'ESCAPED_BUNDLE';
+    throw e;
+  }
+  return p;
+};
+// Resolve AS THE SIDECAR DOES — from inside the bundle. A bare `require()` here
+// would resolve relative to THIS guard file (it lives in TMPDIR), not the cwd.
+Module.createRequire(path.join(ROOT, 'serve.mjs'))(process.argv[2]);
+GUARD_EOF
   _nat_ok=0
   for _m in $REQUIRED_NATIVE_MODULES; do
-    # The exact require the sidecar performs at boot: the BUNDLED node, resolving
-    # out of the BUNDLE. Never the build host's node or its node_modules — node
-    # resolves UPWARD, so running this from inside the repo would let a missing
-    # native resolve out of the repo's own tree and green a broken bundle.
-    if _err="$(cd "$SIDECAR" && "$NODE_BIN" -e "require('$_m')" 2>&1)"; then
+    if _err="$(cd "$SIDECAR" && PC_SIDECAR_ROOT="$SIDECAR" "$NODE_BIN" "$_guard_js" "$_m" 2>&1)"; then
       _nat_ok=$((_nat_ok+1))
     else
-      fail "$_m: does NOT load from the bundle — it will die at boot on a clean install"
-      echo "$_err" | grep -m3 -E 'Error|Could not load|dlopen' | sed 's/^/      /'
+      case "$_err" in
+        *ESCAPED_BUNDLE*)
+          fail "$_m: resolved OUTSIDE the bundle — it is MISSING from the closure and only 'works' here because node walked up into the repo. On a clean install it dies." ;;
+        *)
+          fail "$_m: does NOT load from the bundle — it will die at boot on a clean install" ;;
+      esac
+      echo "$_err" | grep -m2 -E 'ESCAPED_BUNDLE|Error|Could not load|dlopen' | cut -c1-160 | sed 's/^/      /'
     fi
   done
+  rm -f "$_guard_js"
   # Vacuity guard: a run where nothing loaded is a broken CHECK, not a clean bundle.
   [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
-  [[ "$FAIL" == 0 ]] && ok "all $_nat_ok native modules require() cleanly under $(basename "$NODE_BIN")"
+  [[ "$FAIL" == 0 ]] && ok "all $_nat_ok native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
 fi
 
 echo
