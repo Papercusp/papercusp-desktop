@@ -1,12 +1,14 @@
-//! docs_search — the global-hotkey docs-search palette (WI-2648, feature #5).
+//! docs_search — the global-hotkey Quick Panel (WI-2648 feature #5; tabbed
+//! panel: quick-panel-saved-prompts-2026-07-13).
 //!
 //! A user-configurable global shortcut — **OFF by default** — which, when the
 //! user turns it on, opens (or focuses) a small, always-on-top WebviewWindow
-//! loading the static `/internal/docs/search-palette.html` page, which wires
-//! Pagefind's own default UI widget onto the ALREADY-BUILT + ALREADY-SERVED
-//! search index (apps/operator-docs, `pagefind: true`) — no new server route, no
-//! custom search code. Cross-platform: `tauri_plugin_global_shortcut` handles the
-//! OS registration on macOS/Windows/Linux.
+//! loading the SPA's `/quick-panel` route: a tabbed palette whose DEFAULT tab
+//! is the saved-prompts organizer, with the original Pagefind docs search
+//! (`/internal/docs/search-palette.html`, embedded as an iframe) and the
+//! brainstorm partner as sibling tabs. Cross-platform:
+//! `tauri_plugin_global_shortcut` handles the OS registration on
+//! macOS/Windows/Linux.
 //!
 //! OFF BY DEFAULT (owner directive, 2026-07-12). A global shortcut is a
 //! SYSTEM-WIDE key grab: while registered, the accelerator is stolen from every
@@ -227,7 +229,7 @@ pub fn open_palette(app: &AppHandle) {
         eprintln!("[docs-search] could not resolve app origin — palette not opened");
         return;
     };
-    let url = format!("{base}/internal/docs/search-palette.html");
+    let url = format!("{base}/quick-panel");
     // Explicit type: `parsed` is now also `.clone()`d into a second builder
     // below, and `.clone()` on an un-annotated binding leaves `url.parse()`'s
     // target ambiguous (E0282).
@@ -247,9 +249,9 @@ pub fn open_palette(app: &AppHandle) {
         WINDOW_LABEL,
         tauri::WebviewUrl::External(parsed.clone()),
     )
-    .title("Search docs")
-    .inner_size(640.0, 480.0)
-    .min_inner_size(420.0, 320.0)
+    .title("Quick Panel")
+    .inner_size(760.0, 540.0)
+    .min_inner_size(480.0, 360.0)
     .center()
     .always_on_top(true)
     .focused(true)
@@ -265,9 +267,9 @@ pub fn open_palette(app: &AppHandle) {
                     WINDOW_LABEL,
                     tauri::WebviewUrl::External(parsed),
                 )
-                .title("Search docs")
-                .inner_size(640.0, 480.0)
-                .min_inner_size(420.0, 320.0)
+                .title("Quick Panel")
+                .inner_size(760.0, 540.0)
+                .min_inner_size(480.0, 360.0)
                 .center()
                 .always_on_top(true)
                 .focused(true)
