@@ -120,6 +120,14 @@ FORBIDDEN_PATH = [
      [".papercup-console-active.*"]),
     ("next-build-cache", re.compile(r"(^|/)\.next/"),
      [".next"]),
+    # Any tool's build cache (storybook, babel, eslint, …). These are generated on
+    # THIS box and bake its absolute paths into their artifacts — every one of the
+    # 8 `/home/<owner>` hits in the 0.0.8-era bundle came from
+    # */node_modules/.cache/storybook/**/manager-bundle.js. Nothing in a .cache/ is
+    # needed to RUN the tree (it exists to make the next BUILD faster), so this is
+    # a leak class we delete rather than scrub.
+    ("build-cache", re.compile(r"(^|/)\.cache/"),
+     [".cache"]),
 ]
 
 # ── CONTENT: real credential VALUES (grep -E, C speed). Not the word "secret".
@@ -133,7 +141,13 @@ CREDENTIAL_ERE = [
     ("anthropic-key", r"\bsk-ant-(api|oat)[0-9]{2}-[A-Za-z0-9_-]{40,}"),
     ("openai-key", r"\bsk-(proj-)?[A-Za-z0-9]{40,}"),
     ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
-    ("aws-secret-key", r"aws_secret_access_key[[:space:]]*=[[:space:]]*[^[:space:]]{30,}"),
+    # The VALUE must look like an AWS secret (40 chars of the key alphabet), not
+    # merely "30+ non-space chars after an =". The loose form matched wrangler's
+    # own JavaScript — `aws_secret_access_key === …typeof` — and our OWN
+    # secret-scrubber's pattern list: the gate was convicting secret-DETECTION code
+    # of being a secret. A gate that cries wolf is a gate that gets an exception
+    # added to shut it up, which is the failure it exists to prevent.
+    ("aws-secret-key", r"aws_secret_access_key[[:space:]]*[=:][[:space:]]*[\"']?[A-Za-z0-9/+]{40}"),
     ("slack-token", r"\bxox[abprs]-[A-Za-z0-9-]{20,}"),
     # PostHog: phx_ is a WRITE-side personal key (the one that must never ship);
     # phc_ is an anonymous-capture project key — see BENIGN for the one we ship.
