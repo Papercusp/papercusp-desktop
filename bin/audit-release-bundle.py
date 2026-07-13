@@ -77,8 +77,17 @@ import tarfile
 FORBIDDEN_PATH = [
     ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$"),
      ["pi-sessions"]),
-    ("papercusp-state-dir", re.compile(r"(^|/)\.papercusp/"),
-     [".papercusp"]),
+    # `.papercusp` AND its siblings (`.papercusp-tmp`, `.papercusp-workspaces`): a
+    # rule anchored on `.papercusp/` alone MISSED packages/operator-core/.papercusp-tmp/
+    # — a node compile-cache full of this box's absolute paths, nested inside an
+    # allowlisted dir, i.e. exactly the shape of the original leak.
+    ("papercusp-state-dir", re.compile(r"(^|/)\.papercusp(-[a-z-]+)?/"),
+     [".papercusp", ".papercusp-*"]),
+    # Editor swap/backup files. A tracked `.agent-action-registry-plan.md.swp` was
+    # sitting in apps/operator/docs — a binary vim swap holding whatever the author
+    # last had in the buffer. Never source, never shippable.
+    ("editor-swapfile", re.compile(r"(^|/)\.?[^/]*\.(swp|swo|swn)$|(^|/)[^/]*~$"),
+     ["*.swp", "*.swo", "*.swn", "*~"]),
     ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+|\.vite|\.vite-temp)/|(^|/)(junit\.xml|\.modules\.yaml)$"),
      ["scratch", "scratchpad", "test-results", ".agent-tmp", ".vitest-tmp", ".tmp",
       ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*",
