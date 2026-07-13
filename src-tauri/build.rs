@@ -182,6 +182,9 @@ fn main() {
             // native terminal toggle
             "native_terminal_status",
             "native_terminal_toggle",
+            // webview→shell flag relay (NativeTerminalGate) — registered to keep
+            // the WI-2143 ACL-sync guard green; command is in main.rs collect_commands!
+            "native_terminal_set_enabled",
             // WI-3388: resizeable/collapsible terminal dock — layout get/set
             // (registered here to keep the WI-2143 ACL-sync guard green; the
             // commands are in collect_commands! in main.rs)

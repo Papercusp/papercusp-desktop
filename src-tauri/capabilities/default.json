@@ -59,6 +59,7 @@
 
     "allow-native-terminal-status",
     "allow-native-terminal-toggle",
+    "allow-native-terminal-set-enabled",
     "allow-terminal-get-layout",
     "allow-terminal-set-layout",
 
