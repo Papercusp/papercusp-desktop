@@ -3231,27 +3231,37 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
 /// click from the open/quit items and recover the chosen accelerator.
 const DOCS_SHORTCUT_MENU_PREFIX: &str = "docs-shortcut::";
 
-/// The "Docs search shortcut" submenu: one checkable item per preset, the
-/// active accelerator (docs_search::current_shortcut) checked. Rebuilt after
-/// each rebind so the checkmark tracks the live selection.
+/// The "Docs search shortcut" submenu: an "Off" item followed by one checkable
+/// item per preset, with the live state (docs_search::current_shortcut) checked.
+/// Rebuilt after each change so the checkmark tracks the selection.
+///
+/// "Off" is FIRST and is checked on a fresh install — the shortcut ships disabled
+/// (owner directive 2026-07-12), so this submenu is also the only place the OS key
+/// grab is ever turned ON.
 fn build_docs_shortcut_submenu(
     app: &tauri::AppHandle,
 ) -> tauri::Result<tauri::menu::Submenu<tauri::Wry>> {
     use tauri::menu::{CheckMenuItem, IsMenuItem, Submenu};
     let current = docs_search::current_shortcut();
-    let items: Vec<CheckMenuItem<tauri::Wry>> = docs_search::PRESET_SHORTCUTS
-        .iter()
-        .map(|accel| {
-            CheckMenuItem::with_id(
-                app,
-                format!("{DOCS_SHORTCUT_MENU_PREFIX}{accel}"),
-                *accel,
-                true,
-                current.as_str() == *accel,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
+    let mut items: Vec<CheckMenuItem<tauri::Wry>> = Vec::new();
+    items.push(CheckMenuItem::with_id(
+        app,
+        format!("{DOCS_SHORTCUT_MENU_PREFIX}{}", docs_search::SHORTCUT_OFF),
+        "Off (no global shortcut)",
+        true,
+        current.is_none(),
+        None::<&str>,
+    )?);
+    for accel in docs_search::PRESET_SHORTCUTS {
+        items.push(CheckMenuItem::with_id(
+            app,
+            format!("{DOCS_SHORTCUT_MENU_PREFIX}{accel}"),
+            *accel,
+            true,
+            current.as_deref() == Some(*accel),
+            None::<&str>,
+        )?);
+    }
     let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items
         .iter()
         .map(|i| i as &dyn IsMenuItem<tauri::Wry>)
@@ -3417,10 +3427,12 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                             .show();
                     }
                 });
-            } else if let Some(accel) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
-                // Rebind the docs-search global shortcut live, then rebuild the
-                // tray menu so the checkmark tracks the new selection.
-                match docs_search::rebind_shortcut(app, accel) {
+            } else if let Some(payload) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
+                // Set the docs-search global shortcut live, then rebuild the tray
+                // menu so the checkmark tracks the new selection. The "Off" item
+                // carries the SHORTCUT_OFF payload → None → disable entirely.
+                let choice = (payload != docs_search::SHORTCUT_OFF).then_some(payload);
+                match docs_search::set_shortcut(app, choice) {
                     Ok(()) => match build_server_tray_menu(app) {
                         Ok(menu) => {
                             if let Some(tray) = app.tray_by_id("papercusp-server") {
@@ -3432,7 +3444,7 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                         }
                     },
                     Err(e) => {
-                        eprintln!("[papercusp-server] docs-search rebind to {accel} failed: {e}")
+                        eprintln!("[papercusp-server] docs-search set to {payload} failed: {e}")
                     }
                 }
             }
