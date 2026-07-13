@@ -164,6 +164,12 @@ BENIGN_ERE = [
 ]
 
 
+# Attribution reads whole members into memory to regex them. Phase B has already
+# convicted the bundle by this point, so a member too big to attribute costs us a
+# file NAME, never a missed leak — the build fails either way.
+MAX_ATTRIBUTE_BYTES = 8 * 1024 * 1024
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
@@ -267,15 +273,29 @@ def phase_b_content(bundle, lits):
     return found
 
 
-def phase_c_attribute(bundle, lits, wanted):
-    """Only on a failing build: name the offending files. Slow, and that is fine."""
-    needles = [(r, v.encode()) for r, _, v in wanted]
-    out = []
+def phase_c_attribute(bundle, lits, wanted, per_rule=8):
+    """Only on a failing build: name the offending files. Slow, and that is fine.
+
+    Attribution MUST convict with the same regex phase B convicted with (lit_ere)
+    — never a raw substring. It used to search for the bare bytes `Avi`, and the
+    result was a gate that was RIGHT and USELESS at the same time: the verdict
+    counted 10 real `\\bAvi\\b` hits, but the file list blamed 40 innocent vendor
+    files (`AVIF` in sharp's image code, `KAviBO` inside a base64 sourcemap) and
+    then hit its 200-file scan cap — so not one of the 10 real offenders was ever
+    printed. That is the most dangerous state a gate can be in: a red build whose
+    evidence is visibly nonsense is what teaches an engineer to reach for an
+    exception instead of the leak.
+
+    Counting is therefore per RULE, not one global cap — a noisy rule must never
+    be able to starve a quiet one out of the report.
+    """
+    needles = [(rule, re.compile(lit_ere(val).encode())) for rule, _n, val in wanted]
+    found = {}
     proc = subprocess.Popen(["bash", "-c", f"zstd -dc {q(bundle)} | cat"], stdout=subprocess.PIPE)
     try:
         with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
             for m in tf:
-                if not m.isfile() or m.size > 8 * 1024 * 1024:
+                if not m.isfile() or m.size > MAX_ATTRIBUTE_BYTES:
                     continue
                 f = tf.extractfile(m)
                 if f is None:
@@ -283,16 +303,16 @@ def phase_c_attribute(bundle, lits, wanted):
                 blob = f.read()
                 if b"\0" in blob[:4096]:
                     continue
-                for rule, needle in needles:
-                    if blob.find(needle) != -1:
-                        out.append((rule, m.name))
-                        break
-                if len(out) >= 200:
-                    break
+                for rule, rx in needles:
+                    if rx.search(blob):
+                        g = found.setdefault(rule, {"n": 0, "files": []})
+                        g["n"] += 1
+                        if len(g["files"]) < per_rule:
+                            g["files"].append(m.name)
     finally:
         proc.stdout.close()
         proc.wait()
-    return out
+    return found
 
 
 def q(s):
@@ -365,8 +385,20 @@ def main():
             shown = val if rule.startswith("build-") else redact(val)
             print(f"    [{rule}]  {n:,}×  {shown}")
         print("\n  attributing to files (slow pass — only runs on a failing build)…")
-        for rule, name in phase_c_attribute(bundle, lits, content_hits)[:40]:
-            print(f"    {rule:24s} {name}")
+        attributed = phase_c_attribute(bundle, lits, content_hits)
+        for rule, n, _val in content_hits[:20]:
+            g = attributed.get(rule)
+            if not g:
+                # Convicted in phase B but attributable to no file: the value lives in
+                # a member over MAX_ATTRIBUTE_BYTES, or in one phase C reads as binary.
+                print(f"    [{rule}]  {n:,}× — NOT attributable to a file "
+                      f"(member >{MAX_ATTRIBUTE_BYTES // 1024 // 1024}MB, or binary)")
+                continue
+            print(f"    [{rule}]  {g['n']:,} file(s)")
+            for name in g["files"]:
+                print(f"        {name}")
+            if g["n"] > len(g["files"]):
+                print(f"        … and {g['n'] - len(g['files']):,} more")
 
     print("\n  Fix the SOURCE — the allowlist in bin/stage-source-tree.sh. Do NOT add an")
     print("  exception here to make the build pass: that is the bug this gate exists to catch.")
