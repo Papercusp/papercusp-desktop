@@ -527,10 +527,33 @@ prune_foreign_onnx_bins() {
   [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign onnx bin dir(s), kept ${_bare_node_platform}/${_bare_node_arch}"
   return 0
 }
+# Walks a package's dependency closure and copies each package into the sidecar.
+#
+# ⚠ It follows BOTH `dependencies` AND `optionalDependencies`, and it must:
+# napi/node-gyp packages ship their PLATFORM BINARIES as optionalDependencies —
+# that is the convention, not an edge case. sharp is the worst offender:
+#     sharp --(optional)--> @img/sharp-linux-x64 --(optional)--> @img/sharp-libvips-linux-x64
+# Every hop is optional, so a copier that walks only `dependencies` copies sharp's
+# JavaScript and NONE of its native code. The result INSTALLS cleanly and then dies
+# at boot with `Could not load the "sharp" module using the linux-x64 runtime` — which
+# is exactly how 0.0.9 shipped dead on all three platforms. It survived every check
+# because on a dev box the desktop app falls back to a :3070 operator that a beta
+# tester does not have; the only thing that sees it is a real install on a clean
+# machine. (sharp reaches us transitively via @huggingface/transformers / the ONNX
+# voice stack.) Note the musl-strip further down already spoke of "@img/sharp-linuxmusl-*"
+# arriving "as optional deps" — it was stripping packages that never got copied.
+#
+# A queued name may carry a leading '?', meaning "reached via optionalDependencies".
+# For those, NOT FOUND is the expected, correct outcome — npm only installs the
+# optionalDeps matching THIS platform, so @img/sharp-darwin-arm64 is legitimately
+# absent on Linux — so it is a silent skip. A missing REQUIRED dep still warns and
+# counts, because that one is a real defect.
 copy_pkg_closure() {
   local queue=("$1")
   while [[ ${#queue[@]} -gt 0 ]]; do
     local cur="${queue[0]}"; queue=("${queue[@]:1}")
+    local optional=0
+    if [[ "$cur" == '?'* ]]; then optional=1; cur="${cur#\?}"; fi
     case "$_seen" in *" $cur "*) continue ;; esac
     _seen="${_seen}${cur} "
     # onnxruntime-web is a @huggingface/transformers dependency but is ONLY used on
