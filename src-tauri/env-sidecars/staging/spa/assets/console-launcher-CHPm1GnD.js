@@ -1,0 +1,1 @@
+import{r as e,t}from"./console-launcher-Cs9Mn_K3.js";e();export{t as buildConsoleEnvelope};
