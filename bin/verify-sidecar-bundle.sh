@@ -51,6 +51,12 @@
 set -uo pipefail
 
 SIDECAR="${1:-$(cd "$(dirname "$0")/.." && pwd)/src-tauri/sidecar}"
+# Normalize to ABSOLUTE. Callers pass a relative dir (mac-vm-build.sh:
+# `verify-sidecar-bundle.sh src-tauri/sidecar`), and [6] cd's into the bundle to
+# resolve modules as the sidecar does — after which a relative $BIN/node points
+# nowhere and every native "fails to load". Phases [1]-[5] never cd, so they
+# never noticed.
+[[ -d "$SIDECAR" ]] && SIDECAR="$(cd "$SIDECAR" && pwd)"
 BIN="$SIDECAR/bin"
 OS="$(uname -s)"
 FAIL=0
