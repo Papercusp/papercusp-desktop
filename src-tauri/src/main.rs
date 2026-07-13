@@ -5757,9 +5757,22 @@ pub fn run() {
             // windowless Server would otherwise race the same file); the GUI is
             // what the demo films.
             if is_dev || role.is_gui() {
+                // Display-scoped filename so two GUI instances on different X
+                // displays (e.g. a dev app on :1 and a staged demo app on :110)
+                // never clobber each other's report — the capture pipeline reads
+                // the file for the exact display it is about to record.
+                let disp = std::env::var("DISPLAY").unwrap_or_default();
+                let fname = if disp.is_empty() {
+                    "desktop-app-version.json".to_string()
+                } else {
+                    format!(
+                        "desktop-app-version-{}.json",
+                        disp.replace(':', "").replace('.', "_")
+                    )
+                };
                 let ver_path = workspaces::shared_sidecar_home()
                     .join(".papercusp")
-                    .join("desktop-app-version.json");
+                    .join(&fname);
                 let started_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis())
@@ -5768,7 +5781,7 @@ pub fn run() {
                     "version": env!("CARGO_PKG_VERSION"),
                     "pid": std::process::id(),
                     "startedAtMs": started_ms,
-                    "display": std::env::var("DISPLAY").unwrap_or_default(),
+                    "display": disp,
                     "role": role.label(),
                     "isDev": is_dev,
                 });
