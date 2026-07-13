@@ -5748,6 +5748,50 @@ pub fn run() {
             );
             let is_dev = cfg!(debug_assertions);
 
+            // Demo-pipeline version gate (demo-pipeline-version-gate-2026-07-13):
+            // write THIS running app's real version to a well-known file so the
+            // capture pipeline can assert it is filming the current build, not a
+            // stale installed binary (draft 4 filmed a July-4 0.0.2 binary while
+            // the repo was already 0.0.9). Best-effort — a self-report failure
+            // must never crash the app. Only the GUI/dev process writes it (the
+            // windowless Server would otherwise race the same file); the GUI is
+            // what the demo films.
+            if is_dev || role.is_gui() {
+                let ver_path = workspaces::shared_sidecar_home()
+                    .join(".papercusp")
+                    .join("desktop-app-version.json");
+                let started_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let report = serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "pid": std::process::id(),
+                    "startedAtMs": started_ms,
+                    "display": std::env::var("DISPLAY").unwrap_or_default(),
+                    "role": role.label(),
+                    "isDev": is_dev,
+                });
+                if let Some(parent) = ver_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(
+                    &ver_path,
+                    serde_json::to_vec_pretty(&report).unwrap_or_else(|_| b"{}".to_vec()),
+                ) {
+                    Ok(_) => println!(
+                        "[papercusp-desktop] version self-report v{} pid {} -> {}",
+                        env!("CARGO_PKG_VERSION"),
+                        std::process::id(),
+                        ver_path.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "[papercusp-desktop] failed to write version self-report to {}: {e}",
+                        ver_path.display()
+                    ),
+                }
+            }
+
             // Native sibling terminal — resolve strategy + launch the glued
             // (X11) / native terminal and register the glue hook. It's glued to
             // a window, so only the GUI (and dev) has one; the windowless Server
