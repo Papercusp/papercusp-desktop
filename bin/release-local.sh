@@ -81,10 +81,15 @@ KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 # are run directly all the time, and when they were relying on inheriting these
 # exports FROM here, a direct run baked an EMPTY host and shipped a permanently
 # un-updatable app without a single red line (WI-4389). See lib/release-host.sh.
+#
+# This is the CUT, so it REQUIRES the host — it does not merely warn. A hostless
+# dev build is fine (you just get no auto-update); a hostless RELEASE ships an app
+# that can never be updated, and it fails INVISIBLY ("up to date", forever). 0.0.8
+# warned, and shipped anyway. Escape hatch, if you truly want a throwaway:
+# PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1.
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
-load_release_host
-RELEASE_HOST_ENV="$PAPERCUSP_RELEASE_HOST_ENV"
+require_release_host
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"

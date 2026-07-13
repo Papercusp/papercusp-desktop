@@ -78,3 +78,55 @@ load_release_host() {
   authority="${authority%%/*}"
   echo "==> release host loaded: ${authority:-<unparsable>} (path redacted — it is the shared secret)"
 }
+
+# require_release_host — the CUT's rail. Use this instead of load_release_host in
+# anything that PUBLISHES (release-local.sh), never in a plain producer.
+#
+# A WARNING IS THE WRONG CONTROL FOR A RELEASE (b0fbf, 2026-07-12). A hostless
+# DEV build is legitimate — you get installers, you just get no auto-update, and
+# load_release_host's warning says so. A hostless RELEASE is never legitimate: it
+# ships an app that can NEVER be updated, and the defect is invisible (the Tauri
+# updater renders the failed check as "up to date", forever), so the one person
+# who could have caught it — the human watching the cut scroll past — is exactly
+# the person the warning fails to stop. 0.0.8 proved a warning does not hold:
+# it warned, and it shipped anyway, and it cost a rebuild of every platform plus
+# a manual reinstall of every install.
+#
+# Escape hatch is EXPLICIT and LOUD, never silent: PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1
+# (same posture as PAPERCUSP_ALLOW_DEV_RESTART / PAPERCUSP_ALLOW_DB_MIGRATE — you
+# must say the dangerous thing out loud to get it).
+require_release_host() {
+  load_release_host
+  if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" ]]; then return 0; fi
+
+  if [[ "${PAPERCUSP_ALLOW_HOSTLESS_RELEASE:-0}" == "1" ]]; then
+    echo ""
+    echo "⚠ PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1 — cutting a release with NO update source, deliberately."
+    echo "  Every install from this cut will be un-updatable FOREVER and will report 'up to date'."
+    echo "  latest.json's urls will be placeholders. Only do this for a throwaway/diagnostic build."
+    echo ""
+    return 0
+  fi
+
+  echo "" >&2
+  echo "✗ REFUSING TO CUT: no release host configured." >&2
+  echo "" >&2
+  echo "  Expected PAPERCUSP_RELEASE_HOST in: $PAPERCUSP_RELEASE_HOST_ENV" >&2
+  echo "" >&2
+  echo "  A release cut without an update source ships an app that can NEVER reach the" >&2
+  echo "  update manifest. It will not LOOK broken — the installer runs, the bundle is" >&2
+  echo "  signed, latest.json validates — and the Tauri updater cannot distinguish a" >&2
+  echo "  failed check from 'no update available', so it reports UP TO DATE, PERMANENTLY." >&2
+  echo "  That is the 0.0.8 defect: a full rebuild of every platform and a manual" >&2
+  echo "  reinstall of every install, because an auto-updater cannot deliver the fix to" >&2
+  echo "  its own brokenness." >&2
+  echo "" >&2
+  echo "  FIX: restore ~/.papercusp/release-host.env (it is PERMANENT and must never be" >&2
+  echo "  rotated — see its header). It is deliberately outside git, alongside the" >&2
+  echo "  minisign signing key." >&2
+  echo "" >&2
+  echo "  If you genuinely want an un-updatable throwaway build, say so explicitly:" >&2
+  echo "      PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1 $0 …" >&2
+  echo "" >&2
+  exit 1
+}
