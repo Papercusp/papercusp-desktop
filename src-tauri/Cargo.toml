@@ -1,6 +1,6 @@
 [package]
 name = "papercusp-desktop"
-version = "0.0.8"
+version = "0.0.9"
 description = "Papercusp desktop shell — Tauri webview + Node sidecar"
 authors = ["Papercusp Team"]
 license = "MIT"
