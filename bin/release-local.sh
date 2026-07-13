@@ -94,6 +94,39 @@ require_release_host
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
+# Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
+# build never fails a desktop cut. The APK is BUILT here in the sibling
+# papercup-rust-mobile repo; it is RECORDED separately by record-release-cli
+# (scanMobileArtifacts) and deliberately NOT swept into ARTIFACTS[], which feeds
+# the DESKTOP-only auto-update latest.json (mobile must never leak into the
+# desktop updater). iOS is NOT built here — it needs the Mac VM + Apple Developer
+# signing, so it enters the registry from a Mac-VM leg once a signed .ipa exists;
+# until enrollment it stays dormant (record-release simply finds no .ipa).
+# Resolve the sibling mobile repo the same way record-release-cli's
+# resolveMobileRoot does (walk up, match crates/ or Makefile).
+resolve_mobile_root() {
+  if [[ -n "${PAPERCUSP_MOBILE_ROOT:-}" ]]; then printf '%s\n' "$PAPERCUSP_MOBILE_ROOT"; return 0; fi
+  local d="$ROOT" cand parent
+  for _ in 1 2 3 4 5 6 7 8; do
+    for cand in "$d/papercup-rust-mobile" "$(dirname "$d")/papercup-rust-mobile"; do
+      if [[ -d "$cand/crates" || -f "$cand/Makefile" ]]; then printf '%s\n' "$cand"; return 0; fi
+    done
+    parent="$(dirname "$d")"; [[ "$parent" == "$d" ]] && break; d="$parent"
+  done
+  printf '%s\n' ""
+}
+MOBILE_ROOT="$(resolve_mobile_root)"
+# Auto-detect: on when the sibling repo AND an Android SDK are present; an explicit
+# WITH_ANDROID env (0/1) always wins; PAPERCUSP_SKIP_MOBILE=1 forces it off.
+if [[ "${PAPERCUSP_SKIP_MOBILE:-0}" == "1" ]]; then
+  WITH_ANDROID=0
+elif [[ -n "${WITH_ANDROID:-}" ]]; then
+  : # explicit override respected
+elif [[ -n "$MOBILE_ROOT" && ( -n "${ANDROID_HOME:-}" || -n "${ANDROID_SDK_ROOT:-}" || -d "$HOME/Android/Sdk" ) ]]; then
+  WITH_ANDROID=1
+else
+  WITH_ANDROID=0
+fi
 # P-014 (repro hygiene): PIN the Tauri CLI instead of `@latest` (which fetches
 # whatever npm resolves at cut time — a silent reproducibility hole: two cuts of
 # identical source could bundle with different tauri-cli versions). Keep in sync
