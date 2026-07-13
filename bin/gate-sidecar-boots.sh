@@ -151,7 +151,13 @@ while [[ $(date +%s) -lt $deadline ]]; do
     tail -25 "$ISO/boot.log" >&2
     fail "the packed sidecar EXITED (rc=$rc) instead of serving. This bundle is DOA on any machine that lacks a fallback operator."
   fi
-  if curl -sf -m 2 -o /dev/null "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null; then
+  # "Up" means exactly what the PRODUCT means by up. serve.ts's own httpAlive()
+  # probes `/api/` and treats ANY response — 404 included — as alive. `curl -sf`
+  # would call a 404 a failure and red a perfectly healthy sidecar; measure at the
+  # consumer, with the consumer's own definition.
+  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null || echo 000)"
+  if [[ "$code" != "000" ]]; then
+    echo "   sidecar answered on :$HTTP_PORT (HTTP $code) — it is UP"
     served=1; break
   fi
   sleep 2
