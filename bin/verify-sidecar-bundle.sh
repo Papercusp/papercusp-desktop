@@ -34,6 +34,11 @@
 #   [5] Windows — vendored .exe tools must have their dependency DLLs beside
 #       them (exe-dir is first in the DLL search order); a missing libpq.dll
 #       means the exe was resolving DLLs via the build host's PATH (WI-3313).
+#   [6] NATIVE MODULES LOAD — every package the runtime require()s that dlopens
+#       native code must actually load under the BUNDLED node, from the bundle.
+#       >>> When you add a dependency that ships a *.node, ADD IT to
+#       >>> REQUIRED_NATIVE_MODULES below. Like [1], this manifest is the
+#       >>> contract; a packaged-but-unloadable native passes everything else.
 #
 # Known limitation: glibc symbol-version requirements are not checked — a
 # binary built on a newer glibc than the target's still passes. Build on the
@@ -77,7 +82,7 @@ probe_args() {
   esac
 }
 
-echo "[1/5] required runtime tools present + probing as-installed"
+echo "[1/6] required runtime tools present + probing as-installed"
 for t in $REQUIRED_TOOLS; do
   p="$BIN/$t"
   [[ -f "$p" || -f "$p.exe" ]] || { fail "$t: MISSING from sidecar/bin — the runtime spawns it by bare name"; continue; }
@@ -96,7 +101,7 @@ for t in $REQUIRED_TOOLS; do
 done
 
 # ── [2] script shims ────────────────────────────────────────────────────────
-echo "[2/5] script-shim scan of sidecar/bin"
+echo "[2/6] script-shim scan of sidecar/bin"
 for f in "$BIN"/*; do
   [[ -f "$f" ]] || continue
   _is_script "$f" || continue
@@ -117,7 +122,7 @@ for f in "$BIN"/*; do
 done
 
 # ── [3] linkage closure (Linux) ─────────────────────────────────────────────
-echo "[3/5] ELF linkage closure (bundle libs + base allowlist only)"
+echo "[3/6] ELF linkage closure (bundle libs + base allowlist only)"
 if [[ "$OS" == "Linux" ]]; then
   if ! command -v objdump >/dev/null 2>&1; then
     fail "objdump not on build host — cannot verify linkage (apt install binutils)"
@@ -172,7 +177,7 @@ else
 fi
 
 # ── [4] macOS: brew-keg absolute install-names ──────────────────────────────
-echo "[4/5] darwin keg-path scan"
+echo "[4/6] darwin keg-path scan"
 if [[ "$OS" == "Darwin" ]]; then
   if ! command -v otool >/dev/null 2>&1; then
     fail "otool not on build host — cannot verify Mach-O linkage (xcode-select --install)"
@@ -194,7 +199,7 @@ else
 fi
 
 # ── [5] Windows: sibling DLLs for vendored exes ─────────────────────────────
-echo "[5/5] windows DLL presence"
+echo "[5/6] windows DLL presence"
 case "$OS" in
   MINGW*|MSYS*|CYGWIN*)
     if [[ -f "$BIN/psql.exe" && ! -f "$BIN/libpq.dll" ]]; then
@@ -204,6 +209,65 @@ case "$OS" in
     fi ;;
   *) echo "  (skipped — not Windows)" ;;
 esac
+
+# ── [6] native modules load under the BUNDLED node ──────────────────────────
+# WHY: [1]-[5] verify BINARIES and their linkage. Nothing here ever `require()`d
+# a native NODE MODULE — and that is exactly how 0.0.9 shipped dead on all three
+# platforms. copy_pkg_closure walked only `dependencies`, but napi packages ship
+# their platform binaries as optionalDependencies, and every hop of sharp's chain
+# is optional (sharp → @img/sharp-linux-x64 → @img/sharp-libvips-linux-x64). So
+# the bundle packaged sharp's JavaScript and NONE of its native code: it passed
+# every check above, installed cleanly, and died at boot with
+# `Could not load the "sharp" module using the linux-x64 runtime`.
+#
+# ⚠ THE CONTRACT IS A STATIC LIST — deliberately. Do NOT "improve" this by
+# scanning node_modules for *.node and testing what you find: a gate that derives
+# its expectations from the artifact it is checking CANNOT FAIL ON A MISSING FILE.
+# Had @img/sharp-linux-x64 been absent (i.e. the actual bug), a scan-driven gate
+# would have found nothing to test and passed. Same cannot-fail defect as a boot
+# probe that reads a refused connection as UP. Assert POSITIVELY, from a list.
+#
+# Windows note: the win sidecar is this same LINUX closure, run under WSL
+# (main.rs make_sidecar_command → `wsl.exe --exec node`), so verifying it here on
+# the linux build host is verifying the bytes Windows actually loads.
+REQUIRED_NATIVE_MODULES="
+sharp
+better-sqlite3
+@lydell/node-pty
+onnxruntime-node
+sodium-native
+udx-native
+rocksdb-native
+quickbit-native
+rabin-native
+simdle-native
+fs-native-extensions
+"
+echo "[6/6] native modules load under the bundled node"
+NODE_BIN=""
+for _c in "$BIN/node" "$BIN/node.exe"; do [[ -x "$_c" ]] && NODE_BIN="$_c" && break; done
+if [[ -z "$NODE_BIN" ]]; then
+  fail "no bundled node at bin/{node,node.exe} — cannot prove the shipped natives load"
+elif [[ ! -d "$SIDECAR/node_modules" ]]; then
+  fail "no node_modules/ in the sidecar — the dependency closure was never copied"
+else
+  _nat_ok=0
+  for _m in $REQUIRED_NATIVE_MODULES; do
+    # The exact require the sidecar performs at boot: the BUNDLED node, resolving
+    # out of the BUNDLE. Never the build host's node or its node_modules — node
+    # resolves UPWARD, so running this from inside the repo would let a missing
+    # native resolve out of the repo's own tree and green a broken bundle.
+    if _err="$(cd "$SIDECAR" && "$NODE_BIN" -e "require('$_m')" 2>&1)"; then
+      _nat_ok=$((_nat_ok+1))
+    else
+      fail "$_m: does NOT load from the bundle — it will die at boot on a clean install"
+      echo "$_err" | grep -m3 -E 'Error|Could not load|dlopen' | sed 's/^/      /'
+    fi
+  done
+  # Vacuity guard: a run where nothing loaded is a broken CHECK, not a clean bundle.
+  [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
+  [[ "$FAIL" == 0 ]] && ok "all $_nat_ok native modules require() cleanly under $(basename "$NODE_BIN")"
+fi
 
 echo
 if [[ "$FAIL" != 0 ]]; then
