@@ -28,10 +28,12 @@
 mod app_role;
 mod custom_protocol;
 mod dev_bridge;
-// Global-hotkey docs-search palette (WI-2648, feature #5): CmdOrCtrl+K opens a
-// small always-on-top window loading Pagefind's own default UI against the
-// already-built operator-docs search index. Registered on every platform +
-// role (unlike env_switch's dev-only backstop) — this is a real feature.
+// Global-hotkey docs-search palette (WI-2648, feature #5): an opt-in global
+// shortcut opens a small always-on-top window loading Pagefind's own default UI
+// against the already-built operator-docs search index. OFF BY DEFAULT (owner
+// directive 2026-07-12) — a global shortcut is a system-wide key grab, so nothing
+// is registered until the user picks a key in the Server tray's "Docs search
+// shortcut" submenu (whose first item is "Off").
 mod docs_search;
 // Env-switch plumbing — the desktop-side source of truth + /api routing for the
 // cross-platform in-webview EnvSwitcherBar and its native backstop. Replaces the

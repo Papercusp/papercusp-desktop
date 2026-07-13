@@ -1393,6 +1393,54 @@ mod tests {
         serde_json::to_value(v).expect("serialize")
     }
 
+    // ── distro re-provisioning (WI-4479) ──
+    //
+    // These live HERE, in the plain #[cfg(test)] module, and NOT in the
+    // #[cfg(all(test, target_os = "windows"))] `windows_tests` module below —
+    // that one never compiles on the Linux dev box, so tests placed there look
+    // written but never run. `distro_needs_reprovision` is deliberately
+    // #[cfg(any(target_os = "windows", test))] precisely so its DECISION can be
+    // pinned from Linux even though it only ever fires on Windows.
+
+    /// THE regression this guards: an app update ships a new rootfs recipe, but
+    /// the distro on disk was imported by an older one. Before this check, a
+    /// distro that existed and started was `Ready` forever — so a fix to the
+    /// rootfs reached new installs and nobody who already had the app. The
+    /// Windows chat dock would have shipped "fixed" and still opened onto a dead
+    /// `pui` for every existing user.
+    #[test]
+    fn a_distro_provisioned_by_an_older_recipe_is_stale() {
+        assert!(distro_needs_reprovision(
+            Some("new-recipe"),
+            Some("old-recipe")
+        ));
+    }
+
+    #[test]
+    fn a_distro_matching_the_shipped_recipe_is_left_alone() {
+        assert!(!distro_needs_reprovision(Some("same"), Some("same")));
+        // Trailing newline from the resource file must not read as a mismatch —
+        // that would re-bootstrap on every single launch, forever.
+        assert!(!distro_needs_reprovision(Some("same\n"), Some("same")));
+    }
+
+    #[test]
+    fn a_distro_with_no_recorded_recipe_is_treated_as_stale() {
+        // Installs predating the marker: we cannot show the distro matches, so we
+        // re-run the idempotent bootstrap rather than trust it. Failing toward
+        // doing the work is the safe direction.
+        assert!(distro_needs_reprovision(Some("recipe"), None));
+    }
+
+    #[test]
+    fn an_unknown_shipped_recipe_never_forces_a_reprovision_loop() {
+        // No shipped marker (a build predating it) → nothing to compare and
+        // nothing we could record afterwards, so re-running would loop every
+        // launch and never converge. Leave the distro alone.
+        assert!(!distro_needs_reprovision(None, Some("whatever")));
+        assert!(!distro_needs_reprovision(None, None));
+    }
+
     // ── wslconfig_with_mirrored (WI-3360) ──
 
     #[test]
@@ -1847,41 +1895,5 @@ mod windows_tests {
             WslOpError::Failed(msg) => assert!(msg.contains("exit=?"), "got: {}", msg),
             other => panic!("expected Failed, got {:?}", other),
         }
-    }
-
-    /// THE regression this guards: an app update ships a new rootfs recipe, but
-    /// the distro on disk was imported by an older one. Before this check, a
-    /// distro that existed and started was `Ready` forever — so a fix to the
-    /// rootfs reached new installs and nobody who already had the app. The
-    /// Windows chat dock would have shipped "fixed" and still opened onto a dead
-    /// `pui` for every existing user.
-    #[test]
-    fn a_distro_provisioned_by_an_older_recipe_is_stale() {
-        assert!(distro_needs_reprovision(Some("new-recipe"), Some("old-recipe")));
-    }
-
-    #[test]
-    fn a_distro_matching_the_shipped_recipe_is_left_alone() {
-        assert!(!distro_needs_reprovision(Some("same"), Some("same")));
-        // Trailing newline from the resource file must not read as a mismatch —
-        // that would re-bootstrap on every single launch, forever.
-        assert!(!distro_needs_reprovision(Some("same\n"), Some("same")));
-    }
-
-    #[test]
-    fn a_distro_with_no_recorded_recipe_is_treated_as_stale() {
-        // Installs predating the marker: we cannot show the distro matches, so we
-        // re-run the idempotent bootstrap rather than trust it. Failing toward
-        // doing the work is the safe direction.
-        assert!(distro_needs_reprovision(Some("recipe"), None));
-    }
-
-    #[test]
-    fn an_unknown_shipped_recipe_never_forces_a_reprovision_loop() {
-        // No shipped marker (a build predating it) → nothing to compare and
-        // nothing we could record afterwards, so re-running would loop every
-        // launch and never converge. Leave the distro alone.
-        assert!(!distro_needs_reprovision(None, Some("whatever")));
-        assert!(!distro_needs_reprovision(None, None));
     }
 }

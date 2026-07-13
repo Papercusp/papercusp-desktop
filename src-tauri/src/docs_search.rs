@@ -52,15 +52,14 @@ use tauri::{AppHandle, Manager};
 /// an already-open palette instead of spawning a duplicate.
 const WINDOW_LABEL: &str = "docs-search-palette";
 
-/// The accelerator pre-selected in the tray when the user turns the shortcut ON
-/// without having a persisted choice — NOT a default that is ever registered on
-/// its own. The palette ships OFF (see the module doc); this constant only names
-/// the key the "on" affordance suggests. MUST be a member of `PRESET_SHORTCUTS`.
-pub const SUGGESTED_SHORTCUT: &str = "CmdOrCtrl+K";
-
 /// Menu payload for the tray's "Off" item — the disable affordance. Not an
 /// accelerator, and deliberately not a member of `PRESET_SHORTCUTS` (it must
 /// never be handed to the OS registrar).
+///
+/// There is deliberately no `DEFAULT_SHORTCUT` constant any more: a default
+/// accelerator is precisely the thing that used to get registered on a fresh
+/// install. "Off" is the default, and it is expressed by `current_shortcut()`
+/// returning `None` — not by a constant a caller could decide to fall back to.
 pub const SHORTCUT_OFF: &str = "off";
 
 /// The curated set of accelerators the tray rebind offers. A native tray menu
@@ -138,11 +137,6 @@ pub fn current_shortcut() -> Option<String> {
     read_persisted_shortcut()
 }
 
-/// Whether the global shortcut is currently enabled (a convenience for callers
-/// that only need the boolean — the tray's checkmark, tests, diagnostics).
-pub fn is_enabled() -> bool {
-    current_shortcut().is_some()
-}
 
 // ---------------------------------------------------------------------------
 // Palette window
@@ -421,14 +415,6 @@ pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn suggested_is_a_preset() {
-        assert!(
-            PRESET_SHORTCUTS.contains(&SUGGESTED_SHORTCUT),
-            "SUGGESTED_SHORTCUT must be one of the offered presets"
-        );
-    }
 
     #[test]
     fn presets_are_unique() {

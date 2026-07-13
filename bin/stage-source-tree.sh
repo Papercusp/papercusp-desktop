@@ -64,6 +64,54 @@ if [[ ! -x "$MONO/node_modules/.bin/tsx" ]]; then
 fi
 
 OUT="$SIDECAR/source.tar.zst"
+
+# ── Serialize against build-desktop-sidecar.sh (2026-07-12) ─────────────────
+# We write source.tar.zst INTO the sidecar dir, and build-desktop-sidecar.sh
+# REBUILDS that whole dir (rm -rf + atomic rename of a temp sibling). It takes a
+# lock (EI-160) to protect readers from a half-written bundle — but this script
+# never did, so a `npm run dev` (which rebuilds the sidecar) racing a release
+# stage silently swapped the directory out from under our multi-minute tar: tar
+# and zstd both reported SUCCESS, and the finished bundle was simply gone one
+# line later. Observed 2026-07-12: the stage died on `du: cannot access
+# .../source.tar.zst`, having produced nothing, while three `tauri dev` shells
+# ran. Take the SAME lock (same path, so the two scripts actually exclude each
+# other) for the whole tar, and the rebuild waits its turn instead of eating the
+# artifact.
+#
+# NOT -n: we WAIT. A release stage that aborts because someone opened the dev
+# shell is a worse failure than one that takes a few minutes longer.
+exec 9>"$SIDECAR.lock"
+STAGE_LOCKDIR=""
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    echo "    → build-desktop-sidecar.sh holds $SIDECAR.lock — waiting (it would delete this bundle mid-tar)"
+    flock 9
+  fi
+else
+  # macOS ships no flock(1) — the same mkdir spinlock + stale-PID reclaim
+  # build-desktop-sidecar.sh falls back to, on the SAME lockdir path (mac-vm-build.sh
+  # calls this stager, so the mac leg needs the protection too — WI-3307).
+  STAGE_LOCKDIR="$SIDECAR.lockdir"
+  while ! mkdir "$STAGE_LOCKDIR" 2>/dev/null; do
+    holder="$(cat "$STAGE_LOCKDIR/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$STAGE_LOCKDIR"
+      continue
+    fi
+    echo "    → another sidecar build/stage holds $STAGE_LOCKDIR — waiting for it"
+    sleep 5
+  done
+  echo "$$" > "$STAGE_LOCKDIR/pid"
+fi
+trap 'rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"}' EXIT
+
+# Re-check AFTER taking the lock: a rebuild we just waited on may have replaced
+# the sidecar (the serve.mjs check above ran unlocked, so its answer is stale).
+if [[ ! -f "$SIDECAR/serve.mjs" ]]; then
+  echo "ERROR: $SIDECAR/serve.mjs missing after acquiring the sidecar lock — run bin/build-desktop-sidecar.sh first" >&2
+  exit 1
+fi
+
 rm -f "$OUT"
 echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 
