@@ -16,15 +16,13 @@
 --
 -- FIX (CREATE OR REPLACE, idempotent, no table/trigger rewrite — all ~19+
 -- triggered tables keep pointing at the same function and pick up the new
--- body immediately): additively include `args.plan_slug` —
--- `to_jsonb(COALESCE(NEW,OLD))->'plan_slug'` — which is JSON null (absent,
--- harmless) for every table other than harness_plans. table-to-query-names.ts
--- prefers `args.id` and falls back to `args.plan_slug` as the scope key, so a
--- `harness_plans` write can now resolve `plans.get`'s per-slug scope instead
--- of unconditionally full-busting.
+-- body immediately): additively include `args.plan_slug` and
+-- `args.harness_slug`. The latter is the natural key for id-less
+-- harness_shared.pot_settings rows, allowing the per-Pot beacon-consent query
+-- to invalidate only the changed Hive home.
 --
--- BACKWARD-COMPATIBLE: the payload shape gains one additive field
--- (`args.plan_slug`); every existing consumer ignores unknown fields.
+-- BACKWARD-COMPATIBLE: the payload shape gains additive fields (`args.plan_slug`
+-- and `args.harness_slug`); every existing consumer ignores unknown fields.
 -- Generic on purpose (not a harness_plans-only special case) so the SAME
 -- pattern (nominate a natural-key column) extends to the next id-less table
 -- that needs scoping without another trigger-body edit — just add its column
@@ -40,6 +38,7 @@ DECLARE
   row_id     jsonb;
   row_jsonb  jsonb;
   plan_slug  jsonb;
+  harness_slug jsonb;
 BEGIN
   ws_id := current_setting('app.workspace_id', true);
   q_name := TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME || '.changed';
@@ -50,11 +49,11 @@ BEGIN
   -- triggered table has no `id` column — consumers ignore the extra field either way.
   row_id := row_jsonb -> 'id';
 
-  -- Additive natural-key fallback (EI-7433): only `harness_plans` carries a
-  -- `plan_slug` column today, so this is JSON null for every other table.
-  -- A future id-less table needing scoping nominates its own key column the
-  -- same way (add it here + teach table-to-query-names.ts's extractor).
+  -- Additive natural-key fallbacks: harness_plans carries `plan_slug`; the
+  -- id-less pot_settings table carries `harness_slug`. These are JSON null for
+  -- unrelated tables and are ignored by consumers that do not opt into scope.
   plan_slug := row_jsonb -> 'plan_slug';
+  harness_slug := row_jsonb -> 'harness_slug';
 
   payload := jsonb_build_object(
     'name', q_name,
@@ -62,7 +61,8 @@ BEGIN
       'workspace_id', ws_id,
       'op',           TG_OP,
       'id',           row_id,
-      'plan_slug',    plan_slug
+      'plan_slug',    plan_slug,
+      'harness_slug', harness_slug
     )
   );
 

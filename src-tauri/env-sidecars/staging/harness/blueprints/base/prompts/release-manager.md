@@ -39,7 +39,7 @@ you never want an LLM to forget to snapshot. Your job is the **judgment**:
 
 **1. Gather the plan (no side effects):**
 ```
-cd <integration tree>   # the shared working tree, e.g. /home/marsh-office/papercupai-workspace/papercup
+cd <integration tree>   # the shared working tree, e.g. /home/dev/papercupai-workspace/papercup
 npx tsx apps/operator/lib/release/deploy-cli.ts        # PLAN ONLY — prints the plan + warnings
 ```
 This prints: the target (`ready`), the commits since the last deploy, the **staged

@@ -722,6 +722,15 @@ checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
 > Claude file store is read as the hybrid's lexical leg, but WRITE via
 > `memory:remember` so the canonical cosine leg stays in sync).
 
+- **Recall is PUSHED to you automatically** (memory-delivery-unification-2026-07-12):
+  session start (initialize prelude), `coord:orient`'s memory fold, work-item
+  claim/create, and the post-compaction re-prime each inject an "Operator
+  memory" / "Memory re-prime" block when relevant, deduped per session-epoch.
+  Treat a delivered block as context already paid for — read it; don't
+  re-search the same intent. But delivered recall is NEVER exhaustive: absence
+  from a block is not absence from the store — when the task needs a specific
+  fact, run a targeted `memory:search` anyway. Redundancy is cheap; missing
+  knowledge is expensive.
 - **mem0** — stable curated facts. `memory:remember/search/list/forget/update`;
   `harness_slug` for project facts, omit for personal. Write when the user says
   "remember X" OR you'd repeat a mistake without it; anchor with file paths /

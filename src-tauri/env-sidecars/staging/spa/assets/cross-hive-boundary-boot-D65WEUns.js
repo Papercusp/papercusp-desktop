@@ -1,0 +1,1 @@
+import{n as e,t}from"./cross-hive-boundary-boot-fh9740qp.js";e();export{t as ensureCrossHiveBoundariesWired};

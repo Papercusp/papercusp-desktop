@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./wake-brain-action-dmSAQ-7m.js";e();export{t as resolveBrainOwner};

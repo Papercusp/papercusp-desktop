@@ -1,0 +1,1 @@
+import{i as e,o as t}from"./wake-mode-n3SnHx-g.js";t();export{e as getDefaultWakeMode};

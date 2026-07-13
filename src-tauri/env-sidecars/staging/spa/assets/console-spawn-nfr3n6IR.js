@@ -1,1 +1,0 @@
-import{c as e,d as t}from"./console-spawn-_hUc2SVU.js";e();export{t as spawnConsole};

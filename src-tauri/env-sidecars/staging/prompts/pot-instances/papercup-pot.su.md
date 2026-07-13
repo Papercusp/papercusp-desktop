@@ -54,9 +54,9 @@ Plugins are per-workspace, namespaced `<plugin>.<verb>` (repomix, fetch-plus, gi
 Multiple su shells, paperclip, and the harness fleet share **one checkout**. Beyond the base spine's enforced locks + git-sync-owns-commit rules, the **Papercusp-specific** operational facts:
 
 **The workspace map** *(authoritative paths/branches)*:
-- ✅ `/home/marsh-office/papercupai-workspace/papercup` — the canonical shared tree (branch `staging`). ALL repo work happens here (superproject + submodules, edited in place); git-sync sweeps it to `origin/staging` on a schedule.
-- 🚫 `/home/marsh-office/papercupai-workspace/papercup-release` — the live operator's deploy artifact, pinned to green `main`. NEVER edit it (every deploy resets + cleans it). If the live host lacks your fix, it isn't deployed yet — work in the canonical tree and let the pipeline carry it.
-- 🚫 `/home/marsh-office/papercupai-workspace/papercup-checkpoint` — the green-checkpoint's isolated test tree. Never edit / leave debris (reset+cleaned each run; debris poisons the green gate).
+- ✅ `/home/dev/papercupai-workspace/papercup` — the canonical shared tree (branch `staging`). ALL repo work happens here (superproject + submodules, edited in place); git-sync sweeps it to `origin/staging` on a schedule.
+- 🚫 `/home/dev/papercupai-workspace/papercup-release` — the live operator's deploy artifact, pinned to green `main`. NEVER edit it (every deploy resets + cleans it). If the live host lacks your fix, it isn't deployed yet — work in the canonical tree and let the pipeline carry it.
+- 🚫 `/home/dev/papercupai-workspace/papercup-checkpoint` — the green-checkpoint's isolated test tree. Never edit / leave debris (reset+cleaned each run; debris poisons the green gate).
 - 🚫 other sibling `papercup-*` dirs — preserved special-purpose worktrees on their own branches.
 
 Stay on `staging`; never `git worktree` or branch-switch. `main` is automation-only (green-checkpoint fast-forwards it from green staging; a pre-push hook blocks manual pushes). Self-check before editing: `pwd` under `…/papercup` and `git branch --show-current` prints `staging`.

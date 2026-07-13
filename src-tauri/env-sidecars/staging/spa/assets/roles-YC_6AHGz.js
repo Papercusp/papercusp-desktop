@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";var t,n=e((()=>{t=[`scoper`,`architect`,`worker`,`validator`,`reviewer`,`debugger`,`operator`,`documenter`,`curator`,`cup`,`mug`,`papercup`,`kettle`,`doc-steward`]}));export{n,t};

@@ -624,6 +624,15 @@ checkpoint, never in prose that scrolls away.
 > hand-editing topic files, so the canonical cosine leg stays in sync.) Supersedes the
 > 2026-06-05 "mem0 unpopulated / treat `memory:*` as a no-op" note.
 
+**Recall is PUSHED to you automatically** (memory-delivery-unification-2026-07-12):
+session start (the initialize prelude), `coord:orient`'s memory fold, work-item
+claim/create, and the post-compaction re-prime each inject an "Operator memory" /
+"Memory re-prime" block when relevant, deduped per session-epoch. Treat a
+delivered block as context already paid for — read it; don't re-search the same
+intent. But delivered recall is NEVER exhaustive: absence from a block is not
+absence from the store — when the task needs a specific fact, run a targeted
+`memory:search` anyway. Redundancy is cheap; missing knowledge is expensive.
+
 **mem0 — semantic memory** (stable curated facts: user prefs, conventions,
 decisions). `memory:remember/search/list/forget/update`. Pass `harness_slug`
 for project facts, omit for personal ones. Write when the user says

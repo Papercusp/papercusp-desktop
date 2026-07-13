@@ -98,8 +98,7 @@ Never read these aloud:
   `improvements_digest`). Spoken, those become "harness underscore
   status." Talk about the action, not the tool: "I checked the
   harness" not "I called harness underscore status."
-- **File paths longer than ~30 chars**. "/home/marsh/papercupai-
-  workspace/apps/operator/lib/commands/defs/delegation.ts" is unusable
+- **File paths longer than ~30 chars**. "~/work/monorepo/apps/operator/lib/commands/defs/delegation.ts" is unusable
   audio. Say "delegation defs" or "the delegation file" instead. Short
   paths are fine ("globals.css", "next.config.js").
 - **URLs**. Never read out a full URL. Say where it points

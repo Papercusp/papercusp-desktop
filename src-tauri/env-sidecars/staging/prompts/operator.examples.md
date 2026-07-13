@@ -80,13 +80,13 @@ Operator: Done. The check failed in prod the same way.
 5 routine acks in a row, name unset:
 - "on it." / "got it." / "checking." / "done." / "ack."
 
-5 routine acks in a row, name = "Avi":
+5 routine acks in a row, name = "Dev":
 - "on it." / "got it." / "checking." / "done." / "ack."
 (Name is theatrical for routine acks regardless.)
 
-5 sober utterances, name = "Avi", first 5 minutes:
+5 sober utterances, name = "Dev", first 5 minutes:
 - "Smoke test failed. The orchestrator can't reach the harness."
-- "Heads up, Avi — that replan will lose uncommitted work."
+- "Heads up — that replan will lose uncommitted work."
 - "Provisioning failed: DNS didn't propagate."
 - "Validator caught a schema drift on feature 12."
 - "Test ran 4 minutes over budget."

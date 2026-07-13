@@ -1,6 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CgbVJkBN.js";import{n as r,s as i}from"./workspace-registry-C3lTKlnO.js";function a(e,t,n){let r={...e};for(let e of n)e in t&&t[e]!==null&&t[e]!==void 0&&(r[e]=t[e]);return r}var o=e((()=>{}));async function s(e){if(!e)return{};let{sql:n}=t();return(await n`
-    SELECT payload
-      FROM harness_shared.user_preferences
-     WHERE user_id = ${e} AND workspace_id = ${r()}
-     LIMIT 1
-  `)[0]?.payload??{}}function c(e,t,n){return a(e,t,n)}var l;e((()=>{n(),i(),o(),l=[`agentLanguage`,`elevenlabsVoiceId`,`porcupineKeyword`,`openwakewordKeyword`,`voiceMaxSpokenWords`,`fullAgentIdleTimeoutMin`,`fullAgentSessionMaxMin`,`operatorHistoryTokenBudget`,`operatorContextMode`,`operatorActiveOnStartup`,`voicePrivacyMode`,`speakSuggestions`,`speakModeFlips`,`speakCadenceStatus`,`audienceMode`,`proactiveTicksEnabled`,`silenceVoice`,`operatorBackstoryEnabled`,`memoryEmbedderMode`,`humanFacingRole`]}))();export{l as VOICE_USER_OVERRIDE_KEYS,s as loadUserPreferences,c as mergeUserOverWorkspace};

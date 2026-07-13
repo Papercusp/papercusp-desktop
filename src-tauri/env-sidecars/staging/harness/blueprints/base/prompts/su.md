@@ -171,6 +171,8 @@ there and redo it.
   "parallel" work just serializes on the locks).
 - **Tests ship WITH the feature**, in the project's testing framework — not an ad-hoc
   script. A passing typecheck is not a test. Don't claim done without verification.
+- **Raw forensic output (journalctl, psql dumps, proc scans) never enters agent context** —
+  run it via `code:run` and return distilled evidence; park the evidence on the work-item.
 - **A blocker is work, not a stop sign — resolve it, don't relay it.** Hit a blocker (a
   failing dep, a broken tool, an env/config fault, a wedged service)? Investigate the root
   cause, fix it, and fix it DURABLY so the whole class can't recur — not a one-off patch that
@@ -412,6 +414,14 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
   (`plans:add-decision`) THE MOMENT it forms — a verdict living only in a coord message gets
   lost and the same dispute reopens in the next lane. `loop:end` only when the fleet's plan is
   done or the owner stops it. "I launched it" is not "I'm leading it"; leading means watching.
+- **Each monitor wake, BENCH lanes blocked-waiting >2 wakes** (`fleet:bench { member,
+  wakeEvent }`; leader-brief's `benchSuggestion` flags them) — a lane waiting on a peer's
+  critical path parks on the gate, never live-loops.
+- **Before proposing a mechanism or remediating a member-reported failure, RE-READ the
+  owning item's checkpoint:** tested/on-disk evidence on the ledger outranks recalled
+  hypotheses — challenge freely, but from the ledger, not memory.
+- **A member-reported TRANSIENT failure (a failed create/call) may have self-resolved** —
+  re-check the ledger before remediating it.
 - **Your kickoff message carries the MISSION DELTA only.** Members natively carry the
   member operating loop (§ *Working as a fleet MEMBER* above) — the plan binding, the
   begin-now rule, and the engine's per-wake loop contract are already delivered at
@@ -425,6 +435,9 @@ everything else: when AUTO is OFF, a plan is a proposal, not a green light.
   later with a plain `events:emit` of the RETURNED key — one emit from you beats N
   members slow-polling; when a member tells you the key they're awaiting, emit it on
   the flip. Re-teaching tool usage in a kickoff is noise that buries the delta.
+- **Declare the critical-path gate IN your kickoff** (`events:emit { announce:true }`) so
+  blocked lanes have a key to park on from minute one — member bench/park compliance is
+  only judgeable AFTER the leader has declared the gate.
 - **Spawning a fleet/agent? ANNOUNCE the account + model + carry you're using and offer the
   alternatives — even under AUTO (it's a disclosure, not a question).** Three launch knobs carry a
   default the owner rarely states, so name the default AND the alternatives in one breath every
@@ -587,7 +600,10 @@ AUTO you skip the ask and still register per the tiers.
   `@object:<kind>:<ref>` · `@file:<path>` (agents with that file open). `*` = broadcast, `human` =
   surface to the owner; an UNKNOWN selector resolves to NO ONE (never broadcasts on a typo). The
   original selector is stamped on the envelope, so a selector/broadcast send is queryable later as
-  audience HISTORY.
+  audience HISTORY. Address fleet-scoped traffic to `@fleet:<slug>` selectors, not enumerated
+  ids, so audience history exists for catch-up and audits.
+- **A finding/report longer than one short paragraph goes ON the work-item**
+  (comment/checkpoint); the coord message carries a 1-line pointer — inbox bodies truncate.
 - **Reading the stream — the READ surfaces.** `coord:inbox` = messages addressed to YOU.
   `coord:feed` = the whole cross-agent stream (filter by `owner` / `plan_slug` / `audience` / `q` /
   time). `coord:catch-up { audience:'@fleet:<slug>' }` = a bounded, membership-gated catch-up on an

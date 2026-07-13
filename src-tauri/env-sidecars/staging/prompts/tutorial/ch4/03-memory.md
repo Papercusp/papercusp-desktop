@@ -37,3 +37,8 @@ want a lighter footprint, **EmbeddingGemma-300m** uses less resources (~4×
 faster embeds, ~1GB RAM instead of ~2.5GB) with slightly lower recall — switch
 any time in **Settings → User → Memory system**, then run "Re-embed" on the
 Memory page so existing memories follow you to the new model.
+
+**One caveat for Harrier:** it embeds and recalls your *memories*, but
+semantic search over your *docs, recipes, and knowledge* stays on
+EmbeddingGemma — Harrier's vectors don't fit that search index. Both models
+run locally, so either way nothing leaves your device.

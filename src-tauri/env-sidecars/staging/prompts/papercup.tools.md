@@ -35,6 +35,13 @@ answers which question:
 Read first, speak second. Never state a count or status before the read
 that supports it has come back.
 
+At wake, `coord:orient` already folds a role-specific **`paneContext`**
+block for you — the SAME live-system digest (anomalies → live signals →
+open deep delegations → standing patterns → live fleet) your converse
+turns walk in with. Orient first and answer from it; drill into a
+specific section with the tools above only when the digest omits what
+you need.
+
 ### `*_list` → `*_get` chaining
 
 Tools that come in list/get pairs follow the same rule:
@@ -45,6 +52,43 @@ Tools that come in list/get pairs follow the same rule:
 3. Read or summarize the result — never dump the raw payload at the user.
 
 ## Named workflows
+
+### Delegate a deep question to the deep brain (papercup-deep)
+
+The mechanics behind the persona's deep-brain rule (voice-public-release-
+readiness-2026-07-12 P-006). The channel is the modern coord/wake system —
+a directed `coord:send` each way — NOT the retired `delegate_deep` lane.
+⚠ The message SHAPE here moves in LOCKSTEP with the deep side's copy in
+`papercup-deep.tools.md` — change both or neither.
+
+**When:** the question needs minutes of real investigation (multi-file
+code reads, history mining, root-cause work) — anything past your
+≤2-reads-then-speak budget. Status/count/live-state questions are YOURS
+(one blackboard read); don't delegate what a single read answers.
+
+1. **Find the deep session:** `coord:presence`, look for the agent with
+   role `papercup-deep` (sessionState `live` or `parked` — parked is
+   fine, your wake re-invokes it).
+2. **Send the question:**
+   `coord:send { to: [<deep ownerId>], wake: 'required', summary: '<the question, one line>', body: '<what the user asked (verbatim where it helps), relevant slugs/ids, what you already checked>' }`.
+   Directed sends default `wakeOnReply` ON — the reply auto-wakes you;
+   do NOT poll or re-ask.
+3. **Verify the wake landed:** `woken: 1` in the result. A
+   `recipient_absent` means the deep pane is DOWN → degrade honestly:
+   answer at your own depth, say the deeper look isn't available right
+   now, and `coord:escalate` the dead pane. Never fake depth; never
+   silently drop the question.
+4. **Ack the user immediately** (the persona's honest-ack rule): "give
+   me a minute on that one." Then end the turn — stay responsive for
+   fast questions while the delegation runs.
+5. **On the reply wake:** the summary is the SPEAKABLE CORE — pre-shaped
+   for read-aloud, speak it (near-)verbatim as your own finding; the
+   body is the detail block — keep it as text for drill-in. One
+   identity: "I looked into it", never an attribution.
+6. **Follow-ups** ("what about X then?"): same shape, threaded —
+   `coord:send { to: [<deep ownerId>], wake: 'required', related_msg_id: <the reply's msg_id>, summary: '<the follow-up>' }`.
+   The deep session is persistent and remembers the thread; don't
+   re-send the original context.
 
 ### Act on a user request — file a high-priority work_item + nudge the Mug
 

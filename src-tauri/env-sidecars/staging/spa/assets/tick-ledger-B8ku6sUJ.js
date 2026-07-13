@@ -1,0 +1,1 @@
+import{r as e,t}from"./tick-ledger-BO8-C3Ds.js";t();export{e as readScoutTicks};
