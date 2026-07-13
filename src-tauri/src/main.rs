@@ -514,6 +514,56 @@ mod tests {
         assert_eq!(got, expected, "input={:?}", input);
     }
 
+    /// The sidecar runs INSIDE WSL2 on Windows, so a var set with `Command::env`
+    /// reaches it ONLY if it is also named in WSLENV. A var that is set but not
+    /// listed is dropped SILENTLY — no error, no log, Windows only, at runtime.
+    ///
+    /// That is how Windows auto-update shipped dead: PAPERCUSP_RELEASE_HOST was
+    /// baked into the .exe and set via `.env(...)`, but never crossed into WSL, so
+    /// `releaseHostBase()` read undefined, the manifest route answered
+    /// `cannot_check`, and the updater rendered that as "you're on the latest" —
+    /// permanently. The bake was real; the value never arrived where it was used.
+    ///
+    /// This test pins the vars whose ABSENCE is silent-but-fatal. It is the only
+    /// thing standing between the two lists (`.env(...)` and WSLENV) and the next
+    /// silent divergence.
+    #[test]
+    fn wslenv_forwards_every_var_the_sidecar_reads() {
+        let wslenv = super::SIDECAR_WSLENV;
+        // Split on ':' and strip any '/p' (path-translation) suffix, so a var is
+        // matched as a NAME — never as a substring of a longer var, which would
+        // let PAPERCUSP_RELEASE_HOST_FOO satisfy a check for PAPERCUSP_RELEASE_HOST.
+        let names: Vec<&str> = wslenv
+            .split(':')
+            .map(|e| e.trim())
+            .map(|e| e.split('/').next().unwrap_or(e))
+            .filter(|e| !e.is_empty())
+            .collect();
+
+        for required in [
+            // THE ONE THIS TEST EXISTS FOR: the sidecar's releaseHostBase() reads
+            // process.env.PAPERCUSP_RELEASE_HOST. Without this, auto-update is dead
+            // on Windows and reports success while being dead.
+            "PAPERCUSP_RELEASE_HOST",
+            // Endpoint-IPC: WI-3395 — PAPERCUSP_IPC_ENABLE not crossing is why the
+            // IPC server never even STARTED inside WSL2 under packaged production.
+            "PAPERCUSP_IPC_ENABLE",
+            "PAPERCUSP_IPC_TCP",
+            // The sidecar cannot serve or find itself without these.
+            "PAPERCUSP_HONO_PORT",
+            "PAPERCUSP_BIND_HOST",
+            "PAPERCUSP_SIDECAR_BIN",
+            "PAPERCUSP_SERVE_UI",
+        ] {
+            assert!(
+                names.contains(&required),
+                "{required} is NOT in WSLENV — on Windows the sidecar runs inside WSL2, so this \
+                 var will be set by Command::env and then silently dropped at the boundary. \
+                 It will look fine on Linux and Mac and be dead on Windows. WSLENV = {wslenv}"
+            );
+        }
+    }
+
     /// EI-239: the recovery page embeds the failed URI as a JSON string
     /// literal — quoting in the URL must not escape the script context.
     #[cfg(target_os = "linux")]
@@ -3708,6 +3758,40 @@ fn bring_up_sidecar(
     std::thread::spawn(move || finish_boot(app_handle, workspace_home_bg, via_wsl));
 }
 
+/// Env vars forwarded across the Windows→WSL boundary to the sidecar.
+///
+/// WHY THIS IS A NAMED CONSTANT AND NOT AN INLINE STRING. On Windows the sidecar
+/// runs INSIDE WSL2, so `Command::env(...)` alone does not reach it: a var must
+/// ALSO be named here or the Linux side never sees it. That makes this list and
+/// the `.env(...)` calls in `spawn_serve` two lists that must agree, with nothing
+/// enforcing it — and a var set but not listed is dropped SILENTLY, on Windows
+/// only, at runtime.
+///
+/// That is exactly how Windows auto-update shipped dead. `PAPERCUSP_RELEASE_HOST`
+/// was baked into the .exe (the byte-gate proved it), set via `.env(...)` below,
+/// and then never crossed into WSL — so the sidecar's `releaseHostBase()` read
+/// undefined, `/api/updates/manifest` answered `cannot_check`, and the updater
+/// rendered that as "you're on the latest". Forever. The bake was real and the
+/// gate was honest; the value simply never arrived at the process that uses it.
+/// PACKED IS NOT DELIVERED.
+///
+/// So: if you add a `.env(...)` to `spawn_serve` that the SIDECAR reads, add it
+/// here too. `wslenv_forwards_every_var_the_sidecar_reads` pins the ones we know
+/// are load-bearing.
+const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
+     PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
+     PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
+     PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
+     PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
+     PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
+     PAPERCUSP_DBOS_ORCHESTRATOR:PAPERCUSP_PROVISION_ENV_OPERATORS:\
+     HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
+     PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
+     PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
+     PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
+     PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP:\
+     PAPERCUSP_RELEASE_HOST";
+
 fn spawn_serve(
     via_wsl: bool,
     port_hint: u16,
@@ -3812,21 +3896,7 @@ fn spawn_serve(
     // resolves — the rootfs bakes node into /usr/local for exactly that
     // no-shell lookup (P-004).
     if via_wsl {
-        cmd.env(
-            "WSLENV",
-            "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
-             PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
-             PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
-             PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
-             PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
-             PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
-             PAPERCUSP_DBOS_ORCHESTRATOR:PAPERCUSP_PROVISION_ENV_OPERATORS:\
-             HARNESS_DATABASE_URL:HARNESS_ADMIN_DATABASE_URL:\
-             PAPERCUSP_SPA_DIST/p:PAPERCUSP_DOCS_ROOT/p:\
-             PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
-             PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
-             PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP",
-        );
+        cmd.env("WSLENV", SIDECAR_WSLENV);
         // WI-3395: the sidecar runs INSIDE WSL2 (process.platform==='linux'),
         // where defaultSocketPath() would otherwise create a UNIX socket the
         // Windows-native webview host can't open (and can't create a `\\.\pipe\`
