@@ -165,19 +165,30 @@ FORBIDDEN_PATH = [
     # npm `files`-array docs, NOT `exports`/`main` runtime entries, so dropping them
     # breaks nothing.) NONE of these basenames/dirs collide with a vendored RUNTIME
     # entry (checked: no build-system/ dir and no runbook basename in node_modules).
+    # NB build-system has BOTH a build-system/ subtree AND a build-system.{html,md}
+    # section LANDING page (Astro renders a section index as a sibling file) — the
+    # dir glob prunes the subtree, the .html/.md globs catch the landing twin.
     ("internal-build-infra-docs",
-     re.compile(r"(^|/)build-system/"
+     re.compile(r"(^|/)build-system(/|\.(html|md)$)"
                 r"|(^|/)(mac-vm-qmp-recovery|mac-vm-e2e-battery"
                 r"|macos-signing-notarization-runbook"
                 r"|federation-public-release-known-limitations"
                 r"|agent-insights-index)\.(mdx|md|html)$"
                 r"|(^|/)(llms-full|llms-small)\.txt$"),
-     ["build-system",
+     ["build-system", "build-system.html", "build-system.md",
       "mac-vm-qmp-recovery.*", "mac-vm-e2e-battery.*",
       "macos-signing-notarization-runbook.*",
       "federation-public-release-known-limitations.*",
       "agent-insights-index.*",
       "llms-full.txt", "llms-small.txt"]),
+    # Astro's content-collection build cache (apps/operator-docs/node_modules/.astro/
+    # data-store.json): Astro serialises EVERY doc's rendered content into this store
+    # at build time, so it inlines the same build-system creds the docs exclusion
+    # above removes — and it is a regenerable build cache (the .cache/.vite class),
+    # never read to RUN the tree. Delete, don't scrub. (Nested under node_modules,
+    # so the top-level allowlist can't reach it — this rule can.)
+    ("astro-build-cache", re.compile(r"(^|/)\.astro/"),
+     [".astro"]),
     # Rust/Cargo build target dirs (apps/tui/target, apps/pui-*/target,
     # libs/**/src-tauri/target, …) at ANY depth. A cargo target bakes THIS build
     # box's absolute home path into .rustc_info.json, the *.d dep-files and the
@@ -254,6 +265,29 @@ BENIGN_ERE = [
 # convicted the bundle by this point, so a member too big to attribute costs us a
 # file NAME, never a missed leak — the build fails either way.
 MAX_ATTRIBUTE_BYTES = 8 * 1024 * 1024
+
+
+# ── KNOWN SENSITIVE IDENTITIES — the cross-identity blind spot fix (WI-4419).
+#
+# identity_literals() below resolves ONLY the box RUNNING the build. On a
+# multi-box release that is a hole the size of the release: the LINUX leg hunts
+# its own 'marsh-office' and is blind to the mac VM's 'aviweiss'; the mac leg
+# hunts 'aviweiss' and is blind to 'marsh-office'; a value owned by NEITHER box
+# (the mac loginwindow password 'avraham') is hunted by nobody. That blind spot
+# is exactly how the 0.0.8 mac bundle shipped the mac VM's sudo password
+# ('aviweiss') and login password ('avraham') to the public while every leg's
+# per-box audit passed. So these literals are hunted on EVERY build regardless of
+# which box runs it — the fixed backstop beneath the per-box scan. All are
+# high-entropy by construction (≥7 chars / contain '-'), so they hunt EVERYWHERE
+# incl node_modules as plain substrings (never the bare-first-name word-boundary
+# path). This is a DENYLIST OF KNOWN LEAKED IDENTITIES — each entry a real value
+# that has leaked or would leak cross-box — NOT a generic name regex, so it does
+# not cry wolf on a vendor package.json maintainer field.
+KNOWN_SENSITIVE_IDENTITIES = {
+    "known-sensitive:mac-vm-user": "aviweiss",           # mac VM unix user AND its sudo password
+    "known-sensitive:mac-vm-login": "avraham",           # mac VM loginwindow password
+    "known-sensitive:linux-build-user": "marsh-office",  # linux build-box unix user
+}
 
 
 def identity_literals():
@@ -492,6 +526,11 @@ def main():
     lits = identity_literals()
     print(f"==> auditing {os.path.basename(bundle)}")
     print(f"    identity of this build box: {', '.join(sorted(lits)) or '(none resolved)'}")
+    # Cross-box blind-spot backstop (WI-4419): hunt the KNOWN leaked identities on
+    # EVERY build, not just the ones belonging to the box running this scan.
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    print(f"    + {len(KNOWN_SENSITIVE_IDENTITIES)} known cross-box sensitive identities "
+          f"(hunted on every build regardless of build host)")
 
     members, path_hits = phase_a_paths(bundle, lits)
     print(f"    [A] paths    — {members:,} members, {len(path_hits):,} finding(s)")
