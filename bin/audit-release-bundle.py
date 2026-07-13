@@ -229,6 +229,37 @@ def lit_ere(lit):
     return rf"\b{re.escape(lit)}\b" if needs_word_boundary(lit) else re.escape(lit)
 
 
+def is_low_entropy(lit):
+    """A literal so short/common that VENDOR code hits it by coincidence.
+
+    Same set as needs_word_boundary — a bare first name. \\bAvi\\b is necessary but
+    not sufficient: node_modules/natural ships an English POS lexicon in which
+    "Avi" is a dictionary entry, and @huggingface/transformers' README credits a
+    DIFFERENT REAL PERSON named Avi. Both are word-boundary hits and neither is
+    our owner.
+    """
+    return needs_word_boundary(lit)
+
+
+def is_vendor(name):
+    """Third-party code — we did not write it, so our box's identity cannot have
+    ORIGINATED in it.
+
+    This is the scoping rule for low-entropy literals ONLY. A high-entropy literal
+    (/home/<owner>, the username, the hostname, an email, a credential) is still
+    hunted EVERYWHERE including node_modules — those genuinely do leak into vendor
+    trees, baked in by a build running on this box, and that is exactly where the
+    real 0.0.8 home-path hits were found. What we refuse to do is convict a vendor
+    dictionary of containing the owner's first name.
+
+    Our own workspace packages are symlinked under node_modules, but they are also
+    present at their real path (libs/, packages/, apps/), where they ARE scanned —
+    so nothing we authored escapes the name check by hiding here.
+    """
+    n = name.lstrip("./")
+    return n.startswith("node_modules/") or "/node_modules/" in n
+
+
 def lit_rx(lit):
     return re.compile(lit_ere(lit))
 
@@ -259,22 +290,36 @@ def phase_a_paths(bundle, lits):
 
 
 def phase_b_content(bundle, lits):
-    """Concatenated content through C grep. No filenames — that is phase C's job."""
-    # Every interpolated value is shell-quoted via q() — including git user.name,
-    # which is attacker-ish only in the sense that it is arbitrary user config.
-    pats = [f"-e {q(p)}" for _, p in CREDENTIAL_ERE]
-    lit_pats = [f"-e {q(lit_ere(v))}" for v in lits.values()]
-    if not pats and not lit_pats:
-        return []
-    benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)
-    grep = f"grep -aoE {' '.join(pats + lit_pats)}"
-    # Filter the documented benign values out of the stream before we judge.
-    cmd = f"zstd -dc {q(bundle)} | tar -xOf - | {grep} | grep -avE {benign} | sort | uniq -c | sort -rn"
-    r = sh(cmd)
-    out = [l.strip() for l in r.stdout.splitlines() if l.strip()]
-    found = []
+    """Concatenated content through C grep. No filenames — that is phase C's job.
+
+    TWO passes, because the needles have different trustworthiness:
+      • BROAD  — credentials + high-entropy identity, over the WHOLE bundle.
+                 A hit in node_modules is real: only a build on this box could
+                 have put it there.
+      • NARROW — low-entropy identity (a bare first name), over OUR SOURCE ONLY.
+                 Vendored dictionaries and third-party READMEs are full of common
+                 first names that are not our owner.
+    """
     rev = {v: k for k, v in lits.items()}
-    for line in out:
+    benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)
+
+    def scan(pats, tar_flags=""):
+        if not pats:
+            return []
+        grep = f"grep -aoE {' '.join(f'-e {q(p)}' for p in pats)}"
+        cmd = (f"zstd -dc {q(bundle)} | tar {tar_flags} -xOf - | {grep} "
+               f"| grep -avE {benign} | sort | uniq -c | sort -rn")
+        return [l.strip() for l in sh(cmd).stdout.splitlines() if l.strip()]
+
+    broad = [p for _, p in CREDENTIAL_ERE]
+    broad += [lit_ere(v) for v in lits.values() if not is_low_entropy(v)]
+    narrow = [lit_ere(v) for v in lits.values() if is_low_entropy(v)]
+
+    # GNU tar --exclude applies to extraction too; * spans '/' by default.
+    vendor_excl = "--exclude='./node_modules/*' --exclude='*/node_modules/*'"
+
+    found = []
+    for line in scan(broad) + scan(narrow, vendor_excl):
         n, _, val = line.partition(" ")
         val = val.strip()
         rule = rev.get(val)
@@ -303,7 +348,10 @@ def phase_c_attribute(bundle, lits, wanted, per_rule=8):
     Counting is therefore per RULE, not one global cap — a noisy rule must never
     be able to starve a quiet one out of the report.
     """
-    needles = [(rule, re.compile(lit_ere(val).encode())) for rule, _n, val in wanted]
+    # (rule, regex, vendor_scoped) — the SAME scoping phase B convicted with, or the
+    # diagnosis would name files the verdict never counted (and vice versa).
+    needles = [(rule, re.compile(lit_ere(val).encode()), is_low_entropy(val))
+               for rule, _n, val in wanted]
     found = {}
     proc = subprocess.Popen(["bash", "-c", f"zstd -dc {q(bundle)} | cat"], stdout=subprocess.PIPE)
     try:
@@ -317,7 +365,10 @@ def phase_c_attribute(bundle, lits, wanted, per_rule=8):
                 blob = f.read()
                 if b"\0" in blob[:4096]:
                     continue
-                for rule, rx in needles:
+                vendor = is_vendor(m.name)
+                for rule, rx, scoped in needles:
+                    if scoped and vendor:
+                        continue
                     if rx.search(blob):
                         g = found.setdefault(rule, {"n": 0, "files": []})
                         g["n"] += 1
