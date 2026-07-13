@@ -90,6 +90,13 @@ FORBIDDEN_PATH = [
       ".modules.yaml"]),
     ("agent-config", re.compile(r"(^|/)(\.claude|\.harness)/"),
      [".claude", ".harness"]),
+    # Internal fleet-coordination artifacts: briefs agents write to each other, and
+    # the plan/handoff notes beside them. Nobody we hand a build to needs these, and
+    # they are AGENT-AUTHORED CONTINUOUSLY — a new brief naming a box path lands every
+    # day. Scrubbing them one by one would make this gate a treadmill that reds every
+    # cut; excluding the class ends it. (Product docs — apps/operator-docs — DO ship.)
+    ("internal-agent-artifacts", re.compile(r"(^|/)(agent-briefs|docs/plans)/"),
+     ["agent-briefs", "docs/plans"]),
     ("vcs", re.compile(r"(^|/)\.git/"),
      [".git"]),
     ("dotenv", re.compile(r"(^|/)\.env(\.|$)"),

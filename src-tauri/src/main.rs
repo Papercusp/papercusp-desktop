@@ -4363,6 +4363,51 @@ struct UpdateInfo {
     current_version: String,
     new_version: Option<String>,
     notes: Option<String>,
+    /// The update check could not actually be performed — the release host was
+    /// unreachable, throttled, or never configured. DISTINCT from `available:
+    /// false`, which means "checked, and you are current".
+    ///
+    /// The Tauri updater protocol has no slot for this: a 204 means "no update",
+    /// and the plugin hands back `Ok(None)` whether we compared versions or
+    /// never got an answer at all. So an unreachable host reads to the user as
+    /// "you are up to date" — silently, forever, and indistinguishable from
+    /// success. That is the worst failure mode an updater can have, and it is
+    /// exactly how a 0.0.8 with no release host baked in would present: eternally
+    /// current, never updating, saying nothing.
+    check_failed: bool,
+    /// Why the check could not be performed (`no_token` / `fetch_failed` /
+    /// `no_candidate` / `manifest_unconfigured`), when the sidecar reports one.
+    check_reason: Option<String>,
+}
+
+/// Ask the sidecar whether its 204 meant "up to date" or "could not check".
+///
+/// The sidecar has known the difference since WI-3697 and says so in
+/// `X-Update-Check: up_to_date | cannot_check` (+ `X-Update-Reason`) — but the
+/// updater plugin parses no headers on a 204, so nothing had ever read them and
+/// the distinction died at the wire. Re-ask the same loopback endpoint and read
+/// them, so a failed check can be surfaced AS a failed check.
+///
+/// Loopback + only on the no-update path, so the extra request is cheap. Any
+/// failure to probe leaves the verdict unchanged rather than inventing one.
+async fn probe_update_check_status(endpoint: String) -> Option<(String, Option<String>)> {
+    tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let res = client.get(&endpoint).send().ok()?;
+        let check = res.headers().get("x-update-check")?.to_str().ok()?.to_string();
+        let reason = res
+            .headers()
+            .get("x-update-reason")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Some((check, reason))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Is the running bundle the "Papercusp Server" product (vs "Papercusp GUI")?
@@ -4452,13 +4497,26 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
             current_version: current,
             new_version: Some(update.version.clone()),
             notes: update.body.clone(),
+            check_failed: false,
+            check_reason: None,
         }),
-        Ok(None) => Ok(UpdateInfo {
-            available: false,
-            current_version: current,
-            new_version: None,
-            notes: None,
-        }),
+        // `Ok(None)` is the ambiguous one: a 204 that may mean "you are current"
+        // OR "we never reached the release host". Ask the sidecar which it was
+        // instead of assuming the happy one.
+        Ok(None) => {
+            let (check_failed, check_reason) = match probe_update_check_status(endpoint).await {
+                Some((check, reason)) if check == "cannot_check" => (true, reason),
+                _ => (false, None),
+            };
+            Ok(UpdateInfo {
+                available: false,
+                current_version: current,
+                new_version: None,
+                notes: None,
+                check_failed,
+                check_reason,
+            })
+        }
         Err(e) => Err(e.to_string()),
     }
 }
