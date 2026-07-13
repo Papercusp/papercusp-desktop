@@ -548,8 +548,30 @@ TAR_BYTES=$(stat -c%s "$TARBALL")
 REQUIRED_BYTES=$(( TAR_BYTES + TAR_UNCOMPRESSED_BYTES + BUILD_HEADROOM_GB * 1024 * 1024 * 1024 + PREFLIGHT_SLACK_GB * 1024 * 1024 * 1024 ))
 REQUIRED_GB=$(awk "BEGIN { printf \"%.2f\", $REQUIRED_BYTES/1024/1024/1024 }")
 REQUIRED_BREAKDOWN="$(( TAR_BYTES/1024/1024/1024 ))G tarball + $(( TAR_UNCOMPRESSED_BYTES/1024/1024/1024 ))G extract + ${BUILD_HEADROOM_GB}G build headroom + ${PREFLIGHT_SLACK_GB}G slack = ${REQUIRED_GB}G required"
-echo "==> pre-flight: reclaiming stale VM build output + asserting free space ($REQUIRED_BREAKDOWN)"
-VM_FREE_OUTPUT="$("${SSH[@]}" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno' -EA SilentlyContinue; Remove-Item -Force 'C:\\Users\\user\\papercusp-desktop-build.tar.gz' -EA SilentlyContinue; \$f=[math]::Round((Get-PSDrive C).Free/1GB,2); Write-Output ('VM C: free = '+\$f+' GB'); if (\$f -lt $REQUIRED_GB) { Write-Output 'DISK_TOO_LOW'; exit 1 }\"" \
+# RECLAIM THE OLD TREE *BEFORE* ASSERTING, NOT AFTER (the double-count).
+# The extract step below deletes $VM_BUILD_DIR wholesale and untars a fresh tree into
+# it — so the old tree's bytes are NOT competing with the new build and must not be
+# counted against it. Asserting first and reclaiming later demanded room for BOTH at
+# once, which is a free-space bar the build never actually has to clear. It is not
+# hypothetical: attempt9's own killed extract left a 6.4GB tree behind, and the next
+# cut then failed DISK_TOO_LOW at 15.3GB free on a VM that had 21.7GB once that
+# doomed tree was subtracted. A cut refusing to start over space it is about to free
+# is a false negative, and the "fix" it invites (hand-deleting on the VM) is a manual
+# step that has to be repeated after every failure.
+# FAST_ITER is the deliberate exception: it extracts OVER the existing dir precisely to
+# keep target/ + node_modules warm, so there the old tree IS live and only the narrow
+# stale outputs are reclaimable.
+if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
+  RECLAIM_PS="Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno' -EA SilentlyContinue;"
+  RECLAIM_DESC="stale inno output (FAST_ITER: keeping the build dir + caches)"
+else
+  RECLAIM_PS="Remove-Item -Recurse -Force 'C:\\Users\\user\\$VM_BUILD_DIR' -EA SilentlyContinue;"
+  RECLAIM_DESC="the whole previous build dir (the extract deletes it anyway)"
+fi
+RECLAIM_PS="$RECLAIM_PS Remove-Item -Force 'C:\\Users\\user\\papercusp-desktop-build.tar.gz' -EA SilentlyContinue;"
+
+echo "==> pre-flight: reclaiming $RECLAIM_DESC, THEN asserting free space ($REQUIRED_BREAKDOWN)"
+VM_FREE_OUTPUT="$("${SSH[@]}" "powershell -NoProfile -Command \"$RECLAIM_PS \$f=[math]::Round((Get-PSDrive C).Free/1GB,2); Write-Output ('VM C: free = '+\$f+' GB'); if (\$f -lt $REQUIRED_GB) { Write-Output 'DISK_TOO_LOW'; exit 1 }\"" \
   | tr -d '\r')" \
   || fail "VM C: has <${REQUIRED_GB}GB free even after reclaiming stale output ($REQUIRED_BREAKDOWN — was: $VM_FREE_OUTPUT) — free space before rebuilding (WI-3360: a full disk truncates main.rs mid-extract; the extract needs the tarball + extracted tree to coexist). Quick reclaim: 'powercfg -h off' drops hiberfil.sys (~12 GB on a headless build VM), or delete old version-scoped installers under C:\\Users\\user\\$VM_BUILD_DIR. (WI-4232: this requirement is now computed from the actual tarball size, not a stale fixed 6GB — set BUILD_HEADROOM_GB / PREFLIGHT_SLACK_GB to retune it.)"
 echo "    $VM_FREE_OUTPUT"
