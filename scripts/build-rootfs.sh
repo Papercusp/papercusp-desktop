@@ -155,6 +155,29 @@ rm -rf /var/lib/apt/lists/*
 echo "papercup bootstrap complete"
 EOF
 
+# ── Recipe fingerprint (WI-4448) ─────────────────────────────────────
+# THE thing that determines what ends up inside the rootfs: the bootstrap we run
+# in the container, the base image, and the pinned runtime versions. Deliberately
+# NOT a hash of this whole file — a comment or a stamp-block edit must not
+# invalidate a perfectly good tarball. A gate that cries wolf gets switched off,
+# and then it is not a gate.
+#
+# This is the SINGLE SOURCE OF TRUTH for the fingerprint: build-windows-on-vm.sh
+# re-derives it by calling `build-rootfs.sh --print-recipe-fingerprint` rather
+# than reimplementing the hash, so the producer and the checker cannot drift
+# apart. (Drift between two hand-maintained copies of the same knowledge is
+# precisely what let .papercusp/ into the release bundle — WI-4419.)
+recipe_fingerprint() {
+  printf '%s\n%s\n%s\n%s\n' \
+    "$UBUNTU_IMAGE" "$NODE_VERSION" "$PNPM_VERSION" "$BOOTSTRAP_SH" \
+  | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1
+}
+
+if [[ "${1:-}" == "--print-recipe-fingerprint" ]]; then
+  recipe_fingerprint
+  exit 0
+fi
+
 # ── Run the bootstrap inside the container ───────────────────────────
 docker pull "$UBUNTU_IMAGE"
 
@@ -178,4 +201,32 @@ echo "exporting rootfs to $OUT_TARBALL"
 docker export "$CONTAINER" | gzip -9 > "$OUT_TARBALL"
 
 ls -lh "$OUT_TARBALL"
+
+# ── Freshness stamp (WI-4448) ────────────────────────────────────────
+# The Windows cut NEVER rebuilds this tarball — bin/build-windows-on-vm.sh only
+# asserts it EXISTS and ships whatever is on disk. So editing the recipe above
+# (the apt list, the bootstrap) without re-running THIS script means the fix
+# never reaches the distro, the build is still GREEN, and it fails only in the
+# user's hands. That is exactly how libasound2t64 was nearly shipped missing,
+# which would have left the Windows chat dock opening onto a dead `pui` — a
+# blank pane, the same class we already fixed once on Linux.
+#
+# So stamp the RECIPE alongside the output. build-windows-on-vm.sh re-derives the
+# fingerprint and refuses to package on a mismatch, turning "changed the recipe,
+# forgot to rebuild" into a loud build failure instead of a shipped-dead distro.
+# Same fail-closed contract as the sidecar stamp (P-004 / D-003).
+# shellcheck source=../bin/lib/portable-sha256.sh
+source "$(cd "$(dirname "$0")/.." && pwd)/bin/lib/portable-sha256.sh"
+_recipe_sha="$(recipe_fingerprint)"
+_rootfs_sha="$(papercusp_portable_sha256 "$OUT_TARBALL")"
+{
+  printf '{\n'
+  printf '  "recipeSha256": "%s",\n' "${_recipe_sha:-}"
+  printf '  "rootfsSha256": "%s",\n' "${_rootfs_sha:-}"
+  printf '  "builtAtUtc": "%s",\n'   "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "epochSec": %s\n'        "$(date +%s)"
+  printf '}\n'
+} > "${OUT_DIR}/.rootfs-build-stamp"
+echo "→ wrote rootfs freshness stamp (recipe ${_recipe_sha:0:12}…, WI-4448)"
+
 echo "done. ship it as a Tauri resource."

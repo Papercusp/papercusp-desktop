@@ -130,6 +130,49 @@ rust_src_fingerprint() {
 [[ -d "$ROOT/src-tauri/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
 [[ -f "$ROOT/src-tauri/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
 
+# ── WSL rootfs freshness contract — FAIL-CLOSED (WI-4448) ────────────────────
+# This script never rebuilds the rootfs; it ships whatever tarball is on disk.
+# So a fix made to scripts/build-rootfs.sh (say, adding a library the distro
+# needs) reaches the shipped distro ONLY if someone re-ran that script — and if
+# they did not, EVERYTHING STILL GOES GREEN. The Rust half of the fix ships, the
+# distro half does not, and the failure surfaces in the user's hands.
+#
+# That nearly shipped: the checked-in tarball predated libasound2t64, so the new
+# Windows chat dock would have opened a zellij session whose chat pane was a dead
+# binary. Nothing in the build would have said a word.
+#
+# So verify the tarball against the recipe that produced it. The fingerprint is
+# derived BY build-rootfs.sh (--print-recipe-fingerprint), never reimplemented
+# here — a checker that re-derives the producer's knowledge drifts from it, and
+# that drift is the bug, not the check.
+verify_rootfs_freshness() {
+  local res="$ROOT/src-tauri/resources"
+  local tarball="$res/papercup-runtime.tar.gz"
+  local stamp="$res/.rootfs-build-stamp"
+  if [[ "${PAPERCUSP_ALLOW_STALE_ROOTFS:-0}" == "1" ]]; then
+    echo "==> ⚠ PAPERCUSP_ALLOW_STALE_ROOTFS=1 — skipping the WSL rootfs freshness guard (WI-4448)"
+    return 0
+  fi
+  [[ -f "$stamp" ]] || fail "WSL rootfs has no freshness stamp ($stamp) — it was built by an old build-rootfs.sh, so we cannot tell whether it matches the current recipe. Rebuild: bash scripts/build-rootfs.sh. Override: PAPERCUSP_ALLOW_STALE_ROOTFS=1. (WI-4448)"
+
+  local want_recipe have_recipe
+  want_recipe="$(grep -oE '"recipeSha256"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "$stamp" | grep -oE '[0-9a-f]{64}' | head -1)"
+  have_recipe="$(bash "$ROOT/scripts/build-rootfs.sh" --print-recipe-fingerprint 2>/dev/null)"
+  [[ -n "$want_recipe" && -n "$have_recipe" ]] || fail "could not derive the WSL rootfs recipe fingerprint (stamp=${want_recipe:-<none>} current=${have_recipe:-<none>}) — rebuild: bash scripts/build-rootfs.sh. Override: PAPERCUSP_ALLOW_STALE_ROOTFS=1. (WI-4448)"
+  [[ "$want_recipe" == "$have_recipe" ]] || fail "WSL rootfs is STALE: scripts/build-rootfs.sh has changed since this tarball was built (recipe now ${have_recipe:0:12}…, tarball built from ${want_recipe:0:12}…). Shipping it would silently omit whatever that change added — the build would go GREEN and the distro would be broken in the user's hands. Rebuild: bash scripts/build-rootfs.sh. Override: PAPERCUSP_ALLOW_STALE_ROOTFS=1. (WI-4448)"
+
+  # The tarball must also be the one the stamp describes — catches a half-written
+  # export, or a concurrent rebuild swapping it mid-cut.
+  local want_tar have_tar
+  want_tar="$(grep -oE '"rootfsSha256"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "$stamp" | grep -oE '[0-9a-f]{64}' | head -1)"
+  have_tar="$(sha256sum "$tarball" 2>/dev/null | cut -d' ' -f1)"
+  [[ -n "$want_tar" && -n "$have_tar" ]] || fail "could not hash the WSL rootfs tarball for the freshness guard — rebuild: bash scripts/build-rootfs.sh. Override: PAPERCUSP_ALLOW_STALE_ROOTFS=1. (WI-4448)"
+  [[ "$want_tar" == "$have_tar" ]] || fail "WSL rootfs tarball ($have_tar) does not match its build stamp ($want_tar) — it is corrupt, half-exported, or was swapped by a concurrent rebuild. Rebuild: bash scripts/build-rootfs.sh. Override: PAPERCUSP_ALLOW_STALE_ROOTFS=1. (WI-4448)"
+
+  echo "==> ✓ WSL rootfs freshness verified (recipe ${have_recipe:0:12}…, WI-4448)"
+}
+verify_rootfs_freshness
+
 # ── P-004 (desktop-build-hardening-tri-platform-2026-07-11): sidecar freshness
 # contract — FAIL-CLOSED (D-003) ─────────────────────────────────────────────
 # This script PACKS sidecar/serve.mjs AS-IS (it never rebuilds the sidecar), so
