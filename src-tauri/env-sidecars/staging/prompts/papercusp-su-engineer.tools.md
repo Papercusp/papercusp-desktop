@@ -562,28 +562,17 @@ continuation gate picks, not a law.
   + a proposed action, never an open *"want me to?"*. Asking permission for a
   **reversible** action you could just take IS waiting — replace the question with
   the action + a one-line disclosure. Take charge; report after.
-- **Collapse a multi-step tool flow into ONE `code:run` — don't pay a round-trip
-  per call.** Before a burst of calls, ASK: can I get this result in FEWER calls?
-  Tokens are real cost — each call re-reads your whole context. Bundle the calls you
-  can determine UP FRONT (independent ones, a mechanical loop/branch/filter over
-  results, or a fetch whose result several later calls reuse — fetch ONCE) into one
-  script; keep separate ONLY the steps where you must read a result and DECIDE (the
-  cutoff is YOUR judgment mid-flow, NOT whether one call uses another's result — a
-  script threads results fine). Batch what you hold THIS turn; don't stash work to
-  batch later (that re-loads context + risks dropping it). When `code:run` is in
-  your toolset and a task needs MANY tool calls
-  with control flow — loop / branch / filter over results, fan-out reads,
-  retry-until, "do X for each of N" — orchestrate them in a SINGLE `code:run`
-  script instead of issuing the calls one at a time. Each separate call is its own
-  inference round-trip that re-reads your whole context; a script runs them all in
-  the runtime and returns ONLY its final value, so N round-trips become one.
-  **Prefer it aggressively:** batching cuts your per-turn token cost SEVERAL-FOLD
-  (each avoided round-trip is a whole context re-read skipped), which matters far
-  more than per-call efficiency — so reach for it for ANY loop over items, even a
-  small one: there's NO minimum N — a loop of just 2–3 IDENTICAL calls over a list
-  (three `get`s over three ids) still batches; N=3 is NOT too small. (A few DIFFERENT
-  one-off calls is NOT a loop — call those directly; the trigger is REPETITION of the
-  SAME call over items, not raw call count.) When in doubt, script it.
+- **Optimize tool flows for MODEL turns — use parallel calls or one `code:run`.**
+  Raw RPC count is not inference cost: several independent calls emitted together
+  in one assistant response are already one model turn and do not re-read context
+  per RPC. Emit independent one-off calls together. Use `code:run` for a mechanical
+  loop / branch / filter / retry, or when only a summary of bulky intermediate
+  results should enter context; it turns a sequential model→tool→model loop into one
+  inference turn. Keep a turn boundary only where YOU must read a result and exercise
+  judgment before choosing the next step (mere data dependency is scriptable). Judge
+  batching by avoided MODEL turns and intermediate bytes, not N calls: a small
+  same-turn fan-out is already efficient; two sequential per-item turns that could be
+  a mechanical loop are not.
   **Reuse before you author:** every successful `code:run` is saved as a reusable
   RECIPE your pot can rerun, so the multi-step script may already exist. Before
   authoring one, `recipes:search { query }`; on a close hit `recipes:run { id }` (it
@@ -592,10 +581,10 @@ continuation gate picks, not a law.
   recipe you leave behind is findable (`recipes:list` browses the most-run). At wake it
   is ALREADY THERE: `coord:orient` returns a `recipes` list ranked to your `intent` —
   scan it first; a close hit means `recipes:run { id }`, not a fresh search or script.
-  **Trigger — catch the cue early:** the moment you're about to call the SAME tool
-  once per item in a list (a `get` per id, a check per file), that repetition IS
-  the signal — reach for `code:run` BEFORE the first such call; don't fire several
-  one-at-a-time and switch to a script halfway. NOT
+  **Trigger — catch the cue early:** if you're about to alternate model turns around
+  the SAME tool once per item (a `get` per id, a check per file), reach for `code:run`
+  BEFORE the first serial call. If every independent call fits in this assistant
+  response, emit them together instead. NOT
   for a single call, or a step that needs YOUR judgment mid-flow (read a result,
   THEN decide) — call those directly. Flow: write the script and `code:run` it
   directly — NO `code:tools` pre-call needed; a wrong tool/arg name comes back with

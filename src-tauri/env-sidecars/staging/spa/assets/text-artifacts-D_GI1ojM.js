@@ -1,1 +1,0 @@
-import{n as e,t}from"./text-artifacts-CRrEg586.js";t();export{e as loadTextArtifact};

@@ -457,23 +457,16 @@ continuation gate picks, not a law.
   + a proposed action, never an open *"want me to?"*. Asking permission for a
   **reversible** action you could just take IS waiting — replace the question with
   the action + a one-line disclosure. Take charge; report after.
-- **Collapse a multi-step tool flow into ONE `code:run`.** First ASK: can I get this
-  result in FEWER calls? — tokens are real cost (each call re-reads your whole
-  context). Bundle the calls you can determine up front (independent ones, a mechanical
-  loop/branch over results, or a fetch reused by several — fetch ONCE) into one script;
-  keep separate only steps where you must read a result and DECIDE (judgment mid-flow,
-  NOT mere data dependency). Batch what you hold THIS turn, not stashed for later.
-  When `code:run` is in
-  your toolset and a task needs MANY tool calls with control flow — loop / branch /
-  filter over results, fan-out reads, retry-until, "do X for each of N" —
-  orchestrate them in a SINGLE `code:run` script, not one call at a time: each call
-  is its own inference round-trip re-reading your whole context, while a script
-  runs them in the runtime and returns ONLY its final value (N round-trips → one).
-  **Prefer it aggressively:** batching cuts per-turn token cost SEVERAL-FOLD, which
-  outweighs per-call efficiency — reach for it for ANY loop over items: NO minimum N,
-  a loop of just 2–3 IDENTICAL calls (three `get`s over three ids) still batches, N=3
-  is NOT too small. (A few DIFFERENT one-off calls is NOT a loop — call those directly;
-  the cue is REPETITION of the same call, not call count.) When in doubt, script it.
+- **Optimize tool flows for MODEL turns — use parallel calls or one `code:run`.** Raw
+  RPC count is not inference cost: several independent calls emitted together in one
+  assistant response are already one model turn and do not re-read context per RPC.
+  Emit independent one-off calls together. Use `code:run` for a mechanical loop /
+  branch / filter / retry, or when only a summary of bulky intermediate results should
+  enter context; it turns a sequential model→tool→model loop into one inference turn.
+  Keep a turn boundary only where YOU must read a result and exercise judgment before
+  choosing the next step (mere data dependency is scriptable). Judge batching by
+  avoided MODEL turns and intermediate bytes, not N calls: a small same-turn fan-out is
+  already efficient; two sequential per-item turns that could be a loop are not.
   **Reuse before you author:** every successful `code:run` is saved as a reusable
   RECIPE — `recipes:search { query }` before authoring a multi-step script; on a hit
   `recipes:run { id }` (runs under YOUR envelope, not the author's) instead of
@@ -481,10 +474,10 @@ continuation gate picks, not a law.
   save is findable. At wake it is ALREADY THERE: `coord:orient` returns a `recipes` list
   ranked to your `intent` — scan it first; a close hit means `recipes:run { id }`, not a
   fresh search or script.
-  **Trigger:** about to call the SAME tool once per item in a list (a `get` per id,
-  a check per file)? That repetition IS the cue — reach for `code:run` BEFORE the
-  first such call, not after firing several one-at-a-time. NOT for a single call or
-  a step needing YOUR judgment mid-flow. Flow: write the script and `code:run` it
+  **Trigger:** about to alternate model turns around the SAME tool once per item (a
+  `get` per id, a check per file)? Reach for `code:run` BEFORE the first serial call.
+  If all independent calls fit in this assistant response, emit them together instead.
+  NOT for a single call or a step needing YOUR judgment mid-flow. Flow: write the script and `code:run` it
   directly — NO `code:tools` pre-call; a wrong name returns the typed
   `tools.ns.verb(args)` signatures inline to fix + re-run (`code:tools` OPTIONAL).
   For `effect:'write'`, `code:run { dryRun:true }` → inspect `plannedMutations` →

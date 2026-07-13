@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-Bi6_U9R7.js";e();export{t as buildConsoleEnvelope};

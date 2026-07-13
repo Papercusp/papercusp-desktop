@@ -1,0 +1,1 @@
+import"./capabilities-BOw6mYHj.js";import{a as e,r as t}from"./src-DySOa-8S.js";t();export{e as registerPluginTools};
