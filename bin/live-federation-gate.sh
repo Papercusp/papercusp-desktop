@@ -149,6 +149,47 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
   fi
 fi
 
+# ── 0a. prod-port guard (EI-11342, 2026-07-13) ─────────────────────────────────
+# A rig-owned process must NEVER hold a production operator port. Incident (14:48–14:55Z):
+# a packaged sidecar spawned under this gate lost its per-instance port override, fell back
+# to the baked default 3070, and won the bind race against a mid-restart papercup-dev-api —
+# prod crash-looped on EADDRINUSE and every fleet MCP call died with superuser_invalid_bearer
+# until the squatter was killed by hand. This guard kills any RIG-OWNED listener on a prod
+# port within seconds. Ownership test = cgroup membership (this service) OR a cwd/cmdline
+# under a rig dir — a non-rig holder is prod itself and is never touched. NOTE: this is the
+# rig-level recurrence guard; the ROOT-CAUSE half of EI-11342 (the packaged sidecar must fail
+# loudly instead of falling back to the prod default port) stays open for the desktop lane.
+PROD_PORTS="${GATE_PROD_PORTS:-3070 3170 3270}"
+GUARD_TRIP_FILE="$WORK/prod-port-guard.tripped"
+guard_prod_ports() { # <when-label> — kill rig-owned listeners on prod ports; record any trip
+  local when="$1" p pid pids owned
+  for p in $PROD_PORTS; do
+    pids="$(ss -ltnpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+    for pid in $pids; do
+      owned=0
+      grep -qa 'live-federation-gate' "/proc/$pid/cgroup" 2>/dev/null && owned=1
+      if [ "$owned" = 0 ]; then
+        { readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null; } \
+          | grep -qaE "papercusp-lane-[a-z0-9-]*-fed|$WORK" && owned=1
+      fi
+      if [ "$owned" = 1 ]; then
+        log "PROD-PORT GUARD ($when): rig-owned pid=$pid is LISTENING on prod :$p (EI-11342 class) — killing it. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 200)"
+        echo "$when :$p pid=$pid" >>"$GUARD_TRIP_FILE"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      fi
+    done
+  done
+  return 0
+}
+guard_prod_ports preflight
+# Continuous sweep: a squat mid-smoke must die within seconds, not at leg end — the
+# incident's damage window was the smoke's own multi-minute runtime. Reaped on exit.
+( while :; do sleep "${GATE_PORT_GUARD_INTERVAL_S:-15}"; guard_prod_ports sweep; done ) &
+GUARD_SWEEP_PID=$!
+trap 'guard_prod_ports exit-trap; kill "$GUARD_SWEEP_PID" 2>/dev/null || true' EXIT
+
 # ── 0. assert-core self-test (WI-754) ──────────────────────────────────────────
 # Hermetic (~2s, synthetic listeners, no .deb): prove the rig's PORT SELF-DISCOVERY
 # logic (fed_probe_sidecar / fed_discover_sidecar_os in federation-asserts.sh)
