@@ -82,7 +82,21 @@ OUT="$SIDECAR/source.tar.zst"
 # shell is a worse failure than one that takes a few minutes longer.
 exec 9>"$SIDECAR.lock"
 STAGE_LOCKDIR=""
-if command -v flock >/dev/null 2>&1; then
+if [[ "${PAPERCUSP_SIDECAR_LOCK_HELD:-0}" == "1" ]]; then
+  # The caller already holds an flock on THIS sidecar.lock for our whole run and
+  # invokes us from inside it (build-windows-on-vm.sh's pack subshell:
+  # `( flock 9; … bash stage-source-tree.sh; tar … ) 9>>src-tauri/sidecar.lock`).
+  # Re-acquiring here would SELF-DEADLOCK: the `exec 9>` above opened a NEW open
+  # file description, so `flock 9` would block on the caller's still-held lock
+  # while the caller blocks waiting for us to return. Observed live on the
+  # 2026-07-13 0.0.9 win leg — this script printed "build-desktop-sidecar.sh holds
+  # … waiting" (it was the CALLER holding it, not build-desktop-sidecar.sh) then
+  # hung on `flock 9` until killed. The caller's lock already gives us the exact
+  # SIDECAR-publish exclusion this acquire would — so skip it. (mac-vm-build.sh /
+  # build-linux-local.sh / release-local.sh call us WITHOUT the flag and still
+  # self-lock below.)
+  echo "    → sidecar.lock already held by the caller (PAPERCUSP_SIDECAR_LOCK_HELD=1) — not re-acquiring"
+elif command -v flock >/dev/null 2>&1; then
   if ! flock -n 9; then
     echo "    → build-desktop-sidecar.sh holds $SIDECAR.lock — waiting (it would delete this bundle mid-tar)"
     flock 9

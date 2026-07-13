@@ -403,7 +403,13 @@ trap 'rm -f "$TARBALL" "$TARBALL.fp" "$TARBALL.totals.log"' EXIT
   # is deliberately NOT in the seed+resources raw guard above — papercusp.iss
   # self-detects it (FileExists) and flips the Server role to DiskSpanning
   # (setup.exe + *.bin slices), so Inno's ~4GB single-exe max no longer binds.
-  bash "$ROOT/bin/stage-source-tree.sh"
+  # PAPERCUSP_SIDECAR_LOCK_HELD=1: we already hold `flock 9` on sidecar.lock for
+  # this whole subshell (the `9>>…/sidecar.lock` at the closing paren below), so
+  # stage-source-tree.sh must NOT re-acquire it — its `exec 9>` opens a fresh,
+  # unlocked file description that then blocks on ours, self-deadlocking the whole
+  # win leg (observed + killed on the 2026-07-13 0.0.9 cut). The lock we hold
+  # already serializes this stage against any concurrent sidecar publish.
+  PAPERCUSP_SIDECAR_LOCK_HELD=1 bash "$ROOT/bin/stage-source-tree.sh"
   if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]]; then
     [[ -f "$ROOT/src-tauri/sidecar/source.tar.zst" ]] \
       || fail "PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no src-tauri/sidecar/source.tar.zst"
