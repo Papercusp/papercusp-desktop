@@ -167,12 +167,34 @@ def identity_literals():
         try:
             v = subprocess.run(["git", "config", "--get", cfg], capture_output=True,
                                text=True, timeout=5).stdout.strip()
-            # A one- or two-char name would match half the bundle; require substance.
-            if v and len(v) >= 4:
+            if v:
                 lits[key] = v
         except Exception:
             pass
     return lits
+
+
+def needs_word_boundary(lit):
+    """A SHORT literal must match as a whole word or it matches half the bundle.
+
+    The owner's git user.name here is literally "Avi" — the exact thing they asked
+    us to keep out of a public build ("my name is avi on this machine"). An earlier
+    cut of this gate skipped any literal under 4 chars, which silently made the
+    owner's own example the ONE identity it could not catch. Substring-matching
+    "Avi" instead would fire on every .avi/AVI/Avicenna in vendored code and get
+    the gate switched off, so short literals match case-sensitively on a word
+    boundary: \\bAvi\\b hits "Avi Weiss", not "video.avi".
+    """
+    return len(lit) < 6 and lit.isalnum()
+
+
+def lit_ere(lit):
+    """The ERE this identity literal is searched with (GNU grep supports \\b)."""
+    return rf"\b{re.escape(lit)}\b" if needs_word_boundary(lit) else re.escape(lit)
+
+
+def lit_rx(lit):
+    return re.compile(lit_ere(lit))
 
 
 def sh(cmd, **kw):
@@ -194,7 +216,7 @@ def phase_a_paths(bundle, lits):
                 break
         else:
             for rule, lit in lits.items():
-                if lit in name:
+                if lit_rx(lit).search(name):
                     hits.append((rule + " (in path)", name))
                     break
     return len(names), hits
@@ -205,7 +227,7 @@ def phase_b_content(bundle, lits):
     # Every interpolated value is shell-quoted via q() — including git user.name,
     # which is attacker-ish only in the sense that it is arbitrary user config.
     pats = [f"-e {q(p)}" for _, p in CREDENTIAL_ERE]
-    lit_pats = [f"-e {q(re.escape(v))}" for v in lits.values()]
+    lit_pats = [f"-e {q(lit_ere(v))}" for v in lits.values()]
     if not pats and not lit_pats:
         return []
     benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)

@@ -245,6 +245,17 @@ NATIVE_PKGS=(
   # Externalize + closure-copy (asn1, bcrypt-pbkdf) like the other natives;
   # its in-tree try/catch handles an absent binding at runtime.
   ssh2
+  # ONNX local-voice stack (P-009): voice-node/kokoro-local dynamic-imports
+  # @huggingface/transformers for in-process Kokoro TTS. transformers require()s
+  # onnxruntime-node's `.node` addon through a TEMPLATE specifier
+  # (`../bin/napi-v6/${process.platform}/${process.arch}/…`), which esbuild follows
+  # into all 5 platform binaries → "No loader is configured for .node files" (it
+  # broke bundle-host.sh outright: :3170 down + release deploy dead, 2026-07-12).
+  # Externalizing @huggingface/transformers also stops esbuild at the package
+  # boundary, so the whole onnxruntime graph leaves the bundle; closure-copy then
+  # ships the runtime. Foreign-platform binaries are pruned below (AppImage/WI-807).
+  onnxruntime-node
+  "@huggingface/transformers"
 )
 HOST_EXTERNALS=(
   --external:@lydell/*
@@ -487,12 +498,45 @@ prune_foreign_prebuilds() {
   done
   [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign-platform prebuilds/ dir(s), kept $keep"
 }
+# onnxruntime-node does NOT use the prebuilds/<platform>-<arch>/ convention above:
+# it ships bin/napi-v6/<platform>/<arch>/{onnxruntime_binding.node,libonnxruntime.so}
+# for all 5 platforms (211M). A plain closure-copy therefore (a) bloats the sidecar
+# ~6x over what one platform needs, and (b) re-arms WI-807: linuxdeploy ldd-walks
+# every ELF under the AppDir and chokes on the foreign-arch linux/arm64 .so, aborting
+# `tauri build --bundles appimage`. Same remedy as prune_foreign_prebuilds, different
+# layout. (P-009.)
+prune_foreign_onnx_bins() {
+  local pkg_dir="$1"
+  [[ -d "$pkg_dir/bin/napi-v6" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
+  local pd pd_name pruned=0
+  for pd in "$pkg_dir/bin/napi-v6"/*/; do
+    [[ -d "$pd" ]] || continue
+    pd_name="$(basename "$pd")"
+    if [[ "$pd_name" != "$_bare_node_platform" ]]; then
+      rm -rf "$pd"; pruned=$((pruned+1)); continue
+    fi
+    # keep this platform, drop its foreign ARCH subdirs
+    local ad ad_name
+    for ad in "$pd"*/; do
+      [[ -d "$ad" ]] || continue
+      ad_name="$(basename "$ad")"
+      [[ "$ad_name" == "$_bare_node_arch" ]] && continue
+      rm -rf "$ad"; pruned=$((pruned+1))
+    done
+  done
+  [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign onnx bin dir(s), kept ${_bare_node_platform}/${_bare_node_arch}"
+  return 0
+}
 copy_pkg_closure() {
   local queue=("$1")
   while [[ ${#queue[@]} -gt 0 ]]; do
     local cur="${queue[0]}"; queue=("${queue[@]:1}")
     case "$_seen" in *" $cur "*) continue ;; esac
     _seen="${_seen}${cur} "
+    # onnxruntime-web is a @huggingface/transformers dependency but is ONLY used on
+    # the browser backend — the node path loads onnxruntime-node. Copying it would
+    # add 134M of wasm/js to the sidecar that can never execute. Skip it outright.
+    [[ "$cur" == "onnxruntime-web" ]] && { echo "  ⊘ skipping onnxruntime-web (browser-only backend; node uses onnxruntime-node)"; continue; }
     [[ -e "$SIDECAR_DIR/node_modules/$cur" ]] && continue
     local src=""
     for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
@@ -504,6 +548,7 @@ copy_pkg_closure() {
     mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
     cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
     prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
+    prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
     local deps; deps=$(node -e "try{const d=require('$src/package.json').dependencies||{};process.stdout.write(Object.keys(d).join(' '))}catch(e){}" 2>/dev/null)
     for d in $deps; do queue+=("$d"); done
