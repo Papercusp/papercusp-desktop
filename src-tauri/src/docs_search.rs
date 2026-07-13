@@ -1,13 +1,26 @@
 //! docs_search — the global-hotkey docs-search palette (WI-2648, feature #5).
 //!
-//! A user-configurable global shortcut (default `CmdOrCtrl+K`), registered
-//! unconditionally in dev AND packaged builds → opens (or focuses) a small,
-//! always-on-top WebviewWindow loading the static
-//! `/internal/docs/search-palette.html` page, which wires Pagefind's own default
-//! UI widget onto the ALREADY-BUILT + ALREADY-SERVED search index
-//! (apps/operator-docs, `pagefind: true`) — no new server route, no custom
-//! search code. Cross-platform: `tauri_plugin_global_shortcut` handles the OS
-//! registration on macOS/Windows/Linux.
+//! A user-configurable global shortcut — **OFF by default** — which, when the
+//! user turns it on, opens (or focuses) a small, always-on-top WebviewWindow
+//! loading the static `/internal/docs/search-palette.html` page, which wires
+//! Pagefind's own default UI widget onto the ALREADY-BUILT + ALREADY-SERVED
+//! search index (apps/operator-docs, `pagefind: true`) — no new server route, no
+//! custom search code. Cross-platform: `tauri_plugin_global_shortcut` handles the
+//! OS registration on macOS/Windows/Linux.
+//!
+//! OFF BY DEFAULT (owner directive, 2026-07-12). A global shortcut is a
+//! SYSTEM-WIDE key grab: while registered, the accelerator is stolen from every
+//! other app on the machine, whether or not Papercusp is focused. `CmdOrCtrl+K`
+//! is "focus the search box" in Slack, VS Code, every browser — so the old
+//! register-on-first-launch behavior silently broke a key the user relies on
+//! elsewhere, and did it before they had ever asked for the feature. A grab that
+//! broad must be opt-IN. This is enforced STRUCTURALLY, not by a default
+//! constant: the shortcut is registered ONLY when a valid preset has been
+//! explicitly persisted by a user choice (`current_shortcut() -> Option<String>`,
+//! `None` = disabled), so there is no code path on which a fresh install grabs a
+//! key. Missing file, malformed file, unknown accelerator, explicit `null` — all
+//! land on `None`, i.e. OFF. The user turns it on (and picks the key) from the
+//! Server tray's "Docs search shortcut" submenu, whose first item is `Off`.
 //!
 //! Ownership (packaged builds): the **Server** process owns the shortcut +
 //! palette, NOT the GUI. The Server is the always-on process (auto-starts at
@@ -39,9 +52,16 @@ use tauri::{AppHandle, Manager};
 /// an already-open palette instead of spawning a duplicate.
 const WINDOW_LABEL: &str = "docs-search-palette";
 
-/// The docs-search palette's default global shortcut. MUST be a member of
-/// `PRESET_SHORTCUTS`.
-pub const DEFAULT_SHORTCUT: &str = "CmdOrCtrl+K";
+/// The accelerator pre-selected in the tray when the user turns the shortcut ON
+/// without having a persisted choice — NOT a default that is ever registered on
+/// its own. The palette ships OFF (see the module doc); this constant only names
+/// the key the "on" affordance suggests. MUST be a member of `PRESET_SHORTCUTS`.
+pub const SUGGESTED_SHORTCUT: &str = "CmdOrCtrl+K";
+
+/// Menu payload for the tray's "Off" item — the disable affordance. Not an
+/// accelerator, and deliberately not a member of `PRESET_SHORTCUTS` (it must
+/// never be handed to the OS registrar).
+pub const SHORTCUT_OFF: &str = "off";
 
 /// The curated set of accelerators the tray rebind offers. A native tray menu
 /// can't capture an arbitrary keystroke, so we present a small, valid, mutually
@@ -69,14 +89,21 @@ fn persisted_shortcut_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".papercusp/docs-search-shortcut.json"))
 }
 
-/// Serialize the persisted payload for `accel`. Pure (no I/O) so it's unit-testable.
-fn serialize_shortcut(accel: &str) -> String {
+/// Serialize the persisted payload. `None` (disabled) persists as an explicit
+/// `null`, which is a RECORD OF A CHOICE — distinct on disk from "never chosen",
+/// even though both read back as OFF. Pure (no I/O) so it's unit-testable.
+fn serialize_shortcut(accel: Option<&str>) -> String {
     serde_json::json!({ "accelerator": accel }).to_string()
 }
 
-/// Parse a persisted payload, returning the accelerator ONLY if it is a known
-/// preset. Malformed JSON, a missing/non-string key, or a non-preset value all
-/// yield `None` (→ caller falls back to the default). Pure so it's unit-testable.
+/// Parse a persisted payload into the accelerator to register, or `None` for
+/// DISABLED. `None` is returned for every uncertain input — malformed JSON, a
+/// missing key, a non-string value, an explicit `null`, or an accelerator that is
+/// not a known preset (e.g. persisted by a build that offered a key this one no
+/// longer does). That is the safe direction: the failure mode of guessing wrong
+/// here is a system-wide key grab the user never asked for, so anything we cannot
+/// positively confirm as an explicit, still-valid user choice means OFF.
+/// Pure so it's unit-testable.
 fn parse_persisted(txt: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(txt).ok()?;
     let accel = v.get("accelerator")?.as_str()?.to_string();
@@ -88,7 +115,7 @@ fn read_persisted_shortcut() -> Option<String> {
     parse_persisted(&txt)
 }
 
-fn write_persisted_shortcut(accel: &str) {
+fn write_persisted_shortcut(accel: Option<&str>) {
     let Some(path) = persisted_shortcut_path() else {
         return;
     };
@@ -100,10 +127,21 @@ fn write_persisted_shortcut(accel: &str) {
     }
 }
 
-/// The accelerator currently in effect: the persisted choice if valid, else the
-/// default.
-pub fn current_shortcut() -> String {
-    read_persisted_shortcut().unwrap_or_else(|| DEFAULT_SHORTCUT.to_string())
+/// The accelerator currently in effect, or `None` when the global shortcut is
+/// DISABLED — which is the state of every fresh install (see the module doc).
+///
+/// There is deliberately no "fall back to the default accelerator" branch: the
+/// ONLY way this returns `Some` is a valid preset the user explicitly chose and
+/// we persisted. That is what makes "off by default" structural rather than a
+/// constant some future caller can forget to honor.
+pub fn current_shortcut() -> Option<String> {
+    read_persisted_shortcut()
+}
+
+/// Whether the global shortcut is currently enabled (a convenience for callers
+/// that only need the boolean — the tray's checkmark, tests, diagnostics).
+pub fn is_enabled() -> bool {
+    current_shortcut().is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,39 +350,71 @@ fn install_shortcut(app: &AppHandle, accel: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Register the docs-search global shortcut (the persisted accelerator, or the
-/// default). Call once at startup — on the dev process and the packaged Server
-/// process (NOT the packaged GUI; see the module doc). Best-effort: a shortcut
-/// the desktop environment already owns just doesn't register (logged, not fatal).
+/// Register the docs-search global shortcut at startup — ONLY if the user has
+/// explicitly enabled one. Call once, on the dev process and the packaged Server
+/// process (NOT the packaged GUI; see the module doc).
+///
+/// On a fresh install `current_shortcut()` is `None` and this registers NOTHING:
+/// no OS key grab happens until the user opts in from the tray. Best-effort when
+/// enabled: a shortcut the desktop environment already owns just doesn't register
+/// (logged, not fatal).
 pub fn register_shortcut(app: &tauri::App) {
-    let accel = current_shortcut();
+    let Some(accel) = current_shortcut() else {
+        println!("[docs-search] global shortcut disabled (default) — no key registered");
+        return;
+    };
     match install_shortcut(app.handle(), &accel) {
         Ok(()) => println!("[docs-search] {accel} registered (docs search palette)"),
         Err(e) => eprintln!("[docs-search] {accel} not registered (DE may own it): {e}"),
     }
 }
 
-/// Live-rebind the palette shortcut to `new_accel`: unregister the previous
-/// accelerator, register the new one, and persist the choice. Called from the
-/// Server tray's "Docs search shortcut" submenu.
+/// Set the palette shortcut: `Some(accel)` binds that preset, `None` DISABLES the
+/// shortcut entirely. Unregisters the previous accelerator, registers the new one
+/// (if any), and persists the choice. Called from the Server tray's "Docs search
+/// shortcut" submenu (whose first item is "Off").
 ///
 /// Unregisters ONLY the previous docs-search accelerator — never
 /// `unregister_all()`, which would also drop env_switch's dev backstop
 /// shortcuts. Returns `Err` (leaving the persisted value + tray checkmark
-/// unchanged) if `new_accel` isn't an offered preset or fails to register.
-pub fn rebind_shortcut(app: &AppHandle, new_accel: &str) -> Result<(), String> {
+/// unchanged) if `new` isn't an offered preset or fails to register.
+///
+/// Disabling CANNOT fail: releasing a key grab is not an operation the OS can
+/// refuse, so the user is never stuck with a shortcut they asked to turn off. The
+/// unregister result is intentionally ignored (an accelerator that never
+/// registered — because the DE already owned it — is already not grabbed), and
+/// `None` is persisted regardless, so the choice survives restart even if the
+/// live unregister was a no-op.
+pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
-    if !PRESET_SHORTCUTS.contains(&new_accel) {
-        return Err(format!("{new_accel} is not an offered preset"));
+    if let Some(accel) = new {
+        if !PRESET_SHORTCUTS.contains(&accel) {
+            return Err(format!("{accel} is not an offered preset"));
+        }
     }
     let old = current_shortcut();
-    if old == new_accel {
-        return Ok(()); // already active — no-op
+    if old.as_deref() == new {
+        return Ok(()); // already in that state — no-op
     }
-    let _ = app.global_shortcut().unregister(old.as_str());
-    install_shortcut(app, new_accel)?;
-    write_persisted_shortcut(new_accel);
-    println!("[docs-search] shortcut rebound {old} -> {new_accel}");
+    if let Some(prev) = old.as_deref() {
+        let _ = app.global_shortcut().unregister(prev);
+    }
+    match new {
+        Some(accel) => {
+            // Register BEFORE persisting: a key the OS refuses must not be
+            // recorded as the user's active choice (it would come back as a dead
+            // shortcut on every future launch). On failure the previous
+            // accelerator is already unregistered, but the persisted value is
+            // untouched, so a restart restores the last state that actually worked.
+            install_shortcut(app, accel)?;
+            write_persisted_shortcut(Some(accel));
+            println!("[docs-search] shortcut set {old:?} -> {accel}");
+        }
+        None => {
+            write_persisted_shortcut(None);
+            println!("[docs-search] shortcut DISABLED (was {old:?})");
+        }
+    }
     Ok(())
 }
 
@@ -353,10 +423,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_a_preset() {
+    fn suggested_is_a_preset() {
         assert!(
-            PRESET_SHORTCUTS.contains(&DEFAULT_SHORTCUT),
-            "DEFAULT_SHORTCUT must be one of the offered presets"
+            PRESET_SHORTCUTS.contains(&SUGGESTED_SHORTCUT),
+            "SUGGESTED_SHORTCUT must be one of the offered presets"
         );
     }
 
@@ -371,7 +441,7 @@ mod tests {
     #[test]
     fn serialize_parse_roundtrip_for_each_preset() {
         for accel in PRESET_SHORTCUTS {
-            let txt = serialize_shortcut(accel);
+            let txt = serialize_shortcut(Some(accel));
             assert_eq!(
                 parse_persisted(&txt).as_deref(),
                 Some(*accel),
@@ -380,19 +450,49 @@ mod tests {
         }
     }
 
+    /// THE owner-directed default (2026-07-12): a fresh install grabs NO key.
+    /// `parse_persisted` is the only thing that can turn a shortcut on, so every
+    /// state a machine can be in BEFORE the user has made a choice must read as
+    /// disabled. If this ever goes green while some input yields `Some`, a fresh
+    /// install has started stealing a system-wide key again.
     #[test]
-    fn parse_rejects_non_preset_accelerator() {
-        // Well-formed JSON, but an accelerator we don't offer → None (fall back
-        // to default rather than register a stale/unknown accelerator).
-        let txt = serialize_shortcut("CmdOrCtrl+Q");
-        assert_eq!(parse_persisted(&txt), None);
+    fn disabled_is_the_default_for_every_unchosen_state() {
+        let unchosen = [
+            "",                                  // empty file
+            "not json",                          // corrupt
+            "{}",                                // no key
+            r#"{"accelerator": null}"#,          // EXPLICITLY disabled by the user
+            r#"{"accelerator": 5}"#,             // wrong type
+            r#"{"other": "CmdOrCtrl+K"}"#,       // wrong key
+            r#"{"accelerator": "CmdOrCtrl+Q"}"#, // an accelerator we do not offer
+            r#"{"accelerator": "off"}"#,         // the tray's OFF payload is not an accelerator
+        ];
+        for txt in unchosen {
+            assert_eq!(
+                parse_persisted(txt),
+                None,
+                "must read as DISABLED (no key grab), got a shortcut from: {txt}"
+            );
+        }
     }
 
+    /// Disabling must round-trip: the user's "off" survives a restart rather than
+    /// reverting to a key on next launch.
     #[test]
-    fn parse_rejects_malformed_or_missing() {
-        assert_eq!(parse_persisted("not json"), None);
-        assert_eq!(parse_persisted("{}"), None);
-        assert_eq!(parse_persisted(r#"{"accelerator": 5}"#), None);
-        assert_eq!(parse_persisted(r#"{"other": "CmdOrCtrl+K"}"#), None);
+    fn off_roundtrips_as_disabled() {
+        let txt = serialize_shortcut(None);
+        assert_eq!(parse_persisted(&txt), None);
+        assert!(
+            txt.contains("null"),
+            "off should persist as an explicit null (a record of the choice), got {txt}"
+        );
+    }
+
+    /// The tray's OFF payload must never be registrable as an accelerator — if it
+    /// leaked into the preset list, "Off" would try to grab a key literally named
+    /// "off".
+    #[test]
+    fn off_sentinel_is_not_a_preset() {
+        assert!(!PRESET_SHORTCUTS.contains(&SHORTCUT_OFF));
     }
 }

@@ -544,11 +544,145 @@ mod imp {
             };
         }
 
+        // The distro is bootstrapped — but bootstrapped BY WHAT? An app update
+        // ships a new rootfs recipe while the distro on disk keeps whatever
+        // provisioned it months ago, and a distro that exists and starts looks
+        // Ready forever. That is how a fix to the rootfs (a library the distro
+        // needs, say) reaches new installs and NOBODY WHO ALREADY HAS THE APP.
+        //
+        // Re-import is the wrong hammer — it destroys the user's workspaces inside
+        // the distro. The bootstrap is idempotent, so re-run the CURRENT one and
+        // record which recipe it was.
+        let shipped = shipped_rootfs_recipe(app);
+        if super::distro_needs_reprovision(shipped.as_deref(), persisted.rootfs_recipe.as_deref()) {
+            eprintln!(
+                "[wsl_setup] detect: `{DISTRO_NAME}` was provisioned by recipe {:?} but this build ships {:?} — re-running the bootstrap so the distro matches the app",
+                persisted.rootfs_recipe.as_deref().unwrap_or("<unknown>"),
+                shipped.as_deref().unwrap_or("<unknown>"),
+            );
+            return WslStatus {
+                state: WslState::PendingBootstrap,
+                wsl_exe_available: true,
+                distros,
+                default_version,
+            };
+        }
+
         WslStatus {
             state: WslState::Ready,
             wsl_exe_available: true,
             distros,
             default_version,
+        }
+    }
+
+    /// Copy the bootstrap THIS BUILD ships into the distro, replacing the one
+    /// baked in when the distro was first imported.
+    ///
+    /// Feeding it over stdin (`bash -c 'cat > …'`) rather than a `/mnt/c/...`
+    /// path keeps this independent of Windows→WSL path translation and of where
+    /// the app happens to be installed — the resource path contains spaces
+    /// ("Papercusp GUI"), which is exactly the kind of thing that works on the
+    /// dev box and breaks in the field.
+    ///
+    /// Best-effort by design: a failure here leaves the previous bootstrap in
+    /// place and the recipe marker unwritten, so the distro stays marked stale
+    /// and we retry next launch. It must never block bootstrap outright.
+    fn install_shipped_bootstrap(app: &tauri::AppHandle) {
+        use std::io::Write;
+        use tauri::Manager;
+
+        let Ok(path) = app
+            .path()
+            .resolve(
+                format!("resources/{}", super::ROOTFS_BOOTSTRAP_FILENAME),
+                tauri::path::BaseDirectory::Resource,
+            )
+            .or_else(|_| {
+                app.path().resolve(
+                    super::ROOTFS_BOOTSTRAP_FILENAME,
+                    tauri::path::BaseDirectory::Resource,
+                )
+            })
+        else {
+            eprintln!("[wsl_setup] install_shipped_bootstrap: resource path unresolved — running the distro's existing bootstrap");
+            return;
+        };
+        let Ok(script) = std::fs::read(&path) else {
+            eprintln!(
+                "[wsl_setup] install_shipped_bootstrap: cannot read {} — running the distro's existing bootstrap",
+                path.display()
+            );
+            return;
+        };
+
+        let mut child = match wsl_command()
+            .args([
+                "--distribution",
+                DISTRO_NAME,
+                "--user",
+                "root",
+                "--exec",
+                "bash",
+                "-c",
+                "mkdir -p /opt/papercup && cat > /opt/papercup/bootstrap && chmod +x /opt/papercup/bootstrap",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[wsl_setup] install_shipped_bootstrap: spawn failed ({e}) — running the distro's existing bootstrap");
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(&script) {
+                eprintln!("[wsl_setup] install_shipped_bootstrap: write failed ({e})");
+                return;
+            }
+        }
+        match child.wait_with_output() {
+            Ok(out) if out.status.success() => {
+                eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed /opt/papercup/bootstrap from the shipped resource");
+            }
+            Ok(out) => {
+                eprintln!(
+                    "[wsl_setup] install_shipped_bootstrap: exit={:?} stderr={} — running the distro's existing bootstrap",
+                    out.status.code(),
+                    super::decode_wsl_output(&out.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!("[wsl_setup] install_shipped_bootstrap: wait failed ({e})");
+            }
+        }
+    }
+
+    /// The recipe fingerprint of the rootfs shipped in THIS build.
+    fn shipped_rootfs_recipe(app: &tauri::AppHandle) -> Option<String> {
+        use tauri::Manager;
+        let path = app
+            .path()
+            .resolve(
+                format!("resources/{}", super::ROOTFS_RECIPE_FILENAME),
+                tauri::path::BaseDirectory::Resource,
+            )
+            .or_else(|_| {
+                app.path().resolve(
+                    super::ROOTFS_RECIPE_FILENAME,
+                    tauri::path::BaseDirectory::Resource,
+                )
+            })
+            .ok()?;
+        let s = std::fs::read_to_string(path).ok()?;
+        let s = s.trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
         }
     }
 
@@ -625,6 +759,15 @@ mod imp {
     }
 
     pub fn run_bootstrap(app: &tauri::AppHandle) -> Result<String, String> {
+        // Refresh /opt/papercup/bootstrap from the bootstrap THIS BUILD SHIPS
+        // before running it. The copy already inside the distro was baked in at
+        // image-build time, so on an existing install it is the OLD one — re-running
+        // it would faithfully re-apply the old recipe and change nothing, which is
+        // the entire failure we are here to fix. Best-effort: if the resource is
+        // missing (a build predating it), fall through and run whatever is in the
+        // distro rather than bricking bootstrap.
+        install_shipped_bootstrap(app);
+
         // --user root: the rootfs bakes /etc/wsl.conf default=papercup, so a
         // bare `wsl -d` runs as that user — and bootstrap writes /etc/* and
         // apt-installs, which die with Permission denied as non-root
@@ -652,6 +795,11 @@ mod imp {
         }
         let mut st = load_state(app);
         st.bootstrapped = true;
+        // Record WHICH recipe provisioned this distro. Only after a SUCCESSFUL
+        // bootstrap — a failed run must leave the distro marked stale so the next
+        // launch tries again, rather than recording a provisioning that never
+        // happened.
+        st.rootfs_recipe = shipped_rootfs_recipe(app);
         // A fresh bootstrap is a fresh onboarding: re-allow BOTH roles' single
         // post-onboarding finalize RESTART (see the per-role flags above).
         st.gui_finalize_restart_done = false;
@@ -1699,5 +1847,41 @@ mod windows_tests {
             WslOpError::Failed(msg) => assert!(msg.contains("exit=?"), "got: {}", msg),
             other => panic!("expected Failed, got {:?}", other),
         }
+    }
+
+    /// THE regression this guards: an app update ships a new rootfs recipe, but
+    /// the distro on disk was imported by an older one. Before this check, a
+    /// distro that existed and started was `Ready` forever — so a fix to the
+    /// rootfs reached new installs and nobody who already had the app. The
+    /// Windows chat dock would have shipped "fixed" and still opened onto a dead
+    /// `pui` for every existing user.
+    #[test]
+    fn a_distro_provisioned_by_an_older_recipe_is_stale() {
+        assert!(distro_needs_reprovision(Some("new-recipe"), Some("old-recipe")));
+    }
+
+    #[test]
+    fn a_distro_matching_the_shipped_recipe_is_left_alone() {
+        assert!(!distro_needs_reprovision(Some("same"), Some("same")));
+        // Trailing newline from the resource file must not read as a mismatch —
+        // that would re-bootstrap on every single launch, forever.
+        assert!(!distro_needs_reprovision(Some("same\n"), Some("same")));
+    }
+
+    #[test]
+    fn a_distro_with_no_recorded_recipe_is_treated_as_stale() {
+        // Installs predating the marker: we cannot show the distro matches, so we
+        // re-run the idempotent bootstrap rather than trust it. Failing toward
+        // doing the work is the safe direction.
+        assert!(distro_needs_reprovision(Some("recipe"), None));
+    }
+
+    #[test]
+    fn an_unknown_shipped_recipe_never_forces_a_reprovision_loop() {
+        // No shipped marker (a build predating it) → nothing to compare and
+        // nothing we could record afterwards, so re-running would loop every
+        // launch and never converge. Leave the distro alone.
+        assert!(!distro_needs_reprovision(None, Some("whatever")));
+        assert!(!distro_needs_reprovision(None, None));
     }
 }
