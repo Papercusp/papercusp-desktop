@@ -165,8 +165,19 @@ windows_build_lease_release() {
   else
     lingering="$(printf '%s' "$list_out" | node -e '
       let raw=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",c=>raw+=c);
-      process.stdin.on("end",()=>{try{const o=JSON.parse(raw); const hs=o.holders ?? o.data?.holders ?? [];
-        process.stdout.write(hs.some(h=>h.owner===process.argv[1])?"true":"false");}catch{process.exit(2);}});
+      process.stdin.on("end",()=>{
+        try {
+          const o=JSON.parse(raw); const hs=o.holders ?? o.data?.holders ?? [];
+          process.stdout.write(hs.some(h=>h.owner===process.argv[1])?"true":"false");
+        } catch {
+          // locks:list is payload-tier shaped as TOON in trimmed MCP sessions.
+          // Its empty-holder sentinel is exact; otherwise the owner value is a
+          // dedicated holder column, so an exact line field is authoritative.
+          if (/^holders:\s*\[\]\s*$/m.test(raw)) process.stdout.write("false");
+          else if (raw.split(/\r?\n/).some(line => line.trimStart().startsWith(process.argv[1] + ","))) process.stdout.write("true");
+          else process.exit(2);
+        }
+      });
     ' "$PAPERCUSP_WINDOWS_BUILD_LEASE_OWNER" 2>/dev/null || true)"
     if [[ "$lingering" != "false" ]]; then
       echo "ERROR: Windows VM build lease cleanup verification found a lingering/unknown holder for owner=$PAPERCUSP_WINDOWS_BUILD_LEASE_OWNER: $list_out" >&2
