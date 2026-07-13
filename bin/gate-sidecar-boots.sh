@@ -115,67 +115,104 @@ touch "$ISO/.before-boot"
 # bundle, and dies on missing migrations — a gate artifact that looks exactly
 # like a real failure. If main.rs gains a resource path, add it here too; the
 # drift check below prints the ones we do not pass.
-HTTP_PORT=$(( 20000 + RANDOM % 20000 ))
-PG_PORT=$((  40000 + RANDOM % 20000 ))
-echo "   booting bundled node $("$B/bin/node" --version) → http :$HTTP_PORT, pg :$PG_PORT"
+#
+# HERMETIC: PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 suppresses the first-boot hive clone
+# of github.com/Papercusp/papercup. Without it, serve kicks off a best-effort
+# multi-GB clone that git authenticates through the BUILD BOX's own `gh`
+# credential helper — so the gate would touch the network and lean on a per-box
+# credential to prove something (sidecar startup) that has nothing to do with the
+# hive. It also produces the alarming-but-benign `x-access-token:gho_…` clone URL
+# in the process list: that token is the operator resolving the box's gh login at
+# clone time (clone-github.ts), NOT anything carried in the bundle — the packed
+# seed + bundle were both verified free of it. The gate needs the sidecar to
+# START and SERVE; it does not need it to clone. Disable it and stay hermetic.
+# A port with a listener is occupied; a refused connect means very likely free.
+# This only narrows the race (something can still grab the port between the check
+# and PG's bind) — the collision RETRY below closes it. Uses bash /dev/tcp so it
+# needs no ss/lsof.
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+pick_port() {  # pick_port LO SPAN → echoes a currently-free port in [LO, LO+SPAN)
+  local lo=$1 span=$2 p
+  for _ in $(seq 1 20); do p=$(( lo + RANDOM % span )); port_free "$p" && { echo "$p"; return 0; }; done
+  echo $(( lo + RANDOM % span ))  # all 20 busy? use the last — the retry loop still covers it
+}
 
-set -m
-env -i \
-  HOME="$ISO/home" \
-  PATH="$B/bin:/usr/bin:/bin" \
-  LANG=C.UTF-8 TERM=dumb \
-  PAPERCUSP_DESKTOP=1 \
-  PAPERCUSP_SERVE_UI=0 \
-  PAPERCUSP_HONO_PORT="$HTTP_PORT" \
-  PAPERCUSP_PG_PORT="$PG_PORT" \
-  PAPERCUSP_PG_DATA_DIR="$ISO/pgdata" \
-  PAPERCUSP_PG_SQL_DIR="$B/db-sql" \
-  PAPERCUSP_PG_SEED_PATH="$B/db-seed.tar.gz" \
-  PAPERCUSP_SEED_DIR="$B/../seed" \
-  PAPERCUSP_HARNESS_DIR="$B/harness" \
-  PAPERCUSP_RUBRICS_DIR="$B/rubrics" \
-  PAPERCUSP_PROMPTS_DIR="$B/prompts" \
-  PAPERCUSP_DOCS_ROOT="$B/internal-docs" \
-  PAPERCUSP_SOURCE_ARCHIVE="$B/source.tar.zst" \
-  PAPERCUSP_DEV_SOURCE_DIR="$ISO/dev-source" \
-  "$B/bin/node" "$B/serve.mjs" --ensure > "$ISO/boot.log" 2>&1 &
-PID=$!
+# ── 3. Boot, and require it to SERVE. Exit = death; silence to the deadline =
+# death. A PORT COLLISION is NEITHER — it is an infra flake of THIS box (a busy
+# shared machine), not a defect in the bundle. Retrying a genuine DOA would be
+# how the gate masks the very failure it exists to catch, so the retry keys
+# STRICTLY on the postmaster's bind-failure signature and nothing else: a real
+# boot error (missing native, bad module) still fails on the first attempt.
+PORT_COLLISION_RE='could not bind|Address already in use|could not create any TCP/IP sockets|EADDRINUSE'
+MAX_ATTEMPTS="${PAPERCUSP_BOOT_GATE_ATTEMPTS:-3}"
 
-# ── 3. It must SERVE. Exiting is death; silence until the deadline is death. ──
-deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
 served=0
-while [[ $(date +%s) -lt $deadline ]]; do
-  if ! kill -0 "$PID" 2>/dev/null; then
-    wait "$PID"; rc=$?
-    echo "── last 25 lines of the packed sidecar's boot log ──" >&2
-    tail -25 "$ISO/boot.log" >&2
-    fail "the packed sidecar EXITED (rc=$rc) instead of serving. This bundle is DOA on any machine that lacks a fallback operator."
+for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+  HTTP_PORT="$(pick_port 20000 20000)"
+  PG_PORT="$(pick_port 40000 20000)"
+  echo "   attempt $attempt/$MAX_ATTEMPTS: bundled node $("$B/bin/node" --version) → http :$HTTP_PORT, pg :$PG_PORT"
+
+  set -m
+  env -i \
+    HOME="$ISO/home" \
+    PATH="$B/bin:/usr/bin:/bin" \
+    LANG=C.UTF-8 TERM=dumb \
+    PAPERCUSP_DESKTOP=1 \
+    PAPERCUSP_SERVE_UI=0 \
+    PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
+    PAPERCUSP_HONO_PORT="$HTTP_PORT" \
+    PAPERCUSP_PG_PORT="$PG_PORT" \
+    PAPERCUSP_PG_DATA_DIR="$ISO/pgdata" \
+    PAPERCUSP_PG_SQL_DIR="$B/db-sql" \
+    PAPERCUSP_PG_SEED_PATH="$B/db-seed.tar.gz" \
+    PAPERCUSP_SEED_DIR="$B/../seed" \
+    PAPERCUSP_HARNESS_DIR="$B/harness" \
+    PAPERCUSP_RUBRICS_DIR="$B/rubrics" \
+    PAPERCUSP_PROMPTS_DIR="$B/prompts" \
+    PAPERCUSP_DOCS_ROOT="$B/internal-docs" \
+    PAPERCUSP_SOURCE_ARCHIVE="$B/source.tar.zst" \
+    PAPERCUSP_DEV_SOURCE_DIR="$ISO/dev-source" \
+    "$B/bin/node" "$B/serve.mjs" --ensure > "$ISO/boot.log" 2>&1 &
+  PID=$!
+
+  deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+  outcome=""   # served | exited | timeout
+  while [[ $(date +%s) -lt $deadline ]]; do
+    if ! kill -0 "$PID" 2>/dev/null; then wait "$PID"; rc=$?; outcome="exited"; break; fi
+    # "Up" means exactly what the PRODUCT means by up. serve.ts's httpAlive() probes
+    # `/api/` and treats ANY response — 404 included — as alive; match a real status
+    # code POSITIVELY (a refused connect yields empty/000 and must never read as up).
+    code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null)"
+    if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
+      echo "   sidecar answered on :$HTTP_PORT (HTTP $code) — it is UP"
+      served=1; outcome="served"; break
+    fi
+    sleep 2
+  done
+  [[ "$outcome" == "served" ]] && break
+
+  # Tear the attempt's process tree down before deciding, so a retry's ports are free.
+  kill -TERM "-$PID" 2>/dev/null; sleep 1; kill -KILL "-$PID" 2>/dev/null; PID=""
+
+  if [[ "$outcome" == "exited" ]] && grep -qiE "$PORT_COLLISION_RE" "$ISO/boot.log"; then
+    echo "   ⚠ attempt $attempt hit a PG port collision (infra flake, not a bundle defect) — retrying with new ports" >&2
+    continue
   fi
-  # "Up" means exactly what the PRODUCT means by up. serve.ts's own httpAlive()
-  # probes `/api/` and treats ANY response — 404 included — as alive. `curl -sf`
-  # would call a 404 a failure and red a perfectly healthy sidecar; measure at the
-  # consumer, with the consumer's own definition.
-  #
-  # ⚠ MATCH A REAL STATUS *POSITIVELY*. Do not test the failure sentinel by
-  # inequality. curl -w '%{http_code}' prints `000` on a connection failure AND
-  # exits nonzero, so the obvious `curl ... || echo 000` CONCATENATES a second one
-  # → "000000" — and `[[ "000000" != "000" ]]` is TRUE, so a refused connection
-  # reads as a live response. That made this gate fire on its FIRST probe, ~0s in,
-  # before the sidecar could have served or died: it passed a bundle with sharp's
-  # native binaries deleted, i.e. the exact 0.0.9 defect this gate exists to catch.
-  # A gate that cannot fail is worse than no gate — it manufactures confidence.
-  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null)"
-  if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
-    echo "   sidecar answered on :$HTTP_PORT (HTTP $code) — it is UP"
-    served=1; break
+
+  # Anything else is a REAL failure — do not retry, do not mask it.
+  echo "── last 25 lines of the packed sidecar's boot log ──" >&2
+  tail -25 "$ISO/boot.log" >&2
+  if [[ "$outcome" == "exited" ]]; then
+    fail "the packed sidecar EXITED (rc=${rc:-?}) instead of serving. This bundle is DOA on any machine that lacks a fallback operator."
+  else
+    fail "the packed sidecar never served on :$HTTP_PORT within ${BOOT_TIMEOUT}s — treating silence as failure, not success."
   fi
-  sleep 2
 done
 
 if [[ $served -ne 1 ]]; then
   echo "── last 25 lines of the packed sidecar's boot log ──" >&2
   tail -25 "$ISO/boot.log" >&2
-  fail "the packed sidecar never served on :$HTTP_PORT within ${BOOT_TIMEOUT}s — treating silence as failure, not success."
+  fail "could not obtain a clean boot in $MAX_ATTEMPTS attempts — every attempt hit a port collision. The box is too busy to gate on; re-run, or set PAPERCUSP_BOOT_GATE_ATTEMPTS higher."
 fi
 
 if [[ $HARDLINKED -eq 1 ]]; then
