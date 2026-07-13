@@ -3283,9 +3283,11 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
 /// click from the open/quit items and recover the chosen accelerator.
 const DOCS_SHORTCUT_MENU_PREFIX: &str = "docs-shortcut::";
 
-/// The "Docs search shortcut" submenu: an "Off" item followed by one checkable
-/// item per preset, with the live state (docs_search::current_shortcut) checked.
-/// Rebuilt after each change so the checkmark tracks the selection.
+/// The "Quick Panel shortcut" submenu (né "Docs search shortcut" — the palette
+/// is now the tabbed Quick Panel, quick-panel-saved-prompts-2026-07-13): an
+/// "Off" item followed by one checkable item per preset, with the live state
+/// (docs_search::current_shortcut) checked. Rebuilt after each change so the
+/// checkmark tracks the selection.
 ///
 /// "Off" is FIRST and is checked on a fresh install — the shortcut ships disabled
 /// (owner directive 2026-07-12), so this submenu is also the only place the OS key
@@ -3318,7 +3320,7 @@ fn build_docs_shortcut_submenu(
         .iter()
         .map(|i| i as &dyn IsMenuItem<tauri::Wry>)
         .collect();
-    Submenu::with_items(app, "Docs search shortcut", true, &refs)
+    Submenu::with_items(app, "Quick Panel shortcut", true, &refs)
 }
 
 /// Server-role state for the WI-4404 background update poller: the newest
