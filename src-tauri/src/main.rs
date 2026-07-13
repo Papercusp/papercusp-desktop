@@ -5018,6 +5018,15 @@ struct NativeTerminalStatus {
 fn native_terminal_status(
     nt: tauri::State<native_terminal::NativeTerminal>,
 ) -> NativeTerminalStatus {
+    // D-004: gate closed (FLAGS.TESTING off — the default) ⇒ the dock is
+    // dark. Report `disabled` so webview consumers (TerminalDivider's
+    // hasDockedSurface check) stay unmounted without knowing about the flag.
+    if !nt.gate_enabled() {
+        return NativeTerminalStatus {
+            strategy: "disabled".to_string(),
+            running: false,
+        };
+    }
     NativeTerminalStatus {
         strategy: nt.strategy.label().to_string(),
         running: nt.is_running(),
@@ -5025,11 +5034,21 @@ fn native_terminal_status(
 }
 
 /// Show/hide the native sibling terminal. Returns the new running state.
+/// D-004: refuses while the FLAGS.TESTING gate is closed — the dock is
+/// testing-gated (flip the flag via /admin/features, then relaunch or let
+/// the webview relay re-open the gate live).
 #[tauri::command]
 #[specta::specta]
 fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
     let running = {
         let nt = app.state::<native_terminal::NativeTerminal>();
+        if !nt.gate_enabled() {
+            return Err(
+                "the native terminal dock is testing-gated (FLAGS.TESTING is off) — \
+                 flip it via /admin/features to restore the dock"
+                    .into(),
+            );
+        }
         nt.is_running()
     };
     if running {
@@ -5038,6 +5057,31 @@ fn native_terminal_toggle(app: AppHandle) -> Result<bool, String> {
     } else {
         start_native_terminal(&app);
         Ok(true)
+    }
+}
+
+/// D-004 (operator-chat-sidebar-revival P-014): the webview relays its
+/// resolved FLAGS.TESTING across the seam here, once flags load and again on
+/// any live flip. Rust no longer spawns the dock at boot — this is the ONLY
+/// path that opens the gate. Enabled + not running ⇒ spawn (restores today's
+/// dock exactly); disabled + running ⇒ shutdown (a live flag-off flip hides
+/// the dock without a relaunch). Returns the new running state.
+#[tauri::command]
+#[specta::specta]
+fn native_terminal_set_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let running = {
+        let nt = app.state::<native_terminal::NativeTerminal>();
+        nt.set_gate_enabled(enabled);
+        nt.is_running()
+    };
+    if enabled && !running {
+        start_native_terminal(&app);
+        Ok(app.state::<native_terminal::NativeTerminal>().is_running())
+    } else if !enabled && running {
+        app.state::<native_terminal::NativeTerminal>().shutdown();
+        Ok(false)
+    } else {
+        Ok(running)
     }
 }
 
@@ -5454,9 +5498,10 @@ fn start_native_terminal(app: &AppHandle) {
     }
 }
 
-/// Resolve the terminal strategy, manage the `NativeTerminal`, launch it for
-/// the main window, and register the move/resize/focus glue hook. Runs in both
-/// dev and prod so the terminal is present whenever the desktop is.
+/// Resolve the terminal strategy and manage the `NativeTerminal` state — but
+/// do NOT launch it (D-004: the dock is FLAGS.TESTING-gated; the webview's
+/// `native_terminal_set_enabled` relay is the only spawn path). Runs in both
+/// dev and prod so the state + layout persistence are ready if the gate opens.
 fn init_native_terminal(app: &tauri::App) {
     let strategy = native_terminal::resolve_strategy_from_env();
     println!(
@@ -5477,14 +5522,15 @@ fn init_native_terminal(app: &tauri::App) {
     }
     app.manage(nt);
 
-    // The main window must exist before we launch (the glue resolves it by pid).
-    if app.get_webview_window("main").is_none() {
-        return;
-    }
-
-    // The glue loop (run_glue_loop) owns the move/resize tracking, so there's no
-    // per-window-event hook to register here.
-    start_native_terminal(app.handle());
+    // D-004 (operator-chat-sidebar-revival P-014): NO boot-time spawn. The
+    // dock is gated behind FLAGS.TESTING, which is client-loaded — Rust can't
+    // read it here. The webview relays the resolved flag via
+    // `native_terminal_set_enabled` once flags load (NativeTerminalGate in
+    // the operator app), and THAT is what spawns the dock when the flag is
+    // on. Flag off (the default; TESTING is parked) ⇒ no dock window, while
+    // all code + bundled pui/zellij binaries stay in the app.
+    // (The glue loop — run_glue_loop — owns move/resize tracking once
+    // launched, so there's no per-window-event hook to register here.)
 }
 
 /// A hardware GL render node (`/dev/dri/renderD*`) — its ABSENCE means software
@@ -5640,6 +5686,7 @@ pub fn run() {
             native_console::external_console_run,
             native_terminal_status,
             native_terminal_toggle,
+            native_terminal_set_enabled,
             terminal_get_layout,
             terminal_set_layout,
             endpoint_ipc::endpoint_invoke,
