@@ -731,6 +731,14 @@ Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
 # forwards its own \$VERSION arg into this script's env.
 \$env:PAPERCUSP_BUILD_VERSION = "${PAPERCUSP_BUILD_VERSION:-}"
 Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
+# WI-4389/WI-3875: the update source is baked by option_env!("PAPERCUSP_RELEASE_HOST")
+# at COMPILE time, and the compile happens on the VM — so it must be set HERE, in the
+# remote build's env, exactly like the two provenance vars above. It does not cross ssh
+# on its own. Omit it and cargo bakes an EMPTY host: the shipped app polls nothing and
+# the Tauri updater reads that as "up to date" FOREVER (the 0.0.8 defect that forced a
+# full rebuild). release-local.sh exports it, so this script inherits it.
+\$env:PAPERCUSP_RELEASE_HOST = "${PAPERCUSP_RELEASE_HOST:-}"
+Write-Host "[build] PAPERCUSP_RELEASE_HOST=\$env:PAPERCUSP_RELEASE_HOST"
 # Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
 # GUI (base config) + Server (tauri.server.conf.json override). Distinct
 # productNames → distinct *-setup.exe filenames; each recompiles because

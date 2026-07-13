@@ -367,6 +367,15 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   if [[ "$role" == "server" && -f "$SRC_ZST_STASH" ]]; then mv "$SRC_ZST_STASH" "$SRC_ZST"; fi
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
+  # LABELED != PACKED (WI-4389): the .app EXISTING says nothing about whether the
+  # update source actually made it into the binary. option_env!("PAPERCUSP_RELEASE_HOST")
+  # reads the env of THIS cargo process — on the VM — and bakes an empty string,
+  # SUCCESSFULLY, if the var was not exported into the remote build. The app then
+  # polls nothing and the updater says "up to date" forever. Gate on the BYTES, here
+  # in the producer, so no leg can forget it (0.0.8 shipped exactly this defect and
+  # it cost a full rebuild + manual reinstall).
+  bash "$HERE/assert-release-host-baked.sh" "$role_bundle_dir/macos/$role_label.app" \
+    || { echo "ERROR: $role_label — release host not baked; refusing to package a permanently-un-updatable app"; exit 1; }
   # Downstream (release fetch, install verify) reads artifacts from the legacy
   # shared bundle dir — hardlink the updater artifacts over (same volume, free).
   mkdir -p "$BUNDLE_DIR/macos"
