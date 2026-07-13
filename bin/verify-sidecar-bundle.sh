@@ -261,7 +261,10 @@ else
   # So enforce the REAL contract — THE BUNDLE IS SELF-CONTAINED — by failing any
   # resolution that escapes it. This catches the missing native AND the upward
   # escape, in place, with no isolation copy.
-  _guard_js="$(mktemp "${TMPDIR:-/tmp}/pc-nat-guard-XXXXXX.js")"
+  # NB: template ends in X's with NO suffix — BSD/macOS mktemp rejects a suffix
+  # after the X's (GNU allows it), and this script runs on the mac build VM.
+  # Extensionless is fine: node runs it as CommonJS (no package.json in TMPDIR).
+  _guard_js="$(mktemp "${TMPDIR:-/tmp}/pc-nat-guard-XXXXXX")"
   cat >"$_guard_js" <<'GUARD_EOF'
 const Module = require('module');
 const path = require('path');
