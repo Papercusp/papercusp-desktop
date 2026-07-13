@@ -190,6 +190,22 @@ EXCLUDES+=(
   --exclude='*.tsbuildinfo'
   --exclude='./.DS_Store' --exclude='*/.DS_Store'
 )
+# Rust/Cargo build targets at ANY depth. The `./target` above only anchors the
+# MONO ROOT; a nested crate target (apps/tui/target, apps/pui-*/target,
+# libs/**/src-tauri/target) sails through, and a cargo target bakes this box's
+# absolute home path into .rustc_info.json / *.d / release binaries — the 0.0.9
+# mac leg leaked /Users/<owner> ×8075 out of apps/tui/target/ and the gate
+# (correctly) red'd the cut (WI-4419). We CANNOT use a blanket `*/target`:
+# node_modules/weapon-regex ships its RUNTIME under core/target/ (package.json
+# exports → ./core/target/js-3/weapon-regex-opt/main.js), so `*/target` would drop
+# a shipped runtime and break module resolution. So discover the REAL cargo targets
+# generically — every `target/` dir OUTSIDE any node_modules, at any depth, so a new
+# crate can't re-open the hole (no hand-kept per-crate list) — and exclude each.
+# The gate carries a matching node_modules-scoped `cargo-build-target` path rule as
+# the fast backstop; the content identity scan is the ultimate one (WI-4419).
+while IFS= read -r tdir; do
+  [[ -n "$tdir" ]] && EXCLUDES+=(--exclude="$tdir")
+done < <(cd "$MONO" && find . -type d -name node_modules -prune -o -type d -name target -print 2>/dev/null)
 # ── ALLOWLIST (WI-4419). The EXCLUDES above are kept as a second layer for
 # NESTED junk inside an allowed dir (apps/operator/.next, a stray */.env), but
 # they are no longer what decides whether a top-level entry ships.

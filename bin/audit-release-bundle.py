@@ -128,6 +128,28 @@ FORBIDDEN_PATH = [
     # a leak class we delete rather than scrub.
     ("build-cache", re.compile(r"(^|/)\.cache/"),
      [".cache"]),
+    # Rust/Cargo build target dirs (apps/tui/target, apps/pui-*/target,
+    # libs/**/src-tauri/target, …) at ANY depth. A cargo target bakes THIS build
+    # box's absolute home path into .rustc_info.json, the *.d dep-files and the
+    # release binaries — the 0.0.9 mac leg leaked /Users/<owner> ×8075 out of
+    # apps/tui/target/ and this gate red'd the cut (WI-4419). The size-class
+    # `./target` in stage-source-tree.sh only anchors the MONO ROOT, so a nested
+    # crate target sailed straight through.
+    #
+    # GLOBS ARE DELIBERATELY EMPTY (gate-only) — the ONE rule in this file that
+    # cannot self-emit its own exclude. print_tar_excludes() would turn a `target`
+    # glob into `./target` + `*/target`, and `*/target` drops
+    # node_modules/weapon-regex/core/target/ — a VENDORED package's RUNTIME entry
+    # (its package.json `exports` resolve to ./core/target/js-3/weapon-regex-opt/
+    # main.js), silently corrupting the shipped toolchain. So the EXCLUDE is
+    # generated node_modules-SAFELY in stage-source-tree.sh (find real cargo targets
+    # OUTSIDE any node_modules); THIS rule is the fast path-phase backstop that fires
+    # only if that exclude ever misses, and the content identity scan is the ultimate
+    # backstop. The regex is likewise node_modules-scoped so weapon-regex's legit
+    # target/ (and any nested-node_modules vendored target) never trips it.
+    ("cargo-build-target",
+     re.compile(r"^(?!.*(?:^|/)node_modules/)(?:.*/)?target/"),
+     []),
 ]
 
 # ── CONTENT: real credential VALUES (grep -E, C speed). Not the word "secret".
