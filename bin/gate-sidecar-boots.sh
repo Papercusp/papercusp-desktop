@@ -53,7 +53,15 @@ fail() { echo "❌ BOOT GATE FAILED: $*" >&2; exit 1; }
 
 [[ -d "$SIDECAR" ]]            || fail "no sidecar dir at $SIDECAR"
 [[ -f "$SIDECAR/serve.mjs" ]]  || fail "no serve.mjs in $SIDECAR"
-[[ -x "$SIDECAR/bin/node" ]]   || fail "no BUNDLED node at $SIDECAR/bin/node — the gate must use the node we ship, not the box's"
+
+# The bundled node is `node` on linux/mac, `node.exe` on Windows — resolve either,
+# and always run THE NODE WE SHIP (never the box's), since a stale foreign node
+# would mask exactly the kind of runtime-mismatch this gate exists to catch.
+NODE_BIN=""
+for cand in "$SIDECAR/bin/node" "$SIDECAR/bin/node.exe"; do
+  [[ -f "$cand" ]] && { NODE_BIN="$cand"; break; }
+done
+[[ -n "$NODE_BIN" ]] || fail "no BUNDLED node at $SIDECAR/bin/{node,node.exe} — the gate must use the node we ship, not the box's"
 
 echo "== boot gate: can the PACKED sidecar actually start?"
 
@@ -102,6 +110,7 @@ else
   cp -a "$SIDECAR" "$ISO/sidecar" || fail "could not stage the bundle"
 fi
 B="$ISO/sidecar"
+B_NODE="$B/bin/$(basename "$NODE_BIN")"   # node or node.exe, inside the isolated copy
 mkdir -p "$ISO/home" "$ISO/pgdata" "$ISO/dev-source"
 # Hardlinks share inodes: a sidecar that wrote to its OWN dir IN PLACE would mutate
 # the real staged bundle the cut is about to pack. It doesn't today (the shipped
@@ -150,7 +159,7 @@ served=0
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   HTTP_PORT="$(pick_port 20000 20000)"
   PG_PORT="$(pick_port 40000 20000)"
-  echo "   attempt $attempt/$MAX_ATTEMPTS: bundled node $("$B/bin/node" --version) → http :$HTTP_PORT, pg :$PG_PORT"
+  echo "   attempt $attempt/$MAX_ATTEMPTS: bundled node $("$B_NODE" --version) → http :$HTTP_PORT, pg :$PG_PORT"
 
   set -m
   env -i \
@@ -172,7 +181,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     PAPERCUSP_DOCS_ROOT="$B/internal-docs" \
     PAPERCUSP_SOURCE_ARCHIVE="$B/source.tar.zst" \
     PAPERCUSP_DEV_SOURCE_DIR="$ISO/dev-source" \
-    "$B/bin/node" "$B/serve.mjs" --ensure > "$ISO/boot.log" 2>&1 &
+    "$B_NODE" "$B/serve.mjs" --ensure > "$ISO/boot.log" 2>&1 &
   PID=$!
 
   deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
