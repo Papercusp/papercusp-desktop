@@ -155,8 +155,17 @@ while [[ $(date +%s) -lt $deadline ]]; do
   # probes `/api/` and treats ANY response — 404 included — as alive. `curl -sf`
   # would call a 404 a failure and red a perfectly healthy sidecar; measure at the
   # consumer, with the consumer's own definition.
-  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null || echo 000)"
-  if [[ "$code" != "000" ]]; then
+  #
+  # ⚠ MATCH A REAL STATUS *POSITIVELY*. Do not test the failure sentinel by
+  # inequality. curl -w '%{http_code}' prints `000` on a connection failure AND
+  # exits nonzero, so the obvious `curl ... || echo 000` CONCATENATES a second one
+  # → "000000" — and `[[ "000000" != "000" ]]` is TRUE, so a refused connection
+  # reads as a live response. That made this gate fire on its FIRST probe, ~0s in,
+  # before the sidecar could have served or died: it passed a bundle with sharp's
+  # native binaries deleted, i.e. the exact 0.0.9 defect this gate exists to catch.
+  # A gate that cannot fail is worse than no gate — it manufactures confidence.
+  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/api/" 2>/dev/null)"
+  if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
     echo "   sidecar answered on :$HTTP_PORT (HTTP $code) — it is UP"
     served=1; break
   fi
