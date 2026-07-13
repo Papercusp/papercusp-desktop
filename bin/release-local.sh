@@ -576,6 +576,27 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
 ) >"$LINUX_LEG_LOG" 2>&1 &
 LINUX_PID=$!
 
+# ── Mobile (Android) leg — parallel + BEST-EFFORT (see WITH_ANDROID block above).
+# Builds fresh design tokens + UniFFI Kotlin bindings, cross-compiles the 4 ABIs,
+# and assembles the APK — but NOT install-and-launch (that needs an adb device,
+# which a headless release host does not have). The APK lands in the mobile repo's
+# own output tree; record-release-cli scans it there. A failure here is joined
+# NON-fatally below, so it can never block a desktop release.
+ANDROID_LEG_LOG="/tmp/papercusp-androidleg-${TAG}.log"
+ANDROID_PID=""
+if [[ "$WITH_ANDROID" == "1" ]]; then
+  echo "==> [parallel] launching Android APK build in $MOBILE_ROOT (best-effort; log: $ANDROID_LEG_LOG)"
+  (
+    set -euo pipefail
+    cd "$MOBILE_ROOT"
+    make tokens bindings-kotlin
+    bash tools/build-scripts/build-android.sh
+  ) >"$ANDROID_LEG_LOG" 2>&1 &
+  ANDROID_PID=$!
+else
+  echo "==> Android leg SKIPPED (WITH_ANDROID=$WITH_ANDROID — sibling papercup-rust-mobile repo/Android SDK absent, or PAPERCUSP_SKIP_MOBILE=1). Desktop-only cut; mobile stays dormant."
+fi
+
 WIN_LEG_LOG="/tmp/papercusp-winleg-${TAG}.log"
 MAC_LEG_LOG="/tmp/papercusp-macleg-${TAG}.log"
 WIN_PID=""; MAC_PID=""; MAC_REUSE=0; WIN_REUSE=0
@@ -823,6 +844,23 @@ join_leg() {  # $1=pid  $2=name  $3=logfile
 [[ -n "$LINUX_PID" ]] && join_leg "$LINUX_PID" linux "$LINUX_LEG_LOG"
 [[ -n "$WIN_PID"   ]] && join_leg "$WIN_PID"   win   "$WIN_LEG_LOG"
 [[ -n "$MAC_PID"   ]] && join_leg "$MAC_PID"   mac   "$MAC_LEG_LOG"
+
+# Android is ADDITIVE — a broken/absent mobile build must NEVER fail a desktop
+# release, so it is joined BEST-EFFORT (log the outcome, never exit). Ground truth
+# is the APK on disk (record-release-cli registers it later via scanMobileArtifacts);
+# the APK is intentionally NOT added to ARTIFACTS[] (that feeds the desktop-only
+# auto-update latest.json — mobile must not leak into the desktop updater).
+if [[ -n "$ANDROID_PID" ]]; then
+  echo "==> joining android leg (pid $ANDROID_PID, best-effort)…"
+  if wait "$ANDROID_PID"; then android_rc=0; else android_rc=$?; fi
+  [[ -f "$ANDROID_LEG_LOG" ]] && sed "s/^/  [android] /" "$ANDROID_LEG_LOG"
+  android_apk="$(ls -1t "$MOBILE_ROOT"/android/app/build/outputs/apk/release/*.apk "$MOBILE_ROOT"/android/app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1 || true)"
+  if [[ "$android_rc" == "0" && -n "$android_apk" ]]; then
+    echo "==> android leg SUCCEEDED — APK: $android_apk ($(du -h "$android_apk" 2>/dev/null | cut -f1)); record-release-cli will register it"
+  else
+    echo "==> ⚠ android leg did not produce a usable APK (rc=$android_rc) — desktop release CONTINUES; mobile omitted from this cut"
+  fi
+fi
 
 # ── Collect artifacts in the PARENT, post-join (a subshell's ARTIFACTS+= would not
 # survive the fork). Version-scoped globs so a stale older-version bundle can't
