@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./src-DW7JHyJi.js";import{n}from"./categories-Cc2AsxTG.js";var r=e((()=>{t(),n()}));function i(e,t){return t||typeof e!=`string`?!1:e===`system`||e.startsWith(`system:`)||a.has(e)}var a,o=e((()=>{r(),a=new Set([`green-checkpoint`,`steering-lease`,`compaction-watchdog`])}));export{i as n,o as t};

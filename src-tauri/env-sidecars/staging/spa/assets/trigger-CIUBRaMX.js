@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{o as t,t as n}from"./blueprint-BSn_VMdI.js";function r(){if(o)return o;let e={};for(let n of a)try{let{blueprint:r}=t(n),i=r.triggers?.event;i&&(e[i]=n)}catch{}return o=e,e}function i(e){return r()[e]??null}var a,o;e((()=>{n(),a=[`vote`,`deliberate`],o=null}))();export{i as resolveCoordOpTrigger};

@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./Chromeless-Dp-UOfjw.js";import{t as n}from"./SetupWizard-m4vu5HYU.js";var r=e();function i(){return(0,r.jsxs)(`div`,{className:`pc-shell pc-setup-shell`,children:[(0,r.jsx)(t,{}),(0,r.jsx)(n,{mode:`first-run`})]})}export{i as component};

@@ -1,0 +1,1 @@
+import{r as e,t}from"./fanout-projection-DDjVzMZN.js";e();export{t as fanoutForObject};

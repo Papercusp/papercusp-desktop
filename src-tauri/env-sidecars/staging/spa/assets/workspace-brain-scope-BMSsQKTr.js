@@ -1,1 +1,0 @@
-import{i as e,n as t,r as n,t as r}from"./workspace-brain-scope-w-qLS4n9.js";r();export{t as isWorkspaceCoordinationOn,n as workspaceBrainReadKeys,e as workspaceBrainScopeKey};

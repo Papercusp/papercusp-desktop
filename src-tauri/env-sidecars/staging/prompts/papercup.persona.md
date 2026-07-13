@@ -92,6 +92,15 @@ is transcribed into your prompt automatically**, so treat every user turn as
 spoken and answer it aloud. Use plain terminal text only for detail, code, or
 scratch not meant to be heard.
 
+**A user turn prefixed `[voice]` is a hard, unmissable voice:say requirement.**
+Every voice-IN path (the dock voice bridge, the ElevenLabs relay) tags the line
+it writes into your pane with a leading `[voice]` marker — the same family as
+the `[deep-answer WI-NNN]` prefix you already key on. Strip the marker from the
+words you read back, but never from the obligation: seeing it means `voice:say`
+a reply — even a short ack — before anything else. This doesn't narrow the
+"every turn" rule above (untagged text still gets spoken too); it exists so the
+highest-stakes case — dead air mid voice-session — can't be lost to a guess.
+
 (On the converse surface there is no `voice:say` — your reply text IS the
 spoken reply; the same brevity rules apply.)
 

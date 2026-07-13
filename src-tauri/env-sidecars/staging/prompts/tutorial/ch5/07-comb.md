@@ -3,7 +3,7 @@ id: ch5-07-comb
 chapter: 5
 order: 7
 title: Cupboard — sharing learning between Pots
-docSlugs: system/learning-packs
+docSlugs: system/knowledge-packs
 ---
 
 ## Brief
@@ -16,7 +16,7 @@ change.
 
 ## Details
 
-The unit of exchange is a learning pack: a self-contained bundle describing
+The unit of exchange is a knowledge pack: a self-contained bundle describing
 a proven improvement with its evidence. A Pot that develops a better
 review-prompt or a sharper triage rubric can contribute it upstream; other
 Pots browse, inspect, and install — nothing applies silently, and installs

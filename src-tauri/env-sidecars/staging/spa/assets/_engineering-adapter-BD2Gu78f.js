@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{r as t,t as n}from"./src-CTwB5sI0.js";import{r,t as i}from"./_repo-paths-D8jrjjgF.js";var a;e((()=>{n(),r(),a=t({name:`papercusp-engineering`,contentRoot:i,baseUrl:`/internal/docs`})}))();export{a as engineeringAdapter};

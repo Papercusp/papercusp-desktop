@@ -3,7 +3,7 @@ id: ch4-07-self-learning
 chapter: 4
 order: 7
 title: The self-learning system — closing the loop
-docSlugs: system/learning-packs
+docSlugs: system/knowledge-packs
 ---
 
 ## Brief

@@ -1,0 +1,1 @@
+import{n as e,t}from"./full-autonomy-grant-CmTgxZDQ.js";t();export{e as readOwnerFullAutonomyGrant};

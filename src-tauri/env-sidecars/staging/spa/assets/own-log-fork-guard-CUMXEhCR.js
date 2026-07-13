@@ -1,0 +1,1 @@
+import{n as e,t}from"./own-log-fork-guard-XkAikSpp.js";e();export{t as attachOwnLogForkListener};

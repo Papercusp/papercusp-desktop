@@ -93,14 +93,16 @@ knobs:
     greenCmd: null
     deploy: null
 
-# Learning: a fresh coding hive seeds the generic `coding` learning pack
+# Knowledge: a fresh coding pot seeds the generic `coding` knowledge pack
 # (domain-generic-hive-architecture-2026-06-18 P-017, D-010) — generic
 # engineering wisdom carried as discovery rules, NOT project-specific (project
-# specifics ride the per-hive override + a separate project pack, never the
-# blueprint). hive:create reads learning.pack as the default seed when the
-# caller passes no explicit pack. Loop provisioning stays flag-gated in
-# createHiveHarness (PER_HIVE_LEARNING_LOOPS), so no `loops` key here.
-learning:
+# specifics ride the per-pot override + a separate project pack, never the
+# blueprint). pot:create reads knowledge.pack as the default seed when the
+# caller passes no explicit pack. (Renamed from `learning.pack` in
+# cupboard-public-release-2026-07-12 P-001 — the learning LOOPS keep the
+# `learning:` block; loop provisioning stays flag-gated in createHiveHarness
+# (PER_HIVE_LEARNING_LOOPS), so no `loops` key here.)
+knowledge:
   pack: coding
 
 # NO `triggers.schedule` — deliberately. The hive's wake is SELF-DECLARED

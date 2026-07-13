@@ -1,0 +1,1 @@
+import{n as e,o as t}from"./pack-format-DGfbZRtc.js";t();export{e as DEFAULT_KNOWLEDGE_PACK_ID};

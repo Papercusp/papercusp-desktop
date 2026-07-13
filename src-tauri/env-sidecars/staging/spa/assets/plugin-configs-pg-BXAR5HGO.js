@@ -1,1 +1,0 @@
-import{n as e,t}from"./plugin-configs-pg-MzNNcj4N.js";t();export{e as loadPluginConfig};
