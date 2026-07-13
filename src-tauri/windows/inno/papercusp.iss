@@ -147,6 +147,68 @@ Name: "{autoprograms}\Papercusp Tutorial & Setup"; Filename: "{sys}\wsl.exe"; Pa
 Filename: "{app}\papercusp-desktop.exe"; Flags: nowait; Check: IsUpdaterLaunch
 
 [Code]
+const
+  LegacyUninstallRoot =
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\';
+
+function UninstallTargetExists(const UninstallString: String): Boolean;
+var
+  Target: String;
+  QuotePos: Integer;
+  SpacePos: Integer;
+begin
+  Target := Trim(UninstallString);
+  if Target = '' then
+    Result := False
+  else
+  begin
+    { UninstallString is normally a quoted path followed by arguments. }
+    if Copy(Target, 1, 1) = '"' then
+    begin
+      Delete(Target, 1, 1);
+      QuotePos := Pos('"', Target);
+      if QuotePos > 0 then
+        Delete(Target, QuotePos, Length(Target) - QuotePos + 1)
+      else
+        Target := '';
+    end
+    else
+    begin
+      SpacePos := Pos(' ', Target);
+      if SpacePos > 0 then
+        Delete(Target, SpacePos, Length(Target) - SpacePos + 1);
+    end;
+    Result := (Target <> '') and FileExists(Target);
+  end;
+end;
+
+procedure ReapLegacyUninstallEntry(const LegacyName: String);
+var
+  LegacyKey: String;
+  UninstallString: String;
+begin
+  LegacyKey := LegacyUninstallRoot + LegacyName;
+  { Only remove an old bare-name key when it has an uninstall command and
+    that command's executable is genuinely gone. A live entry from another
+    install must never be deleted just because its display name is old. }
+  if RegKeyExists(HKCU, LegacyKey) and
+     RegQueryStringValue(HKCU, LegacyKey, 'UninstallString', UninstallString) and
+     (not UninstallTargetExists(UninstallString)) then
+    RegDeleteKeyIncludingSubkeys(HKCU, LegacyKey);
+end;
+
+procedure ReapLegacyUninstallEntries;
+begin
+  ReapLegacyUninstallEntry('Papercusp GUI');
+  ReapLegacyUninstallEntry('Papercusp Server');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    ReapLegacyUninstallEntries;
+end;
+
 function IsUpdaterLaunch(): Boolean;
 begin
   Result := Pos('/UPDATE', UpperCase(GetCmdTail())) > 0;
