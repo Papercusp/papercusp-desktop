@@ -168,16 +168,34 @@ FORBIDDEN_PATH = [
     # NB build-system has BOTH a build-system/ subtree AND a build-system.{html,md}
     # section LANDING page (Astro renders a section index as a sibling file) — the
     # dir glob prunes the subtree, the .html/.md globs catch the landing twin.
+    #
+    # DURABILITY (0.0.9 cut#3c ARRIVES, su-a1a71 named the residual): a per-file
+    # name list is a treadmill — cut#3c's bundle still shipped two creds-FREE mac-VM
+    # runbooks the named set had never heard of (copying-artifacts-off-the-mac-vm,
+    # macos-ppid-1-is-not-an-orphan-signal — both disclose the mac VM alias
+    # papercup-vm-mac + loopback:2222; no passwords, but internal build topology that
+    # must not ship). So beyond naming those two, a basename glob `*mac-vm*` catches
+    # ANY current-or-future agent-insights runbook about the mac build VM with no new
+    # edit each time (it subsumes mac-vm-qmp-recovery / mac-vm-e2e-battery, kept
+    # explicit as the known-critical plaintext-password file). We deliberately do NOT
+    # blanket `macos-*`: a real PRODUCT doc could legitimately name macOS, so the two
+    # known build-infra macos-* runbooks are listed by name, not by prefix.
     ("internal-build-infra-docs",
      re.compile(r"(^|/)build-system(/|\.(html|md)$)"
                 r"|(^|/)(mac-vm-qmp-recovery|mac-vm-e2e-battery"
                 r"|macos-signing-notarization-runbook"
+                r"|macos-ppid-1-is-not-an-orphan-signal"
+                r"|copying-artifacts-off-the-mac-vm"
                 r"|federation-public-release-known-limitations"
                 r"|agent-insights-index)\.(mdx|md|html)$"
+                r"|(^|/)[^/]*mac-vm[^/]*\.(mdx|md|html)$"
                 r"|(^|/)(llms-full|llms-small)\.txt$"),
      ["build-system", "build-system.html", "build-system.md",
       "mac-vm-qmp-recovery.*", "mac-vm-e2e-battery.*",
       "macos-signing-notarization-runbook.*",
+      "macos-ppid-1-is-not-an-orphan-signal.*",
+      "copying-artifacts-off-the-mac-vm.*",
+      "*mac-vm*.mdx", "*mac-vm*.md", "*mac-vm*.html",
       "federation-public-release-known-limitations.*",
       "agent-insights-index.*",
       "llms-full.txt", "llms-small.txt"]),
