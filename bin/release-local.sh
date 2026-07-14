@@ -436,6 +436,17 @@ cut_release_seed
 #       lane). The gate keeps throttling the actual CAUSES (other agents' raw
 #       vitest/tsc/build); it just never throttles this victim.
 export PC_HEAVY_BYPASS=1
+# WI-4781 (build-box-identity hygiene, cosmetic — not a security fix; parity
+# with mac-vm-build.sh's identical export): without --remap-path-prefix, Rust
+# DEPENDENCY source-paths embed this build box's $HOME (e.g.
+# /home/<build-user>/.cargo/registry/src/…/<crate>/src/*.rs) in shipped
+# binaries' panic/debug strings. Non-sensitive (no credentials) but worth
+# stripping. Exported before the sidecar build + every local `tauri build`
+# call below; a plain `export` also reaches build-appimage.sh, which this
+# script invokes as a child process later. A RUSTFLAGS change busts the cargo
+# incremental cache once — expected, not a regression.
+CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
 PC_NICE=()
 if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
   command -v nice   >/dev/null 2>&1 && PC_NICE=(nice -n "${PAPERCUSP_RELEASE_NICE_ADJ:-10}")

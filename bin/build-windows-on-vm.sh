@@ -862,6 +862,18 @@ Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
 # full rebuild). release-local.sh exports it, so this script inherits it.
 \$env:PAPERCUSP_RELEASE_HOST = "${PAPERCUSP_RELEASE_HOST:-}"
 Write-Host "[build] PAPERCUSP_RELEASE_HOST=\$env:PAPERCUSP_RELEASE_HOST"
+# WI-4781 (build-box-identity hygiene, cosmetic — not a security fix; parity
+# with the mac/linux legs' identical RUSTFLAGS export): without
+# --remap-path-prefix, Rust DEPENDENCY source-paths embed this VM's user
+# profile dir (e.g. C:\Users\<build-user>\.cargo\registry\src\…\<crate>\src\*.rs)
+# in shipped binaries' panic/debug strings. Non-sensitive (no credentials) but
+# worth stripping. \$env:USERPROFILE is always set on Windows; CARGO_HOME
+# defaults to %USERPROFILE%\.cargo when unset. Targets use forward slashes —
+# --remap-path-prefix's replacement is an opaque string baked into the binary,
+# not a real path, so this is valid on Windows too and avoids backslash-escaping
+# a Windows path inside this generated PowerShell string.
+\$env:RUSTFLAGS = "--remap-path-prefix=\$env:USERPROFILE=/build-home --remap-path-prefix=\$env:USERPROFILE\.cargo=/build-cargo"
+Write-Host "[build] RUSTFLAGS=\$env:RUSTFLAGS"
 # Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
 # GUI (base config) + Server (tauri.server.conf.json override). Distinct
 # productNames → distinct *-setup.exe filenames; each recompiles because

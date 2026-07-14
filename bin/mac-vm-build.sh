@@ -25,6 +25,21 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # this makes the build FAIL rather than ship them again.
 export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 
+# WI-4781 (build-box-identity hygiene, cosmetic — not a security fix; the mac
+# ARRIVES on desktop 0.0.9 audit found the shipped binaries embed the build
+# VM's $HOME in Rust DEPENDENCY source-paths, e.g.
+# /Users/aviweiss/.cargo/registry/src/index.crates.io-…/<crate>/src/*.rs, in
+# panic/debug strings — standard Rust behavior without --remap-path-prefix.
+# Non-sensitive (no credentials; the build account name is already public and
+# rotated separately under WI-4723) but worth stripping for hygiene. Must be
+# exported BEFORE every cargo/tauri invocation below (pui, the companion wasm
+# plugin, and both tauri build roles). A RUSTFLAGS change busts the cargo
+# incremental cache once (a one-time full rebuild), same as any other RUSTFLAGS
+# edit — expected, not a regression. Verify post-build with:
+#   strings <binary> | grep -c /Users/   (and /home/) — should be 0.
+CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
+
 # nvm Node 22 for the build (the *bundled* runtime is vendored separately).
 if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   . "$HOME/.nvm/nvm.sh"
