@@ -68,6 +68,7 @@
 
     "allow-list-envs",
     "allow-open-docs-search-palette",
+    "allow-open-route-in-app",
 
     "allow---dev-bridge-result"
   ]
