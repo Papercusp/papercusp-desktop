@@ -508,12 +508,126 @@ def print_tar_excludes():
     return 0
 
 
+def _rule_rx(name):
+    """The compiled regex of one FORBIDDEN_PATH rule — the single source of truth
+    a non-tar caller (the sidecar prune below) reuses so it can NEVER drift from
+    what the release audit itself forbids."""
+    for rule, rx, _globs in FORBIDDEN_PATH:
+        if rule == name:
+            return rx
+    print(f"AUDIT ERROR: no FORBIDDEN_PATH rule named {name!r}", file=sys.stderr)
+    sys.exit(2)
+
+
+def prune_docs(dirs):
+    """Delete internal-build-infra docs from an ASSEMBLED (un-staged) docs tree.
+
+    Why this exists: the stager's --tar-excludes only filters source.tar.zst. The
+    desktop sidecar's two doc copies (build-desktop-sidecar.sh: rendered
+    public/internal/docs, and the source .mdx tree for docs-qa grounding) are
+    pulled from the LIVE monorepo tree and bypass that exclude entirely — so the
+    in-build audit, which scans source.tar.zst, is structurally blind to them, and
+    0.0.9 shipped the mac VM's sudo/login passwords inside the sidecar while every
+    leg's source audit passed CLEAN (WI-4419 follow-up). Prune the SAME paths the
+    release audit forbids, using the gate's own `internal-build-infra-docs` rule as
+    the single source of truth — no second list to drift.
+    """
+    rx = _rule_rx("internal-build-infra-docs")
+    for root in dirs:
+        if not os.path.isdir(root):
+            print(f"    prune-docs: {root} absent — skipping")
+            continue
+        removed = []
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+            keep = []
+            for d in dirnames:
+                rel = os.path.relpath(os.path.join(dirpath, d), root)
+                # test dirs WITH a trailing slash so `.../build-system/` hits the
+                # rule's `(^|/)build-system/` alternative and the whole subtree goes.
+                if rx.search(rel.replace(os.sep, "/") + "/"):
+                    shutil.rmtree(os.path.join(dirpath, d), ignore_errors=True)
+                    removed.append(rel + "/")
+                else:
+                    keep.append(d)
+            dirnames[:] = keep
+            for fn in filenames:
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                if rx.search(rel.replace(os.sep, "/")):
+                    os.remove(os.path.join(dirpath, fn))
+                    removed.append(rel)
+        print(f"    prune-docs: {root} — removed {len(removed)} internal-infra path(s)")
+        for r in sorted(removed):
+            print(f"        - {r}")
+    return 0
+
+
+def scan_dir(dirs):
+    """Ultimate backstop: identity-scan the ASSEMBLED bytes that actually ship,
+    honoring NO path-exclude. If a known-sensitive or build-box identity literal
+    is on disk in what ships, FAIL — exclude list or not.
+
+    The existing phase-B scan is meant to be this backstop, but it reads
+    source.tar.zst (the staged tree), which is CLEAN, so it never sees the sidecar
+    the .app also ships. Pointing the identity scan at the assembled sidecar closes
+    exactly the gap the 0.0.9 ARRIVES probe caught, at BUILD time. High-entropy
+    literals (home paths, usernames, the known mac-VM creds) are hunted EVERYWHERE
+    incl node_modules; a low-entropy bare first name is hunted non-vendor only —
+    the same anti-false-positive scoping as phase B/C.
+    """
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    high = sorted({v for v in lits.values() if not is_low_entropy(v)})
+    low = sorted({v for v in lits.values() if is_low_entropy(v)})
+    print("==> identity-scan of assembled tree (honors NO path-exclude — WI-4419)")
+    print(f"    high-entropy (all files):  {', '.join(high) or '(none)'}")
+    print(f"    low-entropy (non-vendor):  {', '.join(low) or '(none)'}")
+    files = set()
+
+    def grep_l(pats, scoped):
+        if not pats:
+            return
+        for root in dirs:
+            if not os.path.isdir(root):
+                print(f"    scan-dir: {root} absent — skipping")
+                continue
+            cmd = ["grep", "-rIlE"]
+            if scoped:
+                cmd.append("--exclude-dir=node_modules")
+            for p in pats:
+                cmd += ["-e", lit_ere(p)]
+            cmd.append(root)
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            for line in r.stdout.splitlines():
+                if line.strip():
+                    files.add(line.strip())
+
+    grep_l(high, False)
+    grep_l(low, True)
+    if not files:
+        print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle")
+        return 0
+    print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
+          f"({len(files)} file(s))\n")
+    for f in sorted(files)[:40]:
+        print(f"        {f}")
+    if len(files) > 40:
+        print(f"        … and {len(files) - 40:,} more")
+    print("\n  This scan IGNORES the path-exclude list BY DESIGN (scan the bytes that ship).")
+    print("  Fix the SOURCE: prune the leaking file from the sidecar copy in")
+    print("  build-desktop-sidecar.sh, or scrub the value — never add an exclude here.")
+    return 1
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
     if sys.argv[1] == "--tar-excludes":
         return print_tar_excludes()
+    if sys.argv[1] == "--prune-docs":
+        return prune_docs(sys.argv[2:])
+    if sys.argv[1] == "--scan-dir":
+        return scan_dir(sys.argv[2:])
     bundle = sys.argv[1]
     if not os.path.isfile(bundle):
         print(f"AUDIT ERROR: no such bundle: {bundle}", file=sys.stderr)

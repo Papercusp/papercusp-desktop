@@ -727,6 +727,40 @@ else
   echo "  ⚠ $_docs_src not found — docs-qa (tutorial/palette Ask) will be UNGROUNDED in the bundle"
 fi
 
+# ── Release privacy (WI-4419 follow-up). The two doc copies above pull from the
+# LIVE monorepo tree, NOT the stager's source.tar.zst, so the in-build release
+# audit (which scans source.tar.zst) is STRUCTURALLY BLIND to them: 0.0.9 shipped
+# the mac VM's sudo/login passwords (aviweiss/avraham) inside the sidecar docs
+# while every leg's source audit passed CLEAN. Durable fix, co-located with the
+# copy that creates the exposure:
+#   (1) PRUNE the same internal-build-infra docs the release audit forbids, using
+#       audit-release-bundle.py's own rule as the SINGLE source of truth (no drift).
+#   (2) In a RELEASE build, IDENTITY-SCAN the assembled sidecar UNCONDITIONALLY
+#       (honoring no path-exclude) and FAIL if any known-sensitive/build-box
+#       identity survives on disk — the ultimate backstop the source.tar.zst scan
+#       cannot be. Hard-fail is release-gated (PAPERCUSP_RELEASE_AUDIT=1) so a dev
+#       sidecar on the build box — whose own identity legitimately pervades its
+#       compiled binaries — still builds; the prune runs in every build regardless.
+_audit_py="$HERE/audit-release-bundle.py"
+if [[ -f "$_audit_py" ]]; then
+  echo "→ pruning internal-build-infra docs from sidecar (release-privacy, WI-4419)"
+  python3 "$_audit_py" --prune-docs \
+    "$SIDECAR_DIR/internal-docs" \
+    "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+  if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
+    echo "→ identity-scanning assembled sidecar (release gate, honors NO path-exclude)"
+    if ! python3 "$_audit_py" --scan-dir "$SIDECAR_DIR"; then
+      echo "ERROR: assembled sidecar carries a sensitive/build-box identity — refusing to ship (WI-4419)."
+      exit 1
+    fi
+  fi
+elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
+  echo "ERROR: release build requires $_audit_py for sidecar privacy enforcement — aborting."
+  exit 1
+else
+  echo "  ⚠ audit-release-bundle.py not found at $_audit_py — sidecar release-privacy NOT enforced (dev build)"
+fi
+
 # Operator prompts — some endpoint-route handlers read apps/operator/prompts/
 # at runtime. esbuild doesn't trace runtime fs reads, so copy them explicitly.
 if [[ -d "$WEB_DIR/prompts" ]]; then

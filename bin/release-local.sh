@@ -449,6 +449,11 @@ echo "==> building sidecar"
 # >= this — the Windows leg's guard then proves the packed serve.mjs was rebuilt
 # for THIS cut, not a stale leftover.
 export PAPERCUSP_SIDECAR_MIN_EPOCH_SEC="$(date +%s)"
+# WI-4419 follow-up: this is a RELEASE build, so arm build-desktop-sidecar.sh's
+# unconditional identity-scan of the assembled sidecar (the ultimate backstop the
+# source.tar.zst audit structurally cannot be — it never sees the sidecar's
+# docs-qa copies). Prune runs regardless; this flag makes the scan a HARD gate.
+export PAPERCUSP_RELEASE_AUDIT=1
 "${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"
 # P-004: the exact sha of the serve.mjs we just built — exported so every leg's
 # packer asserts it packs THIS byte-identical sidecar (fail-closed on a
