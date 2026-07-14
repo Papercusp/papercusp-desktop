@@ -39,6 +39,22 @@ CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
 [ -n "$CT" ] || CT="$HOME/.cargo-target"
 APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+AUDIT_PY="$DESK/bin/audit-release-bundle.py"
+
+# 0. PURGE any stale AppDir from a PRIOR build BEFORE tauri runs. This is the ROOT
+#    CAUSE of the 0.0.9 credential leak (WI-4736 / EI-11730): `tauri build
+#    --bundles appimage` REUSES a pre-existing *.AppDir and does NOT resync its
+#    bundled `sidecar/` resources from the (freshly pruned + identity-scanned)
+#    src-tauri/sidecar/. So a leftover AppDir from an OLDER sidecar — one built
+#    before the 2026-07-07 code-server/meridian removal and the spa/internal/docs
+#    prune — kept shipping the mac-VM sudo/login passwords + build-box identity
+#    inside its rendered docs, even though the .deb (packed straight from the
+#    clean sidecar in the same cut) carried NONE of it. Proven 2026-07-13: the
+#    current src-tauri/sidecar identity-scanned CLEAN (0 hits) while the leftover
+#    AppDir carried 302. Removing it forces tauri to build a FRESH AppDir from the
+#    current clean sidecar; the fail-closed scan in step 3d is the backstop.
+echo "==> purging any stale AppDir under $APPIMG_DIR (WI-4736: a reused stale AppDir ships an un-pruned/leaky sidecar)"
+rm -rf "$APPIMG_DIR"/*.AppDir
 
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.
@@ -98,6 +114,50 @@ export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
 exec "$HERE/usr/bin/papercusp-desktop" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
+
+# 3c. RELATIVIZE any absolute symlink whose target points INSIDE the AppDir.
+#     linuxdeploy creates the AppDir-root `.DirIcon` and `<productName>.desktop`
+#     symlinks with ABSOLUTE targets (/home/<builder>/.cargo-target/.../*.AppDir/…),
+#     which appimagetool packs into the squashfs VERBATIM — leaking the build-box
+#     home path + username into every shipped AppImage (WI-4736). The identity
+#     scan in 3d CANNOT catch these: grep -rIlE never reads a symlink's target.
+#     Rewrite each as a path RELATIVE to the symlink's own directory so the packed
+#     AppImage carries no absolute build path AND the link still resolves at the
+#     user's mount point.
+echo "==> relativizing absolute in-AppDir symlinks (strip build-box path from .DirIcon/.desktop; WI-4736)"
+_appdir_abs="$(cd "$APPDIR" && pwd)"
+while IFS= read -r -d '' _lnk; do
+  _tgt="$(readlink "$_lnk")"
+  case "$_tgt" in
+    "$_appdir_abs"/*)
+      _rel="$(realpath -ms --relative-to="$(dirname "$_lnk")" "$_tgt")"
+      ln -sfn "$_rel" "$_lnk"
+      echo "   relativized: ${_lnk#"$_appdir_abs"/} -> $_rel"
+      ;;
+  esac
+done < <(find "$APPDIR" -type l -print0)
+
+# 3d. RELEASE-PRIVACY GATE (WI-4736 / EI-11730) — FAIL CLOSED. Never package an
+#     AppImage whose AppDir carries a known-sensitive or build-box identity. This
+#     is the backstop to the stale-AppDir purge (step 0): even if a fresh AppDir
+#     somehow still picks up a contaminated sidecar (a concurrent sidecar rebuild,
+#     a future tauri regression), this HARD-STOPS the ship instead of leaking
+#     silently — the 0.0.8/0.0.9 failure mode. Uses audit-release-bundle.py's
+#     --scan-dir, the SAME identity rule build-desktop-sidecar.sh enforces on the
+#     source sidecar (single source of truth; honors NO path-exclude). Default-ON
+#     because an AppImage is ALWAYS a release artifact; PAPERCUSP_RELEASE_AUDIT=0
+#     opts a throwaway local dev appimage out (matches bin/mac-vm-build.sh).
+if [ "${PAPERCUSP_RELEASE_AUDIT:-1}" = "1" ]; then
+  if [ ! -f "$AUDIT_PY" ]; then
+    echo "FATAL: $AUDIT_PY not found — cannot enforce AppImage release-privacy; refusing to ship blind (WI-4736)." >&2
+    exit 1
+  fi
+  echo "==> identity-scanning AppDir before packaging (release gate, honors NO path-exclude; WI-4736)"
+  if ! python3 "$AUDIT_PY" --scan-dir "$APPDIR"; then
+    echo "FATAL: AppDir carries a sensitive/build-box identity — refusing to package a leaky AppImage (WI-4736/EI-11730)." >&2
+    exit 1
+  fi
+fi
 
 # 4. Locate appimagetool (tauri downloads the linuxdeploy appimage plugin, which
 #    embeds it) and package the AppDir. No ELF scan → no crash.
