@@ -86,6 +86,80 @@ fn ensure_seed_placeholder(manifest_dir: &Path) {
     );
 }
 
+/// EI-12083: cross-check the `AppManifest::commands(&[...])` list below against
+/// the app-command permission GRANTS in `capabilities/default.json`, before
+/// handing off to `tauri_build::try_build`. When a grant references a command
+/// with no backing entry in `commands`, `tauri_build` panics with a ~500-line
+/// wall listing every valid permission — technically correct, zero signal.
+///
+/// Root cause of the real 2026-07-14 incident this guards: WI-4827 landed the
+/// capability grant (`allow-open-route-in-app`) and its backing command
+/// (`open_route_in_app`) as TWO separate git-sync auto-commits ~6 minutes
+/// apart on the shared tree. Any build that reads the tree in that window
+/// (not a source bug — a transient split-commit race) hit the cryptic panic.
+/// `packages/operator-core/lib/desktop-acl-command-sync.test.ts` already
+/// guards the settled tree in CI; this guards the LOCAL build-time read of
+/// whatever state the tree happens to be in right now.
+///
+/// Deliberately dependency-free (no `serde_json` in `[build-dependencies]`,
+/// matching the WI's "keep it panic-only, no new deps"): a plain quoted-string
+/// scan, the same technique the TS regression test already uses
+/// (`/"([^"]+)"/g`) rather than a full JSON parse. `capabilities/default.json`
+/// has no other field whose value happens to start with `allow-`, so scanning
+/// every quoted string in the file (not just inside `"permissions"`) is safe
+/// here — see the sibling TS test for the authoritative structural check.
+fn check_capability_commands_are_registered(manifest_dir: &Path, commands: &[&str]) {
+    let cap_path = manifest_dir.join("capabilities/default.json");
+    let raw = match std::fs::read_to_string(&cap_path) {
+        // An absent/unreadable capabilities file is tauri_build's own error to
+        // raise (with its own accurate message) — nothing for this guard to add.
+        Err(_) => return,
+        Ok(s) => s,
+    };
+    let known: HashSet<&str> = commands.iter().copied().collect();
+
+    let mut in_quotes = false;
+    let mut current = String::new();
+    let mut missing_grants: Vec<String> = Vec::new();
+    for c in raw.chars() {
+        if c == '"' {
+            if in_quotes {
+                if let Some(rest) = current.strip_prefix("allow-") {
+                    // "allow-open-route-in-app" -> "open_route_in_app"; the
+                    // dev-bridge command's "allow---dev-bridge-result" round-trips
+                    // to "__dev_bridge_result" the same way (dash<->underscore is
+                    // a 1:1 per-character swap, so this exactly inverts permId()
+                    // in the TS test / Tauri's own dashed-permission generation).
+                    let cmd = rest.replace('-', "_");
+                    if !cmd.is_empty() && !known.contains(cmd.as_str()) {
+                        missing_grants.push(current.clone());
+                    }
+                }
+                current.clear();
+            }
+            in_quotes = !in_quotes;
+        } else if in_quotes {
+            current.push(c);
+        }
+    }
+
+    if !missing_grants.is_empty() {
+        panic!(
+            "capabilities/default.json grants {grants} but build.rs's AppManifest::commands(&[...]) \
+             list has no backing command for {grants}.\n\n\
+             If you did NOT just edit these, you most likely caught the shared tree mid-edit: a \
+             capability grant and its backing build.rs command can land as TWO separate git-sync \
+             auto-commits a few minutes apart (the WI-4827 / EI-12083 incident). Try `git -C {dir} \
+             pull` (or wait ~1 min for the second half to land) and re-run.\n\n\
+             Otherwise this is a genuine omission: add the missing command name(s) to build.rs's \
+             `.commands(&[...])` list, and keep \
+             packages/operator-core/lib/desktop-acl-command-sync.test.ts green.",
+            grants = missing_grants.join(", "),
+            dir = manifest_dir.display(),
+        );
+    }
+}
+
 fn main() {
     // Read this at build-script RUN time, not via env! at compile time. The
     // fleet shares CARGO_TARGET_DIR across the canonical and checkpoint
@@ -140,8 +214,7 @@ fn main() {
     // collect_commands!, this list, and the capability grants diverge. When you
     // add/remove a collect_commands! entry, update THIS list + the capability
     // in the same change (the test tells you exactly what drifted).
-    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
-        tauri_build::AppManifest::new().commands(&[
+    let commands: &[&str] = &[
             // workspaces (WorkspaceSwitcher / HarnessWorkspacesButton)
             "workspaces_list",
             "workspaces_create",
@@ -208,7 +281,16 @@ fn main() {
             // remote http origin, so every tauri-agent-tools eval/click/dom
             // call times out — the fleet-wide "wedged shell" symptom.
             "__dev_bridge_result",
-        ]),
-    ))
+        ];
+
+    // EI-12083: catch a capability/manifest mismatch here, with an actionable
+    // message, before handing off to tauri_build (whose own error on the same
+    // condition is a ~500-line permission-enum wall with zero signal about the
+    // likely cause — see the function doc above).
+    check_capability_commands_are_registered(&manifest_dir, commands);
+
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(commands)),
+    )
     .expect("failed to run tauri_build with the app-command manifest (WI-1976)");
 }
