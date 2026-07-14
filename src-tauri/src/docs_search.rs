@@ -52,7 +52,15 @@ use tauri::{AppHandle, Manager};
 
 /// The palette window's label — stable so `get_webview_window` can find + focus
 /// an already-open palette instead of spawning a duplicate.
-const WINDOW_LABEL: &str = "docs-search-palette";
+pub const WINDOW_LABEL: &str = "docs-search-palette";
+
+/// Injected into the palette webview BEFORE any page script, on every load, so
+/// the SPA's Quick Panel window-sandbox guard (operator-core
+/// `client-navigation.ts`) knows it is running in the panel window: a navigation
+/// that would leave the chromeless panel is handed to the main app window
+/// (Spotlight-style) instead of turning this small popup into the whole operator
+/// app (WI-4827). The main app window never sets this global.
+pub const QUICK_PANEL_WINDOW_INIT_JS: &str = "window.__PAPERCUSP_QUICK_PANEL_WINDOW__ = true;";
 
 /// Menu payload for the tray's "Off" item — the disable affordance. Not an
 /// accelerator, and deliberately not a member of `PRESET_SHORTCUTS` (it must
@@ -256,7 +264,8 @@ pub fn open_palette(app: &AppHandle) {
     .always_on_top(true)
     .focused(true)
     .decorations(true)
-    .resizable(true);
+    .resizable(true)
+    .initialization_script(QUICK_PANEL_WINDOW_INIT_JS);
     if let Some(icon) = app.default_window_icon().cloned() {
         match builder.icon(icon) {
             Ok(b) => builder = b,
@@ -274,7 +283,8 @@ pub fn open_palette(app: &AppHandle) {
                 .always_on_top(true)
                 .focused(true)
                 .decorations(true)
-                .resizable(true);
+                .resizable(true)
+                .initialization_script(QUICK_PANEL_WINDOW_INIT_JS);
             }
         }
     }
