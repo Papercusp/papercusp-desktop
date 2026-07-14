@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){return e.replace(/\.git$/,``)}function n(e,n){let r=t(e);return n?`https://x-access-token:${n}@github.com/${r}.git`:`https://github.com/${r}`}function r(e){return`https://github.com/${t(e)}.git`}function i(e){return e.replace(/x-access-token:[^@\s]*@/g,`x-access-token:***@`)}var a=e((()=>{}));export{i,r as n,a as r,n as t};

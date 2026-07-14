@@ -1,1 +1,0 @@
-import{n as e,t}from"./node-module-browser-BIpJATUS.js";e();export{t as createRequire};

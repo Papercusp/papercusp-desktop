@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t){let n=new Date(e).getTime();if(!Number.isFinite(n))return`stale`;let r=t-n;return r<6e4?`live`:r<6e5?`idle`:`stale`}var n,r,i=e((()=>{n=6e4,r=6e5}));export{i,r as n,t as r,n as t};

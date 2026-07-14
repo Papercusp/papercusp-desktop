@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{r as t,t as n}from"./mdast-util-to-markdown-nhWKvnHH.js";function r(e){let n=this;n.compiler=r;function r(r){return t(r,{...n.data(`settings`),...e,extensions:n.data(`toMarkdownExtensions`)||[]})}}var i=e((()=>{n()})),a=e((()=>{i()}));export{i as n,r,a as t};

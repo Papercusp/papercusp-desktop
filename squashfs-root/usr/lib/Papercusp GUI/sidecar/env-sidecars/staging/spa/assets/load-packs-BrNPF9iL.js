@@ -1,1 +1,0 @@
-import{i as e,n as t}from"./load-packs-BF20cxWZ.js";t();export{e as loadKnowledgePack};

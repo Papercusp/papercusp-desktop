@@ -1,1 +1,0 @@
-import{o as e}from"./chunk-CMxvf4Kt.js";import{t}from"./react-C1Wm8aMI.js";var n=e(t());function r({auto:e=!1}){return(0,n.useEffect)(()=>{if(!(e&&window.self===window.top))return document.body.classList.add(`papercusp-chromeless`),()=>document.body.classList.remove(`papercusp-chromeless`)},[e]),null}export{r as t};

@@ -1,1 +1,0 @@
-import{r as e,t}from"./fanout-projection-CLAXJBc4.js";e();export{t as fanoutForObject};

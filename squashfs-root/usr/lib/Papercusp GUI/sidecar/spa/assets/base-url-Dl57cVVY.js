@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(){let e={}.PAPERCUSP_CUPBOARD_URL;return e&&e.trim()?e.trim().replace(/\/+$/,``):n}var n,r=e((()=>{n=`https://cupboard.papercusp.com`}));export{r as n,t as r,n as t};

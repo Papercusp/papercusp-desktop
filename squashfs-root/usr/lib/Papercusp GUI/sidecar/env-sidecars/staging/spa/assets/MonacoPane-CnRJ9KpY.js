@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-sLPvdpSW.js";import{t}from"./dist-CSRU-AuW.js";var n=e();function r({value:e,onChange:r}){return(0,n.jsx)(t,{height:`100%`,language:`markdown`,theme:`vs-dark`,value:e,onChange:e=>r(e??``),options:{wordWrap:`on`,minimap:{enabled:!0},fontSize:13,scrollBeyondLastLine:!1}})}export{r as default};

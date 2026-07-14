@@ -1,4 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./__vite-browser-external-CM3Eme-n.js";function n(e){if(!e.startsWith(`---
-`))return null;let t=e.indexOf(`
----`,4);if(t<0)return null;let n=e.slice(4,t),r={};for(let e of n.split(`
-`)){if(!e.trim()||e.trim().startsWith(`#`)||e.startsWith(`  `))continue;let t=e.indexOf(`:`);if(t<0)continue;let n=e.slice(0,t).trim(),i=e.slice(t+1).trim();n&&((i.startsWith(`"`)&&i.endsWith(`"`)||i.startsWith(`'`)&&i.endsWith(`'`))&&(i=i.slice(1,-1)),i.startsWith(`[`)&&i.endsWith(`]`)?r[n]=i.slice(1,-1).split(`,`).map(e=>e.trim()).filter(Boolean).map(e=>e.startsWith(`"`)&&e.endsWith(`"`)||e.startsWith(`'`)&&e.endsWith(`'`)?e.slice(1,-1):e):r[n]=i)}return r}var r=e((()=>{t(),t()}));export{n,r as t};

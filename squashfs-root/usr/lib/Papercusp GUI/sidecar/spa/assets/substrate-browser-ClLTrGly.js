@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(){throw Error(`P2P substrate networking (corestore/hyperswarm/hyperdht/sodium/udx) is server-only and cannot run in the operator-vite browser bundle`)}var n,r=e((()=>{n=new Proxy(function(){t()},{get(e,t){return t===Symbol.toPrimitive||t===`toString`?()=>`[substrate-browser-shim]`:n},apply:t,construct:t})}));export{n,r as t};

@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t,n){let r=t.split(`.`),i=e;for(let e of r)if(typeof i!=`object`||!i||(i=i[e],i===void 0))return n;return i??n}function n(e){let t=e.phase??`staging`,n=(e.phases??{})[t]??{};return{phase:t,port:n.port==null?``:String(n.port),dbPath:n.dbPath==null?``:String(n.dbPath)}}var r=e((()=>{}));export{r as n,n as r,t};

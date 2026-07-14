@@ -1,5 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e,t=50){let n=[...e].sort((e,t)=>t.miss_count-e.miss_count||t.distinct_agents-e.distinct_agents),i=null;for(let t of e){let e=r(t.updated_at);(i===null||e>i)&&(i=e)}return{entries:n.slice(0,t).map(e=>({surface:e.surface,queryNorm:e.query_norm,exampleQuery:e.example_query,missCount:e.miss_count,distinctAgents:e.distinct_agents,lastMissedAt:r(e.last_missed_at),candidateImprovementId:e.candidate_improvement_id})),totalEntries:e.length,totalMisses:e.reduce((e,t)=>e+t.miss_count,0),filedCount:e.filter(e=>e.candidate_improvement_id!=null).length,minedAt:i}}async function n(e,n,r=50){return t(await e`
-    SELECT surface, query_norm, example_query, miss_count, distinct_agents,
-           last_missed_at, candidate_improvement_id, updated_at
-      FROM harness_shared.negative_space_demand
-     WHERE workspace_id = ${n}`,r)}var r;e((()=>{r=e=>e instanceof Date?e.toISOString():String(e)}))();export{n as readDemandSnapshot};

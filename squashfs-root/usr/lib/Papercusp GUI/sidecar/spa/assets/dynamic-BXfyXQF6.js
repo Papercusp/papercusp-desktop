@@ -1,1 +1,0 @@
-import{o as e}from"./chunk-CMxvf4Kt.js";import{t}from"./react-C1Wm8aMI.js";import{t as n}from"./jsx-runtime-sLPvdpSW.js";var r=e(t()),i=n();function a(e,t){let n=(0,r.lazy)(async()=>{let t=await e();return`default`in t?t:{default:t}}),a=t?.loading?t.loading():null;return e=>(0,i.jsx)(r.Suspense,{fallback:a,children:(0,i.jsx)(n,{...e})})}export{a as t};

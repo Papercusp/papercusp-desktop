@@ -1,9 +1,0 @@
-[Desktop Entry]
-Categories=Development;
-Comment=Open-source autonomous-harness framework
-Exec=papercusp-desktop
-StartupWMClass=papercusp-desktop
-Icon=papercusp-desktop
-Name=Papercusp GUI
-Terminal=false
-Type=Application

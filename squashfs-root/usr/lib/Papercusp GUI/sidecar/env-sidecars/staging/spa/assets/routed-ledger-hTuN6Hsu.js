@@ -1,1 +1,0 @@
-import{a as e,r as t}from"./routed-ledger-B11WcjI5.js";t();export{e as readRoutedIdeas};
