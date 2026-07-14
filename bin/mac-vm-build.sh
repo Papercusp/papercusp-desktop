@@ -409,6 +409,21 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   done
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
+  # ── WI-4723: fail-closed identity scan of the ASSEMBLED .app (mac creds-leak gate) ──
+  # The fail-closed backstop for the resource-hygiene rsync above: scan the bytes
+  # that actually ship. audit-release-bundle.py --scan-dir hunts the build-box
+  # identity AND the known-sensitive cross-box identities (aviweiss/avraham/
+  # marsh-office, WI-4419 KNOWN_SENSITIVE_IDENTITIES — hunted regardless of which
+  # box runs the build, so the mac leg catches avraham/marsh-office too) over the
+  # assembled tree, honoring NO path-exclude, and exits non-zero if any land in the
+  # .app. grep -rIlE skips binary files, so shipped dylibs with an embedded build
+  # path don't false-positive — only TEXT leaks (the docs class) trip it. This
+  # closes the mac gap the 0.0.9 ARRIVES probe caught: the linux AppImage leg has
+  # the equivalent scan (build-appimage.sh), the mac leg had NONE. Fail BEFORE the
+  # host-baked assert + the artifact hardlink below, so a dirty .app — and its
+  # already-minted .app.tar.gz+.sig — can never reach record-release.
+  python3 "$HERE/audit-release-bundle.py" --scan-dir "$role_bundle_dir/macos/$role_label.app" \
+    || { echo "ERROR: $role_label — assembled .app carries sensitive identity (see scan above); refusing to package a bundle that leaks build-infra creds"; exit 1; }
   # LABELED != PACKED (WI-4389): the .app EXISTING says nothing about whether the
   # update source actually made it into the binary. option_env!("PAPERCUSP_RELEASE_HOST")
   # reads the env of THIS cargo process — on the VM — and bakes an empty string,
