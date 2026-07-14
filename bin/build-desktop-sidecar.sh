@@ -206,66 +206,13 @@ echo "→ esbuild-bundling the serve entry (headless operator boot) → $SIDECAR
 # banner re-creates them — the standard esbuild-ESM-for-Node recipe — for
 # the bundled code + the externalized CJS deps below.
 #
-# node-pty (the pty-terminal routes) is the host's one hard native dep —
-# it loads a platform .node binary and cannot be inlined. Keep the list in
-# sync if a future host route pulls in another native/.wasm package (see
-# the FIRST-BUILD NOTE above).
-# `const module/exports`: some bundled files use the CJS `if (require.main ===
-# module)` CLI-guard idiom (e.g. bin/audit-memory-anchors.ts). In an ESM bundle
-# `module` is undefined → ReferenceError at host.mjs load. Define a dummy
-# `module` (an object, so `require.main === module` is always false → the CLI
-# guard body is skipped, which is correct — it is not the entrypoint) + a
-# matching `exports`.
-HOST_BANNER="import{createRequire as __pcr}from'module';import{fileURLToPath as __pftu}from'url';import{dirname as __pdn}from'path';const require=__pcr(import.meta.url);const __filename=__pftu(import.meta.url);const __dirname=__pdn(__filename);const module={exports:{}};const exports=module.exports;"
-# Native (.node-addon) packages esbuild cannot inline — they load a platform
-# binary via node-gyp-build / bare's `require.addon`, which only resolves
-# relative to the real package dir. Inlining them makes host.mjs crash at LOAD
-# with "Cannot find addon" (observed: sodium-native). node-pty (@lydell) is the
-# pty dep; the rest are the hypercore/holepunch "dogfood substrate" P2P stack,
-# eagerly imported by the orchestrator-claim + harness + dogfood-substrate
-# routes. Each is externalized here AND copied (with prebuilds/) into the
-# bundle below. Over-shipping an unused one is harmless; a missing required one
-# crashes the boot.
-NATIVE_PKGS=(
-  sodium-native udx-native rocksdb-native quickbit-native rabin-native
-  simdle-native fs-native-extensions
-  bare-fs bare-os bare-url bare-inspect bare-type
-  # better-sqlite3 — REQUIRED addon (native-addon-preflight.ts DEFAULT_REQUIRED_ADDONS;
-  # mem0's store). Loaded via dynamic require('better-sqlite3') (the boot preflight
-  # test-load + mem0), so esbuild never sees it statically → it was neither inlined
-  # nor copied, and the packaged operator FAILed the addon preflight at boot with
-  # "Cannot find module 'better-sqlite3'" (2-machine release rig, EI-2634).
-  # Externalize + closure-copy brings the package incl. its build/Release/
-  # better_sqlite3.node binding + bindings/prebuild-install — same pattern as the
-  # natives above. (shared-hive-public-release-2026-06-22 BUG-2.)
-  better-sqlite3
-  # ssh2 — its optional sshcrypto.node accel binding only EXISTS where
-  # node-gyp could build it (the mac VM has Xcode; the linux box doesn't
-  # compile it), and esbuild has no .node loader → mac-only bundle error.
-  # Externalize + closure-copy (asn1, bcrypt-pbkdf) like the other natives;
-  # its in-tree try/catch handles an absent binding at runtime.
-  ssh2
-  # ONNX local-voice stack (P-009): voice-node/kokoro-local dynamic-imports
-  # @huggingface/transformers for in-process Kokoro TTS. transformers require()s
-  # onnxruntime-node's `.node` addon through a TEMPLATE specifier
-  # (`../bin/napi-v6/${process.platform}/${process.arch}/…`), which esbuild follows
-  # into all 5 platform binaries → "No loader is configured for .node files" (it
-  # broke bundle-host.sh outright: :3170 down + release deploy dead, 2026-07-12).
-  # Externalizing @huggingface/transformers also stops esbuild at the package
-  # boundary, so the whole onnxruntime graph leaves the bundle; closure-copy then
-  # ships the runtime. Foreign-platform binaries are pruned below (AppImage/WI-807).
-  onnxruntime-node
-  "@huggingface/transformers"
-)
+# The banner, native-package list, and shared optional externals are sourced
+# from the development-host recipe so a host-graph change cannot silently
+# leave the packaged sidecar with a different esbuild boundary.
 source "$WEB_DIR/bin/bundle-host-common.sh"
 HOST_EXTERNALS=(
   "${HOST_COMMON_EXTERNALS[@]}"
-  # cpu-features — OPTIONAL native dep of ssh2 (required inside try/catch; ssh2
-  # falls back cleanly when the require fails). Its build/Release/*.node binding
-  # comes and goes with node_modules churn (node-gyp can't rebuild it under
-  # modern Python — distutils removed), so bundling it makes the sidecar build
-  # flaky. Externalize: present → loads; absent → ssh2's catch handles it.
-  --external:cpu-features
+
   # @embedded-postgres/<platform> — `embedded-postgres/dist/binary.js` does
   # `import('@embedded-postgres/<plat>')` for EVERY platform, but only the host's
   # own (linux-x64) is installed, so esbuild can't resolve the others and the
