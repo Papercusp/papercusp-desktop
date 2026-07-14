@@ -53,20 +53,18 @@ AUDIT_PY="$DESK/bin/audit-release-bundle.py"
 echo "==> purging any stale AppDir under $APPIMG_DIR (WI-4736: a reused stale AppDir ships an un-pruned/leaky sidecar)"
 rm -rf "$APPIMG_DIR"/*.AppDir
 
-# 0b. PURGE the tauri RELEASE RESOURCE-STAGING intermediates — the ACTUAL accumulation
-#     point behind the AppImage leak (proven su-b0fbf 2026-07-14, EI-11730). `tauri build`
-#     stages each `resources` glob (sidecar/**, seed/**, resources/*) into
-#     $CT/release/<name>/ next to the release binary, and the appimage AppDir is assembled
-#     FROM THERE — but that staging is copy-into-never-delete, so each dir accumulates the
-#     UNION of every past cut. On this box $CT/release/sidecar (11G) still held code-server
-#     (mtime 2026-06-17, dropped 07-07) + meridian-host (517M) + pre-prune operator-docs,
-#     and $CT/release/seed held a stale corestore/db/LOG — all coexisting with THIS cut's
-#     fresh files. The .deb is immune (its bundler archives straight from the clean
-#     src-tauri/sidecar). Wiping these forces tauri to restage the resources FRESH from the
-#     clean sources on the build below, so the shipped AppDir equals the clean sidecar.
-#     (Bonus: reclaims ~15G on a disk-pressured box.)
-echo "==> purging stale tauri resource-staging intermediates under $CT/release (EI-11730: the AppDir refills from HERE — the real accumulation point the step-0 AppDir wipe missed)"
-rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources"
+# 0b. Opportunistic DISK HYGIENE (NOT the leak fix — see step 2b). The tauri release
+#     resource-staging dirs $CT/release/{sidecar,seed,resources} are copy-into-never-delete,
+#     so they accumulate the union of past cuts (this box's $CT/release/sidecar was 11G,
+#     holding a month-stale code-server + meridian-host). Wiping them reclaims ~15G on a
+#     disk-pressured builder. NOTE (su-b0fbf 2026-07-14, EI-11730): wiping these does NOT by
+#     itself stop the AppImage leak — proven, a fresh AppDir built AFTER this wipe still
+#     carried 339 files. tauri sources the AppDir sidecar from an opaque path (two relocated
+#     target trees are in play: $CT -> /mnt/data/.../cargo-target and the src-tauri/target
+#     symlink -> /mnt/data/.../papercusp-desktop-src-tauri-target). The guaranteed fix is the
+#     correct-by-construction force-sync in step 2b, below.
+echo "==> purging tauri resource-staging intermediates under $CT/release (EI-11730: disk hygiene, reclaims ~15G — does NOT by itself fix the leak; see step 2b)"
+rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/null || true
 
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.
@@ -79,6 +77,42 @@ PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-}" PAPERCUSP_BUILD_VERSION="${PAPERC
 APPDIR="$(ls -d "$APPIMG_DIR"/*.AppDir 2>/dev/null | grep -vi server | head -1)"
 [ -n "$APPDIR" ] && [ -d "$APPDIR" ] || { echo "FATAL: no AppDir under $APPIMG_DIR — tauri didn't get far enough" >&2; exit 1; }
 echo "==> finishing AppDir: $APPDIR"
+
+# 2b. THE LEAK FIX (EI-11730, su-b0fbf 2026-07-14) — correct-by-construction.
+#     tauri's appimage bundler populates the AppDir's bundled sidecar from an opaque
+#     staging path that, UNLIKE the .deb, accumulates dropped trees (code-server,
+#     meridian-host) + pre-prune docs across cuts. Wiping the AppDir (step 0) AND the
+#     $CT/release/* staging (step 0b) both PROVED INSUFFICIENT — a fresh AppDir still
+#     carried 339 leaking files, sourced from a location neither wipe controls (two
+#     relocated target trees confound it). So instead of chasing tauri's copy source, we
+#     make the shipped bytes a PURE FUNCTION of the single source of truth: rsync --delete
+#     the freshly pruned+identity-scanned src-tauri/sidecar/ over the AppDir's sidecar.
+#     After this the AppDir sidecar EQUALS the clean .deb sidecar exactly — anything tauri
+#     staged that is absent from the clean source (code-server, meridian-host, stale docs)
+#     is deleted here. The step-3d scan then validates the result as a fail-closed backstop.
+#     tauri.conf bundle.resources = [sidecar/**, resources/*, seed/**], so the AppDir
+#     carries THREE sibling resource trees under usr/lib/<product>/ (sidecar, resources,
+#     seed) — the leak spanned sidecar/ AND seed/ (a stale corestore/db/LOG). Force-sync
+#     EACH from its clean src-tauri/<name>/ source; if a source is gone but the AppDir has
+#     a stale tree (e.g. a dropped resource), delete it outright.
+APPDIR_SIDECAR="$(ls -d "$APPDIR"/usr/lib/*/sidecar 2>/dev/null | head -1)"
+if [ -z "$APPDIR_SIDECAR" ] || [ ! -d "$APPDIR_SIDECAR" ]; then
+  echo "FATAL: no bundled sidecar under $APPDIR/usr/lib/*/sidecar — tauri bundle incomplete" >&2; exit 1
+fi
+LIBDIR="$(dirname "$APPDIR_SIDECAR")"   # $APPDIR/usr/lib/<product>
+for _res in sidecar resources seed; do
+  _src="$DESK/src-tauri/$_res"
+  _dst="$LIBDIR/$_res"
+  [ -e "$_dst" ] || continue           # AppDir doesn't carry this resource → nothing to fix
+  if [ -d "$_src" ]; then
+    echo "==> force-syncing AppDir/$_res to the clean src-tauri/$_res (EI-11730: correct-by-construction)"
+    rsync -a --delete "$_src"/ "$_dst"/
+    echo "   AppDir/$_res now mirrors the clean source ($(du -sh "$_dst" 2>/dev/null | cut -f1))"
+  else
+    echo "==> AppDir carries /$_res but src-tauri/$_res is absent — removing the stale tree (EI-11730)"
+    rm -rf "$_dst"
+  fi
+done
 
 # 3. appimagetool requires the desktop file's Icon=<name> to exist as <name>.png at
 #    the AppDir ROOT. linuxdeploy names the root icon after the productName, but the
