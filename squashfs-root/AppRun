@@ -1,0 +1,23 @@
+#!/bin/bash
+# Robust shell AppRun (replaces linuxdeploy's crashing compiled AppRun) — WI-2902.
+HERE="$(dirname "$(readlink -f "${0}")")"
+export APPDIR="${APPDIR:-$HERE}"
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$HERE/usr/bin:$PATH"
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# gdk-pixbuf image loaders
+_pbcache="$(ls "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | head -1)"
+[ -n "$_pbcache" ] && export GDK_PIXBUF_MODULE_FILE="$_pbcache"
+# gio modules (tls etc.)
+for _gio in "$HERE/usr/lib/x86_64-linux-gnu/gio/modules" "$HERE/usr/lib/gio/modules"; do
+  [ -d "$_gio" ] && export GIO_MODULE_DIR="$_gio" && break
+done
+# gstreamer (webkit media)
+[ -d "$HERE/usr/lib/gstreamer-1.0" ] && export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+# WebKitGTK helper-process exec path (network/web process live beside the lib)
+for _wk in "$HERE/usr/libexec/webkit2gtk-4.1" "$HERE/usr/lib/webkit2gtk-4.1" "$HERE/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"; do
+  [ -d "$_wk" ] && export WEBKIT_EXEC_PATH="$_wk" && break
+done
+# single-process webkit sandbox off (AppImage helper processes can't sandbox)
+export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
+exec "$HERE/usr/bin/papercusp-desktop" "$@"

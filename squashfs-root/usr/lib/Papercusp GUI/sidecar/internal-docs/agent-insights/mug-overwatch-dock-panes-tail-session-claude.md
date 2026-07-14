@@ -1,0 +1,89 @@
+# The Mug/Overwatch dock panes tail transcripts under session-claude, not ~/.claude/projects
+URL: /internal/docs/agent-insights/mug-overwatch-dock-panes-tail-session-claude
+
+The dock's ♛ mug / 👁 overwatch panes are READ-ONLY transcript tails (`pui brain-view`), not interactive psu sessions. They showed "waiting…" because psu-launched agents write their transcript under ~/.papercusp/session-claude/<session>/projects/<munged>/<uuid>.jsonl — NOT ~/.claude/projects/ — and the roster's sessionId was empty for them. Map of all four moving parts.
+
+## Symptom
+
+The desktop chat dock's `♛ mug` and `👁 overwatch` panes are blank or stuck on
+`… not running right now — waiting…`, even while the autonomous Mug is clearly
+alive and doing real work (placements, escalations, wakes). Relaunching the app,
+or opening a second instance, never shows the same Mug — historically each
+instance spawned its own parked per-window shell.
+
+## The design (D-003 of `mug-overwatch-live-visibility-2026-06-16`)
+
+Those two panes are **read-only transcript tails** — `pui brain-view --mug` /
+`pui brain-view --overwatch` (`apps/tui/src/brain_view.rs`), NOT interactive
+`psu --brain` / `psu --role=overwatch` sessions. A single Claude session can't be
+attached in two places, so the old interactive panes could never render the same
+agent across instances and blanked when their shell exited. A read-only tail of
+the **shared backend transcript** renders identically in unlimited instances and
+survives shell exit. To make a pane show live turns, FOUR things must line up:
+
+### 1. Two transcript roots — psu agents do NOT write to `~/.claude/projects/`
+
+A plain interactive Claude session writes `~/.claude/projects/<munged-cwd>/<uuid>.jsonl`.
+But a **psu-launched** agent (mug / overwatch / cup) gets a per-session config dir,
+so its transcript lands at:
+
+```
+~/.papercusp/session-claude/<session>/projects/<munged-cwd>/<uuid>.jsonl
+```
+
+— one extra `<session>` level, a different root. `locate_session_transcript`
+(`apps/tui/src/transcript.rs`) must scan **both** roots. Scanning only
+`~/.claude/projects` (the original bug) finds nothing for any psu agent, so every
+mug/overwatch/cup pane reads as "waiting" while a 450 KB live transcript sits
+untouched under `session-claude`.
+
+### 2. The roster `sessionId` comes from the adv row, not `spawned_agents`
+
+The pane resolves the agent's native uuid from the live roster (`/api/adv/roster`).
+A spawned cup records its uuid in `spawned_agents.session_id`; a psu agent has **no
+spawned\_agents row** but stamps the uuid on its `adv_sessions` row (mig 115). So
+`mergeRosterEntries` (`packages/operator-core/lib/adv-roster.ts`) must fall back:
+`sessionId: sessionsByOwner.get(ownerId) ?? adv?.sessionId ?? null`. Without the
+fallback the mug/overwatch entries carry `sessionId: null` and the pane filters
+them all out → "waiting".
+
+### 3. Resolve the NEWEST wake with a transcript, not the first match
+
+The Mug is **fresh-per-wake** — every wake is a new session with a new uuid
+(see \[\[pot-mug-fresh-per-wake]]); the roster accumulates dozens of past wakes
+(45 active + 24 ended is normal). `resolve_session` sorts by `adv_session_id` (a
+serial PK — higher = launched later) and returns the most recent wake that has a
+transcript on disk, so the pane shows her latest activity and rolls forward to
+each new wake. A `.find(first match)` instead pins to the OLDEST stale wake.
+
+### 4. The pane connects via `endpoint-ipc.json` — that operator must carry the fix
+
+`OperatorClient::from_discovery()` prefers the local IPC socket resolved from
+`~/.papercusp/endpoint-ipc.json` (last-writer-wins on a multi-operator dev box).
+So the pane talks to **whatever operator wrote that file last** — which is NOT
+necessarily the desktop's `/api`-pinned build target (`PAPERCUSP_DEV_API_TARGET`
+only re-points the web content). If that operator lacks the §2 roster fallback
+(e.g. green `:3070` before the deploy lands), the pane sees `sessionId: null` and
+shows "waiting" even though a sibling operator (`:3170`/`:3270`, integration tree)
+returns it fine. Diagnosing "works in one instance, waits in another" starts here:
+`cat ~/.papercusp/endpoint-ipc.json` → which pid/port → does its `/api/adv/roster`
+expose the mug's `sessionId`?
+
+## Shipping it
+
+Two artifacts, two paths:
+
+* **Operator** (`adv-roster.ts`, §2) deploys to `:3070` via the normal staging →
+  green-checkpoint → release pipeline.
+* **pui binary** (`transcript.rs` §1 + `brain_view.rs` §3 + the `layout.rs` dock
+  KDL that makes the panes `pui brain-view`) is a CLIENT binary — `cargo install --path apps/tui --force` to `~/.cargo/bin/pui`, then **relaunch the dock** (a
+  running pane keeps its old binary — see
+  \[\[pui-dock-pane-runs-the-binary-it-launched-with]]).
+
+## Verify without a screenshot
+
+`pui brain-view --mug` run directly uses the exact pane code path (IPC →
+operator → resolve → locate → tail). It prints `── attached: Mug <uuid8> ──`
+then `[user]…/[assistant]…` turns, or `waiting…` if §1–§4 aren't all satisfied.
+Two independent runs printing the SAME `attached: …` uuid confirms every instance
+resolves the same wake (the "same Mug every time" requirement).

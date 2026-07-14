@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";var t,n=e((()=>{t=[`analogical`,`first-principles`,`reframing`,`constraint-removal`],[...t]}));export{n,t};

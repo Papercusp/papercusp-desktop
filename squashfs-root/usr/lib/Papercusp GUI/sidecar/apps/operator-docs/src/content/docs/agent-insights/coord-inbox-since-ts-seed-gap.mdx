@@ -1,0 +1,84 @@
+---
+title: "coord:inbox since_ts tail-poll: never seed the cursor to \"now\"/poll-start"
+description: A hand-rolled since_ts poll loop that seeds its cursor to poll-loop-start (instead of task-start, or an unfiltered first read) structurally cannot see a message that already landed before the loop began. Prefer coord:await-inbox (push/wake) for "wait for one specific message" patterns.
+discovered: 2026-07-02
+tags: [coord, inbox, since_ts, polling, handoff, race-condition]
+status: active
+documents:
+  - packages/operator-core/lib/agent-tools/coordination/tools/inbox.ts
+  - packages/operator-core/lib/agent-tools/coordination/tools/await-inbox.ts
+  - libs/generic/pubsub-substrate/src/core/inbox.ts
+plans:
+  - ornith-2agent-comms-probe-2026-07-02
+sidebar:
+  order: 20
+---
+
+## TL;DR
+
+`coord:inbox { since_ts }` is a **strict forward-tail filter**: it returns only
+entries with `ts` strictly after the given timestamp. If you hand-roll a
+polling loop around it — "wait for a message whose summary starts
+`HANDOFF-TO-PARTNER:`" — and you seed `since_ts` to **wall-clock "now" at the
+moment your poll loop starts**, any message that already landed **before**
+that instant is invisible to every subsequent poll. A forward-tail filter
+cannot retroactively see something that arrived before its own cutoff. There
+is no timeout-driven retry that fixes this: you can poll for the full window
+and still never see it, because the message is permanently excluded by the
+predicate, not merely delayed.
+
+## Where this was found
+
+Live-caught by the `ornith-2agent-comms-probe-2026-07-02` 2-agent handoff
+drill (WI-1600, WI-1581 comment, plan D-002). Agent A sent its
+`HANDOFF-TO-PARTNER:` broadcast at `14:48:12Z`, **while Agent B was still
+claiming its own work-item** (naturally slower — claim → declare-intent →
+enter its poll loop). Agent B's poll loop didn't start until `~14:49:30Z` and
+seeded `since_ts` to that instant. The handoff (`ts=14:48:12Z`) was already
+older than B's cutoff on B's very first poll, so it was excluded from **every**
+poll for the full 15-minute timeout. Agent B only found it via a bare,
+unfiltered `coord:inbox` call (no `since_ts`) after giving up on the tail-poll.
+
+The handoff content itself was complete and accurate — this is purely a
+**consumer-side protocol gap**, not a sender bug or a data-loss bug (the
+message was in the log the whole time; the filter just excluded it from the
+poller's view by construction).
+
+## The fix — two options, prefer (b)
+
+**(a) If you must hand-roll a since_ts tail-poll:** do **one unfiltered read
+first** (omit `since_ts` entirely, or set it to your own **task-start**
+timestamp, never poll-loop-start) to see the current backlog. Then, for every
+poll after that, advance your cursor to `summary.newest_ts` **of what you
+actually saw** — never to wall-clock "now". This is exactly the pattern the
+standard mid-turn coord-injection hook already uses correctly (see
+[coord-mid-turn-delivery](/agent-insights/coord-mid-turn-delivery)): its first
+run seeds the cursor to "now" too, but that's safe there ONLY because the
+session-start `coord:inbox`/`coord:orient` call (unfiltered) already surfaced
+the existing backlog before the hook's cursor gets seeded — the hook's "now"
+seed is really "now, after the baseline read", not "now, before anything is
+checked."
+
+**(b) Better: don't hand-roll polling at all.** For "wait until a specific
+peer sends me something" — the exact shape of this drill — use
+`coord:await-inbox` (an idle-state annotation over the always-armed
+inbox-wake watch). You are already wakeable at session start; a peer's
+`coord:send {wake:true}` re-invokes you regardless of any cursor, so there is
+no seed-timing race to get wrong. Reserve `since_ts` tail-polling for genuine
+periodic sweeps where you don't have one specific message to wait for.
+
+## Generalizes to
+
+Any consumer-side "poll a timestamped log with `since_ts`/`since`/`cursor`"
+pattern in this codebase has the same structural hazard if the cursor is
+seeded to the poll-loop's own start time rather than to a point **before**
+the producer could plausibly have already written. Same class as the
+opposite-direction "backfill your cursor from the newest-seen ts, not
+wall-clock" rule that `coord:inbox`'s own read-receipt watermark
+(`messages_shown_ts`) already follows correctly — the bug here was a
+mirror-image mistake at the *other* end of the same cursor's lifecycle (the
+seed, not the advance).
+
+`coord:inbox`'s tool description now carries this caution inline (WI-1600
+fix, 2026-07-02) so an agent reading the schema sees it before writing a
+polling loop, without needing to have found this doc first.

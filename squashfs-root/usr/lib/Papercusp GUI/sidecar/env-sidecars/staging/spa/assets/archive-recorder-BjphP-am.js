@@ -1,0 +1,42 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-BvZp-r10.js";import{r,s as i,t as a}from"./store-oEC4iwnu.js";import{i as o,n as s,t as c}from"./elite-outcome-record-CF19_agl.js";function l(e){return`${e.scope}|${e.domain.toLowerCase()}|${e.risk}`}function u(e){return e<0?0:e>1?1:e}function d(e){let t=Math.max(0,b.indexOf(e.scope)),n=Math.max(0,x.indexOf(e.risk)),r=b.length>1?t/(b.length-1):0,i=x.length>1?n/(x.length-1):0,a=e.domain.toLowerCase();return[r,i,...S.map(e=>+(e===a))]}function f(e,t){let n=Math.max(e.length,t.length);if(n===0)return 0;let r=0;for(let i=0;i<n;i++){let n=(e[i]??0)-(t[i]??0);r+=n*n}return u(Math.sqrt(r)/Math.sqrt(n))}function p(e,t,n=3,r={}){let i=r.excludeSelf??!0,a=t.map(t=>f(e,t));if(i&&(a=a.filter(e=>e>1e-9)),a.sort((e,t)=>e-t),a.length===0)return 1;let o=a.slice(0,Math.max(1,n));return o.reduce((e,t)=>e+t,0)/o.length}function m(e,t){let n=t?.promptOverrides??{},r=[];for(let[t,i]of Object.entries(e.promptOverrides??{})){let e=t in n?n[t]:null;e!==i&&r.push({role:t,before:e,after:i})}return r}function h(e){return e<=1?`local`:e===2?`module`:e<=4?`cross-cutting`:`architectural`}function g(e){return e<T?`low`:e<E?`medium`:`high`}function _(e){let t=0;for(let n of e)if(n.before===null)t+=n.after.length;else{let e=Math.abs(n.after.length-n.before.length);t+=e>0?e:n.after.length}return t}function v(e){let t=new Set;for(let n of e)t.add(w[n.role]??`execution`);return t.size===1?[...t][0]:`mixed`}function y(e){let t=m(e.overlay,e.parentOverlay),n={scope:h(t.length),domain:v(t),risk:g(_(t))};return{coords:n,features:d(n)}}var b,x,S,C,w,T,E,D=e((()=>{b=[`local`,`module`,`cross-cutting`,`architectural`],x=[`low`,`medium`,`high`],S=[`planning`,`execution`,`quality`,`knowledge`,`mixed`],C=b.length*S.length*x.length,w=Object.freeze({scoper:`planning`,architect:`planning`,worker:`execution`,validator:`quality`,reviewer:`quality`,documenter:`knowledge`,curator:`knowledge`}),T=400,E=1500}));function O(e,t){return t.fitness-e.fitness||(e.nicheKey<t.nicheKey?-1:+(e.nicheKey>t.nicheKey))}function k(e,t){let n=[...e].sort(O);if(n.length<=t)return n;let r=[n[0]];for(;r.length<t;){let e=null,t=-1;for(let i of n){if(r.includes(i))continue;let n=1/0;for(let e of r){let t=f(i.descriptor.features,e.descriptor.features);t<n&&(n=t)}(n>t||n===t&&e!==null&&i.nicheKey<e.nicheKey)&&(t=n,e=i)}if(!e)break;r.push(e)}return r}var A,j=e((()=>{D(),A=class{store;constructor(e){this.store=e}async upsertElite(e,t=Date.now()){let n=l(e.descriptor.coords),r=await this.store.list(),i=p(e.descriptor.features,r.map(e=>e.descriptor.features),1,{excludeSelf:!1}),a=r.find(e=>e.nicheKey===n)??null,o={nicheKey:n,coords:e.descriptor.coords,candidateId:e.candidateId,fitness:e.fitness,descriptor:e.descriptor,source:e.source??`gym`,rationale:e.rationale??null,updatedAt:t};return a?e.fitness>a.fitness?(await this.store.put(o),{admitted:!0,reason:`improved`,nicheKey:n,isNewNiche:!1,novelty:i,replaced:a.candidateId,elite:o}):{admitted:!1,reason:`dominated`,nicheKey:n,isNewNiche:!1,novelty:i,elite:a}:(await this.store.put(o),{admitted:!0,reason:`new-niche`,nicheKey:n,isNewNiche:!0,novelty:i,elite:o})}async getElite(e){return this.store.get(e)}async listElites(e){return this.store.list(e)}async noveltyScore(e,t=3){let n=await this.store.list();return p(e.features,n.map(e=>e.descriptor.features),t)}async coverage(){let e=(await this.store.list()).length,t=C;return{filled:e,total:t,fraction:t?e/t:0}}async steppingStones(e={}){let t=Math.max(1,e.k??5),n=await this.store.list();if(n.length<=t)return n;if(e.descriptor){let r=e.descriptor.features;return[...n].map(e=>({e,d:f(r,e.descriptor.features)})).sort((e,t)=>t.d-e.d||(e.e.nicheKey<t.e.nicheKey?-1:+(e.e.nicheKey>t.e.nicheKey))).slice(0,t).map(e=>e.e)}return k(n,t)}}}));function M(e){let t=e.descriptor,n=typeof t==`string`?JSON.parse(t):t,r={scope:String(e.scope),domain:String(e.domain),risk:String(e.risk)};return{nicheKey:String(e.niche_key),coords:r,candidateId:String(e.candidate_id),fitness:Number(e.fitness),descriptor:n,source:String(e.source),rationale:e.rationale==null?null:String(e.rationale),updatedAt:Number(e.updated_at)}}var N,P=e((()=>{N=class{sql;scope;constructor(e,t){this.sql=e,this.scope=t}async get(e){let t=await this.sql`
+      SELECT * FROM harness_shared.gym_qd_archive
+       WHERE workspace_id = ${this.scope.workspaceId}
+         AND harness_slug = ${this.scope.harnessSlug}
+         AND niche_key = ${e}
+       LIMIT 1`;return t.length?M(t[0]):null}async put(e){await this.sql`
+      INSERT INTO harness_shared.gym_qd_archive
+        (workspace_id, harness_slug, niche_key, candidate_id, scope, domain, risk, fitness, descriptor, source, rationale, updated_at)
+      VALUES (${this.scope.workspaceId}, ${this.scope.harnessSlug}, ${e.nicheKey}, ${e.candidateId},
+              ${e.coords.scope}, ${e.coords.domain}, ${e.coords.risk}, ${e.fitness},
+              ${JSON.stringify(e.descriptor)}::text::jsonb, ${e.source}, ${e.rationale??null}, ${e.updatedAt})
+      ON CONFLICT (workspace_id, harness_slug, niche_key) DO UPDATE SET
+        candidate_id = EXCLUDED.candidate_id,
+        scope = EXCLUDED.scope, domain = EXCLUDED.domain, risk = EXCLUDED.risk,
+        fitness = EXCLUDED.fitness, descriptor = EXCLUDED.descriptor,
+        source = EXCLUDED.source, rationale = EXCLUDED.rationale, updated_at = EXCLUDED.updated_at`}async list(e){return(await this.sql`
+      SELECT * FROM harness_shared.gym_qd_archive
+       WHERE workspace_id = ${this.scope.workspaceId}
+         AND harness_slug = ${this.scope.harnessSlug}
+         ${e?.source?this.sql`AND source = ${e.source}`:this.sql``}
+       ORDER BY fitness DESC, niche_key ASC
+       ${e?.limit==null?this.sql``:this.sql`LIMIT ${e.limit}`}`).map(M)}}}));async function F(e,n){if(!a(e.eligibility))return{federatable:!1,reason:`not-eligible`};if(!i(e.workspaceId))throw Error(`markEliteFederatable — an eligible elite cannot federate from the '${e.workspaceId}' workspace partition (WI-1564): the coordination/'*' partition never federates, so the elite would be captured then stranded on every peer. Publish from a hive-scoped workspace.`);let r=n??t().sql;if(!e.outcomeSigner){let t=await r`
+      UPDATE harness_shared.gym_qd_archive
+         SET federatable = true
+       WHERE workspace_id = ${e.workspaceId}
+         AND harness_slug = ${e.harnessSlug}
+         AND niche_key = ${e.nicheKey}
+         AND source_hive IS NULL
+      RETURNING niche_key`,n=Array.isArray(t)&&t.length>0;return{federatable:n,reason:n?`stamped`:`no-row`}}let s=await r`
+    UPDATE harness_shared.gym_qd_archive
+       SET federatable = true
+     WHERE workspace_id = ${e.workspaceId}
+       AND harness_slug = ${e.harnessSlug}
+       AND niche_key = ${e.nicheKey}
+       AND source_hive IS NULL
+    RETURNING candidate_id, fitness, updated_at`;if(!Array.isArray(s)||s.length===0)return{federatable:!1,reason:`no-row`};let l=s[0],u=e.eligibility.outcome===`won`?`won`:`graded`,d=await o({nicheKey:e.nicheKey,candidateId:String(l.candidate_id),sourceHive:e.harnessSlug,outcome:u,grade:Number(e.eligibility.grade??0),fitness:Number(l.fitness),devicePubkeyBase64:e.outcomeSigner.devicePubkeyBase64,nowMs:Number(l.updated_at)},e.outcomeSigner.sign);return await r`
+    UPDATE harness_shared.gym_qd_archive
+       SET outcome_record = ${JSON.stringify(d)}::text::jsonb
+     WHERE workspace_id = ${e.workspaceId}
+       AND harness_slug = ${e.harnessSlug}
+       AND niche_key = ${e.nicheKey}
+       AND source_hive IS NULL`,{federatable:!0,reason:`stamped`,outcomeRecordId:c(d)}}var I=e((()=>{n(),r(),s()}));function L(e,t,n={}){let r=n.archive??R(e,t),i=t.now??(()=>Date.now()),a=new Map;return{recordArchive:async e=>{let t=y({overlay:e.overlay,parentOverlay:e.parentOverlay});a.set(e.variantId,t),await r.upsertElite({candidateId:e.variantId,descriptor:t,fitness:e.fitness,source:`gym`,rationale:e.rationale??null},i())},noveltyForVariant:async e=>{let t=a.get(e);return t?r.noveltyScore(t,n.k):1},federateAcceptedElite:async(r,i)=>{let o=a.get(r);o&&await F({workspaceId:t.workspaceId,harnessSlug:t.harnessSlug,nicheKey:l(o.coords),eligibility:i,outcomeSigner:n.outcomeSigner},e)}}}function R(e,t){return new A(new N(e,t))}var z=e((()=>{D(),j(),P(),I()}));export{x as a,l as c,S as i,R as n,b as o,L as r,D as s,z as t};

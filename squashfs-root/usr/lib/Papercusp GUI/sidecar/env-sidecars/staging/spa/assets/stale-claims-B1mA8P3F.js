@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";var t,n,r=e((()=>{t=600*1e3,n=(()=>{let e=Number({}.PAPERCUSP_PLAN_ASSIGNMENT_GRACE_MS??3600*1e3);return Number.isFinite(e)&&e>0?e:3600*1e3})(),(()=>{let e=Number({}.PAPERCUSP_PLAN_ASSIGNMENT_ACTIVITY_MS??1800*1e3);return Number.isFinite(e)&&e>0?e:1800*1e3})()}));export{t as n,r,n as t};

@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){return e?r.test(e.trim().toLowerCase()):!1}var n,r,i=e((()=>{n=`^system[:-]|-(watch|watchdog|sweep|monitor|digest|reaper|ladder)$|^work-items$`,r=new RegExp(n)}));export{i as n,t as r,n as t};

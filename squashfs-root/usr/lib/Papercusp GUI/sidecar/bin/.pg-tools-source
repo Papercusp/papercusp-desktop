@@ -1,0 +1,5 @@
+pg_dump: copy (real binary, pgdg /usr/lib/postgresql/18/bin) (/usr/lib/postgresql/18/bin/pg_dump)
+psql: copy (real binary, pgdg /usr/lib/postgresql/18/bin) (/usr/lib/postgresql/18/bin/psql)
+pg_dumpall: copy (real binary, pgdg /usr/lib/postgresql/18/bin) (/usr/lib/postgresql/18/bin/pg_dumpall)
+pg_restore: copy (real binary, pgdg /usr/lib/postgresql/18/bin) (/usr/lib/postgresql/18/bin/pg_restore)
+kopia: copy (from system PATH) (/usr/bin/kopia)

@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){let t={HARNESS_SLUG:e.harnessSlug,PAPERCUSP_CHUNK_LOCK_PG:`1`,PAPERCUSP_TURN_TRIGGER:e.turnTrigger??`cron`};return e.idempotencyKey&&(t.IDEMPOTENCY_KEY=e.idempotencyKey),e.workspaceId&&(t.PAPERCUSP_WORKSPACE_ID=e.workspaceId),t}var n=e((()=>{}));export{n,t};

@@ -1,0 +1,1 @@
+import{n as e}from"./wake-word-KVmabuNp.js";export{e as stripWakeWordAndPrefix};

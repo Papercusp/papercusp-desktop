@@ -1,0 +1,1 @@
+var e=null;function t(t){e=t}function n(t){let n=t.trim();return!n||!e?!1:(e(n,{spoken:!0}),!0)}export{n,t};

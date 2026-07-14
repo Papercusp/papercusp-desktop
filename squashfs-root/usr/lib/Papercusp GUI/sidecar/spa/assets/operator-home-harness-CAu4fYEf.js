@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";function t(){let e={}[i]?.trim();return e&&e.length>0?e:r}function n(e){let t=e?.trim();return t?a[t]??t:e}var r,i,a,o=e((()=>{r=`papercusp`,i=`PAPERCUSP_POT_HOME_SLUG`,a=Object.freeze({papercup:`papercusp`,"papercup-hive":`papercusp`})}));export{o as a,n as i,r as n,t as o,a as r,i as t};

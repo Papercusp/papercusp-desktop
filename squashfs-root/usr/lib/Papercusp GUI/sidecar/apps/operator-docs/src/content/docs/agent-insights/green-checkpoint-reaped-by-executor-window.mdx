@@ -1,0 +1,81 @@
+---
+title: Green-checkpoint reaped at 25m — the executor-reaper no-output window must exceed the suite runtime
+description: >-
+  The DBOS executor-reaper cancels any routineFire with no operation_output for DEFAULT_STALE_ROUTINE_FIRE_NO_OUTPUT_MS. The green-checkpoint runs its ~55-min suite as a single opaque `await runScript()` with no intermediate DBOS checkpoint, so when that window was 25m (tuned for Scout's 20m cycle) every checkpoint over 25m was cancelled mid-suite — never producing a verdict. The gate showed 87 consecutive "reds" / skipped-locked and froze `main` (every fleet deploy) for ~64h. Fix: raise the window above the suite runtime (60m), keeping suite(55m) < window(60m) < lock-stale(65m).
+discovered: 2026-06-29
+tags: [green-checkpoint, dbos, executor-reaper, release-pipeline, deploy, idle-session-reaper-window, main-frozen, skipped-locked]
+status: active
+documents:
+  - packages/operator-core/lib/dbos/dbos-executor-reaper.ts
+  - packages/operator-core/lib/harness/routines/release-actions.ts
+---
+
+## Symptom
+
+`release:deploy op:status` shows the gate RED with a high `consecutiveReds` and
+`lastGreenAt` many hours ago; `main` is frozen so no fleet deploy lands. The
+green-checkpoint routine metadata (`harness_shared.routines` where
+`name = 'green-checkpoint'`) shows:
+
+```
+last_error: "DBOS routineFire produced no DBOS operation output; executor reaper
+             cancelled the stuck fire and requeued the routine"
+last_error_source: "dbos-executor-reaper"
+```
+
+and `harness_shared.pipeline_events` shows a long run of `green_checkpoint` rows that
+are `skipped-locked` (never a real `not-green`/`advanced` verdict). The `flake_history`
+is stale — this is **not** a test failure.
+
+## Root cause
+
+The `green-checkpoint` action (`release-actions.ts`) runs the whole suite as a single
+`await runScript('green-checkpoint.ts', …)` bounded by `GREEN_CHECKPOINT_SUITE_TIMEOUT_MS`
+(~55m). From DBOS's view that routineFire records **no `operation_outputs` row with
+`function_id > 0`** until it completes — it is one long opaque await with no intermediate
+DBOS step checkpoint.
+
+The `dbos-executor-reaper` (a 2-min process-level sweep, NOT a DBOS workflow) cancels any
+`routineFire` that is still non-terminal, has a live queue row, and has produced no
+operation output for `DEFAULT_STALE_ROUTINE_FIRE_NO_OUTPUT_MS`. That constant was **25m**,
+tuned only for Scout's 20-min first step. Once the green-checkpoint suite grew to ~55m,
+**every checkpoint that ran longer than 25m was cancelled mid-suite** before it could emit
+a verdict; a checkpoint that happened to finish under 25m was the only way the gate ever
+went green. A cancelled run also left its 65-min run-lock stale-held, so the next fires
+came back `skipped-locked` — a self-sustaining wedge (here: ~64h, blocking all deploys).
+
+## Fix
+
+Raise `DEFAULT_STALE_ROUTINE_FIRE_NO_OUTPUT_MS` above the suite's full runtime so a healthy
+long checkpoint reaches a terminal (non-reapable) status before the window elapses. The
+cross-file invariant (the constants live in separate files because operator-core cannot
+import the apps/operator tier — same convention as the result MARKERs):
+
+```
+GREEN_CHECKPOINT_SUITE_TIMEOUT_MS (55m, release-actions.ts)
+  <  DEFAULT_STALE_ROUTINE_FIRE_NO_OUTPUT_MS (60m, dbos-executor-reaper.ts)
+  <  CHECKPOINT_LOCK_STALE_MS (65m, green-checkpoint.ts)
+```
+
+The fast orphan path (no live `workflow_queue` row → reaped in ~90s) and the dead-executor
+path (5-min liveness) are unchanged, so this longer window only delays the rare
+has-a-queue-row-but-no-output case — never the common wedge classes.
+
+## Activating the fix
+
+The reaper runs in the **bg-host** (`papercup-bg-host.service`, executor `bg-host-3270`,
+from the `papercupai-workspace/papercusp` dev tree), NOT the `:3070` release operator. The
+constant is read at boot, so the change takes effect only after
+`systemctl --user restart papercup-bg-host.service` (its watchdog restarts it routinely, so
+this is safe). After restart the boot-reap clears the stale dedup and the next checkpoint
+runs to completion.
+
+## How to diagnose next time
+
+1. `release:deploy op:status` → gate red + stale lastGreen.
+2. Query the routine metadata `last_error` / `last_error_source` — `dbos-executor-reaper`
+   means a WEDGE (cancelled fire), not a test failure.
+3. `ps -ef | grep green-checkpoint.ts` and check `~/.papercusp/checkpoint-logs/*.log`: if a
+   suite is actively running but keeps getting cancelled near a round-number minute mark,
+   suspect the reaper window. The newest *completed* log shows the real test verdict (the
+   four deterministic failures here were already fixed at HEAD — the wedge was the blocker).

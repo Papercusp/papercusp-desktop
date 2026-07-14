@@ -1,0 +1,1 @@
+import{n as e,t}from"./plugin-configs-pg-DCDm5siI.js";t();export{e as loadPluginConfig};

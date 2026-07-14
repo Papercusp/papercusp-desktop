@@ -1,0 +1,1 @@
+import{n as e,t}from"./cross-hive-boundary-boot-Cyus8-cp.js";e();export{t as ensureCrossHiveBoundariesWired};

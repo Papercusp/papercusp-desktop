@@ -1,0 +1,53 @@
+import{n as e,o as t}from"./chunk-CMxvf4Kt.js";import{t as n}from"./__vite-browser-external-CM3Eme-n.js";import{J as r,t as i}from"./src-BvZp-r10.js";import{n as a,s as o}from"./workspace-registry-Bu1Yy540.js";import{n as s,t as c}from"./papercusp-root-dbgFIsCY.js";import{a as l,o as u}from"./operator-home-harness-CAu4fYEf.js";import{n as ee,r as d,t as f}from"./rubric-template-DLH5Ffol.js";import{n as p,t as te}from"./with-plan-lock-C-GqzvxB.js";function m(e,t){let n={}[e];return n&&n.length>0?n:t}function h(e){return(0,b.existsSync)((0,x.join)(e,`package.json`))&&(0,b.existsSync)((0,x.join)(e,`packages`))}function g(e){let t=e;for(let e=0;e<24;e+=1){if(h(t))return t;let e=(0,x.dirname)(t);if(e===t)break;t=e}return null}function _(e,t){return(0,x.join)(g((0,x.dirname)((0,S.fileURLToPath)(t)))??g(process.cwd())??process.cwd(),e)}function v(e){return[{dir:m(e.envVar,e.devFallbackDir),layer:`bundled`},{dir:s(e.userSubdir),layer:`user`}]}function y(e,t){let n=new Map;for(let r of e){if(!(0,b.existsSync)(r.dir))continue;let e;try{e=(0,b.readdirSync)(r.dir)}catch{continue}for(let i of e){let e=(0,x.join)(r.dir,i),a=!1;try{a=(0,b.statSync)(e).isDirectory()}catch{a=!1}if(!a)continue;let o=t(e,i,r.layer);o&&n.set(i,o)}}return[...n.entries()].sort(([e],[t])=>e.localeCompare(t)).map(([,e])=>e)}var b,x,S,C=e((()=>{b=t(n(),1),x=t(n(),1),S=t(n(),1),c()}));function w(){return v({envVar:`PAPERCUSP_RUBRICS_DIR`,devFallbackDir:k,userSubdir:`rubrics`})}function T(e){if(!Array.isArray(e)||e.length===0)return null;let t=[];for(let n of e){if(typeof n!=`object`||!n)return null;let e=n,r=A(e.key),i=A(e.title),a=A(e.model),o=A(e.method),s=A(e.driftMarkers);if(!r||!i||!a||!o||!s)return null;let c=Array.isArray(e.ratingScale)&&e.ratingScale.every(e=>typeof e==`string`)?e.ratingScale:void 0,l=A(e.replication);t.push({key:r,title:i,model:a,method:o,driftMarkers:s,...c?{ratingScale:c}:{},...l?{replication:l}:{}})}return t}function E(e){try{if(!(0,D.existsSync)(e))return null;let t=JSON.parse((0,D.readFileSync)(e,`utf8`));return typeof t==`object`&&t?t:null}catch{return null}}function ne(e,t,n){let r=E((0,O.join)(e,`rubric.json`));if(!r)return null;let i=E((0,O.join)(e,`listing.json`))??{},a=A(r.rubricId)??A(i.id)??t,o=A(r.title)??A(i.title),s=A(r.characteristic)??A(i.category),c=T(r.criteria),l=Array.isArray(r.ratingScale)&&r.ratingScale.every(e=>typeof e==`string`)?r.ratingScale:null;return!o||!s||!c||!l||l.length===0?null:{ref:t,rubricId:a,title:o,characteristic:s,description:A(r.description)??A(i.description)??``,ratingScale:l,methodRef:A(r.methodRef)??null,criteria:c,version:A(r.version)??A(i.version)??`0.1.0`,source:A(r.source)??A(i.source)??(n===`user`?`installed`:`first-party`),dir:e,layer:n}}function re(e=w()){return y(e,ne)}function ie(e,t){return e.filter(e=>!t.has(e.rubricId))}var D,O,k,A,j=e((()=>{D=t(n(),1),O=t(n(),1),c(),C(),k=_(`rubrics`,import.meta.url),A=e=>typeof e==`string`&&e!==``?e:void 0}));function M(){return a()}function N(){return u()}function P(e){return typeof e==`string`?e:e.toISOString()}function F(e,t=!1){if(t)return`retired`;switch(e){case`active`:case`ready`:return`active`;case`superseded`:case`shipped`:return`retired`;default:return`proposed`}}function I(e){switch(e){case`active`:return`active`;case`retired`:return`superseded`;default:return`draft`}}function L(e){let t=d.safeParse(e.template_data);if(!t.success)return null;let n=t.data,r=P(e.updated_at),i=F(e.status,e.archived);return{rubricId:e.plan_slug,workspaceId:e.workspace_id,characteristic:n.characteristic,title:e.title??e.plan_slug,description:n.description??``,criteria:n.criteria.map(e=>({key:e.key,title:e.title,model:e.model,method:e.method,driftMarkers:e.driftMarkers,...e.ratingScale?{ratingScale:e.ratingScale}:{},...e.replication?{replication:e.replication}:{}})),ratingScale:n.ratingScale,methodRef:n.methodRef??null,status:i,createdBy:e.owner??null,proposedBy:n.proposedBy??e.owner??null,ratifiedBy:i===`active`?n.ratifiedBy??e.owner??null:null,createdAt:e.created??r,updatedAt:r}}function R(e){return e.sort((e,t)=>X[e.status]-X[t.status]||t.updatedAt.localeCompare(e.updatedAt))}async function z(){return{}.VITEST||await H(),B()}async function B(){try{let{sql:e}=r();return(await e`
+      SELECT plan_slug, workspace_id, harness_slug, title, status, created, updated, updated_at,
+             owner, archived, template_data
+        FROM harness_shared.harness_plans
+       WHERE workspace_id = ${M()}
+         AND template = ${f}
+         AND template_slug IS NULL
+       LIMIT 500`).map(L).filter(e=>e!==null)}catch{return[]}}async function V(){let{sql:e}=r(),t=await e`
+    SELECT plan_slug
+      FROM harness_shared.harness_plans
+     WHERE workspace_id = ${M()}
+       AND template = ${f}`;return new Set(t.map(e=>e.plan_slug))}async function H(){if(Q!==`pending`)return;Q=`running`;let e=!0;try{let t=re();if(t.length>0){let n=ie(t,await V());for(let t of n)try{await oe({rubricId:t.rubricId,characteristic:t.characteristic,title:t.title,...t.description?{description:t.description}:{},criteria:t.criteria,ratingScale:t.ratingScale,...t.methodRef?{methodRef:t.methodRef}:{},by:Z,status:`active`})}catch(n){e=!1,console.warn(`[rubrics] first-party seed failed for '${t.rubricId}' (will retry on a later read):`,n instanceof Error?n.message:n)}}}catch(t){e=!1,console.warn(`[rubrics] first-party seed deferred (store/bundle unavailable; will retry on a later read):`,t instanceof Error?t.message:t)}Q=e?`done`:`pending`}async function U(e={}){let t=await z();return e.status&&(t=t.filter(t=>t.status===e.status)),e.characteristic&&(t=t.filter(t=>t.characteristic===e.characteristic)),R(t).slice(0,Math.min(e.limit??100,500))}async function W(e){return(await z()).find(t=>t.rubricId===e)??null}function G(e){return`${e.method}${e.replication?`\n${e.replication}`:``}`}function K(e,t){if(!e)return;let n=new Map(t.criteria.map(e=>[e.key,e])),r=new Set(t.dropKeys??[]),i=[],a=e.criteria.filter(e=>!n.has(e.key)&&!r.has(e.key));a.length>0&&i.push(`DROPS ${a.length} stored criteri${a.length===1?`on`:`a`}: ${a.map(e=>`'${e.key}'`).join(`, `)} — acknowledge intentional removal with dropKeys:[${a.map(e=>`"${e.key}"`).join(`, `)}], or rubrics:get the stored rubric and resubmit ALL criteria (a partial list silently deletes the rest)`);let o=[];for(let t of e.criteria){let e=n.get(t.key);if(!e)continue;let r=G(t),i=G(e);if(r.includes(`REPLICATION DRILL`)&&!i.includes(`REPLICATION DRILL`))o.push(`criterion '${t.key}' LOSES its '${$}' testing procedure (stored method+replication carries the marker; the proposal's doesn't)`);else if(r.length>=200&&i.length<r.length*.6){let e=Math.round((1-i.length/r.length)*100);o.push(`criterion '${t.key}' procedure text (method+replication) shrinks ${r.length} → ${i.length} chars (−${e}%)`)}}if(o.length>0&&(t.allowMethodShrink&&(t.shrinkReason??``).trim()!==``||(t.allowMethodShrink?i.push(`${o.join(`; `)} — allowMethodShrink is set but shrinkReason is empty: explain WHY the procedure is intentionally shrinking`):i.push(`${o.join(`; `)} — if intentional, pass allowMethodShrink:true + shrinkReason; otherwise restore the full procedure text (rubrics:get the stored rubric and edit from it)`))),i.length>0)throw Error(`invalid_args: proposeRubric: rubrics:propose REPLACES the whole rubric document, and this proposal would SILENTLY LOSE content from stored rubric '${e.rubricId}':\n`+i.map(e=>`  • ${e}`).join(`
+`))}function q(e){let t={characteristic:e.characteristic,criteria:e.criteria,ratingScale:e.ratingScale??[...Y],...e.methodRef?{methodRef:e.methodRef}:{},...e.description===void 0?{}:{description:e.description},...e.by?{proposedBy:e.by}:{},...e.ratifiedBy?{ratifiedBy:e.ratifiedBy}:{}},n=d.safeParse(t);if(!n.success){let t=n.error.issues.map(e=>`${e.path.join(`.`)||`(root)`}: ${e.message}`).join(`; `);throw Error(`proposeRubric: invalid rubric data for '${e.rubricId}': ${t}`)}return n.data}function J(e){let{slug:t,title:n,planStatus:r,owner:i,date:a,description:o}=e,s=i?`\nowner: ${i}`:``,c=o?.trim()?o.trim():`A shared standard for a system characteristic — its criteria grade structured observations.`;return`---
+title: ${n}
+slug: ${t}
+status: ${r}
+template: ${f}
+created: ${a}
+updated: ${a}${s}
+---
+
+# ${n}
+
+## Now
+
+**State:** Rubric-template plan (template:rubric). Its structured fields (characteristic,
+criteria, ratingScale, methodRef) live in \`template_data\`, queried via
+rubrics:list/get/search; this body is the narrative model/method context. Status
+\`${r}\` ⇒ a ${F(r)} rubric.
+
+**Next:** The Mug ratifies a proposed rubric by promoting this plan to \`active\`
+(rubrics:ratify / plans:set-plan-status). Revise the criteria via plans:set-template-data.
+
+## Background
+
+${c}
+
+## Criteria — the structured \`template_data\`
+
+The per-criterion model / method / drift markers live in \`template_data\` (read via
+rubrics:get or plans:get-template-data). Agents read/write the rubric structured, never
+by parsing this markdown.
+
+## Decisions
+
+(Use plans:add-decision to append.)
+`}async function ae(e){let t=M();try{let{sql:n}=r(),i=await n`
+      SELECT harness_slug
+        FROM harness_shared.harness_plans
+       WHERE workspace_id = ${t}
+         AND plan_slug = ${e}
+         AND template = ${f}
+       LIMIT 1`;if(i[0]?.harness_slug)return{workspaceId:t,harnessSlug:i[0].harness_slug}}catch{}return{workspaceId:t,harnessSlug:N()}}async function oe(e){let t=I(e.status??`proposed`),n=q(e);K(await W(e.rubricId),e);let r=await ae(e.rubricId),i=new Date().toISOString().slice(0,10),a=J({slug:e.rubricId,title:e.title,planStatus:t,owner:e.by??null,date:i,...e.description===void 0?{}:{description:e.description}});if((await p(null,{slug:e.rubricId,intent:`rubrics:propose ${e.rubricId}`,...r},async()=>({newBody:a,templateData:{data:n},value:!0}))).kind===`busy`)throw Error(`proposeRubric: plan '${e.rubricId}' is being written by another caller`);let o=await W(e.rubricId);if(!o)throw Error(`proposeRubric: rubric '${e.rubricId}' did not resolve after write`);return o}var Y,X,Z,Q,$,se=e((()=>{i(),o(),ee(),te(),l(),j(),Y=[`healthy`,`degraded`,`broken`,`unknown`],X={active:0,proposed:1,retired:2},Z=`first-party-bundle`,Q=`pending`,$=`REPLICATION DRILL`}));export{se as n,U as r,W as t};

@@ -1,0 +1,1 @@
+import{n as e,r as t}from"./base-url-Dl57cVVY.js";e();export{t as resolveCupboardBaseUrl};

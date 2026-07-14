@@ -1,0 +1,1 @@
+import{a as e,n as t}from"./loopback-fetch-BntBvpMj.js";t();export{e as loopbackFetch};

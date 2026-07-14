@@ -1,0 +1,161 @@
+# Recovering a dropped papercusp-su MCP client via the HTTP bridge
+URL: /internal/docs/agent-insights/recovering-a-dropped-mcp-client-via-the-http-bridge
+
+When your harness MCP client disconnects (tools vanish, ToolSearch finds nothing) but the operator :3070 is healthy, replay MCP JSON-RPC directly via curl to /api/mcp and keep working — don't just idle waiting to reconnect.
+
+## What
+
+A harness's `papercusp-su` MCP **client connection** can drop mid-session and
+**not auto-reconnect**. Symptoms: every `mcp__papercusp-su__*` tool disappears,
+and `ToolSearch` for them returns *"No matching deferred tools found"*. A looping
+agent in this state will otherwise just idle ("MCP down, holding") indefinitely —
+observed live 2026-06-20 for \~1.5h+ (WI-260).
+
+**A `/loop` (or other skill) reload is a suspected trigger.** In one session
+(su-707ed, 2026-06-20, EI-1740) the `mcp__papercusp-su__*` tools were present and
+in use, then vanished *immediately after the first `/loop` ran* (a large
+deferred-tools system-reminder appeared and the papercusp-su tools were absent from
+it). The harness rebuilds its tool registry on a skill reload and the MCP
+advertisement isn't always restored. So **anticipate this specifically when you put
+yourself on a loop** — verify `coord:*` still works right after a `/loop`, and fall
+straight to the bridge if not.
+
+**Crucial check before you assume an outage:** the operator is almost certainly
+**fine**. Confirm:
+
+```bash
+curl -s -m 4 -o /dev/null -w "%{http_code}\n" http://localhost:3070/api/health   # 200?
+```
+
+If `/api/health` is 200 (and `systemctl --user` shows `papercup-dev-api` active),
+the drop is at the **harness MCP-client layer** (the streamable-HTTP/SSE
+connection died and was not re-established), NOT an operator outage. The MCP
+endpoint itself is still fully serving requests — you just need a different
+transport to it.
+
+## The bridge
+
+The `papercusp-su` MCP is plain **HTTP** (see `~/.claude.json` → `mcpServers`
+→ `papercusp-su`): a URL `http://localhost:3070/api/mcp?...` plus a
+`Authorization: Bearer <token>` header. You can replay MCP JSON-RPC over `curl`
+to that same authorized endpoint and call **any** tool (`coord:*`, `plans:*`,
+`work_items:*`, `memory:*`).
+
+Key details learned the hard way:
+
+* **Identity** comes from the `client` query param — use your `PAPERCUSP_SID`
+  (`env | grep PAPERCUSP_SID`), e.g. `client=su-400d97b0-...`. Confirm with a
+  `coord:whoami` call before any write so attribution is correct.
+  * **Continuity gotcha:** `$PAPERCUSP_SID` can DIFFER from the su-id under which
+    you already declared your lane / did work this session (observed 2026-06-20:
+    env SID `su-3ece675c` vs the established identity `su-707ed` that owned the
+    declared intent, claimed issues, and sent messages). If they differ, pass your
+    **established** id as `client=` — not blindly `$PAPERCUSP_SID` — or you fork
+    your own presence into two identities and peers see a stranger pick up your
+    work. Both ids resolve via the bridge, so choose deliberately.
+  * **EI-1753 — the flap can happen DESPITE a correct `client=`:** during operator
+    blips the server-side identity resolution can still fall back to the BEARER's
+    default session even when you passed the right `client=`, so a claim/comment
+    lands on the WRONG su-id *silently*. Mitigation until the code fix lands: right
+    before any CRITICAL write (`issues:claim`, `*:resolve`, `work_items:set_state`,
+    `coord:declare-intent`), call `coord:whoami` and confirm it returns YOUR id;
+    if it flapped, re-issue. (Fix direction: fail-closed on an unresolvable
+    `client=` rather than silently using the bearer's session.)
+* **Pass `workspace`** in the URL (e.g. `workspace=papercusp-workspace`).
+  Omitting it under `superuser=1` fails with
+  `request_rejected: scoped_superuser_workspace_unresolved`.
+* Responses are **SSE**: lines look like `data: {...json...}`. Grep `^data:`
+  and strip the prefix.
+* Tool names use the **colon** form (`coord:whoami`, `plans:add-decision`),
+  not the `mcp__papercusp-su__coord_whoami` harness alias.
+* The endpoint is effectively **stateless** per request (no `Mcp-Session-Id`
+  needed): each POST is a self-contained `tools/call`.
+
+### Reusable helper
+
+```bash
+#!/usr/bin/env bash
+# psu_call.sh <tool-name> [json-args]
+set -euo pipefail
+URL='http://localhost:3070/api/mcp?superuser=1&client='"$PAPERCUSP_SID"'&workspace=papercusp-workspace&profile='
+TOK='<bearer from ~/.claude.json>'
+TOOL="$1"; if [ "$#" -ge 2 ]; then ARGS="$2"; else ARGS='{}'; fi
+payload=$(jq -nc --arg n "$TOOL" --argjson a "$ARGS" \
+  '{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:$n,arguments:$a}}')
+curl -s -m 90 -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -X POST "$URL" -d "$payload" \
+  | grep '^data:' | sed 's/^data: //' \
+  | jq -r 'if .result.content then (.result.content[].text) elif .error then ("ERROR: "+(.error|tojson)) else tojson end'
+```
+
+Then e.g. `psu_call.sh "coord:declare-intent" '{"intent":"..."}'`,
+`psu_call.sh "plans:add-decision" "$ARGS"`.
+
+> Gotcha: `ARGS="${2:-{}}"` is a **bash brace-ambiguity trap** — it appends a
+> literal `}` to your JSON. Use the explicit `if [ "$#" -ge 2 ]` form above.
+
+### Caveat: an externally-launched session has NO minted `client` id
+
+The helper above assumes `$PAPERCUSP_SID` is a real **minted** client identity.
+A Claude Code (or OMP/Codex) shell launched **outside** `psu` — i.e. *not* through
+`install-standalone-mcp.sh` — has no `PAPERCUSP_SID` and no minted `uiClientId`. In
+that state the bridge still authenticates (loopback + the bearer from
+`~/.papercusp/superuser-token`), but the tools split into two classes (observed
+2026-06-20, EI-1740):
+
+* **Work without an identity:** `tools/list`, `memory:remember`, and read-only
+  reads like `coord:handoffs` / `coord:feed`. Enough to recall context, persist a
+  durable fact, and read the board.
+* **Gated on a `uiClientId`:** every tool that calls `resolveAgentIdentity` —
+  `coord:whoami`, `coord:declare-intent`, `issues:*`, and `work_items:claim` /
+  `:comment` / `:complete` / `:set_state`. They fail with:
+
+  ```
+  handler_error: resolveAgentIdentity: superuser context is missing uiClientId
+  — re-run install-standalone-mcp.sh to mint a ?client= id
+  ```
+
+So an externally-launched session **cannot claim/close/comment on work items or
+declare a coord lane**, even via the bridge. Do NOT reflexively run
+`install-standalone-mcp.sh` to fix this mid-session: it **regenerates the superuser
+token and rewrites `~/.claude.json` + `~/.claude/settings.json`** (your *own*
+running session's MCP config + hooks) — far too invasive to fire blind during an
+autonomous loop. Instead, deliver value through the ungated paths: land the actual
+**code fix** (the commit is the durable artifact), reference the `EI-NNNN` in-code
+and in the commit, and `memory:remember` the learning. The unclaimable-but-fixed
+item resolves when a peer or the issues-engine notices the fix; the small
+duplication risk is cheaper than a token/config rewrite at 4am.
+
+> **Superseded (fixed since discovery, EI-2127/EI-334):** the hard failure above no
+> longer reproduces. `resolveAgentIdentity`'s superuser branch used to **throw** on a
+> missing `uiClientId`; it now resolves a stable fallback id
+> (`SUPERUSER_FALLBACK_CLIENT_ID = 'su-loopback'`,
+> `packages/operator-core/lib/agent-tools/coordination/identity.ts`) instead of
+> throwing — and the JSON-HTTP transport layer
+> (`libs/generic/tooldef-http/src/http-projection.ts`) already defaults a missing
+> `uiClientId` to `'su-http-loopback'` before identity resolution even runs. So an
+> externally-launched session hitting the bridge with **no** `?client=` now
+> resolves to one of those fallback ids instead of failing — `coord:whoami`,
+> `coord:declare-intent`, `issues:*`, and `work_items:claim`/`:comment`/`:complete`/
+> `:set_state` all work, just attributed to the shared fallback identity rather
+> than a per-session one. The symptom, the `EI-NNNN` error text, and the
+> workaround above are kept as a record of what the gap looked like and how to
+> route around a **similar** future gap — don't expect to hit this exact error
+> anymore.
+
+## When to use vs. wait
+
+Don't burn a loop idling on reconnection. If `/api/health` is green, switch to
+the bridge and keep making progress (post decisions, message peers, claim work).
+Re-`coord:declare-intent` through the bridge so peers see you're alive — presence
+from the omp-hook is independent of the MCP client, so a dropped client leaves
+you looking "active" while doing nothing.
+
+## Related
+
+* WI-260 — the underlying gap (no auto-recovery/detection of a dropped MCP client).
+* `agent-mcp-slow-but-health-fast-event-loop-saturation` — the *adjacent* case
+  (MCP slow, health fast) caused by event-loop saturation; this doc is the
+  harder case where the client is fully **disconnected**, not just slow.

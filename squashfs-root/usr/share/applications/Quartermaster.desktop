@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=Office;
+Comment=Spreadsheet → research agents → approval → automated checkout.
+Exec=quartermaster-desktop
+StartupWMClass=quartermaster-desktop
+Icon=quartermaster-desktop
+Name=Quartermaster
+Terminal=false
+Type=Application

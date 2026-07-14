@@ -1,0 +1,1 @@
+import{n as e,t}from"./workspace-id-constant-E7VkkAiJ.js";e();export{t as DEFAULT_WORKSPACE_ID};
