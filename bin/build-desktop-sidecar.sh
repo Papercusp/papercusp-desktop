@@ -257,11 +257,9 @@ NATIVE_PKGS=(
   onnxruntime-node
   "@huggingface/transformers"
 )
+source "$WEB_DIR/bin/bundle-host-common.sh"
 HOST_EXTERNALS=(
-  --external:@lydell/*
-  --external:bufferutil
-  --external:utf-8-validate
-  --external:fsevents
+  "${HOST_COMMON_EXTERNALS[@]}"
   # cpu-features — OPTIONAL native dep of ssh2 (required inside try/catch; ssh2
   # falls back cleanly when the require fails). Its build/Release/*.node binding
   # comes and goes with node_modules churn (node-gyp can't rebuild it under
