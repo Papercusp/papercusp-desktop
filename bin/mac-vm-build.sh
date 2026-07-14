@@ -17,6 +17,14 @@ set -eo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
+# WI-4419 follow-up: mac-vm-build.sh is a RELEASE build entrypoint, so arm
+# build-desktop-sidecar.sh's unconditional identity-scan of the assembled sidecar
+# by default (env does NOT cross the release-local.sh ssh boundary, so it must be
+# defaulted HERE, not relied upon from the caller). The mac sidecar's docs-qa
+# copies are exactly what leaked the mac VM's aviweiss/avraham creds in 0.0.9;
+# this makes the build FAIL rather than ship them again.
+export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
+
 # nvm Node 22 for the build (the *bundled* runtime is vendored separately).
 if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   . "$HOME/.nvm/nvm.sh"
