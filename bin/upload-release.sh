@@ -257,61 +257,58 @@ echo "  ✓ latest.json served and byte-identical"
 # to bytes. A manifest pointing at a 404 is the LABELED!=PACKED failure this
 # whole rail exists to prevent.
 #
-# BUT the r2.dev public dev URL is rate-limited and routinely returns a
-# TRANSIENT 403 (occasionally 429/5xx) on an object in the seconds after it is
-# written — especially a multi-GB one, and especially right after we just GET'd
-# latest.json a few times on the same edge. A single HEAD therefore false-fails
-# an upload that fully succeeded (every artifact verified present at full size
-# in the bucket above). So retry with backoff before declaring the manifest a
-# lie, and fall back to a range-GET (what a real updater client actually does —
-# some edges 403 a HEAD but serve a GET). Only a PERSISTENT miss is a real fail.
+# ⚠ MUST send a real User-Agent. Cloudflare's r2.dev public URL bot-blocks the
+# default `Python-urllib/x.y` UA with a hard 403 (NOT a rate-limit, NOT
+# transient — reproducible 100% of the time), while it serves `curl/*`,
+# `reqwest` (what the tauri updater client actually uses), `Mozilla/*`, and any
+# non-bot UA with 200. A probe using urllib's default UA therefore false-fails
+# an upload that fully succeeded and that every real client can download. So set
+# an explicit updater-like UA below; with that in place a 403/404 means a REAL
+# permission/missing-object problem worth failing on. A short retry still guards
+# a genuinely transient 429/5xx, but we do NOT retry a 403 (with a good UA it is
+# real). Probe via range-GET — exactly what tauri-plugin-updater does.
 python3 - "$TMP_MANIFEST" <<'PY'
 import json, sys, time, urllib.request, urllib.error
 m = json.load(open(sys.argv[1]))
-ATTEMPTS = 5          # total tries per url
-BACKOFF  = [2, 4, 8, 16]  # seconds between tries (transient r2.dev 403/429)
+# A real-client UA — r2.dev 403s the default Python-urllib bot UA (see comment).
+UA = "Papercusp-Updater (release-verify; reqwest-compatible)"
+ATTEMPTS = 3                 # total tries per url (only for transient 429/5xx)
+BACKOFF  = [3, 9]            # seconds between transient retries
 
 def probe(url):
-    """Return (ok, detail). Try HEAD, then a range-GET fallback on 403/405."""
-    for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
-        req = urllib.request.Request(url, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                size = int(r.headers.get("content-length") or 0)
-                # A range-GET returns 206 + content-length 1; report the object
-                # size from the (earlier authenticated) bucket check instead of
-                # this 1-byte body, so keep it simple and just report status.
-                return True, f"{r.status}" + (f" {size/1e9:.2f} GB" if method == "HEAD" else " (range-GET ok)")
-        except urllib.error.HTTPError as e:
-            # 403/405 → try the GET fallback in the next loop iteration; other
-            # HTTP errors (404/429/5xx) fall through to the caller's retry.
-            last = f"HTTP {e.code}"
-            if e.code in (403, 405) and method == "HEAD":
-                continue
-            return False, last
-        except Exception as e:
-            return False, str(e)
-    return False, last
+    """Return (ok, detail, retryable). Range-GET, mirroring the updater client."""
+    req = urllib.request.Request(
+        url, method="GET",
+        headers={"User-Agent": UA, "Range": "bytes=0-0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return True, f"{r.status} (range-GET ok)", False
+    except urllib.error.HTTPError as e:
+        # 429/5xx can be transient; 403/404 with a good UA is a real failure.
+        return False, f"HTTP {e.code}", e.code == 429 or 500 <= e.code < 600
+    except Exception as e:
+        return False, str(e), True   # network-level blip: retryable
 
 bad = 0
 for key, entry in (m.get("platforms") or {}).items():
     url = entry.get("url", "")
-    ok, detail = False, "no attempt"
+    ok, detail, retryable = False, "no attempt", False
     for i in range(ATTEMPTS):
-        ok, detail = probe(url)
+        ok, detail, retryable = probe(url)
         if ok:
             if i:
                 detail += f" (after {i+1} tries)"
             break
-        if i < ATTEMPTS - 1:
-            time.sleep(BACKOFF[min(i, len(BACKOFF) - 1)])
+        if not retryable or i == ATTEMPTS - 1:
+            break
+        time.sleep(BACKOFF[min(i, len(BACKOFF) - 1)])
     if ok:
         print(f"  ✓ {key}: {detail}")
     else:
         bad += 1
-        print(f"  ✗ {key}: {url} -> {detail} (after {ATTEMPTS} tries)")
+        print(f"  ✗ {key}: {url} -> {detail}")
 if bad:
-    sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable after retries — the manifest lies. Fix before shipping.")
+    sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable — the manifest lies. Fix before shipping.")
 PY
 
 echo
