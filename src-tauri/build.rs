@@ -215,73 +215,73 @@ fn main() {
     // add/remove a collect_commands! entry, update THIS list + the capability
     // in the same change (the test tells you exactly what drifted).
     let commands: &[&str] = &[
-            // workspaces (WorkspaceSwitcher / HarnessWorkspacesButton)
-            "workspaces_list",
-            "workspaces_create",
-            "workspaces_rename",
-            "workspaces_delete",
-            "workspaces_switch",
-            "workspaces_open_window",
-            // attention / update chip
-            "show_attention_notification",
-            "app_version",
-            "check_for_update",
-            "install_update",
-            "revert_to",
-            // pty (desktop terminals)
-            "pty_spawn",
-            "pty_write",
-            "pty_resize",
-            "pty_kill",
-            "pty_history",
-            "pty_is_alive",
-            // WSL setup wizard
-            "wsl_status",
-            "wsl_install",
-            "wsl_relaunch_elevated",
-            "wsl_import",
-            "wsl_bootstrap",
-            "wsl_finalize_ready",
-            "wsl_uninstall",
-            // native console / window control (WI-1976 originals)
-            "console_launch",
-            "list_windows_by_title",
-            "focus_window_by_title",
-            // WI-3033: onboarding console routed to an external Windows
-            // Terminal window (the embedded ConPTY path wedges on inbox WSL)
-            "external_console_run",
-            // window_title_for is a plain Rust helper, not a #[tauri::command];
-            // its grant is an inert orphan kept for continuity (harmless).
-            "window_title_for",
-            // native terminal toggle
-            "native_terminal_status",
-            "native_terminal_toggle",
-            // webview→shell flag relay (NativeTerminalGate) — registered to keep
-            // the WI-2143 ACL-sync guard green; command is in main.rs collect_commands!
-            "native_terminal_set_enabled",
-            // WI-3388: resizeable/collapsible terminal dock — layout get/set
-            // (registered here to keep the WI-2143 ACL-sync guard green; the
-            // commands are in collect_commands! in main.rs)
-            "terminal_get_layout",
-            "terminal_set_layout",
-            // endpoint IPC transport (currently no live JS caller, but
-            // collect_commands! exposes it, so grant to stay in sync)
-            "endpoint_invoke",
-            "endpoint_cancel",
-            // env switcher
-            "list_envs",
-            // docs search palette
-            "open_docs_search_palette",
-            // WI-4827: Quick Panel "open in the main app window" — the palette
-            // webview invokes this to hand a full-app route to the main window
-            // (Spotlight-style) instead of navigating the small popup in place.
-            "open_route_in_app",
-            // The dev-bridge eval return channel (debug builds). Without this
-            // grant the injected eval JS's invoke() is ACL-rejected from the
-            // remote http origin, so every tauri-agent-tools eval/click/dom
-            // call times out — the fleet-wide "wedged shell" symptom.
-            "__dev_bridge_result",
-        ];
+        // workspaces (WorkspaceSwitcher / HarnessWorkspacesButton)
+        "workspaces_list",
+        "workspaces_create",
+        "workspaces_rename",
+        "workspaces_delete",
+        "workspaces_switch",
+        "workspaces_open_window",
+        // attention / update chip
+        "show_attention_notification",
+        "app_version",
+        "check_for_update",
+        "install_update",
+        "revert_to",
+        // pty (desktop terminals)
+        "pty_spawn",
+        "pty_write",
+        "pty_resize",
+        "pty_kill",
+        "pty_history",
+        "pty_is_alive",
+        // WSL setup wizard
+        "wsl_status",
+        "wsl_install",
+        "wsl_relaunch_elevated",
+        "wsl_import",
+        "wsl_bootstrap",
+        "wsl_finalize_ready",
+        "wsl_uninstall",
+        // native console / window control (WI-1976 originals)
+        "console_launch",
+        "list_windows_by_title",
+        "focus_window_by_title",
+        // WI-3033: onboarding console routed to an external Windows
+        // Terminal window (the embedded ConPTY path wedges on inbox WSL)
+        "external_console_run",
+        // window_title_for is a plain Rust helper, not a #[tauri::command];
+        // its grant is an inert orphan kept for continuity (harmless).
+        "window_title_for",
+        // native terminal toggle
+        "native_terminal_status",
+        "native_terminal_toggle",
+        // webview→shell flag relay (NativeTerminalGate) — registered to keep
+        // the WI-2143 ACL-sync guard green; command is in main.rs collect_commands!
+        "native_terminal_set_enabled",
+        // WI-3388: resizeable/collapsible terminal dock — layout get/set
+        // (registered here to keep the WI-2143 ACL-sync guard green; the
+        // commands are in collect_commands! in main.rs)
+        "terminal_get_layout",
+        "terminal_set_layout",
+        // endpoint IPC transport (currently no live JS caller, but
+        // collect_commands! exposes it, so grant to stay in sync)
+        "endpoint_invoke",
+        "endpoint_cancel",
+        // env switcher
+        "list_envs",
+        // docs search palette
+        "open_docs_search_palette",
+        // WI-4827: Quick Panel "open in the main app window" — the palette
+        // webview invokes this to hand a full-app route to the main window
+        // (Spotlight-style) instead of navigating the small popup in place.
+        "open_route_in_app",
+        // The dev-bridge eval return channel (debug builds). Without this
+        // grant the injected eval JS's invoke() is ACL-rejected from the
+        // remote http origin, so every tauri-agent-tools eval/click/dom
+        // call times out — the fleet-wide "wedged shell" symptom.
+        "__dev_bridge_result",
+    ];
 
     // EI-12083: catch a capability/manifest mismatch here, with an actionable
     // message, before handing off to tauri_build (whose own error on the same
@@ -290,7 +290,8 @@ fn main() {
     check_capability_commands_are_registered(&manifest_dir, commands);
 
     tauri_build::try_build(
-        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(commands)),
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(commands)),
     )
     .expect("failed to run tauri_build with the app-command manifest (WI-1976)");
 }
