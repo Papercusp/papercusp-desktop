@@ -41,20 +41,32 @@ APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 AUDIT_PY="$DESK/bin/audit-release-bundle.py"
 
-# 0. PURGE any stale AppDir from a PRIOR build BEFORE tauri runs. This is the ROOT
-#    CAUSE of the 0.0.9 credential leak (WI-4736 / EI-11730): `tauri build
-#    --bundles appimage` REUSES a pre-existing *.AppDir and does NOT resync its
-#    bundled `sidecar/` resources from the (freshly pruned + identity-scanned)
-#    src-tauri/sidecar/. So a leftover AppDir from an OLDER sidecar — one built
-#    before the 2026-07-07 code-server/meridian removal and the spa/internal/docs
-#    prune — kept shipping the mac-VM sudo/login passwords + build-box identity
-#    inside its rendered docs, even though the .deb (packed straight from the
-#    clean sidecar in the same cut) carried NONE of it. Proven 2026-07-13: the
-#    current src-tauri/sidecar identity-scanned CLEAN (0 hits) while the leftover
-#    AppDir carried 302. Removing it forces tauri to build a FRESH AppDir from the
-#    current clean sidecar; the fail-closed scan in step 3d is the backstop.
+# 0. PURGE any stale AppDir from a PRIOR build BEFORE tauri runs (WI-4736 / EI-11730).
+#    A leftover *.AppDir from an OLDER sidecar can ship the mac-VM sudo/login passwords +
+#    build-box identity inside its rendered docs, even though the .deb (packed straight
+#    from the clean sidecar in the same cut) carries NONE of it.
+#    NOTE (su-b0fbf 2026-07-14): wiping the AppDir is NECESSARY BUT NOT SUFFICIENT — see
+#    step 0b. In 0.0.9 cut#3d a mtime-FRESH AppDir (built AFTER this purge) still carried
+#    339 leaking files, because `tauri build --bundles appimage` REFILLS the AppDir from
+#    the staged resource intermediate under $CT/release/ (step 0b), NOT from
+#    src-tauri/sidecar/ directly. The fail-closed identity scan in step 3d is the backstop.
 echo "==> purging any stale AppDir under $APPIMG_DIR (WI-4736: a reused stale AppDir ships an un-pruned/leaky sidecar)"
 rm -rf "$APPIMG_DIR"/*.AppDir
+
+# 0b. PURGE the tauri RELEASE RESOURCE-STAGING intermediates — the ACTUAL accumulation
+#     point behind the AppImage leak (proven su-b0fbf 2026-07-14, EI-11730). `tauri build`
+#     stages each `resources` glob (sidecar/**, seed/**, resources/*) into
+#     $CT/release/<name>/ next to the release binary, and the appimage AppDir is assembled
+#     FROM THERE — but that staging is copy-into-never-delete, so each dir accumulates the
+#     UNION of every past cut. On this box $CT/release/sidecar (11G) still held code-server
+#     (mtime 2026-06-17, dropped 07-07) + meridian-host (517M) + pre-prune operator-docs,
+#     and $CT/release/seed held a stale corestore/db/LOG — all coexisting with THIS cut's
+#     fresh files. The .deb is immune (its bundler archives straight from the clean
+#     src-tauri/sidecar). Wiping these forces tauri to restage the resources FRESH from the
+#     clean sources on the build below, so the shipped AppDir equals the clean sidecar.
+#     (Bonus: reclaims ~15G on a disk-pressured box.)
+echo "==> purging stale tauri resource-staging intermediates under $CT/release (EI-11730: the AppDir refills from HERE — the real accumulation point the step-0 AppDir wipe missed)"
+rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources"
 
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.

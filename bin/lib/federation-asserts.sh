@@ -29,6 +29,7 @@
 
 declare -gA FED_PG FED_SC
 declare -ga FED_KILL_PIDS
+declare -ga FED_PORT_LOCK_FDS FED_PORT_LOCK_PATHS
 
 fed_log() { printf '\n=== %s ===\n' "$*"; }
 
@@ -461,6 +462,44 @@ fed_pick_free_port() {
   local p="${1:-18000}"
   while ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; do p=$((p + 1)); done
   echo "$p"
+}
+
+# fed_acquire_port_lock <port> [lock_dir] — hold an advisory lock for the
+# lifetime of a launcher so two concurrent local launchers cannot both select
+# the same port in the ss-probe → bind gap. The kernel releases the lock if a
+# launcher dies, so stale lock files are harmless. Call fed_release_port_locks
+# after the owned processes have stopped.
+fed_acquire_port_lock() {
+  local port="$1" dir="${2:-${TMPDIR:-/tmp}/papercusp-port-locks}" fd path
+  command -v flock >/dev/null 2>&1 || {
+    echo "fed_acquire_port_lock: flock is required for concurrent port safety" >&2
+    return 1
+  }
+  mkdir -p "$dir" || {
+    echo "fed_acquire_port_lock: cannot create lock directory $dir" >&2
+    return 1
+  }
+  path="$dir/$port.lock"
+  exec {fd}>"$path" || {
+    echo "fed_acquire_port_lock: cannot open $path" >&2
+    return 1
+  }
+  if ! flock -n "$fd"; then
+    eval "exec ${fd}>&-"
+    return 1
+  fi
+  FED_PORT_LOCK_FDS+=("$fd")
+  FED_PORT_LOCK_PATHS+=("$path")
+  return 0
+}
+
+fed_release_port_locks() {
+  local fd
+  for fd in "${FED_PORT_LOCK_FDS[@]:-}"; do
+    eval "exec ${fd}>&-"
+  done
+  FED_PORT_LOCK_FDS=()
+  FED_PORT_LOCK_PATHS=()
 }
 
 # fed_probe_sidecar <inst> <port> — true iff <port> answers the sidecar preflight 2xx.

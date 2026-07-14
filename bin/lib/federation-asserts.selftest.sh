@@ -106,7 +106,27 @@ else
   bad "fed_pick_free_port returned '$got' for held :$held (expected a higher, free port)"
 fi
 
-# 5) fed_local_launch_sidecar rejects same/empty hono+pg ports (the 2026-07-03
+# 5) advisory port locks close the ss-probe → bind selection race
+LOCK_DIR="$WORK/port-locks"
+LOCK_PORT="$((SIDE_PORT + 20))"
+if fed_acquire_port_lock "$LOCK_PORT" "$LOCK_DIR"; then
+  if bash -c 'source "$1"; fed_acquire_port_lock "$2" "$3"' _ "$DIR/federation-asserts.sh" "$LOCK_PORT" "$LOCK_DIR"; then
+    bad "fed_acquire_port_lock allowed a concurrent holder on :$LOCK_PORT"
+  else
+    ok "fed_acquire_port_lock rejects a concurrent holder on :$LOCK_PORT"
+  fi
+  fed_release_port_locks
+  if fed_acquire_port_lock "$LOCK_PORT" "$LOCK_DIR"; then
+    ok "fed_acquire_port_lock is reusable after release"
+    fed_release_port_locks
+  else
+    bad "fed_acquire_port_lock did not release :$LOCK_PORT"
+  fi
+else
+  bad "fed_acquire_port_lock could not acquire :$LOCK_PORT"
+fi
+
+# 6) fed_local_launch_sidecar rejects same/empty hono+pg ports (the 2026-07-03
 #    P-002 class: argless fed_pick_free_port x4 handed 18000 to everything and
 #    every instance EADDRINUSE'd at boot — the guard must fail LOUDLY instead)
 if fed_local_launch_sidecar "$WORK/g-home" /dev/null "$WORK" 18000 18000 2>/dev/null; then
@@ -120,7 +140,7 @@ else
   ok "fed_local_launch_sidecar rejects empty ports"
 fi
 
-# 6) ambient-env neutralization (the 2026-07-03 P-002 layer-4 class): fleet
+# 7) ambient-env neutralization (the 2026-07-03 P-002 layer-4 class): fleet
 #    shells carry PAPERCUSP_DHT_HOST=<bridge-ip> and PAPERCUSP_DHT_BOOTSTRAP=
 #    <bridge-ip:port>; a launcher that INHERITS either swarm-binds/bootstraps
 #    loopback smokes on the bridge → 0 peer dials. Static guard: every local
@@ -143,7 +163,7 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   fi
 done
 
-# 7) Route-cutover guard (WI-2929): the live federation driver runs against the
+# 8) Route-cutover guard (WI-2929): the live federation driver runs against the
 # current pot route. A stale /hives/from-repo call hard-404s on current packaged
 # binaries before the matrix can exercise federation at all.
 # WI-3350: the join route likewise moved to /api/discovery/join-pot; stale
