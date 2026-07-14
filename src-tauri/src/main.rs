@@ -664,6 +664,61 @@ mod tests {
             "/mnt/c/Users/Jane Doe/work/repo",
         );
     }
+
+    /// WI-4827: the Quick Panel "open in main app" hand-off must only ever point
+    /// the main window at a SAME-ORIGIN app path — never an off-origin URL, a
+    /// custom scheme, or a protocol-relative `//host` (which resolves to a
+    /// different origin). sanitize_app_route is the one gate for both the live
+    /// command arg and the cross-process pending-route file.
+    #[test]
+    fn sanitize_app_route_accepts_only_same_origin_paths() {
+        use super::sanitize_app_route;
+        // Accepted: ordinary app routes (with query / hash), trimmed.
+        assert_eq!(sanitize_app_route("/settings/voice").as_deref(), Some("/settings/voice"));
+        assert_eq!(sanitize_app_route("/adv?tab=harnesses").as_deref(), Some("/adv?tab=harnesses"));
+        assert_eq!(sanitize_app_route("  /settings/user#a  ").as_deref(), Some("/settings/user#a"));
+        // Rejected: not rooted, protocol-relative, absolute URLs, schemes, control chars.
+        assert_eq!(sanitize_app_route("settings/voice"), None);
+        assert_eq!(sanitize_app_route("//evil.example.com"), None);
+        assert_eq!(sanitize_app_route("https://evil.example.com/x"), None);
+        assert_eq!(sanitize_app_route("javascript:alert(1)"), None);
+        assert_eq!(sanitize_app_route("/foo\nbar"), None);
+        assert_eq!(sanitize_app_route(""), None);
+    }
+
+    /// The cross-process hand-off file (macOS/Windows two-bundle) round-trips a
+    /// route and is one-shot: reading it clears it, and it is sanitized on the
+    /// way out so a tampered file can't redirect the main window off-origin.
+    #[test]
+    fn pending_route_round_trip_is_one_shot_and_sanitized() {
+        // Isolate HOME so the test writes to a temp dir, not the real ~/.papercusp.
+        let tmp = std::env::temp_dir().join(format!("pc-pending-route-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: single-threaded unit test; no concurrent env access.
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+
+        assert_eq!(super::take_pending_route(), None, "empty when nothing written");
+        super::write_pending_route("/settings/voice");
+        assert_eq!(super::take_pending_route().as_deref(), Some("/settings/voice"));
+        assert_eq!(super::take_pending_route(), None, "one-shot: cleared after read");
+
+        // A tampered off-origin route is rejected on read (still cleared).
+        super::write_pending_route("https://evil.example.com");
+        assert_eq!(super::take_pending_route(), None, "off-origin rejected");
+        assert_eq!(super::take_pending_route(), None);
+
+        unsafe {
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 #[cfg(test)]
@@ -3034,7 +3089,113 @@ fn on_second_instance(app: &AppHandle, args: Vec<String>, cwd: String) {
     if role.is_gui() {
         if let Some(window) = app.get_webview_window("main") {
             restore_window_visibility(&window, "second-instance");
+            // WI-4827: the Quick Panel palette (a different process in the
+            // macOS/Windows two-bundle split) may have launched us to open a
+            // specific route in the main app. Apply it now that we're focused.
+            apply_pending_route(&window);
         }
+    }
+}
+
+/// WI-4827 — "open this route in the main app" for the CROSS-PROCESS case: on
+/// macOS/Windows the Quick Panel palette lives in the always-on Server bundle,
+/// a different process from the GUI's `main` window, so it cannot navigate that
+/// window directly. It writes the desired same-origin app route here and
+/// launches/focuses the GUI bundle; the GUI reads + clears it (one-shot) and
+/// navigates. On Linux/dev the palette and `main` share ONE process, so
+/// `open_route_in_app` takes the in-process branch and never touches this file.
+fn pending_route_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".papercusp")
+            .join("gui-pending-route"),
+    )
+}
+
+/// Accept only a same-origin app path: exactly one leading '/', no scheme/host,
+/// no protocol-relative '//', no control chars. Anything else → None (ignored),
+/// so a hand-off can never point the main window off-origin.
+fn sanitize_app_route(input: &str) -> Option<String> {
+    let s = input.trim();
+    if !s.starts_with('/') || s.starts_with("//") {
+        return None;
+    }
+    if s.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+fn write_pending_route(route: &str) {
+    let Some(path) = pending_route_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&path, route) {
+        eprintln!("[papercusp-desktop] could not persist pending GUI route: {e}");
+    }
+}
+
+/// Read + delete the pending route (one-shot). Sanitized on the way out.
+fn take_pending_route() -> Option<String> {
+    let path = pending_route_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    sanitize_app_route(&raw)
+}
+
+/// Navigate `window` to a same-origin app `route` via a soft client navigation
+/// (the desktop host's `location.assign` override turns it into a pushState nav;
+/// off that host it degrades to a real load — either way it lands there). Shared
+/// by the in-process branch and the cross-process apply.
+fn navigate_window_to_route<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, route: &str) {
+    let js = format!(
+        "window.location.assign({})",
+        serde_json::to_string(route).unwrap_or_else(|_| "\"/\"".to_string())
+    );
+    if let Err(e) = window.eval(&js) {
+        eprintln!("[papercusp-desktop] open_route_in_app: navigate failed: {e}");
+    }
+}
+
+/// Apply a one-shot pending route to `window` if one was left by the palette.
+fn apply_pending_route<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if let Some(route) = take_pending_route() {
+        navigate_window_to_route(window, &route);
+    }
+}
+
+/// WI-4827 — open a same-origin app `route` in the MAIN operator window and
+/// dismiss the Quick Panel palette (Spotlight-style). Invoked from the panel
+/// webview when a control would otherwise navigate the small palette window into
+/// the full app. Branch-1 (dev + the Linux single-bundle install): the `main`
+/// window is in THIS process — focus + soft-navigate it. Branch-2 (macOS/Windows
+/// two-bundle): the GUI is a separate process — persist the route and launch /
+/// focus the GUI bundle, which applies it via `apply_pending_route`.
+#[tauri::command]
+#[specta::specta]
+fn open_route_in_app(app: AppHandle, route: String) {
+    let Some(route) = sanitize_app_route(&route) else {
+        eprintln!("[papercusp-desktop] open_route_in_app: rejected route {route:?}");
+        return;
+    };
+    if let Some(main) = app.get_webview_window("main") {
+        restore_window_visibility(&main, "open-route-in-app");
+        navigate_window_to_route(&main, &route);
+    } else {
+        write_pending_route(&route);
+        if let Err(e) = launch_bundle(GUI_BUNDLE_ID, "Papercusp GUI") {
+            eprintln!("[papercusp-desktop] open_route_in_app: could not launch GUI bundle: {e}");
+        }
+    }
+    // Dismiss the palette so the main app is what the user sees. Focus loss on
+    // the palette also hides it (its blur handler), but be deterministic — and
+    // in the Linux single-process case the palette must go regardless.
+    if let Some(palette) = app.get_webview_window(docs_search::WINDOW_LABEL) {
+        let _ = palette.hide();
     }
 }
 
@@ -3078,9 +3239,17 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let workspace_home = workspaces::shared_sidecar_home();
     std::thread::spawn(move || {
         ensure_server_running(&app_handle, &workspace_home, via_wsl);
+        let after = app_handle.clone();
         // finish_boot polls operator.json (up to 120s — covers a cold Server
         // boot), wires endpoint-IPC, and navigates the window to the operator.
         finish_boot(app_handle, workspace_home, via_wsl);
+        // WI-4827 cross-process COLD start (macOS/Windows two-bundle): if the
+        // Quick Panel palette launched us to open a route and the GUI wasn't
+        // already running, on_second_instance never fired. Now that main is at
+        // the operator, apply any one-shot pending route the palette left.
+        if let Some(window) = after.get_webview_window("main") {
+            apply_pending_route(&window);
+        }
     });
     Ok(())
 }
@@ -5694,6 +5863,7 @@ pub fn run() {
             dev_bridge::__dev_bridge_result,
             env_switch::list_envs,
             docs_search::open_docs_search_palette,
+            open_route_in_app,
         ]);
 
     // Export to the operator app — that's where the desktop UI lives
