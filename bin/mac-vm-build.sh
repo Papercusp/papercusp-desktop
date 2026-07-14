@@ -373,6 +373,40 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   SRC_ZST_STASH="src-tauri/source.tar.zst.role-stash"
   if [[ "$role" == "gui" && -f "$SRC_ZST" ]]; then mv "$SRC_ZST" "$SRC_ZST_STASH"; fi
   if [[ "$role" == "server" && -f "$SRC_ZST_STASH" ]]; then mv "$SRC_ZST_STASH" "$SRC_ZST"; fi
+  # ── WI-4723: correct-by-construction resource hygiene (mac creds-leak fix) ──
+  # tauri copies the bundle `resources` (sidecar/**, seed/**, resources/*) into a
+  # PERSISTENT per-target staging tree next to the binary and assembles the .app
+  # FROM there with a copy-into-NEVER-delete step, so the staging accumulates the
+  # UNION of every past cut. That is how the PRUNED mac-VM creds docs
+  # (agent-insights/mac-vm-qmp-recovery.mdx → sudo pw 'aviweiss', loginwindow pw
+  # 'avraham', build-system/**) re-shipped in the public 0.0.8/0.0.9 bundles even
+  # though src-tauri/sidecar SOURCE is clean (audit --scan-dir RC=0). This role
+  # target dir is PERSISTENT BY DESIGN (role-$role, kept incremental across legs,
+  # L353-357), so it carries that accumulation from cut to cut. Make the shipped
+  # bytes a PURE FUNCTION of the clean source: rsync -a --delete src-tauri/{sidecar,
+  # seed,resources} over every per-arch + universal staging resource tree BEFORE
+  # the build. --delete evicts stale files the source no longer has; tauri's
+  # in-build copy only re-adds (clean) source files, so it cannot re-introduce the
+  # cruft. This MUST precede the build, not follow it: `tauri build --bundles app`
+  # mints the .app AND the signed .app.tar.gz+.sig in the SAME step, so cleaning
+  # the .app afterwards is a FALSE fix — the tarball is already minted from the
+  # dirty .app. We clean the INPUT; the post-build --scan-dir gate below proves it.
+  # (Linux does the analogous clean in build-appimage.sh step 2b, AFTER tauri's
+  # packaging crashes and BEFORE appimagetool packs; mac has no such window, hence
+  # pre-staging here.) Scoped to the 3 resource subdirs only — cargo build
+  # artifacts (deps/, build/, the binaries) are untouched, preserving incrementality.
+  for _stage_rel in \
+      "$CARGO_TARGET_DIR/aarch64-apple-darwin/release" \
+      "$CARGO_TARGET_DIR/x86_64-apple-darwin/release" \
+      "$CARGO_TARGET_DIR/$MAC_BUILD_TARGET/release"; do
+    for _res in sidecar seed resources; do
+      _res_src="$ROOT/src-tauri/$_res"
+      _res_dst="$_stage_rel/$_res"
+      [[ -d "$_res_src" && -d "$_res_dst" ]] || continue
+      echo "    (WI-4723 resource-hygiene: rsync --delete $_res → ${_stage_rel#$PWD/})"
+      rsync -a --delete "$_res_src"/ "$_res_dst"/
+    done
+  done
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
   # LABELED != PACKED (WI-4389): the .app EXISTING says nothing about whether the
