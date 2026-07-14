@@ -5993,26 +5993,37 @@ pub fn run() {
                 // gui_setup() for packaged builds.
                 docs_search::register_shortcut(app);
 
-                // `npm run dev:quickpanel` — the shortcut popup's equivalent of
-                // `npm run dev`. When PAPERCUSP_DEV_OPEN_QUICK_PANEL is set, auto-
-                // open the Quick Panel popup once the working-tree operator + main
-                // window are up, so the owner sees the same always-on-top window
-                // the global shortcut opens with no key-grab dance. Dev-only, opt-in
-                // (a no-op unless the env var is set), best-effort. The popup window
-                // is built on the main (GTK) thread, so defer via run_on_main_thread
-                // after a short settle for the beforeDevCommand operator + first paint.
-                if std::env::var("PAPERCUSP_DEV_OPEN_QUICK_PANEL")
-                    .ok()
+                // `npm run dev:quickpanel` — preview the shortcut popup from the
+                // working tree. PAPERCUSP_DEV_OPEN_QUICK_PANEL controls it:
+                //   =1     → app window stays, palette opens always-on-top over it.
+                //   =only  → hide the main app window and show ONLY the palette, a
+                //            focused preview of just the shortcut popup. In this mode
+                //            the palette is PINNED (open_palette skips its click-away
+                //            auto-hide) so it stays put, and closing it exits the app.
+                // Dev-only, opt-in (a no-op unless the env var is set), best-effort.
+                // The popup window is built on the main (GTK) thread, so defer via
+                // run_on_main_thread after a short settle for the beforeDevCommand
+                // operator + first paint. open_palette runs FIRST (it resolves its
+                // base URL from the still-visible main window), THEN main is hidden.
+                let qp_env = std::env::var("PAPERCUSP_DEV_OPEN_QUICK_PANEL").ok();
+                let qp_open = qp_env
                     .as_deref()
                     .map(|v| v != "0" && !v.is_empty())
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                let qp_only = qp_env.as_deref() == Some("only");
+                if qp_open {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(3000));
                         let h = handle.clone();
-                        let _ = handle
-                            .run_on_main_thread(move || docs_search::open_palette(&h));
+                        let _ = handle.run_on_main_thread(move || {
+                            docs_search::open_palette(&h);
+                            if qp_only {
+                                if let Some(main) = h.get_webview_window("main") {
+                                    let _ = main.hide();
+                                }
+                            }
+                        });
                     });
                 }
 
