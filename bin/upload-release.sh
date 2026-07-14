@@ -252,26 +252,66 @@ fi
 echo "  ✓ latest.json served and byte-identical"
 
 # Spot-check that each artifact URL the manifest ADVERTISES is actually fetchable
-# (HEAD only — these are gigabytes). Verifying the bucket is not enough: what
-# matters is that the exact url a client reads out of the manifest resolves to
-# bytes. A manifest pointing at a 404 is the LABELED!=PACKED failure this whole
-# rail exists to prevent.
+# (no full download — these are gigabytes). Verifying the bucket is not enough:
+# what matters is that the exact url a client reads out of the manifest resolves
+# to bytes. A manifest pointing at a 404 is the LABELED!=PACKED failure this
+# whole rail exists to prevent.
+#
+# BUT the r2.dev public dev URL is rate-limited and routinely returns a
+# TRANSIENT 403 (occasionally 429/5xx) on an object in the seconds after it is
+# written — especially a multi-GB one, and especially right after we just GET'd
+# latest.json a few times on the same edge. A single HEAD therefore false-fails
+# an upload that fully succeeded (every artifact verified present at full size
+# in the bucket above). So retry with backoff before declaring the manifest a
+# lie, and fall back to a range-GET (what a real updater client actually does —
+# some edges 403 a HEAD but serve a GET). Only a PERSISTENT miss is a real fail.
 python3 - "$TMP_MANIFEST" <<'PY'
-import json, sys, urllib.request
+import json, sys, time, urllib.request, urllib.error
 m = json.load(open(sys.argv[1]))
+ATTEMPTS = 5          # total tries per url
+BACKOFF  = [2, 4, 8, 16]  # seconds between tries (transient r2.dev 403/429)
+
+def probe(url):
+    """Return (ok, detail). Try HEAD, then a range-GET fallback on 403/405."""
+    for method, headers in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
+        req = urllib.request.Request(url, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                size = int(r.headers.get("content-length") or 0)
+                # A range-GET returns 206 + content-length 1; report the object
+                # size from the (earlier authenticated) bucket check instead of
+                # this 1-byte body, so keep it simple and just report status.
+                return True, f"{r.status}" + (f" {size/1e9:.2f} GB" if method == "HEAD" else " (range-GET ok)")
+        except urllib.error.HTTPError as e:
+            # 403/405 → try the GET fallback in the next loop iteration; other
+            # HTTP errors (404/429/5xx) fall through to the caller's retry.
+            last = f"HTTP {e.code}"
+            if e.code in (403, 405) and method == "HEAD":
+                continue
+            return False, last
+        except Exception as e:
+            return False, str(e)
+    return False, last
+
 bad = 0
 for key, entry in (m.get("platforms") or {}).items():
     url = entry.get("url", "")
-    req = urllib.request.Request(url, method="HEAD")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            size = int(r.headers.get("content-length") or 0)
-            print(f"  ✓ {key}: {r.status} {size/1e9:.2f} GB")
-    except Exception as e:
+    ok, detail = False, "no attempt"
+    for i in range(ATTEMPTS):
+        ok, detail = probe(url)
+        if ok:
+            if i:
+                detail += f" (after {i+1} tries)"
+            break
+        if i < ATTEMPTS - 1:
+            time.sleep(BACKOFF[min(i, len(BACKOFF) - 1)])
+    if ok:
+        print(f"  ✓ {key}: {detail}")
+    else:
         bad += 1
-        print(f"  ✗ {key}: {url} -> {e}")
+        print(f"  ✗ {key}: {url} -> {detail} (after {ATTEMPTS} tries)")
 if bad:
-    sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable — the manifest lies. Fix before shipping.")
+    sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable after retries — the manifest lies. Fix before shipping.")
 PY
 
 echo
