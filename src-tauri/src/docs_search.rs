@@ -291,24 +291,9 @@ pub fn open_palette(app: &AppHandle) {
             // can't hide the palette before it's even been seen — only a
             // REAL loss of focus, after it was genuinely focused at least
             // once, dismisses it.
-            // dev:quickpanel `=only` mode (PAPERCUSP_DEV_OPEN_QUICK_PANEL=only) is a
-            // STANDALONE preview of just the palette — the main app window is hidden,
-            // so the usual click-away auto-hide would leave nothing on screen. In
-            // that mode keep the palette pinned (skip the blur-hide) and treat a
-            // window close as "done previewing" → exit the app. Normal (Ctrl+K) use
-            // leaves the env unset, so both branches below behave exactly as before.
-            let qp_only =
-                std::env::var("PAPERCUSP_DEV_OPEN_QUICK_PANEL").ok().as_deref() == Some("only");
-            let close_app = app.clone();
             let has_focused_once = Arc::new(AtomicBool::new(false));
             win.on_window_event(move |event| match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if qp_only {
-                        // Standalone palette preview: no main window to fall back
-                        // to, so a close means quit the app.
-                        close_app.exit(0);
-                        return;
-                    }
                     // Dismiss = HIDE, not close. The palette is the Server's
                     // ONLY window; closing/destroying it would exit the app
                     // (last-window ExitRequested) and tear down the sole GTK
@@ -323,7 +308,7 @@ pub fn open_palette(app: &AppHandle) {
                     has_focused_once.store(true, Ordering::Relaxed);
                 }
                 tauri::WindowEvent::Focused(false) => {
-                    if !qp_only && has_focused_once.load(Ordering::Relaxed) {
+                    if has_focused_once.load(Ordering::Relaxed) {
                         let _ = hide_target.hide();
                     }
                 }

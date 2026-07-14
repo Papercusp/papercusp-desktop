@@ -5993,18 +5993,21 @@ pub fn run() {
                 // gui_setup() for packaged builds.
                 docs_search::register_shortcut(app);
 
-                // `npm run dev:quickpanel` — preview the shortcut popup from the
-                // working tree. PAPERCUSP_DEV_OPEN_QUICK_PANEL controls it:
-                //   =1     → app window stays, palette opens always-on-top over it.
-                //   =only  → hide the main app window and show ONLY the palette, a
-                //            focused preview of just the shortcut popup. In this mode
-                //            the palette is PINNED (open_palette skips its click-away
-                //            auto-hide) so it stays put, and closing it exits the app.
+                // `npm run dev:quickpanel` — preview the Quick Panel from the working
+                // tree. PAPERCUSP_DEV_OPEN_QUICK_PANEL controls it:
+                //   =1     → keep the full app window, open the palette popup
+                //            always-on-top over it (preview the real popup window).
+                //   =only  → turn the MAIN window INTO the Quick Panel: navigate it
+                //            to /quick-panel (which renders CHROMELESS — no env bar,
+                //            sidebars, or chat, see operator-vite CHROMELESS_PREFIXES)
+                //            and shrink it to the popup's size, so `dev:quickpanel`
+                //            shows JUST the tabbed panel, not the whole operator. No
+                //            second window and no window-hide (some Linux WMs don't
+                //            honor hide()), so it behaves identically everywhere.
                 // Dev-only, opt-in (a no-op unless the env var is set), best-effort.
-                // The popup window is built on the main (GTK) thread, so defer via
-                // run_on_main_thread after a short settle for the beforeDevCommand
-                // operator + first paint. open_palette runs FIRST (it resolves its
-                // base URL from the still-visible main window), THEN main is hidden.
+                // Deferred via run_on_main_thread after a short settle for the
+                // beforeDevCommand operator + first paint; the eval preserves the
+                // current ?ws=/slug= query so the panel stays workspace-scoped.
                 let qp_env = std::env::var("PAPERCUSP_DEV_OPEN_QUICK_PANEL").ok();
                 let qp_open = qp_env
                     .as_deref()
@@ -6017,11 +6020,17 @@ pub fn run() {
                         std::thread::sleep(std::time::Duration::from_millis(3000));
                         let h = handle.clone();
                         let _ = handle.run_on_main_thread(move || {
-                            docs_search::open_palette(&h);
                             if qp_only {
                                 if let Some(main) = h.get_webview_window("main") {
-                                    let _ = main.hide();
+                                    let _ = main.set_title("Quick Panel");
+                                    let _ = main
+                                        .set_size(tauri::LogicalSize::new(760.0, 540.0));
+                                    let _ = main.eval(
+                                        "window.location.assign('/quick-panel' + window.location.search)",
+                                    );
                                 }
+                            } else {
+                                docs_search::open_palette(&h);
                             }
                         });
                     });
