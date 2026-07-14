@@ -198,6 +198,10 @@ fn main() {
             "list_envs",
             // docs search palette
             "open_docs_search_palette",
+            // WI-4827: Quick Panel "open in the main app window" — the palette
+            // webview invokes this to hand a full-app route to the main window
+            // (Spotlight-style) instead of navigating the small popup in place.
+            "open_route_in_app",
             // The dev-bridge eval return channel (debug builds). Without this
             // grant the injected eval JS's invoke() is ACL-rejected from the
             // remote http origin, so every tauri-agent-tools eval/click/dom
