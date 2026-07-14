@@ -489,6 +489,27 @@ bash "$ROOT/bin/stage-env-sidecars.sh"
 # (WI-3308, 2026-07-07); opt out with PAPERCUSP_STAGE_SOURCE=0 for a smaller build.
 bash "$ROOT/bin/stage-source-tree.sh"
 
+# ── IDENTITY-LITERAL LINT GATE (WI-4776) — fail in SECONDS, not after a build ──
+# stage-source-tree.sh already runs audit-release-bundle.py against the just-tarred
+# source.tar.zst (fast-ish: catches it after the tar, not after a full cut), and
+# build-desktop-sidecar.sh's --scan-dir runs even earlier against the assembled
+# sidecar. Both are real gates, but every one of the FOUR observed 0.0.9 leaks
+# (a `[owner:<name> …]` provenance tag or a stray box-identity literal in a hand-
+# authored comment/doc) is something that can be caught on the TRACKED SOURCE
+# ALONE, in seconds, before any staging/tar/build work happens at all. Run all
+# three identity lints here, immediately, so a leaked literal reds the cut before
+# stage-source-tree.sh's ~multi-minute tar+scan even starts — recurrence
+# prevention for the class that has already killed multiple 0.0.9 cuts ~10min in.
+echo "==> identity-literal lint gate (WI-4776): tracked source, before any staging work"
+_MONO="$(cd "$ROOT/.." && pwd)"
+if ! ( cd "$_MONO" \
+    && node scripts/check-no-owner-name-tags.mjs \
+    && node scripts/check-no-box-identity.mjs \
+    && node scripts/check-no-identity-literals.mjs ); then
+  echo "ERROR: tracked source carries an owner-name / box-identity literal — refusing to stage a leaky cut (WI-4776). Fix the source above; see each lint's own FIX note." >&2
+  exit 1
+fi
+
 # ── BOOT GATE (desktop-release-0-0-8) — the sidecar must actually START ────────
 # 0.0.9 shipped a sidecar that could not boot on ANY platform (sharp native
 # missing from the closure copy). FIVE green cuts missed it, because a dev box

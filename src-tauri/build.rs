@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 /// EI-160 (point 2): `src-tauri/sidecar/` is a gitignored ~2.2GB artifact
