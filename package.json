@@ -7,7 +7,7 @@
     "tauri": "tauri",
     "dev": "bin/desktop-dev-nohmr",
     "dev:nohmr": "bin/desktop-dev-nohmr",
-    "dev:quickpanel": "PAPERCUSP_DEV_OPEN_QUICK_PANEL=1 bin/desktop-dev-nohmr",
+    "dev:quickpanel": "PAPERCUSP_DEV_OPEN_QUICK_PANEL=only bin/desktop-dev-nohmr",
     "dev:preview": "bin/desktop-preview-prod",
     "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "test:federation:live-matrix": "bash bin/deb-hetzner-matrix.sh",
