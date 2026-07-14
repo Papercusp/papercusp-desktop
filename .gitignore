@@ -66,3 +66,15 @@ src-tauri/sidecar.tmp.*/
 **/.papercusp/logs/
 **/.papercusp/bench-reports/
 **/.papercusp/pi-sessions/
+
+# AppImage extraction/verification scratch — an ARRIVES sidecar-boot check (or a
+# manual `<app>.AppImage --appimage-extract`) unpacks the whole AppDir into a
+# `squashfs-root/` (3.6GB incl. a >100MB binary). On 2026-07-14 a verify script's
+# scratch-dir mktemp failed (perm-denied) and it extracted into THIS tree; git-sync
+# committed 8352 small files and hit the 100MB cap on the big ones. Never track it.
+# (Verify scripts must also target an out-of-tree scratch dir and hard-fail if it is
+# not writable, never fall through to cwd — see WI-4736 / the filed bug.)
+squashfs-root/
+**/squashfs-root/
+appimg-arrives*/
+**/appimg-arrives*/
