@@ -58,6 +58,7 @@ leg matches the real name exactly. Still can't call it directly?
 server-side under the tool's real identity and ALWAYS works. Full detail:
 `/internal/docs/agent-insights/toolsearch-cannot-select-colon-form-tool-names`.
 
+<!-- papercusp-rule:file-locking=automatic-hooks -->
 File-lock enforcement is **automatic here**: a `PreToolUse` hook in
 `~/.claude/settings.json` claims a lock before each `Edit`/`Write` and
 **blocks it (with the holder's intent) when another agent holds the

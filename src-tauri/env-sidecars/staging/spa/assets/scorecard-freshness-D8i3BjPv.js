@@ -1,0 +1,1 @@
+import{n as e,t}from"./scorecard-freshness-4w-kMI-e.js";e();export{t as checkScorecardFreshness};

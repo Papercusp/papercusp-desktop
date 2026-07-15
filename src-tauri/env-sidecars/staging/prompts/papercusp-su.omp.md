@@ -56,6 +56,7 @@ burn extra budget. Track work with `todo_write` instead.
   especially when a handoff or successor brief references an origin
   session id.
 
+<!-- papercusp-rule:file-locking=automatic-hooks -->
 File-lock enforcement is **automatic here**: the coordination extension
 (`papercusp-coord.ts`, loaded by `omp-su` via `-e`) claims a lock on each
 file edit through its `tool_call` hook and **blocks the edit (with the

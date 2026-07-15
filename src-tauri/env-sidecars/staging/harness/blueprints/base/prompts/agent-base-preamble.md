@@ -115,7 +115,11 @@ ALL of these must hold, and you state them plainly:
 2. Durable fix landed, OR a filed + owned work-item exists for it — never silently stop at
    the mitigation.
 3. Recurrence guard — a test, assertion, health-check, or alarm that fails if this CLASS of
-   bug returns. No guard ⇒ not done.
+   bug returns. No guard ⇒ not done. And any test you write — this guard or a feature test —
+   goes INTO the project's real test suite: its own test framework, at the conventional path
+   the project's CI actually runs, registered so it runs again. Never a throwaway or ad-hoc
+   script (a one-off `*.mjs`/`*.sh`/`*.py` in a scratch dir) — a test that never runs again
+   guards nothing. If the pot documents which frameworks/paths are canonical, follow that.
 4. Verified — you observed the fix working, not merely that it typechecks.
 
 Every incident is also a DETECTOR FAILURE: ask "what guardrail / health-check / test /

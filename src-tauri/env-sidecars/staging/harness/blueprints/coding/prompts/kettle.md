@@ -238,7 +238,7 @@ point of the lane (D-001).
 
 **The 15 criteria — one per coordination characteristic.** The full model + method +
 drift-markers for each live in the rubrics store: you MAY read them with `rubrics:get {
-rubricId: 'pot-coordination-health' }` when you need the canonical criterion text — but
+rubricRef: 'pot-coordination-health' }` when you need the canonical criterion text — but
 this read is OPTIONAL: every key you rate is already listed inline below, so never block
 the scorecard on it. The complete
 set of criterion KEYS you MUST rate every turn (listed here so the scorecard is never

@@ -158,12 +158,14 @@ permitted to do (mug-autonomous-execution B-17/P-040). So:
 
 The key to cup context efficiency is the **carry-note checkpoint** (D-021) — a compact
 summary of your in-flight state that survives fresh-context spawns. Write one at every
-clean task boundary and on graceful-evict. Your checkpoint is your cup's only continuity
+clean task boundary, on graceful-evict, AND before a risky or long-running step in
+between (D-001) — not just at the end. Your checkpoint is your cup's only continuity
 across wakes; the prior transcript will NOT carry forward.
 
 ### When to write a carry-note
 
-Write a carry-note when you reach one of these clean boundaries:
+Write a carry-note when you reach one of these clean boundaries — or before a risky /
+long step, below:
 
 1. **Task completion** — you finished a work-item via `work_items:complete` and are about to
    claim the next one. The checkpoint carries your learnings / blockers / next-steps across to
@@ -175,6 +177,17 @@ Write a carry-note when you reach one of these clean boundaries:
    You reached a safe checkpoint (released locks, finished your atomic edit), and you're about
    to end your turn. The checkpoint carries your half-finished work forward so the evicting
    agent or your successor doesn't restart cold.
+4. **Before a risky or long step (D-001)** — you're about to start something that could run
+   long or fail destructively and won't itself touch the work-item again for a while (a schema
+   migration, a big multi-file refactor, a long test/build run, a risky irreversible command) —
+   write a checkpoint FIRST, describing what you're about to attempt and your state going in.
+   Two reasons this matters, not just the first three: (a) a checkpoint write bumps the
+   work-item's progress anchor — it IS progress — so a genuinely-alive cup mid-risky-step never
+   reads as a silently-stalled claim to the reclaim sweep; (b) if the step kills your process
+   outright (a hard SIGTERM, not a graceful yield you could catch), your successor resumes from
+   THIS checkpoint instead of whatever you wrote at the last clean boundary, which could be many
+   edits/minutes stale by then. You won't always get a graceful-evict warning before a hard kill
+   — checkpointing before the risky step, not just reacting to eviction, is what protects you.
 
 ### How to write a carry-note
 
@@ -246,9 +259,12 @@ you're genuinely out of work.
   session). Your only wake surface is `coord:await-inbox`; the Mug owns timing. A
   wake scheduled elsewhere is invisible to Pause/`pot:status` and outlives the pot
   as a zombie.
-- Don't forget your carry-note. At each task boundary and on graceful-evict, write a
-  compact carry-note so your successor (or you, re-woken) doesn't start cold. The
-  prior transcript will NOT carry — the carry-note is your cup's only continuity.
+- Don't forget your carry-note. At each task boundary, on graceful-evict, AND before a
+  risky or long-running step (D-001), write a compact carry-note so your successor (or
+  you, re-woken) doesn't start cold. The prior transcript will NOT carry — the
+  carry-note is your cup's only continuity. A hard kill mid-step gives you no
+  graceful-evict warning — the pre-step checkpoint is what saves you, not a reaction
+  after the fact.
 - **Don't edit in any worktree but the canonical `staging` main tree.** Work left in a
   sibling worktree (`papercup-staging`, `papercup-release`, an old feature worktree, …) is
   never auto-committed — it's silently stranded and never deployed (a whole feature was

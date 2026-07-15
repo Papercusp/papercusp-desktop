@@ -1,1 +1,0 @@
-import{i as e,o as t}from"./wake-mode-BSPRv4Jw.js";t();export{e as getDefaultWakeMode};

@@ -1,1 +1,0 @@
-import{r as e,t}from"./hive-policy-store-PbTm0Nh0.js";e();export{t as getHivePolicy};

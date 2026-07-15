@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{n as t,t as n}from"./identity-DHbbI2Vl.js";import{n as r,t as i}from"./coordination-domain-53_BMQsA.js";function a(e){let n=t(e);return{ownerId:n.ownerId,ownerLabel:n.ownerLabel,coordinationDomain:r()}}var o=e((()=>{n(),i()}));export{a as n,o as t};

@@ -1,0 +1,16 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./src-9yr5ozZ_.js";import{J as n,t as r}from"./src-C4H77EbW.js";import{n as i,s as a}from"./workspace-registry-Bu1Yy540.js";import{r as o}from"./coordination-event-log-browser-Dq_4i-_C.js";function s(e){if(typeof e==`string`)try{e=JSON.parse(e)}catch{return null}if(!e||typeof e!=`object`)return null;let t=e;return t.kind!==`msg`&&t.kind!==`work-item`&&t.kind!==`owner-turn`||typeof t.verified!=`boolean`||typeof t.verifiedAt!=`string`||!t.verifiedAt?null:{kind:t.kind,verified:t.verified,verifiedAt:t.verifiedAt,...typeof t.quote==`string`&&t.quote?{quote:t.quote}:{},...typeof t.label==`string`&&t.label?{label:t.label}:{},...typeof t.error==`string`&&t.error?{error:t.error}:{}}}function c(e){let t=e.sourceRef??``,n=e.sourceProvenance;return n?n.verified?n.quote?`${t} ✓ "${n.quote}"`:`${t} ✓${n.label?` ${n.label}`:``}`:`${t} ✗unverified${n.error?` (${n.error})`:``}`:t}function l(e){return e??n().sql}function u(e){let t=e?.trim();return t&&t!==`*`&&t!=="default"?t:void 0}async function d(e,t={},n){if(e.length===0)return[];let r=l(n),a=t.workspaceId??i(),o=t.limitPerSelector??12,s=(t.keyPrefix??``).trim(),c=t.audiences===`all`?`all`:(t.audiences??[]).map(e=>e.trim()).filter(Boolean),u=[];for(let t of e){let e=t.scope===`workspace`?``:(t.scopeRef??``).trim();if(t.scope!==`workspace`&&!e)continue;let n=await r`
+      SELECT scope, scope_ref, key, body, source_ref, audience_scope, source_provenance,
+             created_by, updated_at::text, expires_at::text
+        FROM harness_shared.agent_facts
+       WHERE workspace_id = ${a} AND scope = ${t.scope}
+         AND coalesce(scope_ref,'') = ${e}
+         AND retracted_at IS NULL AND expires_at > now()
+         AND ${s?r`key LIKE ${s+`%`}`:r`TRUE`}
+         AND ${c===`all`?r`TRUE`:c.length>0?r`(audience_scope IS NULL OR audience_scope = ANY(${c}))`:r`audience_scope IS NULL`}
+       ORDER BY updated_at DESC
+       LIMIT ${o}`;u.push(...n.map(h))}return u}async function f(e){return(await l(e)`
+    DELETE FROM harness_shared.agent_facts
+     WHERE expires_at < now() - interval '30 days'
+        OR retracted_at < now() - interval '30 days'
+    RETURNING key`).length}function p(e){return e.outcome===`won`||(e.grade??0)>=4}function m(e,t=Date.now()){return e.length===0?``:`### Standing facts (deterministic — assert via facts:assert, retract when stale)\n${e.map(e=>{let n=e.scopeRef?`${e.scope}:${e.scopeRef}`:e.scope,r=e.audienceScope?` ⊸${e.audienceScope}`:``,i=Math.max(0,Math.round((Date.parse(e.expiresAt)-t)/864e5)),a=c(e),o=a?`, src ${a}`:``;return`• [${n}${r}] ${e.body} (expires ~${i}d${o})`}).join(`
+`)}`}function h(e){return{scope:e.scope,scopeRef:e.scope_ref,key:e.key,body:e.body,sourceRef:e.source_ref,audienceScope:e.audience_scope??null,sourceProvenance:s(e.source_provenance),createdBy:e.created_by,updatedAt:e.updated_at,expiresAt:e.expires_at}}var g=e((()=>{r(),o(),t(),a()}));export{c as a,f as c,s as i,d as n,m as o,g as r,u as s,p as t};

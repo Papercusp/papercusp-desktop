@@ -1,0 +1,1 @@
+import{r as e,t}from"./tick-ledger-CfsiDx6r.js";t();export{e as readScoutTicks};

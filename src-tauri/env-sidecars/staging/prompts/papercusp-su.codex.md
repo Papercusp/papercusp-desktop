@@ -30,19 +30,11 @@ search that returns the exact tool names by intent — then call the
 returned tool directly. (You load the full catalog, so there's no
 `search_tool_bm25` activation step — that's OMP-only.)
 
-File-lock enforcement is **NOT automatic on Codex** (unlike Claude, whose
-edits a `PreToolUse` hook locks for it). Current Codex builds don't fire
-hooks on `apply_patch` (upstream openai/codex #20204), so **nothing claims
-locks for you** — the cooperative discipline is on you. Before editing any
-file another agent could touch, **call `locks:acquire` yourself**:
-
-```
-locks:acquire { paths: ['<repo-rel>', …], intent: '<one line>', ttl_sec: 1200, wait: { max_sec: 300 } }
-```
-
-then edit → commit → `locks:release { lock_id }`. If it returns `busy`,
-pivot/yield to the holder — don't route around it. This is what keeps you
-from clobbering concurrent Claude/OMP agents (whose edits ARE hook-locked
-the same way). See the base playbook's "File locking is ENFORCED" section
-for the mechanics — but on Codex, treat **every** edit as needing the
-explicit claim, not just multi-file changes.
+<!-- PAPERCUSP-CODEX:LOCK-GUIDANCE-START -->
+Codex file-lock policy is resolved from runtime evidence, never from a static
+assumption. The generated **Codex Lock Enforcement Status** section at the end
+of this prompt carries exactly one effective `lockMode` plus hook health.
+`coord:orient.codexLocks` is the live authority after launch and supersedes the
+launch snapshot when its generation changes. Follow that one instruction; do
+not combine the automatic and manual paths.
+<!-- PAPERCUSP-CODEX:LOCK-GUIDANCE-END -->

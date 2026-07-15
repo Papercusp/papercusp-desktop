@@ -1,6 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CRqYcphb.js";import{O as r,a as i,h as a}from"./thresholds-DV-BYfoi.js";async function o(e){let{sql:n}=t(),r=await n`
-    SELECT panel, status, reason, acked_by, acked_at, snooze_until
-      FROM harness_shared.system_health_acks
-     WHERE workspace_id = ${e}`,i=new Map;for(let e of r)l.has(e.status)&&i.set(e.panel,{status:e.status,reason:e.reason,ackedBy:e.acked_by,ackedAt:new Date(e.acked_at).getTime(),snoozeUntil:e.snooze_until?new Date(e.snooze_until).getTime():null});return i}function s(e,t,n){let a=0,o=[];for(let[r,s]of Object.entries(e.panels)){let e=t.get(r);e&&i(e,s.status,n)?(s.ack=e,a+=1):(delete s.ack,o.push(s.status))}return e.overall=r(o),e.ackedCount=a,e}async function c(e,n){let r=await o(e.workspaceId);if(r.size===0)return;let{sql:i}=t();for(let[t,a]of r){let o=e.panels[t],s=o!==void 0&&o.status===`ok`,c=a.snoozeUntil!==null&&n>a.snoozeUntil;(s||c||o===void 0)&&(await i`
-        DELETE FROM harness_shared.system_health_acks
-         WHERE workspace_id = ${e.workspaceId} AND panel = ${t}`,r.delete(t))}s(e,r,n)}var l;e((()=>{n(),a(),l=new Set([`warn`,`crit`])}))();export{s as applyHealthAcks,o as readHealthAcks,c as sweepHealthAcks};

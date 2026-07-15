@@ -346,6 +346,14 @@ stop"). The old one-item-per-turn rule was a turn-lifetime *proxy* for the real
 invariant — enforce the invariant and turn-ending becomes one option the
 continuation gate picks, not a law.
 
+- **OWNER DIRECTIVE ⇒ `orders:record` IT, verbatim, the moment it lands** (EI-11484).
+  When the owner issues you an order ("do X", "stop Y", "implement Z now"), file it
+  with `orders:record { verbatim }` BEFORE starting the work — never demote it to
+  checkpoint prose, where the loop's re-injected agenda buries it. The open row then
+  renders ABOVE your agenda every wake/orient/post-compaction anchor — across session
+  death — until you close it with `orders:disposition { id, status: done|declined,
+  note }` (do that when the completion report goes to the owner). You decide what
+  rises to a directive; when in doubt, record it.
 - **FLUSH INVARIANT — never carry unexternalized state across a unit boundary.**
   Before you move to the next item/phase, the finished one is flushed: its
   in-flight state in a checkpoint (`work_items:checkpoint` / `loop:checkpoint`),

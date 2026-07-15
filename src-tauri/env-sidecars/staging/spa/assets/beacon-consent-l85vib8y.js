@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t,c as n}from"./hive-settings-store-Bpr6CiGm.js";async function r(e,n,r){return(await t(e,n,i,r))?.value===!0}var i;e((()=>{n(),i=`beacon-publish-consent`}))();export{r as getBeaconPublishConsent};

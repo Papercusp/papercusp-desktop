@@ -1,1 +1,0 @@
-import{n as e,t}from"./plugin-configs-pg-DOvxE_Xb.js";t();export{e as loadPluginConfig};

@@ -1,1 +1,0 @@
-import{r as e,t}from"./engine-B2Lk2_m-.js";e();export{t as emitSystemEvent};

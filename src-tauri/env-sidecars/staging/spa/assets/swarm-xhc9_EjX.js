@@ -1,0 +1,1 @@
+import{f as e,p as t}from"./swarm--x2ToyoW.js";t();export{e as getSharedSwarm};

@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{a as t,c as n}from"./hive-settings-store-Bpr6CiGm.js";function r(e){return e===`bridged`||e===`p2p-only`?e:`legacy`}async function i(e,n,i){try{return r((await t(e,n,a,i))?.value)}catch{return`legacy`}}var a,o=e((()=>{n(),a=`hiveGit.mode`}));export{o as n,i as t};
