@@ -270,7 +270,12 @@ BENIGN_ERE = [
     r"gh[pousr]_(PersonalAccessToken|InstallationUserToServer|InstallallationOrActionToken)",
     # The ONE deliberately-public key every build ships (posthog-public-defaults.ts):
     # anonymous-capture only, cannot read events. Shipping it is the feature.
-    r"phc_tnwKu5QTgaHi6hyrHwA3EUQFKhskJES4c4zAzHCUrPFv",
+    # ⚠ ROTATION SYNC (WI-5013 0.0.11 cut red, 2026-07-15): this literal exists in
+    # THREE places that must move together — posthog-public-defaults.ts (the shipped
+    # value), bin/audit-bundle.sh PUBLIC_PROJECT_KEY, and HERE. The 2026-07 rotation
+    # updated the first two and missed this one, redding the next cut on our own
+    # public key. When rotating: update all three in the same change.
+    r"phc_nm3LSXkJKynGzsGTZfwqUywbrfsryNNNVWrxHy7Kriug",
     # Third-party vendors' OWN public anon keys, compiled into their npm packages:
     # mem0ai/dist/* and lost-pixel/dist/constants.js. Not our secrets, and not ours
     # to rotate. (That these libraries carry live telemetry keys at all is a real
