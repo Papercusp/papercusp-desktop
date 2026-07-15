@@ -840,7 +840,7 @@ function Invoke-Inno([string]\$role, [string]\$appId, [string]\$appName) {
   \$outDir = Join-Path \$PWD "src-tauri\target\release\bundle\inno"
   New-Item -ItemType Directory -Force \$outDir | Out-Null
   \$buildRoot = Join-Path \$PWD "src-tauri"
-  Write-Host "[build] ISCC \$role packaging (full seed stored raw; several minutes)"
+  Write-Host "[build] ISCC \$role packaging (full seed stored raw; SLOW — measured ~40+ min at the ~4GB payload, EI-12902; ISCC output block-buffers on the VM, so this phase can look SILENT the whole time — that is NORMAL, not a hang)"
   & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" ${SPAN_DEFINE}"src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
   Write-Host "[build] ISCC \$role EXIT=\$LASTEXITCODE"
   Sign-File (Join-Path \$outDir "\${appName}_\${ver}_x64-setup.exe")
@@ -901,14 +901,58 @@ EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
 rm -f "$BUILD_PS1"
 
-echo "==> building (this holds the ssh session; first build ~15-25 min)"
+# ── Whole-leg build timeout (EI-12902) — MAC PARITY ──────────────────────────
+# The mac leg bounds its remote build under PAPERCUSP_MAC_BUILD_TIMEOUT_SEC; the
+# windows leg had NO bound at all. Its only limits were the ssh keepalives
+# (ConnectTimeout / ServerAliveInterval / ServerAliveCountMax above), which prove
+# the VM's sshd still ANSWERS — NOT that the build is PROGRESSING. So a build that
+# wedges behind a network-alive VM (a deadlocked/spinning ISCC, a full disk, a
+# stuck MSVC child) hung this blocking ssh FOREVER — and because release-local.sh's
+# join_leg does a bare `wait "$pid"`, the ENTIRE cut hung with it: no watchdog, no
+# diagnostic, no exit code.
+#
+# This is a WALL-CLOCK BACKSTOP, deliberately sized ABOVE a healthy build — NOT a
+# tight bound. A real win leg legitimately runs LONG: measured on the 0.0.11 cut,
+# GUI ISCC alone took 2,557s (42.6 min) packaging the ~4GB raw-stored seed, plus a
+# comparable Server ISCC and two Rust builds ⇒ ~5,000-6,000s+ end to end. A naive
+# small timeout would FALSELY KILL good builds (worse than a hang — a hang is at
+# least honest), so the default is 10800s (3h), well clear of the measured cost and
+# env-tunable. On timeout we do NOT re-invoke (a re-run doubles the wall clock, it
+# does not save it — same D-005 reasoning as the mac leg): we fail with a named
+# error + a tail of the leg log and leave the VM build running for inspection.
+# (A progress-based SILENCE detector would be the better long-term shape, but it
+# needs the remote ISCC output to STREAM instead of block-buffer for ~42 min on the
+# VM — a larger change; this backstop closes the infinite-hang gap safely meanwhile.)
+WIN_BUILD_TIMEOUT_SEC="${PAPERCUSP_WIN_BUILD_TIMEOUT_SEC:-10800}"
+echo "==> building (this holds the ssh session; first build ~15-25 min; hard cap ${WIN_BUILD_TIMEOUT_SEC}s)"
 # 2>&1 BEFORE the pipe: cargo + tauri-cli print progress (including the
 # load-bearing "Finished 1 bundle at:" line) to STDERR, which ssh carries on
 # its own stderr channel — without the merge it bypasses tee and the
 # assertions below see an empty log (bit the first uninterrupted run live,
 # 2026-06-11: bundle finished, lane reported "produced no bundle").
-"${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
+# `timeout` wraps the ssh (the left side of the pipe). On expiry it SIGTERMs the
+# LOCAL ssh (SIGKILL 30s later if it will not die); with no -t the signal is NOT
+# propagated to the VM, so the remote build keeps running for inspection — exactly
+# what we want. PIPESTATUS[0] is timeout's/ssh's rc (124/137 on expiry), not tee's.
+set +e
+timeout --signal=TERM --kill-after=30s "$WIN_BUILD_TIMEOUT_SEC" \
+  "${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
   2>&1 | tee /tmp/vm-release-build.log
+build_ssh_rc="${PIPESTATUS[0]}"
+set -e
+if [[ "$build_ssh_rc" == "124" || "$build_ssh_rc" == "137" ]]; then
+  echo "" >&2
+  echo "ERROR: Windows build exceeded the ${WIN_BUILD_TIMEOUT_SEC}s hard cap (EI-12902) — the local ssh was terminated, but the build MAY STILL BE RUNNING on the VM (inspect it there before assuming it is dead). NOT re-invoking (a re-run doubles the wall clock, it does not save it). If a legitimately larger build needs more time, raise PAPERCUSP_WIN_BUILD_TIMEOUT_SEC; otherwise investigate the VM (wedged ISCC/MSVC, full disk). Tail of the leg log:" >&2
+  tail -40 /tmp/vm-release-build.log 2>/dev/null | sed 's/^/  [win-vm] /' >&2 || true
+  exit 124
+elif [[ "$build_ssh_rc" != "0" ]]; then
+  # Preserve the prior `set -e | pipefail` behavior: a nonzero build ssh (an in-VM
+  # Assert-ReleaseHostBaked `exit 1`, or an ssh transport failure) fails the leg
+  # exactly as before, so the grep assertions below are reached only on a clean
+  # ssh exit.
+  echo "ERROR: Windows build ssh exited $build_ssh_rc — see /tmp/vm-release-build.log" >&2
+  exit "$build_ssh_rc"
+fi
 # Per-step exit assertions. The cargo compile AND the Inno packaging of each
 # built role must both report EXIT=0 (with --no-bundle there is no in-VM
 # updater signing, so the old "expected keyless exit 1" allowance is gone —
