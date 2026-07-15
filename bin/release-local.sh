@@ -89,6 +89,9 @@ KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 # PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1.
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
+# EI-12913: the ONE source of truth for this cut's artifact set — release-local.sh
+# writes it (below), upload-release.sh reads it, so the two halves can never drift.
+source "$HERE/lib/release-artifacts.sh"
 require_release_host
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
@@ -1225,6 +1228,15 @@ if not UPDATE_BASE:
         file=sys.stderr,
     )
 PY
+
+# EI-12913: record the EXACT artifact set (inno .exe + .sig + every DiskSpanning
+# .bin slice, all mac + linux bundles) that this cut produced, so upload-release.sh
+# publishes THIS list instead of re-deriving its own (which drifted: it scanned the
+# wrong tree and excluded .bin, dropping the Server payload). ARTIFACTS[] here is
+# authoritative — it already caught the inno dir + .bin slices via the version-scoped
+# globs above. Written next to latest.json in /tmp (same TAG-scoped lifecycle).
+ARTIFACTS_MANIFEST="$(release_artifacts_write "$TAG" "${ARTIFACTS[@]}")"
+echo "==> artifact manifest: $ARTIFACTS_MANIFEST (${#ARTIFACTS[@]} files — upload-release.sh reads this)"
 
 echo "==> committing version bump"
 git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock

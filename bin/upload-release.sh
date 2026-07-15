@@ -128,16 +128,33 @@ if [[ -f "$LATEST_SERVER_JSON" ]] && grep -q 'papercusp-update-base-unset://' "$
   exit 1
 fi
 
-mapfile -t ARTIFACTS < <(
-  find "$BUNDLE/deb" "$BUNDLE/appimage" "$BUNDLE/dmg" "$BUNDLE/macos" "$BUNDLE/nsis" "$BUNDLE/msi" \
-    -maxdepth 1 -type f \( -name "*${VERSION}*" -o -name "*.sig" \) 2>/dev/null \
-    | grep -E '\.(deb|AppImage|dmg|tar\.gz|exe|msi)(\.sig)?$' \
-    | grep -F "$VERSION" \
-    | sort
-)
+# EI-12913: consume the ONE artifact set release-local.sh already computed
+# (bin/lib/release-artifacts.sh) instead of re-deriving it here with a second
+# glob. The old glob scanned $BUNDLE/{deb,appimage,dmg,macos,nsis,msi} — which has
+# NO `inno` dir (where the windows artifacts actually land) and still named the
+# retired `nsis` packager — and its extension allowlist EXCLUDED `.bin`, so it
+# could not see the windows installer at all AND would have dropped every Server
+# DiskSpanning .bin slice (the ~4 GB payload; the .exe alone is a ~3.6 MB stub).
+# One list, written by the builder, read here — no drift.
+# shellcheck source=lib/release-artifacts.sh
+. "$HERE/lib/release-artifacts.sh"
+mapfile -t ARTIFACTS < <(release_artifacts_read "$TAG") || {
+  echo "ERROR: could not resolve this cut's artifacts for $TAG — run bin/release-local.sh $VERSION $CHANNEL first (it writes the manifest this reads)." >&2
+  exit 1
+}
 
 if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
-  echo "ERROR: no artifacts for $VERSION found under $BUNDLE" >&2
+  echo "ERROR: no artifacts recorded for $TAG" >&2
+  exit 1
+fi
+
+# Recurrence guard (EI-12913): every artifact URL the manifest(s) ADVERTISE must
+# be in the set we are about to upload. Fail BEFORE uploading — the post-upload
+# fetch-check below catches an advertised-but-missing artifact only once the
+# manifest lie is already live. latest-server.json is optional (only Server cuts
+# emit it) and skipped if absent.
+if ! release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON"; then
+  echo "ERROR: latest.json advertises artifact(s) not in this cut's upload set — the manifest would lie. Fix the cut before shipping (EI-12913)." >&2
   exit 1
 fi
 
