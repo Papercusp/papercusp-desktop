@@ -1,0 +1,14 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-C4H77EbW.js";import{i as r,o as i}from"./started-DGJ4xoBr.js";import{i as a,n as o}from"./watchdog-CziXkPhv.js";import{_ as s,b as c,u as l}from"./placement-watchdog-CdONBQ_h.js";function u(){let e=Number({}.PAPERCUSP_SCOUT_DRAFT_REVIEW_STALE_SEC??43200);return Number.isFinite(e)?e:43200}function d(e,t){return t.thresholdMs<=0?[]:e.filter(e=>Number.isFinite(e.updatedAtMs)&&t.now-e.updatedAtMs>=t.thresholdMs).sort((e,t)=>e.updatedAtMs-t.updatedAtMs)}async function f(e,t,n,r={}){return(await e`
+    SELECT plan_slug, title,
+           (extract(epoch FROM updated_at) * 1000)::bigint AS updated_at_ms
+      FROM harness_shared.harness_plans
+     WHERE workspace_id = ${t}
+       AND harness_slug = ${n}
+       AND status = 'draft'
+       AND archived = false
+       AND content LIKE ${`%
+origin: scout
+%`}
+     ORDER BY updated_at ASC
+     LIMIT ${r.limit??50}`).map(e=>({planSlug:e.plan_slug,title:e.title,updatedAtMs:Number(e.updated_at_ms??0)}))}async function p(e,t,n,r,i=null){let a=Math.max(1,Math.round(r/3600)),o=n.slice(0,5),s=o.map(e=>`• ${e.planSlug}${e.title?` — ${e.title}`:``}`).join(`
+`),l=n.length>o.length?`\n…and ${n.length-o.length} more.`:``;await c({workspaceId:e,mugOwner:t,summary:`Scout-draft review backstop: ${n.length} scout-routed draft(s) unreviewed > ${a}h (the plan-review idle activity never ran — the hive has been saturated, so the Queen was never idle). This is a backstop WAKE, not an idle activity: review each and either promote it (= ready), coord:send feedback to its scout owner to iterate, or deprecate it WITH learnings (never just leave it). Clearing or progressing them stops this wake.\n\n${s}${l}`,payload:{kind:`scout-draft-review`,slugs:n.map(e=>e.planSlug),staleHours:a},source:`scout-draft-review`,body:`${s}${l}`,harnessSlug:i})}async function m(e={}){let n=[],r=u();if(r<=0)return n;try{let a=await i();if(a.length===0)return n;let{sql:c}=t(),l=e.now??Date.now(),u=r*1e3,m=Math.max(1,Math.round(r/3600));for(let{workspaceId:e,installSlug:t}of a)try{let i=d(await f(c,e,t),{now:l,thresholdMs:u});if(i.length===0)continue;let a=`${i.length} scout-routed draft(s) unreviewed > ${m}h: `+i.slice(0,5).map(e=>e.planSlug).join(`, `);if(!await o({workspaceId:e,installSlug:t,source:`scout-draft-review`,reason:a,wakeAt:null,windowHours:m})){n.push({workspaceId:e,installSlug:t,outcome:`skipped`,staleCount:i.length,reason:`debounced`});continue}await p(e,await s(c,e,t),i,r,t),n.push({workspaceId:e,installSlug:t,outcome:`nudged`,staleCount:i.length,reason:a})}catch(r){n.push({workspaceId:e,installSlug:t,outcome:`error`,staleCount:0,reason:r instanceof Error?r.message:String(r)})}}catch(e){console.warn(`[scout-draft-review] sweep failed: ${e instanceof Error?e.message:e}`)}return n}e((()=>{n(),r(),l(),a()}))();export{m as scoutDraftReviewSweep};

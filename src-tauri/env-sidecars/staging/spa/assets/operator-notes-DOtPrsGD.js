@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{t}from"./__vite-browser-external-CM3Eme-n.js";import{t as n}from"./src-C4H77EbW.js";import{s as r}from"./workspace-registry-Bu1Yy540.js";import{a as i,c as a}from"./harness-registry-BDAgv6Ft.js";async function o(e){return(await a()).projects.find(t=>t.slug===e)?.path??null}var s=e((()=>{t(),t(),n(),i(),r()}));export{o as n,s as t};
