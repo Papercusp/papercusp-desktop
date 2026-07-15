@@ -196,6 +196,28 @@ else
   echo "WARN: term shim dylib not produced — embedded terminal will downgrade to NewWindow"
 fi
 
+# ── Recurrence guard (EI-12894): fail FAST + legibly on workspace-link drift ──
+# The sidecar build below esbuilds @papercusp/operator-core, which resolves
+# @papercusp/* via the MONOREPO-ROOT node_modules (createRequire walks up). If the
+# VM's root node_modules is stale — missing a workspace package added since its last
+# root `npm install` (the rsync that stages the tree excludes node_modules, so it
+# drifts) — esbuild dies ~35 min deep with a cryptic `Could not resolve` (the 0.0.11
+# r8 mac-leg kill; @papercusp/kokoro-tts was the first to bite). Assert every root
+# `workspaces` entry has a node_modules/<name> link NOW, before the build, so drift
+# surfaces as an immediate NAMED failure instead of a late esbuild resolve error.
+# `set -eo pipefail` aborts the build on the guard's non-zero exit. $ROOT is
+# papercusp-desktop; the monorepo root (where the guard + the root node_modules that
+# esbuild resolves against both live) is one directory up.
+MONO_ROOT="$(cd "$ROOT/.." && pwd)"
+if [[ -f "$MONO_ROOT/scripts/assert-workspace-links.mjs" ]]; then
+  echo "--- workspace-link drift guard (root: $MONO_ROOT) ---"
+  node "$MONO_ROOT/scripts/assert-workspace-links.mjs" --root "$MONO_ROOT"
+else
+  # Building an older snapshot (a tag cut before this guard existed) — degrade to a
+  # warn rather than a self-inflicted hard failure on a missing script.
+  echo "WARN: workspace-link guard not found at $MONO_ROOT/scripts/assert-workspace-links.mjs — skipping (older snapshot?)"
+fi
+
 echo "--- sidecar (darwin $(uname -m)) ---"
 # REUSE only a real DARWIN sidecar. A host-side `rsync` can clobber the VM's
 # darwin sidecar with the Linux host's `src-tauri/sidecar` (Linux node/binaries)
