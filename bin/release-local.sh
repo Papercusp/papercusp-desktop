@@ -438,6 +438,15 @@ cut_release_seed() {
 
 cut_release_seed
 
+# Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
+# info log at cut time, but a reused/as-is seed (PAPERCUSP_SKIP_SEED_CUT=1) or a
+# later store re-open can regenerate it — and `LOG` embeds the build box's
+# hostname + absolute paths, which reds the AppDir identity gate. Exact names
+# only: the numbered <NNN>.log WALs are data and must survive.
+if [[ -d "$ROOT/src-tauri/seed/corestore/db" ]]; then
+  rm -f "$ROOT/src-tauri/seed/corestore/db/LOG" "$ROOT/src-tauri/seed/corestore/db"/LOG.old* 2>/dev/null || true
+fi
+
 # ── P-006 (desktop-build-hardening-tri-platform-2026-07-11), per D-005 ────────
 # The release cut is the VICTIM of host load, not its cause: WI-3792's 05:20Z
 # 0.0.7 death was runaway staging hono-hosts + the Gemma ONNX all-core spin
