@@ -39,7 +39,7 @@ REGEX_NEEDLES=(
 # enables telemetry. It is NOT a leak — mask it before the regex scan so
 # any OTHER phc_/phx_ key (esp. write-side phx_ personal keys) still
 # FAILS. Keep in sync with POSTHOG_PUBLIC_DEFAULTS.projectKey.
-PUBLIC_PROJECT_KEY='phc_tnwKu5QTgaHi6hyrHwA3EUQFKhskJES4c4zAzHCUrPFv'
+PUBLIC_PROJECT_KEY='phc_nm3LSXkJKynGzsGTZfwqUywbrfsryNNNVWrxHy7Kriug'
 
 # Soft-warn needles: signals that posthog-js (the browser SDK) is in the
 # bundle. Today it's dynamic-imported only when the user opts into
