@@ -824,9 +824,11 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       # member, so the per-desktop install below never touches the root — and mac-vm-build.sh
       # rebuilds the sidecar, whose esbuild (createRequire walks up) then cannot resolve the
       # new dep. The rsync excludes node_modules, so the VM root node_modules goes stale silently.
-      cd '"$MAC_VM_BUILD_DIR"' || status=91
+      cd \$HOME/'"$MAC_VM_BUILD_DIR"' || status=91
       if [ \$status -eq 0 ]; then npm install --legacy-peer-deps >/tmp/mac-release-root-install.log 2>&1 || { tail -20 /tmp/mac-release-root-install.log; status=92; }; fi
-      if [ \$status -eq 0 ]; then cd '"$MAC_VM_BUILD_DIR"'/papercusp-desktop || status=91; fi
+      # ABSOLUTE path: the root install above moved into MAC_VM_BUILD_DIR, so a relative
+      # cd here would resolve against that dir and miss the papercusp-desktop subdir.
+      if [ \$status -eq 0 ]; then cd \$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop || status=91; fi
       if [ \$status -eq 0 ]; then npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; status=92; }; fi
       if [ \$status -eq 0 ]; then
         export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
