@@ -331,13 +331,38 @@ if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
   MONO_SHA="$(git -C "$MONOREPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
   echo "==> dogfood pin: tagging monorepo ($MONOREPO @ $MONO_SHA) as $TAG"
-  if git -C "$MONOREPO" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "    tag $TAG already exists on the monorepo — reusing"
+  # The pin MUST resolve to the commit this build is made from. Re-cutting a
+  # version is routine (a failed attempt, a retry — 0.0.11 was cut 3x on
+  # 2026-07-15 alone), and the pin used to be REUSED-never-moved on a re-cut:
+  # it froze at attempt #1's commit while the build moved on, so the shipped app
+  # cloned source that did not match its binary. Silent, exit 0, prints green.
+  # 0.0.9 shipped that way — pinned 60 desktop commits / 27h behind its binary
+  # (WI-5022, measured). A stale pin is the exact drift this block exists to
+  # prevent, so a mismatch RE-PINS and says so.
+  MONO_HEAD="$(git -C "$MONOREPO" rev-parse HEAD 2>/dev/null || echo '?')"
+  PIN_FORCE=""
+  if EXISTING_PIN="$(git -C "$MONOREPO" rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null)"; then
+    if [[ "$EXISTING_PIN" == "$MONO_HEAD" ]]; then
+      echo "    tag $TAG already at this build's commit (${MONO_HEAD:0:10}) — reusing"
+    else
+      # Re-pinning a version whose installs are already in the wild changes what
+      # they dogfood-clone. That is intended here: re-cutting a published version
+      # is itself the deliberate act, and leaving the pin stale is never right.
+      echo "    ⚠ RE-PINNING $TAG: ${EXISTING_PIN:0:10} (stale) -> ${MONO_HEAD:0:10} (this build)"
+      git -C "$MONOREPO" tag -f "$TAG" || echo "    WARN: could not move monorepo tag $TAG"
+      PIN_FORCE="--force"
+    fi
   else
     git -C "$MONOREPO" tag "$TAG" || echo "    WARN: could not create monorepo tag $TAG"
   fi
-  git -C "$MONOREPO" push origin "refs/tags/$TAG" 2>/dev/null \
+  git -C "$MONOREPO" push $PIN_FORCE origin "refs/tags/$TAG" 2>/dev/null \
     || echo "    WARN: could not push monorepo tag $TAG — dogfood clone will fall back to the default branch (main)"
+  # Fail loud rather than ship a pin that silently disagrees with the build.
+  PUSHED_PIN="$(git -C "$MONOREPO" ls-remote --tags origin "refs/tags/$TAG" 2>/dev/null | awk '{print $1}')"
+  if [[ -n "$PUSHED_PIN" && "$PUSHED_PIN" != "$MONO_HEAD" ]]; then
+    echo "    ⚠ WARN: remote $TAG is $PUSHED_PIN but this build is $MONO_HEAD —"
+    echo "      the dogfood clone will NOT match this binary (WI-5022)."
+  fi
 else
 echo "==> dogfood pin: $ROOT/.. is not a git repo — skipping (sidecar bakes no ref → dogfood clone uses main)"
 fi
