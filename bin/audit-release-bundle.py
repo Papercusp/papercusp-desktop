@@ -103,7 +103,10 @@ FORBIDDEN_PATH = [
     # the plan/handoff notes beside them. Nobody we hand a build to needs these, and
     # they are AGENT-AUTHORED CONTINUOUSLY — a new brief naming a box path lands every
     # day. Scrubbing them one by one would make this gate a treadmill that reds every
-    # cut; excluding the class ends it. (Product docs — apps/operator-docs — DO ship.)
+    # cut; excluding the class ends it. (apps/operator-docs is PARTLY product docs and
+    # DOES ship — but not wholesale: its internal build-infra sections are excluded by
+    # the "internal-infra-docs" rule below, which is the WI-4723 creds leak. Do not read
+    # this rule as blessing the whole operator-docs tree.)
     ("internal-agent-artifacts", re.compile(r"(^|/)(agent-briefs|docs/plans)/"),
      ["agent-briefs", "docs/plans"]),
     ("vcs", re.compile(r"(^|/)\.git/"),
