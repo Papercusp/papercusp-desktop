@@ -449,3 +449,64 @@ warning: use of deprecated associated function `gtk::glib::main_context_channel:
    |                               ^^^^^^^
 
    Compiling tray-icon v0.24.1
+warning: `tao` (lib) generated 3 warnings
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+  --> vendor/wry/src/webkitgtk/synthetic_mouse_events.rs:22:17
+   |
+22 |         webview.run_javascript(
+   |                 ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+  --> vendor/wry/src/webkitgtk/synthetic_mouse_events.rs:32:17
+   |
+32 |         webview.run_javascript(
+   |                 ^^^^^^^^^^^^^^
+
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+  --> vendor/wry/src/webkitgtk/synthetic_mouse_events.rs:56:17
+   |
+56 |         webview.run_javascript(
+   |                 ^^^^^^^^^^^^^^
+
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+  --> vendor/wry/src/webkitgtk/synthetic_mouse_events.rs:66:17
+   |
+66 |         webview.run_javascript(
+   |                 ^^^^^^^^^^^^^^
+
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+   --> vendor/wry/src/webkitgtk/mod.rs:359:21
+    |
+359 |             webview.run_javascript(&script, cancellable, |_| ());
+    |                     ^^^^^^^^^^^^^^
+
+warning: use of deprecated method `webkit2gtk::WebViewExt::run_javascript`: Since 2.40
+   --> vendor/wry/src/webkitgtk/mod.rs:702:20
+    |
+702 |       self.webview.run_javascript(js, cancellable, |result| {
+    |                    ^^^^^^^^^^^^^^
+
+warning: `wry` (lib) generated 6 warnings
+   Compiling tauri-plugin-single-instance v2.4.2
+   Compiling tauri-specta v2.0.0-rc.24
+warning: function `read_dev_ipc_socket_for_port` is never used
+   --> src/main.rs:216:4
+    |
+216 | fn read_dev_ipc_socket_for_port(papercusp_dir: &std::path::Path, port: u16) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `extent` is never used
+   --> src/native_terminal.rs:750:12
+    |
+744 | impl TerminalLayout {
+    | ------------------- method in this implementation
+...
+750 |     pub fn extent(&self, axis: i32, min_px: i32, max_px: i32) -> i32 {
+    |            ^^^^^^
+
+warning: `papercusp-desktop` (bin "papercusp-desktop") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 2m 22s
