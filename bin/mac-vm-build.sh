@@ -394,6 +394,24 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   export CARGO_TARGET_DIR="$PWD/src-tauri/target/role-$role"
   role_bundle_dir="$CARGO_TARGET_DIR/$MAC_BUILD_TARGET/release/bundle"
   echo "--- tauri build: $role_label ($MAC_BUILD_TARGET, target dir role-$role) ---"
+  # ── disk preflight (durable fix 2026-07-15) ────────────────────────────────
+  # Each role compiles into its OWN ~11-12GB CARGO_TARGET_DIR (role-gui +
+  # role-server ≈ 24GB of target). On the disk-tight VM the SECOND role's cold
+  # compile silently ran out of disk MID-BUILD and died with no artifacts AND no
+  # DONE sentinel — it looked like a mysterious hang/kill but was ENOSPC (0.0.11,
+  # 2026-07-15). Fail LOUD + EARLY instead: a cold compile (no target dir yet)
+  # needs ~14GB free; an incremental one + bundle/DMG needs ~5GB. Below that,
+  # refuse with an actionable message rather than dying invisibly near 96% full.
+  free_gb=$(( $(df -Pk "$PWD" | awk 'NR==2{print $4}') / 1024 / 1024 ))
+  if [[ -d "$CARGO_TARGET_DIR" ]]; then need_gb=5; disk_kind="incremental compile + bundle"; else need_gb=14; disk_kind="cold compile"; fi
+  if (( free_gb < need_gb )); then
+    echo "ERROR: insufficient disk for $role_label ($disk_kind): ${free_gb}GB free, need ~${need_gb}GB." >&2
+    echo "       Each role uses a separate ~12GB cargo target dir (gui + server ≈ 24GB total)." >&2
+    echo "       Free space on the build VM, or build a single role:" >&2
+    echo "         PAPERCUSP_BUILD_ROLES=gui bin/mac-vm-build.sh" >&2
+    exit 28  # ENOSPC — a clear failure + DONE:28 sentinel, never a silent wedge
+  fi
+  echo "    (disk preflight ✓ ${free_gb}GB free — ok for $disk_kind of $role_label)"
   verbose_flag=()
   [[ "${PAPERCUSP_BUILD_VERBOSE:-0}" == "1" ]] && verbose_flag=(--verbose)
   fast_cfg=()
