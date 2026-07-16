@@ -98,18 +98,28 @@ echo "boot-headless: sidecar=$SIDECAR"
 echo "boot-headless: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  DEV_SOURCE_DIR=$PAPERCUSP_DEV_SOURCE_DIR"
 echo "boot-headless: DHT_BOOTSTRAP=$PAPERCUSP_DHT_BOOTSTRAP  HONO_PORT=$PAPERCUSP_HONO_PORT"
 
-# --- spawn detached, survive ssh disconnect ---------------------------------
+# --- spawn FULLY DETACHED (survive the ssh session closing) ------------------
+# A plain `nohup ... &` is NOT enough here: when the ssh session that ran this
+# script closes, macOS signals the session's whole process group, and serve
+# catches the SIGTERM and cleanly shuts PG down (observed: a graceful
+# "database system is shut down" seconds after launch, WI-4070 verify run).
+# perl POSIX::setsid (fork, parent exits, child setsid) puts serve in its OWN
+# session with no controlling terminal, immune to the ssh teardown. macOS ships
+# perl but NOT setsid(1), so perl is the portable detacher.
 : > "$LOG"
-nohup "$NODE" --require "$PRELOAD" "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
-pid=$!
-echo "$pid" > "$PIDFILE"
-echo "LAUNCHED serve.mjs --ensure pid=$pid log=$LOG pidfile=$PIDFILE"
+perl -e '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); exec @ARGV or die "exec: $!"' -- \
+  "$NODE" --require "$PRELOAD" "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
+# the perl parent forks+exits; discover the real detached node pid
+sleep 2
+pid="$(pgrep -f 'serve.mjs --ensure' | head -1)"
+echo "${pid:-}" > "$PIDFILE"
+echo "LAUNCHED (detached) serve.mjs --ensure pid=${pid:-?} log=$LOG pidfile=$PIDFILE"
 # brief settle so the caller sees an early crash immediately
 sleep 3
-if kill -0 "$pid" 2>/dev/null; then
-  echo "STILL-ALIVE after 3s (booting; PG initdb/migration replay may take a while). Poll $LOG + :${HONO_PORT}/api/health."
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  echo "STILL-ALIVE after ~5s (booting; PG start + migration check may take a while). Poll $LOG + :${HONO_PORT}/api/health."
 else
-  echo "DIED within 3s — see $LOG below:" >&2
+  echo "DIED early — see $LOG below:" >&2
   tail -40 "$LOG" >&2
   exit 1
 fi
