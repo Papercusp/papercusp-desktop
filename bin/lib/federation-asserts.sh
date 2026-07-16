@@ -819,7 +819,10 @@ fed_assert_wake_bridge() {
 fed_assert_delivery_receipts() {
   local src="$1" mid="$2" tries="${3:-30}" i row
   for i in $(seq 1 "$tries"); do
-    row="$(drv_psql "$src" "SELECT count(*)::text || '|' || coalesce(bool_and((body->'extra'->'fed_event'->'payload'->>'delivered')::boolean)::text, 'none') FROM harness_shared.coord_event_log WHERE body->'extra'->'fed_event'->>'key' = 'coord:receipt:$mid';" 2>/dev/null | tr -d '[:space:]')"
+    # Persisted shape: sendMessage MERGES `extra` onto the envelope, so the key
+    # lives at body->'fed_event' TOP-LEVEL (verified against a real receipt row
+    # from the 2026-07-10 gate-clear: fed_event.payload = {delivered,woken,machine}).
+    row="$(drv_psql "$src" "SELECT count(*)::text || '|' || coalesce(bool_and((body->'fed_event'->'payload'->>'delivered')::boolean)::text, 'none') FROM harness_shared.coord_event_log WHERE body->'fed_event'->>'key' = 'coord:receipt:$mid';" 2>/dev/null | tr -d '[:space:]')"
     if [ "$row" = "1|true" ]; then echo 1; return 0; fi
     sleep 3
   done
