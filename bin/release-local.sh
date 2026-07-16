@@ -715,11 +715,15 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   done
 fi
 if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
-  # SALVAGE PATH (2026-07-08): the mac VM (~9.6GB total) is fundamentally too small
-  # for a universal (dual-arch) build (~8-10GB) and OOM-disk'd mid-build. Instead of
-  # rebuilding, REUSE the good mac artifacts already restored into $MAC_OUT from a
-  # backed-up successful cut. Skip the mac build subshell entirely (MAC_PID stays
-  # empty) AND skip the pre-scp clean; the collection block below fires on MAC_REUSE=1.
+  # EMERGENCY SALVAGE PATH (last resort — NOT first-class; see EI-12853). REUSE the
+  # good mac artifacts already restored into $MAC_OUT from a backed-up successful cut
+  # instead of rebuilding. This SHIPS STALE BYTES from a PRIOR cut, so it is only ever
+  # a stopgap when a fresh mac build is genuinely impossible — the routine path is to
+  # reclaim the VM's regenerable caches (see the disk-preflight branch below) and build
+  # fresh. Skip the mac build subshell entirely (MAC_PID stays empty) AND skip the
+  # pre-scp clean; the collection block below fires on MAC_REUSE=1. (P-005
+  # assert_reused_provenance refuses to relabel a different version's bytes — the guard
+  # that stops this stopgap silently mis-shipping an old release as a new one.)
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
   echo "==> [reuse] PAPERCUSP_REUSE_MAC=1 — skipping mac build; reusing artifacts in $MAC_OUT"
   mac_reuse_found=0
@@ -741,38 +745,66 @@ elif [[ "$WITH_MAC" == "1" ]]; then
     fi
     # ── P-008 (desktop-build-hardening-tri-platform-2026-07-11, per D-005 option
     # 3): FAIL FAST on insufficient VM disk BEFORE the multi-GB rsync + ~20-min
-    # build, instead of OOM-ing mid-build and forcing a manual REUSE_MAC panic. The
-    # mac VM (~9.6GB) is marginal for a universal (dual-arch) build (~8-10GB peak);
-    # if space is short, abort with an actionable message that names the
-    # P-005-provenance-verified salvage path as the FIRST-CLASS fallback — a planned
-    # choice, not a mid-build emergency. Threshold PAPERCUSP_MAC_MIN_FREE_GB (default
-    # 12); PAPERCUSP_MAC_MIN_FREE_GB=0 skips the check entirely.
+    # build, instead of OOM-ing mid-build. The mac VM is a 120GB disk — NOT
+    # "fundamentally too small" (the ~9.6GB claim this comment once carried was a
+    # transient full-disk misread that inverted a 96%-full disk into a permanent
+    # hardware limit, EI-12853). It fills over time with REGENERABLE Xcode/SPM/cargo
+    # caches + a live dogfood workspace, so it needs periodic cache reclamation —
+    # which the branch below now does for real (the old reclaim was a no-op). If space
+    # is still short AFTER reclaiming, abort with an actionable message; the
+    # PAPERCUSP_REUSE_MAC salvage path is an EMERGENCY last resort (it re-ships stale
+    # bytes), never the first-class fallback. Threshold PAPERCUSP_MAC_MIN_FREE_GB
+    # (default 12); PAPERCUSP_MAC_MIN_FREE_GB=0 skips the check entirely.
     _mac_min_free_gb="${PAPERCUSP_MAC_MIN_FREE_GB:-12}"
     if (( _mac_min_free_gb > 0 )); then
       _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
       if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
         _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
         echo "    mac VM free disk: ${_mac_free_gb}GB (universal build needs ~${_mac_min_free_gb}GB)"
+        _mac_reclaimed_gb=0
         if (( _mac_free_gb < _mac_min_free_gb )); then
-          # WI-4389 durable self-heal for "the recurring mac cut emergency": the cut
-          # itself leaves stale target/debug PROFILE dirs on the VM's PERSISTENT target
-          # tree (the rsync above excludes target/, so it survives every cut) — and a
-          # --release universal build NEVER reads a debug profile (the two roles build
-          # into target/role-{gui,server}/…/release). So reclaim every debug/ dir under
-          # the target and re-measure BEFORE failing: a cut self-heals on the space the
-          # build made stale instead of hard-failing on it. ONLY debug profiles are
-          # removed — never the role-* release incremental caches, never a REUSE_MAC
-          # salvage source. find (not a glob) because the VM shell is zsh with NOMATCH.
-          echo "    ⚠ ${_mac_free_gb}GB < ${_mac_min_free_gb}GB — auto-reclaiming stale target/debug profiles before failing…"
-          "${MAC_VM_SSH[@]}" 'T="$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop/src-tauri/target"; [ -d "$T" ] && find "$T" -maxdepth 3 -type d -name debug -prune -exec rm -rf {} + 2>/dev/null; true' 2>/dev/null || true
+          # WI-4389 / EI-12853 durable self-heal for "the recurring mac cut emergency".
+          # The mac VM is a 120GB disk that fills over time with REGENERABLE Xcode/SPM/
+          # cargo caches + build output — a macOS desktop --release build re-creates
+          # none of these, so reclaiming them frees space without touching source or
+          # live data. The PRIOR reclaim targeted ONLY
+          # $MAC_VM_BUILD_DIR/.../src-tauri/target/**/debug — a path a --release build
+          # never creates (and, since the rsync excludes target/, one that may not even
+          # exist), so it freed ~0 bytes every time. That silent 0-byte "self-heal" is
+          # exactly what made the VM look permanently full and reinforced the false
+          # "too small" premise. This is an EXPLICIT allow-list of regenerable dirs; it
+          # NEVER touches a source tree or the live dogfood workspace
+          # ($HOME/.papercusp-workspaces). We re-measure via df (the truth on bytes
+          # freed) and report what was actually reclaimed. find/loop, not a glob,
+          # because the VM shell is zsh with NOMATCH.
+          _mac_free_kb_before="$_mac_free_kb"
+          echo "    ⚠ ${_mac_free_gb}GB < ${_mac_min_free_gb}GB free — auto-reclaiming regenerable VM caches (NOT source, NOT the live dogfood workspace) before failing…"
+          "${MAC_VM_SSH[@]}" '
+            set +e
+            for d in \
+              "$HOME/Library/Developer/Xcode/DerivedData" \
+              "$HOME/Library/Developer/CoreSimulator" \
+              "$HOME/Library/Caches" \
+              "$HOME/spm-cache" \
+              "$HOME/papercup-rust-mobile/ios/build" \
+              "$HOME/papercup-rust-mobile/target"; do
+              [ -e "$d" ] && rm -rf "$d" 2>/dev/null
+            done
+            T="$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop/src-tauri/target"
+            [ -d "$T" ] && find "$T" -maxdepth 3 -type d -name debug -prune -exec rm -rf {} + 2>/dev/null
+            true
+          ' 2>/dev/null || true
           _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
           if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
             _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
-            echo "    mac VM free disk after reclaim: ${_mac_free_gb}GB"
+            if [[ "$_mac_free_kb_before" =~ ^[0-9]+$ ]] && (( _mac_free_kb > _mac_free_kb_before )); then
+              _mac_reclaimed_gb=$(( (_mac_free_kb - _mac_free_kb_before) / 1024 / 1024 ))
+            fi
+            echo "    mac VM free disk after reclaim: ${_mac_free_gb}GB (reclaimed ~${_mac_reclaimed_gb}GB)"
           fi
         fi
         if (( _mac_free_gb < _mac_min_free_gb )); then
-          echo "ERROR: mac VM has only ${_mac_free_gb}GB free (after auto-reclaiming stale debug profiles) — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB and OOM-disks mid-build (the recurring mac cut emergency). FIX: free space / grow the VM disk, OR cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified prior mac artifacts (the first-class salvage fallback). Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
+          echo "ERROR: mac VM has only ${_mac_free_gb}GB free (auto-reclaim freed ~${_mac_reclaimed_gb}GB) — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB. The VM is a 120GB disk that has filled with regenerable caches + a live dogfood workspace; it is NOT fundamentally too small. FIX (in order): (1) reclaim VM caches manually — the big regenerable consumers are ~/Library/Developer/CoreSimulator, ~/Library/Developer/Xcode/DerivedData, ~/spm-cache, ~/papercup-rust-mobile/{ios/build,target}, ~/Library/Caches (NEVER touch ~/.papercusp-workspaces — that is the live dogfood instance's data); (2) grow the VM disk if it stays tight. LAST RESORT ONLY: cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified PRIOR mac artifacts — this re-ships STALE bytes and must never be the routine path. Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
         fi
       else
         echo "    ⚠ could not read mac VM free disk (got '${_mac_free_kb}') — skipping P-008 disk preflight (non-fatal)"
