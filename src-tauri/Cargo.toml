@@ -142,6 +142,29 @@ windows = { version = "0.58", features = [
     "Win32_System_Console",
 ] }
 
+# ── Release build-speed profile (desktop-build-speed-2026-07-16 P-008) ────────
+# No [profile.release] override existed before → cargo defaults (incremental
+# OFF, strip OFF). Two build-speed knobs, both safe for an alpha desktop shell:
+#   incremental = true — recompile only changed crates on a re-cut. This is the
+#     lever that PAIRS with warm caches (release-local.sh / mac-vm-build.sh keep
+#     the role target dirs warm; WI-5027 grew the mac VM disk 120→180 GiB so the
+#     larger incremental target dir fits). Trade-off is a bigger target dir + a
+#     non-reproducible binary — acceptable in alpha, and the disk headroom is the
+#     whole reason this is now unlocked. Adding it busts the cargo cache ONCE
+#     (expected — same one-time cost as the RUSTFLAGS remap in release-local.sh).
+#   strip = "symbols" — drop the symbol table from the shipped binary: smaller
+#     artifact, a slightly faster final link, and it complements the WI-4781
+#     --remap-path-prefix hygiene (fewer embedded build-box paths). Signing runs
+#     on the assembled bundle AFTER the build, so stripping never breaks the
+#     updater .sig; the identity scan uses grep -rIlE (skips binaries) so it is
+#     unaffected. This is also tauri's own recommended release setting.
+# Runtime perf is unchanged: opt-level / lto / codegen-units stay at the release
+# defaults — this binary is a webview host, not a hot path. Measured build-time
+# before/after belongs on the plan per D-003 — captured at the next real cut.
+[profile.release]
+incremental = true
+strip = "symbols"
+
 # tauri-runtime-wry 2.11.0 + one local fix: its undecorated-resizing hit-test
 # does `webview.parent().parent()` and UNWRAPS a downcast to GtkWindow — any
 # embedder that reparents the webview (our native-terminal VTE embed nests it
