@@ -803,6 +803,17 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   CR="F-MODTEST-$(date +%s)"
   echo "  mod vars: WS=$MOD_WS  A_GH_ID=$MOD_A_GH_ID  B_GH_ID=$MOD_B_GH_ID  contentRef=$CR"
 
+  # ── owner-key diag (WI-5061 not_owner_swarm): the policy route recomputes the keychain id as
+  # 'hive:<activeWorkspaceId()>:<urlSlug>' (hive-keypair.ts hiveKeychainId), while the mint stored
+  # under the id now recorded AUTHORITATIVELY in pots.keychain_id. Dumping the row + the file-keychain
+  # dir + the ws registry pins which (ws,slug) the key actually lives under vs what the route computes.
+  mod_owner_diag() {
+    echo "    DIAG A pots row (kc= is the MINT's exact id): $(drv_psql a "SELECT workspace_id||'|'||home_slug||'|kc='||keychain_id||'|pk='||left(encode(public_key,'base64'),12) FROM harness_shared.pots WHERE home_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A identity dir: $(ls "$A_HOME/.papercusp/identity" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A ws registry: $(cat "$A_HOME"/.papercusp/workspace*.json 2>/dev/null | head -c 200)"
+    echo "    DIAG A mint warn: $(grep -oa '\[pot:create\] pot identity mint failed[^\"]\{0,120\}' "${FED_LOG[a]:-$A_HOME/serve.log}" 2>/dev/null | head -1)"
+  }
+
   # ── PREREQ for LEG 2 — enable reporting on the owner-signed policy (done BEFORE the takedown so
   # the takedown's read-mutate-resign PRESERVES reportable). Seed A's local claim, then author via
   # the real claim-gated signed route (re-signs + federates). A soft prereq: if it fails, LEG 1
@@ -818,6 +829,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  [reportable] A POST /api/pot/$HIVE_SLUG/policy reportable=true -> $(echo "$pol" | head -c 220)"  # route renamed hive→pot (pot/policy-set.ts)
   echo "$pol" | grep -q '"ok":true' && mod_reportable_ok=1
   echo "  reportable authored on A (owner-signed): $([ "$mod_reportable_ok" = 1 ] && echo yes || echo "no — LEG 2 will be INCONCLUSIVE (report gate stays off)")"
+  [ "$mod_reportable_ok" != 1 ] && mod_owner_diag
 
   # ── LEG 1 — TAKEDOWN (owner A → joiner B; hive_policy, hive-home-grained, A-003 class) ─────────
   M0_VER="$(drv_psql a "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
@@ -837,6 +849,8 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
     echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG A outbox(hive_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG takedown err: $(echo "$td" | grep -oaE '"error":"[^"]{0,80}"|not_owner_swarm|no_owner_pubkey|hive_unclaimed' | head -2 | tr '\n' ' ')"
+    mod_owner_diag
   fi
 
   # ── LEG 2 — REPORT (member B → owner A; hive_reports, member→owner federation, key=report_id) ──
