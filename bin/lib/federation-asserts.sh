@@ -631,12 +631,15 @@ curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/pots/from-
 EOF
 }
 
-# fed_hive_dir_row <inst> <hiveId> — GET /api/discovery/hives; echo the matching
-# row's JSON (incl. memberLinks[]) or nothing if that hive isn't listed yet.
+# fed_hive_dir_row <inst> <potId> — GET /api/discovery/pots; echo the matching
+# row's JSON (incl. memberLinks[]) or nothing if that pot isn't listed yet.
+# (Route renamed hives→pots in the mig-557 lexicon sweep — the old
+# /api/discovery/hives 404s {"error":"not_found"} on current builds, which
+# red-failed the whole discovery leg of every smoke on 2026-07-16.)
 fed_hive_dir_row() {
   local inst="$1" hive="$2" body
   body="$(drv_exec "$inst" <<EOF
-curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/hives"
+curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/pots"
 EOF
 )"
   fed_json "$body" "json.dumps(next(r for r in d['rows'] if r['potId']=='$hive'))"

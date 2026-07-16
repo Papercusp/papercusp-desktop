@@ -287,7 +287,7 @@ if [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ]; then
 fi
 
 # ── helpers ─────────────────────────────────────────────────────────────────────
-dir_list() { curl -s -m 10 "http://127.0.0.1:${FED_SC[$1]}/api/discovery/hives"; }
+dir_list() { curl -s -m 10 "http://127.0.0.1:${FED_SC[$1]}/api/discovery/pots"; }
 
 # from_repo <inst> [extra-json-fields] — POST the create/lookup composition.
 # shallow + runTests:false keep the create light; route timeoutSec is 600.

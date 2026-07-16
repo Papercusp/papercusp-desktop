@@ -251,7 +251,7 @@ echo "  negative-isolation=$NEG"
 
 # ── 4. B joins (current flow) + topic-equality ──────────────────────────────────
 log "B: discover + join-pot '$HIVE_SLUG'"
-BR=""; RESP=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do RESP="$(curl -s -m 10 "$(sc b)/api/discovery/hives")"; BR="$(jget "$RESP" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'), None))")"; [ -n "$BR" ] && [ "$BR" != "null" ] && break; sleep 3; done
+BR=""; RESP=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do RESP="$(curl -s -m 10 "$(sc b)/api/discovery/pots")"; BR="$(jget "$RESP" "json.dumps(next((r for r in d['rows'] if r['potId']=='$HIVE_SLUG'), None))")"; [ -n "$BR" ] && [ "$BR" != "null" ] && break; sleep 3; done
 echo "  [discovery] B saw rows=$(jget "$RESP" "len(d.get('rows') or [])"); target '$HIVE_SLUG' match=$([ -n "$BR" ] && [ "$BR" != "null" ] && echo Y || echo N) after ${DISCOVERY_RETRIES:-40} tries"
 LINKS="$(jget "${BR:-null}" "json.dumps((d or {}).get('memberLinks') or [])" 2>/dev/null || echo '[]')"
 if [ "$(jget "$LINKS" "len(d)")" = 0 ]; then
@@ -306,7 +306,7 @@ if [ -z "${SKIP_B_PUBLISH:-}" ]; then
   B_HIVE_SLUG="$(jget "$b_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"
   if [ -n "$B_HIVE_SLUG" ]; then
     echo "✓ B public hive='$B_HIVE_SLUG' announced=$(jget "$b_resp" "d['publish']['announced']")"
-    AR=""; ABR=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do AR="$(curl -s -m 10 "$(sc a)/api/discovery/hives")"; ABR="$(jget "$AR" "json.dumps(next((r for r in d['rows'] if r['hiveId']=='$B_HIVE_SLUG'), None))")"; [ -n "$ABR" ] && [ "$ABR" != "null" ] && break; sleep 3; done
+    AR=""; ABR=""; for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do AR="$(curl -s -m 10 "$(sc a)/api/discovery/pots")"; ABR="$(jget "$AR" "json.dumps(next((r for r in d['rows'] if r['potId']=='$B_HIVE_SLUG'), None))")"; [ -n "$ABR" ] && [ "$ABR" != "null" ] && break; sleep 3; done
     BA_DIR=$([ -n "$ABR" ] && [ "$ABR" != "null" ] && echo PASS || echo "FAIL (A never saw B's hive after ${DISCOVERY_RETRIES:-40} tries)")
   else
     echo "✗ B publish failed: $(echo "$b_resp" | head -c 300)"; BA_DIR="FAIL (publish)"

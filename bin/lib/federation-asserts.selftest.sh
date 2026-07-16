@@ -184,6 +184,12 @@ for file in "${ROUTE_FILES[@]}"; do
   fi
   if grep -Eq 'curl .*/api/discovery/join-hive' "$file"; then
     bad "$(basename "$file") still curls retired discovery/join-hive route"
+  fi
+  # mig-557 lexicon sweep: /api/discovery/hives → /api/discovery/pots. The old
+  # route 404s {"error":"not_found"} on current builds and red-fails the whole
+  # discovery leg (caught live 2026-07-16 — the from-repo smoke's B poll).
+  if grep -Eq 'curl .*/api/discovery/hives' "$file"; then
+    bad "$(basename "$file") still curls retired discovery/hives route (renamed /api/discovery/pots)"
     route_bad=1
   fi
 done

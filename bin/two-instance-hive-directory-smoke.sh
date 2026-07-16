@@ -131,7 +131,7 @@ dir_set_hive() {
 # dir_list <inst> — the instance's discovered-hive list (loopback HTTP route).
 dir_list() {
   local inst="$1"
-  curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/hives"
+  curl -s -m 10 "http://127.0.0.1:${FED_SC[$inst]}/api/discovery/pots"
 }
 
 # dir_wait_listed <inst> <hiveId> <owner> [tries] — poll an instance's directory
