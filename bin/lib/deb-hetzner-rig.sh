@@ -622,7 +622,7 @@ cr=d.get("created",{}) or {}
 pub=d.get("publish",{}) or {}
 ml=(ex.get("memberLinks") or cr.get("memberLinks") or pub.get("memberLinks") or [])
 print(ml[0] if ml else "")
-print(ex.get("hiveId") or cr.get("potSlug") or cr.get("hiveSlug") or "")
+print(ex.get("potId") or ex.get("hiveId") or cr.get("potSlug") or cr.get("hiveSlug") or "")  # offer key renamed hiveId->potId; old key kept for stale-deb runs
 print(ex.get("hivePubkey") or pub.get("hivePubkey") or "")
 print(cr.get("memberSlug") or "")' 2>/dev/null)"
   { read -r RIG_HIVE_LINK; read -r RIG_HIVE_ID; read -r RIG_HIVE_PUBKEY; read -r RIG_OWNER_MEMBER_SLUG; } <<<"$fields"

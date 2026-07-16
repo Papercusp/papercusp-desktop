@@ -370,7 +370,7 @@ log "B ($P_B_USER): poll GET /api/discovery/hives for '$HIVE_SLUG' (≤$(( ${DIS
 discover_ok=0; links_ok=0; B_ROW=""
 for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
   body="$(dir_list b)"
-  B_ROW="$(jget "$body" "json.dumps(next(r for r in d['rows'] if r['hiveId']=='$HIVE_SLUG'))")"
+  B_ROW="$(jget "$body" "json.dumps(next(r for r in d['rows'] if r['potId']=='$HIVE_SLUG'))")"  # row key renamed hiveId→potId (discovery-hive-rows.ts)
   [ -n "$B_ROW" ] && { discover_ok=1; break; }
   sleep 3
 done
@@ -394,7 +394,7 @@ if [ "$discover_ok" = 1 ]; then
   B_KIND="$(jget "$b_resp" "d['existing']['kind']")"
   B_CREATED="$(jget "$b_resp" "'created' in d")"
   B_SOURCE="$(jget "$b_resp" "d['existing']['source']")"
-  B_OFFER_HIVE="$(jget "$b_resp" "d['existing']['hive']['hiveId']")"
+  B_OFFER_HIVE="$(jget "$b_resp" "d['existing']['hive']['potId']")"  # offer key renamed hiveId→potId (lookup-hive-for-repo.ts HiveHit)
   OFFER_LINKS_JSON="$(jget "$b_resp" "json.dumps(d['existing']['hive'].get('memberLinks') or [])")"
   [ "$B_KIND" = "hive" ] && [ "$B_CREATED" != "True" ] && offer_ok=1
   [ "$offer_ok" = 1 ] && echo "✓ B got the JOIN OFFER (existing.kind='hive', no create)" \

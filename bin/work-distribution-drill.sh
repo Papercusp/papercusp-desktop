@@ -147,7 +147,7 @@ resp="$(curl -s -m 610 -X POST "$SC/api/harness/pots/from-repo" -H 'content-type
 HIVE_SLUG="$(jget "$resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # renamed hiveSlug→potSlug; accept both for skew
 HIVE_PATH="created"
 if [ -z "$HIVE_SLUG" ]; then
-  HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['hiveId']")"; HIVE_PATH="existing"
+  HIVE_SLUG="$(jget "$resp" "d['existing']['hive']['potId']")"; HIVE_PATH="existing"  # offer key renamed hiveId→potId (lookup-hive-for-repo.ts HiveHit)
 fi
 [ -n "$HIVE_SLUG" ] || { echo "✗ hive create failed: $(echo "$resp" | head -c 300)"; exit 6; }
 echo "  hive=$HIVE_SLUG (path=$HIVE_PATH)"
