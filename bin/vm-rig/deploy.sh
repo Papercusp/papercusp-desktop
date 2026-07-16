@@ -18,4 +18,16 @@ MCP_CALL="$ROOT/scripts/mcp-call.mjs"
 echo "deploy → $VM:/tmp/{vmcall.sh,mcp-call.mjs}"
 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$HERE/vmcall.sh" "$VM:/tmp/vmcall.sh"
 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$MCP_CALL" "$VM:/tmp/mcp-call.mjs"
-ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$VM" 'chmod +x /tmp/vmcall.sh && /tmp/vmcall.sh coord:presence "{}" --client vm-rig-deploy-probe --workspace papercusp-workspace --harness papercusp >/dev/null 2>&1; rc=$?; echo "deployed; driver self-test rc=$rc (0=operator reachable; 3=NO_OPERATOR_PORT — is the VM app running?)"'
+selftest="$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$VM" 'chmod +x /tmp/vmcall.sh && /tmp/vmcall.sh coord:presence "{}" --client vm-rig-deploy-probe --workspace papercusp-workspace --harness papercusp >/dev/null 2>&1; echo rc=$?')"
+rc="${selftest##*rc=}"
+echo "deployed; driver self-test rc=${rc} (0=operator reachable; 3=NO_OPERATOR_PORT — VM app not running)"
+
+# If the operator is unreachable, the #1 silent cause is the rig VM sitting at
+# the loginwindow because macOS auto-login broke (kcpassword drifted). Auto-run
+# the login preflight so a dark rig fails LOUD with the real diagnosis instead
+# of masquerading as a swarm/DHT wedge (WI-4070 / EI-13010). Non-fatal.
+if [ "${rc:-0}" != "0" ]; then
+  echo ""
+  echo "⚠ VM operator not reachable — running login preflight to diagnose the cause…"
+  "$HERE/preflight-login.sh" "$VM" || true
+fi

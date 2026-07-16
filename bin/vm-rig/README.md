@@ -55,6 +55,18 @@ that's the last delivery hop, not a federation failure.
 
 ## Gotchas (each burned a real drill)
 
+- **VM stuck at the loginwindow = auto-login broke = the whole rig is dark,
+  SILENTLY** (this is the WI-4070 root cause — it burned DAYS on a phantom
+  "network/DHT wedge"). macOS auto-login stops firing the moment
+  `/etc/kcpassword` drifts from the account password; the Mac then sits at the
+  loginwindow, the Papercusp LaunchAgent never starts, and the rig goes dark
+  (`procs=0`, zero `origin='remote'` rows on the tower) with **no crash and no
+  error** — so it reads exactly like a swarm/DHT failure. `deploy.sh` now
+  auto-runs `preflight-login.sh` whenever the operator is unreachable, to catch
+  this LOUD with the real diagnosis. **Secure Token blocks any headless password
+  reset**, so recovery is a one-time human GUI login at `spice://127.0.0.1:5930`,
+  then re-run `deploy.sh`. Durable fix (keep kcpassword in sync) tracked in
+  EI-13010.
 - **VM `/tmp` is wiped on reboot** — always `deploy.sh` after a reboot; a
   `NO_OPERATOR_PORT` from vmcall means the VM app isn't running (start
   Papercusp Server.app in the VM), not a driver bug.
@@ -93,7 +105,8 @@ that's the last delivery hop, not a federation failure.
 | File | Role |
 | --- | --- |
 | `vmcall.sh` | VM-SIDE driver: port auto-discovery + mcp-call (deployed to VM `/tmp`) |
-| `deploy.sh` | push `vmcall.sh` + `scripts/mcp-call.mjs` onto the VM + self-test |
+| `deploy.sh` | push `vmcall.sh` + `scripts/mcp-call.mjs` onto the VM + self-test (auto-runs `preflight-login.sh` if the operator is unreachable) |
+| `preflight-login.sh` | assert the VM's unattended-login invariant (kcpassword ↔ account password); fails LOUD on the silent loginwindow-stuck death (WI-4070 / EI-13010) instead of letting it look like a federation failure |
 | `probe-fwd.sh` | tower→VM federated-event probe (from `/tmp/p059-e1c.sh`) |
 | `probe-rev.sh` | VM→tower federated-event probe (from `/tmp/p059-rev2.sh`) |
 | `diag.sh` | tower+VM `dev:dogfood_substrate_status` side-by-side + swarm log (from `/tmp/p059-diag.sh`) |
