@@ -840,7 +840,13 @@ function Invoke-Inno([string]\$role, [string]\$appId, [string]\$appName) {
   \$outDir = Join-Path \$PWD "src-tauri\target\release\bundle\inno"
   New-Item -ItemType Directory -Force \$outDir | Out-Null
   \$buildRoot = Join-Path \$PWD "src-tauri"
-  Write-Host "[build] ISCC \$role packaging (full seed stored raw; SLOW — measured ~40+ min at the ~4GB payload, EI-12902; ISCC output block-buffers on the VM, so this phase can look SILENT the whole time — that is NORMAL, not a hang)"
+  # Per-role seed note (EI-12909): only the Server bundle carries the seed
+  # (papercusp.iss:109 guards it behind AppId == com.papercusp.server; the GUI
+  # bundle ships NO seed — WI-3234). One shared line interpolating \$role must
+  # NOT claim "full seed stored raw" for the seedless GUI. Slowness is
+  # LZMA-compressing the ~50k-file sidecar (true for BOTH roles), not the seed.
+  \$seedNote = if (\$role -eq 'Server') { 'incl. the raw-stored multi-GB seed' } else { 'no seed in this bundle — the GUI carries none (WI-3234)' }
+  Write-Host "[build] ISCC \$role packaging (\$seedNote; SLOW — measured ~40+ min, LZMA-compressing the ~50k-file sidecar, EI-12902; ISCC output block-buffers on the VM, so this phase can look SILENT the whole time — that is NORMAL, not a hang)"
   & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" ${SPAN_DEFINE}"src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
   Write-Host "[build] ISCC \$role EXIT=\$LASTEXITCODE"
   Sign-File (Join-Path \$outDir "\${appName}_\${ver}_x64-setup.exe")
