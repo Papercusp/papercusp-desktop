@@ -543,7 +543,7 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # (setup) Under approval mode the from-repo join leaves the OWNER with a PENDING B (no member row
   # → no device to attest). Approve B first so A carries B's member row + device (the LEG1/2 subject).
   echo "  [att-setup] PRE A members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')  pending=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_pending_joins WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null|tr -d '[:space:]')"
-  dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
+  dec="$(mcp_call a "pot:membership_decide" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [att-setup] membership_decide(approve B=$ATT_B_GH_ID) -> $(echo "$dec" | head -c 200)"
   sleep 4
 
@@ -568,7 +568,7 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   n_before="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
   now_ms="$(date +%s)000"
   drv_psql a "INSERT INTO harness_shared.pot_pending_joins (workspace_id,harness_slug,github_user_id,github_username,device_attestations,status,requested_at,created_at,updated_at) VALUES ('$ATT_WS','$HIVE_SLUG',$ATT_B_GH_ID,'$P_B_USER','[{\"device_pubkey\":\"$D2\",\"gist_id\":\"att-2dev-probe\",\"gist_url\":\"\",\"device_label\":\"$P_B_USER-dev2\",\"created_at\":$now_ms,\"signature_by_device\":\"\"}]'::jsonb,'pending',$now_ms,$now_ms,$now_ms) ON CONFLICT (workspace_id,harness_slug,github_user_id) DO UPDATE SET device_attestations=EXCLUDED.device_attestations,status='pending',updated_at=EXCLUDED.updated_at;" >/dev/null 2>&1
-  dec2="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
+  dec2="$(mcp_call a "pot:membership_decide" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$ATT_B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [LEG2] approve 2nd-device pending (D2=${D2:0:16}…) -> $(echo "$dec2" | head -c 160)"
   sleep 3
   n_after="$(drv_psql a "SELECT jsonb_array_length(device_attestations) FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" 2>/dev/null | tr -d '[:space:]')"
@@ -666,7 +666,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # for the joiner → the epoch-key grant (on upsertHiveMember) never fires → no encryption → nothing to cut.
   # Diagnose A's admission state; if a pending-join exists (approval-mode), APPROVE it to fire the grant.
   echo "  [C-001-setup] PRE: A pending_joins=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_pending_joins;" 2>/dev/null|tr -d '[:space:]') members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
-  dec="$(mcp_call a "hive:membership_decide" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"decision\":\"approve\"}")"
+  dec="$(mcp_call a "pot:membership_decide" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"decision\":\"approve\"}")"
   echo "  [C-001-setup] membership_decide(approve B=$B_GH_ID) -> $(echo "$dec" | head -c 240)"
   sleep 5
   echo "  [C-001-setup] POST: A members=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null|tr -d '[:space:]') epoch_keys=$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys;" 2>/dev/null|tr -d '[:space:]')"
@@ -677,7 +677,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  AK0 default-off control (B→A, no policy): $([ "$ak_default_ok" = 1 ] && echo PASS || echo "FAIL ($ak0)")"
 
   # AK ban (P-MOD / EN-4, policy-only revoke:false → B stays admitted, ops dropped by ban).
-  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"revoke\":false}" >/dev/null 2>&1
+  mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"revoke\":false}" >/dev/null 2>&1
   sleep 3
   banprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKBAN 40 || true)"
   akban_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-AKBAN' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
@@ -685,7 +685,7 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  AK ban (B's op DROPPED on A, EN-4): $([ "$ak_ban_ok" = 1 ] && echo PASS || echo "FAIL (probe=$banprobe A_count=$akban_a)")"
 
   # AK teeth — unban → B's next write lands again (proves the ban gate was load-bearing).
-  mcp_call a "hive:ban_member" "{\"hive\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"unban\":true}" >/dev/null 2>&1
+  mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"unban\":true}" >/dev/null 2>&1
   sleep 3
   unbanprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKUNBAN 40 || true)"
   [ "${unbanprobe%% *}" = 1 ] && ak_unban_ok=1
@@ -814,8 +814,8 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # PG — only this hive's member rows exist), which the fallback finds.
   claimed="$(drv_psql a "UPDATE harness_shared.shared_repo_binding_cache SET claim_status='claimed', claimed_by_github_user_ids=ARRAY[${MOD_A_GH_ID:-0}]::bigint[], claimed_at=now() RETURNING claim_status;" 2>/dev/null | tr -d '[:space:]')"
   echo "  [reportable] seed A claim (claim_status=${claimed:-<no-binding-row>}, claimant=$MOD_A_GH_ID)"
-  pol="$(curl -s -m 30 -X POST "http://127.0.0.1:${FED_SC[a]}/api/hive/$HIVE_SLUG/policy" -H 'content-type: application/json' -d '{"policy":{"moderation":{"reportable":true}}}')"
-  echo "  [reportable] A POST /api/hive/$HIVE_SLUG/policy reportable=true -> $(echo "$pol" | head -c 220)"
+  pol="$(curl -s -m 30 -X POST "http://127.0.0.1:${FED_SC[a]}/api/pot/$HIVE_SLUG/policy" -H 'content-type: application/json' -d '{"policy":{"moderation":{"reportable":true}}}')"
+  echo "  [reportable] A POST /api/pot/$HIVE_SLUG/policy reportable=true -> $(echo "$pol" | head -c 220)"  # route renamed hive→pot (pot/policy-set.ts)
   echo "$pol" | grep -q '"ok":true' && mod_reportable_ok=1
   echo "  reportable authored on A (owner-signed): $([ "$mod_reportable_ok" = 1 ] && echo yes || echo "no — LEG 2 will be INCONCLUSIVE (report gate stays off)")"
 
@@ -823,8 +823,8 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   M0_VER="$(drv_psql a "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   B0_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   echo "  [takedown] BEFORE: A policy_version=$M0_VER  B policy_version=$B0_VER"
-  td="$(mcp_call a "hive:takedown" "{\"hive\":\"$HIVE_SLUG\",\"contentRef\":\"$CR\",\"workspace\":\"$MOD_WS\"}")"
-  echo "  [takedown] A hive:takedown($CR) -> $(echo "$td" | head -c 240)"
+  td="$(mcp_call a "pot:takedown" "{\"pot\":\"$HIVE_SLUG\",\"contentRef\":\"$CR\",\"workspace\":\"$MOD_WS\"}")"
+  echo "  [takedown] A pot:takedown($CR) -> $(echo "$td" | head -c 240)"
   # POLL B for the federated signed-list delta: origin=remote, version bumped past M0_VER, ref present.
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
     hit="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG' AND origin='remote' AND policy_version > $M0_VER AND (policy_json::jsonb->'moderation'->'takedownList') @> to_jsonb('$CR'::text);" 2>/dev/null | tr -d '[:space:]')"
@@ -850,7 +850,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
     done
     echo "  [report] reportable federated to B: $([ "$b_reportable" = 1 ] && echo yes || echo "no (report will no-op → INCONCLUSIVE)")"
   fi
-  rep="$(mcp_call b "hive:report" "{\"hive\":\"$HIVE_SLUG\",\"targetKind\":\"content\",\"targetRef\":\"$CR\",\"reason\":\"witness-report\",\"workspace\":\"$MOD_WS\"}")"
+  rep="$(mcp_call b "pot:report" "{\"pot\":\"$HIVE_SLUG\",\"targetKind\":\"content\",\"targetRef\":\"$CR\",\"reason\":\"witness-report\",\"workspace\":\"$MOD_WS\"}")"
   echo "  [report] B hive:report($CR) -> $(echo "$rep" | head -c 220)"
   # POLL A's moderation queue (hive_reports) for the federated row origin=remote.
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
@@ -859,7 +859,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
     sleep 3
   done
   # Secondary confirmation via the owner tool surface (the witness shape's "queue shows it").
-  q="$(mcp_call a "hive:moderation_queue" "{\"hive\":\"$HIVE_SLUG\",\"workspace\":\"$MOD_WS\"}")"
+  q="$(mcp_call a "pot:moderation_queue" "{\"pot\":\"$HIVE_SLUG\",\"workspace\":\"$MOD_WS\"}")"
   if [ "$mod_report_ok" = 1 ]; then
     echo "  MOD-LEG2 REPORT (B's report federates to A's moderation queue origin=remote): PASS"
   elif [ "$b_reportable" = 1 ]; then
