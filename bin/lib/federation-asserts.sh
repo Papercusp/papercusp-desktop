@@ -779,6 +779,108 @@ fed_coord_merge_probe() {
   echo 0; return 1
 }
 
+# ── LIVE-1 parity-surface asserts (WI-5067 / P-059, coordination lane) ──────
+# The 5 cross-machine coordination parity surfaces (LIVE-1 runbook §"What
+# LIVE-1 must prove"), codified so the live parity proof is a green/red exit
+# instead of manual PG inspection. These are the ASSERT halves: the drill
+# DRIVES each surface from the SOURCE machine via mcp-call.mjs / vmcall.sh
+# (coord:send wake:'required' scope:'hive' · events:emit scope:'hive' ·
+# scheduler:set_claim_spec scope:'hive' — see the runbook §Run), then calls
+# the matching assert against the RECEIVING instance's PG. House style:
+# drv_psql poll loop, echo 1/0 + return (see fed_merge_assert). Column sets +
+# event/receipt key shapes verified against the live schema and the emitting
+# code (coord-message.ts:256/526, inbox-wake.ts:36) on 2026-07-16.
+# NOT covered here (needs crafted signed frames — stays with the in-process
+# suites, run those at drill time): H1/H2/H3 adversarial presence frames
+# (presence-gossip.test.ts), M6 below-steer claim-spec authz + M5b quarantine
+# budget (coord-message-federation.integration.test.ts, bee-claim-spec.test.ts).
+
+# fed_assert_wake_bridge <dst> <dst_agent> <since_epoch_ms> [tries]
+# Surface 1 (P-002/P-003, wake bridge): after the drill sends a directed
+# wake:'required' scope:'hive' message to <dst_agent> (homed on dst), the
+# agent's standing inbox-wake await on dst must FIRE — fired_at stamped after
+# <since_epoch_ms>. Echoes 1 (fired) or 0.
+fed_assert_wake_bridge() {
+  local dst="$1" agent="$2" since="$3" tries="${4:-30}" i n
+  for i in $(seq 1 "$tries"); do
+    n="$(drv_psql "$dst" "SELECT count(*) FROM harness_shared.event_awaits WHERE subscriber_id='$agent' AND event_key='coord:inbox-wake:$agent' AND fired_at IS NOT NULL AND fired_at > to_timestamp($since/1000.0);" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$n" ] && [ "$n" -ge 1 ] 2>/dev/null; then echo 1; return 0; fi
+    sleep 3
+  done
+  echo 0; return 1
+}
+
+# fed_assert_delivery_receipts <src> <msg_id> [tries]
+# Surface 2 (P-008 + M5a, delivery receipts): EXACTLY ONE
+# `coord:receipt:<msg_id>` fed-event row arrives back on the SENDER's machine
+# with payload.delivered=true (M5a: only the machine that actually woke someone
+# answers — a 2nd row is the N-1 false-delivered bug; 0 rows = the receipt rail
+# is dead). Echoes 1 only on count==1 AND delivered:true.
+fed_assert_delivery_receipts() {
+  local src="$1" mid="$2" tries="${3:-30}" i row
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$src" "SELECT count(*)::text || '|' || coalesce(bool_and((body->'extra'->'fed_event'->'payload'->>'delivered')::boolean)::text, 'none') FROM harness_shared.coord_event_log WHERE body->'extra'->'fed_event'->>'key' = 'coord:receipt:$mid';" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$row" = "1|true" ]; then echo 1; return 0; fi
+    sleep 3
+  done
+  echo 0; return 1
+}
+
+# fed_assert_federated_events <dst> <key> <since_epoch_ms> [tries] [settle_sec]
+# Surface 3 (P-009, federated events): the src-emitted scope:'hive' key fires
+# dst's registered await EXACTLY ONCE — polls until >=1 fired-after-<since>,
+# then holds settle_sec and asserts the fired count did NOT grow (a re-applied
+# row re-firing = the exactly-once regression). Echoes 1 or 0.
+fed_assert_federated_events() {
+  local dst="$1" key="$2" since="$3" tries="${4:-30}" settle="${5:-10}" i n n2 q
+  q="SELECT count(*) FROM harness_shared.event_awaits WHERE event_key='$key' AND fired_at IS NOT NULL AND fired_at > to_timestamp($since/1000.0);"
+  n=""
+  for i in $(seq 1 "$tries"); do
+    n="$(drv_psql "$dst" "$q" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$n" ] && [ "$n" -ge 1 ] 2>/dev/null; then break; fi
+    sleep 3
+  done
+  { [ -n "$n" ] && [ "$n" -ge 1 ] 2>/dev/null; } || { echo 0; return 1; }
+  sleep "$settle"
+  n2="$(drv_psql "$dst" "$q" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$n2" = "$n" ]; then echo 1; return 0; fi
+  echo "✗ fed-event '$key' re-fired: $n → $n2 (exactly-once regression)" >&2
+  echo 0; return 1
+}
+
+# fed_assert_presence_gossip <dst> <src_machine_label> [tries]
+# Surface 4 (P-004/P-005, presence gossip — the PRESENCE_GOSSIP cutover gate):
+# with the writer flag ON on both machines, dst's shared_presence AND
+# shared_session_presence must carry FRESH (<120s) rows for the src machine —
+# the roster-populates leg. Remote ADDRESSABILITY is asserted by the drill's
+# follow-up: a coord:send from dst to a src-homed su-id succeeds (surface 1
+# reversed). Echoes 1 or 0.
+fed_assert_presence_gossip() {
+  local dst="$1" mach="$2" tries="${3:-30}" i row
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$dst" "SELECT (SELECT count(*) FROM harness_shared.shared_presence WHERE machine_label='$mach' AND last_seen_at > now() - interval '120 seconds')::text || '|' || (SELECT count(*) FROM harness_shared.shared_session_presence WHERE machine_label='$mach' AND last_seen_at > now() - interval '120 seconds');" 2>/dev/null | tr -d '[:space:]')"
+    case "$row" in
+      0\|*|*\|0|'') sleep 3 ;;
+      *) echo 1; return 0 ;;
+    esac
+  done
+  echo 0; return 1
+}
+
+# fed_assert_claim_spec_federation <dst> <bee_id> [tries]
+# Surface 5 (P-016 + M7, claim-spec federation): the src-set scope:'hive'
+# claim spec lands on dst origin='remote' with fed_hlc AND fed_ts stamped
+# (M7 — the bee_claim_specs HLC regression guard, mig 439). Echoes 1 or 0.
+fed_assert_claim_spec_federation() {
+  local dst="$1" bee="$2" tries="${3:-30}" i n
+  for i in $(seq 1 "$tries"); do
+    n="$(drv_psql "$dst" "SELECT count(*) FROM harness_shared.cup_claim_specs WHERE bee_id='$bee' AND origin='remote' AND fed_hlc IS NOT NULL AND fed_ts IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$n" ] && [ "$n" -ge 1 ] 2>/dev/null; then echo 1; return 0; fi
+    sleep 3
+  done
+  echo 0; return 1
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # fed_cleanup_scoped <work> — kill FED_KILL_PIDS + every process whose cmdline
