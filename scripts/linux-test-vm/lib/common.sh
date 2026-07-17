@@ -30,9 +30,13 @@ VM_USER="${PAPERCUSP_TESTVM_USER:-tester}"
 # Existing box VMs use SSH 2222/2223, SPICE 5930/5931 — we start past them.
 # Returns "<ssh_port> <spice_port> <operator_fwd_port>" for an instance name.
 # Bases are env-overridable (VM_SSH_BASE / VM_SPICE_BASE / VM_OP_BASE) — set
-# VM_OP_BASE when the default operator-forward range (3072-3074) collides with a
-# live host operator. (The green release operator binds BOTH :3070 and :3073, so
-# the default fed-a op-forward 3073 fails `qemu hostfwd` when that operator is up.)
+# VM_OP_BASE to move the whole op-forward range if it ever collides with a live
+# host listener again. (EI-495: the default base USED to be 3072, which put
+# fed-a's op-forward at 3073 — exactly the green release operator's secondary
+# listener (the operator binds BOTH :3070 and :3073). That FATAL'd every
+# `vm-federation.sh --vms=1` run while the green operator was up. Moved the
+# default base to 3090+, clear of the operator's :3070/:3073 neighborhood and
+# staging's :3170, so this collision can't recur by default.)
 ports_for() {
   local name="$1" idx
   case "$name" in
@@ -42,7 +46,7 @@ ports_for() {
     updater) idx=3 ;;
     *)     idx=9 ;;   # ad-hoc instances share a high slot; override via env if needed
   esac
-  echo "$(( ${VM_SSH_BASE:-2224} + idx )) $(( ${VM_SPICE_BASE:-5932} + idx )) $(( ${VM_OP_BASE:-3072} + idx ))"
+  echo "$(( ${VM_SSH_BASE:-2224} + idx )) $(( ${VM_SPICE_BASE:-5932} + idx )) $(( ${VM_OP_BASE:-3090} + idx ))"
 }
 
 # ── Per-instance file paths ────────────────────────────────────────────────
