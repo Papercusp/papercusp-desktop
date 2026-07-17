@@ -4923,28 +4923,69 @@ struct UpdateDownloadProgressPayload {
     total: Option<u64>,
 }
 
+/// Pure throttle decision for `make_download_progress_reporter`, split out so
+/// it's unit-testable without a live `AppHandle`: should THIS chunk trigger
+/// an `update-download-progress` emit? Chunks arrive far more often than any
+/// UI needs to redraw (network-buffer-sized, often <64KB against a multi-GB
+/// payload), so the reporter only emits when either ~150ms have elapsed
+/// since the last emit or the download has completed — bounding event volume
+/// to a handful per second regardless of chunk granularity, while still
+/// guaranteeing the final 100% emit is never swallowed by the throttle.
+fn should_emit_download_progress(downloaded: u64, total: Option<u64>, ms_since_last_emit: u128) -> bool {
+    let complete = total.map(|t| downloaded >= t).unwrap_or(false);
+    complete || ms_since_last_emit >= 150
+}
+
 /// Build the `on_chunk` callback for `Update::download_and_install` that
 /// turns the plugin's raw per-chunk byte deltas into throttled
-/// `update-download-progress` webview events. Chunks arrive far more often
-/// than any UI needs to redraw (network-buffer-sized, often <64KB against a
-/// multi-GB payload), so this accumulates `downloaded` across calls and only
-/// emits when either ~150ms have elapsed since the last emit or the download
-/// has completed — bounding event volume to a handful per second regardless
-/// of chunk granularity, while still guaranteeing a final 100% emit.
+/// `update-download-progress` webview events (see
+/// `should_emit_download_progress` for the throttle policy).
 fn make_download_progress_reporter(app: AppHandle) -> impl FnMut(usize, Option<u64>) {
     let mut downloaded: u64 = 0;
     let mut last_emit = std::time::Instant::now();
     move |chunk_length: usize, total: Option<u64>| {
         downloaded += chunk_length as u64;
         let now = std::time::Instant::now();
-        let complete = total.map(|t| downloaded >= t).unwrap_or(false);
-        if complete || now.duration_since(last_emit).as_millis() >= 150 {
+        if should_emit_download_progress(downloaded, total, now.duration_since(last_emit).as_millis()) {
             last_emit = now;
             let _ = app.emit(
                 "update-download-progress",
                 UpdateDownloadProgressPayload { downloaded, total },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod download_progress_throttle_tests {
+    use super::should_emit_download_progress;
+
+    #[test]
+    fn emits_once_150ms_have_elapsed() {
+        assert!(should_emit_download_progress(1_000, Some(10_000), 150));
+        assert!(should_emit_download_progress(1_000, Some(10_000), 500));
+    }
+
+    #[test]
+    fn suppresses_a_chunk_that_arrives_before_the_throttle_window() {
+        assert!(!should_emit_download_progress(1_000, Some(10_000), 0));
+        assert!(!should_emit_download_progress(1_000, Some(10_000), 149));
+    }
+
+    #[test]
+    fn always_emits_the_completing_chunk_even_inside_the_throttle_window() {
+        // WI-5011: the final chunk must land a 100% event immediately —
+        // never wait out the throttle and leave the UI stuck at <100%.
+        assert!(should_emit_download_progress(10_000, Some(10_000), 0));
+        assert!(should_emit_download_progress(12_000, Some(10_000), 0)); // over-total chunk still counts as complete
+    }
+
+    #[test]
+    fn no_content_length_falls_back_to_pure_time_throttling() {
+        // The release host omitted Content-Length (rare) — total is None, so
+        // "complete" can never be inferred; only the time throttle governs.
+        assert!(!should_emit_download_progress(999_999, None, 0));
+        assert!(should_emit_download_progress(999_999, None, 150));
     }
 }
 
