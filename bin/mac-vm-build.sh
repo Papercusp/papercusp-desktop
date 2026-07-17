@@ -40,6 +40,20 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
 
+# WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
+# by a persistent ~/.cache/sccache on THIS VM, so its cargo/tauri builds below
+# (term-shim excluded — that's Swift) reuse crates compiled by a prior build
+# on this same VM instead of recompiling from zero every cut. This script
+# runs directly on the VM (no ssh boundary once we're here), so it can just
+# source the shared lib the linux legs use — it ships in the rsynced tree
+# (release-local.sh's mac leg rsyncs the whole papercusp-desktop dir). A
+# smaller cache cap than the dev-box default: this VM's disk is chronically
+# tight (see the P-008 disk-preflight block in release-local.sh). Best-effort
+# — see lib/sccache.sh; this must never fail the build.
+# shellcheck source=lib/sccache.sh
+source "$HERE/lib/sccache.sh"
+setup_sccache_env "10G"
+
 # nvm Node 22 for the build (the *bundled* runtime is vendored separately).
 if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   . "$HOME/.nvm/nvm.sh"

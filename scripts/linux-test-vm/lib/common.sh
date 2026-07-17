@@ -39,6 +39,7 @@ ports_for() {
     clean) idx=0 ;;
     fed-a) idx=1 ;;
     fed-b) idx=2 ;;
+    updater) idx=3 ;;
     *)     idx=9 ;;   # ad-hoc instances share a high slot; override via env if needed
   esac
   echo "$(( ${VM_SSH_BASE:-2224} + idx )) $(( ${VM_SPICE_BASE:-5932} + idx )) $(( ${VM_OP_BASE:-3072} + idx ))"

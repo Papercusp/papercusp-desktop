@@ -20,7 +20,8 @@ Full runbook: `/internal/docs/build-system/vms` ("Linux test VM" section).
 - **SSH key:** `~/.ssh/papercup-vm-linux` (auto-generated on first `provision`).
 
 Ports (per instance, starting past the Mac/Win build VMs): `clean` → SSH 2224,
-SPICE 127.0.0.1:5932.
+SPICE 127.0.0.1:5932; the dedicated updater lane uses `updater` → SSH 2227,
+SPICE 127.0.0.1:5935.
 
 ## Quick start
 
@@ -33,6 +34,25 @@ SPICE 127.0.0.1:5932.
 ./vmctl reset clean          # wipe back to a pristine overlay
 ./vmctl down clean           # power off
 ```
+
+## Update / Revert E2E: VM only
+
+Destructive updater testing must use the dedicated VM lane; never copy a live
+home into `/tmp` and launch it beside the host desktop. Prepare a baseline with:
+
+```sh
+PAPERCUSP_E2E_RELEASE_HOST=http://10.0.2.2:8043 \
+  ./vmctl updater-e2e /path/to/Papercusp-baseline.AppImage
+./vmctl gui updater
+```
+
+`updater-e2e` resets only an `updater`/`updater-*` overlay, proves the guest has
+a different kernel boot ID, copies only the AppImage, and launches with a new
+empty `HOME`. It never imports host `.papercusp` state, discovery files,
+heartbeats, console markers, sockets, or embedded database rows. The command
+also verifies that the guest `operator.json` birth identity matches `/proc`
+before it allows the test to proceed. Click Update and then Revert only inside
+the SPICE guest.
 
 `vmctl install` defaults to the newest
 `src-tauri/target/release/bundle/deb/Papercusp_*_amd64.deb`; pass a path to override.

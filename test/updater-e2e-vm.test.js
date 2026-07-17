@@ -1,0 +1,41 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+
+const root = path.resolve(__dirname, '..');
+const vmctl = fs.readFileSync(path.join(root, 'scripts/linux-test-vm/vmctl'), 'utf8');
+const common = fs.readFileSync(path.join(root, 'scripts/linux-test-vm/lib/common.sh'), 'utf8');
+
+function updaterFunction() {
+  const start = vmctl.indexOf('cmd_updater_e2e()');
+  const end = vmctl.indexOf('\ncmd_gui()', start);
+  assert(start >= 0 && end > start, 'cmd_updater_e2e must exist before cmd_gui');
+  return vmctl.slice(start, end);
+}
+
+test('updater E2E is pinned to a dedicated disposable VM lane', () => {
+  const fn = updaterFunction();
+  assert.match(common, /updater\) idx=3/);
+  assert.match(fn, /updater\|updater-/);
+  assert.match(fn, /cmd_reset "\$name"/);
+  assert(fn.indexOf('cmd_reset "$name"') < fn.indexOf('cmd_up "$name"'));
+});
+
+test('updater E2E proves a different kernel and never seeds live home state', () => {
+  const fn = updaterFunction();
+  assert.match(fn, /systemd-detect-virt/);
+  assert.match(fn, /guest_boot.*!=.*host_boot/);
+  assert.match(fn, /PAPERCUSP_E2E_PID_ISOLATED=1/);
+  assert.match(fn, /e2e_home="\$e2e_root\/home"/);
+  assert.match(fn, /forbidden PID-bearing seed/);
+  assert.doesNotMatch(fn, /(?:rsync|cp -a).*\.papercusp/);
+});
+
+test('guest startup validates operator birth identity against guest procfs', () => {
+  const fn = updaterFunction();
+  assert.match(fn, /operator\.json/);
+  assert.match(fn, /processIdentity/);
+  assert.match(fn, /fields\[19\]/);
+  assert.match(fn, /isolation-proof\.json/);
+});

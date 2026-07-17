@@ -484,6 +484,19 @@ export PC_HEAVY_BYPASS=1
 # incremental cache once — expected, not a regression.
 CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
+# WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
+# by a persistent ~/.cache/sccache, exported HERE (before the Linux leg forks
+# below + the optional arm64 cross-compile section) so both inherit it via
+# plain process-env inheritance — no ssh boundary to cross for either. The
+# mac/windows VM legs DO cross an ssh boundary (env does not travel over ssh,
+# see the PAPERCUSP_RELEASE_HOST notes throughout this file) so they set up
+# their own sccache env remotely: mac-vm-build.sh sources this same lib;
+# build-windows-on-vm.sh carries a PowerShell-native equivalent
+# (Ensure-Sccache) in its generated build script. Best-effort throughout —
+# see lib/sccache.sh.
+# shellcheck source=lib/sccache.sh
+source "$HERE/lib/sccache.sh"
+setup_sccache_env "30G"
 PC_NICE=()
 if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
   command -v nice   >/dev/null 2>&1 && PC_NICE=(nice -n "${PAPERCUSP_RELEASE_NICE_ADJ:-10}")

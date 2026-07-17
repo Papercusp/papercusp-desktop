@@ -43,6 +43,13 @@ cd "$ROOT"
 source "$HERE/lib/release-host.sh"
 load_release_host
 
+# WI-5083: RUSTC_WRAPPER=sccache backed by a persistent ~/.cache/sccache, so
+# even this "local" build reuses crates compiled by a prior run/checkout
+# instead of a bare-metal recompile. Best-effort — see lib/sccache.sh.
+# shellcheck source=lib/sccache.sh
+source "$HERE/lib/sccache.sh"
+setup_sccache_env "30G"
+
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"

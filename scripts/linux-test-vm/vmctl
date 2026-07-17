@@ -12,6 +12,8 @@
 #   vmctl ssh   [name] [cmd...]   shell / run a command in the VM
 #   vmctl install [name] [deb]    scp the newest .deb in + apt install (fresh-install test)
 #   vmctl launch  [name]          start the installed app in the VM's GUI session
+#   vmctl updater-e2e APPIMAGE    reset the dedicated VM and launch an isolated
+#                                 updater/revert baseline (never host PID space)
 #   vmctl gui     [name]          open a SPICE viewer (run this yourself; opens a window)
 #   vmctl verify  [name]          assert install/PG/operator/window; capture logs+screenshot
 #   vmctl status  [name]          VM up? app up? operator :3070? disk free?
@@ -166,6 +168,112 @@ setsid bash -c 'exec /usr/bin/papercusp-desktop' >"$HOME/papercusp-app.log" 2>&1
 sleep 1; echo "started; log → ~/papercusp-app.log"
 EOF
   log "app launching. Watch: vmctl ssh $name 'tail -f papercusp-app.log'  ·  view: vmctl gui $name"
+}
+
+# ── destructive updater/revert E2E preparation ────────────────────────────
+# This is the canonical door for clicking Update / Revert. It deliberately
+# resets a DEDICATED VM, copies only the baseline AppImage, creates a brand-new
+# HOME inside the guest, and proves the guest has a different kernel boot id.
+# No host ~/.papercusp state, pid file, console marker, heartbeat, socket, or
+# embedded database is copied. Even a catastrophic cleanup bug can therefore
+# signal only guest processes.
+cmd_updater_e2e() {
+  local appimage="${1:-}" name="${2:-updater}"
+  local release_host="${PAPERCUSP_E2E_RELEASE_HOST:-http://10.0.2.2:8043}"
+  [ -n "$appimage" ] && [ -f "$appimage" ] \
+    || die "usage: vmctl updater-e2e <baseline.AppImage> [updater|updater-N]"
+  case "$name" in
+    updater|updater-[A-Za-z0-9_-]*) ;;
+    *) die "updater-e2e may reset only the dedicated updater/updater-* VM lane (got '$name')" ;;
+  esac
+  [[ "$release_host" =~ ^https?://[^[:space:]\']+$ ]] \
+    || die "PAPERCUSP_E2E_RELEASE_HOST must be an http(s) URL without whitespace or quotes"
+
+  local host_boot guest_boot guest_virt release_host_q
+  host_boot="$(cat /proc/sys/kernel/random/boot_id)"
+  log "resetting dedicated $name overlay — updater/revert E2E always starts from pristine state"
+  cmd_reset "$name"
+  cmd_up "$name"
+
+  guest_virt="$(vm_ssh "$name" 'systemd-detect-virt 2>/dev/null || true')"
+  [ -n "$guest_virt" ] && [ "$guest_virt" != "none" ] \
+    || die "$name did not prove it is virtualized; refusing destructive updater E2E"
+  guest_boot="$(vm_ssh "$name" 'cat /proc/sys/kernel/random/boot_id')"
+  [ -n "$guest_boot" ] && [ "$guest_boot" != "$host_boot" ] \
+    || die "$name shares the host kernel boot id; refusing destructive updater E2E"
+  log "PID boundary proved: host boot $host_boot != guest boot $guest_boot ($guest_virt)"
+
+  vm_scp "$name" "$appimage" /tmp/Papercusp-updater-baseline.AppImage
+  printf -v release_host_q '%q' "$release_host"
+  vm_ssh "$name" \
+    "PAPERCUSP_E2E_RELEASE_HOST=$release_host_q PAPERCUSP_E2E_HOST_BOOT=$host_boot bash -s" <<'EOF'
+set -euo pipefail
+real_home="$HOME"
+e2e_root="$real_home/updater-e2e"
+e2e_home="$e2e_root/home"
+appimage="$e2e_root/bin/Papercusp.AppImage"
+
+# The reset above is the primary state scrub. This second boundary creates an
+# empty app HOME and refuses every live-state copying pattern that caused the
+# 2026-07-16 incident.
+rm -rf "$e2e_root"
+mkdir -p "$e2e_home" "$e2e_root/bin" "$e2e_root/config" "$e2e_root/data" "$e2e_root/cache"
+install -m 0755 /tmp/Papercusp-updater-baseline.AppImage "$appimage"
+for forbidden in \
+  "$e2e_home/.papercusp/operator.json" \
+  "$e2e_home/.papercusp/embedded-pg.json" \
+  "$e2e_home/.papercusp/endpoint-ipc.json" \
+  "$e2e_home/.papercusp/sockets" \
+  "$e2e_home/.papercup-console-active."*; do
+  [ ! -e "$forbidden" ] || { echo "forbidden PID-bearing seed: $forbidden" >&2; exit 1; }
+done
+
+export DISPLAY=:0
+export XAUTHORITY="$real_home/.Xauthority"
+for _ in $(seq 1 30); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 1; done
+xdpyinfo -display :0 >/dev/null 2>&1 || { echo "guest X :0 is not ready" >&2; exit 1; }
+
+setsid env \
+  HOME="$e2e_home" \
+  XDG_CONFIG_HOME="$e2e_root/config" \
+  XDG_DATA_HOME="$e2e_root/data" \
+  XDG_CACHE_HOME="$e2e_root/cache" \
+  XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+  DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+  PAPERCUSP_RELEASE_HOST="$PAPERCUSP_E2E_RELEASE_HOST" \
+  PAPERCUSP_E2E=1 PAPERCUSP_E2E_PID_ISOLATED=1 \
+  "$appimage" >"$e2e_root/app.log" 2>&1 </dev/null &
+echo $! >"$e2e_root/launcher.pid"
+
+# Wait for the guest operator record, then prove its recorded birth identity
+# matches the guest kernel. This is also the live guard for the stale-PID fix.
+for _ in $(seq 1 120); do
+  [ -s "$e2e_home/.papercusp/operator.json" ] && break
+  sleep 2
+done
+[ -s "$e2e_home/.papercusp/operator.json" ] \
+  || { tail -80 "$e2e_root/app.log" >&2; echo "guest operator did not start" >&2; exit 1; }
+python3 - "$e2e_home/.papercusp/operator.json" <<'PY'
+import json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pid = int(record["pid"])
+boot = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+fields = stat[stat.rfind(")") + 1:].split()
+expected = f"linux:{boot}:{fields[19]}"
+actual = record.get("processIdentity")
+if actual != expected:
+    raise SystemExit(f"operator birth identity mismatch: recorded={actual!r} expected={expected!r}")
+PY
+printf '{"pidIsolated":true,"hostBoot":"%s","guestBoot":"%s"}\n' \
+  "$PAPERCUSP_E2E_HOST_BOOT" "$(cat /proc/sys/kernel/random/boot_id)" \
+  >"$e2e_root/isolation-proof.json"
+EOF
+
+  log "updater/revert baseline is running in the $name VM with an empty HOME"
+  log "release host: $release_host"
+  log "drive it only through: vmctl gui $name  (Update, verify relaunch, then Revert)"
+  log "guest evidence: ~/updater-e2e/isolation-proof.json and ~/updater-e2e/app.log"
 }
 
 cmd_gui() {
@@ -327,6 +435,7 @@ case "$cmd" in
   ssh)       cmd_ssh "$@" ;;
   install)   cmd_install "$@" ;;
   launch)    cmd_launch "$@" ;;
+  updater-e2e) cmd_updater_e2e "$@" ;;
   gui)       cmd_gui "$@" ;;
   verify)    cmd_verify "$@" ;;
   status)    cmd_status "$@" ;;
