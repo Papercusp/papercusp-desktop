@@ -6373,9 +6373,13 @@ pub fn run() {
                 // Invisible escape hatch: CmdOrCtrl+Alt+1..4 switch envs even
                 // when the loaded build's own bar + IPC are dead. No menu bar.
                 env_switch::register_backstop_shortcuts(app);
-                // WI-2648: CmdOrCtrl+K opens the docs-search palette. Real
-                // feature (not a dev-only escape hatch) — also registered in
-                // gui_setup() for packaged builds.
+                // WI-2648: the docs-search palette global shortcut. Real feature
+                // (not a dev-only escape hatch). THIS call site is the DEV process
+                // only, which is a single process and so owns the shortcut itself.
+                // In PACKAGED builds the always-on SERVER product registers it
+                // (next to install_server_tray, `is_server_product`); gui_setup()
+                // deliberately does NOT — the GUI must not own a key that has to
+                // work while the GUI is closed.
                 docs_search::register_shortcut(app);
 
                 // `npm run dev:quickpanel` — preview the Quick Panel from the working
