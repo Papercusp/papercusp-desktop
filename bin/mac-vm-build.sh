@@ -40,6 +40,29 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
 
+# EI-14660: main.rs bakes the update source + build sha via option_env! at
+# COMPILE time (WI-4389/WI-3875), and the compile happens HERE, on the VM.
+# release-local.sh's ssh heredoc pushes both PAPERCUSP_RELEASE_HOST and
+# PAPERCUSP_BUILD_SHA into the ONE ssh session that invokes this script — but
+# neither survives a STANDALONE re-run (e.g. a one-leg retry driven directly
+# on the VM after a failed attempt, exactly the "run a producer directly" gap
+# lib/release-host.sh's own header warns about). build-linux-local.sh and
+# build-windows-on-vm.sh both already close this gap themselves (source
+# lib/release-host.sh + load_release_host, plus build-linux-local.sh computes
+# its own BUILD_SHA via git rev-parse) — this leg never got the same fix, so a
+# standalone run silently bakes an EMPTY host + sha (mac 0.0.11 v1-v4:
+# host-bake assert failed 4 consecutive times). Both loaders below are
+# idempotent/overridable — an already-exported value (the normal
+# release-local.sh path) always wins, so this changes nothing for that path
+# and only fixes the standalone-invocation gap.
+# shellcheck source=lib/release-host.sh
+source "$HERE/lib/release-host.sh"
+load_release_host
+if [[ -z "${PAPERCUSP_BUILD_SHA:-}" ]]; then
+  export PAPERCUSP_BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
+  echo "==> PAPERCUSP_BUILD_SHA not inherited from caller — computed locally: ${PAPERCUSP_BUILD_SHA:-<none>}"
+fi
+
 # WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
 # by a persistent ~/.cache/sccache on THIS VM, so its cargo/tauri builds below
 # (term-shim excluded — that's Swift) reuse crates compiled by a prior build
