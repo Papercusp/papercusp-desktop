@@ -890,16 +890,23 @@ mod discovery_tests {
 
     #[test]
     fn parses_valid_payload() {
-        let d = parse_operator_discovery(r#"{"port":3070,"pid":1234}"#).unwrap();
+        let d = parse_operator_discovery(
+            r#"{"port":3070,"pid":1234,"processIdentity":"linux:boot-1:99"}"#,
+        )
+        .unwrap();
         assert_eq!(d.port, 3070);
         assert_eq!(d.pid, 1234);
+        assert_eq!(d.process_identity.as_deref(), Some("linux:boot-1:99"));
     }
 
     #[test]
     fn tolerates_extra_fields() {
-        assert!(
-            parse_operator_discovery(r#"{"port":1,"pid":2,"startedAt":"2026-06-10"}"#).is_some()
-        );
+        let d =
+            parse_operator_discovery(r#"{"port":1,"pid":2,"startedAt":"2026-06-10"}"#)
+                .unwrap();
+        // Legacy records remain readable for healthy reuse, but destructive
+        // cleanup later refuses them because they have no birth identity.
+        assert!(d.process_identity.is_none());
     }
 
     #[test]
@@ -920,7 +927,10 @@ mod discovery_tests {
 
     // WI-3282 fix direction 1: cmdline verification guards a recycled pid in a
     // stale operator.json from false-positively reading as "our live operator".
-    use super::cmdline_looks_like_serve;
+    use super::{
+        cmdline_is_protected_session_process, cmdline_looks_like_serve,
+        linux_process_identity_from_stat,
+    };
 
     #[test]
     fn cmdline_check_matches_serve_mjs_and_ts() {
@@ -948,6 +958,31 @@ mod discovery_tests {
         assert!(cmdline_looks_like_serve("NODE SERVE.MJS --ensure"));
     }
 
+    #[test]
+    fn linux_identity_uses_boot_id_and_starttime_field_22() {
+        let stat = "42 (odd process) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
+        assert_eq!(
+            linux_process_identity_from_stat("boot-abc\n", stat).as_deref(),
+            Some("linux:boot-abc:987654")
+        );
+    }
+
+    #[test]
+    fn protected_session_processes_are_never_kill_targets() {
+        for cmdline in [
+            "/usr/lib/systemd/systemd --user",
+            "/usr/bin/gnome-shell",
+            "/usr/sbin/gdm-session-worker",
+            "/System/Library/CoreServices/loginwindow.app/loginwindow",
+            "/sbin/launchd",
+        ] {
+            assert!(cmdline_is_protected_session_process(cmdline), "{cmdline}");
+        }
+        assert!(!cmdline_is_protected_session_process(
+            "node /opt/papercusp/serve.mjs --ensure"
+        ));
+    }
+
     // WI-1869: the operator watcher's re-navigate decision. These run on Linux
     // CI, where the macOS/Windows dynamic-port restart path they guard can never
     // be exercised — the exact blind spot that let strand-on-restart ship.
@@ -957,6 +992,7 @@ mod discovery_tests {
         let latest = OperatorDiscovery {
             port: 21927,
             pid: 50461,
+            process_identity: None,
         };
         assert_eq!(next_operator_port(21385, Some(&latest)), Some(21927));
     }
@@ -967,6 +1003,7 @@ mod discovery_tests {
         let latest = OperatorDiscovery {
             port: 3070,
             pid: 999,
+            process_identity: None,
         };
         assert_eq!(next_operator_port(3070, Some(&latest)), None);
     }
@@ -1660,6 +1697,7 @@ fn make_sidecar_command(
 struct OperatorDiscovery {
     port: u16,
     pid: u32,
+    process_identity: Option<String>,
 }
 
 /// Parse the operator.json discovery payload, or None. Factored from the
@@ -1671,7 +1709,16 @@ fn parse_operator_discovery(txt: &str) -> Option<OperatorDiscovery> {
     if port == 0 || pid == 0 {
         return None;
     }
-    Some(OperatorDiscovery { port, pid })
+    let process_identity = v
+        .get("processIdentity")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Some(OperatorDiscovery {
+        port,
+        pid,
+        process_identity,
+    })
 }
 
 /// Parse `<home>/.papercusp/operator.json`, or None.
@@ -2479,12 +2526,100 @@ fn spawn_operator_watcher(
 /// a bare "does /proc/<pid> exist" check is defeated by pid reuse, which is
 /// near-certain after enough process churn (this desktop already hit the
 /// identical class on the WSL cold-start lock, per that function's docs).
-/// Pure + unit-tested; `None` (cmdline unreadable — e.g. a flaky WSL UNC
-/// read) means "couldn't check" and the caller should fail OPEN (trust bare
-/// pid-aliveness) rather than wrongly declare a live operator dead.
+/// Pure + unit-tested. The general liveness watcher may fail open when a
+/// cmdline read is flaky so it does not tear down a healthy connection; the
+/// destructive orphan sweep has a separate fail-CLOSED authority check.
 fn cmdline_looks_like_serve(cmdline: &str) -> bool {
     let lower = cmdline.to_ascii_lowercase();
     lower.contains("serve.mjs") || lower.contains("serve.ts")
+}
+
+/// Session roots are never valid cleanup targets, even if a copied record is
+/// accidentally paired with their current pid. This is defense in depth
+/// behind the stricter serve-role + process-birth checks below.
+fn cmdline_is_protected_session_process(cmdline: &str) -> bool {
+    let lower = cmdline.to_ascii_lowercase();
+    [
+        "systemd --user",
+        "gnome-shell",
+        "gdm-session-worker",
+        "plasmashell",
+        "loginwindow",
+        "windowserver",
+        "/launchd",
+        " launchd",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Linux `/proc/<pid>/stat` field 22 (starttime), paired with the kernel boot
+/// id. Parsing starts after the LAST ')' because comm may contain spaces or
+/// parentheses. This format is shared with operator-core's process-identity.ts.
+fn linux_process_identity_from_stat(boot_id: &str, stat: &str) -> Option<String> {
+    let close = stat.rfind(')')?;
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    // Text after comm begins at field 3 (state); starttime is field 22 => 19.
+    let start_ticks = fields.get(19)?;
+    if start_ticks.is_empty() || !start_ticks.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let boot_id = boot_id.trim();
+    if boot_id.is_empty() {
+        return None;
+    }
+    Some(format!("linux:{boot_id}:{start_ticks}"))
+}
+
+/// Current kernel-backed identity for a local process. Any read/parse failure
+/// is `None`; destructive callers fail closed on that result.
+fn local_process_identity(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        linux_process_identity_from_stat(&boot_id, &stat)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .ok()?
+            .stdout;
+        let started = String::from_utf8_lossy(&output)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!started.is_empty()).then(|| format!("darwin:{started}"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// A discovery record grants kill authority only when it names the same
+/// kernel process incarnation and that process is still exactly a serve role.
+/// Legacy/missing fields, unreadable proc state, protected session roots, and
+/// copied/recycled PIDs all refuse the operation.
+fn recorded_operator_kill_authority(discovery: &OperatorDiscovery, via_wsl: bool) -> bool {
+    // The Windows path never sends POSIX signals from this sweep. Keeping WSL
+    // records non-authoritative avoids inventing a second remote kill surface.
+    if via_wsl {
+        return false;
+    }
+    let Some(expected) = discovery.process_identity.as_deref() else {
+        return false;
+    };
+    if local_process_identity(discovery.pid).as_deref() != Some(expected) {
+        return false;
+    }
+    let Some(cmdline) = local_process_cmdline(discovery.pid) else {
+        return false;
+    };
+    cmdline_looks_like_serve(&cmdline) && !cmdline_is_protected_session_process(&cmdline)
 }
 
 /// Best-effort cmdline read for a LOCAL (non-WSL) pid: `/proc/<pid>/cmdline`
@@ -6562,7 +6697,7 @@ fn shutdown_native_terminal(app_handle: &tauri::AppHandle) {
     }
 }
 
-/// The four outcomes `sweep_stale_operator_orphan` can reach, factored out as
+/// The outcomes `sweep_stale_operator_orphan` can reach, factored out as
 /// a PURE decision (no OS calls) so it's unit-testable without a live process
 /// table / network. `sweep_stale_operator_orphan` is the thin OS-facing
 /// wrapper that gathers the three inputs and acts on the verdict.
@@ -6584,12 +6719,16 @@ enum OrphanSweepDecision {
     /// either never installed (older build) or never ran (crashed before
     /// install), so it never self-terminated on reparenting. Sweep it.
     StaleKill,
+    /// A live, unresponsive pid is present, but the discovery record cannot
+    /// prove it is the same serve incarnation. Fail closed and leave it alone.
+    RefusedUnverified,
 }
 
 fn decide_orphan_sweep(
     discovery: Option<&OperatorDiscovery>,
     pid_alive: bool,
     http_ready: bool,
+    kill_authority_verified: bool,
 ) -> OrphanSweepDecision {
     if discovery.is_none() {
         return OrphanSweepDecision::NothingRecorded;
@@ -6599,6 +6738,9 @@ fn decide_orphan_sweep(
     }
     if http_ready {
         return OrphanSweepDecision::HealthyReuse;
+    }
+    if !kill_authority_verified {
+        return OrphanSweepDecision::RefusedUnverified;
     }
     OrphanSweepDecision::StaleKill
 }
@@ -6624,20 +6766,27 @@ fn decide_orphan_sweep(
 /// orphan signal on this platform the way it would be under a shell/systemd.
 /// A blind "PPID==1 + serve.mjs" match would have KILLED a live, in-use,
 /// currently-reused operator (`serve --ensure`'s "Decision C" reuse — SP1
-/// C5), a real regression this live check caught before it shipped. Scoping
-/// to exactly the ONE pid `operator.json` names — the SAME discovery record
-/// `wait_for_operator`/Decision-C reuse already trust — and requiring it to
-/// FAIL an HTTP health probe (`operator_http_ready`, the same one
-/// `wait_for_operator` uses) before touching it, makes this sweep structurally
-/// unable to ever kill a healthy, in-use operator: `decide_orphan_sweep`
-/// only reaches `StaleKill` when the pid is alive but NOT serving.
+/// C5), a real regression this live check caught before it shipped. Scoping to
+/// one recorded pid is still insufficient: copied state or PID reuse can make
+/// that number identify the desktop session itself. Destructive cleanup also
+/// requires the recorded boot + start-time identity to match the current
+/// process and a strict serve cmdline. The signal targets that one PID, never
+/// a process group.
 fn sweep_stale_operator_orphan(workspace_home: &std::path::Path, via_wsl: bool) {
     let discovery = find_operator_discovery(workspace_home, via_wsl);
     let pid_alive = discovery
         .as_ref()
         .is_some_and(|d| discovery_pid_alive(d.pid, via_wsl));
     let http_ready = discovery.as_ref().is_some_and(|d| operator_http_ready(d.port));
-    match decide_orphan_sweep(discovery.as_ref(), pid_alive, http_ready) {
+    let kill_authority_verified = discovery
+        .as_ref()
+        .is_some_and(|d| recorded_operator_kill_authority(d, via_wsl));
+    match decide_orphan_sweep(
+        discovery.as_ref(),
+        pid_alive,
+        http_ready,
+        kill_authority_verified,
+    ) {
         OrphanSweepDecision::NothingRecorded | OrphanSweepDecision::AlreadyDead => {}
         OrphanSweepDecision::HealthyReuse => {
             println!(
@@ -6648,23 +6797,34 @@ fn sweep_stale_operator_orphan(workspace_home: &std::path::Path, via_wsl: bool) 
         OrphanSweepDecision::StaleKill => {
             let d = discovery.expect("StaleKill only reached with Some(discovery)");
             println!(
-                "[papercusp-server] boot orphan sweep: operator.json pid={} port={} is alive but NOT HTTP-responsive — stale orphan, killing its process group",
+                "[papercusp-server] boot orphan sweep: operator.json pid={} port={} is alive, identity-verified, and NOT HTTP-responsive — terminating that exact process",
                 d.pid, d.port
             );
             #[cfg(unix)]
             {
+                if !recorded_operator_kill_authority(&d, via_wsl) {
+                    eprintln!(
+                        "[papercusp-server] boot orphan sweep: pid={} identity changed before TERM — refusing signal",
+                        d.pid
+                    );
+                    return;
+                }
                 let _ = Command::new("kill")
                     .arg("-TERM")
-                    .arg(format!("-{}", d.pid))
+                    .arg(d.pid.to_string())
                     .status();
                 let deadline = Instant::now() + Duration::from_millis(3000);
                 while Instant::now() < deadline && discovery_pid_alive(d.pid, via_wsl) {
                     std::thread::sleep(Duration::from_millis(150));
                 }
-                let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg(format!("-{}", d.pid))
-                    .status();
+                // Revalidate after grace so a recycled replacement never
+                // receives the forceful signal.
+                if recorded_operator_kill_authority(&d, via_wsl) {
+                    let _ = Command::new("kill")
+                        .arg("-KILL")
+                        .arg(d.pid.to_string())
+                        .status();
+                }
             }
             #[cfg(not(unix))]
             {
@@ -6675,6 +6835,13 @@ fn sweep_stale_operator_orphan(workspace_home: &std::path::Path, via_wsl: bool) 
                 // still run on the NEXT owned-child teardown either way.
                 let _ = d;
             }
+        }
+        OrphanSweepDecision::RefusedUnverified => {
+            let d = discovery.expect("RefusedUnverified only reached with Some(discovery)");
+            eprintln!(
+                "[papercusp-server] boot orphan sweep: refusing recorded pid={} port={} — no matching boot/start identity + serve role; leaving it untouched",
+                d.pid, d.port
+            );
         }
     }
 }
