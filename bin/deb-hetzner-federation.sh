@@ -159,9 +159,17 @@ ba=0; [ "${probe_ba%% *}" = 1 ] && ba=1
 # cross-machine over the same wire. A→B then B→A, distinct plan slugs per dir.
 fed_log "PLAN-PART MERGE (per-part plan federation, flag ON) A→B + B→A (hive member slugs)"
 ppab="$(fed_plan_part_merge_assert a b "$MEMBER_SLUG" 80 || true)"
-[ "$ppab" = 1 ] && echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" || echo "✗ plan-part A→B failed (probe=$ppab)"
+case "$ppab" in
+  1)    echo "✓ plan-part A→B: item:P-001 federated into B as origin=remote" ;;
+  skip) echo "⊘ plan-part A→B: SKIPPED — harness_plan_parts table absent (this .deb predates the plan-parts lane, EI-505)" ;;
+  *)    echo "✗ plan-part A→B failed (probe=$ppab)" ;;
+esac
 ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 80 || true)"
-[ "$ppba" = 1 ] && echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" || echo "✗ plan-part B→A failed (probe=$ppba)"
+case "$ppba" in
+  1)    echo "✓ plan-part B→A: item:P-001 federated into A as origin=remote" ;;
+  skip) echo "⊘ plan-part B→A: SKIPPED — harness_plan_parts table absent (this .deb predates the plan-parts lane, EI-505)" ;;
+  *)    echo "✗ plan-part B→A failed (probe=$ppba)" ;;
+esac
 
 # D-042 COMMS: the cross-machine COMMUNICATION system (coord feed / coord_event_log)
 # must federate over the SAME peer-log wire as content. A→B then B→A, harness-scoped.
@@ -174,7 +182,7 @@ cba="$(fed_coord_merge_probe b a "$B_MEMBER_SLUG" B2A 80 || true)"
 # EI-521 WS-DIAG: on merge-fail, dump workspace_ids to settle product-bug vs probe-artifact —
 # does the undrained outbox row's workspace_id match the member's boot workspace (the drain's
 # WHERE workspace_id = handle.workspaceId)?
-if [ "$ab" != 1 ] || [ "$ba" != 1 ] || [ "$ppab" != 1 ] || [ "$ppba" != 1 ] || [ "${cab:-0}" != 1 ] || [ "${cba:-0}" != 1 ]; then
+if [ "$ab" != 1 ] || [ "$ba" != 1 ] || { [ "$ppab" != 1 ] && [ "$ppab" != skip ]; } || { [ "$ppba" != 1 ] && [ "$ppba" != skip ]; } || [ "${cab:-0}" != 1 ] || [ "${cba:-0}" != 1 ]; then
   fed_log "WS-DIAG (EI-521): workspace_id alignment between capture + drain"
   echo "--- A: undrained outbox (id|table_name|harness_slug|workspace_id|drained_at) ---"; drv_psql a "SELECT id||'|'||table_name||'|'||COALESCE(harness_slug,'∅')||'|'||workspace_id||'|d='||COALESCE(drained_at::text,'NULL') FROM harness_shared.substrate_outbox ORDER BY id;" 2>/dev/null
   echo "--- A: booted-harness workspaceId/slug (the drain's WHERE key — does it match the outbox above?) ---"; drv_exec a <<<"grep -aoE 'bootHarness[^ ]* (ws|workspace)[=:][^ ]+ (slug|harness)[=:][^ ]+|wireOutbox.*slug[=:][^ ]+|startOutboxDrain.*[a-z]' /home/pcusp/serve.log 2>/dev/null | tail -10; echo '(drain-wiring lines:)'; grep -aE 'ensureRelocatedSendSideWired|wireOutbox|outbox wiring|startOutboxDrain|\[outbox-drain\]|relocated send-side|drain wired' /home/pcusp/serve.log 2>/dev/null | tail -15"

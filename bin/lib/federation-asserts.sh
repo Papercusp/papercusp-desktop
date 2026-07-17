@@ -719,10 +719,23 @@ fed_merge_assert() {
 # into harness_plans.content + the merge/no-clobber semantics are proven single-box
 # on real PG (plan-part-federation-cutover.integration.test.ts, 7/7); THIS proves
 # the remaining rung — the table federates across two genuinely-separate machines.
-# Echoes 1 (merged) or 0.
+# Echoes 1 (merged), 0 (failed — table present, merge didn't land), or "skip" (the
+# harness_plan_parts table is absent on src and/or dst — a shipped .deb built before
+# mig 270/271 landed predates the plan-parts lane entirely, EI-505). Callers must
+# treat "skip" as N/A, not FAIL, when computing OVERALL.
 fed_plan_part_merge_assert() {
-  local src="$1" dst="$2" slug="$3" tries="${4:-30}" i row ts ws_src
+  local src="$1" dst="$2" slug="$3" tries="${4:-30}" i row ts ws_src has_src has_dst
   ts="$(date +%s)000"
+  # EI-505 gate: probe BOTH frames for the table before touching it. A shipped .deb
+  # predating the plan-parts migration has neither the table nor the capture trigger,
+  # so the INSERT below would hard-fail with "relation does not exist" and this leg
+  # would spuriously read as FAILED even though everything else (discovery, feature
+  # merge, coord merge) genuinely passed. SKIP instead — it's not applicable.
+  has_src="$(drv_psql "$src" "SELECT to_regclass('harness_shared.harness_plan_parts') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  has_dst="$(drv_psql "$dst" "SELECT to_regclass('harness_shared.harness_plan_parts') IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$has_src" != "t" ] || [ "$has_dst" != "t" ]; then
+    echo skip; return 0
+  fi
   # The federated feature row (from fed_merge_assert, run earlier) carries the
   # frame's resolved workspace_id — reuse it so the part INSERT matches the
   # capture trigger + RLS binding. harness_plan_parts.workspace_id is NOT NULL.

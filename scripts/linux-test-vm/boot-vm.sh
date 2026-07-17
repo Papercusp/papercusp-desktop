@@ -55,10 +55,12 @@ wait_port_free "$SSH_PORT"   ssh
 wait_port_free "$SPICE_PORT" spice
 # (2) The operator hostfwd (host:$OP_PORT → guest:3070) is a CONVENIENCE for host-side
 #     access only — the in-guest tests (vmctl verify: SSH + in-guest curl + qemu
-#     screendump) never use it. On a busy host the default op-fwd range (3072-3074)
-#     collides with LIVE host services (Tower box) — a persistent holder a wait can't
-#     clear. So DROP just that one hostfwd rule when its port is taken (the VM still
-#     boots) instead of letting qemu abort; set VM_OP_BASE to a free base to reclaim it.
+#     screendump) never use it. On a busy host the op-fwd range (default base 3090,
+#     EI-495 — moved off 3072 which sat in the green release operator's own
+#     :3070/:3073 neighborhood) can still collide with LIVE host services — a
+#     persistent holder a wait can't clear. So DROP just that one hostfwd rule when
+#     its port is taken (the VM still boots) instead of letting qemu abort; set
+#     VM_OP_BASE to a free base to reclaim it.
 op_hostfwd=",hostfwd=tcp::${OP_PORT}-:3070"
 if ! port_free "$OP_PORT"; then
   warn "op-fwd port $OP_PORT in use on host — booting WITHOUT the host→guest operator forward (set VM_OP_BASE to a free base to reclaim it; in-guest tests are unaffected)"
