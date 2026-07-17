@@ -260,15 +260,31 @@ pub fn ensure_initialized() -> io::Result<Registry> {
 
     // First launch (or registry corrupted/missing).
     fs::create_dir_all(workspaces_root())?;
-    let default_id = "default".to_string();
-    let default_dir = workspace_dir(&default_id);
-    fs::create_dir_all(&default_dir)?;
+    // D2 (WI-5321, root-causing WI-2381 Blocker A): mint a REAL, non-literal-
+    // "default" workspace id here, not the bare string "default". "default" is
+    // NOT just an ambient placeholder — it is `DEFAULT_COORD_WORKSPACE`, a
+    // distinct coordination-shared partition sentinel the p2p/allotment layer
+    // (resource-allotments.ts / metering-store.ts / grant-store.ts, WI-1564)
+    // deliberately fail-closes on with a `workspace_unresolved` refusal,
+    // because a row captured under that partition is unattributable /
+    // unfederatable. Every fresh (or pre-fix legacy) install used to mint its
+    // ONE real workspace with id "default", so it collided with that sentinel
+    // and could NEVER complete a p2p seat_offer/spawn_request — the guard
+    // working exactly as designed against what looked like a real workspace
+    // but wasn't one. Minting a unique per-install id here removes the
+    // collision while leaving the WI-1564 guard itself untouched (a stale
+    // pre-fix install whose registry still says "default" keeps refusing,
+    // which is correct — it must be migrated, not silently reinterpreted).
+    // Display name stays "Default" for UX continuity; only the `id` changes.
+    let initial_id = format!("workspace-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let initial_dir = workspace_dir(&initial_id);
+    fs::create_dir_all(&initial_dir)?;
 
-    // Migrate ~/.papercusp -> workspaces/default/.papercusp if present and
+    // Migrate ~/.papercusp -> workspaces/<initial_id>/.papercusp if present and
     // the destination doesn't already exist.
     let home = real_home();
     let legacy = home.join(".papercusp");
-    let migrated = default_dir.join(".papercusp");
+    let migrated = initial_dir.join(".papercusp");
     if legacy.exists() && !migrated.exists() {
         // Best-effort rename; if cross-device or permissions block it, fall
         // back to leaving the legacy dir alone — the new workspace just
@@ -290,9 +306,9 @@ pub fn ensure_initialized() -> io::Result<Registry> {
     }
 
     let reg = Registry {
-        current: default_id.clone(),
+        current: initial_id.clone(),
         workspaces: vec![Workspace {
-            id: default_id,
+            id: initial_id,
             name: "Default".to_string(),
             created_at: now_ms(),
         }],
