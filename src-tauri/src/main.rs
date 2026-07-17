@@ -4911,6 +4911,43 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateInfo, String> {
     }
 }
 
+/// Payload for the `update-download-progress` webview event (WI-5011). Fired
+/// repeatedly during `install_update` / `revert_to`'s download phase so the
+/// Update Center can render a real progress bar instead of a bare spinner for
+/// what is otherwise a multi-GB, multi-minute wait. `total` is `None` when the
+/// release host didn't send a `Content-Length` (rare) — the UI falls back to
+/// a byte-count-only display in that case.
+#[derive(Debug, serde::Serialize, Clone)]
+struct UpdateDownloadProgressPayload {
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Build the `on_chunk` callback for `Update::download_and_install` that
+/// turns the plugin's raw per-chunk byte deltas into throttled
+/// `update-download-progress` webview events. Chunks arrive far more often
+/// than any UI needs to redraw (network-buffer-sized, often <64KB against a
+/// multi-GB payload), so this accumulates `downloaded` across calls and only
+/// emits when either ~150ms have elapsed since the last emit or the download
+/// has completed — bounding event volume to a handful per second regardless
+/// of chunk granularity, while still guaranteeing a final 100% emit.
+fn make_download_progress_reporter(app: AppHandle) -> impl FnMut(usize, Option<u64>) {
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    move |chunk_length: usize, total: Option<u64>| {
+        downloaded += chunk_length as u64;
+        let now = std::time::Instant::now();
+        let complete = total.map(|t| downloaded >= t).unwrap_or(false);
+        if complete || now.duration_since(last_emit).as_millis() >= 150 {
+            last_emit = now;
+            let _ = app.emit(
+                "update-download-progress",
+                UpdateDownloadProgressPayload { downloaded, total },
+            );
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
@@ -4951,9 +4988,10 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     // serve supervisor does NOT respawn the operator we're about to swap out
     // from under (the app restarts immediately after the install).
     let teardown_app = app.clone();
+    let progress_reporter = make_download_progress_reporter(app.clone());
     update
         .download_and_install(
-            |_chunk, _total| {},
+            progress_reporter,
             move || {
                 {
                     let state: tauri::State<SidecarState> = teardown_app.state();
@@ -5155,9 +5193,10 @@ async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
     // BEFORE the binary swap — and flag `shutdown_done` FIRST so the Server-side
     // serve supervisor does NOT respawn the operator we're about to swap out.
     let teardown_app = app.clone();
+    let progress_reporter = make_download_progress_reporter(app.clone());
     update
         .download_and_install(
-            |_chunk, _total| {},
+            progress_reporter,
             move || {
                 {
                     let state: tauri::State<SidecarState> = teardown_app.state();
