@@ -197,6 +197,16 @@ guard_prod_ports preflight
 ( while :; do sleep "${GATE_PORT_GUARD_INTERVAL_S:-15}"; guard_prod_ports sweep; done ) &
 GUARD_SWEEP_PID=$!
 trap 'guard_prod_ports exit-trap; kill "$GUARD_SWEEP_PID" 2>/dev/null || true' EXIT
+# An external kill (unit TimeoutStartSec, manual systemctl stop) must NEVER end a run
+# silently: the 2026-07-17 00:30 run was systemd-killed mid-local-matrix with no GATE:
+# line, so watchers greping verdicts waited forever and the red-EI/state machinery never
+# ran. Emit a distinct TERMINATED verdict (not RED — an external kill is not federation
+# signal) with whatever leg statuses exist; the EXIT trap still reaps the port guard.
+on_external_term() {
+  echo "GATE: TERMINATED (external signal — unit timeout or manual stop; legs at kill: content-matrix=${MATRIX_RES:-?} from-repo=${FROMREPO_RES:-?} local-matrix=${MATRIXFULL_RES:-?} build=$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)) ; logs in ${WORK:-?}"
+  exit 143
+}
+trap on_external_term TERM INT
 
 # ── 0. assert-core self-test (WI-754) ──────────────────────────────────────────
 # Hermetic (~2s, synthetic listeners, no .deb): prove the rig's PORT SELF-DISCOVERY
