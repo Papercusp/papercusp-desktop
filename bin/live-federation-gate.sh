@@ -266,6 +266,7 @@ if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
       else
         log "SKIP: credentialed GitHub REST unhealthy (HTTP $GH_CODE for $GH_PREFLIGHT_USER after 3 tries) — smokes would false-RED (announced=False/memberLinks=0); retry next window (not a failure)."
         check_staleness
+        skip_cleanup
         echo "GATE: SKIPPED (github-api-unhealthy HTTP $GH_CODE)"; exit 0
       fi
     else
