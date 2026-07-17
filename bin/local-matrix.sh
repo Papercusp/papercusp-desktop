@@ -80,6 +80,30 @@ fi
 IMAGE_TAG=pcusp-local-frame:ubuntu24
 SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
 
+# ── frame CPU reservation (WI-5319 / plan D-003) ─────────────────────────────
+# Pin each frame to its own reserved core set so fleet/host load cannot starve the
+# frames' node main threads. Run 20260717-174333: rig-b logged 18×"boot timeout after
+# 30000ms" + 10 late-adopt cycles with event-loop p99 1.48s under host load 40–100 —
+# starved (unpinned) frames read as federation bugs. Defaults take the TOP cores,
+# 8 per frame, only on boxes big enough that the reservation can't crowd the host
+# (<24 cores ⇒ no pinning). Override per frame with PCUSP_RIG_CPUSET_{A,B,C}
+# ('' disables). --cpu-shares=4096 additionally wins scheduler bursts against other
+# docker work (default weight 1024) without hard-starving it.
+NCPU="$(nproc 2>/dev/null || echo 8)"
+if [ "$NCPU" -ge 24 ]; then
+  _def_cpuset_a="$((NCPU-8))-$((NCPU-1))"
+  _def_cpuset_b="$((NCPU-16))-$((NCPU-9))"
+  _def_cpuset_c="$((NCPU-24))-$((NCPU-17))"
+else
+  _def_cpuset_a=""; _def_cpuset_b=""; _def_cpuset_c=""
+fi
+CPUSET_A="${PCUSP_RIG_CPUSET_A-$_def_cpuset_a}"
+CPUSET_B="${PCUSP_RIG_CPUSET_B-$_def_cpuset_b}"
+CPUSET_C="${PCUSP_RIG_CPUSET_C-$_def_cpuset_c}"
+CPU_ARGS_A="--cpu-shares 4096"; [ -n "$CPUSET_A" ] && CPU_ARGS_A="--cpuset-cpus $CPUSET_A $CPU_ARGS_A"
+CPU_ARGS_B="--cpu-shares 4096"; [ -n "$CPUSET_B" ] && CPU_ARGS_B="--cpuset-cpus $CPUSET_B $CPU_ARGS_B"
+CPU_ARGS_C="--cpu-shares 4096"; [ -n "$CPUSET_C" ] && CPU_ARGS_C="--cpuset-cpus $CPUSET_C $CPU_ARGS_C"
+
 # ── args ──────────────────────────────────────────────────────────────────────
 DEB=""; ONLY=""; KEEP_UP=0; REUSE=0; MODE=run; FRAMES=2
 for arg in "$@"; do case "$arg" in
@@ -213,10 +237,11 @@ else
   REUSE=0
   docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true
   log "provision $FRAMES frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
-  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" "$IMAGE_TAG" >/dev/null || exit 1
-  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" "$IMAGE_TAG" >/dev/null || exit 1
+  # $CPU_ARGS_* word-split deliberately (WI-5319 frame CPU reservation, defined above).
+  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" $CPU_ARGS_A "$IMAGE_TAG" >/dev/null || exit 1
+  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" $CPU_ARGS_B "$IMAGE_TAG" >/dev/null || exit 1
   if [ "$FRAMES" = 3 ]; then
-    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" "$IMAGE_TAG" >/dev/null || exit 1
+    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" $CPU_ARGS_C "$IMAGE_TAG" >/dev/null || exit 1
   fi
 fi
 

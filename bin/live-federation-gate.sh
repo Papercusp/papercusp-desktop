@@ -46,17 +46,24 @@
 #                                     a genuine fix is never hidden behind a stale suppression).
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# LOAD_GATE default is CORE-AWARE (P-013): max(15, 3*nproc/8). The old absolute 15 never fired
-# on the 128-core fleet box, and the first core-aware cut (nproc/4 = 32) STILL sat below the
-# fleet-era operating floor (observed 1-min load 35-46 through 2026-07-03 midday — the 12:37
-# timer run skipped at 36.76 vs gate 32), reproducing the exact "gate never runs" class P-013
-# exists to kill. 3*nproc/8 (= 48 on 128 cores) sits above that floor but below the empirical
-# ~51+ kill zone where smokes start dying. The load-94 mid-run storm that false-failed a
-# 30-threshold run is handled by the STORM downgrade at verdict time (SKIPPED-STORM, not RED)
-# instead of by an unreachably low admission threshold.
+# LOAD_GATE default is SATURATION-BASED (WI-5319 / plan D-003): max(15, 85% of nproc).
+# History: the old absolute 15 never fired on the 128-core fleet box; nproc/4=32 and then
+# 3*nproc/8=48 each still sat below the fleet-era operating floor — on 2026-07-17 the box ran
+# 1-min load 40–120 ALL DAY and the 19:04 hourly window self-skipped at 48.78 vs gate 48, so
+# the timer effectively never fired (the exact "gate never runs" class P-013 exists to kill).
+# Owner directive (plan p2p-public-release-remaining-lanes-2026-07-16 D-003): load is not a
+# reason to withhold verification — engineer isolation instead. That isolation now exists:
+# local-matrix.sh pins each frame to a reserved cpuset (+ elevated cpu-shares), so host load
+# no longer starves the frames' node main threads (run 174333 forensics: 18×30s substrate
+# boot timeouts / 10 late-adopts / event-loop p99 1.48s on an UNPINNED rig-b). Admission now
+# skips only near true saturation, where even reserved cores can't be kept clear.
 NPROC="$(nproc 2>/dev/null || echo 8)"
-LOAD_GATE="${LOAD_GATE:-$(( NPROC * 3 / 8 > 15 ? NPROC * 3 / 8 : 15 ))}"
-STORM_GATE="${STORM_GATE:-$(( NPROC * 6 / 10 ))}"
+LOAD_GATE="${LOAD_GATE:-$(( NPROC * 85 / 100 > 15 ? NPROC * 85 / 100 : 15 ))}"
+# STORM downgrade moves with it (0.6n → 0.9n): with pinned frames, host loadavg is a weak
+# starvation proxy — the honest starvation signal is event-loop-lag inside the frame
+# serve.logs (grep '[event-loop-lag]'), which the verdict reader checks per WI-5319. Keep
+# the downgrade only as a last-resort guard at genuine saturation.
+STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
 REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
