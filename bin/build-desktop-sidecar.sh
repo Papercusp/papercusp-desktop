@@ -310,6 +310,36 @@ if [[ ! -f "$SIDECAR_DIR/git-ext-bridge.mjs" ]]; then
   exit 1
 fi
 
+# opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
+# gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
+# opusscript's JS shim (voice-node/codec.ts's lazy `import('opusscript')`) into
+# serve.mjs like any other pure-JS dep, but that shim's Emscripten wasm loader
+# reads its binary asset off `__dirname + "/opusscript_native_wasm.wasm"` at
+# RUNTIME (node_modules/opusscript/build/opusscript_native_wasm.js) — and in
+# this bundle every inlined module shares serve.mjs's own
+# `__dirname`/`import.meta.url` (the HOST_BANNER above), so it looks for the
+# .wasm right next to serve.mjs, not inside node_modules/opusscript/build/.
+# esbuild has no way to see that runtime fs read (same reason rrule/luxon need
+# an explicit copy below) — the .wasm is a pure BINARY ASSET, un-inlinable
+# regardless. Without this copy the packaged app hard-aborts the moment
+# anything touches the voice/Opus codec seam: "Aborted(Error: ENOENT: no such
+# file or directory, open '.../sidecar/opusscript_native_wasm.wasm')".
+echo "→ copying opusscript_native_wasm.wasm → $SIDECAR_DIR (EI-501)"
+_opus_wasm=""
+for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
+  cand="$base/opusscript/build/opusscript_native_wasm.wasm"
+  [[ -f "$cand" ]] && { _opus_wasm="$cand"; break; }
+done
+if [[ -z "$_opus_wasm" ]]; then
+  echo "ERROR: opusscript_native_wasm.wasm not found in any node_modules — voice/Opus would hard-abort in the packaged app (EI-501)"
+  exit 1
+fi
+cp "$_opus_wasm" "$SIDECAR_DIR/opusscript_native_wasm.wasm"
+if [[ ! -f "$SIDECAR_DIR/opusscript_native_wasm.wasm" ]]; then
+  echo "ERROR: failed to stage opusscript_native_wasm.wasm next to serve.mjs (EI-501)"
+  exit 1
+fi
+
 echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
   --bundle --platform=node --format=esm --target=node22 \

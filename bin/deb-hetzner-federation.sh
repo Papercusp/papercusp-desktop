@@ -213,8 +213,16 @@ fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
 if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   for inst in a b; do echo "[$inst] $(drv_exec "$inst" <<<"grep -E '\[swarm\]' /home/pcusp/serve.log 2>/dev/null | tail -5")"; done
 fi
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$([ "$ppab" = 1 ] && echo PASS || echo FAIL)  plan-part B→A=$([ "$ppba" = 1 ] && echo PASS || echo FAIL)  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$ppab" = 1 ] && [ "$ppba" = 1 ] && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
-  echo "OVERALL: PASS — the .deb federates cross-machine incl. per-part plans AND coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"; exit 0
+# EI-505: plan-part legs report PASS/SKIP/FAIL — SKIP (table absent, pre-plan-parts
+# .deb) is N/A, not a failure, and must not sink OVERALL.
+pp_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
+echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
+if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+  if [ "$ppab" = skip ] || [ "$ppba" = skip ]; then
+    echo "OVERALL: PASS (plan-part lane SKIPPED — harness_plan_parts absent, this .deb predates the plan-parts migration, EI-505) — the .deb federates cross-machine incl. coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"
+  else
+    echo "OVERALL: PASS — the .deb federates cross-machine incl. per-part plans AND coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"
+  fi
+  exit 0
 fi
 echo "OVERALL: INCOMPLETE — see [swarm] diagnostics + /home/pcusp/serve.log on each frame"; exit 6

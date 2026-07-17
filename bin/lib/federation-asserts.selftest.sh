@@ -343,6 +343,59 @@ BASH
   rm -rf "$RS_ROOT" "$RS_WORK"
 fi
 
+# 9) EI-505: fed_plan_part_merge_assert must SKIP (not spuriously FAIL) when
+# harness_plan_parts is absent on either frame — a shipped .deb built before mig
+# 270/271 landed has neither the table nor its capture trigger, and the raw INSERT
+# used to hard-error ("relation ... does not exist"), reading as a genuine merge
+# FAILURE and sinking deb-hetzner-federation.sh's OVERALL to INCOMPLETE even though
+# discovery + feature + coord merges all passed. Stub drv_psql to simulate both
+# frames, with no real PG / network involved — pure, hermetic.
+declare -A EI505_HAS_TABLE=()
+EI505_MERGED=0
+drv_psql() {
+  local inst="$1" sql="$2"
+  case "$sql" in
+    *"to_regclass('harness_shared.harness_plan_parts')"*)
+      [ "${EI505_HAS_TABLE[$inst]:-0}" = 1 ] && echo t || echo f ;;
+    *"INSERT INTO harness_shared.harness_plan_parts"*)
+      EI505_MERGED=1 ;;
+    *"SELECT origin||'|'||body FROM harness_shared.harness_plan_parts"*)
+      [ "$EI505_MERGED" = 1 ] && echo "remote|xmerge-proof-from-src" ;;
+    *"harness_features_consolidated WHERE harness_slug"*)
+      echo "fake-ws" ;;
+  esac
+}
+
+EI505_HAS_TABLE=( [src]=1 [dst]=0 ); EI505_MERGED=0
+res="$(fed_plan_part_merge_assert src dst slug 1)"
+[ "$res" = skip ] && ok "fed_plan_part_merge_assert SKIPs when harness_plan_parts is absent on dst (EI-505)" \
+                   || bad "fed_plan_part_merge_assert expected 'skip' (table absent on dst), got '$res'"
+
+EI505_HAS_TABLE=( [src]=0 [dst]=1 ); EI505_MERGED=0
+res="$(fed_plan_part_merge_assert src dst slug 1)"
+[ "$res" = skip ] && ok "fed_plan_part_merge_assert SKIPs when harness_plan_parts is absent on src (EI-505)" \
+                   || bad "fed_plan_part_merge_assert expected 'skip' (table absent on src), got '$res'"
+
+EI505_HAS_TABLE=( [src]=1 [dst]=1 ); EI505_MERGED=0
+res="$(fed_plan_part_merge_assert src dst slug 1)"
+[ "$res" = 1 ] && ok "fed_plan_part_merge_assert still MERGES (returns 1) when the table is present on both frames" \
+               || bad "fed_plan_part_merge_assert expected '1' (table present, merge lands), got '$res'"
+
+# deb-hetzner-federation.sh's OVERALL logic must treat a SKIPped plan-part leg as
+# N/A, not a failure, and must not label it FAIL in the summary line.
+FED_SCRIPT="$DIR/../deb-hetzner-federation.sh"
+if grep -qE '\[ "\$ppab" != skip \]' "$FED_SCRIPT" && grep -q 'ppab" = skip \] \|\| \[ "\$ppab" = 1' "$FED_SCRIPT"; then
+  ok "deb-hetzner-federation.sh's OVERALL condition treats a SKIPped plan-part leg as N/A, not FAIL"
+else
+  bad "deb-hetzner-federation.sh no longer excludes a SKIPped plan-part leg from the OVERALL gate (EI-505 regression)"
+fi
+if grep -q 'pp_label()' "$FED_SCRIPT" && grep -q 'skip) echo SKIP' "$FED_SCRIPT"; then
+  ok "deb-hetzner-federation.sh reports plan-part legs as PASS/SKIP/FAIL, not a binary PASS/FAIL"
+else
+  bad "deb-hetzner-federation.sh no longer distinguishes SKIP from FAIL in its summary line (EI-505 regression)"
+fi
+unset -f drv_psql
+
 required_line="$(grep '^REQUIRED_TOOLS=' "$verify_file" || true)"
 case "$required_line" in
   *" omp "*|*" omp\""*)
