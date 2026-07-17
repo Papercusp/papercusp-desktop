@@ -353,6 +353,14 @@ HIVE_SLUG="$(jget "$a_resp" "d['created'].get('potSlug') or d['created'].get('hi
 MEMBER_SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 A_ANNOUNCED="$(jget "$a_resp" "d['publish']['announced']")"
 A_UNVERIFIED="$(jget "$a_resp" "d['bindingUnverified']")"
+# WI-953 checkpoint + EI-13590 both flagged that the head -c 600 echo above cuts
+# off BEFORE the publish.announceError field (a thrown-and-caught exception in
+# hive-publish-from-repo.ts is the only way a PUBLIC hive gets announced:false) —
+# so a bare 'announced=FAIL' never told anyone WHY. Pull it explicitly.
+A_ANNOUNCE_ERR="$(jget "$a_resp" "(d.get('publish') or {}).get('announceError') or ''")"
+if [ "$A_ANNOUNCED" != "True" ] && [ -n "$A_ANNOUNCE_ERR" ]; then
+  echo "  [announce-error] publish.announceError = $A_ANNOUNCE_ERR"
+fi
 create_ok=0; [ "$A_OK" = "True" ] && [ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ] && create_ok=1
 if [ "$create_ok" = 1 ]; then
   echo "✓ A created hive='$HIVE_SLUG' member='$MEMBER_SLUG' from $REPO_URL"
@@ -912,7 +920,7 @@ fi
 
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
+echo "pre-peered=$([ "$prepeer_ok" = 1 ] && echo PASS || echo FAIL)  create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
 if [ "$witness_ran" = 1 ]; then
   CONTENT_CUT_REPORT="$([ "$rk_content_applicable" = 1 ] && { [ "$rk_content_cut_ok" = 1 ] && echo PASS || echo FAIL; } || echo INCONCLUSIVE)"
   echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)  K4-CONTENT-CUT=$CONTENT_CUT_REPORT"
