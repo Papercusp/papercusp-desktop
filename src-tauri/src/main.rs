@@ -545,6 +545,10 @@ mod tests {
             // process.env.PAPERCUSP_RELEASE_HOST. Without this, auto-update is dead
             // on Windows and reports success while being dead.
             "PAPERCUSP_RELEASE_HOST",
+            // WI-4389 follow-up: workspace-registry.ts reads this to resolve the
+            // real (unremapped) workspace root; dropped silently the same way
+            // PAPERCUSP_RELEASE_HOST was.
+            "PAPERCUSP_WORKSPACES_ROOT",
             // Endpoint-IPC: WI-3395 — PAPERCUSP_IPC_ENABLE not crossing is why the
             // IPC server never even STARTED inside WSL2 under packaged production.
             "PAPERCUSP_IPC_ENABLE",
@@ -4096,7 +4100,7 @@ const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCU
      PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
      PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
      PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP:\
-     PAPERCUSP_RELEASE_HOST";
+     PAPERCUSP_RELEASE_HOST:PAPERCUSP_WORKSPACES_ROOT/p";
 
 fn spawn_serve(
     via_wsl: bool,
