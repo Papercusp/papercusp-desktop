@@ -101,23 +101,49 @@ GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
 # Restart on non-zero exit (3s backoff); a graceful stop (exit 0 — e.g. the
 # SIGTERM connection-drain path) still ends the session. Each iteration runs
 # in a subshell so DEV_CMD's `cd` starts from the same cwd every time.
+#
+# EI-256 (found while writing the reaper's first hermetic test): reap()/the
+# watchdog kill the WHOLE group with `kill -TERM -- "-$GROUP"` — that reaches
+# this loop-bash AND its current DEV_CMD child at once. In principle the two
+# could race: if the child (a fast-to-signal process, e.g. `sleep`) dies
+# before this loop-bash gets around to processing its OWN copy of the same
+# signal, `code` comes back non-zero (killed-by-signal) and — with no
+# stopping flag — the WI-3042 branch below would fire and RESPAWN DEV_CMD,
+# spawning a fresh process the group-kill already broadcast past. `trap ...
+# TERM INT HUP` tells "we were asked to stop" apart from "the command
+# crashed on its own", closing that narrow theoretical race as cheap
+# defense-in-depth.
 setsid bash -c 'echo "$$" > "$1"; shift
+  stopping=0
+  trap "stopping=1" TERM INT HUP
   while :; do
     ( eval "$1" ); code=$?
+    [ "$stopping" = 1 ] && exit 0
     [ "$code" -eq 0 ] && exit 0
     echo "[tauri] operator dev server exited code=$code — restarting in 3s (WI-3042 supervision)" >&2
     sleep 3
   done' _ "$GROUP_FILE" "$DEV_CMD" &
 CHILD=$!
-GROUP=""
-for _ in $(seq 1 50); do
-  GROUP="$(cat "$GROUP_FILE" 2>/dev/null || true)"
-  [ -n "$GROUP" ] && break
-  sleep 0.1
-done
-rm -f "$GROUP_FILE"
-GROUP="${GROUP:-$CHILD}"
-
+# EI-256 (the REAL root cause found while writing the reaper's first
+# hermetic test — the theoretical race above was NOT it; A/B-testing that
+# trap alone left the SAME ~25-60% not-reaped rate unchanged on this box).
+# `GROUP` used to stay unset — and `reap`/its trap stayed UNDEFINED — for the
+# ENTIRE up-to-5s polling loop below that waits for the loop-bash to report
+# its real pgid through $GROUP_FILE. A signal (TERM/INT/HUP — exactly what a
+# graceful `dev:restart` drain, Ctrl-C, or a deploy's first shutdown attempt
+# sends) landing anywhere in that window hit bash's DEFAULT disposition
+# (terminate immediately) with NO trap yet installed — the freshly-spawned
+# dev stack was orphaned with zero supervision, permanently (confirmed via
+# `bash -x` tracing: the wrapper died mid-poll-loop, `$GROUP` still empty,
+# `reap` never even defined). Fix: arm the trap NOW, against the safe
+# interim target `$CHILD` — `reap` re-reads `$GROUP` at CALL time (bash
+# doesn't freeze it at trap-registration time), so once the poll loop below
+# corrects `$GROUP` to the real pgid (when setsid forked rather than
+# exec'd-in-place — see the note above), a later-firing trap picks up the
+# right target for free. Worst case (the loop-bash never reports in time)
+# `$GROUP` stays `$CHILD` — still an armed, usable target, instead of no
+# supervision at all.
+GROUP="$CHILD"
 reap() {
   kill -TERM -- "-$GROUP" 2>/dev/null || true
   for _ in $(seq 1 50); do
@@ -130,16 +156,45 @@ trap reap EXIT INT TERM HUP
 
 # Watchdog: its own session too, so nothing that kills our group takes it
 # down before it can reap. It exits as soon as the dev-stack group is gone.
+#
+# EI-256: spawned EARLY (before $GROUP_FILE is even read below) and given
+# $CHILD + $GROUP_FILE rather than a pre-resolved $GROUP, for the SAME reason
+# the wrapper's own trap moved earlier above — a SIGKILL to the wrapper
+# (which the watchdog alone survives; SIGKILL can't be trapped) landing
+# before the watchdog existed would orphan the stack just as badly as the
+# TERM/INT/HUP case did. It now does its OWN independent refinement against
+# $CHILD, run concurrently with the wrapper's identical loop below. Neither
+# side removes $GROUP_FILE (that would race the OTHER reader into an early,
+# wrong $CHILD fallback in the fork case — measured: it happened) — a
+# detached, generously-delayed cleanup below removes it once both have had
+# ample time to read it.
 setsid bash -c '
-  wrapper="$1"; child="$2"
-  while kill -0 "$wrapper" 2>/dev/null; do sleep 1; done
-  kill -TERM -- "-$child" 2>/dev/null || true
+  wrapper="$1"; child="$2"; group_file="$3"
+  group="$child"
   for _ in $(seq 1 50); do
-    kill -0 -- "-$child" 2>/dev/null || exit 0
+    g="$(cat "$group_file" 2>/dev/null || true)"
+    [ -n "$g" ] && { group="$g"; break; }
     sleep 0.1
   done
-  kill -KILL -- "-$child" 2>/dev/null || true
-' dev-operator-watchdog "$$" "$GROUP" >/dev/null 2>&1 &
+  while kill -0 "$wrapper" 2>/dev/null; do sleep 1; done
+  kill -TERM -- "-$group" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 -- "-$group" 2>/dev/null || exit 0
+    sleep 0.1
+  done
+  kill -KILL -- "-$group" 2>/dev/null || true
+' dev-operator-watchdog "$$" "$CHILD" "$GROUP_FILE" >/dev/null 2>&1 &
+
+for _ in $(seq 1 50); do
+  g="$(cat "$GROUP_FILE" 2>/dev/null || true)"
+  [ -n "$g" ] && { GROUP="$g"; break; }
+  sleep 0.1
+done
+# Both readers above give up after 5s max; 15s comfortably clears that with
+# margin before this tiny (single-line) temp file is removed. Backgrounded
+# and left un-awaited on purpose — a harmless orphan by the time this script
+# exits either way.
+( sleep 15; rm -f "$GROUP_FILE" ) &
 
 # Block for the dev stack's lifetime (tauri-cli treats a long-running
 # beforeDevCommand as the dev server and pings devUrl for readiness).

@@ -271,19 +271,34 @@ fn open_unavailable_window(app: &AppHandle, reason: &str) {
         eprintln!("[docs-search] could not build the diagnostic page url");
         return;
     };
-    let mut builder =
-        tauri::WebviewWindowBuilder::new(app, UNAVAILABLE_WINDOW_LABEL, tauri::WebviewUrl::External(parsed))
-            .title("Quick Panel unavailable")
-            .inner_size(560.0, 400.0)
-            .min_inner_size(420.0, 320.0)
-            .center()
-            .always_on_top(true)
-            .focused(true)
-            .decorations(true)
-            .resizable(true);
+    // `icon()` CONSUMES the builder and returns a Result, so the error arm needs
+    // a fresh one — hence this factory rather than a bare `if let Ok(..)` (which
+    // would move the builder away with no way to put it back).
+    let make = || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            UNAVAILABLE_WINDOW_LABEL,
+            tauri::WebviewUrl::External(parsed.clone()),
+        )
+        .title("Quick Panel unavailable")
+        .inner_size(560.0, 400.0)
+        .min_inner_size(420.0, 320.0)
+        .center()
+        .always_on_top(true)
+        .focused(true)
+        .decorations(true)
+        .resizable(true)
+    };
+    let mut builder = make();
     if let Some(icon) = app.default_window_icon().cloned() {
-        if let Ok(b) = builder.icon(icon) {
-            builder = b;
+        match builder.icon(icon) {
+            Ok(b) => builder = b,
+            Err(e) => {
+                // Never drop the window over a cosmetic icon failure — the
+                // whole point of this window is that the user hears SOMETHING.
+                eprintln!("[docs-search] could not set diagnostic window icon: {e}");
+                builder = make();
+            }
         }
     }
     match builder.build() {

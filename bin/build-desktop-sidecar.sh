@@ -90,7 +90,7 @@ fi
 # glob (sidecar/**/*) is validated by `generate_context!` at COMPILE time,
 # and the publish sequence briefly renames SIDECAR_FINAL_DIR OUT before
 # renaming the new tree IN (a real, if narrow, "sidecar/ doesn't exist at
-# all" window) — a cargo build whose glob validation lands there fails with
+# all" window) — a cargo-build invocation whose glob validation lands there fails with
 # a misleading "path not found" error. Use bin/cargo-build-safe.sh instead
 # of a bare `cargo <args>` under src-tauri when building alongside active
 # desktop-sidecar contention — it takes a SHARED flock on this same lock
