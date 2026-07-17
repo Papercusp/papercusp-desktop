@@ -529,7 +529,17 @@ rig_restart_sidecar() {
   rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
-pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1
+# serve.mjs needs the same actually-exited discipline as postgres below (WI-183 class):
+# SIGTERM + a fixed 1s under-covers a slow graceful shutdown, and a relaunch while the
+# old process still holds the Corestore root is the WI-4236 two-process race — the old
+# instance's own-log forks and every post-restart write silently strands (the exact
+# restart_durability NEW-WRITE/NO-DUP failure seen in gate run 20260716-234524).
+pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true
+for i in $(seq 1 15); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
+if pgrep -u pcusp -f 'serve.mjs' >/dev/null; then
+  pkill -9 -u pcusp -f 'serve.mjs' 2>/dev/null || true
+  for i in $(seq 1 10); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
+fi
 pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true
 # shm-race hygiene (WI-183 rig hardening; seen LIVE 2026-07-03 19:46Z frame b):
 # the old pkill + sleep 2 + pid-file-clear UNDER-COVERS the class — PG backends
