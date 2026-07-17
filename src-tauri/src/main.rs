@@ -1759,12 +1759,30 @@ fn no_console_window(cmd: &mut Command) {
     cmd.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
 }
 
-/// operator.json path INSIDE the WSL distro. The sidecar runs as the distro
-/// user `papercup` (HOME=/home/papercup — WSLENV HOME/p forwarding does not
-/// survive WSL session init), so serve writes discovery here, not under the
-/// forwarded /mnt/c home.
+/// The `.papercusp` dir INSIDE the WSL distro that the sidecar reads/writes
+/// discovery state to. The sidecar runs as the distro user `papercup`
+/// (HOME=/home/papercup — WSLENV HOME/p forwarding does not survive WSL
+/// session init), so this defaults to the shared `/home/papercup/.papercusp`,
+/// NOT the forwarded /mnt/c home. Honors `PAPERCUSP_HOME` when the launcher
+/// sets it (forwarded via `PAPERCUSP_HOME/p` in SIDECAR_WSLENV, translated
+/// from its Windows-side value) — this is the same isolation escape hatch
+/// `papercusp-root.ts` already promises on Linux/Mac, letting a caller run an
+/// throwaway/isolated sidecar instance instead of always adopting the shared
+/// distro home (WI-5305: previously silently ignored on Windows because
+/// PAPERCUSP_HOME wasn't in SIDECAR_WSLENV and this path was hardcoded).
 #[cfg(target_os = "windows")]
-const WSL_OPERATOR_JSON: &str = "/home/papercup/.papercusp/operator.json";
+fn wsl_papercusp_home_dir() -> String {
+    match std::env::var("PAPERCUSP_HOME") {
+        Ok(v) if !v.trim().is_empty() => windows_path_to_wsl(std::path::Path::new(&v)),
+        _ => "/home/papercup/.papercusp".to_string(),
+    }
+}
+
+/// operator.json path INSIDE the WSL distro. See `wsl_papercusp_home_dir`.
+#[cfg(target_os = "windows")]
+fn wsl_operator_json_path() -> String {
+    format!("{}/operator.json", wsl_papercusp_home_dir())
+}
 
 /// Read operator.json the ROBUST way when the sidecar runs inside WSL: shell
 /// into the distro and `cat` the file. The `\\wsl.localhost` UNC share we used
@@ -1777,13 +1795,14 @@ const WSL_OPERATOR_JSON: &str = "/home/papercup/.papercusp/operator.json";
 /// discovery_pid_alive already relies on, so it works whenever the distro is up.
 #[cfg(target_os = "windows")]
 fn read_operator_discovery_via_wsl() -> Option<OperatorDiscovery> {
+    let path = wsl_operator_json_path();
     let mut cmd = Command::new("wsl.exe");
     cmd.args([
         "--distribution",
         wsl_setup::DISTRO_NAME_PUB,
         "-e",
         "cat",
-        WSL_OPERATOR_JSON,
+        &path,
     ]);
     no_console_window(&mut cmd);
     let out = cmd.output().ok()?;
@@ -4100,7 +4119,7 @@ const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCU
      PAPERCUSP_PROMPTS_DIR/p:PAPERCUSP_SEED_DIR/p:PAPERCUSP_SIDECAR_BIN/p:\
      PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
      PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP:\
-     PAPERCUSP_RELEASE_HOST:PAPERCUSP_WORKSPACES_ROOT/p";
+     PAPERCUSP_RELEASE_HOST:PAPERCUSP_WORKSPACES_ROOT/p:PAPERCUSP_HOME/p";
 
 fn spawn_serve(
     via_wsl: bool,
