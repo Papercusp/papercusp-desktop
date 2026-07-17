@@ -703,17 +703,17 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     format!(
         "printf '\\033]0;%s\\007' {title} \
          ; cd {cwd} && {exports} \
-         && PAPERCUSP_CONSOLE_IDENTITY="$( \
+         && PAPERCUSP_CONSOLE_IDENTITY=\"$( \
               if [ -r /proc/sys/kernel/random/boot_id ] && [ -r /proc/$$/stat ]; then \
                 printf 'linux:%s:%s' \
-                  "$(cat /proc/sys/kernel/random/boot_id)" \
-                  "$(awk '{{print $22}}' /proc/$$/stat)"; \
+                  \"$(cat /proc/sys/kernel/random/boot_id)\" \
+                  \"$(awk '{{print $22}}' /proc/$$/stat)\"; \
               else \
-                papercusp_started="$(ps -o lstart= -p $$ 2>/dev/null | awk '{{$1=$1; print}}')"; \
-                [ -n "$papercusp_started" ] && printf 'darwin:%s' "$papercusp_started"; \
-              fi; true)" \
+                papercusp_started=\"$(ps -o lstart= -p $$ 2>/dev/null | awk '{{$1=$1; print}}')\"; \
+                [ -n \"$papercusp_started\" ] && printf 'darwin:%s' \"$papercusp_started\"; \
+              fi; true)\" \
          && export PAPERCUSP_CONSOLE_IDENTITY \
-         && printf '%s\n' "$PAPERCUSP_CONSOLE_IDENTITY" > {sentinel_glob}.$$ \
+         && printf '%s\n' \"$PAPERCUSP_CONSOLE_IDENTITY\" > {sentinel_glob}.$$ \
          && trap 'rm -f {sentinel_glob}.$$' EXIT \
          && (eval {greet}) ; \
          exec \"${{SHELL:-/bin/bash}}\" -l",

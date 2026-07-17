@@ -6851,19 +6851,23 @@ mod orphan_sweep_decision_tests {
     use super::{decide_orphan_sweep, OperatorDiscovery, OrphanSweepDecision};
 
     fn disc() -> OperatorDiscovery {
-        OperatorDiscovery { port: 3070, pid: 4242 }
+        OperatorDiscovery {
+            port: 3070,
+            pid: 4242,
+            process_identity: Some("linux:test-boot:123".to_string()),
+        }
     }
 
     #[test]
     fn no_discovery_file_is_nothing_recorded() {
         assert_eq!(
-            decide_orphan_sweep(None, false, false),
+            decide_orphan_sweep(None, false, false, false),
             OrphanSweepDecision::NothingRecorded
         );
         // pid_alive/http_ready are meaningless without a discovery record —
         // NothingRecorded wins regardless of what they'd say.
         assert_eq!(
-            decide_orphan_sweep(None, true, true),
+            decide_orphan_sweep(None, true, true, true),
             OrphanSweepDecision::NothingRecorded
         );
     }
@@ -6872,13 +6876,13 @@ mod orphan_sweep_decision_tests {
     fn dead_pid_is_already_dead_never_killed() {
         let d = disc();
         assert_eq!(
-            decide_orphan_sweep(Some(&d), false, false),
+            decide_orphan_sweep(Some(&d), false, false, false),
             OrphanSweepDecision::AlreadyDead
         );
         // Even a (nonsensical) http_ready:true with a dead pid stays AlreadyDead
         // — pid liveness gates before the HTTP check ever matters.
         assert_eq!(
-            decide_orphan_sweep(Some(&d), false, true),
+            decide_orphan_sweep(Some(&d), false, true, true),
             OrphanSweepDecision::AlreadyDead
         );
     }
@@ -6889,7 +6893,7 @@ mod orphan_sweep_decision_tests {
         // found — MUST NOT be swept.
         let d = disc();
         assert_eq!(
-            decide_orphan_sweep(Some(&d), true, true),
+            decide_orphan_sweep(Some(&d), true, true, false),
             OrphanSweepDecision::HealthyReuse
         );
     }
@@ -6898,8 +6902,17 @@ mod orphan_sweep_decision_tests {
     fn alive_but_unresponsive_is_the_only_kill_case() {
         let d = disc();
         assert_eq!(
-            decide_orphan_sweep(Some(&d), true, false),
+            decide_orphan_sweep(Some(&d), true, false, true),
             OrphanSweepDecision::StaleKill
+        );
+    }
+
+    #[test]
+    fn alive_unresponsive_but_unverified_is_refused_never_killed() {
+        let d = disc();
+        assert_eq!(
+            decide_orphan_sweep(Some(&d), true, false, false),
+            OrphanSweepDecision::RefusedUnverified
         );
     }
 }
