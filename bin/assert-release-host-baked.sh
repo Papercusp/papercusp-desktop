@@ -32,6 +32,16 @@
 
 set -uo pipefail
 
+# LC_ALL=C — match the baked host as RAW BYTES, not decoded UTF-8. This gate
+# greps a compiled binary (Mach-O/ELF) whose .rodata contains invalid-UTF-8
+# byte sequences; under a UTF-8 locale (the build VMs run en_US.UTF-8) both
+# BSD and GNU `grep -aF` can FAIL to find an ASCII substring in such a file —
+# a FALSE NEGATIVE that fails this gate on a CORRECTLY-baked binary. This cost
+# an ENTIRE 0.0.11 release cycle chasing a phantom "host not baked": the host
+# WAS baked (`strings|grep` and `LC_ALL=C grep` both found it; plain `grep`
+# did not, exit 1). Forcing the C locale makes every match below byte-exact.
+export LC_ALL=C
+
 if [[ $# -lt 1 ]]; then
   echo "usage: assert-release-host-baked.sh <binary> [<binary> ...]" >&2
   exit 2
