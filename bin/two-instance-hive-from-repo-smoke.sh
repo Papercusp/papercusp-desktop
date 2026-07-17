@@ -561,7 +561,7 @@ if [ "${A003_MEMBERSHIP_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
     echo "A003-HIVE-SETTINGS-CROSS=PASS  (incremental hive_settings federated owner->joiner — A-003 GREEN on the binary)"
   else
     echo "A003-HIVE-SETTINGS-CROSS=FAIL  (A's new hive_settings row never reached B as origin=remote — A-003 RED)"
-    echo "  DIAG A outbox(hive_settings,$a003_key): $(drv_psql a "SELECT 'drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_settings' AND key='$a003_key';" 2>/dev/null | tr '\n' ' ')"
+    echo "  DIAG A outbox(pot_settings,$a003_key): $(drv_psql a "SELECT 'drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='pot_settings' AND key='$a003_key';" 2>/dev/null | tr '\n' ' ')"
     echo "  DIAG B settings: $(drv_psql b "SELECT setting_key||'/'||origin FROM harness_shared.pot_settings WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ' | head -c 300)"
     echo "  DIAG B [A-003] admit: $(grep -aE '\[A-003\] slug-filter' "${FED_LOG[b]}" 2>/dev/null | grep -iF "$HIVE_SLUG" | tail -4 | tr '\n' '|')"
   fi
@@ -855,9 +855,9 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # under the id now recorded AUTHORITATIVELY in pots.keychain_id. Dumping the row + the file-keychain
   # dir + the ws registry pins which (ws,slug) the key actually lives under vs what the route computes.
   mod_owner_diag() {
-    echo "    DIAG A pots row (kc= is the MINT's exact id): $(drv_psql a "SELECT workspace_id||'|'||home_slug||'|kc='||keychain_id||'|pk='||left(encode(public_key,'base64'),12) FROM harness_shared.pots WHERE home_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A pots row (kc= is the MINT's exact id): $(drv_psql a "SELECT workspace_id||'|'||pot_home_slug||'|kc='||keychain_id||'|pk='||left(encode(public_key,'base64'),12) FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG A identity dir: $(ls "$A_HOME/.papercusp/identity" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG A ws registry: $(cat "$A_HOME"/.papercusp/workspace*.json 2>/dev/null | head -c 200)"
+    echo "    DIAG A ws registry (current= the ws the policy route hashes into hive:<ws>:<slug>): $(if [ -f "$A_HOME/.papercusp-workspaces/registry.json" ]; then tr -d '[:space:]' < "$A_HOME/.papercusp-workspaces/registry.json" | head -c 200; else echo "registry.json MISSING -> activeWorkspaceId()='default'"; fi)"
     echo "    DIAG A mint warn: $(grep -oa '\[pot:create\] pot identity mint failed[^\"]\{0,120\}' "${FED_LOG[a]:-$A_HOME/serve.log}" 2>/dev/null | head -1)"
   }
 
@@ -895,7 +895,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   if [ "$mod_takedown_ok" != 1 ]; then
     echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG A outbox(hive_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A outbox(pot_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='pot_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG takedown err: $(echo "$td" | grep -oaE '"error":"[^"]{0,80}"|not_owner_swarm|no_owner_pubkey|hive_unclaimed' | head -2 | tr '\n' ' ')"
     mod_owner_diag
   fi
@@ -932,7 +932,7 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   if [ "$mod_report_ok" != 1 ] && [ "$b_reportable" = 1 ]; then
     echo "    DIAG A reports: $(drv_psql a "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.pot_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
     echo "    DIAG B reports(local): $(drv_psql b "SELECT report_id||'/'||origin||'/'||target_ref FROM harness_shared.pot_reports WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG B outbox(hive_reports): $(drv_psql b "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='hive_reports' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG B outbox(pot_reports): $(drv_psql b "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='pot_reports' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
   fi
 fi
 
