@@ -323,6 +323,27 @@ mcp_call() {
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
 }
 
+# ── 0. pre-create A↔B swarm peering gate (EI-13590 r6 fix, 2026-07-17) ──────────
+# r5 found create=PASS / announced=FAIL (reachablePeers:0): this smoke goes
+# fed_wait_boot → fed_wait_api → from_repo with NO peering wait, so A's swarm can
+# still be mid-dial to the DHT when the create-time announce flush runs (0 peers
+# to announce to). Every other federation smoke waits for [swarm] peer_connected
+# before its first assert (two-instance-hive-directory-smoke.sh ~90s,
+# deb-hetzner-federation.sh ~210s) — this one never did. Bounded wait (~120s,
+# same fed_wait_discovery primitive those use); a miss is LOUD (both swarm-log
+# tails) but NON-FATAL — firing create on a still-unpeered swarm anyway is itself
+# the datapoint under test (does create-time announce ever retry product-side?
+# tracked separately, not fixed in this script).
+log "wait: A↔B swarm peering BEFORE create (≤120s) — r5 exposed this race unguarded"
+prepeer_ok="$(fed_wait_discovery a b strict 40 || true)"
+if [ "$prepeer_ok" = 1 ]; then
+  echo "✓ A↔B peered before create"
+else
+  echo "⚠ A↔B did NOT peer within ~120s before create — proceeding anyway (the create-time announce race is what r6 is testing)"
+  echo "--- A [swarm] tail ---"; grep -aE '\[swarm\]' "${FED_LOG[a]}" 2>/dev/null | tail -15
+  echo "--- B [swarm] tail ---"; grep -aE '\[swarm\]' "${FED_LOG[b]}" 2>/dev/null | tail -15
+fi
+
 # ── 1. A creates a PUBLIC hive from the fixture repo ────────────────────────────
 log "A ($P_A_USER): POST /api/harness/pots/from-repo ($REPO_URL, public, runTests:false, shallow)"
 a_resp="$(from_repo a)"
