@@ -558,6 +558,10 @@ mod tests {
             "PAPERCUSP_BIND_HOST",
             "PAPERCUSP_SIDECAR_BIN",
             "PAPERCUSP_SERVE_UI",
+            // WI-5305: the isolation escape hatch (papercusp-root.ts resolve())
+            // must cross the WSL boundary too, or a caller's env override
+            // silently no-ops on Windows while working on Linux/Mac.
+            "PAPERCUSP_HOME",
         ] {
             assert!(
                 names.contains(&required),
@@ -1882,11 +1886,14 @@ fn find_operator_discovery(
 }
 
 /// The endpoint-IPC discovery file INSIDE the WSL distro. Mirrors
-/// `WSL_OPERATOR_JSON`: the sidecar (running in WSL2) writes it to its
-/// WSL-native `$HOME/.papercusp`, NOT the Windows-side workspace_home the
-/// client reads — see `find_endpoint_ipc_socket` (WI-3395).
+/// `wsl_operator_json_path`: the sidecar (running in WSL2) writes it to its
+/// WSL-native `$HOME/.papercusp` (or the isolated `PAPERCUSP_HOME` dir when
+/// set — see `wsl_papercusp_home_dir`), NOT the Windows-side workspace_home
+/// the client reads — see `find_endpoint_ipc_socket` (WI-3395).
 #[cfg(target_os = "windows")]
-const WSL_ENDPOINT_IPC_JSON: &str = "/home/papercup/.papercusp/endpoint-ipc.json";
+fn wsl_endpoint_ipc_json_path() -> String {
+    format!("{}/endpoint-ipc.json", wsl_papercusp_home_dir())
+}
 
 /// Read the endpoint-IPC `socketPath` from INSIDE the WSL distro via `wsl.exe
 /// -e cat`, exactly like `read_operator_discovery_via_wsl` (the `\\wsl$` UNC
@@ -1896,13 +1903,14 @@ const WSL_ENDPOINT_IPC_JSON: &str = "/home/papercup/.papercusp/endpoint-ipc.json
 /// WSL2 localhost-forwarding (same mechanism as the operator HTTP port).
 #[cfg(target_os = "windows")]
 fn read_endpoint_ipc_socket_via_wsl() -> Option<String> {
+    let path = wsl_endpoint_ipc_json_path();
     let mut cmd = Command::new("wsl.exe");
     cmd.args([
         "--distribution",
         wsl_setup::DISTRO_NAME_PUB,
         "-e",
         "cat",
-        WSL_ENDPOINT_IPC_JSON,
+        &path,
     ]);
     no_console_window(&mut cmd);
     let out = cmd.output().ok()?;
