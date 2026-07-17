@@ -1,0 +1,1 @@
+import{n as e,t}from"./plugin-configs-pg-DCcglMBF.js";t();export{e as loadPluginConfig};

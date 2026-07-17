@@ -1,0 +1,1 @@
+import{_ as e,g as t}from"./agent-config-constants-C0iFM-7p.js";e();export{t as defaultCompactionLimitForSpec};

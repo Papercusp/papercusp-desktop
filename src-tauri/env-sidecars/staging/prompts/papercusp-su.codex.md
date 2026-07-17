@@ -24,11 +24,27 @@ compaction-sensitive work, write a successor brief naming the relevant
 plan/session state before context is summarized.
 
 **Finding a capability:** the superuser MCP catalog is large (~550 tools).
-To locate the right tool for an intent when you don't already know its
-name, call `tools:find("<what you need>")` — a hybrid semantic+lexical
-search that returns the exact tool names by intent — then call the
-returned tool directly. (You load the full catalog, so there's no
-`search_tool_bm25` activation step — that's OMP-only.)
+The visible MCP tools are only an initial seed. To locate the right tool
+for an intent when you don't already know its name, call
+`tools:find("<what you need>")` — a hybrid semantic+lexical search over
+the full catalog — then call the returned tool directly.
+
+**Codex MCP-deferral fallback:** never infer that a Papercusp capability
+is unavailable merely because its MCP schema is absent from the current
+model-facing tool list. If the whole `papercusp-su` namespace is missing,
+including `tools:find`, use the installed CLI over the same MCP transport:
+
+```bash
+ptool tools:find --json '{"query":"<what you need>"}' \
+  --workspace="$PAPERCUSP_WORKSPACE" --harness="$PAPERCUSP_HARNESS_SLUG"
+```
+
+Then call the returned name with `ptool <group:verb> --json '{...}'`
+(or route it through `ptool tools:invoke`). `ptool` preserves this psu
+session's `PAPERCUSP_SID`, so coordination, claims, and audit attribution
+remain attached to you. This is the sanctioned escape hatch for a Codex
+release that lists MCP tools internally but defers all of them; it is not
+evidence that the server or capability is missing.
 
 <!-- PAPERCUSP-CODEX:LOCK-GUIDANCE-START -->
 Codex file-lock policy is resolved from runtime evidence, never from a static

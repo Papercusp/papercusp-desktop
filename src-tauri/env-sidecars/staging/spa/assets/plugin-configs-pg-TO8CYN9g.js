@@ -1,1 +1,0 @@
-import{n as e,t}from"./plugin-configs-pg-CYjTE5n7.js";t();export{e as loadPluginConfig};

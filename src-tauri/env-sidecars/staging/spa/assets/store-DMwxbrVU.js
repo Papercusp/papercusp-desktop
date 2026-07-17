@@ -1,0 +1,209 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{l as t,o as n,t as r,u as i}from"./src-C0H6dNEO.js";import{J as a,t as o}from"./src-CwW4br4q.js";import{r as s,t as c}from"./coordination-event-log-browser-Dq_4i-_C.js";function l(e){if(typeof e!=`string`||!e.startsWith(`@`))return e;let t=/^@plan:(.+)$/.exec(e);if(t)return`plan-item:done:${t[1]}:*`;let n=/^@fleet:(.+)$/.exec(e);if(n)return`fleet:*:${n[1]}`;throw Error(`events:await — unknown pattern macro '${e}'. Known macros: @plan:<slug>, @fleet:<slug>. Or pass a raw glob, e.g. 'work-item:done:*'.`)}function u(e){return e.replace(/[.+?^${}()|[\]\\]/g,`\\$&`)}function d(e){return{matches:`^`+u(e).replace(/\*/g,`.*`)+`$`}}function f(e,t){if(typeof e!=`string`)return!1;let n=l(e);return n.includes(`*`)?i(d(n),t):n===t}function p(e,r){if(e==null)return!0;if(!t(e))return!1;try{return n(e,r)}catch{return!1}}var m=e((()=>{r()})),h,g=e((()=>{h=[`pty-inject`,`psu-socket-inject`,`psu-socket-reset`,`psu-socket-recycle`,`resume`,`resume-headless`,`hive-fresh-wake`,`plan-run-resume`]}));function _(e){if(e==null)return null;if(typeof e==`string`)try{return JSON.parse(e)}catch{return null}return e}function v(e){return{id:Number(e.id),workspaceId:e.workspace_id,subscriberId:e.subscriber_id,eventKey:e.event_key,policy:e.policy,note:e.note??null,wakeHandle:_(e.wake_handle),timeoutBehavior:e.timeout_behavior,expiresTs:e.expires_ts?new Date(e.expires_ts).toISOString():null,createdAt:new Date(e.created_at).toISOString(),firedAt:e.fired_at?new Date(e.fired_at).toISOString():null,firedReason:e.fired_reason??null,cancelledAt:e.cancelled_at?new Date(e.cancelled_at).toISOString():null,once:e.once??!0,minSleepSec:e.min_sleep_sec==null?null:Number(e.min_sleep_sec),urgency:e.urgency??!1,payloadFilter:_(e.payload_filter),scopeKind:e.scope_kind??null,scopeRef:e.scope_ref??null,causalGeneration:e.causal_generation==null?null:Number(e.causal_generation),expectedCondition:_(e.expected_condition),supersededAt:e.superseded_at?new Date(e.superseded_at).toISOString():null,firedBy:e.fired_by??null,firedPayload:_(e.fired_payload),nodeId:e.node_id==null?null:Number(e.node_id),rootId:e.root_id==null?null:Number(e.root_id),memberFiredAt:e.member_fired_at?new Date(e.member_fired_at).toISOString():null,memberPayload:_(e.member_payload)}}function y(e){return{id:Number(e.id),workspaceId:e.workspace_id,awaitId:Number(e.await_id),subscriberId:e.subscriber_id,eventKey:e.event_key,payload:_(e.payload),summary:e.summary??null,status:e.status,channel:e.channel??null,attempts:Number(e.attempts),lastError:e.last_error??null,nextAttemptAt:new Date(e.next_attempt_at).toISOString(),createdAt:new Date(e.created_at).toISOString(),deliveredAt:e.delivered_at?new Date(e.delivered_at).toISOString():null,urgent:e.urgent??!1,minSleepSec:e.min_sleep_sec==null?null:Number(e.min_sleep_sec),coalescedCount:e.coalesced_count==null?1:Number(e.coalesced_count),source:e.source??null}}function b(e){return{...y(e),wakeHandle:_(e.wake_handle),note:e.await_note??null}}async function x(e){let{sql:t}=a();return(await t`
+    UPDATE harness_shared.event_awaits
+       SET cancelled_at = now()
+     WHERE workspace_id = ${W()} AND subscriber_id = ${e}
+       AND policy = 'wake' AND once = false AND fired_at IS NULL AND cancelled_at IS NULL
+       AND event_key LIKE 'coord:inbox-wake:%'
+    RETURNING id
+  `).length}async function S(e,t){if(e.length===0||t.length===0)return 0;let{sql:n}=a();return(await n`
+    UPDATE harness_shared.event_awaits
+       SET cancelled_at = now()
+     WHERE workspace_id = ${W()}
+       AND subscriber_id = ANY(${n.array([...e])}::text[])
+       AND event_key = ANY(${n.array([...t])}::text[])
+       AND fired_at IS NULL AND cancelled_at IS NULL
+    RETURNING id
+  `).length}async function C(e){if(e.length===0)return 0;let{sql:t}=a();return(await t`
+    UPDATE harness_shared.event_awaits
+       SET cancelled_at = now()
+     WHERE workspace_id = ${W()} AND id = ANY(${[...e]})
+       AND fired_at IS NULL AND cancelled_at IS NULL
+    RETURNING id
+  `).length}async function w(e){let{sql:t}=a();return(await t`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${W()} AND subscriber_id = ${e}
+       AND fired_at IS NULL AND cancelled_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 100
+  `).map(v)}async function T(e){let t=[...new Set(e.filter(e=>!!e))];if(t.length===0)return[];let{sql:n}=a();return(await n`
+    SELECT subscriber_id, event_key, note, expires_ts, created_at
+      FROM harness_shared.event_awaits
+     WHERE workspace_id = ${W()}
+       AND subscriber_id = ANY(${t}::text[])
+       AND fired_at IS NULL AND cancelled_at IS NULL
+       AND event_key NOT LIKE ${`coord:inbox-wake:%`}
+       AND policy <> 'announce'
+       AND (expires_ts IS NULL OR expires_ts > now())
+     ORDER BY created_at DESC
+     LIMIT 500
+  `).map(e=>({subscriberId:e.subscriber_id,eventKey:e.event_key,note:e.note??null,expiresTs:e.expires_ts?new Date(e.expires_ts).toISOString():null,createdAt:new Date(e.created_at).toISOString()}))}async function E(e){let{sql:t}=a();return(await t`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${W()} AND event_key = ${e}
+       AND fired_at IS NULL AND cancelled_at IS NULL
+       AND policy <> 'announce'
+     ORDER BY created_at ASC
+  `).map(v)}async function D(e){let{sql:t}=a(),n=W(),r=await t`
+    UPDATE harness_shared.event_awaits
+       SET fired_at = now(), fired_reason = ${e.reason??`event`}
+     WHERE workspace_id = ${n} AND event_key = ${e.eventKey}
+       AND once = true AND fired_at IS NULL AND cancelled_at IS NULL
+       AND payload_filter IS NULL
+       AND policy <> 'announce'
+    RETURNING *
+  `,i=(await t`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${n} AND event_key = ${e.eventKey}
+       AND once = true AND fired_at IS NULL AND cancelled_at IS NULL
+       AND payload_filter IS NOT NULL
+       AND policy <> 'announce'
+  `).filter(t=>p(_(t.payload_filter),e.payload)).map(e=>Number(e.id)),o=i.length>0?await t`
+          UPDATE harness_shared.event_awaits
+             SET fired_at = now(), fired_reason = ${e.reason??`event`}
+           WHERE id = ANY(${i})
+             AND fired_at IS NULL AND cancelled_at IS NULL
+          RETURNING *
+        `:[],s=(await t`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${n} AND event_key = ${e.eventKey}
+       AND once = false AND cancelled_at IS NULL
+       AND (expires_ts IS NULL OR expires_ts > now())
+       AND policy <> 'announce'
+  `).filter(t=>p(_(t.payload_filter),e.payload)),c=(await t`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${n}
+       AND event_key LIKE '%*%'
+       AND fired_at IS NULL AND cancelled_at IS NULL
+       AND (once = true OR expires_ts IS NULL OR expires_ts > now())
+       AND policy <> 'announce'
+  `).filter(t=>typeof t.event_key==`string`&&f(t.event_key,e.eventKey)&&p(_(t.payload_filter),e.payload)),l=c.filter(e=>(e.once??!0)===!0).map(e=>Number(e.id)),u=c.filter(e=>(e.once??!0)===!1),d=l.length>0?await t`
+          UPDATE harness_shared.event_awaits
+             SET fired_at = now(), fired_reason = ${e.reason??`event`}
+           WHERE id = ANY(${l})
+             AND fired_at IS NULL AND cancelled_at IS NULL
+          RETURNING *
+        `:[];return[...r,...o,...s,...d,...u].map(v)}async function O(e,t=`event`){if(e.length===0)return[];let{sql:n}=a();return(await n`
+    UPDATE harness_shared.event_awaits
+       SET fired_at = now(), fired_reason = ${t}
+     WHERE workspace_id = ${W()} AND id = ANY(${e})
+       AND once = true AND fired_at IS NULL AND cancelled_at IS NULL
+    RETURNING *
+  `).map(v)}async function k(e){if(e.awaits.length===0)return 0;let{sql:t}=a(),n=W(),r=e.payload===void 0?null:JSON.stringify(e.payload),i=0;for(let a of e.awaits){let o=(e.urgent??!1)||a.urgency;await t`
+      INSERT INTO harness_shared.event_wake_deliveries
+        (workspace_id, await_id, subscriber_id, event_key, payload, summary, urgent, min_sleep_sec, source)
+      VALUES (${n}, ${a.id}, ${a.subscriberId}, ${a.eventKey}, ${r}::text::jsonb,
+              ${e.summary??null}, ${o}, ${a.minSleepSec??null}, ${e.source??null})
+    `,i++}return i}async function A(e){let{sql:t}=a();return(await t`
+    WITH due AS (
+      SELECT id FROM harness_shared.event_wake_deliveries
+       WHERE workspace_id = ${W()}
+         AND status IN ('pending', 'parked')
+         AND next_attempt_at <= now()
+       ORDER BY created_at ASC
+       LIMIT ${e.limit??10}
+       FOR UPDATE SKIP LOCKED
+    )
+    UPDATE harness_shared.event_wake_deliveries d
+       SET status = 'delivering', attempts = d.attempts + 1
+      FROM due
+     WHERE d.id = due.id
+    RETURNING d.*,
+      (SELECT a.wake_handle FROM harness_shared.event_awaits a WHERE a.id = d.await_id) AS wake_handle,
+      (SELECT a.note FROM harness_shared.event_awaits a WHERE a.id = d.await_id) AS await_note
+  `).map(b)}async function j(e,t,n=1){let{sql:r}=a();await r`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'delivered', channel = ${t}, delivered_at = now(), last_error = NULL,
+           coalesced_count = ${n}
+     WHERE id = ${e}
+  `}async function M(e,t){if(e.length===0)return;let{sql:n}=a();await n`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'delivered', channel = 'coalesced', delivered_at = now(),
+           last_error = ${`coalesced into wake #${t}`}
+     WHERE id = ANY(${e})
+  `}async function N(e){let t=new Map;if(e.length===0)return t;let{sql:n}=a(),r=await n`
+    SELECT subscriber_id, max(delivered_at) AS last_woken_at
+      FROM harness_shared.event_wake_deliveries
+     WHERE workspace_id = ${W()}
+       AND subscriber_id = ANY(${e})
+       AND status = 'delivered'
+       AND channel = ANY(${h})
+       AND delivered_at IS NOT NULL
+     GROUP BY subscriber_id
+  `;for(let e of r)e.last_woken_at&&t.set(e.subscriber_id,new Date(e.last_woken_at).getTime());return t}async function P(e,t,n){let{sql:r}=a();await r`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'parked', last_error = ${t},
+           next_attempt_at = now() + make_interval(secs => ${Math.ceil(n/1e3)})
+     WHERE id = ${e}
+  `}async function F(e,t){let{sql:n}=a();await n`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'dropped', last_error = ${t}
+     WHERE id = ${e}
+  `}async function I(e){let{sql:t}=a();return e.attempts>=e.maxAttempts?(await t`
+      UPDATE harness_shared.event_wake_deliveries
+         SET status = 'dead', last_error = ${e.error}
+       WHERE id = ${e.id}
+    `,`dead`):(await t`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'pending', last_error = ${e.error},
+           next_attempt_at = now() + make_interval(secs => ${Math.ceil(e.backoffMs/1e3)})
+     WHERE id = ${e.id}
+  `,`retrying`)}async function L(e){let{sql:t}=a(),n=(await t`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = CASE WHEN attempts >= ${e.maxAttempts} THEN 'dead' ELSE 'pending' END,
+           channel = NULL,
+           delivered_at = NULL,
+           coalesced_count = 1,
+           last_error = ${e.error},
+           next_attempt_at = CASE
+             WHEN attempts >= ${e.maxAttempts} THEN next_attempt_at
+             ELSE now() + make_interval(secs => ${Math.ceil(e.backoffMs/1e3)})
+           END
+     WHERE id = ${e.id} AND status = 'delivered'
+    RETURNING status
+  `)[0]?.status;return n===`dead`?`dead`:n===`pending`?`retrying`:`ignored`}async function R(e,t){let{sql:n}=a();await n`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'pending', attempts = greatest(attempts - 1, 0),
+           next_attempt_at = now() + make_interval(secs => ${Math.ceil(t/1e3)})
+     WHERE id = ${e}
+  `}async function z(e){let{sql:t}=a();return(await t`
+    UPDATE harness_shared.event_wake_deliveries
+       SET status = 'pending'
+     WHERE workspace_id = ${W()} AND status = 'delivering'
+       AND next_attempt_at < now() - make_interval(secs => ${Math.ceil(e.olderThanMs/1e3)})
+    RETURNING id
+  `).length}async function B(){let{sql:e}=a();return(await e`
+    UPDATE harness_shared.event_awaits
+       SET fired_at = now(), fired_reason = 'timeout'
+     WHERE workspace_id = ${W()} AND timeout_behavior = 'wake'
+       AND expires_ts IS NOT NULL AND expires_ts <= now()
+       AND fired_at IS NULL AND cancelled_at IS NULL
+    RETURNING *
+  `).map(v)}async function V(){let{sql:e}=a();return(await e`
+    UPDATE harness_shared.event_awaits
+       SET fired_at = now(), fired_reason = 'expired'
+     WHERE workspace_id = ${W()} AND timeout_behavior = 'expire'
+       AND expires_ts IS NOT NULL AND expires_ts <= now()
+       AND fired_at IS NULL AND cancelled_at IS NULL
+    RETURNING id
+  `).length}async function H(e,t={}){let{sql:n}=a(),r=W();return(await n`
+    UPDATE harness_shared.event_awaits
+       SET fired_at = now(), fired_reason = 'event', fired_by = ${t.firedBy??null},
+           fired_payload = ${t.payload===void 0?null:JSON.stringify(t.payload)}::text::jsonb
+     WHERE workspace_id = ${r} AND policy = 'announce' AND event_key = ${e}
+       AND fired_at IS NULL AND cancelled_at IS NULL AND superseded_at IS NULL
+    RETURNING id
+  `).length}async function U(e){let{sql:t}=a(),n=W();return t.begin(async t=>{let r=await t`
+      SELECT * FROM harness_shared.event_awaits
+       WHERE workspace_id = ${n} AND event_key = ${e} AND policy = 'announce'
+       ORDER BY causal_generation DESC NULLS LAST, created_at DESC
+       LIMIT 50
+    `,i=await t`
+      SELECT * FROM harness_shared.event_awaits
+       WHERE workspace_id = ${n} AND event_key = ${e} AND policy <> 'announce'
+       ORDER BY created_at DESC
+       LIMIT 200
+    `,a=await t`
+      SELECT * FROM harness_shared.event_wake_deliveries
+       WHERE workspace_id = ${n} AND event_key = ${e}
+       ORDER BY created_at DESC
+       LIMIT 200
+    `;return{announcements:r.map(v),waiters:i.map(v),deliveries:a.map(y)}})}var W,G=e((()=>{o(),s(),m(),g(),W=()=>c}));export{L as C,p as E,z as S,m as T,R as _,O as a,I as b,B as c,U as d,N as f,M as g,T as h,A as i,G as l,E as m,S as n,V as o,w as p,x as r,D as s,C as t,k as u,j as v,H as w,P as x,F as y};

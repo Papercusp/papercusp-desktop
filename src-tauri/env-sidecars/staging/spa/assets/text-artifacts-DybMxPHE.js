@@ -1,0 +1,1 @@
+import{n as e,t}from"./text-artifacts-nitROI2U.js";t();export{e as loadTextArtifact};

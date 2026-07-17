@@ -8,8 +8,10 @@
 -- Overwatch must emit every turn (D-002, OWNER REQUIREMENT #1). It crystallizes the
 -- owner's 13-question hive-coordination scorecard (hive-coordination-test-loop-2026-06-20
 -- D-001, Q1-Q13) into a named, ratified rubric. (A 14th criterion, `scheduler-usage`,
--- was added by mig 371 — hybrid-bee-scheduler-work-stealing-2026-06-22 P-004 — so the
--- current rubric carries 14 criteria; this seed includes it for a clean fresh-DB replay.)
+-- was added by mig 371 — hybrid-bee-scheduler-work-stealing-2026-06-22 P-004 — and a
+-- 15th, `context-burn`, by mig 615 — EI-8769/EI-13241, context-injection budget +
+-- compaction cadence health — so the current rubric carries 15 criteria; this seed
+-- includes both for a clean fresh-DB replay.)
 --
 -- SEEDED status='active' (not 'proposed'): the Queen-ratify gate (D-001) governs FUTURE
 -- agent-proposed rubrics; THIS is the owner-authored founding rubric the owner required
@@ -42,7 +44,7 @@ VALUES (
   'hive-coordination-health',
   'hive-coordination',
   'Hive coordination health',
-  $desc$The 14-criteria scorecard for whether the papercusp queen/bee/overwatch/scout self-improving loop is healthy — the WHOLE loop turning, not any one stage merely busy. Crystallized from the owner's 13-question hive-coordination scorecard (hive-coordination-test-loop-2026-06-20 D-001, Q1-Q13). Grade a STRUCTURED OBSERVATION against it: rate each criterion (healthy/degraded/broken/unknown) with MANDATORY evidence. Overwatch emits this scorecard every turn (OWNER REQUIREMENT #1). Source of truth is code + the live DB, never docs/tool-summaries. Three pitfalls that invalidate a naive read: (1) enumerate started hives across ALL workspace_ids first (multi-workspace); (2) idle is not dead and activity is not health — check WHY via the carryNote, not wake-count/spend; (3) silence is not health (the cursed-latch + stale alarms). Long-form per-criterion method: the agent-insights runbook named by method_ref.$desc$,
+  $desc$The 15-criteria scorecard for whether the papercusp queen/bee/overwatch/scout self-improving loop is healthy — the WHOLE loop turning, not any one stage merely busy. Crystallized from the owner's 13-question hive-coordination scorecard (hive-coordination-test-loop-2026-06-20 D-001, Q1-Q13). Grade a STRUCTURED OBSERVATION against it: rate each criterion (healthy/degraded/broken/unknown) with MANDATORY evidence. Overwatch emits this scorecard every turn (OWNER REQUIREMENT #1). Source of truth is code + the live DB, never docs/tool-summaries. Three pitfalls that invalidate a naive read: (1) enumerate started hives across ALL workspace_ids first (multi-workspace); (2) idle is not dead and activity is not health — check WHY via the carryNote, not wake-count/spend; (3) silence is not health (the cursed-latch + stale alarms). Long-form per-criterion method: the agent-insights runbook named by method_ref.$desc$,
   $criteria$[
     {
       "key": "end-to-end-flow",
@@ -97,7 +99,7 @@ VALUES (
       "key": "overwatch-observation-quality",
       "title": "Overwatch observations and the mandatory scorecard",
       "model": "Overwatch is the system's self-monitor: specific, self-aware observations AND (OWNER REQUIREMENT #1) ALWAYS a STRUCTURED scorecard against this rubric every turn (rate each criterion + cite evidence), in addition to free-form.",
-      "method": "Read recent overwatch observations/escalations for specificity + self-awareness (catching stale panels, conflations, over-fires). Verify the structured scorecard is emitted EVERY turn against hive-coordination-health: rubricRef set, all 14 criteria rated, evidence non-empty on each.",
+      "method": "Read recent overwatch observations/escalations for specificity + self-awareness (catching stale panels, conflations, over-fires). Verify the structured scorecard is emitted EVERY turn against hive-coordination-health: rubricRef set, all 15 criteria rated, evidence non-empty on each.",
       "driftMarkers": "Free-form only, no structured scorecard (an owner #1 violation); a scorecard with missing criteria or empty evidence; stale/echoed observations that contradict live state."
     },
     {
@@ -141,6 +143,13 @@ VALUES (
       "model": "The within-hive deterministic scheduler is USED as designed: the Queen authors + VERSIONS a per-bee claim SPEC (a scoped view.filter + rank over the live work-item DAG, composed from the primitive vocabulary) and re-steers a running bee by bumping the spec revision — she does NOT micro-dispatch each item. Bees PULL their next item through the get_next claim path (global hard floors AND the spec filter, ORDER BY the spec rank, FOR UPDATE SKIP LOCKED) rather than self-scanning the raw frontier or hand-claiming. Resolution is deterministic, the plan-item dedup floor holds (ZERO duplicate-plan-item claims), and completions flow from pulled work. Model-routing (model_fit / per-model capability) is DESCOPED behind its own flag (plan D-010): its absence is NOT a drift.",
       "method": "Walk the live claim path: are bee claims stamped with a spec specId@revision (get_next records provenance), and do revisions bump when the Queen re-steers? Are there claims that did NOT go through get_next (a self-scanned/hand-claimed item, the bypass)? Query for duplicate-plan-item claims (two non-terminal claims sharing a source_plan_item_id — the dedup floor failing). Check that pulled items reach completion (claim -> working -> done) rather than zombie-holding. Signal is limited when no spec-driven hive is running (rate unknown). model_fit is neutral until its lane ships — do NOT flag its absence.",
       "driftMarkers": "Queen micro-dispatching item-by-item instead of issuing/versioning specs; bees bypassing the scheduler (self-prioritizing the raw frontier, hand-claiming) instead of pulling via get_next; non-deterministic or floor-violating resolution; duplicate-plan-item claims (dedup floor breached); pulled claims that never make progress (zombie holds). NOT a drift: model_fit being neutral (descoped). Low evidence (no spec-driven hive running) is unknown, not broken."
+    },
+    {
+      "key": "context-burn",
+      "title": "Context burn and compaction cadence",
+      "model": "The coordination layer's own context injections stay on the post-diet budget: mean coord:inbox-wake delivery <= ~3000 chars, compaction cadence sane, and compactions never degrade work — ZERO post-compaction error markers (hallucinated-schema errors right after a session's context was rebuilt).",
+      "method": "ACTIVITY GATE first (EI-7624): loop:soak-report contextBurn.loopWakes == 0 in the window -> rate unknown with `idle:` evidence (no loops ran). Then read contextBurn: meanWakeChars / estMeanWakeTokens against the WAKE_MEAN_CHAR_BUDGET (3000); requestedCompactions + compactionsPerSession for cadence; postCompactionErrorMarkers MUST be 0. The wake-template scaffold itself is unit-ratcheted (loop-fire.test.ts P-008 byte budgets) — this criterion watches the LIVE deliveries, catching content-side bloat the unit ratchet cannot see.",
+      "driftMarkers": "Mean wake size drifting back toward full-boilerplate (>= 3000 chars — the pre-diet behavior burned ~200k tokens/session); postCompactionErrorMarkers > 0 (a compacted session immediately erring on hallucinated schema); compactionsPerSession spiking above its baseline."
     }
   ]$criteria$::jsonb,
   '["healthy","degraded","broken","unknown"]'::jsonb,

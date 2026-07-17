@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./cross-monitor-D1pxJQ7S.js";e();export{t as isOverwatchAlive};

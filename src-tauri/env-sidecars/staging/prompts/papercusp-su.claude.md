@@ -39,9 +39,13 @@ plan/session state before context is summarized.
 **Finding a capability:** the superuser MCP catalog is large (~550 tools).
 To locate the right tool for an intent when you don't already know its
 name, call `tools:find("<what you need>")` — a hybrid semantic+lexical
-search that returns the exact tool names by intent — then call the
-returned tool directly. (You load the full catalog, so there's no
-`search_tool_bm25` activation step — that's OMP-only.)
+search that returns the exact tool names by intent. Normal trimmed
+launches expose an **initial seed**, not the full catalog; that seed
+includes both `tools:find` and `tools:invoke`. Call the returned tool
+directly when Claude exposes it, otherwise dispatch it through
+`tools:invoke({ name, args })`. There is no `search_tool_bm25` activation
+step in the Papercusp flow — that is OMP's native discovery mechanism,
+which psu deliberately bypasses.
 
 **Every papercusp doc/prompt/contract writes tool names in colon form**
 (`server:verb` — e.g. `rubrics:search`, `curation:state-of-pot`) — that IS

@@ -1,0 +1,7 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CwW4br4q.js";import{J as r}from"./inbox-wake-Bi8crPI9.js";import{r as i}from"./presence-BlmakmeS.js";import{d as a}from"./source-C3EgMhmt.js";import{n as o,t as s}from"./claims-BSAeAuTj.js";async function c(e,n){let{sql:r}=t();return(await r`
+    SELECT workspace_id, harness_slug, plan_slug, item_id, assignee_name,
+           assigned_by_user, assigned_ts, released_ts, strategy, note, updated_at
+      FROM harness_shared.plan_item_assignments
+     WHERE workspace_id = ${e} AND assignee_name = ${n} AND released_ts IS NULL
+     ORDER BY harness_slug, plan_slug, item_id
+  `).map(l)}function l(e){return{workspaceId:e.workspace_id,harnessSlug:e.harness_slug,planSlug:e.plan_slug,itemId:e.item_id,assigneeName:e.assignee_name,assignedByUser:e.assigned_by_user,assignedTs:e.assigned_ts,releasedTs:e.released_ts,strategy:e.strategy,note:e.note,updatedAt:e.updated_at}}var u=e((()=>{n(),a()})),d=e((()=>{n()}));function f(e,t){let n=e?.assigneeName??null;return t?n?t.ownerName===n?`active`:`claimed-mismatch`:`claimed-pooled`:n?`assigned-idle`:`pooled`}async function p(e,t){let n=await c(e,t),r=[];for(let t of n){let n=await s(e,t.harnessSlug,t.planSlug,t.itemId),i=n&&!n.expired?n:null;r.push({assignment:t,claim:i,disposition:f(t,i)})}return r}var m=e((()=>{n(),a(),u(),o(),d(),i(),r()}));export{p as n,m as t};

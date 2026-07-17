@@ -1,0 +1,11 @@
+import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CwW4br4q.js";import{i as r,r as i}from"./presence-BlmakmeS.js";import{a,i as o,s}from"./assignments-BbqpDeCQ.js";import{v as c}from"./work-items-BCXHUNAA.js";import{Z as l}from"./boot-all-bE70bA0g.js";import{u}from"./placement-watchdog-DF0BcFUz.js";import{f as d}from"./survey-CLgilOXK.js";function f(e,t){let n=e?Date.parse(e):NaN;return Number.isFinite(n)?n:t!=null&&Number.isFinite(t)?t:null}function p(e,t,n=Date.now()){return e==null?t==null||!Number.isFinite(t)?!1:n-t<=h:!e}async function m(e){let{sql:n}=t(),i=await n`
+    SELECT spawn_id, session_owner, harness_slug,
+           -- P-015 (presence-v2 D-003): nursery activity = GENUINE work
+           -- (last_output_at), not the keepalive heartbeat_at — a parked-but-alive
+           -- bee must not read as recently active. started_at is the floor: a
+           -- just-spawned bee with no output yet is legitimately "recent".
+           (EXTRACT(EPOCH FROM COALESCE(last_output_at, started_at)) * 1000)::bigint::text AS last_active_ms
+      FROM harness_shared.spawned_agents
+     WHERE workspace_id = ${e}
+       AND status IN ('running', 'restarting')
+       AND child_role = 'cup'`;if(i.length===0)return[];let a=await r({workspaceId:e}).catch(()=>[]),c=new Map(a.map(e=>[e.ownerId,e])),l=o(await s({workspaceId:e}).catch(()=>[])),u=new Map(l.map(e=>[e.agentId,e])),d=new Map;for(let e of l)for(let t of e.claims)t.type===`work-item`&&t.id&&d.set(t.id,t.harnessSlug);let m=[];for(let e of i){let t=e.session_owner??e.spawn_id,n=c.get(t),r=u.get(t),i=e.last_active_ms==null?null:Number(e.last_active_ms),a=p(n?.stale,i),o=f(n?.lastActiveAt,i),s=r?[...new Set((r.queued??[]).map(e=>d.get(e.id)??null).filter(e=>!!e))]:[],l=r?.doing?d.get(r.doing.id)??null:null;m.push({ownerId:t,label:n?.ownerLabel??r?.label??null,harness:e.harness_slug,intent:n?.intent??r?.intent??``,currentFiles:n?.currentFiles??[],currentPlanSlug:n?.currentPlanSlug??r?.declaredPlanSlug??null,doingHarness:l,queuedHarnesses:s,load:r?.load??0,lastActiveMs:o,alive:a})}return m}var h,g=e((()=>{n(),i(),a(),c(),l(),u(),d(),h=2*6e4}));export{f as a,g as i,p as n,m as r,h as t};

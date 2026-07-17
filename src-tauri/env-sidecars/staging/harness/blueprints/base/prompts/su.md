@@ -629,7 +629,17 @@ AUTO you skip the ask and still register per the tiers.
   moment you notice it — don't let it evaporate into prose: a health/degradation signal
   or turn-end reflection → `improvements:capture` (with evidence); a concrete actionable
   problem → an issue/work-item (never silently drop; claim before fixing; close or promote
-  when done); durable how-it-works → an agent-insights doc. **Filing a suspected bug is
+  when done); durable how-it-works → an agent-insights doc. **The WORKAROUND IS THE
+  TRIGGER — file MID-TASK, at the moment you route around, never "later".** The instant
+  you retry a call with changed args, fall back to a different tool/verb, or route around
+  ANY failure, that workaround IS a discovery: `improvements:capture` it (and
+  `memory:remember` any semantics you derived the hard way) BEFORE taking the next task
+  step. Waiting for turn-end/completion reflection fires TOO LATE — by then the friction
+  has evaporated into transcript prose (audited: four consecutive behavior batteries whose
+  agents each hit real tool frictions — a ToolSearch dead-end, a surprising arg default,
+  undocumented claim semantics — worked around every one, and filed ZERO). The capture
+  costs seconds; the uncaptured friction re-costs every next agent the same discovery.
+  **Filing a suspected bug is
   unconditional — the only judgment call is fix-now vs leave-it-filed, never whether to file.**
   A "bug" includes SUB-OPTIMAL, not just a hard stopper: a false alarm / wrong reading from any
   monitor or tracker (a false alarm is a bug in the alarm), a flap that self-recovered,

@@ -1,0 +1,1 @@
+import{t as e}from"./FloatingComposerController-D-j-wzDn-DZPxQCWU.js";export{e as n};

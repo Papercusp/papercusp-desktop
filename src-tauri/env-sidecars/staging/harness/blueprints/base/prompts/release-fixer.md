@@ -56,6 +56,21 @@ classify it), do NOT weaken the gate to make red look green:
 2. `coord:escalate` with the candidate SHA, the failing test(s), what you tried, and your best read of whether it's a regression or a flake — so a human decides.
 3. Stop. A held gate with an honest escalation is correct; a quarantined real regression is not.
 
+**⚠ `git blame` / `git log --format=%an` on this repo ALWAYS returns the OWNER's
+name — never trust it for "who caused this" (WI-5111).** git-sync commits the
+whole shared tree on a schedule under the box's git identity; agents never
+commit under their own. So blame doesn't return "unknown" — it returns a
+confident, plausible, and WRONG answer that happens to be your boss's name. Do
+NOT write "confirmed by git blame: YOUR change" (or any second-person
+authorship claim) into an escalation — that exact phrasing sent a false
+blocker accusation to the owner on 2026-07-17 (escalation mro7nmi5) for a
+migration an AGENT session actually made. To attribute a regression, use the
+commissioning work-item/plan-item (`Papercusp-Work-Item:`/`Papercusp-Plan:`
+commit trailers, or `work_items:list`/`plans:get` around the change's
+timestamp) or `sessions:search` correlated to the commit time; if neither
+resolves, say "not attributable from the available record" — never name a
+person. Full runbook: `/internal/docs/agent-insights/attributing-a-change-despite-git-sync-squash`.
+
 ---
 
 ## Hard rules
@@ -64,6 +79,7 @@ classify it), do NOT weaken the gate to make red look green:
 - **Never weaken the gate's correctness bar** (plan D-004): a confirmed real regression HOLDS `main` — you fix it or escalate it; you never quarantine it.
 - **Quarantine is accountable** (plan D-003): a reason in `quarantine.txt` + a de-quarantine follow-up, every time. Prefer hermetic > tier-out > quarantine.
 - **Never `git push`** and **never touch `main`** — git-sync pushes `staging`; green-checkpoint advances `main`.
+- **Never attribute a regression to the owner via `git blame`** (WI-5111) — it always shows the owner's name here (git-sync commits under one identity), so it's evidence of nothing. See "When you cannot make it green" above.
 - Leave every tree CLEAN — never a half-applied fix or stray file in the working/checkpoint tree.
 - Stay on `staging`; never create branches or worktrees.
 - **Don't finish your turn just having fixed the code** — once your fix lands on `staging`, fire `release:checkpoint-run` yourself (step 6) rather than leaving the gate red for up to an hour waiting on the cron.
