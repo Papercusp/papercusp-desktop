@@ -855,10 +855,26 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # under the id now recorded AUTHORITATIVELY in pots.keychain_id. Dumping the row + the file-keychain
   # dir + the ws registry pins which (ws,slug) the key actually lives under vs what the route computes.
   mod_owner_diag() {
-    echo "    DIAG A pots row (kc= is the MINT's exact id): $(drv_psql a "SELECT workspace_id||'|'||pot_home_slug||'|kc='||keychain_id||'|pk='||left(encode(public_key,'base64'),12) FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG A identity dir: $(ls "$A_HOME/.papercusp/identity" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG A ws registry (current= the ws the policy route hashes into hive:<ws>:<slug>): $(if [ -f "$A_HOME/.papercusp-workspaces/registry.json" ]; then tr -d '[:space:]' < "$A_HOME/.papercusp-workspaces/registry.json" | head -c 200; else echo "registry.json MISSING -> activeWorkspaceId()='default'"; fi)"
-    echo "    DIAG A mint warn: $(grep -oa '\[pot:create\] pot identity mint failed[^\"]\{0,120\}' "${FED_LOG[a]:-$A_HOME/serve.log}" 2>/dev/null | head -1)"
+    # NULL/zero-row-safe (WI-5061): a bare a||b||NULL collapses to NULL in Postgres and a
+    # zero-row SELECT prints nothing — BOTH previously rendered an EMPTY DIAG line that hid
+    # the very key-custody state we need. Aggregate+coalesce guarantees one non-empty row;
+    # 2>&1 (not 2>/dev/null) surfaces a schema error INLINE instead of silently swallowing it.
+    echo "    DIAG A pots row (kc=pots.keychain_id, the MINT's AUTHORITATIVE id): $(drv_psql a "SELECT 'n='||count(*)||' '||COALESCE(string_agg(coalesce(workspace_id,'?ws')||'|'||coalesce(pot_home_slug,'?slug')||'|kc='||coalesce(keychain_id,'NULL-KC')||'|pk='||coalesce(left(encode(public_key,'base64'),12),'nopk'),' , '),'<no row>') FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG';" 2>&1 | tr '\n' ' ')"
+    # C1 discriminant: loadHivePubkey/signWithHiveKey RECOMPUTE hive:<activeWs>:<slug>, while
+    # ensureHiveIdentity treats pots.keychain_id as AUTHORITATIVE. If those diverge, the recompute
+    # misses the on-disk key -> not_owner_swarm even though the owner holds a valid hive key.
+    local aws diag_kc computed safe slugsafe d
+    aws="$(grep -o '"activeWorkspaceId":"[^"]*"' "${A_HOME:-}/.papercusp-workspaces/registry.json" 2>/dev/null | head -1 | sed 's/.*:"//;s/"$//')"; aws="${aws:-default}"
+    diag_kc="$(drv_psql a "SELECT keychain_id FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+    computed="hive:${aws}:${HIVE_SLUG}"; safe="$(printf '%s' "$computed" | sed 's/[^a-zA-Z0-9_-]/_/g')"
+    slugsafe="$(printf '%s' "$HIVE_SLUG" | sed 's/[^a-zA-Z0-9_-]/_/g')"
+    echo "    DIAG A key-resolve: computed='$computed' authoritative(pots.kc)='${diag_kc:-<none>}' MATCH=$([ -n "$diag_kc" ] && [ "$diag_kc" = "$computed" ] && echo yes || echo 'NO->not_owner_swarm(C1)')"
+    for d in "${A_HOME:-}/.papercusp/identity" "${HOME:-}/.papercusp/identity"; do
+      [ -d "$d" ] || continue
+      echo "    DIAG A idir[$d]: computed-key-file=$([ -f "$d/keypair-${safe}.enc" ] && echo EXISTS || echo MISSING) slug-keys='$(ls "$d" 2>/dev/null | grep -i "$slugsafe" | tr '\n' ' ')'"
+    done
+    echo "    DIAG A ws registry raw: $(tr -d '[:space:]' < "${A_HOME:-}/.papercusp-workspaces/registry.json" 2>/dev/null | head -c 160 || echo 'MISSING->activeWorkspaceId()=default')"
+    echo "    DIAG A serve.log key errs: $(grep -aoE 'not_owner_swarm|hive private key not held by this Swarm|pot identity mint failed[^\"]{0,120}|auth tag mismatch[^\"]{0,60}|epoch_decrypt_fail' "${FED_LOG[a]:-${A_HOME:-}/serve.log}" 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
   }
 
   # ── PREREQ for LEG 2 — enable reporting on the owner-signed policy (done BEFORE the takedown so
@@ -893,9 +909,9 @@ if [ "${MODERATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   B1_VER="$(drv_psql b "SELECT COALESCE(max(policy_version),-1) FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
   echo "  MOD-LEG1 TAKEDOWN (B receives owner-signed takedownList origin=remote, v$M0_VER→v$B1_VER, ref present): $([ "$mod_takedown_ok" = 1 ] && echo PASS || echo "FAIL — B did not receive '$CR' on the signed takedownList as origin=remote")"
   if [ "$mod_takedown_ok" != 1 ]; then
-    echo "    DIAG A policy: $(drv_psql a "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG B policy: $(drv_psql b "SELECT policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr '\n' ' ')"
-    echo "    DIAG A outbox(pot_policy): $(drv_psql a "SELECT key||' drained='||(drained_at IS NOT NULL)::text FROM harness_shared.substrate_outbox WHERE table_name='pot_policy' ORDER BY id DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+    echo "    DIAG A policy: $(drv_psql a "SELECT 'n='||count(*)||' '||COALESCE(string_agg(policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null'),' , '),'<no policy row>') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>&1 | tr '\n' ' ')"
+    echo "    DIAG B policy: $(drv_psql b "SELECT 'n='||count(*)||' '||COALESCE(string_agg(policy_version||'/'||origin||' td='||COALESCE((policy_json::jsonb->'moderation'->'takedownList')::text,'null'),' , '),'<no policy row>') FROM harness_shared.pot_policy WHERE harness_slug='$HIVE_SLUG';" 2>&1 | tr '\n' ' ')"
+    echo "    DIAG A outbox(pot_policy): $(drv_psql a "SELECT 'n='||count(*)||' '||COALESCE(string_agg(key||' drained='||(drained_at IS NOT NULL)::text,' , '),'<no outbox row>') FROM (SELECT key,drained_at FROM harness_shared.substrate_outbox WHERE table_name='pot_policy' ORDER BY id DESC LIMIT 3) t;" 2>&1 | tr '\n' ' ')"
     echo "    DIAG takedown err: $(echo "$td" | grep -oaE '"error":"[^"]{0,80}"|not_owner_swarm|no_owner_pubkey|hive_unclaimed' | head -2 | tr '\n' ' ')"
     mod_owner_diag
   fi
