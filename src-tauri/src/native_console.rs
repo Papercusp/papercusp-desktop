@@ -1421,6 +1421,32 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn oneliner_exports_the_current_shell_birth_identity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "papercusp-console-identity-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut e = envelope(tmp.to_str().unwrap());
+        e.env.insert("SHELL".to_string(), "/bin/true".to_string());
+        e.greeting_cmd = "expected=\"linux:$(cat /proc/sys/kernel/random/boot_id):$(awk '{print $22}' /proc/$$/stat)\"; test \"$PAPERCUSP_CONSOLE_IDENTITY\" = \"$expected\" && printf ok > identity-check"
+            .to_string();
+
+        let out = build_launcher_oneliner(&e);
+        let status = std::process::Command::new("bash")
+            .args(["-c", &out])
+            .status()
+            .expect("run launcher identity probe");
+        assert!(status.success(), "launcher identity probe failed: {out}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("identity-check")).unwrap(),
+            "ok"
+        );
+        std::fs::remove_dir_all(tmp).ok();
+    }
+
     #[test]
     fn scripts_dir_prepended_to_path() {
         let e = envelope("/x");
