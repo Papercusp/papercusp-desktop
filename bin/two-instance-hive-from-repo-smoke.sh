@@ -225,8 +225,33 @@ sc_launch() {
     # race. (2) it never scrubbed the shared-native-PG env vars the canonical helper
     # scrubs (-u DATABASE_URL etc, the WI-1666 leak class) — also present ambiently
     # on this box; scrubbing defensively even though today's failure didn't trace to it.
+    # r8 fix (2026-07-17, same leak CLASS as EI-13590/(1) above, third instance):
+    # neither this local sc_launch NOR the canonical fed_local_launch_sidecar()
+    # ever scrubbed PAPERCUSP_HOME. Every su/dev session on this box has
+    # PAPERCUSP_HOME set ambiently (its own per-workspace operator home, e.g.
+    # ~/.papercusp-workspaces/<ws>/.papercusp) — `env` inherits any var not
+    # explicitly listed, so it leaked straight through HOME="$home" below.
+    # serve.ts's PAPERCUSP_DIR = process.env.PAPERCUSP_HOME || homedir()+".papercusp"
+    # (apps/operator/bin/serve.ts:96) prefers PAPERCUSP_HOME OVER the isolated
+    # HOME override, so BOTH instances A and B silently shared the calling
+    # session's REAL, LIVE operator home instead of their own isolated $home —
+    # defeating isolation entirely (the exact "half isolation" class the
+    # PAPERCUSP_DIR docblock at serve.ts:85-95 warns about, EI-13917's sibling
+    # incident). Confirmed live: A's cold-start wrote operator.lock +
+    # operator-port.json{port:18071} into the SHARED ambient PAPERCUSP_HOME dir;
+    # B's resolveStickyPort (serve.ts:423, gated on PAPERCUSP_DESKTOP=1, which
+    # this launch sets) then read that shared port back and tried to re-bind
+    # onto A's already-live port/lock in the SAME shared dir — "another `serve`
+    # holds the cold-start lock; aborting". 100% reproducible (2 independent r8
+    # attempts, byte-identical failure) until -u PAPERCUSP_HOME below; verified
+    # fixed via a standalone single-instance manual repro (same env, add the -u,
+    # the spurious "re-binding remembered operator port" log + lock collision
+    # both vanish). This is genuinely UNRELATED to WI-5061/not_owner_swarm — it
+    # is a boot-level isolation leak that stops the smoke before it ever reaches
+    # the moderation legs, not a semantic moderation-federation failure.
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
         -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+        -u PAPERCUSP_HOME \
         HOME="$home" \
         PATH="$SIDECAR_SRC/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \

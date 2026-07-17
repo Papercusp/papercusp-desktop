@@ -271,9 +271,23 @@ fed_local_launch_sidecar() {
   # PAPERCUSP_BACKGROUND_WORKERS is forced ON for the same reason: packaged
   # content smokes need the in-process hyperbee substrate, and request-only
   # ambient worker mode makes joins look green while outboxes never drain.
+  # PAPERCUSP_HOME is scrubbed (2026-07-17, r8/WI-5129 finding): every su/dev
+  # session on this box carries PAPERCUSP_HOME ambiently (its own per-workspace
+  # operator home). serve.ts's PAPERCUSP_DIR = process.env.PAPERCUSP_HOME ||
+  # homedir()+".papercusp" PREFERS PAPERCUSP_HOME over the isolated HOME="$home"
+  # below, so an unscrubbed caller session silently collapses BOTH local
+  # instances onto the CALLER's real, live, SHARED operator home — defeating
+  # isolation entirely (each instance fights the live operator, and each
+  # other, over the same operator.lock / operator-port.json / embedded-pg.json
+  # — "another `serve` holds the cold-start lock; aborting" is the signature).
+  # 100% reproducible from an su fleet session until this -u; confirmed fixed
+  # via a standalone single-instance repro. Same leak class as the
+  # DATABASE_URL family above (WI-1666) and PAPERCUSP_BACKGROUND_WORKERS
+  # (EI-13590) — an unlisted `env VAR=val cmd` var is inherited, never cleared.
   ( cd "$side"
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
         -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+        -u PAPERCUSP_HOME \
         HOME="$home" \
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
