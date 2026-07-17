@@ -83,6 +83,18 @@ fi
 # flock, build into a temp sibling, and publish with an atomic rename at the
 # very end so readers only ever see the complete old tree or the complete
 # new tree.
+#
+# EI-200: this protects OTHER invocations of THIS script from each other —
+# it does NOT protect a plain `cargo build`/`cargo check` under src-tauri
+# from racing the publish step below. tauri.conf.json's `bundle.resources`
+# glob (sidecar/**/*) is validated by `generate_context!` at COMPILE time,
+# and the publish sequence briefly renames SIDECAR_FINAL_DIR OUT before
+# renaming the new tree IN (a real, if narrow, "sidecar/ doesn't exist at
+# all" window) — a cargo build whose glob validation lands there fails with
+# a misleading "path not found" error. Use bin/cargo-build-safe.sh instead
+# of a bare `cargo <args>` under src-tauri when building alongside active
+# desktop-sidecar contention — it takes a SHARED flock on this same lock
+# file, so it waits out an in-flight rebuild instead of racing it.
 SIDECAR_FINAL_DIR="$SIDECAR_DIR"
 SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"

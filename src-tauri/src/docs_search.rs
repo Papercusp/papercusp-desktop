@@ -54,6 +54,16 @@ use tauri::{AppHandle, Manager};
 /// an already-open palette instead of spawning a duplicate.
 pub const WINDOW_LABEL: &str = "docs-search-palette";
 
+/// The diagnostic window's label — DISTINCT from `WINDOW_LABEL` on purpose.
+///
+/// Sharing the palette's label would be a trap: the reuse branch at the top of
+/// `open_palette` would then find the ERROR window on the next press, toggle it,
+/// and `location.reload()` a `data:` URL — re-rendering the error forever. The
+/// user could never reach the real panel again even after the operator came
+/// back. Separate label ⇒ the error window is hidden the moment a real palette
+/// opens, and the palette path is never shadowed by it.
+pub const UNAVAILABLE_WINDOW_LABEL: &str = "quick-panel-unavailable";
+
 /// Injected into the palette webview BEFORE any page script, on every load, so
 /// the SPA's Quick Panel window-sandbox guard (operator-core
 /// `client-navigation.ts`) knows it is running in the panel window: a navigation
@@ -177,6 +187,130 @@ fn resolve_base(app: &AppHandle) -> Option<String> {
     (*guard).map(|p| format!("http://localhost:{}", p))
 }
 
+// ---------------------------------------------------------------------------
+// The "can't open" diagnostic window (WI-5216)
+// ---------------------------------------------------------------------------
+
+/// Build the diagnostic page shown when the palette cannot be opened.
+///
+/// Pure (no I/O, no AppHandle) so the wording + the escaping are unit-testable.
+/// `reason` is operator-facing detail, not a user-facing sentence — it is
+/// rendered in a de-emphasised block below the plain-English explanation.
+///
+/// HTML-escaped: `reason` can carry a URL/port/message we did not author.
+pub fn unavailable_page_html(reason: &str) -> String {
+    let safe = reason
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
+<title>Quick Panel unavailable</title><style>
+:root {{ color-scheme: light dark; }}
+body {{ margin:0; padding:28px 30px; font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:#1e1b4b; color:#f4f4f5; }}
+h1 {{ margin:0 0 14px; font-size:17px; font-weight:600; }}
+p {{ margin:0 0 12px; color:#c7d2fe; }}
+code {{ background:rgba(255,255,255,.10); padding:1px 6px; border-radius:4px;
+  font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }}
+.detail {{ margin-top:18px; padding:10px 12px; border-radius:6px;
+  background:rgba(0,0,0,.28); color:#a5b4fc;
+  font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-word; }}
+.hint {{ margin-top:16px; font-size:13px; color:#818cf8; }}
+</style></head><body>
+<h1>Quick Panel can’t open right now</h1>
+<p>Your shortcut worked — Papercusp received the keypress. The panel itself
+couldn’t load because Papercusp’s background service isn’t serving content.</p>
+<p>It usually recovers if you quit Papercusp from the tray icon and start it again.
+If it keeps happening, the boot log has the reason:</p>
+<p><code>~/.papercusp/logs/serve.log</code></p>
+<div class="detail">{safe}</div>
+<p class="hint">Press your Quick Panel shortcut again to retry, or close this window.</p>
+</body></html>"#
+    )
+}
+
+/// The `data:` URL for the diagnostic page. base64 so the HTML needs no
+/// percent-encoding and can contain quotes/newlines freely.
+fn unavailable_data_url(reason: &str) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(unavailable_page_html(reason));
+    format!("data:text/html;charset=utf-8;base64,{b64}")
+}
+
+/// Show the diagnostic window — the ANSWER to WI-5216's real complaint.
+///
+/// Before this, a palette that could not resolve an origin `eprintln!`d into
+/// `~/.papercusp/logs/server-app.log` and returned. To the user the global
+/// shortcut was simply DEAD: no window, no message, nothing. The owner
+/// reasonably concluded the KEY was broken and rebound it twice (CmdOrCtrl+K →
+/// CmdOrCtrl+Shift+K → Alt+Space) chasing a key bug that never existed, while
+/// every press was in fact being delivered and failing downstream.
+///
+/// A desktop notification is NOT an option here: notifications to the owner are
+/// OFF by standing directive (root CLAUDE.md, 2026-07-14 — `notify-send` is a
+/// logged no-op shim), so the feedback must be a window.
+///
+/// Hides (never destroys) on dismiss, exactly like the palette: on the packaged
+/// Server this may be the process's ONLY window, and destroying the last one
+/// fires an ExitRequested that tears down the operator + embedded PG, and kills
+/// the sole GTK frame clock (a webkit2gtk crash on GNOME).
+fn open_unavailable_window(app: &AppHandle, reason: &str) {
+    if let Some(existing) = app.get_webview_window(UNAVAILABLE_WINDOW_LABEL) {
+        // Refresh the reason (the failure may differ from last time), then show.
+        let _ = existing.eval(format!(
+            "location.replace({});",
+            serde_json::to_string(&unavailable_data_url(reason)).unwrap_or_else(|_| "''".into())
+        ));
+        let _ = existing.show();
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        return;
+    }
+    let Ok(parsed) = unavailable_data_url(reason).parse::<url::Url>() else {
+        eprintln!("[docs-search] could not build the diagnostic page url");
+        return;
+    };
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(app, UNAVAILABLE_WINDOW_LABEL, tauri::WebviewUrl::External(parsed))
+            .title("Quick Panel unavailable")
+            .inner_size(560.0, 400.0)
+            .min_inner_size(420.0, 320.0)
+            .center()
+            .always_on_top(true)
+            .focused(true)
+            .decorations(true)
+            .resizable(true);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        if let Ok(b) = builder.icon(icon) {
+            builder = b;
+        }
+    }
+    match builder.build() {
+        Ok(win) => {
+            let _ = win.set_focus();
+            let hide_target = win.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    // HIDE, never destroy — see the doc comment above.
+                    api.prevent_close();
+                    let _ = hide_target.hide();
+                }
+            });
+        }
+        Err(e) => eprintln!("[docs-search] failed to open the diagnostic window: {e}"),
+    }
+}
+
+/// Hide a diagnostic window left over from an earlier failure. Called when a
+/// real palette opens, so a recovered operator doesn't leave a stale "can't
+/// open" window sitting on top of the working panel.
+fn dismiss_unavailable_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(UNAVAILABLE_WINDOW_LABEL) {
+        let _ = w.hide();
+    }
+}
+
 /// Open the docs-search palette, or focus it if already open. Exposed as a
 /// Tauri command too (`#[tauri::command]` below) so a future in-webview menu
 /// item / button can trigger the identical path the global shortcut uses.
@@ -218,6 +352,8 @@ pub fn open_palette(app: &AppHandle) {
             let _ = existing.hide();
             return;
         }
+        // Re-showing the real palette — retire any stale diagnostic window.
+        dismiss_unavailable_window(app);
         let _ = existing.show();
         let _ = existing.unminimize();
         let _ = existing.set_focus();
@@ -233,8 +369,16 @@ pub fn open_palette(app: &AppHandle) {
         let _ = existing.eval("location.reload()");
         return;
     }
+    // WI-5216: origin unresolvable = the operator/sidecar isn't serving. This
+    // used to be a bare eprintln! + return, i.e. a DEAD key from the user's
+    // side. Never fail silently on a user-initiated action — say so on screen.
     let Some(base) = resolve_base(app) else {
         eprintln!("[docs-search] could not resolve app origin — palette not opened");
+        open_unavailable_window(
+            app,
+            "No content origin: the operator sidecar reported no port and there is no app window \
+             to inherit one from. Its boot most likely failed (see serve.log).",
+        );
         return;
     };
     let url = format!("{base}/quick-panel");
@@ -243,6 +387,7 @@ pub fn open_palette(app: &AppHandle) {
     // target ambiguous (E0282).
     let Ok(parsed) = url.parse::<url::Url>() else {
         eprintln!("[docs-search] bad palette url {url}");
+        open_unavailable_window(app, &format!("Resolved an unusable panel address: {url}"));
         return;
     };
     // Base builder. The icon is applied below so the palette carries the SAME
@@ -290,6 +435,8 @@ pub fn open_palette(app: &AppHandle) {
     }
     match builder.build() {
         Ok(win) => {
+            // A real palette is up — retire any stale "can't open" window.
+            dismiss_unavailable_window(app);
             // Bring it to the front — on the Server process (a windowless
             // background app) the WM does not auto-raise the new window.
             let _ = win.set_focus();
@@ -325,7 +472,12 @@ pub fn open_palette(app: &AppHandle) {
                 _ => {}
             });
         }
-        Err(e) => eprintln!("[docs-search] failed to open palette window: {e}"),
+        Err(e) => {
+            // The window itself failed to build — still the user's dead-key
+            // experience, so still owed an explanation (WI-5216).
+            eprintln!("[docs-search] failed to open palette window: {e}");
+            open_unavailable_window(app, &format!("The panel window could not be created: {e}"));
+        }
     }
 }
 
@@ -492,5 +644,65 @@ mod tests {
     #[test]
     fn off_sentinel_is_not_a_preset() {
         assert!(!PRESET_SHORTCUTS.contains(&SHORTCUT_OFF));
+    }
+
+    // --- WI-5216: the palette must never fail SILENTLY ---
+
+    /// The diagnostic page's ONE job: tell the user the key WORKED, so they stop
+    /// debugging the shortcut. The owner rebound his key twice chasing a key bug
+    /// that never existed because this text did not exist.
+    #[test]
+    fn unavailable_page_tells_the_user_the_shortcut_was_not_the_problem() {
+        let html = unavailable_page_html("no port");
+        assert!(
+            html.contains("Your shortcut worked"),
+            "the page must absolve the shortcut — that is the whole point"
+        );
+        // A concrete next step + where the real reason lives.
+        assert!(html.contains("~/.papercusp/logs/serve.log"));
+        assert!(html.contains("tray"));
+    }
+
+    /// The operator-facing reason must reach the page — a diagnostic window that
+    /// says only "something went wrong" would be the silent failure with extra
+    /// steps.
+    #[test]
+    fn unavailable_page_carries_the_reason() {
+        assert!(unavailable_page_html("sidecar port was None").contains("sidecar port was None"));
+    }
+
+    /// `reason` is not authored by us (it interpolates errors/URLs), so it must
+    /// not be able to inject markup into the page.
+    #[test]
+    fn unavailable_page_escapes_html_in_the_reason() {
+        let html = unavailable_page_html("<script>alert('x')</script> a & b");
+        assert!(!html.contains("<script>alert"), "reason must not inject markup");
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("a &amp; b"));
+    }
+
+    /// The data: URL must be well-formed and parse as a URL — `open_palette`
+    /// feeds it straight to `url::Url::parse`, and a parse failure there would
+    /// put us right back to showing the user nothing.
+    #[test]
+    fn unavailable_data_url_is_parseable_base64_html() {
+        let u = unavailable_data_url("boom");
+        assert!(u.starts_with("data:text/html;charset=utf-8;base64,"));
+        assert!(u.parse::<url::Url>().is_ok(), "must parse — open_palette depends on it");
+        use base64::Engine as _;
+        let payload = u.trim_start_matches("data:text/html;charset=utf-8;base64,");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+        let html = String::from_utf8(decoded).unwrap();
+        assert!(html.contains("Quick Panel can’t open right now"));
+        assert!(html.contains("boom"));
+    }
+
+    /// The diagnostic window MUST NOT share the palette's label: the reuse
+    /// branch in open_palette would otherwise find the error window on the next
+    /// press and reload the data: URL forever, permanently shadowing the real
+    /// panel even after the operator recovered.
+    #[test]
+    fn diagnostic_window_label_is_distinct_from_the_palette() {
+        assert_ne!(WINDOW_LABEL, UNAVAILABLE_WINDOW_LABEL);
     }
 }

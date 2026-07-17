@@ -211,10 +211,27 @@ sc_launch() {
   ln -sf "$HOME/.config/gh" "$home/.config/gh"
   ln -sf "$HOME/.gitconfig" "$home/.gitconfig" 2>/dev/null || true
   ( cd "$SIDECAR_SRC"
-    env HOME="$home" \
+    # r7 fix (EI-13590/WI-953, 2026-07-17): this local sc_launch had drifted from
+    # the canonical fed_local_launch_sidecar() in federation-asserts.sh in two
+    # ways that BOTH matter here — (1) it never forced PAPERCUSP_BACKGROUND_WORKERS=1,
+    # so an ambient PAPERCUSP_BACKGROUND_WORKERS=0 in the CALLING shell (present on
+    # this box) leaks through `env` (unlisted vars are inherited, not cleared) and
+    # makes requestOnlyHost() true for BOTH instances — wireHiveDirectoryForWorkspace
+    # then silently no-ops (background-workers.ts / hive-directory-boot.ts:436), so
+    # setHiveDirectoryTransport() NEVER runs and every announce throws "device
+    # keychain not wired" (hive-directory-deps.ts:68). This is the CONFIRMED root
+    # cause of r5's and r6's identical announced:false — decisively fingerprinted via
+    # the publish.error diagnostic added earlier this session, NOT a swarm-timing
+    # race. (2) it never scrubbed the shared-native-PG env vars the canonical helper
+    # scrubs (-u DATABASE_URL etc, the WI-1666 leak class) — also present ambiently
+    # on this box; scrubbing defensively even though today's failure didn't trace to it.
+    env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
+        -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+        HOME="$home" \
         PATH="$SIDECAR_SRC/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
+        PAPERCUSP_BACKGROUND_WORKERS=1 \
         PAPERCUSP_DHT_HOST= \
         PAPERCUSP_DHT_BOOTSTRAP= \
         PAPERCUSP_HONO_PORT="$hono_port" PAPERCUSP_PG_PORT="$pg_port" \
