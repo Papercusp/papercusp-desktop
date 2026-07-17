@@ -225,6 +225,46 @@ else
   log "load $LOAD1 OK (<= $LOAD_GATE); proceeding."
 fi
 
+# ── 1b. GitHub credentialed-REST preflight (2026-07-16 outage class) ───────────
+# The smokes create/publish hives from REAL GitHub repos using the smoke accounts'
+# tokens (fetchGithubRepoMeta repo-id lookup, resolveOwner attestation). On
+# 2026-07-16 GitHub's edge served HTML 503 to ALL credentialed REST from this box
+# for hours while anonymous requests, /rate_limit, and git-over-HTTPS all kept
+# working — so the box looked healthy, but every run burned ~25 min into a false
+# RED that mimics a code regression (announced=False, publish.memberLinks=0).
+# Probe the exact call class the smokes need (authenticated REST read of the
+# fixture repo) and SKIP loudly — like the load gate — when it is down:
+# environmental, not a failure. check_staleness still runs, so a persistent
+# outage trips the staleness EI instead of looking green.
+if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
+  GH_PREFLIGHT_USER="${GATE_GH_USER:-papercupai}"
+  GH_PREFLIGHT_TOKEN="$(gh auth token --user "$GH_PREFLIGHT_USER" 2>/dev/null || true)"
+  if [ -z "$GH_PREFLIGHT_TOKEN" ]; then
+    # No token is a local misconfig, not the outage class — let the smoke surface it.
+    log "WARN: no gh token for $GH_PREFLIGHT_USER — cannot preflight credentialed GitHub REST; proceeding."
+  else
+    GH_CODE=000
+    for _try in 1 2 3; do
+      GH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+        -H "Authorization: Bearer $GH_PREFLIGHT_TOKEN" \
+        https://api.github.com/repos/octocat/Hello-World 2>/dev/null || echo 000)"
+      [ "$GH_CODE" = 200 ] && break
+      sleep 10
+    done
+    if [ "$GH_CODE" != 200 ]; then
+      if [ "${GATE_FORCE:-0}" = 1 ]; then
+        log "credentialed GitHub REST unhealthy (HTTP $GH_CODE) but GATE_FORCE=1 — proceeding anyway."
+      else
+        log "SKIP: credentialed GitHub REST unhealthy (HTTP $GH_CODE for $GH_PREFLIGHT_USER after 3 tries) — smokes would false-RED (announced=False/memberLinks=0); retry next window (not a failure)."
+        check_staleness
+        echo "GATE: SKIPPED (github-api-unhealthy HTTP $GH_CODE)"; exit 0
+      fi
+    else
+      log "credentialed GitHub REST OK (200 for $GH_PREFLIGHT_USER); proceeding."
+    fi
+  fi
+fi
+
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
