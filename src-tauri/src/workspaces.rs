@@ -463,4 +463,92 @@ mod tests {
         assert_eq!(unique_id(&reg, "a"), "a-3");
         assert_eq!(unique_id(&reg, "b"), "b");
     }
+
+    // WI-5321 (root-causing WI-2381 Blocker A): a fresh install used to mint its
+    // ONE real workspace with the literal id "default", which collides with
+    // DEFAULT_COORD_WORKSPACE — the p2p/allotment layer's coordination-shared
+    // partition sentinel (WI-1564) that fail-closes with `workspace_unresolved`
+    // on exactly that string. That made every fresh install permanently unable
+    // to complete a p2p seat_offer/spawn_request. These guard the fix: a fresh
+    // `ensure_initialized()` must mint a real, unique, non-"default" id while
+    // keeping the "Default" display name and the migration behavior.
+    #[test]
+    fn ensure_initialized_mints_a_real_non_default_id_on_fresh_install() {
+        // Isolate HOME so the test writes to a temp dir, never the real
+        // workspaces root. SAFETY: single-threaded unit test; no concurrent
+        // env access (same convention as main.rs's HOME-isolated tests).
+        let tmp = std::env::temp_dir().join(format!("pcusp-ws-fresh-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+
+        let reg = ensure_initialized().expect("ensure_initialized should succeed on a fresh HOME");
+
+        assert_eq!(reg.workspaces.len(), 1);
+        let ws = &reg.workspaces[0];
+        assert_ne!(
+            ws.id, "default",
+            "fresh install must not mint the literal 'default' workspace id (WI-1564 collision)"
+        );
+        assert!(
+            ws.id.starts_with("workspace-"),
+            "expected a minted workspace-<hex> id, got {}",
+            ws.id
+        );
+        assert_eq!(ws.name, "Default", "display name stays 'Default' for UX continuity");
+        assert_eq!(reg.current, ws.id);
+        assert!(workspace_dir(&ws.id).exists());
+
+        // Idempotent: a second call re-reads the SAME registry, never re-mints
+        // (else every boot would silently orphan the previous workspace's data).
+        let reg2 = ensure_initialized().expect("second call should succeed");
+        assert_eq!(reg2.workspaces.len(), 1);
+        assert_eq!(reg2.workspaces[0].id, ws.id);
+
+        unsafe {
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ensure_initialized_migrates_legacy_papercusp_into_the_minted_workspace_dir() {
+        let tmp = std::env::temp_dir().join(format!("pcusp-ws-legacy-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        // Pre-seed a legacy ~/.papercusp with a marker file, as a real upgrading
+        // install would have.
+        let legacy = tmp.join(".papercusp");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("marker.txt"), b"legacy-state").unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+
+        let reg = ensure_initialized().expect("ensure_initialized should succeed");
+        let ws_id = reg.workspaces[0].id.clone();
+        let migrated_marker = workspace_dir(&ws_id).join(".papercusp").join("marker.txt");
+        assert!(
+            migrated_marker.exists(),
+            "legacy ~/.papercusp should migrate into the minted (non-'default') workspace dir"
+        );
+        assert_eq!(fs::read(&migrated_marker).unwrap(), b"legacy-state");
+        assert!(!legacy.exists(), "legacy dir should be moved (renamed), not copied");
+
+        unsafe {
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
