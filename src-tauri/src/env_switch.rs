@@ -127,8 +127,33 @@ fn env_api_target() -> Option<u16> {
     parse_api_target(std::env::var("PAPERCUSP_DEV_API_TARGET").ok())
 }
 
+/// Accepts a bare port (`"3170"`), a `host:port` pair (`"127.0.0.1:3170"`), or a
+/// full URL (`"http://127.0.0.1:3170"`) — the natural thing to pass, and what
+/// docs/runbooks have specified — extracting the port from whichever form was
+/// given. Ports <1024 are rejected as obviously wrong. When the env var IS set
+/// but doesn't resolve to a usable port, this WARNS instead of silently
+/// dropping the override (EI-729: a full-URL value used to silently no-op and
+/// fall back to the default target with zero indication anything was wrong).
 fn parse_api_target(raw: Option<String>) -> Option<u16> {
-    raw?.trim().parse::<u16>().ok().filter(|p| *p >= 1024)
+    let raw = raw?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let port = trimmed
+        .parse::<u16>()
+        .ok()
+        .or_else(|| url::Url::parse(trimmed).ok().and_then(|u| u.port()))
+        .or_else(|| trimmed.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()));
+    match port.filter(|p| *p >= 1024) {
+        Some(p) => Some(p),
+        None => {
+            eprintln!(
+                "[env-switch] PAPERCUSP_DEV_API_TARGET={trimmed:?} is not a usable port — accepts a bare port, host:port, or URL, all >=1024 — ignoring, falling back to the default target"
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +480,28 @@ mod tests {
         assert_eq!(parse_api_target(Some("  3070 ".into())), Some(3070));
         assert_eq!(parse_api_target(Some("80".into())), None);
         assert_eq!(parse_api_target(None), None);
+    }
+
+    #[test]
+    fn parse_api_target_accepts_url_and_host_port_forms() {
+        // EI-729: a full URL (the natural thing to pass, and what the e2e
+        // runbook literally specifies) must extract the port, not silently
+        // no-op back to the default target.
+        assert_eq!(
+            parse_api_target(Some("http://127.0.0.1:3370".into())),
+            Some(3370)
+        );
+        assert_eq!(
+            parse_api_target(Some("https://127.0.0.1:3370/adv".into())),
+            Some(3370)
+        );
+        // Bare host:port (no scheme) also resolves.
+        assert_eq!(parse_api_target(Some("127.0.0.1:3370".into())), Some(3370));
+        // A URL/host:port whose port is below the floor is still rejected.
+        assert_eq!(parse_api_target(Some("http://127.0.0.1:80".into())), None);
+        // Garbage input (no parseable port anywhere) is rejected, not panics.
+        assert_eq!(parse_api_target(Some("not-a-target".into())), None);
+        assert_eq!(parse_api_target(Some("".into())), None);
     }
 
     #[test]
