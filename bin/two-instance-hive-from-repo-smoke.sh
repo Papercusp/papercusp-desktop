@@ -354,12 +354,13 @@ MEMBER_SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
 A_ANNOUNCED="$(jget "$a_resp" "d['publish']['announced']")"
 A_UNVERIFIED="$(jget "$a_resp" "d['bindingUnverified']")"
 # WI-953 checkpoint + EI-13590 both flagged that the head -c 600 echo above cuts
-# off BEFORE the publish.announceError field (a thrown-and-caught exception in
-# hive-publish-from-repo.ts is the only way a PUBLIC hive gets announced:false) —
-# so a bare 'announced=FAIL' never told anyone WHY. Pull it explicitly.
-A_ANNOUNCE_ERR="$(jget "$a_resp" "(d.get('publish') or {}).get('announceError') or ''")"
+# off BEFORE the publish.error field (hive-publish-from-repo.ts:558 surfaces a
+# thrown-and-caught announce exception there — for a PUBLIC hive that's the ONLY
+# way announced comes back false) — so a bare 'announced=FAIL' never told anyone
+# WHY. Pull it explicitly.
+A_ANNOUNCE_ERR="$(jget "$a_resp" "(d.get('publish') or {}).get('error') or ''")"
 if [ "$A_ANNOUNCED" != "True" ] && [ -n "$A_ANNOUNCE_ERR" ]; then
-  echo "  [announce-error] publish.announceError = $A_ANNOUNCE_ERR"
+  echo "  [announce-error] publish.error = $A_ANNOUNCE_ERR"
 fi
 create_ok=0; [ "$A_OK" = "True" ] && [ -n "$HIVE_SLUG" ] && [ -n "$MEMBER_SLUG" ] && create_ok=1
 if [ "$create_ok" = 1 ]; then
