@@ -670,7 +670,8 @@ fn cfs_remove(path: &str) {
 
 /// Build the bash one-liner the terminal runs as its first command.
 /// Pattern:
-///   cd → env exports → drop sentinel → trap-cleanup → greeting → exec shell
+///   cd → env exports → stamp process birth identity → drop sentinel →
+///   trap-cleanup → greeting → exec shell
 ///
 /// The sentinel file (`.papercup-console-active.$`) is how the Rust
 /// side knows the user's shell is still alive. We can't trust the pid
@@ -702,7 +703,17 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     format!(
         "printf '\\033]0;%s\\007' {title} \
          ; cd {cwd} && {exports} \
-         && touch {sentinel_glob}.$$ \
+         && PAPERCUSP_CONSOLE_IDENTITY="$( \
+              if [ -r /proc/sys/kernel/random/boot_id ] && [ -r /proc/$$/stat ]; then \
+                printf 'linux:%s:%s' \
+                  "$(cat /proc/sys/kernel/random/boot_id)" \
+                  "$(awk '{{print $22}}' /proc/$$/stat)"; \
+              else \
+                papercusp_started="$(ps -o lstart= -p $$ 2>/dev/null | awk '{{$1=$1; print}}')"; \
+                [ -n "$papercusp_started" ] && printf 'darwin:%s' "$papercusp_started"; \
+              fi; true)" \
+         && export PAPERCUSP_CONSOLE_IDENTITY \
+         && printf '%s\n' "$PAPERCUSP_CONSOLE_IDENTITY" > {sentinel_glob}.$$ \
          && trap 'rm -f {sentinel_glob}.$$' EXIT \
          && (eval {greet}) ; \
          exec \"${{SHELL:-/bin/bash}}\" -l",
@@ -1395,10 +1406,13 @@ mod tests {
     fn oneliner_drops_sentinel_with_trap() {
         let e = envelope("/x");
         let out = build_launcher_oneliner(&e);
-        // Touches sentinel with shell pid suffix ($$ → <pid>, not a literal $)
+        // Writes the kernel-backed process identity to a sentinel whose shell
+        // pid suffix is expanded ($$ → <pid>, not a literal $).
         assert!(
-            out.contains("touch .papercup-console-active.$$"),
-            "sentinel touch missing or has a literal (unexpanded) $ suffix: {out}"
+            out.contains("PAPERCUSP_CONSOLE_IDENTITY=\"$(")
+                && out.contains("export PAPERCUSP_CONSOLE_IDENTITY")
+                && out.contains("> .papercup-console-active.$$"),
+            "sentinel identity stamp missing or has a literal (unexpanded) $ suffix: {out}"
         );
         // trap fires on EXIT to clean up
         assert!(
