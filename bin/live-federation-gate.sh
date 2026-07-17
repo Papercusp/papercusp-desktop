@@ -440,7 +440,10 @@ MATRIXFULL_RES="SKIPPED"
 if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_RES" = PASS-971 ]; } && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
   if [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ]; then
     log "running local-matrix (weekly cadence) …"
-    if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ) >"$WORK/local-matrix.out" 2>&1; then
+    # Pass the gate's freshly-repacked .deb — without it the leg's default_deb()
+    # picks the newest PREBUILT bundle, which can be days stale (the 2026-07-16 RED
+    # ran a Jul-11 deb against current-tree expectations and its own WARN said so).
+    if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
     else
       MATRIXFULL_RES="FAIL"
@@ -475,7 +478,7 @@ if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_res
 fi
 
 if [ ${#REDS[@]} -eq 0 ]; then
-  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed"
+  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs"
   echo "GATE: GREEN — $SUMMARY"; exit 0
 fi
 
@@ -501,12 +504,21 @@ echo "GATE: RED (${REDS[*]}) — $SUMMARY ; logs in $WORK"
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
 BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE: a from-repo RED is EXPECTED while WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is open; a content-matrix, local-matrix, or build RED is a NEW regression — investigate."
 RED_MARKER="$STATE_DIR/red-ei-filed"
+# Dedup is PER failing-leg-set, not global (2026-07-16: a brand-new local-matrix
+# RED was silently suppressed for 12h under the marker of an already-fixed
+# content-matrix RED — a distinct regression got no tracking item). Same legs
+# within the window ⇒ suppress; different legs ⇒ a new condition ⇒ file.
+RED_LEGS_MARKER="$STATE_DIR/red-ei-legs"
 red_marker_age_h="$(age_h "$RED_MARKER")"
-if [ "$red_marker_age_h" -lt "$RED_REFILE_H" ]; then
-  log "RED already tracked (EI filed ${red_marker_age_h}h ago, < RED_REFILE_H ${RED_REFILE_H}h) — skipping duplicate filing. $TITLE"
+prev_legs="$(cat "$RED_LEGS_MARKER" 2>/dev/null || true)"
+if [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] && [ "$prev_legs" = "${REDS[*]}" ]; then
+  log "RED already tracked (EI filed ${red_marker_age_h}h ago for same legs '${REDS[*]}', < RED_REFILE_H ${RED_REFILE_H}h) — skipping duplicate filing. $TITLE"
 else
+  [ -n "$prev_legs" ] && [ "$prev_legs" != "${REDS[*]}" ] && [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] \
+    && log "failing-leg set changed ('$prev_legs' → '${REDS[*]}') — filing despite the ${red_marker_age_h}h-old marker."
   file_ei "$TITLE" "$BODY"
   echo "$(now_s)" >"$RED_MARKER"
+  printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
 fi
 check_staleness
 exit 1
