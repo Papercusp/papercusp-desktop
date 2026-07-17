@@ -70,6 +70,23 @@ that's the last delivery hop, not a federation failure.
 - **VM `/tmp` is wiped on reboot** — always `deploy.sh` after a reboot; a
   `NO_OPERATOR_PORT` from vmcall means the VM app isn't running (start
   Papercusp Server.app in the VM), not a driver bug.
+- **The pre-mig-557 relation errors fire LAZILY (~5min in), so a boot-time
+  "0 relation errors" grep is a FALSE GREEN** (WI-4070 verify, 2026-07-17).
+  The `hive-owner-key-health` / directory sweeps are what hit the renamed
+  `harness_shared.hive*` tables — grep the serve log again ≥6min after boot
+  before declaring the schema clean.
+- **An installed app bundle can be OLDER than the shared DB schema — and
+  dev-source can NEVER be newer than the bundle** (it extracts from the
+  bundle's own `source.tar.zst`). The Jul-11 bundle was built mid-rename
+  (`loadHivePubkey` still queried `harness_shared.hives`) → owner key null →
+  the VM COULD NOT SIGN → outbound federation dead while inbound catch-up
+  worked. Until a fresh mac build is cut, run current code via
+  `boot-headless-current.sh` (tower-built esbuild serve.mjs + composed
+  node_modules over the bundle's darwin natives).
+- **A `claude` relaunch on the tower drops `SSH_AUTH_SOCK`** — ssh to the VM
+  then fails with "Too many authentication failures". Fixed durably via the
+  `Host 172.31.44.2` entry in `~/.ssh/config` (IdentityFile
+  `~/.ssh/papercup-vm-mac`, IdentitiesOnly) — keep it.
 - **ufw on the tower can silently block guest→host** traffic on the bridge
   (the P-059 "post-UFW-fix" history). If reverse-leg traffic dies:
   `sudo ufw allow from 172.31.44.0/24`.
