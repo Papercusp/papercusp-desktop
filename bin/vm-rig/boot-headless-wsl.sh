@@ -89,6 +89,9 @@ export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-iden
 export PAPERCUSP_WORKSPACES_ROOT="$REAL_HOME/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
+# EI-13317 forensics: keep the per-attempt dial trace armed by default (see
+# boot-headless-current.sh) — a reboot must never silently drop the evidence.
+export HGDIALDEBUG="${HGDIALDEBUG:-1}"
 
 echo "boot-wsl: serve=$SERVE node=$($NODE --version 2>/dev/null)"
 echo "boot-wsl: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  PG_SQL_DIR=$PAPERCUSP_PG_SQL_DIR"

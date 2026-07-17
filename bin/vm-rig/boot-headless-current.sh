@@ -82,6 +82,10 @@ export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-iden
 export PAPERCUSP_WORKSPACES_ROOT="/Users/aviweiss/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
+# EI-13317 forensics ride the per-attempt dial trace (peer-dial-registry.ts) —
+# keep it armed by default on the rig so a reboot never silently drops the
+# evidence stream (su-71c69's reverse-leg legs depend on it).
+export HGDIALDEBUG="${HGDIALDEBUG:-1}"
 
 echo "boot-current: serve=$SERVE"
 echo "boot-current: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  PG_SQL_DIR=$PAPERCUSP_PG_SQL_DIR"
