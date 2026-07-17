@@ -184,6 +184,17 @@ EXCLUDES+=(
   # the runtime-resolved build output and stays).
   --exclude='./.next' --exclude='*/.next'
   --exclude='*/.turbo'
+  # apps/operator-docs/dist (WI-4419): the STANDALONE Starlight docs-SITE build
+  # (193M, untracked). Exempt from the "dist/ stays" rule above — that rule is for
+  # package dist/ resolved at runtime via exports."main"; this dist is a static
+  # website nothing in the app consumes. Runtime reads the docs SOURCE tree
+  # (apps/operator-docs/src/content/docs) and the operator's OWN public/ copy of
+  # llms.txt (see resource-index.ts / _repo-paths.ts LLMS_TXT_PATH), NEVER this
+  # dist. It is also the RECURRING box-identity leak source: every operator-docs
+  # rebuild bakes the owner's git-name/email from an agent-insight into dist HTML
+  # (e.g. attributing-a-change-*.html), red-ing the cut ~10min in on stale output
+  # the cut never regenerates. Dropping it kills that class and shrinks the bundle.
+  --exclude='./apps/operator-docs/dist' --exclude='*/operator-docs/dist'
   --exclude='./.idea' --exclude='*/.idea'
   --exclude='./.vscode' --exclude='*/.vscode'
   --exclude='*.log'
