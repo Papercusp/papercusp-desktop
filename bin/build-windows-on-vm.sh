@@ -749,15 +749,36 @@ function Ensure-Sccache {
 Ensure-Sccache
 PS1BLOCK
 )
-# Server bundle: built by DEFAULT even in FAST_ITER — the live operator on an
-# installed box runs from the SERVER install's sidecar, so any sidecar/SPA/TS
-# change MUST ship a fresh Server setup.exe (skipping it silently verifies a
-# stale UI — bit the WI-3033 verify, 2026-07-05). Rust-only iterations can opt
-# out with PAPERCUSP_FAST_ITER_GUI_ONLY=1; the skip also DELETES the stale
-# Server artifacts from the VM's inno dir so the collection step below can't
-# hand back a previous build's Server setup.exe as if fresh.
+# WI-5085 (desktop-build-speed-2026-07-16#P-006): which role(s) to build, same
+# knob as the mac (mac-vm-build.sh) and linux (release-local.sh /
+# build-linux-local.sh) legs. Defaults to GUI-ONLY — see the comment below.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+_win_build_server=0
+for _win_role in $PAPERCUSP_BUILD_ROLES; do
+  case "$_win_role" in
+    gui) : ;;
+    server) _win_build_server=1 ;;
+    *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$_win_role' — skipping" >&2 ;;
+  esac
+done
+# Server bundle: previously built by DEFAULT even in FAST_ITER; now GUI-ONLY by
+# default (WI-5085) — the Windows Server output isn't actually shippable today
+# (spanned Inno install; record-release-cli skips it, WI-5028), so building it
+# on every cut spent a second Rust compile + a ~40min ISCC pack (EI-12902) on
+# output nobody publishes. Set PAPERCUSP_BUILD_ROLES="gui server" to build it
+# anyway. If a sidecar/SPA/TS change is destined for an installed Windows
+# Server box, that env var is required — skipping it silently verifies a stale
+# UI (bit the WI-3033 verify, 2026-07-05, back when Server was default).
+# PAPERCUSP_FAST_ITER_GUI_ONLY=1 remains a narrower override: forces GUI-only
+# regardless of PAPERCUSP_BUILD_ROLES, for fast Rust-only iteration. Either way
+# the skip DELETES the stale Server artifacts from the VM's inno dir so the
+# collection step below can't hand back a previous build's Server setup.exe as
+# if fresh.
 if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
-  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
+  _win_build_server=0
+fi
+if [[ "$_win_build_server" != "1" ]]; then
+  SERVER_BUILD_BLOCK='Write-Host "[build] GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
 else
   if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
     SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC Server packaging"\nWrite-Host "[build] ISCC Server EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-Server.exe"'
@@ -1025,7 +1046,7 @@ grep -q '\[build\] GUI EXIT=0' /tmp/vm-release-build.log \
   || fail "GUI compile failed — see /tmp/vm-release-build.log"
 grep -q '\[build\] ISCC GUI EXIT=0' /tmp/vm-release-build.log \
   || fail "GUI Inno packaging failed (ISCC nonzero/missing — winget install --id JRSoftware.InnoSetup on the VM if absent) — see /tmp/vm-release-build.log"
-if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+if ! grep -q 'GUI-only' /tmp/vm-release-build.log; then
   grep -q '\[build\] Server EXIT=0' /tmp/vm-release-build.log \
     || fail "Server compile failed — see /tmp/vm-release-build.log"
   grep -q '\[build\] ISCC Server EXIT=0' /tmp/vm-release-build.log \
@@ -1041,7 +1062,7 @@ if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
   COLLECTED=()
   "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-GUI.exe" "$OUT_DIR/papercusp-desktop-GUI.exe" \
     && COLLECTED+=(GUI:"$OUT_DIR/papercusp-desktop-GUI.exe")
-  if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+  if ! grep -q 'GUI-only' /tmp/vm-release-build.log; then
     "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-Server.exe" "$OUT_DIR/papercusp-desktop-Server.exe" \
       && COLLECTED+=(Server:"$OUT_DIR/papercusp-desktop-Server.exe")
   fi
@@ -1107,7 +1128,7 @@ done
 # FileExists gate saw nothing) and the "5-button" build silently shipped
 # 3-button; fail loudly instead. Install note: run the Server setup.exe from
 # the collected dir (or the VM's inno dir) so the .bin slices sit next to it.
-if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]] && ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]] && ! grep -q 'GUI-only' /tmp/vm-release-build.log; then
   compgen -G "$OUT_DIR/*Server*-setup-*.bin" > /dev/null \
     || fail "PAPERCUSP_STAGE_SOURCE=1 but no Server setup-*.bin slices came back — DiskSpanning didn't engage (source.tar.zst missing from the VM build tree?)"
 fi

@@ -138,6 +138,13 @@ check_staleness() { # called on every non-GREEN exit path: silence must never lo
     "The WI-261/P-013 standing live-federation gate has not completed a GREEN run for ${green_age_h}h (threshold ${GATE_STALE_DAYS}d). Every window either load-skipped, storm-downgraded, all-legs-skipped, or failed — the shared-hive P2P green/red signal is DARK, which must never read as green. Check: systemctl --user list-timers papercup-live-federation-gate.timer; journalctl --user -u papercup-live-federation-gate.service; state in ~/.papercusp/live-fed-gate/. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."
   echo "$(now_s)" >"$STATE_DIR/stale-ei-filed"
 }
+skip_cleanup() { # SKIP/FRESH exits carry no diagnostic value — drop the near-empty run dir so
+  # hourly SKIP windows don't rotate real RED/GREEN evidence dirs out of GATE_KEEP_RUNS
+  # retention (observed 2026-07-16: five consecutive load-SKIP windows evicted BOTH diagnostic
+  # run dirs of that day's RED within ~5h). The dir is kept if anything beyond selftest.log
+  # landed in it (e.g. a prod-port-guard trip is evidence).
+  find "$WORK" -mindepth 1 ! -name selftest.log 2>/dev/null | grep -q . || rm -rf "$WORK"
+}
 
 # ── fresh-exit: hourly timer + ~daily actual run. A GREEN younger than the TTL means this
 # window has nothing to do — exit instantly (before the self-test) so hourly fires cost ~0.
@@ -145,6 +152,7 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
   GREEN_AGE_H="$(age_h "$STATE_DIR/last-green")"
   if [ "$GREEN_AGE_H" -lt "$GATE_SUCCESS_TTL_H" ]; then
     log "fresh: last GREEN ${GREEN_AGE_H}h ago (< ${GATE_SUCCESS_TTL_H}h TTL) — nothing to do this window."
+    skip_cleanup
     echo "GATE: FRESH (green ${GREEN_AGE_H}h ago)"; exit 0
   fi
 fi
@@ -219,6 +227,7 @@ if awk "BEGIN{exit !($LOAD1 > $LOAD_GATE)}"; then
   else
     log "SKIP: 1-min load $LOAD1 > LOAD_GATE $LOAD_GATE — smokes get killed under load; retry next window (not a failure)."
     check_staleness
+    skip_cleanup
     echo "GATE: SKIPPED (load $LOAD1 > $LOAD_GATE)"; exit 0
   fi
 else
