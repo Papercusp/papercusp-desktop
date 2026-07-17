@@ -504,6 +504,22 @@ fn windows_path_to_wsl(path: &std::path::Path) -> String {
     normalized
 }
 
+/// Serializes every test IN THIS BINARY that mutates the process-global
+/// `HOME` (or `USERPROFILE`) env var. `cargo test` runs test functions on
+/// separate threads within ONE process by default, so two HOME-mutating
+/// tests running concurrently is a REAL, observed race — each can read the
+/// OTHER's HOME mid-test (WI-5321: `workspaces::tests::
+/// ensure_initialized_mints_a_real_non_default_id_and_migrates_legacy_dir`
+/// intermittently failed racing this file's own
+/// `pending_route_round_trip_is_one_shot_and_sanitized`, in different
+/// modules, only visible when the FULL suite's extra concurrent threads
+/// made the race land). Any test that calls `std::env::set_var("HOME", ..)`
+/// MUST hold this lock for the whole set→act→restore span — `unwrap_or_else`
+/// recovers a poisoned lock (a prior panicking test must not deadlock the
+/// rest).
+#[cfg(test)]
+pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::windows_path_to_wsl;
@@ -757,11 +773,18 @@ mod tests {
     /// way out so a tampered file can't redirect the main window off-origin.
     #[test]
     fn pending_route_round_trip_is_one_shot_and_sanitized() {
+        // WI-5321: HOME is a process-global env var — hold the cross-binary
+        // lock for the whole set→act→restore span so this can't race another
+        // HOME-mutating test (e.g. workspaces::tests::
+        // ensure_initialized_mints_a_real_non_default_id_and_migrates_legacy_dir)
+        // running concurrently on another thread.
+        let _home_guard = crate::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Isolate HOME so the test writes to a temp dir, not the real ~/.papercusp.
         let tmp = std::env::temp_dir().join(format!("pc-pending-route-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: single-threaded unit test; no concurrent env access.
         let prev_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", &tmp);

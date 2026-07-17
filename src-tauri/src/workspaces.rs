@@ -474,19 +474,21 @@ mod tests {
     // keeping the "Default" display name and the migration behavior.
     //
     // Both scenarios (fresh mint + legacy-dir migration) live in ONE test
-    // function deliberately: `ensure_initialized()` reads/writes the process-
+    // function AND hold the crate-wide `crate::HOME_ENV_TEST_LOCK` (main.rs)
+    // for their whole span: `ensure_initialized()` reads/writes the process-
     // global `HOME` env var, and `cargo test` runs test fns on separate
     // threads within the SAME process by default — two tests mutating `HOME`
     // concurrently is a real, observed race (each can read the other's HOME),
-    // not a hypothetical one. Keeping them sequential in one fn is the fix;
-    // splitting them back out later needs a shared cross-test HOME lock (see
-    // the equivalent isolation note on main.rs's pending-route test).
+    // not a hypothetical one. This raced main.rs's own
+    // `pending_route_round_trip_is_one_shot_and_sanitized` the first time the
+    // FULL suite ran both concurrently; that test now takes the same lock.
     #[test]
     fn ensure_initialized_mints_a_real_non_default_id_and_migrates_legacy_dir() {
+        let _home_guard = crate::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Isolate HOME so the test writes to a temp dir, never the real
-        // workspaces root. SAFETY: this whole scenario runs sequentially in
-        // one thread, so there is no concurrent mutation of HOME from within
-        // this test (see the race note above for why it must stay merged).
+        // workspaces root.
         let tmp = std::env::temp_dir().join(format!("pcusp-ws-fresh-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
