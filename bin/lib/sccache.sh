@@ -21,6 +21,20 @@
 # failures are WARN, not fatal. Effectiveness (hit-rate, before/after delta)
 # is measured separately — WI-5084.
 #
+# ⚠ EVERY filesystem-mutating step below (mkdir/cp/chmod) is guarded so a
+# failure DEGRADES instead of propagating. This is not optional politeness:
+# every caller of this lib runs under `set -e` (release-local.sh,
+# build-linux-local.sh, mac-vm-build.sh), and this function executes SOURCED
+# — in the caller's own shell, not a subshell — so an unguarded failing
+# command in here would abort the ENTIRE release build, not just skip the
+# cache. Confirmed live (WI-5084 investigation, 2026-07-16): some sandboxed
+# execution contexts on this fleet mount $HOME read-only (only a project
+# checkout + /tmp are writable) — `mkdir -p "$HOME/.local/bin"` and
+# `mkdir -p "$HOME/.cache/sccache"` both fail there. An unguarded version of
+# this lib would have crash-looped every release build run from such a
+# context; every mutating step here is now wrapped so that class of
+# environment just silently skips RUSTC_WRAPPER instead.
+#
 # Usage:
 #   source ".../lib/sccache.sh"
 #   setup_sccache_env   # exports RUSTC_WRAPPER / SCCACHE_DIR / SCCACHE_CACHE_SIZE
@@ -66,21 +80,25 @@ setup_sccache_env() {
     esac
     if [[ -n "$target" ]]; then
       asset="sccache-v${SCCACHE_LIB_VERSION}-${target}.tar.gz"
-      tmp="$(mktemp -d)"
-      if curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_LIB_VERSION}/${asset}" \
-           -o "$tmp/sccache.tar.gz" 2>/dev/null \
+      tmp="$(mktemp -d 2>/dev/null || true)"
+      if [[ -n "$tmp" ]] \
+         && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_LIB_VERSION}/${asset}" \
+              -o "$tmp/sccache.tar.gz" 2>/dev/null \
          && tar -xzf "$tmp/sccache.tar.gz" -C "$tmp" 2>/dev/null; then
         local extracted
-        extracted="$(find "$tmp" -maxdepth 2 -type f -name sccache | head -1)"
-        if [[ -n "$extracted" ]]; then
-          mkdir -p "$HOME/.local/bin"
-          cp "$extracted" "$HOME/.local/bin/sccache"
-          chmod +x "$HOME/.local/bin/sccache"
+        extracted="$(find "$tmp" -maxdepth 2 -type f -name sccache 2>/dev/null | head -1)"
+        # Guarded as ONE && chain inside an `if` — a failure at any step (a
+        # read-only $HOME being the observed real-world case) short-circuits
+        # into the `else` below instead of tripping the caller's `set -e`.
+        if [[ -n "$extracted" ]] \
+           && mkdir -p "$HOME/.local/bin" 2>/dev/null \
+           && cp "$extracted" "$HOME/.local/bin/sccache" 2>/dev/null \
+           && chmod +x "$HOME/.local/bin/sccache" 2>/dev/null; then
           export PATH="$HOME/.local/bin:$PATH"
           sccache_bin="$HOME/.local/bin/sccache"
         fi
       fi
-      rm -rf "$tmp"
+      [[ -n "$tmp" ]] && rm -rf "$tmp" 2>/dev/null
     fi
     if [[ -n "$sccache_bin" ]]; then
       echo "    ✓ sccache installed → $sccache_bin ($("$sccache_bin" --version 2>/dev/null || echo "v${SCCACHE_LIB_VERSION}"))"
@@ -90,15 +108,23 @@ setup_sccache_env() {
   fi
 
   if [[ -n "$sccache_bin" ]]; then
-    export RUSTC_WRAPPER="$sccache_bin"
-    export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
-    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-$default_cache_size}"
-    # sccache's own cache and cargo's incremental cache both try to skip
-    # recompiling the same code, keyed differently — running both splits the
-    # hit-rate between two caches instead of maximizing one. Upstream sccache
-    # guidance is to disable cargo incremental when RUSTC_WRAPPER=sccache.
-    export CARGO_INCREMENTAL=0
-    mkdir -p "$SCCACHE_DIR"
-    echo "==> sccache: RUSTC_WRAPPER=$RUSTC_WRAPPER SCCACHE_DIR=$SCCACHE_DIR SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE CARGO_INCREMENTAL=0"
+    local cache_dir="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+    # Guarded the same way as the install steps above: a read-only $HOME
+    # (confirmed real on this fleet, see the file header) must degrade this
+    # to "no cache dir, no wrapper" — never abort the caller's build.
+    if mkdir -p "$cache_dir" 2>/dev/null; then
+      export RUSTC_WRAPPER="$sccache_bin"
+      export SCCACHE_DIR="$cache_dir"
+      export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-$default_cache_size}"
+      # sccache's own cache and cargo's incremental cache both try to skip
+      # recompiling the same code, keyed differently — running both splits
+      # the hit-rate between two caches instead of maximizing one. Upstream
+      # sccache guidance is to disable cargo incremental when
+      # RUSTC_WRAPPER=sccache.
+      export CARGO_INCREMENTAL=0
+      echo "==> sccache: RUSTC_WRAPPER=$RUSTC_WRAPPER SCCACHE_DIR=$SCCACHE_DIR SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE CARGO_INCREMENTAL=0"
+    else
+      echo "    WARN: sccache binary found ($sccache_bin) but its cache dir ($cache_dir) is not writable — continuing without RUSTC_WRAPPER"
+    fi
   fi
 }
