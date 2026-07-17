@@ -285,6 +285,19 @@ if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   exit 1
 fi
 
+# git-ext-bridge.mjs — the pot-git `ext::` transport helper (fetch-transport.ts
+# resolves it as a SIBLING of the running entry: dirname(import.meta.url), which
+# in the bundled sidecar is serve.mjs's own dir). git execs it as an external
+# on-disk node script, so it can never be inlined into the bundle — without this
+# copy every packaged desktop's hive-git fetch (G-8 bootstrap / G-2 transport)
+# dies "Cannot find module .../git-ext-bridge.mjs" (live-caught on the P-302
+# rig, WI-3496). Pure node:net, no deps — a straight copy is the whole ship.
+cp "$REPO_ROOT/packages/operator-core/lib/sync/pot-git/git-ext-bridge.mjs" "$SIDECAR_DIR/git-ext-bridge.mjs"
+if [[ ! -f "$SIDECAR_DIR/git-ext-bridge.mjs" ]]; then
+  echo "ERROR: failed to stage git-ext-bridge.mjs next to serve.mjs"
+  exit 1
+fi
+
 echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
   --bundle --platform=node --format=esm --target=node22 \
