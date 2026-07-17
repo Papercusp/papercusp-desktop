@@ -368,9 +368,17 @@ fi
 # Both share the sidecar payload built above. Each role recompiles the Rust
 # binary because generate_context! bakes the (different) identifier, which is
 # how the runtime picks its role. Distinct productNames → distinct bundle
-# filenames, so they don't clobber. Set PAPERCUSP_BUILD_ROLES="gui" (or
-# "server") to build just one while iterating.
-PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+# filenames, so they don't clobber.
+#
+# WI-5085 (desktop-build-speed-2026-07-16#P-006): defaults to GUI-ONLY. The GUI
+# bundle is the auto-updatable + download artifact end users get; Server on mac
+# doesn't fit the disk-tight VM's second ~12GB role target anyway (see the
+# per-role disk preflight below) and every real mac release has been cut
+# PAPERCUSP_BUILD_ROLES=gui by hand for exactly that reason. Set
+# PAPERCUSP_BUILD_ROLES="gui server" to also build Server. release-local.sh
+# forwards its own PAPERCUSP_BUILD_ROLES into this VM's ssh env; a standalone
+# run of this script (env not forwarded) falls back to this same gui-only default.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
 BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
 # DMGs are packed DIRECTLY by this script (see the pack loop below), NOT by
 # tauri: tauri's create-dmg fork (bundle_dmg.sh) mounts a rw image and

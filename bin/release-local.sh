@@ -44,6 +44,21 @@
 #              (SSH :2223, ~/windows-vm/boot-windows.sh).
 #   - arm64  : cross-compile via WITH_ARM64=1 (needs `cross` set up)
 #
+# Which Tauri role(s) to build (WI-5085, desktop-build-speed-2026-07-16#P-006):
+#   PAPERCUSP_BUILD_ROLES="gui"            build ONLY the GUI role (DEFAULT)
+#   PAPERCUSP_BUILD_ROLES="gui server"     also build the Server role
+# Defaults to GUI-ONLY: the GUI bundle is the auto-updatable + download
+# artifact end users actually get, and Server is already excluded from what
+# ships on mac (the disk-tight VM cannot fit a second ~12GB role target — see
+# mac-vm-build.sh's disk preflight) and windows (record-release-cli skips the
+# unpublishable spanned Inno Server installer outright — WI-5028). Building it
+# on every cut by default wasted mac VM disk (ENOSPC risk) and ~half the
+# Windows leg's wall clock for output nobody ships. Set
+# PAPERCUSP_BUILD_ROLES="gui server" to build Server too (still real on Linux —
+# e.g. a Hetzner deploy runs the Server role; that path is unaffected by this
+# knob, see bin/build-and-archive-deb.sh). WI-5028 tracks giving mac/windows a
+# real Server auto-update path so it stops silently missing there.
+#
 # Re-run safety: idempotent. If a release for the tag exists, asset
 # uploads use `gh release upload --clobber`.
 
@@ -97,6 +112,13 @@ require_release_host
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
 WITH_MAC="${WITH_MAC:-0}"
+# WI-5085: the ONE source of truth for which Tauri role(s) this cut builds —
+# canonicalized HERE so every leg (linux in-process, mac + windows over ssh,
+# where it must be explicitly forwarded since env does not cross ssh on its
+# own) sees the SAME value instead of each falling back to its own default.
+# Default gui-only — see the usage comment above for why.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+export PAPERCUSP_BUILD_ROLES
 # Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
 # build never fails a desktop cut. The APK is BUILT here in the sibling
 # papercup-rust-mobile repo; it is RECORDED separately by record-release-cli
@@ -643,7 +665,7 @@ LINUX_PID=""
 echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
 (
   set -euo pipefail
-  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
   for role in $PAPERCUSP_BUILD_ROLES; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     # rpm DROPPED (2026-07-08): it is never collected (Linux ships deb+AppImage only —
@@ -712,13 +734,14 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
   # cut src-tauri/seed ONCE above; build-windows-on-vm.sh REUSES it.
   (
     set -euo pipefail
-    PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" bash "$ROOT/bin/build-windows-on-vm.sh"
+    PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+      PAPERCUSP_BUILD_ROLES="$PAPERCUSP_BUILD_ROLES" bash "$ROOT/bin/build-windows-on-vm.sh"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
-  for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
+  for role in ${PAPERCUSP_BUILD_ROLES:-gui}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
@@ -883,6 +906,11 @@ elif [[ "$WITH_MAC" == "1" ]]; then
         export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
         export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
         export PAPERCUSP_BUILD_VERSION='"$VERSION"'
+        # WI-5085: env does not cross ssh on its own — mac-vm-build.sh falls back to
+        # its OWN default (gui-only) if this is omitted, so a caller who explicitly
+        # asked for PAPERCUSP_BUILD_ROLES="gui server" must have it forwarded here to
+        # actually get a mac Server build.
+        export PAPERCUSP_BUILD_ROLES='"$PAPERCUSP_BUILD_ROLES"'
         export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
         export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
         export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
