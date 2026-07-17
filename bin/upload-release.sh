@@ -159,7 +159,14 @@ if ! release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER
 fi
 
 echo "==> release host : ${BASE%/*}/<secret>"
-echo "==> bucket       : s3://${R2_BUCKET}/${KEY_PREFIX}/"
+# NEVER print the raw KEY_PREFIX — it is the unguessable path segment that keeps
+# the bucket unlisted (D-002/D-003), so it is a masked secret (must never reach a
+# transcript / PG / a shared log). This preview is meant to be safe to paste into
+# a status update, INCLUDING under DRY_RUN, so it masks the prefix the same way
+# line 161 masks the host path. (An agent's mask-sed around DRY_RUN output missed
+# it here on 2026-07-17 because there is no KEY_PREFIX env var to grep — it is
+# derived from PAPERCUSP_UPDATE_BASE_URL — so the preview must self-mask.)
+echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
 echo "==> tag          : $TAG"
 echo "==> artifacts    : ${#ARTIFACTS[@]}"
 for f in "${ARTIFACTS[@]}"; do
