@@ -41,4 +41,11 @@ test('guest startup validates operator birth identity against guest procfs', () 
   assert.match(fn, /processIdentity/);
   assert.match(fn, /fields\[19\]/);
   assert.match(fn, /isolation-proof\.json/);
+  assert.match(fn, /operatorIdentityVerified":false/);
+  assert.match(fn, /operatorIdentityVerified":true/);
+  assert.match(fn, /artifact predates the.*stale-PID cleanup fix/s);
+  assert(
+    fn.indexOf('operatorIdentityVerified":false') < fn.indexOf('record.get("processIdentity")'),
+    'kernel-isolation evidence must survive rejection of a stale artifact',
+  );
 });

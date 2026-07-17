@@ -256,6 +256,15 @@ setsid env \
   "$appimage" >"$e2e_root/app.log" 2>&1 </dev/null &
 echo $! >"$e2e_root/launcher.pid"
 
+# Persist the kernel-isolation evidence before inspecting the artifact. A
+# deliberately old baseline may fail the birth-identity gate below; that must
+# not erase proof that the destructive test itself ran outside the host PID
+# namespace. operatorIdentityVerified flips true only after the live procfs
+# comparison succeeds.
+printf '{"pidIsolated":true,"hostBoot":"%s","guestBoot":"%s","operatorIdentityVerified":false}\n' \
+  "$PAPERCUSP_E2E_HOST_BOOT" "$(cat /proc/sys/kernel/random/boot_id)" \
+  >"$e2e_root/isolation-proof.json"
+
 # Wait for the guest operator record, then prove its recorded birth identity
 # matches the guest kernel. This is also the live guard for the stale-PID fix.
 for _ in $(seq 1 120); do
@@ -273,10 +282,15 @@ stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
 fields = stat[stat.rfind(")") + 1:].split()
 expected = f"linux:{boot}:{fields[19]}"
 actual = record.get("processIdentity")
+if not actual:
+    raise SystemExit(
+        "operator record has no processIdentity; this artifact predates the "
+        "stale-PID cleanup fix and is rejected. Rebuild the AppImage."
+    )
 if actual != expected:
     raise SystemExit(f"operator birth identity mismatch: recorded={actual!r} expected={expected!r}")
 PY
-printf '{"pidIsolated":true,"hostBoot":"%s","guestBoot":"%s"}\n' \
+printf '{"pidIsolated":true,"hostBoot":"%s","guestBoot":"%s","operatorIdentityVerified":true}\n' \
   "$PAPERCUSP_E2E_HOST_BOOT" "$(cat /proc/sys/kernel/random/boot_id)" \
   >"$e2e_root/isolation-proof.json"
 EOF
