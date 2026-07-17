@@ -572,6 +572,64 @@ mod tests {
         }
     }
 
+    /// WI-5305: `PAPERCUSP_HOME` must actually redirect the WSL-side discovery
+    /// paths a caller reads back (`operator.json` / `endpoint-ipc.json`), not
+    /// just cross the WSLENV boundary — a var that arrives but isn't consulted
+    /// is exactly as dead as one that never arrives. Covers: the default
+    /// (unset) falls back to the shared distro home; a Windows-style override
+    /// is translated via `windows_path_to_wsl`; an already-POSIX override is
+    /// left alone.
+    #[test]
+    fn papercusp_home_override_redirects_wsl_discovery_paths() {
+        use super::{wsl_endpoint_ipc_json_path, wsl_operator_json_path};
+
+        // SAFETY: single-threaded unit test; PAPERCUSP_HOME is not touched by
+        // any other test in this crate, so there is no cross-test race.
+        let prev = std::env::var_os("PAPERCUSP_HOME");
+
+        unsafe {
+            std::env::remove_var("PAPERCUSP_HOME");
+        }
+        assert_eq!(
+            wsl_operator_json_path(),
+            "/home/papercup/.papercusp/operator.json",
+            "unset PAPERCUSP_HOME must fall back to the shared distro home"
+        );
+        assert_eq!(
+            wsl_endpoint_ipc_json_path(),
+            "/home/papercup/.papercusp/endpoint-ipc.json"
+        );
+
+        unsafe {
+            std::env::set_var("PAPERCUSP_HOME", r"C:\Users\User\iso-home\.papercusp");
+        }
+        assert_eq!(
+            wsl_operator_json_path(),
+            "/mnt/c/Users/User/iso-home/.papercusp/operator.json",
+            "a Windows-style override must be translated, not used verbatim"
+        );
+        assert_eq!(
+            wsl_endpoint_ipc_json_path(),
+            "/mnt/c/Users/User/iso-home/.papercusp/endpoint-ipc.json"
+        );
+
+        unsafe {
+            std::env::set_var("PAPERCUSP_HOME", "/home/other-user/.papercusp");
+        }
+        assert_eq!(
+            wsl_operator_json_path(),
+            "/home/other-user/.papercusp/operator.json",
+            "an already-POSIX override must be left alone"
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("PAPERCUSP_HOME", v),
+                None => std::env::remove_var("PAPERCUSP_HOME"),
+            }
+        }
+    }
+
     /// EI-239: the recovery page embeds the failed URI as a JSON string
     /// literal — quoting in the URL must not escape the script context.
     #[cfg(target_os = "linux")]
@@ -1774,7 +1832,10 @@ fn no_console_window(cmd: &mut Command) {
 /// throwaway/isolated sidecar instance instead of always adopting the shared
 /// distro home (WI-5305: previously silently ignored on Windows because
 /// PAPERCUSP_HOME wasn't in SIDECAR_WSLENV and this path was hardcoded).
-#[cfg(target_os = "windows")]
+///
+/// `#[cfg(any(..., test))]` (mirrors `windows_path_to_wsl` above) so this is
+/// exercised by `cargo test` on every dev platform, not just a Windows build.
+#[cfg(any(target_os = "windows", test))]
 fn wsl_papercusp_home_dir() -> String {
     match std::env::var("PAPERCUSP_HOME") {
         Ok(v) if !v.trim().is_empty() => windows_path_to_wsl(std::path::Path::new(&v)),
@@ -1783,7 +1844,7 @@ fn wsl_papercusp_home_dir() -> String {
 }
 
 /// operator.json path INSIDE the WSL distro. See `wsl_papercusp_home_dir`.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn wsl_operator_json_path() -> String {
     format!("{}/operator.json", wsl_papercusp_home_dir())
 }
@@ -1890,7 +1951,7 @@ fn find_operator_discovery(
 /// WSL-native `$HOME/.papercusp` (or the isolated `PAPERCUSP_HOME` dir when
 /// set — see `wsl_papercusp_home_dir`), NOT the Windows-side workspace_home
 /// the client reads — see `find_endpoint_ipc_socket` (WI-3395).
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn wsl_endpoint_ipc_json_path() -> String {
     format!("{}/endpoint-ipc.json", wsl_papercusp_home_dir())
 }
