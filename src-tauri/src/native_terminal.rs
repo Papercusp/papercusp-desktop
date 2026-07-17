@@ -1088,16 +1088,9 @@ mod x11_glue {
             None
         }
 
-        /// OUTER frame geometry of `win` in root coords (client geom translated
-        /// to root, expanded by `_NET_FRAME_EXTENTS`).
-        fn geometry(&self, win: u32) -> Option<Rect> {
-            let geo = self.conn.get_geometry(win).ok()?.reply().ok()?;
-            let t = self
-                .conn
-                .translate_coordinates(win, self.root, 0, 0)
-                .ok()?
-                .reply()
-                .ok()?;
+        /// `_NET_FRAME_EXTENTS` of `win` as (left, right, top, bottom), or all-zero
+        /// when the WM hasn't set the property (undecorated / WM-less X).
+        fn frame_extents(&self, win: u32) -> (i32, i32, i32, i32) {
             let (mut fl, mut fr, mut ft, mut fb) = (0i32, 0i32, 0i32, 0i32);
             if let Ok(Ok(reply)) = self
                 .conn
@@ -1112,6 +1105,20 @@ mod x11_glue {
                     fb = vals[3] as i32;
                 }
             }
+            (fl, fr, ft, fb)
+        }
+
+        /// OUTER frame geometry of `win` in root coords (client geom translated
+        /// to root, expanded by `_NET_FRAME_EXTENTS`).
+        fn geometry(&self, win: u32) -> Option<Rect> {
+            let geo = self.conn.get_geometry(win).ok()?.reply().ok()?;
+            let t = self
+                .conn
+                .translate_coordinates(win, self.root, 0, 0)
+                .ok()?
+                .reply()
+                .ok()?;
+            let (fl, fr, ft, fb) = self.frame_extents(win);
             Some(Rect {
                 x: t.dst_x as i32 - fl,
                 y: t.dst_y as i32 - ft,
@@ -1120,11 +1127,32 @@ mod x11_glue {
             })
         }
 
+        /// Move/resize `win` to the given OUTER (frame-inclusive) rect —
+        /// callers (this module) always compute geometry in the same OUTER
+        /// terms `geometry()` reads back, so this is the single conversion
+        /// point. `_NET_MOVERESIZE_WINDOW`'s width/height are the CLIENT
+        /// window's size (frame excluded), NOT the frame's — a decorated
+        /// window (the GUI, `decorations:true` in tauri.conf.json) has
+        /// non-zero `_NET_FRAME_EXTENTS`, so sending the OUTER size
+        /// unconverted asks the WM for a CLIENT this big, which yields an
+        /// OUTER frame bigger again by the frame extent. Repeated collapse/
+        /// expand cycles then compound that mismatch every call — reproduced
+        /// live (WI-3388 verify, 2026-07-17): 3 collapse/expand cycles under
+        /// openbox drifted the GUI window from 1280x800 to 1296x1016. The
+        /// undecorated ghostty sibling has zero frame extents, so this
+        /// conversion is a no-op for it — only the decorated GUI window was
+        /// ever actually affected. x/y, by contrast, are the FRAME's
+        /// top-left under gravity 0 (openbox honors it as such empirically —
+        /// converting x/y the same way as w/h reintroduced an equal-and-
+        /// opposite creep in Y position, so ONLY width/height need the
+        /// frame-extent correction here).
         fn move_resize(&self, win: u32, x: i32, y: i32, w: i32, h: i32) {
+            let (fl, fr, ft, fb) = self.frame_extents(win);
+            let (cw, ch) = (w - fl - fr, h - ft - fb);
             // data.l[0]: low byte = gravity (0); bits 8..=11 flag x,y,w,h present;
             // bits 12..13 = source indication (2 = pager/app per EWMH).
             let flags: u32 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (2 << 12);
-            let data = [flags, x as u32, y as u32, w.max(1) as u32, h.max(1) as u32];
+            let data = [flags, x as u32, y as u32, cw.max(1) as u32, ch.max(1) as u32];
             let event = ClientMessageEvent::new(32, win, self.net_moveresize, data);
             let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
             let _ = self.conn.send_event(false, self.root, mask, event);

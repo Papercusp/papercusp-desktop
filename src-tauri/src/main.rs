@@ -6553,8 +6553,9 @@ pub fn run() {
             // single-instance lock and wedged (WI-3407). None depend on WSL or
             // the sidecar.
             // WI-2648: the always-on Server owns the docs-search palette global
-            // shortcut (CmdOrCtrl+K by default) — so it works whether or not the
-            // GUI is open, and the tray's rebind control is same-process.
+            // shortcut — OFF unless the user opted in (WI-4480) — so it works
+            // whether or not the GUI is open, and the tray's rebind control is
+            // same-process.
             docs_search::register_shortcut(app);
             // The backend has no window, so the tray both keeps the app alive and
             // gives the user a place to open the GUI, change the docs-search
