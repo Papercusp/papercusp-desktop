@@ -180,6 +180,7 @@ EOF
 cmd_updater_e2e() {
   local appimage="${1:-}" name="${2:-updater}"
   local release_host="${PAPERCUSP_E2E_RELEASE_HOST:-http://10.0.2.2:8043}"
+  local runtime_deb="${PAPERCUSP_E2E_RUNTIME_DEB:-}"
   [ -n "$appimage" ] && [ -f "$appimage" ] \
     || die "usage: vmctl updater-e2e <baseline.AppImage> [updater|updater-N]"
   case "$name" in
@@ -202,6 +203,16 @@ cmd_updater_e2e() {
   [ -n "$guest_boot" ] && [ "$guest_boot" != "$host_boot" ] \
     || die "$name shares the host kernel boot id; refusing destructive updater E2E"
   log "PID boundary proved: host boot $host_boot != guest boot $guest_boot ($guest_virt)"
+
+  # The AppImage intentionally relies on system WebKit/GTK. A pristine golden
+  # does not carry those libraries; install the existing desktop .deb first to
+  # provision the runtime dependency set, then launch the AppImage from the
+  # separate empty HOME so the updater still exercises AppImage self-swap.
+  [ -n "$runtime_deb" ] || runtime_deb="$(default_deb)"
+  [ -n "$runtime_deb" ] && [ -f "$runtime_deb" ] \
+    || die "no runtime .deb available; set PAPERCUSP_E2E_RUNTIME_DEB=/path/to/Papercusp.deb"
+  log "installing runtime dependencies from $(basename "$runtime_deb")"
+  cmd_install "$name" "$runtime_deb"
 
   vm_scp "$name" "$appimage" /tmp/Papercusp-updater-baseline.AppImage
   printf -v release_host_q '%q' "$release_host"

@@ -47,8 +47,11 @@ PAPERCUSP_E2E_RELEASE_HOST=http://10.0.2.2:8043 \
 ```
 
 `updater-e2e` resets only an `updater`/`updater-*` overlay, proves the guest has
-a different kernel boot ID, copies only the AppImage, and launches with a new
-empty `HOME`. It never imports host `.papercusp` state, discovery files,
+a different kernel boot ID, installs the existing desktop `.deb` to provision
+WebKit/GTK runtime dependencies, then copies only the AppImage and launches it
+with a new empty `HOME`. Override the dependency artifact with
+`PAPERCUSP_E2E_RUNTIME_DEB=/path/to/Papercusp.deb` when needed. The flow never
+imports host `.papercusp` state, discovery files,
 heartbeats, console markers, sockets, or embedded database rows. The command
 also verifies that the guest `operator.json` birth identity matches `/proc`
 before it allows the test to proceed. Click Update and then Revert only inside

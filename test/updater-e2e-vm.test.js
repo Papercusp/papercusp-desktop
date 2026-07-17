@@ -20,6 +20,9 @@ test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   assert.match(fn, /updater\|updater-/);
   assert.match(fn, /cmd_reset "\$name"/);
   assert(fn.indexOf('cmd_reset "$name"') < fn.indexOf('cmd_up "$name"'));
+  assert.match(fn, /PAPERCUSP_E2E_RUNTIME_DEB/);
+  assert(fn.indexOf('cmd_install "$name" "$runtime_deb"') < fn.indexOf('vm_scp "$name" "$appimage"'));
+  assert.match(common, /grep -v '\/Papercusp Server_'/);
 });
 
 test('updater E2E proves a different kernel and never seeds live home state', () => {

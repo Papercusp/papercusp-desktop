@@ -677,10 +677,6 @@ fi
 # the PS1 heredoc below (unquoted <<EOF, so ${VAR} expands; the $-signs inside
 # each value are NOT re-scanned, so PS variables like $LASTEXITCODE survive).
 if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
-  # sccache caches compiled crates across even clean builds; best-effort (only
-  # if it's installed on the VM PATH). Persisted target/ already gives cargo
-  # incremental regardless.
-  FAST_ITER_PRELUDE='if (Get-Command sccache -ErrorAction SilentlyContinue) { $env:RUSTC_WRAPPER = "sccache"; Write-Host "[build] FAST_ITER: RUSTC_WRAPPER=sccache" } else { Write-Host "[build] FAST_ITER: sccache not on VM PATH (skipping; cargo incremental via persisted target still applies)" }'
   # node_modules persists across FAST_ITER builds — skip the reinstall when it is
   # already there. Change a dependency? run a full (non-FAST_ITER) build once.
   # ASCII ONLY inside PS1-bound strings: an em dash here once rendered as a
@@ -688,9 +684,488 @@ if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" ]]; then
   # below now also guards this class).
   NPM_INSTALL_BLOCK='if (Test-Path node_modules) { Write-Host "[build] FAST_ITER: node_modules present - skipping npm install" } else { Write-Host "[build] npm install"; npm install --no-audit --no-fund 2>&1 }'
 else
-  FAST_ITER_PRELUDE=''
-  NPM_INSTALL_BLOCK=$'Write-Host "[build] npm install"\nnpm install --no-audit --no-fund 2>&1'
+  NPM_INSTALL_BLOCK=
+# Server bundle: built by DEFAULT even in FAST_ITER — the live operator on an
+# installed box runs from the SERVER install's sidecar, so any sidecar/SPA/TS
+# change MUST ship a fresh Server setup.exe (skipping it silently verifies a
+# stale UI — bit the WI-3033 verify, 2026-07-05). Rust-only iterations can opt
+# out with PAPERCUSP_FAST_ITER_GUI_ONLY=1; the skip also DELETES the stale
+# Server artifacts from the VM's inno dir so the collection step below can't
+# hand back a previous build's Server setup.exe as if fresh.
+if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
+  SERVER_BUILD_BLOCK='Write-Host "[build] FAST_ITER GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
+else
+  if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC Server packaging"\nWrite-Host "[build] ISCC Server EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-Server.exe"'
+  else
+    SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
+  fi
 fi
+
+# ── EI-8914: DERIVE the provenance label from the tree we actually packed ──
+# `PAPERCUSP_BUILD_SHA` is baked in via option_env! and self-reported by the
+# operator at /api/health. It used to be a caller-supplied constant tied to
+# nothing: the 0.0.5 cut on 2026-07-09 shipped `1a161ab-wi3407` while its
+# packed main.rs was byte-identical to ecea544 — 767 files and ~10k lines
+# apart. A release artifact that lies about its own provenance is worse than
+# one with no label at all. The commit portion is now COMPUTED; callers may
+# only add a human suffix via PAPERCUSP_BUILD_TAG.
+#
+# Note the label can never be a bare commit: the pack snapshots the WORKING
+# TREE, which on this fleet is ~always dirty against HEAD (git-sync commits on
+# a schedule). So say so, with `-dirty`.
+PACKED_FP="$(cat "$TARBALL.fp" 2>/dev/null || echo unknown)"
+_head_sha="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+if ! git -C "$ROOT" diff --quiet HEAD -- src-tauri 2>/dev/null; then
+  _head_sha="${_head_sha}-dirty"
+fi
+if [[ -n "${PAPERCUSP_BUILD_SHA:-}" ]]; then
+  echo "==> ⚠ PAPERCUSP_BUILD_SHA is DEPRECATED (EI-8914): a caller-supplied commit is not tied to the packed bytes." >&2
+  echo "    Demoting '${PAPERCUSP_BUILD_SHA}' to a suffix. Use PAPERCUSP_BUILD_TAG for human context." >&2
+  PAPERCUSP_BUILD_TAG="${PAPERCUSP_BUILD_TAG:-$PAPERCUSP_BUILD_SHA}"
+fi
+PAPERCUSP_BUILD_SHA="${_head_sha}${PAPERCUSP_BUILD_TAG:+-${PAPERCUSP_BUILD_TAG}}"
+echo "==> build provenance: sha=$PAPERCUSP_BUILD_SHA version=${PAPERCUSP_BUILD_VERSION:-<tauri.conf.json>} packed-src=${PACKED_FP:0:16}"
+
+# ── WI-4389: the release host must be PACKED, not merely LABELED ─────────────
+# main.rs bakes the update source with option_env!("PAPERCUSP_RELEASE_HOST") at
+# COMPILE time, and the compile happens on the VM over ssh. Env does NOT cross
+# ssh: the var reaches cargo only via the \$env: block in the PS1 below. Omit it
+# and cargo bakes an EMPTY string and the compile SUCCEEDS — the installer works,
+# the bundle is signed, latest.json verifies, and the shipped app polls nothing
+# forever, because the Tauri updater cannot tell a failed check from "no update".
+# That is exactly the 0.0.8 defect, and it was found only by grepping the shipped
+# binary AFTER the fact.
+#
+# The mac leg already gates on this (bin/assert-release-host-baked.sh, called from
+# mac-vm-build.sh) — Windows never got wired to it, so the identical bug could ship
+# here silently. Gate on the BYTES, on the VM, right after each cargo build: the
+# raw exe is what Inno packages, and it never comes back to this host in the normal
+# (non-EXE_ONLY) path, so a host-side grep could not see it.
+#
+# Needle = the host's AUTHORITY only (scheme + secret path stripped) — same rule as
+# assert-release-host-baked.sh, so the secret-bearing path is never echoed into the
+# ssh build log.
+RELEASE_HOST_NEEDLE="${PAPERCUSP_RELEASE_HOST:-}"
+RELEASE_HOST_NEEDLE="${RELEASE_HOST_NEEDLE#*://}"   # strip scheme
+RELEASE_HOST_NEEDLE="${RELEASE_HOST_NEEDLE%%/*}"    # authority only
+if [[ -z "$RELEASE_HOST_NEEDLE" ]]; then
+  echo "==> WARNING: PAPERCUSP_RELEASE_HOST is unset — the Windows build will ship WITHOUT"
+  echo "             an update source. Installers work; auto-update does NOT (the 0.0.8 defect)."
+  echo "             release-local.sh sources ~/.papercusp/release-host.env; a standalone run does not."
+fi
+
+echo "==> writing build script"
+BUILD_PS1="$(mktemp /tmp/vm-build-XXXX.ps1)"
+# UTF-8 BOM: Windows PowerShell 5.1 decodes BOM-less .ps1 as CP-1252, which
+# mangles any non-ASCII byte into stray smart-quotes/letters (a heredoc em
+# dash became `”` and broke parsing — found live 2026-07-05, WI-3033 build).
+printf '\xEF\xBB\xBF' > "$BUILD_PS1"
+cat >> "$BUILD_PS1" <<EOF
+\$ErrorActionPreference = 'Continue'
+\$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+\$vcvars = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"
+if (-not (Test-Path \$vcvars)) { \$vcvars = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" }
+cmd /c "\`"\$vcvars\`" && set" | ForEach-Object {
+  if (\$_ -match "^(.*?)=(.*)\$") { [System.Environment]::SetEnvironmentVariable(\$matches[1], \$matches[2], "Process") }
+}
+Set-Location C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop
+# Reclaim disk from prior installer outputs BEFORE building — two full-seed
+# Inno installers are ~2.7GB each and the VM disk is tight.
+Remove-Item -Recurse -Force "src-tauri\target\release\bundle\nsis","src-tauri\target\release\bundle\inno" -ErrorAction SilentlyContinue
+Get-PSDrive C | ForEach-Object { Write-Host "[build] disk free: \$([int](\$_.Free/1MB)) MB" }
+${FAST_ITER_PRELUDE}
+${NPM_INSTALL_BLOCK}
+${SIGN_PRELUDE}
+# Authenticode signer — a no-op unless SIGN_PRELUDE set a thumbprint/command
+# (see the host-side branch above). signtool comes from the VS SDK on PATH
+# (vcvars64 sourced above).
+# WI-4389 gate: prove the release host was PACKED into the bytes cargo just
+# produced. "Set in the env block" is a LABEL; the only evidence it was PACKED is
+# finding it inside the artifact. findstr is binary-safe and streams (the exe is
+# large; ReadAllBytes would double it in RAM). ASCII only in this file.
+function Assert-ReleaseHostBaked([string]\$path) {
+  \$needle = "${RELEASE_HOST_NEEDLE}"
+  if (-not \$needle) {
+    Write-Host "[build] release-host assert: no host configured - nothing to assert (auto-update will NOT work)"
+    return
+  }
+  if (-not (Test-Path \$path)) {
+    Write-Host "[build] RELEASE HOST ASSERT ERROR: no such binary: \$path"
+    exit 1
+  }
+  & findstr /M "/C:\$needle" "\$path" | Out-Null
+  if (\$LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "[build] X RELEASE HOST NOT BAKED: \$path"
+    Write-Host "[build]   Expected the configured host ('\$needle') in the binary's bytes; it is ABSENT."
+    Write-Host "[build]   This build would ship an app that can NEVER reach the update manifest, and it"
+    Write-Host "[build]   would NOT look broken: the installer works, the bundle verifies, and the Tauri"
+    Write-Host "[build]   updater renders a failed check as 'up to date' - PERMANENTLY. (The 0.0.8 defect.)"
+    Write-Host '[build]   CAUSE: PAPERCUSP_RELEASE_HOST absent from the \$env: block below -- option_env!'
+    Write-Host "[build]   then bakes an empty string and the compile SUCCEEDS."
+    exit 1
+  }
+  Write-Host "[build] OK release host is BAKED into \$path"
+}
+function Sign-File([string]\$path) {
+  if (\$script:SignCmd) {
+    Write-Host "[build] Authenticode signing (custom): \$path"
+    cmd /c \$script:SignCmd.Replace('%1', \$path)
+    if (\$LASTEXITCODE -ne 0) { Write-Host "[build] AUTHENTICODE SIGN FAILED (\$LASTEXITCODE): \$path" }
+  } elseif (\$script:SignThumb) {
+    Write-Host "[build] Authenticode signing (signtool): \$path"
+    signtool sign /sha1 \$script:SignThumb /fd ${WINDOWS_SIGN_DIGEST} ${SIGNTOOL_TS_ARGS} "\$path"
+    if (\$LASTEXITCODE -ne 0) { Write-Host "[build] AUTHENTICODE SIGN FAILED (\$LASTEXITCODE): \$path" }
+  }
+}
+# Package one role with Inno Setup (WI-3172 — replaces tauri's NSIS bundle;
+# see src-tauri/windows/inno/papercusp.iss for why). Filters the per-file
+# "Compressing:" spam (~50k sidecar files) out of the ssh log.
+function Invoke-Inno([string]\$role, [string]\$appId, [string]\$appName) {
+  \$ver = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+  \$iscc = Join-Path \$env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+  if (-not (Test-Path \$iscc)) { \$iscc = Join-Path \${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe" }
+  if (-not (Test-Path \$iscc)) {
+    Write-Host "[build] ISCC NOT FOUND - provision: winget install --id JRSoftware.InnoSetup"
+    Write-Host "[build] ISCC \$role EXIT=127"
+    return
+  }
+  \$outDir = Join-Path \$PWD "src-tauri\target\release\bundle\inno"
+  New-Item -ItemType Directory -Force \$outDir | Out-Null
+  \$buildRoot = Join-Path \$PWD "src-tauri"
+  # Per-role seed note (EI-12909): only the Server bundle carries the seed
+  # (papercusp.iss:109 guards it behind AppId == com.papercusp.server; the GUI
+  # bundle ships NO seed — WI-3234). One shared line interpolating \$role must
+  # NOT claim "full seed stored raw" for the seedless GUI. Slowness is
+  # LZMA-compressing the ~50k-file sidecar (true for BOTH roles), not the seed.
+  \$seedNote = if (\$role -eq 'Server') { 'incl. the raw-stored multi-GB seed' } else { 'no seed in this bundle — the GUI carries none (WI-3234)' }
+  Write-Host "[build] ISCC \$role packaging (\$seedNote; SLOW — measured ~40+ min, LZMA-compressing the ~50k-file sidecar, EI-12902; ISCC output block-buffers on the VM, so this phase can look SILENT the whole time — that is NORMAL, not a hang)"
+  & \$iscc "/DAppId=\$appId" "/DAppName=\$appName" "/DAppVersion=\$ver" "/DBuildRoot=\$buildRoot" "/O\$outDir" ${SPAN_DEFINE}"src-tauri\windows\inno\papercusp.iss" 2>&1 | Where-Object { \$_ -notmatch '^\s*Compressing' }
+  Write-Host "[build] ISCC \$role EXIT=\$LASTEXITCODE"
+  Sign-File (Join-Path \$outDir "\${appName}_\${ver}_x64-setup.exe")
+}
+# Build provenance: baked via option_env!("PAPERCUSP_BUILD_SHA") (main.rs) so
+# the operator's /api/health self-reports the commit. Empty when unset.
+\$env:PAPERCUSP_BUILD_SHA = "${PAPERCUSP_BUILD_SHA:-}"
+Write-Host "[build] PAPERCUSP_BUILD_SHA=\$env:PAPERCUSP_BUILD_SHA"
+# Same provenance mechanism for the shipped app VERSION (WI-2644) — see the
+# matching PAPERCUSP_BUILD_VERSION option_env! in main.rs. release-local.sh
+# forwards its own \$VERSION arg into this script's env.
+\$env:PAPERCUSP_BUILD_VERSION = "${PAPERCUSP_BUILD_VERSION:-}"
+Write-Host "[build] PAPERCUSP_BUILD_VERSION=\$env:PAPERCUSP_BUILD_VERSION"
+# WI-4389/WI-3875: the update source is baked by option_env!("PAPERCUSP_RELEASE_HOST")
+# at COMPILE time, and the compile happens on the VM — so it must be set HERE, in the
+# remote build's env, exactly like the two provenance vars above. It does not cross ssh
+# on its own. Omit it and cargo bakes an EMPTY host: the shipped app polls nothing and
+# the Tauri updater reads that as "up to date" FOREVER (the 0.0.8 defect that forced a
+# full rebuild). release-local.sh exports it, so this script inherits it.
+\$env:PAPERCUSP_RELEASE_HOST = "${PAPERCUSP_RELEASE_HOST:-}"
+Write-Host "[build] PAPERCUSP_RELEASE_HOST=\$env:PAPERCUSP_RELEASE_HOST"
+# WI-4781 (build-box-identity hygiene, cosmetic — not a security fix; parity
+# with the mac/linux legs' identical RUSTFLAGS export): without
+# --remap-path-prefix, Rust DEPENDENCY source-paths embed this VM's user
+# profile dir (e.g. C:\Users\<build-user>\.cargo\registry\src\…\<crate>\src\*.rs)
+# in shipped binaries' panic/debug strings. Non-sensitive (no credentials) but
+# worth stripping. \$env:USERPROFILE is always set on Windows; CARGO_HOME
+# defaults to %USERPROFILE%\.cargo when unset. Targets use forward slashes —
+# --remap-path-prefix's replacement is an opaque string baked into the binary,
+# not a real path, so this is valid on Windows too and avoids backslash-escaping
+# a Windows path inside this generated PowerShell string.
+\$env:RUSTFLAGS = "--remap-path-prefix=\$env:USERPROFILE=/build-home --remap-path-prefix=\$env:USERPROFILE\.cargo=/build-cargo"
+Write-Host "[build] RUSTFLAGS=\$env:RUSTFLAGS"
+# Two-bundle split (one binary, two roles — see src-tauri/src/app_role.rs):
+# GUI (base config) + Server (tauri.server.conf.json override). Distinct
+# productNames → distinct *-setup.exe filenames; each recompiles because
+# generate_context! bakes the differing identifier. Each role compiles with
+# --no-bundle (the NSIS bundler is retired on Windows — WI-3172) and is then
+# packaged by Invoke-Inno. NOTE the two roles share one exe path, so each
+# role's ISCC run MUST complete before the next role's cargo build overwrites
+# target\release\papercusp-desktop.exe — keep build→package interleaved.
+Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"
+npx tauri build --no-bundle 2>&1
+Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
+Assert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"
+Sign-File "src-tauri\\target\\release\\papercusp-desktop.exe"
+$( if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+cat <<'PSEXE'
+Write-Host "[build] EXE_ONLY: skipping ISCC GUI packaging"
+Write-Host "[build] ISCC GUI EXIT=0"
+Copy-Item -Force "src-tauri\target\release\papercusp-desktop.exe" "src-tauri\target\release\papercusp-desktop-GUI.exe"
+PSEXE
+else
+echo 'Invoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"'
+fi )
+${SERVER_BUILD_BLOCK}
+EOF
+"${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
+rm -f "$BUILD_PS1"
+
+# ── Whole-leg build timeout (EI-12902) — MAC PARITY ──────────────────────────
+# The mac leg bounds its remote build under PAPERCUSP_MAC_BUILD_TIMEOUT_SEC; the
+# windows leg had NO bound at all. Its only limits were the ssh keepalives
+# (ConnectTimeout / ServerAliveInterval / ServerAliveCountMax above), which prove
+# the VM's sshd still ANSWERS — NOT that the build is PROGRESSING. So a build that
+# wedges behind a network-alive VM (a deadlocked/spinning ISCC, a full disk, a
+# stuck MSVC child) hung this blocking ssh FOREVER — and because release-local.sh's
+# join_leg does a bare `wait "$pid"`, the ENTIRE cut hung with it: no watchdog, no
+# diagnostic, no exit code.
+#
+# This is a WALL-CLOCK BACKSTOP, deliberately sized ABOVE a healthy build — NOT a
+# tight bound. A real win leg legitimately runs LONG: measured on the 0.0.11 cut,
+# GUI ISCC alone took 2,557s (42.6 min) packaging the ~4GB raw-stored seed, plus a
+# comparable Server ISCC and two Rust builds ⇒ ~5,000-6,000s+ end to end. A naive
+# small timeout would FALSELY KILL good builds (worse than a hang — a hang is at
+# least honest), so the default is 10800s (3h), well clear of the measured cost and
+# env-tunable. On timeout we do NOT re-invoke (a re-run doubles the wall clock, it
+# does not save it — same D-005 reasoning as the mac leg): we fail with a named
+# error + a tail of the leg log and leave the VM build running for inspection.
+# (A progress-based SILENCE detector would be the better long-term shape, but it
+# needs the remote ISCC output to STREAM instead of block-buffer for ~42 min on the
+# VM — a larger change; this backstop closes the infinite-hang gap safely meanwhile.)
+WIN_BUILD_TIMEOUT_SEC="${PAPERCUSP_WIN_BUILD_TIMEOUT_SEC:-10800}"
+echo "==> building (this holds the ssh session; first build ~15-25 min; hard cap ${WIN_BUILD_TIMEOUT_SEC}s)"
+# 2>&1 BEFORE the pipe: cargo + tauri-cli print progress (including the
+# load-bearing "Finished 1 bundle at:" line) to STDERR, which ssh carries on
+# its own stderr channel — without the merge it bypasses tee and the
+# assertions below see an empty log (bit the first uninterrupted run live,
+# 2026-06-11: bundle finished, lane reported "produced no bundle").
+# `timeout` wraps the ssh (the left side of the pipe). On expiry it SIGTERMs the
+# LOCAL ssh (SIGKILL 30s later if it will not die); with no -t the signal is NOT
+# propagated to the VM, so the remote build keeps running for inspection — exactly
+# what we want. PIPESTATUS[0] is timeout's/ssh's rc (124/137 on expiry), not tee's.
+set +e
+timeout --signal=TERM --kill-after=30s "$WIN_BUILD_TIMEOUT_SEC" \
+  "${SSH[@]}" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\vm-release-build.ps1' \
+  2>&1 | tee /tmp/vm-release-build.log
+build_ssh_rc="${PIPESTATUS[0]}"
+set -e
+if [[ "$build_ssh_rc" == "124" || "$build_ssh_rc" == "137" ]]; then
+  echo "" >&2
+  echo "ERROR: Windows build exceeded the ${WIN_BUILD_TIMEOUT_SEC}s hard cap (EI-12902) — the local ssh was terminated, but the build MAY STILL BE RUNNING on the VM (inspect it there before assuming it is dead). NOT re-invoking (a re-run doubles the wall clock, it does not save it). If a legitimately larger build needs more time, raise PAPERCUSP_WIN_BUILD_TIMEOUT_SEC; otherwise investigate the VM (wedged ISCC/MSVC, full disk). Tail of the leg log:" >&2
+  tail -40 /tmp/vm-release-build.log 2>/dev/null | sed 's/^/  [win-vm] /' >&2 || true
+  exit 124
+elif [[ "$build_ssh_rc" != "0" ]]; then
+  # Preserve the prior `set -e | pipefail` behavior: a nonzero build ssh (an in-VM
+  # Assert-ReleaseHostBaked `exit 1`, or an ssh transport failure) fails the leg
+  # exactly as before, so the grep assertions below are reached only on a clean
+  # ssh exit.
+  echo "ERROR: Windows build ssh exited $build_ssh_rc — see /tmp/vm-release-build.log" >&2
+  exit "$build_ssh_rc"
+fi
+# Per-step exit assertions. The cargo compile AND the Inno packaging of each
+# built role must both report EXIT=0 (with --no-bundle there is no in-VM
+# updater signing, so the old "expected keyless exit 1" allowance is gone —
+# any nonzero step is a real failure).
+grep -q '\[build\] GUI EXIT=0' /tmp/vm-release-build.log \
+  || fail "GUI compile failed — see /tmp/vm-release-build.log"
+grep -q '\[build\] ISCC GUI EXIT=0' /tmp/vm-release-build.log \
+  || fail "GUI Inno packaging failed (ISCC nonzero/missing — winget install --id JRSoftware.InnoSetup on the VM if absent) — see /tmp/vm-release-build.log"
+if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+  grep -q '\[build\] Server EXIT=0' /tmp/vm-release-build.log \
+    || fail "Server compile failed — see /tmp/vm-release-build.log"
+  grep -q '\[build\] ISCC Server EXIT=0' /tmp/vm-release-build.log \
+    || fail "Server Inno packaging failed — see /tmp/vm-release-build.log"
+fi
+
+if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+  echo "==> collecting exe-only artifact(s)"
+  OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/exe-only"
+  mkdir -p "$OUT_DIR"
+  find "$OUT_DIR" -maxdepth 1 -type f -delete
+  VM_RELEASE_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release"
+  COLLECTED=()
+  "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-GUI.exe" "$OUT_DIR/papercusp-desktop-GUI.exe" \
+    && COLLECTED+=(GUI:"$OUT_DIR/papercusp-desktop-GUI.exe")
+  if ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+    "${SCP[@]}" "$VM_SSH_HOST":"$VM_RELEASE_DIR/papercusp-desktop-Server.exe" "$OUT_DIR/papercusp-desktop-Server.exe" \
+      && COLLECTED+=(Server:"$OUT_DIR/papercusp-desktop-Server.exe")
+  fi
+  [[ ${#COLLECTED[@]} -gt 0 ]] || fail "PAPERCUSP_EXE_ONLY=1 but no papercusp-desktop-*.exe came back from the VM"
+  ls -lh "$OUT_DIR"
+
+  if [[ -n "$EXE_ONLY_DEPLOY_HOST" ]]; then
+    DEPLOY_SSH=(ssh -i "$EXE_ONLY_DEPLOY_KEY" -o IdentitiesOnly=yes -p "$EXE_ONLY_DEPLOY_PORT" -o ConnectTimeout=10 "$EXE_ONLY_DEPLOY_HOST")
+    DEPLOY_SCP=(scp -i "$EXE_ONLY_DEPLOY_KEY" -o IdentitiesOnly=yes -P "$EXE_ONLY_DEPLOY_PORT" -o ConnectTimeout=10)
+    # Deploy the FIRST collected role (GUI, unless GUI-only skipped it and only
+    # Server built) — set PAPERCUSP_FAST_ITER_GUI_ONLY=1 alongside this to be
+    # explicit about which role's exe is going out when both were built.
+    DEPLOY_LOCAL="${COLLECTED[0]#*:}"
+    echo "==> EXE_ONLY deploy: pushing $(basename "$DEPLOY_LOCAL") to $EXE_ONLY_DEPLOY_HOST:$EXE_ONLY_DEPLOY_PATH"
+    # Best-effort stop: an in-use exe can't be overwritten on Windows. Ignore
+    # failure (process may not be running, or may be named differently).
+    "${DEPLOY_SSH[@]}" 'taskkill /IM papercusp-desktop.exe /F' >/dev/null 2>&1 || true
+    sleep 2
+    "${DEPLOY_SCP[@]}" "$DEPLOY_LOCAL" "$EXE_ONLY_DEPLOY_HOST":"$EXE_ONLY_DEPLOY_PATH" \
+      || fail "EXE_ONLY deploy: scp to $EXE_ONLY_DEPLOY_HOST:$EXE_ONLY_DEPLOY_PATH failed"
+    echo "==> EXE_ONLY deploy: done — app is STOPPED on $EXE_ONLY_DEPLOY_HOST; relaunch it yourself"
+  else
+    echo "==> EXE_ONLY: no PAPERCUSP_EXE_ONLY_DEPLOY_HOST set — exe(s) left in $OUT_DIR for a manual Copy-Item -Force"
+  fi
+  echo "==> done (exe-only)"
+  exit 0
+fi
+
+echo "==> collecting artifacts"
+OUT_DIR="$ROOT/src-tauri/target/windows-vm/bundle/inno"
+mkdir -p "$OUT_DIR"
+# files only — the dir may hold archived prev-version subdirs (e.g.
+# prev-0.0.1/ for the future updater E2E); `rm -f dir/*` dies on them
+# under set -e (bit the first uninterrupted run, 2026-06-12)
+find "$OUT_DIR" -maxdepth 1 -type f -delete
+INNO_VM_DIR="C:/Users/user/$VM_BUILD_DIR/papercusp-desktop/src-tauri/target/release/bundle/inno"
+# Read one filename per line — a `for name in $(...)` word-SPLITS the space in
+# the GUI/Server split's productNames ("Papercusp GUI_..-setup.exe") and scp's a
+# truncated ".../Papercusp" path (No such file), silently collecting NOTHING
+# (2026-07-02 parity fix). scp uses the SFTP protocol (OpenSSH 9+), which passes
+# the spaced remote path literally, so no extra remote-shell quoting is needed.
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  "${SCP[@]}" "$VM_SSH_HOST":"$INNO_VM_DIR/$name" "$OUT_DIR/$name"
+done < <("${SSH[@]}" "cmd /c dir /b \"C:\\Users\\user\\$VM_BUILD_DIR\\papercusp-desktop\\src-tauri\\target\\release\\bundle\\inno\"" | tr -d '\r\0')
+
+# Ground-truth size check: Inno's single-exe limit is ~4GB. Warn near it.
+# (A source-bundled Server build spans instead — its setup.exe is a small stub
+# and never trips this; the payload lives in the *.bin slices asserted below.)
+for f in "$OUT_DIR"/*-setup.exe; do
+  [[ -e "$f" ]] || continue
+  size=$(stat -c%s "$f")
+  if (( size > 4290772992 )); then
+    fail "$(basename "$f") is $((size / 1024 / 1024))MB — exceeds Inno's ~4GB single-exe max; the payload must shrink or move to DiskSpanning (WI-3172)"
+  elif (( size > 3900000000 )); then
+    echo "WARN: $(basename "$f") is $((size / 1024 / 1024))MB — within ~10% of Inno's ~4GB single-exe max (WI-3172)" >&2
+  fi
+done
+
+# Source-bundled build (WI-3306/WI-3308): DiskSpanning must actually have
+# engaged — the Server payload comes back as setup.exe + setup-*.bin slices.
+# No slices means source.tar.zst never reached the VM build tree (the .iss
+# FileExists gate saw nothing) and the "5-button" build silently shipped
+# 3-button; fail loudly instead. Install note: run the Server setup.exe from
+# the collected dir (or the VM's inno dir) so the .bin slices sit next to it.
+if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]] && ! grep -q 'FAST_ITER GUI-only' /tmp/vm-release-build.log; then
+  compgen -G "$OUT_DIR/*Server*-setup-*.bin" > /dev/null \
+    || fail "PAPERCUSP_STAGE_SOURCE=1 but no Server setup-*.bin slices came back — DiskSpanning didn't engage (source.tar.zst missing from the VM build tree?)"
+fi
+
+echo "==> signing updater artifacts (host-side)"
+# The GUI/Server split emits TWO *-setup.exe — sign BOTH. The old `head -1` left
+# the Server bundle's updater artifact unsigned (2026-07-02 parity fix).
+shopt -s nullglob
+SETUP_EXES=("$OUT_DIR"/*-setup.exe)
+shopt -u nullglob
+[[ ${#SETUP_EXES[@]} -gt 0 ]] || fail "no *-setup.exe came back from the VM"
+for SETUP_EXE in "${SETUP_EXES[@]}"; do
+  echo "  signing: $(basename "$SETUP_EXE")"
+  # release-local.sh exports TAURI_SIGNING_PRIVATE_KEY (tauri reads it as
+  # --private-key); a newer tauri CLI HARD-REJECTS it alongside --private-key-path
+  # ("cannot be used with"). Strip both signing env vars for this call so ONLY the
+  # explicit --private-key-path is seen (2026-07-08 fix; broke the 0.0.3-alpha win leg).
+  (cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
+    npx tauri signer sign \
+    --private-key-path "$KEY_FILE" \
+    --password "$KEY_PASSWORD" \
+    "$SETUP_EXE")
+  [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
+done
+
+# EI-8914 / P-002: emit provenance via the SHARED bin/emit-build-provenance.sh
+# — one emitter, one JSON schema across all three legs (was an inline duplicate
+# here). The Windows-only fields pass through the PROVENANCE_* env seam:
+#   * packedSrcFingerprint — a hash of the exact tree we packed to the VM (this
+#     leg's strongest anti-LABELED!=PACKED signal; mac/linux don't have it).
+#   * signed — whether Authenticode signing was configured.
+# gitHead/gitDirty now come from the shared emitter over PROVENANCE_GIT_ROOT=$ROOT
+# (whole papercusp-desktop tree, vs the old src-tauri-only diff — strictly more
+# honest, since the packed sidecar comes from outside src-tauri). This leg only
+# ever runs a FRESH build (release-local's REUSE_WIN path skips it), so reused=false.
+# WI-4243: enumerate EVERY distributable — the setup.exe stubs AND the Inno
+# DiskSpanning *-setup-*.bin payload slices (0.0.8 shipped the Server payload
+# in two unhashed .bins; the owner handoff needed manual sha256s). nullglob so
+# a GUI-only build (no slices) passes a clean list.
+shopt -s nullglob
+PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
+shopt -u nullglob
+PROVENANCE_GIT_ROOT="$ROOT" \
+PROVENANCE_PACKED_SRC_FINGERPRINT="${PACKED_FP:-unknown}" \
+PROVENANCE_SIGNED="$([[ -n "${WINDOWS_CERT_BASE64:-}${WINDOWS_SIGN_COMMAND:-}" ]] && echo true || echo false)" \
+  bash "$ROOT/bin/emit-build-provenance.sh" \
+    "$OUT_DIR" \
+    "${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo unknown)}" \
+    "${PAPERCUSP_BUILD_SHA}" \
+    false \
+    "${PROV_ARTIFACTS[@]}"
+
+ls -lh "$OUT_DIR"
+echo "==> done — artifacts in $OUT_DIR"
+exit 0
+
+}  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──
+Write-Host "[build] npm install"\nnpm install --no-audit --no-fund 2>&1'
+fi
+
+# WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
+# by a persistent %USERPROFILE%\.cache\sccache on THIS VM — UNCONDITIONAL now
+# (previously only wired under PAPERCUSP_FAST_ITER=1, and only best-effort if
+# already installed — that missed exactly the "clean checkout" case this WI
+# asks for, since a clean extract has no persisted target/ to fall back on).
+# Ensure-Sccache installs a static binary into %USERPROFILE%\.local\bin if
+# sccache isn't already on PATH (winget/choco aren't guaranteed provisioned on
+# this VM — a direct GitHub-release download needs neither). Best-effort
+# throughout — sccache absent/uninstallable just skips RUSTC_WRAPPER, exactly
+# like before this existed; never fails the build. ASCII ONLY (see the
+# NPM_INSTALL_BLOCK comment above — the same CP-1252 mis-decode trap applies
+# to every PS1-bound heredoc value in this script).
+# shellcheck disable=SC2016  # PS $-syntax, not bash — must stay unexpanded
+SCCACHE_PRELUDE=$(cat <<'PS1BLOCK'
+function Ensure-Sccache {
+  $sccacheVer = "0.16.0"
+  $sccacheCmd = Get-Command sccache -ErrorAction SilentlyContinue
+  $localBin = Join-Path $env:USERPROFILE ".local\bin"
+  if (-not $sccacheCmd -and (Test-Path (Join-Path $localBin "sccache.exe"))) {
+    $env:Path = "$localBin;$env:Path"
+    $sccacheCmd = Get-Command sccache -ErrorAction SilentlyContinue
+  }
+  if (-not $sccacheCmd) {
+    Write-Host "[build] sccache: not on PATH - installing v$sccacheVer into $localBin (WI-5083)"
+    try {
+      New-Item -ItemType Directory -Force $localBin | Out-Null
+      $zip = Join-Path $env:TEMP "sccache-dl.zip"
+      $extractDir = Join-Path $env:TEMP "sccache-extract"
+      $url = "https://github.com/mozilla/sccache/releases/download/v$sccacheVer/sccache-v$sccacheVer-x86_64-pc-windows-msvc.zip"
+      Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+      Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+      $exe = Get-ChildItem -Path $extractDir -Filter sccache.exe -Recurse | Select-Object -First 1
+      if ($exe) {
+        Copy-Item -Force $exe.FullName (Join-Path $localBin "sccache.exe")
+        $env:Path = "$localBin;$env:Path"
+        $sccacheCmd = Get-Command sccache -ErrorAction SilentlyContinue
+      }
+      Remove-Item -Force $zip -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+    } catch {
+      Write-Host "[build] WARN sccache install failed ($_) - continuing without RUSTC_WRAPPER"
+    }
+  }
+  if ($sccacheCmd) {
+    $env:RUSTC_WRAPPER = "sccache"
+    $env:SCCACHE_DIR = Join-Path $env:USERPROFILE ".cache\sccache"
+    # Smaller cap than the dev-box default (30G): this VM's C: is chronically
+    # tight (see the disk-preflight/reclaim logic elsewhere in this script).
+    $env:SCCACHE_CACHE_SIZE = "10G"
+    # sccache + cargo's own incremental cache fight over the same job — see
+    # lib/sccache.sh (the bash-side twin of this function) for the rationale.
+    $env:CARGO_INCREMENTAL = "0"
+    New-Item -ItemType Directory -Force $env:SCCACHE_DIR | Out-Null
+    Write-Host "[build] sccache: RUSTC_WRAPPER=$env:RUSTC_WRAPPER SCCACHE_DIR=$env:SCCACHE_DIR SCCACHE_CACHE_SIZE=$env:SCCACHE_CACHE_SIZE"
+  } else {
+    Write-Host "[build] sccache: unavailable - building without RUSTC_WRAPPER (WI-5083 benefit skipped this run)"
+  }
+}
+Ensure-Sccache
+PS1BLOCK
+)
 # Server bundle: built by DEFAULT even in FAST_ITER — the live operator on an
 # installed box runs from the SERVER install's sidecar, so any sidecar/SPA/TS
 # change MUST ship a fresh Server setup.exe (skipping it silently verifies a

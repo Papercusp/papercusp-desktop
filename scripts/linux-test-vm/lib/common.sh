@@ -114,9 +114,12 @@ vm_running() {  # vm_running <name>
 # Search BOTH locations + BOTH name shapes, newest wins.
 default_deb() {
   local deb
+  # This is the GUI desktop VM. The same bundle directory also contains a
+  # newer-looking "Papercusp Server_*.deb" on some release cuts; a broad
+  # newest-file glob silently installed that different product here.
   deb="$(ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
                "${CARGO_TARGET_DIR:-$HOME/.cargo-target}"/release/bundle/deb/Papercusp*_amd64.deb \
-               2>/dev/null | head -1)"
+               2>/dev/null | grep -v '/Papercusp Server_' | head -1)"
   [ -n "$deb" ] && _warn_if_deb_stale "$deb"
   printf '%s\n' "$deb"
 }
