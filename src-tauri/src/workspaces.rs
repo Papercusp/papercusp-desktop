@@ -469,14 +469,24 @@ mod tests {
     // DEFAULT_COORD_WORKSPACE — the p2p/allotment layer's coordination-shared
     // partition sentinel (WI-1564) that fail-closes with `workspace_unresolved`
     // on exactly that string. That made every fresh install permanently unable
-    // to complete a p2p seat_offer/spawn_request. These guard the fix: a fresh
+    // to complete a p2p seat_offer/spawn_request. This guards the fix: a fresh
     // `ensure_initialized()` must mint a real, unique, non-"default" id while
     // keeping the "Default" display name and the migration behavior.
+    //
+    // Both scenarios (fresh mint + legacy-dir migration) live in ONE test
+    // function deliberately: `ensure_initialized()` reads/writes the process-
+    // global `HOME` env var, and `cargo test` runs test fns on separate
+    // threads within the SAME process by default — two tests mutating `HOME`
+    // concurrently is a real, observed race (each can read the other's HOME),
+    // not a hypothetical one. Keeping them sequential in one fn is the fix;
+    // splitting them back out later needs a shared cross-test HOME lock (see
+    // the equivalent isolation note on main.rs's pending-route test).
     #[test]
-    fn ensure_initialized_mints_a_real_non_default_id_on_fresh_install() {
+    fn ensure_initialized_mints_a_real_non_default_id_and_migrates_legacy_dir() {
         // Isolate HOME so the test writes to a temp dir, never the real
-        // workspaces root. SAFETY: single-threaded unit test; no concurrent
-        // env access (same convention as main.rs's HOME-isolated tests).
+        // workspaces root. SAFETY: this whole scenario runs sequentially in
+        // one thread, so there is no concurrent mutation of HOME from within
+        // this test (see the race note above for why it must stay merged).
         let tmp = std::env::temp_dir().join(format!("pcusp-ws-fresh-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
@@ -515,22 +525,21 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&tmp);
-    }
 
-    #[test]
-    fn ensure_initialized_migrates_legacy_papercusp_into_the_minted_workspace_dir() {
-        let tmp = std::env::temp_dir().join(format!("pcusp-ws-legacy-migrate-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
+        // --- Legacy-migration scenario: a SEPARATE fresh HOME, still isolated
+        // from the first scenario above (which already restored/cleaned up). ---
+        let tmp2 = std::env::temp_dir().join(format!("pcusp-ws-legacy-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp2);
+        fs::create_dir_all(&tmp2).unwrap();
         // Pre-seed a legacy ~/.papercusp with a marker file, as a real upgrading
         // install would have.
-        let legacy = tmp.join(".papercusp");
+        let legacy = tmp2.join(".papercusp");
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("marker.txt"), b"legacy-state").unwrap();
 
-        let prev_home = std::env::var_os("HOME");
+        let prev_home2 = std::env::var_os("HOME");
         unsafe {
-            std::env::set_var("HOME", &tmp);
+            std::env::set_var("HOME", &tmp2);
         }
 
         let reg = ensure_initialized().expect("ensure_initialized should succeed");
@@ -544,11 +553,11 @@ mod tests {
         assert!(!legacy.exists(), "legacy dir should be moved (renamed), not copied");
 
         unsafe {
-            match prev_home {
+            match prev_home2 {
                 Some(h) => std::env::set_var("HOME", h),
                 None => std::env::remove_var("HOME"),
             }
         }
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&tmp2);
     }
 }
