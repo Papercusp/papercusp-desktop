@@ -11,6 +11,7 @@
     "dev:preview": "bin/desktop-preview-prod",
     "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "test:release-artifacts": "bash bin/lib/release-artifacts.selftest.sh",
+    "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:updater-e2e-vm": "node --test test/updater-e2e-vm.test.js",
     "test:federation:live-matrix": "bash bin/deb-hetzner-matrix.sh",
     "test:rust": "node ../scripts/report-cargo-tests.mjs --manifest-path papercusp-desktop/src-tauri/Cargo.toml",

@@ -1828,7 +1828,11 @@ mkdir -p "$SIDECAR_DIR/bin"
 # uses; empty string on failure → the standard in-crate paths below still match).
 CARGO_TGT="$(cd "$REPO/apps/tui" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
 # 1. pui (apps/tui) — native release build for the host triple.
-( cd "$REPO/apps/tui" && cargo build --release )
+# Close the sidecar lock fd in the cargo subtree. RUSTC_WRAPPER may start the
+# long-lived sccache server; if that daemon inherits fd 9 it keeps the flock
+# alive after this builder exits and wedges stage-source-tree forever. The
+# parent shell still owns fd 9, so the lock remains held for this whole build.
+( exec 9>&-; cd "$REPO/apps/tui" && cargo build --release )
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
 # `set -eo pipefail` a missing path arg makes find non-zero → exit). The resolved
 # CARGO_TGT comes first (covers the target-dir redirect); then the standard
@@ -1842,7 +1846,7 @@ cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 # 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
+( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
 WASM=""
 for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
   [[ -f "$_c" ]] && WASM="$_c" && break
