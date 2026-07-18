@@ -61,17 +61,21 @@
 # This lib does NOT call rig_cleanup directly and never decides overall pass/fail —
 # the scenario owns its exit code (behavior parity with the pre-refactor rigs).
 
-# ── re-source guard (WI-5380) ─────────────────────────────────────────────────
-# This lib holds LIVE rig state (RIG_FRAMES/FRAME_*), so loading must be
-# idempotent: a second `source` in the same shell must never reinitialize it.
-# Without this guard, `RIG_FRAMES=()` below re-ran on every re-source — and the
-# matrix DOES re-source transitively AFTER provision (source_scenarios → scenario
-# shims b5/b6/b7/b8/reconnect_catchup → the standalone deb-hetzner-*.sh rigs →
-# this lib). FRAME_IP survived (`declare -gA` never clears an existing array), so
-# every scenario kept working by frame name while rig_bank_logs iterated an EMPTY
-# RIG_FRAMES and silently banked zero serve-*.log for every matrix run.
-if [ -n "${__RIG_LIB_SOURCED:-}" ]; then return 0; fi
-declare -g __RIG_LIB_SOURCED=1
+# ── re-source guard (WI-5380, NARROWED after the 2026-07-18 orders-10-30 red) ──
+# This lib holds LIVE rig state (RIG_FRAMES/FRAME_*), so a re-source must never
+# REINITIALIZE that state — but it MUST still re-run the declares and function
+# definitions. v1 of this guard `return 0`ed out of the whole lib on re-source;
+# that broke every 00-base bidir probe from the 12:21 gate run onward (orders
+# 10-30 RED, psql "Connection refused", runs 122147/142153/162155): the matrix
+# re-sources transitively (source_scenarios → scenario shims b5/b6/b7/b8/
+# reconnect_catchup → the standalone deb-hetzner-*.sh rigs → this lib), the
+# standalone rigs override shared functions/vars for THEIR local-lane topology,
+# and the full re-source of THIS lib at the end of that chain was what restored
+# the matrix's definitions. Skipping the whole lib left the standalone overrides
+# live. So: guard ONLY the destructive state resets (RIG_FRAMES / the quota lock
+# id — WI-5380's actual bug was the RIG_FRAMES wipe that made rig_bank_logs bank
+# zero serve-*.log) and let everything else re-run. `declare -gA/-ga` never
+# clears an existing array, so re-running the declares is safe.
 
 # ── globals (declared once; safe under set -u) ────────────────────────────────
 declare -gA FRAME_ID FRAME_IP FRAME_USER FRAME_TOKEN FRAME_MEMBER_SLUG
@@ -80,7 +84,12 @@ declare -g RIG_TOKEN RIG_SSH_KEY_ID RIG_SSH_IDENTITY
 declare -g RIG_STYPE RIG_IMAGE RIG_HONO_PORT RIG_PG_PORT
 declare -g RIG_WORK RIG_PKG RIG_SLUG RIG_SERVERS_FILE RIG_KEEP_UP
 declare -g RIG_HIVE_ID RIG_HIVE_PUBKEY RIG_HIVE_LINK RIG_REPO_URL
-RIG_FRAMES=()
+declare -g RIG_QUOTA_LOCK_ID
+if [ -z "${__RIG_LIB_SOURCED:-}" ]; then
+  RIG_FRAMES=()
+  RIG_QUOTA_LOCK_ID=""
+fi
+declare -g __RIG_LIB_SOURCED=1
 RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
 
 # ── rig_init [STYPE] [IMAGE] ──────────────────────────────────────────────────
@@ -328,7 +337,8 @@ rig_install_exit_trap() { trap rig_cleanup EXIT; }
 # liveness backstop: even a hard-killed holder's lease lapses on its own
 # rather than leaving a phantom hold forever.
 RIG_QUOTA_RESOURCE="ops/hetzner-federation-quota"
-RIG_QUOTA_LOCK_ID=""
+# RIG_QUOTA_LOCK_ID is initialized in the re-source-guarded state block at the
+# top of this lib — a bare reset here would wipe a HELD lock id on re-source.
 OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp}"
 
 # rig_mcp_call <tool-name> <json-args> → echoes the raw JSON-RPC response.
