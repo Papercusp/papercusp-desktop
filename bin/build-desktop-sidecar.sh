@@ -1992,9 +1992,10 @@ fi
 # vector.dylib — kill it wholesale).
 chmod -R u+w "$SIDECAR_DIR"
 
-# NB: plain `mv src dst` (no GNU-only -T) — both renames have a
-# guaranteed-absent destination, so BSD/macOS mv does the same rename(2)
-# and never falls into move-INTO-directory mode.
+# NB: plain `mv src dst` (no GNU-only -T; BSD/macOS mv lacks it) — safe ONLY
+# while the destination is absent; if it exists, mv falls into
+# move-INTO-directory mode. The publish below re-checks for that (see the
+# squatter guard) because "absent" is NOT guaranteed under concurrency.
 OLD_DIR="$SIDECAR_FINAL_DIR.old.$$"
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
   mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"
@@ -2056,7 +2057,30 @@ _stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || ech
 } > "$SIDECAR_TMP_DIR/.sidecar-build-stamp"
 echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, P-004)"
 
+# EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
+# NOT guaranteed absent here — a concurrent bare `cargo build` (tauri-dev
+# shells don't go through cargo-build-safe.sh) can run build.rs in the long
+# window since the OLD_DIR rename (overlay cp + two sha256 stamps) and
+# recreate $SIDECAR_FINAL_DIR as a placeholder skeleton. Plain mv then
+# publishes sidecar/sidecar.tmp.<pid>/ NESTED inside it — a silently-corrupt
+# tree the federation gate repacked into a .deb and burned a content-matrix
+# RED on. Portable guard: evict a squatter just before the rename, then
+# verify the publish landed flat and repair the nested shape if the race
+# re-fired inside the tiny check→mv gap.
+if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
+  echo "→ WARN: $SIDECAR_FINAL_DIR reappeared mid-publish (concurrent cargo build.rs placeholder) — evicting squatter before the publish rename"
+  rm -rf "$SIDECAR_FINAL_DIR"
+fi
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
+_tmp_base="$(basename "$SIDECAR_TMP_DIR")"
+if [[ ! -f "$SIDECAR_FINAL_DIR/serve.mjs" && -d "$SIDECAR_FINAL_DIR/$_tmp_base" ]]; then
+  _squat_dir="$SIDECAR_FINAL_DIR.squat.$$"
+  mv "$SIDECAR_FINAL_DIR" "$_squat_dir"
+  mv "$_squat_dir/$_tmp_base" "$SIDECAR_FINAL_DIR"
+  rm -rf "$_squat_dir"
+  echo "→ repaired nested publish (a squatter raced the final rename)"
+fi
+[[ -f "$SIDECAR_FINAL_DIR/serve.mjs" ]] || { echo "FATAL: published sidecar has no serve.mjs — publish corrupted, refusing to report success" >&2; exit 1; }
 rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 

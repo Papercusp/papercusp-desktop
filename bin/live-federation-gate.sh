@@ -317,6 +317,16 @@ if [ -z "${GATE_DEB:-}" ]; then
   # build while the mechanism was in fact present (bundle carries the symbol 3x).
   grep -qa 'grantEpochKeysToMembers' "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" 2>/dev/null \
     || log "WARN: fresh serve.mjs lacks the Seam-2 grantEpochKeysToMembers symbol — re-key legs may false-RED."
+  # 2026-07-18 (run 20260718-000508): a nested sidecar publish (concurrent cargo
+  # build.rs placeholder squatted src-tauri/sidecar mid-swap; the bundler's mv then
+  # published sidecar/sidecar.tmp.<pid>/) shipped a serve.mjs-less sidecar into the
+  # gate deb — the smoke died 7 min in on luxon injection and the run burned a
+  # content-matrix RED on pure build corruption. Refuse to repack a tree that is
+  # obviously not a sidecar bundle: that is a BUILD red, not a matrix red.
+  if [ "$FAIL_BUILD" != 1 ] && [ ! -f "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" ]; then
+    FAIL_BUILD=1
+    log "BUILD FAILED — src-tauri/sidecar has no serve.mjs (nested sidecar.tmp.* publish?) — refusing to repack a corrupt sidecar tree"
+  fi
   if [ "$SKIP_MATRIX" != 1 ] && [ "$FAIL_BUILD" != 1 ]; then
     CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
     BASE_DEB="$(ls -t \
@@ -467,22 +477,13 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
     else
       MATRIXFULL_RES="FAIL"
-      # WI-2381 carve-out (mirrors content-matrix's PASS-971): seat_offer + spawn_request are
-      # DOCUMENTED known-red on the live rig (WI-2381, open since 2026-07-04 — the 'default'
-      # workspace refuses the seat allotment, and the cross-frame substrate apply breaks under
-      # a concrete workspace; triaged as a dedicated rig investigation). If a COMPLETED run
-      # (final scoreboard present — a killed/truncated run never prints it) failed ONLY on that
-      # documented set, downgrade to PASS-2381 so the leg still catches NEW scenario regressions
-      # without permanently blocking gate green. Loudly NOT a clean pass.
-      if grep -q 'LIVE FEDERATION MATRIX' "$WORK/local-matrix.out" && grep -q '^OVERALL: FAIL' "$WORK/local-matrix.out"; then
-        MX_FAILED="$(awk '/LIVE FEDERATION MATRIX/{t=1} t && $1=="FAIL"{print $2}' "$WORK/local-matrix.out" | sort -u)"
-        MX_UNEXPECTED="$(printf '%s\n' "$MX_FAILED" | grep -vE '^(seat_offer|spawn_request)$' || true)"
-        if [ -n "$MX_FAILED" ] && [ -z "$MX_UNEXPECTED" ]; then
-          MATRIXFULL_RES="PASS-2381"
-          echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
-          log "local-matrix FAIL downgraded → PASS-2381: all failing scenarios ($(printf '%s' "$MX_FAILED" | tr '\n' ' ')) are the documented WI-2381 known-red set. NOT a clean pass."
-        fi
-      fi
+      # WI-2381 carve-out RETIRED 2026-07-18 [self, WI-5137/P-402]: the seat_offer/
+      # spawn_request known-red was root-caused to RIG_WORKSPACE_ID never being set on
+      # headless frames (serve.mjs-only boot skips the Rust workspace-id mint), and
+      # deb-hetzner-rig.sh now mints a default — those legs are expected GREEN on a
+      # freshly-provisioned rig. Any local-matrix FAIL therefore stays FAIL: first-green
+      # must be a FULL pass, and the old PASS-2381 downgrade both stamped
+      # last-matrix-green and let the gate report green with the seat legs unproven.
     fi
     log "local-matrix → $MATRIXFULL_RES"
   fi
