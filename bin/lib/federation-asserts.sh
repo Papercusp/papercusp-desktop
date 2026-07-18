@@ -587,9 +587,28 @@ EOF
 # helpers below (create-from-repo → discover → join-hive). See vm-federation.sh §9
 # and two-instance-hive-from-repo-smoke.sh.
 
+# ⛔ Runtime fail-fast (EI-680): the wires below 404 on every current build. A rig
+# that drives them joins NO swarm topic and every later federation assert times
+# out — masquerading as a federation regression. Die at the choke point instead
+# of letting the 404 propagate as a bogus FAIL.
+_fed_retired_share_die() {
+  cat >&2 <<'EOF'
+✗ RETIRED WIRE (fail-fast, EI-680): the per-harness share endpoints
+  (/api/harness/projects + /api/harness/<slug>/share/finalize) were retired
+  2026-06-11 (comb-retire-per-harness-sharing → the HIVE model) and 404 on
+  current builds — driving them sets up NO hive/swarm topic, so every later
+  federation assert times out looking like a federation regression.
+  Use the CURRENT-flow helpers: fed_hive_create_from_repo → fed_hive_dir_row →
+  fed_hive_join (see vm-federation.sh §9 / two-instance-hive-from-repo-smoke.sh).
+  Delete this guard only if the per-harness wire is deliberately resurrected.
+EOF
+  exit 64
+}
+
 # fed_register_project <inst> <slug> <parent_dir> <folder>  [RETIRED — see above]
 # Register a harness project (the share endpoint needs a registered harness).
 fed_register_project() {
+  _fed_retired_share_die
   local inst="$1" slug="$2" parent="$3" folder="$4"
   drv_exec "$inst" <<EOF >/dev/null
 curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/projects" \
@@ -601,6 +620,7 @@ EOF
 # fed_share_finalize <inst> <slug> <state_json> — POST share/finalize; echoes
 # the interesting response fragments (bindingPublished / state).
 fed_share_finalize() {
+  _fed_retired_share_die
   local inst="$1" slug="$2" state_json="$3"
   drv_exec "$inst" <<EOF
 curl -s -m 90 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/$slug/share/finalize" \
