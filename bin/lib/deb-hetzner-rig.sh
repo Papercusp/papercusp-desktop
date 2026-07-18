@@ -475,7 +475,26 @@ INSTEOF
   rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
-pkill -u pcusp -f 'serve.mjs --ensure' 2>/dev/null || true; sleep 1
+# WI-183 class, seen LIVE on a --reuse relaunch (2026-07-17, frame b): a reused frame
+# still runs the PREVIOUS run's serve + embedded-PG children, and postgres OUTLIVES
+# serve (PARENT_DEATH_WATCH=0) — a serve-only pkill + fixed 1s grace leaves live PG
+# writing WAL while rm -rf empties pgdata → 'pg_wal: Directory not empty' aborts the
+# launch. Same actually-exited discipline as the restart path below: kill BOTH, WAIT
+# until each has exited (escalate to SIGKILL once), reap orphan SysV shm, THEN wipe.
+pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true
+for i in $(seq 1 15); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
+if pgrep -u pcusp -f 'serve.mjs' >/dev/null; then
+  pkill -9 -u pcusp -f 'serve.mjs' 2>/dev/null || true
+  for i in $(seq 1 10); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
+fi
+pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true
+for i in $(seq 1 20); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
+if pgrep -u pcusp -f 'bin/postgres' >/dev/null; then
+  pkill -9 -u pcusp -f 'bin/postgres' 2>/dev/null || true
+  for i in $(seq 1 10); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
+fi
+for id in $(ipcs -m 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -m "$id" 2>/dev/null || true; done
+for id in $(ipcs -s 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -s "$id" 2>/dev/null || true; done
 rm -rf "$H/pgdata" "$H/.papercusp" "$H/.papercusp-workspaces"; mkdir -p "$H/pgdata" "$H/fed"
 SIDE="${SIDE_DIR:-/usr/lib/Papercusp/sidecar}"
 set -a; . "$H/fed.env"; set +a
