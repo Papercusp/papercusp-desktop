@@ -24,7 +24,7 @@
 # streamable-HTTP single-shot). $1=inst $2=tool $3=json-args.
 _fdir_mcp_call() {
   local inst="$1" tool="$2" args="$3" ws
-  ws="$(drv_psql "$inst" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
+  ws="$(drv_psql "$inst" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
   rig_pcusp_run "$inst" <<EOS
 # Read-or-generate the sidecar superuser token (rig_ban_member precedent: the
 # sidecar re-reads the file per request, so a fresh write is honored).

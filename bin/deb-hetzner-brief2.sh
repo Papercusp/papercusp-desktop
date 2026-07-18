@@ -115,7 +115,7 @@ poll_remote() {  # <inst> <fid> [tries]
 plan_part_fanout() {  # <src> <src_slug> <dst1> <dst2> [tries] → "<r1> <r2>"
   local src="$1" slug="$2" d1="$3" d2="$4" tries="${5:-80}" ps ts i r1=0 r2=0 row
   ps="ppfan-$src-$(date +%s)"; ts="$(date +%s)000"
-  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'$slug','$ps','item:P-001','item','fanout-from-$src',1,$ts,'$src',false,'local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'$slug','$ps','item:P-001','item','fanout-from-$src',1,$ts,'$src',false,'local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     [ "$r1" = 0 ] && { row="$(drv_psql "$d1" "SELECT 1 FROM harness_shared.harness_plan_parts WHERE plan_slug='$ps' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; [ "$row" = 1 ] && r1=1; }
     [ "$r2" = 0 ] && { row="$(drv_psql "$d2" "SELECT 1 FROM harness_shared.harness_plan_parts WHERE plan_slug='$ps' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; [ "$row" = 1 ] && r2=1; }
@@ -126,7 +126,7 @@ plan_part_fanout() {  # <src> <src_slug> <dst1> <dst2> [tries] → "<r1> <r2>"
 coord_fanout() {  # <src> <src_slug> <dst1> <dst2> <tag> [tries] → "<r1> <r2>"
   local src="$1" slug="$2" d1="$3" d2="$4" tag="$5" tries="${6:-80}" mid i r1=0 r2=0 row
   mid="COMM-$tag-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members LIMIT 1),'default'),'messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"brief2 fanout probe\"}'::jsonb,'$slug','local');" >/dev/null
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"brief2 fanout probe\"}'::jsonb,'$slug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     [ "$r1" = 0 ] && { row="$(drv_psql "$d1" "SELECT 1 FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; [ "$row" = 1 ] && r1=1; }
     [ "$r2" = 0 ] && { row="$(drv_psql "$d2" "SELECT 1 FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; [ "$row" = 1 ] && r2=1; }
