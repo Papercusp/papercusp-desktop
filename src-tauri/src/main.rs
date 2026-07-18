@@ -1428,6 +1428,40 @@ mod discovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // The seam that actually mattered: `spawn_serve` must REFUSE, not spawn. The
+    // live bug was that it happily launched a command that could never work, and
+    // the resulting instant death was indistinguishable from a crash — which is
+    // what fed the infinite respawn. Safe to call for real: the preflight returns
+    // before any `Command` is built, so nothing is executed.
+    #[test]
+    fn spawn_serve_refuses_a_broken_install_before_launching_anything() {
+        let missing_dir = std::env::temp_dir().join(format!(
+            "papercusp-wi5390-nonexistent-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+
+        let err = super::spawn_serve(
+            false,
+            0,
+            &missing_dir,
+            0,
+            &missing_dir,
+            &missing_dir,
+        )
+        .expect_err("a sidecar dir with no serve.mjs must not spawn");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let text = err.to_string();
+        assert!(text.contains("serve.mjs"), "error names the missing file: {text}");
+        assert!(text.to_lowercase().contains("reinstall"), "error is actionable: {text}");
+
+        // And it latched the defect for the updater to report.
+        assert!(super::current_install_defect().is_some());
+        super::set_install_defect(None);
+    }
+
     // The message a user actually sees must name the missing files AND where they
     // were expected, and must say what to DO — the diagnosis that took the fleet
     // two days should be one line on screen.
