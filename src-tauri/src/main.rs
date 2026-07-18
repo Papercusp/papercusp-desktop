@@ -44,6 +44,12 @@ mod endpoint_ipc;
 mod endpoint_ipc_framing;
 mod env_switch;
 mod fd_limit;
+// Boot-time WebKitGTK localStorage WAL reclaim + runaway guard (EI-14135): the
+// webview's per-origin localStorage is a SQLite WAL store whose `-wal` never
+// resets while a long-lived webview holds a reader (and never checkpoints on a
+// hard-killed shell), so it grew to ~127 GiB. Checkpoint-TRUNCATE each store at
+// boot, before the webview reopens it.
+mod localstorage_wal;
 mod native_console;
 mod native_terminal;
 mod pty;
@@ -6683,6 +6689,24 @@ pub fn run() {
                     Err(e) => eprintln!(
                         "[papercusp-desktop] failed to write version self-report to {}: {e}",
                         ver_path.display()
+                    ),
+                }
+            }
+
+            // Boot-time WebKitGTK localStorage WAL reclaim (EI-14135). Runs
+            // HERE — synchronously in setup, before the async page load reaches
+            // the JS that first opens window.localStorage — so no persistent
+            // webview reader is present and the TRUNCATE checkpoint can fully
+            // reset a runaway `-wal` (observed at ~127 GiB). GUI/dev only (the
+            // windowless Server has no webview store); Linux only (macOS
+            // WKWebView / Windows WebView2 use different localStorage backends
+            // under different paths). Best-effort — never fails boot.
+            #[cfg(target_os = "linux")]
+            if is_dev || role.is_gui() {
+                match app.path().app_local_data_dir() {
+                    Ok(dir) => localstorage_wal::reclaim_on_boot(&dir),
+                    Err(e) => eprintln!(
+                        "[papercusp-desktop] localstorage WAL reclaim skipped — no app_local_data_dir: {e}"
                     ),
                 }
             }

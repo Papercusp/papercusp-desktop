@@ -62,6 +62,16 @@ tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Boot-time WebKitGTK localStorage WAL reclaim (EI-14135): the webview's
+# localStorage is a SQLite DB in WAL mode whose `-wal` never resets (a
+# persistent webview reader blocks the wrap, and a killed shell skips the
+# on-close checkpoint), so it grew to ~127 GiB. `localstorage_wal.rs` opens
+# each `*.localstorage` DB at boot and runs `PRAGMA wal_checkpoint(TRUNCATE)`.
+# `bundled` statically compiles SQLite into the binary → no new RUNTIME
+# dependency on libsqlite3 (same no-hard-dep discipline as the dlopen'd VTE/
+# SwiftTerm embeds) and it works on any shipped .deb/.rpm/AppImage.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Endpoint IPC client — async UnixStream / named-pipe transport for
 # dispatching projected tools without the localhost HTTP round-trip.
 # See apps/operator/lib/endpoint-ipc/PROTOCOL.md in the operator repo
