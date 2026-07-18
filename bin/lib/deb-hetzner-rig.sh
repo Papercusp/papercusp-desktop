@@ -231,7 +231,14 @@ rig_cleanup() {
       rig_server_gone "$id" || echo "  ⚠ $id may still BILL — destroy manually (DELETE /v1/servers/$id)"
     done < "$RIG_SERVERS_FILE"
   fi
-  rm -rf "$RIG_WORK" 2>/dev/null
+  # The matrix summary promises per-scenario logs are "kept if --keep-up" — honor
+  # it: an unconditional rm here destroyed the forensics of two failed
+  # reconnect_catchup runs (EI-13317) before anyone could read them.
+  if [ "${RIG_KEEP_UP:-0}" = 1 ]; then
+    echo "  --keep-up: keeping work dir $RIG_WORK (per-scenario logs)" >&2
+  else
+    rm -rf "$RIG_WORK" 2>/dev/null
+  fi
   # EI-5884 / WI-1442 fix (b): release the quota mutex UNCONDITIONALLY (even
   # under --keep-up, and even on a killed run — this runs from the EXIT trap)
   # so the next queued run can attempt its own provision. A real Hetzner
