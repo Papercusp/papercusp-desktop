@@ -83,18 +83,21 @@ rig_init() {
   RIG_IMAGE="${2:-${RIG_IMAGE:-ubuntu-24.04}}"
   RIG_HONO_PORT="${RIG_HONO_PORT:-39070}"
   RIG_PG_PORT="${RIG_PG_PORT:-39532}"
-  # OPT-IN concrete-workspace seam (default EMPTY = legacy behaviour: frames boot
-  # under activeWorkspaceId()'s 'default' global — the baseline the matrix expects).
-  # WHY the seam exists: the seat-offer/spawn-request federation (D-005/P-009) can't
-  # be live-verified under 'default' — WI-1564's resolveAllotmentWorkspace REFUSES
-  # 'default' so resource:delegate returns `workspace_unresolved` and no seat-offer
-  # is ever authored (the local publish leg works fine once a CONCRETE ws is pinned;
-  # proven 2026-07-04). BUT pinning a concrete ws currently REGRESSES the substrate
-  # a→b APPLY (fleet_directory card never materialises on the peer — cause still in
-  # the federation/projection layer, NOT the offer code; tracked as a blocker WI).
-  # So this stays OFF until that federation bug is fixed; then set RIG_WORKSPACE_ID
-  # (any non-'default' id, e.g. papercusp-workspace) to run the faithful path.
-  RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-}"
+  # Concrete-workspace pin (default: MINT a per-run concrete id — the production-
+  # faithful path since WI-5321). No real install runs under the literal 'default'
+  # workspace id anymore (fresh installs mint workspace-<hex> in Rust
+  # ensure_initialized; 'default' is the DEFAULT_COORD_WORKSPACE sentinel WI-1564's
+  # allotment guard fail-closes on). But rig frames launch serve.mjs HEADLESS — the
+  # Rust mint never executes — so an UNPINNED frame still resolves 'default' and
+  # seat_offer/spawn_request deterministically red with `workspace_unresolved`
+  # (the exact false-RED of gate run 20260717-211750). The old reason this seam
+  # defaulted OFF — a concrete ws regressing the substrate a→b apply
+  # (fleet_directory card missing on the peer) — is FIXED: RUN-2 m1784334810
+  # (2026-07-17, WI-5321 completion evidence) passed seat_offer + spawn_request +
+  # fleet_directory 3/3 under RIG_WORKSPACE_ID=workspace-fedcba98. Override with a
+  # specific id to pin it, or RIG_WORKSPACE_ID=default to force the retired
+  # legacy baseline (archaeology only — the seat legs can never pass under it).
+  RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-workspace-rig$(openssl rand -hex 4 2>/dev/null || printf '%08x' $((RANDOM * 32768 + RANDOM)))}"
   # Operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_HIVE_HOME_SLUG,
   # else 'papercusp'). NOTE: on a fresh frame NO slug resolves at BOOT (projects are
   # created/joined post-boot), so the checkHomeHarnessResolves boot-validation warns
