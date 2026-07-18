@@ -1606,6 +1606,18 @@ echo "→ bundling external binaries for $target_os-$target_arch"
 OMP_DIR="$SIDECAR_DIR/bin"
 mkdir -p "$OMP_DIR"
 
+# EI-1869: SIDECAR_DIR is a fresh `sidecar.tmp.$$` tree every single build (the
+# EI-160 atomic-publish scheme above), so a same-build "already extracted"
+# check inside it can never hit across builds — every rebuild re-downloaded
+# Node (~118M) + gh (~38M) from scratch, ~10min of identical re-fetch on the
+# edit→build→verify loop. Vendor fetched binaries into a stable,
+# version-keyed cache OUTSIDE the per-build tmp tree; a version bump
+# (NODE_VERSION/GH_VERSION) naturally busts its own cache slot since the key
+# includes the version. Override with PAPERCUSP_SIDECAR_BIN_CACHE (e.g. to
+# point CI at a persisted cache dir).
+SIDECAR_BIN_CACHE="${PAPERCUSP_SIDECAR_BIN_CACHE:-$HOME/.cache/papercusp-sidecar-bins}"
+mkdir -p "$SIDECAR_BIN_CACHE"
+
 # Node.js — vendor a known-good runtime so users don't need Node on PATH.
 # Tauri main spawns the sidecar + embedded-postgres-server with this binary
 # explicitly (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
@@ -1621,33 +1633,48 @@ case "$target_os" in
   windows) node_archive="node-${NODE_VERSION}-win-x64.zip" ;;
 esac
 if [[ -n "${node_archive:-}" ]]; then
-  echo "→ downloading Node $NODE_VERSION → $node_archive"
-  node_tarball="/tmp/$node_archive"
-  if curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/${node_archive}" -o "$node_tarball"; then
-    tmp_node_dir=$(mktemp -d)
-    case "$node_archive" in
-      *.tar.xz) tar -xJf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
-      *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
-      *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
-                 inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | head -1) && \
-                 mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
-    esac
-    if [[ -f "$tmp_node_dir/bin/node" ]]; then
-      cp "$tmp_node_dir/bin/node" "$OMP_DIR/node"
-      chmod +x "$OMP_DIR/node"
-      node_dst="$OMP_DIR/node"
-    elif [[ -f "$tmp_node_dir/node.exe" ]]; then
-      cp "$tmp_node_dir/node.exe" "$OMP_DIR/node.exe"
-      node_dst="$OMP_DIR/node.exe"
-    fi
-    rm -rf "$tmp_node_dir" "$node_tarball"
-    if [[ -n "$node_dst" ]]; then
-      echo "  ✓ node at $node_dst ($(du -h "$node_dst" | awk '{print $1}'))"
-    else
-      echo "  ⚠ node tarball extracted but no node binary found at expected path; sidecar will fall back to system node"
-    fi
+  # EI-1869: cache slot keyed by version+platform (a version/arch bump ⇒ a new
+  # slot ⇒ correctly re-downloads; nothing else invalidates it).
+  node_cache_bin="node"
+  [[ "$target_os" == "windows" ]] && node_cache_bin="node.exe"
+  node_cache_dir="$SIDECAR_BIN_CACHE/node-${NODE_VERSION}-${target_os}-${target_arch}"
+  if [[ -f "$node_cache_dir/$node_cache_bin" ]]; then
+    cp "$node_cache_dir/$node_cache_bin" "$OMP_DIR/$node_cache_bin"
+    chmod +x "$OMP_DIR/$node_cache_bin"
+    node_dst="$OMP_DIR/$node_cache_bin"
+    echo "  ✓ node $NODE_VERSION cached → $node_dst ($(du -h "$node_dst" | awk '{print $1}')) — skipped download"
   else
-    echo "  ⚠ failed to download Node; sidecar will fall back to system node"
+    echo "→ downloading Node $NODE_VERSION → $node_archive"
+    node_tarball="/tmp/$node_archive"
+    if curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/${node_archive}" -o "$node_tarball"; then
+      tmp_node_dir=$(mktemp -d)
+      case "$node_archive" in
+        *.tar.xz) tar -xJf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
+        *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
+        *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
+                   inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | head -1) && \
+                   mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
+      esac
+      if [[ -f "$tmp_node_dir/bin/node" ]]; then
+        cp "$tmp_node_dir/bin/node" "$OMP_DIR/node"
+        chmod +x "$OMP_DIR/node"
+        node_dst="$OMP_DIR/node"
+      elif [[ -f "$tmp_node_dir/node.exe" ]]; then
+        cp "$tmp_node_dir/node.exe" "$OMP_DIR/node.exe"
+        node_dst="$OMP_DIR/node.exe"
+      fi
+      rm -rf "$tmp_node_dir" "$node_tarball"
+      if [[ -n "$node_dst" ]]; then
+        echo "  ✓ node at $node_dst ($(du -h "$node_dst" | awk '{print $1}'))"
+        # Seed the cache (best-effort; a seed failure never fails the build —
+        # the next build just re-downloads).
+        mkdir -p "$node_cache_dir" && cp "$node_dst" "$node_cache_dir/$node_cache_bin" 2>/dev/null || true
+      else
+        echo "  ⚠ node tarball extracted but no node binary found at expected path; sidecar will fall back to system node"
+      fi
+    else
+      echo "  ⚠ failed to download Node; sidecar will fall back to system node"
+    fi
   fi
 fi
 
@@ -1668,27 +1695,40 @@ case "$target_os" in
   windows) gh_archive="gh_${GH_VERSION}_windows_amd64.zip";          gh_inner_dir="gh_${GH_VERSION}_windows_amd64" ;;
 esac
 if [[ -n "$gh_archive" ]]; then
-  echo "→ downloading gh $GH_VERSION → $gh_archive"
-  gh_tarball="/tmp/$gh_archive"
-  if curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_archive}" -o "$gh_tarball"; then
-    gh_tmp=$(mktemp -d)
-    case "$gh_archive" in
-      *.tar.gz) tar -xzf "$gh_tarball" -C "$gh_tmp" ;;
-      *.zip)    unzip -q "$gh_tarball" -d "$gh_tmp" ;;
-    esac
-    # Find the gh binary regardless of inner dir naming quirks
-    gh_src=$(find "$gh_tmp" -name "gh" -o -name "gh.exe" 2>/dev/null | head -1)
-    if [[ -n "$gh_src" && -f "$gh_src" ]]; then
-      gh_dst="$OMP_DIR/$(basename "$gh_src")"
-      cp "$gh_src" "$gh_dst"
-      chmod +x "$gh_dst"
-      echo "  ✓ gh at $gh_dst ($(du -h "$gh_dst" | awk '{print $1}'))"
-    else
-      echo "  ⚠ gh archive extracted but no gh binary found"
-    fi
-    rm -rf "$gh_tmp" "$gh_tarball"
+  # EI-1869: same version-keyed cache as Node, above.
+  gh_cache_bin="gh"
+  [[ "$target_os" == "windows" ]] && gh_cache_bin="gh.exe"
+  gh_cache_dir="$SIDECAR_BIN_CACHE/gh-${GH_VERSION}-${target_os}-${target_arch}"
+  if [[ -f "$gh_cache_dir/$gh_cache_bin" ]]; then
+    gh_dst="$OMP_DIR/$gh_cache_bin"
+    cp "$gh_cache_dir/$gh_cache_bin" "$gh_dst"
+    chmod +x "$gh_dst"
+    echo "  ✓ gh $GH_VERSION cached → $gh_dst ($(du -h "$gh_dst" | awk '{print $1}')) — skipped download"
   else
-    echo "  ⚠ failed to download gh; harness GitHub-integration flows will fall back to user-installed gh"
+    echo "→ downloading gh $GH_VERSION → $gh_archive"
+    gh_tarball="/tmp/$gh_archive"
+    if curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_archive}" -o "$gh_tarball"; then
+      gh_tmp=$(mktemp -d)
+      case "$gh_archive" in
+        *.tar.gz) tar -xzf "$gh_tarball" -C "$gh_tmp" ;;
+        *.zip)    unzip -q "$gh_tarball" -d "$gh_tmp" ;;
+      esac
+      # Find the gh binary regardless of inner dir naming quirks
+      gh_src=$(find "$gh_tmp" -name "gh" -o -name "gh.exe" 2>/dev/null | head -1)
+      if [[ -n "$gh_src" && -f "$gh_src" ]]; then
+        gh_dst="$OMP_DIR/$(basename "$gh_src")"
+        cp "$gh_src" "$gh_dst"
+        chmod +x "$gh_dst"
+        echo "  ✓ gh at $gh_dst ($(du -h "$gh_dst" | awk '{print $1}'))"
+        # Seed the cache (best-effort; never fails the build).
+        mkdir -p "$gh_cache_dir" && cp "$gh_dst" "$gh_cache_dir/$(basename "$gh_dst")" 2>/dev/null || true
+      else
+        echo "  ⚠ gh archive extracted but no gh binary found"
+      fi
+      rm -rf "$gh_tmp" "$gh_tarball"
+    else
+      echo "  ⚠ failed to download gh; harness GitHub-integration flows will fall back to user-installed gh"
+    fi
   fi
 fi
 
