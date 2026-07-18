@@ -219,11 +219,51 @@ rig_create_server() {
 rig_delete_server() { rig_hz -X DELETE "https://api.hetzner.cloud/v1/servers/$1" >/dev/null 2>&1; }
 rig_server_gone()   { local code; code="$(rig_hz -o /dev/null -w '%{http_code}' "https://api.hetzner.cloud/v1/servers/$1")"; [ "$code" = "404" ]; }
 
+# ── log banking (WI-5373 STEP 2, 2026-07-18): structural, not manually-armed ──
+# Two banking gaps in 24h (run 032603: an ad-hoc, hand-run bank script had an
+# early-exit grep bug; run 044437: nothing armed it at all — a timer-fired run has
+# no human present to arm a sidecar script) left every anomalous run's per-frame
+# serve.log and load state post-hoc unexplainable: rig_cleanup destroys the frames
+# (and, absent --keep-up, $RIG_WORK itself) before anyone can read them. Bank
+# BEFORE any destructive step, UNCONDITIONALLY — every run, timer-fired or
+# manual, pass or fail — so the two recurring triage questions are always
+# answerable: (1) what did each frame's own serve.log say at teardown, and
+# (2) was the box saturated (a rig-load event) or calm (a real regression)
+# during the run. Lands OUTSIDE $RIG_WORK (which rig_cleanup rm -rf's right
+# after this, absent --keep-up) so it survives; RIG_BANK_KEEP bounds growth.
+# Best-effort throughout (fetch/mkdir/docker failures are logged, never fatal) —
+# banking must never abort or mask the run's actual verdict.
+RIG_BANK_DIR="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
+RIG_BANK_KEEP="${RIG_BANK_KEEP:-200}"
+rig_bank_logs() {
+  local stamp inst path
+  mkdir -p "$RIG_BANK_DIR" 2>/dev/null || { fed_log "bank: cannot mkdir $RIG_BANK_DIR — skipping (best-effort)"; return 0; }
+  stamp="$(date +%H%M%S 2>/dev/null || echo now)"
+  fed_log "bank: persisting per-frame serve.log + load markers to $RIG_BANK_DIR (stamp=$stamp) before teardown"
+  for inst in "${RIG_FRAMES[@]}"; do
+    [ -n "${FRAME_IP[$inst]:-}" ] || continue
+    path="$(drv_applog 2>/dev/null || echo /home/pcusp/serve.log)"
+    { drv_exec "$inst" <<<"cat '$path' 2>/dev/null || echo '(no serve.log at $path)'"
+      echo "=== bank $stamp: frame $inst /proc/loadavg ==="
+      drv_exec "$inst" <<<"cat /proc/loadavg 2>/dev/null" 2>/dev/null
+    } >"$RIG_BANK_DIR/serve-$inst-$stamp.log" 2>/dev/null \
+      || echo "(bank fetch failed for frame $inst — ssh/frame may already be gone)" >"$RIG_BANK_DIR/serve-$inst-$stamp.log"
+  done
+  { echo "=== bank $stamp: host /proc/loadavg ==="; cat /proc/loadavg 2>/dev/null || true
+    echo "=== bank $stamp: host docker stats (informational — n/a for a pure-Hetzner rig) ==="
+    command -v docker >/dev/null 2>&1 && docker stats --no-stream 2>/dev/null || echo "(docker unavailable)"
+  } >"$RIG_BANK_DIR/load-$stamp.txt" 2>/dev/null || true
+  # bounded retention — keep the newest RIG_BANK_KEEP files across both patterns
+  ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t serve-*.log load-*.txt 2>/dev/null \
+      | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
+}
+
 # ── teardown: the EXIT-trap auto-destroy (N-frame correct) ────────────────────
 # Reads ONLY $RIG_SERVERS_FILE — never RIG_FRAMES / the FRAME_* arrays — so it
 # destroys every server that was ever created, regardless of how many frames there
 # are or where setup failed. Each id is DELETEd (retry ×6) and confirmed GONE (404).
 rig_cleanup() {
+  rig_bank_logs
   fed_log "cleanup — DESTROY all frames (ends billing)"
   local id i
   if [ "${RIG_KEEP_UP:-0}" = 1 ]; then
