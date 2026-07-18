@@ -271,7 +271,21 @@ rig_bank_logs() {
   fi
   for inst in "${RIG_FRAMES[@]}"; do
     [ -n "${FRAME_IP[$inst]:-}" ] || continue
-    path="$(drv_applog 2>/dev/null || echo /home/pcusp/serve.log)"
+    # Empty-string bug (verified 2026-07-18, same re-source-drift class as
+    # WI-5396): if a scenario shim re-sources federation-asserts.sh AFTER this
+    # lib without re-sourcing this lib again, ITS arg-requiring drv_applog
+    # (keyed off FED_LOG, which this Hetzner driver never populates) shadows
+    # ours — and it SUCCEEDS with empty stdout, so `drv_applog || echo ...`
+    # never falls back (the command didn't fail, it just printed nothing).
+    # Check emptiness explicitly, not just exit status, and be LOUD about it
+    # (same "never silent" precedent as the RIG_FRAMES-empty check above) —
+    # this exact silent-empty-bank bug cost a run's entire A-003 forensic
+    # evidence (WI-5369) before being caught.
+    path="$(drv_applog 2>/dev/null)"
+    if [ -z "$path" ]; then
+      fed_log "bank: ⚠ drv_applog returned EMPTY for frame $inst (function-override shadow) — falling back to the known default path"
+      path="/home/pcusp/serve.log"
+    fi
     { drv_exec "$inst" <<<"cat '$path' 2>/dev/null || echo '(no serve.log at $path)'"
       echo "=== bank $stamp: frame $inst /proc/loadavg ==="
       drv_exec "$inst" <<<"cat /proc/loadavg 2>/dev/null" 2>/dev/null
