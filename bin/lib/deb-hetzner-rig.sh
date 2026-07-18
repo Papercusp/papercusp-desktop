@@ -61,6 +61,18 @@
 # This lib does NOT call rig_cleanup directly and never decides overall pass/fail —
 # the scenario owns its exit code (behavior parity with the pre-refactor rigs).
 
+# ── re-source guard (WI-5380) ─────────────────────────────────────────────────
+# This lib holds LIVE rig state (RIG_FRAMES/FRAME_*), so loading must be
+# idempotent: a second `source` in the same shell must never reinitialize it.
+# Without this guard, `RIG_FRAMES=()` below re-ran on every re-source — and the
+# matrix DOES re-source transitively AFTER provision (source_scenarios → scenario
+# shims b5/b6/b7/b8/reconnect_catchup → the standalone deb-hetzner-*.sh rigs →
+# this lib). FRAME_IP survived (`declare -gA` never clears an existing array), so
+# every scenario kept working by frame name while rig_bank_logs iterated an EMPTY
+# RIG_FRAMES and silently banked zero serve-*.log for every matrix run.
+if [ -n "${__RIG_LIB_SOURCED:-}" ]; then return 0; fi
+declare -g __RIG_LIB_SOURCED=1
+
 # ── globals (declared once; safe under set -u) ────────────────────────────────
 declare -gA FRAME_ID FRAME_IP FRAME_USER FRAME_TOKEN FRAME_MEMBER_SLUG
 declare -ga RIG_FRAMES
@@ -240,6 +252,14 @@ rig_bank_logs() {
   mkdir -p "$RIG_BANK_DIR" 2>/dev/null || { fed_log "bank: cannot mkdir $RIG_BANK_DIR — skipping (best-effort)"; return 0; }
   stamp="$(date +%H%M%S 2>/dev/null || echo now)"
   fed_log "bank: persisting per-frame serve.log + load markers to $RIG_BANK_DIR (stamp=$stamp) before teardown"
+  # Empty frame state must be LOUD, never a silent zero-file bank (WI-5380): the
+  # serve.log is the single most important triage artifact and its absence was
+  # invisible until someone went looking for it a run too late.
+  if [ "${#RIG_FRAMES[@]}" -eq 0 ]; then
+    fed_log "bank: ⚠ RIG_FRAMES is EMPTY at bank time — NOTHING to bank (WI-5380 class: frame state was lost mid-run, e.g. a lib re-source)"
+    echo "RIG_FRAMES was empty when rig_bank_logs ran (stamp=$stamp) — zero serve logs banked (WI-5380 class)." \
+      >"$RIG_BANK_DIR/BANK-EMPTY-$stamp.txt" 2>/dev/null || true
+  fi
   for inst in "${RIG_FRAMES[@]}"; do
     [ -n "${FRAME_IP[$inst]:-}" ] || continue
     path="$(drv_applog 2>/dev/null || echo /home/pcusp/serve.log)"
