@@ -1252,11 +1252,12 @@ mod discovery_tests {
 
     // Child still running, operator not yet up, debounce not armed (normal boot)
     // → nothing to do. (Args: child_exited, shutting_down, operator_reachable,
-    // unreachable_respawn_ready, respawns_in_window, max_respawns.)
+    // unreachable_respawn_ready, install_broken, respawns_in_window,
+    // max_respawns.)
     #[test]
     fn serve_respawn_healthy_when_child_running() {
         assert_eq!(
-            decide_serve_respawn(false, false, false, false, 0, 5),
+            decide_serve_respawn(false, false, false, false, false, 0, 5),
             R::Healthy
         );
     }
@@ -1267,12 +1268,12 @@ mod discovery_tests {
     #[test]
     fn serve_respawn_healthy_when_operator_reachable_despite_exit() {
         assert_eq!(
-            decide_serve_respawn(true, false, true, false, 0, 5),
+            decide_serve_respawn(true, false, true, false, false, 0, 5),
             R::Healthy
         );
         // reachable wins even if the unreachable path were somehow armed.
         assert_eq!(
-            decide_serve_respawn(true, false, true, true, 0, 5),
+            decide_serve_respawn(true, false, true, true, false, 0, 5),
             R::Healthy
         );
     }
@@ -1283,11 +1284,11 @@ mod discovery_tests {
     #[test]
     fn serve_respawn_when_child_exited_and_unreachable() {
         assert_eq!(
-            decide_serve_respawn(true, false, false, false, 0, 5),
+            decide_serve_respawn(true, false, false, false, false, 0, 5),
             R::Respawn
         );
         assert_eq!(
-            decide_serve_respawn(true, false, false, false, 4, 5),
+            decide_serve_respawn(true, false, false, false, false, 4, 5),
             R::Respawn
         );
     }
@@ -1298,15 +1299,15 @@ mod discovery_tests {
     #[test]
     fn serve_respawn_suppressed_when_shutting_down() {
         assert_eq!(
-            decide_serve_respawn(true, true, false, false, 0, 5),
+            decide_serve_respawn(true, true, false, false, false, 0, 5),
             R::Suppressed
         );
         assert_eq!(
-            decide_serve_respawn(true, true, false, false, 9, 5),
+            decide_serve_respawn(true, true, false, false, false, 9, 5),
             R::Suppressed
         );
         assert_eq!(
-            decide_serve_respawn(false, true, false, true, 0, 5),
+            decide_serve_respawn(false, true, false, true, false, 0, 5),
             R::Suppressed
         );
     }
@@ -1315,7 +1316,7 @@ mod discovery_tests {
     #[test]
     fn serve_respawn_gives_up_at_cap() {
         assert_eq!(
-            decide_serve_respawn(true, false, false, false, 5, 5),
+            decide_serve_respawn(true, false, false, false, false, 5, 5),
             R::GiveUp
         );
     }
@@ -1331,24 +1332,131 @@ mod discovery_tests {
         // Wrapper Child alive (child_exited=false), operator unreachable past the
         // debounce, under the cap → respawn (the exact bug case).
         assert_eq!(
-            decide_serve_respawn(false, false, false, true, 0, 5),
+            decide_serve_respawn(false, false, false, true, false, 0, 5),
             R::Respawn
         );
         assert_eq!(
-            decide_serve_respawn(false, false, false, true, 4, 5),
+            decide_serve_respawn(false, false, false, true, false, 4, 5),
             R::Respawn
         );
         // The crash-loop cap still applies to this path.
         assert_eq!(
-            decide_serve_respawn(false, false, false, true, 5, 5),
+            decide_serve_respawn(false, false, false, true, false, 5, 5),
             R::GiveUp
         );
         // But BEFORE the debounce arms (normal boot: serve alive, operator still
         // coming up) we must NOT respawn — that would double-spawn a competing serve.
         assert_eq!(
-            decide_serve_respawn(false, false, false, false, 0, 5),
+            decide_serve_respawn(false, false, false, false, false, 0, 5),
             R::Healthy
         );
+    }
+
+    // WI-5390: a broken install must SHORT-CIRCUIT the respawn machinery. The
+    // live bug: `<install>/sidecar/` was gone, every spawn died instantly on
+    // chdir/MODULE_NOT_FOUND, the supervisor read that as an ordinary child exit,
+    // and respawned it in a loop that was still running ~18h later — with nothing
+    // user-visible ever naming the cause.
+    #[test]
+    fn serve_respawn_reports_install_broken_instead_of_respawning() {
+        // Child exited + unreachable + install broken → InstallBroken, NOT Respawn.
+        assert_eq!(
+            decide_serve_respawn(true, false, false, false, true, 0, 5),
+            R::InstallBroken
+        );
+        // The Windows/WSL blind-spot path (wrapper child alive, operator durably
+        // unreachable) is the shape actually observed on the VM — same verdict.
+        assert_eq!(
+            decide_serve_respawn(false, false, false, true, true, 0, 5),
+            R::InstallBroken
+        );
+        // And it does NOT degrade into GiveUp at the cap: GiveUp is a backoff that
+        // RETRIES once the window drains, which is exactly the forever-loop this
+        // fix removes.
+        assert_eq!(
+            decide_serve_respawn(true, false, false, false, true, 5, 5),
+            R::InstallBroken
+        );
+    }
+
+    // A broken install must not override the two verdicts that outrank it:
+    // deliberate teardown, and a reachable (possibly foreign, `--ensure`-reused)
+    // operator — reporting "reinstall me" while the app demonstrably works would
+    // be a false alarm.
+    #[test]
+    fn serve_respawn_install_broken_never_outranks_shutdown_or_a_live_operator() {
+        assert_eq!(
+            decide_serve_respawn(true, true, false, false, true, 0, 5),
+            R::Suppressed
+        );
+        assert_eq!(
+            decide_serve_respawn(true, false, true, false, true, 0, 5),
+            R::Healthy
+        );
+    }
+
+    // The preflight itself: which entrypoints are reported missing. Uses a real
+    // temp dir (no tempfile dep) because the whole point is a filesystem check.
+    #[test]
+    fn missing_sidecar_entrypoints_detects_the_half_removed_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "papercusp-wi5390-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The observed live state: the sidecar dir is absent entirely.
+        let absent = dir.join("sidecar");
+        assert_eq!(
+            super::missing_sidecar_entrypoints(&absent),
+            vec!["serve.mjs", "sidecar-preload.js"]
+        );
+
+        // A partially-populated dir reports only what is actually missing.
+        std::fs::write(dir.join("serve.mjs"), "//").unwrap();
+        assert_eq!(
+            super::missing_sidecar_entrypoints(&dir),
+            vec!["sidecar-preload.js"]
+        );
+
+        // Intact ⇒ empty, so the normal path is never diverted.
+        std::fs::write(dir.join("sidecar-preload.js"), "//").unwrap();
+        assert!(super::missing_sidecar_entrypoints(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The message a user actually sees must name the missing files AND where they
+    // were expected, and must say what to DO — the diagnosis that took the fleet
+    // two days should be one line on screen.
+    #[test]
+    fn install_defect_message_names_the_files_the_dir_and_the_remedy() {
+        let msg = super::install_defect_message(
+            std::path::Path::new("/opt/Papercusp Server/sidecar"),
+            &["serve.mjs", "sidecar-preload.js"],
+        );
+        assert!(msg.contains("serve.mjs"));
+        assert!(msg.contains("sidecar-preload.js"));
+        assert!(msg.contains("/opt/Papercusp Server/sidecar"));
+        assert!(msg.to_lowercase().contains("reinstall"));
+    }
+
+    // WI-5390: the updater must not render a PERMANENT fault as a transient one.
+    // "try again after boot completes" is a lie when boot can never complete.
+    #[test]
+    fn sidecar_port_message_distinguishes_broken_install_from_still_booting() {
+        super::set_install_defect(None);
+        let booting = super::sidecar_port_unavailable_message();
+        assert!(booting.contains("try again after boot completes"));
+
+        super::set_install_defect(Some("installation is incomplete".to_string()));
+        let broken = super::sidecar_port_unavailable_message();
+        assert!(broken.contains("installation is incomplete"));
+        assert!(!broken.contains("try again after boot completes"));
+
+        super::set_install_defect(None);
     }
 
     #[test]
@@ -2136,6 +2244,12 @@ enum ServeRespawnAction {
     Respawn,
     /// Respawned too many times in the window (crash-loop) — stop until restart.
     GiveUp,
+    /// WI-5390: the install itself is broken (a required sidecar entrypoint is
+    /// absent), so no respawn can ever succeed. Structurally distinct from
+    /// `GiveUp`: a cap hit is a BACKOFF that retries once the window drains,
+    /// while this must NOT retry at all — it needs a reinstall, and saying so
+    /// once is worth more than an infinite quiet loop.
+    InstallBroken,
 }
 
 /// The files a `serve.mjs` spawn STRUCTURALLY requires inside the sidecar dir.
@@ -2228,11 +2342,15 @@ fn sidecar_port_unavailable_message() -> String {
 ///     (so a slow cold boot never trips it). This closes the Windows/WSL blind
 ///     spot: respawn a durably-dead operator even when the wrapper `Child` is
 ///     still alive (`child_exited` == false).
+///   * `install_broken` — a required sidecar entrypoint is missing from the
+///     install (WI-5390). No respawn can fix this, so it must short-circuit the
+///     respawn/backoff machinery entirely rather than feeding it forever.
 fn decide_serve_respawn(
     child_exited: bool,
     shutting_down: bool,
     operator_reachable: bool,
     unreachable_respawn_ready: bool,
+    install_broken: bool,
     respawns_in_window: usize,
     max_respawns: usize,
 ) -> ServeRespawnAction {
@@ -2240,9 +2358,17 @@ fn decide_serve_respawn(
         return ServeRespawnAction::Suppressed;
     }
     // Operator answering discovery+health is ground truth — healthy regardless of
-    // the stored `Child` (on Windows it is the wsl.exe wrapper, which lies).
+    // the stored `Child` (on Windows it is the wsl.exe wrapper, which lies). This
+    // stays AHEAD of the install check on purpose: under `--ensure` a foreign
+    // operator can legitimately be serving us, and a reachable operator is not a
+    // problem to report no matter what our own install dir looks like.
     if operator_reachable {
         return ServeRespawnAction::Healthy;
+    }
+    // Operator unreachable AND our install can't produce one — respawning is
+    // futile. Report it instead of looping (WI-5390).
+    if install_broken {
+        return ServeRespawnAction::InstallBroken;
     }
     // Operator is UNREACHABLE. Respawn if the child fully exited (Linux/mac:
     // definitive death) OR it has been unreachable past the debounce (Windows/WSL:
@@ -2497,6 +2623,26 @@ fn notify_operator_dead(
         .show()
     {
         eprintln!("[papercusp-desktop] operator-dead notification failed: {e}");
+    }
+}
+
+/// WI-5390: surface a broken/partial install as a distinct TERMINAL state, on
+/// the same two channels as `notify_operator_dead` (in-app event for a banner +
+/// an OS notification for a backgrounded window). Deliberately a separate event
+/// name and wording from `operator-dead`: "stopped responding / retrying" invites
+/// the user to wait, and waiting can never help here — the actionable fact is
+/// "reinstall". Best-effort; a failed notification is logged, never fatal.
+fn notify_install_broken(app_handle: &tauri::AppHandle, message: &str) {
+    let _ = app_handle.emit("install-broken", message.to_string());
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title("Papercusp installation is incomplete")
+        .body(message)
+        .show()
+    {
+        eprintln!("[papercusp-desktop] install-broken notification failed: {e}");
     }
 }
 
@@ -3611,6 +3757,12 @@ fn ensure_server_running(
                 "[papercusp-gui] could not self-host the operator sidecar ({e}); \
                  will keep polling in case it comes up another way"
             );
+            // WI-5390: "keep polling" is right for a transient failure and WRONG
+            // as the user's only signal when the install itself is broken — that
+            // poll can never succeed. Report the terminal cause once.
+            if let Some(defect) = current_install_defect() {
+                notify_install_broken(app_handle, &defect);
+            }
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -4226,6 +4378,15 @@ fn bring_up_sidecar(
         Ok(c) => c,
         Err(e) => {
             eprintln!("[papercusp-desktop] failed to spawn serve: {}", e);
+            // WI-5390: a BROKEN INSTALL fails here on the very first spawn — before
+            // any supervisor exists to notice or report it. Without this the user
+            // gets an app that boots to nothing and says nothing at all (the
+            // failure mode is worse at first boot than mid-session). Tell them
+            // directly; there is nothing to supervise, so do not start a
+            // supervisor that would only re-derive the same verdict.
+            if let Some(defect) = current_install_defect() {
+                notify_install_broken(app, &defect);
+            }
             return;
         }
     };
@@ -4295,6 +4456,19 @@ fn spawn_serve(
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
 ) -> std::io::Result<Child> {
+    // WI-5390: fail CLOSED on a structurally broken install instead of spawning a
+    // command that cannot possibly work. Without this the spawn "succeeds" (the
+    // wsl.exe / node wrapper starts), dies on chdir/MODULE_NOT_FOUND, and comes
+    // back to the supervisor as an ordinary child exit — indistinguishable from a
+    // crash, hence respawned forever.
+    let missing = missing_sidecar_entrypoints(sidecar_dir);
+    if !missing.is_empty() {
+        let message = install_defect_message(sidecar_dir, &missing);
+        set_install_defect(Some(message.clone()));
+        eprintln!("[papercusp-desktop] FATAL: {message} (WI-5390)");
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, message));
+    }
+    set_install_defect(None);
     println!(
         "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}",
         port_hint,
@@ -4688,6 +4862,9 @@ fn spawn_serve_supervisor(
         // outside) and the give-up notification (once per dead episode).
         let mut forward_degraded = false;
         let mut gave_up_notified = false;
+        // WI-5390: the broken-install notification, once per defect episode
+        // (cleared if a reinstall repairs the install under us).
+        let mut install_broken_notified = false;
         // WI-3360: whether we've already `wsl --terminate`d a WEDGED distro this
         // outage — one reset per dead episode (cleared when the operator
         // recovers) so we never terminate-loop a distro that stays down for a
@@ -4814,16 +4991,41 @@ fn spawn_serve_supervisor(
                 unreachable_since.map(|t| now.duration_since(t)),
                 SERVE_UNREACHABLE_DEBOUNCE,
             );
+            // WI-5390: re-checked every tick rather than latched, so an install
+            // repaired underneath us (a reinstall over the running app) heals on
+            // the next tick instead of needing this supervisor restarted.
+            let missing_entrypoints = missing_sidecar_entrypoints(&sup_sidecar);
             match decide_serve_respawn(
                 child_exited,
                 shutting_down,
                 operator_reachable,
                 unreachable_respawn_ready,
+                !missing_entrypoints.is_empty(),
                 respawn_times.len(),
                 MAX_RESPAWNS_PER_WINDOW,
             ) {
-                ServeRespawnAction::Healthy => {}
+                ServeRespawnAction::Healthy => {
+                    // Install is intact (or a foreign operator serves us) — clear
+                    // any latched defect so the updater stops reporting it.
+                    if missing_entrypoints.is_empty() {
+                        set_install_defect(None);
+                        install_broken_notified = false;
+                    }
+                }
                 ServeRespawnAction::Suppressed => return,
+                ServeRespawnAction::InstallBroken => {
+                    // Terminal by nature: no respawn can conjure the missing
+                    // files back. Say it ONCE, loudly, through the same channels
+                    // as operator-dead (in-app event + OS notification), then keep
+                    // ticking silently in case a reinstall repairs it.
+                    let message = install_defect_message(&sup_sidecar, &missing_entrypoints);
+                    set_install_defect(Some(message.clone()));
+                    if !install_broken_notified {
+                        eprintln!("[papercusp-desktop] FATAL: {message} — NOT respawning (WI-5390)");
+                        notify_install_broken(&sup_handle, &message);
+                        install_broken_notified = true;
+                    }
+                }
                 ServeRespawnAction::GiveUp => {
                     // WI-3270 (b): do NOT exit the supervisor thread —
                     // a cap hit is a backoff, not a terminal state (the
@@ -5037,9 +5239,7 @@ fn resolve_update_endpoint(app: &AppHandle) -> Result<String, String> {
     } else {
         let state: tauri::State<SidecarState> = app.state();
         let guard = state.port.lock().map_err(|e| e.to_string())?;
-        guard.ok_or_else(|| {
-            "sidecar port not yet known; try again after boot completes".to_string()
-        })?
+        guard.ok_or_else(sidecar_port_unavailable_message)?
     };
     // GUI and Server are two products built from this same codebase
     // (tauri.server.conf.json overlays productName) — release assets are
@@ -5350,9 +5550,7 @@ fn resolve_rollback_endpoint(app: &AppHandle, tag: &str) -> Result<String, Strin
     } else {
         let state: tauri::State<SidecarState> = app.state();
         let guard = state.port.lock().map_err(|e| e.to_string())?;
-        guard.ok_or_else(|| {
-            "sidecar port not yet known; try again after boot completes".to_string()
-        })?
+        guard.ok_or_else(sidecar_port_unavailable_message)?
     };
     let product = if is_server_product(app) {
         "server"
