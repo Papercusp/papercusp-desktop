@@ -2138,6 +2138,80 @@ enum ServeRespawnAction {
     GiveUp,
 }
 
+/// The files a `serve.mjs` spawn STRUCTURALLY requires inside the sidecar dir.
+/// Both are written by the installer; neither is optional, and neither can
+/// appear later on its own — so an absence is a broken install, not a race.
+const REQUIRED_SIDECAR_ENTRYPOINTS: [&str; 2] = ["serve.mjs", "sidecar-preload.js"];
+
+/// WI-5390: which required sidecar entrypoints are MISSING from `sidecar_dir`.
+/// Empty ⇒ the install looks structurally intact (this is a cheap existence
+/// check, not an integrity check — it catches the half-removed-install class,
+/// not corruption).
+///
+/// WHY THIS EXISTS. A `%LOCALAPPDATA%\Papercusp Server\` holding only the .exe —
+/// no `sidecar/`, no `resources/` — spawned `node .../sidecar/serve.mjs` anyway.
+/// The spawn died instantly (`chdir(...) failed 2`, then MODULE_NOT_FOUND on
+/// sidecar-preload.js), the supervisor classified that as an ordinary child exit,
+/// and respawned it — 5 times in 8 seconds, then every window drain, FOREVER
+/// (observed still looping ~18h later on the Windows VM, 2026-07-17→18). Nothing
+/// user-visible ever said "your install is broken": the process stayed alive and
+/// looked idle, and the update check reported the soft, transient-sounding
+/// "sidecar port not yet known; try again after boot completes" — when boot can
+/// never complete. That silent failure cost two days of fleet diagnosis and
+/// actively MANUFACTURED a false root cause (it looked like an uninstaller had
+/// deleted user state, because the operator never booted to re-write it).
+///
+/// A structural fault must fail CLOSED and LOUD, not retry forever.
+fn missing_sidecar_entrypoints(sidecar_dir: &std::path::Path) -> Vec<&'static str> {
+    REQUIRED_SIDECAR_ENTRYPOINTS
+        .iter()
+        .copied()
+        .filter(|name| !sidecar_dir.join(name).exists())
+        .collect()
+}
+
+/// Pure text builder for the broken-install diagnostic (same
+/// testable-without-a-live-AppHandle rationale as
+/// `operator_dead_notification_body`). Names the missing files AND the directory
+/// they were expected in — the two facts a user or a support agent needs to
+/// confirm the diagnosis without a log dive.
+fn install_defect_message(sidecar_dir: &std::path::Path, missing: &[&'static str]) -> String {
+    format!(
+        "Papercusp's installation is incomplete or corrupt: {} missing from {}. \
+         The operator cannot start. Reinstall Papercusp to recover.",
+        missing.join(", "),
+        sidecar_dir.display()
+    )
+}
+
+/// Process-global latch for a detected broken install (WI-5390). Set by the
+/// spawn preflight / supervisor; read by the updater endpoint builders so a
+/// user-facing "can't check for updates" reports the TERMINAL cause instead of
+/// the transient-sounding "try again after boot completes".
+static INSTALL_DEFECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_install_defect(message: Option<String>) {
+    if let Ok(mut guard) = INSTALL_DEFECT.lock() {
+        *guard = message;
+    }
+}
+
+fn current_install_defect() -> Option<String> {
+    INSTALL_DEFECT.lock().ok().and_then(|g| g.clone())
+}
+
+/// The error a port-dependent call (update check, rollback) should report while
+/// the sidecar port is unknown. WI-5390: distinguish "still booting, retry" from
+/// "the install is broken, boot can NEVER complete" — the updater rendering the
+/// latter as a soft retry is the same silent-failure shape
+/// `assert-release-host-baked.sh` exists to kill.
+fn sidecar_port_unavailable_message() -> String {
+    match current_install_defect() {
+        Some(defect) => format!("cannot check for updates — {defect}"),
+        None => "sidecar port not yet known; try again after boot completes".to_string(),
+    }
+}
+
 /// Pure respawn decision for the Server-side serve supervisor (WI-2667, WI-3170).
 ///   * `child_exited` — the stored serve `Child` has reaped (`try_wait` → Some).
 ///     UNRELIABLE on Windows: `spawn_serve` stores the wsl.exe WRAPPER as the
