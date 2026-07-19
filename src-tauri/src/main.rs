@@ -5505,6 +5505,75 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 /// Interval + startup grace are env-overridable for tests/local iteration; errors
 /// (most commonly "sidecar port not yet known" very early in boot) are logged and
 /// retried next tick — this must never panic the Server's setup thread.
+///
+/// EI-13939: a build that predates this poller (or whose call site never runs)
+/// produces ZERO log lines, ever — indistinguishable from "polled and found
+/// nothing to do", so "the poller is silently absent" reads as healthy forever.
+/// `update_poll_heartbeat_line` is the fix for the "checked, nothing to install"
+/// branch: it prints an UNCONDITIONAL line every tick (not just when an update is
+/// found), so ANY installed build that actually contains a poller is provably
+/// distinguishable in the logs from one that doesn't, purely by "did the grace
+/// period elapse with no heartbeat line at all". It also stops silently discarding
+/// `UpdateInfo.check_failed`/`check_reason` (WI-3697 computed these — "the check
+/// could not be performed" vs "checked, you are current" — but the poller loop
+/// never read them, so a persistently-unreachable release host looked identical
+/// to "up to date" in the logs, the same silent-failure class this item is about).
+fn update_poll_heartbeat_line(info: &UpdateInfo) -> String {
+    if info.check_failed {
+        let reason = info.check_reason.as_deref().unwrap_or("unknown");
+        format!(
+            "[papercusp-server] update check: COULD NOT CHECK (reason={reason}, current=v{}) — will retry next tick",
+            info.current_version
+        )
+    } else {
+        format!(
+            "[papercusp-server] update check: up to date (v{})",
+            info.current_version
+        )
+    }
+}
+
+#[cfg(test)]
+mod update_poll_heartbeat_tests {
+    use super::{update_poll_heartbeat_line, UpdateInfo};
+
+    fn info(check_failed: bool, check_reason: Option<&str>) -> UpdateInfo {
+        UpdateInfo {
+            available: false,
+            current_version: "0.0.12".to_string(),
+            new_version: None,
+            notes: None,
+            check_failed,
+            check_reason: check_reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn genuinely_up_to_date_is_reported_as_such() {
+        let line = update_poll_heartbeat_line(&info(false, None));
+        assert!(line.contains("up to date"));
+        assert!(line.contains("0.0.12"));
+        assert!(!line.contains("COULD NOT CHECK"));
+    }
+
+    #[test]
+    fn a_failed_check_is_never_reported_as_up_to_date() {
+        // EI-13939: this is the exact silent-failure class — a check that
+        // could not be performed must NEVER read the same as "you are current".
+        let line = update_poll_heartbeat_line(&info(true, Some("fetch_failed")));
+        assert!(line.contains("COULD NOT CHECK"));
+        assert!(line.contains("fetch_failed"));
+        assert!(!line.contains("up to date"));
+    }
+
+    #[test]
+    fn a_failed_check_with_no_reason_still_says_so_rather_than_panicking() {
+        let line = update_poll_heartbeat_line(&info(true, None));
+        assert!(line.contains("COULD NOT CHECK"));
+        assert!(line.contains("unknown"));
+    }
+}
+
 fn spawn_server_update_poller(app: &tauri::App) {
     let handle = app.handle().clone();
     if !is_server_product(&handle) {
@@ -5565,7 +5634,13 @@ fn spawn_server_update_poller(app: &tauri::App) {
                         ))
                         .show();
                 }
-                Ok(_) => { /* up to date — nothing to do this tick */ }
+                Ok(info) => {
+                    // EI-13939: an UNCONDITIONAL per-tick heartbeat — never skip
+                    // logging just because there was "nothing to do". Silence must
+                    // not be mistaken for "polled and healthy"; see
+                    // `update_poll_heartbeat_line`'s doc comment.
+                    println!("{}", update_poll_heartbeat_line(&info));
+                }
                 Err(e) => {
                     eprintln!("[papercusp-server] update check failed (will retry next tick): {e}");
                 }
