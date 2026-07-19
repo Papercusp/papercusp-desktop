@@ -1098,6 +1098,51 @@ mod tests {
         assert_eq!(pid_alive(2_000_000_000), Some(false));
     }
 
+    // ── origin_reachable (EI-13218) ──────────────────────────────────────────
+
+    #[test]
+    fn origin_reachable_none_for_an_empty_url() {
+        let client = reqwest::blocking::Client::new();
+        // Nothing to check (no webview / unreadable URL upstream) — never a
+        // false failure.
+        assert_eq!(origin_reachable(&client, ""), None);
+    }
+
+    #[test]
+    fn origin_reachable_true_when_the_origin_answers() {
+        // A real tiny_http responder — ANY response (even this bare 200)
+        // proves the origin is up.
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let handle = thread::spawn(move || {
+            if let Ok(req) = server.recv() {
+                let _ = req.respond(Response::from_string("ok"));
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let url = format!("http://127.0.0.1:{port}/api/health");
+        assert_eq!(origin_reachable(&client, &url), Some(true));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn origin_reachable_false_when_nothing_is_listening() {
+        // Bind then immediately drop — the OS reclaims the port, so the
+        // connection is refused deterministically (no timeout wait needed).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let url = format!("http://127.0.0.1:{port}/api/health");
+        assert_eq!(origin_reachable(&client, &url), Some(false));
+    }
+
     // ── LogBuffer ring semantics ────────────────────────────────────────────
 
     fn entry(msg: &str) -> LogEntry {
