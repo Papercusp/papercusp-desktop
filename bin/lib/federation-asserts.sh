@@ -792,7 +792,7 @@ fed_plan_part_merge_assert() {
 # for that feature_id arriving origin='remote' under ANY harness_slug. Answers the open
 # question "does a write federate AFTER a hive join?" Echoes "1 <landed_slug>" or "0".
 fed_hive_merge_probe() {
-  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts ws
+  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts ws=""
   ts="$(date +%s)000"
   # D-050 / WI-5399 iteration 2: workspace_id = the operator's REAL workspace (the
   # harness drains WHERE workspace_id=its boot workspace). Prefer pot_home_slug
@@ -828,7 +828,7 @@ fed_hive_merge_probe() {
 # Body shape mirrors a real coord message ({kind,text}) so the coord-message
 # projection applies it. Distinct from content (features/plans) — this is comms.
 fed_coord_merge_probe() {
-  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid ws
+  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid ws=""
   mid="COMM-${tag}-$(date +%s)"
   # D-050 / WI-5399 iteration 2: see fed_hive_merge_probe's comment — prefer
   # pot_home_slug scoping (RIG_HIVE_ID) which works on owner AND joiner; fall back
