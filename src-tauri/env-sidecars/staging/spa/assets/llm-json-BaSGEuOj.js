@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){if(e.json!=null)return e.json;let t=e.text??``,n=t.match(/```(?:json)?\s*([\s\S]*?)```/i),r=(n?n[1]:t).trim();try{return JSON.parse(r)}catch{let e=r.match(/\{[\s\S]*\}/);if(e)try{return JSON.parse(e[0])}catch{}return null}}var n=e((()=>{}));export{t as n,n as t};

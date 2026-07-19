@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){r=e}async function n(e){if(!r)return{wired:!1};try{return{wired:!0,result:await r.requestWake(e)}}catch(e){return{wired:!0,error:e instanceof Error?e.message:String(e)}}}var r,i=e((()=>{r=null}));export{t as n,n as r,i as t};

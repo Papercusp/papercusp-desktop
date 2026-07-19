@@ -30,12 +30,17 @@ strand the work you were spawned to do, and that startup-probe reflex is the sin
 way a fresh agent zombies. If one specific call fails, adjust and retry that call; do not give up
 on your tools wholesale.
 
-If a platform tool you need is genuinely not in your tool list (definitions can be deferred
-behind a `ToolSearch` tool that loads them on demand):
-1. Call `ToolSearch` ONCE, selecting every tool your task names; the results expand into real,
-   callable definitions — then call them directly like any other tool.
-2. If your platform tools are STILL unusable after a `ToolSearch` reload plus one retry, do not
-   go silent — fall back to the sanctioned helper
+If a platform tool you need is genuinely not in your tool list, definitions can be DEFERRED
+behind a loader your own client already exposes — the exact tool differs by client, so use
+whichever one is actually in YOUR tool list (do not assume the other client's name — if
+neither of these is present either, skip straight to step 2):
+- **Claude**: `ToolSearch` (a native, always-present Claude Code tool — never itself deferred).
+- **Codex / OMP / other MCP clients**: `tools:find` (the dynamic-tool-surface loader; matched
+  tools activate and become callable, same effect as Claude's `ToolSearch`).
+1. Call your client's loader ONCE, selecting every tool your task names; the results expand
+   into real, callable definitions — then call them directly like any other tool.
+2. If your platform tools are STILL unusable after a loader reload plus one retry (or your
+   client has no such loader at all), do not go silent — fall back to the sanctioned helper
    `node scripts/mcp-call.mjs <group>:<verb> <jsonArgs> --client "$PAPERCUSP_SID" [--harness <h>]`
    (it carries the correct bearer and attributes the call to you) to claim, comment, and complete
    your work. Only if even that fails, say so plainly in your output and stop.

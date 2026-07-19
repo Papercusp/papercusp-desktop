@@ -241,9 +241,16 @@ When your work-list is **drained or you're blocked awaiting direction**, do NOT 
 stop: call **`coord:await-inbox`** first. It registers a standing wake-watch on your
 own inbox so a later `coord:send { wake:true }` (from the Mug or a peer) re-invokes
 you. ALSO park ONE `events:await { event: 'work-item:claimable', payload_filter:
-<your claim spec's view>, timeout_sec: 1800 }` — the inbox watch wakes you on a
+<scope>, timeout_sec: 1800 }` — the inbox watch wakes you on a
 Mug/peer SEND; this event wakes you when the POOL refills (created-unclaimed /
-claim-released / unblocked; the ~30-min on_timeout backstops a missed emit). Either
+claim-released / unblocked; the ~30-min on_timeout backstops a missed emit). For
+`<scope>` use the ready-made `payloadFilter` `scheduler:get_next` returns in its
+scoped-miss response (derived from your OWN claim spec — EI-15185), else scope by
+your harness (`{ harness: { eq: '<your-harness>' } }`). NEVER register the await
+UNSCOPED: the key fires on every system-wide release, so a bare filter wastes a
+full wake on out-of-scope items `get_next` then immediately re-rejects. If no
+`payloadFilter` is offered and you have no harness to narrow by, skip the event
+await and rely on the inbox watch / a leader wake. Either
 wake is a HINT, never a claim: `scheduler:get_next` on the wake turn stays the
 authoritative claim (a re-miss just re-registers the await). Then end your turn.
 While you still have queued work, keep going — only register the idle wakes when

@@ -10,16 +10,16 @@ docSlugs: agents/compaction
 
 An agent's working memory (its "context window") is finite — a long session
 eventually fills it. **Compaction** is how a session survives that: the
-conversation is summarized down to the essentials and the agent continues
-with the summary plus pointers back to durable state. It happens
+harness distills what matters into a compact carry document and relaunches
+the agent on it, with pointers back to durable state. It happens
 automatically; you'll barely notice beyond a brief pause.
 
 ## Details
 
-The key design choice: the summary is an *index*, not the state itself.
+The key design choice: the carry document is an *index*, not the state itself.
 Before compacting, a disciplined agent parks everything important in durable
-stores — progress on its work items, conclusions, memory — and the summary
-just points there. So even an imperfect summary loses nothing that matters:
+stores — progress on its work items, conclusions, memory — and the carry
+just points there. So even an imperfect carry loses nothing that matters:
 the next turn re-reads the real state from the database.
 
 This is also why long-running work here is resilient in general. Sessions

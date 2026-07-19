@@ -1,1 +1,0 @@
-function e(){if(typeof window>`u`)return;let e=window;if(typeof e.__papercuspOriginalReload==`function`)try{e.__papercuspOriginalReload();return}catch{}try{let e=new URL(window.location.href);e.searchParams.set(`_r`,String(Date.now())),window.location.href=e.toString();return}catch{}window.location.reload()}export{e as t};

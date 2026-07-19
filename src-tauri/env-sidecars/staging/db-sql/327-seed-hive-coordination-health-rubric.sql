@@ -43,7 +43,7 @@ VALUES (
   'default',
   'hive-coordination-health',
   'hive-coordination',
-  'Hive coordination health',
+  'Pot coordination health',
   $desc$The 15-criteria scorecard for whether the papercusp queen/bee/overwatch/scout self-improving loop is healthy — the WHOLE loop turning, not any one stage merely busy. Crystallized from the owner's 13-question hive-coordination scorecard (hive-coordination-test-loop-2026-06-20 D-001, Q1-Q13). Grade a STRUCTURED OBSERVATION against it: rate each criterion (healthy/degraded/broken/unknown) with MANDATORY evidence. Overwatch emits this scorecard every turn (OWNER REQUIREMENT #1). Source of truth is code + the live DB, never docs/tool-summaries. Three pitfalls that invalidate a naive read: (1) enumerate started hives across ALL workspace_ids first (multi-workspace); (2) idle is not dead and activity is not health — check WHY via the carryNote, not wake-count/spend; (3) silence is not health (the cursed-latch + stale alarms). Long-form per-criterion method: the agent-insights runbook named by method_ref.$desc$,
   $criteria$[
     {

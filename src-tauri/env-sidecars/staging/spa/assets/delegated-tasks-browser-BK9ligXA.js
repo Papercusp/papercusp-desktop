@@ -1,0 +1,1 @@
+function e(){throw new Error("delegated-tasks is server-only and cannot run in the operator-vite browser bundle")}function n(){return e()}function r(){return e()}function t(){return e()}export{r as getDelegatedSession,n as listDelegatedSessions,t as searchDelegatedSessions};

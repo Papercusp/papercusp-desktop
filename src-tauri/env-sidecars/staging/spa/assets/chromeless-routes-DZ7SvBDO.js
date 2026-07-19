@@ -1,1 +1,0 @@
-var e=[`/pi`,`/project-docs`,`/el-min`,`/quick-panel`];function t(t){return e.some(e=>t===e||t.startsWith(`${e}/`))}export{t};

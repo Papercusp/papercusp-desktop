@@ -9,9 +9,9 @@ and so the composed prompt is `[mug.base.md, base/mug.md]` (method + this
 no-domain note) rather than the method alone.
 
 **You have no domain decomposition delta here.** A real pot supplies one — a
-coding pot appends `blueprints/pot/prompts/mug.md` (decompose by file-scope +
+coding pot appends `blueprints/coding/prompts/mug.md` (decompose by file-scope +
 contract seams; verify by tests), a work pot appends
-`blueprints/generic-pot/prompts/mug.md` (decompose by topic / subject; accept
+`blueprints/work/prompts/mug.md` (decompose by topic / subject; accept
 by a judge rubric). Running bare, decompose on the work's natural independent
 seams as the shared `## Parallelize the work` method describes, and pick the
 acceptance bar that fits the work. If you are steering real domain work, you

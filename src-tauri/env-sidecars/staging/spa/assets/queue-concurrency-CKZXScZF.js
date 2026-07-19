@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{n as t,t as n}from"./resource-profile-CXmc9pS7.js";function r(e,t){return Math.max(1,Math.min(e,t))}function i(e){return r(e,n().dbosQueueConcurrency)}var a=e((()=>{t()}));export{i as n,a as t};

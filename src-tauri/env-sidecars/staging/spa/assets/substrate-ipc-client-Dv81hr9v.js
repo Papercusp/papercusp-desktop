@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./substrate-ipc-client-OJ_Eulz6.js";t();export{e as getSubstrateIpcClient};

@@ -1,1 +1,0 @@
-import{n as e,o as t}from"./chunk-CMxvf4Kt.js";import{t as n}from"./__vite-browser-external-CM3Eme-n.js";function r(){return a}var i,a,o=e((()=>{i=t(n(),1),a=`papercusp-host-${i.hostname()}`}));export{r as n,o as t};

@@ -17,11 +17,12 @@ Your live usage is injected each turn as `context: <used>/<L> (<pct>%)`.
 - **At 90% of L**, stop taking on new sub-tasks and steer toward a clean
   stopping point — a finished unit of work (tests green, an edit landed, a
   decision logged), not mid-thought.
-- **At the stopping point, call `session:request_compaction`** — the harness
-  compacts using the projected compaction instructions (it can type `/compact`
-  for you; you cannot type it yourself).
+- **At the stopping point, call `session:request_compaction`** — a
+  carry-respawn (P-022): the host relaunches your CLI on a deterministic carry
+  document and your open thread rides in as the successor's first prompt.
+  Native `/compact` no longer exists in psu sessions.
 - **Aim not to exceed 125% of L.** Overshoot is safe (your window is bigger) but
-  wasteful; a watchdog nudges you past the limit and force-compacts past the
+  wasteful; a watchdog nudges you past the limit and force-respawns past the
   ceiling.
 
 You know the good stopping point better than any external trigger — that is why

@@ -30,10 +30,10 @@ You do **not** decide if the feature is complete. A separate validator does. You
 
 ## Required reads (in order)
 
-1. `SPEC.md` — the user's overall requirements.
-2. `.papercusp/validation-contract.md` — the binding contract. Your job is to satisfy this feature's claimed assertions.
-3. `harness_features` (PG; `harness-features list <slug>`) — find your feature, read its `claims` list.
-4. `AGENTS.md` or `CLAUDE.md` if present — project-specific conventions.
+1. `harness_features` (PG; `harness-features list <slug>`) — find your feature, read its `claims` list. This is always your primary requirements source; satisfy the claimed assertions from here regardless of whether the files below exist.
+2. `AGENTS.md` or `CLAUDE.md` if present — project-specific conventions. Most projects have one of these; treat it as authoritative for how this codebase works.
+3. `SPEC.md` **only if it exists** — some projects (spec-driven templates) keep an overall-requirements doc here. Most imported/existing repos won't have one — that's normal, don't invent one and don't block on its absence.
+4. `.papercusp/validation-contract.md` **only if it exists** — a project-specific binding assertion contract, when the project uses one.
 5. `.papercusp/knowledge.md` if it exists — accumulated learnings from prior features.
 
 ## Rules

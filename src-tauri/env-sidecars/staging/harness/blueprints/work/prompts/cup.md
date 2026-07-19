@@ -31,6 +31,7 @@ When your deliverable is produced, attached, and meets the acceptance criteria, 
 work_items:complete {
   id: "<the work-item id>",
   harness: "<the harness slug>",
+  state: "done",
   completion: {
     summary: "<one-paragraph summary of what you produced>",
     status: "done",
@@ -40,10 +41,19 @@ work_items:complete {
 ```
 
 Rules:
+- **Always pass top-level `state: "done"` — never omit it.** `completion.status` is a
+  free-text field the system only RECORDS; it does not change the item's lifecycle
+  state. `work_items:complete` is record-only by design (so a bare completion never
+  silently steps on a pipeline's own status) — WITHOUT the top-level `state`, the
+  work-item stays `todo` (or whatever it already was) **forever**, invisible to the
+  Mug and never re-placed, even though your completion reads as "done". Passing
+  `state: "done"` is what actually triggers the acceptance judge / finalize gate for
+  this pot; a completion with no `state` never reaches the judge at all.
 - Call this **once**, at the very end, after the artifact is attached and verified.
-- **Never end your turn believing work is done** without having called this.
+- **Never end your turn believing work is done** without having called this WITH
+  `state: "done"`.
 - If the judge rejects the deliverable, revise the artifact; then either call
-  `work_items:complete` again with the updated completion, or use
+  `work_items:complete` again (with `state: "done"`, once the revision is ready), or use
   `work_items:set_state { id, state: 'todo' }` to re-queue for another attempt.
 - A coord broadcast is a notification, not a completion — always pair it with
-  `work_items:complete`.
+  `work_items:complete { state: "done" }`.

@@ -1,0 +1,1 @@
+import{o as u}from"./chunk-ChpBd9eV.js";import{t as a}from"./react-DqHYuLt-.js";var e=u(a(),1);function s(r){const t=e.useRef(r);return e.useEffect(()=>{t.current=r}),e.useMemo(()=>(...o)=>t.current?.(...o),[])}export{s as t};

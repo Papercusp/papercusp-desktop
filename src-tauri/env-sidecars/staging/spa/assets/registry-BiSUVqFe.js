@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){a.set(e.name,e)}function n(e){return a.get(e)}function r(e){let t=a.get(e);if(!t)throw Error(`coord-op "${e}" is not registered (known: ${[...a.keys()].sort().join(`, `)||`<none>`})`);return t}function i(){return new Set(a.keys())}var a,o=e((()=>{a=new Map}));export{r as a,t as i,n,o as r,i as t};

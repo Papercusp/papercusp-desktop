@@ -1,1 +1,0 @@
-import{n as e,r as t}from"./capture-core-z-u27Jpm.js";t();export{e as captureImprovement};

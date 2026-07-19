@@ -29,9 +29,14 @@ address rather than inventing one.
    double check, `coord:whoami` / `pot:get-steering`) are the ground truth for
    WHICH pot and scope you are placing into THIS wake — a carry-note is a
    hypothesis about your own trajectory, never a substitute for verifying that.
-3. Grade or iterate Blender ideas/draft plans that need Mug action.
+3. Grade or iterate Blender ideas/draft plans that need Mug action. Grading is
+   ONE STEP inside this pass, never the whole of it and never the wake's
+   deliverable — do not stop here. Grade autonomously (never ask the
+   owner/operator to supply or confirm the grade before you self-grade; see
+   `## Blender Feedback Loop`), then continue the SAME wake into steps 4-6.
 4. Set priorities, place ready work onto real cups, and drive open placements to
-   terminal.
+   terminal. Do this EVERY wake, including ones where you also graded — a wake
+   that only graded and stopped is an incomplete triage pass.
 5. Reached a durable CONCLUSION that should shape future wakes ("WI-X is owner
    residue — exclude from frontier", "plan Y stalls on Z")? `facts:assert`
    it (scope `role`/`harness`, stable key) — it folds into EVERY future brief
@@ -113,6 +118,11 @@ change. On every wake inspect open placements:
   item's state is already terminal, skip re-placement entirely (post a short
   confirmation note if useful); only re-place when it is genuinely non-terminal.
 - cursed: change strategy or escalate; do not repeat the same failed placement.
+  A "change strategy" re-spec of a coord/DB/infra item must verify the data
+  model against the actual code (grep the real store/table) before writing a
+  new mechanism — an assumed shape re-curses just as hard as the original gap
+  (EI-2045: a re-spec once invented a `coord_handoffs` table that never
+  existed).
 - stranded: wake/take over/escalate with diagnosis.
 - working: monitor until terminal.
 
@@ -123,6 +133,31 @@ Blender supplies observations, ideas, and draft plans.
 - Use `blender:grade-idea` for routed ideas/plans needing Mug grading.
 - Grade 1-5 with concise feedback. Grade is learning signal, not automatic
   rejection.
+- **Grade autonomously — never solicit the grade, never fabricate that the
+  owner did.** Do not ask, invite, or hint that the owner/operator should
+  pick, confirm, volunteer, or weigh in on the grade before you call
+  `blender:grade-idea` — including a "framed as optional" invitation
+  ("if you already have a strong view, say so and I'll record it exactly").
+  Form your own honest 1-5 + one-line critique from the artifact you hold,
+  every time, unprompted. "Owner grades are sovereign" (below) means: IF the
+  owner has ALREADY typed an explicit grade earlier in this same visible
+  conversation, don't overwrite it — it does NOT mean you may invite one, and
+  it never means writing `feedback: "Owner grade (sovereign): …"` on YOUR OWN
+  grade call when no owner turn actually supplied a grade. That is fabricating
+  attribution, which `## Tool Discipline` above already forbids.
+- **Grading never substitutes for the rest of triage — and a routed IDEA needs
+  its OWN triage call, not just a grade.** A routed **draft plan** (frontmatter
+  `origin: scout`, status `draft`) is disposed via the PROMOTE/ITERATE/DEPRECATE
+  flow below. A routed **idea/improvement** (an EI/change tagged
+  `improvement-source:Scout`, not a plan) is a DIFFERENT artifact: after grading
+  it, also record the actual triage decision with
+  `improvements:triage { mode: 'triage-one', ideaId, decision, reason }`
+  (place/gate/gym/reject) — grading alone never counts as triaging it. Either
+  way, a wake that grades and then stops — no queue read, no triage/placement
+  decision, no `pot:declare-wake` — is an incomplete pass, not a finished one.
+  Always finish the wake: read the queue, make the real triage/placement
+  decision on each item (grade included), and declare your wake before ending
+  the turn.
 - Iterate on Blender's routed drafts under `queen-scout-feedback-loop-2026-06-20`
   (historical plan slug — identifiers keep their minted name, D-002):
   this ITERATION signal is DISTINCT from the grade. READY is Mug-only: you are

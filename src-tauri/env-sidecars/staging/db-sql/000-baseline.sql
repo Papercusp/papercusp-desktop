@@ -394,6 +394,36 @@ CREATE TABLE IF NOT EXISTS harness_shared.adaptive_telemetry (
     synthesis_error text
 );
 
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS requested_n integer;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS actual_n integer;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS tier_label text;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS available_at_decision integer;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS max_slots integer;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS outcome text;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS outcome_ts bigint;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS duration_ms bigint;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS synthesized boolean;
+
+ALTER TABLE harness_shared.adaptive_telemetry ADD COLUMN IF NOT EXISTS synthesis_error text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.adaptive_telemetry_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -424,6 +454,40 @@ CREATE TABLE IF NOT EXISTS harness_shared.adv_sessions (
     CONSTRAINT adv_sessions_mode_check CHECK ((mode = ANY (ARRAY['omp'::text, 'console'::text])))
 );
 
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS plan_slug text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS mode text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS terminal_bin text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS pid integer;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS window_id text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS omp_thread_id text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS label text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS cwd text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS ended_at timestamp with time zone;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS exit_code integer;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS coord_owner_id text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS agent text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.adv_sessions ADD COLUMN IF NOT EXISTS feature text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.adv_sessions_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -446,6 +510,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.agent_actions (
     session_id text,
     request_id text
 );
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS agent text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS command_id text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS args jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS error_code text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS duration_ms integer;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS workspace text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS session_id text;
+
+ALTER TABLE harness_shared.agent_actions ADD COLUMN IF NOT EXISTS request_id text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.agent_actions_id_seq
     START WITH 1
@@ -472,6 +558,32 @@ CREATE TABLE IF NOT EXISTS harness_shared.agent_chats_consolidated (
     archived_at bigint
 );
 
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS transcript jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS total_input_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS total_output_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS total_cost_usd_cents bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS created_at bigint;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS updated_at bigint;
+
+ALTER TABLE harness_shared.agent_chats_consolidated ADD COLUMN IF NOT EXISTS archived_at bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.agent_queries (
     id bigint NOT NULL,
     ts timestamp with time zone DEFAULT now() NOT NULL,
@@ -481,6 +593,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.agent_queries (
     workspace text,
     request_id text
 );
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS agent text;
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS query_id text;
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS args_compact jsonb;
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS workspace text;
+
+ALTER TABLE harness_shared.agent_queries ADD COLUMN IF NOT EXISTS request_id text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.agent_queries_id_seq
     START WITH 1
@@ -510,6 +636,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.agent_runs_consolidated (
     updated_ts bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS size_bytes bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS duration_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS cost_usd double precision DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS input_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS output_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS cache_read_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS cache_creation_tokens bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS running boolean DEFAULT false;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS last_event_ts bigint;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS created_ts bigint;
+
+ALTER TABLE harness_shared.agent_runs_consolidated ADD COLUMN IF NOT EXISTS updated_ts bigint;
+
 COMMENT ON TABLE harness_shared.agent_runs_consolidated IS 'Canonical store for agent runs (Migration 031). Trigger-mirrored from per-harness agent_runs.';
 
 CREATE TABLE IF NOT EXISTS harness_shared.audit_log (
@@ -524,6 +682,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.audit_log (
     CONSTRAINT audit_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS actor text DEFAULT 'user'::text;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS action text;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS subject text;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS details jsonb;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.audit_log ADD COLUMN IF NOT EXISTS _search tsvector GENERATED ALWAYS AS (((setweight(to_tsvector('simple'::regconfig, COALESCE(subject, ''::text)), 'A'::"char") || setweight(to_tsvector('simple'::regconfig, COALESCE(action, ''::text)), 'B'::"char")) || setweight(to_tsvector('simple'::regconfig, COALESCE(actor, ''::text)), 'C'::"char"))) STORED;
+
 CREATE TABLE IF NOT EXISTS harness_shared.auth_audit_log (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     ts timestamp with time zone DEFAULT now() NOT NULL,
@@ -537,6 +711,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.auth_audit_log (
     metadata jsonb
 );
 
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS username text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS ip text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS user_agent text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS ok boolean;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS error_code text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS session_hmac text;
+
+ALTER TABLE harness_shared.auth_audit_log ADD COLUMN IF NOT EXISTS metadata jsonb;
+
 ALTER TABLE ONLY harness_shared.auth_audit_log REPLICA IDENTITY FULL;
 
 CREATE TABLE IF NOT EXISTS harness_shared.auth_rate_limit (
@@ -544,6 +738,12 @@ CREATE TABLE IF NOT EXISTS harness_shared.auth_rate_limit (
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.auth_rate_limit ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.auth_rate_limit ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.auth_rate_limit ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 ALTER TABLE ONLY harness_shared.auth_rate_limit REPLICA IDENTITY FULL;
 
@@ -560,6 +760,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.auto_review_audit (
     ts timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT auto_review_audit_action_check CHECK ((action = ANY (ARRAY['auto_approve'::text, 'auto_merge'::text, 'manual_approve'::text, 'manual_merge'::text, 'skipped_untrusted'::text, 'skipped_checks_failing'::text, 'error'::text])))
 );
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS pr_number integer;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS pr_url text;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS author_github_id bigint;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS reviewer_github_id bigint;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS action text;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS detail text;
+
+ALTER TABLE harness_shared.auto_review_audit ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.auto_review_audit_id_seq
     START WITH 1
@@ -579,6 +799,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.autoloop_state (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS role text DEFAULT 'director'::text;
+
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS last_fired_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS last_status text;
+
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS consecutive_errors integer DEFAULT 0;
+
+ALTER TABLE harness_shared.autoloop_state ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.backup_events (
     id bigint NOT NULL,
     workspace_id text NOT NULL,
@@ -587,6 +819,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.backup_events (
     payload_json jsonb,
     at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS snapshot_id bigint;
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS payload_json jsonb;
+
+ALTER TABLE harness_shared.backup_events ADD COLUMN IF NOT EXISTS at timestamp with time zone DEFAULT now();
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.backup_events_id_seq
     START WITH 1
@@ -612,6 +856,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.backup_snapshots (
     error_text text
 );
 
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS kopia_snapshot_id text;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS finished_at timestamp with time zone;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS status text DEFAULT 'running'::text;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS trigger_reason text;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS trigger_context jsonb;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS bytes_added bigint;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS bytes_total bigint;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS sources_json jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.backup_snapshots ADD COLUMN IF NOT EXISTS error_text text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.backup_snapshots_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -632,6 +900,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.claim_audit (
     detail text,
     CONSTRAINT claim_audit_outcome_check CHECK ((outcome = ANY (ARRAY['won'::text, 'lost'::text, 'timeout'::text, 'error'::text])))
 );
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS claimer_pubkey text;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS attempt_ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS outcome text;
+
+ALTER TABLE harness_shared.claim_audit ADD COLUMN IF NOT EXISTS detail text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.claim_audit_id_seq
     START WITH 1
@@ -654,6 +938,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.contributor_usage_events (
     schema_version bigint DEFAULT 1 NOT NULL
 );
 
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS event_id text;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS device_pubkey text;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS ref_id text;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.contributor_usage_events ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
+
 CREATE TABLE IF NOT EXISTS harness_shared.contributors (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
@@ -673,11 +975,49 @@ CREATE TABLE IF NOT EXISTS harness_shared.contributors (
     binding_last_checked_at timestamp with time zone
 );
 
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS github_username text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS display_name text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS avatar_url text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS device_attestations jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS revoked_pubkeys text[] DEFAULT '{}'::text[];
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS joined_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS binding_status text DEFAULT 'unverified'::text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS channel1_verified_at timestamp with time zone;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS channel2_verified_at timestamp with time zone;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS channel2_branch_ref text;
+
+ALTER TABLE harness_shared.contributors ADD COLUMN IF NOT EXISTS binding_last_checked_at timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.cooldown_marks (
     key text NOT NULL,
     marked_at_ms bigint NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.cooldown_marks ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.cooldown_marks ADD COLUMN IF NOT EXISTS marked_at_ms bigint;
+
+ALTER TABLE harness_shared.cooldown_marks ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.coord_event_log (
     id bigint NOT NULL,
@@ -688,6 +1028,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.coord_event_log (
     body jsonb NOT NULL,
     ts timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS surface text;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS writer_key text;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS msg_id text;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS body jsonb;
+
+ALTER TABLE harness_shared.coord_event_log ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.coord_event_log_id_seq
     START WITH 1
@@ -712,6 +1066,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.coord_presence (
     heartbeat_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS owner_id text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS owner_label text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS source text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS intent text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS current_plan_slug text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS current_files jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS host text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS pid integer;
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.coord_presence ADD COLUMN IF NOT EXISTS heartbeat_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.coord_subscriptions (
     msg_id text NOT NULL,
     workspace_id text DEFAULT 'default'::text NOT NULL,
@@ -723,12 +1099,36 @@ CREATE TABLE IF NOT EXISTS harness_shared.coord_subscriptions (
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS msg_id text;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS owner_id text;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS pattern text;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS trigger text;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS expires_ts timestamp with time zone;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS cancelled_at timestamp with time zone;
+
+ALTER TABLE harness_shared.coord_subscriptions ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.coord_watermarks (
     workspace_id text DEFAULT 'default'::text NOT NULL,
     owner_id text NOT NULL,
     surfaces jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.coord_watermarks ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.coord_watermarks ADD COLUMN IF NOT EXISTS owner_id text;
+
+ALTER TABLE harness_shared.coord_watermarks ADD COLUMN IF NOT EXISTS surfaces jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.coord_watermarks ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.delegate_inbox (
     id bigint NOT NULL,
@@ -739,6 +1139,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.delegate_inbox (
     headline text NOT NULL,
     agent_session_id text
 );
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS delivered_at timestamp with time zone;
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS kind text DEFAULT 'delegate-complete'::text;
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS headline text;
+
+ALTER TABLE harness_shared.delegate_inbox ADD COLUMN IF NOT EXISTS agent_session_id text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.delegate_inbox_id_seq
     START WITH 1
@@ -766,6 +1180,32 @@ CREATE TABLE IF NOT EXISTS harness_shared.delegates (
     CONSTRAINT delegates_agent_backend_check CHECK ((agent_backend = ANY (ARRAY['claude-code'::text, 'omp'::text])))
 );
 
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS workspace text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS agent_session_id text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS status text DEFAULT 'open'::text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS last_active_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS turn_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS origin text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS initiator_msg text;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS transcript jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.delegates ADD COLUMN IF NOT EXISTS agent_backend text DEFAULT 'claude-code'::text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.delegates_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -784,6 +1224,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.el_conv_calls (
     duration_secs integer DEFAULT 0 NOT NULL,
     ym text DEFAULT to_char(now(), 'YYYY-MM'::text) NOT NULL
 );
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS conversation_id text;
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS agent_id text;
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS workspace text;
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS duration_secs integer DEFAULT 0;
+
+ALTER TABLE harness_shared.el_conv_calls ADD COLUMN IF NOT EXISTS ym text DEFAULT to_char(now(), 'YYYY-MM'::text);
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.el_conv_calls_id_seq
     START WITH 1
@@ -806,6 +1260,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.feature_audit_consolidated (
     actor text
 );
 
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS field text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS old_value text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS new_value text;
+
+ALTER TABLE harness_shared.feature_audit_consolidated ADD COLUMN IF NOT EXISTS actor text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.feature_audit_consolidated_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -827,6 +1299,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.feature_claims (
     schema_version bigint DEFAULT 1 NOT NULL
 );
 
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS seq bigint;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS claimer_pubkey text;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS claimer_github_user_id bigint;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS outcome text;
+
+ALTER TABLE harness_shared.feature_claims ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
+
 CREATE TABLE IF NOT EXISTS harness_shared.feature_queue (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
@@ -838,6 +1328,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.feature_queue (
     origin text DEFAULT 'local'::text NOT NULL,
     schema_version bigint DEFAULT 1 NOT NULL
 );
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS queued_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS removed_at timestamp with time zone;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS author_pubkey text;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS origin text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.feature_queue ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS harness_shared.feature_working_set (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -851,6 +1359,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.feature_working_set (
     schema_version bigint DEFAULT 1 NOT NULL
 );
 
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS cleared_at timestamp with time zone;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS author_pubkey text;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS origin text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.feature_working_set ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
+
 CREATE TABLE IF NOT EXISTS harness_shared.git_export_outbox (
     id bigint NOT NULL,
     workspace_id text NOT NULL,
@@ -863,6 +1389,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.git_export_outbox (
     exported_at bigint,
     CONSTRAINT git_export_outbox_op_check CHECK ((op = ANY (ARRAY['put'::text, 'del'::text])))
 );
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS table_name text;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS op text;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS "row" jsonb;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.git_export_outbox ADD COLUMN IF NOT EXISTS exported_at bigint;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.git_export_outbox_id_seq
     START WITH 1
@@ -889,6 +1433,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.goals (
     CONSTRAINT goals_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS install_slug text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS body text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS parent_id text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS budget_cents bigint;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS status text DEFAULT 'active'::text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.goals ADD COLUMN IF NOT EXISTS _search tsvector GENERATED ALWAYS AS ((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(body, ''::text)), 'B'::"char"))) STORED;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_archives (
     harness_slug text NOT NULL,
     phase text DEFAULT 'staging'::text NOT NULL,
@@ -897,6 +1465,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_archives (
     ts bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS size_bytes bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_archives ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_brainstorm (
     harness_slug text NOT NULL,
@@ -910,6 +1490,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_brainstorm (
     content_embedding public.vector(384)
 );
 
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS canvas jsonb;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS mindmap jsonb;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS content_tsv tsvector;
+
+ALTER TABLE harness_shared.harness_brainstorm ADD COLUMN IF NOT EXISTS content_embedding public.vector(384);
+
 ALTER TABLE ONLY harness_shared.harness_brainstorm REPLICA IDENTITY FULL;
 
 COMMENT ON TABLE harness_shared.harness_brainstorm IS 'Canonical brainstorm artifacts (Migration 033, Phase 2). FS at .harness/brainstorm.{md,canvas.json,mindmap.json} is now a derived mirror.';
@@ -922,6 +1520,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_branch_actions (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_branch_actions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_branch_actions ADD COLUMN IF NOT EXISTS branch text;
+
+ALTER TABLE harness_shared.harness_branch_actions ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_branch_actions ADD COLUMN IF NOT EXISTS last_check_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_branch_actions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_checkpoints (
     harness_slug text NOT NULL,
     name text NOT NULL,
@@ -931,6 +1539,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_checkpoints (
     workspace_id text DEFAULT ''::text NOT NULL,
     consumed boolean DEFAULT false NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS waiting_since_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS granted boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_checkpoints ADD COLUMN IF NOT EXISTS consumed boolean DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_chunk_plans (
     workspace_id text NOT NULL,
@@ -949,6 +1571,34 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_chunk_plans (
     spawned_by_spawn_id text
 );
 
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS chunk_id text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS chunk_index integer;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS files jsonb;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS description text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS strikes integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS last_error text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS commit_sha text;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS created_ts bigint DEFAULT ((EXTRACT(epoch FROM now()) * (1000)::numeric))::bigint;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS updated_ts bigint DEFAULT ((EXTRACT(epoch FROM now()) * (1000)::numeric))::bigint;
+
+ALTER TABLE harness_shared.harness_chunk_plans ADD COLUMN IF NOT EXISTS spawned_by_spawn_id text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_decisions (
     harness_slug text NOT NULL,
     line_hash text NOT NULL,
@@ -963,6 +1613,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_decisions (
     body_embedding public.vector(384)
 );
 
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS line_hash text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS iso text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS verb text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS args text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS iteration integer;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS is_ghost boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS body_tsv tsvector;
+
+ALTER TABLE harness_shared.harness_decisions ADD COLUMN IF NOT EXISTS body_embedding public.vector(384);
+
 ALTER TABLE ONLY harness_shared.harness_decisions REPLICA IDENTITY FULL;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_design_artifacts (
@@ -976,6 +1648,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_design_artifacts (
     CONSTRAINT hda_kind_chk CHECK ((kind = ANY (ARRAY['spec'::text, 'sketch'::text, 'screenshot'::text, 'annotation'::text, 'rejected_candidate'::text, 'review'::text])))
 );
 
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.harness_design_artifacts ADD COLUMN IF NOT EXISTS created_ts bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_dispatches (
     workspace_id text DEFAULT 'default'::text NOT NULL,
     parent_slug text NOT NULL,
@@ -984,6 +1670,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_dispatches (
     dispatch_at bigint NOT NULL,
     result_body jsonb
 );
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS parent_slug text;
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS child_slug text;
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS child_role text;
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS dispatch_at bigint;
+
+ALTER TABLE harness_shared.harness_dispatches ADD COLUMN IF NOT EXISTS result_body jsonb;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_dock_layouts (
     workspace_id text NOT NULL,
@@ -995,6 +1693,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_dock_layouts (
     created_ts bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS user_id text;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS layout_name text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS schema_version integer DEFAULT 1;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS layout_json jsonb;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS updated_ts bigint;
+
+ALTER TABLE harness_shared.harness_dock_layouts ADD COLUMN IF NOT EXISTS created_ts bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_escalations (
     harness_slug text NOT NULL,
     phase text DEFAULT 'staging'::text NOT NULL,
@@ -1005,6 +1717,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_escalations (
     body_tsv tsvector,
     body_embedding public.vector(384)
 );
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS escalation text;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS supervisor_notes text;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS body_tsv tsvector;
+
+ALTER TABLE harness_shared.harness_escalations ADD COLUMN IF NOT EXISTS body_embedding public.vector(384);
 
 ALTER TABLE ONLY harness_shared.harness_escalations REPLICA IDENTITY FULL;
 
@@ -1019,6 +1747,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_expert_feedback (
     ended_at bigint
 );
 
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS expert_id text;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS feedback_id text;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS persona text;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS verdict jsonb;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS created_at bigint;
+
+ALTER TABLE harness_shared.harness_expert_feedback ADD COLUMN IF NOT EXISTS ended_at bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_expert_turns (
     workspace_id text DEFAULT 'default'::text NOT NULL,
     harness_slug text NOT NULL,
@@ -1030,6 +1774,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_expert_turns (
     created_at bigint NOT NULL,
     CONSTRAINT harness_expert_turns_speaker_check CHECK ((speaker = ANY (ARRAY['expert'::text, 'feedback'::text])))
 );
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS expert_id text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS feedback_id text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS turn_idx integer;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS speaker text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS body text;
+
+ALTER TABLE harness_shared.harness_expert_turns ADD COLUMN IF NOT EXISTS created_at bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_experts (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -1051,6 +1811,40 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_experts (
     assertions_content text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS expert_id text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS title text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS status text DEFAULT 'unknown'::text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS budget_cents bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS feature_size text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS high_level_spec text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS agent_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS round_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS personas_used jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS user_engaged boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS created_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS termination_reason text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS spec_content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_experts ADD COLUMN IF NOT EXISTS assertions_content text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_debug_notes (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
@@ -1059,6 +1853,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_debug_notes (
     mtime_ms bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_feature_debug_notes ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_feature_debug_notes ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_feature_debug_notes ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_feature_debug_notes ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_feature_debug_notes ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_notes (
     workspace_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -1066,6 +1870,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_notes (
     content text NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_feature_notes ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_feature_notes ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_feature_notes ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_feature_notes ADD COLUMN IF NOT EXISTS content text;
+
+ALTER TABLE harness_shared.harness_feature_notes ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_prs (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -1076,6 +1890,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_feature_prs (
     opened_ts bigint DEFAULT 0 NOT NULL,
     updated_ts bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS pr_url text;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS pr_state text DEFAULT 'unknown'::text;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS opened_ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_feature_prs ADD COLUMN IF NOT EXISTS updated_ts bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_features_consolidated (
     harness_slug text NOT NULL,
@@ -1128,6 +1956,98 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_features_consolidated (
     CONSTRAINT hfc_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS attempts bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS claims text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS notes text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS expected_cost_cents bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS tags jsonb;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS needs_human_review boolean;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS created_ts bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS updated_ts bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS parent_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS goal_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS taken_by text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS taken_at timestamp with time zone;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS expires_at timestamp with time zone;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS _search tsvector GENERATED ALWAYS AS (((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(summary, ''::text)), 'B'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(notes, ''::text)), 'C'::"char"))) STORED;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS deprecation_reason text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS see_also text[] DEFAULT '{}'::text[];
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS needs_design boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS design_status text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS design_spec_id text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS discarded_design_work boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS completion_ref jsonb;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS created_by_github_user_id bigint;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS working_users bigint[] DEFAULT '{}'::bigint[];
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS worked_by_history jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS verified_done_at_remote_ts timestamp with time zone;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS verifier_last_error text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS verifier_last_checked_at timestamp with time zone;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS source_plan_slug text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS source_plan_item_ids text[];
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS wave text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS feature_order integer;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS author_pubkey text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS origin text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS audit_verdict text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS audit_reasons text;
+
+ALTER TABLE harness_shared.harness_features_consolidated ADD COLUMN IF NOT EXISTS audited_at timestamp with time zone;
+
 COMMENT ON TABLE harness_shared.harness_features_consolidated IS 'Canonical store for harness features. (Migration 029) Was a trigger-mirrored copy of per-harness harness_features.<schema>.harness_features tables; the per-harness tables remain temporarily as the trigger sources but writers should target this table directly. Per-harness tables drop in a later migration once unread.';
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_generator_items (
@@ -1137,6 +2057,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_generator_items (
     items jsonb DEFAULT '[]'::jsonb NOT NULL,
     updated_ts bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_generator_items ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_generator_items ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_generator_items ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_generator_items ADD COLUMN IF NOT EXISTS items jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_generator_items ADD COLUMN IF NOT EXISTS updated_ts bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_git_log (
     harness_slug text NOT NULL,
@@ -1149,6 +2079,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_git_log (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS sha text;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS parents jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS subject text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS author text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS refs jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_git_log ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_health (
     harness_slug text NOT NULL,
     spec_present boolean DEFAULT false NOT NULL,
@@ -1156,6 +2102,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_health (
     last_check_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_health ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_health ADD COLUMN IF NOT EXISTS spec_present boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_health ADD COLUMN IF NOT EXISTS contract_present boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_health ADD COLUMN IF NOT EXISTS last_check_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_health ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_hook_logs (
     harness_slug text NOT NULL,
@@ -1165,6 +2121,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_hook_logs (
     size_bytes bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS log_id text;
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS name text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS size_bytes bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_hook_logs ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_issues_consolidated (
     harness_slug text NOT NULL,
@@ -1189,6 +2157,46 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_issues_consolidated (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS issue_id text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS severity text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS source text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS found_at timestamp with time zone;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS found_during text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS repro text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS evidence text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS suggested_fix text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS code_pointer text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS linked_feature_id text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS attempts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS notes jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS created_ts bigint;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS updated_ts bigint;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS author_pubkey text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS origin text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.harness_issues_consolidated ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 COMMENT ON TABLE harness_shared.harness_issues_consolidated IS 'Canonical store for harness issues. (Migration 030) Trigger-mirrored from per-harness harness_<slug>.harness_issues until writers move; per-harness tables drop in a later migration.';
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_lanes (
@@ -1201,6 +2209,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_lanes (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS pid integer;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS started_at bigint;
+
+ALTER TABLE harness_shared.harness_lanes ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_mission_state (
     workspace_id text DEFAULT 'default'::text NOT NULL,
     harness_slug text NOT NULL,
@@ -1209,6 +2231,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_mission_state (
     lanes jsonb DEFAULT '[]'::jsonb NOT NULL,
     updated_at bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS cost_warn_fired boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS ready_for_prod_at bigint;
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS lanes jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_mission_state ADD COLUMN IF NOT EXISTS updated_at bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_pending_issues (
     harness_slug text NOT NULL,
@@ -1224,6 +2258,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_pending_issues (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS issue_id text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS title text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS severity text DEFAULT 'normal'::text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS source text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_pending_issues ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_phase_last_used (
     workspace_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -1231,6 +2287,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_phase_last_used (
     phase text NOT NULL,
     updated_ts bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_phase_last_used ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_phase_last_used ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_phase_last_used ADD COLUMN IF NOT EXISTS user_id text;
+
+ALTER TABLE harness_shared.harness_phase_last_used ADD COLUMN IF NOT EXISTS phase text;
+
+ALTER TABLE harness_shared.harness_phase_last_used ADD COLUMN IF NOT EXISTS updated_ts bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_phases (
     harness_slug text NOT NULL,
@@ -1250,6 +2316,36 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_phases (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS phase text;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS phase_path text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS branch text;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS port integer;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS public_url text;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS exists_on_disk boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS alive boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS passed_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS total_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS cost_usd double precision DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS iteration integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS promotion_in_flight boolean DEFAULT false;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_phases ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_plan_assertions (
     workspace_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -1265,12 +2361,42 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_plan_assertions (
     CONSTRAINT harness_plan_assertions_status_check CHECK ((status = ANY (ARRAY['todo'::text, 'validating'::text, 'passed'::text, 'failed'::text])))
 );
 
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS val_id text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS plan_slug text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS item_id text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS verify_text text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS evidence_text text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS status text DEFAULT 'todo'::text;
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.harness_plan_assertions ADD COLUMN IF NOT EXISTS requires_test boolean DEFAULT true;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_plan_review (
     harness_slug text NOT NULL,
     content text DEFAULT ''::text NOT NULL,
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_plan_review ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_plan_review ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_plan_review ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_plan_review ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_plan_status (
     workspace_id text NOT NULL,
@@ -1284,6 +2410,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_plan_status (
     CONSTRAINT harness_plan_status_status_check CHECK ((status = ANY (ARRAY['started'::text, 'paused'::text, 'done'::text])))
 );
 
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS plan_slug text;
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS current_wave text;
+
+ALTER TABLE harness_shared.harness_plan_status ADD COLUMN IF NOT EXISTS priority integer;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_project_files (
     harness_slug text NOT NULL,
     spec text,
@@ -1294,6 +2436,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_project_files (
     workspace_id text DEFAULT ''::text NOT NULL,
     version bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS spec text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS agents text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS contract text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS config text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_project_files ADD COLUMN IF NOT EXISTS version bigint DEFAULT 0;
 
 COMMENT ON TABLE harness_shared.harness_project_files IS 'Canonical store for SPEC.md / AGENTS.md / validation-contract.md / config.json (Migration 034, Phase 2). Project-dir files are derived mirrors.';
 
@@ -1307,6 +2465,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_promotions (
     ts bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS promotion_id text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS from_phase text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS to_phase text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS sha text;
+
+ALTER TABLE harness_shared.harness_promotions ADD COLUMN IF NOT EXISTS ts bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_prompt_overrides (
     workspace_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -1314,6 +2486,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_prompt_overrides (
     prompt_md text NOT NULL,
     updated_at bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_prompt_overrides ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_prompt_overrides ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_prompt_overrides ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.harness_prompt_overrides ADD COLUMN IF NOT EXISTS prompt_md text;
+
+ALTER TABLE harness_shared.harness_prompt_overrides ADD COLUMN IF NOT EXISTS updated_at bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_proposals_shared (
     harness_slug text NOT NULL,
@@ -1332,11 +2514,45 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_proposals_shared (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS proposal_id text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS review_verdict text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS review_summary text;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS reviewed_at bigint;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS applied_at bigint;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS rejected_at bigint;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS size_bytes bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_proposals_shared ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_registry (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_registry ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.harness_registry ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_registry ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_run_chunks (
     workspace_id text DEFAULT 'default'::text NOT NULL,
@@ -1346,6 +2562,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_run_chunks (
     chunk_data text NOT NULL,
     ts bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS seq integer;
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS chunk_data text;
+
+ALTER TABLE harness_shared.harness_run_chunks ADD COLUMN IF NOT EXISTS ts bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_run_output (
     workspace_id text DEFAULT 'default'::text NOT NULL,
@@ -1362,6 +2590,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_run_output (
     ended_at bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS prompt_body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS jsonl_body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS out_body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS err_body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS exit_code integer;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS duration_ms integer;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS started_at bigint;
+
+ALTER TABLE harness_shared.harness_run_output ADD COLUMN IF NOT EXISTS ended_at bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_screenshots (
     harness_slug text NOT NULL,
     phase text DEFAULT 'staging'::text NOT NULL,
@@ -1371,6 +2623,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_screenshots (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS size_bytes bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_screenshots ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_skills (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
@@ -1378,6 +2642,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_skills (
     content text DEFAULT ''::text NOT NULL,
     mtime_ms bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_skills ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_skills ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_skills ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.harness_skills ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_skills ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_smoke_test (
     harness_slug text NOT NULL,
@@ -1389,6 +2663,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_smoke_test (
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS status text DEFAULT 'unknown'::text;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS pass_content text;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS failure_content text;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS results jsonb;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS startup_log text;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_smoke_test ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_snapshots (
     workspace_id text DEFAULT 'default'::text NOT NULL,
@@ -1402,6 +2692,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_snapshots (
     taken_at bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS snapshot_id text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS iteration integer;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS features_json text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS validation_md text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS notes_md text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS config_json text;
+
+ALTER TABLE harness_shared.harness_snapshots ADD COLUMN IF NOT EXISTS taken_at bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_snapshots_consolidated (
     harness_slug text NOT NULL,
     snapshot_id text NOT NULL,
@@ -1412,6 +2720,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_snapshots_consolidated (
     created_ts bigint NOT NULL,
     updated_ts bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS snapshot_id text;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS iter_num integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS files jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS feature_counts jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS created_ts bigint;
+
+ALTER TABLE harness_shared.harness_snapshots_consolidated ADD COLUMN IF NOT EXISTS updated_ts bigint;
 
 COMMENT ON TABLE harness_shared.harness_snapshots_consolidated IS 'Canonical store for harness snapshots (Migration 031). Trigger-mirrored.';
 
@@ -1432,6 +2756,32 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_status (
     CONSTRAINT harness_status_status_check CHECK ((status = ANY (ARRAY['idle'::text, 'running'::text, 'stalled'::text, 'paused'::text, 'error'::text])))
 );
 
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS iteration integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS total_features integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS passed_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS todo_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS blocked_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS last_active_ts bigint;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS cost_usd numeric(10,4);
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS updated_at bigint;
+
+ALTER TABLE harness_shared.harness_status ADD COLUMN IF NOT EXISTS expires_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_summaries (
     harness_slug text NOT NULL,
     phase text DEFAULT 'staging'::text NOT NULL,
@@ -1440,6 +2790,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_summaries (
     updated_at bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_summaries ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.harness_tests (
     harness_slug text NOT NULL,
@@ -1454,6 +2816,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_tests (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS test_id text;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS name text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS duration_ms integer DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS last_run_ts bigint;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_tests ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.harness_text_artifacts (
     harness_slug text NOT NULL,
     rel_path text NOT NULL,
@@ -1461,6 +2843,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.harness_text_artifacts (
     updated_at bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.harness_text_artifacts ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.harness_text_artifacts ADD COLUMN IF NOT EXISTS rel_path text;
+
+ALTER TABLE harness_shared.harness_text_artifacts ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.harness_text_artifacts ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.harness_text_artifacts ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 COMMENT ON TABLE harness_shared.harness_text_artifacts IS 'Generic text artifact store, keyed (harness_slug, rel_path). Migration 035, Phase 2. FS files at <harness_dir>/<rel_path> are derived mirrors.';
 
@@ -1471,6 +2863,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.hidden_plugins (
     hidden_by text,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.hidden_plugins ADD COLUMN IF NOT EXISTS basename text;
+
+ALTER TABLE harness_shared.hidden_plugins ADD COLUMN IF NOT EXISTS reason text;
+
+ALTER TABLE harness_shared.hidden_plugins ADD COLUMN IF NOT EXISTS hidden_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.hidden_plugins ADD COLUMN IF NOT EXISTS hidden_by text;
+
+ALTER TABLE harness_shared.hidden_plugins ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 COMMENT ON TABLE harness_shared.hidden_plugins IS 'Plugin basenames hidden from marketplace UIs. workspace_id="" is the global default; per-workspace rows override.';
 
@@ -1483,6 +2885,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.identity_files (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS bytes integer DEFAULT 0;
+
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.identity_files ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 COMMENT ON TABLE harness_shared.identity_files IS 'Mirror of ~/autonomous-harness/identity/<role>.md, populated by the operator fs-watcher. Files remain canonical (orchestrator subprocess reads them at prompt-build time).';
 
 CREATE TABLE IF NOT EXISTS harness_shared.insights_first_visit (
@@ -1492,12 +2906,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.insights_first_visit (
     seen_at_ts timestamp with time zone
 );
 
+ALTER TABLE harness_shared.insights_first_visit ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.insights_first_visit ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.insights_first_visit ADD COLUMN IF NOT EXISTS user_id text;
+
+ALTER TABLE harness_shared.insights_first_visit ADD COLUMN IF NOT EXISTS seen_at_ts timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.known_schema_versions (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
     max_known_version bigint DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.known_schema_versions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.known_schema_versions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.known_schema_versions ADD COLUMN IF NOT EXISTS max_known_version bigint DEFAULT 1;
+
+ALTER TABLE harness_shared.known_schema_versions ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.llm_test_claims (
     claim_key text NOT NULL,
@@ -1509,6 +2939,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.llm_test_claims (
     expires_at timestamp with time zone NOT NULL,
     metadata_json jsonb DEFAULT '{}'::jsonb NOT NULL
 );
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS claim_key text;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS owner_id text;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS scenario_id text;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS identity_hash text;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS matrix_index integer;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS acquired_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS expires_at timestamp with time zone;
+
+ALTER TABLE harness_shared.llm_test_claims ADD COLUMN IF NOT EXISTS metadata_json jsonb DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS harness_shared.llm_test_findings (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1529,6 +2975,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.llm_test_findings (
     acknowledged_at timestamp with time zone
 );
 
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS run_id uuid;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS source text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS severity text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS axis text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS assert_kind text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS shape text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS evidence_turn_idx integer;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS claim text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS suggestion text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS copy_prompt text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS promoted_to_assert_id text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS promoted_from text[] DEFAULT '{}'::text[];
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS acknowledged boolean DEFAULT false;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS acknowledged_by text;
+
+ALTER TABLE harness_shared.llm_test_findings ADD COLUMN IF NOT EXISTS acknowledged_at timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.llm_test_fixtures (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     scenario_id text NOT NULL,
@@ -1538,6 +3016,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.llm_test_fixtures (
     recorded_at timestamp with time zone DEFAULT now() NOT NULL,
     recorded_from_run_id uuid
 );
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS scenario_id text;
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS label text;
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS sse_tape_json jsonb;
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS user_inputs_json jsonb;
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS recorded_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.llm_test_fixtures ADD COLUMN IF NOT EXISTS recorded_from_run_id uuid;
 
 CREATE TABLE IF NOT EXISTS harness_shared.llm_test_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1570,6 +3062,62 @@ CREATE TABLE IF NOT EXISTS harness_shared.llm_test_runs (
     metadata_json jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS scenario_id text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS scenario_version integer;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS scenario_target text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS scenario_hash text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS identity_hash text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS matrix_group_id uuid;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS matrix_index integer;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS rubric_version text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS sut_model text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS judge_model text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS persona_id text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS persona_traits_json jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS workspace_mode text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS transport_mode text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS finished_at timestamp with time zone;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS cost_usd numeric(10,6) DEFAULT 0;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS cap_breaches text[] DEFAULT '{}'::text[];
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS scores_json jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS findings_count jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS transcript_raw_zstd bytea;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS transcript_norm_json jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS telemetry_json jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS asserts_json jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS judge_json jsonb;
+
+ALTER TABLE harness_shared.llm_test_runs ADD COLUMN IF NOT EXISTS metadata_json jsonb DEFAULT '{}'::jsonb;
+
 CREATE OR REPLACE VIEW harness_shared.llm_test_matrix_results AS
  SELECT matrix_group_id,
     scenario_id,
@@ -1600,6 +3148,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.memory_anchors (
     CONSTRAINT memory_anchors_kind_check CHECK ((kind = ANY (ARRAY['file'::text, 'feature'::text, 'plan'::text, 'migration'::text, 'symbol'::text])))
 );
 
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS memory_id uuid;
+
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS value text;
+
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS last_checked_at timestamp with time zone;
+
+ALTER TABLE harness_shared.memory_anchors ADD COLUMN IF NOT EXISTS last_check_ok boolean;
+
 CREATE TABLE IF NOT EXISTS harness_shared.memory_canonical (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
@@ -1610,6 +3170,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.memory_canonical (
     state text DEFAULT 'active'::text NOT NULL,
     CONSTRAINT memory_canonical_state_check CHECK ((state = ANY (ARRAY['active'::text, 'broken_anchor'::text, 'superseded'::text, 'contradicted'::text, 'forgotten'::text])))
 );
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS last_validated_at timestamp with time zone;
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS last_surfaced_at timestamp with time zone;
+
+ALTER TABLE harness_shared.memory_canonical ADD COLUMN IF NOT EXISTS state text DEFAULT 'active'::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.memory_feedback (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1624,17 +3198,47 @@ CREATE TABLE IF NOT EXISTS harness_shared.memory_feedback (
     CONSTRAINT memory_feedback_action_check CHECK ((action = ANY (ARRAY['edit'::text, 'delete'::text, 'forget_all'::text])))
 );
 
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS mem_id text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS user_id uuid;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS action text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS prior_text text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS new_text text;
+
+ALTER TABLE harness_shared.memory_feedback ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.memory_vec_local (
     memory_id uuid NOT NULL,
     vector public.vector(384) NOT NULL,
     embedded_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.memory_vec_local ADD COLUMN IF NOT EXISTS memory_id uuid;
+
+ALTER TABLE harness_shared.memory_vec_local ADD COLUMN IF NOT EXISTS vector public.vector(384);
+
+ALTER TABLE harness_shared.memory_vec_local ADD COLUMN IF NOT EXISTS embedded_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.memory_vec_openai (
     memory_id uuid NOT NULL,
     vector public.vector(384) NOT NULL,
     embedded_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.memory_vec_openai ADD COLUMN IF NOT EXISTS memory_id uuid;
+
+ALTER TABLE harness_shared.memory_vec_openai ADD COLUMN IF NOT EXISTS vector public.vector(384);
+
+ALTER TABLE harness_shared.memory_vec_openai ADD COLUMN IF NOT EXISTS embedded_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.mobile_devices (
     device_id text NOT NULL,
@@ -1648,6 +3252,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.mobile_devices (
     CONSTRAINT mobile_devices_device_kind_check CHECK ((device_kind = 'mobile'::text))
 );
 
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS device_id text;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS user_email text;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS device_kind text DEFAULT 'mobile'::text;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS device_label text;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS paired_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS last_seen timestamp with time zone;
+
+ALTER TABLE harness_shared.mobile_devices ADD COLUMN IF NOT EXISTS revoked_at timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.mobile_pair_tokens (
     pair_token text NOT NULL,
     workspace_id text NOT NULL,
@@ -1658,6 +3278,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.mobile_pair_tokens (
     created_at_ms bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS pair_token text;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS user_email text;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS desktop_host text;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS expires_at_ms bigint;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS consumed boolean DEFAULT false;
+
+ALTER TABLE harness_shared.mobile_pair_tokens ADD COLUMN IF NOT EXISTS created_at_ms bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.mobile_push_tokens (
     device_id text NOT NULL,
     platform text NOT NULL,
@@ -1666,6 +3300,14 @@ CREATE TABLE IF NOT EXISTS harness_shared.mobile_push_tokens (
     CONSTRAINT mobile_push_tokens_platform_check CHECK ((platform = ANY (ARRAY['apns'::text, 'fcm'::text])))
 );
 
+ALTER TABLE harness_shared.mobile_push_tokens ADD COLUMN IF NOT EXISTS device_id text;
+
+ALTER TABLE harness_shared.mobile_push_tokens ADD COLUMN IF NOT EXISTS platform text;
+
+ALTER TABLE harness_shared.mobile_push_tokens ADD COLUMN IF NOT EXISTS token text;
+
+ALTER TABLE harness_shared.mobile_push_tokens ADD COLUMN IF NOT EXISTS registered_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.oauth_nonces (
     nonce text NOT NULL,
     exp_ms bigint NOT NULL,
@@ -1673,11 +3315,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.oauth_nonces (
     created_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.oauth_nonces ADD COLUMN IF NOT EXISTS nonce text;
+
+ALTER TABLE harness_shared.oauth_nonces ADD COLUMN IF NOT EXISTS exp_ms bigint;
+
+ALTER TABLE harness_shared.oauth_nonces ADD COLUMN IF NOT EXISTS consumed boolean DEFAULT false;
+
+ALTER TABLE harness_shared.oauth_nonces ADD COLUMN IF NOT EXISTS created_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_agent_config (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_agent_config ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_agent_config ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_agent_config ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_budget (
     workspace_id text NOT NULL,
@@ -1685,12 +3341,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_budget (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_budget ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_budget ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_budget ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_budget_tiers (
     ord integer NOT NULL,
     label text NOT NULL,
     cap_usd numeric(10,2) NOT NULL,
     blurb text NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_budget_tiers ADD COLUMN IF NOT EXISTS ord integer;
+
+ALTER TABLE harness_shared.operator_budget_tiers ADD COLUMN IF NOT EXISTS label text;
+
+ALTER TABLE harness_shared.operator_budget_tiers ADD COLUMN IF NOT EXISTS cap_usd numeric(10,2);
+
+ALTER TABLE harness_shared.operator_budget_tiers ADD COLUMN IF NOT EXISTS blurb text;
 
 COMMENT ON TABLE harness_shared.operator_budget_tiers IS 'Preset daily-budget tiers shown in the first-run Operator picker. Edit rows to adjust caps without a code change.';
 
@@ -1706,6 +3376,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_claims (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS plugin_slug text;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS machine_id text;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS pid integer;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS script_hash text;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS expires_at timestamp with time zone;
+
+ALTER TABLE harness_shared.operator_claims ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_continue_chains (
     id bigint NOT NULL,
     conversation_id uuid NOT NULL,
@@ -1718,6 +3406,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_continue_chains (
     was_capped boolean DEFAULT false NOT NULL,
     cap_reason text
 );
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS conversation_id uuid;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS ui_client_id text;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS chain_id uuid;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS turn_idx integer;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS trigger text;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS elapsed_secs_in_chain numeric(10,3);
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS was_capped boolean DEFAULT false;
+
+ALTER TABLE harness_shared.operator_continue_chains ADD COLUMN IF NOT EXISTS cap_reason text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.operator_continue_chains_id_seq
     START WITH 1
@@ -1740,12 +3448,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_conversations (
     has_audio boolean DEFAULT false NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS status text DEFAULT 'active'::text;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS started_at bigint;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS ended_at bigint;
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS el_conversation_ids text[] DEFAULT '{}'::text[];
+
+ALTER TABLE harness_shared.operator_conversations ADD COLUMN IF NOT EXISTS has_audio boolean DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_credentials (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL,
     payload_ct bytea
 );
+
+ALTER TABLE harness_shared.operator_credentials ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_credentials ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_credentials ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_credentials ADD COLUMN IF NOT EXISTS payload_ct bytea;
 
 CREATE OR REPLACE VIEW harness_shared.operator_decisions AS
  SELECT id,
@@ -1764,11 +3498,23 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_dismissed_cards (
     dismissed_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_dismissed_cards ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_dismissed_cards ADD COLUMN IF NOT EXISTS card_id text;
+
+ALTER TABLE harness_shared.operator_dismissed_cards ADD COLUMN IF NOT EXISTS dismissed_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_first_run (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_first_run ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_first_run ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_first_run ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_idle_snapshot (
     workspace_id text NOT NULL,
@@ -1776,11 +3522,23 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_idle_snapshot (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_idle_snapshot ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_idle_snapshot ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_idle_snapshot ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_last_scan (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_last_scan ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_last_scan ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_last_scan ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_marketplace_token (
     workspace_id text NOT NULL,
@@ -1789,11 +3547,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_marketplace_token (
     payload_ct bytea
 );
 
+ALTER TABLE harness_shared.operator_marketplace_token ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_marketplace_token ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_marketplace_token ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_marketplace_token ADD COLUMN IF NOT EXISTS payload_ct bytea;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_oracle_memory (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_oracle_memory ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_oracle_memory ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_oracle_memory ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_oracle_prompt (
     workspace_id text NOT NULL,
@@ -1801,11 +3573,23 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_oracle_prompt (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_oracle_prompt ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_oracle_prompt ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_oracle_prompt ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_paused (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_paused ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_paused ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_paused ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_preferences (
     workspace_id text NOT NULL,
@@ -1813,11 +3597,23 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_preferences (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_preferences ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_preferences ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_preferences ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_prompt_user (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_prompt_user ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_prompt_user ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_prompt_user ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_publish_credentials (
     workspace_id text NOT NULL,
@@ -1826,11 +3622,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_publish_credentials (
     payload_ct bytea
 );
 
+ALTER TABLE harness_shared.operator_publish_credentials ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_publish_credentials ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_publish_credentials ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_publish_credentials ADD COLUMN IF NOT EXISTS payload_ct bytea;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_rate_limit (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_rate_limit ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_rate_limit ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_rate_limit ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_scan_locks (
     workspace_id text NOT NULL,
@@ -1839,11 +3649,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_scan_locks (
     expires_at timestamp with time zone NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_scan_locks ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_scan_locks ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.operator_scan_locks ADD COLUMN IF NOT EXISTS holder_id text;
+
+ALTER TABLE harness_shared.operator_scan_locks ADD COLUMN IF NOT EXISTS expires_at timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_scanner_session (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_scanner_session ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_scanner_session ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_scanner_session ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_scans (
     id bigint NOT NULL,
@@ -1859,6 +3683,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_scans (
     cached boolean DEFAULT false NOT NULL,
     error text
 );
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS ended_at timestamp with time zone;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS agent_session_id text;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS request_text text;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS suggestions jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS suggestion_count integer DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS cost_usd numeric(10,4) DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS cached boolean DEFAULT false;
+
+ALTER TABLE harness_shared.operator_scans ADD COLUMN IF NOT EXISTS error text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.operator_scans_id_seq
     START WITH 1
@@ -1876,6 +3724,14 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_search_provider_credentials (
     updated_at bigint DEFAULT ((EXTRACT(epoch FROM now()) * (1000)::numeric))::bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_search_provider_credentials ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_search_provider_credentials ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.operator_search_provider_credentials ADD COLUMN IF NOT EXISTS payload_ct bytea;
+
+ALTER TABLE harness_shared.operator_search_provider_credentials ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT ((EXTRACT(epoch FROM now()) * (1000)::numeric))::bigint;
+
 COMMENT ON TABLE harness_shared.operator_search_provider_credentials IS 'API keys for the 14 OMP web_search providers. Single-row-per-workspace; encrypted at rest via pgcrypto. Read/written by /api/credentials/search-providers; injected as env vars at OMP spawn time.';
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_secrets (
@@ -1885,12 +3741,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_secrets (
     rotated_at timestamp with time zone
 );
 
+ALTER TABLE harness_shared.operator_secrets ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.operator_secrets ADD COLUMN IF NOT EXISTS value_b64 text;
+
+ALTER TABLE harness_shared.operator_secrets ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.operator_secrets ADD COLUMN IF NOT EXISTS rotated_at timestamp with time zone;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_settings (
     key text NOT NULL,
     value text NOT NULL,
     description text,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_settings ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.operator_settings ADD COLUMN IF NOT EXISTS value text;
+
+ALTER TABLE harness_shared.operator_settings ADD COLUMN IF NOT EXISTS description text;
+
+ALTER TABLE harness_shared.operator_settings ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 COMMENT ON TABLE harness_shared.operator_settings IS 'Per-deployment configurable strings (URLs, default text). Edit rows to change without a code edit.';
 
@@ -1900,11 +3772,23 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_standing_candidates (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_standing_candidates ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_standing_candidates ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_standing_candidates ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_stt_spend (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_stt_spend ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_stt_spend ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_stt_spend ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_trust_store (
     workspace_id text NOT NULL,
@@ -1913,11 +3797,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_trust_store (
     payload_ct bytea
 );
 
+ALTER TABLE harness_shared.operator_trust_store ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_trust_store ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_trust_store ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_trust_store ADD COLUMN IF NOT EXISTS payload_ct bytea;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_tts_spend (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_tts_spend ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_tts_spend ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_tts_spend ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_turns (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1935,6 +3833,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_turns (
     CONSTRAINT operator_turns_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
 );
 
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS conversation_id uuid;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS seq integer;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS text text;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS source text DEFAULT 'text_typed'::text;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS el_conv_id text;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS audio_url text;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS created_at bigint;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS text_tsv tsvector;
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS text_embedding public.vector(384);
+
+ALTER TABLE harness_shared.operator_turns ADD COLUMN IF NOT EXISTS tools jsonb;
+
 ALTER TABLE ONLY harness_shared.operator_turns REPLICA IDENTITY FULL;
 
 CREATE TABLE IF NOT EXISTS harness_shared.operator_user_profile (
@@ -1943,6 +3865,12 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_user_profile (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.operator_user_profile ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_user_profile ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_user_profile ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_voice_credentials (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
@@ -1950,11 +3878,25 @@ CREATE TABLE IF NOT EXISTS harness_shared.operator_voice_credentials (
     payload_ct bytea
 );
 
+ALTER TABLE harness_shared.operator_voice_credentials ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_voice_credentials ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_voice_credentials ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.operator_voice_credentials ADD COLUMN IF NOT EXISTS payload_ct bytea;
+
 CREATE TABLE IF NOT EXISTS harness_shared.operator_voice_prefs (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.operator_voice_prefs ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.operator_voice_prefs ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.operator_voice_prefs ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.orchestrator_settings (
     id integer DEFAULT 1 NOT NULL,
@@ -1965,12 +3907,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.orchestrator_settings (
     CONSTRAINT orchestrator_settings_id_check CHECK ((id = 1))
 );
 
+ALTER TABLE harness_shared.orchestrator_settings ADD COLUMN IF NOT EXISTS id integer DEFAULT 1;
+
+ALTER TABLE harness_shared.orchestrator_settings ADD COLUMN IF NOT EXISTS tiers jsonb DEFAULT '[1, 2, 4]'::jsonb;
+
+ALTER TABLE harness_shared.orchestrator_settings ADD COLUMN IF NOT EXISTS labels jsonb DEFAULT '["trivial", "normal", "hard"]'::jsonb;
+
+ALTER TABLE harness_shared.orchestrator_settings ADD COLUMN IF NOT EXISTS rubric text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.orchestrator_settings ADD COLUMN IF NOT EXISTS updated_ts bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.org_charter (
     org_id text NOT NULL,
     content text DEFAULT ''::text NOT NULL,
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.org_charter ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_charter ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_charter ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_charter ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.org_decisions (
     org_id text NOT NULL,
@@ -1979,6 +3939,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_decisions (
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.org_decisions ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_decisions ADD COLUMN IF NOT EXISTS dept_slug text;
+
+ALTER TABLE harness_shared.org_decisions ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_decisions ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_decisions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.org_departments (
     org_id text NOT NULL,
@@ -1992,6 +3962,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_departments (
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS dept_slug text;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS harness_slug text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS name text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS mandate text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS inbox_kinds jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS outbox_kinds jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_departments ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.org_inbox (
     org_id text NOT NULL,
@@ -2012,6 +4002,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_inbox (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS dept_slug text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS message_id text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS msg_from text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS msg_to jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS kind text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS subject text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS ref_id text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS directive_id text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_inbox ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.org_notes (
     org_id text NOT NULL,
     dept_slug text NOT NULL,
@@ -2019,6 +4041,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_notes (
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.org_notes ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_notes ADD COLUMN IF NOT EXISTS dept_slug text;
+
+ALTER TABLE harness_shared.org_notes ADD COLUMN IF NOT EXISTS content text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_notes ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_notes ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.org_outbox (
     org_id text NOT NULL,
@@ -2039,6 +4071,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_outbox (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS dept_slug text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS message_id text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS ts bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS msg_from text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS msg_to jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS kind text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS subject text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS body text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS ref_id text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS directive_id text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_outbox ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.org_projects (
     org_id text NOT NULL,
     project_id text NOT NULL,
@@ -2050,6 +4114,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.org_projects (
     mtime_ms bigint DEFAULT 0 NOT NULL,
     workspace_id text DEFAULT ''::text NOT NULL
 );
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS org_id text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS slug text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS name text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS vertical text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS status text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.org_projects ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.pending_events (
     id text NOT NULL,
@@ -2066,6 +4148,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.pending_events (
     CONSTRAINT pending_events_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS install_slug text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS target_role text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS due_at timestamp with time zone;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS consumed_at timestamp with time zone;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS consumed_by text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS source_id text;
+
+ALTER TABLE harness_shared.pending_events ADD COLUMN IF NOT EXISTS workspace_id text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.pending_reviews (
     harness_slug text NOT NULL,
     phase text DEFAULT 'staging'::text NOT NULL,
@@ -2079,6 +4183,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.pending_reviews (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS phase text DEFAULT 'staging'::text;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS review_id text;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS resolved boolean DEFAULT false;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS mtime_ms bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.pending_reviews ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.pi_sessions (
     workspace_id text NOT NULL,
     session_id text NOT NULL,
@@ -2088,6 +4212,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.pi_sessions (
     ended_at timestamp with time zone,
     CONSTRAINT pi_sessions_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS session_id text;
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS bearer_hash text;
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS capabilities jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.pi_sessions ADD COLUMN IF NOT EXISTS ended_at timestamp with time zone;
 
 CREATE TABLE IF NOT EXISTS harness_shared.plan_revisions (
     id bigint NOT NULL,
@@ -2103,6 +4239,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.plan_revisions (
     session_kind text,
     created_at bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS harness_slug text DEFAULT 'papercup'::text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS plan_slug text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS seq integer;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS content_hash text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS content_snapshot text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS rationale text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS author_kind text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS author_id text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS session_id text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS session_kind text;
+
+ALTER TABLE harness_shared.plan_revisions ADD COLUMN IF NOT EXISTS created_at bigint;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.plan_revisions_id_seq
     START WITH 1
@@ -2124,6 +4284,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.plan_run_turns (
     cost_usd numeric,
     created_at bigint NOT NULL
 );
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS plan_run_id bigint;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS seq integer;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS content text;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS tokens_in integer;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS tokens_out integer;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS cost_usd numeric;
+
+ALTER TABLE harness_shared.plan_run_turns ADD COLUMN IF NOT EXISTS created_at bigint;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.plan_run_turns_id_seq
     START WITH 1
@@ -2148,6 +4326,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.plan_runs (
     updated_at bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS harness_slug text DEFAULT 'papercup'::text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS plan_slug text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS plan_content_hash text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS session_id text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS note text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS launched_by text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS launched_at bigint;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.plan_runs ADD COLUMN IF NOT EXISTS updated_at bigint;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.plan_runs_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -2167,6 +4367,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.plugin_capability_grants (
     reason text
 );
 
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS plugin_name text;
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS plugin_version text;
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS capability text;
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS granted_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS granted_by text;
+
+ALTER TABLE harness_shared.plugin_capability_grants ADD COLUMN IF NOT EXISTS reason text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.plugin_configs (
     harness_slug text NOT NULL,
     plugin_slug text NOT NULL,
@@ -2176,6 +4390,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.plugin_configs (
     config_ct bytea,
     CONSTRAINT plugin_configs_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS plugin_slug text;
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS config jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.plugin_configs ADD COLUMN IF NOT EXISTS config_ct bytea;
 
 COMMENT ON COLUMN harness_shared.plugin_configs.config_ct IS 'pgcrypto-encrypted JSON payload (replaces plaintext config column). Decrypted via pgp_sym_decrypt with the key from ~/.papercusp/db-encryption-key (or PAPERCUSP_DB_ENCRYPTION_KEY).';
 
@@ -2190,6 +4416,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.plugin_enables (
     CONSTRAINT plugin_enables_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS plugin_slug text;
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS version text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS config_hash text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS enabled_at bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.plugin_enables ADD COLUMN IF NOT EXISTS workspace_id text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.plugin_kv (
     plugin_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -2199,6 +4439,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.plugin_kv (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS plugin_id text;
+
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS value jsonb;
+
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS byte_size integer;
+
+ALTER TABLE harness_shared.plugin_kv ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.plugin_reload_state (
     plugin_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -2206,6 +4458,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.plugin_reload_state (
     byte_size integer NOT NULL,
     saved_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.plugin_reload_state ADD COLUMN IF NOT EXISTS plugin_id text;
+
+ALTER TABLE harness_shared.plugin_reload_state ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.plugin_reload_state ADD COLUMN IF NOT EXISTS state jsonb;
+
+ALTER TABLE harness_shared.plugin_reload_state ADD COLUMN IF NOT EXISTS byte_size integer;
+
+ALTER TABLE harness_shared.plugin_reload_state ADD COLUMN IF NOT EXISTS saved_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.power_user_sessions (
     auth_session_id text NOT NULL,
@@ -2215,6 +4477,18 @@ CREATE TABLE IF NOT EXISTS harness_shared.power_user_sessions (
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     revoked_at timestamp with time zone
 );
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS auth_session_id text;
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS user_id text;
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.power_user_sessions ADD COLUMN IF NOT EXISTS revoked_at timestamp with time zone;
 
 CREATE TABLE IF NOT EXISTS harness_shared.pr_check_status_cache (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -2228,6 +4502,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.pr_check_status_cache (
     raw jsonb
 );
 
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS head_sha text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS check_name text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS conclusion text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS details_url text;
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS fetched_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.pr_check_status_cache ADD COLUMN IF NOT EXISTS raw jsonb;
+
 CREATE TABLE IF NOT EXISTS harness_shared.pr_reviewer_settings (
     workspace_id text DEFAULT ''::text NOT NULL,
     harness_slug text NOT NULL,
@@ -2239,6 +4531,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.pr_reviewer_settings (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT pr_reviewer_settings_merge_method_check CHECK ((merge_method = ANY (ARRAY['squash'::text, 'merge'::text, 'rebase'::text])))
 );
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS pr_reviewer_role_enabled boolean DEFAULT false;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS auto_review boolean DEFAULT false;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS auto_merge boolean DEFAULT false;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS merge_method text DEFAULT 'squash'::text;
+
+ALTER TABLE harness_shared.pr_reviewer_settings ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.project_spec_revisions (
     id bigint NOT NULL,
@@ -2255,6 +4563,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.project_spec_revisions (
     workspace_id text NOT NULL,
     CONSTRAINT psr_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS spec text;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS author_role text;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS author text;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS include_decisions jsonb;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS tokens_in bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS tokens_out bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS cost_usd_cents bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.project_spec_revisions ADD COLUMN IF NOT EXISTS workspace_id text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.project_spec_revisions_id_seq
     START WITH 1
@@ -2288,6 +4620,44 @@ CREATE TABLE IF NOT EXISTS harness_shared.projects (
     CONSTRAINT projects_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS slug text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS budget_cents bigint;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS spent_cents bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS cost_cap_cents bigint;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS earned_cents bigint DEFAULT 0;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS owning_dept text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS vertical text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS created_ts bigint;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS updated_ts bigint;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS spec text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS spec_updated_at timestamp with time zone;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS spec_manually_edited_at timestamp with time zone;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS parent_slug text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.projects ADD COLUMN IF NOT EXISTS _search tsvector GENERATED ALWAYS AS ((setweight(to_tsvector('english'::regconfig, COALESCE(name, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(slug, ''::text)), 'B'::"char"))) STORED;
+
 CREATE TABLE IF NOT EXISTS harness_shared.prompt_compositions (
     id bigint NOT NULL,
     workspace_id text NOT NULL,
@@ -2304,6 +4674,34 @@ CREATE TABLE IF NOT EXISTS harness_shared.prompt_compositions (
     identity_chars integer,
     runtime_chars integer
 );
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS ts_ms bigint;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS total_chars integer DEFAULT 0;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS substrate_chars integer DEFAULT 0;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS history_chars integer DEFAULT 0;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS role_prompt_chars integer;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS memory_chars integer;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS identity_chars integer;
+
+ALTER TABLE harness_shared.prompt_compositions ADD COLUMN IF NOT EXISTS runtime_chars integer;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.prompt_compositions_id_seq
     START WITH 1
@@ -2325,6 +4723,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.provision_audit_log (
     data jsonb
 );
 
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS plugin_slug text;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.provision_audit_log ADD COLUMN IF NOT EXISTS data jsonb;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.provision_audit_log_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -2342,6 +4756,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.provision_state (
     updated_at bigint DEFAULT 0 NOT NULL
 );
 
+ALTER TABLE harness_shared.provision_state ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.provision_state ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.provision_state ADD COLUMN IF NOT EXISTS plugin_slug text;
+
+ALTER TABLE harness_shared.provision_state ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.provision_state ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS harness_shared.route_invocations (
     id bigint NOT NULL,
     workspace_id text NOT NULL,
@@ -2355,6 +4779,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.route_invocations (
     error_message text,
     invoked_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS method text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS path text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS duration_ms integer;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS principal_kind text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS principal_auth_method text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS principal_trust text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS error_message text;
+
+ALTER TABLE harness_shared.route_invocations ADD COLUMN IF NOT EXISTS invoked_at timestamp with time zone DEFAULT now();
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.route_invocations_id_seq
     START WITH 1
@@ -2385,6 +4831,38 @@ CREATE TABLE IF NOT EXISTS harness_shared.routines (
     CONSTRAINT routines_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS install_slug text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS trigger_kind text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS trigger_config jsonb;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS target_role text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS payload_template jsonb;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS concurrency text DEFAULT 'queue'::text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS catchup text DEFAULT 'skip-old'::text;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS active boolean DEFAULT true;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS last_fired_at timestamp with time zone;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS next_fire_at timestamp with time zone;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.routines ADD COLUMN IF NOT EXISTS workspace_id text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.saved_prompts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     workspace_id text NOT NULL,
@@ -2397,17 +4875,47 @@ CREATE TABLE IF NOT EXISTS harness_shared.saved_prompts (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS body text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS description text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS arg_hint text;
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.saved_prompts ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.schema_migrations (
     filename text NOT NULL,
     applied_at timestamp with time zone DEFAULT now() NOT NULL,
     sha256 text NOT NULL
 );
 
+ALTER TABLE harness_shared.schema_migrations ADD COLUMN IF NOT EXISTS filename text;
+
+ALTER TABLE harness_shared.schema_migrations ADD COLUMN IF NOT EXISTS applied_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.schema_migrations ADD COLUMN IF NOT EXISTS sha256 text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.setup_wizard_state (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.setup_wizard_state ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.setup_wizard_state ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.setup_wizard_state ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.shared_presence (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -2420,6 +4928,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.shared_presence (
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     schema_version bigint DEFAULT 1 NOT NULL
 );
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS github_user_id bigint;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS machine_label text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS device_pubkey text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS intent text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS current_view text;
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.shared_presence ADD COLUMN IF NOT EXISTS schema_version bigint DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS harness_shared.shared_repo_binding_cache (
     workspace_id text DEFAULT ''::text NOT NULL,
@@ -2444,6 +4970,40 @@ CREATE TABLE IF NOT EXISTS harness_shared.shared_repo_binding_cache (
     CONSTRAINT shared_repo_binding_cache_provider_check CHECK ((provider = 'github'::text))
 );
 
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS provider text DEFAULT 'github'::text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS github_repository_id bigint;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS github_full_name text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS harness_topic text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS harness_link text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS privacy text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS claim_status text DEFAULT 'unclaimed'::text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS provisional_owner_github_user_id bigint;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS provisional_owner_github_login text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS claimed_by_github_user_ids bigint[] DEFAULT '{}'::bigint[];
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS last_permission_verified_at timestamp with time zone;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS superseded_by_harness_topic text;
+
+ALTER TABLE harness_shared.shared_repo_binding_cache ADD COLUMN IF NOT EXISTS cached_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.snapshot_features (
     harness_slug text NOT NULL,
     snapshot_id text NOT NULL,
@@ -2467,6 +5027,46 @@ CREATE TABLE IF NOT EXISTS harness_shared.snapshot_features (
     created_ts bigint NOT NULL
 );
 
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS snapshot_id text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS attempts bigint;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS claims text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS notes text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS metadata jsonb;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS expected_cost_cents bigint;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS tags jsonb;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS needs_human_review boolean DEFAULT false;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS deprecation_reason text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS parent_id text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS goal_id text;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.snapshot_features ADD COLUMN IF NOT EXISTS created_ts bigint;
+
 CREATE TABLE IF NOT EXISTS harness_shared.spawn_sig_verification_failures (
     id bigint NOT NULL,
     ts timestamp with time zone DEFAULT now() NOT NULL,
@@ -2479,6 +5079,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.spawn_sig_verification_failures (
     remote_addr text,
     user_agent text
 );
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS reason text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS claimed_role text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS claimed_harness text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS claimed_workspace text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS claimed_spawn text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS exp_claim bigint;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS remote_addr text;
+
+ALTER TABLE harness_shared.spawn_sig_verification_failures ADD COLUMN IF NOT EXISTS user_agent text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.spawn_sig_verification_failures_id_seq
     START WITH 1
@@ -2509,6 +5129,40 @@ CREATE TABLE IF NOT EXISTS harness_shared.spawned_agents (
     cancel_requested boolean DEFAULT false NOT NULL
 );
 
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS spawn_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS parent_spawn_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS parent_role text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS child_role text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS chunk_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS finished_at timestamp with time zone;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS duration_ms bigint;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS exit_code integer;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS output_tail text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS error_message text;
+
+ALTER TABLE harness_shared.spawned_agents ADD COLUMN IF NOT EXISTS cancel_requested boolean DEFAULT false;
+
 COMMENT ON TABLE harness_shared.spawned_agents IS 'Durable mirror of orchestrator-spawn plugin''s in-memory spawn records (Phase 9). Survives operator restarts so poll/list_active return real history rather than "not found." Status enum: running|done|failed|cancelled|reaped.';
 
 CREATE TABLE IF NOT EXISTS harness_shared.substrate_meta (
@@ -2517,6 +5171,14 @@ CREATE TABLE IF NOT EXISTS harness_shared.substrate_meta (
     key text NOT NULL,
     value text NOT NULL
 );
+
+ALTER TABLE harness_shared.substrate_meta ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.substrate_meta ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.substrate_meta ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.substrate_meta ADD COLUMN IF NOT EXISTS value text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.substrate_outbox (
     id bigint NOT NULL,
@@ -2530,6 +5192,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.substrate_outbox (
     drained_at bigint,
     CONSTRAINT substrate_outbox_op_check CHECK ((op = ANY (ARRAY['put'::text, 'del'::text])))
 );
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS table_name text;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS op text;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS key text;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS "row" jsonb;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE harness_shared.substrate_outbox ADD COLUMN IF NOT EXISTS drained_at bigint;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.substrate_outbox_id_seq
     START WITH 1
@@ -2560,11 +5240,27 @@ CREATE TABLE IF NOT EXISTS harness_shared.system_principals (
     CONSTRAINT system_principals_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.system_principals ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.system_principals ADD COLUMN IF NOT EXISTS name text;
+
+ALTER TABLE harness_shared.system_principals ADD COLUMN IF NOT EXISTS bearer_hash text;
+
+ALTER TABLE harness_shared.system_principals ADD COLUMN IF NOT EXISTS capabilities jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.system_principals ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.telemetry_reports (
     workspace_id text NOT NULL,
     payload jsonb NOT NULL,
     updated_at bigint DEFAULT 0 NOT NULL
 );
+
+ALTER TABLE harness_shared.telemetry_reports ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.telemetry_reports ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.telemetry_reports ADD COLUMN IF NOT EXISTS updated_at bigint DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS harness_shared.telemetry_reports_archive (
     id bigint NOT NULL,
@@ -2576,6 +5272,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.telemetry_reports_archive (
     payload jsonb,
     forwarded_at timestamp with time zone
 );
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS received_at timestamp with time zone;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS app_version text;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS os text;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.telemetry_reports_archive ADD COLUMN IF NOT EXISTS forwarded_at timestamp with time zone;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.telemetry_reports_archive_id_seq
     START WITH 1
@@ -2605,6 +5317,34 @@ CREATE TABLE IF NOT EXISTS harness_shared.test_runs (
     CONSTRAINT test_runs_status_valid CHECK ((status = ANY (ARRAY['pass'::text, 'fail'::text, 'skip'::text, 'cancelled'::text, 'error'::text, 'running'::text])))
 );
 
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS file_path text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS framework text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS duration_ms bigint;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS started_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS finished_at timestamp with time zone;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS output_tail text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS suite_id text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS run_group_id text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS source text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS branch text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS commit_sha text;
+
+ALTER TABLE harness_shared.test_runs ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.test_runs_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -2625,6 +5365,22 @@ CREATE TABLE IF NOT EXISTS harness_shared.toast_log (
     action_href text
 );
 
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS level text;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS message text;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS description text;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS created_at bigint;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS action_label text;
+
+ALTER TABLE harness_shared.toast_log ADD COLUMN IF NOT EXISTS action_href text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.toast_log_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -2643,6 +5399,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.token_index (
     CONSTRAINT token_index_workspace_nonempty CHECK ((workspace_id <> ''::text))
 );
 
+ALTER TABLE harness_shared.token_index ADD COLUMN IF NOT EXISTS token text;
+
+ALTER TABLE harness_shared.token_index ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.token_index ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.token_index ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.token_index ADD COLUMN IF NOT EXISTS kind text DEFAULT 'harness'::text;
+
 CREATE TABLE IF NOT EXISTS harness_shared.tool_authz_log (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     ts timestamp with time zone DEFAULT now() NOT NULL,
@@ -2656,6 +5422,28 @@ CREATE TABLE IF NOT EXISTS harness_shared.tool_authz_log (
     gate text NOT NULL,
     reason text
 );
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS principal_slug text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS tool text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS action text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS resource_type text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS resource_id text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS decision text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS gate text;
+
+ALTER TABLE harness_shared.tool_authz_log ADD COLUMN IF NOT EXISTS reason text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.tool_invocations (
     id bigint NOT NULL,
@@ -2684,6 +5472,56 @@ CREATE TABLE IF NOT EXISTS harness_shared.tool_invocations (
     principal_auth_method text,
     principal_trust text
 );
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS plugin_name text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS tool_name text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS role text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS feature_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS chunk_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS run_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS spawn_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS parent_spawn_id text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS window_key text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS invoked_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS duration_ms integer;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS output_ref text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS output_size bigint;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS error_message text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS args_json jsonb;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS transport text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS event_count integer;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS metadata_json jsonb;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS principal_kind text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS principal_auth_method text;
+
+ALTER TABLE harness_shared.tool_invocations ADD COLUMN IF NOT EXISTS principal_trust text;
 
 COMMENT ON COLUMN harness_shared.tool_invocations.metadata_json IS 'Per-call structured metadata emitted by the tool handler via ctx.metadata. JSONB so Phase 2 trigger predicates can query specific shapes (e.g. metadata_json->>''truncated'' for docs:get). NULL when handler did not call ctx.metadata.';
 
@@ -2800,6 +5638,16 @@ CREATE TABLE IF NOT EXISTS harness_shared.trusted_authors (
     trusted_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.trusted_authors ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.trusted_authors ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.trusted_authors ADD COLUMN IF NOT EXISTS trusted_github_user_id bigint;
+
+ALTER TABLE harness_shared.trusted_authors ADD COLUMN IF NOT EXISTS trusted_by_github_user_id bigint;
+
+ALTER TABLE harness_shared.trusted_authors ADD COLUMN IF NOT EXISTS trusted_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.ui_clients (
     client_id text NOT NULL,
     workspace_id text,
@@ -2809,6 +5657,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.ui_clients (
     opened_at timestamp with time zone DEFAULT now() NOT NULL,
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS client_id text;
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS url text;
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS viewport jsonb;
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS opened_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.ui_clients ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS harness_shared.ui_intents (
     id bigint NOT NULL,
@@ -2822,6 +5684,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.ui_intents (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone
 );
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS client_id text;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS intent text;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS args jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS result jsonb;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS error_message text;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS requested_by text;
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.ui_intents ADD COLUMN IF NOT EXISTS completed_at timestamp with time zone;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.ui_intents_id_seq
     START WITH 1
@@ -2847,6 +5729,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.user_actions (
     workspace_id text DEFAULT ''::text NOT NULL
 );
 
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS summary text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS detail_url text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS error_text text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS invocation_id text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS started_at bigint;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS finished_at bigint;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS actor text;
+
+ALTER TABLE harness_shared.user_actions ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
 CREATE SEQUENCE IF NOT EXISTS harness_shared.user_actions_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -2862,6 +5768,12 @@ CREATE TABLE IF NOT EXISTS harness_shared.user_preferences (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.user_preferences ADD COLUMN IF NOT EXISTS user_id uuid;
+
+ALTER TABLE harness_shared.user_preferences ADD COLUMN IF NOT EXISTS payload jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE harness_shared.user_preferences ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS harness_shared.user_sessions (
     token text NOT NULL,
     user_id uuid NOT NULL,
@@ -2871,6 +5783,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.user_sessions (
     user_agent text,
     remote_addr text
 );
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS token text;
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS user_id uuid;
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS expires_at timestamp with time zone;
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS user_agent text;
+
+ALTER TABLE harness_shared.user_sessions ADD COLUMN IF NOT EXISTS remote_addr text;
 
 CREATE TABLE IF NOT EXISTS harness_shared.users (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -2882,6 +5808,20 @@ CREATE TABLE IF NOT EXISTS harness_shared.users (
     is_active boolean DEFAULT true NOT NULL
 );
 
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS username text;
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS display_name text;
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS password_hash text;
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS last_login_at timestamp with time zone;
+
+ALTER TABLE harness_shared.users ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true;
+
 CREATE TABLE IF NOT EXISTS harness_shared.voice_lease (
     workspace_id text NOT NULL,
     owner_id text NOT NULL,
@@ -2889,6 +5829,14 @@ CREATE TABLE IF NOT EXISTS harness_shared.voice_lease (
     expires_at_ms bigint NOT NULL,
     CONSTRAINT voice_lease_owner_kind_check CHECK ((owner_kind = ANY (ARRAY['desktop'::text, 'mobile'::text])))
 );
+
+ALTER TABLE harness_shared.voice_lease ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.voice_lease ADD COLUMN IF NOT EXISTS owner_id text;
+
+ALTER TABLE harness_shared.voice_lease ADD COLUMN IF NOT EXISTS owner_kind text;
+
+ALTER TABLE harness_shared.voice_lease ADD COLUMN IF NOT EXISTS expires_at_ms bigint;
 
 CREATE TABLE IF NOT EXISTS harness_shared.voice_utterances (
     id bigint NOT NULL,
@@ -2901,6 +5849,24 @@ CREATE TABLE IF NOT EXISTS harness_shared.voice_utterances (
     had_backstory boolean DEFAULT false NOT NULL,
     modifications jsonb
 );
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS ts timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS workspace text;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS source text;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS mode text;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS length_chars integer;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS name_used boolean DEFAULT false;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS had_backstory boolean DEFAULT false;
+
+ALTER TABLE harness_shared.voice_utterances ADD COLUMN IF NOT EXISTS modifications jsonb;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.voice_utterances_id_seq
     START WITH 1
@@ -2923,6 +5889,26 @@ CREATE TABLE IF NOT EXISTS harness_shared.webhook_audit (
     sent_at timestamp with time zone DEFAULT now() NOT NULL,
     error text
 );
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS workspace_id text DEFAULT ''::text;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS id bigint;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS harness_slug text;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS target_url text;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS event_kind text;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS payload jsonb;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS status_code integer;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS attempt_count integer DEFAULT 1;
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS sent_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.webhook_audit ADD COLUMN IF NOT EXISTS error text;
 
 CREATE SEQUENCE IF NOT EXISTS harness_shared.webhook_audit_id_seq
     START WITH 1
@@ -2948,6 +5934,30 @@ CREATE TABLE IF NOT EXISTS harness_shared.workspace_backup_settings (
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS workspace_id text;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS enabled boolean DEFAULT true;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS cadence_mode text DEFAULT 'both'::text;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS cadence_minutes integer DEFAULT 5;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS retention_preset text DEFAULT 'default'::text;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS retention_custom_json jsonb;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS event_triggers_json jsonb DEFAULT '["pre_destructive", "post_run", "plugin_install", "secret_change"]'::jsonb;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS excluded_paths_json jsonb DEFAULT '[]'::jsonb;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS destination_type text DEFAULT 'local'::text;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS destination_config_encrypted text;
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS created_at timestamp with time zone DEFAULT now();
+
+ALTER TABLE harness_shared.workspace_backup_settings ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS papercup_shared.briefings (
     id text NOT NULL,
     title text NOT NULL,
@@ -2964,6 +5974,32 @@ CREATE TABLE IF NOT EXISTS papercup_shared.briefings (
     summary text
 );
 
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS title text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS quarter text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS status text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS created_at bigint;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS script_path text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS duration_seconds bigint;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS youtube_url text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS youtube_video_id text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS thumbnail_url text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS render_log text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS error text;
+
+ALTER TABLE papercup_shared.briefings ADD COLUMN IF NOT EXISTS summary text;
+
 CREATE TABLE IF NOT EXISTS papercup_shared.directive_summaries (
     id text NOT NULL,
     directive_id text NOT NULL,
@@ -2971,6 +6007,16 @@ CREATE TABLE IF NOT EXISTS papercup_shared.directive_summaries (
     author text DEFAULT 'ceo'::text NOT NULL,
     body text NOT NULL
 );
+
+ALTER TABLE papercup_shared.directive_summaries ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE papercup_shared.directive_summaries ADD COLUMN IF NOT EXISTS directive_id text;
+
+ALTER TABLE papercup_shared.directive_summaries ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE papercup_shared.directive_summaries ADD COLUMN IF NOT EXISTS author text DEFAULT 'ceo'::text;
+
+ALTER TABLE papercup_shared.directive_summaries ADD COLUMN IF NOT EXISTS body text;
 
 CREATE TABLE IF NOT EXISTS papercup_shared.message_comments (
     id text NOT NULL,
@@ -2980,10 +6026,24 @@ CREATE TABLE IF NOT EXISTS papercup_shared.message_comments (
     body text NOT NULL
 );
 
+ALTER TABLE papercup_shared.message_comments ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE papercup_shared.message_comments ADD COLUMN IF NOT EXISTS message_id text;
+
+ALTER TABLE papercup_shared.message_comments ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE papercup_shared.message_comments ADD COLUMN IF NOT EXISTS author text;
+
+ALTER TABLE papercup_shared.message_comments ADD COLUMN IF NOT EXISTS body text;
+
 CREATE TABLE IF NOT EXISTS papercup_shared.message_recipients (
     message_id text NOT NULL,
     dept_slug text NOT NULL
 );
+
+ALTER TABLE papercup_shared.message_recipients ADD COLUMN IF NOT EXISTS message_id text;
+
+ALTER TABLE papercup_shared.message_recipients ADD COLUMN IF NOT EXISTS dept_slug text;
 
 CREATE TABLE IF NOT EXISTS papercup_shared.messages (
     id text NOT NULL,
@@ -2998,6 +6058,28 @@ CREATE TABLE IF NOT EXISTS papercup_shared.messages (
     status text DEFAULT 'pending'::text NOT NULL,
     metadata jsonb
 );
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS id text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS ts bigint;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS from_dept text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS kind text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS subject text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS body text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS ref_id text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS project_id text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS directive_id text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS status text DEFAULT 'pending'::text;
+
+ALTER TABLE papercup_shared.messages ADD COLUMN IF NOT EXISTS metadata jsonb;
 
 ALTER TABLE ONLY harness_shared.adaptive_telemetry ALTER COLUMN id SET DEFAULT nextval('harness_shared.adaptive_telemetry_id_seq'::regclass);
 
@@ -5728,34 +8810,41 @@ END $baseline_guard$;
 ALTER TABLE harness_shared.adv_sessions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS adv_sessions_workspace_isolation ON harness_shared.adv_sessions;
+
 CREATE POLICY adv_sessions_workspace_isolation ON harness_shared.adv_sessions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.agent_chats_consolidated ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS agent_chats_consolidated_workspace_isolation ON harness_shared.agent_chats_consolidated;
+
 CREATE POLICY agent_chats_consolidated_workspace_isolation ON harness_shared.agent_chats_consolidated USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.audit_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS audit_log_workspace_isolation ON harness_shared.audit_log;
+
 CREATE POLICY audit_log_workspace_isolation ON harness_shared.audit_log USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 DROP POLICY IF EXISTS chunk_plans_workspace_isolation ON harness_shared.harness_chunk_plans;
+
 CREATE POLICY chunk_plans_workspace_isolation ON harness_shared.harness_chunk_plans USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.feature_audit_consolidated ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS feature_audit_consolidated_workspace_isolation ON harness_shared.feature_audit_consolidated;
+
 CREATE POLICY feature_audit_consolidated_workspace_isolation ON harness_shared.feature_audit_consolidated USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.goals ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS goals_workspace_isolation ON harness_shared.goals;
+
 CREATE POLICY goals_workspace_isolation ON harness_shared.goals USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_brainstorm ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_brainstorm_workspace_isolation ON harness_shared.harness_brainstorm;
+
 CREATE POLICY harness_brainstorm_workspace_isolation ON harness_shared.harness_brainstorm USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_chunk_plans ENABLE ROW LEVEL SECURITY;
@@ -5763,126 +8852,151 @@ ALTER TABLE harness_shared.harness_chunk_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE harness_shared.harness_dock_layouts ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_dock_layouts_workspace_isolation ON harness_shared.harness_dock_layouts;
+
 CREATE POLICY harness_dock_layouts_workspace_isolation ON harness_shared.harness_dock_layouts USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_escalations ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_escalations_workspace_isolation ON harness_shared.harness_escalations;
+
 CREATE POLICY harness_escalations_workspace_isolation ON harness_shared.harness_escalations USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_experts ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_experts_workspace_isolation ON harness_shared.harness_experts;
+
 CREATE POLICY harness_experts_workspace_isolation ON harness_shared.harness_experts USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_feature_notes ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_feature_notes_workspace_isolation ON harness_shared.harness_feature_notes;
+
 CREATE POLICY harness_feature_notes_workspace_isolation ON harness_shared.harness_feature_notes USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_features_consolidated ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_features_consolidated_workspace_isolation ON harness_shared.harness_features_consolidated;
+
 CREATE POLICY harness_features_consolidated_workspace_isolation ON harness_shared.harness_features_consolidated USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_generator_items ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_generator_items_workspace_isolation ON harness_shared.harness_generator_items;
+
 CREATE POLICY harness_generator_items_workspace_isolation ON harness_shared.harness_generator_items USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_pending_issues ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_pending_issues_workspace_isolation ON harness_shared.harness_pending_issues;
+
 CREATE POLICY harness_pending_issues_workspace_isolation ON harness_shared.harness_pending_issues USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_phase_last_used ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_phase_last_used_workspace_isolation ON harness_shared.harness_phase_last_used;
+
 CREATE POLICY harness_phase_last_used_workspace_isolation ON harness_shared.harness_phase_last_used USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_phases ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_phases_workspace_isolation ON harness_shared.harness_phases;
+
 CREATE POLICY harness_phases_workspace_isolation ON harness_shared.harness_phases USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_plan_assertions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_plan_assertions_workspace_isolation ON harness_shared.harness_plan_assertions;
+
 CREATE POLICY harness_plan_assertions_workspace_isolation ON harness_shared.harness_plan_assertions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_plan_status ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_plan_status_workspace_isolation ON harness_shared.harness_plan_status;
+
 CREATE POLICY harness_plan_status_workspace_isolation ON harness_shared.harness_plan_status USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_project_files ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_project_files_workspace_isolation ON harness_shared.harness_project_files;
+
 CREATE POLICY harness_project_files_workspace_isolation ON harness_shared.harness_project_files USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_prompt_overrides ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_prompt_overrides_workspace_isolation ON harness_shared.harness_prompt_overrides;
+
 CREATE POLICY harness_prompt_overrides_workspace_isolation ON harness_shared.harness_prompt_overrides USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_proposals_shared ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_proposals_shared_workspace_isolation ON harness_shared.harness_proposals_shared;
+
 CREATE POLICY harness_proposals_shared_workspace_isolation ON harness_shared.harness_proposals_shared USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_registry ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_registry_workspace_isolation ON harness_shared.harness_registry;
+
 CREATE POLICY harness_registry_workspace_isolation ON harness_shared.harness_registry USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_skills ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_skills_workspace_isolation ON harness_shared.harness_skills;
+
 CREATE POLICY harness_skills_workspace_isolation ON harness_shared.harness_skills USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_summaries ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_summaries_workspace_isolation ON harness_shared.harness_summaries;
+
 CREATE POLICY harness_summaries_workspace_isolation ON harness_shared.harness_summaries USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_tests ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_tests_workspace_isolation ON harness_shared.harness_tests;
+
 CREATE POLICY harness_tests_workspace_isolation ON harness_shared.harness_tests USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.harness_text_artifacts ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS harness_text_artifacts_workspace_isolation ON harness_shared.harness_text_artifacts;
+
 CREATE POLICY harness_text_artifacts_workspace_isolation ON harness_shared.harness_text_artifacts USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.hidden_plugins ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS hidden_plugins_workspace_isolation ON harness_shared.hidden_plugins;
+
 CREATE POLICY hidden_plugins_workspace_isolation ON harness_shared.hidden_plugins USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.identity_files ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS identity_files_workspace_isolation ON harness_shared.identity_files;
+
 CREATE POLICY identity_files_workspace_isolation ON harness_shared.identity_files USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.memory_feedback ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS memory_feedback_workspace_isolation ON harness_shared.memory_feedback;
+
 CREATE POLICY memory_feedback_workspace_isolation ON harness_shared.memory_feedback USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.mobile_devices ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS mobile_devices_workspace_policy ON harness_shared.mobile_devices;
+
 CREATE POLICY mobile_devices_workspace_policy ON harness_shared.mobile_devices USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.mobile_pair_tokens ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS mobile_pair_tokens_workspace_isolation ON harness_shared.mobile_pair_tokens;
+
 CREATE POLICY mobile_pair_tokens_workspace_isolation ON harness_shared.mobile_pair_tokens USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.mobile_push_tokens ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS mobile_push_tokens_workspace_policy ON harness_shared.mobile_push_tokens;
+
 CREATE POLICY mobile_push_tokens_workspace_policy ON harness_shared.mobile_push_tokens USING ((EXISTS ( SELECT 1
    FROM harness_shared.mobile_devices d
   WHERE ((d.device_id = mobile_push_tokens.device_id) AND (d.workspace_id = current_setting('app.workspace_id'::text, true))))));
@@ -5890,91 +9004,109 @@ CREATE POLICY mobile_push_tokens_workspace_policy ON harness_shared.mobile_push_
 ALTER TABLE harness_shared.operator_agent_config ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_agent_config_workspace_isolation ON harness_shared.operator_agent_config;
+
 CREATE POLICY operator_agent_config_workspace_isolation ON harness_shared.operator_agent_config USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_budget ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_budget_workspace_isolation ON harness_shared.operator_budget;
+
 CREATE POLICY operator_budget_workspace_isolation ON harness_shared.operator_budget USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_claims ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_claims_workspace_isolation ON harness_shared.operator_claims;
+
 CREATE POLICY operator_claims_workspace_isolation ON harness_shared.operator_claims USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_credentials ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_credentials_workspace_isolation ON harness_shared.operator_credentials;
+
 CREATE POLICY operator_credentials_workspace_isolation ON harness_shared.operator_credentials USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_dismissed_cards ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_dismissed_cards_workspace_iso ON harness_shared.operator_dismissed_cards;
+
 CREATE POLICY operator_dismissed_cards_workspace_iso ON harness_shared.operator_dismissed_cards USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_first_run ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_first_run_workspace_isolation ON harness_shared.operator_first_run;
+
 CREATE POLICY operator_first_run_workspace_isolation ON harness_shared.operator_first_run USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_idle_snapshot ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_idle_snapshot_workspace_isolation ON harness_shared.operator_idle_snapshot;
+
 CREATE POLICY operator_idle_snapshot_workspace_isolation ON harness_shared.operator_idle_snapshot USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_last_scan ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_last_scan_workspace_isolation ON harness_shared.operator_last_scan;
+
 CREATE POLICY operator_last_scan_workspace_isolation ON harness_shared.operator_last_scan USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_marketplace_token ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_marketplace_token_workspace_isolation ON harness_shared.operator_marketplace_token;
+
 CREATE POLICY operator_marketplace_token_workspace_isolation ON harness_shared.operator_marketplace_token USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_oracle_memory ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_oracle_memory_workspace_isolation ON harness_shared.operator_oracle_memory;
+
 CREATE POLICY operator_oracle_memory_workspace_isolation ON harness_shared.operator_oracle_memory USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_oracle_prompt ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_oracle_prompt_workspace_isolation ON harness_shared.operator_oracle_prompt;
+
 CREATE POLICY operator_oracle_prompt_workspace_isolation ON harness_shared.operator_oracle_prompt USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_paused ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_paused_workspace_isolation ON harness_shared.operator_paused;
+
 CREATE POLICY operator_paused_workspace_isolation ON harness_shared.operator_paused USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_preferences ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_preferences_workspace_isolation ON harness_shared.operator_preferences;
+
 CREATE POLICY operator_preferences_workspace_isolation ON harness_shared.operator_preferences USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_prompt_user ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_prompt_user_workspace_isolation ON harness_shared.operator_prompt_user;
+
 CREATE POLICY operator_prompt_user_workspace_isolation ON harness_shared.operator_prompt_user USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_publish_credentials ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_publish_credentials_workspace_isolation ON harness_shared.operator_publish_credentials;
+
 CREATE POLICY operator_publish_credentials_workspace_isolation ON harness_shared.operator_publish_credentials USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_rate_limit ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_rate_limit_workspace_isolation ON harness_shared.operator_rate_limit;
+
 CREATE POLICY operator_rate_limit_workspace_isolation ON harness_shared.operator_rate_limit USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_scan_locks ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_scan_locks_workspace_iso ON harness_shared.operator_scan_locks;
+
 CREATE POLICY operator_scan_locks_workspace_iso ON harness_shared.operator_scan_locks USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_scanner_session ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_scanner_session_workspace_isolation ON harness_shared.operator_scanner_session;
+
 CREATE POLICY operator_scanner_session_workspace_isolation ON harness_shared.operator_scanner_session USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_search_provider_credentials ENABLE ROW LEVEL SECURITY;
@@ -5982,154 +9114,185 @@ ALTER TABLE harness_shared.operator_search_provider_credentials ENABLE ROW LEVEL
 ALTER TABLE harness_shared.operator_standing_candidates ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_standing_candidates_workspace_isolation ON harness_shared.operator_standing_candidates;
+
 CREATE POLICY operator_standing_candidates_workspace_isolation ON harness_shared.operator_standing_candidates USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_stt_spend ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_stt_spend_workspace_isolation ON harness_shared.operator_stt_spend;
+
 CREATE POLICY operator_stt_spend_workspace_isolation ON harness_shared.operator_stt_spend USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_trust_store ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_trust_store_workspace_isolation ON harness_shared.operator_trust_store;
+
 CREATE POLICY operator_trust_store_workspace_isolation ON harness_shared.operator_trust_store USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_tts_spend ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_tts_spend_workspace_isolation ON harness_shared.operator_tts_spend;
+
 CREATE POLICY operator_tts_spend_workspace_isolation ON harness_shared.operator_tts_spend USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_user_profile ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_user_profile_workspace_isolation ON harness_shared.operator_user_profile;
+
 CREATE POLICY operator_user_profile_workspace_isolation ON harness_shared.operator_user_profile USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_voice_credentials ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_voice_credentials_workspace_isolation ON harness_shared.operator_voice_credentials;
+
 CREATE POLICY operator_voice_credentials_workspace_isolation ON harness_shared.operator_voice_credentials USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.operator_voice_prefs ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS operator_voice_prefs_workspace_isolation ON harness_shared.operator_voice_prefs;
+
 CREATE POLICY operator_voice_prefs_workspace_isolation ON harness_shared.operator_voice_prefs USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_charter ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_charter_workspace_isolation ON harness_shared.org_charter;
+
 CREATE POLICY org_charter_workspace_isolation ON harness_shared.org_charter USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_decisions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_decisions_workspace_isolation ON harness_shared.org_decisions;
+
 CREATE POLICY org_decisions_workspace_isolation ON harness_shared.org_decisions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_departments ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_departments_workspace_isolation ON harness_shared.org_departments;
+
 CREATE POLICY org_departments_workspace_isolation ON harness_shared.org_departments USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_inbox ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_inbox_workspace_isolation ON harness_shared.org_inbox;
+
 CREATE POLICY org_inbox_workspace_isolation ON harness_shared.org_inbox USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_notes ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_notes_workspace_isolation ON harness_shared.org_notes;
+
 CREATE POLICY org_notes_workspace_isolation ON harness_shared.org_notes USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_outbox ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_outbox_workspace_isolation ON harness_shared.org_outbox;
+
 CREATE POLICY org_outbox_workspace_isolation ON harness_shared.org_outbox USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.org_projects ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS org_projects_workspace_isolation ON harness_shared.org_projects;
+
 CREATE POLICY org_projects_workspace_isolation ON harness_shared.org_projects USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 DROP POLICY IF EXISTS osc_workspace_isolation ON harness_shared.operator_search_provider_credentials;
+
 CREATE POLICY osc_workspace_isolation ON harness_shared.operator_search_provider_credentials USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.pending_events ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS pending_events_workspace_isolation ON harness_shared.pending_events;
+
 CREATE POLICY pending_events_workspace_isolation ON harness_shared.pending_events USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.pending_reviews ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS pending_reviews_workspace_isolation ON harness_shared.pending_reviews;
+
 CREATE POLICY pending_reviews_workspace_isolation ON harness_shared.pending_reviews USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.pi_sessions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS pi_sessions_workspace_isolation ON harness_shared.pi_sessions;
+
 CREATE POLICY pi_sessions_workspace_isolation ON harness_shared.pi_sessions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.plugin_configs ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS plugin_configs_workspace_isolation ON harness_shared.plugin_configs;
+
 CREATE POLICY plugin_configs_workspace_isolation ON harness_shared.plugin_configs USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.plugin_enables ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS plugin_enables_workspace_isolation ON harness_shared.plugin_enables;
+
 CREATE POLICY plugin_enables_workspace_isolation ON harness_shared.plugin_enables USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.project_spec_revisions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS project_spec_revisions_workspace_isolation ON harness_shared.project_spec_revisions;
+
 CREATE POLICY project_spec_revisions_workspace_isolation ON harness_shared.project_spec_revisions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.projects ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS projects_workspace_isolation ON harness_shared.projects;
+
 CREATE POLICY projects_workspace_isolation ON harness_shared.projects USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.prompt_compositions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS prompt_compositions_workspace_isolation ON harness_shared.prompt_compositions;
+
 CREATE POLICY prompt_compositions_workspace_isolation ON harness_shared.prompt_compositions USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.provision_audit_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS provision_audit_log_workspace_isolation ON harness_shared.provision_audit_log;
+
 CREATE POLICY provision_audit_log_workspace_isolation ON harness_shared.provision_audit_log USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.provision_state ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS provision_state_workspace_isolation ON harness_shared.provision_state;
+
 CREATE POLICY provision_state_workspace_isolation ON harness_shared.provision_state USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.route_invocations ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS route_invocations_workspace_isolation ON harness_shared.route_invocations;
+
 CREATE POLICY route_invocations_workspace_isolation ON harness_shared.route_invocations USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.routines ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS routines_workspace_isolation ON harness_shared.routines;
+
 CREATE POLICY routines_workspace_isolation ON harness_shared.routines USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.saved_prompts ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS saved_prompts_workspace_isolation ON harness_shared.saved_prompts;
+
 CREATE POLICY saved_prompts_workspace_isolation ON harness_shared.saved_prompts USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.setup_wizard_state ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS setup_wizard_state_workspace_isolation ON harness_shared.setup_wizard_state;
+
 CREATE POLICY setup_wizard_state_workspace_isolation ON harness_shared.setup_wizard_state USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.spawned_agents ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS spawned_agents_workspace_isolation ON harness_shared.spawned_agents;
+
 CREATE POLICY spawned_agents_workspace_isolation ON harness_shared.spawned_agents USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.system_principals ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS system_principals_workspace_isolation ON harness_shared.system_principals;
+
 CREATE POLICY system_principals_workspace_isolation ON harness_shared.system_principals USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.telemetry_reports ENABLE ROW LEVEL SECURITY;
@@ -6137,27 +9300,33 @@ ALTER TABLE harness_shared.telemetry_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE harness_shared.telemetry_reports_archive ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS telemetry_reports_archive_workspace_isolation ON harness_shared.telemetry_reports_archive;
+
 CREATE POLICY telemetry_reports_archive_workspace_isolation ON harness_shared.telemetry_reports_archive USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 DROP POLICY IF EXISTS telemetry_reports_workspace_isolation ON harness_shared.telemetry_reports;
+
 CREATE POLICY telemetry_reports_workspace_isolation ON harness_shared.telemetry_reports USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.token_index ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS token_index_workspace_isolation ON harness_shared.token_index;
+
 CREATE POLICY token_index_workspace_isolation ON harness_shared.token_index USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.tool_authz_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tool_authz_log_workspace_isolation ON harness_shared.tool_authz_log;
+
 CREATE POLICY tool_authz_log_workspace_isolation ON harness_shared.tool_authz_log USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.tool_invocations ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tool_invocations_workspace_isolation ON harness_shared.tool_invocations;
+
 CREATE POLICY tool_invocations_workspace_isolation ON harness_shared.tool_invocations USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));
 
 ALTER TABLE harness_shared.voice_lease ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS voice_lease_workspace_isolation ON harness_shared.voice_lease;
+
 CREATE POLICY voice_lease_workspace_isolation ON harness_shared.voice_lease USING ((workspace_id = current_setting('app.workspace_id'::text, true))) WITH CHECK ((workspace_id = current_setting('app.workspace_id'::text, true)));

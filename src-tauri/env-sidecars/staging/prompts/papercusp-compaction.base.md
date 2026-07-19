@@ -102,10 +102,14 @@ compaction**. Do not spend summary budget restating them. Keep only:
   "re-`tools:find` / ToolSearch `<capability>` if needed" — never the schema text.
 
 ## Liveness semantics (so the successor avoids the classic error)
-`fleet:status.alive` = heartbeat freshness only (a process keepalive), NOT
-"taking turns / working". Verify real activity via `coord:presence.sessionState`
-(live / parked / ended) + `last_active_at`; `intentStale` = a claim not
-progressing.
+`sessionState` (live | parked | draining | suspect | ended | recorded) is THE
+liveness verdict, derived by ONE shared oracle behind every surface —
+coord:presence, fleet:status, fleet:assignments, coord:roster, leader-brief,
+the send-miss report (presence-derivation-unification-2026-07-17).
+`heartbeatFresh` (and any remaining `alive` boolean) = raw process-keepalive
+freshness, NOT "taking turns / working" — a warm-dead session reads
+heartbeatFresh:true + sessionState:'ended'. Verify real activity via
+`sessionState` + `last_active_at`; `intentStale` = a claim not progressing.
 
 ## Continuity tools — EXTERNALIZE state, then point (don't carry it in prose)
 This system has purpose-built carry surfaces that are RE-INJECTED automatically

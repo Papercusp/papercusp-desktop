@@ -1,1 +1,0 @@
-import{r as e,t}from"./contribution-admission-WcIM-bTr.js";t();export{e as isPrAuthorRevoked};

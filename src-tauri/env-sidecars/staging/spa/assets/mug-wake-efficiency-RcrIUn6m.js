@@ -1,8 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";import{J as t,t as n}from"./src-CwW4br4q.js";function r(e){let t=typeof e==`string`?Number(e):e;return typeof t==`number`&&Number.isFinite(t)?t:0}function i(e,t){return e`
-    SELECT run_id, ts, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, turn_count
-      FROM harness_shared.agent_usage_samples
-     WHERE workspace_id = ${t.workspaceId}
-       AND role = 'mug'
-       ${t.harnessSlug?e`AND harness_slug = ${t.harnessSlug}`:e``}
-     ORDER BY ts DESC
-     LIMIT ${t.limit}`}function a(){return{fetchSamples:async e=>i(t().sql,e)}}async function o(e,t={}){let n=(await{...a(),...t.deps}.fetchSamples({workspaceId:e,harnessSlug:t.harnessSlug,limit:t.limit??50})).map(e=>({runId:e.run_id,tsMs:r(e.ts),inputTokens:r(e.input_tokens),outputTokens:r(e.output_tokens),cacheReadTokens:r(e.cache_read_tokens),cacheCreationTokens:r(e.cache_creation_tokens),costUsd:e.cost_usd==null?null:r(e.cost_usd),turns:e.turn_count==null?null:r(e.turn_count)})),i=0,o=0,s=0,c=0,l=0,u=0,d=0,f=0;for(let e of n)i+=e.inputTokens,o+=e.cacheReadTokens,s+=e.cacheCreationTokens,c+=e.outputTokens,l+=e.costUsd??0,e.cacheReadTokens>0&&(u+=1),e.turns!=null&&(d+=e.turns,f+=1);let p=o+s+i,m=p>0?o/p:0,h=f>0?d/f:null;return{wakes:n.length,cachedWakes:u,totalInputTokens:i,totalCacheReadTokens:o,totalCacheCreationTokens:s,totalOutputTokens:c,totalCostUsd:l,cacheHitRatio:m,avgTurns:h,totalTurns:d,turnsReportedWakes:f,samples:n}}var s=e((()=>{n()}));export{o as n,i as r,s as t};

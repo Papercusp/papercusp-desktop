@@ -1,0 +1,1 @@
+import{t as o}from"./jsx-runtime-BmDUFisN.js";import{t}from"./dist-BMPON1vw.js";var a=o();function s({value:e,onChange:r}){return(0,a.jsx)(t,{height:"100%",language:"markdown",theme:"vs-dark",value:e,onChange:n=>r(n??""),options:{wordWrap:"on",minimap:{enabled:!0},fontSize:13,scrollBeyondLastLine:!1}})}export{s as default};

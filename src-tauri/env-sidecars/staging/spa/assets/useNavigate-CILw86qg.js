@@ -1,0 +1,1 @@
+import{o as e}from"./chunk-ChpBd9eV.js";import{t as a}from"./react-DqHYuLt-.js";import{t as m}from"./useRouter-KaUNRQTE.js";var u=e(a(),1);function c(r){const o=m();return u.useCallback(t=>o.navigate({...t,from:t.from??r?.from}),[r?.from,o])}export{c as t};

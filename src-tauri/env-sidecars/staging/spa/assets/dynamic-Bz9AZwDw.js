@@ -1,0 +1,1 @@
+import{o as s}from"./chunk-ChpBd9eV.js";import{t as m}from"./react-DqHYuLt-.js";import{t as c}from"./jsx-runtime-BmDUFisN.js";var a=s(m()),e=c();function _(n,t){const o=(0,a.lazy)(async()=>{const r=await n();return"default"in r?r:{default:r}}),i=t?.loading?t.loading():null;return r=>(0,e.jsx)(a.Suspense,{fallback:i,children:(0,e.jsx)(o,{...r})})}export{_ as t};

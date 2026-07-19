@@ -1,1 +1,0 @@
-import{r as e,t}from"./console-launcher-BUc7CRPI.js";e();export{t as buildConsoleEnvelope};

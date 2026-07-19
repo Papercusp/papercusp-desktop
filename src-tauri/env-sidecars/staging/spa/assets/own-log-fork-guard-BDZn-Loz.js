@@ -1,1 +1,0 @@
-import{n as e,t}from"./own-log-fork-guard-DtOSeoua.js";e();export{t as attachOwnLogForkListener};

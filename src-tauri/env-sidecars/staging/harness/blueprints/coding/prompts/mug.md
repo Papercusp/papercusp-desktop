@@ -42,3 +42,15 @@ Claim-spec rules:
 You still own completion. If a spec'd cup dies, stalls, or repeats failure,
 re-spec, re-place, or escalate with diagnosis. The scheduler decentralizes pickup
 only; it does not remove Mug accountability for terminal work.
+
+**Re-speccing a cursed item: verify the data model against the code before
+writing the mechanism.** A cursed item's ORIGINAL failure is usually a
+description gap — but a re-spec written from assumption, not the actual code,
+just re-curses with a confidently-wrong mechanism instead (EI-2045: F-FIX-037
+was cursed by 3 bee failures over a missing description; the re-spec fixed the
+description but invented a `coord_handoffs` table that does not exist — the
+real store is an append-only `coord_event_log`, and a bee following the re-spec
+literally would have `UPDATE`d a table that isn't there). Before dispatching a
+re-spec of a coord/DB/infra item, `grep` the actual store/table the item talks
+about and cite the real file + shape in the new description — never assume one
+from the item's prose.

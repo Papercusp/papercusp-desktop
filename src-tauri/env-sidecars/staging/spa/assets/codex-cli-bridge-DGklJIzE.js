@@ -1,1 +1,0 @@
-import{n as e,o as t}from"./chunk-CMxvf4Kt.js";import{t as n}from"./__vite-browser-external-CM3Eme-n.js";function r(e){if(!e.startsWith(`codex-cli:`))return null;let t=e.slice(10).trim();return t?t===`~`?i.homedir():t.startsWith(`~/`)?`${i.homedir()}${t.slice(1)}`:t:null}var i,a,o=e((()=>{n(),i=t(n(),1),a=`codex-cli:`}));export{o as n,r,a as t};

@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-CMxvf4Kt.js";function t(e){let t=e?.knowledge?.pack?.trim()||void 0,n=e?.learning?.pack?.trim()||void 0;return t&&n&&t!==n?{packId:n,deprecatedKey:!0,conflict:{knowledge:t,learning:n}}:t?{packId:t,deprecatedKey:!1}:n?{packId:n,deprecatedKey:!0}:{deprecatedKey:!1}}e((()=>{}))();export{t as resolveSeedPackKey};

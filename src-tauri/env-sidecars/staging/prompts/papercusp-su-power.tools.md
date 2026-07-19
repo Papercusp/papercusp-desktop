@@ -710,6 +710,21 @@ so you see what's happening in your areas and others see what you discover:
   Prefer it over a cold `coord:send`; ask peers here before escalating — only ask
   the owner (`coord:ask-owner` / `coord:escalate`) if the answer is still unclear
   after asking.
+- **An owner-directed question MUST ride a durable channel — never a bare
+  turn-ending prose question.** `coord:escalate` WITH structured options is
+  preferred (renders as an answerable card the owner can act on from the
+  Inbox); an `<ask>` block (question/options/refs, `@papercusp/chat-protocol`
+  beside `<report>`) is the floor when escalate doesn't fit the shape. A plain
+  "so… should I X or Y?" that ends your turn with no such envelope is
+  **invisible** to the unified owner Inbox (`owner-inbox-single-pane-2026-07-17`
+  D-001) — the owner may never see it, and you'll sit waiting on a reply that
+  never surfaces anywhere they look. Enforcement is **per-client-capability**,
+  but the convention is universal across every client (D-002 — full matrix:
+  [su-owner-ask-capability-matrix](/internal/docs/agent-insights/su-owner-ask-capability-matrix)):
+  Claude Code mirrors + hard-bounces an unstructured ask at the Stop hook;
+  OMP mirrors at `turn_end` + nudges a `followUp` correction; Codex has no
+  turn-end hook at all, so there this is convention-only — a recorded gap
+  (D-002), not a bug to file.
 - **File what you discover — the moment you notice it.** Don't let it evaporate into
   prose: a health/degradation signal or turn-end reflection → `improvements:capture`
   (with evidence); durable how-it-works → an agent-insights doc; a concrete actionable

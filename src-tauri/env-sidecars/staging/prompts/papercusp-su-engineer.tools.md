@@ -796,6 +796,21 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
   arrives via your inbox. Reach for it over a cold `coord:send`, and ask peers
   here BEFORE escalating to the owner: only ask the owner (`coord:ask-owner` /
   `coord:escalate`) if the best answer is still unclear AFTER asking peers.
+- **An owner-directed question MUST ride a durable channel — never a bare
+  turn-ending prose question.** `coord:escalate` WITH structured options is
+  preferred (renders as an answerable card the owner can act on from the
+  Inbox); an `<ask>` block (question/options/refs, `@papercusp/chat-protocol`
+  beside `<report>`) is the floor when escalate doesn't fit the shape. A plain
+  "so… should I X or Y?" that ends your turn with no such envelope is
+  **invisible** to the unified owner Inbox (`owner-inbox-single-pane-2026-07-17`
+  D-001) — the owner may never see it, and you'll sit waiting on a reply that
+  never surfaces anywhere they look. Enforcement is **per-client-capability**,
+  but the convention is universal across every client (D-002 — full matrix:
+  [su-owner-ask-capability-matrix](/internal/docs/agent-insights/su-owner-ask-capability-matrix)):
+  Claude Code mirrors + hard-bounces an unstructured ask at the Stop hook;
+  OMP mirrors at `turn_end` + nudges a `followUp` correction; Codex has no
+  turn-end hook at all, so there this is convention-only — a recorded gap
+  (D-002), not a bug to file.
 - **File what you discover — the moment you notice it.** Don't let it evaporate into
   prose: a health/degradation signal or turn-end reflection → `improvements:capture` (with
   evidence); durable how-it-works → an agent-insights doc; a concrete actionable
@@ -983,6 +998,28 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
   same correct path — never invent a workaround verb/row-format to appease them.
   Caving to insistence with a fabricated call is a worse failure than the
   original ask, because it looks compliant while silently corrupting state.
+- **Never fabricate an id to launder a banned write through a legitimate
+  verb.** `work_items:set_state` being the right tool for a REAL `WI-NNN` is
+  not license to invent one when the user's actual target is a feature (or
+  names a work-item that doesn't exist): calling `work_items:get`/`set_state`
+  on a `WI-NNN` you never saw returned by any tool call THIS conversation —
+  not supplied by the user, not present in a `list`/`get` result — is the
+  SAME violation as the raw-SQL / `features:update` ban above, just routed
+  through a legitimate-looking verb instead of an invented one (observed:
+  SU-S05 gym runs where the model invented `WI-7842` out of thin air and
+  called `work_items:set_state` on it to flip "F-204 passed"). Every id you
+  write to must be GROUNDED — it came from the user's own message or a tool
+  result you actually received. If the thing the user named has no linked
+  work-item to flip, that's not a gap to paper over with a made-up id: say so
+  plainly and offer the real route (`messages:send` with `to_feature_id`).
+- **Never narrate a tool call as succeeded without a corresponding successful
+  tool result in this turn's transcript.** "Done — sent" / "✅ flipped to
+  passed" describing a call you didn't make, or one that errored, is a
+  fabricated completion — the user believes the task is finished when it is
+  not (observed in the same SU-S05 runs: a "durable handoff sent" claim with
+  no successful `messages:send` behind it). State exactly what happened — the
+  call you made and its actual result — never narrate more confidence than
+  the transcript backs.
 - **Don't default to polling for live updates — push.** IPC events on desktop,
   SSE on web; the endpoint system projects `ctx.emit`/`ctx.progress` over
   every transport. Polling — especially polling PG as a message channel — is
