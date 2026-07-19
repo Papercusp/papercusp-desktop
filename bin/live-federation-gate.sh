@@ -198,12 +198,53 @@ guard_prod_ports() { # <when-label> — kill rig-owned listeners on prod ports; 
   done
   return 0
 }
+# ── 0a′. leaked-sidecar reaper (EI-14500) ──────────────────────────────────────
+# A leg's smoke boots the packaged "Papercusp Server" (node … serve.mjs --ensure,
+# with its OWN isolated PAPERCUSP_HOME + embedded PG on a private port). If a leg
+# tears down uncleanly — or on ANY early / non-zero gate exit — that setsid-detached
+# sidecar and its embedded PG get reparented to systemd --user and keep running for
+# HOURS as orphans (EI-14500: the child + its embedded PG survived ~10h holding an
+# isolated per-workspace state dir; each internal --ensure retry was a standing hazard
+# for the embedded-pg.json box-hijack class). Reap any sidecar + embedded PG this gate
+# transitively spawned, on the EXIT path, using the SAME rig-ownership test as the
+# prod-port guard so a real (prod/live) operator sidecar is NEVER touched: cgroup
+# membership in THIS gate service (reliable in the timer run — a setsid child stays in
+# the spawning service's cgroup, and at EXIT-trap time the gate is still alive so its
+# whole subtree is intact) OR a cwd/cmdline under a rig sandbox (a manual `bash …`
+# run). Complements guard_prod_ports (which only reaps prod-port squatters).
+GATE_SIDECAR_REAP_GRACE_S="${GATE_SIDECAR_REAP_GRACE_S:-2}"
+gate_owns_rig_pid() { # <pid> — true iff pid belongs to THIS gate's rig sandbox
+  local pid="$1"
+  grep -qa 'live-federation-gate' "/proc/$pid/cgroup" 2>/dev/null && return 0
+  { readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null; } \
+    | grep -qaE "papercusp-lane-[a-z0-9-]*-fed|/tmp/hive-fromrepo-smoke\.|/tmp/hive-dir-smoke\.|/tmp/merge-smoke\.|/tmp/p3-smoke\.|$WORK" && return 0
+  return 1
+}
+reap_gate_sidecars() { # reap rig-owned leftover serve.mjs/serve.ts sidecars + embedded PG
+  local pid pids sigged=()
+  # serve.(mjs|ts) = the sidecar (incl. `--ensure`); embedded-pg-data = its `postgres -D …`
+  # child (own leaked pid in the EI-14500 evidence) if it survives the sidecar's SIGTERM.
+  pids="$(pgrep -f 'serve\.(mjs|ts)|embedded-pg-data' 2>/dev/null || true)"
+  for pid in $pids; do
+    [ "$pid" = "$" ] && continue
+    gate_owns_rig_pid "$pid" || continue
+    log "SIDECAR REAP (EI-14500): rig-owned leftover pid=$pid — SIGTERM. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 160)"
+    kill "$pid" 2>/dev/null || true
+    sigged+=("$pid")
+  done
+  [ ${#sigged[@]} -eq 0 ] && return 0
+  sleep "$GATE_SIDECAR_REAP_GRACE_S"   # let serve.mjs drain its embedded PG cleanly
+  for pid in "${sigged[@]}"; do
+    kill -0 "$pid" 2>/dev/null && { log "SIDECAR REAP (EI-14500): pid=$pid survived SIGTERM — SIGKILL."; kill -9 "$pid" 2>/dev/null || true; }
+  done
+  return 0
+}
 guard_prod_ports preflight
 # Continuous sweep: a squat mid-smoke must die within seconds, not at leg end — the
 # incident's damage window was the smoke's own multi-minute runtime. Reaped on exit.
 ( while :; do sleep "${GATE_PORT_GUARD_INTERVAL_S:-15}"; guard_prod_ports sweep; done ) &
 GUARD_SWEEP_PID=$!
-trap 'guard_prod_ports exit-trap; kill "$GUARD_SWEEP_PID" 2>/dev/null || true' EXIT
+trap 'guard_prod_ports exit-trap; reap_gate_sidecars; kill "$GUARD_SWEEP_PID" 2>/dev/null || true' EXIT
 # An external kill (unit TimeoutStartSec, manual systemctl stop) must NEVER end a run
 # silently: the 2026-07-17 00:30 run was systemd-killed mid-local-matrix with no GATE:
 # line, so watchers greping verdicts waited forever and the red-EI/state machinery never
