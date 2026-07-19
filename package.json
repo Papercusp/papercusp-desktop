@@ -11,6 +11,7 @@
     "dev:preview": "bin/desktop-preview-prod",
     "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "test:release-artifacts": "bash bin/lib/release-artifacts.selftest.sh",
+    "test:live-fed-reaper": "bash bin/lib/live-federation-gate-reaper.selftest.sh",
     "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:dev-operator-reaper": "node --test test/dev-operator-ifneeded-reaper.test.js",
     "test:shell": "node --test test/build-desktop-sidecar-lock.test.js test/dev-operator-ifneeded-reaper.test.js",
