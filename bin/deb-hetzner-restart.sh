@@ -56,6 +56,19 @@ _rd_poll_remote() {
   return 1
 }
 
+# _rd_remote_loadavg <inst> — echo <inst>'s OWN /proc/loadavg (1/5/15min + runq/total
+# + last-pid), best-effort ("?" on ssh/frame failure, never fatal). WI-5481 discriminator
+# (su-c009b3b4 forensic pass, thread post 53109): the soak's failures correlate with
+# HOST loadavg (this driver box), but that's a confound, not proof — this is the
+# frame's-own-load reading needed to tell "real replicator-attach protocol bug"
+# (frames genuinely idle when a leg fails) apart from "load-attach coupling" (the
+# failing frame was itself starved). Cheap (<1s), safe to call every cycle.
+_rd_remote_loadavg() {
+  local inst="$1" out
+  out="$(drv_exec "$inst" <<<'cat /proc/loadavg 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)"
+  [ -n "$out" ] && echo "$out" || echo "?"
+}
+
 # _rd_row_count <inst> <feature_id> — echo the number of PG rows for this feature_id
 # on <inst> (across all slugs). The no-duplicate-rows census probe.
 _rd_row_count() {
