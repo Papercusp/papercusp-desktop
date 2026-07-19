@@ -106,7 +106,15 @@ export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-whe
 PAGES="$(find "$SITE_DIR" -name '*.html' | wc -l)"
 echo
 echo "==> release host : ${BASE%/*}/<secret>"
-echo "==> bucket       : s3://${R2_BUCKET}/${KEY_PREFIX}/"
+# NEVER print the raw KEY_PREFIX — it is the unguessable path segment that keeps
+# the bucket unlisted (D-002/D-003), so it is a masked secret (must never reach a
+# transcript / PG / a shared log). This preview must be safe to paste into a
+# status update, INCLUDING under DRY_RUN, so it self-masks the same way
+# upload-release.sh's preview does (EI-15305: this sibling script's own preview
+# line still leaked the raw prefix even after that fix landed — the "pipe it
+# through a mask-sed" guidance was never reliable here either, since KEY_PREFIX
+# is derived from PAPERCUSP_UPDATE_BASE_URL, not a grep-able env var).
+echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
 echo "==> pages        : $PAGES"
 
 if [[ "$DRY_RUN" == "1" ]]; then
