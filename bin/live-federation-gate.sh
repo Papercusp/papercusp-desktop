@@ -226,7 +226,7 @@ reap_gate_sidecars() { # reap rig-owned leftover serve.mjs/serve.ts sidecars + e
   # child (own leaked pid in the EI-14500 evidence) if it survives the sidecar's SIGTERM.
   pids="$(pgrep -f 'serve\.(mjs|ts)|embedded-pg-data' 2>/dev/null || true)"
   for pid in $pids; do
-    [ "$pid" = "$" ] && continue
+    # (the gate itself is a `bash` process — never matches the serve/PG pgrep pattern)
     gate_owns_rig_pid "$pid" || continue
     log "SIDECAR REAP (EI-14500): rig-owned leftover pid=$pid — SIGTERM. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 160)"
     kill "$pid" 2>/dev/null || true
