@@ -2,6 +2,15 @@
 # restart-settle-barrier.selftest.sh — regression test for the WI-5444 settle-
 # or-repair barrier (bin/lib/scenarios/restart-settle-barrier.sh).
 #
+# Deliberately lives HERE (bin/lib/, not bin/lib/scenarios/) even though it
+# tests a scenarios/ file: bin/deb-hetzner-matrix.sh's source_scenarios()
+# sources EVERY bin/lib/scenarios/*.sh at the top of a real run — a selftest
+# living inside that directory would itself get swept in and its STUBBED
+# matrix_register/fed_log/_rd_origin/_rd_poll_remote would silently clobber
+# the real ones for the whole live run. Mirrors
+# live-federation-gate-reaper.selftest.sh, which avoids the same trap the
+# same way (it tests bin/live-federation-gate.sh from outside its sweep too).
+#
 # Sources the REAL scenario file (the shipping code, not a copy) and exercises
 # scn_restart_settle_barrier() against STUBBED _rd_origin/_rd_poll_remote/fed_log
 # so this never touches a real rig/SSH/PG — purely local, <1s. Mirrors the
@@ -9,10 +18,10 @@
 # TS/Cargo/LLM frameworks don't host shell units; the live matrix is the
 # integration test).
 #
-#   bash bin/lib/scenarios/restart-settle-barrier.selftest.sh   # exit 0 = PASS, 1 = FAIL
+#   bash bin/lib/restart-settle-barrier.selftest.sh   # exit 0 = PASS, 1 = FAIL
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCEN="$DIR/restart-settle-barrier.sh"
+SCEN="$DIR/scenarios/restart-settle-barrier.sh"
 [ -f "$SCEN" ] || { echo "SKIP: scenario file not found at $SCEN"; exit 0; }
 
 FAILS=0
