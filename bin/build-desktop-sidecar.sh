@@ -1490,6 +1490,39 @@ rm -rf "$SIDECAR_DIR/db-sql"
 mkdir -p "$SIDECAR_DIR/db-sql"
 cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 
+# WI-4419 D-004 (copy-point identity scrub): db-sql/ is a SECOND path (besides
+# source.tar.zst) by which must-ship canonical source leaves the tree VERBATIM —
+# the migration SQL is copied byte-for-byte, so an [owner:Avi] provenance header
+# (e.g. migrations 630/631) survives to disk and is caught by this build's own
+# release-privacy --scan-dir audit below (and the AppImage AppDir scan). Unlike
+# the compiled .ts source (esbuild strips comments), these .sql comments ship as-
+# is. Redact the SHIPPED COPY in place — NEVER the canonical working-tree source
+# (that would rewrite the owner's committed authorship AND break test fixtures
+# that assert on these literals) — using the gate's ONE rule
+# (audit-release-bundle.py --identity-literals) as the single source of truth so
+# the scrub cannot drift from what the audit later fails on. Filenames + count are
+# preserved, so the WI-3047 tree-match guard below still holds. Opt out with
+# PAPERCUSP_STAGE_SCRUB=0 (mirrors stage-source-tree.sh).
+if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" && -f "$HERE/audit-release-bundle.py" ]]; then
+  declare -a _dbsql_sed=()
+  while IFS=$'\t' read -r _val _red _wb; do
+    [[ -z "$_val" ]] && continue
+    _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
+    _r="$(printf '%s' "$_red" | sed 's/[&/\]/\\&/g')"
+    if [[ "$_wb" == "1" ]]; then _dbsql_sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _dbsql_sed+=(-e "s/${_p}/${_r}/g"); fi
+  done < <(python3 "$HERE/audit-release-bundle.py" --identity-literals)
+  if (( ${#_dbsql_sed[@]} > 0 )); then
+    _dbsql_scrubbed=0
+    for _f in "$SIDECAR_DIR/db-sql/"*.sql; do
+      [[ -f "$_f" ]] || continue
+      sed -E "${_dbsql_sed[@]}" "$_f" | cmp -s - "$_f" && continue
+      sed -E -i "${_dbsql_sed[@]}" "$_f"
+      _dbsql_scrubbed=$((_dbsql_scrubbed+1))
+    done
+    echo "    identity scrub: redacted $_dbsql_scrubbed shipped db-sql file(s) in place (WI-4419 D-004)"
+  fi
+fi
+
 # WI-3047 guard: assert what we just copied EXACTLY matches the source tree at
 # this instant (same count, same highest migration number) — cheap defense-in-
 # depth against a partial/failed cp, a stale leftover db-sql/ from a prior
