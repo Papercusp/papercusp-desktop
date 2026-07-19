@@ -141,7 +141,21 @@ case "$PLATFORM" in
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
     OPJSON_PATH="\$HOME/.papercusp/operator.json"
     INSTALL_CMD="${INSTALL_CMD:-sudo dpkg -i __ARTIFACT__}"
-    RELAUNCH_CMD="${RELAUNCH_CMD:-systemctl --user restart papercusp-desktop.service}"
+    # LINUX relaunch (LIVE-VALIDATED 2026-07-19 on the linux-test VM, WI-5484):
+    # the app is a plain Tauri GUI in the user X session, NOT a systemd service
+    # (the old `systemctl --user restart papercusp-desktop.service` default was
+    # vestigial and a silent no-op — there is no such unit). Two linux-specific
+    # facts drive this sequence: (a) Tauri single-instance — exec'ing the binary
+    # while the OLD GUI is still running is a NO-OP (the new process forwards to
+    # the running instance and exits), so `serve --ensure` never runs on the new
+    # build and the flip silently never happens; (b) UNLIKE windows/WSL, the
+    # `serve.mjs` operator is a CHILD of the GUI and is reaped when the GUI is
+    # killed. So we must CLOSE the old GUI first (mirrors the windows taskkill),
+    # then cold-launch the newly-installed GUI, whose serve --ensure cold-starts
+    # a fresh operator ON THE SAME sticky port (from operator.json) reporting the
+    # new build sha — which is exactly what the flip + port-hold assertions check.
+    # DISPLAY/XAUTHORITY default to the VM's :0 session; override via env if needed.
+    RELAUNCH_CMD="${RELAUNCH_CMD:-pkill -f '/usr/bin/papercusp-desktop' 2>/dev/null; sleep 2; export DISPLAY=\${DISPLAY:-:0} XAUTHORITY=\${XAUTHORITY:-\$HOME/.Xauthority}; setsid bash -c 'exec /usr/bin/papercusp-desktop' >\$HOME/papercusp-relaunch.log 2>&1 </dev/null & disown; sleep 2; echo relaunched}"
     ;;
   *) echo "unknown --platform: $PLATFORM (want windows|mac|linux)" >&2; exit 2 ;;
 esac

@@ -215,7 +215,7 @@ scenario_replication_liveness_soak() {
   local tries=$(( (sla_s + 2) / 3 ))   # _rd_poll_remote polls every 3s
   local oslug="${FRAME_MEMBER_SLUG[$OWNER]:-}" mslug="${FRAME_MEMBER_SLUG[$MEMBER]:-}"
   local ts; ts="$(date +%s)"
-  local rc=0 i target t0 t1
+  local rc=0 i target t0 t1 load_o load_m
 
   fed_log "═══ P-004: replication-liveness soak — $cycles kill/restart cycles, SLA ${sla_s}s/leg ═══"
   if [ -z "$oslug" ] || [ -z "$mslug" ]; then
@@ -235,6 +235,12 @@ scenario_replication_liveness_soak() {
     rig_wait_swarm "$OWNER" "$MEMBER" 70 \
       || echo "  ⚠ cycle $i: swarm not re-peered within window (probes below still enforce the SLA)"
 
+    # WI-5481 discriminator (baseline, post-repeer/pre-probe): both frames' OWN
+    # loadavg for this cycle, so a later FAIL can be read against "were the
+    # frames idle at cycle start" even if it later spikes mid-probe.
+    load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
+    echo "  ⚙ cycle $i remote loadavg (post-repeer, pre-probe) — '$OWNER': $load_o   '$MEMBER': $load_m"
+
     # Leg A: owner → member.
     local fid_am="F-RLSOAK-${ts}-${i}-AM"
     t0="$(date +%s)"
@@ -243,7 +249,12 @@ scenario_replication_liveness_soak() {
       t1="$(date +%s)"
       echo "  ✓ cycle $i A→B: $fid_am landed on member in $((t1 - t0))s (SLA ${sla_s}s)"
     else
-      echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class)"
+      # Precise-at-failure capture (WI-5481 discriminator): $MEMBER is the frame
+      # that should have RECEIVED + re-attached the replicator — its load right
+      # now is the most direct read on "was it starved". $OWNER too, since either
+      # side stalling the swarm/replicator could explain a one-direction miss.
+      load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
+      echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m"
       rc=1
     fi
 
@@ -255,7 +266,8 @@ scenario_replication_liveness_soak() {
       t1="$(date +%s)"
       echo "  ✓ cycle $i B→A: $fid_ma landed on owner in $((t1 - t0))s (SLA ${sla_s}s)"
     else
-      echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class)"
+      load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
+      echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m"
       rc=1
     fi
   done
