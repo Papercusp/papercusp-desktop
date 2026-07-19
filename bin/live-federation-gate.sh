@@ -214,10 +214,16 @@ guard_prod_ports() { # <when-label> — kill rig-owned listeners on prod ports; 
 # run). Complements guard_prod_ports (which only reaps prod-port squatters).
 GATE_SIDECAR_REAP_GRACE_S="${GATE_SIDECAR_REAP_GRACE_S:-2}"
 gate_owns_rig_pid() { # <pid> — true iff pid belongs to THIS gate's rig sandbox
-  local pid="$1"
+  local pid="$1" info
   grep -qa 'live-federation-gate' "/proc/$pid/cgroup" 2>/dev/null && return 0
-  { readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null; } \
-    | grep -qaE "papercusp-lane-[a-z0-9-]*-fed|/tmp/hive-fromrepo-smoke\.|/tmp/hive-dir-smoke\.|/tmp/merge-smoke\.|/tmp/p3-smoke\.|$WORK" && return 0
+  # Capture cwd + cmdline into a var, then grep a here-string — NOT `{ …; } | grep -q`.
+  # This file runs under `set -o pipefail` (top): with a pipeline, `grep -q` short-circuits
+  # on the FIRST (cwd) line and closes the pipe, so `tr` gets SIGPIPE and the pipeline
+  # reports non-zero — making `… && return 0` MISFIRE and this predicate return "not owned"
+  # for a genuinely rig-owned pid (an owned orphan then slips past reap_gate_sidecars'
+  # `|| continue` and is NEVER reaped — the exact EI-14500 leak this reaper exists to close).
+  info="$(readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+  grep -qaE "papercusp-lane-[a-z0-9-]*-fed|/tmp/hive-fromrepo-smoke\.|/tmp/hive-dir-smoke\.|/tmp/merge-smoke\.|/tmp/p3-smoke\.|$WORK" <<<"$info" && return 0
   return 1
 }
 reap_gate_sidecars() { # reap rig-owned leftover serve.mjs/serve.ts sidecars + embedded PG

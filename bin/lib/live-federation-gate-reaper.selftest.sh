@@ -49,9 +49,13 @@ eval "$FN_SRC"
 
 # spawn_fake_serve <cwd> — a backgrounded `sleep` stand-in whose argv looks like the leaked
 # sidecar and whose cwd is $cwd (what gate_owns_rig_pid inspects). Echoes its pid.
+# stdin/out/err are detached (</dev/null >/dev/null 2>&1): the NEUTRAL fake is deliberately
+# NOT reaped, so if it inherited this test's stdout it would hold the caller's capture pipe
+# open until it exits (120s) — hanging any harness that reads our output to EOF.
 spawn_fake_serve() {
   local cwd="$1"
-  ( cd "$cwd" && exec -a "node --require sidecar-preload.js serve.mjs --ensure" sleep 120 ) &
+  ( cd "$cwd" && exec -a "node --require sidecar-preload.js serve.mjs --ensure" sleep 120 ) \
+    </dev/null >/dev/null 2>&1 &
   echo $!
 }
 
@@ -62,7 +66,7 @@ NEUTRAL_DIR="$(mktemp -d /tmp/reaper-neutral.XXXXXX)"
 RIG_PID="$(spawn_fake_serve "$RIG_DIR")"
 NEUTRAL_PID="$(spawn_fake_serve "$NEUTRAL_DIR")"
 cleanup() { kill "$RIG_PID" "$NEUTRAL_PID" 2>/dev/null || true; rm -rf "$RIG_DIR" "$NEUTRAL_DIR"; }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 sleep 0.3   # let the execs settle so /proc/<pid>/cwd resolves
 
 # ── 1. rig-ownership predicate ──────────────────────────────────────────────────
