@@ -24,9 +24,26 @@ scn_revocation_kcut() {
 
   # 1. baseline — owner→B federation works pre-ban (the matrix already proved it at order
   #    10; re-confirm here so the post-ban absence is attributable to the BAN, not a broken
-  #    path e.g. the WI-1378 no-restart empty-roster gap).
+  #    path). NOTE (EI-15535): this is a CONTENT probe (harness_features_consolidated),
+  #    NOT the hive_members/roster path WI-1378 fixed — a "WI-1378?" guess in this message
+  #    is a red herring for THIS probe. Cross-run evidence (EI-15535, WI-5481, WI-5448)
+  #    instead shows this baseline reliably fails whenever order-87 replication_soak just
+  #    failed a few scenarios earlier: the soak's sustained 5x-restart churn leaves
+  #    federation genuinely stalled (WI-183-class) and it has not recovered by the time
+  #    this order-90 scenario runs. Surface THAT correlation instead of misattributing to
+  #    WI-1378, so a reader doesn't file a fresh "is this a WI-1378 regression?" bug again
+  #    (SCN_RC is the matrix runner's global result table — populated for every
+  #    already-run scenario id since scenarios run in-process in order; guarded with a
+  #    default for standalone/--only invocations where it may be unset under `set -u`).
   local pre; pre="$(fed_hive_merge_probe a b "$oslug" "$FPRE" 40 || true)"
-  [ "${pre%% *}" = 1 ] || { echo "revocation: BASELINE FAIL — owner→B pre-ban federation broken (probe=$pre; roster empty / WI-1378?) — cannot attribute a cut-off"; return 1; }
+  if [ "${pre%% *}" != 1 ]; then
+    local hint="mechanism unconfirmed — this is a content probe, not the WI-1378 roster path; check order-87 replication_soak + WI-5481/WI-5448 (known WI-183-class sustained-restart stall) before assuming a fresh regression"
+    if [ "${SCN_RC[replication_soak]:-0}" -ne 0 ]; then
+      hint="order-87 replication_soak FAILED earlier this run (rc=${SCN_RC[replication_soak]}) — this is almost certainly the SAME downstream WI-183-class stall (see WI-5481/WI-5448), not a fresh regression or a WI-1378 roster issue"
+    fi
+    echo "revocation: BASELINE FAIL — owner→B pre-ban federation broken (probe=$pre; $hint) — cannot attribute a cut-off"
+    return 1
+  fi
 
   # 2. owner bans B (owner authority = the Hive-key holder = frame a; Hive-wide revoke →
   #    revoked_pubkeys admission blocklist + the epoch 0→1 K-cut).
