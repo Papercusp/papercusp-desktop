@@ -51,8 +51,17 @@
 # coord_event_log row origin='local' on <inst> (the mig-150 capture trigger federates
 # it). Mirrors fed_coord_merge_probe's column shape + the D-050 workspace_id resolve.
 _ccp_coord_write() {
-  local inst="$1" slug="$2" mid="$3" kind="$4" text="${5:-brief7 control-plane probe}"
-  drv_psql "$inst" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'messages','ccp-probe','$mid','{\"kind\":\"$kind\",\"text\":\"$text\"}'::jsonb,'$slug','local');" >/dev/null
+  local inst="$1" slug="$2" mid="$3" kind="$4" text="${5:-brief7 control-plane probe}" ws
+  # D-050 / WI-5399 iteration 2: pot_home_slug scoping — works on owner AND joiner,
+  # unlike origin='local' (structurally never matches a joiner's own membership
+  # row). This scenario always runs with deb-hetzner-rig.sh sourced (per the
+  # CONTRACT header), so RIG_HIVE_ID is reliably in scope. Fail loudly, never 'default'.
+  ws="$(drv_psql "$inst" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='${RIG_HIVE_ID:-}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws" ]; then
+    echo "FATAL _ccp_coord_write($inst,$slug,$mid): could not resolve a real workspace_id for pot '${RIG_HIVE_ID:-<unset>}' — refusing to silently write under 'default' (D-050/WI-5399 class)" >&2
+    return 1
+  fi
+  drv_psql "$inst" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws','messages','ccp-probe','$mid','{\"kind\":\"$kind\",\"text\":\"$text\"}'::jsonb,'$slug','local');" >/dev/null
 }
 
 # _ccp_coord_arrives <dst> <msg_id> [tries] — poll <dst> for the coord row arriving
@@ -109,19 +118,31 @@ scenario_coord_control_plane() {
   # registry contract is "only rows with harness_slug set + non-fanout cross", so a
   # NULL harness_slug is the canonical non-federating case.
   mid="CC4-NOHARNESS-$ts"
-  drv_psql "$a" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'messages','ccp-probe',\$\$$mid\$\$,'{\"kind\":\"message\",\"text\":\"operator-scope must not cross\"}'::jsonb,NULL,'local');" >/dev/null
-  res="$(rig_assert_row_absent "$b" "harness_shared.coord_event_log WHERE msg_id='$mid'")"
-  if [ "$res" = 1 ]; then echo "CC-4 PASS — operator/no-harness coord row correctly DID NOT federate to b (boundary holds)"
-  else echo "CC-4 FAIL — a non-harness coord row LEAKED to b (capture-trigger filter not gating scope)"; rc=1; fi
+  # D-050 / WI-5399 iteration 2: pot_home_slug scoping — see _ccp_coord_write's comment.
+  local ws_cc4
+  ws_cc4="$(drv_psql "$a" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='${RIG_HIVE_ID:-}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws_cc4" ]; then
+    echo "CC-4 FAIL — could not resolve a real workspace_id for pot '${RIG_HIVE_ID:-<unset>}' on $a (D-050/WI-5399 class)"; rc=1
+  else
+    drv_psql "$a" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws_cc4','messages','ccp-probe',\$\$$mid\$\$,'{\"kind\":\"message\",\"text\":\"operator-scope must not cross\"}'::jsonb,NULL,'local');" >/dev/null
+    res="$(rig_assert_row_absent "$b" "harness_shared.coord_event_log WHERE msg_id='$mid'")"
+    if [ "$res" = 1 ]; then echo "CC-4 PASS — operator/no-harness coord row correctly DID NOT federate to b (boundary holds)"
+    else echo "CC-4 FAIL — a non-harness coord row LEAKED to b (capture-trigger filter not gating scope)"; rc=1; fi
+  fi
 
   # CC-5 — NEGATIVE: a coord WATERMARK row must NOT cross (local-only by design).
   # coord_watermarks is coord_-prefixed → sync:'none' (no capture trigger). Read
   # position is per-machine. Insert one on a, assert absent on b.
-  local wm_owner="ccp-watermark-$ts"
-  drv_psql "$a" "INSERT INTO harness_shared.coord_watermarks (workspace_id,owner_id,messages_shown_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'$wm_owner', now()) ON CONFLICT DO NOTHING;" >/dev/null 2>&1
-  res="$(rig_assert_row_absent "$b" "harness_shared.coord_watermarks WHERE owner_id='$wm_owner'")"
-  if [ "$res" = 1 ]; then echo "CC-5 PASS — coord watermark correctly local-only (did NOT federate to b)"
-  else echo "CC-5 FAIL — coord watermark LEAKED to b (unexpected: watermarks should be sync:none)"; rc=1; fi
+  local wm_owner="ccp-watermark-$ts" ws_cc5
+  ws_cc5="$(drv_psql "$a" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='${RIG_HIVE_ID:-}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws_cc5" ]; then
+    echo "CC-5 FAIL — could not resolve a real workspace_id for pot '${RIG_HIVE_ID:-<unset>}' on $a (D-050/WI-5399 class)"; rc=1
+  else
+    drv_psql "$a" "INSERT INTO harness_shared.coord_watermarks (workspace_id,owner_id,messages_shown_ts) VALUES ('$ws_cc5','$wm_owner', now()) ON CONFLICT DO NOTHING;" >/dev/null 2>&1
+    res="$(rig_assert_row_absent "$b" "harness_shared.coord_watermarks WHERE owner_id='$wm_owner'")"
+    if [ "$res" = 1 ]; then echo "CC-5 PASS — coord watermark correctly local-only (did NOT federate to b)"
+    else echo "CC-5 FAIL — coord watermark LEAKED to b (unexpected: watermarks should be sync:none)"; rc=1; fi
+  fi
 
   if [ "$rc" = 0 ]; then echo "✓ scenario_coord_control_plane: ALL CC probes PASS (owner=$a member=$b)"
   else echo "✗ scenario_coord_control_plane: one or more CC probes FAILED (owner=$a member=$b)"; fi

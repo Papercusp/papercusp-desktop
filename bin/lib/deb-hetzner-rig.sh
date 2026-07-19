@@ -840,29 +840,40 @@ rig_wait_swarm() {
 # the operator's REAL workspace (the harness drains WHERE workspace_id = its boot
 # workspace — a bare INSERT defaulting to 'default' never drains; D-050).
 
+# rig_resolve_ws [inst] [pot] — echo the REAL workspace_id for <pot> (default
+# RIG_HIVE_ID) on <inst> (default "a"), or nothing + FATAL on stderr + return 1.
+#
+# WI-5399 iteration 2 (D-050 class, joiner side): every probe/write helper in this
+# scenario family used to resolve workspace_id via
+#   `pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1`
+# falling back to the literal string 'default' when that returned NULL. But
+# `origin` classifies WRITE PROVENANCE (did THIS db insert the row directly, vs
+# receive it via federation-apply), not identity-ownership. A JOINER's own
+# membership row is authored by the OWNER and federates IN, so it is ALWAYS
+# origin='remote' on the joiner — the old predicate structurally never matched
+# there (confirmed live on a failing joiner frame: 0 local rows, 4/4 remote,
+# direct psql). Resolve by `pot_home_slug` instead (part of the table's PK, one
+# workspace_id per pot on a given frame's DB — uniform on owner AND joiner, no
+# origin asymmetry) and FAIL LOUDLY instead of silently falling back to a
+# workspace_id the harness never drains (that silent 'default' fallback *is*
+# D-050 — this replaces it, it doesn't reinstate it).
+rig_resolve_ws() {
+  local inst="${1:-a}" pot="${2:-${RIG_HIVE_ID:-}}" ws
+  ws="$(drv_psql "$inst" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$pot' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws" ]; then
+    echo "FATAL rig_resolve_ws($inst,$pot): could not resolve a real workspace_id — refusing to silently use 'default' (D-050/WI-5399 class)" >&2
+    return 1
+  fi
+  echo "$ws"
+}
+
 # rig_write_content <inst> <harness_slug> <feature_id> [title] [status]
 # INSERT a feature row origin='local' on <inst> (the capture trigger federates it).
 # Echoes the feature_id written. The analog the fed_*_merge probes also use.
-#
-# WI-5399 iteration 2 (D-050 class, joiner side): workspace_id resolution used to
-# read `pot_members WHERE origin='local'` — but `origin` classifies WRITE
-# PROVENANCE (did THIS db insert the row directly, vs receive it via
-# federation-apply), not identity-ownership. A JOINER's own membership row is
-# authored by the OWNER and federates IN, so it is ALWAYS origin='remote' on the
-# joiner — the old predicate structurally never matched there (confirmed live on
-# a failing joiner frame: 0 local rows, 4/4 remote). Resolve by `pot_home_slug`
-# instead (part of the table's PK, one workspace_id per pot on a given frame's
-# DB — uniform on owner AND joiner, no origin asymmetry) and FAIL LOUDLY instead
-# of silently falling back to a workspace_id the harness never drains (that
-# silent fallback to 'default' *is* D-050 — this replaces it, it doesn't reinstate it).
 rig_write_content() {
   local inst="$1" slug="$2" fid="$3" title="${4:-rig write}" status="${5:-todo}" ts ws
   ts="$(date +%s)000"
-  ws="$(drv_psql "$inst" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='${RIG_HIVE_ID:-}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  if [ -z "$ws" ]; then
-    echo "FATAL rig_write_content($inst,$slug,$fid): could not resolve a real workspace_id for pot '${RIG_HIVE_ID:-<unset>}' on $inst — refusing to silently write under 'default' (D-050/WI-5399 class)" >&2
-    return 1
-  fi
+  ws="$(rig_resolve_ws "$inst")" || return 1
   drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null
   echo "$fid"
 }
@@ -914,11 +925,7 @@ rig_github_id() { gh api "users/$1" --jq '.id' 2>/dev/null; }
 rig_ban_member() {
   local owner="$1" target_id="$2" scope="${3:-hive}" ws field val resp token
   [ -n "$target_id" ] || { echo "FATAL rig_ban_member: no target github id" >&2; return 1; }
-  # WI-5399 iteration 2 (D-050 class): scope by pot_home_slug, not origin='local' —
-  # see rig_write_content's comment for the mechanism (origin=write-provenance, not
-  # identity-ownership; structurally 'remote' on a joiner). Fail loudly, no 'default' fallback.
-  ws="$(drv_psql "$owner" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='${RIG_HIVE_ID:-}' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$ws" ] || { echo "FATAL rig_ban_member: could not resolve a real workspace_id for pot '${RIG_HIVE_ID:-<unset>}' on $owner — refusing to silently use 'default' (D-050/WI-5399 class)" >&2; return 1; }
+  ws="$(rig_resolve_ws "$owner")" || return 1
   if [ "$scope" = "harness" ]; then field="harnessSlug"; val="${FRAME_MEMBER_SLUG[$owner]:-}"
   else field="potSlug"; val="${RIG_HIVE_ID:-}"; fi  # endpoint field renamed hiveSlug→potSlug by cup-lexicon-full-rename-2026-07-09
   [ -n "$val" ] || { echo "FATAL rig_ban_member: no $field resolved (run rig_owner_publish_hive + rig_join_hive first)" >&2; return 1; }

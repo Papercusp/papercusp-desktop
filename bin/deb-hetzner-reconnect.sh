@@ -77,9 +77,12 @@ _rc_origin() { rig_read_content "$1" "$2"; }
 # whitespace-free (the poll strips whitespace before comparing). Mirrors
 # fed_plan_part_merge_assert's INSERT; workspace_id = the operator's REAL workspace.
 _rc_write_planpart() {
-  local src="$1" slug="$2" plan_slug="$3" part_key="$4" body="$5" ts
+  local src="$1" slug="$2" plan_slug="$3" part_key="$4" body="$5" ts ws
   ts="$(date +%s)000"
-  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'$slug','$plan_slug','$part_key','item','$body',1,$ts,'$src',false,'local');" >/dev/null
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping) — works on
+  # owner AND joiner, unlike origin='local'. See its definition for the mechanism.
+  ws="$(rig_resolve_ws "$src")" || return 1
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws','$slug','$plan_slug','$part_key','item','$body',1,$ts,'$src',false,'local');" >/dev/null
 }
 
 # _rc_poll_planpart <dst> <plan_slug> <part_key> <body> [tries] — PASS iff the part arrives
@@ -97,8 +100,10 @@ _rc_poll_planpart() {
 # _rc_write_coord <src> <slug> <msg_id> — INSERT a coord (messages surface) event
 # origin='local' on <src>. Mirrors fed_coord_merge_probe's INSERT.
 _rc_write_coord() {
-  local src="$1" slug="$2" msg_id="$3"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'messages','rc-probe','$msg_id','{\"kind\":\"message\",\"text\":\"reconnect catchup coord probe\"}'::jsonb,'$slug','local');" >/dev/null
+  local src="$1" slug="$2" msg_id="$3" ws
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping).
+  ws="$(rig_resolve_ws "$src")" || return 1
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws','messages','rc-probe','$msg_id','{\"kind\":\"message\",\"text\":\"reconnect catchup coord probe\"}'::jsonb,'$slug','local');" >/dev/null
 }
 
 # _rc_poll_coord <dst> <msg_id> [tries] — PASS iff the coord event arrives origin='remote'.

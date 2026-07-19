@@ -109,9 +109,12 @@ set +u   # the FED_*/FRAME_* assoc arrays are nounset-hostile
 # so the mig-150 capture trigger federates it (harness_slug=member slug satisfies
 # the WHEN gate); poll <dst> for the same msg_id at origin='remote'. → "1"/"0".
 _ctrl_coord_probe() {
-  local src="$1" dst="$2" sslug="$3" surface="$4" tag="$5" tries="${6:-30}" i row mid
+  local src="$1" dst="$2" sslug="$3" surface="$4" tag="$5" tries="${6:-30}" i row mid ws
   mid="CTRL-${surface}-${tag}-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'$surface','ctrl-probe','$mid','{\"kind\":\"$surface\",\"text\":\"control-plane $surface probe\"}'::jsonb,'$sslug','local');" >/dev/null
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping) — works on
+  # owner AND joiner, unlike origin='local'. See its definition for the mechanism.
+  ws="$(rig_resolve_ws "$src")" || { echo 0; return 1; }
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws','$surface','ctrl-probe','$mid','{\"kind\":\"$surface\",\"text\":\"control-plane $surface probe\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo 1; return 0; }
@@ -130,9 +133,11 @@ _ctrl_coord_probe() {
 # handoff on <src>; poll <dst>. Echoes "1 <author_github_user_id>" on quarantine,
 # "2" if it APPLIED (gate did not fire), "0" if neither landed.
 _ctrl_handoff_ungranted_probe() {
-  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i mid q applied
+  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i mid q applied ws
   mid="CTRL-handoffs-${tag}-$(date +%s)"
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'handoffs','ctrl-probe','$mid','{\"kind\":\"handoffs\",\"text\":\"control-plane handoffs probe (ungranted)\"}'::jsonb,'$sslug','local');" >/dev/null
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping).
+  ws="$(rig_resolve_ws "$src")" || { echo 0; return 1; }
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws','handoffs','ctrl-probe','$mid','{\"kind\":\"handoffs\",\"text\":\"control-plane handoffs probe (ungranted)\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     q="$(drv_psql "$dst" "SELECT author_github_user_id FROM harness_shared.coord_quarantine WHERE msg_id='$mid' AND reason='handoff-below-steer' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$q" ] && { echo "1 $q"; return 0; }
@@ -239,14 +244,18 @@ scenario_coord_controlplane() {
   esac
   p_ho=0
   if [ "$p_hoq" = 1 ]; then
-    WS_B="$(drv_psql "$MEMBER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
-    [ -n "$WS_B" ] || WS_B="default"
-    NOWMS="$(( $(date +%s) * 1000 ))"
-    drv_psql "$MEMBER" "INSERT INTO harness_shared.comms_trust_list (workspace_id,trusted_github_user_id,tier,note,created_ts,updated_ts) VALUES ('$WS_B',$HO_AUTHOR,'steer','ctrl-probe steer grant',$NOWMS,$NOWMS) ON CONFLICT (workspace_id,trusted_github_user_id) DO UPDATE SET tier='steer', updated_ts=$NOWMS;" >/dev/null
-    echo "  granted steer to gh=$HO_AUTHOR on B (local override) — waiting out the 30s tier cache (comms-tier-gate.ts CACHE_TTL_MS)"
-    sleep 35
-    p_ho="$(_ctrl_coord_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" handoffs h2 60 || true)"
-    [ "$p_ho" = 1 ] && echo "✓ coord HANDOFF (steer-granted author) federated A→B and APPLIED (origin=remote)" || echo "✗ coord HANDOFF did NOT apply on B even after the steer grant"
+    # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping) — $MEMBER
+    # is the joiner here, where origin='local' structurally never matches.
+    if WS_B="$(rig_resolve_ws "$MEMBER")"; then
+      NOWMS="$(( $(date +%s) * 1000 ))"
+      drv_psql "$MEMBER" "INSERT INTO harness_shared.comms_trust_list (workspace_id,trusted_github_user_id,tier,note,created_ts,updated_ts) VALUES ('$WS_B',$HO_AUTHOR,'steer','ctrl-probe steer grant',$NOWMS,$NOWMS) ON CONFLICT (workspace_id,trusted_github_user_id) DO UPDATE SET tier='steer', updated_ts=$NOWMS;" >/dev/null
+      echo "  granted steer to gh=$HO_AUTHOR on B (local override) — waiting out the 30s tier cache (comms-tier-gate.ts CACHE_TTL_MS)"
+      sleep 35
+      p_ho="$(_ctrl_coord_probe "$OWNER" "$MEMBER" "$MEMBER_SLUG" handoffs h2 60 || true)"
+      [ "$p_ho" = 1 ] && echo "✓ coord HANDOFF (steer-granted author) federated A→B and APPLIED (origin=remote)" || echo "✗ coord HANDOFF did NOT apply on B even after the steer grant"
+    else
+      echo "  ✗ could not resolve a real workspace_id on B — skipping steer grant (D-050/WI-5399 class)"
+    fi
   else
     echo "  (skipping the steer-grant leg — no quarantine row to resolve the author id from)"
   fi
@@ -263,8 +272,8 @@ scenario_coord_controlplane() {
 
   # ── NEGATIVE probes — RAW control state must stay LOCAL (never on B) ───────
   fed_log "CONTROL-PLANE NEGATIVE probes (raw presence/watermark/await must stay LOCAL to A)"
-  PWS="$(drv_psql "$OWNER" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$PWS" ] || PWS="default"
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping).
+  PWS="$(rig_resolve_ws "$OWNER")" || { echo "  ✗ could not resolve a real workspace_id on A — negative probes below may be unreliable (D-050/WI-5399 class)"; PWS="__unresolved__"; }
   NTS="$(date +%s)"
 
   # _ctrl_row_on_a <pred> — echoes 1 iff the probe row EXISTS on A. The

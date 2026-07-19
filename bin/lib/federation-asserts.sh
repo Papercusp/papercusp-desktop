@@ -792,12 +792,26 @@ fed_plan_part_merge_assert() {
 # for that feature_id arriving origin='remote' under ANY harness_slug. Answers the open
 # question "does a write federate AFTER a hive join?" Echoes "1 <landed_slug>" or "0".
 fed_hive_merge_probe() {
-  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts
+  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts ws
   ts="$(date +%s)000"
-  # D-050: write under the operator's REAL workspace (the harness drains WHERE workspace_id=its
-  # boot workspace, e.g. 'papercusp-workspace'); the bare INSERT defaulted to 'default' → mismatch
-  # → never drained. Resolve it from the product-written hive_members (correct workspace).
-  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
+  # D-050 / WI-5399 iteration 2: workspace_id = the operator's REAL workspace (the
+  # harness drains WHERE workspace_id=its boot workspace). Prefer pot_home_slug
+  # scoping when a caller has RIG_HIVE_ID in scope (deb-hetzner-rig.sh family) —
+  # it works identically on OWNER and JOINER frames, unlike origin='local', which
+  # structurally never matches a joiner's own membership row (authored by the
+  # owner, federates IN as 'remote'). Falls back to the origin heuristic for
+  # callers with no RIG_HIVE_ID (e.g. two-instance-content-matrix-smoke.sh, which
+  # manages its own join outside deb-hetzner-rig.sh). Fails loudly instead of
+  # silently writing under a workspace_id the harness never drains.
+  if [ -n "${RIG_HIVE_ID:-}" ]; then
+    ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [ -n "$ws" ] || ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws" ]; then
+    echo "FATAL fed_hive_merge_probe($src,$sslug,$fid): could not resolve a real workspace_id — refusing to silently write under 'default' (D-050/WI-5399 class)" >&2
+    echo "0"; return 1
+  fi
+  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT harness_slug FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo "1 $row"; return 0; }
@@ -814,10 +828,20 @@ fed_hive_merge_probe() {
 # Body shape mirrors a real coord message ({kind,text}) so the coord-message
 # projection applies it. Distinct from content (features/plans) — this is comms.
 fed_coord_merge_probe() {
-  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid
+  local src="$1" dst="$2" sslug="$3" tag="$4" tries="${5:-30}" i row mid ws
   mid="COMM-${tag}-$(date +%s)"
-  # D-050: workspace_id = the operator's REAL workspace (matches where the harness drains), not 'default'.
-  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default'),'messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"comm federation probe\"}'::jsonb,'$sslug','local');" >/dev/null
+  # D-050 / WI-5399 iteration 2: see fed_hive_merge_probe's comment — prefer
+  # pot_home_slug scoping (RIG_HIVE_ID) which works on owner AND joiner; fall back
+  # to the origin heuristic when RIG_HIVE_ID isn't in scope; fail loudly, never 'default'.
+  if [ -n "${RIG_HIVE_ID:-}" ]; then
+    ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [ -n "$ws" ] || ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws" ]; then
+    echo "FATAL fed_coord_merge_probe($src,$sslug): could not resolve a real workspace_id — refusing to silently write under 'default' (D-050/WI-5399 class)" >&2
+    echo 0; return 1
+  fi
+  drv_psql "$src" "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin) VALUES ('$ws','messages','comm-probe','$mid','{\"kind\":\"message\",\"text\":\"comm federation probe\"}'::jsonb,'$sslug','local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$mid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo 1; return 0; }
