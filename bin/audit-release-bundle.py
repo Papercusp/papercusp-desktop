@@ -48,6 +48,7 @@ unscannable bundle is not a clean one). Never prints a secret VALUE.
 
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
 """
+import fnmatch
 import os
 import pwd
 import re
@@ -710,6 +711,20 @@ def source_leakers(argv):
     high = sorted({v for v in lits.values() if not is_low_entropy(v)})
     low = sorted({v for v in lits.values() if is_low_entropy(v)})
     forbidden = [rx for _r, rx, _g in FORBIDDEN_PATH]
+    # FORBIDDEN_PATH is the gate's PRIVACY exclude set (== --tar-excludes), so a
+    # candidate under one of those never ships and is already skipped above. The
+    # stager ALSO drops a SIZE/heavy class (bin/stage-source-tree.sh) that is not
+    # in FORBIDDEN_PATH — build logs, tsbuildinfo, editor/turbo dirs, the docs-site
+    # dist, cargo-target twins, the papercusp-desktop self-reference. A candidate in
+    # one of THOSE is a build artifact that will not ship either, so scrubbing +
+    # re-adding it would smuggle a non-shipper into the bundle. Mirror that heavy
+    # class here (target/.next/.cache/.astro/pagefind are already FORBIDDEN_PATH).
+    size_skip = [
+        "*.log", "*.tsbuildinfo", "*.DS_Store",
+        "*/.turbo/*", "*/.idea/*", "*/.vscode/*",
+        "*/operator-docs/dist/*", "operator-docs/dist/*",
+        "*cargo-target*", "papercusp-desktop/*", "*/papercusp-desktop/*",
+    ]
     leakers = set()
 
     def hunt(pats):
@@ -732,6 +747,8 @@ def source_leakers(argv):
                     continue
                 rel = os.path.relpath(line, mono).replace(os.sep, "/")
                 if any(rx.search(rel) or rx.search("/" + rel) for rx in forbidden):
+                    continue
+                if any(fnmatch.fnmatch(rel, g) for g in size_skip):
                     continue
                 leakers.add(rel)
 

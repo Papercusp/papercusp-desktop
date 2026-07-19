@@ -117,7 +117,8 @@ else
   done
   echo "$$" > "$STAGE_LOCKDIR/pid"
 fi
-trap 'rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"}' EXIT
+SCRUB_DIR=""
+trap 'rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"} ${SCRUB_DIR:+"$SCRUB_DIR"}' EXIT
 
 # Re-check AFTER taking the lock: a rebuild we just waited on may have replaced
 # the sidecar (the serve.mjs check above ran unlocked, so its answer is stale).
@@ -266,6 +267,52 @@ done
   || echo "    note: allowlist entries absent from this tree (skipped): ${MISSING[*]}"
 echo "    allowlist: ${#INCLUDES[@]} top-level entries"
 
+# ── IDENTITY SCRUB (WI-4419; desktop-v0-0-12-release-tri-platform-2026-07-19 D-004)
+# ─────────────────────────────────────────────────────────────────────────────
+# The audit gate (below) forbids this build box's identity — git name ("Avi"),
+# home path, unix user, email, hostname — plus the known cross-box creds, in the
+# shipped bytes. Dev-infra and agent-authored SOURCE keeps re-introducing them into
+# MUST-SHIP files: [owner:Avi] provenance comments in prod .ts/.sql, dev systemd
+# ExecStart=/home/<user> units, test fixtures hardcoding the build username. Those
+# files ship (or run), so they can't be pruned like a scratch dir, and hand-editing
+# each one is a treadmill that reds the next cut the instant a new tag lands. So:
+# redact every identity literal in a COPY of each leaking source file, and tar the
+# copy IN PLACE OF the original via a --transform overlay (streams — never touches
+# the shared working tree, never node_modules; a vendored leak is a delete-exclude
+# class handled above). BOTH the literal→placeholder map AND the leaking-file set
+# come from the gate's ONE rule (audit-release-bundle.py --identity-literals /
+# --source-leakers), so the scrub cannot drift from what the gate later fails on.
+# This REMOVES the leak from the shipped bytes — the gate still fails on anything
+# left un-redacted, so it is not an exception. Opt out: PAPERCUSP_STAGE_SCRUB=0.
+declare -a SCRUB_EXCLUDES=()
+declare -a SCRUB_MEMBERS=()
+declare -a SCRUB_TRANSFORM=()
+if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
+  declare -a _leakers=()
+  mapfile -t _leakers < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
+  if (( ${#_leakers[@]} > 0 )); then
+    # literal→placeholder sed program, longest-literal-first (so /home/<user> is
+    # redacted before the bare <user> inside it) — straight from the gate's rule.
+    declare -a _sed=()
+    while IFS=$'\t' read -r _val _red _wb; do
+      [[ -z "$_val" ]] && continue
+      _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
+      _r="$(printf '%s' "$_red" | sed 's/[&/\]/\\&/g')"
+      if [[ "$_wb" == "1" ]]; then _sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _sed+=(-e "s/${_p}/${_r}/g"); fi
+    done < <(python3 "$HERE/audit-release-bundle.py" --identity-literals)
+    SCRUB_DIR="$(mktemp -d "$SIDECAR/.stage-scrub-XXXXXX")"
+    for _rel in "${_leakers[@]}"; do
+      [[ -f "$MONO/$_rel" ]] || continue
+      mkdir -p "$SCRUB_DIR/SCRUBBED/$(dirname "$_rel")"
+      sed -E "${_sed[@]}" "$MONO/$_rel" > "$SCRUB_DIR/SCRUBBED/$_rel"
+      SCRUB_EXCLUDES+=(--exclude="./$_rel")
+      SCRUB_MEMBERS+=("./SCRUBBED/$_rel")
+    done
+    SCRUB_TRANSFORM+=(--transform='s|^\./SCRUBBED/|./|')
+    echo "    identity scrub: redacted ${#SCRUB_MEMBERS[@]} must-ship source file(s) in the bundle (WI-4419 D-004)"
+  fi
+fi
+
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
 # GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
 # flags above are GNU dialect — macOS bsdtar rejects --owner outright and
@@ -288,9 +335,18 @@ command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH (macOS: brew 
 # (the changed-file warnings stay visible on stderr); exit ≥2 and any zstd
 # failure remain fatal.
 set +e +o pipefail
+# The scrub overlay (D-004): SCRUB_EXCLUDES drop the leaking originals from the
+# MONO pass; a second `-C "$SCRUB_DIR"` adds the redacted copies, whose ./SCRUBBED/
+# prefix the SCRUB_TRANSFORM rewrites back to the real path (and which the leaker
+# excludes — anchored on ./<relpath> — do NOT match, so the redacted copy survives
+# while the original is dropped). One archive, one EOF; empty arrays no-op when
+# PAPERCUSP_STAGE_SCRUB=0 or nothing leaked.
+declare -a _scrub_tail=()
+[[ -n "$SCRUB_DIR" ]] && _scrub_tail=(-C "$SCRUB_DIR" "${SCRUB_MEMBERS[@]}")
 "$TAR_BIN" --numeric-owner --owner=0 --group=0 \
-  "${EXCLUDES[@]}" \
+  "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${SCRUB_TRANSFORM[@]}" \
   -C "$MONO" -cf - "${INCLUDES[@]}" \
+  "${_scrub_tail[@]}" \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
 rcs=("${PIPESTATUS[@]}")
 set -e -o pipefail
