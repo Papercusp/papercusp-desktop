@@ -155,7 +155,16 @@ case "$PLATFORM" in
     # a fresh operator ON THE SAME sticky port (from operator.json) reporting the
     # new build sha — which is exactly what the flip + port-hold assertions check.
     # DISPLAY/XAUTHORITY default to the VM's :0 session; override via env if needed.
-    RELAUNCH_CMD="${RELAUNCH_CMD:-pkill -f '/usr/bin/papercusp-desktop' 2>/dev/null; sleep 2; export DISPLAY=\${DISPLAY:-:0} XAUTHORITY=\${XAUTHORITY:-\$HOME/.Xauthority}; setsid bash -c 'exec /usr/bin/papercusp-desktop' >\$HOME/papercusp-relaunch.log 2>&1 </dev/null & disown; sleep 2; echo relaunched}"
+    # NOTE the pkill pattern is ANCHORED (^): this whole RELAUNCH_CMD runs in one
+    # remote shell whose OWN command line CONTAINS '/usr/bin/papercusp-desktop'
+    # (the launch step below), so an unanchored `pkill -f '/usr/bin/papercusp-desktop'`
+    # MATCHES AND SIGTERMs ITS OWN SHELL mid-script — the launch never runs, no flip
+    # (live-diagnosed 2026-07-19, WI-5484: the canonical run failed rc=1 while a
+    # split-across-two-ssh-calls manual repro passed, because there the self-match
+    # killed an already-finished pkill shell). The running app's cmdline is exactly
+    # '/usr/bin/papercusp-desktop' (no args), so ^-anchoring matches it but NOT this
+    # shell (whose cmdline starts with 'bash'/'pkill') nor the sidecar node procs.
+    RELAUNCH_CMD="${RELAUNCH_CMD:-pkill -f '^/usr/bin/papercusp-desktop' 2>/dev/null; sleep 2; export DISPLAY=\${DISPLAY:-:0} XAUTHORITY=\${XAUTHORITY:-\$HOME/.Xauthority}; setsid bash -c 'exec /usr/bin/papercusp-desktop' >\$HOME/papercusp-relaunch.log 2>&1 </dev/null & disown; sleep 2; echo relaunched}"
     ;;
   *) echo "unknown --platform: $PLATFORM (want windows|mac|linux)" >&2; exit 2 ;;
 esac
