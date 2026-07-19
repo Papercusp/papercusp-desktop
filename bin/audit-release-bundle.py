@@ -316,6 +316,32 @@ KNOWN_SENSITIVE_IDENTITIES = {
 }
 
 
+# ── STAGING SCRUB (WI-4419 durable; desktop-v0-0-12-release-tri-platform#D-004).
+# Dev-infra and agent-authored SOURCE keep re-introducing this box's identity into
+# must-ship files — [owner:Avi] provenance comments in prod .ts/.sql, dev systemd
+# ExecStart=/home/<user> paths, test fixtures hardcoding the build username. Those
+# files cannot be pruned (they ship / run), and a per-file source edit is a
+# treadmill that reds the next cut the moment a new tag lands. So bin/stage-source-
+# tree.sh redacts these literals in a COPY of each leaking source file at tar time
+# (a --transform overlay, streaming — never the working tree, never node_modules).
+# The literal→placeholder map lives HERE, next to the identities it neutralises, so
+# the stager derives it from --identity-literals and cannot drift (the same ONE-rule
+# discipline as --tar-excludes). Keyed by identity KEY (stable across build boxes),
+# NOT value. A value with no explicit token falls back to "redacted".
+# This does NOT weaken the gate: the gate still fails on any UN-redacted identity in
+# the produced bytes — the scrub removes the leak, it does not hide it.
+REDACTION_BY_KEY = {
+    "build-user-name": "builduser",
+    "build-home-path": "/home/builduser",
+    "build-hostname": "buildhost",
+    "build-git-email": "owner@example.invalid",
+    "build-git-name": "owner",
+    "known-sensitive:mac-vm-user": "macuser",
+    "known-sensitive:mac-vm-login": "maclogin",
+    "known-sensitive:linux-build-user": "builduser",
+}
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
@@ -644,12 +670,88 @@ def scan_dir(dirs):
     return 1
 
 
+def print_identity_literals():
+    """Emit `value<TAB>redaction<TAB>wordboundary(0/1)` for every identity literal
+    the gate hunts — build-box identity + the known cross-box sensitive set — so
+    bin/stage-source-tree.sh scrubs EXACTLY what this gate would later fail on, from
+    the one source of truth (no second list to drift). LONGEST value first so an
+    overlapping pair is applied safely (/home/<user> before the bare <user> inside
+    it). A value with no explicit REDACTION_BY_KEY token falls back to 'redacted'."""
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    seen = set()
+    for key, val in sorted(lits.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if val in seen:
+            continue
+        seen.add(val)
+        red = REDACTION_BY_KEY.get(key, "redacted")
+        wb = "1" if needs_word_boundary(val) else "0"
+        print(f"{val}\t{red}\t{wb}")
+    return 0
+
+
+def source_leakers(argv):
+    """Print the must-ship SOURCE files (relative to MONO) that carry a build-box /
+    known-sensitive identity literal, for the stager to redact-overlay at tar time.
+
+    Same scoping the gate convicts with, so the stager scrubs exactly the set that
+    would otherwise red the cut: low-entropy literals (a bare first name) are hunted
+    in OUR source only; high-entropy literals everywhere EXCEPT node_modules — a
+    vendored high-entropy hit is a delete-exclude class (build caches, handled by
+    --tar-excludes), never something we rewrite inside a third-party package. Paths
+    matching a FORBIDDEN_PATH rule are skipped: they do not ship, so scrubbing +
+    re-adding one would smuggle a non-shipper into the bundle."""
+    if not argv:
+        print("AUDIT ERROR: --source-leakers needs <MONO> <dir...>", file=sys.stderr)
+        return 2
+    mono, roots = argv[0], argv[1:]
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    high = sorted({v for v in lits.values() if not is_low_entropy(v)})
+    low = sorted({v for v in lits.values() if is_low_entropy(v)})
+    forbidden = [rx for _r, rx, _g in FORBIDDEN_PATH]
+    leakers = set()
+
+    def hunt(pats):
+        if not pats:
+            return
+        for root in roots:
+            if os.path.basename(root.rstrip("/")) == "node_modules":
+                continue  # never scrub vendored code
+            aroot = os.path.join(mono, root)
+            if not os.path.exists(aroot):
+                continue
+            cmd = ["grep", "-rIlE", "--exclude-dir=node_modules"]
+            for p in pats:
+                cmd += ["-e", lit_ere(p)]
+            cmd.append(aroot)
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rel = os.path.relpath(line, mono).replace(os.sep, "/")
+                if any(rx.search(rel) or rx.search("/" + rel) for rx in forbidden):
+                    continue
+                leakers.add(rel)
+
+    hunt(high)
+    hunt(low)
+    for rel in sorted(leakers):
+        print(rel)
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
     if sys.argv[1] == "--tar-excludes":
         return print_tar_excludes()
+    if sys.argv[1] == "--identity-literals":
+        return print_identity_literals()
+    if sys.argv[1] == "--source-leakers":
+        return source_leakers(sys.argv[2:])
     if sys.argv[1] == "--prune-docs":
         return prune_docs(sys.argv[2:])
     if sys.argv[1] == "--scan-dir":
