@@ -296,8 +296,23 @@ rig_bank_logs() {
     echo "=== bank $stamp: host docker stats (informational — n/a for a pure-Hetzner rig) ==="
     command -v docker >/dev/null 2>&1 && docker stats --no-stream 2>/dev/null || echo "(docker unavailable)"
   } >"$RIG_BANK_DIR/load-$stamp.txt" 2>/dev/null || true
-  # bounded retention — keep the newest RIG_BANK_KEEP files across both patterns
-  ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t serve-*.log load-*.txt 2>/dev/null \
+  # WI-5481 gap (2026-07-19): $RIG_WORK/scn.<id>.log holds each scenario's FULL
+  # raw stdout (per-cycle detail a scenario's own summary line filters out —
+  # see b8-replication-soak.sh) but rig_cleanup rm -rf's $RIG_WORK right after
+  # this function returns (absent --keep-up), so that detail was unreachable
+  # by any post-hoc/next-wake investigation — only readable in the ~1min window
+  # between a scenario finishing and teardown. Bank every scn.*.log here too,
+  # same as serve-*.log above, so it survives for as long as RIG_BANK_KEEP.
+  if [ -n "${RIG_WORK:-}" ] && [ -d "$RIG_WORK" ]; then
+    local f base
+    for f in "$RIG_WORK"/scn.*.log; do
+      [ -e "$f" ] || continue
+      base="$(basename "$f")"
+      cp -f "$f" "$RIG_BANK_DIR/${base%.log}-$stamp.log" 2>/dev/null || true
+    done
+  fi
+  # bounded retention — keep the newest RIG_BANK_KEEP files across all patterns
+  ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t serve-*.log load-*.txt scn.*-*.log 2>/dev/null \
       | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
 }
 
