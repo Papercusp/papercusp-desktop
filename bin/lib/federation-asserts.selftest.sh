@@ -161,7 +161,30 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   else
     bad "$fn no longer forces PAPERCUSP_BACKGROUND_WORKERS=1 (WI-3350 regression)"
   fi
+  # EI-15308: both local launchers set HOME="$home" to isolate the instance, but
+  # serve.ts's PAPERCUSP_DIR = process.env.PAPERCUSP_HOME || homedir()+".papercusp"
+  # PREFERS PAPERCUSP_HOME over that isolated HOME. Every su/dev shell carries
+  # PAPERCUSP_HOME ambiently, so a launcher that doesn't `env -u` it collapses the
+  # instance onto the caller's real shared operator home (cold-start lock/port
+  # collision — "another `serve` holds the cold-start lock; aborting"), defeating
+  # isolation. Same env-inheritance class as the DATABASE_URL family above.
+  if printf '%s\n' "$body" | grep -q -- '-u PAPERCUSP_HOME'; then
+    ok "$fn scrubs ambient PAPERCUSP_HOME (isolation-leak guard)"
+  else
+    bad "$fn no longer scrubs ambient PAPERCUSP_HOME (EI-15308 shared-home isolation-leak regression)"
+  fi
 done
+
+# 7b) EI-15308 (smoke-local copy): two-instance-hive-from-repo-smoke.sh's sc_launch
+# is a script-local launcher (not in this sourced lib, so `declare -f` can't see
+# it) that likewise sets HOME="$home". Static-grep it for the same PAPERCUSP_HOME
+# scrub so the smoke's private launcher can't regress the isolation leak either.
+SC_LAUNCH_FILE="$DIR/../two-instance-hive-from-repo-smoke.sh"
+if grep -q -- '-u PAPERCUSP_HOME' "$SC_LAUNCH_FILE"; then
+  ok "two-instance-hive-from-repo-smoke sc_launch scrubs ambient PAPERCUSP_HOME (EI-15308)"
+else
+  bad "two-instance-hive-from-repo-smoke sc_launch no longer scrubs PAPERCUSP_HOME (EI-15308 regression)"
+fi
 
 # 8) Route-cutover guard (WI-2929): the live federation driver runs against the
 # current pot route. A stale /hives/from-repo call hard-404s on current packaged

@@ -222,8 +222,17 @@ fed_local_launch() {
     # an "isolated" instance inheriting one reads/writes the tower's PG (how a
     # fresh from-repo smoke saw a pre-existing hello-world-hive). UNSET them
     # (env -u, not VAR= — an empty DSN string breaks spawn-mcp downstream).
+    # PAPERCUSP_HOME is scrubbed for the same reason the sidecar launcher scrubs
+    # it (EI-15308, see fed_local_launch_sidecar's docblock): every su/dev shell
+    # carries PAPERCUSP_HOME ambiently, and serve.ts's
+    # PAPERCUSP_DIR = process.env.PAPERCUSP_HOME || homedir()+".papercusp" PREFERS
+    # it over the isolated HOME="$home" below — so an unscrubbed GUI launch would
+    # collapse the instance onto the caller's real shared operator home, the
+    # identical isolation leak. Same env-inheritance class as the DATABASE_URL
+    # family (an unlisted `env VAR=val cmd` var is inherited, never cleared).
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
       -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+      -u PAPERCUSP_HOME \
       DISPLAY=":$disp" HOME="$home" PATH="$(dirname "$(command -v node)"):$PATH" \
       PAPERCUSP_BACKGROUND_WORKERS=1 \
       PAPERCUSP_DHT_HOST= PAPERCUSP_DHT_BOOTSTRAP= "$@" \
