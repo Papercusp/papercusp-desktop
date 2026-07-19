@@ -94,7 +94,15 @@ if [[ ${#PAIRS[@]} -eq 0 ]]; then
 fi
 
 echo "==> release host : ${BASE%/*}/<secret>"
-echo "==> bucket       : s3://${R2_BUCKET}/${KEY_PREFIX}/"
+# NEVER print the raw KEY_PREFIX — it is the unguessable path segment that keeps
+# the bucket unlisted (D-002/D-003), so it is a masked secret (must never reach a
+# transcript / PG / a shared log). This preview must be safe to paste into a
+# status update, INCLUDING under DRY_RUN, so it self-masks the same way
+# upload-release.sh's preview does (EI-15305: this sibling script had the same
+# unmasked echo — relying on an operator's own mask-sed is not reliable here,
+# since KEY_PREFIX is derived from PAPERCUSP_UPDATE_BASE_URL, not a grep-able
+# env var).
+echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
 echo "==> tag          : $TAG"
 echo "==> mobile artifacts: ${#PAIRS[@]}"
 for pair in "${PAIRS[@]}"; do
