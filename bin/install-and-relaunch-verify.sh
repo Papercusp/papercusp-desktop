@@ -219,13 +219,26 @@ if [[ -n "$PORT_BEFORE" ]]; then
   SHA_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str sha)"
   VERSION_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str version)"
 fi
-if [[ -z "$PORT_BEFORE" || -z "$SHA_BEFORE" ]]; then
-  echo "no healthy pre-update operator (port='$PORT_BEFORE' sha='$SHA_BEFORE') — nothing to update in place" >&2
+if [[ -z "$PORT_BEFORE" ]]; then
+  echo "no healthy pre-update operator (no operator.json port found) — nothing to update in place" >&2
   exit 2
 fi
-if [[ "$SHA_BEFORE" == "$EXPECTED_SHA" ]]; then
+if [[ -z "$SHA_BEFORE" && -z "$VERSION_BEFORE" ]]; then
+  echo "pre-update operator on port $PORT_BEFORE reports neither sha nor version — cannot establish an update baseline" >&2
+  exit 2
+fi
+if [[ -n "$SHA_BEFORE" && "$SHA_BEFORE" == "$EXPECTED_SHA" ]]; then
   echo "pre-update operator already reports the target sha $EXPECTED_SHA — nothing to flip (stale target or already-updated)" >&2
   exit 2
+fi
+# A pre-update build that predates embedded build-provenance reports sha:null
+# (and often version 0.0.0). That does NOT block the flip proof: the assertion
+# below is sha REACHING $EXPECTED_SHA, and a null->real-sha transition is a
+# STRICTLY STRONGER no-op-update signal than a sha-to-sha move (the stale
+# operator advertised no sha at all; only a genuine in-place replacement can
+# make the port report the real one). Proceed on the port + version baseline.
+if [[ -z "$SHA_BEFORE" ]]; then
+  note "pre-update build predates embedded build-provenance (sha empty; version='$VERSION_BEFORE') — asserting the FLIP on sha reaching $EXPECTED_SHA plus the version transition to $EXPECTED_VERSION"
 fi
 
 # ── 2. PUSH ─────────────────────────────────────────────────────────────────
