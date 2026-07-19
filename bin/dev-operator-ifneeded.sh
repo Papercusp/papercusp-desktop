@@ -78,6 +78,39 @@ in_use() {
 
 if in_use; then
   echo "[tauri] operator already serving on :$PORT — reusing"
+  # EI-13537: `in_use` only proves the PORT is bound — it does NOT prove the
+  # bound process is actually the low-privilege, background-workers-OFF dev
+  # operator this wrapper is supposed to guarantee (DEFAULT_DEV_CMD above
+  # pins PAPERCUSP_BACKGROUND_WORKERS=0). A process bound to :$PORT by some
+  # OTHER means (started directly, outside this wrapper, with background
+  # workers ON) gets silently and PERMANENTLY adopted by every future
+  # `npm run dev` via this exact reuse path — running redundant DBOS
+  # machinery against the shared DB (the EI-126 two-hosts-one-DB class of
+  # bug) with no supervision/reaper watching it. Confirmed live 2026-07-19:
+  # an orphaned `hono-host.ts` (no dev-operator-ifneeded.sh ancestry, no
+  # reaper) squatted :3270 with PAPERCUSP_BACKGROUND_WORKERS=1 and was
+  # silently backing a real desktop session's webview.
+  #
+  # `/api/health/deep` is already PUBLIC + cheap and echoes `dbosEnabled`
+  # (dbosLaunchesHere(), which mirrors backgroundWorkersEnabled() —
+  # packages/operator-core/lib/background-workers.ts) — reuse it as the
+  # identity check instead of trusting the bare port bind. Best-effort:
+  # skip silently if curl is unavailable or the probe fails/times out (never
+  # block the reuse fast path on a diagnostic).
+  if command -v curl >/dev/null 2>&1; then
+    health="$(curl -s --max-time 2 "http://127.0.0.1:$PORT/api/health/deep" 2>/dev/null || true)"
+    case "$health" in
+      *'"dbosEnabled":true'*)
+        echo "[tauri] WARNING: the operator on :$PORT reports dbosEnabled=true — background" >&2
+        echo "[tauri] workers are ON, NOT the expected dev-operator config (background workers" >&2
+        echo "[tauri] should be OFF on :$PORT). This looks like a leaked/misconfigured process" >&2
+        echo "[tauri] started OUTSIDE this wrapper (no reaper is watching it), possibly running" >&2
+        echo "[tauri] redundant DBOS machinery against the shared DB. Find + kill it" >&2
+        echo "[tauri]   (ss -ltnp | grep :$PORT) and re-run \`npm run dev\` for a clean instance." >&2
+        echo "[tauri] See EI-13537." >&2
+        ;;
+    esac
+  fi
   # `beforeDevCommand` reuse path: exit immediately so Tauri proceeds to
   # spawn its native window pointing at the existing dev server. We did not
   # start that server, so we also don't reap it.
