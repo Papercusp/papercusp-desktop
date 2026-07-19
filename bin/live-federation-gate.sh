@@ -177,15 +177,18 @@ fi
 PROD_PORTS="${GATE_PROD_PORTS:-3070 3170 3270}"
 GUARD_TRIP_FILE="$WORK/prod-port-guard.tripped"
 guard_prod_ports() { # <when-label> — kill rig-owned listeners on prod ports; record any trip
-  local when="$1" p pid pids owned
+  local when="$1" p pid pids owned info
   for p in $PROD_PORTS; do
     pids="$(ss -ltnpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
     for pid in $pids; do
       owned=0
       grep -qa 'live-federation-gate' "/proc/$pid/cgroup" 2>/dev/null && owned=1
       if [ "$owned" = 0 ]; then
-        { readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null; } \
-          | grep -qaE "papercusp-lane-[a-z0-9-]*-fed|$WORK" && owned=1
+        # Capture-then-grep, NOT `{ …; } | grep -q` — same pipefail+SIGPIPE false-negative
+        # hazard as gate_owns_rig_pid above (a MISSED rig-owned prod-port squatter is the
+        # EI-11342 box-hijack this guard exists to stop, so the ownership read must be robust).
+        info="$(readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+        grep -qaE "papercusp-lane-[a-z0-9-]*-fed|$WORK" <<<"$info" && owned=1
       fi
       if [ "$owned" = 1 ]; then
         log "PROD-PORT GUARD ($when): rig-owned pid=$pid is LISTENING on prod :$p (EI-11342 class) — killing it. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 200)"
