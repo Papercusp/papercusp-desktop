@@ -607,10 +607,21 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
+  PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
 EOF
 }
+# EI-16524: PAPERCUSP_DESKTOP=1 (set above, for faithful desktop-app parity) makes
+# host-bootstrap.ts's bg-host DEFAULT-ON provision the env-switcher operator siblings
+# (prod:3070/staging:3170/release/…, WI-3285) ~20s after boot — a real-desktop
+# convenience with zero purpose on a single-role federation-test frame. LIVE-observed
+# on both BYO frames (docker/ssh, 2026-07-19): the spawned "prod" sibling
+# (`[env-operators] spawned prod on :3070 (bundled, request-only, pid=…)`) is a full
+# second Hono-host process that sustained 200-270% CPU / severe event-loop-lag
+# alongside the primary — exactly the "duplicate serve.mjs process" this EI flagged.
+# PAPERCUSP_PROVISION_ENV_OPERATORS=0 is the documented opt-out (host-bootstrap.ts's
+# own comment: "Never on a non-desktop host" — a rig frame is exactly that in spirit).
 
 # rig_setup_all — rig_setup_frame for EVERY frame in RIG_FRAMES (in order).
 rig_setup_all() {
@@ -689,6 +700,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
+  PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "relaunched as pcusp (no wipe)"
 EOF
