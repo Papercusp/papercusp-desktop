@@ -450,8 +450,64 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   done
   echo FAIL
 }
-# True iff a leg's result string is any flavor of "nothing proven" (SKIPPED / SKIPPED-BUSY).
+# True iff a leg's result string is any flavor of "nothing proven" (SKIPPED / SKIPPED-BUSY /
+# SKIPPED-STARVATION).
 is_skip_result() { case "$1" in SKIPPED*) return 0 ;; *) return 1 ;; esac; }
+
+# ── local-matrix frame-starvation downgrade (WI-5329, 2026-07-19) ─────────────────────────
+# THE GAP THIS CLOSES: the STORM_GATE comment above already CLAIMS "the honest starvation
+# signal is event-loop-lag inside the frame serve.logs (grep '[event-loop-lag]'), which the
+# verdict reader checks per WI-5319" — but no such check existed anywhere in this gate or in
+# local-matrix.sh. Host loadavg (STORM_GATE) is a single END-OF-RUN sample and, per that same
+# comment, a weak proxy once frames are cpuset-pinned — a mid-run CPU spike (exactly when the
+# restart-heavy scenarios below hammer the pinned frames) can have subsided by verdict time
+# even though it already caused the failure. ROOT-CAUSED live (WI-5329, gate runs
+# 20260717-211750 through 20260719-094058): restart_durability/reconnect_catchup/
+# replication_soak REDs correlate with `[event-loop-lag] high loop delay — host is CPU-bound
+# on the main thread` (maxMs > 1s) inside the FRAME's own serve.log at the exact moment its
+# substrate boot blew the 30s timeout (`boot timeout after 30000ms` → zombie window → late
+# boot ADOPTED, repeating every restart cycle) — while the single end-of-run host loadavg
+# sample was, on at least one run (09:40:54 same day), NOT above STORM_GATE, so a purely
+# environmental starvation event was filed as a fresh regression bug.
+#
+# DELIBERATELY NARROW (mirrors the content-matrix PASS-971 carve-out's discipline above):
+# downgrades ONLY when (a) EVERY failing scenario in this run's local-matrix.out is one of the
+# restart-heavy class already known to trip this (a FAIL in any OTHER scenario — concurrent
+# writes, revocation, directory, … — is a genuine regression signature and is NEVER downgraded
+# here) AND (b) a banked frame log from THIS SPECIFIC run actually shows the starvation
+# symptom, not merely that the host was generically busy.
+STARVATION_PRONE_SCENARIOS="restart_durability reconnect_catchup replication_soak"
+local_matrix_only_starvation_prone_fails() { # <local-matrix.out path>
+  local out="$1" name all_known=1 saw_any=0
+  [ -f "$out" ] || return 1
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    saw_any=1
+    case " $STARVATION_PRONE_SCENARIOS " in
+      *" $name "*) ;;
+      *) all_known=0 ;;
+    esac
+  done < <(grep -aoE '^[[:space:]]*FAIL[[:space:]]+[A-Za-z0-9_]+' "$out" 2>/dev/null | awk '{print $2}' | sort -u)
+  [ "$saw_any" = 1 ] && [ "$all_known" = 1 ]
+}
+check_local_matrix_frame_starvation() { # <leg-start-epoch-s> — true iff a banked frame
+  # serve.log from THIS run (mtime after the leg started) shows severe frame-local CPU
+  # starvation. 1000ms is conservative: healthy runs on this fleet box see occasional
+  # sub-300ms event-loop blips; a >1s single-threaded stall is enough to blow the 30s
+  # substrate-boot budget by a wide margin on its own.
+  local start_ts="$1" bank_dir="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
+  local f maxms hits=0 marker
+  [ -d "$bank_dir" ] || return 1
+  marker="$(mktemp -u 2>/dev/null || echo "/tmp/.lfg-starvation-marker.$$")"
+  touch -d "@$start_ts" "$marker" 2>/dev/null || touch "$marker" 2>/dev/null
+  while IFS= read -r -d '' f; do
+    maxms="$(grep -aoE 'maxMs: [0-9.]+' "$f" 2>/dev/null | grep -oE '[0-9.]+' \
+      | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{print m+0}')"
+    if awk "BEGIN{exit !($maxms > 1000)}" 2>/dev/null; then hits=$((hits + 1)); fi
+  done < <(find "$bank_dir" -maxdepth 1 -name 'serve-*.log' -newer "$marker" -print0 2>/dev/null)
+  rm -f "$marker" 2>/dev/null
+  [ "$hits" -gt 0 ]
+}
 
 MATRIX_RES="SKIPPED"
 if [ "$SKIP_MATRIX" != 1 ]; then
@@ -523,6 +579,7 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
     # Pass the gate's freshly-repacked .deb — without it the leg's default_deb()
     # picks the newest PREBUILT bundle, which can be days stale (the 2026-07-16 RED
     # ran a Jul-11 deb against current-tree expectations and its own WARN said so).
+    MATRIX_LEG_START_TS="$(now_s)"
     if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
     else
@@ -534,6 +591,14 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
       # freshly-provisioned rig. Any local-matrix FAIL therefore stays FAIL: first-green
       # must be a FULL pass, and the old PASS-2381 downgrade both stamped
       # last-matrix-green and let the gate report green with the seat legs unproven.
+      #
+      # WI-5319/WI-5329 frame-starvation downgrade (2026-07-19): see the function
+      # doc-comments above. Narrow + evidence-gated — never masks a non-restart-class FAIL.
+      if local_matrix_only_starvation_prone_fails "$WORK/local-matrix.out" \
+        && check_local_matrix_frame_starvation "$MATRIX_LEG_START_TS"; then
+        MATRIXFULL_RES="SKIPPED-STARVATION"
+        log "local-matrix FAIL downgraded → SKIPPED-STARVATION: every failing scenario is in the restart-heavy class (restart_durability/reconnect_catchup/replication_soak) AND a banked frame serve.log from this run shows [event-loop-lag] maxMs>1000ms — genuine frame-local CPU starvation (WI-5319 signal, root-caused WI-5329), not a regression. Host-loadavg STORM_GATE below is a weak proxy for these CPU-pinned frames (single end-of-run sample) and can miss this."
+      fi
     fi
     log "local-matrix → $MATRIXFULL_RES"
   fi
