@@ -44,8 +44,36 @@
 #                                     stale-ei-filed marker: file once, then suppress re-filing
 #                                     for this window (cleared immediately on the next GREEN, so
 #                                     a genuine fix is never hidden behind a stale suppression).
+# ── self-snapshot re-exec (EI-16828 root-cause fix) ─────────────────────────────
+# This gate runs via a `Type=oneshot` systemd unit for up to 4h (TimeoutStartSec=14400)
+# executing THIS file directly out of the shared tree, which many agents edit
+# concurrently. bash does not slurp a plain script into memory up front — it re-reads
+# it by byte offset as execution proceeds — so an in-place edit to this file mid-run
+# (not an atomic rename-swap) shifts those offsets under the running interpreter and
+# can crash it with a spurious syntax error partway through a run, even though the
+# on-disk file is (and always was) syntactically valid. Observed live 2026-07-19
+# (EI-16828): the gate died at "line 491: er: command not found" / "line 498: syntax
+# error near unexpected token 'fi'" right as another agent's edit landed on that exact
+# PASS-971 block; seconds later the current on-disk lines 491-498 were clean. Impact
+# was minor (results were already logged; systemd auto-restarted within 2s) but the
+# hazard applies to ANY long-running script over this tree, not just this one. Fix:
+# snapshot ourselves into a private tmp copy ONCE, then re-exec from that immutable
+# copy — the rest of this run is then immune to further edits to the live tree path.
+# NOTE: DESKTOP_DIR must be captured from the ORIGINAL (pre-snapshot) path — once we
+# re-exec below, BASH_SOURCE[0] points into the /tmp snapshot dir, and re-deriving
+# DESKTOP_DIR from THAT would resolve to /tmp instead of papercusp-desktop. Compute it
+# once here, export it, and the post-snapshot line below only falls back to recomputing
+# it when GATE_SELF_SNAPSHOT is unset (i.e. this file was invoked directly, un-snapshotted).
+if [ -z "${GATE_SELF_SNAPSHOT:-}" ]; then
+  DESKTOP_DIR_FOR_SNAPSHOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  __snap_dir="$(mktemp -d /tmp/live-fed-gate-snapshot.XXXXXX)"
+  cp -- "${BASH_SOURCE[0]}" "$__snap_dir/live-federation-gate.sh"
+  chmod +x "$__snap_dir/live-federation-gate.sh"
+  export GATE_SELF_SNAPSHOT=1 GATE_SELF_SNAPSHOT_DIR="$__snap_dir" DESKTOP_DIR="$DESKTOP_DIR_FOR_SNAPSHOT"
+  exec bash "$__snap_dir/live-federation-gate.sh" "$@"
+fi
 set -uo pipefail
-DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DESKTOP_DIR="${DESKTOP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # LOAD_GATE default is SATURATION-BASED (WI-5319 / plan D-003): max(15, 85% of nproc).
 # History: the old absolute 15 never fired on the 128-core fleet box; nproc/4=32 and then
 # 3*nproc/8=48 each still sat below the fleet-era operating floor — on 2026-07-17 the box ran
@@ -253,7 +281,7 @@ guard_prod_ports preflight
 # incident's damage window was the smoke's own multi-minute runtime. Reaped on exit.
 ( while :; do sleep "${GATE_PORT_GUARD_INTERVAL_S:-15}"; guard_prod_ports sweep; done ) &
 GUARD_SWEEP_PID=$!
-trap 'guard_prod_ports exit-trap; reap_gate_sidecars; kill "$GUARD_SWEEP_PID" 2>/dev/null || true' EXIT
+trap 'guard_prod_ports exit-trap; reap_gate_sidecars; kill "$GUARD_SWEEP_PID" 2>/dev/null || true; rm -rf -- "${GATE_SELF_SNAPSHOT_DIR:-}" 2>/dev/null || true' EXIT
 # An external kill (unit TimeoutStartSec, manual systemctl stop) must NEVER end a run
 # silently: the 2026-07-17 00:30 run was systemd-killed mid-local-matrix with no GATE:
 # line, so watchers greping verdicts waited forever and the red-EI/state machinery never
