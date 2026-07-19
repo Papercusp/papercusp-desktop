@@ -178,10 +178,21 @@ scenario_restart_durability() {
 
   # ── STEP 5: NEW write after the OWNER restart still federates to the member ──
   fed_log "[5] owner writes $FPOST2 (post owner-restart) → federate to member"
+  # WI-5444: stamp the write time BEFORE issuing it, and export the canary's
+  # identity below regardless of pass/fail, so the settle-barrier scenario
+  # (order 82, bin/lib/scenarios/restart-settle-barrier.sh) can re-poll this
+  # SAME row for a longer, instrumented window before 85/87/90 start — this
+  # scenario's own check below stays bounded at 90 tries (~270s) on purpose
+  # (it is the "measures the SLA with no barrier in front of it" leg the
+  # WI-5444 disposition asked to keep unchanged); the barrier picks up from
+  # here rather than this check being widened.
+  RD_LAST_CANARY_WRITE_TS="$(date +%s)"
   rig_write_content "$OWNER" "$oslug" "$FPOST2" "authored after owner restart" todo >/dev/null
   if _rd_poll_remote "$MEMBER" "$FPOST2" 90 >/dev/null; then echo "  ✓ new-write: $FPOST2 federated to member after OWNER restart (origin=remote)"; else
     echo "  ✗ NEW-WRITE FAIL: $FPOST2 did not federate after owner restart"; _RD_RC=1; fi
   _rd_assert_single "$MEMBER" "$FPOST2" "owner→member F-post2"
+  RD_LAST_MEMBER="$MEMBER"
+  RD_LAST_CANARY_FID="$FPOST2"
 
   # ── report ──
   fed_log "RESULT Brief 5 (restart durability, 2-frame .deb sidecar, real public DHT)"
