@@ -110,6 +110,37 @@ FORBIDDEN_PATH = [
     # this rule as blessing the whole operator-docs tree.)
     ("internal-agent-artifacts", re.compile(r"(^|/)(agent-briefs|docs/plans)/"),
      ["agent-briefs", "docs/plans"]),
+    # Dev-box ops infra: the systemd unit/timer templates under
+    # apps/operator/scripts/systemd/ are for THIS build box's services (kopia
+    # backups, the db-backup alerter, the mcp-proxy / inference-gateway units,
+    # …). They are never installed by — nor needed to RUN — the shipped Tauri
+    # desktop app, and several bake this box's absolute paths
+    # (ExecStart=/home/<owner>/.config/kopia/…, WI-4419) that the release audit
+    # forbids. EXCLUDE the class (D-004, desktop-v0-0-12): the source-scrub
+    # convention is redact-must-ship / EXCLUDE-never-ship, and a dev ops unit is
+    # never-ship — excluding it (vs redacting its paths, which would break it as a
+    # dev unit) is the root-cause fix and keeps a future unit that names a box path
+    # from re-redding the cut.
+    ("dev-systemd-units", re.compile(r"(^|/)scripts/systemd/"),
+     ["scripts/systemd"]),
+    # Test files never ship in — nor are needed to RUN — the product: no runtime
+    # code imports a *.test.* / __tests__/ module (verified across apps+libs+
+    # packages). They are pure bulk in source.tar.zst, and a handful embed identity
+    # literals AS TEST DATA (D-004: carry-surface-provenance-stamp.test.ts asserts
+    # on `[owner:Avi]` linting; bash-resource-gate/coord-hook assert the
+    # `loginctl terminate-user <user>` literal) that MUST NOT be scrubbed — doing so
+    # rewrites the assertion and reds the green gate. So the correct handling is
+    # EXCLUDE-from-ship, not redact: the tests keep their literals in the tree (green
+    # gate stays green) and simply never reach any shipped bundle (tar, AppImage
+    # AppDir, mac .app). Excluding the CLASS (not the 5 current leakers) ends the
+    # treadmill — the next test that names an identity can never leak into a cut.
+    ("test-files",
+     re.compile(r"(^|/)__tests__/|(^|/)[^/]+\.(test|spec)\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$"),
+     ["__tests__",
+      "*.test.ts", "*.test.tsx", "*.test.mts", "*.test.cts",
+      "*.test.js", "*.test.jsx", "*.test.mjs", "*.test.cjs",
+      "*.spec.ts", "*.spec.tsx", "*.spec.mts", "*.spec.cts",
+      "*.spec.js", "*.spec.jsx", "*.spec.mjs", "*.spec.cjs"]),
     ("vcs", re.compile(r"(^|/)\.git/"),
      [".git"]),
     ("dotenv", re.compile(r"(^|/)\.env(\.|$)"),
