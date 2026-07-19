@@ -139,6 +139,19 @@ struct HealthResponse {
     webview_ready: bool,
     sidecars_alive: bool,
     sidecars: Vec<SidecarSummary>,
+    /// EI-13218: is the origin the main webview is CURRENTLY displaying
+    /// actually answering HTTP right now? `sidecars_alive` above is PID-based
+    /// only (`pid_alive`, a signal-0 check) and — in production — `sidecars`
+    /// is always empty (nothing ever calls the test-only `register_sidecar` /
+    /// `spawn_sidecar_monitored` outside this file's own tests, since the dev
+    /// operator is spawned by a shell script, not by this process), so
+    /// `sidecars_alive` was vacuously `true` regardless of whether the
+    /// operator origin (:3270 in dev) could serve a request. That let
+    /// `tauri-agent-tools probe`/`health` report a healthy bridge while the
+    /// webview's own fetches to `/api/health` and `/` failed outright. `None`
+    /// when there is no main webview or its URL can't be read (nothing to
+    /// check); `Some(false)` means the origin refused/timed out/errored.
+    operator_reachable: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -213,6 +226,21 @@ fn pid_alive(pid: u32) -> Option<bool> {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> Option<bool> {
     None
+}
+
+/// EI-13218: real HTTP reachability probe for the origin the main webview is
+/// currently pointed at — the ground truth `sidecars_alive`'s PID-only check
+/// (and the always-empty-in-production sidecar registry) never captures. ANY
+/// response (even a 4xx/5xx) means the origin is answering, so this reports
+/// `Some(true)`; a connect-refused/timeout/other transport error reports
+/// `Some(false)`; an empty `url` (no webview / unreadable URL upstream)
+/// reports `None` — "nothing to check", never a false failure. `client` is
+/// injected so tests never depend on a real Tauri webview.
+fn origin_reachable(client: &reqwest::blocking::Client, url: &str) -> Option<bool> {
+    if url.is_empty() {
+        return None;
+    }
+    Some(client.get(url).send().is_ok())
 }
 
 /// Register a sidecar process with the bridge so it shows up in `/process`
@@ -516,6 +544,15 @@ pub fn start_bridge(
     let expected_token = token.clone();
     let server_log_buffer = log_buffer.clone();
     let server_registry = sidecar_registry.clone();
+    // EI-13218: short-timeout client for /health's origin-reachability check
+    // (built once — a client per request would pay connection-pool setup for
+    // no benefit here). A bounded 800ms keeps a wedged/unreachable origin from
+    // stalling the bridge's own request thread for long; a healthy localhost
+    // round-trip completes in low single-digit ms.
+    let health_check_client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(800))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new());
 
     thread::spawn(move || {
         // Keep _guard alive for the lifetime of the server thread
@@ -713,15 +750,37 @@ pub fn start_bridge(
                             continue;
                         }
                         let sidecars = server_registry.snapshot();
-                        let sidecars_alive = sidecars
+                        let pid_sidecars_alive = sidecars
                             .iter()
                             .all(|s| matches!(s.alive, Some(true) | None));
                         let webview_ready = !app_handle.webview_windows().is_empty();
+                        // EI-13218: cross-check the origin the main webview is
+                        // CURRENTLY displaying, not just PID liveness (which
+                        // `pid_sidecars_alive` above is — and in production
+                        // `sidecars` is always empty, so that alone is a
+                        // vacuous `true`). `None` (no webview / no URL) never
+                        // fails the gate — only a confirmed-unreachable origin
+                        // does, so `sidecars_alive` stays `true` whenever we
+                        // genuinely can't check.
+                        let webview_url = app_handle
+                            .get_webview_window("main")
+                            .and_then(|w| w.url().ok())
+                            .map(|u| u.to_string());
+                        let health_url = webview_url.as_deref().and_then(|u| {
+                            reqwest::Url::parse(u).ok().and_then(|parsed| {
+                                parsed.join("/api/health").ok().map(|j| j.to_string())
+                            })
+                        });
+                        let operator_reachable = health_url.as_deref().and_then(|u| {
+                            origin_reachable(&health_check_client, u)
+                        });
+                        let sidecars_alive = pid_sidecars_alive && operator_reachable.unwrap_or(true);
                         let resp = HealthResponse {
                             uptime_ms: start_instant.elapsed().as_millis() as u64,
                             webview_ready,
                             sidecars_alive,
                             sidecars,
+                            operator_reachable,
                         };
                         let json = serde_json::to_string(&resp).unwrap();
                         let header =
