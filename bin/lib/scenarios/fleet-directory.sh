@@ -24,7 +24,16 @@
 # streamable-HTTP single-shot). $1=inst $2=tool $3=json-args.
 _fdir_mcp_call() {
   local inst="$1" tool="$2" args="$3" ws
-  ws="$(drv_psql "$inst" "SELECT COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'default');" 2>/dev/null | tr -d '[:space:]')"
+  # D-050 / WI-5399 iteration 2: rig_resolve_ws (pot_home_slug scoping) — works on
+  # owner AND joiner, unlike origin='local' (structurally never matches a
+  # joiner's own membership row). An unresolved/wrong workspace here doesn't
+  # just mis-stamp a probe row — it sends the REAL MCP call's ?workspace= param
+  # at the wrong (or a nonexistent) partition, surfacing as
+  # "workspace_unresolved"/"unresolvable workspace partition" downstream.
+  if ! ws="$(rig_resolve_ws "$inst")"; then
+    echo '{"isError":true,"error":"MCP_ERROR: could not resolve a real workspace_id for the mcp call (D-050/WI-5399 class)"}'
+    return 1
+  fi
   rig_pcusp_run "$inst" <<EOS
 # Read-or-generate the sidecar superuser token (rig_ban_member precedent: the
 # sidecar re-reads the file per request, so a fresh write is honored).
