@@ -289,7 +289,15 @@ declare -a SCRUB_MEMBERS=()
 declare -a SCRUB_TRANSFORM=()
 if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
   declare -a _leakers=()
-  mapfile -t _leakers < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
+  # NOTE: portable read loop instead of `mapfile -t` — mapfile/readarray is a
+  # bash-4+ builtin and this script also runs on the mac release VM, whose
+  # default /bin/bash is 3.2 (macOS ships no newer bash); mapfile there aborts
+  # the build with `mapfile: command not found` (exit 127) — broke the mac
+  # v0.0.12 leg. This loop is functionally identical to `mapfile -t` (strips the
+  # trailing newline per line and drops the final empty line).
+  while IFS= read -r _leak_line; do
+    [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
+  done < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
   if (( ${#_leakers[@]} > 0 )); then
     # literal→placeholder sed program, longest-literal-first (so /home/<user> is
     # redacted before the bare <user> inside it) — straight from the gate's rule.
