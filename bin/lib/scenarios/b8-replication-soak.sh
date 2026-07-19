@@ -28,6 +28,19 @@ source "$DESKTOP_DIR/bin/deb-hetzner-restart.sh"
 scn_replication_soak() {
   local out rc
   out="$(scenario_replication_liveness_soak a b 2>&1)"; rc=$?
+  # WI-5481/WI-5355 investigation gap: the outer matrix harness redirects THIS
+  # function's stdout to $RIG_WORK/scn.replication_soak.log, but until now every
+  # line of $out (the per-cycle PASS/FAIL detail, the rig_wait_swarm "swarm not
+  # re-peered within window" warnings, timings) was captured into this local var
+  # and then discarded — only a grep-filtered ✗/OVERALL subset on FAIL ever
+  # reached that log, so the ⚠ pairing-warning line (needed to correlate a
+  # failed probe with a failed post-restart re-pair) was never persisted
+  # anywhere. Always echo the FULL raw output first so it lands in the
+  # per-scenario log regardless of outcome; the summary/filtered lines below
+  # are kept for the terse local-matrix.out report.
+  echo "── full replication-liveness soak output (for post-hoc correlation) ──"
+  printf '%s\n' "$out"
+  echo "── end full output ──"
   if [ "$rc" = 0 ]; then
     echo "replication-liveness soak OK (${RL_SOAK_CYCLES:-5} kill/restart cycles: replication re-established both directions within SLA every cycle; detector quiet)"
   else
