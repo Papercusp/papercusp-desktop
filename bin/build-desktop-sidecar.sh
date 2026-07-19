@@ -780,6 +780,12 @@ if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
   for py in "$CC_HOOK_SRC_DIR"/*.py; do
     [[ -e "$py" ]] && cp -a "$py" "$CC_HOOK_DST_DIR"/
   done
+  # EI-16981: guard-operator-desktop.mjs is a Node hook (not .sh/.py) — without
+  # this the packaged app silently ships NO desktop-navigation guard, the exact
+  # WI-3665/EI-8191 fail-open shape. nullglob-safe, same pattern as the .py loop.
+  for mjs in "$CC_HOOK_SRC_DIR"/*.mjs; do
+    [[ -e "$mjs" ]] && cp -a "$mjs" "$CC_HOOK_DST_DIR"/
+  done
 fi
 
 # Same reason: lib/desktop-install/papercusp-files.ts resolves the
