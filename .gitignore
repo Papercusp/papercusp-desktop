@@ -1,6 +1,11 @@
 # Rust build outputs
 src-tauri/target/
 
+# Seed corestore reuse caches (PAPERCUSP_SEED_REUSE_CORESTORE=1 build workaround
+# writes ~100MB+ blobs that git-sync must never sweep — >100MB rejects the push)
+src-tauri/.seed-corestore-reuse-*/
+**/.seed-corestore-reuse-*/
+
 # Tauri-generated schema/permissions (regenerated on build)
 src-tauri/gen/
 
