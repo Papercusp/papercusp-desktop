@@ -393,6 +393,14 @@ echo "A create → $(echo "$a_resp" | head -c 600)"
 A_OK="$(jget "$a_resp" "d['ok'] and 'created' in d")"
 HIVE_SLUG="$(jget "$a_resp" "d['created'].get('potSlug') or d['created'].get('hiveSlug') or ''")"  # renamed hiveSlug→potSlug; accept both for skew
 MEMBER_SLUG="$(jget "$a_resp" "d['created']['memberSlug']")"
+# WI-5472: thread the pot's home slug through as RIG_HIVE_ID so fed_hive_merge_probe /
+# fed_coord_merge_probe use the pot_home_slug-scoped workspace_id lookup (works on BOTH
+# owner and joiner frames) instead of the origin='local' fallback heuristic, which
+# structurally can never match a JOINER's own membership row (authored by the owner,
+# federates in as 'remote') — without this, every B→A merge probe below fails loud with
+# "could not resolve a real workspace_id", not because federation is broken but because
+# this script (unlike the deb-hetzner-rig.sh family) never set RIG_HIVE_ID.
+export RIG_HIVE_ID="$HIVE_SLUG"
 A_ANNOUNCED="$(jget "$a_resp" "d['publish']['announced']")"
 A_UNVERIFIED="$(jget "$a_resp" "d['bindingUnverified']")"
 # WI-953 checkpoint + EI-13590 both flagged that the head -c 600 echo above cuts
