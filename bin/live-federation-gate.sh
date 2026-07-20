@@ -501,21 +501,40 @@ is_skip_result() { case "$1" in SKIPPED*) return 0 ;; *) return 1 ;; esac; }
 # DELIBERATELY NARROW (mirrors the content-matrix PASS-971 carve-out's discipline above):
 # downgrades ONLY when (a) EVERY failing scenario in this run's local-matrix.out is one of the
 # restart-heavy class already known to trip this (a FAIL in any OTHER scenario — concurrent
-# writes, revocation, directory, … — is a genuine regression signature and is NEVER downgraded
-# here) AND (b) a banked frame log from THIS SPECIFIC run actually shows the starvation
-# symptom, not merely that the host was generically busy.
+# writes, directory, … — is a genuine regression signature and is NEVER downgraded here) AND
+# (b) a banked frame log from THIS SPECIFIC run actually shows the starvation symptom, not
+# merely that the host was generically busy.
+#
+# revocation_kcut CASCADE CARVE-OUT (WI-5616, 2026-07-20): bin/lib/scenarios/b3-revocation.sh's
+# own BASELINE-FAIL probe already self-attributes a revocation_kcut FAIL to a same-run
+# replication_soak failure (it checks SCN_RC[replication_soak] and, when nonzero, reports
+# "SAME downstream WI-183-class stall (see WI-5481/WI-5448), not a fresh regression" instead
+# of a roster/regression verdict) — cross-run-evidenced (EI-15535, WI-5481, WI-5448) as the SAME
+# starvation class this downgrade already exists to catch, just observed one scenario later.
+# Before this carve-out, that documented attribution was trusted by the scenario script but
+# IGNORED here: any revocation_kcut FAIL riding alongside a starvation-class replication_soak
+# FAIL still blocked the downgrade (revocation_kcut wasn't in STARVATION_PRONE_SCENARIOS), so a
+# fresh "NEW regression — investigate" bug got filed on every such run (WI-5616 is one instance).
+# So: a revocation_kcut FAIL is ALSO tolerated, but ONLY when replication_soak is ALSO among
+# this run's failures (mirrors b3-revocation.sh's own gate exactly) — an isolated revocation_kcut
+# FAIL with no replication_soak FAIL in the same run is NEVER downgraded here; it stays a
+# genuine regression signature, same as before.
 STARVATION_PRONE_SCENARIOS="restart_durability reconnect_catchup replication_soak"
 local_matrix_only_starvation_prone_fails() { # <local-matrix.out path>
-  local out="$1" name all_known=1 saw_any=0
+  local out="$1" name all_known=1 saw_any=0 fails
   [ -f "$out" ] || return 1
+  fails="$(grep -aoE '^[[:space:]]*FAIL[[:space:]]+[A-Za-z0-9_]+' "$out" 2>/dev/null | awk '{print $2}' | sort -u)"
   while IFS= read -r name; do
     [ -z "$name" ] && continue
     saw_any=1
     case " $STARVATION_PRONE_SCENARIOS " in
-      *" $name "*) ;;
-      *) all_known=0 ;;
+      *" $name "*) continue ;;
     esac
-  done < <(grep -aoE '^[[:space:]]*FAIL[[:space:]]+[A-Za-z0-9_]+' "$out" 2>/dev/null | awk '{print $2}' | sort -u)
+    if [ "$name" = revocation_kcut ] && printf '%s\n' "$fails" | grep -qx 'replication_soak'; then
+      continue   # cascade-tolerant: see the revocation_kcut CASCADE CARVE-OUT comment above
+    fi
+    all_known=0
+  done <<<"$fails"
   [ "$saw_any" = 1 ] && [ "$all_known" = 1 ]
 }
 check_local_matrix_frame_starvation() { # <leg-start-epoch-s> — true iff a banked frame
