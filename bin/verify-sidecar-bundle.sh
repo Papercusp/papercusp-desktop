@@ -50,7 +50,20 @@
 # (macOS system bash) — no mapfile/associative arrays.
 set -uo pipefail
 
-SIDECAR="${1:-$(cd "$(dirname "$0")/.." && pwd)/src-tauri/sidecar}"
+# Usage: verify-sidecar-bundle.sh [SIDECAR_DIR] [--target-os OS] [--target-arch ARCH]
+# WI-5651: --target-os/--target-arch let a CROSS build (baked on linux for
+# darwin/windows) tell the verifier which platform the bundle is FOR — default is
+# the build host, so every existing native caller is unchanged.
+SIDECAR=""
+TARGET_OS_ARG=""; TARGET_ARCH_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target-os)   TARGET_OS_ARG="${2:-}"; shift 2 ;;
+    --target-arch) TARGET_ARCH_ARG="${2:-}"; shift 2 ;;
+    *) [[ -z "$SIDECAR" ]] && SIDECAR="$1"; shift ;;
+  esac
+done
+SIDECAR="${SIDECAR:-$(cd "$(dirname "$0")/.." && pwd)/src-tauri/sidecar}"
 # Normalize to ABSOLUTE. Callers pass a relative dir (mac-vm-build.sh:
 # `verify-sidecar-bundle.sh src-tauri/sidecar`), and [6] cd's into the bundle to
 # resolve modules as the sidecar does — after which a relative $BIN/node points
@@ -63,11 +76,38 @@ FAIL=0
 fail() { echo "  ✗ $*"; FAIL=1; }
 ok()   { echo "  ✓ $*"; }
 
+# WI-5651: this verifier historically assumed bundle-platform == build-host, so
+# it exec-probes tools and dlopen-tests natives. A CROSS bundle ships FOREIGN
+# binaries the host can't exec — normalize both sides and derive CROSS so those
+# execution checks become STATIC format/presence assertions (a stronger check
+# than a --version that a wrong-platform copy would fail anyway; the true runtime
+# load-test happens when the app is exercised on-target).
+case "$OS" in Linux*) _host_os_n=linux ;; Darwin*) _host_os_n=darwin ;; MINGW*|MSYS*|CYGWIN*) _host_os_n=windows ;; *) _host_os_n="$OS" ;; esac
+case "$(uname -m)" in x86_64|amd64) _host_arch_n=x64 ;; arm64|aarch64) _host_arch_n=arm64 ;; *) _host_arch_n="$(uname -m)" ;; esac
+TARGET_OS_N="${TARGET_OS_ARG:-$_host_os_n}"
+TARGET_ARCH_N="${TARGET_ARCH_ARG:-$_host_arch_n}"
+CROSS=0
+[[ "$TARGET_OS_N" != "$_host_os_n" || "$TARGET_ARCH_N" != "$_host_arch_n" ]] && CROSS=1
+
 [[ -d "$BIN" ]] || { echo "verify-sidecar-bundle: ERROR: no bin/ under $SIDECAR" >&2; exit 2; }
-echo "→ verify-sidecar-bundle: $SIDECAR ($OS)"
+echo "→ verify-sidecar-bundle: $SIDECAR ($OS$([[ "$CROSS" == 1 ]] && echo " → cross ${TARGET_OS_N}-${TARGET_ARCH_N}"))"
 
 _is_script() { [[ "$(head -c 2 "$1" 2>/dev/null)" == "#!" ]]; }
 _is_elf()    { [[ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]]; }
+# Mach-O (thin LE/BE 32/64 + fat/universal both endians) and PE (MZ) magic.
+_is_macho() {
+  local m; m="$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  case "$m" in cffaedfe|cefaedfe|feedface|feedfacf|cafebabe|bebafeca) return 0 ;; *) return 1 ;; esac
+}
+_is_pe() { [[ "$(head -c 2 "$1" 2>/dev/null)" == "MZ" ]]; }
+# The expected machine-code format for the TARGET platform.
+_is_target_format() {
+  case "$TARGET_OS_N" in
+    darwin)  _is_macho "$1" ;;
+    windows) _is_pe "$1" ;;
+    *)       _is_elf "$1" ;;
+  esac
+}
 
 # ── [1] required runtime tools ──────────────────────────────────────────────
 # Everything the runtime spawns by bare name (sidecar/bin is on the operator
@@ -94,6 +134,21 @@ for t in $REQUIRED_TOOLS; do
   [[ -f "$p" || -f "$p.exe" ]] || { fail "$t: MISSING from sidecar/bin — the runtime spawns it by bare name"; continue; }
   [[ -f "$p.exe" && ! -f "$p" ]] && p="$p.exe"
   [[ -x "$p" ]] || { fail "$t: present but not executable"; continue; }
+  if [[ "$CROSS" == "1" ]]; then
+    # Can't exec a foreign-platform binary on this host — assert the shipped file
+    # is the RIGHT FORMAT for the target (proves we shipped the TARGET's binary,
+    # not the host's). Scripts (papercup) are allowlisted wrappers. The real
+    # runtime probe happens when the app is exercised on-target (the VMs remain
+    # for testing — owner directive 2026-07-20).
+    if _is_script "$p"; then
+      ok "$t (script wrapper; exec-probe skipped — cross ${TARGET_OS_N}-${TARGET_ARCH_N})"
+    elif _is_target_format "$p"; then
+      ok "$t (${TARGET_OS_N}/${TARGET_ARCH_N} binary; exec-probe skipped — cross)"
+    else
+      fail "$t: not a ${TARGET_OS_N} binary — a ${TARGET_OS_N} bundle must ship the target's binary here, not the build host's"
+    fi
+    continue
+  fi
   args="$(probe_args "$t")"
   if [[ -n "$args" ]]; then
     if out="$("$p" $args 2>&1 | head -1)"; then
@@ -184,24 +239,35 @@ fi
 
 # ── [4] macOS: brew-keg absolute install-names ──────────────────────────────
 echo "[4/6] darwin keg-path scan"
-if [[ "$OS" == "Darwin" ]]; then
-  if ! command -v otool >/dev/null 2>&1; then
-    fail "otool not on build host — cannot verify Mach-O linkage (xcode-select --install)"
+if [[ "$TARGET_OS_N" == "darwin" ]]; then
+  # WI-5651: gate on the TARGET, not the host — a darwin bundle cross-baked on
+  # linux needs this scan too. Native mac uses otool; the linux cross host uses
+  # llvm-otool-<N>. Also catch the Homebrew bottle placeholder TOKENS
+  # (@@HOMEBREW_CELLAR@@/@@HOMEBREW_PREFIX@@) a cross vendor must have rewritten,
+  # not just the resolved /opt/homebrew|/usr/local keg paths. Scan bin/ AND
+  # bin/.pg-lib/ (vendored dylibs).
+  _otool=""
+  for _c in otool llvm-otool-18 llvm-otool; do command -v "$_c" >/dev/null 2>&1 && _otool="$_c" && break; done
+  if [[ -z "$_otool" ]]; then
+    fail "no otool/llvm-otool on build host — cannot verify Mach-O linkage (xcode-select --install, or apt install llvm)"
   else
-    for f in "$BIN"/*; do
+    _keg_bad=0
+    for f in "$BIN"/* "$BIN"/.pg-lib/*; do
       [[ -f "$f" ]] || continue
       _is_script "$f" && continue
-      refs="$(otool -L "$f" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^(/opt/homebrew|/usr/local)/' || true)"
+      _is_macho "$f" || continue
+      refs="$("$_otool" -L "$f" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^(/opt/homebrew|/usr/local)/|@@HOMEBREW' || true)"
       if [[ -n "$refs" ]]; then
-        fail "$(basename "$f") references brew-keg paths that only exist on Homebrew machines (WI-3314):"
+        fail "$(basename "$f") references brew-keg paths/tokens that only exist on Homebrew machines (WI-3314):"
         echo "$refs" | sed 's/^/      /'
-        echo "      fix: bundle the dylib + install_name_tool -change to @executable_path-relative"
+        echo "      fix: bundle the dylib + (llvm-)install-name-tool -change to @executable_path-relative"
+        _keg_bad=1
       fi
     done
-    [[ "$FAIL" == 0 ]] && ok "no bundled Mach-O references /opt/homebrew or /usr/local"
+    [[ "$_keg_bad" == 0 ]] && ok "no bundled Mach-O references /opt/homebrew, /usr/local, or @@HOMEBREW tokens (via $_otool)"
   fi
 else
-  echo "  (skipped — not Darwin)"
+  echo "  (skipped — target is not darwin)"
 fi
 
 # ── [5] Windows: sibling DLLs for vendored exes ─────────────────────────────
@@ -261,7 +327,46 @@ OPTIONAL_NATIVE_MODULES="
 onnxruntime-node
 "
 echo "[6/6] native modules load under the bundled node"
-NODE_BIN=""
+if [[ "$CROSS" == "1" ]]; then
+  # WI-5651: can't exec the target's node here — assert STATICALLY that every
+  # required native ships a TARGET-format *.node in the bundle. This catches the
+  # 0.0.9 missing-native / dead-on-boot class POSITIVELY, from the static list
+  # (never derived from the artifact — see the contract note above). The real
+  # dlopen load-test runs when the app is exercised on-target (the mac/windows
+  # VMs remain for testing — owner directive 2026-07-20).
+  _nat_target_present() {
+    local m="$1" d nf
+    local dirs="$SIDECAR/node_modules/$m"
+    # Some natives ship their binary in a SIBLING per-platform package, not in
+    # the JS package dir — include the target's platform package for those.
+    case "$m" in
+      sharp) dirs="$dirs $SIDECAR/node_modules/@img/sharp-${TARGET_OS_N}-${TARGET_ARCH_N} $SIDECAR/node_modules/@img/sharp-libvips-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
+      @lydell/node-pty) dirs="$dirs $SIDECAR/node_modules/@lydell/node-pty-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
+    esac
+    for d in $dirs; do
+      [[ -d "$d" ]] || continue
+      while IFS= read -r nf; do _is_target_format "$nf" && return 0; done < <(find "$d" -name '*.node' 2>/dev/null)
+    done
+    return 1
+  }
+  for _m in $REQUIRED_NATIVE_MODULES; do
+    if [[ ! -d "$SIDECAR/node_modules/$_m" ]]; then
+      fail "$_m: package MISSING from the bundle closure"
+    elif _nat_target_present "$_m"; then
+      ok "$_m (${TARGET_OS_N}/${TARGET_ARCH_N} native present; dlopen load-test deferred to on-target)"
+    else
+      fail "$_m: no ${TARGET_OS_N}-${TARGET_ARCH_N} *.node in the bundle — the target's native binding is missing (0.0.9 dead-on-boot class); cross-fetch it in build-desktop-sidecar.sh"
+    fi
+  done
+  for _m in $OPTIONAL_NATIVE_MODULES; do
+    if _nat_target_present "$_m"; then
+      ok "$_m (advisory; ${TARGET_OS_N} native present)"
+    else
+      echo "  ⚠ $_m (advisory): no ${TARGET_OS_N}-${TARGET_ARCH_N} native in the bundle — lazily imported, so boot is unaffected; the feature that uses it degrades"
+    fi
+  done
+else
+  NODE_BIN=""
 for _c in "$BIN/node" "$BIN/node.exe"; do [[ -x "$_c" ]] && NODE_BIN="$_c" && break; done
 if [[ -z "$NODE_BIN" ]]; then
   fail "no bundled node at bin/{node,node.exe} — cannot prove the shipped natives load"
@@ -327,6 +432,7 @@ GUARD_EOF
   # Vacuity guard: a run where nothing loaded is a broken CHECK, not a clean bundle.
   [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
   [[ "$FAIL" == 0 ]] && ok "all $_nat_ok required native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
+fi
 fi
 
 echo

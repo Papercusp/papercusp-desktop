@@ -2162,6 +2162,32 @@ if [[ -n "$gh_archive" ]]; then
   fi
 fi
 
+# ── better-sqlite3 darwin native (WI-5651 cross) ────────────────────────────
+# Unlike the holepunch/bare *-native stack (prebuildify — ships ALL platforms in
+# the npm package, so prune_foreign_prebuilds just keeps the target's), and
+# unlike sharp/node-pty (sibling per-platform packages, cross-fetched above),
+# better-sqlite3 is a node-gyp package: npm only produced THIS host's
+# build/Release/better_sqlite3.node (a linux ELF). A darwin bundle needs the
+# darwin binary or it dies at boot (it's in verify's REQUIRED_NATIVE_MODULES).
+# Fetch the matching prebuilt with prebuild-install, which derives the node ABI
+# from --target=$NODE_VERSION (available here, after the node bundle above).
+# (Windows cross runs the sidecar under WSL with the LINUX node — its better-
+# sqlite3 is correctly the linux binary — so this is darwin-only.)
+if [[ "$_cross_darwin" == "1" ]]; then
+  _bsq_dir="$SIDECAR_DIR/node_modules/better-sqlite3"
+  if [[ -d "$_bsq_dir" ]]; then
+    echo "→ WI-5651 cross-fetching better-sqlite3 darwin-${TARGET_ARCH} prebuilt (node ${NODE_VERSION}, ABI via prebuild-install)"
+    rm -f "$_bsq_dir"/build/Release/*.node
+    ( cd "$_bsq_dir" && npx --yes prebuild-install --platform="$TARGET_OS" --arch="$TARGET_ARCH" --target="${NODE_VERSION#v}" --runtime=node --tag-prefix=v ) \
+      || { echo "ERROR: better-sqlite3 ${TARGET_OS}-${TARGET_ARCH} prebuilt fetch failed (prebuild-install). The bundle would die at boot ('Could not locate the bindings file')."; exit 1; }
+    _bsq_node="$(find "$_bsq_dir" -name '*.node' 2>/dev/null | head -1)"
+    [[ -n "$_bsq_node" ]] || { echo "ERROR: better-sqlite3: no *.node present after prebuild-install"; exit 1; }
+    echo "  ✓ better-sqlite3 ${TARGET_OS} binding → ${_bsq_node#"$SIDECAR_DIR"/}"
+  else
+    echo "  ⚠ better-sqlite3 not in the sidecar closure — nothing to cross-fetch"
+  fi
+fi
+
 # MinGit-busybox (Windows only) — provides BOTH `git.exe` and a busybox-
 # backed `bash.exe`, plus the small POSIX util set the harness scripts
 # expect (sed, grep, sort, …). Tauri main prepends `git/cmd` and `git/usr/bin`
@@ -2475,7 +2501,7 @@ fi
 # The point: build-host probes are masked (the host has the dev deps), which
 # is exactly how the pg_wrapper psql (WI-3311) and unbundled kopia (WI-3312)
 # shipped broken. See the verifier's header before touching its allowlists.
-"$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR"
+"$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"
 
 # ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
 # Retire the old bundle via rename, rename the temp build into place, then
