@@ -331,7 +331,31 @@ BACKFILL_TABLE="$MATRIX"; MATRIX=""
 
 # ── 6. INCREMENTAL matrix both directions (post-join) ───────────────────────────
 log "INCREMENTAL A→B"; write_all a "$WS_A" ab; check_all b ab "incr-A→B" a
+AB_TABLE="$MATRIX"; MATRIX=""
 log "INCREMENTAL B→A"; write_all b "$WS_B" ba; check_all a ba "incr-B→A" b
+BA_TABLE="$MATRIX"; MATRIX="$AB_TABLE$BA_TABLE"
+
+# ── 6a. INCREMENTAL B→A LATE-RECHECK: latency vs dead (WI-5673 differential) ────
+# WI-5673 (3+ live-federation-gate runs 2026-07-20): features/conversations/
+# messages/threads incr-B→A intermittently "NEVER crossed (src outbox=0/1)" —
+# src-side capture+drain confirms the op was genuinely SENT (0 undrained), so a
+# miss here is receive/apply-side (or in-flight), not a lost write. These 4 types
+# are exactly the FIRST 4 entries in $TYPES, i.e. the first ops write_all() issues
+# in B's very first outbound burst since it joined — the same "early-after-join
+# ops are at risk, later ones are reliable" shape WI-5672 documented for the
+# local-matrix leg's early scenarios. This mirrors the BACKFILL LATE-RECHECK
+# pattern below (§6b) for the incremental leg specifically: a poll-only recheck
+# (no new writes) after the normal window distinguishes "still missing after
+# more real time" (genuine gap) from "landed once B's send/replication path
+# finished warming up" (latency, not death) — never gates CONTENT_OVERALL, purely
+# diagnostic so the next gate run's report says which one this was.
+if printf '%b' "$BA_TABLE" | grep -q FAIL; then
+  log "INCREMENTAL B→A LATE-RECHECK (was the incr-B→A miss above latency or death?)"
+  check_all a ba "incr-B→A-late" b
+  BA_LATE_TABLE="$MATRIX"; MATRIX=""
+else
+  BA_LATE_TABLE=""
+fi
 
 # ── 6b. BACKFILL LATE-RECHECK: latency vs dead (2026-07-03 differential) ─────────
 # Pre-join (historical) log entries were observed applying MINUTES after the live

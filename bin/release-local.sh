@@ -30,22 +30,19 @@
 # is pushed to origin). It also pushes a dogfood *monorepo* tag — see the
 # PAPERCUP_DOGFOOD_REPO_REF block below; that is a source-pin, not a release.
 #
-# Optional platform legs:
-#   - macOS  : WITH_MAC=1 — drives the macOS build VM over SSH
-#              (universal binary, UNSIGNED by Apple — D-002/D-006 of
-#              mac-desktop-release-readiness-2026-06-11; updater
-#              artifacts are still minisign-signed). VM must be up
-#              (SSH :2222, see /internal/docs/build-system/vms).
-#   - Windows: WITH_WINDOWS=1 — builds the Inno installer(s). Two producers:
-#              • DEFAULT: drives the Windows 11 build VM over SSH (native MSVC,
-#                keyless in-VM, .sig signed host-side — D-001/D-006 of
-#                windows-desktop-release-readiness-2026-06-11). VM must be up
-#                (SSH :2223, ~/windows-vm/boot-windows.sh).
-#              • PAPERCUSP_WINDOWS_CROSS=1: cross-compile NATIVELY on this Linux
-#                box (cargo-xwin + Inno-under-wine) — no VM (WI-5651). Same
-#                artifacts, no SSH/lease. Default OFF until a full cross cut
-#                validates, then the VM leg retires.
-#              Neither is Authenticode-signed unless an owner cert is supplied
+# Optional platform legs (both mac + windows now build NATIVELY on this Linux box
+# via cross-compilation — the QEMU build VMs were retired as build legs, WI-5651;
+# the VMs stay startable for on-device TESTING only):
+#   - macOS  : WITH_MAC=1 — universal binary cross-compiled here by
+#              bin/build-mac-cross.sh (cargo-zigbuild + llvm-lipo + rcodesign +
+#              libdmg-hfsplus), UNSIGNED by Apple (D-002/D-006 of
+#              mac-desktop-release-readiness-2026-06-11; updater artifacts are
+#              still minisign-signed). No VM, no SSH.
+#   - Windows: WITH_WINDOWS=1 — builds the Inno installer(s) via
+#              bin/build-windows-cross.sh (cargo-xwin + Inno-under-wine) NATIVELY
+#              on this Linux box — no VM, no SSH/lease (D-001/D-006 of
+#              windows-desktop-release-readiness-2026-06-11). Not
+#              Authenticode-signed unless an owner cert is supplied
 #              (WINDOWS_CERT_*), so SmartScreen will warn.
 #   - arm64  : cross-compile via WITH_ARM64=1 (needs `cross` set up)
 #
