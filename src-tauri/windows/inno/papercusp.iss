@@ -53,9 +53,20 @@ OutputBaseFilename={#AppName}_{#AppVersion}_x64-setup
 ; git bundles) and the WSL rootfs tar.gz are incompressible — stored raw
 ; (fast compile, ~0 size cost). The sidecar (node, embedded PG, SPA)
 ; compresses ~3:1 under lzma2.
-Compression=lzma2
+;
+; P-012 (desktop-build-speed): the ISCC pack is the slowest leg of a Windows cut
+; (~40 min), and every default cut now runs it TWICE — one pack per role (GUI +
+; Server) since WI-5600 restored gui+server as the Windows default. This is an
+; ALPHA: installer download size does not matter, build latency does. So use the
+; FAST lzma2 variant + multi-threaded packing (CompressionThreads=auto = one per
+; core). Trades a larger installer for a much faster pack; the GUI stays under
+; Inno's ~4 GB single-file ceiling (the Server already DiskSpans regardless).
+; (Before/after wall-clock is MEASURED on the next real VM cut — this box has no
+; ISCC; the directives themselves are standard Inno 6 and reversible.)
+Compression=lzma2/fast
 SolidCompression=no
 LZMAUseSeparateProcess=yes
+CompressionThreads=auto
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; All-5-buttons source bundle (WI-3306/WI-3308): when stage-source-tree.sh has
