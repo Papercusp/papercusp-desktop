@@ -115,6 +115,21 @@ async function runReapCycle(signalTheWrapper) {
   }
 }
 
+/** Like `waitFor`, but for an async `check` (e.g. a TCP probe) — `waitFor`
+ *  itself only inspects a SYNCHRONOUS truthy/falsy return (a Promise is
+ *  always truthy, so passing an async check to it resolves after exactly one
+ *  attempt regardless of the real result). This awaits each attempt before
+ *  deciding whether to retry. */
+async function waitForAsync(check, { timeoutMs = 10_000, stepMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await check();
+    if (v) return v;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+}
+
 /** Retry a REAL (rare, environment-timing) flake up to `attempts` times — a
  *  genuine regression fails every attempt, not just an unlucky one, so this
  *  never masks the thing the test exists to catch. */
@@ -174,4 +189,87 @@ test('KILL path: the detached watchdog still reaps the dev stack when the wrappe
   // HUP` never runs. Only the SEPARATE detached watchdog (which polls the
   // wrapper's liveness independently) can still reap here.
   await withRetry(() => runReapCycle((wrapper) => process.kill(wrapper.pid, 'SIGKILL')));
+});
+
+// EI-13537 / EI-18175101264082617: a squatter bound to $PORT with
+// dbosEnabled:true used to be silently adopted forever (warn-only) — a real
+// instance did exactly this for ~4h on the live dev box, alone accounting for
+// ~46-47 concurrent admin-pool connections and driving a server-wide PG
+// connection-saturation regression past its warn budget. The wrapper must now
+// detect the mismatch, terminate the squatter, and spawn a fresh
+// wrapper-supervised (reaped) instance in its place instead of reusing it.
+test('squatter path: a dbosEnabled:true process on $PORT is killed and replaced by a fresh supervised instance', async () => {
+  const port = testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-squatter-'));
+  const marker = path.join(tmp, 'pid');
+  let squatter;
+  let wrapper;
+
+  try {
+    // A minimal fake "leaked hono-host" that binds $PORT and answers
+    // /api/health/deep the same way the real dbosEnabled:true squatter did.
+    squatter = spawn(
+      process.execPath,
+      [
+        '-e',
+        `
+        const http = require('node:http');
+        const server = http.createServer((req, res) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ dbosEnabled: true }));
+        });
+        server.listen(${port}, '127.0.0.1');
+        `,
+      ],
+      { stdio: 'ignore' },
+    );
+    const reachable = await waitForAsync(
+      () =>
+        new Promise((resolve) => {
+          const sock = net.createConnection({ port, host: '127.0.0.1' }, () => {
+            sock.destroy();
+            resolve(true);
+          });
+          sock.on('error', () => resolve(false));
+        }),
+      { timeoutMs: 5000 },
+    );
+    assert(reachable, 'fake squatter server never became reachable');
+    assert(pidAlive(squatter.pid), 'fake squatter never started');
+
+    const devCmd = `echo "$BASHPID" > '${marker}'; exec sleep 600`;
+    wrapper = spawn('bash', [script], {
+      env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
+      stdio: 'ignore',
+    });
+
+    // The squatter should be terminated by the wrapper's reject_squatter().
+    const squatterGone = await waitFor(() => !pidAlive(squatter.pid), { timeoutMs: 15_000 });
+    assert(squatterGone, 'squatter with dbosEnabled:true was not terminated — EI-13537 regressed');
+
+    // And the wrapper should fall through to spawn a fresh, supervised DEV_CMD.
+    const sleeperPid = Number(
+      await waitFor(() => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : undefined), {
+        timeoutMs: 10_000,
+      }),
+    );
+    assert(Number.isInteger(sleeperPid) && sleeperPid > 1, 'wrapper did not spawn a replacement instance');
+    assert(pidAlive(sleeperPid), 'replacement instance should be alive');
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        wrapper.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    if (squatter && !squatter.killed) {
+      try {
+        squatter.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

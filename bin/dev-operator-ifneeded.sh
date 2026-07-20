@@ -76,6 +76,33 @@ in_use() {
   fi
 }
 
+reject_squatter() {
+  # Best-effort: find + kill whatever is bound to $PORT, then wait for the
+  # port to actually free up. Never fatal — the caller falls back to the
+  # warn-and-reuse behavior if this can't complete cleanly (fail open).
+  local pids
+  if command -v ss >/dev/null 2>&1; then
+    pids="$(ss -ltnp "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u || true)"
+  elif command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  fi
+  [ -z "${pids:-}" ] && return 1
+  echo "[tauri] terminating squatter pid(s) on :$PORT: $pids" >&2
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    in_use || return 0
+    sleep 0.1
+  done
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    in_use || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 if in_use; then
   echo "[tauri] operator already serving on :$PORT — reusing"
   # EI-13537: `in_use` only proves the PORT is bound — it does NOT prove the
@@ -86,35 +113,57 @@ if in_use; then
   # workers ON) gets silently and PERMANENTLY adopted by every future
   # `npm run dev` via this exact reuse path — running redundant DBOS
   # machinery against the shared DB (the EI-126 two-hosts-one-DB class of
-  # bug) with no supervision/reaper watching it. Confirmed live 2026-07-19:
-  # an orphaned `hono-host.ts` (no dev-operator-ifneeded.sh ancestry, no
-  # reaper) squatted :3270 with PAPERCUSP_BACKGROUND_WORKERS=1 and was
-  # silently backing a real desktop session's webview.
+  # bug) with no supervision/reaper watching it. Confirmed live 2026-07-19
+  # (EI-13537) — and AGAIN live 2026-07-20 (EI-18175101264082617): a squatter
+  # on :3270 (PAPERCUSP_BACKGROUND_WORKERS=1, full DBOS routines/curation/
+  # orchestrator/timers ON, started via a bare `npm exec tsx bin/hono-host.ts`
+  # with NO dev-operator-ifneeded.sh ancestry — confirmed via `ps` parent-chain
+  # tracing straight to `systemd --user`) ran unsupervised for ~4h and alone
+  # held ~46-47 concurrent admin-pool connections (vs. its own
+  # PAPERCUSP_DB_POOL_MAX=24 budget) — a major contributor to a server-wide
+  # PG connection-saturation regression past its 85% warn budget. The
+  # warn-only response below was not enough: nothing ever re-runs this
+  # wrapper against a squatter that just sits there silently backing a real
+  # session, so the leak persisted for hours. Now: detected mismatch ⇒
+  # actively terminate the squatter and fall through to spawn a fresh,
+  # wrapper-supervised (reaped) instance in its place, instead of merely
+  # logging and adopting it forever.
   #
   # `/api/health/deep` is already PUBLIC + cheap and echoes `dbosEnabled`
   # (dbosLaunchesHere(), which mirrors backgroundWorkersEnabled() —
   # packages/operator-core/lib/background-workers.ts) — reuse it as the
   # identity check instead of trusting the bare port bind. Best-effort:
   # skip silently if curl is unavailable or the probe fails/times out (never
-  # block the reuse fast path on a diagnostic).
+  # block the reuse fast path on a diagnostic — fail OPEN to the old
+  # silent-reuse behavior rather than block `npm run dev` on a flaky probe).
+  squatter=0
   if command -v curl >/dev/null 2>&1; then
     health="$(curl -s --max-time 2 "http://127.0.0.1:$PORT/api/health/deep" 2>/dev/null || true)"
     case "$health" in
-      *'"dbosEnabled":true'*)
-        echo "[tauri] WARNING: the operator on :$PORT reports dbosEnabled=true — background" >&2
-        echo "[tauri] workers are ON, NOT the expected dev-operator config (background workers" >&2
-        echo "[tauri] should be OFF on :$PORT). This looks like a leaked/misconfigured process" >&2
-        echo "[tauri] started OUTSIDE this wrapper (no reaper is watching it), possibly running" >&2
-        echo "[tauri] redundant DBOS machinery against the shared DB. Find + kill it" >&2
-        echo "[tauri]   (ss -ltnp | grep :$PORT) and re-run \`npm run dev\` for a clean instance." >&2
-        echo "[tauri] See EI-13537." >&2
-        ;;
+      *'"dbosEnabled":true'*) squatter=1 ;;
     esac
   fi
-  # `beforeDevCommand` reuse path: exit immediately so Tauri proceeds to
-  # spawn its native window pointing at the existing dev server. We did not
-  # start that server, so we also don't reap it.
-  exit 0
+  if [ "$squatter" = "1" ]; then
+    echo "[tauri] WARNING: the operator on :$PORT reports dbosEnabled=true — background" >&2
+    echo "[tauri] workers are ON, NOT the expected dev-operator config (background workers" >&2
+    echo "[tauri] should be OFF on :$PORT). This is a leaked/misconfigured process started" >&2
+    echo "[tauri] OUTSIDE this wrapper, running redundant DBOS machinery against the shared" >&2
+    echo "[tauri] DB with no reaper watching it. See EI-13537 / EI-18175101264082617." >&2
+    if reject_squatter; then
+      echo "[tauri] squatter on :$PORT cleared — starting a fresh supervised instance" >&2
+      # fall through to the normal spawn path below.
+    else
+      echo "[tauri] could not clear the squatter on :$PORT (best-effort kill failed or" >&2
+      echo "[tauri] port still bound) — reusing it anyway rather than blocking startup." >&2
+      echo "[tauri]   Find + kill it by hand: ss -ltnp | grep :$PORT" >&2
+      exit 0
+    fi
+  else
+    # `beforeDevCommand` reuse path: exit immediately so Tauri proceeds to
+    # spawn its native window pointing at the existing dev server. We did not
+    # start that server, so we also don't reap it.
+    exit 0
+  fi
 fi
 
 echo "[tauri] starting operator dev server on :$PORT"
