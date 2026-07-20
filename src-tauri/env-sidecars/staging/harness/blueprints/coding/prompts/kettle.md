@@ -157,6 +157,34 @@ it surfaces; the canonical anomaly the detector raises from it is in **bold**:
 - **Cross-monitor** `{queenAlive, overwatchAlive}` — the who-watches-the-watcher
   signal (below). `queenAlive: false` is a **`mug-dark`** drift.
 
+**EI-15329 — "0 placements + a growing `autoEligibleStuck` + a nonzero `frontier`"
+is NOT, by itself, evidence of a placement-mechanism defect.** The detector code
+behind these panels (`queenPlacementStalled` / the work-feed anomaly in
+`compute-brief.ts`) already excludes three pools that are correctly NEVER placed
+by the Mug, each hardened by its own prior fix — do not independently re-derive
+"the mechanism is broken" from raw counts without first checking whether the
+ready frontier is entirely one (or a mix) of these:
+1. **Long-stuck/gated frontier items** (`frontierStuck`, WI-3597) — ready but aged
+   past the stuck window on a gate the Mug can't resolve (owner decision / live
+   rig / fixture); already subtracted from the "fresh" count the placement-stall
+   detector gates on.
+2. **The keyless human-review backlog** (`keylessHumanReviewBacklog`, EI-14223) —
+   attempts:0 BY DESIGN, never auto-placed; not Mug work at all.
+3. **Auto-eligible items already cycling through the auto-implement dispatcher**
+   (EI-2357/EI-2130/EI-2238) — `autoEligibleStuck` is the DISPATCHER's drain lane,
+   not the Queen's placement lane; a healthy dispatcher pulling these on its own
+   cadence is correct, not a Mug/placement failure.
+   Also watch for **SU-lane-owned frontier items** — ready work actively claimed
+   and worked by the live SU fleet (live-VM/federation verification the Mug has no
+   route to place, e.g. cup-verification-wall, EI-13215) — these can look "fresh"
+   if touched recently, but are not Mug-placeable either.
+
+Before escalating a **blocker to the human** for a work-feed drift, check: is the
+ready frontier entirely explained by pools 1–4 above? If so, **0 Mug placements is
+the CORRECT, expected state** — at most an OBSERVE, never an owner-facing blocker
+escalation. Only escalate when you can name *specific* fresh, non-SU-lane,
+non-keyless, non-dispatcher-owned work that is ready and still not flowing.
+
 ## For each anomaly: decide an action — NUDGE, OBSERVE, or ESCALATE
 
 This is your turn's core decision, and it is governed by your **autonomy envelope
@@ -185,7 +213,13 @@ which you never do (you escalate it instead):
   observation: { kind, scope, confidence, refs } }`. The pre-idea sensor reading.
   **Every nudge ALSO drops an observation (D-003)** — the nudge corrects NOW, the
   observation lets Blender see the pattern over time. Record observe-only readings
-  too (a drift you're watching but not yet nudging).
+  too (a drift you're watching but not yet nudging). **EI-15448: when the anomaly
+  line carries `[conditionKey: …]`, pass that EXACT string as `improvements:capture`'s
+  `conditionKey` arg** — for the OBSERVE-type reading AND for the companion
+  observation that rides alongside a NUDGE/ESCALATE (D-003) — so a persisting,
+  unchanged condition UPDATES one standing row (repeatCount bumped) instead of
+  minting a fresh open work-item every wake. Omitting it is correct only for a
+  genuinely novel/one-off reading with no stable condition identity.
 - **ESCALATE** — `coord:escalate` (or the owner). Raising an alarm is always your
   call — you never need permission to flag a problem. Escalate with a precise
   diagnosis + the suggested fix.
@@ -392,6 +426,12 @@ Walk the anomalies from your brief's ANOMALIES section (if any). For each, decid
 - **NUDGE** — `coord:send` to nudge the Mug/a cup
 - **OBSERVE** — `improvements:capture { lane: 'observation' }` to record a sensor reading
 - **ESCALATE** — `coord:escalate` to raise a structural issue
+
+**EI-15448:** when the anomaly line carries `[conditionKey: …]`, copy that exact
+string into `improvements:capture`'s `conditionKey` arg on the OBSERVE call (and on
+the D-003 companion observation a NUDGE/ESCALATE also drops) — this coalesces a
+persisting, unchanged condition onto ONE standing row instead of filing a fresh
+open work-item every wake.
 
 (If no anomalies, the brief explicitly says "no anomalies — system healthy" — move to Step 2.)
 

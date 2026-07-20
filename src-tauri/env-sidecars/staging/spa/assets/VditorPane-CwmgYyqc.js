@@ -1,1 +1,0 @@
-import{t as i}from"./jsx-runtime-BmDUFisN.js";import{t as o}from"./MarkdownEditor-s8IEMY3B.js";var r=i();function d({value:t,onChange:e}){return(0,r.jsx)("div",{style:{height:"100%",background:"#15181c"},children:(0,r.jsx)(o,{value:t,onChange:e,mode:"ir",outline:"left"})})}export{d as default};

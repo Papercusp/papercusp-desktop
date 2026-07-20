@@ -1,1 +1,0 @@
-import{t}from"./jsx-runtime-BmDUFisN.js";import{t as e}from"./FeaturesAdmin-DjmJy9sz.js";import{t as i}from"./AdminShell-pt7dmJcy.js";var r=t();function s(){return(0,r.jsx)(i,{title:"Features",children:(0,r.jsx)(e,{})})}export{s as component};
