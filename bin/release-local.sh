@@ -838,8 +838,19 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
   # cut src-tauri/seed ONCE above; build-windows-on-vm.sh REUSES it.
   (
     set -euo pipefail
-    PAPERCUSP_SKIP_SEED_CUT=1 PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-      PAPERCUSP_BUILD_ROLES="$PAPERCUSP_BUILD_ROLES" bash "$ROOT/bin/build-windows-on-vm.sh"
+    win_env=(PAPERCUSP_SKIP_SEED_CUT=1 "PAPERCUSP_BUILD_SHA=$BUILD_SHA" "PAPERCUSP_BUILD_VERSION=$VERSION")
+    # WI-5559: only forward PAPERCUSP_BUILD_ROLES when the CALLER explicitly set
+    # it (captured above, before this script's own default was applied). Windows
+    # deliberately keeps a narrower gui-only default (build-windows-on-vm.sh) than
+    # mac/linux's gui+server (D-004) — its Server installer is never published
+    # (WI-5028), so building it on every real cut wastes a ~40min ISCC pack.
+    # Forwarding our resolved default unconditionally defeated that windows-side
+    # default on every plain `WITH_WINDOWS=1 release-local.sh` run. An explicit
+    # `PAPERCUSP_BUILD_ROLES=... release-local.sh` still reaches windows verbatim.
+    if [[ -n "${_PAPERCUSP_BUILD_ROLES_CALLER_SET:-}" ]]; then
+      win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
+    fi
+    env "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi
