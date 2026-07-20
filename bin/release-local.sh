@@ -257,6 +257,19 @@ if [[ "${PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK:-0}" != "1" ]]; then
     || { echo "ERROR: build-provenance parity gate failed (above) — a leg re-forked provenance. Fix, or PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK=1 to override."; exit 1; }
 fi
 
+# Migration-safety gate — fail FAST (before the ~35-min build) if a migration would
+# crash the packaged operator on FIRST BOOT. Catches the migration-631 class (an
+# unguarded work_items harness_slug re-slug UPDATE → duplicate work_items_pkey →
+# crash-loop) that in v0.0.12 was found only AFTER a full build + install + boot —
+# a big slice of that release's 12h. Static scan (seconds), no PG needed. Skip with
+# PAPERCUSP_SKIP_MIGRATION_LINT=1 (emergencies only). Plan
+# release-readiness-preflight-gate-2026-07-19 P-003.
+if [[ "${PAPERCUSP_SKIP_MIGRATION_LINT:-0}" != "1" ]]; then
+  echo "==> checking migration safety (lint:migrations)"
+  ( cd "$ROOT/.." && node scripts/lint-migrations.mjs ) \
+    || { echo "ERROR: migration lint failed (above) — a migration would break the packaged operator's first-boot migrate. Fix, or PAPERCUSP_SKIP_MIGRATION_LINT=1 to override."; exit 1; }
+fi
+
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "ERROR: signing key not found at $KEY_FILE"
   echo "       Run bin/setup-signing-key.sh first."
