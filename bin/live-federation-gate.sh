@@ -24,9 +24,21 @@
 #   REBUILD           (default 1)   — rebuild the sidecar from HEAD first (test current code).
 #   GATE_DEB          (unset)       — use this prebuilt .deb instead of rebuild+repack.
 #   SKIP_MATRIX       (default 0)   — skip the content-matrix leg (reliable, needs a .deb).
-#   SKIP_FROMREPO     (default 0)   — skip the from-repo leg (currently WI-971-RED by design:
+#   SKIP_FROMREPO     (default 1)   — skip the from-repo leg (currently WI-971-RED by design:
 #                                     outbox drain never wired for joined/created hive
-#                                     harnesses; WI-259 was closed as its duplicate).
+#                                     harnesses; WI-259 was closed as its duplicate). Defaulted
+#                                     to 1 (WI-5629, 2026-07-20): the production systemd unit
+#                                     already forces this via Environment=SKIP_FROMREPO=1, but
+#                                     the script's own default disagreed (0) — so any manual/
+#                                     ad-hoc invocation (the kind this file's own GATE_DISPLAY
+#                                     comment explicitly anticipates, e.g. reproducing a gate
+#                                     red for debugging) silently re-ran the KNOWN, documented,
+#                                     expected WI-971 red and (a) filed a confusing "NEW
+#                                     regression — investigate" bug for a condition that isn't
+#                                     new, and (b) fed that RED into check_staleness(), filing a
+#                                     spurious staleness EI too (WI-5628 + WI-5629, live case).
+#                                     Set SKIP_FROMREPO=0 explicitly to opt back in (e.g. to
+#                                     verify WI-971's fix once it lands).
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
@@ -93,7 +105,7 @@ LOAD_GATE="${LOAD_GATE:-$(( NPROC * 85 / 100 > 15 ? NPROC * 85 / 100 : 15 ))}"
 # the downgrade only as a last-resort guard at genuine saturation.
 STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
 REBUILD="${REBUILD:-1}"
-SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"
+SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-1}"
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
 # invalid_request_context (needs harness/workspace/role/run/spawn params or superuser) — the
 # 13:00 red's EI filing died on exactly this and only the loud fallback saved the verdict.
