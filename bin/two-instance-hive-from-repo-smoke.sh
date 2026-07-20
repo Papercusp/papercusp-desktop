@@ -313,8 +313,11 @@ fed_wait_boot a 60 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG
 fed_wait_boot b 60 || { echo "B boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[b]}"; exit 4; }
 log "A: PG=${FED_PG[a]} sc=${FED_SC[a]} | B: PG=${FED_PG[b]} sc=${FED_SC[b]}"
 fed_assert_isolated a b || exit 5
-fed_wait_api a 30 || { echo "A sidecar API never came up"; exit 4; }
-fed_wait_api b 30 || { echo "B sidecar API never came up"; exit 4; }
+# WI-5641: don't override fed_wait_api's own default (60 tries*2s=120s, EI-521 —
+# embedded-PG init + ~500 migrations + owner-bootstrap can exceed a 60s budget).
+# A hardcoded 30 here re-introduces the exact boot-readiness flake EI-521 fixed.
+fed_wait_api a || { echo "A sidecar API never came up"; exit 4; }
+fed_wait_api b || { echo "B sidecar API never came up"; exit 4; }
 
 # (re-key witness, su-9140a 2026-06-19): the env recipe PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 does NOT
 # engage getFlag(HIVE_REKEY) on the packaged binary (verified: owner had 0 hive_epoch_keys). Flip the

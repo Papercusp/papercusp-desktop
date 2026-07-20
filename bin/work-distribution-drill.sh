@@ -117,7 +117,9 @@ SMK_HONO="$(fed_pick_free_port 18271)"; SMK_PG="$(fed_pick_free_port 18932)"
 fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_HONO" "$SMK_PG" \
   GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 fed_wait_boot a 80 || { echo "boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[a]}"; exit 4; }
-fed_wait_api a 30 || { echo "FATAL: sidecar API never came up"; exit 4; }
+# WI-5641: don't override fed_wait_api's own default (60 tries*2s=120s, EI-521) —
+# a hardcoded 30 re-introduces the boot-readiness flake EI-521 already fixed.
+fed_wait_api a || { echo "FATAL: sidecar API never came up"; exit 4; }
 DSN="postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[a]}/papercusp"
 q() { psql "$DSN" -tA -c "$1" 2>/dev/null | tr -d '\r'; }
 SC="http://127.0.0.1:${FED_SC[a]}"

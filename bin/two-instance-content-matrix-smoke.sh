@@ -108,7 +108,16 @@ fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_A_HONO" "$S
 fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 for inst in a b; do fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }; done
 log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]}"
-fed_wait_api a 30 && fed_wait_api b 30 || { echo "FATAL: sidecar API never came up"; exit 4; }
+# WI-5641 (same category as WI-5509's "insufficient boot-timeout headroom" fix):
+# this call site hardcoded 30 tries*2s=60s, HALF of fed_wait_api's own documented
+# fix (EI-521: bumped the function's default to 60 tries*2s=120s specifically
+# because embedded-PG init + ~500 migrations + owner-bootstrap can exceed the old
+# 40s budget). The override here silently re-introduced the exact flake EI-521
+# already fixed — reproduced live 2026-07-20: a fresh boot's create+publish step
+# got an EMPTY response because fed_wait_api gave up waiting for 2xx at 60s and
+# "accepted liberally" while the sidecar was still mid-migration. Drop the
+# explicit tries so both instances get the intended 120s headroom.
+fed_wait_api a && fed_wait_api b || { echo "FATAL: sidecar API never came up"; exit 4; }
 
 dsn() { echo "postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp"; }
 q() { psql "$(dsn "$1")" -tA -c "$2" 2>/dev/null | tr -d '\r'; }
