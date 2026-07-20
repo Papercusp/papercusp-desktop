@@ -197,6 +197,15 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     skip_cleanup
     echo "GATE: FRESH (green ${GREEN_AGE_H}h ago)"; exit 0
   fi
+  # A starvation-downgraded window is NOT a green (it never refreshes last-green, so it does not
+  # satisfy the TTL above), but back off for a SHORTER window so a chronically starved box does
+  # not full-run every hour — which would worsen the very starvation it is skipping.
+  DOWNGRADE_AGE_H="$(age_h "$STATE_DIR/last-downgrade")"
+  if [ "$DOWNGRADE_AGE_H" -lt "$GATE_DOWNGRADE_TTL_H" ]; then
+    log "fresh: last window STARVATION-DOWNGRADED ${DOWNGRADE_AGE_H}h ago (< ${GATE_DOWNGRADE_TTL_H}h retry TTL) — NOT a green; retrying after the TTL, nothing to do this window."
+    skip_cleanup
+    echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)"; exit 0
+  fi
 fi
 
 # ── 0a. prod-port guard (EI-11342, 2026-07-13) ─────────────────────────────────
@@ -684,6 +693,15 @@ if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_res
 fi
 
 if [ ${#REDS[@]} -eq 0 ]; then
+  # A window whose local-matrix "passed" only via the WI-5329 frame-starvation downgrade is NOT a
+  # genuine green (D-005): the restart-heavy class (incl. replication_soak) was never actually
+  # proven this run. Recording last-green here is what suppressed real hourly re-runs for ~22h on
+  # 2026-07-19 and hid WI-5481. So record last-downgrade (short retry TTL) instead — never a green.
+  if [ "$MATRIXFULL_RES" = SKIPPED-STARVATION ]; then
+    echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    check_staleness
+    echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)"; exit 0
+  fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs"
   echo "GATE: GREEN — $SUMMARY"; exit 0
 fi
