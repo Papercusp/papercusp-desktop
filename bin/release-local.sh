@@ -339,6 +339,18 @@ if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
     || { echo "ERROR: migration boot-smoke failed (above) — a migration crashes on a from-scratch replay, so a packaged install would crash-loop its seed on first boot. Fix the offending migration, or PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1 to override (Docker-less box only)."; exit 1; }
 fi
 
+# Build-set architecture invariant — fail FAST (seconds, no build) if this cut's
+# effective PAPERCUSP_BUILD_ROLES drops a required product. On mac/win the GUI
+# attaches to a separately-installed Papercusp Server, so a gui-only role set ships
+# a dead GUI (the 0.0.12 "Server dropped from the cut" class, D-004). For a
+# deliberate fast-iteration cut set PAPERCUSP_ALLOW_INCOMPLETE_ROLES=1 (a conscious
+# warning). Plan release-readiness-preflight-gate-2026-07-19 P-002.
+if [[ "${PAPERCUSP_SKIP_BUILDSET_CHECK:-0}" != "1" ]]; then
+  echo "==> checking build-set completeness (roles=${PAPERCUSP_BUILD_ROLES})"
+  ( cd "$ROOT/.." && npx tsx apps/operator/lib/release/preflight-build-set.ts ) \
+    || { echo "ERROR: build-set check failed (above) — this release cut would drop a required product (e.g. the Server the mac/win GUI attaches to). Set PAPERCUSP_BUILD_ROLES=\"gui server\", or PAPERCUSP_ALLOW_INCOMPLETE_ROLES=1 for a deliberate partial cut."; exit 1; }
+fi
+
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "ERROR: signing key not found at $KEY_FILE"
   echo "       Run bin/setup-signing-key.sh first."
