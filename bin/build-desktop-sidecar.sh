@@ -543,6 +543,14 @@ copy_pkg_closure() {
     fi
     mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
     cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
+    # WI-5638: strip runtime model-download scratch. @huggingface/transformers
+    # writes fetched ONNX models to node_modules/@huggingface/transformers/.cache
+    # at RUNTIME (default cache_dir); on a dev box this grew to 3.6GB (harrier-oss
+    # 2.3GB + embeddinggemma 1.2GB + bge-small 127MB) and rode into the .deb via the
+    # bundle.resources "sidecar/**/*" glob → a 4.2GB installer. The cache is pure
+    # download scratch — never needed in the bundle (models re-download on first
+    # use), so drop any package-local `.cache` from every copied closure package.
+    rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"
     prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
     prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
