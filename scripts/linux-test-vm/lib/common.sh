@@ -136,11 +136,16 @@ default_deb() {
 # per-script "default_deb may resolve an older bundle, pass --deb explicitly"
 # comments on several rigs went unread). Compares the .deb's mtime against the
 # newest commit touching the code that actually feeds the bundle (this repo's
-# HEAD, the outer monorepo's apps/operator, and the libs/papercusp submodule) and
-# WARNs loudly. Never fails the call — a deliberately-older artifact is legitimate
-# (regression tests) — but a caller can no longer be silently bitten without a
-# printed signal pointing at the fix (bin/release-local.sh, or the cheaper
-# bin/build-desktop-sidecar.sh + rig hotpatch for a live re-verify).
+# HEAD, the outer monorepo's apps/operator, and the libs/papercusp submodule).
+#
+# EI-18160721229588594 (2026-07-20): a WARN alone was never enough — an agent/human
+# skimming a long boot log (dozens of setup lines) reliably misses one yellow WARN
+# and burns a full run (soak: 20+ min) silently verifying the WRONG artifact. So
+# this now HARD-FAILS (exit 1) by default on a stale IMPLICIT pick — the caller
+# must either rebuild, pass an explicit --deb=PATH (bypasses this check entirely —
+# an explicit choice is always respected), or set PCUSP_ALLOW_STALE_DEB=1 for a
+# genuinely deliberate regression test against an older build (the legitimate case
+# this check must not block, just no longer silently satisfy by default).
 _warn_if_deb_stale() {
   local deb="$1" deb_ts newest_ts t outer desktop_ts outer_ts papercusp_ts
   deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
@@ -159,11 +164,21 @@ _warn_if_deb_stale() {
   done
   if [ -n "$newest_ts" ] && [ "$newest_ts" -gt "$deb_ts" ] 2>/dev/null; then
     local age_days=$(( (newest_ts - deb_ts) / 86400 ))
-    warn "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
-         "source commit touching the bundle inputs, so it may be missing a landed fix." \
-         "Rebuild (bin/release-local.sh for a full .deb, or bin/build-desktop-sidecar.sh +" \
-         "RIG_SERVE_HOTPATCH for a fast live re-verify) or pass an explicit --deb=PATH." \
-         "(WI-1334/Brief-8, 2026-07-02.)"
+    if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
+      warn "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
+           "source commit touching the bundle inputs, so it may be missing a landed fix." \
+           "Continuing anyway (PCUSP_ALLOW_STALE_DEB=1 — deliberate regression-test override)." \
+           "(WI-1334/Brief-8, 2026-07-02; EI-18160721229588594.)"
+    else
+      die "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
+          "source commit touching the bundle inputs, so it may be missing a landed fix." \
+          "REFUSING to silently continue on a possibly-stale artifact (EI-18160721229588594 —" \
+          "a WARN alone was reliably missed in a long boot log, burning full soak runs on the" \
+          "wrong bits). Rebuild (bin/release-local.sh for a full .deb, or" \
+          "bin/build-desktop-sidecar.sh + RIG_SERVE_HOTPATCH for a fast live re-verify), pass an" \
+          "explicit --deb=PATH to use '$deb' anyway, or set PCUSP_ALLOW_STALE_DEB=1 for a" \
+          "deliberate regression test against an older build. (WI-1334/Brief-8, 2026-07-02.)"
+    fi
   fi
 }
 
