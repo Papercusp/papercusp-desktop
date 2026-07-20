@@ -56,16 +56,38 @@ scn_replication_soak() {
     # .size). This assert makes that class self-announcing instead of needing a
     # by-hand serve.log autopsy. Grace(180s) < SLA-wait accumulation across both
     # directions, so by scenario exit the line must exist on a true stall.
-    local frame hit=0
+    local frame hit=0 oslug mslug
+    oslug="${FRAME_MEMBER_SLUG[a]:-}"; mslug="${FRAME_MEMBER_SLUG[b]:-}"
+    # WI-5665/WI-5639 follow-up (bug-drain-200k, 2026-07-20): this pin used to
+    # grep for ANY "replication_stalled" line anywhere in serve.log, unscoped
+    # to harness — on a shared matrix pass, earlier scenarios (content_bidir
+    # etc.) federate a DIFFERENT fixed harness (e.g. hello-world/hello-world-
+    # pot) whose own transient stalls make this assert a false PASS even when
+    # the detector never fired for the harness THIS soak's F-RLSOAK probes
+    # actually replicate through (oslug/mslug). Verified live on run
+    # stamp=140846 (WI-5665, cycles 1-2 both-direction SLA miss, cpu.pressure
+    # all-zero on both frames): frame 'a's only connected_never_replicated/
+    # no_replicator events in the ENTIRE serve.log were for
+    # harness=hello-world/hello-world-pot, all logged BEFORE
+    # replication_soak's own cycles began (leftover from
+    # restart_durability/reconnect_catchup) — i.e. this pin was passing on
+    # coincidental unrelated noise, not real evidence the detector saw the
+    # soak's own stall. Scoping to the soak's own harness slugs makes the pin
+    # mean what it claims to mean. Falls back to the old unscoped check only
+    # if oslug/mslug somehow never resolved (shouldn't happen post-join).
     for frame in a b; do
-      if drv_exec "$frame" <<<'grep -q "replication-liveness.*replication_stalled" /home/pcusp/serve.log' 2>/dev/null; then
+      if [ -n "$oslug$mslug" ]; then
+        if drv_exec "$frame" <<<"grep -qE 'replication_stalled.*harness=(${oslug}|${mslug}) ' /home/pcusp/serve.log" 2>/dev/null; then
+          hit=1
+        fi
+      elif drv_exec "$frame" <<<'grep -q "replication-liveness.*replication_stalled" /home/pcusp/serve.log' 2>/dev/null; then
         hit=1
       fi
     done
     if [ "$hit" = 1 ]; then
-      echo "      ✓ detector fire-path pin: replication_stalled present in serve.log (WI-1840 detector saw the stall)"
+      echo "      ✓ detector fire-path pin: replication_stalled present in serve.log for this soak's own harness (WI-1840 detector saw the stall)"
     else
-      echo "      ✗ DETECTOR REGRESSION: soak failed its SLA but NO replication_stalled line on either frame — the WI-1840 detector was blind to a real stall (check lastSwarmConnections via substrate:getReplicationLiveness RPC)"
+      echo "      ✗ DETECTOR REGRESSION: soak failed its SLA but NO replication_stalled line for this soak's own harness (oslug=$oslug mslug=$mslug) on either frame — the WI-1840 detector was blind to a real stall (check lastSwarmConnections via substrate:getReplicationLiveness RPC)"
     fi
   fi
   return "$rc"

@@ -1279,7 +1279,16 @@ case "$_pgv_os" in
     pgv_lib_ext="so"
     ;;
   darwin)
-    if command -v brew >/dev/null 2>&1; then
+    pgv_lib_ext="dylib"
+    if [[ "$CROSS_BUILD" == "1" ]]; then
+      # brew is absent on the linux cross host — fetch the darwin bottle from ghcr.
+      _pgv_ver="$(curl -fsSL https://formulae.brew.sh/api/formula/pgvector.json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
+      [[ -n "$_pgv_ver" ]] || { echo "ERROR: could not resolve pgvector stable version from the brew formula api"; exit 1; }
+      echo "  → cross: fetching pgvector ${_pgv_ver} darwin-${TARGET_ARCH} bottle from ghcr (no brew on ${_host_os})"
+      _pgv_bottle="$(fetch_pgvector_darwin_bottle "$_pgv_ver" "$TARGET_ARCH")" || { echo "ERROR: pgvector darwin bottle fetch failed (see above)"; exit 1; }
+      pgv_lib_src="$_pgv_bottle/vector.dylib"
+      pgv_ext_src="$_pgv_bottle/extension"
+    elif command -v brew >/dev/null 2>&1; then
       brew_prefix="$(brew --prefix 2>/dev/null)"
       pgv_lib_src="$brew_prefix/lib/postgresql/vector.dylib"
       pgv_ext_src="$brew_prefix/share/postgresql@18/extension"
@@ -1293,7 +1302,6 @@ case "$_pgv_os" in
         pgv_lib_src="$pgv_prefix/lib/postgresql@18/vector.dylib"
         pgv_ext_src="$pgv_prefix/share/postgresql@18/extension"
       fi
-      pgv_lib_ext="dylib"
     fi
     ;;
   windows)
