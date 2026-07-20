@@ -54,6 +54,42 @@ if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   exit 1
 fi
 
+# ── WI-5651: cross-target sidecar (bake on Linux for mac/windows, retire the VMs) ─
+# The sidecar's JS (serve.mjs, spa/, db-sql/) is platform-INDEPENDENT — only its
+# BINARY payload differs per OS/arch: the vendored `node`, gh/zellij/pui, the
+# embedded-postgres binaries, pgvector, and the native .node addons (node-pty,
+# sharp, the bare/holepunch stack, onnxruntime-node). Historically this script
+# built ONLY for its own host ($(uname)), so a mac/windows bundle had to be
+# produced ON a mac/windows host (the fragile QEMU build VMs). WI-5651 retires
+# those VMs by CROSS-baking every leg on this Linux box.
+#   TARGET_OS   = linux | darwin | windows   (default: this host)
+#   TARGET_ARCH = x64 | arm64                 (default: this host)
+# Both DEFAULT to the host, so an UN-set invocation is byte-for-byte the same
+# build as before — every existing linux/native caller is unchanged. The value
+# flows into: target_os/target_arch (external-binary section), the native-addon
+# prune (keeps the TARGET's prebuilds) + fetch (pulls the TARGET's per-platform
+# optional pkgs npm won't install cross), embedded-postgres, and pgvector.
+_host_os=""
+case "$(uname -s)" in
+  Linux*)               _host_os="linux" ;;
+  Darwin*)              _host_os="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) _host_os="windows" ;;
+  *)                    _host_os="$(uname -s)" ;;
+esac
+_host_arch=""
+case "$(uname -m)" in
+  x86_64|amd64)  _host_arch="x64" ;;
+  arm64|aarch64) _host_arch="arm64" ;;
+  *)             _host_arch="$(uname -m)" ;;
+esac
+TARGET_OS="${TARGET_OS:-$_host_os}"
+TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"
+CROSS_BUILD=0
+if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
+  CROSS_BUILD=1
+  echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
+fi
+
 # WI-2644: the packaged sidecar's serve.mjs runs standalone (no `npm run`
 # context), so process.env.npm_package_version is unset at runtime and
 # build-info.ts / serve.ts fall back to their (differing) hardcoded defaults
