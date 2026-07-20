@@ -16,12 +16,10 @@ import {
   type Channel,
   type TargetDriver,
   type TauriReleaseConfig,
-  type VmConfig,
   collectArtifacts,
   defaultClassifyArtifact,
   linuxArm64Driver,
   linuxX86Driver,
-  makeVmBuildDriver,
   registerTargetDriver,
 } from '../../libs/generic/tauri-release-kit/src/index.js';
 
@@ -59,17 +57,6 @@ function scriptDelegatingDriver(
         cfg.classifyArtifact ?? defaultClassifyArtifact,
       );
     },
-  };
-}
-
-/** Mac VM frame from env (defaults match mac-vm-build.sh's header). */
-function macVm(): VmConfig {
-  return {
-    host: process.env.MAC_VM_HOST ?? '127.0.0.1',
-    port: Number(process.env.MAC_VM_PORT ?? '2222'),
-    user: process.env.MAC_VM_USER ?? 'aviweiss',
-    identityFile: process.env.MAC_VM_KEY ?? resolve(home, '.ssh/papercup-vm-mac'),
-    buildDir: process.env.MAC_VM_BUILD_DIR ?? 'papercup-build-mac/papercup/papercusp-desktop',
   };
 }
 
