@@ -267,8 +267,12 @@ for role in $ROLES; do
 
   # Assert the release host was actually baked (the 0.0.8 defect: an empty host
   # compiles fine and the updater reads it as "up to date" forever).
+  # grep the binary directly (-a) rather than `strings … | grep -q`: under
+  # `set -o pipefail`, grep -q exits on first match and SIGPIPEs strings (141),
+  # which pipefail then propagates as a spurious failure whenever the host IS
+  # present — the exact inversion of what the guard is checking.
   if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" ]]; then
-    strings -a "$EXE" | grep -qF "$PAPERCUSP_RELEASE_HOST" \
+    grep -aqF "$PAPERCUSP_RELEASE_HOST" "$EXE" \
       || fail "[$role] PAPERCUSP_RELEASE_HOST='$PAPERCUSP_RELEASE_HOST' is NOT baked into the exe — cargo cached a stale/empty host. Clean the crate and rebuild."
   fi
 
