@@ -632,12 +632,29 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
+  PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
 EOF
 }
+# WI-5631 (2nd cause, found by LIVE verification — the RIG_HOME_HARNESS_SLUG fix alone
+# cut the "EI-13285 id collision" storm ~99% (8068→58 ops in one replication_soak run)
+# but did NOT fully eliminate it): the residual leak is bootstrap-papercusp-hive.ts's
+# clone-on-first-boot dogfood auto-join. Its THIRD trigger path
+# (hive-directory-boot.ts's maybeTriggerCanonicalJoinOnIngest) is UNGATED — it fires the
+# instant this frame overhears the REAL production papercusp hive's announce on the
+# shared GLOBAL DIRECTORY topic (which a BYO rig frame on the public DHT, using a real
+# papercupai/aviynw GH identity, routinely does) and clones/joins it, registering a
+# local harness_slug='papercusp' project independent of PAPERCUSP_POT_HOME_SLUG — that
+# project then gets its OWN engineer-issues projection whose own-slug fast path
+# (member-content-guard.ts decideMemberContentOp) applies every real papercusp op
+# unconditionally, same as before the home-harness-slug fix. WI-1423 already documented
+# + fixed this EXACT class for other test-boot paths (see gate-sidecar-boots.sh) via the
+# hard, flag-independent `PAPERCUSP_DISABLE_DOGFOOD_HIVE=1` kill-switch
+# (bootstrap-papercusp-hive.ts's dogfoodHiveDisabled()) — it was just never wired into
+# this rig launch path. Set on BOTH launch env blocks above.
 # EI-16524: PAPERCUSP_DESKTOP=1 (set above, for faithful desktop-app parity) makes
 # host-bootstrap.ts's bg-host DEFAULT-ON provision the env-switcher operator siblings
 # (prod:3070/staging:3170/release/…, WI-3285) ~20s after boot — a real-desktop
@@ -725,6 +742,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
+  PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
