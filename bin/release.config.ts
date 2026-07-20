@@ -120,7 +120,6 @@ export function makePapercuspConfig(opts: {
       keyPath: resolve(home, '.papercusp/signing/papercusp.key'),
       passwordEnv: 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD',
     },
-    vm: { 'macos-universal': macVm() },
     buildSidecar: async ({ root, ports }) => {
       const r = await ports.exec.run('bash', [resolve(root, 'bin/build-desktop-sidecar.sh')], {
         cwd: root,
