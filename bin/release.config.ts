@@ -32,9 +32,10 @@ const home = process.env.HOME ?? '';
 
 /**
  * A target driver that DELEGATES to an existing host-side script, then collects
- * the artifacts it produced. Used for Windows (build-windows-on-vm.sh is itself
- * the host-side pack→ship→build→collect orchestrator), so we keep that proven
- * path and just fold its output into the kit's release flow.
+ * the artifacts it produced. Used for Windows (build-windows-cross.sh) and Mac
+ * (build-mac-cross.sh) — each is itself the host-side build→package orchestrator
+ * (cross-compiled natively on this Linux box, no QEMU build VM) — so we keep
+ * those proven paths and just fold their output into the kit's release flow.
  */
 function scriptDelegatingDriver(
   key: string,
