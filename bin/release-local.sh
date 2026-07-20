@@ -36,12 +36,17 @@
 #              mac-desktop-release-readiness-2026-06-11; updater
 #              artifacts are still minisign-signed). VM must be up
 #              (SSH :2222, see /internal/docs/build-system/vms).
-#   - Windows: WITH_WINDOWS=1 — drives the Windows 11 build VM over SSH
-#              (native MSVC NSIS build, keyless in-VM, .sig signed
-#              host-side — D-001/D-006 of
-#              windows-desktop-release-readiness-2026-06-11; no
-#              Authenticode yet, SmartScreen will warn). VM must be up
-#              (SSH :2223, ~/windows-vm/boot-windows.sh).
+#   - Windows: WITH_WINDOWS=1 — builds the Inno installer(s). Two producers:
+#              • DEFAULT: drives the Windows 11 build VM over SSH (native MSVC,
+#                keyless in-VM, .sig signed host-side — D-001/D-006 of
+#                windows-desktop-release-readiness-2026-06-11). VM must be up
+#                (SSH :2223, ~/windows-vm/boot-windows.sh).
+#              • PAPERCUSP_WINDOWS_CROSS=1: cross-compile NATIVELY on this Linux
+#                box (cargo-xwin + Inno-under-wine) — no VM (WI-5651). Same
+#                artifacts, no SSH/lease. Default OFF until a full cross cut
+#                validates, then the VM leg retires.
+#              Neither is Authenticode-signed unless an owner cert is supplied
+#              (WINDOWS_CERT_*), so SmartScreen will warn.
 #   - arm64  : cross-compile via WITH_ARM64=1 (needs `cross` set up)
 #
 # Which Tauri role(s) to build (WI-5085, desktop-build-speed-2026-07-16#P-006;
