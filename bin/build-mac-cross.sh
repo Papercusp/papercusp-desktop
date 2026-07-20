@@ -428,12 +428,24 @@ make_dmg() { # $1=app $2=productName
   "$DMG_TOOL" "$raw" "$dmg" >/dev/null 2>&1 || fail "dmg UDIF conversion failed for $name"
   rm -f "$raw"; rm -rf "$stage"
 
-  # Sign the dmg (ad-hoc/cert), then structurally verify the app + its binary
-  # actually landed inside the image.
-  local sargs=(); [[ -n "$MAC_CERT_P12" ]] && sargs+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
-  rcodesign sign "${sargs[@]}" "$dmg" >/dev/null 2>&1 || echo "    WARN: rcodesign could not sign the dmg (non-fatal)"
-  7z l "$dmg" 2>/dev/null | grep -qF "$name.app/Contents/MacOS/papercusp-desktop" \
+  # Structurally verify the app + its binary actually landed in the image BEFORE
+  # signing. Capture the listing to a var and grep THAT — NEVER `7z l | grep -q`:
+  # grep -q exits on first match and SIGPIPEs 7z (exit 141), which `set -o
+  # pipefail` then propagates as a spurious pack failure whenever 7z's enumeration
+  # outlives the match. That is real: the larger universal dmg failed here while
+  # the smaller x64 dmg raced clean (same class as build-windows-cross.sh's
+  # grep-vs-strings note).
+  local listing; listing="$(7z l "$dmg" 2>/dev/null || true)"
+  grep -qF "$name.app/Contents/MacOS/papercusp-desktop" <<<"$listing" \
     || fail "dmg $(basename "$dmg") does not contain $name.app/Contents/MacOS/papercusp-desktop — pack failed"
+
+  # Sign the dmg ONLY with a real cert. The current prod dmgs ship UNSIGNED, and
+  # the .app inside is already signed; rcodesign's ad-hoc dmg signature adds
+  # nothing for gatekeeper and is non-standard, so the ad-hoc path skips it.
+  if [[ -n "$MAC_CERT_P12" ]]; then
+    rcodesign sign --p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}" "$dmg" >/dev/null 2>&1 \
+      || echo "    WARN: rcodesign could not sign the dmg (non-fatal)"
+  fi
   echo "    ✓ $(basename "$dmg") ($(du -h "$dmg" | cut -f1))"
 }
 
