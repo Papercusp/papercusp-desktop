@@ -1178,6 +1178,52 @@ if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && win_found=1
   done
   [[ "$win_found" == "1" ]] || { echo "ERROR: WITH_WINDOWS=1 but no windows artifacts $([[ "$WIN_REUSE" == "1" ]] && echo "in the inno dir (reuse)" || echo "came back from the VM")"; exit 1; }
+  # WI-5600: the Windows Server DiskSpans — it bundles the dogfood source tree
+  # (source.tar.zst, staged by default) so the payload passes Inno's ~4GB single-
+  # exe ceiling and Inno emits a "…-setup.exe" stub + "…-setup-N.bin" disks.
+  # record-release-cli can't publish a bare spanned stub (isSpannedInstaller SKIPS
+  # it — recording the stub alone offers a download that can't install), so
+  # normalize the span into ONE ".zip" here: the single artifact upload-release.sh
+  # ships, the release page offers, and a tester unzips + runs. This is exactly the
+  # manual step that published 0.0.12's Windows Server, now automatic so the
+  # by-default Server build (WI-5600 reversal of WI-5559) publishes without hand
+  # surgery. GUARDED + fall-back-safe: any failure leaves the raw stub+slices in
+  # ARTIFACTS (record-release-cli then skips the stub exactly as before — no
+  # regression, just a manual publish). Scoped to a spanned SERVER set; a single-
+  # file Server (source-staging off) or the GUI installer is untouched.
+  _win_inno_dir="$ROOT/src-tauri/target/windows-vm/bundle/inno"
+  _win_srv_stub=""
+  for _f in "$_win_inno_dir"/*Server*_"$VERSION"_*-setup.exe; do
+    [[ -f "$_f" ]] && _win_srv_stub="$_f"
+  done
+  if [[ -n "$_win_srv_stub" ]]; then
+    _win_srv_base="${_win_srv_stub%.exe}"        # ".../…-setup"
+    shopt -s nullglob
+    _win_srv_slices=( "$_win_srv_base"-*.bin )   # ".../…-setup-1.bin", …
+    shopt -u nullglob
+    if (( ${#_win_srv_slices[@]} > 0 )); then    # spanned only when disks exist
+      _win_srv_zip="${_win_srv_base}.zip"        # ".../…-setup.zip"
+      if command -v zip >/dev/null 2>&1 \
+         && rm -f "$_win_srv_zip" \
+         && zip -0 -j "$_win_srv_zip" "$_win_srv_stub" "${_win_srv_slices[@]}" >/dev/null \
+         && [[ -s "$_win_srv_zip" ]]; then
+        # Swap: drop the raw stub + slices (+ any stale same-name zip already
+        # swept by the glob above) from ARTIFACTS, then add the one fresh zip.
+        _win_kept=()
+        for _a in "${ARTIFACTS[@]}"; do
+          [[ "$_a" == "$_win_srv_stub" || "$_a" == "$_win_srv_zip" ]] && continue
+          _drop=0
+          for _s in "${_win_srv_slices[@]}"; do [[ "$_a" == "$_s" ]] && { _drop=1; break; }; done
+          (( _drop )) && continue
+          _win_kept+=("$_a")
+        done
+        ARTIFACTS=( "${_win_kept[@]}" "$_win_srv_zip" )
+        echo "==> [win] spanned Server normalized → $(basename "$_win_srv_zip") ($(du -h "$_win_srv_zip" | cut -f1); stub + ${#_win_srv_slices[@]} slice(s)) — the single download the release page offers"
+      else
+        echo "WARNING: [win] could not zip the spanned Server set (zip missing or failed) — leaving the raw stub+slices; record-release-cli will SKIP the stub, so publish the Windows Server manually (WI-5600)" >&2
+      fi
+    fi
+  fi
 fi
 if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
