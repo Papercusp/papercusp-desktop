@@ -82,24 +82,19 @@ export function registerPapercuspDrivers(): void {
     ),
   );
 
-  // Mac: SSH into the darwin VM (build-in-place) and run mac-vm-build.sh there,
-  // then download the universal .dmg. Uses the kit's generic VM driver.
+  // Mac: cross-compiled natively on this Linux box (cargo-zigbuild per arch →
+  // llvm-lipo universal → hand-assembled .app → rcodesign → libdmg-hfsplus dmg)
+  // by bin/build-mac-cross.sh — the QEMU mac VM was retired as a BUILD leg
+  // (WI-5651). Mirrors the Windows cross path: the script does the whole build,
+  // the kit just collects its output (dmg/ + macos/). (The mac VM is left
+  // startable for on-device TESTING; it is no longer a release producer.)
   registerTargetDriver(
-    makeVmBuildDriver('macos-universal', (cfg) => {
-      const vm = cfg.vm?.['macos-universal'] ?? macVm();
-      const keyPrefix = `TAURI_SIGNING_PRIVATE_KEY=${cfg.signing.keyPath}`;
-      const remoteDmgDir = `${vm.buildDir}/src-tauri/target/universal-apple-darwin/release/bundle/dmg`;
-      return {
-        remoteBuildCommand: `${keyPrefix} bash ${vm.buildDir}/bin/mac-vm-build.sh`,
-        assertSuccess: (log) => /mac build done/.test(log),
-        listCommand: `ls -1 ${remoteDmgDir}`,
-        remoteBundlePath: (name) => `${remoteDmgDir}/${name}`,
-        collectDir: resolve(
-          cfg.root,
-          'src-tauri/target/universal-apple-darwin/release/bundle/dmg',
-        ),
-      };
-    }),
+    scriptDelegatingDriver(
+      'macos-universal',
+      'bin/build-mac-cross.sh',
+      'src-tauri/target/universal-apple-darwin/release/bundle',
+      ['dmg', 'macos'],
+    ),
   );
 }
 
