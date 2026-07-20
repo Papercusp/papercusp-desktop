@@ -2,11 +2,12 @@
  * Papercusp desktop release config for @papercusp/tauri-release-kit.
  *
  * ADDITIVE: this does NOT replace bin/release-local.sh. It is a parallel,
- * kit-driven path proven for Linux; Windows/Mac DELEGATE to the existing
- * battle-tested scripts (build-windows-on-vm.sh / mac-vm-build.sh) so the kit
- * adopts them rather than reimplementing them. Once Linux parity is signed off
- * (and the in-flight public release lands), release-local.sh can become a thin
- * wrapper over `bin/release.ts`.
+ * kit-driven path proven for Linux; Windows/Mac DELEGATE to the native
+ * cross-build scripts (build-windows-cross.sh / build-mac-cross.sh) so the kit
+ * adopts them rather than reimplementing them. Both QEMU build VMs were retired
+ * as build legs (WI-5651) — the cross scripts build on this Linux box. Once
+ * Linux parity is signed off (and the in-flight public release lands),
+ * release-local.sh can become a thin wrapper over `bin/release.ts`.
  *
  * Run via:  npx tsx bin/release.ts <version> <channel> [--plan]
  */
