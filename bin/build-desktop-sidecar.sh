@@ -1701,6 +1701,29 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
     echo "ERROR: bundled $tool is a script shim — refusing to ship it"
     exit 1
   fi
+  if [[ "$_cross_darwin" == "1" ]]; then
+    # WI-5651: can't exec a darwin Mach-O on this linux host — assert STRUCTURALLY
+    # instead: no keg/absolute dylib refs remain, every @executable_path ref
+    # resolves to a bundled file, and the Mach-O is ad-hoc signed (dyld SIGKILLs
+    # an unsigned/stale-signed binary on load).
+    _bad="$(llvm-otool-18 -L "$_final" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '@@|/opt/|/Library/|/usr/local/' || true)"
+    if [[ -n "$_bad" ]]; then
+      echo "ERROR: cross-vendored $tool still references keg/absolute dylib paths (would dangle on a clean Mac):"
+      echo "$_bad" | sed 's/^/    /'
+      exit 1
+    fi
+    while IFS= read -r _ref; do
+      [[ -n "$_ref" ]] || continue
+      _res="${_ref/@executable_path/$SIDECAR_DIR/bin}"
+      [[ -e "$_res" ]] || { echo "ERROR: cross-vendored $tool references a missing bundled lib: $_ref"; exit 1; }
+    done < <(llvm-otool-18 -L "$_final" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^@executable_path' || true)
+    if ! rcodesign print-signature-info "$_final" 2>/dev/null | grep -q 'CodeDirectory'; then
+      echo "ERROR: cross-vendored $tool is not ad-hoc signed (dyld would SIGKILL it on load)"
+      exit 1
+    fi
+    echo "  $tool probe: cross-darwin structural OK (no dangling refs, bundled libs resolve, signed)"
+    continue
+  fi
   if ! _probe_out="$("$_final" --version 2>&1)"; then
     echo "ERROR: bundled $tool fails --version probe; not loadable as installed:"
     echo "  $_probe_out"
@@ -1732,7 +1755,29 @@ fi
 # got `spawn kopia ENOENT` and every snapshot silently shipped without a
 # kopia backup — same masked-dependency class as the pg_wrapper bug above.
 # kopia is a single fully-static Go binary (Apache-2.0) — vendor it.
-if [[ -x "$SIDECAR_DIR/bin/kopia" ]] && "$SIDECAR_DIR/bin/kopia" --version >/dev/null 2>&1; then
+if [[ "$_cross_darwin" == "1" ]]; then
+  # WI-5651: fetch the DARWIN kopia (Go static binary — links only macOS system
+  # libs, so no dylib rewrite needed) matching the build host's kopia version. A
+  # copied linux kopia would be an ELF the mac can't exec → silently dump-less
+  # snapshots, and the host `--version` probe below CAN'T catch it (it runs the
+  # ELF on linux, where it passes). Just fetch, copy, ad-hoc sign.
+  _kopia_ver="$(kopia --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  [[ -n "$_kopia_ver" ]] || { echo "ERROR: could not determine build-host kopia version to match the darwin download"; exit 1; }
+  case "$TARGET_ARCH" in x64) _kopia_arch=x64 ;; arm64) _kopia_arch=arm64 ;; *) echo "ERROR: unsupported kopia target arch $TARGET_ARCH"; exit 1 ;; esac
+  _kopia_url="https://github.com/kopia/kopia/releases/download/v${_kopia_ver}/kopia-${_kopia_ver}-macOS-${_kopia_arch}.tar.gz"
+  echo "  → cross: fetching darwin kopia ${_kopia_ver} (${_kopia_arch}) from github releases"
+  _kopia_tmp="$(mktemp -d)"
+  curl -fsSL "$_kopia_url" -o "$_kopia_tmp/kopia.tgz" || { echo "ERROR: darwin kopia download failed: $_kopia_url"; rm -rf "$_kopia_tmp"; exit 1; }
+  tar -xzf "$_kopia_tmp/kopia.tgz" -C "$_kopia_tmp" || { echo "ERROR: darwin kopia extract failed"; rm -rf "$_kopia_tmp"; exit 1; }
+  _kopia_bin="$(find "$_kopia_tmp" -type f -name kopia | head -1)"
+  [[ -n "$_kopia_bin" ]] || { echo "ERROR: kopia binary not found in the darwin tarball"; rm -rf "$_kopia_tmp"; exit 1; }
+  cp -L "$_kopia_bin" "$SIDECAR_DIR/bin/kopia"
+  chmod 755 "$SIDECAR_DIR/bin/kopia"
+  rcodesign sign "$SIDECAR_DIR/bin/kopia" >/dev/null 2>&1 || { echo "ERROR: rcodesign ad-hoc sign failed for darwin kopia"; rm -rf "$_kopia_tmp"; exit 1; }
+  rm -rf "$_kopia_tmp"
+  echo "  kopia: cross-fetched darwin ${_kopia_ver} (${_kopia_arch}), ad-hoc signed"
+  echo "kopia: cross-fetch (darwin ${_kopia_ver} ${_kopia_arch} github release)" >> "$SOURCE_NOTE_FILE"
+elif [[ -x "$SIDECAR_DIR/bin/kopia" ]] && "$SIDECAR_DIR/bin/kopia" --version >/dev/null 2>&1; then
   echo "  kopia: already bundled ($("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1))"
 else
   _kopia_src="$(command -v kopia 2>/dev/null || true)"
