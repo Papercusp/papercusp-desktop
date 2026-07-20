@@ -1229,9 +1229,18 @@ if [[ -n "$_pg_otool" ]]; then
       | grep -oE '@loader_path/\.\./lib/[^ ]+\.dylib' | sed 's#.*/lib/##' | sort -u )"
     for _ref in $_pg_refs; do
       [[ -e "$_pg_native/lib/$_ref" ]] && continue
-      _pg_cand="$(ls "$_pg_native/lib/${_ref%.dylib}."*.dylib 2>/dev/null | head -1)"
-      [[ -n "$_pg_cand" ]] || continue
-      ln -sf "$(basename "$_pg_cand")" "$_pg_native/lib/$_ref" && _pg_made=$((_pg_made + 1))
+      # Versioned counterpart: libzstd.1.dylib → libzstd.1.<ver>.dylib. compgen -G
+      # so a ref with NO bundled counterpart (e.g. libcurl.4.dylib — OAuth-only,
+      # never dlopen'd) yields an EMPTY list and is SKIPPED. The prior
+      # `ls "…${_ref%.dylib}."*.dylib | head -1` aborted the ENTIRE sidecar build on
+      # such a ref: an unmatched glob makes `ls` exit 2, and under this script's
+      # `set -euo pipefail` the failing command-substitution assignment tripped
+      # errexit (exit 2, no error text) — invisible when the block is run
+      # interactively without errexit, caught only by a clean in-script rebuild.
+      _pg_cands=()
+      mapfile -t _pg_cands < <(compgen -G "$_pg_native/lib/${_ref%.dylib}.*.dylib" || true)
+      [[ ${#_pg_cands[@]} -gt 0 ]] || continue
+      ln -sf "$(basename "${_pg_cands[0]}")" "$_pg_native/lib/$_ref" && _pg_made=$((_pg_made + 1))
     done
     echo "  ✓ darwin PG dylib compat symlinks: ${_pg_made} restored in ${_pg_native#$SIDECAR_DIR/}/lib"
   done
