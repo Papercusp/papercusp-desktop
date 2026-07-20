@@ -405,23 +405,37 @@ make_dmg() { # $1=app $2=productName
   dd if=/dev/zero of="$raw" bs=1M count="$mb" status=none
   mkfs.hfsplus -v "$name" "$raw" >/dev/null 2>&1 || fail "mkfs.hfsplus failed for $name"
 
-  # Populate. Primary: sudo-free `hfsplus addall` (deterministic, userspace).
-  # NOTE: addall follows symlinks, so the /Applications drag-target symlink is
-  # NOT added here — a minor cosmetic gap (users drag the app to their own
-  # Applications). A passwordless-sudo box can opt into the mount path (which
-  # preserves the symlink) via PAPERCUSP_DMG_USE_MOUNT=1.
-  if [[ "${PAPERCUSP_DMG_USE_MOUNT:-0}" == "1" ]] && sudo -n true 2>/dev/null \
+  # Populate the image. PRIMARY: loop-mount + `cp -a` (root, via passwordless
+  # sudo). This is REQUIRED for a working install, not a nicety: the userspace
+  # `hfsplus addall` writes EVERY file mode 0644, so a dmg-installed app cannot
+  # exec its own binaries — "Permission denied", verified on macOS (WI-5651).
+  # cp -a preserves the exec bits AND the /Applications drag symlink, and is ~20x
+  # faster (kernel bulk writes: ~8s vs ~2.5min). FALLBACK (no sudo / no hfsplus
+  # module): `addall` + re-chmod every source executable (0644→0755), so the
+  # install still runs (minus the /Applications symlink). Force the fallback with
+  # PAPERCUSP_DMG_NO_MOUNT=1.
+  local populated=0
+  if [[ "${PAPERCUSP_DMG_NO_MOUNT:-0}" != "1" ]] && sudo -n true 2>/dev/null \
      && sudo -n modprobe hfsplus 2>/dev/null; then
     local mnt; mnt="$(mktemp -d)"
     if sudo -n mount -o loop,rw -t hfsplus "$raw" "$mnt" 2>/dev/null; then
-      sudo cp -a "$stage/." "$mnt/" && sudo ln -sf /Applications "$mnt/Applications"
-      sync; sudo umount "$mnt"; rmdir "$mnt" 2>/dev/null || true
-    else
-      rmdir "$mnt" 2>/dev/null || true
-      "$HFSPLUS_TOOL" "$raw" addall "$stage" >/dev/null 2>&1 || fail "hfsplus addall failed for $name"
+      if sudo cp -a "$stage/." "$mnt/" && sudo ln -sf /Applications "$mnt/Applications"; then
+        populated=1
+      fi
+      sync; sudo umount "$mnt" 2>/dev/null || true
     fi
-  else
+    rmdir "$mnt" 2>/dev/null || true
+  fi
+  if [[ "$populated" != "1" ]]; then
+    echo "    (dmg: loop-mount unavailable — addall + exec-perm repair; no /Applications symlink)"
     "$HFSPLUS_TOOL" "$raw" addall "$stage" >/dev/null 2>&1 || fail "hfsplus addall failed for $name"
+    # addall writes 0644 for everything — restore +x on the source's executables,
+    # or the installed app can't run its own binaries.
+    local relf
+    while IFS= read -r -d '' f; do
+      relf="${f#$stage/}"
+      "$HFSPLUS_TOOL" "$raw" chmod 0755 "/$relf" >/dev/null 2>&1 || true
+    done < <(find "$stage" -type f -perm -u+x -print0)
   fi
 
   rm -f "$dmg"
