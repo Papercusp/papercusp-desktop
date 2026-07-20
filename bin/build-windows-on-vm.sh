@@ -771,9 +771,10 @@ SCCACHE_PRELUDE="${SCCACHE_PRELUDE/"# __PAPERCUSP_SCCACHE_INVOKE__"/$_win_sccach
 # nothing to silently drop there.)
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
 _win_build_server=0
+_win_build_gui=0
 for _win_role in $PAPERCUSP_BUILD_ROLES; do
   case "$_win_role" in
-    gui) : ;;
+    gui) _win_build_gui=1 ;;
     server) _win_build_server=1 ;;
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$_win_role' — skipping" >&2 ;;
   esac
@@ -793,6 +794,7 @@ done
 # if fresh.
 if [[ "${PAPERCUSP_FAST_ITER:-0}" == "1" && "${PAPERCUSP_FAST_ITER_GUI_ONLY:-0}" == "1" ]]; then
   _win_build_server=0
+  _win_build_gui=1
 fi
 if [[ "$_win_build_server" != "1" ]]; then
   SERVER_BUILD_BLOCK='Write-Host "[build] GUI-only: skipping Papercusp Server bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp Server*" -ErrorAction SilentlyContinue'
