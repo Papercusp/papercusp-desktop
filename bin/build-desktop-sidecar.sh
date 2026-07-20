@@ -1206,6 +1206,37 @@ if [[ "$pg_bin_checked" -eq 0 ]]; then
   exit 1
 fi
 
+# ── WI-5651: restore the darwin dylib compat symlinks the cross-fetch dropped ──
+# The @embedded-postgres/darwin-<arch> server binaries (postgres/initdb/pg_ctl)
+# reference dylibs by their SHORT soname via @loader_path/../lib/<name>
+# (libzstd.1.dylib, liblz4.1.dylib, libz.1.dylib, libicui18n.dylib, …), but
+# native/lib ships only the FULLY-versioned files (libzstd.1.5.7.dylib, …). A
+# Homebrew keg carries the short→versioned compat symlinks; the npm-pack→extract
+# cross-fetch above drops them. dyld then aborts the instant postgres is exec'd
+# on macOS ("Library not loaded: @loader_path/../lib/libzstd.1.dylib") — a
+# failure the linux-side verifier is blind to (it cannot run a Mach-O; caught
+# only by executing on the mac VM, WI-5651). Re-create every referenced-but-
+# missing name as a symlink to its versioned counterpart. Idempotent (ln -sf),
+# a no-op where the package already ships the link. (libcurl.4.dylib — referenced
+# only by libpq-oauth-18.dylib, the OAuth plugin embedded PG never dlopens under
+# local/trust auth — has no bundled counterpart and is correctly skipped.)
+_pg_otool="$(command -v llvm-otool-18 2>/dev/null || command -v otool 2>/dev/null || true)"
+if [[ -n "$_pg_otool" ]]; then
+  for _pg_native in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/darwin-*/native; do
+    [[ -d "$_pg_native/lib" ]] || continue
+    _pg_made=0
+    _pg_refs="$( { for _f in "$_pg_native/bin/"* "$_pg_native/lib/"*.dylib; do [[ -f "$_f" ]] && "$_pg_otool" -L "$_f" 2>/dev/null; done; } \
+      | grep -oE '@loader_path/\.\./lib/[^ ]+\.dylib' | sed 's#.*/lib/##' | sort -u )"
+    for _ref in $_pg_refs; do
+      [[ -e "$_pg_native/lib/$_ref" ]] && continue
+      _pg_cand="$(ls "$_pg_native/lib/${_ref%.dylib}."*.dylib 2>/dev/null | head -1)"
+      [[ -n "$_pg_cand" ]] || continue
+      ln -sf "$(basename "$_pg_cand")" "$_pg_native/lib/$_ref" && _pg_made=$((_pg_made + 1))
+    done
+    echo "  ✓ darwin PG dylib compat symlinks: ${_pg_made} restored in ${_pg_native#$SIDECAR_DIR/}/lib"
+  done
+fi
+
 # Bundle pgvector into the embedded-postgres binary tree, per platform.
 # Without this, mem0's vector store falls back to in-process memory
 # (volatile across restarts). The embedded-postgres binaries from zonky
