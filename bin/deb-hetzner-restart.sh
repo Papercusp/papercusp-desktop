@@ -69,6 +69,39 @@ _rd_remote_loadavg() {
   [ -n "$out" ] && echo "$out" || echo "?"
 }
 
+# _rd_remote_cpu_pressure <inst> — echo <inst>'s OWN cgroup-v2 CPU PSI
+# (/sys/fs/cgroup/cpu.pressure "some"/"full" avg10/avg60/avg300/total), best-effort
+# ("?" on ssh/frame failure or a non-PSI kernel, never fatal).
+#
+# WI-5639 follow-up (bug-drain-200k, 2026-07-20): _rd_remote_loadavg above was
+# introduced as the WI-5481 discriminator for "was the frame itself starved", but
+# /proc/loadavg is NOT cgroup/PID-namespace-scoped in mainline Linux — reading it
+# from INSIDE a container (local-matrix.sh's docker frames, which share the host
+# kernel) surfaces the HOST-WIDE load average, not the frame's own reserved-core
+# pressure, regardless of whether WI-5319/D-003's cpuset exclusivity actually
+# succeeded for this run. Verified live on the shared dev box hosting this rig
+# (2026-07-20): host /proc/loadavg read '39.13 36.77 35.74 26/41175 …' while a
+# concurrently-running unrelated container's own cpu.pressure read 'avg60=0.00
+# total=161593' against the host's 'avg60=0.19 total=49703324973' — three orders
+# of magnitude apart, proving the two numbers measure entirely different things.
+# This is very likely why WI-5481/WI-5634/WI-5639's "was cycle 2 A→B starved"
+# question stayed open across three investigations despite loadavg readings of
+# 86.03 at the failure: that number cannot distinguish "this frame's own 8
+# reserved cores were pressured" from "the shared host's other ~100 unrelated
+# containers were busy" — it is the same number either way. cgroup v2 CPU
+# pressure (PSI), by contrast, IS genuinely cgroup-scoped (confirmed via the same
+# live comparison above) and reads correctly from inside a container whose
+# cgroup namespace exposes only its own delegated subtree — exactly what
+# WI-5319/D-003's cpuset.cpus.exclusive partition sets up. A nonzero avg10/avg60
+# here on the failing leg is the first REAL evidence of frame-local CPU
+# starvation; an all-zero reading conclusively RULES IT OUT (unlike a loadavg
+# reading, which can never rule it in or out).
+_rd_remote_cpu_pressure() {
+  local inst="$1" out
+  out="$(drv_exec "$inst" <<<'cat /sys/fs/cgroup/cpu.pressure 2>/dev/null | tr "\n" ";"' 2>/dev/null | tr -d '\r')"
+  [ -n "$out" ] && echo "$out" || echo "?"
+}
+
 # _rd_row_count <inst> <feature_id> — echo the number of PG rows for this feature_id
 # on <inst> (across all slugs). The no-duplicate-rows census probe.
 _rd_row_count() {

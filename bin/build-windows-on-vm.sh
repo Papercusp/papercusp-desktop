@@ -1064,10 +1064,19 @@ fi
 # built role must both report EXIT=0 (with --no-bundle there is no in-VM
 # updater signing, so the old "expected keyless exit 1" allowance is gone —
 # any nonzero step is a real failure).
-grep -q '\[build\] GUI EXIT=0' /tmp/vm-release-build.log \
-  || fail "GUI compile failed — see /tmp/vm-release-build.log"
-grep -q '\[build\] ISCC GUI EXIT=0' /tmp/vm-release-build.log \
-  || fail "GUI Inno packaging failed (ISCC nonzero/missing — winget install --id JRSoftware.InnoSetup on the VM if absent) — see /tmp/vm-release-build.log"
+# Gate the GUI assertions on whether the GUI was actually built (P-011): a
+# server-only cut (_win_build_gui=0) SKIPS the GUI build+bundle on the VM (it
+# logs "Server-only: skipping Papercusp GUI build+bundle" and emits no
+# "[build] GUI EXIT=0"), so asserting a GUI compile result here would FALSE-FAIL
+# the whole leg AFTER the Server built but BEFORE collection — stranding a
+# perfectly-good Server installer on the VM (WI-5600). Only assert a role that
+# was built, mirroring the Server assertions' own gate and the build-block gate.
+if [[ "$_win_build_gui" == "1" ]]; then
+  grep -q '\[build\] GUI EXIT=0' /tmp/vm-release-build.log \
+    || fail "GUI compile failed — see /tmp/vm-release-build.log"
+  grep -q '\[build\] ISCC GUI EXIT=0' /tmp/vm-release-build.log \
+    || fail "GUI Inno packaging failed (ISCC nonzero/missing — winget install --id JRSoftware.InnoSetup on the VM if absent) — see /tmp/vm-release-build.log"
+fi
 if ! grep -q 'GUI-only' /tmp/vm-release-build.log; then
   grep -q '\[build\] Server EXIT=0' /tmp/vm-release-build.log \
     || fail "Server compile failed — see /tmp/vm-release-build.log"
