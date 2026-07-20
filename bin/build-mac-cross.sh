@@ -209,7 +209,12 @@ file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -q 'Mach-O' \
 echo "===== mac cross-build start $(date) ====="
 echo "  roles=$ROLES  target=$MAC_BUILD_TARGET  version=$VERSION  sha=${PAPERCUSP_BUILD_SHA:-<none>}"
 echo "  sidecar=$DARWIN_SIDECAR  out=$OUT_BUNDLE"
-echo "  release-host=${PAPERCUSP_RELEASE_HOST:+<set>}${PAPERCUSP_RELEASE_HOST:-<unset — auto-update disabled>}"
+if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" ]]; then
+  _rh_auth="${PAPERCUSP_RELEASE_HOST#*://}"; _rh_auth="${_rh_auth%%/*}"
+  echo "  release-host=<set: $_rh_auth> (path redacted — it is the shared secret)"
+else
+  echo "  release-host=<unset — auto-update disabled>"
+fi
 
 # ── Info.plist generator: Tauri's computed CFBundle* keys, then src-tauri/
 # Info.plist merged ON TOP (mic + ATS). plistlib keeps it byte-valid. ───────────
