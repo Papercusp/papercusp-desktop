@@ -21,6 +21,15 @@ _WINDOWS_BUILD_LEASE_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." &
 _WINDOWS_BUILD_LEASE_MCP_CALL="${PAPERCUSP_WINDOWS_LEASE_MCP_CALL:-$_WINDOWS_BUILD_LEASE_REPO_ROOT/scripts/mcp-call.mjs}"
 _WINDOWS_BUILD_LEASE_TTL_SEC="${PAPERCUSP_WINDOWS_LEASE_TTL_SEC:-900}"
 _WINDOWS_BUILD_LEASE_HEARTBEAT_SEC="${PAPERCUSP_WINDOWS_LEASE_HEARTBEAT_SEC:-60}"
+# WI-5600 (2026-07-20): a SINGLE transient mcp-call/network blip on one
+# heartbeat tick used to nuke an ~85min build outright. These bound the
+# retry-before-terminate behavior: MAX_RETRIES/RETRY_DELAY govern in-tick
+# short-backoff retries for a momentary blip; the overall stale-writer
+# terminate decision (below, in _windows_build_lease_start_heartbeat) is
+# additionally keyed on a budget derived from the lease TTL, so only a
+# SUSTAINED renewal failure — not one flaky call — kills the build.
+_WINDOWS_BUILD_LEASE_HEARTBEAT_MAX_RETRIES="${PAPERCUSP_WINDOWS_LEASE_HEARTBEAT_MAX_RETRIES:-3}"
+_WINDOWS_BUILD_LEASE_HEARTBEAT_RETRY_DELAY_SEC="${PAPERCUSP_WINDOWS_LEASE_HEARTBEAT_RETRY_DELAY_SEC:-5}"
 
 PAPERCUSP_WINDOWS_BUILD_LEASE_HELD=0
 PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID=""
@@ -83,20 +92,54 @@ _windows_build_lease_release_raw() {
   _windows_build_lease_mcp locks:release_resource "$args"
 }
 
+_windows_build_lease_heartbeat_once() {
+  # One heartbeat renewal, with bounded IN-TICK retries (short backoff) so a
+  # single transient mcp-call/network blip doesn't immediately read as lease
+  # loss. Returns 0 if the lease was extended, 1 if every attempt this tick
+  # failed. Logs each failed attempt to stderr (last failure's detail included).
+  local local_args heartbeat_out attempt=1
+  local max_retries="$_WINDOWS_BUILD_LEASE_HEARTBEAT_MAX_RETRIES"
+  local retry_delay="$_WINDOWS_BUILD_LEASE_HEARTBEAT_RETRY_DELAY_SEC"
+  local_args="$(node -e 'process.stdout.write(JSON.stringify({lock_id:process.argv[1],ttl_sec:Number(process.argv[2])}))' \
+    "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" "$_WINDOWS_BUILD_LEASE_TTL_SEC")"
+  while (( attempt <= max_retries )); do
+    if heartbeat_out="$(_windows_build_lease_mcp locks:heartbeat_resource "$local_args" 2>&1)" \
+      && [[ "$(printf '%s' "$heartbeat_out" | _windows_build_heartbeat_extended "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" 2>/dev/null || true)" == "true" ]]; then
+      return 0
+    fi
+    echo "WARN: Windows VM build lease heartbeat attempt $attempt/$max_retries failed (transient?): $heartbeat_out" >&2
+    attempt=$(( attempt + 1 ))
+    (( attempt <= max_retries )) && sleep "$retry_delay"
+  done
+  return 1
+}
+
 _windows_build_lease_start_heartbeat() {
   local parent_pid="$$"
-  local local_args heartbeat_out
   (
     trap - INT TERM
+    local last_success_epoch now elapsed budget_sec
+    last_success_epoch=$(date +%s)
+    # Keep retrying across ticks until roughly HALF the lease TTL has elapsed
+    # with NO successful renewal — the other half is buffer against the
+    # actual server-side expiry while we terminate + drain. A lone failed
+    # tick (WI-5600: one transient "fetch failed") never trips this; only a
+    # SUSTAINED renewal failure does.
+    budget_sec=$(( _WINDOWS_BUILD_LEASE_TTL_SEC / 2 ))
+    (( budget_sec < 1 )) && budget_sec=1
     while sleep "$_WINDOWS_BUILD_LEASE_HEARTBEAT_SEC"; do
-      local_args="$(node -e 'process.stdout.write(JSON.stringify({lock_id:process.argv[1],ttl_sec:Number(process.argv[2])}))' \
-        "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" "$_WINDOWS_BUILD_LEASE_TTL_SEC")"
-      if ! heartbeat_out="$(_windows_build_lease_mcp locks:heartbeat_resource "$local_args" 2>&1)" \
-        || [[ "$(printf '%s' "$heartbeat_out" | _windows_build_heartbeat_extended "$PAPERCUSP_WINDOWS_BUILD_LEASE_LOCK_ID" 2>/dev/null || true)" != "true" ]]; then
-        echo "ERROR: Windows VM build lease heartbeat failed; terminating before this process can become a stale writer: $heartbeat_out" >&2
+      if _windows_build_lease_heartbeat_once; then
+        last_success_epoch=$(date +%s)
+        continue
+      fi
+      now=$(date +%s)
+      elapsed=$(( now - last_success_epoch ))
+      if (( elapsed >= budget_sec )); then
+        echo "ERROR: Windows VM build lease heartbeat has failed continuously for ${elapsed}s (>= ${budget_sec}s retry budget, half of the ${_WINDOWS_BUILD_LEASE_TTL_SEC}s TTL) — lease is genuinely at risk of loss; terminating before this process can become a stale writer." >&2
         kill -TERM "$parent_pid" 2>/dev/null || true
         exit 1
       fi
+      echo "WARN: Windows VM build lease heartbeat tick failed (failed continuously for ${elapsed}s of a ${budget_sec}s retry budget) — will keep retrying next tick." >&2
     done
   ) &
   PAPERCUSP_WINDOWS_BUILD_LEASE_HEARTBEAT_PID="$!"

@@ -724,7 +724,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
-  ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
+  ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &

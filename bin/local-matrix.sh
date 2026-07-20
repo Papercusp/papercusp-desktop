@@ -77,6 +77,20 @@ else
   STATE_FILE="${PCUSP_LOCAL_RIG_STATE:-/tmp/$NET.state}"
   RIG_LOCK_DEFAULT="/tmp/$NET.lock"
 fi
+
+# WI-5631: pin the rig frames' home-harness slug to a synthetic, non-'papercusp' value.
+# Left unset, deb-hetzner-rig.sh's RIG_HOME_HARNESS_SLUG stays empty, so every frame's
+# operatorHomeHarnessSlug() falls through to LEGACY_DEFAULT_HOME_HARNESS='papercusp' —
+# which then matches the `harness_slug` on federated ops carrying the REAL production
+# papercusp home-harness backlog, so the engineer-issues projection's own-slug fast path
+# (decideMemberContentOp: rowHarnessSlug === opts.harnessSlug → unconditional apply, no
+# membership check) admits + writes that entire real backlog into the frame — thousands
+# of "EI-13285 id collision" ops/run that starve the frame's event loop and block a clean
+# replication_soak pass. One value for the whole rig run is enough (RIG_WORKSPACE_ID is
+# likewise a single per-run value shared by every frame) — it only needs to NOT resolve
+# to a real registered project. Override with RIG_HOME_HARNESS_SLUG if a scenario
+# deliberately wants a specific (non-'papercusp') slug.
+RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-${NET}-home}"
 IMAGE_TAG=pcusp-local-frame:ubuntu24
 SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
 
@@ -426,10 +440,11 @@ ARGS=()
 [ -n "$ONLY" ] && ARGS+=("--only=$ONLY")
 [ "$KEEP_UP" = 1 ] && ARGS+=("--keep-up")
 FRAME_IPS="$IP_A $IP_B"; [ "$FRAMES" = 3 ] && FRAME_IPS="$IP_A $IP_B $IP_C"
-log "exec deb-hetzner-matrix.sh ${ARGS[*]:-} (BYO frames: $FRAME_IPS)"
+log "exec deb-hetzner-matrix.sh ${ARGS[*]:-} (BYO frames: $FRAME_IPS, home-harness-slug: $RIG_HOME_HARNESS_SLUG)"
 RIG_FRAME_IPS="$FRAME_IPS" \
 RIG_DHT_BOOTSTRAP="$BOOTSTRAP" \
 RIG_SSH_IDENTITY="$SSH_KEY" \
+RIG_HOME_HARNESS_SLUG="$RIG_HOME_HARNESS_SLUG" \
 bash "$DESKTOP_DIR/bin/deb-hetzner-matrix.sh" ${ARGS[@]+"${ARGS[@]}"}
 rc=$?
 [ "$KEEP_UP" = 1 ] && log "--keep-up: frames + DHT left running (re-enter with --reuse; destroy with --teardown)"
