@@ -751,7 +751,12 @@ PS1BLOCK
 )
 # WI-5085 (desktop-build-speed-2026-07-16#P-006): which role(s) to build, same
 # knob as the mac (mac-vm-build.sh) and linux (release-local.sh /
-# build-linux-local.sh) legs. Defaults to GUI-ONLY — see the comment below.
+# build-linux-local.sh) legs. UNLIKE those two, Windows KEEPS the GUI-ONLY
+# default deliberately — see the comment below. (D-004 of the same plan
+# restored the mac/linux default to BOTH roles after gui-only silently
+# dropped their *published* Server product, EI-18099496479921046; Windows
+# Server isn't a published product at all today — see below — so there is
+# nothing to silently drop there.)
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
 _win_build_server=0
 for _win_role in $PAPERCUSP_BUILD_ROLES; do

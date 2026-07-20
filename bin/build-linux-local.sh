@@ -57,6 +57,15 @@ load_release_host
 source "$HERE/lib/sccache.sh"
 setup_sccache_env "30G"
 
+# EI-18105311090526787: defensive parity with mac-vm-build.sh — this dev box
+# happens to have a system `ld.lld` on PATH already (the `lld` apt package),
+# but the `-fuse-ld=lld` config (../.cargo/config.toml) applies here too, and a
+# cold build on a box WITHOUT that system package would hit the same cc-crate
+# build-script linker failure the mac VM did.
+# shellcheck source=lib/lld-path.sh
+source "$HERE/lib/lld-path.sh"
+setup_lld_path
+
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"

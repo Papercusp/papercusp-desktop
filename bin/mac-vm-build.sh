@@ -77,6 +77,15 @@ fi
 source "$HERE/lib/sccache.sh"
 setup_sccache_env "10G"
 
+# EI-18105311090526787: a COLD build (empty target dir) makes every cc-crate
+# build script (proc-macro2, serde_core, quote, libc, …) link via
+# cc→clang→`-fuse-ld=lld` (../.cargo/config.toml), which needs ld64.lld
+# resolvable ON PATH — not just at rustc's own sysroot-relative link step.
+# Must run before the FIRST cargo build below (pui/apps/tui).
+# shellcheck source=lib/lld-path.sh
+source "$HERE/lib/lld-path.sh"
+setup_lld_path
+
 # nvm Node 22 for the build (the *bundled* runtime is vendored separately).
 if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   . "$HOME/.nvm/nvm.sh"
