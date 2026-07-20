@@ -265,6 +265,48 @@ if [[ "$TARGET_OS_N" == "darwin" ]]; then
       fi
     done
     [[ "$_keg_bad" == 0 ]] && ok "no bundled Mach-O references /opt/homebrew, /usr/local, or @@HOMEBREW tokens (via $_otool)"
+
+    # ── dangling @loader_path linkage (WI-5651) ──────────────────────────────
+    # A darwin Mach-O that references @loader_path/../lib/<name> which does NOT
+    # resolve to a bundled file makes dyld ABORT the instant the app exec's it
+    # ("Library not loaded: @loader_path/../lib/libzstd.1.dylib") — a failure the
+    # linux build host is otherwise blind to (it cannot exec a Mach-O; the keg
+    # scan above only checks bin/ + bin/.pg-lib/, never the embedded-postgres
+    # native tree where the pg server binaries live). This is the exact class that
+    # shipped a broken embedded Postgres: the @embedded-postgres/darwin-x64 npm
+    # cross-fetch drops the short→versioned dylib compat symlinks a Homebrew keg
+    # carries (libzstd.1.dylib → libzstd.1.5.7.dylib), so postgres's @loader_path
+    # refs pointed at nothing. Resolve every @loader_path ref against the Mach-O's
+    # OWN dir and FAIL on any missing target — so this fails HERE on linux, not
+    # on-device. (@rpath refs need LC_RPATH resolution and are NOT covered — pg
+    # uses @loader_path; keeping scope tight avoids false positives.)
+    _dangle_bad=0; _dangle_checked=0
+    _macho_set=( "$BIN"/* "$BIN"/.pg-lib/* )
+    while IFS= read -r _m; do _macho_set+=( "$_m" ); done < <(
+      find "$SIDECAR" \( -path '*@embedded-postgres/darwin-*/native/bin/*' \
+                       -o -path '*@embedded-postgres/darwin-*/native/lib/*.dylib' \) \
+                      -type f 2>/dev/null )
+    for f in "${_macho_set[@]}"; do
+      [[ -f "$f" ]] || continue
+      _is_script "$f" && continue
+      _is_macho "$f" || continue
+      _fdir="$(dirname "$f")"
+      while IFS= read -r _ref; do
+        [[ -n "$_ref" ]] || continue
+        # @loader_path resolves relative to the referencing Mach-O's own directory.
+        _resolved="${_ref/@loader_path/$_fdir}"
+        [[ -e "$_resolved" ]] && continue
+        # libcurl.4.dylib: referenced only by libpq-oauth-18.dylib (the PG18 OAuth
+        # plugin), never dlopen'd under embedded PG's local/trust auth, and macOS
+        # ships no libcurl as a file — intentionally not bundled. Allowlisted.
+        [[ "$(basename "$_ref")" == libcurl.4.dylib ]] && continue
+        fail "$(basename "$f"): dangling @loader_path linkage → $_ref (missing $_resolved) — dyld aborts at exec (WI-5651)"
+        echo "      fix: bundle the dylib, or restore its short→versioned compat symlink in native/lib"
+        _dangle_bad=1
+      done < <("$_otool" -L "$f" 2>/dev/null | awk 'NR>1{print $1}' | grep -E '^@loader_path/' || true)
+      _dangle_checked=$((_dangle_checked + 1))
+    done
+    [[ "$_dangle_bad" == 0 ]] && ok "no dangling @loader_path linkage across $_dangle_checked Mach-O ($_otool)"
   fi
 else
   echo "  (skipped — target is not darwin)"
