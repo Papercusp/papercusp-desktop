@@ -286,20 +286,29 @@ if [[ "$TARGET_OS_N" == "darwin" ]]; then
       find "$SIDECAR" \( -path '*@embedded-postgres/darwin-*/native/bin/*' \
                        -o -path '*@embedded-postgres/darwin-*/native/lib/*.dylib' \) \
                       -type f 2>/dev/null )
+    # Optional PG modules embedded PG NEVER auto-loads under papercusp's usage
+    # (local/trust auth, no xml2 extension): dyld only resolves their deps on an
+    # explicit dlopen that never happens here, so an unresolved @loader_path dep of
+    # THESE is benign. Everything ALWAYS loaded (postgres/initdb/pg_ctl, libpq,
+    # pgvector, libxml2 for the core xml type, the wired client tools) is still
+    # hard-checked. Referrer-scoped (not dep-name-scoped) so a dangling libcurl/
+    # libxslt in an actually-loaded binary would STILL fail. Verified unused:
+    #   libpq-oauth-*.dylib → libcurl.4.dylib  (OAuth; macOS ships no libcurl file)
+    #   pgxml.dylib         → libxslt.1.dylib  (xml2 contrib; grep-confirmed unused)
+    _is_optional_pg_module() {
+      case "$(basename "$1")" in libpq-oauth-*.dylib|pgxml.dylib) return 0 ;; *) return 1 ;; esac
+    }
     for f in "${_macho_set[@]}"; do
       [[ -f "$f" ]] || continue
       _is_script "$f" && continue
       _is_macho "$f" || continue
+      _is_optional_pg_module "$f" && continue
       _fdir="$(dirname "$f")"
       while IFS= read -r _ref; do
         [[ -n "$_ref" ]] || continue
         # @loader_path resolves relative to the referencing Mach-O's own directory.
         _resolved="${_ref/@loader_path/$_fdir}"
         [[ -e "$_resolved" ]] && continue
-        # libcurl.4.dylib: referenced only by libpq-oauth-18.dylib (the PG18 OAuth
-        # plugin), never dlopen'd under embedded PG's local/trust auth, and macOS
-        # ships no libcurl as a file — intentionally not bundled. Allowlisted.
-        [[ "$(basename "$_ref")" == libcurl.4.dylib ]] && continue
         fail "$(basename "$f"): dangling @loader_path linkage → $_ref (missing $_resolved) — dyld aborts at exec (WI-5651)"
         echo "      fix: bundle the dylib, or restore its short→versioned compat symlink in native/lib"
         _dangle_bad=1
