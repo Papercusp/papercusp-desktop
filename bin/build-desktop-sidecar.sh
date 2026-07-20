@@ -1259,15 +1259,22 @@ print(pick[1])
   local tmp; tmp="$(mktemp -d)"
   curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/blobs/${layer}" -o "$tmp/bottle.tar.gz" 2>/dev/null || { echo "pgvector bottle: blob download failed" >&2; rm -rf "$tmp"; return 1; }
   tar -xzf "$tmp/bottle.tar.gz" -C "$tmp" 2>/dev/null || { echo "pgvector bottle: tar extract failed" >&2; rm -rf "$tmp"; return 1; }
-  local dylib; dylib="$(find "$tmp" -type f -name vector.dylib -path '*postgresql@18*' | head -1)"
+  # The bottle carries BOTH share/postgresql@18/extension (the SQL + vector.control
+  # we want) AND include/postgresql@18/server/extension (headers, no control) — so
+  # target the share/ path EXPLICITLY, or a bare `-name extension` picks include/
+  # (it sorts first) and the copy fails. NB: set -e is DISABLED inside this fn (it
+  # is called via `||`), so every failure is checked by hand and returns non-zero.
+  local dylib; dylib="$(find "$tmp" -type f -path '*/lib/postgresql@18/vector.dylib' | head -1)"
   [[ -z "$dylib" ]] && dylib="$(find "$tmp" -type f -name vector.dylib | head -1)"
-  local extdir; extdir="$(find "$tmp" -type d -path '*postgresql@18*' -name extension | head -1)"
-  [[ -z "$extdir" ]] && extdir="$(find "$tmp" -type f -name 'vector.control' -exec dirname {} \; | head -1)"
-  [[ -f "$dylib" && -n "$extdir" && -d "$extdir" ]] || { echo "pgvector bottle: vector.dylib / extension dir not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  local extdir; extdir="$(find "$tmp" -type d -path '*/share/postgresql@18/extension' | head -1)"
+  [[ -z "$extdir" ]] && extdir="$(dirname "$(find "$tmp" -type f -path '*/share/*' -name vector.control | head -1)")"
+  [[ -f "$dylib" ]] || { echo "pgvector bottle: lib/postgresql@18/vector.dylib not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  [[ -n "$extdir" && -f "$extdir/vector.control" ]] || { echo "pgvector bottle: share/postgresql@18/extension/vector.control not found in bottle" >&2; rm -rf "$tmp"; return 1; }
   local out; out="$(mktemp -d)"; mkdir -p "$out/extension"
-  cp "$dylib" "$out/vector.dylib"
+  cp "$dylib" "$out/vector.dylib" || { echo "pgvector bottle: dylib copy failed" >&2; rm -rf "$tmp"; return 1; }
   cp "$extdir"/vector*.sql "$out/extension/" 2>/dev/null || true
-  cp "$extdir"/vector.control "$out/extension/"
+  cp "$extdir"/vector.control "$out/extension/" || { echo "pgvector bottle: vector.control copy failed" >&2; rm -rf "$tmp"; return 1; }
+  [[ -f "$out/vector.dylib" && -f "$out/extension/vector.control" ]] || { echo "pgvector bottle: normalized output incomplete" >&2; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
   printf '%s\n' "$out"
 }
