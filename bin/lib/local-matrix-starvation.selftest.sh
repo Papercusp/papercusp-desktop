@@ -84,6 +84,28 @@ else
   ok "only-starvation-prone-fails: a non-whitelisted co-FAIL correctly keeps this false"
 fi
 
+# revocation_kcut cascade carve-out (WI-5616, 2026-07-20): b3-revocation.sh's own
+# BASELINE-FAIL probe self-attributes to a same-run replication_soak failure — so a
+# revocation_kcut FAIL riding alongside replication_soak must ALSO be treated as
+# whitelisted-only (not block the downgrade), but an ISOLATED revocation_kcut FAIL
+# (no replication_soak FAIL in the same run) must NOT be downgraded — it stays a
+# genuine regression signature, same as any other non-whitelisted scenario.
+CASCADE_OUT="$WORK_DIR/cascade.out"
+matrix_out "$CASCADE_OUT" replication_soak revocation_kcut
+if local_matrix_only_starvation_prone_fails "$CASCADE_OUT"; then
+  ok "only-starvation-prone-fails: revocation_kcut cascading alongside replication_soak → true"
+else
+  bad "only-starvation-prone-fails: revocation_kcut+replication_soak cascade wrongly read as false (WI-5616 would still mis-file)"
+fi
+
+ISOLATED_REVOCATION_OUT="$WORK_DIR/isolated-revocation.out"
+matrix_out "$ISOLATED_REVOCATION_OUT" revocation_kcut
+if local_matrix_only_starvation_prone_fails "$ISOLATED_REVOCATION_OUT"; then
+  bad "only-starvation-prone-fails: an ISOLATED revocation_kcut FAIL (no replication_soak FAIL) wrongly read as true — would mask a genuine revocation regression"
+else
+  ok "only-starvation-prone-fails: an isolated revocation_kcut FAIL correctly stays non-downgradeable"
+fi
+
 NO_FAIL_OUT="$WORK_DIR/no-fail.out"
 matrix_out "$NO_FAIL_OUT"
 if local_matrix_only_starvation_prone_fails "$NO_FAIL_OUT"; then

@@ -128,6 +128,13 @@ log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
 # must keep working when the operator/PG is down (EI filing is already best-effort curl).
 STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_DIR"
 GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
+# A WI-5329 frame-starvation downgrade is NOT a genuine green (D-005: a starvation SKIP never
+# satisfies first-green). Such a window must NOT refresh last-green — that is exactly how the
+# 2026-07-19 15:38 downgrade suppressed real hourly runs for ~22h and hid the replication_soak
+# DHT-recovery bug (WI-5481). A downgraded window records last-downgrade instead and re-tries
+# after this SHORTER TTL: long enough to avoid a starvation→expensive-rerun→more-starvation
+# loop, short enough that a real red surfaces same-day.
+GATE_DOWNGRADE_TTL_H="${GATE_DOWNGRADE_TTL_H:-3}"
 GATE_STALE_DAYS="${GATE_STALE_DAYS:-3}"
 RED_REFILE_H="${RED_REFILE_H:-24}"
 now_s() { date +%s 2>/dev/null || echo 0; }
@@ -644,7 +651,7 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
       if local_matrix_only_starvation_prone_fails "$WORK/local-matrix.out" \
         && check_local_matrix_frame_starvation "$MATRIX_LEG_START_TS"; then
         MATRIXFULL_RES="SKIPPED-STARVATION"
-        log "local-matrix FAIL downgraded → SKIPPED-STARVATION: every failing scenario is in the restart-heavy class (restart_durability/reconnect_catchup/replication_soak) AND a banked frame serve.log from this run shows [event-loop-lag] maxMs>1000ms — genuine frame-local CPU starvation (WI-5319 signal, root-caused WI-5329), not a regression. Host-loadavg STORM_GATE below is a weak proxy for these CPU-pinned frames (single end-of-run sample) and can miss this."
+        log "local-matrix FAIL downgraded → SKIPPED-STARVATION: every failing scenario is in the restart-heavy class (restart_durability/reconnect_catchup/replication_soak), or is revocation_kcut cascading from a same-run replication_soak FAIL (b3-revocation.sh's own SCN_RC[replication_soak] attribution — WI-5616), AND a banked frame serve.log from this run shows [event-loop-lag] maxMs>1000ms — genuine frame-local CPU starvation (WI-5319 signal, root-caused WI-5329), not a regression. Host-loadavg STORM_GATE below is a weak proxy for these CPU-pinned frames (single end-of-run sample) and can miss this."
       fi
     fi
     log "local-matrix → $MATRIXFULL_RES"
