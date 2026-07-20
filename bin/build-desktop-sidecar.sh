@@ -489,6 +489,38 @@ case "$TARGET_OS" in
   *)       _bare_node_platform="$TARGET_OS" ;;
 esac
 _bare_node_arch="$TARGET_ARCH"
+# WI-5651: fetch a single per-platform npm package that npm WON'T install on this
+# host because it is an optionalDependency scoped to a DIFFERENT platform (e.g.
+# @img/sharp-darwin-x64 while building on linux). `npm pack` downloads the tarball
+# for ANY platform regardless of the host, so a cross-baked darwin/windows sidecar
+# can pull the exact @scope/pkg@version the target needs and unpack it where the
+# closure/embedded-pg install would have placed it. ALWAYS pass an explicit
+# @version (the `%@*` name-strip below assumes one). Idempotent; fails loud.
+fetch_cross_npm_pkg() {
+  local spec="$1" nm_dir="$2"
+  local pkg_name="${spec%@*}"            # @img/sharp-darwin-x64@0.35.3 → @img/sharp-darwin-x64
+  local dest="$nm_dir/$pkg_name"
+  [[ -e "$dest/package.json" ]] && { echo "    ✓ $pkg_name already present — skip cross-fetch"; return 0; }
+  local tmp; tmp="$(mktemp -d)"
+  if ! ( cd "$tmp" && npm pack "$spec" --silent >/dev/null 2>&1 ); then
+    echo "ERROR: npm pack '$spec' failed (cross-fetch of a per-platform pkg)"; rm -rf "$tmp"; return 1
+  fi
+  local tgz; tgz="$(ls "$tmp"/*.tgz 2>/dev/null | head -1)"
+  [[ -f "$tgz" ]] || { echo "ERROR: npm pack '$spec' produced no tarball"; rm -rf "$tmp"; return 1; }
+  mkdir -p "$dest"
+  if ! tar -xzf "$tgz" -C "$dest" --strip-components=1; then
+    echo "ERROR: extracting '$spec' tarball failed"; rm -rf "$tmp"; return 1
+  fi
+  rm -rf "$tmp"
+  echo "    ✓ cross-fetched $pkg_name → ${dest#"$SIDECAR_DIR/"}"
+}
+# Read an exact pinned version from a package's optionalDependencies map (npm pins
+# @img/* and @lydell/* platform packages to an EXACT version there, so we fetch the
+# ABI-matched build instead of `latest`, which could drift ahead of the JS pkg).
+opt_dep_version() {
+  local pkg_json="$1" dep="$2"
+  node -e "try{const d=require('$pkg_json').optionalDependencies||{};process.stdout.write(String(d['$dep']||''))}catch(e){}" 2>/dev/null
+}
 prune_foreign_prebuilds() {
   local pkg_dir="$1"
   [[ -d "$pkg_dir/prebuilds" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
@@ -619,6 +651,46 @@ echo "  rrule closure copied ($nat_copied total package(s), $nat_missing missing
 echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
 copy_pkg_closure luxon
 echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"
+
+# WI-5651: cross-bake the darwin native addons npm SKIPPED on this linux host.
+# copy_pkg_closure silently drops foreign-platform optionalDeps (correct on a
+# native build — npm never installed @img/sharp-darwin-* on linux). For a cross
+# darwin bundle those ARE the addons the app loads at runtime, so fetch each one
+# at the EXACT version its parent pins in optionalDependencies (ABI-matched, not
+# `latest`). sharp/node-pty dying at boot ('Could not load the sharp module') is
+# exactly the class that shipped 0.0.9 dead — so a resolve failure is fatal here.
+if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
+  echo "→ WI-5651 cross-fetching darwin native addons for darwin-${TARGET_ARCH} (npm skipped them on ${_host_os})"
+  _xnm="$SIDECAR_DIR/node_modules"
+  # node-pty: @lydell/node-pty pins @lydell/node-pty-darwin-<arch> in optionalDependencies.
+  _npty_json="$_xnm/@lydell/node-pty/package.json"
+  if [[ -f "$_npty_json" ]]; then
+    _npty_dep="@lydell/node-pty-darwin-${TARGET_ARCH}"
+    _npty_ver="$(opt_dep_version "$_npty_json" "$_npty_dep")"
+    [[ -n "$_npty_ver" ]] || { echo "ERROR: cannot resolve $_npty_dep version from @lydell/node-pty optionalDependencies"; exit 1; }
+    fetch_cross_npm_pkg "${_npty_dep}@${_npty_ver}" "$_xnm" || exit 1
+  else
+    echo "  ⚠ @lydell/node-pty not in the sidecar closure — no darwin node-pty addon to fetch"
+  fi
+  # sharp: sharp pins @img/sharp-darwin-<arch>, which in turn pins @img/sharp-libvips-darwin-<arch>.
+  _sharp_json="$_xnm/sharp/package.json"
+  if [[ -f "$_sharp_json" ]]; then
+    _sharp_dep="@img/sharp-darwin-${TARGET_ARCH}"
+    _sharp_ver="$(opt_dep_version "$_sharp_json" "$_sharp_dep")"
+    [[ -n "$_sharp_ver" ]] || { echo "ERROR: cannot resolve $_sharp_dep version from sharp optionalDependencies"; exit 1; }
+    fetch_cross_npm_pkg "${_sharp_dep}@${_sharp_ver}" "$_xnm" || exit 1
+    _vips_dep="@img/sharp-libvips-darwin-${TARGET_ARCH}"
+    _vips_ver="$(opt_dep_version "$_xnm/${_sharp_dep}/package.json" "$_vips_dep")"
+    if [[ -n "$_vips_ver" ]]; then
+      fetch_cross_npm_pkg "${_vips_dep}@${_vips_ver}" "$_xnm" || exit 1
+    else
+      echo "  ⚠ $_vips_dep not pinned by $_sharp_dep — assuming sharp bundles libvips internally"
+    fi
+  else
+    echo "  ⚠ sharp not in the sidecar closure — no darwin sharp addon to fetch"
+  fi
+  echo "  ✓ darwin native addons cross-fetched"
+fi
 
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
