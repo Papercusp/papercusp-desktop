@@ -1130,6 +1130,26 @@ echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-
   echo "ERROR: failed to install embedded-postgres-server runtime deps"
   exit 1
 }
+# WI-5651: cross-swap the embedded-postgres binary pkg for a darwin build. npm
+# resolved @embedded-postgres/<HOST> above (e.g. linux-x64 — it keys the optional
+# binary pkg on the build host); for a cross darwin bundle that is dead weight AND
+# wrong. Drop it and fetch the target's binary pkg at the SAME resolved version.
+# The published @embedded-postgres/darwin-<arch> tarball SHIPS native/bin/{initdb,
+# postgres,pg_ctl} as real Mach-O UNIVERSAL (fat x86_64+arm64) directly — no
+# postinstall — so npm-pack+extract yields runnable binaries the assertion below
+# accepts. (Proven on linux, WI-5651.)
+if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
+  _epg_root="$EMBEDDED_PG_DST/node_modules/@embedded-postgres"
+  _epg_host="$(ls "$_epg_root" 2>/dev/null | head -1)"
+  [[ -n "$_epg_host" ]] || { echo "ERROR: no @embedded-postgres/<host> pkg after npm install — cannot derive the cross version"; exit 1; }
+  _epg_ver="$(node -e "console.log(require('$_epg_root/$_epg_host/package.json').version)" 2>/dev/null)"
+  [[ -n "$_epg_ver" ]] || { echo "ERROR: could not read installed @embedded-postgres/$_epg_host version"; exit 1; }
+  echo "→ WI-5651 cross-swapping embedded-postgres binary pkg: drop $_epg_host, fetch darwin-${TARGET_ARCH}@${_epg_ver}"
+  rm -rf "${_epg_root:?}"/*
+  fetch_cross_npm_pkg "@embedded-postgres/darwin-${TARGET_ARCH}@${_epg_ver}" "$EMBEDDED_PG_DST/node_modules" || exit 1
+  # tar/umask can drop the exec bit on extract; the assertion below requires -x.
+  chmod +x "$_epg_root/darwin-${TARGET_ARCH}/native/bin/"* 2>/dev/null || true
+fi
 # Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
 if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q .; then
   echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
@@ -1197,15 +1217,61 @@ fi
 #   Windows:               No automation yet; we warn and continue. mem0
 #                          falls back to in-memory provider on Windows
 #                          desktops until a vector.dll is bundled.
+# WI-5651: fetch the pgvector Homebrew bottle for a darwin target FROM this linux
+# host (brew is absent here). Homebrew publishes bottles as OCI artifacts on ghcr;
+# we pull the darwin/<arch> bottle for the pinned pgvector version, PREFERRING the
+# macOS 14 (sonoma) build — the one proven ABI-matched to zonky's embedded PG18 and
+# what the retired mac VM's `brew install pgvector` also used — and fall back to the
+# newest available. Prints a normalized dir: <out>/vector.dylib + <out>/extension/.
+fetch_pgvector_darwin_bottle() {
+  local ver="$1" arch="$2"
+  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *) echo "pgvector bottle: unsupported arch $arch" >&2; return 1 ;; esac
+  local repo="homebrew/core/pgvector"
+  local token; token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null)"
+  [[ -n "$token" ]] || { echo "pgvector bottle: ghcr token fetch failed" >&2; return 1; }
+  local idx; idx="$(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.index.v1+json" "https://ghcr.io/v2/${repo}/manifests/${ver}" 2>/dev/null)"
+  [[ -n "$idx" ]] || { echo "pgvector bottle: index manifest fetch failed (v${ver})" >&2; return 1; }
+  local nested; nested="$(printf '%s' "$idx" | python3 -c '
+import sys,json,re
+idx=json.load(sys.stdin); want=sys.argv[1]
+def mac(s):
+    m=re.search(r"(\d+)", s or ""); return int(m.group(1)) if m else -1
+cands=[]
+for m in idx.get("manifests",[]):
+    p=m.get("platform",{}) or {}
+    if p.get("os")=="darwin" and p.get("architecture")==want:
+        cands.append((mac(p.get("os.version","")), m.get("digest","")))
+if not cands: sys.exit(1)
+# prefer macOS 14 (sonoma, proven), else the newest available
+sonoma=[c for c in cands if c[0]==14]
+pick=sonoma[0] if sonoma else max(cands, key=lambda c:c[0])
+print(pick[1])
+' "$brew_arch" 2>/dev/null)"
+  [[ -n "$nested" ]] || { echo "pgvector bottle: no darwin/$brew_arch manifest in the index" >&2; return 1; }
+  local man; man="$(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/${repo}/manifests/${nested}" 2>/dev/null)"
+  local layer; layer="$(printf '%s' "$man" | python3 -c 'import sys,json;print(json.load(sys.stdin)["layers"][0]["digest"])' 2>/dev/null)"
+  [[ -n "$layer" ]] || { echo "pgvector bottle: could not read layer digest" >&2; return 1; }
+  local tmp; tmp="$(mktemp -d)"
+  curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/blobs/${layer}" -o "$tmp/bottle.tar.gz" 2>/dev/null || { echo "pgvector bottle: blob download failed" >&2; rm -rf "$tmp"; return 1; }
+  tar -xzf "$tmp/bottle.tar.gz" -C "$tmp" 2>/dev/null || { echo "pgvector bottle: tar extract failed" >&2; rm -rf "$tmp"; return 1; }
+  local dylib; dylib="$(find "$tmp" -type f -name vector.dylib -path '*postgresql@18*' | head -1)"
+  [[ -z "$dylib" ]] && dylib="$(find "$tmp" -type f -name vector.dylib | head -1)"
+  local extdir; extdir="$(find "$tmp" -type d -path '*postgresql@18*' -name extension | head -1)"
+  [[ -z "$extdir" ]] && extdir="$(find "$tmp" -type f -name 'vector.control' -exec dirname {} \; | head -1)"
+  [[ -f "$dylib" && -n "$extdir" && -d "$extdir" ]] || { echo "pgvector bottle: vector.dylib / extension dir not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  local out; out="$(mktemp -d)"; mkdir -p "$out/extension"
+  cp "$dylib" "$out/vector.dylib"
+  cp "$extdir"/vector*.sql "$out/extension/" 2>/dev/null || true
+  cp "$extdir"/vector.control "$out/extension/"
+  rm -rf "$tmp"
+  printf '%s\n' "$out"
+}
 echo "→ bundling pgvector into embedded-postgres (per platform)"
 pgvector_copied=0
-# Compute platform locally — target_os is computed later in this script.
-case "$(uname -s)" in
-  Linux*)               _pgv_os="linux" ;;
-  Darwin*)              _pgv_os="darwin" ;;
-  MINGW*|MSYS*|CYGWIN*) _pgv_os="windows" ;;
-  *)                    _pgv_os="$(uname -s)" ;;
-esac
+# WI-5651: route pgvector's platform off TARGET_OS (default host), NOT uname — a
+# cross darwin bundle must ship the darwin vector.dylib, not this linux host's .so.
+# TARGET_OS is already spelled linux|darwin|windows, matching the branches below.
+_pgv_os="$TARGET_OS"
 case "$_pgv_os" in
   linux)
     pgv_lib_src="/usr/lib/postgresql/18/lib/vector.so"
