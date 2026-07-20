@@ -323,6 +323,22 @@ if [[ "${PAPERCUSP_SKIP_MIGRATION_LINT:-0}" != "1" ]]; then
     || { echo "ERROR: migration lint failed (above) — a migration would break the packaged operator's first-boot migrate. Fix, or PAPERCUSP_SKIP_MIGRATION_LINT=1 to override."; exit 1; }
 fi
 
+# Cold-seed migration BOOT-SMOKE — the dynamic complement to the static lint above.
+# Spins a throwaway PG and REPLAYS every libs/papercusp/libs/db/sql/*.sql in order
+# (000-baseline then 104…N), exactly as the packaged operator's embedded-pg does on
+# a clean install's first boot, and fails if ANY migration crashes. The lint catches
+# the KNOWN 631 pattern statically in seconds; this catches the GENERAL class (any
+# migration-vs-seed / ordering / dup-key crash) that the ordinary integration suite
+# misses because it provisions from the squashed baseline, never a from-scratch
+# replay. ~15-60s (Docker/testcontainers required). Skip with
+# PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1 (e.g. a build box without Docker). Plan
+# release-readiness-preflight-gate-2026-07-19 P-001.
+if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
+  echo "==> checking migration boot-smoke (from-scratch replay of all migrations)"
+  ( cd "$ROOT/.." && npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
+    || { echo "ERROR: migration boot-smoke failed (above) — a migration crashes on a from-scratch replay, so a packaged install would crash-loop its seed on first boot. Fix the offending migration, or PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1 to override (Docker-less box only)."; exit 1; }
+fi
+
 if [[ ! -f "$KEY_FILE" ]]; then
   echo "ERROR: signing key not found at $KEY_FILE"
   echo "       Run bin/setup-signing-key.sh first."
