@@ -459,7 +459,19 @@ EOF
     # Backward-compat safety net: the configured port answered (just not 2xx) and OS
     # discovery found nothing better — preserve the pre-hardening liberal acceptance
     # rather than regress a smoke that used to pass, but say so loudly.
-    fed_log "fed_wait_api: $inst — :${FED_SC[$inst]} answered '$last' (not 2xx) and no other sidecar port resolved; accepting (legacy liberal) — downstream API calls may be unreliable" >&2
+    #
+    # DIAGNOSTIC-GAP FIX (2026-07-20, live-fed-gate content-matrix RED triage): this
+    # branch used to return WITHOUT ever calling fed_dump_instance_diag, so a run that
+    # took this path left ZERO record of the instance's real listening ports / app-log
+    # tail — and fed_cleanup_scoped's `rm -rf $WORK` on the smoke's later hard failure
+    # (e.g. the subsequent "create failed" API call) destroys the only other copy.
+    # Observed live: 3 consecutive gate attempts (2026-07-20 10:45-11:01 EDT) took
+    # EXACTLY this branch (last never a bare "000" — some curl/heredoc interaction can
+    # yield a non-'000' sentinel like '000000' even on a hard connection failure) and
+    # left no diagnostics for what should have been the FAIL path. Always dump — this
+    # is pure additional stderr logging, it does not change the return value/behavior.
+    fed_log "fed_wait_api: $inst — :${FED_SC[$inst]} answered '$last' (not 2xx) and no other sidecar port resolved; accepting (legacy liberal) — downstream API calls may be unreliable; instance diagnostics follow:" >&2
+    fed_dump_instance_diag "$inst" >&2
     return 0
   fi
   fed_log "fed_wait_api: $inst sidecar never answered on :${FED_SC[$inst]}; instance diagnostics follow:" >&2

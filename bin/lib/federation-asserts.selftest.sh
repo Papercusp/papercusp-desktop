@@ -427,6 +427,33 @@ case "$required_line" in
     ok "verify-sidecar-bundle does not require retired bundled omp" ;;
 esac
 
+# fed_wait_api must ALWAYS dump instance diagnostics (listening ports + app-log
+# tail) when it cannot confirm a 2xx sidecar — via EITHER exit path: the
+# hard-FAIL branch (last literally "000") already did this; the "legacy
+# liberal accept" branch (last non-2xx but not exactly the 3-char sentinel
+# "000") used to return silently, losing the only record of why the sidecar
+# never answered (2026-07-20 live-fed-gate triage: 3 consecutive content-matrix
+# RED attempts all took this exact branch and left zero diagnostics before
+# fed_cleanup_scoped's `rm -rf $WORK` destroyed the real app logs). Exercise
+# the ACTUAL fed_wait_api against a port nothing listens on, with a log file
+# fed_discover_sidecar_os cannot resolve to anything — forcing a non-2xx exit
+# — and assert the diagnostic dump fires regardless of which non-2xx branch
+# it took.
+WAPI_WORK="$(mktemp -d /tmp/fed-selftest-waitapi.XXXXXX)"
+WAPI_LOG="$WAPI_WORK/inst-y.applog"
+echo "some unrelated boot log content, no discoverable sidecar port here" > "$WAPI_LOG"
+FED_LOG[y]="$WAPI_LOG"
+CLOSED_PORT="$(free_port)"   # bound+released — nothing is listening on it
+declare -A FED_SC; FED_SC[y]="$CLOSED_PORT"
+WAPI_STDERR="$(mktemp /tmp/fed-selftest-waitapi-stderr.XXXXXX)"
+fed_wait_api y 1 2>"$WAPI_STDERR" >/dev/null
+if grep -q "listening TCP ports:" "$WAPI_STDERR" && grep -q "app-log tail" "$WAPI_STDERR"; then
+  ok "fed_wait_api dumps instance diagnostics on a non-2xx exit (both the hard-FAIL and legacy-liberal-accept branches)"
+else
+  bad "fed_wait_api took a non-2xx exit but did not dump instance diagnostics (stderr: $(cat "$WAPI_STDERR" | tr '\n' '|'))"
+fi
+rm -rf "$WAPI_WORK" "$WAPI_STDERR"
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1
