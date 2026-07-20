@@ -480,17 +480,15 @@ _seen=" "
 # folded into libc.so) — which aborts the whole `tauri build --bundles
 # appimage` (WI-807). Prune every closure-copied package's `prebuilds/`
 # down to just this build host's platform-arch dir immediately after copying.
-_bare_node_platform=""
-case "$(uname -s)" in
-  Linux*)               _bare_node_platform="linux" ;;
-  Darwin*)              _bare_node_platform="darwin" ;;
-  MINGW*|MSYS*|CYGWIN*) _bare_node_platform="win32" ;;
+# WI-5651: prune to the TARGET platform-arch (default host), NOT $(uname) — so a
+# cross-baked darwin/windows bundle KEEPS the target's prebuilds and drops this
+# Linux host's. Prebuild dirs use node's process.platform spelling (`win32`), so
+# map windows→win32 here (TARGET_OS uses the `windows` spelling elsewhere).
+case "$TARGET_OS" in
+  windows) _bare_node_platform="win32" ;;
+  *)       _bare_node_platform="$TARGET_OS" ;;
 esac
-_bare_node_arch=""
-case "$(uname -m)" in
-  x86_64|amd64)  _bare_node_arch="x64" ;;
-  arm64|aarch64) _bare_node_arch="arm64" ;;
-esac
+_bare_node_arch="$TARGET_ARCH"
 prune_foreign_prebuilds() {
   local pkg_dir="$1"
   [[ -d "$pkg_dir/prebuilds" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
@@ -1665,20 +1663,13 @@ cp "$ROOT/bin/sidecar-preload.js" "$SIDECAR_DIR/sidecar-preload.js"
 # runs the desktop build under `tauri build` on a matrix of macos-{14,13},
 # ubuntu-22.04, and windows-2022, so each matrix leg picks the right asset.
 # ---------------------------------------------------------------------------
-target_os=""
-target_arch=""
-case "$(uname -s)" in
-  Linux*)  target_os="linux" ;;
-  Darwin*) target_os="darwin" ;;
-  MINGW*|MSYS*|CYGWIN*) target_os="windows" ;;
-  *) target_os="$(uname -s)" ;;
-esac
-case "$(uname -m)" in
-  x86_64|amd64) target_arch="x64" ;;
-  arm64|aarch64) target_arch="arm64" ;;
-  *) target_arch="$(uname -m)" ;;
-esac
-echo "→ bundling external binaries for $target_os-$target_arch"
+# WI-5651: target_os/target_arch now come from the TARGET_OS/TARGET_ARCH resolved
+# at the top of this script (default = host $(uname), so an un-set invocation is
+# unchanged). Cross-baking a mac/windows bundle on Linux sets them; the darwin/win
+# node + gh + zellij + pui fetches below already switch on these vars.
+target_os="$TARGET_OS"
+target_arch="$TARGET_ARCH"
+echo "→ bundling external binaries for $target_os-$target_arch$([[ "$CROSS_BUILD" == "1" ]] && echo " (cross-baked on ${_host_os}-${_host_arch})")"
 
 # BIN_DIR (historically OMP_DIR) — destination for bundled CLIs (node, gh).
 # Tauri prepends this dir to the sidecar's PATH on spawn (see main.rs PATH
