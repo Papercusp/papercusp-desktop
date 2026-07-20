@@ -49,6 +49,23 @@
 SCCACHE_LIB_VERSION="${SCCACHE_LIB_VERSION:-0.16.0}"
 
 setup_sccache_env() {
+  # desktop-build-speed-2026-07-16 D-006 / WI-5577: sccache is OPT-IN, default OFF.
+  # WHY: the block below exports CARGO_INCREMENTAL=0 (sccache and cargo incremental
+  # cancel — running both splits the hit-rate between two caches), and that env var
+  # OVERRIDES src-tauri/Cargo.toml [profile.release] incremental=true — the warm-rebuild
+  # lever (P-002 measured ~4.4s warm vs 143s cold full recompile; the plan's biggest win,
+  # D-002). The whole rail keeps role target-dirs WARM (P-001) and WI-5027 removed the
+  # ENOSPC that used to force cold builds, so cold builds — sccache's only real benefit —
+  # are now RARE (D-005). Defaulting sccache ON therefore REGRESSED the common warm
+  # rebuild. So default to the incremental warm path; enable sccache only for an explicit
+  # cold/clean build via PAPERCUSP_USE_SCCACHE=1.
+  case "${PAPERCUSP_USE_SCCACHE:-0}" in
+    1|true|yes|on) : ;; # opt-in: wire sccache (disables incremental — best for a genuine cold build)
+    *)
+      echo "==> sccache: OFF by default — incremental warm-rebuild is the fast path (set PAPERCUSP_USE_SCCACHE=1 for a cold/clean build); RUSTC_WRAPPER unset, CARGO_INCREMENTAL left to [profile.release] incremental=true"
+      return 0
+      ;;
+  esac
   local default_cache_size="${1:-30G}"
   local sccache_bin
   sccache_bin="$(command -v sccache || true)"

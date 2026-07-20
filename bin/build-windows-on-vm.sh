@@ -746,9 +746,21 @@ function Ensure-Sccache {
     Write-Host "[build] sccache: unavailable - building without RUSTC_WRAPPER (WI-5083 benefit skipped this run)"
   }
 }
-Ensure-Sccache
+# __PAPERCUSP_SCCACHE_INVOKE__
 PS1BLOCK
 )
+# desktop-build-speed-2026-07-16 D-006 / WI-5577: sccache is OPT-IN, default OFF —
+# the Windows mirror of lib/sccache.sh (the bash/linux+mac twin). The prelude above
+# DEFINES Ensure-Sccache (which sets CARGO_INCREMENTAL=0, nullifying cargo incremental)
+# and the __PAPERCUSP_SCCACHE_INVOKE__ token line invokes it. Gate that invocation so the
+# default Windows cut keeps the incremental warm-rebuild fast path; wire sccache only for
+# a genuine cold/clean build. Default-safe: if this swap ever no-ops, the token stays a PS
+# comment → Ensure-Sccache never runs → sccache off → incremental on.
+case "${PAPERCUSP_USE_SCCACHE:-0}" in
+  1|true|yes|on) _win_sccache_line='Ensure-Sccache' ;;
+  *)             _win_sccache_line='Write-Host "[build] sccache: OFF by default - incremental warm-rebuild is the fast path (set PAPERCUSP_USE_SCCACHE=1 for a cold/clean build)"' ;;
+esac
+SCCACHE_PRELUDE="${SCCACHE_PRELUDE/"# __PAPERCUSP_SCCACHE_INVOKE__"/$_win_sccache_line}"
 # WI-5085 (desktop-build-speed-2026-07-16#P-006): which role(s) to build, same
 # knob as the mac (mac-vm-build.sh) and linux (release-local.sh /
 # build-linux-local.sh) legs. UNLIKE those two, Windows KEEPS the GUI-ONLY
