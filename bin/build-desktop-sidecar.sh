@@ -1846,6 +1846,15 @@ echo "→ patching @lydell/node-pty prebuilts (native bindings)"
 for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   [[ -d "$pkg" ]] || continue
   pkg_name="$(basename "$pkg")"
+  # WI-5651: a CROSS-FETCHED per-platform package (e.g. node-pty-darwin-x64 pulled
+  # by fetch_cross_npm_pkg) ALREADY ships its prebuilds/<plat>/pty.node — and the
+  # host has no source for a foreign platform anyway. If they're already present,
+  # keep them (the native path still backfills the host's own package, whose
+  # prebuilds Next's tracer strips — that's why the host-source copy exists).
+  if find "$pkg/prebuilds" -name '*.node' 2>/dev/null | grep -q .; then
+    echo "  ✓ $pkg_name: prebuilds already present ($(find "$pkg/prebuilds" -name '*.node' | wc -l) .node file(s)) — cross-fetched pkg"
+    continue
+  fi
   src_prebuilds=""
   for cand in \
     "$WEB_DIR/node_modules/@lydell/$pkg_name/prebuilds" \
@@ -1859,6 +1868,11 @@ for pkg in $SIDECAR_DIR/node_modules/@lydell/node-pty-*/; do
   if [[ -n "$src_prebuilds" ]]; then
     cp -a "$src_prebuilds" "$pkg/"
     echo "  ✓ $pkg_name ← $src_prebuilds → $(find "$pkg/prebuilds" -name '*.node' | wc -l) .node file(s)"
+  elif [[ "$CROSS_BUILD" == "1" ]]; then
+    # A cross bundle whose TARGET pty binding is missing would 500 on every agent
+    # spawn on a clean target — fail loud rather than ship it silently broken.
+    echo "ERROR: $pkg_name: no prebuilds present in the cross-fetched package AND none on the host — the target's node-pty native binding would be missing (agent PTYs 500 at module load)"
+    exit 1
   else
     echo "  ⚠ $pkg_name: no prebuilds source found in any candidate path; the catch-all /api route will 500 at module load"
   fi
@@ -1937,7 +1951,15 @@ echo "    ✓ shipped db-sql/ matches the tree (highest migration $_tree_sql_max
 # doubles as a build-time gate that the full migration set applies cleanly on this
 # platform. Skip with PAPERCUSP_BUILD_PG_SEED=0 (then first-boot falls back to the
 # old initdb+replay path — correct, just slow).
-if [[ "${PAPERCUSP_BUILD_PG_SEED:-1}" == "1" ]]; then
+if [[ "$CROSS_BUILD" == "1" ]]; then
+  # WI-5651: the seed is built by BOOTING the just-bundled embedded-PG — which is
+  # the TARGET's binary, impossible to exec on this ${_host_os} cross host (the
+  # cross-swap also dropped the host's @embedded-postgres pkg). And a seed built
+  # with the HOST's PG would be exactly the cross-platform PGDATA hazard the note
+  # above says this step avoids "by construction". Skip it: the target machine's
+  # first boot does initdb + replay (correct, ~11s slower on the FIRST launch only).
+  echo "→ WI-5651 skipping pre-migrated seed (cross ${TARGET_OS}-${TARGET_ARCH} bundle — can't boot the target's PG on a ${_host_os} host); first-boot will initdb + replay migrations on the target"
+elif [[ "${PAPERCUSP_BUILD_PG_SEED:-1}" == "1" ]]; then
   echo "→ building pre-migrated PGDATA seed (first-boot fast path)"
   _seed_tmp="$(mktemp -d)"
   if node "$EMBEDDED_PG_DST/bin/build-seed.mjs" \
