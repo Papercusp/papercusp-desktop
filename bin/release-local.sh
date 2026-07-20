@@ -850,7 +850,14 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
     if [[ -n "${_PAPERCUSP_BUILD_ROLES_CALLER_SET:-}" ]]; then
       win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
     fi
-    env "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
+    # `-u PAPERCUSP_BUILD_ROLES` matters even in the not-explicit-set branch:
+    # this script `export`s its own resolved PAPERCUSP_BUILD_ROLES (default
+    # "gui server") above, so without stripping it here the child would still
+    # INHERIT that exported value from our environment regardless of win_env —
+    # env only ADDS/overrides the names it's given, it does not otherwise
+    # sanitize inherited exports. Explicitly unset-then-reapply so only an
+    # explicit caller override survives into the windows leg's environment.
+    env -u PAPERCUSP_BUILD_ROLES "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi
