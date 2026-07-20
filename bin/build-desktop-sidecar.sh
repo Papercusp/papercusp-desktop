@@ -2144,6 +2144,23 @@ _stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || ech
 } > "$SIDECAR_TMP_DIR/.sidecar-build-stamp"
 echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, P-004)"
 
+# WI-5638 recurrence guard: node_modules/@huggingface/transformers/.cache (and
+# any sibling package's runtime download scratch) must never reach the .deb —
+# it is not source, it re-downloads on first use, and left unchecked it grew
+# to 3.6GB on a dev box (harrier-oss 2.3GB + embeddinggemma 1.2GB + bge-small
+# 127MB), turning a ~0.6GB installer into a 4.2GB one. copy_pkg_closure's
+# `rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"` (above) is the primary
+# defense; this is the class-level backstop — it fails the BUILD if ANY
+# `.cache` dir survives staging, from that path or a future one (a new
+# closure entry point, the embedded-postgres/node-pty copies, …). One `find`
+# over the fully-staged tree, run once, right before publish.
+_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null)
+if [[ -n "$_stray_caches" ]]; then
+  echo "FATAL: runtime .cache dir(s) found in staged sidecar node_modules — these are download scratch that must never ship (WI-5638):" >&2
+  echo "$_stray_caches" >&2
+  exit 1
+fi
+
 # EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
 # NOT guaranteed absent here — a concurrent bare `cargo build` (tauri-dev
 # shells don't go through cargo-build-safe.sh) can run build.rs in the long
