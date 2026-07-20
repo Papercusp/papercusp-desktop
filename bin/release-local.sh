@@ -170,6 +170,16 @@ WITH_MAC="${WITH_MAC:-0}"
 # Default BOTH roles (D-004, desktop-build-speed-2026-07-16) — see the usage
 # comment above for why. Pass PAPERCUSP_BUILD_ROLES=gui for the fast-iteration
 # opt-in.
+#
+# WI-5559: capture whether the CALLER explicitly set this (even to the same
+# value as our default) BEFORE we apply the default below — the Windows leg
+# needs to tell "caller asked for gui+server" from "release-local's own
+# default resolved to gui+server", because unlike mac/linux, Windows' own
+# gui-only default (build-windows-on-vm.sh) must survive an UNSET caller
+# input. Forwarding our resolved value unconditionally (as this script used
+# to) defeats that windows-side default on every real release cut — the
+# exact ~40min unpublished-Server-build waste WI-5085 was meant to avoid.
+_PAPERCUSP_BUILD_ROLES_CALLER_SET="${PAPERCUSP_BUILD_ROLES+1}"
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 export PAPERCUSP_BUILD_ROLES
 # Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
