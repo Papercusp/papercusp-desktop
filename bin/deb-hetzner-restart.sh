@@ -259,7 +259,7 @@ scenario_replication_liveness_soak() {
   local tries=$(( (sla_s + 2) / 3 ))   # _rd_poll_remote polls every 3s
   local oslug="${FRAME_MEMBER_SLUG[$OWNER]:-}" mslug="${FRAME_MEMBER_SLUG[$MEMBER]:-}"
   local ts; ts="$(date +%s)"
-  local rc=0 i target t0 t1 load_o load_m
+  local rc=0 i target t0 t1 load_o load_m psi_o psi_m
 
   fed_log "═══ P-004: replication-liveness soak — $cycles kill/restart cycles, SLA ${sla_s}s/leg ═══"
   if [ -z "$oslug" ] || [ -z "$mslug" ]; then
@@ -297,8 +297,12 @@ scenario_replication_liveness_soak() {
       # that should have RECEIVED + re-attached the replicator — its load right
       # now is the most direct read on "was it starved". $OWNER too, since either
       # side stalling the swarm/replicator could explain a one-direction miss.
+      # WI-5639 follow-up: loadavg alone can never answer this (see
+      # _rd_remote_cpu_pressure's comment) — pair it with each frame's own
+      # cgroup CPU-pressure (PSI) reading, which IS frame-scoped.
       load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
-      echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m"
+      psi_o="$(_rd_remote_cpu_pressure "$OWNER")"; psi_m="$(_rd_remote_cpu_pressure "$MEMBER")"
+      echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m — cpu.pressure (frame-scoped): '$OWNER'=$psi_o '$MEMBER'=$psi_m"
       rc=1
     fi
 
@@ -311,7 +315,8 @@ scenario_replication_liveness_soak() {
       echo "  ✓ cycle $i B→A: $fid_ma landed on owner in $((t1 - t0))s (SLA ${sla_s}s)"
     else
       load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
-      echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m"
+      psi_o="$(_rd_remote_cpu_pressure "$OWNER")"; psi_m="$(_rd_remote_cpu_pressure "$MEMBER")"
+      echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m — cpu.pressure (frame-scoped): '$OWNER'=$psi_o '$MEMBER'=$psi_m"
       rc=1
     fi
   done
