@@ -2187,13 +2187,19 @@ echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
 #    OS-aware triple: Linux uses the STATIC musl build (libc-independent → portable
 #    across distros); macOS uses apple-darwin (matching bin/mac-vm-build.sh).
 ZJ_VER=0.44.3
-case "$(uname -m)" in arm64|aarch64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
-case "$(uname -s)" in
-  Linux*)  ZJ_TRIPLE="${ZJ_ARCH}-unknown-linux-musl" ;;
-  Darwin*) ZJ_TRIPLE="${ZJ_ARCH}-apple-darwin" ;;
-  *)       echo "ERROR: zellij bundling: unsupported OS $(uname -s)"; exit 1 ;;
+# WI-5651: OS/arch off TARGET_* (default host) so a cross darwin bundle fetches the
+# apple-darwin zellij, not this linux host's musl build.
+case "$TARGET_ARCH" in arm64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
+case "$TARGET_OS" in
+  linux)   ZJ_TRIPLE="${ZJ_ARCH}-unknown-linux-musl" ;;
+  darwin)  ZJ_TRIPLE="${ZJ_ARCH}-apple-darwin" ;;
+  *)       echo "ERROR: zellij bundling: unsupported target OS $TARGET_OS"; exit 1 ;;
 esac
-if [[ -x "$SIDECAR_DIR/bin/zellij" ]] && "$SIDECAR_DIR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
+# The "already present" fast-path RUNS the binary (`--version`), which only works
+# when the bundled zellij matches THIS host — so never trust it for a cross build
+# (a stale host-platform zellij would masquerade as up-to-date and ride into the
+# wrong-OS bundle). Force a fresh fetch when cross-baking.
+if [[ "$CROSS_BUILD" == "0" && -x "$SIDECAR_DIR/bin/zellij" ]] && "$SIDECAR_DIR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
   echo "    ✓ zellij ${ZJ_VER} already present — skipping download"
 else
   curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_TRIPLE}.tar.gz" | tar -xz -C "$SIDECAR_DIR/bin"
@@ -2218,7 +2224,14 @@ fi
 # drop dyld-needed symbols) and the result is re-signed by the later
 # `tauri build` bundling step (strip-then-sign).
 _strip_os="$(uname -s)"
-if command -v strip >/dev/null 2>&1 && [[ "$_strip_os" == "Linux" || "$_strip_os" == "Darwin" ]]; then
+# WI-5651: a cross bundle's native binaries are for a DIFFERENT OS, so this host's
+# `strip` can't touch them (a GNU strip on a Mach-O just fails; the re-probe then
+# restores the unstripped copy — pure wasted churn). Skip the pass; node ships
+# ~17MB unstripped and gh/kopia/zellij are already stripped by their release.
+if [[ "$CROSS_BUILD" == "1" ]]; then
+  echo "→ WI-5651 skipping native-binary strip pass (cross ${TARGET_OS}-${TARGET_ARCH} bundle; host strip can't strip foreign binaries)"
+fi
+if [[ "$CROSS_BUILD" == "0" ]] && command -v strip >/dev/null 2>&1 && [[ "$_strip_os" == "Linux" || "$_strip_os" == "Darwin" ]]; then
   _strip_flags=(); [[ "$_strip_os" == "Darwin" ]] && _strip_flags=(-S)
   echo "→ stripping debug symbols from bundled native binaries ($_strip_os)"
   _strip_saved=0
