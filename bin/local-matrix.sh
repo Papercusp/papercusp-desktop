@@ -104,6 +104,95 @@ CPU_ARGS_A="--cpu-shares 4096"; [ -n "$CPUSET_A" ] && CPU_ARGS_A="--cpuset-cpus 
 CPU_ARGS_B="--cpu-shares 4096"; [ -n "$CPUSET_B" ] && CPU_ARGS_B="--cpuset-cpus $CPUSET_B $CPU_ARGS_B"
 CPU_ARGS_C="--cpu-shares 4096"; [ -n "$CPUSET_C" ] && CPU_ARGS_C="--cpuset-cpus $CPUSET_C $CPU_ARGS_C"
 
+# ── frame MEMORY reservation (D-003 / EI-13317: genuine memory isolation) ────
+# WI-5319 pinned the frame CPUs but left memory UNBOUNDED — so under host memory
+# pressure the fleet's page-cache churn reclaims the frames' resident pages and
+# their node/PG stall: the same starvation that breaks replication_soak's 90s
+# reconnect SLA, on the memory axis. --memory-reservation sets cgroup-v2
+# `memory.low` — a PROTECTED floor the kernel will not reclaim below under
+# pressure (this is the isolation that matters); --memory is a generous hard cap
+# for hygiene; --memory-swap==--memory disables swap growth so the frame stays
+# resident (no swap-in latency spikes on the event loop; this box has no working
+# --memory-swappiness). Sized way above one operator sidecar + embedded PG on
+# this 251G box; override with PCUSP_RIG_MEM_{MAX,LOW} ('' disables that piece).
+MEM_MAX="${PCUSP_RIG_MEM_MAX-16g}"
+MEM_LOW="${PCUSP_RIG_MEM_LOW-4g}"
+MEM_ARGS=""
+[ -n "$MEM_MAX" ] && MEM_ARGS="--memory $MEM_MAX --memory-swap $MEM_MAX"
+[ -n "$MEM_LOW" ] && MEM_ARGS="$MEM_ARGS --memory-reservation $MEM_LOW"
+
+# ── genuine CPU EXCLUSIVITY (D-003: exclusive cores, not just affinity) ───────
+# --cpuset-cpus above is AFFINITY ONLY: it confines the frame TO its cores but
+# does NOT evict the host fleet OFF them, so under sustained load (this box idles
+# at 40–120) fleet threads pile onto the frame's "reserved" cores and starve its
+# node event loop during the restart/reconnect legs — exactly the miss that fails
+# replication_soak (passes in ~10s on a quiet frame, misses the 90s SLA on a
+# starved one). A cgroup-v2 EXCLUSIVE partition genuinely evicts every other
+# cgroup from the frame's cores: we grant the frame cores as exclusively-
+# allocatable at system.slice (parent of every docker-*.scope), then promote each
+# frame's scope to `cpuset.cpus.partition=root`. Needs cgroup v2 + the cpuset
+# controller delegated to system.slice + passwordless sudo; degrades to
+# affinity-only with a WARN otherwise (never fails the run). The grant + each
+# partition are released on teardown. PCUSP_RIG_EXCLUSIVE=0 opts out.
+CGROOT="${PCUSP_CGROUP_ROOT:-/sys/fs/cgroup}"
+RIG_EXCLUSIVE="${PCUSP_RIG_EXCLUSIVE:-1}"
+RIG_EXCLUSIVE_ACTIVE=0
+
+# Union of the frame cpusets actually in use (respects --frames + '' disables).
+rig_exclusive_cores() {
+  local list=""
+  [ -n "$CPUSET_A" ] && list="$CPUSET_A"
+  [ -n "$CPUSET_B" ] && list="${list:+$list,}$CPUSET_B"
+  [ "$FRAMES" = 3 ] && [ -n "$CPUSET_C" ] && list="${list:+$list,}$CPUSET_C"
+  printf '%s' "$list"
+}
+
+# Grant the frame cores as exclusively-allocatable at system.slice. Idempotent;
+# returns non-zero (⇒ affinity-only fallback) if the platform can't support it.
+rig_enable_exclusive() {
+  [ "$RIG_EXCLUSIVE" = 1 ] || return 1
+  local cores; cores="$(rig_exclusive_cores)"
+  [ -n "$cores" ] || return 1   # no pinning at all (small box) ⇒ nothing to isolate
+  [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" = cgroup2fs ] || { log "WARN: not cgroup v2 — frames get CPU affinity only, NOT exclusive cores"; return 1; }
+  [ -e "$CGROOT/system.slice/cpuset.cpus.exclusive" ] || { log "WARN: cpuset controller not delegated to system.slice — affinity only"; return 1; }
+  sudo -n true 2>/dev/null || { log "WARN: no passwordless sudo — cannot make frame cores exclusive; affinity only"; return 1; }
+  if sudo -n sh -c "printf '%s' '$cores' > '$CGROOT/system.slice/cpuset.cpus.exclusive'" 2>/dev/null; then
+    RIG_EXCLUSIVE_ACTIVE=1
+    return 0
+  fi
+  log "WARN: could not reserve exclusive cores [$cores] at system.slice — affinity only"
+  return 1
+}
+
+# Promote one frame's cgroup scope to an exclusive partition root (evicts the
+# host fleet off its cores). Best-effort: logs + continues on any failure.
+rig_frame_exclusive() {  # $1=container name  $2=cpuset
+  local cn="$1" cores="$2" id scope st
+  { [ "$RIG_EXCLUSIVE_ACTIVE" = 1 ] && [ -n "$cores" ]; } || return 0
+  id="$(docker inspect -f '{{.Id}}' "$cn" 2>/dev/null)" || return 0
+  scope="$CGROOT/system.slice/docker-$id.scope"
+  [ -d "$scope" ] || { log "WARN: no cgroup scope for frame $cn — cores $cores stay affinity-only"; return 0; }
+  if sudo -n sh -c "printf '%s' '$cores' > '$scope/cpuset.cpus.exclusive' && echo root > '$scope/cpuset.cpus.partition'" 2>/dev/null; then
+    st="$(cat "$scope/cpuset.cpus.partition" 2>/dev/null || echo '?')"
+    case "$st" in
+      root) log "frame $cn: EXCLUSIVE cores $cores — host fleet evicted (cgroup-v2 partition)" ;;
+      *)    log "WARN: frame $cn partition=[$st] not exclusive — cores $cores stay affinity-only" ;;
+    esac
+  else
+    log "WARN: could not make frame $cn cores $cores exclusive — affinity only"
+  fi
+}
+
+# Release the system.slice exclusive grant (teardown, after the frame scopes are
+# gone — removing the containers already dissolved their partitions). Also cleans
+# a grant left by a hard-killed prior run. Unconditional beyond platform support
+# so `--teardown` repairs a stale grant; writing empty over empty is a no-op.
+rig_disable_exclusive() {
+  [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" = cgroup2fs ] || return 0
+  [ -e "$CGROOT/system.slice/cpuset.cpus.exclusive" ] || return 0
+  sudo -n sh -c "echo > '$CGROOT/system.slice/cpuset.cpus.exclusive'" 2>/dev/null || true
+}
+
 # ── args ──────────────────────────────────────────────────────────────────────
 DEB=""; ONLY=""; KEEP_UP=0; REUSE=0; MODE=run; FRAMES=2
 for arg in "$@"; do case "$arg" in
@@ -153,6 +242,7 @@ printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${RIG_LOCK_LABEL:-${USER:-?}:local-m
 rig_local_teardown() {
   log "teardown: frames + DHT"
   docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht" >/dev/null 2>&1 || true
+  rig_disable_exclusive   # release the system.slice exclusive-core grant (scopes now gone)
   if [ -f "$STATE_FILE" ]; then
     local pid; pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true   # legacy host-pid DHT state
@@ -237,16 +327,25 @@ else
   REUSE=0
   docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true
   log "provision $FRAMES frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
-  # $CPU_ARGS_* word-split deliberately (WI-5319 frame CPU reservation, defined above).
-  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" $CPU_ARGS_A "$IMAGE_TAG" >/dev/null || exit 1
-  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" $CPU_ARGS_B "$IMAGE_TAG" >/dev/null || exit 1
+  # $CPU_ARGS_* / $MEM_ARGS word-split deliberately (frame CPU+memory reservation, defined above).
+  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" $CPU_ARGS_A $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
+  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" $CPU_ARGS_B $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
   if [ "$FRAMES" = 3 ]; then
-    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" $CPU_ARGS_C "$IMAGE_TAG" >/dev/null || exit 1
+    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" $CPU_ARGS_C $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
   fi
 fi
 
 # ARM teardown now (frames exist). --keep-up / --reuse leave everything running.
 [ "$KEEP_UP" = 1 ] || trap rig_local_teardown EXIT
+
+# Promote the reserved frame cores to genuine EXCLUSIVE cgroup-v2 partitions so
+# the host fleet cannot starve them (D-003). Runs for both fresh + --reuse frames
+# (idempotent), after the teardown trap so a partial setup is still released.
+if rig_enable_exclusive; then
+  rig_frame_exclusive "$CN_A" "$CPUSET_A"
+  rig_frame_exclusive "$CN_B" "$CPUSET_B"
+  [ "$FRAMES" = 3 ] && rig_frame_exclusive "$CN_C" "$CPUSET_C"
+fi
 
 # wait sshd
 sshprobe() { ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
