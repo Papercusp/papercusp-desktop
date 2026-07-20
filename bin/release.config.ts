@@ -82,13 +82,16 @@ export function registerPapercuspDrivers(): void {
   registerTargetDriver(linuxX86Driver);
   registerTargetDriver(linuxArm64Driver);
 
-  // Windows: the host-side script already does pack→ship→build→collect.
+  // Windows: cross-compiled natively on this Linux box (cargo-xwin + Inno under
+  // wine) — the QEMU Windows VM was retired (WI-5651). The host-side script still
+  // does pack→ship→build→collect, just without a VM. Output dir is unchanged
+  // (build-windows-cross.sh writes byte-shape-identical artifacts there).
   registerTargetDriver(
     scriptDelegatingDriver(
       'windows-x86_64',
-      'bin/build-windows-on-vm.sh',
+      'bin/build-windows-cross.sh',
       'src-tauri/target/windows-vm/bundle',
-      ['nsis'],
+      ['inno'],
     ),
   );
 

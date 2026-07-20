@@ -834,22 +834,19 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
   assert_reused_provenance "$ROOT/src-tauri/target/windows-vm/bundle/inno" windows
   WIN_REUSE=1
 elif [[ "$WITH_WINDOWS" == "1" ]]; then
-  # WI-5651: the Windows installer can now be built NATIVELY on this Linux box by
+  # WI-5651: the Windows installer is built NATIVELY on this Linux box by
   # cross-compiling (cargo-xwin) + packing Inno under wine — no QEMU Windows VM,
   # no SSH, no lease contention (the VM's heartbeat deaths caused 3 of WI-5600's
-  # failed builds, EI-18152964860625919). Opt in with PAPERCUSP_WINDOWS_CROSS=1;
-  # it produces byte-shape-identical artifacts into the SAME OUT_DIR the collect
-  # + span->zip + record path below consumes. Default OFF keeps the VM path until
-  # a full cross RELEASE cut is validated, then build-windows-on-vm.sh + the VM
-  # retire. Both producers take the same env; the cross one ignores the VM-only
-  # PAPERCUSP_SKIP_SEED_CUT (it never cuts seed — release-local cut it once above).
-  if [[ "${PAPERCUSP_WINDOWS_CROSS:-0}" == "1" ]]; then
-    WIN_PRODUCER="$ROOT/bin/build-windows-cross.sh"
-    echo "==> [parallel] launching Windows x86_64 build NATIVELY on Linux (cross-compile, no VM) (log: $WIN_LEG_LOG)"
-  else
-    WIN_PRODUCER="$ROOT/bin/build-windows-on-vm.sh"
-    echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
-  fi
+  # failed builds, EI-18152964860625919). This is now the ONLY Windows producer:
+  # the QEMU Windows VM (:2223) and bin/build-windows-on-vm.sh were RETIRED after
+  # the cross path was validated end-to-end (gates 1-4 proven; a real 0.0.12
+  # gui+server cross cut produced byte-shape-identical, minisign-signed artifacts
+  # into the SAME OUT_DIR the collect + span->zip + record path below consumes).
+  # The cross producer never cuts seed — release-local cut it once above (it
+  # ignores the VM-only PAPERCUSP_SKIP_SEED_CUT). The old PAPERCUSP_WINDOWS_CROSS
+  # opt-in is gone (cross is unconditional); passing it is now a harmless no-op.
+  WIN_PRODUCER="$ROOT/bin/build-windows-cross.sh"
+  echo "==> [parallel] launching Windows x86_64 build NATIVELY on Linux (cross-compile, no VM) (log: $WIN_LEG_LOG)"
   # Native MSVC build (VM: in the QEMU Windows 11 VM, windows-desktop-release-
   # readiness-2026-06-11 D-001; cross: on this box, WI-5651). SKIP the per-build
   # seed cut: release-local already cut src-tauri/seed ONCE above; the producer REUSES it.

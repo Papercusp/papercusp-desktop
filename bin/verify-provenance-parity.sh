@@ -22,7 +22,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 EMITTER="$HERE/emit-build-provenance.sh"
 RELEASE_LOCAL="$HERE/release-local.sh"
-WIN_BUILD="$HERE/build-windows-on-vm.sh"
+WIN_BUILD="$HERE/build-windows-cross.sh"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 fail() { echo "PROVENANCE-PARITY FAIL: $*" >&2; exit 1; }
@@ -30,7 +30,7 @@ pass() { echo "  ✓ $*"; }
 
 [[ -f "$EMITTER" ]]       || fail "shared emitter missing at $EMITTER"
 [[ -f "$RELEASE_LOCAL" ]] || fail "release-local.sh missing at $RELEASE_LOCAL"
-[[ -f "$WIN_BUILD" ]]     || fail "build-windows-on-vm.sh missing at $WIN_BUILD"
+[[ -f "$WIN_BUILD" ]]     || fail "build-windows-cross.sh missing at $WIN_BUILD"
 
 # ── Check 1: schema conformance in BOTH modes ──────────────────────────────
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -92,13 +92,13 @@ PY
 grep -q 'bin/emit-build-provenance.sh' "$RELEASE_LOCAL" \
   || fail "release-local.sh no longer calls bin/emit-build-provenance.sh (linux/mac leg re-forked?)"
 grep -q 'emit-build-provenance.sh' "$WIN_BUILD" \
-  || fail "build-windows-on-vm.sh no longer calls emit-build-provenance.sh (windows leg re-inlined its emitter?)"
+  || fail "build-windows-cross.sh no longer calls emit-build-provenance.sh (windows leg re-inlined its emitter?)"
 pass "all three legs invoke bin/emit-build-provenance.sh"
 
 # The old inline windows emitter was the ONLY place a raw packedSrcFingerprint
 # JSON line was printf'd; its reappearance means a leg re-inlined an emitter.
 if grep -Eq "printf[^\n]*packedSrcFingerprint" "$WIN_BUILD"; then
-  fail "build-windows-on-vm.sh re-inlined a packedSrcFingerprint printf emitter — P-002 consolidation reverted"
+  fail "build-windows-cross.sh re-inlined a packedSrcFingerprint printf emitter — P-002 consolidation reverted"
 fi
 if grep -Eq 'printf[^\n]*"sha256"' "$RELEASE_LOCAL" "$WIN_BUILD"; then
   fail "a release leg re-inlined an artifact-sha256 printf emitter — provenance must delegate to emit-build-provenance.sh"
