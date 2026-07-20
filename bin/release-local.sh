@@ -899,197 +899,54 @@ if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
   assert_reused_provenance "$MAC_OUT" mac
   MAC_REUSE=1
 elif [[ "$WITH_MAC" == "1" ]]; then
-  echo "==> [parallel] launching macOS universal build on the mac VM (log: $MAC_LEG_LOG)"
+  # WI-5651: macOS universal build, cross-compiled NATIVELY on this Linux box
+  # (cargo-zigbuild per arch -> llvm-lipo -> hand-assembled .app -> rcodesign ->
+  # libdmg-hfsplus dmg) by bin/build-mac-cross.sh -- no QEMU mac VM, no ssh/rsync,
+  # no detached-poll, no lease contention (the fragile legs the owner asked to
+  # retire). Mirrors the Windows cross leg above. mac-vm-build.sh + the VM
+  # systemd/disk are intentionally LEFT IN PLACE (dormant, for on-device TESTING);
+  # this leg no longer touches them.
+  MAC_PRODUCER="$ROOT/bin/build-mac-cross.sh"
+  MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+  # build-mac-cross bundles a fully-DARWIN sidecar (Mach-O node/pg/zellij/...) -- a
+  # SEPARATE artifact from the linux sidecar cut above (that one is native/linux).
+  # Build it here with TARGET_OS=darwin and hand it to the producer.
+  MAC_SIDECAR_DIR="${PAPERCUSP_DARWIN_SIDECAR_DIR:-$ROOT/src-tauri/target/darwin-sidecar}"
+  echo "==> [parallel] launching macOS universal build NATIVELY on Linux (cross-compile, no VM) (log: $MAC_LEG_LOG)"
+  # Clean stale artifacts FIRST: the mac collection glob is UNSCOPED (app.tar.gz
+  # has no version in its filename), so a prior cut's dmg/app would contaminate
+  # this release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
+  mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
+  rm -f "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig 2>/dev/null || true
   (
     set -euo pipefail
-    if ! "${MAC_VM_SSH[@]}" 'true' 2>/dev/null; then
-      echo "ERROR: mac VM unreachable on :2222 — boot it first (see /internal/docs/build-system/vms)"; exit 1
-    fi
-    # ── P-008 (desktop-build-hardening-tri-platform-2026-07-11, per D-005 option
-    # 3): FAIL FAST on insufficient VM disk BEFORE the multi-GB rsync + ~20-min
-    # build, instead of OOM-ing mid-build. The mac VM is a 120GB disk — NOT
-    # "fundamentally too small" (the ~9.6GB claim this comment once carried was a
-    # transient full-disk misread that inverted a 96%-full disk into a permanent
-    # hardware limit, EI-12853). It fills over time with REGENERABLE Xcode/SPM/cargo
-    # caches + a live dogfood workspace, so it needs periodic cache reclamation —
-    # which the branch below now does for real (the old reclaim was a no-op). If space
-    # is still short AFTER reclaiming, abort with an actionable message; the
-    # PAPERCUSP_REUSE_MAC salvage path is an EMERGENCY last resort (it re-ships stale
-    # bytes), never the first-class fallback. Threshold PAPERCUSP_MAC_MIN_FREE_GB
-    # (default 12); PAPERCUSP_MAC_MIN_FREE_GB=0 skips the check entirely.
-    _mac_min_free_gb="${PAPERCUSP_MAC_MIN_FREE_GB:-12}"
-    if (( _mac_min_free_gb > 0 )); then
-      _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
-      if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
-        _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
-        echo "    mac VM free disk: ${_mac_free_gb}GB (universal build needs ~${_mac_min_free_gb}GB)"
-        _mac_reclaimed_gb=0
-        if (( _mac_free_gb < _mac_min_free_gb )); then
-          # WI-4389 / EI-12853 durable self-heal for "the recurring mac cut emergency".
-          # The mac VM is a 120GB disk that fills over time with REGENERABLE Xcode/SPM/
-          # cargo caches + build output — a macOS desktop --release build re-creates
-          # none of these, so reclaiming them frees space without touching source or
-          # live data. The PRIOR reclaim targeted ONLY
-          # $MAC_VM_BUILD_DIR/.../src-tauri/target/**/debug — a path a --release build
-          # never creates (and, since the rsync excludes target/, one that may not even
-          # exist), so it freed ~0 bytes every time. That silent 0-byte "self-heal" is
-          # exactly what made the VM look permanently full and reinforced the false
-          # "too small" premise. This is an EXPLICIT allow-list of regenerable dirs; it
-          # NEVER touches a source tree or the live dogfood workspace
-          # ($HOME/.papercusp-workspaces). We re-measure via df (the truth on bytes
-          # freed) and report what was actually reclaimed. find/loop, not a glob,
-          # because the VM shell is zsh with NOMATCH.
-          _mac_free_kb_before="$_mac_free_kb"
-          echo "    ⚠ ${_mac_free_gb}GB < ${_mac_min_free_gb}GB free — auto-reclaiming regenerable VM caches (NOT source, NOT the live dogfood workspace) before failing…"
-          "${MAC_VM_SSH[@]}" '
-            set +e
-            for d in \
-              "$HOME/Library/Developer/Xcode/DerivedData" \
-              "$HOME/Library/Developer/CoreSimulator" \
-              "$HOME/Library/Caches" \
-              "$HOME/spm-cache" \
-              "$HOME/papercup-rust-mobile/ios/build" \
-              "$HOME/papercup-rust-mobile/target"; do
-              [ -e "$d" ] && rm -rf "$d" 2>/dev/null
-            done
-            T="$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop/src-tauri/target"
-            [ -d "$T" ] && find "$T" -maxdepth 3 -type d -name debug -prune -exec rm -rf {} + 2>/dev/null
-            true
-          ' 2>/dev/null || true
-          _mac_free_kb="$("${MAC_VM_SSH[@]}" 'df -Pk "$HOME" 2>/dev/null | awk "NR==2{print \$4}"' 2>/dev/null || true)"
-          if [[ "$_mac_free_kb" =~ ^[0-9]+$ ]]; then
-            _mac_free_gb=$(( _mac_free_kb / 1024 / 1024 ))
-            if [[ "$_mac_free_kb_before" =~ ^[0-9]+$ ]] && (( _mac_free_kb > _mac_free_kb_before )); then
-              _mac_reclaimed_gb=$(( (_mac_free_kb - _mac_free_kb_before) / 1024 / 1024 ))
-            fi
-            echo "    mac VM free disk after reclaim: ${_mac_free_gb}GB (reclaimed ~${_mac_reclaimed_gb}GB)"
-          fi
-        fi
-        if (( _mac_free_gb < _mac_min_free_gb )); then
-          echo "ERROR: mac VM has only ${_mac_free_gb}GB free (auto-reclaim freed ~${_mac_reclaimed_gb}GB) — a universal (dual-arch) build needs ~${_mac_min_free_gb}GB. The VM is a 120GB disk that has filled with regenerable caches + a live dogfood workspace; it is NOT fundamentally too small. FIX (in order): (1) reclaim VM caches manually — the big regenerable consumers are ~/Library/Developer/CoreSimulator, ~/Library/Developer/Xcode/DerivedData, ~/spm-cache, ~/papercup-rust-mobile/{ios/build,target}, ~/Library/Caches (NEVER touch ~/.papercusp-workspaces — that is the live dogfood instance's data); (2) grow the VM disk if it stays tight. LAST RESORT ONLY: cut with PAPERCUSP_REUSE_MAC=1 to ship the P-005-provenance-verified PRIOR mac artifacts — this re-ships STALE bytes and must never be the routine path. Bypass this check: PAPERCUSP_MAC_MIN_FREE_GB=0."; exit 1
-        fi
-      else
-        echo "    ⚠ could not read mac VM free disk (got '${_mac_free_kb}') — skipping P-008 disk preflight (non-fatal)"
-      fi
-    fi
-    # WI-1708: build from a COMMIT (git archive HEAD), never the live working tree —
-    # the superproject is edited concurrently by the fleet, so a direct rsync would
-    # snapshot a moving target. git archive is an atomic read of committed objects.
-    SNAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-mac-snap.XXXXXX")"
-    echo "    snapshotting HEAD (superproject + submodules) → $SNAP_DIR"
-    git -C "$MONOREPO" archive --format=tar HEAD | tar -x -C "$SNAP_DIR" \
-      || { echo "ERROR: git archive of superproject HEAD failed"; rm -rf "$SNAP_DIR"; exit 1; }
-    git -C "$MONOREPO" submodule foreach --recursive --quiet \
-      'git archive --format=tar --prefix="$displaypath/" HEAD | tar -x -C "'"$SNAP_DIR"'"' \
-      || { echo "ERROR: git archive of a submodule failed"; rm -rf "$SNAP_DIR"; exit 1; }
-    # Re-apply THIS release's version bump + freshly-cut seed onto the snapshot (both
-    # are working-tree-only mutations not yet in HEAD).
-    cp "$ROOT/package.json"              "$SNAP_DIR/papercusp-desktop/package.json"
-    cp "$ROOT/src-tauri/tauri.conf.json" "$SNAP_DIR/papercusp-desktop/src-tauri/tauri.conf.json"
-    cp "$ROOT/src-tauri/Cargo.toml"      "$SNAP_DIR/papercusp-desktop/src-tauri/Cargo.toml"
-    if [[ -f "$ROOT/src-tauri/seed/manifest.json" ]]; then
-      rm -rf "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
-      mkdir -p "$SNAP_DIR/papercusp-desktop/src-tauri/seed"
-      cp -a "$ROOT/src-tauri/seed/." "$SNAP_DIR/papercusp-desktop/src-tauri/seed/"
-    else
-      echo "ERROR: seed cut did not produce $ROOT/src-tauri/seed/manifest.json"; rm -rf "$SNAP_DIR"; exit 1
-    fi
-    echo "    rsync snapshot → VM:$MAC_VM_BUILD_DIR"
-    rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' \
-      --exclude '.turbo' --exclude '.next' --exclude '.mcp.json' --exclude '.claude' \
-      -e "$MAC_VM_RSYNC_E" \
-      "$SNAP_DIR/" "aviweiss@127.0.0.1:$MAC_VM_BUILD_DIR/"
-    rm -rf "$SNAP_DIR"
-    "${MAC_VM_SCP[@]}" \
-      "$KEY_FILE" aviweiss@127.0.0.1:.papercusp-updater.key
-    # ── P-007 (desktop-build-hardening-tri-platform-2026-07-11, per D-005): run
-    # the ~35-min build DETACHED on the VM (nohup + a status sentinel) and POLL
-    # for it — so a dropped ssh connection (the 90s-keepalive death that discarded
-    # 0.0.7, or a hard reset the keepalive can't survive) never kills the build.
-    # A poll that fails (ssh flap) is NON-fatal: the detached build keeps running
-    # and we RETRY THE POLL; we NEVER re-invoke the build from scratch (a re-run
-    # doubles the 35 min, it does not save it). macOS has no setsid — nohup +
-    # </dev/null + redirected fds is what detaches it from the ssh channel.
-    # Sentinel ~/mac-release-build.done holds "DONE:<exit-code>".
-    _mac_done="mac-release-build.done"
-    _mac_log="mac-release-build.log"
-    echo "    launching DETACHED mac build on the VM (nohup; sentinel ~/$_mac_done, log ~/$_mac_log)"
-    "${MAC_VM_SSH[@]}" 'chmod 600 .papercusp-updater.key; rm -f "$HOME/'"$_mac_done"'"; nohup bash -lc "
-      status=0
-      # WI-4470 fix: refresh the ROOT workspace node_modules FIRST so a new root workspace
-      # dep (e.g. kokoro-tts) gets its symlink. papercusp-desktop is NOT a root workspace
-      # member, so the per-desktop install below never touches the root — and mac-vm-build.sh
-      # rebuilds the sidecar, whose esbuild (createRequire walks up) then cannot resolve the
-      # new dep. The rsync excludes node_modules, so the VM root node_modules goes stale silently.
-      cd \$HOME/'"$MAC_VM_BUILD_DIR"' || status=91
-      if [ \$status -eq 0 ]; then npm install --legacy-peer-deps >/tmp/mac-release-root-install.log 2>&1 || { tail -20 /tmp/mac-release-root-install.log; status=92; }; fi
-      # ABSOLUTE path: the root install above moved into MAC_VM_BUILD_DIR, so a relative
-      # cd here would resolve against that dir and miss the papercusp-desktop subdir.
-      if [ \$status -eq 0 ]; then cd \$HOME/'"$MAC_VM_BUILD_DIR"'/papercusp-desktop || status=91; fi
-      if [ \$status -eq 0 ]; then npm install --legacy-peer-deps >/tmp/mac-release-install.log 2>&1 || { tail -20 /tmp/mac-release-install.log; status=92; }; fi
-      if [ \$status -eq 0 ]; then
-        export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
-        export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
-        export PAPERCUSP_BUILD_SHA='"$BUILD_SHA"'
-        export PAPERCUSP_BUILD_VERSION='"$VERSION"'
-        # WI-5085: env does not cross ssh on its own — mac-vm-build.sh falls back to
-        # its OWN default (gui-only) if this is omitted, so a caller who explicitly
-        # asked for PAPERCUSP_BUILD_ROLES="gui server" must have it forwarded here to
-        # actually get a mac Server build.
-        export PAPERCUSP_BUILD_ROLES='"$PAPERCUSP_BUILD_ROLES"'
-        export PAPERCUP_DOGFOOD_REPO_REF='"$TAG"'
-        export PAPERCUP_DOGFOOD_POT_PUBKEY='"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}"'
-        export PAPERCUP_DOGFOOD_POT_INVITE_SECRET='"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}"'
-        export PAPERCUSP_SKIP_SEED_CUT=1
-        # WI-4389/WI-3875: main.rs bakes the update source via option_env! at COMPILE
-        # time, and the compile happens HERE, on the VM. This export list is the ONLY
-        # channel into that build: the var does NOT cross ssh by itself, and the VM has
-        # no ~/.papercusp/release-host.env for the loader above to read. Omit it and
-        # cargo bakes an EMPTY host, so the shipped mac app polls nothing and the Tauri
-        # updater reports up-to-date FOREVER. That is the 0.0.8 defect that forced a
-        # full rebuild + manual reinstall, and it was invisible because the manifest,
-        # the signature and the installer were all still perfect.
-        # (mac-vm-build.sh now GATES on this: it greps the built binary for the host.)
-        export PAPERCUSP_RELEASE_HOST='"$PAPERCUSP_RELEASE_HOST"'
-        bash bin/mac-vm-build.sh || status=\$?
-      fi
-      echo \"DONE:\$status\" > \"\$HOME/'"$_mac_done"'\"
-    " </dev/null >"$HOME/'"$_mac_log"'" 2>&1 &' </dev/null >/dev/null 2>&1 \
-      || { echo "ERROR: failed to launch the detached mac build over ssh"; exit 1; }
-
-    # Poll the sentinel; an ssh flap here is NON-fatal (retry). Wall-clock timeout
-    # leaves the detached build running for inspection rather than re-invoking it.
-    _mac_timeout="${PAPERCUSP_MAC_BUILD_TIMEOUT_SEC:-3600}"
-    _mac_poll="${PAPERCUSP_MAC_POLL_INTERVAL_SEC:-30}"
-    _mac_t0="$(date +%s)"; _mac_sentinel=""
-    echo "    polling for mac build completion (timeout ${_mac_timeout}s, every ${_mac_poll}s)…"
-    while :; do
-      if (( $(date +%s) - _mac_t0 > _mac_timeout )); then
-        echo "ERROR: mac build did not finish within ${_mac_timeout}s — it is DETACHED and may still be running on the VM (~/$_mac_log). NOT re-invoking (D-005). Raise PAPERCUSP_MAC_BUILD_TIMEOUT_SEC or investigate the VM."; exit 1
-      fi
-      _mac_sentinel="$("${MAC_VM_SSH[@]}" 'cat "$HOME/'"$_mac_done"'" 2>/dev/null' 2>/dev/null || true)"
-      [[ "$_mac_sentinel" == DONE:* ]] && break
-      sleep "$_mac_poll"
-    done
-    if [[ "${_mac_sentinel#DONE:}" != "0" ]]; then
-      echo "ERROR: mac build FAILED on the VM ($_mac_sentinel) — tail of ~/$_mac_log:"
-      "${MAC_VM_SSH[@]}" 'tail -80 "$HOME/'"$_mac_log"'" 2>/dev/null' 2>/dev/null | sed 's/^/  [mac-vm] /' || true
-      exit 1
-    fi
-    echo "    mac build completed OK (detached; survived any ssh flaps) — replaying VM build log:"
-    "${MAC_VM_SSH[@]}" 'cat "$HOME/'"$_mac_log"'" 2>/dev/null' 2>/dev/null | sed 's/^/  [mac-vm] /' || true
-    MAC_BUNDLE_VM="$MAC_VM_BUILD_DIR/papercusp-desktop/src-tauri/target/universal-apple-darwin/release/bundle"
-    MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
-    mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
-    # Clean stale artifacts FIRST: the mac collection glob is UNSCOPED (app.tar.gz has
-    # no version in its filename), so a prior cut's dmg/app would contaminate this
-    # release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
-    rm -f "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig 2>/dev/null || true
-    "${MAC_VM_SCP[@]}" \
-      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/dmg/*.dmg" "$MAC_OUT/dmg/" || true
-    "${MAC_VM_SCP[@]}" \
-      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz" \
-      "aviweiss@127.0.0.1:$MAC_BUNDLE_VM/macos/*.app.tar.gz.sig" "$MAC_OUT/macos/" || true
+    # 1) darwin sidecar (Mach-O). Inherits the release env exported above
+    #    (PAPERCUSP_SIDECAR_MIN_EPOCH_SEC freshness stamp, PAPERCUSP_RELEASE_AUDIT=1
+    #    hard identity-scan, PAPERCUP_DOGFOOD_* bake) exactly like the linux sidecar
+    #    build at the top of this script; only TARGET_OS + OUT differ, so it lands
+    #    BESIDE -- not on top of -- src-tauri/sidecar/. verify-sidecar-bundle.sh
+    #    (incl. the WI-5651 dangling-@loader_path gate) runs inside it.
+    echo "==> building darwin sidecar -> $MAC_SIDECAR_DIR (TARGET_OS=darwin, for the mac .app)"
+    rm -rf "$MAC_SIDECAR_DIR"
+    env TARGET_OS=darwin TARGET_ARCH=x64 PAPERCUSP_SIDECAR_OUT="$MAC_SIDECAR_DIR" \
+      bash "$ROOT/bin/build-desktop-sidecar.sh"
+    # 2) universal .app + .app.tar.gz(+.sig) + dmg, bundling that darwin sidecar.
+    #    env does not cross a child on its own, so forward the build identity like
+    #    the Windows leg. PAPERCUSP_RELEASE_HOST is deliberately NOT forced here:
+    #    build-mac-cross loads it from ~/.papercusp/release-host.env (override-safe)
+    #    and HARD-GATES that it baked into the binary -- forcing an empty value
+    #    would silently skip that gate (the 0.0.8 empty-update-host defect). The
+    #    updater signing key defaults to $KEY_FILE inside the producer.
+    mac_env=(
+      PAPERCUSP_SKIP_SEED_CUT=1
+      "PAPERCUSP_BUILD_SHA=$BUILD_SHA"
+      "PAPERCUSP_BUILD_VERSION=$VERSION"
+      "PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES"
+      "PAPERCUSP_DARWIN_SIDECAR_DIR=$MAC_SIDECAR_DIR"
+      "PAPERCUSP_MAC_OUT=$MAC_OUT"
+      MAC_BUILD_TARGET=universal-apple-darwin
+    )
+    env "${mac_env[@]}" bash "$MAC_PRODUCER"
   ) >"$MAC_LEG_LOG" 2>&1 &
   MAC_PID=$!
 fi
