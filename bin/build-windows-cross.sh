@@ -89,6 +89,14 @@ load_release_host
 
 TARGET="x86_64-pc-windows-msvc"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+# Resolve the cargo target dir ONCE, deterministically — this box relocates it
+# via ~/.cargo/config.toml (target-dir = ~/.cargo-target) AND src-tauri/target is
+# a symlink, so a naive "$SRC_TAURI/target/..." path is wrong. Same derivation
+# release-local.sh uses (its line ~1134).
+CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
+[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$SRC_TAURI/target"
+CROSS_EXE="$CARGO_TARGET_ROOT/$TARGET/release/papercusp-desktop.exe"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 WINEPREFIX_INNO="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
@@ -254,11 +262,8 @@ for role in $ROLES; do
       "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
       "${cfg_env[@]}" \
       cargo xwin build --release --target "$TARGET" -p papercusp-desktop )
-  EXE="$SRC_TAURI/target/$TARGET/release/papercusp-desktop.exe"
-  # CARGO_TARGET_DIR may relocate the target dir (this box: ~/.cargo-target).
-  [[ -f "$EXE" ]] || EXE="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-     | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))')/$TARGET/release/papercusp-desktop.exe"
-  [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role'"
+  EXE="$CROSS_EXE"
+  [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role' at $EXE"
 
   # Assert the release host was actually baked (the 0.0.8 defect: an empty host
   # compiles fine and the updater reads it as "up to date" forever).
