@@ -21,6 +21,21 @@ description: >-
   crosscheck / ui-qa.) Kept intact for future revival — to revive, re-enable
   instantiation (generate-from-repo `extends`) and restore the director dispatch.
 
+# Structured counterpart of the prose above (WI-5645 — no-retirement-launch-guard):
+# before this field existed, "retired" was ONLY human-readable, so nothing checked
+# it before spending (EI-18177667809538623: an autoloop spent $14.51+ against this
+# blueprint via `external-bench`, which `extends: coding-factory`). Deep-merges
+# through `extends` — every descendant that doesn't declare its own `retired`
+# (external-bench included) inherits this one. To revive: delete this block (or set
+# `retired: null` on a specific child to un-retire just that child) and restore the
+# director dispatch per the prose above.
+retired:
+  at: "2026-06-24"
+  reason: >-
+    Preserved-but-dormant — its `director` autoloop last fired 2026-05-01 and
+    nothing currently instantiates it. Do not wire new work to it or any
+    blueprint extending it.
+
 workItem:
   kind: feature
   idPrefix: F
