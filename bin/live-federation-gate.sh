@@ -682,6 +682,7 @@ echo "GATE: RED (${REDS[*]}) — $SUMMARY ; logs in $WORK"
 # hidden behind a stale suppression, and re-fires after RED_REFILE_H even while still red so
 # a forgotten/dropped tracking item doesn't go dark forever.
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
+TITLE_PREFIX="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ("
 BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE: a from-repo RED is EXPECTED while WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is open; a content-matrix, local-matrix, or build RED is a NEW regression — investigate."
 RED_MARKER="$STATE_DIR/red-ei-filed"
 # Dedup is PER failing-leg-set, not global (2026-07-16: a brand-new local-matrix
@@ -691,14 +692,67 @@ RED_MARKER="$STATE_DIR/red-ei-filed"
 RED_LEGS_MARKER="$STATE_DIR/red-ei-legs"
 red_marker_age_h="$(age_h "$RED_MARKER")"
 prev_legs="$(cat "$RED_LEGS_MARKER" 2>/dev/null || true)"
+# find_open_duplicate (bug-drain-200k fleet finding, 2026-07-20): the RED_REFILE_H
+# marker above is LOCAL, EPHEMERAL state — it is deliberately cleared on every GREEN
+# (below, "rm -f ... red-ei-filed red-ei-legs"), so an INTERMITTENT regression
+# (red, green, red, green, …) resets it every cycle and mints a BRAND-NEW work-item
+# each time even though the underlying failure is the exact same still-open,
+# already-tracked condition. This produced ~170 open near-identical
+# "live-federation-gate RED: <legs> failed on the packaged binary (<stamp>)" bugs
+# (found + partly hand-closed via the bug-drain-200k fleet; WI-3358/WI-4336 etc. all
+# duplicates of the one still-open live root cause, WI-5441 at filing time). The
+# platform DOES have a create-time semantic-dupe guard (semantic-dupe-guard.ts,
+# P-008) but it is embedding-based with a 2.5s cold-load budget that an HOURLY
+# caller with no warm sidecar between runs reliably forfeits (fail-open by design)
+# — it was never actually protecting this filer. This is a second, DETERMINISTIC,
+# no-embedder check: before filing, ask whether an OPEN bug already carries the
+# same leg-set title template (ignoring the per-run timestamp) and skip filing if
+# so. Best-effort — any curl/parse failure here falls through to filing as before,
+# never suppressing a genuine new regression because this check itself broke.
+find_open_duplicate() { # <title-prefix, no timestamp> -> prints an existing open WI id, or nothing
+  local prefix="$1" resp
+  local -a auth_hdr=()
+  [ -n "$GATE_SUPERUSER_BEARER" ] && auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
+  resp="$(curl -s -m 15 -X POST "$OPERATOR_MCP_URL" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:list\",\"arguments\":{\"kind\":\"bug\",\"harness\":\"papercusp\",\"state\":\"open\",\"limit\":500}}}" 2>/dev/null || true)"
+  GATE_DUP_PREFIX="$prefix" python3 -c '
+import sys, json, os
+prefix = os.environ.get("GATE_DUP_PREFIX", "")
+raw = sys.stdin.read()
+items = []
+for line in raw.splitlines():
+    line = line.strip()
+    if line.startswith("data:"):
+        payload = line[len("data:"):].strip()
+        try:
+            obj = json.loads(payload)
+            text = obj["result"]["content"][0]["text"]
+            items = json.loads(text)
+        except Exception:
+            continue
+for it in items:
+    t = it.get("title", "")
+    if isinstance(t, str) and t.startswith(prefix):
+        print(it.get("id", ""))
+        break
+' <<<"$resp" 2>/dev/null
+}
 if [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] && [ "$prev_legs" = "${REDS[*]}" ]; then
   log "RED already tracked (EI filed ${red_marker_age_h}h ago for same legs '${REDS[*]}', < RED_REFILE_H ${RED_REFILE_H}h) — skipping duplicate filing. $TITLE"
 else
-  [ -n "$prev_legs" ] && [ "$prev_legs" != "${REDS[*]}" ] && [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] \
-    && log "failing-leg set changed ('$prev_legs' → '${REDS[*]}') — filing despite the ${red_marker_age_h}h-old marker."
-  file_ei "$TITLE" "$BODY"
-  echo "$(now_s)" >"$RED_MARKER"
-  printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
+  existing_open="$(find_open_duplicate "$TITLE_PREFIX")"
+  if [ -n "$existing_open" ]; then
+    log "RED already tracked as still-OPEN $existing_open (same leg-set template; the ${RED_REFILE_H}h local marker had reset, e.g. after an intervening GREEN) — skipping duplicate filing. $TITLE"
+    echo "$(now_s)" >"$RED_MARKER"
+    printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
+  else
+    [ -n "$prev_legs" ] && [ "$prev_legs" != "${REDS[*]}" ] && [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] \
+      && log "failing-leg set changed ('$prev_legs' → '${REDS[*]}') — filing despite the ${red_marker_age_h}h-old marker."
+    file_ei "$TITLE" "$BODY"
+    echo "$(now_s)" >"$RED_MARKER"
+    printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
+  fi
 fi
 check_staleness
 exit 1
