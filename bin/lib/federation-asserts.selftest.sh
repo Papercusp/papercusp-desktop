@@ -445,8 +445,15 @@ echo "some unrelated boot log content, no discoverable sidecar port here" > "$WA
 FED_LOG[y]="$WAPI_LOG"
 CLOSED_PORT="$(free_port)"   # bound+released — nothing is listening on it
 declare -A FED_SC; FED_SC[y]="$CLOSED_PORT"
+# Stub fed_discover_sidecar_os to fail FAST (real one does an O(all /proc entries)
+# scan — correct in production but would make this hermetic ~2s selftest both slow
+# AND host-load-dependent; every OTHER function this test doesn't target is a
+# no-op/stub too, same pattern as the fed_plan_part_merge_assert stubs above).
+eval "$(declare -f fed_discover_sidecar_os | sed '1s/.*/fed_discover_sidecar_os_real()/')"
+fed_discover_sidecar_os() { return 1; }
 WAPI_STDERR="$(mktemp /tmp/fed-selftest-waitapi-stderr.XXXXXX)"
 fed_wait_api y 1 2>"$WAPI_STDERR" >/dev/null
+unset -f fed_discover_sidecar_os; eval "$(declare -f fed_discover_sidecar_os_real | sed '1s/.*/fed_discover_sidecar_os()/')"; unset -f fed_discover_sidecar_os_real
 if grep -q "listening TCP ports:" "$WAPI_STDERR" && grep -q "app-log tail" "$WAPI_STDERR"; then
   ok "fed_wait_api dumps instance diagnostics on a non-2xx exit (both the hard-FAIL and legacy-liberal-accept branches)"
 else
