@@ -1222,20 +1222,21 @@ fi
 #   Windows:               No automation yet; we warn and continue. mem0
 #                          falls back to in-memory provider on Windows
 #                          desktops until a vector.dll is bundled.
-# WI-5651: fetch the pgvector Homebrew bottle for a darwin target FROM this linux
-# host (brew is absent here). Homebrew publishes bottles as OCI artifacts on ghcr;
-# we pull the darwin/<arch> bottle for the pinned pgvector version, PREFERRING the
-# macOS 14 (sonoma) build — the one proven ABI-matched to zonky's embedded PG18 and
-# what the retired mac VM's `brew install pgvector` also used — and fall back to the
-# newest available. Prints a normalized dir: <out>/vector.dylib + <out>/extension/.
-fetch_pgvector_darwin_bottle() {
-  local ver="$1" arch="$2"
-  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *) echo "pgvector bottle: unsupported arch $arch" >&2; return 1 ;; esac
-  local repo="homebrew/core/pgvector"
+# WI-5651: shared OCI core for fetching a Homebrew bottle for a DARWIN target
+# FROM this linux host (brew is absent here). Homebrew publishes bottles as OCI
+# artifacts on ghcr; this pulls the darwin/<arch> bottle for <formula>@<ver> from
+# ghcr repo <repo>, PREFERRING the macOS 14 (sonoma) build (proven ABI-matched to
+# zonky's embedded PG18), falling back to the newest available. Extracts the
+# tarball and echoes the extraction TMP root — the caller finds files under it and
+# MUST rm -rf it when done. set -e is DISABLED inside (these fns are called via
+# `||`), so every failure is checked by hand and returns non-zero.
+_fetch_brew_bottle_raw() {
+  local formula="$1" ver="$2" arch="$3" repo="$4"
+  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *) echo "bottle($formula): unsupported arch $arch" >&2; return 1 ;; esac
   local token; token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null)"
-  [[ -n "$token" ]] || { echo "pgvector bottle: ghcr token fetch failed" >&2; return 1; }
+  [[ -n "$token" ]] || { echo "bottle($formula): ghcr token fetch failed" >&2; return 1; }
   local idx; idx="$(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.index.v1+json" "https://ghcr.io/v2/${repo}/manifests/${ver}" 2>/dev/null)"
-  [[ -n "$idx" ]] || { echo "pgvector bottle: index manifest fetch failed (v${ver})" >&2; return 1; }
+  [[ -n "$idx" ]] || { echo "bottle($formula): index manifest fetch failed (v${ver})" >&2; return 1; }
   local nested; nested="$(printf '%s' "$idx" | python3 -c '
 import sys,json,re
 idx=json.load(sys.stdin); want=sys.argv[1]
@@ -1252,13 +1253,36 @@ sonoma=[c for c in cands if c[0]==14]
 pick=sonoma[0] if sonoma else max(cands, key=lambda c:c[0])
 print(pick[1])
 ' "$brew_arch" 2>/dev/null)"
-  [[ -n "$nested" ]] || { echo "pgvector bottle: no darwin/$brew_arch manifest in the index" >&2; return 1; }
+  [[ -n "$nested" ]] || { echo "bottle($formula): no darwin/$brew_arch manifest in the index" >&2; return 1; }
   local man; man="$(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/${repo}/manifests/${nested}" 2>/dev/null)"
   local layer; layer="$(printf '%s' "$man" | python3 -c 'import sys,json;print(json.load(sys.stdin)["layers"][0]["digest"])' 2>/dev/null)"
-  [[ -n "$layer" ]] || { echo "pgvector bottle: could not read layer digest" >&2; return 1; }
+  [[ -n "$layer" ]] || { echo "bottle($formula): could not read layer digest" >&2; return 1; }
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/blobs/${layer}" -o "$tmp/bottle.tar.gz" 2>/dev/null || { echo "pgvector bottle: blob download failed" >&2; rm -rf "$tmp"; return 1; }
-  tar -xzf "$tmp/bottle.tar.gz" -C "$tmp" 2>/dev/null || { echo "pgvector bottle: tar extract failed" >&2; rm -rf "$tmp"; return 1; }
+  curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/blobs/${layer}" -o "$tmp/bottle.tar.gz" 2>/dev/null || { echo "bottle($formula): blob download failed" >&2; rm -rf "$tmp"; return 1; }
+  tar -xzf "$tmp/bottle.tar.gz" -C "$tmp" 2>/dev/null || { echo "bottle($formula): tar extract failed" >&2; rm -rf "$tmp"; return 1; }
+  printf '%s\n' "$tmp"
+}
+
+# WI-5651: fetch <formula>@<ver> darwin bottle and copy its keg root (the dir
+# directly containing bin/ lib/ share/) into <outdir>. Echoes <outdir>. Sources
+# the darwin PostgreSQL client tools + libreadline on the linux cross host.
+fetch_brew_keg() {
+  local formula="$1" ver="$2" arch="$3" repo="$4" outdir="$5"
+  local tmp; tmp="$(_fetch_brew_bottle_raw "$formula" "$ver" "$arch" "$repo")" || return 1
+  local keg; keg="$(find "$tmp" -maxdepth 4 -type d \( -name bin -o -name lib \) 2>/dev/null | head -1)"
+  [[ -n "$keg" ]] || { echo "bottle($formula): could not locate keg root (no bin/ or lib/)" >&2; rm -rf "$tmp"; return 1; }
+  keg="$(dirname "$keg")"
+  rm -rf "$outdir"; mkdir -p "$outdir"
+  cp -a "$keg/." "$outdir/" || { echo "bottle($formula): keg copy failed" >&2; rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  printf '%s\n' "$outdir"
+}
+
+# WI-5651: fetch the pgvector Homebrew bottle for a darwin target and normalize
+# to <out>/vector.dylib + <out>/extension/ (from share/postgresql@18/extension).
+fetch_pgvector_darwin_bottle() {
+  local ver="$1" arch="$2"
+  local tmp; tmp="$(_fetch_brew_bottle_raw pgvector "$ver" "$arch" homebrew/core/pgvector)" || return 1
   # The bottle carries BOTH share/postgresql@18/extension (the SQL + vector.control
   # we want) AND include/postgresql@18/server/extension (headers, no control) — so
   # target the share/ path EXPLICITLY, or a bare `-name extension` picks include/
@@ -1402,13 +1426,59 @@ fi
 echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
 SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
 > "$SOURCE_NOTE_FILE"
+# WI-5651: cross-baking the darwin sidecar on THIS linux host. The client-tool
+# wiring below needs a dedicated cross-darwin path — every host-source branch
+# resolves LINUX binaries, and the darwin Mach-Os can't be exec'd here (so even
+# the version/probe steps must avoid running them).
+_cross_darwin=0
+[[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]] && _cross_darwin=1
 # The embedded server's major version — vendored client tools must match it
 # (pg_dump cannot dump a server NEWER than itself, so distro-default clients —
 # e.g. Ubuntu 24.04's v16 vs our embedded 18 — are not acceptable sources).
-EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+if [[ "$_cross_darwin" == "1" ]]; then
+  # Can't exec the darwin `postgres` binary on this linux host — derive the major
+  # from the installed @embedded-postgres/<platform> package version instead
+  # (e.g. 18.3.0-beta.17 → 18). EMBEDDED_PG_BIN_DIR is <pkg>/native/bin.
+  _epg_pkg_json="$(cd "$EMBEDDED_PG_BIN_DIR/../.." 2>/dev/null && pwd)/package.json"
+  EMBEDDED_PG_MAJOR="$(node -e "console.log(String(require('$_epg_pkg_json').version).split('.')[0])" 2>/dev/null)"
+else
+  EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+fi
 if [[ -z "$EMBEDDED_PG_MAJOR" ]]; then
   echo "ERROR: could not determine embedded postgres major version from $EMBEDDED_PG_BIN_DIR/postgres"
   exit 1
+fi
+
+# WI-5651 cross-darwin: pre-fetch the darwin PostgreSQL client tools (Homebrew
+# postgresql@<major> bottle) + the one dylib the embedded native/lib lacks
+# (libreadline, psql's dep). The tool loop below sources from $_cross_darwin_pg_keg
+# and rewrites keg-dylib refs via _cross_darwin_vendor_pg_tool. native/lib already
+# ships libpq/libintl/libcrypto/liblz4/libzstd for the server, so we REUSE those
+# and vendor ONLY readline — avoiding a duplicate multi-dylib closure in the app.
+_cross_darwin_pg_keg=""
+if [[ "$_cross_darwin" == "1" ]]; then
+  _brew_pg_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/postgresql@${EMBEDDED_PG_MAJOR}.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
+  [[ -n "$_brew_pg_ver" ]] || { echo "ERROR: could not resolve postgresql@${EMBEDDED_PG_MAJOR} stable version from the brew formula api"; exit 1; }
+  echo "  → cross: fetching postgresql@${EMBEDDED_PG_MAJOR} ${_brew_pg_ver} darwin-${TARGET_ARCH} client tools from ghcr (no brew on ${_host_os})"
+  _cross_darwin_pg_keg="$(fetch_brew_keg "postgresql@${EMBEDDED_PG_MAJOR}" "$_brew_pg_ver" "$TARGET_ARCH" "homebrew/core/postgresql/${EMBEDDED_PG_MAJOR}" "$(mktemp -d)/pgkeg")" \
+    || { echo "ERROR: postgresql@${EMBEDDED_PG_MAJOR} darwin bottle fetch failed (see above)"; exit 1; }
+  # readline: psql's one non-system dep NOT already in native/lib. Vendor it into
+  # bin/.pg-lib (its only dep, libncurses, is a macOS system lib — leave it).
+  _brew_rl_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/readline.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
+  [[ -n "$_brew_rl_ver" ]] || { echo "ERROR: could not resolve readline stable version from the brew formula api"; exit 1; }
+  echo "  → cross: fetching readline ${_brew_rl_ver} darwin-${TARGET_ARCH} bottle (libreadline.8 for psql)"
+  _cross_rl_keg="$(fetch_brew_keg readline "$_brew_rl_ver" "$TARGET_ARCH" "homebrew/core/readline" "$(mktemp -d)/rlkeg")" \
+    || { echo "ERROR: readline darwin bottle fetch failed (see above)"; exit 1; }
+  mkdir -p "$SIDECAR_DIR/bin/.pg-lib"
+  _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8.dylib' | head -1)"
+  [[ -n "$_rl_src" ]] || _rl_src="$(find "$_cross_rl_keg/lib" -maxdepth 1 -name 'libreadline.8*.dylib' ! -type l | head -1)"
+  [[ -n "$_rl_src" ]] || { echo "ERROR: libreadline.8.dylib not found in the readline bottle"; exit 1; }
+  cp -L "$_rl_src" "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib"
+  chmod 755 "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib"
+  llvm-install-name-tool-18 -id "@executable_path/.pg-lib/libreadline.8.dylib" "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib"
+  rcodesign sign "$SIDECAR_DIR/bin/.pg-lib/libreadline.8.dylib" >/dev/null 2>&1 \
+    || { echo "ERROR: rcodesign ad-hoc sign failed for vendored libreadline.8.dylib"; exit 1; }
+  echo "  ✓ cross: vendored + signed libreadline.8.dylib into bin/.pg-lib"
 fi
 
 # NEVER vendor a #!-script as a pg tool. On Debian/Ubuntu `command -v psql`
@@ -1447,11 +1517,64 @@ _darwin_vendor_keg_dylibs() {
   codesign --force -s - "$target"
 }
 
+# WI-5651: the CROSS twin of _darwin_vendor_keg_dylibs — runs on THIS linux host
+# with llvm-install-name-tool-18 + rcodesign (native otool/install_name_tool/
+# codesign are macOS-only). The Homebrew bottle tools reference their dylibs via
+# @@HOMEBREW_CELLAR@@ / @@HOMEBREW_PREFIX@@ placeholder TOKENS. Rewrite every
+# non-system ref to REUSE the darwin native/lib already shipped for the embedded
+# server (name-matched to the exact versioned filename present — the tree ships
+# NO compat-name symlinks), or the bin/.pg-lib readline vendored above; then
+# ad-hoc re-sign (rewriting the load commands invalidates the signature, and a
+# stale one SIGKILLs on load). rcodesign's `verify` is buggy (exits 0 on error)
+# — the sign step's exit code is the reliable signal.
+_cross_darwin_vendor_pg_tool() {
+  local tool="$1"
+  local nlibdir="${EMBEDDED_PG_BIN_DIR%/bin}/lib"
+  local emb_lib_rel="${EMBEDDED_PG_BIN_DIR#"$SIDECAR_DIR"/}"   # node_modules/.../native/bin
+  emb_lib_rel="../${emb_lib_rel%/bin}/lib"                     # ../node_modules/.../native/lib (relative to bin/)
+  chmod +w "$tool"
+  local dep base stem m tgt
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    case "$dep" in /usr/lib/*|/System/*) continue ;; esac      # macOS system libs — always present
+    base="$(basename "$dep")"
+    tgt=""
+    if [[ -e "$nlibdir/$base" ]]; then
+      tgt="$base"                                              # exact (libpq.5, libintl.8, libcrypto.3)
+    else
+      stem="${base%.dylib}"
+      m="$(ls "$nlibdir/$stem".*.dylib 2>/dev/null | head -1)" # compat→versioned (libzstd.1→libzstd.1.5.7)
+      [[ -n "$m" ]] && tgt="$(basename "$m")"
+    fi
+    if [[ -n "$tgt" ]]; then
+      llvm-install-name-tool-18 -change "$dep" "@executable_path/$emb_lib_rel/$tgt" "$tool"
+    elif [[ -e "$SIDECAR_DIR/bin/.pg-lib/$base" ]]; then
+      llvm-install-name-tool-18 -change "$dep" "@executable_path/.pg-lib/$base" "$tool"
+    else
+      echo "ERROR: $(basename "$tool") links '$dep' ($base) — neither in the embedded darwin"
+      echo "  native/lib ($nlibdir) nor vendored in bin/.pg-lib. It would dangle on a clean Mac."
+      return 1
+    fi
+  done < <(llvm-otool-18 -L "$tool" 2>/dev/null | awk 'NR>1{print $1}' | grep -vE '^@(executable_path|loader_path|rpath)/' || true)
+  rcodesign sign "$tool" >/dev/null 2>&1 || { echo "ERROR: rcodesign ad-hoc sign failed for $tool"; return 1; }
+}
+
 _pg_build_os="$(uname -s)"
 for tool in pg_dump psql pg_dumpall pg_restore; do
   src=""
   method=""
-  if [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]] && ! _is_script "$EMBEDDED_PG_BIN_DIR/$tool"; then
+  # WI-5651 cross-darwin: source from the fetched Homebrew postgresql bottle
+  # (checked FIRST — every other branch below resolves this linux host's binaries).
+  if [[ "$_cross_darwin" == "1" ]]; then
+    if [[ -f "$_cross_darwin_pg_keg/bin/$tool" ]]; then
+      src="$_cross_darwin_pg_keg/bin/$tool"
+      method="copy (darwin postgresql@${EMBEDDED_PG_MAJOR} bottle)"
+    else
+      echo "ERROR: $tool not present in the darwin postgresql bottle ($_cross_darwin_pg_keg/bin)"
+      exit 1
+    fi
+  fi
+  if [[ -z "$src" ]] && [[ -x "$EMBEDDED_PG_BIN_DIR/$tool" ]] && ! _is_script "$EMBEDDED_PG_BIN_DIR/$tool"; then
     src="$EMBEDDED_PG_BIN_DIR/$tool"
     method="symlink (from embedded-postgres)"
   fi
@@ -1496,7 +1619,15 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
   case "$method" in
     symlink*) ln -sfn "$src" "$SIDECAR_DIR/bin/$tool" ;;
     copy*)
-      if [[ "$_pg_build_os" == "Linux" ]]; then
+      if [[ "$_cross_darwin" == "1" ]]; then
+        # WI-5651: cross-baking darwin ON linux — the build host IS Linux, so the
+        # branches below would wrongly build the Linux .pg-real wrapper. Copy the
+        # darwin bottle binary and rewrite its keg dylibs with the llvm/rcodesign
+        # toolchain (native otool/install_name_tool/codesign are macOS-only).
+        cp -L "$src" "$SIDECAR_DIR/bin/$tool"
+        chmod 755 "$SIDECAR_DIR/bin/$tool"
+        _cross_darwin_vendor_pg_tool "$SIDECAR_DIR/bin/$tool" || exit 1
+      elif [[ "$_pg_build_os" == "Linux" ]]; then
         # Real pgdg binaries link libpq.so.5 (and psql libreadline.so.8) that a
         # clean target machine may not have. Ship the binary under bin/.pg-real/
         # fronted by a sh wrapper whose LD_LIBRARY_PATH points at (a) the
