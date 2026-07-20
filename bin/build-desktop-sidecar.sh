@@ -41,7 +41,12 @@ ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
-SIDECAR_DIR="$ROOT/src-tauri/sidecar"
+# WI-5651: normally the sidecar is assembled + published at src-tauri/sidecar
+# (where tauri build's bundle.resources glob reads it — a real release cut MUST
+# use that). PAPERCUSP_SIDECAR_OUT redirects the WHOLE build (temp stage, lock,
+# atomic publish) to a scratch dir so a cross-platform TEST bundle can be built
+# and inspected WITHOUT clobbering the live host sidecar on this shared tree.
+SIDECAR_DIR="${PAPERCUSP_SIDECAR_OUT:-$ROOT/src-tauri/sidecar}"
 
 if [[ ! -d "$WEB_DIR" ]]; then
   echo "ERROR: papercup/apps/operator not found at $WEB_DIR"
