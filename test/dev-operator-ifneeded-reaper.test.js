@@ -255,6 +255,16 @@ test('squatter path: a dbosEnabled:true process on $PORT is killed and replaced 
     );
     assert(Number.isInteger(sleeperPid) && sleeperPid > 1, 'wrapper did not spawn a replacement instance');
     assert(pidAlive(sleeperPid), 'replacement instance should be alive');
+
+    // Clean up the replacement instance THROUGH the wrapper's own reap path
+    // (SIGKILL ⇒ the detached watchdog reaps it) and WAIT for that to
+    // complete — a fire-and-forget kill in `finally` races the watchdog's own
+    // ~1s liveness-poll + TERM/KILL escalation and leaks the sleeper (and its
+    // supervisor loop) past this test's lifetime, exactly the kind of leak
+    // this whole file exists to catch.
+    process.kill(wrapper.pid, 'SIGKILL');
+    const reaped = await waitFor(() => !pidAlive(sleeperPid), { timeoutMs: 20_000 });
+    assert(reaped, 'replacement instance survived the wrapper SIGKILL — reaper regressed');
   } finally {
     if (wrapper && !wrapper.killed) {
       try {
