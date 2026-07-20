@@ -394,7 +394,13 @@ make_dmg() { # $1=app $2=productName
   cp -a "$app" "$stage/"
   build_tutorial_app "$stage"
 
-  local bytes mb; bytes=$(du -sb "$stage" | cut -f1); mb=$(( bytes/1024/1024 + 80 ))
+  # Size the HFS+ image with GENEROUS slack: content + 25% + 300MB. HFS+ needs
+  # headroom beyond the raw bytes for its catalog/extents B-trees + allocation
+  # bitmap, which for a bundle with ~14k files (the sidecar node_modules) is well
+  # past a small fixed margin — an 80MB slack silently ran `hfsplus addall` out of
+  # space mid-populate (WI-5651). The empty tail compresses to ~nothing in the
+  # UDIF convert, so oversizing the raw image barely affects the final dmg.
+  local bytes mb; bytes=$(du -sb "$stage" | cut -f1); mb=$(( bytes/1024/1024 + bytes/1024/1024/4 + 300 ))
   echo "    dmg: $(basename "$dmg") (staging $((bytes/1024/1024))MB → ${mb}MB image)"
   dd if=/dev/zero of="$raw" bs=1M count="$mb" status=none
   mkfs.hfsplus -v "$name" "$raw" >/dev/null 2>&1 || fail "mkfs.hfsplus failed for $name"
