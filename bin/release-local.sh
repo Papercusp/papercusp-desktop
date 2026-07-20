@@ -171,15 +171,12 @@ WITH_MAC="${WITH_MAC:-0}"
 # comment above for why. Pass PAPERCUSP_BUILD_ROLES=gui for the fast-iteration
 # opt-in.
 #
-# WI-5559: capture whether the CALLER explicitly set this (even to the same
-# value as our default) BEFORE we apply the default below — the Windows leg
-# needs to tell "caller asked for gui+server" from "release-local's own
-# default resolved to gui+server", because unlike mac/linux, Windows' own
-# gui-only default (build-windows-on-vm.sh) must survive an UNSET caller
-# input. Forwarding our resolved value unconditionally (as this script used
-# to) defeats that windows-side default on every real release cut — the
-# exact ~40min unpublished-Server-build waste WI-5085 was meant to avoid.
-_PAPERCUSP_BUILD_ROLES_CALLER_SET="${PAPERCUSP_BUILD_ROLES+1}"
+# WI-5600: the Windows leg forwards the resolved roles like mac/linux (below),
+# and build-windows-on-vm.sh ALSO defaults to gui+server — so an UNSET caller
+# gets a LAUNCHABLE Windows build (the GUI plus the Server it attaches to).
+# WI-5559 had suppressed the Windows Server here on the false premise it was
+# unpublished throwaway output; a gui-only Windows cut actually ships a dead
+# build (WI-5600), so that suppression is reversed.
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 export PAPERCUSP_BUILD_ROLES
 # Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
@@ -839,25 +836,15 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
   (
     set -euo pipefail
     win_env=(PAPERCUSP_SKIP_SEED_CUT=1 "PAPERCUSP_BUILD_SHA=$BUILD_SHA" "PAPERCUSP_BUILD_VERSION=$VERSION")
-    # WI-5559: only forward PAPERCUSP_BUILD_ROLES when the CALLER explicitly set
-    # it (captured above, before this script's own default was applied). Windows
-    # deliberately keeps a narrower gui-only default (build-windows-on-vm.sh) than
-    # mac/linux's gui+server (D-004) — its Server installer is never published
-    # (WI-5028), so building it on every real cut wastes a ~40min ISCC pack.
-    # Forwarding our resolved default unconditionally defeated that windows-side
-    # default on every plain `WITH_WINDOWS=1 release-local.sh` run. An explicit
-    # `PAPERCUSP_BUILD_ROLES=... release-local.sh` still reaches windows verbatim.
-    if [[ -n "${_PAPERCUSP_BUILD_ROLES_CALLER_SET:-}" ]]; then
-      win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
-    fi
-    # `-u PAPERCUSP_BUILD_ROLES` matters even in the not-explicit-set branch:
-    # this script `export`s its own resolved PAPERCUSP_BUILD_ROLES (default
-    # "gui server") above, so without stripping it here the child would still
-    # INHERIT that exported value from our environment regardless of win_env —
-    # env only ADDS/overrides the names it's given, it does not otherwise
-    # sanitize inherited exports. Explicitly unset-then-reapply so only an
-    # explicit caller override survives into the windows leg's environment.
-    env -u PAPERCUSP_BUILD_ROLES "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
+    # WI-5600: forward the resolved PAPERCUSP_BUILD_ROLES into the Windows leg,
+    # exactly like the mac leg (which must export it because env does not cross
+    # ssh). Windows now defaults to gui+server too (build-windows-on-vm.sh), so
+    # even an unset caller builds a launchable Windows build (GUI + Server). An
+    # explicit `PAPERCUSP_BUILD_ROLES=gui release-local.sh` still reaches Windows
+    # verbatim for a deliberate fast gui-only cut. (WI-5559 previously stripped
+    # roles here to force gui-only — reversed: that shipped a dead Windows build.)
+    win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
+    env "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi

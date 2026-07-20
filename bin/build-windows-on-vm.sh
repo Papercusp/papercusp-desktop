@@ -763,13 +763,17 @@ esac
 SCCACHE_PRELUDE="${SCCACHE_PRELUDE/"# __PAPERCUSP_SCCACHE_INVOKE__"/$_win_sccache_line}"
 # WI-5085 (desktop-build-speed-2026-07-16#P-006): which role(s) to build, same
 # knob as the mac (mac-vm-build.sh) and linux (release-local.sh /
-# build-linux-local.sh) legs. UNLIKE those two, Windows KEEPS the GUI-ONLY
-# default deliberately — see the comment below. (D-004 of the same plan
-# restored the mac/linux default to BOTH roles after gui-only silently
-# dropped their *published* Server product, EI-18099496479921046; Windows
-# Server isn't a published product at all today — see below — so there is
-# nothing to silently drop there.)
-PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+# build-linux-local.sh) legs. Windows defaults to BOTH roles, matching mac/linux
+# (D-004). WI-5559 had narrowed this to gui-only on the premise that the Windows
+# Server is unpublished throwaway output — but WI-5600 (owner-reported,
+# 2026-07-20) established the opposite: on Windows the GUI is a THIN CLIENT that
+# attaches to com.papercusp.server (exactly like mac), so a gui-only Windows cut
+# ships a DEAD build that cannot launch. The Server IS a required, published
+# product (0.0.12's Windows Server is live on the releases site). Defaulting to
+# gui-only silently dropped it and shipped that dead build — the same class of
+# regression D-004 fixed for mac/linux (gui-only had silently dropped their
+# published Server, EI-18099496479921046). So: build both by default.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 _win_build_server=0
 _win_build_gui=0
 for _win_role in $PAPERCUSP_BUILD_ROLES; do
@@ -779,14 +783,17 @@ for _win_role in $PAPERCUSP_BUILD_ROLES; do
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$_win_role' — skipping" >&2 ;;
   esac
 done
-# Server bundle: previously built by DEFAULT even in FAST_ITER; now GUI-ONLY by
-# default (WI-5085) — the Windows Server output isn't actually shippable today
-# (spanned Inno install; record-release-cli skips it, WI-5028), so building it
-# on every cut spent a second Rust compile + a ~40min ISCC pack (EI-12902) on
-# output nobody publishes. Set PAPERCUSP_BUILD_ROLES="gui server" to build it
-# anyway. If a sidecar/SPA/TS change is destined for an installed Windows
-# Server box, that env var is required — skipping it silently verifies a stale
-# UI (bit the WI-3033 verify, 2026-07-05, back when Server was default).
+# Server bundle: built by DEFAULT (WI-5600 reversed WI-5085/WI-5559's gui-only
+# default). On Windows the GUI is a thin client that attaches to
+# com.papercusp.server, so the Server is a REQUIRED, published product — a
+# gui-only cut ships a DEAD build that can't launch. The Server is a spanned
+# Inno install (>4GB); the release path publishes the spanned set (WI-5028/
+# WI-5600). Building it costs a second Rust compile + a ~40min ISCC pack
+# (EI-12902) — the price of a launchable Windows build; P-012 (ISCC lzma2/fast)
+# trims it. For FAST gui-only Rust iteration set PAPERCUSP_BUILD_ROLES="gui" (or
+# PAPERCUSP_FAST_ITER_GUI_ONLY=1); a real release cut must build both. (Skipping
+# the Server silently also verifies a stale UI — bit the WI-3033 verify,
+# 2026-07-05, back when a gui-only skip was the default.)
 # PAPERCUSP_FAST_ITER_GUI_ONLY=1 remains a narrower override: forces GUI-only
 # regardless of PAPERCUSP_BUILD_ROLES, for fast Rust-only iteration. Either way
 # the skip DELETES the stale Server artifacts from the VM's inno dir so the
