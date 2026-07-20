@@ -223,18 +223,9 @@ fi
 # with package.json's @tauri-apps/cli devDependency (^2.1.0 → resolved 2.11.0).
 # One-off override: PAPERCUSP_TAURI_CLI_VERSION=x.y.z.
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}"
-# P-007 (desktop-build-hardening-tri-platform-2026-07-11): keepalive parity with
-# the Windows leg (build-windows-on-vm.sh:113). ssh's DEFAULT ServerAliveCountMax=3
-# tears the session down after ~90s of VM unresponsiveness — that 90s death is what
-# discarded the 0.0.7 cut mid-build when host-load starvation (WI-3792) stalled the
-# VM. 30s interval × 20 misses tolerates ~10min of unresponsiveness before ssh
-# gives up; IdentitiesOnly pins auth to this key so a loaded agent doesn't offer
-# many keys and trip MaxAuthTries. Reused by every mac ssh/scp/rsync call below.
-MAC_VM_KEEPALIVE=(-o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
-MAC_VM_SSH=(ssh -i "${HOME}/.ssh/papercup-vm-mac" -o IdentitiesOnly=yes -p 2222 -o BatchMode=yes "${MAC_VM_KEEPALIVE[@]}" aviweiss@127.0.0.1)
-MAC_VM_SCP=(scp -i "${HOME}/.ssh/papercup-vm-mac" -o IdentitiesOnly=yes -P 2222 -o BatchMode=yes "${MAC_VM_KEEPALIVE[@]}")
-MAC_VM_RSYNC_E="ssh -i ${HOME}/.ssh/papercup-vm-mac -o IdentitiesOnly=yes -p 2222 -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
-MAC_VM_BUILD_DIR="papercup-build-mac/papercup"
+# WI-5651: the mac VM ssh/scp/rsync frames that used to live here are GONE — the
+# mac leg builds natively (bin/build-mac-cross.sh), no VM. mac-vm-build.sh keeps
+# its own VM connection setup for the on-device TESTING the VM is retained for.
 # Build provenance: the short git sha of the tree we're packaging, made HONEST
 # per EI-8914 / P-003 (desktop-build-hardening-tri-platform-2026-07-11). This is
 # the SINGLE SOURCE OF TRUTH for PAPERCUSP_BUILD_SHA across all three legs — it
