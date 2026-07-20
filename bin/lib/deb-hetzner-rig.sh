@@ -119,11 +119,22 @@ rig_init() {
   # specific id to pin it, or RIG_WORKSPACE_ID=default to force the retired
   # legacy baseline (archaeology only — the seat legs can never pass under it).
   RIG_WORKSPACE_ID="${RIG_WORKSPACE_ID:-workspace-rig$(openssl rand -hex 4 2>/dev/null || printf '%08x' $((RANDOM * 32768 + RANDOM)))}"
-  # Operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_HIVE_HOME_SLUG,
+  # Operator-home harness slug (operatorHomeHarnessSlug ← PAPERCUSP_POT_HOME_SLUG,
   # else 'papercusp'). NOTE: on a fresh frame NO slug resolves at BOOT (projects are
   # created/joined post-boot), so the checkHomeHarnessResolves boot-validation warns
-  # regardless — non-fatal (a red herring for the apply regression above). Set only
-  # alongside RIG_WORKSPACE_ID if a future fix makes it matter.
+  # regardless — non-fatal (a red herring for the apply regression above).
+  #
+  # WI-5631: this MUST be a non-'papercusp' value on every rig run. When unset, the
+  # frame's home-harness slug falls through to the app's LEGACY_DEFAULT_HOME_HARNESS
+  # ('papercusp') — which then matches the `harness_slug` the frame's own engineer-issues
+  # projection guard (decideMemberContentOp) sees on federated ops carrying the REAL
+  # production papercusp home-harness backlog, so that guard's own-slug fast path
+  # (`rowHarnessSlug === opts.harnessSlug` → unconditional 'apply', no membership check)
+  # admits + writes the whole real backlog into the frame — the id-collision storm
+  # (8068+ "EI-13285 id collision" ops/run) that starves the frame's event loop and
+  # blocks a clean replication_soak pass. local-matrix.sh sets a synthetic default so
+  # this is never empty on the local (BYO-frames) path; a genuine Hetzner-provisioned
+  # run should set it too.
   RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-}"
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
@@ -620,7 +631,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
-  ${HHSLUG:+PAPERCUSP_HIVE_HOME_SLUG="$HHSLUG"} \
+  ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
