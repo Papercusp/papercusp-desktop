@@ -350,9 +350,10 @@ BA_TABLE="$MATRIX"; MATRIX="$AB_TABLE$BA_TABLE"
 # finished warming up" (latency, not death) — never gates CONTENT_OVERALL, purely
 # diagnostic so the next gate run's report says which one this was.
 if printf '%b' "$BA_TABLE" | grep -q FAIL; then
+  PRE_LATE_MATRIX="$MATRIX"; MATRIX=""
   log "INCREMENTAL B→A LATE-RECHECK (was the incr-B→A miss above latency or death?)"
   check_all a ba "incr-B→A-late" b
-  BA_LATE_TABLE="$MATRIX"; MATRIX=""
+  BA_LATE_TABLE="$MATRIX"; MATRIX="$PRE_LATE_MATRIX"
 else
   BA_LATE_TABLE=""
 fi
@@ -376,11 +377,12 @@ log "RESULT (member=$SLUG hive=$HIVE_SLUG)"
 echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_TABLE"
 if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-incremental re-poll — PASS here + FAIL above = latency, not death):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_LATE_TABLE"; fi
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
+if [ -n "$BA_LATE_TABLE" ]; then echo; echo "INCREMENTAL B→A LATE-RECHECK (post-window re-poll — PASS here + FAIL above = latency/warm-up, not death; see WI-5673):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$BA_LATE_TABLE"; fi
 echo; echo "negative-isolation=$NEG  topic-equal=$TEQ  b-to-a-directory=$BA_DIR"
 CONTENT_OVERALL=PASS
 [ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE
 case "$TEQ" in PASS*) ;; *) CONTENT_OVERALL=INCOMPLETE ;; esac
-if printf '%b%b%b' "$BACKFILL_TABLE" "$BACKFILL_LATE_TABLE" "$MATRIX" | grep -q FAIL; then
+if printf '%b%b%b%b' "$BACKFILL_TABLE" "$BACKFILL_LATE_TABLE" "$MATRIX" "$BA_LATE_TABLE" | grep -q FAIL; then
   CONTENT_OVERALL=INCOMPLETE
 fi
 if [ "$CONTENT_OVERALL" = PASS ]; then
