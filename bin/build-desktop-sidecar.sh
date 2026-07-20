@@ -2142,18 +2142,32 @@ mkdir -p "$SIDECAR_DIR/bin"
 # built binaries are NOT under <crate>/target/. Same resolution release-local.sh
 # uses; empty string on failure → the standard in-crate paths below still match).
 CARGO_TGT="$(cd "$REPO/apps/tui" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-# 1. pui (apps/tui) — native release build for the host triple.
+# 1. pui (apps/tui) — release build for the TARGET triple.
 # Close the sidecar lock fd in the cargo subtree. RUSTC_WRAPPER may start the
 # long-lived sccache server; if that daemon inherits fd 9 it keeps the flock
 # alive after this builder exits and wedges stage-source-tree forever. The
 # parent shell still owns fd 9, so the lock remains held for this whole build.
-( exec 9>&-; cd "$REPO/apps/tui" && cargo build --release )
+# WI-5651: for a cross darwin bundle, pui is a native binary — build it with
+# `cargo zigbuild --target <triple>` (same zig+SDK toolchain the tauri binary
+# uses), NOT the host `cargo build`, or the dock would ship a linux ELF `pui`.
+_pui_rust_arch="$TARGET_ARCH"
+case "$_pui_rust_arch" in x64) _pui_rust_arch="x86_64" ;; arm64) _pui_rust_arch="aarch64" ;; esac
+if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
+  _pui_triple="${_pui_rust_arch}-apple-darwin"
+  echo "    → cross: cargo zigbuild pui for ${_pui_triple}"
+  rustup target add "$_pui_triple" >/dev/null 2>&1 || true
+  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="/tmp/zig:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" cargo zigbuild --release --target "$_pui_triple" )
+  _pui_target_sub="$_pui_triple/release/pui"
+else
+  ( exec 9>&-; cd "$REPO/apps/tui" && cargo build --release )
+  _pui_target_sub="release/pui"
+fi
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
 # `set -eo pipefail` a missing path arg makes find non-zero → exit). The resolved
 # CARGO_TGT comes first (covers the target-dir redirect); then the standard
 # in-crate / workspace target dirs (non-redirected boxes, e.g. the mac VM).
 PUI_BIN=""
-for _c in "$CARGO_TGT/release/pui" "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
+for _c in "$CARGO_TGT/$_pui_target_sub" "$REPO/apps/tui/target/$_pui_target_sub" "$REPO/target/$_pui_target_sub"; do
   [[ -f "$_c" ]] && PUI_BIN="$_c" && break
 done
 [[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
