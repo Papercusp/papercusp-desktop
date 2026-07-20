@@ -829,10 +829,25 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
   assert_reused_provenance "$ROOT/src-tauri/target/windows-vm/bundle/inno" windows
   WIN_REUSE=1
 elif [[ "$WITH_WINDOWS" == "1" ]]; then
-  echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
-  # Native MSVC build on the local QEMU Windows 11 VM (windows-desktop-release-
-  # readiness-2026-06-11 D-001). SKIP the per-build seed cut: release-local already
-  # cut src-tauri/seed ONCE above; build-windows-on-vm.sh REUSES it.
+  # WI-5651: the Windows installer can now be built NATIVELY on this Linux box by
+  # cross-compiling (cargo-xwin) + packing Inno under wine — no QEMU Windows VM,
+  # no SSH, no lease contention (the VM's heartbeat deaths caused 3 of WI-5600's
+  # failed builds, EI-18152964860625919). Opt in with PAPERCUSP_WINDOWS_CROSS=1;
+  # it produces byte-shape-identical artifacts into the SAME OUT_DIR the collect
+  # + span->zip + record path below consumes. Default OFF keeps the VM path until
+  # a full cross RELEASE cut is validated, then build-windows-on-vm.sh + the VM
+  # retire. Both producers take the same env; the cross one ignores the VM-only
+  # PAPERCUSP_SKIP_SEED_CUT (it never cuts seed — release-local cut it once above).
+  if [[ "${PAPERCUSP_WINDOWS_CROSS:-0}" == "1" ]]; then
+    WIN_PRODUCER="$ROOT/bin/build-windows-cross.sh"
+    echo "==> [parallel] launching Windows x86_64 build NATIVELY on Linux (cross-compile, no VM) (log: $WIN_LEG_LOG)"
+  else
+    WIN_PRODUCER="$ROOT/bin/build-windows-on-vm.sh"
+    echo "==> [parallel] launching Windows x86_64 build on the Windows VM (log: $WIN_LEG_LOG)"
+  fi
+  # Native MSVC build (VM: in the QEMU Windows 11 VM, windows-desktop-release-
+  # readiness-2026-06-11 D-001; cross: on this box, WI-5651). SKIP the per-build
+  # seed cut: release-local already cut src-tauri/seed ONCE above; the producer REUSES it.
   (
     set -euo pipefail
     win_env=(PAPERCUSP_SKIP_SEED_CUT=1 "PAPERCUSP_BUILD_SHA=$BUILD_SHA" "PAPERCUSP_BUILD_VERSION=$VERSION")
@@ -844,7 +859,7 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
     # verbatim for a deliberate fast gui-only cut. (WI-5559 previously stripped
     # roles here to force gui-only — reversed: that shipped a dead Windows build.)
     win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
-    env "${win_env[@]}" bash "$ROOT/bin/build-windows-on-vm.sh"
+    env "${win_env[@]}" bash "$WIN_PRODUCER"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi
