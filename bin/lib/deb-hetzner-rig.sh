@@ -137,6 +137,28 @@ rig_init() {
   # run should set it too.
   RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-}"
 
+  # WI-5634: boot-all.ts's connected_never_replicated (WI-183 zombie-socket)
+  # DETECTION grace defaults to 180s (DEFAULT_LIVENESS_GRACE_MS) — structurally
+  # larger than replication_soak's 90s per-cycle SLA, so whenever a genuine
+  # zombie connection occurs during the soak's kill/restart churn the cycle
+  # fails BY CONSTRUCTION regardless of how quickly the repair-on-detect path
+  # runs once it fires (live-evidenced: gate run 20260720-054709, cycles 3/4
+  # both legs FAIL at "204s"/"217s connected-but-dead" — the escalation itself
+  # was prompt <1s, the DETECTION wasn't). boot-all.ts already threads a
+  # PAPERCUSP_REPLICATION_STALL_GRACE_MS env override for exactly this
+  # (production default left unchanged at 180s) but nothing wired it into this
+  # rig's frame launch — that's the missing piece. 15s is well under the 60s
+  # SWARM_CHURN_TOLERANCE_MS reset window's neighbourhood but comfortably
+  # inside the 90s SLA with ~75s of margin for repair + feature-landing to
+  # complete; it only changes behavior for logs that are GENUINELY
+  # connected-but-never-replicated (a cycle whose replicator attaches
+  # normally, however long the end-to-end feature landing itself takes, never
+  # enters this axis and is unaffected). Override with
+  # RIG_REPLICATION_GRACE_MS if a scenario needs the production value (or a
+  # different test value) — threaded to the frames below as PAPERCUSP_
+  # REPLICATION_STALL_GRACE_MS via RIG_GRACE.
+  RIG_REPLICATION_GRACE_MS="${RIG_REPLICATION_GRACE_MS:-15000}"
+
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
   # is required. Hetzner access was gone 2026-07-03→2026-07-09 (D-001 of
@@ -632,6 +654,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
+  ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
@@ -693,7 +716,7 @@ rig_kill_sidecar() {
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 # serve.mjs needs the same actually-exited discipline as postgres below (WI-183 class):
@@ -742,6 +765,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
+  ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
