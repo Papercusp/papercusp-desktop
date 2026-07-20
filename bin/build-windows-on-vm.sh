@@ -805,6 +805,22 @@ else
     SERVER_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp Server (--no-bundle)"\nnpx tauri build --no-bundle --config src-tauri/tauri.server.conf.json 2>&1\nWrite-Host "[build] Server EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "Server" "com.papercusp.server" "Papercusp Server"'
   fi
 fi
+# WI-5600 / desktop-build-speed P-011: gate the GUI leg on roles too (mirror the
+# Server block above), so a Server-ONLY cut (PAPERCUSP_BUILD_ROLES="server") skips
+# the GUI's cargo build AND its ~42min ISCC pack — the GUI installer is a discarded
+# output on a Server-only republish (WI-5600: the published GUI stays). Default
+# roles=gui keeps _win_build_gui=1, so every existing caller is byte-identical. The
+# skip also deletes stale GUI inno artifacts so collection can't hand back a
+# previous build's GUI setup.exe as fresh (same discipline as the Server skip).
+if [[ "$_win_build_gui" != "1" ]]; then
+  GUI_BUILD_BLOCK='Write-Host "[build] Server-only: skipping Papercusp GUI build+bundle"; Remove-Item -Force "src-tauri\target\release\bundle\inno\Papercusp GUI*" -ErrorAction SilentlyContinue'
+else
+  if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
+    GUI_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"\nnpx tauri build --no-bundle 2>&1\nWrite-Host "[build] GUI EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nWrite-Host "[build] EXE_ONLY: skipping ISCC GUI packaging"\nWrite-Host "[build] ISCC GUI EXIT=0"\nCopy-Item -Force "src-tauri\\target\\release\\papercusp-desktop.exe" "src-tauri\\target\\release\\papercusp-desktop-GUI.exe"'
+  else
+    GUI_BUILD_BLOCK=$'Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"\nnpx tauri build --no-bundle 2>&1\nWrite-Host "[build] GUI EXIT=$LASTEXITCODE"\nAssert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"\nSign-File "src-tauri\\target\\release\\papercusp-desktop.exe"\nInvoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"'
+  fi
+fi
 
 # ── EI-8914: DERIVE the provenance label from the tree we actually packed ──
 # `PAPERCUSP_BUILD_SHA` is baked in via option_env! and self-reported by the
@@ -986,20 +1002,7 @@ Write-Host "[build] RUSTFLAGS=\$env:RUSTFLAGS"
 # packaged by Invoke-Inno. NOTE the two roles share one exe path, so each
 # role's ISCC run MUST complete before the next role's cargo build overwrites
 # target\release\papercusp-desktop.exe — keep build→package interleaved.
-Write-Host "[build] tauri build: Papercusp GUI (--no-bundle)"
-npx tauri build --no-bundle 2>&1
-Write-Host "[build] GUI EXIT=\$LASTEXITCODE"
-Assert-ReleaseHostBaked "src-tauri\\target\\release\\papercusp-desktop.exe"
-Sign-File "src-tauri\\target\\release\\papercusp-desktop.exe"
-$( if [[ "$PAPERCUSP_EXE_ONLY" == "1" ]]; then
-cat <<'PSEXE'
-Write-Host "[build] EXE_ONLY: skipping ISCC GUI packaging"
-Write-Host "[build] ISCC GUI EXIT=0"
-Copy-Item -Force "src-tauri\target\release\papercusp-desktop.exe" "src-tauri\target\release\papercusp-desktop-GUI.exe"
-PSEXE
-else
-echo 'Invoke-Inno "GUI" "com.papercusp.gui" "Papercusp GUI"'
-fi )
+${GUI_BUILD_BLOCK}
 ${SERVER_BUILD_BLOCK}
 EOF
 "${SCP[@]}" "$BUILD_PS1" "$VM_SSH_HOST":'C:/Users/user/vm-release-build.ps1'
