@@ -24,11 +24,14 @@
 #
 # Env passthrough (same knobs as release-local.sh's Linux leg):
 #   PAPERCUSP_SKIP_SEED_CUT=1  reuse src-tauri/seed as-is (no live-store seed cut)
-#   PAPERCUSP_BUILD_ROLES      subset of "gui server" (default: gui only — WI-5085,
-#                              desktop-build-speed-2026-07-16#P-006; the GUI bundle is
-#                              the auto-updatable + download artifact. A real Linux
-#                              Server deploy, e.g. a Hetzner box, does not go through
-#                              this knob — see bin/build-and-archive-deb.sh)
+#   PAPERCUSP_BUILD_ROLES      subset of "gui server" (default: BOTH — D-004 of
+#                              desktop-build-speed-2026-07-16 restored this after
+#                              WI-5085/P-006's gui-only default silently dropped the
+#                              published linux Server .deb/.appimage from a release
+#                              cut, see EI-18099496479921046. Pass "gui" for the
+#                              fast-iteration gui-only opt-in. A real Linux Server
+#                              deploy, e.g. a Hetzner box, does not go through this
+#                              knob — see bin/build-and-archive-deb.sh)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  minisign key passphrase (default empty)
 set -euo pipefail
 
@@ -57,7 +60,7 @@ setup_sccache_env "30G"
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
-ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 [[ -f "$KEY_FILE" ]] || { echo "ERROR: minisign signing key not found at $KEY_FILE"; exit 1; }
 
 # Collection destination — the same tree Mac/Windows artifacts land in.

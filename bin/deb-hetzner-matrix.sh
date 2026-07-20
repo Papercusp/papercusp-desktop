@@ -160,7 +160,21 @@ fi
 rig_setup_all || exit 4
 
 fed_log "wait embedded-PG + operator on every sidecar"
-rig_wait_all_ready 50 || exit 5
+# WI-5509 (2026-07-19): the old 50-tries/150s boot window washed out an entire
+# local-matrix run (frame B never came up; 0/13 scenarios attempted) after two
+# LOAD_GATE-skipped cycles left the host with a cold page cache. Every frame's
+# embedded-PG boot APPLIES THE FULL migration set (508 files at HEAD and
+# growing over time) and, in local-matrix's 2-frame mode, ALL frames do this
+# CONCURRENTLY on ONE shared host (rig_setup_all backgrounds each frame's
+# serve.mjs and returns immediately, so the migration-apply windows overlap in
+# full) — real disk-I/O + page-cache contention that per-frame cpuset pinning
+# (local-matrix.sh) does not isolate. 150s already left near-zero margin for
+# that contention plus continued migration-count growth; every OTHER 2-frame
+# smoke in this codebase already budgets 60-80 tries for a lighter boot. Bump
+# to 100 tries/300s so ordinary contention no longer washes out the whole run
+# — still fails loudly (and fast, since fed_wait_boot returns as soon as both
+# markers appear) on a genuinely wedged boot.
+rig_wait_all_ready 100 || exit 5
 
 # owner publishes the hive; every frame joins it (owner self-joins as a VIEW)
 REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"

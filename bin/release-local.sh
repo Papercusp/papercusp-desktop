@@ -44,20 +44,27 @@
 #              (SSH :2223, ~/windows-vm/boot-windows.sh).
 #   - arm64  : cross-compile via WITH_ARM64=1 (needs `cross` set up)
 #
-# Which Tauri role(s) to build (WI-5085, desktop-build-speed-2026-07-16#P-006):
-#   PAPERCUSP_BUILD_ROLES="gui"            build ONLY the GUI role (DEFAULT)
-#   PAPERCUSP_BUILD_ROLES="gui server"     also build the Server role
-# Defaults to GUI-ONLY: the GUI bundle is the auto-updatable + download
-# artifact end users actually get, and Server is already excluded from what
-# ships on mac (the disk-tight VM cannot fit a second ~12GB role target — see
-# mac-vm-build.sh's disk preflight) and windows (record-release-cli skips the
-# unpublishable spanned Inno Server installer outright — WI-5028). Building it
-# on every cut by default wasted mac VM disk (ENOSPC risk) and ~half the
-# Windows leg's wall clock for output nobody ships. Set
-# PAPERCUSP_BUILD_ROLES="gui server" to build Server too (still real on Linux —
-# e.g. a Hetzner deploy runs the Server role; that path is unaffected by this
-# knob, see bin/build-and-archive-deb.sh). WI-5028 tracks giving mac/windows a
-# real Server auto-update path so it stops silently missing there.
+# Which Tauri role(s) to build (WI-5085, desktop-build-speed-2026-07-16#P-006;
+# default RESTORED to both roles by D-004 of that same plan — see EI-18099496479921046):
+#   PAPERCUSP_BUILD_ROLES="gui server"     build BOTH roles (DEFAULT — a real release)
+#   PAPERCUSP_BUILD_ROLES="gui"            GUI-role-only fast-iteration opt-in
+# D-004 (desktop-build-speed-2026-07-16, 2026-07-16): P-006 proposed defaulting
+# the release cut to GUI-only for speed, but that DIRECTLY CONFLICTS with
+# WI-5028/record-release-cli: the linux Server .deb/.appimage is a real
+# published download (product:'server'), and WI-5028 wants Server built on mac
+# too (its mac gap was pure disk pressure — WI-5027 grew the mac VM 120→180GiB,
+# 68GB free, so both roles' ~12GB targets now fit warm). D-004's resolution:
+# do NOT flip the release default — keep BOTH roles in a real cut. The
+# gui-only speed win stays available on demand:
+# PAPERCUSP_BUILD_ROLES="gui" bin/release-local.sh builds gui-only for fast
+# local iteration (documented in the release-upload runbook). Only the
+# WINDOWS leg still defaults gui-only server-side (see build-windows-on-vm.sh)
+# — its Server installer is a hard Inno-spanning limitation, not a disk/scope
+# issue, so record-release-cli never publishes it regardless of whether it's
+# built (WI-5028 checkpoint); building it today wastes a ~40min ISCC pack for
+# an artifact nobody ships. Revisit the mac/linux default ONLY if the owner
+# decides Server is being dropped as a product (then flip default + close
+# WI-5028 as won't-do).
 #
 # Re-run safety: idempotent. If a release for the tag exists, asset
 # uploads use `gh release upload --clobber`.
@@ -75,6 +82,50 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 KEY_FILE="${HOME}/.papercusp/signing/papercusp.key"
 KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
+
+# ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
+# The Linux leg (below) launches `tauri build` → cargo → rustc, and
+# bin/build-appimage.sh (appimagetool/linuxdeploy), as a background subshell of
+# THIS script. If this script's own process dies before `join_leg` reaps that
+# subshell (an interrupted/killed terminal or tmux pane, an OOM, a `kill -9` on
+# a wedged cut) the leg is silently ORPHANED and keeps running forever, pinning
+# a full CPU core — observed live: a `tauri build` ran 10h at 99% CPU after its
+# cutting session died, unrelated to any later cut that happened to run on the
+# same box (EI-17272). Mirrors the EI-14500 leaked-sidecar reaper in
+# bin/live-federation-gate.sh (reap_gate_sidecars/gate_owns_rig_pid): an EXIT
+# trap that pgrep-matches known build-tool cmdlines AND verifies ownership via
+# cwd rooted under THIS script's own tree ($ROOT) before killing — so a
+# concurrent PEER release cut's tauri/cargo build elsewhere on this shared dev
+# box is NEVER touched. A normal, successful join_leg already reaps every leg
+# itself, so by the time this trap fires on a clean exit, pgrep finds nothing —
+# a no-op. Bash still runs the EXIT trap when the script dies from an unhandled
+# signal (SIGINT/SIGTERM/etc, though not SIGKILL of THIS process), so this
+# covers the interrupted-terminal / killed-pane case that produced the observed
+# orphan; it deliberately does NOT ALSO trap INT/TERM directly (see
+# release-local-leg-reaper.selftest.sh header for why that would misfire).
+release_owns_leg_pid() { # <pid> — true iff pid's cwd is rooted under THIS cut's $ROOT
+  local pid="$1" cwd
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  [[ -n "$cwd" ]] || return 1
+  [[ "$cwd" == "$ROOT" || "$cwd" == "$ROOT"/* ]]
+}
+reap_release_legs() { # kill this cut's own orphaned build-tool descendants, if any
+  local pid pids sigged=()
+  pids="$(pgrep -f 'bin/tauri build|cargo build.*papercusp|rustc.*papercusp_desktop|appimagetool|linuxdeploy' 2>/dev/null || true)"
+  for pid in $pids; do
+    release_owns_leg_pid "$pid" || continue
+    echo "==> leg reap (EI-17272): orphaned build process pid=$pid — SIGTERM. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 160)" >&2
+    kill "$pid" 2>/dev/null || true
+    sigged+=("$pid")
+  done
+  [[ ${#sigged[@]} -eq 0 ]] && return 0
+  sleep "${RELEASE_LEG_REAP_GRACE_S:-3}"
+  for pid in "${sigged[@]}"; do
+    kill -0 "$pid" 2>/dev/null && { echo "==> leg reap (EI-17272): pid=$pid survived SIGTERM — SIGKILL." >&2; kill -9 "$pid" 2>/dev/null || true; }
+  done
+  return 0
+}
+trap reap_release_legs EXIT
 
 # ── Release host (plan desktop-release-hosting-r2-2026-07-12) ────────────────
 # Where the shipped app looks for updates, and where the artifacts get uploaded.
@@ -116,8 +167,10 @@ WITH_MAC="${WITH_MAC:-0}"
 # canonicalized HERE so every leg (linux in-process, mac + windows over ssh,
 # where it must be explicitly forwarded since env does not cross ssh on its
 # own) sees the SAME value instead of each falling back to its own default.
-# Default gui-only — see the usage comment above for why.
-PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+# Default BOTH roles (D-004, desktop-build-speed-2026-07-16) — see the usage
+# comment above for why. Pass PAPERCUSP_BUILD_ROLES=gui for the fast-iteration
+# opt-in.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 export PAPERCUSP_BUILD_ROLES
 # Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
 # build never fails a desktop cut. The APK is BUILT here in the sibling
@@ -678,7 +731,7 @@ LINUX_PID=""
 echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
 (
   set -euo pipefail
-  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
   for role in $PAPERCUSP_BUILD_ROLES; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     # rpm DROPPED (2026-07-08): it is never collected (Linux ships deb+AppImage only —
@@ -754,7 +807,7 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   echo "==> building Linux arm64 (cross)"
-  for role in ${PAPERCUSP_BUILD_ROLES:-gui}; do
+  for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")

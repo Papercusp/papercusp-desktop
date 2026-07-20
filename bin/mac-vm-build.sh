@@ -393,15 +393,18 @@ fi
 # how the runtime picks its role. Distinct productNames → distinct bundle
 # filenames, so they don't clobber.
 #
-# WI-5085 (desktop-build-speed-2026-07-16#P-006): defaults to GUI-ONLY. The GUI
-# bundle is the auto-updatable + download artifact end users get; Server on mac
-# doesn't fit the disk-tight VM's second ~12GB role target anyway (see the
-# per-role disk preflight below) and every real mac release has been cut
-# PAPERCUSP_BUILD_ROLES=gui by hand for exactly that reason. Set
-# PAPERCUSP_BUILD_ROLES="gui server" to also build Server. release-local.sh
-# forwards its own PAPERCUSP_BUILD_ROLES into this VM's ssh env; a standalone
-# run of this script (env not forwarded) falls back to this same gui-only default.
-PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui}"
+# WI-5085 (desktop-build-speed-2026-07-16#P-006): default RESTORED to BOTH
+# roles by D-004 of that same plan (2026-07-16; see EI-18099496479921046 —
+# gui-only-by-default silently dropped the Server product from a full
+# release). The old "Server doesn't fit the disk-tight VM" justification is
+# OBSOLETE: WI-5027 grew the mac VM 120→180GiB (68GB free), so both roles'
+# ~12GB targets fit warm now (see the per-role disk preflight below) — and
+# WI-5028 wants Server built + auto-updatable on mac precisely because that
+# disk pressure is gone. Set PAPERCUSP_BUILD_ROLES=gui for the fast-iteration
+# gui-only opt-in. release-local.sh forwards its own PAPERCUSP_BUILD_ROLES
+# into this VM's ssh env; a standalone run of this script (env not forwarded)
+# falls back to this same both-roles default.
+PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 BUNDLE_DIR="src-tauri/target/$MAC_BUILD_TARGET/release/bundle"
 # DMGs are packed DIRECTLY by this script (see the pack loop below), NOT by
 # tauri: tauri's create-dmg fork (bundle_dmg.sh) mounts a rw image and

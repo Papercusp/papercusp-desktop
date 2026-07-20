@@ -12,6 +12,7 @@
     "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "test:release-artifacts": "bash bin/lib/release-artifacts.selftest.sh",
     "test:live-fed-reaper": "bash bin/lib/live-federation-gate-reaper.selftest.sh",
+    "test:release-leg-reaper": "bash bin/lib/release-local-leg-reaper.selftest.sh",
     "test:local-matrix-starvation": "bash bin/lib/local-matrix-starvation.selftest.sh",
     "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:dev-operator-reaper": "node --test test/dev-operator-ifneeded-reaper.test.js",
