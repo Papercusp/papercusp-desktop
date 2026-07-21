@@ -190,6 +190,24 @@ if [ "$FRAME3" = 1 ]; then
   rig_wait_swarm b c 70 || echo "⚠ b↔c peer_connected NOT confirmed — membership_churn may fail"
 fi
 
+# ── WS-DIAG (WI-5672, 2026-07-21): one-shot live DB dump right after peer_connect, ──
+# BEFORE any scenario can fail/teardown. BYO frames are destroyed at run end, so this
+# is the only window to see live state for the "does joiner B ever get an epoch key /
+# does A ever see B's device_attestations" hypothesis. Best-effort + non-fatal — a
+# failure here (e.g. FED_PG not yet populated) must never fail or slow the run; output
+# goes to stdout, which the caller (live-federation-gate.sh) already captures to
+# $WORK/local-matrix.out alongside the rest of this run's evidence.
+{
+  echo "── WS-DIAG (WI-5672) start — home-harness-slug=${RIG_HOME_HARNESS_SLUG:-unset} ──"
+  echo "── hive_epoch_keys (frame a) ──"
+  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin, fed_ts FROM harness_shared.hive_epoch_keys ORDER BY epoch, member_device_pubkey;"
+  echo "── pot_members device_attestations, as seen by frame a (owner) ──"
+  drv_psql a "SELECT username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
+  echo "── pot_members device_attestations, as seen by frame b (joiner, own view) ──"
+  drv_psql b "SELECT username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
+  echo "── WS-DIAG (WI-5672) end ──"
+} 2>&1 || fed_log "⚠ WS-DIAG (WI-5672) dump failed — non-fatal, continuing run"
+
 # unique-per-run tag: scenarios suffix their feature_ids/msg_ids with this.
 MATRIX_RUN_ID="m$(date +%s)"
 export MATRIX_RUN_ID
