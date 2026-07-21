@@ -286,13 +286,32 @@ gate_owns_rig_pid() { # <pid> — true iff pid belongs to THIS gate's rig sandbo
   return 1
 }
 reap_gate_sidecars() { # reap rig-owned leftover serve.mjs/serve.ts sidecars + embedded PG
-  local pid pids sigged=()
+  local pid pids sigged=() cmdline
   # serve.(mjs|ts) = the sidecar (incl. `--ensure`); embedded-pg-data = its `postgres -D …`
   # child (own leaked pid in the EI-14500 evidence) if it survives the sidecar's SIGTERM.
+  # NOTE (WI-5701): this pgrep is DELIBERATELY broad and also matches the esbuild BUNDLE
+  # step (build-desktop-sidecar.sh: `npx esbuild bin/serve.ts --outfile=.../serve.mjs`) —
+  # its argv literally contains "serve.ts"/"serve.mjs" as build I/O paths, not as a running
+  # server. Narrowing happens below via the `--ensure` runtime contract, never on this
+  # pattern alone.
   pids="$(pgrep -f 'serve\.(mjs|ts)|embedded-pg-data' 2>/dev/null || true)"
   for pid in $pids; do
     # (the gate itself is a `bash` process — never matches the serve/PG pgrep pattern)
     gate_owns_rig_pid "$pid" || continue
+    # WI-5701: a REAL running sidecar is ALWAYS launched with `--ensure` (deb-hetzner-rig.sh,
+    # app_role.rs's "Papercusp Server owns serve.mjs --ensure") — the esbuild BUNDLE step that
+    # merely PRODUCES serve.mjs/serve.ts never carries that flag. Without this check, a
+    # concurrent/stray gate invocation's EXIT-trap reap (this same function, cgroup-scoped to
+    # the WHOLE `live-federation-gate` service — not to any one run's $WORK) SIGTERMs the
+    # in-flight esbuild bundle of a DIFFERENT, still-legitimately-running gate's build: the
+    # observed symptom was a clean sidecar build externally SIGTERM'd ~2m15s in, twice in a
+    # row, wedging the green-checkpoint gate for two already-landed fixes. `embedded-pg-data`
+    # matches are exempt — postgres never runs a build step, so it never needs `--ensure`.
+    cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+    if [[ "$cmdline" != *embedded-pg-data* ]] && [[ "$cmdline" != *--ensure* ]]; then
+      log "SIDECAR REAP (EI-14500/WI-5701): pid=$pid matches serve.(mjs|ts) but has no --ensure — looks like a BUILD step (esbuild bundling), not a running sidecar; sparing it. cmd: $(echo "$cmdline" | head -c 160)"
+      continue
+    fi
     log "SIDECAR REAP (EI-14500): rig-owned leftover pid=$pid — SIGTERM. cmd: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 160)"
     kill "$pid" 2>/dev/null || true
     sigged+=("$pid")

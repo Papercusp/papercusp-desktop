@@ -59,13 +59,27 @@ spawn_fake_serve() {
   echo $!
 }
 
+# WI-5701: a rig-owned stand-in for the esbuild BUNDLE step (build-desktop-sidecar.sh's
+# `npx esbuild bin/serve.ts --outfile=.../serve.mjs`) — argv matches the SAME `serve\.(mjs|ts)`
+# pgrep pattern and its cwd is rig-owned, but it is a BUILD, not a running server, and must
+# never be reaped (the live incident: a stray/concurrent gate's exit-trap reap killed a
+# DIFFERENT gate's in-flight sidecar build this way, twice in a row).
+spawn_fake_build() {
+  local cwd="$1"
+  ( cd "$cwd" && exec -a "node esbuild bin/serve.ts --outfile=$cwd/serve.mjs --bundle" sleep 120 ) \
+    </dev/null >/dev/null 2>&1 &
+  echo $!
+}
+
 # A rig-sandbox cwd MATCHES gate_owns_rig_pid's regex (…/tmp/merge-smoke.*); the neutral cwd
 # matches NOTHING in it — so it stands in for a real prod/live sidecar that must be spared.
 RIG_DIR="$(mktemp -d /tmp/merge-smoke.XXXXXX)"
 NEUTRAL_DIR="$(mktemp -d /tmp/reaper-neutral.XXXXXX)"
+BUILD_DIR="$(mktemp -d /tmp/merge-smoke.XXXXXX)"
 RIG_PID="$(spawn_fake_serve "$RIG_DIR")"
 NEUTRAL_PID="$(spawn_fake_serve "$NEUTRAL_DIR")"
-cleanup() { kill "$RIG_PID" "$NEUTRAL_PID" 2>/dev/null || true; rm -rf "$RIG_DIR" "$NEUTRAL_DIR"; }
+BUILD_PID="$(spawn_fake_build "$BUILD_DIR")"
+cleanup() { kill "$RIG_PID" "$NEUTRAL_PID" "$BUILD_PID" 2>/dev/null || true; rm -rf "$RIG_DIR" "$NEUTRAL_DIR" "$BUILD_DIR"; }
 trap cleanup EXIT INT TERM
 sleep 0.3   # let the execs settle so /proc/<pid>/cwd resolves
 
@@ -81,10 +95,10 @@ else
   ok "gate_owns_rig_pid: neutral cwd → NOT owned (a real sidecar is protected)"
 fi
 
-# ── 2. reap kills the rig-owned leftover, spares the non-rig one ─────────────────
-# Stub pgrep so reap_gate_sidecars operates ONLY on our two controlled pids — it NEVER
+# ── 2. reap kills the rig-owned leftover, spares the non-rig one + a rig-owned BUILD ──
+# Stub pgrep so reap_gate_sidecars operates ONLY on our controlled pids — it NEVER
 # scans / signals a real box process, even during a concurrent live gate run.
-pgrep() { printf '%s\n%s\n' "$RIG_PID" "$NEUTRAL_PID"; }
+pgrep() { printf '%s\n%s\n%s\n' "$RIG_PID" "$NEUTRAL_PID" "$BUILD_PID"; }
 reap_gate_sidecars
 unset -f pgrep
 sleep 0.3
@@ -98,6 +112,11 @@ if kill -0 "$NEUTRAL_PID" 2>/dev/null; then
   ok "reap_gate_sidecars: non-rig serve.mjs spared"
 else
   bad "reap_gate_sidecars: non-rig serve.mjs was KILLED — ownership guard failed (would kill prod/live sidecars)"
+fi
+if kill -0 "$BUILD_PID" 2>/dev/null; then
+  ok "reap_gate_sidecars: rig-owned esbuild BUILD step (no --ensure) spared (WI-5701)"
+else
+  bad "reap_gate_sidecars: rig-owned esbuild BUILD step $BUILD_PID was KILLED — a concurrent gate's in-flight sidecar build would die mid-bundle (WI-5701 regressed)"
 fi
 
 # ── 3. structural: the EXIT trap wires the reaper ───────────────────────────────
