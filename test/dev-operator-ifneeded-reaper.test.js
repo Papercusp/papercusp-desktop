@@ -180,6 +180,77 @@ test('reuse path: an already-bound port exits fast without spawning DEV_CMD', as
   }
 });
 
+// EI-13139: papercup-bg-host.service pins its own canonical port
+// (PAPERCUSP_HONO_PORT) — the SAME default (:3270) this wrapper picks for
+// the desktop dev operator. Hit live 2026-07-16: during a bg-host outage the
+// port went briefly free, this wrapper raced in and grabbed it, and
+// bg-host's own restart then EADDRINUSE-crash-looped against the squatter
+// for ~25min. The wrapper must now refuse to ever bind bg-host's reserved
+// port while bg-host is enabled, redirecting to the next free port instead —
+// verified here via a fake `systemctl` shim (no real systemd unit required).
+test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is enabled, picks a different one instead (EI-13139)', async () => {
+  const reservedPort = testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-bghost-'));
+  const marker = path.join(tmp, 'pid');
+  const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-fake-systemctl-'));
+  const fakeSystemctl = path.join(fakeBinDir, 'systemctl');
+  fs.writeFileSync(
+    fakeSystemctl,
+    [
+      '#!/usr/bin/env bash',
+      '# Fake systemctl: papercup-bg-host.service is always "enabled" and',
+      `# reports PAPERCUSP_HONO_PORT=${reservedPort} via "cat".`,
+      'if [ "$1" = "--user" ] && [ "$2" = "is-enabled" ]; then echo enabled; exit 0; fi',
+      `if [ "$1" = "--user" ] && [ "$2" = "cat" ]; then echo "PAPERCUSP_HONO_PORT=${reservedPort}"; exit 0; fi`,
+      'exit 1',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  let wrapper;
+  try {
+    const devCmd = `echo "$BASHPID" > '${marker}'; exec sleep 600`;
+    wrapper = spawn('bash', [script], {
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}:${process.env.PATH}`,
+        OPERATOR_DEV_PORT: String(reservedPort),
+        OPERATOR_DEV_CMD: devCmd,
+      },
+    });
+    let stderr = '';
+    wrapper.stderr.on('data', (d) => (stderr += d));
+
+    const sleeperPid = Number(
+      await waitFor(() => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : undefined), {
+        timeoutMs: 10_000,
+      }),
+    );
+    assert(Number.isInteger(sleeperPid) && sleeperPid > 1, 'wrapper never spawned the dev stack past the guard');
+    assert(pidAlive(sleeperPid), 'sleeper should be alive');
+
+    const redirectMatch = stderr.match(/using :(\d+) instead/);
+    assert(redirectMatch, `wrapper did not log a reserved-port redirect — stderr was: ${stderr}`);
+    assert.match(stderr, new RegExp(`:${reservedPort} is papercup-bg-host's reserved port`));
+    assert.notEqual(Number(redirectMatch[1]), reservedPort, 'wrapper redirected to the SAME reserved port');
+
+    process.kill(wrapper.pid, 'SIGKILL');
+    const reaped = await waitFor(() => !pidAlive(sleeperPid), { timeoutMs: 20_000 });
+    assert(reaped, 'dev stack survived the wrapper SIGKILL');
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        wrapper.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+});
+
 test('TERM path: signaling the wrapper reaps the whole dev-stack process group', async () => {
   await withRetry(() => runReapCycle((wrapper) => wrapper.kill('SIGTERM')));
 });
