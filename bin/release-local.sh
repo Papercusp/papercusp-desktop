@@ -390,8 +390,18 @@ if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   if git -C "$PAPERCUSP_SUBMODULE_DIR" fetch --quiet origin "$SUBMODULE_BRANCH" 2>/dev/null; then
     SUB_LOCAL_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse HEAD)"
     SUB_REMOTE_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse "origin/$SUBMODULE_BRANCH")"
-    if [[ "$SUB_LOCAL_SHA" != "$SUB_REMOTE_SHA" ]]; then
-      SUB_BEHIND="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_LOCAL_SHA..$SUB_REMOTE_SHA" 2>/dev/null || echo '?')"
+    # WI-3047 is a STALENESS guard: block only when local is genuinely BEHIND origin
+    # (missing merged migrations/code). `rev-list LOCAL..REMOTE` counts commits in
+    # origin but NOT local = how far local is BEHIND. A local that is merely AHEAD of
+    # origin (SUB_BEHIND=0, SHAs differ) is the NORMAL state on this shared tree —
+    # git-sync commits the submodule locally faster than origin/$SUBMODULE_BRANCH
+    # advances (a lagging green-checkpoint FF), and the superproject gitlink already
+    # points at this local HEAD — so it ships a SUPERSET of what's merged, not a stale
+    # subset, and must NOT block the cut. Only behind>0 (or an unknown '?' count) is
+    # the real WI-3047 risk. (Previously this errored on ANY local!=remote mismatch,
+    # which blocked EVERY stable/beta cut whenever local led a lagging origin.)
+    SUB_BEHIND="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_LOCAL_SHA..$SUB_REMOTE_SHA" 2>/dev/null || echo '?')"
+    if [[ "$SUB_BEHIND" != "0" ]]; then
       SUB_MSG="libs/papercusp is $SUB_BEHIND commit(s) behind origin/$SUBMODULE_BRANCH (local=${SUB_LOCAL_SHA:0:12} remote=${SUB_REMOTE_SHA:0:12}) — a release cut now may ship migrations/code that lag what's already merged (WI-3047 class)."
       if [[ "$CHANNEL" != "alpha" ]]; then
         echo "ERROR: $SUB_MSG"
@@ -400,6 +410,9 @@ if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
       else
         echo "WARN: $SUB_MSG (continuing — alpha channel)"
       fi
+    elif [[ "$SUB_LOCAL_SHA" != "$SUB_REMOTE_SHA" ]]; then
+      SUB_AHEAD="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_REMOTE_SHA..$SUB_LOCAL_SHA" 2>/dev/null || echo '?')"
+      echo "    ✓ libs/papercusp is $SUB_AHEAD commit(s) AHEAD of origin/$SUBMODULE_BRANCH (${SUB_LOCAL_SHA:0:12}) — contains all merged code (not stale); origin lags the local tree"
     else
       echo "    ✓ libs/papercusp is up to date with origin/$SUBMODULE_BRANCH (${SUB_LOCAL_SHA:0:12})"
     fi
