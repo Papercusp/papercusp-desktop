@@ -199,12 +199,12 @@ fi
 # $WORK/local-matrix.out alongside the rest of this run's evidence.
 {
   echo "── WS-DIAG (WI-5672) start — home-harness-slug=${RIG_HOME_HARNESS_SLUG:-unset} ──"
-  echo "── hive_epoch_keys (frame a) ──"
-  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin, fed_ts FROM harness_shared.hive_epoch_keys ORDER BY epoch, member_device_pubkey;"
-  echo "── pot_members device_attestations, as seen by frame a (owner) ──"
-  drv_psql a "SELECT username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
+  echo "── pot_epoch_keys (frame a) ── (WI-5672 fix: table renamed hive_epoch_keys->pot_epoch_keys by mig 557; harness_slug column NOT renamed)"
+  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin, fed_ts FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;"
+  echo "── pot_members device_attestations, as seen by frame a (owner) ── (WI-5672 fix: column renamed username->github_username by mig 185/557)"
+  drv_psql a "SELECT github_username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
   echo "── pot_members device_attestations, as seen by frame b (joiner, own view) ──"
-  drv_psql b "SELECT username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
+  drv_psql b "SELECT github_username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
   echo "── WS-DIAG (WI-5672) end ──"
 } 2>&1 || fed_log "⚠ WS-DIAG (WI-5672) dump failed — non-fatal, continuing run"
 
