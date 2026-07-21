@@ -673,6 +673,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
+  PAPERCUSP_EPOCH_BOOT_DEBUG=1 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "launched as pcusp"
 EOF
@@ -787,6 +788,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
+  PAPERCUSP_EPOCH_BOOT_DEBUG=1 \
   setsid nohup ./bin/node ./serve.mjs --ensure >> "$H/serve.log" 2>&1 < /dev/null &
 sleep 1; echo "relaunched as pcusp (no wipe)"
 EOF
