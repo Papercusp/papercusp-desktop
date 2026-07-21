@@ -728,6 +728,8 @@ rig_kill_sidecar() {
 # (EI-504): boot-all re-reads the registered project + shared.json + the hive join
 # and rejoins the swarm. Used after a kill (Brief 4) and as the cold-restart probe
 # (Brief 5). Same env block as rig_setup_frame, minus the rm -rf.
+# WI-5672: carries the same PAPERCUSP_DBOS_ENABLE=1 fix as rig_setup_frame above —
+# see that function's comment for the full root-cause chain.
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"

@@ -150,6 +150,10 @@ drv_psql()   { printf '%s\n' "$2" | hssh "${FRAME_IP[$1]}" \
                  "psql 'postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp' -tA"; }
 
 # ── install .deb + launch headless sidecar (copied from setup_frame) ───────────
+# WI-5672 (2026-07-21): PAPERCUSP_DBOS_ENABLE=1 required — see deb-hetzner-rig.sh's
+# rig_setup_frame comment for the full root-cause chain (DBOS gated default-OFF;
+# without it the frame's routines engine never boots at all, so admission/epoch-key
+# distribution falls back to the slow 10-min periodic reconcile).
 setup_frame() {  # <inst>
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] wait sshd @ $ip"
@@ -179,6 +183,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DBOS_ENABLE=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
@@ -208,6 +213,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_HONO_PORT="$HONO" PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
   PAPERCUSP_PG_PORT="$PG" PAPERCUSP_PG_DATA_DIR="$H/pgdata" PAPERCUSP_PG_SQL_DIR="$SIDE/db-sql" \
   PAPERCUSP_SERVE_UI=0 PAPERCUSP_DESKTOP=1 PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DBOS_ENABLE=1 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
   PAPERCUSP_WORKSPACES_ROOT="$H/.papercusp-workspaces" \
