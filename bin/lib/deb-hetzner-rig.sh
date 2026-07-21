@@ -563,6 +563,20 @@ rig_pcusp_run() {
 # create the pcusp user, write its fed.env (GH_TOKEN), launch serve.mjs headless on
 # the PUBLIC DHT (fresh data dir). Identical recipe to the 2-frame rig's setup_frame.
 # Requires: rig_gate_artifact ran (the .deb path is the gated DEB); RIG_DEB set.
+#
+# WI-5672 (2026-07-21): PAPERCUSP_DBOS_ENABLE=1 is REQUIRED here — DBOS is gated
+# default-OFF (host-bootstrap.ts: `if (backgroundWorkers && env.PAPERCUSP_DBOS_ENABLE
+# === '1')`), and this env block was the ONE launch path in the repo that omitted it
+# (every other path — Tauri prod main.rs, boot-headless*.sh, dev-operator-ifneeded.sh —
+# sets it). Without it, DBOS (and the fast onMemberApplied-adjacent admission machinery
+# it schedules) never boots on the frame at all: red-queen-sentinel's "ENGINE DEATH"
+# fires (all 5 routines perpetually overdue, because none ever started), owner-device
+# resolution stalls, and new-member admission/epoch-key distribution falls back to the
+# slow 10-min in-process periodic reconcile (pot-epoch-key-reconcile) — matching the
+# ~19-22min live-fed-gate content_bidir/planpart_bidir/coord_bidir/concurrent_lww
+# early-window co-failures (order 10-40, 180-300s timeouts). This IS the same class of
+# miss already hit once before in packages/operator-core/lib/deployment/frame-bootstrap.ts
+# ("found live 2026-06-06") — do not drop this var again if this block is ever rewritten.
 declare -g RIG_DEB
 rig_setup_frame() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
@@ -648,6 +662,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PARENT_DEATH_WATCH=0 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DBOS_ENABLE=1 \
   PAPERCUSP_DHT_BOOTSTRAP="${DHTB:-}" \
   PAPERCUSP_PGBOUNCER="${PGB:-0}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
@@ -759,6 +774,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   PAPERCUSP_PARENT_DEATH_WATCH=0 \
   PAPERCUSP_FLAG_PAPERCUSP_PLAN_PART_FEDERATION=1 PAPERCUSP_A003_TRACE=1 \
   PAPERCUSP_ANNOUNCE_DEBUG=1 \
+  PAPERCUSP_DBOS_ENABLE=1 \
   PAPERCUSP_DHT_BOOTSTRAP="${DHTB:-}" \
   PAPERCUSP_PGBOUNCER="${PGB:-0}" \
   PAPERCUSP_HARNESS_DIR="$SIDE/harness" PAPERCUSP_PROMPTS_DIR="$SIDE/prompts" \
