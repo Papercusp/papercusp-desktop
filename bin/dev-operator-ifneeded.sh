@@ -28,6 +28,62 @@
 set -euo pipefail
 
 PORT="${OPERATOR_DEV_PORT:-3270}"
+
+# Detection — prefer ss (always present on Linux), fall back to lsof. Accepts
+# an optional port argument (default: $PORT) — used both by the bg-host
+# reserved-port guard below (scanning candidate ports) and the ordinary
+# "already serving" check further down.
+in_use() {
+  local p="${1:-$PORT}"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnH "sport = :$p" 2>/dev/null | grep -q .
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    # No tooling — try to bind via Bash's /dev/tcp; success means we'd collide.
+    (exec 3<>/dev/tcp/127.0.0.1/"$p") 2>/dev/null && exec 3<&- && return 0
+    return 1
+  fi
+}
+
+# ---- bg-host reserved-port guard (EI-13139) --------------------------------
+# papercup-bg-host.service (the DBOS routines/git-sync/orchestrator PRIMARY)
+# is pinned to its own canonical port via PAPERCUSP_HONO_PORT — :3270 by
+# default, the SAME default this wrapper picks for the desktop dev operator.
+# During a bg-host outage (e.g. a GUI session-bounce killing the whole
+# user-manager slice) that port goes briefly free; if this wrapper races in
+# first and grabs it, bg-host's own restart then EADDRINUSE-crash-loops
+# forever against the squatter (its WI-3042 respawn-on-exit only respawns the
+# squatter itself, and this wrapper's own supervision loop happily keeps the
+# squatter alive too) — routines/git-sync/Mug-wake stay dead until a human
+# manually kills the squatter. Never race for bg-host's canonical port while
+# bg-host is enabled — walk forward to the next free, non-reserved port
+# instead. (Testable override: OPERATOR_DEV_BG_HOST_UNIT.)
+BG_HOST_UNIT="${OPERATOR_DEV_BG_HOST_UNIT:-papercup-bg-host.service}"
+
+bg_host_enabled() {
+  command -v systemctl >/dev/null 2>&1 && systemctl --user is-enabled "$BG_HOST_UNIT" >/dev/null 2>&1
+}
+
+bg_host_reserved_port() {
+  local port
+  port="$(systemctl --user cat "$BG_HOST_UNIT" 2>/dev/null \
+    | grep -oP 'PAPERCUSP_HONO_PORT=\K[0-9]+' | tail -1 || true)"
+  echo "${port:-3270}"
+}
+
+if bg_host_enabled; then
+  RESERVED_PORT="$(bg_host_reserved_port)"
+  if [ "$PORT" = "$RESERVED_PORT" ]; then
+    candidate=$((PORT + 1))
+    while [ "$candidate" = "$RESERVED_PORT" ] || in_use "$candidate"; do
+      candidate=$((candidate + 1))
+    done
+    echo "[tauri] :$PORT is papercup-bg-host's reserved port (enabled) — using :$candidate instead to avoid racing its EADDRINUSE recovery (EI-13139)" >&2
+    PORT="$candidate"
+  fi
+fi
+
 # PTY WS data plane: +4, not +1 — :3271..:3273 are squatted by dev-box
 # tooling (socat relays); 3274 verified free at authoring.
 PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
@@ -62,19 +118,6 @@ DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . .
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
-
-# Detection — prefer ss (always present on Linux), fall back to lsof.
-in_use() {
-  if command -v ss >/dev/null 2>&1; then
-    ss -tlnH "sport = :$PORT" 2>/dev/null | grep -q .
-  elif command -v lsof >/dev/null 2>&1; then
-    lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
-  else
-    # No tooling — try to bind via Bash's /dev/tcp; success means we'd collide.
-    (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null && exec 3<&- && return 0
-    return 1
-  fi
-}
 
 reject_squatter() {
   # Best-effort: find + kill whatever is bound to $PORT, then wait for the
