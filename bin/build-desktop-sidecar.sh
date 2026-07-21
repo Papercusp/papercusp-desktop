@@ -59,6 +59,22 @@ if [[ ! -d "$PAPERCUSP_ROOT" ]]; then
   exit 1
 fi
 
+# ── EI-1836 / WI-5695 class guard: fail FAST + NAMED on a committed git conflict
+# marker, before spending minutes on npm install + the vite build. On 2026-06-20
+# (EI-1836) and again on 2026-07-20 (WI-5695, a `git stash` mishap — see
+# EI-18215743778965613) a git-sync auto-commit swept up `apps/operator/app/globals.css`
+# mid-conflict, and this script's `vite build` then died on a cryptic
+# `CssSyntaxError: Unknown word "Stashed"` with no named root — green-checkpoint
+# already runs this same check (apps/operator/lib/release/green-checkpoint.ts) but
+# this standalone sidecar-build path did not, so the SAME class recurred here
+# undetected. scripts/check-conflict-markers.mjs is the single tested source of
+# truth for the marker pattern (packages/operator-core/lib/__tests__/check-conflict-markers-guard.test.ts) — reuse it.
+echo "→ checking for committed git conflict markers (EI-1836/WI-5695 class guard)"
+if ! node "$REPO_ROOT/scripts/check-conflict-markers.mjs"; then
+  echo "ERROR: committed git conflict marker(s) found in $REPO_ROOT — resolve before building (see above)."
+  exit 1
+fi
+
 # ── WI-5651: cross-target sidecar (bake on Linux for mac/windows, retire the VMs) ─
 # The sidecar's JS (serve.mjs, spa/, db-sql/) is platform-INDEPENDENT — only its
 # BINARY payload differs per OS/arch: the vendored `node`, gh/zellij/pui, the
