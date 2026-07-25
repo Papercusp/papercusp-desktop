@@ -45,6 +45,10 @@
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
+#   GATE_SINGLETON    (default 1)   — only one gate run in flight at a time (held for the whole
+#                                     run). 0 disables — for a WEDGED holder only; two concurrent
+#                                     runs share the content-matrix lane dir and kill each
+#                                     other's instances. See §0y.
 #   RIG_WAIT          (default 0)   — 1 = a DELIBERATE run: when the shared rig lock is already
 #                                     held, QUEUE behind the holder (via local-matrix.sh's own
 #                                     blocking flock) instead of exiting SKIPPED-RIG-BUSY. Pay
@@ -225,6 +229,50 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     log "fresh: last window STARVATION-DOWNGRADED ${DOWNGRADE_AGE_H}h ago (< ${GATE_DOWNGRADE_TTL_H}h retry TTL) — NOT a green; retrying after the TTL, nothing to do this window."
     skip_cleanup
     echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)"; exit 0
+  fi
+fi
+
+# ── 0y. gate SINGLETON lock (WI-5137/P-402, 2026-07-25) ────────────────────────
+# Only ONE gate run may be in flight at a time, for the WHOLE run — held here, released
+# by process exit (flock fd semantics). §0z below probes the RIG lock, which structurally
+# CANNOT cover this: a gate run does not take the rig until its local-matrix leg, so for
+# the entire rebuild+content-matrix window (~10min) it is invisible to §0z's probe and a
+# second gate run sees a free rig and commits to its own full rebuild.
+#
+# OBSERVED 2026-07-25 (this is not theoretical): a manual GATE_FORCE run started 18:38:31
+# and did not take the rig until 18:44:59. The hourly timer fired at 18:43:40 — inside that
+# window — passed §0z cleanly, burned a second 3.4GB rebuild, and then sat blocked on the
+# rig for what would have been up to 7200s, monopolising the shared rig against every other
+# agent's targeted verification for a verdict that duplicated the first.
+#
+# WASTE IS THE LESSER HALF. The content-matrix leg runs with a FIXED work dir
+# (two-instance-content-matrix-smoke.sh: PAPERCUSP_MATRIX_WORK, default
+# ~/.papercusp-lane-a-fed) and deliberately LEAVES ITS PAIR RUNNING on exit. Two concurrent
+# gate runs therefore share one lane dir and kill each other's instances — the 18:38 run's
+# content-matrix.out ends in two `Killed ... serve.mjs` lines from the 18:43 run's teardown.
+# That landed after the verdict this time, so it was survivable; landing mid-scenario it
+# would produce a CORRUPT verdict indistinguishable from a real federation failure. A gate
+# that can silently corrupt its own verdict under a routine timer collision is worse than
+# one that skips, so this guard is unconditional.
+#
+# GATE_FORCE does NOT bypass: a forced run colliding with an in-flight gate run is exactly
+# the collision above, and the right move is to wait for (or stop) the in-flight run — not
+# to start a second interfering one. GATE_SINGLETON=0 is the deliberate escape hatch for a
+# WEDGED holder; prefer `systemctl --user stop papercup-live-federation-gate.service`, which
+# stops a timer-launched run via the TERMINATED path (no false RED) and, being cgroup-scoped,
+# provably cannot touch a manually-launched run in another scope.
+if [ "${GATE_SINGLETON:-1}" = 1 ]; then
+  GATE_LOCK="${PCUSP_GATE_LOCK:-/tmp/pcusp-live-fed-gate.lock}"
+  if exec 7>>"$GATE_LOCK" 2>/dev/null; then
+    if ! flock -n 7; then
+      GATE_HOLDER="$(cat "$GATE_LOCK.holder" 2>/dev/null || echo 'unknown holder')"
+      log "another gate run is already in flight (held by: $GATE_HOLDER) — skipping this window rather than starting a second run that would duplicate the verdict and clobber the shared content-matrix lane dir. GATE_SINGLETON=0 overrides (wedged holder only)."
+      skip_cleanup
+      check_staleness   # same reasoning as the other SKIPPED* exits: a recurring skip must not go unnoticed
+      echo "GATE: SKIPPED-GATE-IN-FLIGHT (held by: $GATE_HOLDER)"; exit 0
+    fi
+    # Held for the rest of this process. Record who, for the next run's message.
+    printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${USER:-?}:live-federation-gate${GATE_FORCE:+ (GATE_FORCE)}" >"$GATE_LOCK.holder" 2>/dev/null || true
   fi
 fi
 
