@@ -382,12 +382,49 @@ fi
 # silently stale if the submodule pointer lags its remote (new migrations
 # merged upstream, never pulled locally). Fail loud on stable/beta; warn on
 # alpha (matches the dirty-tree check's channel split above).
+# P-412 (2026-07-25, su-055ae): a freshness check that COULD NOT RUN must never score as
+# "fresh" on a shipping channel. Both skip paths below (fetch failed / not a git repo) used
+# to WARN and continue on EVERY channel, which silently downgraded a blocking stable/beta
+# gate to nothing — one transient network blip on the build box and the WI-3047 guard is
+# simply absent from the cut, with no signal distinguishing "verified fresh" from "never
+# checked". That is the same can-falsely-pass shape as WI-5788/P-411, at the highest-stakes
+# point in the system: it decides what ships to public users.
+#
+# Note the pre-existing asymmetry this fixes: an unknown commit COUNT already failed closed
+# ('?' != '0' → the error path below), but an unknown FETCH failed open. Now both do.
+#
+# Channel split matches the dirty-tree check above: alpha warns, stable/beta blocks. An
+# intentional offline cut is still possible, but must be DELIBERATE and is logged as such.
+_wi3047_unverified() {
+  local reason="$1"
+  if [[ "$CHANNEL" == "alpha" ]]; then
+    echo "WARN: $reason — libs/papercusp freshness UNVERIFIED (continuing — alpha channel)"
+  elif [[ "${PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE:-0}" == "1" ]]; then
+    echo "WARN: $reason — libs/papercusp freshness UNVERIFIED; continuing because"
+    echo "      PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE=1 (deliberate operator override)."
+  else
+    echo "ERROR: $reason"
+    echo "       Cannot verify libs/papercusp is not STALE, and this is a '$CHANNEL' cut."
+    echo "       An unverifiable freshness check is NOT a pass: the 2026-07-05 WI-3047"
+    echo "       incident shipped a pre-505/506 schema precisely because a stale submodule"
+    echo "       went unnoticed. Refusing to cut rather than ship an unverified schema."
+    echo "       Fix the cause (network / auth / remote), or re-run with"
+    echo "       PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE=1 if you are deliberately cutting"
+    echo "       offline AND have confirmed submodule freshness by hand."
+    exit 1
+  fi
+}
+
 PAPERCUSP_SUBMODULE_DIR="$(cd "$ROOT/.." && pwd)/libs/papercusp"
 echo "==> checking libs/papercusp submodule freshness (WI-3047)"
 if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   SUBMODULE_BRANCH="$(git -C "$PAPERCUSP_SUBMODULE_DIR" branch --show-current 2>/dev/null || true)"
   SUBMODULE_BRANCH="${SUBMODULE_BRANCH:-main}"
-  if git -C "$PAPERCUSP_SUBMODULE_DIR" fetch --quiet origin "$SUBMODULE_BRANCH" 2>/dev/null; then
+  # Capture the fetch's stderr instead of discarding it — when this fails on a shipping
+  # channel it now blocks the cut, so the operator needs the actual reason (auth? DNS?
+  # renamed branch?), not a bare "could not fetch". `|| _rc=$?` keeps it set -e safe.
+  _sub_fetch_err="$(git -C "$PAPERCUSP_SUBMODULE_DIR" fetch --quiet origin "$SUBMODULE_BRANCH" 2>&1)" && _sub_fetch_rc=0 || _sub_fetch_rc=$?
+  if [[ "$_sub_fetch_rc" -eq 0 ]]; then
     SUB_LOCAL_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse HEAD)"
     SUB_REMOTE_SHA="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse "origin/$SUBMODULE_BRANCH")"
     # WI-3047 is a STALENESS guard: block only when local is genuinely BEHIND origin
@@ -417,10 +454,14 @@ if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
       echo "    ✓ libs/papercusp is up to date with origin/$SUBMODULE_BRANCH (${SUB_LOCAL_SHA:0:12})"
     fi
   else
-    echo "WARN: could not fetch libs/papercusp origin/$SUBMODULE_BRANCH — skipping freshness check (offline / network issue?)"
+    # NB: an `if`, not `[[ … ]] && echo` — under `set -e` a standalone AND-list whose test
+    # is FALSE returns non-zero and kills the script, so the empty-stderr case would abort
+    # the cut before ever reaching the channel decision below.
+    if [[ -n "$_sub_fetch_err" ]]; then echo "       git fetch said: ${_sub_fetch_err//$'\n'/ }"; fi
+    _wi3047_unverified "could not fetch libs/papercusp origin/$SUBMODULE_BRANCH (offline / network / auth?)"
   fi
 else
-  echo "WARN: $PAPERCUSP_SUBMODULE_DIR is not a git repo — skipping submodule freshness check"
+  _wi3047_unverified "$PAPERCUSP_SUBMODULE_DIR is not a git repo"
 fi
 
 echo "==> bumping version in manifests"

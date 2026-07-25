@@ -226,6 +226,22 @@ fi
   echo "── WS-DIAG (WI-5672) end ──"
 } 2>&1 || fed_log "⚠ WS-DIAG (WI-5672) dump failed — non-fatal, continuing run"
 
+# ── pre-scenario CONVERGENCE barrier (EI-18661870528779127) ──────────────────
+# rig_wait_swarm above only proves `peer_connected` fired once — in run
+# 20260725-183831 that event fired ~85x per frame while EVERY connection died at a
+# fixed ~13.0s, so scenarios 10/20/30/40 ran on an unconverged link and failed for
+# reasons unrelated to what they test (orders 50-90 then passed 11 straight on the
+# same capability). The WS-DIAG dump directly above already showed frame b's
+# pot_members EMPTY at exactly this point — it was printed and never gated on.
+# This is that gate. Deliberately placed AFTER WS-DIAG so a failure still has the
+# live diagnostic dump above it in the log. Unlike the peer_connected checks this
+# is FATAL: starting the matrix on an unconverged link produces misattributed
+# failures, which is strictly worse than not running.
+rig_wait_converged b || exit 7
+if [ "$FRAME3" = 1 ]; then
+  rig_wait_converged c || exit 7
+fi
+
 # unique-per-run tag: scenarios suffix their feature_ids/msg_ids with this.
 MATRIX_RUN_ID="m$(date +%s)"
 export MATRIX_RUN_ID

@@ -937,6 +937,81 @@ rig_wait_swarm() {
   echo "⚠ no $a↔$b peer_connected in ~$(( tries * 3 ))s"; return 1
 }
 
+# rig_wait_converged [joiner] [pot] — the REAL pre-scenario join-convergence barrier.
+#
+# EI-18661870528779127. rig_wait_swarm (above) asserts on `peer_connected`, which is
+# NOT a readiness signal. In gate run 20260725-183831 that event fired ~85x per frame
+# because EVERY connection died at a fixed ~13.0s (141/176 frame-a closes and 152/178
+# frame-b closes at ageMs 13000-13005, every one `precededByError: 'connection timed
+# out'` — POSIX ETIMEDOUT from UDX; a 5ms spread over ~90 samples is a fixed timer,
+# not network variance). So the old barrier was satisfied by the FIRST of ~85 doomed
+# connections: scenarios 10/20/30/40 started on an unconverged link and failed for
+# reasons unrelated to what they test, while orders 50-90 — running later, on a
+# by-then-converged link — passed 11 straight, INCLUDING reconnect_catchup(85), which
+# exercises the SAME content/plan-part/coord A<->B path that "failed" at 10/20/30.
+# Read the ORDER column before the error text: early-fail/late-pass is one readiness
+# defect, not N independent ones.
+#
+# The predicate here is actual a->b STATE ARRIVAL, not connectivity: the joiner must
+# hold at least one pot_members row. On a joiner that row is ALWAYS authored by the
+# owner and federated IN (origin='remote' — see rig_resolve_ws's WI-5399 note), so its
+# presence is direct proof that a->b transfer completed. This is not a new probe: the
+# WS-DIAG block in deb-hetzner-matrix.sh already runs this exact query, and in run
+# 183831 it printed EMPTY for frame b at the very moment the rig announced "frames
+# healthy" — the evidence was on screen, just never gated on.
+#
+# INSTRUMENT, NOT A MUTE — the ratified WI-5444 rule from restart-settle-barrier.sh:
+# "A barrier that silently blocks until convergence would let [scenarios] go green
+# over a system that still takes minutes to resync ... hiding the defect instead of
+# exposing it." So this ALWAYS emits elapsed as a first-class result line, warns
+# loudly past RIG_CONVERGE_WARN_S even when it DOES converge (a visible regression
+# signal short of a fail), and hard-fails only past the deliberately generous
+# RIG_CONVERGE_FAIL_S. Every knob is env-overridable so recalibration never needs a
+# code change.
+#
+# DO NOT "fix" a slow run by raising RIG_CONVERGE_FAIL_S, and do NOT go back to a bare
+# sleep. A converge time creeping toward the deadline IS the product signal this
+# barrier exists to surface: under the 13s cap each reconnect commits ZERO merge
+# progress (serve-a held `merged to 2` of `writer at 11` for 344s across ~25 reconnect
+# cycles, then completed 2->11 in one shot the moment churn paused), i.e.
+# time-to-first-useful-progress exceeds the connection lifetime. That is WI-5763's
+# product-side question — this barrier must expose it, never mask it.
+rig_wait_converged() {
+  local j="${1:-b}" pot="${2:-${RIG_HIVE_ID:-}}"
+  local warn_s="${RIG_CONVERGE_WARN_S:-60}" fail_s="${RIG_CONVERGE_FAIL_S:-420}"
+  local where="" t0 elapsed rows=""
+  # No pot slug in scope → count ANY membership row on the joiner; any row at all is
+  # owner-authored + federated-in, so it still proves a->b arrival. Never narrow to
+  # pot_home_slug='' (which can never match and would hard-fail every run).
+  [ -n "$pot" ] && where=" WHERE pot_home_slug='$pot'"
+  fed_log "wait a→$j JOIN CONVERGENCE (pot_members visible on the joiner; warn ${warn_s}s / fail ${fail_s}s)"
+  t0="$(date +%s)"
+  while :; do
+    rows="$(drv_psql "$j" "SELECT count(*) FROM harness_shared.pot_members${where};" 2>/dev/null | tr -d '[:space:]')"
+    elapsed=$(( $(date +%s) - t0 ))
+    case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+    if [ "$rows" -ge 1 ]; then
+      if [ "$elapsed" -ge "$warn_s" ]; then
+        echo "⚠ a→$j converged in ${elapsed}s (${rows} membership row(s)) — SLOW, past the ${warn_s}s warn threshold; convergence is degrading (cf. WI-5763 / the 13s connection cap)"
+      else
+        echo "✓ a→$j converged in ${elapsed}s (${rows} membership row(s))"
+      fi
+      return 0
+    fi
+    if [ "$elapsed" -ge "$fail_s" ]; then
+      echo "✗ a→$j NEVER CONVERGED in ${elapsed}s — 0 membership rows on the joiner."
+      echo "  This is a REAL federation failure, not a flaky scenario. Do NOT raise RIG_CONVERGE_FAIL_S to get past it."
+      echo "  Triage: the joiner never received owner-authored state. Check each frame's serve.log for a fixed ~13s"
+      echo "  connection lifetime — 'swarm-churn close { ageMs: 130xx, precededByError: connection timed out }' in a"
+      echo "  tight repeating cycle means every reconnect is committing zero merge progress (EI-18661870528779127)."
+      echo "  ── joiner pot_members (final state) ──"
+      drv_psql "$j" "SELECT github_username, pot_home_slug, origin, fed_ts FROM harness_shared.pot_members;" 2>&1 || true
+      return 1
+    fi
+    sleep 3
+  done
+}
+
 # ── scenario content primitives (write / read) ────────────────────────────────
 # These give scenario scripts a uniform way to author + read federated rows under
 # the operator's REAL workspace (the harness drains WHERE workspace_id = its boot
