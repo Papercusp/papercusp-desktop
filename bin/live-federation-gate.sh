@@ -45,6 +45,20 @@
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
+#   MATRIX_STALE_H    (default MATRIX_TTL_H+48) — the local-matrix LEG has produced no verdict
+#                                     (PASS/FAIL) for this long ⇒ file a LOUD leg-staleness EI.
+#                                     EI-18657324526667507: the leg has THREE independent,
+#                                     individually-correct suppression paths — the LOAD_GATE
+#                                     defer, this MATRIX_TTL_H window, and the §0z rig-busy skip
+#                                     — and every one of them exits 0. None was distinguishable
+#                                     from "ran and was fine" at any surface, so the leg could
+#                                     (and did) sit dark for days while the gate read healthy.
+#                                     check_staleness() above did NOT cover it: it only watches
+#                                     the GATE-WIDE last-green, which the cheap content-matrix
+#                                     leg keeps fresh on its own — so a green gate actively HID
+#                                     a never-running local-matrix leg. DERIVED from MATRIX_TTL_H
+#                                     on purpose (not a second independent constant): raising the
+#                                     TTL can never silently disarm its own detector.
 #   GATE_SINGLETON    (default 1)   — only one gate run in flight at a time (held for the whole
 #                                     run). 0 disables — for a WEDGED holder only; two concurrent
 #                                     runs share the content-matrix lane dir and kill each
@@ -161,6 +175,13 @@ GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 GATE_DOWNGRADE_TTL_H="${GATE_DOWNGRADE_TTL_H:-3}"
 GATE_STALE_DAYS="${GATE_STALE_DAYS:-3}"
 RED_REFILE_H="${RED_REFILE_H:-24}"
+# Local-matrix LEG staleness (EI-18657324526667507) — see the MATRIX_STALE_H header note.
+# A verdict is expected about every MATRIX_TTL_H, so "stale" is that cadence plus a grace
+# window; deriving it means a raised TTL moves the detector with it instead of muting it.
+MATRIX_STALE_H="${MATRIX_STALE_H:-$(( ${MATRIX_TTL_H:-144} + 48 ))}"
+# Set by check_matrix_staleness so the human-facing verdict line can carry the leg-dark marker
+# too — an EI in a queue and a line in journald are both easy to miss; the GATE: line is not.
+MATRIX_LEG_STALE=0
 now_s() { date +%s 2>/dev/null || echo 0; }
 age_h() { local f="$1"; [ -f "$f" ] || { echo 999999; return; }; echo $(( ( $(now_s) - $(cat "$f" 2>/dev/null || echo 0) ) / 3600 )); }
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$1"; }
@@ -194,7 +215,32 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
     log "EI filing FALLBACK: verdict + logs remain in $WORK and journald; file manually if this red is real."
   fi
 }
+check_matrix_staleness() { # EI-18657324526667507: "when did the local-matrix leg last DECIDE?"
+  # The leg's suppression paths (LOAD_GATE defer, MATRIX_TTL_H window, §0z rig-busy skip) are
+  # each individually correct, cheap, well-logged no-ops that exit 0 — and are therefore
+  # indistinguishable from "ran and was fine" at every consuming surface. This joins the one
+  # fact none of them reports: how long it has been since the leg produced an actual verdict,
+  # regardless of WHY it has not. Deliberately reports on the GREEN path too — a green gate is
+  # exactly the state that hides a dark leg, because the cheap content-matrix leg alone keeps
+  # last-green fresh while local-matrix never runs.
+  local verdict_age_h; verdict_age_h="$(age_h "$STATE_DIR/last-matrix-verdict")"
+  [ "$verdict_age_h" -lt "$MATRIX_STALE_H" ] && return 0
+  local filed_age_h; filed_age_h="$(age_h "$STATE_DIR/matrix-stale-ei-filed")"
+  [ "$filed_age_h" -lt "$MATRIX_STALE_H" ] && return 0
+  local since; if [ -f "$STATE_DIR/last-matrix-verdict" ]; then since="${verdict_age_h}h ago"; else since="NEVER (no verdict ever recorded)"; fi
+  log "STALE-LEG: local-matrix has produced NO verdict — last decision: $since (threshold ${MATRIX_STALE_H}h). This leg is DARK; the gate's overall green does not cover it."
+  file_ei "live-federation-gate LEG STALE: local-matrix has produced no verdict ($since) — the matrix leg is dark behind an all-green gate" \
+    "The local-matrix leg of the WI-261/P-013 live-federation gate has not produced a PASS/FAIL verdict — last decision: $since (threshold ${MATRIX_STALE_H}h = MATRIX_TTL_H + 48h grace). The leg has three independent suppression paths that each exit 0 and look identical to success: the LOAD_GATE defer (load-*.txt banks in \$STATE_DIR/triage/), the MATRIX_TTL_H (default 144h) cadence window, and the §0z rig-busy pre-check skip. The gate-wide staleness check does NOT cover this: the cheap content-matrix leg keeps last-green fresh on its own, so the gate can report GREEN indefinitely while the containerized 8-scenario matrix never runs — anything waiting on it for verification stalls silently. Check: ls -la \$STATE_DIR (last-matrix-verdict / last-matrix-green); ls \$STATE_DIR/triage/ | tail; journalctl --user -u papercup-live-federation-gate.service. To force a verdict now: GATE_FORCE=1 RIG_WAIT=1 papercusp-desktop/bin/live-federation-gate.sh (RIG_WAIT queues behind a rig holder instead of skipping). Per owner decision D-003 (2026-07-17) the durable fix for the load path is isolation, NOT raising LOAD_GATE. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."
+  echo "$(now_s)" >"$STATE_DIR/matrix-stale-ei-filed"
+  MATRIX_LEG_STALE=1
+}
+# Marker appended to the echoed verdict line whenever the leg is dark, so "GATE: GREEN" can
+# never again read as "everything ran and was fine" while local-matrix has decided nothing.
+matrix_stale_suffix() { [ "$MATRIX_LEG_STALE" = 1 ] && printf ' [WARN: local-matrix leg STALE — no verdict in >%sh]' "$MATRIX_STALE_H"; return 0; }
 check_staleness() { # called on every non-GREEN exit path: silence must never look like green
+  # Leg-level staleness is checked FIRST and unconditionally: the gate-wide green-age early-return
+  # below must never suppress it (a fresh gate-wide green is precisely how a dark leg stays hidden).
+  check_matrix_staleness
   local green_age_h; green_age_h="$(age_h "$STATE_DIR/last-green")"
   [ "$green_age_h" -lt $(( GATE_STALE_DAYS * 24 )) ] && return 0
   local filed_age_h; filed_age_h="$(age_h "$STATE_DIR/stale-ei-filed")"
@@ -219,7 +265,10 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
   if [ "$GREEN_AGE_H" -lt "$GATE_SUCCESS_TTL_H" ]; then
     log "fresh: last GREEN ${GREEN_AGE_H}h ago (< ${GATE_SUCCESS_TTL_H}h TTL) — nothing to do this window."
     skip_cleanup
-    echo "GATE: FRESH (green ${GREEN_AGE_H}h ago)"; exit 0
+    # Cheap (a file mtime read) and deliberately kept on the hot FRESH path: this is the window
+    # the hourly timer takes almost every fire, so it is the one that must not stay silent.
+    check_matrix_staleness
+    echo "GATE: FRESH (green ${GREEN_AGE_H}h ago)$(matrix_stale_suffix)"; exit 0
   fi
   # A starvation-downgraded window is NOT a green (it never refreshes last-green, so it does not
   # satisfy the TTL above), but back off for a SHORTER window so a chronically starved box does
@@ -228,7 +277,8 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
   if [ "$DOWNGRADE_AGE_H" -lt "$GATE_DOWNGRADE_TTL_H" ]; then
     log "fresh: last window STARVATION-DOWNGRADED ${DOWNGRADE_AGE_H}h ago (< ${GATE_DOWNGRADE_TTL_H}h retry TTL) — NOT a green; retrying after the TTL, nothing to do this window."
     skip_cleanup
-    echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)"; exit 0
+    check_matrix_staleness
+    echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)$(matrix_stale_suffix)"; exit 0
   fi
 fi
 
@@ -807,6 +857,11 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
     MATRIX_LEG_START_TS="$(now_s)"
     if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
+      # EI-18657324526667507: last-matrix-green answers "when was it last GOOD"; last-matrix-verdict
+      # answers "when did it last DECIDE anything". They must stay separate — a leg that only ever
+      # FAILS is still running (not stale), and a leg that has been green for a week but has since
+      # been suppressed by load/rig-busy is stale even though last-matrix-green looks recent.
+      echo "$(now_s)" >"$STATE_DIR/last-matrix-verdict"; rm -f "$STATE_DIR/matrix-stale-ei-filed"
     else
       MATRIXFULL_RES="FAIL"
       # WI-2381 carve-out RETIRED 2026-07-18 [self, WI-5137/P-402]: the seat_offer/
@@ -824,6 +879,12 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
         MATRIXFULL_RES="SKIPPED-STARVATION"
         log "local-matrix FAIL downgraded → SKIPPED-STARVATION: every failing scenario is in the restart-heavy class (restart_durability/reconnect_catchup/replication_soak), or is revocation_kcut cascading from a same-run replication_soak FAIL (b3-revocation.sh's own SCN_RC[replication_soak] attribution — WI-5616), AND a banked frame serve.log from this run shows [event-loop-lag] maxMs>1000ms — genuine frame-local CPU starvation (WI-5319 signal, root-caused WI-5329), not a regression. Host-loadavg STORM_GATE below is a weak proxy for these CPU-pinned frames (single end-of-run sample) and can miss this."
       fi
+      # EI-18657324526667507: a genuine FAIL IS a verdict (the leg ran and decided), so it clears
+      # the leg-staleness clock. Stamped AFTER the starvation downgrade and gated on the result
+      # still being FAIL, because SKIPPED-STARVATION is deliberately NOT a verdict — it means the
+      # restart-heavy class was never actually proven this run (D-005), which is exactly the
+      # "nothing was decided" state the staleness clock must keep counting.
+      [ "$MATRIXFULL_RES" = FAIL ] && { echo "$(now_s)" >"$STATE_DIR/last-matrix-verdict"; rm -f "$STATE_DIR/matrix-stale-ei-filed"; }
     fi
     log "local-matrix → $MATRIXFULL_RES"
   fi
@@ -866,7 +927,13 @@ if [ ${#REDS[@]} -eq 0 ]; then
     echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)"; exit 0
   fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs"
-  echo "GATE: GREEN — $SUMMARY"; exit 0
+  # EI-18657324526667507 — THE load-bearing call. check_staleness() is (correctly) not invoked on
+  # the green path, so without this the leg check would never run in exactly the state that hides
+  # it: gate GREEN off the cheap content-matrix leg while local-matrix has decided nothing for
+  # days. Note matrix-stale-ei-filed is deliberately NOT cleared here (unlike stale-ei-filed) —
+  # only a real local-matrix verdict clears the leg's clock; a green gate is not evidence it ran.
+  check_matrix_staleness
+  echo "GATE: GREEN — $SUMMARY$(matrix_stale_suffix)"; exit 0
 fi
 
 # Storm downgrade: if the box got SATURATED mid-run, a FAIL is likelier starvation than a
