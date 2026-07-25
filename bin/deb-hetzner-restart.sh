@@ -409,7 +409,15 @@ RL_AWK_EOF
               "${logmark[$frame]:-0}" "$oslug" "$mslug" "$_rl_noise_awk" "$(drv_applog "$frame")" \
             | drv_exec "$frame" 2>/dev/null)"
       total="$(printf '%s\n' "$det" | sed -n 's/^UNRECOVERED_TOTAL=//p' | tail -1 | tr -d '[:space:]')"
-      if [ -n "${total:-}" ] && [ "$total" != "0" ]; then
+      # A probe that could not RUN must never read as clean. The old grep -c
+      # returned "" on a missing/failed remote command and "" is falsy here, so
+      # any breakage (no awk on the frame, unreadable serve.log, ssh hiccup)
+      # would have silently scored the assert GREEN. "Couldn't measure" is a
+      # FAILURE, not a pass — the one discipline this whole lane turns on.
+      if [ -z "${total:-}" ]; then
+        echo "  ✗ detector-assert INCONCLUSIVE on frame '$frame': the remote probe returned no UNRECOVERED_TOTAL line (awk missing, serve.log unreadable, or exec failed) — scoring FAIL, because an unmeasurable assert is not a passing assert. Raw: $(printf '%s' "$det" | head -3 | tr '\n' '|')"
+        rc=1
+      elif [ "$total" != "0" ]; then
         echo "  ✗ detector-noise: frame '$frame' logged $total UNRECOVERED replication stall event(s) for this soak's own harness ($oslug/$mslug), inside its own window, while every probe passed — a genuine detector false-positive:"
         printf '%s\n' "$det" | grep '^UNRECOVERED ' | sed 's/^/       /'
         rc=1
