@@ -664,21 +664,31 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # B authors a receipt claiming responder=A (not B). It federates to A, whose receipts projection
   # resolves B's attested device→B's gh-id, sees responder-mismatch, REFUSES (row absent) and bumps
   # p2p_refused_op_counters(reason 'receipt-apply:responder_mismatch').
+  # WI-5788 (P-411 residual): an UNMEASURED baseline scores as FAIL — it is NEVER coerced to 0.
+  # An empty read means the probe never ran (frame a down / psql refused), not "the counter is
+  # 0"; a 0 baseline let ANY pre-existing nonzero count satisfy `rc_after -gt rc_before`, so
+  # this leg could print PASS on a run where its own refusal never fired. Mirrors
+  # rig_assert_absent's contract (bin/lib/deb-hetzner-rig.sh): unmeasurable ⇒ fail.
   rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$rc_before" ] && rc_before=0
+  att_wrong_unmeasured=0
+  [ -n "$rc_before" ] || { att_wrong_unmeasured=1; echo "  [LEG3] ✗ baseline responder_mismatch probe on A returned EMPTY — counter UNMEASURED; scoring LEG3 FAIL (cannot distinguish 'counter is 0' from 'probe never ran')"; }
   RID_WRONG="att-wrong-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_WRONG','refusal','work-offer:claim','att wrong-gh probe',${ATT_A_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
   echo "  [LEG3] B authored receipt $RID_WRONG claiming responder=A($ATT_A_GH_ID) — federating to A…"
-  rc_after=$rc_before
+  rc_after=""; rc_after_measured=0
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    [ "$att_wrong_unmeasured" = 1 ] && break
     rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
-    [ -z "$rc_after" ] && rc_after=0
-    { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    if [ -n "$rc_after" ]; then
+      rc_after_measured=1
+      { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    fi
     sleep 3
   done
   rid_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$HIVE_SLUG' AND receipt_id='$RID_WRONG';" 2>/dev/null | tr -d '[:space:]')"
-  { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null && att_wrong_ok=1
-  echo "  LEG3 WRONG-GH REFUSED-OP (A refuses B's mis-attributed receipt; counter++, row absent): $([ "$att_wrong_ok" = 1 ] && echo "PASS (responder_mismatch $rc_before→$rc_after, row-on-A=$rid_on_a)" || echo "FAIL (counter $rc_before→$rc_after, row-on-A=$rid_on_a)")"
+  # PASS requires BOTH endpoints actually measured — an unmeasured probe can no longer score.
+  { [ "$att_wrong_unmeasured" = 0 ] && [ "$rc_after_measured" = 1 ] && [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null && att_wrong_ok=1
+  echo "  LEG3 WRONG-GH REFUSED-OP (A refuses B's mis-attributed receipt; counter++, row absent): $([ "$att_wrong_ok" = 1 ] && echo "PASS (responder_mismatch $rc_before→$rc_after, row-on-A=$rid_on_a)" || echo "FAIL (counter ${rc_before:-UNMEASURED}→${rc_after:-UNMEASURED}, row-on-A=${rid_on_a:-UNMEASURED})")"
 
   # ── LEG4 — UNATTESTED-device refused-op counter ───────────────────────────────────
   # The receipts identity gate is ANTI-SPOOF (author must == the claimed responder) — a member
@@ -690,8 +700,13 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # comms-tier device→user cache TTL (30s, PAPERCUSP_COMMS_TIER_CACHE_MS), then B authors a VALID
   # receipt (responder=B). A resolves the source-log device but it maps to no member → the projection
   # REFUSES (identity_unresolved), bumps p2p_refused_op_counters, and the row stays absent on A.
+  # WI-5788 (P-411 residual): UNMEASURED baseline ⇒ FAIL, never coerced to 0. This leg is the
+  # most exposed of the four: it runs LAST, after the roster mutation + a 35s cache wait, so a
+  # frame-a blip during the baseline read is entirely plausible — and a coerced-0 baseline on a
+  # LIKE 'receipt-apply:%' TOTAL (already bumped by LEG3) makes a false PASS near-certain.
   tot_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$tot_before" ] && tot_before=0
+  att_removed_unmeasured=0
+  [ -n "$tot_before" ] || { att_removed_unmeasured=1; echo "  [LEG4] ✗ baseline receipt-apply:% total probe on A returned EMPTY — counter UNMEASURED; scoring LEG4 FAIL (cannot distinguish 'counter is 0' from 'probe never ran')"; }
   # Strip B's attestation on A (simulate an author device attested to no member) — union preserved for
   # LEG2's assert already recorded; this is the LAST leg so mutating A's roster is safe.
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$HIVE_SLUG' AND github_user_id=$ATT_B_GH_ID;" >/dev/null 2>&1
@@ -700,16 +715,19 @@ if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   RID_REM="att-unatt-$(date +%s)-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ATT_WS','$HIVE_SLUG','$RID_REM','refusal','work-offer:claim','att unattested-device probe',${ATT_B_GH_ID:-999999999},$now_ms,'local');" >/dev/null 2>&1
   echo "  [LEG4] B authored valid receipt $RID_REM (responder=B) with its device now unattested on A — federating…"
-  tot_after=$tot_before
+  tot_after=""; tot_after_measured=0
   for i in $(seq 1 ${DISCOVERY_RETRIES:-40}); do
+    [ "$att_removed_unmeasured" = 1 ] && break
     tot_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
-    [ -z "$tot_after" ] && tot_after=0
-    { [ "$tot_after" -gt "$tot_before" ]; } 2>/dev/null && break
+    if [ -n "$tot_after" ]; then
+      tot_after_measured=1
+      { [ "$tot_after" -gt "$tot_before" ]; } 2>/dev/null && break
+    fi
     sleep 3
   done
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$HIVE_SLUG' AND receipt_id='$RID_REM';" 2>/dev/null | tr -d '[:space:]')"
   att_removed_reason="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$HIVE_SLUG' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
-  { [ "$tot_after" -gt "$tot_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null && att_removed_ok=1
+  { [ "$att_removed_unmeasured" = 0 ] && [ "$tot_after_measured" = 1 ] && [ "$tot_after" -gt "$tot_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null && att_removed_ok=1
   echo "  LEG4 UNATTESTED-DEVICE REFUSED-OP (author device attested to no member → A refuses; counter++, row absent): $([ "$att_removed_ok" = 1 ] && echo "PASS (receipt-apply total $tot_before→$tot_after; reasons: $att_removed_reason; row-on-A=$rem_on_a)" || echo "FAIL (counter $tot_before→$tot_after row-on-A=$rem_on_a reasons: $att_removed_reason)")"
 fi
 

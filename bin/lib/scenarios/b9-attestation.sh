@@ -110,18 +110,29 @@ scn_attestation_membership() {
 
   # ── LEG3 — WRONG-GH-USER-ID refused-op counter (non-destructive: one throwaway receipt
   # that MUST be refused, never applied) ──
-  local rc_before rc_after rid_wrong rid_on_a
+  local rc_before rc_after rid_wrong rid_on_a rc_after_measured
+  # WI-5788 (P-411 residual): an UNMEASURED baseline must FAIL, never coerce to 0. An empty
+  # read here means the probe never ran (frame a down, psql refused, wrong DSN) — it does NOT
+  # mean "the counter is 0". Coercing it to 0 made ANY later nonzero reading satisfy
+  # `rc_after -gt rc_before`, so this leg could report PASS on a run where its own refusal
+  # never fired and the counter had simply been nonzero all along. Same shape as
+  # rig_assert_absent (bin/lib/deb-hetzner-rig.sh): score UNMEASURED as FAIL.
   rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$rc_before" ] && rc_before=0
+  [ -n "$rc_before" ] || { echo "attestation FAIL — LEG3 baseline UNMEASURED: the responder_mismatch counter probe on frame a returned nothing, so 'counter is 0' and 'probe never ran' are indistinguishable; refusing to score this leg"; return 1; }
   rid_wrong="att-wrong-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_wrong','refusal','work-offer:claim','att wrong-gh probe ($rid)',${a_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
-  rc_after=$rc_before
+  rc_after=""; rc_after_measured=0
   for i in $(seq 1 40); do
     rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
-    [ -z "$rc_after" ] && rc_after=0
-    { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    if [ -n "$rc_after" ]; then
+      rc_after_measured=1
+      { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    fi
     sleep 3
   done
+  # A poll that NEVER got a reading is a dead probe, not "no bump" — distinguish them so the
+  # failure message names the real fault instead of blaming the feature under test.
+  [ "$rc_after_measured" = 1 ] || { echo "attestation FAIL — LEG3 post-probe UNMEASURED: all 40 responder_mismatch reads on frame a returned empty (the probe never ran — this is NOT evidence the counter failed to bump)"; return 1; }
   rid_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_wrong';" 2>/dev/null | tr -d '[:space:]')"
   { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null || { echo "attestation FAIL — LEG3 wrong-gh-user refused-op across the container boundary (responder_mismatch $rc_before→$rc_after, row-on-a=$rid_on_a)"; return 1; }
 
@@ -157,9 +168,15 @@ scn_attestation_unattested_device() {
   # identity_unresolved ever firing — a guaranteed-nonzero baseline plus an unrelated further
   # bump is a false PASS, never actually proving this leg's own claim. Scope to the one reason
   # this leg actually causes.
-  local rc_before rc_after rid_rem rem_on_a reasons now_ms
+  local rc_before rc_after rid_rem rem_on_a reasons now_ms rc_after_measured
+  # WI-5788 (P-411 residual): UNMEASURED baseline ⇒ FAIL, never coerce to 0. See the LEG3
+  # comment above — and note this leg is MORE exposed to it, because it runs LAST (order 91)
+  # after four invasive scenarios (restart_durability/reconnect_catchup/replication_soak/
+  # revocation_kcut) that can leave frame a briefly unreachable. A dead baseline probe there
+  # coerces to 0, and then a single real identity_unresolved bump from ANY source reads as
+  # this leg's own proof.
   rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$rc_before" ] && rc_before=0
+  [ -n "$rc_before" ] || { echo "attestation(unattested-device) FAIL — LEG4 baseline UNMEASURED: the identity_unresolved counter probe on frame a returned nothing, so 'counter is 0' and 'probe never ran' are indistinguishable; refusing to score this leg"; return 1; }
 
   # Strip B's attestation on A (author device now maps to no member) — safe here: this is
   # the LAST scenario in the run, so no downstream scenario depends on B's device row.
@@ -168,14 +185,17 @@ scn_attestation_unattested_device() {
 
   rid_rem="att-unatt-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_rem','refusal','work-offer:claim','att unattested-device probe ($rid)',${b_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
-  rc_after=$rc_before
+  rc_after=""; rc_after_measured=0
   local i
   for i in $(seq 1 40); do
     rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
-    [ -z "$rc_after" ] && rc_after=0
-    { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    if [ -n "$rc_after" ]; then
+      rc_after_measured=1
+      { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
+    fi
     sleep 3
   done
+  [ "$rc_after_measured" = 1 ] || { echo "attestation(unattested-device) FAIL — LEG4 post-probe UNMEASURED: all 40 identity_unresolved reads on frame a returned empty (the probe never ran — NOT evidence the counter failed to bump)"; return 1; }
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
   { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, all reasons: $reasons"; return 1; }

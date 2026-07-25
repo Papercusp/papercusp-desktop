@@ -76,14 +76,23 @@ source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 source "$DESKTOP_DIR/bin/lib/deb-hetzner-rig.sh"
 
 # ── the matrix registry (scenario files call matrix_register at source time) ───
-MATRIX_IDS=(); declare -A MATRIX_ORDER MATRIX_LABEL MATRIX_FN
-matrix_register() {  # <id> <order> <label> <fn>
-  local id="$1" order="${2:-50}" label="${3:-$1}" fn="${4:-scn_$1}"
+# <minframes> (5th arg, default 2) DECLARES a scenario's frame requirement so the
+# runner can exclude it GENERICALLY and VISIBLY. It replaces a hardcoded
+# `[ "$id" = membership_churn ] && [ "$FRAME3" != 1 ] && continue` in the run-set
+# resolver, which excluded that one scenario with NO output at all: it did not
+# appear as PASS, FAIL, or skip, so a 2-frame run's log gave no indication that a
+# registered scenario had not executed (EI-18660392396897977). matrix_register is
+# exactly what made it look covered. Declaring the requirement here means a future
+# 3-frame scenario needs no new runner code and cannot be silently dropped.
+MATRIX_IDS=(); declare -A MATRIX_ORDER MATRIX_LABEL MATRIX_FN MATRIX_MINFRAMES
+matrix_register() {  # <id> <order> <label> <fn> [minframes]
+  local id="$1" order="${2:-50}" label="${3:-$1}" fn="${4:-scn_$1}" minframes="${5:-2}"
   case " ${MATRIX_IDS[*]} " in *" $id "*)
     echo "⚠ matrix_register: duplicate scenario id '$id' — later wins" >&2 ;;
   esac
   MATRIX_IDS+=("$id")
   MATRIX_ORDER[$id]="$order"; MATRIX_LABEL[$id]="$label"; MATRIX_FN[$id]="$fn"
+  MATRIX_MINFRAMES[$id]="$minframes"
 }
 
 # emit registered ids sorted by numeric <order> (stable), one per line
@@ -113,8 +122,9 @@ if [ "$LIST" = 1 ]; then
   echo "Registered live-matrix scenarios ($SCEN_DIR, sorted by order):"
   if [ "${#MATRIX_IDS[@]}" -gt 0 ]; then
     while read -r id; do
-      printf "  [%3s] %-26s %s   (fn: %s)\n" \
-        "${MATRIX_ORDER[$id]}" "$id" "${MATRIX_LABEL[$id]}" "${MATRIX_FN[$id]}"
+      printf "  [%3s] %-26s %s   (fn: %s, needs %s frames)\n" \
+        "${MATRIX_ORDER[$id]}" "$id" "${MATRIX_LABEL[$id]}" "${MATRIX_FN[$id]}" \
+        "${MATRIX_MINFRAMES[$id]:-2}"
     done < <(matrix_sorted_ids)
   else
     echo "  (none — drop bin/lib/scenarios/<id>.sh files that call matrix_register)"
@@ -229,14 +239,30 @@ fi
 source_scenarios
 
 # resolve the run set (all registered, or the --only subset), in order.
-# membership_churn needs frame c — skip it unless we're in 3-frame mode (and
-# never require the caller to remember to exclude it via --only on a 2-frame run).
-declare -a RUN_IDS=()
+# EVERY registered scenario is accounted for here: it lands in RUN_IDS, or in
+# SKIP_IDS with a stated reason. Nothing is dropped silently — see the roll-call
+# reconciliation at the end of the run, which fails loudly if that stops holding.
+HAVE_FRAMES=2; [ "$FRAME3" = 1 ] && HAVE_FRAMES=3
+declare -a RUN_IDS=() SKIP_IDS=(); declare -A SKIP_REASON
 while read -r id; do
-  [ "$id" = membership_churn ] && [ "$FRAME3" != 1 ] && continue
-  if [ -n "$ONLY" ]; then case ",$ONLY," in *",$id,"*) RUN_IDS+=("$id") ;; esac
+  need="${MATRIX_MINFRAMES[$id]:-2}"
+  if [ "$need" -gt "$HAVE_FRAMES" ]; then
+    SKIP_IDS+=("$id"); SKIP_REASON[$id]="needs $need frames, have $HAVE_FRAMES (run with --frames=$need)"
+    continue
+  fi
+  if [ -n "$ONLY" ]; then
+    case ",$ONLY," in
+      *",$id,"*) RUN_IDS+=("$id") ;;
+      *) SKIP_IDS+=("$id"); SKIP_REASON[$id]="not in --only=$ONLY" ;;
+    esac
   else RUN_IDS+=("$id"); fi
 done < <(matrix_sorted_ids)
+
+# Announce exclusions BEFORE the run, so a reader of the live log knows what this
+# run is NOT going to cover rather than having to infer it from an absence.
+for id in "${SKIP_IDS[@]}"; do
+  printf "  ⊘ SKIP %-26s [order %3s] — %s\n" "$id" "${MATRIX_ORDER[$id]}" "${SKIP_REASON[$id]}"
+done
 
 if [ "${#RUN_IDS[@]}" -eq 0 ]; then
   echo "✗ no scenarios to run (registered=${#MATRIX_IDS[@]}, only='$ONLY') — nothing to matrix." >&2
@@ -276,9 +302,33 @@ for id in "${RUN_IDS[@]}"; do
   else st="FAIL"; fails=$((fails+1)); fi
   printf "  %-4s  %-26s %s\n" "$st" "$id" "${SCN_LINE[$id]}"
 done
-echo "  ── $passes passed, $fails failed of ${#RUN_IDS[@]} ──"
+# Skipped scenarios appear in the SAME table as pass/fail. A reader must be able to
+# see this run's real coverage from its verdict alone, without cross-referencing the
+# registry — an omission is only honest if it is stated where the results are read.
+for id in "${SKIP_IDS[@]}"; do
+  printf "  %-4s  %-26s %s\n" "SKIP" "$id" "${SKIP_REASON[$id]}"
+done
+echo "  ── $passes passed, $fails failed, ${#SKIP_IDS[@]} skipped of ${#MATRIX_IDS[@]} registered ──"
+
+# ── roll-call reconciliation (EI-18660392396897977) ───────────────────────────
+# Every registered scenario must be accounted for as either run or explicitly
+# skipped. This is deliberately a GENERIC invariant rather than a check on the one
+# exclusion mechanism that caused the bug: it catches any future filter — a new
+# frame tier, a capability gate, an early `continue` — that drops a scenario
+# without saying so. A suite that quietly runs a subset of itself while reporting
+# a clean verdict is the failure this guards.
+accounted=$(( ${#RUN_IDS[@]} + ${#SKIP_IDS[@]} ))
+if [ "$accounted" -ne "${#MATRIX_IDS[@]}" ]; then
+  echo "OVERALL: FAIL — ROLL-CALL MISMATCH: ${#MATRIX_IDS[@]} scenarios registered but only $accounted accounted for (${#RUN_IDS[@]} run + ${#SKIP_IDS[@]} skipped). Some registered scenario was dropped without a stated reason — that is a runner bug, and this run's verdict cannot be trusted to describe its own coverage." >&2
+  exit 1
+fi
+
 if [ "$fails" -eq 0 ]; then
-  echo "OVERALL: PASS — every live federation scenario green across 2 real Hetzner VMs"
+  if [ "${#SKIP_IDS[@]}" -gt 0 ]; then
+    echo "OVERALL: PASS — all $passes EXECUTED scenarios green, but ${#SKIP_IDS[@]} of ${#MATRIX_IDS[@]} registered were SKIPPED (see table): this is NOT full-matrix coverage"
+  else
+    echo "OVERALL: PASS — every live federation scenario green across 2 real Hetzner VMs"
+  fi
   exit 0
 fi
 echo "OVERALL: FAIL — see per-scenario logs in $RIG_WORK (kept if --keep-up; else torn down)"

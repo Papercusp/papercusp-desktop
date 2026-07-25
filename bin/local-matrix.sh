@@ -103,6 +103,10 @@ SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
 # (<24 cores ⇒ no pinning). Override per frame with PCUSP_RIG_CPUSET_{A,B,C}
 # ('' disables). --cpu-shares=4096 additionally wins scheduler bursts against other
 # docker work (default weight 1024) without hard-starving it.
+# assert-integrity-ok: NCPU feeds a CONFIG decision, not an assert — nothing is scored off it.
+# The fallback is also the CONSERVATIVE direction: an unmeasurable nproc reads as 8, which is
+# < 24 and therefore DISABLES cpu pinning entirely. An unmeasured probe here can only forgo an
+# optimisation, never make a claim falsely pass.
 NCPU="$(nproc 2>/dev/null || echo 8)"
 if [ "$NCPU" -ge 24 ]; then
   _def_cpuset_a="$((NCPU-8))-$((NCPU-1))"

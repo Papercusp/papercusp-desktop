@@ -37,6 +37,11 @@ SERVERLOG="$HOME/.papercusp/logs/server-app.log"
 SERVELOG="$HOME/.papercusp/logs/serve.log"
 GUILOG="$HOME/.papercusp/logs/gui.log"
 FAIL=0
+# WI-5788: a check that COULD NOT RUN must announce itself, never vanish into a green verdict.
+# Skips are counted separately from failures so the exit code can distinguish "verified clean"
+# (0) from "a guard never ran, so this run does not verify the claim" (2).
+SKIPPED=0
+SKIPPED_LIST=""
 
 echo "=== 1. Rust Server process raised its soft limit off 256 (server-app.log) ==="
 if [ ! -f "$SERVERLOG" ]; then
@@ -71,8 +76,14 @@ echo; echo "=== 3. REGRESSION GUARD: the raise must not CAP node's self-raise ==
 # HARD limit as well, node's startup self-raise gets clamped to it and the
 # operator ends up with FEWER fds than it had before the "fix".
 OPPID=$(pgrep -f 'node .*[Pp]apercusp' 2>/dev/null | head -1)
+# assert-integrity-ok: WI-5788 — the unmeasured case is RECORDED as a skip (SKIPPED counter +
+# named in the verdict + exit 2), not silently continued, so this branch can no longer let the
+# run report a clean pass. That is the disambiguation R4 asks for; failing outright would be
+# wrong here, since "no operator running" is a legitimate state of the VM, not a regression.
 if [ -z "$OPPID" ]; then
-  echo "⚠ no running operator node process — skipping"
+  echo "⚠ no running operator node process — §3 regression guard SKIPPED (NOT verified this run)"
+  SKIPPED=$((SKIPPED + 1))
+  SKIPPED_LIST="${SKIPPED_LIST}§3 node self-raise regression guard (no operator process running); "
 else
   echo "operator pid=$OPPID, open handles=$(lsof -p "$OPPID" 2>/dev/null | wc -l | tr -d ' ')"
   # A fresh node inherits the same env the operator did, so its self-raised limit
@@ -105,9 +116,15 @@ fi
 
 echo
 echo "================ VERDICT ================"
-if [ "$FAIL" = 0 ]; then
-  echo "✅✅✅ WI-4369 OK — Rust processes raised off 256, node's self-raise intact, no EMFILE"
-else
+if [ "$FAIL" != 0 ]; then
   echo "❌ WI-4369 REGRESSION — see the ❌ lines above"
+  exit 1
+elif [ "$SKIPPED" != 0 ]; then
+  # No ❌ fired, but a guard never ran — reporting this as a clean pass would be the exact
+  # can-falsely-pass shape WI-5788 exists to remove. Distinct exit 2 = "not fully verified".
+  echo "⚠ WI-4369 PARTIAL — no regression seen, but $SKIPPED check(s) SKIPPED, so this run does NOT verify the claim: $SKIPPED_LIST"
+  exit 2
+else
+  echo "✅✅✅ WI-4369 OK — Rust processes raised off 256, node's self-raise intact, no EMFILE"
+  exit 0
 fi
-exit "$FAIL"

@@ -123,4 +123,8 @@ scn_membership_churn() {
 
   echo "membership_churn OK (roster a=$n_a b=$n_b c=$n_c; backfill=${backfill:-n/a}; C→A='${ca#* }' C→B='${cb#* }')"
 }
-matrix_register membership_churn 35 "3-node roster convergence + backfill + full-mesh (c joins late)" scn_membership_churn
+# minframes=3: this scenario probes frame c, so it cannot run on a 2-frame rig. Declaring
+# it here (rather than the runner hardcoding this id) makes the exclusion generic AND
+# visible — a 2-frame run now prints an explicit "⊘ SKIP membership_churn … needs 3 frames"
+# line instead of omitting it with no output at all (EI-18660392396897977).
+matrix_register membership_churn 35 "3-node roster convergence + backfill + full-mesh (c joins late)" scn_membership_churn 3

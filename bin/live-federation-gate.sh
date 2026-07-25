@@ -799,6 +799,13 @@ if [ "$SKIP_MATRIX" != 1 ]; then
     X_TOTAL="$(grep -ac '✗' "$WORK/content-matrix.out" 2>/dev/null || true)"; X_TOTAL="${X_TOTAL:-0}"
     X_OTHER="$(grep -a '✗' "$WORK/content-matrix.out" 2>/dev/null | grep -acvE '(backfill(-late)?|incr-B→A) +NEVER crossed' || true)"; X_OTHER="${X_OTHER:-0}"
     if [ "$X_TOTAL" -ge 1 ] && [ "$X_OTHER" -eq 0 ]; then
+      # assert-integrity-ok: this IS a FAIL→PASS downgrade, but a narrowly-gated, LOUDLY-LOGGED
+      # one — not the silent default-to-pass R2 hunts. It fires only when X_TOTAL>=1 (hard-fails
+      # genuinely occurred) AND X_OTHER==0 (every one matches a documented known-red class); the
+      # log line immediately below states "NOT a clean pass"; and PASS-971 is a DISTINCT token
+      # from PASS, so no downstream reader can mistake it for clean. The residual risk — that a
+      # known-red carve-out masks a real regression indefinitely — is a scenario-level concern
+      # tracked as EI-18657324526667507, not something this line-level lint can adjudicate.
       MATRIX_RES="PASS-971"
       log "content-matrix FAIL downgraded → PASS-971: all $X_TOTAL hard-fails match the documented known-red classes (backfill/backfill-late = WI-1942 latency; incr-B→A = WI-971 fix landed, verify pending); everything else green. NOT a clean pass."
     fi
