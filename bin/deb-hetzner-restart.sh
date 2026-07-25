@@ -383,13 +383,22 @@ NR <= start { next }
   if (!match($0, /harness=[A-Za-z0-9_.-]+/)) next
   hs = substr($0, RSTART + 8, RLENGTH - 8)
   if (hs != h1 && hs != h2) next
-  k = hs " log=" id
-  if ($0 ~ /replication_stalled|replication_frozen/) pend[k]++
-  else if ($0 ~ /re-attached replica session/ || $0 ~ /\] recovered \(/) pend[k] = 0
+  # Keyed by LOG, not (harness,log): one hypercore is reported under BOTH the
+  # harness and its -pot sibling label, so a stall logged as harness=X and its
+  # re-attach logged as harness=X-pot are the SAME log recovering. Keying by the
+  # pair would leave the stall "pending" forever and reintroduce exactly the
+  # false-positive class this assert exists to avoid (seen live on banked stamp
+  # 115441: stall harness=hello-world log=9da47acbbd86, re-attach for the same
+  # log under harness=hello-world-pot). `where` keeps a label for the report.
+  if ($0 ~ /replication_stalled|replication_frozen/) { pend[id]++; where[id] = hs }
+  else if ($0 ~ /re-attached replica session/ || $0 ~ /\] recovered \(/) pend[id] = 0
 }
 END {
   n = 0
-  for (k in pend) if (pend[k] > 0) { n += pend[k]; printf "UNRECOVERED %s x%d\n", k, pend[k] }
+  for (id in pend) if (pend[id] > 0) {
+    n += pend[id]
+    printf "UNRECOVERED %s log=%s x%d\n", where[id], id, pend[id]
+  }
   printf "UNRECOVERED_TOTAL=%d\n", n
 }
 RL_AWK_EOF
