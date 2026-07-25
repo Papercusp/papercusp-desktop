@@ -243,9 +243,11 @@ scenario_restart_durability() {
 # peer-log replication silently never resumes. One restart passing proves little
 # — the class is intermittent. This soak does N kill/restart cycles (alternating
 # member/owner) and asserts LIVE replication re-establishes EVERY cycle, BOTH
-# directions, within a stated SLA — plus a negative detector-assert: the
-# replication-liveness detector must NOT have fired (no replication_stalled /
-# replication_frozen in serve.log) during a healthy soak.
+# directions, within a stated SLA — plus a negative detector-assert: on a soak
+# whose probes ALL passed, the replication-liveness detector must not have left
+# an UNRECOVERED stall for this soak's own harness inside this soak's own window
+# (WI-5715, 2026-07-25 — see the long note on that assert below). Stalls that
+# recover are expected: the scenario cold-restarts sidecars 5 times by design.
 #
 # Knobs: RL_SOAK_CYCLES (default 5) · RL_SOAK_SLA_S (default 90 — seconds each
 # direction's probe write may take to land AFTER the restarted frame is ready).
@@ -266,6 +268,23 @@ scenario_replication_liveness_soak() {
     echo "✗ replication-soak: frames not joined (owner-slug='$oslug' member-slug='$mslug')"
     echo "OVERALL: INCOMPLETE"; return 1
   fi
+
+  # ── WI-5715 (2026-07-25): detector-window marks ──────────────────────────────
+  # The negative detector-assert below must only see events THIS soak produced.
+  # serve.log is cumulative across the whole matrix pass, and the scenarios that
+  # run before us (restart_durability@80, reconnect_catchup@85) legitimately kill
+  # frames on the SAME harness slugs — their stall events were being counted
+  # against us. Record each frame's serve.log line count now; the assert reads
+  # only lines after this mark. (A line offset, not a timestamp: serve.log lines
+  # are not uniformly timestamped, and the offset is exact.)
+  local -A logmark=()
+  local frame
+  for frame in "$OWNER" "$MEMBER"; do
+    logmark[$frame]="$(printf '%s\n' "wc -l < $(printf %q "$(drv_applog "$frame")") 2>/dev/null || echo 0" \
+      | drv_exec "$frame" 2>/dev/null | tail -1 | tr -d '[:space:]')"
+    case "${logmark[$frame]:-}" in ''|*[!0-9]*) logmark[$frame]=0 ;; esac
+  done
+  echo "  ⚙ detector window opens at serve.log line — '$OWNER': ${logmark[$OWNER]}  '$MEMBER': ${logmark[$MEMBER]}"
 
   for i in $(seq 1 "$cycles"); do
     # Alternate the restart target: odd cycles restart the MEMBER, even the OWNER
@@ -321,22 +340,72 @@ scenario_replication_liveness_soak() {
     fi
   done
 
-  # Negative detector-assert: a HEALTHY soak must not have tripped the
-  # replication-liveness detector on either frame. (If a leg above failed, the
-  # detector firing is EXPECTED and this check is skipped — the failure is
-  # already scored; the detector doing its job must not double-count.)
+  # ── Negative detector-assert (WI-5715, rewritten 2026-07-25) ─────────────────
+  # Only runs when every probe leg passed (rc=0), so replication is DEMONSTRABLY
+  # working; its sole job is catching the detector CRYING WOLF. It skips entirely
+  # on a red soak — the detector firing there is expected and already scored by
+  # the fire-path pin in lib/scenarios/b8-replication-soak.sh.
+  #
+  # It used to be `grep -c 'replication_stalled|replication_frozen' serve.log`:
+  # unscoped by harness, unscoped in time, and blind to recovery. That assert
+  # could never pass, which is why P-402 first-green was never once reached (the
+  # ENTIRE history of this gate, per BRIEF-p2p-release-verify-2026-07-25):
+  #   1. NOT TIME-SCOPED — serve.log is cumulative over the whole matrix pass, so
+  #      restart_durability@80 / reconnect_catchup@85, which legitimately kill
+  #      frames, charged their stalls to us. Fixed by the logmark window above.
+  #   2. NOT HARNESS-SCOPED — the same false-positive class WI-5665 already fixed
+  #      for the fire-path pin (which scopes to oslug/mslug), never applied here.
+  #   3. BLIND TO RECOVERY — the real bug. This scenario COLD-RESTARTS a sidecar
+  #      5 times by design. A restart legitimately produces a ~15s
+  #      connected-but-no-replicator window; the detector fires (correctly — that
+  #      IS the WI-183 zombie-connection class it exists to catch), self-repair
+  #      re-attaches the replica session, and the log records `recovered … after
+  #      16s`. Scoring that as "noise" asserts the detector must stay silent
+  #      during the exact event it was built to detect, and directly contradicts
+  #      the fire-path pin's assert that it MUST fire. Evidence (run 143908,
+  #      banked triage serve-{a,b}-151804.log): every one of the 13 stall events
+  #      is followed by `repair-on-detect: re-attached replica session` for the
+  #      same log, and all 10 probe legs landed in 3-4s (SLA 90s).
+  #
+  # So a stall is NOISE only if it NEVER RECOVERED: a detector claiming a log is
+  # dead, with no re-attach/recovery, while this soak's probes crossed fine. That
+  # keeps the true signal (WI-183: connected, silently never replicating again)
+  # and stops failing on detect→repair→recover, which is the system working.
   if [ "$rc" = 0 ]; then
-    local frame hits
+    local _rl_noise_awk det total
+    # Per (harness,log): count stalls, zero the counter on a recovery/re-attach.
+    # Anything still >0 at EOF stalled and never came back.
+    read -r -d '' _rl_noise_awk <<'RL_AWK_EOF' || true
+NR <= start { next }
+{
+  if (!match($0, /log=[0-9a-f]+/)) next
+  id = substr($0, RSTART + 4, RLENGTH - 4)
+  if (!match($0, /harness=[A-Za-z0-9_.-]+/)) next
+  hs = substr($0, RSTART + 8, RLENGTH - 8)
+  if (hs != h1 && hs != h2) next
+  k = hs " log=" id
+  if ($0 ~ /replication_stalled|replication_frozen/) pend[k]++
+  else if ($0 ~ /re-attached replica session/ || $0 ~ /\] recovered \(/) pend[k] = 0
+}
+END {
+  n = 0
+  for (k in pend) if (pend[k] > 0) { n += pend[k]; printf "UNRECOVERED %s x%d\n", k, pend[k] }
+  printf "UNRECOVERED_TOTAL=%d\n", n
+}
+RL_AWK_EOF
     for frame in "$OWNER" "$MEMBER"; do
       # $(drv_applog "$frame") resolves LOCALLY to the frame's app-log path
-      # (/home/pcusp/serve.log on the rig driver); the grep runs remotely.
-      hits="$(printf '%s\n' "grep -c 'replication_stalled\|replication_frozen' '$(drv_applog "$frame")' 2>/dev/null; true" \
-        | drv_exec "$frame" 2>/dev/null | tail -1 | tr -d '[:space:]')"
-      if [ -n "${hits:-}" ] && [ "${hits}" != "0" ]; then
-        echo "  ✗ detector-noise: frame '$frame' logged $hits replication stall event(s) during a soak whose probes all passed — false positive, fix the detector"
+      # (/home/pcusp/serve.log on the rig driver); the awk runs remotely.
+      det="$(printf 'awk -v start=%q -v h1=%q -v h2=%q %q %q 2>/dev/null; true\n' \
+              "${logmark[$frame]:-0}" "$oslug" "$mslug" "$_rl_noise_awk" "$(drv_applog "$frame")" \
+            | drv_exec "$frame" 2>/dev/null)"
+      total="$(printf '%s\n' "$det" | sed -n 's/^UNRECOVERED_TOTAL=//p' | tail -1 | tr -d '[:space:]')"
+      if [ -n "${total:-}" ] && [ "$total" != "0" ]; then
+        echo "  ✗ detector-noise: frame '$frame' logged $total UNRECOVERED replication stall event(s) for this soak's own harness ($oslug/$mslug), inside its own window, while every probe passed — a genuine detector false-positive:"
+        printf '%s\n' "$det" | grep '^UNRECOVERED ' | sed 's/^/       /'
         rc=1
       else
-        echo "  ✓ detector quiet on frame '$frame' (no stall events during healthy soak)"
+        echo "  ✓ detector clean on frame '$frame' — no unrecovered stall for $oslug/$mslug in this soak's window (detect→repair→recover cycles are expected during 5 cold restarts and do not count as noise)"
       fi
     done
   fi

@@ -14,8 +14,12 @@
 # writes stop crossing with zero errors. The soak cold-restarts alternating frames
 # RL_SOAK_CYCLES (default 5) times and asserts live replication re-establishes
 # BOTH directions within RL_SOAK_SLA_S (default 90s) EVERY cycle, plus a negative
-# detector-assert (no replication_stalled/replication_frozen events on a healthy
-# soak — the detector must be quiet when replication is fine).
+# detector-assert: on a soak whose probes all passed, no UNRECOVERED stall for the
+# soak's own harness within the soak's own window (WI-5715, 2026-07-25). Stalls
+# that fire and then recover are EXPECTED — a cold restart legitimately produces a
+# ~15s connected-but-no-replicator window that self-repair re-attaches — and the
+# fire-path pin below asserts the detector MUST fire on a genuinely red soak, so
+# demanding blanket silence contradicted it and made this scenario unpassable.
 #
 # INVASIVE: cold-restarts BOTH sidecars repeatedly. Registered order 87 so it runs
 # late — after restart_durability(80)/reconnect_catchup(85), before
