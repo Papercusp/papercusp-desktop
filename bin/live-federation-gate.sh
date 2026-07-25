@@ -45,6 +45,11 @@
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
+#   RIG_WAIT          (default 0)   — 1 = a DELIBERATE run: when the shared rig lock is already
+#                                     held, QUEUE behind the holder (via local-matrix.sh's own
+#                                     blocking flock) instead of exiting SKIPPED-RIG-BUSY. Pay
+#                                     one possibly-idle rebuild to actually reach a verdict.
+#                                     Leave 0 for the unattended hourly timer. See §0z.
 #   GATE_DISPLAY      (default 250) — Xvfb display base (matrix uses N, from-repo N+2).
 #   OPERATOR_MCP_URL  (default http://127.0.0.1:3070/api/mcp) — curl-MCP endpoint for EI filing.
 #   GATE_NO_FILE      (default 0)   — set 1 to skip EI filing (just log the verdict).
@@ -241,6 +246,22 @@ fi
 # this run and skipping the probe avoids a false skip on a content-matrix-only window.
 # GATE_FORCE does NOT bypass this: a forced run colliding with an in-progress local-
 # matrix run is exactly the collision this exists to catch cheaply, before the rebuild.
+#
+# ── RIG_WAIT=1 opt-in (WI-5137/P-402, 2026-07-25): QUEUE instead of skipping ──
+# The skip above is correct for the UNATTENDED hourly timer (cheap to try again next hour),
+# but on a contended box it is a STARVATION path for a DELIBERATE run: this rig is shared
+# with every agent's targeted `local-matrix.sh --only=…` verification, so "rig busy" can be
+# true for most of the working day and the gate then never reaches its verdict — silently,
+# because each individual skip looks like a correct cheap no-op. That is the same
+# never-runs-and-nobody-notices class as the LOAD_GATE defer and the MATRIX_TTL_H window
+# (EI-18657324526667507); this is its third member. RIG_WAIT=1 says "I am a deliberate run,
+# the rebuild is worth paying to get in line": we fall through to the rebuild and let
+# local-matrix.sh's OWN blocking flock (RIG_LOCK_WAIT_S, default 7200s — the gate passes no
+# override, so it queues) serialize us behind the holder. Safe by construction: the probe
+# below never HOLDS the lock, so waiting here would not help and would only starve the
+# holder's successor; the real queueing lives in local-matrix.sh where the lock is actually
+# taken. The cost is one rebuild that may sit idle while queued — that is the whole point of
+# making it opt-in rather than the default.
 if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ] \
    && [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ]; then
   RIG_LOCK_PRECHECK="${PCUSP_LOCAL_RIG_LOCK:-/tmp/pcusp-local-rig.lock}"
@@ -248,12 +269,17 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]
     if ! flock -n 8; then
       RIG_HOLDER="$(cat "$RIG_LOCK_PRECHECK.holder" 2>/dev/null || echo 'unknown holder')"
       exec 8<&- 2>/dev/null || true
-      log "rig busy (held by: $RIG_HOLDER) and this window would reach the local-matrix leg — skipping now, before the rebuild, rather than wasting one (non-blocking probe only; local-matrix.sh's own flock still serializes correctly regardless of this check)."
-      skip_cleanup
-      check_staleness   # by this point freshness was already ruled out above — same as the other SKIPPED* exits (load/github-api), unlike the FRESH* exits, this skip must not go unnoticed if it recurs
-      echo "GATE: SKIPPED-RIG-BUSY (held by: $RIG_HOLDER)"; exit 0
+      if [ "${RIG_WAIT:-0}" = 1 ]; then
+        log "rig busy (held by: $RIG_HOLDER) but RIG_WAIT=1 — NOT skipping: proceeding to the rebuild and queueing behind the holder via local-matrix.sh's own blocking flock (RIG_LOCK_WAIT_S, default 7200s). This run may sit queued for a long time; that is the opt-in."
+      else
+        log "rig busy (held by: $RIG_HOLDER) and this window would reach the local-matrix leg — skipping now, before the rebuild, rather than wasting one (non-blocking probe only; local-matrix.sh's own flock still serializes correctly regardless of this check). Set RIG_WAIT=1 to queue instead of skipping."
+        skip_cleanup
+        check_staleness   # by this point freshness was already ruled out above — same as the other SKIPPED* exits (load/github-api), unlike the FRESH* exits, this skip must not go unnoticed if it recurs
+        echo "GATE: SKIPPED-RIG-BUSY (held by: $RIG_HOLDER)"; exit 0
+      fi
+    else
+      exec 8<&- 2>/dev/null || true   # release the probe immediately — we only peeked
     fi
-    exec 8<&- 2>/dev/null || true   # release the probe immediately — we only peeked
   fi
 fi
 
