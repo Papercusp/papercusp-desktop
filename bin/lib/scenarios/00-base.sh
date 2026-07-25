@@ -26,10 +26,20 @@ scn_planpart_bidir() {
   local oslug="${FRAME_MEMBER_SLUG[a]}" mslug="${FRAME_MEMBER_SLUG[b]}"
   local ab ba
   ab="$(fed_plan_part_merge_assert a b "$oslug" 60 || true)"
-  [ "$ab" = 1 ] || { echo "plan-part A→B FAIL (probe=$ab)"; return 1; }
+  # WI-5768 (scenario-assert integrity audit): fed_plan_part_merge_assert's own
+  # contract (federation-asserts.sh) is explicit — "skip" (the harness_plan_parts
+  # table absent, a pre-mig-270/271 .deb) means N/A, NOT a failure; a caller that
+  # treats it like any other non-1 value CAN-NEVER-PASS against such a .deb (it
+  # would report FAIL forever for a condition the scenario itself can't avoid).
+  # Mirror the correct handling already in deb-hetzner-federation.sh's pp_label.
+  case "$ab" in 1|skip) : ;; *) echo "plan-part A→B FAIL (probe=$ab)"; return 1 ;; esac
   ba="$(fed_plan_part_merge_assert b a "$mslug" 60 || true)"
-  [ "$ba" = 1 ] || { echo "plan-part B→A FAIL (probe=$ba)"; return 1; }
-  echo "plan-part bidir OK (item:P-001 both directions, origin=remote)"
+  case "$ba" in 1|skip) : ;; *) echo "plan-part B→A FAIL (probe=$ba)"; return 1 ;; esac
+  if [ "$ab" = skip ] || [ "$ba" = skip ]; then
+    echo "plan-part bidir OK (SKIPPED — harness_plan_parts absent, this .deb predates the plan-parts migration, EI-505)"
+  else
+    echo "plan-part bidir OK (item:P-001 both directions, origin=remote)"
+  fi
 }
 matrix_register planpart_bidir 20 "plan-part A↔B" scn_planpart_bidir
 

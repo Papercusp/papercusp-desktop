@@ -1056,14 +1056,39 @@ EOF
 # must NOT receive post-revoke content). Echoes 1 (correctly absent) or 0 (it
 # arrived — a leak). Because a negative is only meaningful after enough time, this
 # always waits the full window before declaring absence (no early-out on success).
+#
+# WI-5768 (scenario-assert integrity audit, generalizing the WI-5715 class): a
+# negative assert over a REMOTE probe (ssh + psql) can silently score PASS on
+# total probe FAILURE, not just genuine absence. drv_psql's pipeline (with
+# `pipefail` set by every caller — verified: every deb-hetzner-*.sh/local-matrix.sh
+# sources `set -uo pipefail` and never unsets pipefail) exits non-zero on an
+# ssh/connection/psql error, but the OLD code only ever inspected $row — which is
+# EMPTY both on "confirmed zero rows" AND "the query never ran" (dead frame,
+# network partition, wrong port). A banned/unreachable member going fully dark
+# for the entire window used to read as "correctly absent" — a false PASS on the
+# SECURITY-critical revocation leak check, exactly the CAN-FALSELY-PASS class
+# this audit targets ("a probe whose failure to RUN reads as clean"). Fix: track
+# each iteration's exit code; only a genuinely-executed (rc=0) empty read counts
+# as a real negative signal, and if NOT ONE probe ever actually ran, the assert
+# is UNMEASURED and scores FAIL — never a pass. A probe failure is also logged so
+# a flaky-but-eventually-successful run stays visible in the log.
 rig_assert_absent() {
-  local inst="$1" fid="$2" tries="${3:-20}" i row
+  local inst="$1" fid="$2" tries="${3:-20}" i row rc measured=0
   for i in $(seq 1 "$tries"); do
-    row="$(drv_psql "$inst" "SELECT 1 FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-    if [ "$row" = "1" ]; then echo 0; return 1; fi   # arrived → negative assert FAILS
+    row="$(drv_psql "$inst" "SELECT 1 FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      measured=$((measured + 1))
+      if [ "$row" = "1" ]; then echo 0; return 1; fi   # arrived → negative assert FAILS
+    else
+      echo "  ⚠ rig_assert_absent($inst,$fid): probe $i/$tries FAILED to run (rc=$rc — ssh/psql error, not a confirmed read)" >&2
+    fi
     sleep 3
   done
-  echo 1; return 0   # never arrived within the window → correctly absent
+  if [ "$measured" -eq 0 ]; then
+    echo "  ✗ rig_assert_absent($inst,$fid): ALL $tries probes failed to run — the assert is UNMEASURED, never a confirmed absence; scoring FAIL (an unmeasurable probe is not a pass)" >&2
+    echo 0; return 1
+  fi
+  echo 1; return 0   # never arrived within the window (genuinely measured) → correctly absent
 }
 
 # rig_assert_row_absent <inst> <sql-predicate> [tries] — generic negative assert:
@@ -1071,12 +1096,27 @@ rig_assert_absent() {
 # <predicate> is a complete SQL boolean over any harness_shared table joined inline,
 # e.g. "harness_shared.coord_event_log WHERE msg_id='X' AND origin='remote'". Lets
 # briefs negative-assert coord/plan-part rows too, not just features.
+#
+# WI-5768: same fail-closed fix as rig_assert_absent above (see its comment for
+# the full rationale) — a probe that never actually ran must never be
+# indistinguishable from a confirmed-empty read. Used by
+# deb-hetzner-coord-controlplane.sh's presence/watermark/subscription
+# non-federation boundary checks, so the same false-PASS risk applied there too.
 rig_assert_row_absent() {
-  local inst="$1" pred="$2" tries="${3:-20}" i row
+  local inst="$1" pred="$2" tries="${3:-20}" i row rc measured=0
   for i in $(seq 1 "$tries"); do
-    row="$(drv_psql "$inst" "SELECT 1 FROM $pred LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-    if [ "$row" = "1" ]; then echo 0; return 1; fi
+    row="$(drv_psql "$inst" "SELECT 1 FROM $pred LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      measured=$((measured + 1))
+      if [ "$row" = "1" ]; then echo 0; return 1; fi
+    else
+      echo "  ⚠ rig_assert_row_absent($inst): probe $i/$tries FAILED to run (rc=$rc — ssh/psql error, not a confirmed read)" >&2
+    fi
     sleep 3
   done
+  if [ "$measured" -eq 0 ]; then
+    echo "  ✗ rig_assert_row_absent($inst): ALL $tries probes failed to run — the assert is UNMEASURED, never a confirmed absence; scoring FAIL (an unmeasurable probe is not a pass)" >&2
+    echo 0; return 1
+  fi
   echo 1; return 0
 }

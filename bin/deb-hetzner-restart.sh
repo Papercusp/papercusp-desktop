@@ -380,18 +380,23 @@ NR <= start { next }
 {
   if (!match($0, /log=[0-9a-f]+/)) next
   id = substr($0, RSTART + 4, RLENGTH - 4)
+  # Keyed by LOG, and RECOVERY IS EVALUATED HARNESS-AGNOSTICALLY — deliberately.
+  # One hypercore is reported under BOTH the harness and its -pot sibling label,
+  # so a stall logged as harness=X and the re-attach for the SAME log logged as
+  # harness=X-pot are one log recovering. Applying the harness filter to recovery
+  # lines too would drop that clear and strand the stall as "unrecovered" forever
+  # — reintroducing the exact false-positive class this assert exists to remove.
+  # This is not theoretical: banked stamp 115441 has stall harness=hello-world
+  # log=9da47acbbd86 whose re-attach is logged under harness=hello-world-pot, and
+  # in production oslug==mslug=="hello-world" (both frames join the same member
+  # slug), so the -pot recovery would have been filtered out. A recovery for a
+  # log always resolves that log; only STALLS are scoped to the soak's harness.
+  if ($0 ~ /re-attached replica session/ || $0 ~ /\] recovered \(/) { pend[id] = 0; next }
+  if ($0 !~ /replication_stalled|replication_frozen/) next
   if (!match($0, /harness=[A-Za-z0-9_.-]+/)) next
   hs = substr($0, RSTART + 8, RLENGTH - 8)
   if (hs != h1 && hs != h2) next
-  # Keyed by LOG, not (harness,log): one hypercore is reported under BOTH the
-  # harness and its -pot sibling label, so a stall logged as harness=X and its
-  # re-attach logged as harness=X-pot are the SAME log recovering. Keying by the
-  # pair would leave the stall "pending" forever and reintroduce exactly the
-  # false-positive class this assert exists to avoid (seen live on banked stamp
-  # 115441: stall harness=hello-world log=9da47acbbd86, re-attach for the same
-  # log under harness=hello-world-pot). `where` keeps a label for the report.
-  if ($0 ~ /replication_stalled|replication_frozen/) { pend[id]++; where[id] = hs }
-  else if ($0 ~ /re-attached replica session/ || $0 ~ /\] recovered \(/) pend[id] = 0
+  pend[id]++; where[id] = hs
 }
 END {
   n = 0

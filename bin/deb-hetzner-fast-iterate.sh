@@ -408,9 +408,13 @@ do_hotpatch() {
 
   fed_log "PLAN-PART MERGE A→B + B→A"
   ppab="$(fed_plan_part_merge_assert a b "$A_MEMBER_SLUG" 20 || true)"
-  [ "$ppab" = 1 ] && echo "✓ plan-part A→B" || echo "✗ plan-part A→B failed (probe=$ppab)"
+  # WI-5768 (scenario-assert integrity audit): fed_plan_part_merge_assert's own
+  # contract (federation-asserts.sh) says "skip" (harness_plan_parts absent, a
+  # pre-mig-270/271 .deb) is N/A, not a failure — a caller comparing only against
+  # 1 CAN-NEVER-PASS on such a .deb. Mirror deb-hetzner-federation.sh's pp_label.
+  case "$ppab" in 1) echo "✓ plan-part A→B" ;; skip) echo "⊘ plan-part A→B SKIPPED (harness_plan_parts absent, EI-505)" ;; *) echo "✗ plan-part A→B failed (probe=$ppab)" ;; esac
   ppba="$(fed_plan_part_merge_assert b a "$B_MEMBER_SLUG" 20 || true)"
-  [ "$ppba" = 1 ] && echo "✓ plan-part B→A" || echo "✗ plan-part B→A failed (probe=$ppba)"
+  case "$ppba" in 1) echo "✓ plan-part B→A" ;; skip) echo "⊘ plan-part B→A SKIPPED (harness_plan_parts absent, EI-505)" ;; *) echo "✗ plan-part B→A failed (probe=$ppba)" ;; esac
 
   fed_log "COORD-COMMS MERGE A→B + B→A"
   cab="$(fed_coord_merge_probe a b "$A_MEMBER_SLUG" A2B 20 || true)"
@@ -420,8 +424,9 @@ do_hotpatch() {
 
   # 6. report
   fed_log "HOTPATCH RESULT"
-  echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$([ "$ppab" = 1 ] && echo PASS || echo FAIL)  plan-part B→A=$([ "$ppba" = 1 ] && echo PASS || echo FAIL)  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
-  if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$ppab" = 1 ] && [ "$ppba" = 1 ] && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+  pp_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
+  echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
+  if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
     echo "OVERALL: PASS — hotpatched serve.mjs federates cross-machine (features + plan-parts + coord)"
     echo "  (VMs still UP — iterate again with --hotpatch, or --teardown when done)"
     exit 0
