@@ -45,17 +45,27 @@ source "$SCEN"
 now() { date +%s; }
 
 reset_env() {
-  unset RD_LAST_CANARY_FID RD_LAST_MEMBER RD_LAST_CANARY_WRITE_TS
+  unset RD_LAST_CANARY_FID RD_LAST_MEMBER RD_LAST_CANARY_WRITE_TS RD_LAST_RAN_AT
   RD_SETTLE_WARN_S=120; RD_SETTLE_FAIL_S=900; RD_SETTLE_WARN_IS_FAIL=0
   STUB_ORIGIN=""; STUB_POLL_RC=1
 }
 
-# ── 1. no preceding canary → PASS, no-op, never a forced fail ────────────────
+# ── 1. no preceding canary AND order 80 never ran → PASS, no-op, never a forced fail ──
 reset_env
 out="$(scn_restart_settle_barrier)"; rc=$?
-[ "$rc" = 0 ] && grep -q "nothing to settle" <<<"$out" \
-  && ok "no-canary → PASS/no-op" \
+[ "$rc" = 0 ] && grep -q "didn't run this session" <<<"$out" && grep -q "nothing to settle" <<<"$out" \
+  && ok "no-canary, order-80-never-ran → PASS/no-op" \
   || bad "no-canary case: rc=$rc out='$out'"
+
+# ── 1b. WI-5772: order 80 RAN (RD_LAST_RAN_AT set) but left no canary (failed/
+#       bailed before its final write) → hard FAIL, never the "didn't run" PASS ──
+reset_env
+RD_LAST_RAN_AT="$(now)"
+out="$(scn_restart_settle_barrier)"; rc=$?
+[ "$rc" = 1 ] && grep -q "OVERALL: FAIL" <<<"$out" && grep -q "RAN this session" <<<"$out" \
+  && ! grep -q "didn't run this session" <<<"$out" \
+  && ok "ran-but-no-canary → FAIL, distinguished from didn't-run" \
+  || bad "ran-but-no-canary case: rc=$rc out='$out'"
 
 # ── 2. already converged, fast (elapsed well under warn bar) → PASS, no ⚠ ────
 reset_env
@@ -111,6 +121,6 @@ out="$(scn_restart_settle_barrier)"; rc=$?
   && ok "poll never lands within budget → FAIL" \
   || bad "poll-timeout case: rc=$rc out='$out'"
 
-echo "── restart-settle-barrier.selftest: $((7 - FAILS))/7 passed ──"
+echo "── restart-settle-barrier.selftest: $((8 - FAILS))/8 passed ──"
 [ "$FAILS" = 0 ] && { echo "OVERALL: PASS"; exit 0; }
 echo "OVERALL: FAIL ($FAILS failing)"; exit 1

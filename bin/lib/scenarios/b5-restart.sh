@@ -14,8 +14,22 @@
 source "$DESKTOP_DIR/bin/deb-hetzner-restart.sh"
 
 scn_restart_durability() {
-  local out rc
-  out="$(scenario_restart_durability a b 2>&1)"; rc=$?
+  # WI-5772: scenario_restart_durability exports RD_LAST_RAN_AT / RD_LAST_CANARY_FID
+  # / RD_LAST_MEMBER / RD_LAST_CANARY_WRITE_TS as plain (non-local) globals so the
+  # LATER settle-barrier scenario (order 82) can re-poll the same canary. A `$(...)`
+  # command substitution runs its command in a SUBSHELL — any such global write
+  # inside it is discarded the instant the subshell exits, so capturing this call's
+  # output via `out="$(scenario_restart_durability a b 2>&1)"` silently dropped
+  # EVERY one of those exports, on both PASS and FAIL, every session. That is the
+  # actual root cause behind "settle-barrier always reports 'order 80 didn't run
+  # this session'" — order 80 DID run, its exports just never escaped this subshell.
+  # Fix: redirect to a temp file instead (same pattern deb-hetzner-matrix.sh's own
+  # top-level runner already uses, for the identical reason) so the call runs in
+  # THIS shell and its global exports survive.
+  local out rc tmp
+  tmp="$(mktemp)"
+  scenario_restart_durability a b >"$tmp" 2>&1; rc=$?
+  out="$(cat "$tmp")"; rm -f "$tmp"
   if [ "$rc" = 0 ]; then
     echo "restart durability OK (cold sidecar restart lost nothing, re-emitted nothing)"
   else

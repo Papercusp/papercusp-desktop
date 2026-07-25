@@ -220,6 +220,40 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
   fi
 fi
 
+# ── 0z. rig-lock pre-check (WI-5726/WI-5773 residual gap, 2026-07-25) ──────────
+# local-matrix.sh (the RUN_LOCAL_MATRIX leg further below) already serializes correctly
+# against a colliding run via a blocking flock on the single-tenant rig lock
+# (/tmp/pcusp-local-rig.lock, per-NET) — see local-matrix.sh's own "single-tenant lock"
+# section. The remaining gap: that lock isn't reached until AFTER this script's own
+# REBUILD (rebuild+repack of a ~3.4GB .deb, several minutes) has already run. A window
+# that is going to attempt local-matrix and finds the rig already held by another gate
+# run (e.g. the hourly timer colliding with a manual GATE_FORCE run) therefore wastes a
+# full rebuild before it ever reaches local-matrix.sh's own queue-or-fail-fast logic.
+# This is a NON-BLOCKING PROBE ONLY — it takes and immediately releases the same lock
+# file, never holds it, and never replaces local-matrix.sh's own (correct) blocking
+# lock: if the rig frees up between this probe and the real invocation, or a stale
+# holder loses the race, local-matrix.sh still serializes exactly as before. It only
+# fires when this WINDOW would actually attempt the local-matrix leg (weekly cadence,
+# same TTL gate the real invocation uses below) — otherwise the rig is irrelevant to
+# this run and skipping the probe avoids a false skip on a content-matrix-only window.
+# GATE_FORCE does NOT bypass this: a forced run colliding with an in-progress local-
+# matrix run is exactly the collision this exists to catch cheaply, before the rebuild.
+if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ] \
+   && [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ]; then
+  RIG_LOCK_PRECHECK="${PCUSP_LOCAL_RIG_LOCK:-/tmp/pcusp-local-rig.lock}"
+  if exec 8>>"$RIG_LOCK_PRECHECK" 2>/dev/null; then
+    if ! flock -n 8; then
+      RIG_HOLDER="$(cat "$RIG_LOCK_PRECHECK.holder" 2>/dev/null || echo 'unknown holder')"
+      exec 8<&- 2>/dev/null || true
+      log "rig busy (held by: $RIG_HOLDER) and this window would reach the local-matrix leg — skipping now, before the rebuild, rather than wasting one (non-blocking probe only; local-matrix.sh's own flock still serializes correctly regardless of this check)."
+      skip_cleanup
+      check_staleness   # by this point freshness was already ruled out above — same as the other SKIPPED* exits (load/github-api), unlike the FRESH* exits, this skip must not go unnoticed if it recurs
+      echo "GATE: SKIPPED-RIG-BUSY (held by: $RIG_HOLDER)"; exit 0
+    fi
+    exec 8<&- 2>/dev/null || true   # release the probe immediately — we only peeked
+  fi
+fi
+
 # ── 0a. prod-port guard (EI-11342, 2026-07-13) ─────────────────────────────────
 # A rig-owned process must NEVER hold a production operator port. Incident (14:48–14:55Z):
 # a packaged sidecar spawned under this gate lost its per-instance port override, fell back

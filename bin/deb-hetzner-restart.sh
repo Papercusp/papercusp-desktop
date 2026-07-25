@@ -133,6 +133,14 @@ scenario_restart_durability() {
   local ts; ts="$(date +%s)"
   local FINIT="F-RD-INIT-$ts" MPRE="F-RD-MPRE-$ts" FPOST="F-RD-POST-$ts" FPOST2="F-RD-POST2-$ts"
   _RD_RC=0
+  # WI-5772: mark that order 80 was genuinely INVOKED this session, unconditionally
+  # and before any possible early-return below — so the settle-barrier (order 82)
+  # can tell "order 80 never ran" (RD_LAST_RAN_AT unset) apart from "order 80 ran
+  # but failed/bailed before reaching its final canary write" (RD_LAST_RAN_AT set,
+  # RD_LAST_CANARY_FID/MEMBER/WRITE_TS still unset). Previously both looked
+  # identical to the barrier (all four vars unset), so a genuine mid-run FAILURE
+  # was misreported by the barrier as "didn't run this session" — PASS.
+  RD_LAST_RAN_AT="$(date +%s)"
 
   fed_log "═══ Brief 5: LIVE restart durability (owner=$OWNER member=$MEMBER) ═══"
   if [ -z "$oslug" ] || [ -z "$mslug" ]; then

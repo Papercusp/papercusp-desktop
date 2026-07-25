@@ -45,6 +45,19 @@
 #
 # No preceding restart_durability canary (e.g. a `--only` run excluded order
 # 80) → nothing to settle → PASS (no-op), never a forced fail.
+#
+# WI-5772: "no canary vars set" used to be treated as a single case ("order 80
+# didn't run this session") — but order 80 (scenario_restart_durability) can also
+# RUN and FAIL/bail *before* reaching its final canary write (frames never
+# joined, an earlier step's assertion failed, etc.), which left the exact same
+# four vars unset. That misattributed a genuine order-80 failure as "nothing to
+# settle — PASS", masking it (gate run 20260725-143908). order 80 now stamps
+# RD_LAST_RAN_AT unconditionally as its first action, before any early return,
+# so this barrier can tell the two apart: RD_LAST_RAN_AT unset = truly did not
+# run this session (still a silent PASS, unchanged); RD_LAST_RAN_AT set but no
+# canary vars = it ran and left no canary to check — that is itself a signal
+# worth a hard FAIL, not a silent pass, since 85/87/90 are about to run without
+# any verified-converged baseline.
 
 RD_SETTLE_WARN_S="${RD_SETTLE_WARN_S:-120}"     # leader's "~2min should be loud" bar (52896) — always a visible ⚠, not by itself a fail (see header)
 RD_SETTLE_FAIL_S="${RD_SETTLE_FAIL_S:-900}"     # provisional hard deadline — comfortably above the observed ~12min self-heal (214246) and short of the confound-free "never converged" case (224336, 36+min) — retune only from a clean run
@@ -52,9 +65,15 @@ RD_SETTLE_WARN_IS_FAIL="${RD_SETTLE_WARN_IS_FAIL:-0}"  # set 1 to make crossing 
 
 scn_restart_settle_barrier() {
   local fid="${RD_LAST_CANARY_FID:-}" member="${RD_LAST_MEMBER:-}" write_ts="${RD_LAST_CANARY_WRITE_TS:-}"
+  local ran_at="${RD_LAST_RAN_AT:-}"
   if [ -z "$fid" ] || [ -z "$member" ] || [ -z "$write_ts" ]; then
-    echo "settle-barrier: no preceding restart_durability canary (order 80 didn't run this session) — nothing to settle, skipping"
-    return 0
+    if [ -z "$ran_at" ]; then
+      echo "settle-barrier: no preceding restart_durability canary (order 80 didn't run this session) — nothing to settle, skipping"
+      return 0
+    fi
+    echo "  ✗ settle-barrier FAIL: order 80 (restart_durability) RAN this session (started at epoch $ran_at) but left no canary — it failed or bailed before its final post-restart write (see its own ✗/OVERALL line above)"
+    echo "OVERALL: FAIL — order 80 ran but produced nothing to settle-check; treat its own failure as unverified, not settled"
+    return 1
   fi
 
   local now elapsed budget tries origin

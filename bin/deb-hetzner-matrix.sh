@@ -205,6 +205,14 @@ fi
   drv_psql a "SELECT github_username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
   echo "── pot_members device_attestations, as seen by frame b (joiner, own view) ──"
   drv_psql b "SELECT github_username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
+  # WI-5672 (2026-07-25): if A is still missing B's attestation/epoch-key at this
+  # checkpoint (the shape seen in 3 of 4 banked runs today, vs. the ~18s-convergence
+  # "143908 control"), the open question is WHETHER that op is even enqueued yet on
+  # B's outbox — distinguishes "not yet admitted locally on B" from "admitted on B,
+  # but undrained/unmerged to A" (a genuine drain-race) from "drained but rejected/
+  # quarantined". drained_at IS NULL = pending; quarantined_at IS NOT NULL = rejected.
+  echo "── substrate_outbox pending/quarantined rows, frame b (pot_members/pot_epoch_keys only) ──"
+  drv_psql b "SELECT table_name, op, key, ts, drained_at, quarantined_at FROM harness_shared.substrate_outbox WHERE table_name IN ('pot_members','pot_epoch_keys') ORDER BY ts;"
   echo "── WS-DIAG (WI-5672) end ──"
 } 2>&1 || fed_log "⚠ WS-DIAG (WI-5672) dump failed — non-fatal, continuing run"
 
