@@ -760,15 +760,34 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  AK0 default-off control (B→A, no policy): $([ "$ak_default_ok" = 1 ] && echo PASS || echo "FAIL ($ak0)")"
 
   # AK ban (P-MOD / EN-4, policy-only revoke:false → B stays admitted, ops dropped by ban).
-  mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"revoke\":false}" >/dev/null 2>&1
+  # WI-5783: pot:ban_member's response used to be discarded (>/dev/null 2>&1), so a
+  # SILENT policy-write failure (banMember/mutateHivePolicy → {ok:false, code:'not_owner_swarm'|
+  # 'no_owner_pubkey'|'write_failed'} — hive-policy-author.ts) was indistinguishable from a real
+  # EN-4 merge/detector bug: either way B's op simply "lands" and the leg reads FAIL. Capture +
+  # surface it so a future FAIL is self-diagnosing instead of needing a live rig re-run to tell
+  # "the ban was never applied" apart from "the ban was applied but not enforced".
+  # NB the tool's JSON is double-encoded (MCP content[].text is itself a JSON string,
+  # so its own quotes arrive backslash-escaped, e.g. \"policy\":{\"ok\":false) — unescape
+  # before grepping so the pattern matches either encoding depth.
+  ban_resp_flat="$(echo "$ban_resp" | sed 's/\\"/"/g')"
+  ban_policy_ok="$(echo "$ban_resp_flat" | grep -oE '"policy":\{"ok":(true|false)' | grep -oE '(true|false)$')"
+  ban_policy_code="$(echo "$ban_resp_flat" | grep -oE '"code":"[a-zA-Z_]+"' | head -1 | sed 's/"code":"//;s/"$//')"
+  echo "  [AK-ban DIAG] pot:ban_member(revoke:false) -> policy.ok=${ban_policy_ok:-<unparsed>}${ban_policy_code:+ code=$ban_policy_code}"
   sleep 3
   banprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKBAN 40 || true)"
   akban_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-AKBAN' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   [ "${banprobe%% *}" != 1 ] && [ "$akban_a" = 0 ] && ak_ban_ok=1
-  echo "  AK ban (B's op DROPPED on A, EN-4): $([ "$ak_ban_ok" = 1 ] && echo PASS || echo "FAIL (probe=$banprobe A_count=$akban_a)")"
+  if [ "$ak_ban_ok" != 1 ] && [ "$ban_policy_ok" = "false" ]; then
+    echo "  AK ban (B's op DROPPED on A, EN-4): FAIL (probe=$banprobe A_count=$akban_a) — NOT a merge/detector bug: the ban WRITE itself failed (policy.ok=false code=${ban_policy_code:-?}), so there was never a ban in force. Fix the ban-write precondition (Swarm must hold the Hive private key), then re-run."
+  else
+    echo "  AK ban (B's op DROPPED on A, EN-4): $([ "$ak_ban_ok" = 1 ] && echo PASS || echo "FAIL (probe=$banprobe A_count=$akban_a)")"
+  fi
 
   # AK teeth — unban → B's next write lands again (proves the ban gate was load-bearing).
-  mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"unban\":true}" >/dev/null 2>&1
+  unban_resp="$(mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"unban\":true}" 2>&1)"
+  unban_resp_flat="$(echo "$unban_resp" | sed 's/\\"/"/g')"
+  unban_policy_ok="$(echo "$unban_resp_flat" | grep -oE '"ok":(true|false)' | head -1 | grep -oE '(true|false)$')"
+  echo "  [AK-unban DIAG] pot:ban_member(unban:true) -> ok=${unban_policy_ok:-<unparsed>}"
   sleep 3
   unbanprobe="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-AKUNBAN 40 || true)"
   [ "${unbanprobe%% *}" = 1 ] && ak_unban_ok=1
