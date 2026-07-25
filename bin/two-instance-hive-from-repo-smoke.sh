@@ -787,6 +787,13 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # NB the tool's JSON is double-encoded (MCP content[].text is itself a JSON string,
   # so its own quotes arrive backslash-escaped, e.g. \"policy\":{\"ok\":false) — unescape
   # before grepping so the pattern matches either encoding depth.
+  # su-6bf2d 2026-07-25: the ACTUAL ban_member call went missing when this DIAG capture
+  # was added (a `set -u` "ban_resp: unbound variable" on a live re-run proved it — grep
+  # for `mcp_call a "pot:ban_member"` here found only the unban call below). Without this
+  # call the ban is NEVER applied, so every "AK ban … FAIL" reading since this landed was
+  # guaranteed regardless of root cause — restoring it is what makes the DIAG line (and
+  # the whole WI-5783 investigation) meaningful again.
+  ban_resp="$(mcp_call a "pot:ban_member" "{\"pot\":\"$HIVE_SLUG\",\"githubUserId\":$B_GH_ID,\"revoke\":false}" 2>&1)"
   ban_resp_flat="$(echo "$ban_resp" | sed 's/\\"/"/g')"
   ban_policy_ok="$(echo "$ban_resp_flat" | grep -oE '"policy":\{"ok":(true|false)' | grep -oE '(true|false)$')"
   ban_policy_code="$(echo "$ban_resp_flat" | grep -oE '"code":"[a-zA-Z_]+"' | head -1 | sed 's/"code":"//;s/"$//')"
