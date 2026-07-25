@@ -237,9 +237,11 @@ fi
 # live diagnostic dump above it in the log. Unlike the peer_connected checks this
 # is FATAL: starting the matrix on an unconverged link produces misattributed
 # failures, which is strictly worse than not running.
-rig_wait_converged b || exit 7
+# exit 8, not 7 — 7 already means "no scenarios to run" (below); a convergence
+# failure must stay distinguishable from an empty run-set in the caller's rc.
+rig_wait_converged b || exit 8
 if [ "$FRAME3" = 1 ]; then
-  rig_wait_converged c || exit 7
+  rig_wait_converged c || exit 8
 fi
 
 # unique-per-run tag: scenarios suffix their feature_ids/msg_ids with this.

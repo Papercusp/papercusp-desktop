@@ -30,16 +30,25 @@ source "$LIB" >/dev/null 2>&1 || true
 
 # ── stubs MUST come after the source: the rig lib defines the real drv_psql. ──
 SQL_LOG="$(mktemp)"
-trap 'rm -f "$SQL_LOG"' EXIT
 
 # STUB_ROWS_SEQ — space-separated values drv_psql returns on successive calls;
 # the LAST value repeats once the sequence is exhausted.
-STUB_IDX=0
+#
+# The call counter MUST live in a file, not a variable: rig_wait_converged reads
+# us as `rows="$(drv_psql ... | tr ...)"`, i.e. a pipeline inside a command
+# substitution, so we run two subshells deep and any variable increment is
+# discarded on every iteration. A shell-variable counter silently pins the stub
+# to seq[0] forever — which, with `sleep` stubbed to a no-op (so wall-clock
+# barely advances and the fail deadline is never reached), hangs the test rather
+# than failing it.
+STUB_IDX_F="$(mktemp)"
+trap 'rm -f "$SQL_LOG" "$STUB_IDX_F"' EXIT
 drv_psql() {
   printf '%s\n' "$2" >>"$SQL_LOG"
   local -a seq=($STUB_ROWS_SEQ)
-  local i="$STUB_IDX" n="${#seq[@]}"
-  STUB_IDX=$((STUB_IDX + 1))
+  local i n; n="${#seq[@]}"
+  i="$(cat "$STUB_IDX_F" 2>/dev/null)"; [ -n "$i" ] || i=0
+  printf '%s' "$((i + 1))" >"$STUB_IDX_F"
   [ "$i" -ge "$n" ] && i=$((n - 1))
   printf '%s\n' "${seq[$i]}"
 }
@@ -47,7 +56,7 @@ sleep() { : ; }
 fed_log() { : ; }
 
 reset_env() {
-  STUB_IDX=0; STUB_ROWS_SEQ="1"
+  printf '0' >"$STUB_IDX_F"; STUB_ROWS_SEQ="1"
   RIG_CONVERGE_WARN_S=60; RIG_CONVERGE_FAIL_S=420
   RIG_HIVE_ID="hello-world-pot"
   : >"$SQL_LOG"
