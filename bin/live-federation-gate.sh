@@ -24,21 +24,24 @@
 #   REBUILD           (default 1)   — rebuild the sidecar from HEAD first (test current code).
 #   GATE_DEB          (unset)       — use this prebuilt .deb instead of rebuild+repack.
 #   SKIP_MATRIX       (default 0)   — skip the content-matrix leg (reliable, needs a .deb).
-#   SKIP_FROMREPO     (default 1)   — skip the from-repo leg (currently WI-971-RED by design:
-#                                     outbox drain never wired for joined/created hive
-#                                     harnesses; WI-259 was closed as its duplicate). Defaulted
-#                                     to 1 (WI-5629, 2026-07-20): the production systemd unit
-#                                     already forces this via Environment=SKIP_FROMREPO=1, but
-#                                     the script's own default disagreed (0) — so any manual/
-#                                     ad-hoc invocation (the kind this file's own GATE_DISPLAY
-#                                     comment explicitly anticipates, e.g. reproducing a gate
-#                                     red for debugging) silently re-ran the KNOWN, documented,
-#                                     expected WI-971 red and (a) filed a confusing "NEW
-#                                     regression — investigate" bug for a condition that isn't
-#                                     new, and (b) fed that RED into check_staleness(), filing a
-#                                     spurious staleness EI too (WI-5628 + WI-5629, live case).
-#                                     Set SKIP_FROMREPO=0 explicitly to opt back in (e.g. to
-#                                     verify WI-971's fix once it lands).
+#   SKIP_FROMREPO     (default 1)   — skip the from-repo leg. HISTORICAL: this leg was
+#                                     WI-971-RED by design (outbox drain never wired for
+#                                     joined/created hive harnesses; WI-259 was closed as its
+#                                     duplicate). WI-971's fix is now VERIFIED (WI-5775,
+#                                     2026-07-25: standalone + gate-flags runs both PASS —
+#                                     bidirectional + continuous post-join federation all
+#                                     green). The default stays 1 regardless — this is a
+#                                     STANDING skip-by-default (WI-5629, 2026-07-20): the
+#                                     production systemd unit already forces this via
+#                                     Environment=SKIP_FROMREPO=1, and flipping the script's
+#                                     own default to opt every ad-hoc/manual invocation back in
+#                                     is a separate decision flagged to the p2p-release leader
+#                                     (su-e3b21), not made unilaterally here. The leg's WITNESS
+#                                     sub-probe (AK-ban) is currently FAILING for an UNRELATED
+#                                     reason — see WI-5783 — which run_smoke's plain
+#                                     `OVERALL: PASS` grep does not by itself catch; the
+#                                     from-repo-witness REDS entry below does.
+#                                     Set SKIP_FROMREPO=0 explicitly to opt back in.
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
@@ -681,15 +684,35 @@ fi
 # The from-repo leg runs WITNESS_PROBE=1 + the re-key flag so it also exercises the AK
 # owner-enforcement + the device-filtered C-001 re-key cut (K0-K3) — the re-key was the 3rd
 # green-rig/red-binary bug (A-003, WI-259, WI-280), all hermetically-green but live-red, so the
-# live gate must cover them too. (Currently REDs on WI-971 by design — outbox drain never wired
-# for joined/created hive harnesses; WI-259 was closed as its duplicate and WI-280/WI-1666 are
-# resolved. Goes green when WI-971 lands.)
+# live gate must cover them too. STATUS (2026-07-25, WI-5775 verify): the outbox-drain leg
+# itself (WI-971/WI-259) is now VERIFIED FIXED — two live runs both PASS, bidirectional +
+# continuous federation. WI-280/WI-1666 (re-key K0-K3) also verified PASS this run. The
+# WITNESS sub-probe's AK-ban leg (policy-only ban, revoke:false) is a SEPARATE, currently-
+# FAILING concern (WI-5783, filed 2026-07-25) — B's write still lands on A after a ban. Because
+# `run_smoke` only greps this smoke's own top-level `OVERALL: PASS` line, a WITNESS-only
+# failure would otherwise pass silently (the smoke's own OVERALL line does not fold WITNESS
+# in) — the explicit WITNESS_RES check below closes that gap so this leg reds until WI-5783
+# is fixed, distinctly from the from-repo/outbox-drain concern SKIP_FROMREPO tracks.
 FROMREPO_RES="SKIPPED"
+WITNESS_RES="SKIPPED"
 if [ "$SKIP_FROMREPO" != 1 ]; then
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
     HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
     PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 WITNESS_PROBE=1)"
   log "from-repo+witness → $FROMREPO_RES"
+  # WI-5783: fold the WITNESS sub-probe's own verdict into a REAL red — the top-level
+  # OVERALL line above does not cover it. Only meaningful when the smoke actually ran the
+  # witness block (witness_ran=1, i.e. join_ok=1 got that far); a run that never reached
+  # WITNESS (e.g. failed earlier) has no "WITNESS OVERALL" line at all and stays SKIPPED,
+  # not a false PASS.
+  if grep -qaE 'FOLDED LIVE WITNESS' "$WORK/from-repo.out" 2>/dev/null; then
+    if grep -qaE 'WITNESS OVERALL: PASS' "$WORK/from-repo.out" 2>/dev/null; then
+      WITNESS_RES="PASS"
+    else
+      WITNESS_RES="FAIL"
+    fi
+    log "from-repo witness (AK-ban/re-key sub-probe) → $WITNESS_RES"
+  fi
 fi
 
 # ── 3b. local-matrix leg (P-013 fold-in; activates when P-002's local-matrix.sh lands) ──
@@ -737,6 +760,7 @@ REDS=()
 [ "$FAIL_BUILD" = 1 ] && REDS+=("sidecar-build")
 [ "$MATRIX_RES" = FAIL ] && REDS+=("content-matrix")
 [ "$FROMREPO_RES" = FAIL ] && REDS+=("from-repo")
+[ "$WITNESS_RES" = FAIL ] && REDS+=("from-repo-witness")
 [ "$MATRIXFULL_RES" = FAIL ] && REDS+=("local-matrix")
 # EI-11342: a prod-port squat by a rig-owned process invalidates the run AND is itself a
 # red-worthy defect (an instance bound the wrong port ⇒ whatever that instance "proved" is void).
@@ -744,7 +768,7 @@ if [ -s "$GUARD_TRIP_FILE" ]; then
   REDS+=("prod-port-squat")
   log "PROD-PORT GUARD tripped during this run (EI-11342): $(tr '\n' '; ' <"$GUARD_TRIP_FILE")"
 fi
-SUMMARY="content-matrix=$MATRIX_RES from-repo=$FROMREPO_RES local-matrix=$MATRIXFULL_RES build=$([ "$FAIL_BUILD" = 1 ] && echo FAIL || echo OK)"
+SUMMARY="content-matrix=$MATRIX_RES from-repo=$FROMREPO_RES from-repo-witness=$WITNESS_RES local-matrix=$MATRIXFULL_RES build=$([ "$FAIL_BUILD" = 1 ] && echo FAIL || echo OK)"
 log "VERDICT: $SUMMARY"
 echo "$(now_s)" >"$STATE_DIR/last-run"
 
