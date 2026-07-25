@@ -816,7 +816,7 @@ echo "GATE: RED (${REDS[*]}) — $SUMMARY ; logs in $WORK"
 # a forgotten/dropped tracking item doesn't go dark forever.
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
 TITLE_PREFIX="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ("
-BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE: a from-repo RED is EXPECTED while WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is open; a content-matrix, local-matrix, or build RED is a NEW regression — investigate."
+BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE (updated 2026-07-25, WI-5775): WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is now VERIFIED FIXED — a bare from-repo RED is a NEW regression, investigate. Only a from-repo-witness RED is currently EXPECTED, while WI-5783 (AK-ban policy-only drop not enforced) is open; a content-matrix, local-matrix, from-repo, or build RED is a NEW regression — investigate."
 RED_MARKER="$STATE_DIR/red-ei-filed"
 # Dedup is PER failing-leg-set, not global (2026-07-16: a brand-new local-matrix
 # RED was silently suppressed for 12h under the marker of an already-fixed

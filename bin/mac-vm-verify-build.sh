@@ -6,12 +6,22 @@
 # Replicates ONLY the safe build legs of release-local.sh WITH_MAC:
 #   snapshot HEAD (git archive, immune to the concurrently-edited shared tree, WI-1708)
 #   -> cut a REAL depth-1 git seed on the tower (owner epoch keychain)
-#   -> rsync -> VM -> mac-vm-build.sh (x86_64 fast-iter test build) -> scp DMGs back.
+#   -> rsync -> VM -> mac-vm-build.sh (fast-iter test build) -> scp DMGs back.
 # NO version bump, NO monorepo tag/push, NO gh release publish.
 #
 # Invocation: run from the tower/monorepo checkout (NOT on the VM) —
 #   bash papercusp-desktop/bin/mac-vm-verify-build.sh
 # It rsyncs a HEAD snapshot to the VM and drives mac-vm-build.sh remotely.
+#
+# MAC_BUILD_TARGET — rust target triple for the REMOTE build + the DMG
+# pull-back path. Defaults to 'universal-apple-darwin' (the actual ship
+# target — matches mac-vm-build.sh's own default) so a plain invocation
+# verifies real arm64+x86_64 parity, not just one arch. Override to
+# 'x86_64-apple-darwin' or 'aarch64-apple-darwin' for a faster single-arch
+# smoke test. (Bug fixed 2026-07-25 / WI-5769: this used to be hardcoded to
+# x86_64-apple-darwin below regardless of what the caller set, so every
+# "universal verify" run before this fix silently only ever built x86_64 —
+# universal build parity was never actually exercised end-to-end.)
 set -uo pipefail
 
 MONOREPO=/home/marsh-office/papercupai-workspace/papercusp
@@ -20,6 +30,7 @@ KEY_FILE="$HOME/.papercusp/signing/papercusp.key"
 SSH_OPTS=(-i "$HOME/.ssh/papercup-vm-mac" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
 VM=aviweiss@127.0.0.1
 VMDIR=papercup-build-mac/papercup
+MAC_BUILD_TARGET="${MAC_BUILD_TARGET:-universal-apple-darwin}"
 SHA="$(git -C "$MONOREPO" rev-parse --short HEAD)"
 VER="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$DESKTOP/src-tauri/tauri.conf.json" 2>/dev/null || echo 0.0.0-rc)"
 # Session-independent scratch dir (override via $MAC_VERIFY_BUILD_SCRATCH_ROOT if you
@@ -99,7 +110,7 @@ rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' 
   -e "ssh ${SSH_OPTS[*]}" "$SNAP/" "$VM:$VMDIR/" || { echo "FATAL: rsync"; exit 1; }
 scp -i "$HOME/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes -o StrictHostKeyChecking=no "$KEY_FILE" "$VM:.papercusp-updater.key" || { echo "FATAL: scp key"; exit 1; }
 
-step "5/6 remote build (x86_64 fast-iter test build)"
+step "5/6 remote build ($MAC_BUILD_TARGET fast-iter test build)"
 ssh "${SSH_OPTS[@]}" "$VM" 'chmod 600 .papercusp-updater.key; bash -lc "
   cd '"$VMDIR"'/papercusp-desktop || exit 1
   echo npm-install...; npm install --legacy-peer-deps >/tmp/mac-rel-install.log 2>&1 || { echo NPM-FAIL; tail -30 /tmp/mac-rel-install.log; exit 1; }
@@ -108,13 +119,13 @@ ssh "${SSH_OPTS[@]}" "$VM" 'chmod 600 .papercusp-updater.key; bash -lc "
   export PAPERCUSP_BUILD_SHA='"$SHA"'
   export PAPERCUSP_BUILD_VERSION='"$VER"'
   export PAPERCUSP_SKIP_SEED_CUT=1
-  export MAC_BUILD_TARGET=x86_64-apple-darwin
+  export MAC_BUILD_TARGET='"$MAC_BUILD_TARGET"'
   export PAPERCUSP_FAST_ITER=1
   bash bin/mac-vm-build.sh
 "' || { echo "FATAL: remote build failed"; exit 1; }
 
 step "6/6 pull DMGs back"
 scp -i "$HOME/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
-  "$VM:$VMDIR/papercusp-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg" "$SCRATCH/dmg/" || true
+  "$VM:$VMDIR/papercusp-desktop/src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/*.dmg" "$SCRATCH/dmg/" || true
 echo; echo "=== DMGs ==="; ls -la "$SCRATCH/dmg/" 2>/dev/null
 echo "=== BUILD DONE sha=$SHA $(date -u +%H:%M:%SZ) ==="
