@@ -146,9 +146,20 @@ scn_attestation_unattested_device() {
   b_gh_id="$(rig_github_id "${FRAME_USER[b]}")"
   [ -n "$b_gh_id" ] || { echo "attestation(unattested-device) FAIL — could not resolve github id for member '${FRAME_USER[b]:-?}'"; return 1; }
 
-  local tot_before tot_after rid_rem rem_on_a reasons now_ms
-  tot_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
-  [ -z "$tot_before" ] && tot_before=0
+  # WI-5779 fix (2026-07-25, code-review catch — same class as WI-5715): the assert MUST be
+  # scoped to the EXACT reason 'receipt-apply:identity_unresolved', never a loose
+  # `LIKE 'receipt-apply:%'` total. LEG3 (attestation_membership, order 60, same run) already
+  # bumped 'receipt-apply:responder_mismatch' earlier, AND restart_durability(80)/
+  # reconnect_catchup(85)/replication_soak(87)/revocation_kcut(90) — all invasive scenarios
+  # that can trigger re-federation/retries of prior receipts — run BETWEEN leg3 and this
+  # scenario(91). A loose total-based `tot_after > tot_before` can therefore go true from a
+  # STRAY re-bump of responder_mismatch (or any other receipt-apply reason) without
+  # identity_unresolved ever firing — a guaranteed-nonzero baseline plus an unrelated further
+  # bump is a false PASS, never actually proving this leg's own claim. Scope to the one reason
+  # this leg actually causes.
+  local rc_before rc_after rid_rem rem_on_a reasons now_ms
+  rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$rc_before" ] && rc_before=0
 
   # Strip B's attestation on A (author device now maps to no member) — safe here: this is
   # the LAST scenario in the run, so no downstream scenario depends on B's device row.
@@ -157,19 +168,19 @@ scn_attestation_unattested_device() {
 
   rid_rem="att-unatt-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_rem','refusal','work-offer:claim','att unattested-device probe ($rid)',${b_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
-  tot_after=$tot_before
+  rc_after=$rc_before
   local i
   for i in $(seq 1 40); do
-    tot_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%';" 2>/dev/null | tr -d '[:space:]')"
-    [ -z "$tot_after" ] && tot_after=0
-    { [ "$tot_after" -gt "$tot_before" ]; } 2>/dev/null && break
+    rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
+    [ -z "$rc_after" ] && rc_after=0
+    { [ "$rc_after" -gt "$rc_before" ]; } 2>/dev/null && break
     sleep 3
   done
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
-  { [ "$tot_after" -gt "$tot_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: receipt-apply total $tot_before→$tot_after, row-on-a=$rem_on_a, reasons: $reasons"; return 1; }
+  { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, all reasons: $reasons"; return 1; }
 
-  echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (receipt-apply total $tot_before→$tot_after; reasons: $reasons; row-on-a=$rem_on_a)"
+  echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
   return 0
 }
 matrix_register attestation_unattested_device 91 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL)" scn_attestation_unattested_device

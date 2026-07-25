@@ -111,9 +111,26 @@ rsync -az --delete --exclude '.git' --exclude 'node_modules' --exclude 'target' 
 scp -i "$HOME/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes -o StrictHostKeyChecking=no "$KEY_FILE" "$VM:.papercusp-updater.key" || { echo "FATAL: scp key"; exit 1; }
 
 step "5/6 remote build ($MAC_BUILD_TARGET fast-iter test build)"
+# WI-5769: npm install MUST run from the MONOREPO ROOT ($VMDIR), not from
+# papercusp-desktop. papercusp-desktop/package.json has ~1 devDependency
+# (@tauri-apps/cli) of its own, so an `npm install` run from inside that
+# subdirectory only ever audits ~3 packages and never touches the root
+# node_modules that apps/operator-vite (and every other workspace) actually
+# builds against. Since the rsync step deliberately excludes node_modules
+# (so it doesn't drift on every run), that root node_modules is a
+# long-lived, only-ever-installed-elsewhere tree — any dependency added or
+# changed in a workspace package.json since the VM's last REAL root install
+# silently never gets installed by this "fast-iter" path, so a build that
+# should now succeed (e.g. after fixing a missing dependency) keeps failing
+# with the exact same resolve error, even though package.json/package-lock
+# on the VM are already correct. Root-caused 2026-07-25 chasing a
+# @mantine/hooks "still failing after the fix landed" mystery: the fix WAS
+# on the VM, but this install never ran against it (node_modules mtime was
+# >1h stale; the papercusp-desktop-scoped install audited only 3 packages).
 ssh "${SSH_OPTS[@]}" "$VM" 'chmod 600 .papercusp-updater.key; bash -lc "
-  cd '"$VMDIR"'/papercusp-desktop || exit 1
+  cd '"$VMDIR"'
   echo npm-install...; npm install --legacy-peer-deps >/tmp/mac-rel-install.log 2>&1 || { echo NPM-FAIL; tail -30 /tmp/mac-rel-install.log; exit 1; }
+  cd papercusp-desktop || exit 1
   export TAURI_SIGNING_PRIVATE_KEY=\$HOME/.papercusp-updater.key
   export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
   export PAPERCUSP_BUILD_SHA='"$SHA"'

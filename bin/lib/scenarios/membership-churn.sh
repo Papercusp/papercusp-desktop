@@ -76,12 +76,41 @@ scn_membership_churn() {
   # ── 2. backfill: c sees content the matrix already wrote a→b before c joined
   # (00-base.sh's content_bidir ran earlier in matrix order — its F-A2B-$rid
   # row should already be on c via the SAME peer-log c is now attached to).
-  local backfill
-  backfill="$(rig_read_content c "F-A2B-$rid" 2>/dev/null)"
+  # WI-5788 (P-411 residual, generalizing the WI-5715/WI-5768 assert-integrity class):
+  # this leg used to read c, and treat an EMPTY result as "no pre-join content to
+  # check — skip". That conflated THREE different states behind one empty string:
+  #   (a) content_bidir genuinely never ran ⇒ nothing to backfill ⇒ a legitimate skip;
+  #   (b) the row EXISTS upstream but never reached late-joiner c ⇒ the exact backfill
+  #       failure this leg is here to catch ⇒ must FAIL;
+  #   (c) the probe never RAN at all (ssh/psql error, dead frame) ⇒ UNMEASURED ⇒ must
+  #       FAIL, because an unmeasurable probe is never a pass.
+  # (b) and (c) both silently scored as a skip, after which the scenario could still
+  # return OK — a leg that self-disables on the very failures it exists to detect.
+  # Fix uses the pattern already established by deb-hetzner-coord-controlplane.sh's
+  # _ctrl_row_on_a ("refusing a vacuous verdict"): prove the precondition upstream
+  # before reading absence downstream, and score every unmeasurable read as FAIL.
+  local backfill backfill_rc upstream upstream_rc
+  backfill="$(rig_read_content c "F-A2B-$rid")"; backfill_rc=$?
+  if [ "$backfill_rc" -ne 0 ]; then
+    echo "membership_churn FAIL — backfill probe on c never RAN (rc=$backfill_rc: ssh/psql error, not a confirmed read); an unmeasurable probe is not a pass"
+    return 1
+  fi
   if [ -z "$backfill" ]; then
-    echo "⚠ membership_churn: no pre-join content to backfill-check (content_bidir may not have run/ordered before this) — skipping backfill leg"
+    # Empty AND genuinely measured. Disambiguate (a) from (b) at the source: is the
+    # row even present on the frame that wrote it? Only "absent upstream too" is a
+    # real skip.
+    upstream="$(rig_read_content a "F-A2B-$rid")"; upstream_rc=$?
+    if [ "$upstream_rc" -ne 0 ]; then
+      echo "membership_churn FAIL — backfill precondition probe on a never RAN (rc=$upstream_rc); cannot tell 'nothing to backfill' from 'backfill broke', so this is not a pass"
+      return 1
+    fi
+    if [ -n "$upstream" ]; then
+      echo "membership_churn FAIL — backfill: F-A2B-$rid IS present on a ('$upstream') but never reached late-joiner c"
+      return 1
+    fi
+    echo "⚠ membership_churn: F-A2B-$rid absent on a as well — content_bidir genuinely did not run/order before this; skipping backfill leg (verified vacuous, not assumed)"
   elif [ "${backfill#*|}" != remote ] && [ "${backfill#*|}" != local ]; then
-    echo "membership_churn FAIL — backfill: F-A2B-$rid absent on late-joiner c (got '$backfill')"
+    echo "membership_churn FAIL — backfill: F-A2B-$rid malformed on late-joiner c (got '$backfill')"
     return 1
   fi
 
