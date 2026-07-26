@@ -51,9 +51,14 @@ _soffer_row_present() {
 # that table ARE this offer, and the probe cannot rot when the key format changes.
 _soffer_diag_b_to_a() {
   local slug="$1" b_pending b_quar b_total a_any a_break verdict
-  b_total="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers';" 2>/dev/null | tr -d '[:space:]')"
-  b_pending="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND drained_at IS NULL;" 2>/dev/null | tr -d '[:space:]')"
-  b_quar="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND quarantined_at IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  # Scoped by harness_slug as well as table_name: substrate_outbox is MULTI-TENANT (keyed
+  # workspace_id + harness_slug), so a bare table_name filter can count another hive's rows
+  # and mis-classify — an unrelated undrained row would read as NEVER-LEFT-B for THIS offer.
+  # (Caught by dev:pg_query's tenant-scope advisory while validating these against the real
+  # schema; see agent-insights/raw-sql-plan-slug-needs-workspace-harness-scope.)
+  b_total="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr -d '[:space:]')"
+  b_pending="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND drained_at IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+  b_quar="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND quarantined_at IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   a_any="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr -d '[:space:]')"
   a_break="$(drv_psql a "SELECT COALESCE(string_agg(o||'/'||s||'='||n, ' '), '<no row for this fleet>') FROM (SELECT COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2) t;" 2>/dev/null | tr '\n' ' ')"
   if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then

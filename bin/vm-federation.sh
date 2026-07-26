@@ -223,6 +223,22 @@ if [ "$NET" = bridge ]; then
     r="$(fednet_guest_ping "${FED_VM[$inst]}" "$FEDBR_HOST_IP")"
     echo "  ${FED_VM[$inst]} → host $FEDBR_HOST_IP: $r"
     [ "$r" = reachable ] || { echo "FATAL: bridge reachability failed"; exit 3; }
+    # WI-760: ICMP reachability is NOT federation reachability. hyperdht/udx are
+    # UDP-only, and this host's ufw default-deny INPUT dropped every UDP datagram
+    # from 10.77.0.0/24 while happily answering pings — so the line above printed
+    # `reachable` for weeks on a rig that could never land a single DHT announce.
+    # Assert the transport federation actually uses.
+    u="$(fednet_guest_udp_ok "${FED_VM[$inst]}" "$FEDBR_HOST_IP")"
+    echo "  ${FED_VM[$inst]} → host $FEDBR_HOST_IP UDP: $u"
+    if [ "$u" != ok ]; then
+      echo "FATAL: guest→host UDP is BLOCKED on $FEDBR_HOST_IP — the DHT bootstrap is unreachable"
+      echo "  hyperdht/udx are UDP-only: joins will log green and NO announce will ever land."
+      echo "  Most likely the host firewall has no rule for this rig subnet. Check:"
+      echo "    sudo ufw status | grep ${FEDBR_HOST_IP%.*}"
+      echo "  and add one (the other rig subnets each have one):"
+      echo "    sudo ufw allow from ${FEDBR_HOST_IP%.*}.0/24 comment 'papercusp fed rig subnet'"
+      exit 3
+    fi
   done
   if [ "$VMS" = 2 ]; then
     r="$(fednet_guest_ping "${FED_VM[a]}" "$(fednet_bridge_ip "${FED_IDX[b]}")")"

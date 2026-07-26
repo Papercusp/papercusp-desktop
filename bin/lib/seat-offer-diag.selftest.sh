@@ -60,6 +60,11 @@ expect_verdict() {
 
 echo "── seat-offer-diag.selftest: WI-6179 b→a discriminator ──"
 
+# Ambient the matrix runner exports before any scenario runs; the outbox reads are
+# harness_slug-scoped by it (multi-tenant table). Set it here or `set -u` aborts the
+# classifier mid-way and the branch cases below fail for the wrong reason.
+RIG_HIVE_ID='mx-selftest-pot'
+
 # 1. Quarantined outbox row on b ⇒ it never left b. Outranks every later branch:
 #    a quarantined row is excluded from the drain batch (mig 645), so "a has
 #    nothing" is a CONSEQUENCE here, not independent evidence.
@@ -94,6 +99,15 @@ if grep -q 'never materialized origin=.remote. on frame a.*_soffer_diag_b_to_a' 
   ok "step-4 FAIL line still calls the discriminator"
 else
   bad "step-4 FAIL line no longer calls _soffer_diag_b_to_a — the leg is back to a one-sentence FAIL"
+fi
+
+# 7. TENANT SCOPE. substrate_outbox is keyed (workspace_id, harness_slug), so a bare
+# table_name filter counts OTHER hives' rows — an unrelated undrained row would then
+# read as NEVER-LEFT-B for this offer. Every outbox read must carry harness_slug.
+if [ "$(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")" = 3 ]; then
+  ok "all 3 substrate_outbox reads are harness_slug-scoped (multi-tenant table)"
+else
+  bad "substrate_outbox reads must all filter harness_slug — found $(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")/3"
 fi
 
 echo

@@ -108,9 +108,62 @@ EOF
 }
 
 # fednet_guest_ping <vmname> <target_ip> — cheap reachability probe.
+#
+# ⚠ ICMP-ONLY. This says NOTHING about whether the guest can deliver UDP to the
+# host, and hyperdht/udx speak ONLY UDP. Pair it with fednet_guest_udp_ok below;
+# see that function's header for the failure this asymmetry hid (WI-760).
 fednet_guest_ping() {
   local name="$1" target="$2"
   vm_run "$name" <<EOF
 ping -c1 -W2 "$target" >/dev/null 2>&1 && echo reachable || echo UNREACHABLE
 EOF
+}
+
+# fednet_guest_udp_ok <vmname> <host_ip> [port] — assert the guest can actually
+# DELIVER a UDP datagram to the host on the rig bridge. Echoes "ok" or "BLOCKED".
+#
+# WHY THIS EXISTS (WI-760, 2026-07-26). The host runs ufw with a default-deny
+# INPUT policy and carries explicit per-subnet ALLOW rules for the other rig
+# bridges (172.31.44.0/24, 10.99.0.0/24, 10.97.0.0/24) — but 10.77.0.0/24, the
+# pcusp-fedbr0 fed-a/fed-b bridge, was never added. So every UDP datagram from a
+# fed VM to the host-run testnet DHT was silently dropped, no hyperdht announce
+# ever landed, and the rig could NEVER peer.
+#
+# It stayed hidden for weeks because ufw's before-rules permit ICMP echo: the
+# driver's own preflight asked "can the guest ping the host?", got `reachable`,
+# and printed green while the ONLY protocol federation depends on was 100%
+# blocked. A reachability check that passes on a protocol the system under test
+# does not use is not a reachability check — assert the real transport.
+#
+# Deliberately dependency-free on the host side (python3 only, no nc: netcat
+# variants disagree on whether `-p` sets the LISTEN or the SOURCE port, and the
+# wrong variant yields a false BLOCKED).
+fednet_guest_udp_ok() {
+  local name="$1" host_ip="$2" port="${3:-45999}"
+  local rx tag="fednet-udp-$$-$RANDOM"
+  rx="$(mktemp)"
+  python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('$host_ip', $port))
+s.settimeout(12)
+try:
+    data, _ = s.recvfrom(4096)
+    sys.stdout.write(data.decode('utf-8', 'replace'))
+except socket.timeout:
+    sys.stdout.write('TIMEOUT')
+" >"$rx" 2>/dev/null &
+  local listener=$!
+  sleep 1
+  vm_run "$name" <<EOF >/dev/null 2>&1
+python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(3):
+    s.sendto(b'$tag', ('$host_ip', $port))
+" 2>/dev/null || for _ in 1 2 3; do echo -n '$tag' >/dev/udp/$host_ip/$port 2>/dev/null; done
+EOF
+  wait "$listener" 2>/dev/null || true
+  if grep -q "$tag" "$rx" 2>/dev/null; then rm -f "$rx"; echo ok; else rm -f "$rx"; echo BLOCKED; fi
 }

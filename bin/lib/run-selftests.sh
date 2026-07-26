@@ -19,7 +19,7 @@
 #   bash bin/lib/run-selftests.sh     # exit 0 = all PASS, 1 = at least one FAIL
 #
 # Every selftest runs even if an earlier one fails (so one red doesn't hide
-# a second) — the aggregate's own exit code is the AND of all seven.
+# a second) — the aggregate's own exit code is the AND of all of them.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -34,15 +34,61 @@ TESTS=(
   vm-run-env.selftest.sh
   seat-offer-diag.selftest.sh
   b9-attestation-precondition.selftest.sh
+  restart-settle-barrier.selftest.sh
+  rig-wait-converged.selftest.sh
+  roster-scope.selftest.sh
 )
 
-# NOTE (WI-6181): this array is HAND-MAINTAINED, so a newly added *.selftest.sh is
-# silently run by nothing — which is how EI-18725214765732588's fix went dark a
-# second time. At the time of writing THREE files on disk are still unlisted
-# (restart-settle-barrier, rig-wait-converged, roster-scope; all three pass). The
-# durable fix — enumerate *.selftest.sh here and FAIL on any unlisted file, plus a
-# Vitest asserting disk == this array == the desktop-selftests registry domain — is
-# tracked at WI-6181. Do not add a selftest without adding it here as well.
+# COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.
+#
+# The array above is the source of truth for WHAT RUNS; the files on disk are the
+# source of truth for WHAT EXISTS. Drift between them is how EI-18725214765732588's
+# fix went dark TWICE: a hand-maintained list plus a new *.selftest.sh equals a
+# guard that nothing executes, and nothing anywhere complains. The three files that
+# were dark at the time this gate was written (restart-settle-barrier,
+# rig-wait-converged, roster-scope) are now listed above; each was run standalone and
+# passed 8/8, 4/4 and 4/4 respectively before being wired in, so adding them does not
+# introduce a new red.
+#
+# We FAIL on drift rather than auto-running whatever is on disk, deliberately: a new
+# selftest must be adopted by a deliberate act, because silently auto-running an
+# unvetted file inside the live-federation gate could red the gate for a reason nobody
+# chose. Both directions are checked — an unlisted file (a guard nothing runs) and a
+# listed-but-absent file (a stale entry after a rename/delete).
+#
+# The cross-surface half of this invariant — disk == TESTS == the `desktop-selftests`
+# testing-domains registry domain — is asserted by
+# packages/operator-core/lib/__tests__/desktop-selftests-registry-complete.test.ts,
+# so registry drift reds a fast unit test rather than this gate.
+DRIFT=0
+declare -A LISTED=()
+for t in "${TESTS[@]}"; do LISTED["$t"]=1; done
+
+UNLISTED=()
+shopt -s nullglob
+for f in "$DIR"/*.selftest.sh; do
+  b="$(basename "$f")"
+  [ -n "${LISTED[$b]:-}" ] || UNLISTED+=("$b")
+done
+shopt -u nullglob
+
+MISSING=()
+for t in "${TESTS[@]}"; do
+  [ -f "$DIR/$t" ] || MISSING+=("$t")
+done
+
+if [ "${#UNLISTED[@]}" -gt 0 ]; then
+  echo "FAIL — ${#UNLISTED[@]} *.selftest.sh file(s) exist on disk but are NOT in the TESTS array, so nothing runs them: ${UNLISTED[*]}" >&2
+  echo "       Add them to TESTS in bin/lib/run-selftests.sh, and to the 'desktop-selftests' domain in packages/operator-core/lib/testing-domains-registry.ts." >&2
+  DRIFT=1
+fi
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  echo "FAIL — ${#MISSING[@]} TESTS entr(ies) have no file on disk (stale after a rename/delete?): ${MISSING[*]}" >&2
+  DRIFT=1
+fi
+if [ "$DRIFT" -ne 0 ]; then
+  exit 1
+fi
 
 FAILED=()
 for t in "${TESTS[@]}"; do
