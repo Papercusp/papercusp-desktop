@@ -116,12 +116,52 @@ test('PAPERCUSP_ALLOW_STALE_SIDECAR=1 is a working escape hatch', () => {
   assert.equal(res.buildRan, true);
 });
 
-test('guard sits BEFORE the build so it cannot burn a full tauri build first', () => {
+test('guard sits BEFORE the mutex and the build, so it cannot burn a full tauri build first', () => {
   const full = fs.readFileSync(scriptPath, 'utf8');
   const guardAt = full.indexOf('# --- STALE-SIDECAR GUARD');
-  const buildAt = full.indexOf('eval "$BUILD_CMD"');
+  const mutexAt = full.indexOf('# --- BUNDLE MUTEX');
+  const buildAt = full.indexOf('setsid bash -c');
 
   assert.ok(guardAt > 0, 'guard block missing');
+  assert.ok(mutexAt > 0, 'bundle mutex block missing');
   assert.ok(buildAt > 0, 'build invocation missing');
-  assert.ok(guardAt < buildAt, 'the guard must run before the build, not after');
+  assert.ok(guardAt < mutexAt, 'check staleness before taking the lock — do not hold it to fail');
+  assert.ok(mutexAt < buildAt, 'the lock must be held before the build starts');
+});
+
+// EI-18698595682442781 — the bundle mutex + process-group ownership.
+// These are load-bearing against a SHARED $CARGO_TARGET staging dir; each
+// property below corresponds to a way the original code corrupted a peer.
+
+test('the build runs with the lock fd CLOSED so a daemonizing child cannot retain it', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  // Same hazard build-desktop-sidecar-lock.test.js pins for the sidecar build:
+  // sccache/node can daemonize and inherit fd 9, holding the flock after we exit.
+  assert.match(full, /setsid bash -c 'exec 9>&-;/);
+});
+
+test('the build runs in its OWN process group with a trap that reaps it', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(full, /setsid /, 'build must get its own process group');
+  assert.match(full, /trap stop_build_group EXIT INT TERM/, 'trap must cover normal + signal exit');
+  // Must signal the GROUP (negative pid), not just the direct child — orphaned
+  // `npm run build` -> `tauri build` -> node kept writing for ~10 minutes.
+  assert.match(full, /kill -TERM "-\$BUILD_PGID"/);
+  assert.match(full, /kill -KILL "-\$BUILD_PGID"/);
+});
+
+test('lock acquisition is bounded and fails loudly rather than hanging forever', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(full, /flock -w "\$BUNDLE_LOCK_WAIT" 9/, 'must use a bounded wait, never a blocking flock');
+  assert.match(full, /exit 5/, 'a lock timeout needs its own distinct exit code');
+  // The diagnostic must point at the real cause; "md5sums" sent the last
+  // investigator hunting for filesystem debris instead of for a peer.
+  assert.match(full, /pgrep -af 'tauri build'/);
+});
+
+test('a build failure explains the concurrent-build cause instead of only echoing rc', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  assert.match(full, /md5sums/, 'the failure path should name the misleading symptom');
 });
