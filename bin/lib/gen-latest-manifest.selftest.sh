@@ -111,6 +111,40 @@ else
   bad "mixed cut did not write both manifests (gui=$([[ -f "$MIX_JSON" ]] && echo y || echo n), server=$([[ -f "$MIX_SERVER_JSON" ]] && echo y || echo n))"
 fi
 
+# 4) MERGE MODE (EI-18111560213741904): publishing a SECOND platform onto an
+#    already-published manifest must overlay its own entry while carrying every
+#    OTHER platform key through byte-for-byte untouched (never regenerated,
+#    never re-signed) — this is what lets bin/publish-platform-incremental.sh
+#    add mac onto an already-live linux release without touching linux's entry.
+BASE_JSON="$WORK/base-latest.json"
+cat > "$BASE_JSON" <<JSON
+{ "version": "$VER", "channel": "alpha", "notes": "x", "pub_date": "2026-01-01T00:00:00Z",
+  "platforms": { "linux-x86_64": { "signature": "ORIGINAL-linux-sig", "url": "https://example.com/releases/desktop-v${VER}-alpha/original-linux.AppImage" } } }
+JSON
+MAC_TARGZ="$WORK/Papercusp.app.tar.gz"
+MAC_SIG="$WORK/Papercusp.app.tar.gz.sig"
+: > "$MAC_TARGZ"; printf 'mac-signature' > "$MAC_SIG"
+
+TAG_MERGE="$(desktop_release_tag "$VER" alpha)"   # SAME tag as test (2) — deliberately re-merges onto its own prior output too
+GEN_LATEST_MANIFEST_MERGE_GUI_JSON="$BASE_JSON" \
+PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
+  gen_latest_manifest "$VER" alpha "$TAG_MERGE" "$MAC_TARGZ" "$MAC_SIG" >/dev/null 2>&1
+
+MERGED_JSON="$(gen_latest_manifest_json_path "$TAG_MERGE")"
+if [[ -f "$MERGED_JSON" ]]; then
+  python3 - "$MERGED_JSON" <<'PY' && ok "merge mode: new platform added, base platform untouched" || bad "merge mode: base platform was NOT carried through byte-for-byte"
+import json, sys
+m = json.load(open(sys.argv[1]))
+p = m["platforms"]
+assert p["linux-x86_64"]["signature"] == "ORIGINAL-linux-sig", p["linux-x86_64"]
+assert p["linux-x86_64"]["url"] == "https://example.com/releases/desktop-v9.9.9-alpha/original-linux.AppImage", p["linux-x86_64"]
+assert "darwin-x86_64" in p and p["darwin-x86_64"]["signature"] == "mac-signature", p.get("darwin-x86_64")
+assert "darwin-aarch64" in p, p
+PY
+else
+  bad "merge mode: manifest was not written"
+fi
+
 # 5) PAPERCUSP_UPDATE_BASE_URL unset ⇒ obviously-invalid placeholder, never a
 #    plausible-but-wrong url.
 TAG_NOBASE="$(desktop_release_tag "$VER" stable)"

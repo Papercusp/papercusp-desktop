@@ -31,6 +31,18 @@
 #        served from — unset, download URLs are an obviously-invalid placeholder
 #        and the function prints a loud warning (never a plausible-but-wrong URL).
 #
+#        MERGE MODE (EI-18111560213741904): set GEN_LATEST_MANIFEST_MERGE_GUI_JSON
+#        (and/or GEN_LATEST_MANIFEST_MERGE_SERVER_JSON) to an existing manifest's
+#        path before calling — its `platforms` entries are loaded as the STARTING
+#        point, and the freshly-classified entries from THIS call's artifacts are
+#        overlaid on top (same platform key ⇒ overwritten with the fresh one,
+#        every other key carried through untouched). This is what lets
+#        bin/publish-platform-incremental.sh ADD one platform onto an
+#        already-published manifest without regenerating (and so re-uploading)
+#        every other platform's entry. Unset (the default) ⇒ a fresh cut, exactly
+#        today's behavior — release-local.sh and bin/gen-latest-manifest.sh are
+#        unaffected.
+#
 # All three "*_path" helpers are pure string functions (no I/O) so a caller can
 # resolve where the manifest WILL land before/after calling gen_latest_manifest.
 
@@ -55,12 +67,29 @@ gen_latest_manifest() {
   out_path="$(gen_latest_manifest_json_path "$tag")"
   out_server_path="$(gen_latest_manifest_server_json_path "$tag")"
   notes_path="$(gen_latest_manifest_notes_path "$tag")"
+  # EI-18111560213741904 MERGE MODE — see the header comment above.
+  local merge_gui="${GEN_LATEST_MANIFEST_MERGE_GUI_JSON:-}"
+  local merge_srv="${GEN_LATEST_MANIFEST_MERGE_SERVER_JSON:-}"
 
-  python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$@" <<'PY'
+  python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$merge_gui" "$merge_srv" "$@" <<'PY'
 import json, os, sys, pathlib, hashlib
 from urllib.parse import quote, urlsplit
-version, channel, tag, out_path, out_server_path, notes_path = sys.argv[1:7]
-artifacts = [pathlib.Path(p) for p in sys.argv[7:]]
+version, channel, tag, out_path, out_server_path, notes_path, merge_gui, merge_srv = sys.argv[1:9]
+artifacts = [pathlib.Path(p) for p in sys.argv[9:]]
+
+def load_merge_base(path: str) -> dict:
+    """MERGE MODE: load a previously-published manifest's `platforms` dict as the
+    starting point for this call's — empty/missing/unreadable ⇒ {} (fresh cut,
+    today's behavior)."""
+    if not path:
+        return {}
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        return (json.loads(p.read_text()) or {}).get("platforms") or {}
+    except Exception:
+        return {}
 
 # Where an updating client DOWNLOADS the artifact from. This used to be
 # hardcoded to github.com/Papercusp/papercusp-desktop/releases/download/... —
@@ -148,8 +177,15 @@ def build_platforms(artifacts, want_token, reject_token):
             add("darwin-aarch64", art, sig)
     return platforms
 
-gui_platforms = build_platforms(artifacts, want_token="", reject_token="Server")
-server_platforms = build_platforms(artifacts, want_token="Server", reject_token="GUI")
+# MERGE MODE: start from the previously-published dicts (if any), then overlay
+# this call's freshly-classified entries on top — a re-published platform's key
+# is overwritten with its fresh signature+url, every OTHER platform key already
+# in the base carries through untouched (that's the whole point: adding mac onto
+# an already-live linux release must not touch the linux entry).
+gui_platforms = load_merge_base(merge_gui)
+gui_platforms.update(build_platforms(artifacts, want_token="", reject_token="Server"))
+server_platforms = load_merge_base(merge_srv)
+server_platforms.update(build_platforms(artifacts, want_token="Server", reject_token="GUI"))
 
 # WI-3696/WI-4404 cut-time assertion: every entry each manifest publishes must
 # genuinely be that manifest's product (a fail-loud backstop against a FUTURE

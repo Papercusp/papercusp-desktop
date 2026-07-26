@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# publish-platform-incremental.sh — ADD one freshly-built platform's artifacts
+# onto an ALREADY-PUBLISHED desktop release, without touching (or re-uploading,
+# re-signing, or re-dating) any OTHER platform's entry.
+#
+# WHY THIS EXISTS (EI-18111560213741904): publishing mac 0.0.12 onto an already-
+# published linux 0.0.12 had no first-class path — bin/release-local.sh ALWAYS
+# rebuilds Linux fresh (no REUSE_LINUX salvage) and regenerates latest.json from
+# scratch from THIS run's artifact set, so re-running it just to add mac would
+# re-cut + re-upload linux with CHANGED bytes/sig. The owner directive (2026-07-
+# 15) is to publish each platform "as soon as each gets ready", not wait for all
+# three — this script is the first-class tool for exactly that: a platform that
+# becomes ready LATER, merged onto what's already live.
+#
+# Usage:
+#   bin/publish-platform-incremental.sh <version> <channel: alpha|beta|stable> <platform: linux|windows|mac>
+#
+# What it does:
+#   1. Globs the platform's already-built artifacts from the SAME version-scoped
+#      locations bin/release-local.sh collects from (this box is a single-host
+#      cross-compile setup — mac/windows build NATIVELY here now, WI-5651 — so
+#      every platform's leg output lands under $ROOT/src-tauri/target/... no
+#      matter which script produced it: run bin/build-linux-local.sh /
+#      bin/build-mac-cross.sh / bin/build-windows-cross.sh FIRST).
+#   2. Fetches the CURRENTLY-PUBLISHED latest.json (+ latest-server.json, best-
+#      effort) from the release host as the merge base — the genuinely LIVE
+#      manifest, not a locally-cached guess. Unreachable/absent (first publish
+#      of a new release) ⇒ starts fresh, same as a normal cut.
+#   3. Merges via bin/lib/gen-latest-manifest.sh's MERGE MODE
+#      (GEN_LATEST_MANIFEST_MERGE_*_JSON): this platform's entries overlay the
+#      base; every OTHER platform key carries through byte-for-byte untouched —
+#      never regenerated, never re-signed, never re-dated.
+#   4. Extends this tag's recorded artifact-SET (bin/lib/release-artifacts.sh)
+#      with the new files UNIONED onto whatever was already recorded — normally
+#      the other, already-live platform's files, still on disk on this single-
+#      host setup — so bin/upload-release.sh's recurrence guard sees every
+#      advertised url covered, and its upload loop only pushes what's new.
+#   5. Prints the result + the exact next command. It does NOT upload —
+#      bin/upload-release.sh <version> <channel> remains the one publish step
+#      (artifacts first, manifest last, self-verified public read path).
+#
+# KNOWN GAP: a spanned Windows SERVER installer (Inno DiskSpanning stub + .bin
+# slices, normalized into one .zip by release-local.sh — see its WI-5600 block)
+# is NOT normalized here; this collects the raw inno/*_<version>_* set as-is. A
+# windows GUI incremental publish is unaffected (never spanned). Extend this
+# script's windows case the same way release-local.sh does if a spanned Windows
+# Server ever needs an incremental publish.
+#
+# Recipe + gotchas this formalizes (EI-18111560213741904): a tauri .sig is
+# ALREADY base64 — never re-encode it (silent double-encode, breaks the
+# updater); a VM→host leg (if one ever returns) needs careful quoting for
+# filenames with spaces — not a concern on the current single-host setup.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck source=lib/gen-latest-manifest.sh
+source "$HERE/lib/gen-latest-manifest.sh"
+# shellcheck source=lib/release-artifacts.sh
+source "$HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/release-host.sh
+source "$HERE/lib/release-host.sh"
+
+if [[ $# -lt 3 ]]; then
+  echo "usage: $0 <version> <channel: alpha|beta|stable> <platform: linux|windows|mac>" >&2
+  exit 2
+fi
+VERSION="$1"
+CHANNEL="$2"
+PLATFORM="$3"
+case "$PLATFORM" in
+  linux|windows|mac) ;;
+  *) echo "ERROR: platform must be linux|windows|mac (got '$PLATFORM')" >&2; exit 2 ;;
+esac
+
+TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
+echo "==> version=$VERSION channel=$CHANNEL platform=$PLATFORM tag=$TAG"
+
+load_release_host
+if [[ -z "${PAPERCUSP_UPDATE_BASE_URL:-}" ]]; then
+  echo "ERROR: no release host configured (~/.papercusp/release-host.env) — cannot fetch the" >&2
+  echo "       live manifest to merge onto, and cannot compute real download urls." >&2
+  exit 1
+fi
+
+# ── [1] glob this platform's already-built artifacts (version-scoped, same
+# globs bin/release-local.sh's collection step uses) ─────────────────────────
+CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+
+NEW_ARTIFACTS=()
+case "$PLATFORM" in
+  linux)
+    BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+    for f in "$BUNDLE"/deb/*_"$VERSION"_*.deb "$BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
+             "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
+      [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
+    done
+    ;;
+  windows)
+    for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*_"$VERSION"_*; do
+      [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
+    done
+    ;;
+  mac)
+    OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+    for f in "$OUT"/dmg/*_"$VERSION"_*.dmg "$OUT"/macos/*.app.tar.gz "$OUT"/macos/*.app.tar.gz.sig; do
+      [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
+    done
+    ;;
+esac
+if [[ ${#NEW_ARTIFACTS[@]} -eq 0 ]]; then
+  echo "ERROR: no $PLATFORM artifacts found for version $VERSION — build it first" >&2
+  echo "       (bin/build-linux-local.sh / bin/build-mac-cross.sh / bin/build-windows-cross.sh)." >&2
+  exit 1
+fi
+echo "==> found ${#NEW_ARTIFACTS[@]} $PLATFORM artifact(s):"
+for f in "${NEW_ARTIFACTS[@]}"; do echo "      $(basename "$f")"; done
+
+# ── [2] fetch the LIVE manifest(s) as the merge base ─────────────────────────
+MERGE_GUI="$(mktemp /tmp/papercusp-merge-base-gui-XXXXXX.json)"
+MERGE_SRV="$(mktemp /tmp/papercusp-merge-base-server-XXXXXX.json)"
+cleanup_merge_base() { rm -f "$MERGE_GUI" "$MERGE_SRV"; }
+trap cleanup_merge_base EXIT
+
+# fetch_live <url-suffix> <out-file> -> 0 (writes body to <out-file>) iff HTTP 200
+fetch_live() {
+  local suffix="$1" out="$2" code
+  code="$(curl -sS -o "$out" -w '%{http_code}' --max-time 20 "${PAPERCUSP_UPDATE_BASE_URL}/${suffix}" 2>/dev/null)" || true
+  [[ "$code" == "200" && -s "$out" ]]
+}
+
+if fetch_live "latest.json" "$MERGE_GUI"; then
+  echo "==> fetched the LIVE latest.json as the merge base"
+else
+  : > "$MERGE_GUI"
+  echo "==> no live latest.json reachable (first publish of this release, or host not yet bound) — starting fresh for GUI"
+fi
+if fetch_live "latest-server.json" "$MERGE_SRV"; then
+  echo "==> fetched the LIVE latest-server.json as the merge base"
+else
+  : > "$MERGE_SRV"
+  echo "==> no live latest-server.json reachable — starting fresh for Server"
+fi
+
+# ── [3] merge — this platform's entries overlay the base; every OTHER platform
+# key carries through byte-for-byte untouched (gen_latest_manifest MERGE MODE,
+# lib/gen-latest-manifest.sh) ────────────────────────────────────────────────
+GEN_LATEST_MANIFEST_MERGE_GUI_JSON="$MERGE_GUI" \
+GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$MERGE_SRV" \
+  gen_latest_manifest "$VERSION" "$CHANNEL" "$TAG" "${NEW_ARTIFACTS[@]}"
+
+LATEST_JSON="$(gen_latest_manifest_json_path "$TAG")"
+LATEST_SERVER_JSON="$(gen_latest_manifest_server_json_path "$TAG")"
+
+# ── [4] extend this tag's recorded artifact-SET with the new files, unioned
+# onto whatever it already recorded — typically the other, already-live
+# platform's files, still on disk on this single-host setup (WI-5651) ────────
+EXISTING_ARTIFACTS=()
+if EXISTING_LIST="$(release_artifacts_read "$TAG" 2>/dev/null)"; then
+  mapfile -t EXISTING_ARTIFACTS <<< "$EXISTING_LIST"
+  echo "==> found ${#EXISTING_ARTIFACTS[@]} already-recorded artifact(s) for $TAG — unioning"
+else
+  echo "==> no prior artifact-set recorded for $TAG — this is the first platform recorded"
+fi
+release_artifacts_write "$TAG" "${EXISTING_ARTIFACTS[@]}" "${NEW_ARTIFACTS[@]}" >/dev/null
+
+# ── [5] recurrence guard + hand-off ──────────────────────────────────────────
+if release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON"; then
+  echo "==> recurrence guard: every advertised url is covered by a recorded artifact"
+else
+  echo "ERROR: the merged manifest advertises an artifact this tag's recorded set does not cover — see above." >&2
+  exit 1
+fi
+
+echo
+echo "==> done — merged $PLATFORM into $TAG's manifest without touching other platforms."
+echo "    manifest:  $LATEST_JSON"
+[[ -f "$LATEST_SERVER_JSON" ]] && echo "    manifest (server): $LATEST_SERVER_JSON"
+echo "    publish with:  bin/upload-release.sh $VERSION $CHANNEL"
