@@ -120,7 +120,7 @@ test('guard sits BEFORE the mutex and the build, so it cannot burn a full tauri 
   const full = fs.readFileSync(scriptPath, 'utf8');
   const guardAt = full.indexOf('# --- STALE-SIDECAR GUARD');
   const mutexAt = full.indexOf('# --- BUNDLE MUTEX');
-  const buildAt = full.indexOf('setsid bash -c');
+  const buildAt = full.indexOf('setsid timeout');
 
   assert.ok(guardAt > 0, 'guard block missing');
   assert.ok(mutexAt > 0, 'bundle mutex block missing');
