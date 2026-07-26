@@ -136,7 +136,7 @@ _soffer_diag_b_to_a() {
   elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
     verdict="NEVER-LEFT-B (outbox row still UNDRAINED on b — never written to the hive peer log; b-side drain is stalled, NOT convergence timing)"
   elif [ "${a_any:-0}" -gt 0 ] 2>/dev/null; then
-    verdict="ARRIVED-NOT-REMOTE (frame a HAS a row for this fleet but not origin='remote' — applied locally, or refused at sig-verify/device-attestation; a PRODUCT fault in the apply path, NOT convergence timing)"
+    verdict="ARRIVED-NOT-REMOTE (frame a HAS a SEAT row for this fleet — offer_kind='seat', the same kind step 4 asserts on — but not origin='remote': applied locally, or refused at sig-verify/device-attestation; a PRODUCT fault in the apply path, NOT convergence timing)"
   elif [ -z "${b_total}${a_any}" ]; then
     verdict="DIAG-UNAVAILABLE (could not read substrate_outbox on b / p2p_work_offers on a — treat the classification as unknown, not as timing)"
   else
