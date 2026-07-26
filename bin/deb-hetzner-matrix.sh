@@ -194,10 +194,23 @@ rig_join_all a
 # join-hive boots + re-keys the substrate; give the swarm time to peer.
 fed_log "joined — wait for peer_connect (NO restart)"
 sleep 12
-rig_wait_swarm a b 70 || echo "⚠ a↔b peer_connected NOT confirmed — scenarios may fail"
+# EI-18687938054040755: rig_wait_swarm is TRI-STATE — 0 = data path proven, 1 = not
+# proven, 2 = N/A (this build predates the peer_data_path_up emitter). A bare
+# `|| echo` collapses 2 into 1 and prints a NEGATIVE FINDING for something that was
+# never measured — and in the exact `peer_connected` vocabulary this bug exists to
+# purge. rig_wait_swarm already prints the verdict line itself; all this adds is the
+# CONSEQUENCE, which is only warranted when the path was measured and genuinely
+# failed. On N/A we add nothing: "not measured" carries no scenario prediction.
+_matrix_swarm_consequence() { # <rc> <a> <b> <consequence>
+  case "$1" in
+    0|2) : ;;
+    *) echo "⚠ $2↔$3 data path NOT proven — $4" ;;
+  esac
+}
+rig_wait_swarm a b 70; _matrix_swarm_consequence $? a b "scenarios may fail"
 if [ "$FRAME3" = 1 ]; then
-  rig_wait_swarm a c 70 || echo "⚠ a↔c peer_connected NOT confirmed — scenarios may fail"
-  rig_wait_swarm b c 70 || echo "⚠ b↔c peer_connected NOT confirmed — membership_churn may fail"
+  rig_wait_swarm a c 70; _matrix_swarm_consequence $? a c "scenarios may fail"
+  rig_wait_swarm b c 70; _matrix_swarm_consequence $? b c "membership_churn may fail"
 fi
 
 # ── WS-DIAG (WI-5672, 2026-07-21): one-shot live DB dump right after peer_connect, ──
