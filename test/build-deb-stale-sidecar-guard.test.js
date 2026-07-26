@@ -137,7 +137,39 @@ test('the build runs with the lock fd CLOSED so a daemonizing child cannot retai
   const full = fs.readFileSync(scriptPath, 'utf8');
   // Same hazard build-desktop-sidecar-lock.test.js pins for the sidecar build:
   // sccache/node can daemonize and inherit fd 9, holding the flock after we exit.
-  assert.match(full, /setsid bash -c 'exec 9>&-;/);
+  // EI-18721897570279658 wrapped the invocation in `timeout` (see below), so the
+  // literal text is now "setsid timeout ... bash -c 'exec 9>&-;" rather than
+  // "setsid bash -c 'exec 9>&-;" — still fd9-closed, just with a bounding timeout
+  // spliced in between setsid and the bash -c that does the actual closing.
+  assert.match(full, /setsid timeout .*bash -c 'exec 9>&-;/);
+});
+
+// EI-18721897570279658 — the hard build timeout.
+// BUNDLE_LOCK_WAIT only bounds how long a LOSER waits to acquire the lock; it
+// does nothing to bound how long the WINNER may hold it. A wedged build used to
+// squat on the lock (and cargo's own target-dir lock) indefinitely — observed
+// live as a 5h13m orphaned build burning a full CPU core with nothing to reap
+// it. `timeout` now bounds the build's own execution and fails loudly instead.
+
+test('the build is wrapped in a bounded `timeout`, not left to run unbounded', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  assert.match(full, /setsid timeout --signal=TERM --kill-after=30 "\$BUILD_TIMEOUT_SEC" bash -c/);
+});
+
+test('the build timeout has a generous but real default, overridable via env', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  assert.match(full, /BUILD_TIMEOUT_SEC="\$\{PAPERCUSP_DEB_BUILD_TIMEOUT_SEC:-3600\}"/);
+});
+
+test('a timeout-killed build (rc 124/137) gets its own clear FATAL message and exit code, distinct from a generic build failure', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const timeoutBlockAt = full.indexOf('BUILD_RC" -eq 124');
+  const genericBlockAt = full.indexOf('FATAL: build failed (rc=$BUILD_RC)');
+
+  assert.ok(timeoutBlockAt > 0, 'expected a dedicated rc==124/137 branch');
+  assert.ok(genericBlockAt > timeoutBlockAt, 'the timeout-specific branch must be checked BEFORE the generic failure branch');
+  assert.match(full, /WEDGED build/);
+  assert.match(full, /exit 6/);
 });
 
 test('the build runs in its OWN process group with a trap that reaps it', () => {

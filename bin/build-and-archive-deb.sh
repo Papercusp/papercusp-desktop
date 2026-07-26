@@ -181,6 +181,29 @@ BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK:-$CARGO_TARGET/.deb-bundle.lock}"
 BUNDLE_LOCK_WAIT="${PAPERCUSP_DEB_BUNDLE_LOCK_WAIT:-3600}"
 mkdir -p "$(dirname "$BUNDLE_LOCK")"
 
+# --- HARD BUILD TIMEOUT (EI-18721897570279658) ------------------------------
+#
+# BUNDLE_LOCK_WAIT above bounds how long a LOSER waits to ACQUIRE the lock —
+# it does nothing to bound how long the WINNER may hold it. A build that
+# wedges (hangs against a stuck toolchain, a stalled network fetch, a runaway
+# linker, ...) previously squatted on the lock — and on cargo's own
+# target-dir lock underneath it — for as long as the process lived, with
+# nothing to reap it. Observed live 2026-07-26: an orphaned build (its
+# owning work-item already closed, its own session long gone) sat at ~99% CPU
+# for 5h13m with no cargo/rustc child left to explain the CPU, starving the
+# next scheduled deb build behind cargo's target-dir lock and burning a real
+# CPU core the whole time as phantom host load.
+#
+# FIX: wrap the build in `timeout` so it fails LOUDLY after a bounded duration
+# instead of squatting silently — the exact same "bounded wait, fail loud"
+# shape BUNDLE_LOCK_WAIT already applies to lock acquisition, just applied to
+# the build's own execution. Default is generous (a clean release build here
+# runs single-digit minutes) so it only fires on a genuine wedge; override
+# with PAPERCUSP_DEB_BUILD_TIMEOUT_SEC for a deliberately long build (e.g. a
+# cold cache on a fresh box). `--kill-after` escalates to SIGKILL if the
+# build ignores the initial SIGTERM.
+BUILD_TIMEOUT_SEC="${PAPERCUSP_DEB_BUILD_TIMEOUT_SEC:-3600}"
+
 BUILD_PGID=""
 stop_build_group() {
   if [ -n "$BUILD_PGID" ] && kill -0 "-$BUILD_PGID" 2>/dev/null; then
@@ -205,14 +228,23 @@ if ! flock -w "$BUNDLE_LOCK_WAIT" 9; then
 fi
 echo "==> holding deb bundle lock ($BUNDLE_LOCK)"
 
-echo "=== building ($BUILD_CMD) ==="
+echo "=== building ($BUILD_CMD), bounded to ${BUILD_TIMEOUT_SEC}s ==="
 set +e
-setsid bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
+setsid timeout --signal=TERM --kill-after=30 "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
 BUILD_PGID=$!
 wait "$BUILD_PGID"
 BUILD_RC=$?
 set -e
 BUILD_PGID=""
+if [ "$BUILD_RC" -eq 124 ] || [ "$BUILD_RC" -eq 137 ]; then
+  echo "FATAL: build exceeded the ${BUILD_TIMEOUT_SEC}s timeout and was killed (rc=$BUILD_RC)." >&2
+  echo "       This is very likely a WEDGED build (stuck toolchain fetch, a runaway" >&2
+  echo "       linker, an orphaned process from a prior session) rather than a merely" >&2
+  echo "       slow one — a clean release build here normally finishes in single-digit" >&2
+  echo "       minutes. If this really is a deliberately long build (e.g. a cold cache" >&2
+  echo "       on a fresh box), rerun with a larger PAPERCUSP_DEB_BUILD_TIMEOUT_SEC." >&2
+  exit 6
+fi
 if [ "$BUILD_RC" -ne 0 ]; then
   echo "FATAL: build failed (rc=$BUILD_RC)." >&2
   echo "       If this was 'Failed to create md5sums file', suspect a CONCURRENT build" >&2

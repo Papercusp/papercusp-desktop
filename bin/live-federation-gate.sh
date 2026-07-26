@@ -711,6 +711,38 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   done
   echo FAIL
 }
+
+# EI-18721667437666267: the two-instance pair writes its instance logs to a FIXED work dir
+# (two-instance-content-matrix-smoke.sh:50 — PAPERCUSP_MATRIX_WORK, default
+# ~/.papercusp-lane-a-fed; :90 — inst-a.log/inst-b.log) and REUSES it every run. Those two
+# files hold the ONLY federation evidence — [swarm] lifecycle, [swarm:unpaired] escalations,
+# [boot-history] announce_admitted/announce_pending — and the gate's per-run dir never kept
+# them, so the next scheduled run destroyed a failing run's evidence before anyone triaged it.
+# OBSERVED 2026-07-26: three consecutive failing runs (074510/083840/094205) all lost their
+# logs; only the PASSING 104022 run's survived — exactly the wrong sample. WI-5673 had to be
+# root-caused from a passing run plus source reading because of this.
+#
+# Bank UNCONDITIONALLY, not just on red: a run that looks green at verdict time is routinely
+# the baseline you need to diff a later red against, and the carve-out logic below can
+# downgrade a FAIL to PASS-971 *after* the leg has already run. The per-run dir already holds
+# a ~3.2GB .deb, so a few MB of logs is free. Never fail the gate over banking — a copy error
+# is logged and swallowed.
+bank_pair_logs() {  # <label> [pair-work-dir]
+  local label="$1"
+  local src="${2:-${PAPERCUSP_MATRIX_WORK:-$HOME/.papercusp-lane-a-fed}}"
+  local dst="$WORK/pair-logs-$label" n=0 f
+  if [ ! -d "$src" ]; then
+    log "bank_pair_logs($label): no pair work dir at $src — nothing to bank"; return 0
+  fi
+  mkdir -p "$dst" 2>/dev/null || { log "bank_pair_logs($label): could not create $dst — skipping"; return 0; }
+  for f in "$src"/inst-*.log; do
+    [ -e "$f" ] || continue
+    if cp -p "$f" "$dst/" 2>/dev/null; then n=$((n+1)); fi
+  done
+  # The pair is deliberately LEFT RUNNING on exit (see the singleton guard's note above), so
+  # these logs keep growing after the leg — this is a point-in-time copy taken at verdict time.
+  log "bank_pair_logs($label): banked $n pair log(s) from $src -> $dst"
+}
 # True iff a leg's result string is any flavor of "nothing proven" (SKIPPED / SKIPPED-BUSY /
 # SKIPPED-STARVATION).
 is_skip_result() { case "$1" in SKIPPED*) return 0 ;; *) return 1 ;; esac; }
@@ -835,6 +867,10 @@ MATRIX_RES="SKIPPED"
 if [ "$SKIP_MATRIX" != 1 ]; then
   MATRIX_RES="$(run_smoke content-matrix two-instance-content-matrix-smoke.sh "${GATE_DEB:-}" \
     PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100)"
+  # EI-18721667437666267 — bank the pair's federation logs into this run's artifact dir
+  # BEFORE the next run overwrites them. Must stay here, immediately after the leg: the
+  # carve-out below can rewrite MATRIX_RES, and banking must not depend on the verdict.
+  bank_pair_logs content-matrix
   # TEMPORARY MITIGATION — known-red carve-out, re-scoped 2026-07-03 after the WI-971
   # differential (evidence: WI-971 thread post 49980, live attempt-5 pair):
   #   · backfill / backfill-late reds = WI-1942 (receive-side historical-catch-up LATENCY;
