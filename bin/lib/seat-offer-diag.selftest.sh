@@ -122,8 +122,13 @@ fi
 # Run 184106 was read the first way off exactly that ambiguity. Every clock read must carry
 # offer_id@publisher, and b's own stored row must be read alongside the outbox, so the two
 # sides can be paired before any clock is compared.
+#
+# Stated as a PER-READ invariant (every fed_hlc read also carries the key), NOT as two
+# independent counts. The count form redded the moment a NON-clock read legitimately started
+# carrying the key too, reporting "3/2" — a guard failing for growth instead of for the
+# unkeyed read it exists to catch, which is the same rot check 7 above was rewritten out of.
 _clk_all="$(grep -c 'COALESCE(fed_hlc' "$SCN")"
-_clk_keyed="$(grep -c "offer_id||'@'||publisher_github_user_id" "$SCN")"
+_clk_keyed="$(grep 'COALESCE(fed_hlc' "$SCN" | grep -c "offer_id||'@'||publisher_github_user_id")"
 if [ "$_clk_all" -gt 0 ] && [ "$_clk_all" = "$_clk_keyed" ]; then
   ok "all $_clk_all fed_hlc clock reads are keyed by offer_id@publisher (pairable, not fleet-scoped alone)"
 else
