@@ -139,3 +139,88 @@ test('no process from the wedged build survives the wrapper (the process-group r
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// EI-18726398328755840 — the class the ABOVE test does NOT cover: a
+// descendant that escapes the original process GROUP entirely (via its own
+// `setsid` call, exactly like a real npm/tauri/cargo build's daemonizing
+// helpers can do). `kill -TERM "-$BUILD_PGID"` — and GNU `timeout`'s own
+// internal killpg — only reach the ORIGINAL group; an escapee is invisible
+// to both. This is the live failure this item found (a real build's monitor
+// vanished while its descendants kept running, unreached by the group kill)
+// and the gap the original tests' stubbed `sleep 30` BUILD_CMDs could never
+// exercise (see the script's own header for the "WHY THE UNIT TEST DIDN'T
+// CATCH IT" note). The fix bounds the whole subtree in a cgroup instead,
+// whose membership survives any setsid/setpgid a descendant performs.
+test('a descendant that escapes into its own session via setsid still gets killed on timeout (the exact class a process-group-only kill misses)', (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-timeout-'));
+  try {
+    const marker = path.join(tmp, 'escaped-still-running');
+    const res = runBuild({
+      buildCmd: `setsid bash -c 'sleep 30; touch ${JSON.stringify(marker)}' & wait`,
+      timeoutSec: 1,
+      lockPath: path.join(tmp, 'bundle.lock'),
+      desktopDir: tmp,
+    });
+
+    if (!/bounded to cgroup/.test(res.stdout + res.stderr)) {
+      t.skip('cgroup v2 not delegated/available in this environment — the hardened enforcement falls back to process-group-only, which this test specifically exists to show is insufficient');
+      return;
+    }
+
+    assert.equal(res.status, 6, `expected the dedicated timeout exit code 6, got ${res.status}. stderr:\n${res.stderr}`);
+    assert.match(res.stderr, /FATAL: build exceeded the 1s timeout and was killed/);
+    assert.equal(
+      fs.existsSync(marker),
+      false,
+      'a descendant that escaped into its own session (setsid) must still be reaped via the cgroup — this is exactly the gap EI-18726398328755840 found live',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// The independent watchdog is the backstop for "the primary `timeout`
+// enforcement itself doesn't land" (the live symptom: the monitor process
+// had vanished from the box entirely). Simulate that directly by having the
+// build spawn a completely UNRELATED descendant via setsid that `timeout`'s
+// own killpg cannot reach (proven above) AND is far outside a short
+// PAPERCUSP_DEB_WATCHDOG_GRACE_SEC — proving the watchdog alone, independent
+// of whatever `timeout` does or does not manage to kill, still bounds the
+// build via the cgroup.
+test('the independent watchdog bounds the build via the cgroup even when the escaped descendant is the only thing left alive', (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-timeout-'));
+  try {
+    const marker = path.join(tmp, 'escaped-still-running-2');
+    const full = fs.readFileSync(scriptPath, 'utf8');
+    const start = full.indexOf('BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK');
+    const end = full.indexOf('DEB_PATH="$(find');
+    const harness = [
+      'set -euo pipefail',
+      `DESKTOP_DIR=${JSON.stringify(tmp)}`,
+      `BUILD_CMD=${JSON.stringify(`setsid bash -c 'sleep 30; touch ${marker}' & wait`)}`,
+      full.slice(start, end),
+      'echo "TEST_HARNESS_BUILD_RC=$BUILD_RC"',
+      '',
+    ].join('\n');
+
+    const res = spawnSync('bash', ['-c', harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PAPERCUSP_DEB_BUNDLE_LOCK: path.join(tmp, 'bundle.lock'),
+        PAPERCUSP_DEB_BUILD_TIMEOUT_SEC: '1',
+        PAPERCUSP_DEB_WATCHDOG_GRACE_SEC: '1',
+      },
+      timeout: 20000,
+    });
+
+    if (!/bounded to cgroup/.test(res.stdout + res.stderr)) {
+      t.skip('cgroup v2 not delegated/available in this environment');
+      return;
+    }
+
+    assert.equal(fs.existsSync(marker), false, 'the watchdog must reach an escaped descendant via the cgroup even independent of the primary timeout mechanism');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
