@@ -101,7 +101,12 @@ s3api_head() {
 }
 
 # ── What to upload ───────────────────────────────────────────────────────────
-BUNDLE="${PAPERCUSP_BUNDLE_DIR:-${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle}"
+# NOTE: there is deliberately no $BUNDLE here. Since EI-12913 this script consumes
+# the ONE artifact list the builder wrote (release_artifacts_read, below) and hard-
+# fails when it is missing or empty — it never globs a bundle dir. A vestigial
+# BUNDLE=${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle sat here unused
+# until EI-18103803991060000; it was removed rather than repointed, because reading
+# it implied this path depends on a bundle root that it does not.
 LATEST_JSON="/tmp/papercusp-latest-${TAG}.json"
 # WI-4404: the Server product's own manifest. Optional — release-local.sh only
 # writes it when the cut actually produced Server-role artifacts

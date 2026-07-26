@@ -40,7 +40,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_ROOT/.." && pwd)"
 
-BUNDLE="${PAPERCUSP_BUNDLE_DIR:-${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle}"
+# EI-18103803991060000: this MUST match record-release-cli's default `--out`
+# (<desktopRoot>/src-tauri/target/release/bundle/release-history) — record generates
+# the site, this uploads it, and a divergence silently publishes a DIFFERENT (stale)
+# index than the one just generated. The old default pointed at
+# ${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle, which bin/build-linux-local.sh
+# MOVES the linux artifacts out of; a stale release-history/ still sits there, so the
+# `index.html` existence check below passed and uploaded the wrong site.
+BUNDLE="${PAPERCUSP_BUNDLE_DIR:-$DESKTOP_ROOT/src-tauri/target/release/bundle}"
 SITE_DIR="${PAPERCUSP_RELEASE_SITE_DIR:-${BUNDLE}/release-history}"
 
 if [[ ! -f "$SITE_DIR/index.html" ]]; then
