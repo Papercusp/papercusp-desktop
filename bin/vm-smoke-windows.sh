@@ -21,6 +21,15 @@
 #      A1/A2). A live `psu --agent=claude` would block on the interactive CLI,
 #      so this verifies the bundle+shim are in place, not a full agent launch.
 #
+# EI-18099988193062000: the release default is `PAPERCUSP_BUILD_ROLES="gui
+# server"` (WI-5600) — a real per-release cut ships the Server app that owns
+# the operator sidecar, so checks 4-9 (which all assume a healthy operator)
+# are expected to pass on it. They can NEVER pass against a deliberate
+# `PAPERCUSP_BUILD_ROLES=gui` fast-iteration cut (the GUI alone has no
+# sidecar to attach to on Windows) — that is a misuse of this gate, not a
+# gate bug. Pass VM_SMOKE_GUI_ONLY=1 to explicitly opt into skipping the
+# operator-dependent checks when you know you installed a gui-only cut.
+#
 # Exit 0 = all green; first failure exits 1 with the failing check named.
 
 set -uo pipefail
@@ -30,9 +39,11 @@ VM_SSH_PORT="${VM_SSH_PORT:-2223}"
 VM_SSH_HOST="${VM_SSH_HOST:-user@127.0.0.1}"
 DISTRO="${DISTRO:-papercup-runtime}"
 SSH=(ssh -i "$VM_SSH_KEY" -p "$VM_SSH_PORT" -o ConnectTimeout=10 "$VM_SSH_HOST")
+VM_SMOKE_GUI_ONLY="${VM_SMOKE_GUI_ONLY:-0}"
 
 pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1" >&2; exit 1; }
+skip() { echo "  ⊘ $1 (VM_SMOKE_GUI_ONLY=1 — operator owned by the out-of-scope Server, WI-5028)"; }
 
 wsl_exec() { timeout 60 "${SSH[@]}" "wsl -d $DISTRO --user papercup --exec $*" 2>/dev/null | tr -d '\r\0'; }
 
@@ -48,6 +59,12 @@ echo "==> 3. app process"
 "${SSH[@]}" 'tasklist /FI "IMAGENAME eq papercusp-desktop.exe" /FO csv /NH' 2>/dev/null \
   | grep -q papercusp-desktop || fail "papercusp-desktop.exe not running"
 pass "app running"
+
+if [[ "$VM_SMOKE_GUI_ONLY" == "1" ]]; then
+  for n in 4 5 6 7 8 9; do skip "check $n"; done
+  echo "GUI-ONLY SMOKE: checks 1-3 green, 4-9 skipped by explicit opt-in (not a release blocker)"
+  exit 0
+fi
 
 echo "==> 4. serve discovery"
 OPJSON="$(wsl_exec cat /home/papercup/.papercusp/operator.json)"
