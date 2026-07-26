@@ -596,6 +596,15 @@ if [ -z "${GATE_DEB:-}" ]; then
     GIT_DIRTY="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo '?')"
     log "rebuilding sidecar from working tree (HEAD=$GIT_HEAD, dirty-files=$GIT_DIRTY)…"
     echo "head=$GIT_HEAD dirty=$GIT_DIRTY ts=$(date -Is)" >"$WORK/provenance"
+    # WI-5706: a bare dirty COUNT let two agents correlate "dirty=1" to a schema-drift
+    # red (stale query text bundled mid-rename) but not to the EXACT in-flight edit — by
+    # the time anyone looked, the tree had moved on and the specific diff was gone. Persist
+    # the actual dirty-file list (paths only, not full diff contents — cheap, and a path
+    # alone is usually enough to spot "this touches the routines/harness-status query path")
+    # so a future dirty+erroring run is attributable to its cause, not just its symptom.
+    if [ "${GIT_DIRTY:-0}" != "0" ] && [ "${GIT_DIRTY:-?}" != "?" ]; then
+      ( cd "$DESKTOP_DIR/.." && git status --porcelain ) >"$WORK/dirty-files.txt" 2>/dev/null || true
+    fi
     ( cd "$DESKTOP_DIR" && bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
   fi
   # Grep the FUNCTION NAME, not a log phrase: the original 'grantEpochKeysToMembers on

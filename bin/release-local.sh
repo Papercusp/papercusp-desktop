@@ -720,13 +720,25 @@ bash "$ROOT/bin/stage-source-tree.sh"
 # three identity lints here, immediately, so a leaked literal reds the cut before
 # stage-source-tree.sh's ~multi-minute tar+scan even starts — recurrence
 # prevention for the class that has already killed multiple 0.0.9 cuts ~10min in.
+#
+# EI-18147177863084708: these three used to be `&&`-chained, so a run only ever
+# showed the FIRST failing lint's leaks — the 0.0.12 Windows Server cut
+# (2026-07-20, 24 leaks across 13 files) turned fixing them into whack-a-mole
+# across multiple ~30min build attempts, one lint at a time. Run all three
+# UNCONDITIONALLY (never short-circuited by the one before it) and report every
+# leak across all three classes together. (These now ALSO run at every
+# green-checkpoint tick — apps/operator/lib/release/green-checkpoint.ts — so a
+# leak reds the tick it lands on `staging`, long before a release attempt; this
+# gate stays as defense-in-depth for a cut running off a snapshot older than the
+# latest green tick.)
 echo "==> identity-literal lint gate (WI-4776): tracked source, before any staging work"
 _MONO="$(cd "$ROOT/.." && pwd)"
-if ! ( cd "$_MONO" \
-    && node scripts/check-no-owner-name-tags.mjs \
-    && node scripts/check-no-box-identity.mjs \
-    && node scripts/check-no-identity-literals.mjs ); then
-  echo "ERROR: tracked source carries an owner-name / box-identity literal — refusing to stage a leaky cut (WI-4776). Fix the source above; see each lint's own FIX note." >&2
+_IDENTITY_LINT_STATUS=0
+( cd "$_MONO" && node scripts/check-no-owner-name-tags.mjs ) || _IDENTITY_LINT_STATUS=1
+( cd "$_MONO" && node scripts/check-no-box-identity.mjs ) || _IDENTITY_LINT_STATUS=1
+( cd "$_MONO" && node scripts/check-no-identity-literals.mjs ) || _IDENTITY_LINT_STATUS=1
+if [[ "$_IDENTITY_LINT_STATUS" != "0" ]]; then
+  echo "ERROR: tracked source carries an owner-name / box-identity literal — refusing to stage a leaky cut (WI-4776). Fix every leak listed above (all 3 lints ran; see each lint's own FIX note)." >&2
   exit 1
 fi
 
