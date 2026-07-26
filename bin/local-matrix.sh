@@ -297,7 +297,40 @@ if [ "$MODE" = teardown ]; then rig_local_teardown; echo "torn down."; exit 0; f
 # some timing fidelity — the eviction, not the rig, was the harm.
 #   PCUSP_RIG_EXCLUSIVE=<n>   set explicitly ⇒ honoured as-is (no auto-degrade)
 #   PCUSP_RIG_GATE_PROBE=0    skip the probe entirely (pre-EI behaviour)
+#
+# ⚠ SELF-EXEMPTION (WI-6133) — the probe MUST NOT fire on the cycle that OWNS this
+# run. live-federation-gate.sh holds this same lock for its WHOLE cycle and then
+# invokes its local-matrix leg as a CHILD, so a naive probe detects its own parent,
+# concludes "a cycle is in flight", and strips THE GATE'S OWN exclusive partition —
+# leaving the gate's most timing-sensitive scenarios to run on a shared, heavily
+# loaded box. That silently converts the gate into a false-red generator whose
+# reds then get misattributed to whatever code change the run happened to carry
+# (on 2026-07-26 this nearly caused a correct fix to be reverted).
+# So: parse the holder pid (live-federation-gate.sh §GATE_SINGLETON writes
+# `pid=$$` into $GATE_LOCK.holder) and skip the degrade when that pid is an
+# ANCESTOR of this process. Ancestry is used rather than an env-var handshake
+# because it is self-contained here, needs no cooperation from the gate, and
+# covers arbitrarily nested spawns; an unparseable holder or a gate that somehow
+# is NOT our ancestor still degrades, preserving the original EI's intent.
 GATE_LOCK_PATH="${PCUSP_GATE_LOCK:-/tmp/pcusp-live-fed-gate.lock}"
+
+# Echoes the holder's pid, or nothing when the holder line has no parseable pid.
+rig_gate_holder_pid() {
+  printf '%s' "${1:-}" | sed -n 's/.*[[:space:]]pid=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# 0 when $1 is THIS process or one of its ancestors ⇒ the in-flight cycle is our own.
+# Walks PPIDs with a hard iteration cap so a pid-reuse cycle can never spin.
+rig_pid_is_self_or_ancestor() {
+  local target="${1:-}" p="$$" guard=0
+  case "$target" in ''|*[!0-9]*) return 1 ;; esac
+  while [ -n "$p" ] && [ "$p" != 0 ] && [ "$p" != 1 ] && [ "$guard" -lt 64 ]; do
+    [ "$p" = "$target" ] && return 0
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]')"
+    guard=$((guard + 1))
+  done
+  return 1
+}
 
 # Echoes the in-flight gate holder and returns 0 when a cycle is running; returns
 # non-zero (silently) when idle, unprobeable, or flock is unavailable — an
@@ -314,6 +347,13 @@ rig_gate_cycle_holder() {
 
 GATE_CYCLE_HOLDER=""
 if [ "${PCUSP_RIG_GATE_PROBE:-1}" = 1 ] && GATE_CYCLE_HOLDER="$(rig_gate_cycle_holder)"; then
+  GATE_CYCLE_PID="$(rig_gate_holder_pid "$GATE_CYCLE_HOLDER")"
+  if rig_pid_is_self_or_ancestor "$GATE_CYCLE_PID"; then
+    # Our OWN cycle (WI-6133). Degrading here would strip the gate's exclusive
+    # cores from the very run the gate launched to measure — never do that.
+    log "gate-cycle probe: the in-flight cycle (pid=$GATE_CYCLE_PID) is THIS run's own ancestor — it launched us, so it is not a peer to yield to; keeping exclusive cores (WI-6133)"
+    GATE_CYCLE_HOLDER=""
+  else
   log "WARN: a live-federation-gate CYCLE IS IN FLIGHT — held by: $GATE_CYCLE_HOLDER"
   log "WARN: its host-side phases share this box's cores and take a DIFFERENT lock, so a free rig lock does NOT mean it is safe to evict cores (EI-18723401175637819)"
   if [ -z "${PCUSP_RIG_EXCLUSIVE+set}" ]; then
@@ -321,6 +361,7 @@ if [ "${PCUSP_RIG_GATE_PROBE:-1}" = 1 ] && GATE_CYCLE_HOLDER="$(rig_gate_cycle_h
     log "WARN: degrading this run to AFFINITY-ONLY (no cgroup-v2 exclusive partition; host fleet NOT evicted) so the in-flight cycle is not starved — PCUSP_RIG_EXCLUSIVE=1 forces exclusive cores anyway, PCUSP_RIG_GATE_PROBE=0 skips this probe"
   else
     log "WARN: PCUSP_RIG_EXCLUSIVE=$PCUSP_RIG_EXCLUSIVE set explicitly — honouring it; exclusive cores WILL evict the host fleet off that gate cycle's phases"
+  fi
   fi
 fi
 
