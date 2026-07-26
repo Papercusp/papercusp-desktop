@@ -33,6 +33,43 @@ _soffer_row_present() {
   echo 0
 }
 
+# WI-6179 b→a DISCRIMINATOR. "published on b but not applied on a" collapses three
+# materially different faults into one sentence, and the banked 1.3MB serve.log pair
+# cannot separate them (verified on the 170106-seat_offer bundle: grepping the offer
+# slug returns 0 hits on BOTH frames — the publish/apply path logs nothing
+# addressable). Only ONE of the three deserves the "environmental / WI-5639 SLA"
+# write-off, so the FAIL line must say WHICH:
+#   NEVER-LEFT-B       b's substrate_outbox row is quarantined or still undrained
+#   ARRIVED-NOT-REMOTE a HAS a row for the fleet, but not origin='remote' (applied
+#                      locally / refused at sig-verify) — a product fault, not timing
+#   LOST-OR-REFUSED    b drained it and a has nothing at all
+#   TIMING-ONLY        the genuine late-apply case (LOST-OR-REFUSED + clean counters)
+# Echoes a one-line classification; never fails the leg (diagnostic only, reads only).
+# The outbox is queried by table_name + aggregate counts rather than by key, because
+# the key is composed downstream of this scenario (harnessSlug/offerId/publisher/
+# workspace) and the matrix authors exactly one seat offer per run — so the counts for
+# that table ARE this offer, and the probe cannot rot when the key format changes.
+_soffer_diag_b_to_a() {
+  local slug="$1" b_pending b_quar b_total a_any a_break verdict
+  b_total="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers';" 2>/dev/null | tr -d '[:space:]')"
+  b_pending="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND drained_at IS NULL;" 2>/dev/null | tr -d '[:space:]')"
+  b_quar="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND quarantined_at IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
+  a_any="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr -d '[:space:]')"
+  a_break="$(drv_psql a "SELECT COALESCE(string_agg(o||'/'||s||'='||n, ' '), '<no row for this fleet>') FROM (SELECT COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2) t;" 2>/dev/null | tr '\n' ' ')"
+  if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then
+    verdict="NEVER-LEFT-B (outbox QUARANTINED on b — the row crossed the retry threshold and is excluded from the drain batch, mig 645; a b-side publish fault, NOT convergence timing)"
+  elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
+    verdict="NEVER-LEFT-B (outbox row still UNDRAINED on b — never written to the hive peer log; b-side drain is stalled, NOT convergence timing)"
+  elif [ "${a_any:-0}" -gt 0 ] 2>/dev/null; then
+    verdict="ARRIVED-NOT-REMOTE (frame a HAS a row for this fleet but not origin='remote' — applied locally, or refused at sig-verify/device-attestation; a PRODUCT fault in the apply path, NOT convergence timing)"
+  elif [ -z "${b_total}${a_any}" ]; then
+    verdict="DIAG-UNAVAILABLE (could not read substrate_outbox on b / p2p_work_offers on a — treat the classification as unknown, not as timing)"
+  else
+    verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
+  fi
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status: ${a_break:-<unreadable>}"
+}
+
 scn_seat_offer() {
   # The MCP driver lives in fleet-directory.sh — both files are sourced by the
   # runner before any scenario executes, so this is a load-order-safe reuse.
@@ -70,7 +107,7 @@ scn_seat_offer() {
   # 4. The offer must MATERIALIZE on a as origin='remote' — the cross-node,
   #    sig-verified leg (the projection refuses anything unverified).
   if [ "$(_soffer_row_present a "fleet_slug='$slug' AND offer_kind='seat' AND origin='remote'")" != 1 ]; then
-    echo "seat-offer FAIL — seat-offer for $slug never materialized origin='remote' on frame a (published on b but not verified/applied on a)"
+    echo "seat-offer FAIL — seat-offer for $slug never materialized origin='remote' on frame a (published on b but not verified/applied on a). WI-6179 discriminator: $(_soffer_diag_b_to_a "$slug")"
     return 1
   fi
 

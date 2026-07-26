@@ -580,6 +580,7 @@ done
 [ -z "$missing" ] && ok "every driver overriding drv_applog also overrides drv_appbundle (no driver can silently resolve no bundle)" \
                   || bad "driver(s) override drv_applog but NOT drv_appbundle:$missing — those runs resolve no bundle ⇒ capability unknown ⇒ strict fires fail-closed on an emitter-less build"
 
+
 # --- RECURRENCE GUARD (WI-6012, leader su-e3b21216): ANY script that JUDGES a
 # discovery verdict must handle the "not measured" state EXPLICITLY.
 # fed_wait_discovery echoes 1|0|skip and rig_wait_swarm exits 0|1|2. A script that
@@ -646,6 +647,48 @@ unset -f _disc_judge_offenders
 
 unset -f drv_applog _fed_disc_capability
 rm -rf "$DISC_WORK"
+
+# --- RECURRENCE GUARD (WI-6180): fed_wait_boot must find the boot markers when
+# they live in the SIDECAR's own structured log rather than the GUI stdout
+# capture. In the packaged build ~/papercusp-app.log holds NOTHING but libEGL
+# warnings, so grepping it alone false-RED'd a fully-healthy app as BOOT_TIMEOUT
+# and blocked the entire 2-VM federation rig at step 8 — every run, invisibly,
+# because "boot failed" is exactly what a real boot failure looks like.
+#
+# BEHAVIOURAL, not a static cross-driver scan: the invariant is "the markers are
+# reachable", which a driver may satisfy either by pointing drv_applog straight
+# at the sidecar log (deb-hetzner-fast-iterate does) or by defining
+# drv_sidecar_log (vm-federation does). A static "must define X" scan encodes the
+# wrong rule and false-flags the former. Hermetic: real temp logs + the real
+# local drv_exec, so the actual greps run.
+BOOT_WORK="$(mktemp -d /tmp/fed-boot-selftest.XXXXXX)"
+GUI_LOG="$BOOT_WORK/app.log"; SIDE_LOG="$BOOT_WORK/serve.log"
+printf 'libEGL warning: DRI3 error: Could not get DRI3 device\nlibEGL warning: egl: failed to create dri2 screen\n' > "$GUI_LOG"
+printf '%s\n%s\n' \
+  '[2026-07-26T21:00:00.000Z] [embedded-pg] ready on localhost:24601 db=papercusp' \
+  '[2026-07-26T21:00:01.000Z] [serve] listening on http://127.0.0.1:24602' > "$SIDE_LOG"
+
+declare -A FED_PG=() FED_SC=() FED_DB=() FED_KIND=([z]=vm)
+drv_exec()   { bash -s; }
+drv_applog() { echo "$GUI_LOG"; }
+fed_discover_sidecar_os() { return 1; }   # force the marker path to prove itself
+
+drv_sidecar_log() { echo ""; }            # PRE-FIX shape
+if fed_wait_boot z 1 >/dev/null 2>&1; then
+  bad "CONTROL FAILED: fed_wait_boot passed with the markers ONLY in the sidecar log and no sidecar-log candidate — the WI-6180 premise is wrong, re-derive before trusting the assertion below"
+else
+  ok "CONTROL: with markers only in the sidecar log and no candidate for it, fed_wait_boot reports BOOT_TIMEOUT (this was the false-RED)"
+fi
+
+FED_PG=(); FED_SC=(); FED_DB=()
+drv_sidecar_log() { echo "$SIDE_LOG"; }   # FIXED shape
+if fed_wait_boot z 1 >/dev/null 2>&1 && [ "${FED_PG[z]:-}" = 24601 ] && [ "${FED_SC[z]:-}" = 24602 ]; then
+  ok "fed_wait_boot resolves PG+sidecar ports from the sidecar's own log (WI-6180)"
+else
+  bad "fed_wait_boot did NOT resolve ports from the sidecar log (got PG=${FED_PG[z]:-unset} sc=${FED_SC[z]:-unset}) — WI-6180 has regressed: a healthy boot will read as BOOT_TIMEOUT"
+fi
+unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os
+rm -rf "$BOOT_WORK"
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi

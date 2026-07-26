@@ -288,6 +288,14 @@ _scn_attestation_unattested_device_core() {
   [ "$rc_after_measured" = 1 ] || { echo "attestation(unattested-device) FAIL — LEG4 post-probe UNMEASURED: all 40 identity_unresolved reads on frame a returned empty (the probe never ran — NOT evidence the counter failed to bump)"; return 1; }
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+  # WI-5064 FOLLOW-UP (2026-07-26, gate run 164022). The strip is verified ONCE, at
+  # line ~256 — then this leg sleeps 35s and polls up to 120s more. `pot_members` is a
+  # FEDERATED table and frame b's copy still carries B's attestations, so any re-sync
+  # of that row from b during those ~155s silently puts the attestations BACK on a and
+  # UNDOES the precondition. Read it again at SCORING time so the verdicts below can
+  # say so instead of blaming the feature (used after the PASS check).
+  local strip_at_scoring
+  strip_at_scoring="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
   # EI-18737225233571148: compute which reasons ACTUALLY MOVED during this leg. A token is
   # 'reason=count', so a changed count OR a brand-new reason both surface as a token absent from
   # the before-set — exactly the "moved" set, with no extra bookkeeping.
@@ -315,8 +323,25 @@ _scn_attestation_unattested_device_core() {
     esac
   done
   if { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null; then
-    echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
+    echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a; strip-at-scoring=${strip_at_scoring:-<unreadable>})"
     return 0
+  fi
+
+  # WI-5064 FOLLOW-UP branch (2026-07-26, gate run 164022 — the FIRST run in which this
+  # leg's probe actually reached frame a, because the ban-ordering fix landed). It then
+  # failed with a BRAND-NEW signature: row-on-a=1 (the receipt was APPLIED, not refused)
+  # with identity_unresolved 0→0. Before asserting "the refusal feature is broken", rule
+  # out the precondition having been undone underneath us: the strip is verified once at
+  # setup, then the leg sleeps 35s and polls up to 120s, and `pot_members` is a FEDERATED
+  # table whose copy on b was never stripped — so a re-sync of B's row from b puts the
+  # attestations back on a and makes the author device legitimately resolvable at apply
+  # time. `strip-verified=yes` elsewhere in these messages refers ONLY to the t0 check.
+  # This file has already been burned twice by exactly this shape of stale precondition
+  # (WI-6046 setup-unverified; EI-18717083046734203 raw-INSERT authorship), so the
+  # measurement goes in the verdict rather than in a reader's head.
+  if [ "${strip_at_scoring:-0}" -gt 0 ] 2>/dev/null; then
+    echo "attestation(unattested-device) FAIL — PRECONDITION UNDONE MID-LEG, so this leg CANNOT score the feature (and this is NOT evidence of a product defect): B's device_attestations were stripped on frame a and verified empty at setup, but at SCORING time a carries $strip_at_scoring attestation(s) again — pot_members re-federated from b, whose copy is never stripped, during this leg's ~155s probe window. The author device was therefore RESOLVABLE when the receipt applied, which makes a non-refusal the EXPECTED behaviour. Evidence: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, reasons that moved during THIS leg: ${reasons_moved:-<none>}. FIX DIRECTION: strip on BOTH frames (or suppress the b→a pot_members re-sync for B) for the duration of the leg, and re-assert emptiness immediately before the probe INSERT."
+    return 1
   fi
 
   # EI-18717083046734203 (WI-6046 follow-up, 2026-07-26): the FAIL message below used to model
@@ -356,7 +381,15 @@ _scn_attestation_unattested_device_core() {
     return 1
   fi
 
-  echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons"
+  # Reaching here with rem_on_a>0 means the probe receipt was APPLIED on frame a, and the
+  # strip was STILL empty at scoring time (the branch above already caught re-federation).
+  # That combination is the first genuinely feature-level signature this leg has ever
+  # produced — say so, with the two facts that make it one, instead of the old flat line.
+  if [ "${rem_on_a:-0}" -gt 0 ] 2>/dev/null; then
+    echo "attestation(unattested-device) FAIL — APPLIED, NOT REFUSED, with the precondition intact at scoring time: the probe receipt EXISTS on frame a (row-on-a=$rem_on_a) while identity_unresolved did not move ($rc_before→$rc_after) AND B still had ZERO device_attestations on a when scored (strip-at-scoring=${strip_at_scoring:-<unreadable>}). This is the first signature from this leg that is not explained by the ban-ordering bug (WI-5064, fixed: the probe now federates b→a at all), by a re-federated precondition, or by a never-emitted probe (probe-on-b=${probe_on_b:-<unmeasured>}). Candidate readings, in order: (1) receipt-apply does not check author-device→member attestation on this path, so an unattested device's op is accepted — the product defect this leg exists to catch; (2) the raw-INSERT probe (bypasses emitP2pReceipt) federates as a plain row mirror that skips the receipt-apply projection entirely, in which case the leg is measuring the wrong path and needs to emit through the product API. DISCRIMINATOR: check frame a's serve.log for a receipt-apply entry naming '$rid_rem' — present ⇒ reading (1); absent ⇒ reading (2). Reasons that moved during THIS leg: ${reasons_moved:-<none>}; top-3 by recency: $reasons"
+    return 1
+  fi
+  echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, strip-at-scoring=${strip_at_scoring:-<unreadable>}, all reasons: $reasons"
   return 1
 }
 # WI-5064 RESTORE HELPER. Puts B's device_attestations back on frame A after the leg has taken

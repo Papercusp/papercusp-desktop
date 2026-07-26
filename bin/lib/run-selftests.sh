@@ -32,7 +32,16 @@ TESTS=(
   local-matrix-starvation.selftest.sh
   rig-bank-logs.selftest.sh
   vm-run-env.selftest.sh
+  seat-offer-diag.selftest.sh
 )
+
+# NOTE (WI-6181): this array is HAND-MAINTAINED, so a newly added *.selftest.sh is
+# silently run by nothing — which is how EI-18725214765732588's fix went dark a
+# second time. At the time of writing THREE files on disk are still unlisted
+# (restart-settle-barrier, rig-wait-converged, roster-scope; all three pass). The
+# durable fix — enumerate *.selftest.sh here and FAIL on any unlisted file, plus a
+# Vitest asserting disk == this array == the desktop-selftests registry domain — is
+# tracked at WI-6181. Do not add a selftest without adding it here as well.
 
 FAILED=()
 for t in "${TESTS[@]}"; do
