@@ -171,14 +171,37 @@ cut_release_seed() {
   if [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]]; then
     core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
   fi
-  # WI-3244 (parity with build-windows-on-vm.sh): the LIVE per-workspace corestore
-  # is fd-locked by the running operator/substrate, so a fresh snapshot fails
-  # "File descriptor could not be locked" without a quiesce.
+  # WI-3244 (parity with the retired build-windows-on-vm.sh): the LIVE
+  # per-workspace corestore is fd-locked by the running operator/substrate, so
+  # a fresh snapshot fails "File descriptor could not be locked" without a
+  # quiesce — and even with the fd free, cut-seed-cli's waitForOperatorDrain
+  # HARD-FAILS the whole build if the operator's outbox doesn't drain within
+  # its timeout (EI-17143, live-hit 2026-07-19: a 64-agent fleet's outbox sat
+  # at ~15,217 rows with zero drain progress for 120s, wasting ~13min of VM
+  # lease + compile time before the manual PAPERCUSP_SEED_REUSE_CORESTORE=1
+  # workaround was discovered).
   # PAPERCUSP_SEED_REUSE_CORESTORE=1 grafts the ALREADY-CUT corestore from
   # src-tauri/seed onto a fresh git cut (cut-seed-cli --reuse-corestore, WI-3232).
-  if [[ "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" == "1" ]]; then
+  # Default is now "auto" (EI-17143 — mirrors ensure-release-seed.sh's WI-3346
+  # auto mode): reuse the committed corestore snapshot when one already exists
+  # (safe, non-mutating, never fd-locks or waits on the live operator) and only
+  # attempt a fresh from-live-store snapshot when there is nothing committed to
+  # reuse yet. A deliberate up-to-date FULL refresh (current hive state baked
+  # in) is still available — force it with PAPERCUSP_SEED_REUSE_CORESTORE=0 on
+  # a quiesced box.
+  local seed_reuse="${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}"
+  if [[ "$seed_reuse" == "auto" ]]; then
+    if [[ -d "$ROOT/src-tauri/seed/corestore" && -f "$ROOT/src-tauri/seed/manifest.json" ]]; then
+      seed_reuse=1
+      echo "--- seed: corestore auto-reuse (committed snapshot present) — refreshing git+epoch-keys only; avoids the live-operator fd-lock/outbox-drain hard-fail on a busy box (EI-17143) ---"
+    else
+      seed_reuse=0
+      echo "--- seed: no committed corestore to reuse — cutting FRESH from the live store (requires a quiesced operator) ---"
+    fi
+  fi
+  if [[ "$seed_reuse" == "1" ]]; then
     core_args=(--reuse-corestore "$ROOT/src-tauri/seed")
-    [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under PAPERCUSP_SEED_REUSE_CORESTORE=1" >&2
+    [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
   fi
   # WI-3232 (owner: "Full pot, plaintext seed" — alpha dogfood): without
   # seed/epoch-keys.json a fresh offline install cannot decrypt the pot, and
@@ -192,12 +215,12 @@ cut_release_seed() {
   # corestore is shipped as-cut, preserving its coreSparseFrom) — cut-seed-cli THROWS on
   # either combination. Default-ON; PAPERCUSP_SEED_SPARSE=0 forces full history.
   local sparse_args=()
-  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "${PAPERCUSP_SEED_REUSE_CORESTORE:-0}" != "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
+  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
   fi
-  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-0} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0)) ---"
+  echo "--- seed: cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=$seed_reuse sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0)) ---"
   (
     cd "$operator_dir"
     OPATH="$PATH"

@@ -572,21 +572,48 @@ cut_release_seed() {
   if [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]]; then
     core_args+=(--store-dir "$PAPERCUSP_SEED_STORE_DIR")
   fi
+  # EI-17143: this path ran HERE on the shared dev box (the same box the whole
+  # fleet lives on) and, unlike mac-vm-build.sh, had NO --reuse-corestore escape
+  # hatch at all — it ALWAYS cut a fresh corestore, so it ALWAYS hit
+  # cut-seed-cli's waitForOperatorDrain hard-fail on a busy box (live-hit
+  # 2026-07-19: a 64-agent fleet's outbox sat at ~15,217 rows with zero drain
+  # progress for 120s). Mirrors mac-vm-build.sh's fix + ensure-release-seed.sh's
+  # WI-3346 "auto" mode: reuse the committed corestore snapshot when one exists
+  # (safe, non-mutating, never fd-locks/waits on the live operator) and only
+  # attempt a fresh from-live-store snapshot when there's nothing committed to
+  # reuse yet. A deliberate up-to-date FULL refresh (current hive state baked
+  # in) is still available — force it with PAPERCUSP_SEED_REUSE_CORESTORE=0 on
+  # a quiesced box.
+  local seed_reuse="${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}"
+  if [[ "$seed_reuse" == "auto" ]]; then
+    if [[ -d "$seed_out/corestore" && -f "$seed_out/manifest.json" ]]; then
+      seed_reuse=1
+      echo "==> seed: corestore auto-reuse (committed snapshot present) — refreshing git+epoch-keys only; avoids the live-operator fd-lock/outbox-drain hard-fail on a busy box (EI-17143)"
+    else
+      seed_reuse=0
+      echo "==> seed: no committed corestore to reuse — cutting FRESH from the live store (requires a quiesced operator)"
+    fi
+  fi
+  if [[ "$seed_reuse" == "1" ]]; then
+    core_args+=(--reuse-corestore "$seed_out")
+    [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
+  fi
   # Offline dogfood restores need the bundled epoch keys too. Keep parity with
   # mac-vm-build.sh; opt out only for diagnostic cuts.
   local emit_args=()
   [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]] && emit_args+=(--emit-epoch-key)
-  # P-004 trim: --sparse ships only the head-snapshot span (~40MB vs ~2.1GB). This
-  # linux path always cuts a FRESH corestore (no --reuse-corestore branch), so --sparse
-  # applies whenever a corestore is cut. Default-ON; PAPERCUSP_SEED_SPARSE=0 forces full
-  # history. cut-seed-cli THROWS if --sparse meets --no-corestore, so gate on corestore=1.
+  # P-004 trim: --sparse ships only the head-snapshot span (~40MB vs ~2.1GB) of a
+  # FRESH corestore cut. Gated off under seed-reuse (a grafted corestore ships
+  # as-cut, preserving its coreSparseFrom) — cut-seed-cli THROWS if --sparse meets
+  # --reuse-corestore/--no-corestore. Default-ON; PAPERCUSP_SEED_SPARSE=0 forces
+  # full history on a fresh cut.
   local sparse_args=()
-  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
+  [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" && "${PAPERCUSP_SEED_SPARSE:-1}" == "1" ]] && sparse_args+=(--sparse)
   local depth_args=()
   if [[ -n "$seed_depth" ]]; then
     depth_args+=(--depth "$seed_depth")
   fi
-  echo "==> cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0))"
+  echo "==> cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=$seed_reuse sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0))"
   (
     cd "$operator_dir"
     OPATH="$PATH"
