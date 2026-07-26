@@ -10,24 +10,73 @@
  *          --with-mac    also build macos-universal (VM :2222, owner-gated)
  *          --skip-git    do not commit/tag/push
  *          --skip-publish  do not create the GitHub release
+ *
+ *   npx tsx bin/release.ts publish --platform <linux|darwin|windows> --incremental <version> <channel>
+ *     ADD one already-built platform's artifacts onto the LIVE latest.json
+ *     without touching any other platform's entry (EI-18683062996592825 —
+ *     the durable, kit-shared fix for what used to be hand-work; mirrors
+ *     bin/publish-platform-incremental.sh but through the shared TS core, so
+ *     oddsmith's `gh release upload --clobber` path can reuse the identical
+ *     merge semantics). Requires the release host env
+ *     (~/.papercusp/release-host.env, PAPERCUSP_UPDATE_BASE_URL) sourced
+ *     first, and the platform already built (bin/build-linux-local.sh /
+ *     bin/build-mac-cross.sh / bin/build-windows-cross.sh). Does NOT upload —
+ *     run bin/upload-release.sh <version> <channel> afterwards, same as
+ *     always.
  */
 import {
   assertValidVersion,
   defaultTagFor,
+  fetchHttpGetPort,
   isValidChannel,
   nodePorts,
+  parsePublishArgs,
+  runIncrementalPublish,
   runRelease,
   type Channel,
 } from '../../libs/generic/tauri-release-kit/src/index.js';
 import { makePapercuspConfig, registerPapercuspDrivers } from './release.config.js';
 
+async function runPublishSubcommand(argv: string[]): Promise<void> {
+  const args = parsePublishArgs(argv);
+  const base = (process.env.PAPERCUSP_UPDATE_BASE_URL ?? '').replace(/\/+$/, '');
+  if (!base) {
+    console.error(
+      'ERROR: PAPERCUSP_UPDATE_BASE_URL is not set — source ~/.papercusp/release-host.env first' +
+        ' (see bin/lib/release-host.sh); an incremental publish must merge onto the genuinely' +
+        ' LIVE manifest, so it cannot guess where that is.',
+    );
+    process.exit(1);
+  }
+
+  registerPapercuspDrivers();
+  const cfg = makePapercuspConfig({ version: args.version, channel: args.channel, targets: [args.targetKey] });
+
+  const ports = nodePorts();
+  const res = await runIncrementalPublish(cfg, args.targetKey, ports, {
+    liveManifestUrl: `${base}/latest.json`,
+    http: fetchHttpGetPort,
+  });
+  console.log(
+    `\n✓ incremental publish ${res.tag} platform=${args.platform} (merged from: ${res.mergedFrom}) — ` +
+      `${res.artifacts.length} artifact(s)`,
+  );
+  console.log(`  manifest: ${res.latestJsonPath}`);
+  console.log(`  next:     bin/upload-release.sh ${args.version} ${args.channel}`);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (argv[0] === 'publish') {
+    await runPublishSubcommand(argv);
+    return;
+  }
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const [version, channel = 'stable'] = argv.filter((a) => !a.startsWith('--'));
 
   if (!version) {
     console.error('usage: release.ts <version> <channel: alpha|beta|stable> [--plan] [--with-arm64] [--with-windows] [--with-mac]');
+    console.error('   or: release.ts publish --platform <linux|darwin|windows> --incremental <version> <channel>');
     process.exit(1);
   }
   assertValidVersion(version);
