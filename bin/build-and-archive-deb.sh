@@ -91,7 +91,13 @@ if [[ -f "$SIDECAR_STAMP" && "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" != "1" ]]; th
     NEWEST_PATCH=""
     NEWEST_PATCH_EPOCH=0
     while IFS= read -r -d '' p; do
-      pe="$(stat -c '%Y' "$p" 2>/dev/null || echo 0)"
+      # Do NOT coerce a failed stat to epoch 0 — that would silently treat an
+      # unreadable patch as "doesn't count" and defeat the exact staleness
+      # check this script exists to enforce (see header). Fail outright.
+      if ! pe="$(stat -c '%Y' "$p")"; then
+        echo "FATAL: could not stat patch file '$p' while checking sidecar staleness." >&2
+        exit 1
+      fi
       if [[ "$pe" -gt "$NEWEST_PATCH_EPOCH" ]]; then
         NEWEST_PATCH_EPOCH="$pe"
         NEWEST_PATCH="$p"
