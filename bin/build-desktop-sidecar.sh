@@ -274,20 +274,47 @@ ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercus
 # "verification" and only surface ~10 minutes later as a cryptic Rolldown
 # "failed to resolve" error, and again ~45 minutes after THAT inside the
 # 6+-minute-a-pop full universal-arch Rust/Swift build if the vite build step
-# were ever skipped. `npm ls --all` walks the ACTUAL installed tree (not the
-# lockfile) for every declared dependency of both workspaces and prints an
-# "missing:" line + a non-zero exit for anything that resolved-but-not-really
-# installed — catch it HERE, before the expensive steps, with a message that
-# names the actual root cause instead of leaving the next agent to
-# re-diagnose an npm quirk as a phantom bundler bug.
-if ! (cd "$REPO_ROOT" && npm ls --all --workspace=@papercusp/operator --workspace=@papercusp/operator-vite >/tmp/npm-ls-verify.log 2>&1); then
-  if grep -q '^npm error missing:' /tmp/npm-ls-verify.log; then
-    echo "FATAL: npm install reported \"up to date\" but left declared dependencies un-extracted on disk (see build-desktop-sidecar.sh:244 comment — a known --prefer-offline-class npm quirk, now removed; if you see this, something ELSE is re-triggering the same failure mode):"
-    grep '^npm error missing:' /tmp/npm-ls-verify.log
-    exit 1
-  fi
-  echo "WARN: npm ls --all reported non-missing issues (peer-dep conflicts etc. under --legacy-peer-deps are expected) — continuing. Full output: /tmp/npm-ls-verify.log"
-fi
+# were ever skipped.
+#
+# SURGICAL, not `npm ls --all`: an earlier version of this guard shelled out to
+# `npm ls --all --workspace=…` and failed on ANY "npm error missing:" line.
+# That is too broad — under --legacy-peer-deps, `npm ls` reports every UNMET
+# (non-optional) PEER dependency the same way, including transitive peers of
+# packages that are test-only and never reach the vite bundle graph (concrete
+# case: @papercusp/test-config → @nestjs/testing's REQUIRED peer @nestjs/core,
+# which nothing in apps/operator/app or apps/operator-vite/src imports — a
+# real false-positive that blocked a build for a dependency this build never
+# needed). Check instead — and ONLY — that every package OUR OWN two
+# workspaces directly declare in "dependencies" actually resolves on disk;
+# that is the exact shape of the original bug (a declared dep silently
+# un-extracted) without inheriting every third-party package's own optional
+# peer graph.
+node -e '
+const fs = require("fs");
+const path = require("path");
+const repoRoot = process.argv[1];
+const pkgs = ["apps/operator/package.json", "apps/operator-vite/package.json"];
+const missing = [];
+for (const rel of pkgs) {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+  for (const dep of Object.keys(pkg.dependencies || {})) {
+    // Resolve the way Node/Rolldown would: workspace-local node_modules first,
+    // falling back to the hoisted root node_modules.
+    const candidates = [
+      path.join(repoRoot, path.dirname(rel), "node_modules", dep),
+      path.join(repoRoot, "node_modules", dep),
+    ];
+    if (!candidates.some((c) => fs.existsSync(c))) {
+      missing.push(`${dep} (declared in ${rel})`);
+    }
+  }
+}
+if (missing.length > 0) {
+  console.error("FATAL: npm install reported \"up to date\" but left the following DIRECTLY-DECLARED dependencies un-extracted on disk (see build-desktop-sidecar.sh:244 comment — a known --prefer-offline-class npm quirk, now removed; if you see this, something ELSE is re-triggering the same failure mode):");
+  for (const m of missing) console.error(`  - ${m}`);
+  process.exit(1);
+}
+' "$REPO_ROOT" || exit 1
 
 echo "→ building operator-vite SPA (vite build → dist/)"
 (cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)
