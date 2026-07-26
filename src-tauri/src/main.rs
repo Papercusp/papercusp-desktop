@@ -4531,13 +4531,23 @@ fn spawn_serve(
     let db_sql_dir = sidecar_dir.join("db-sql");
     // Installer-bundled hive seed (plan hive-seed-bundle-2026-07-04). Optional:
     // only carries a manifest.json when a release cut a real seed into
-    // src-tauri/seed/ (tauri.conf bundles `seed/**/*`; a dev build ships only the
-    // placeholder README). restore-hive-seed's resolveSeedDir manifest-checks it,
-    // so pointing at a manifest-less dir is safe → unchanged cold join. The TS
-    // side ALSO autodetects this dir from a sibling resource env, so this explicit
-    // pass is belt-and-suspenders, not the sole channel.
+    // src-tauri/seed/ (a dev build ships only the placeholder README).
+    // restore-hive-seed's resolveSeedDir manifest-checks it, so pointing at a
+    // manifest-less dir is safe → unchanged cold join. The TS side ALSO
+    // autodetects this dir from a sibling resource env, so this explicit pass is
+    // belt-and-suspenders, not the sole channel.
     //
-    // The seed is a SIBLING of the sidecar dir, not inside it: tauri.conf bundles
+    // WHICH BUNDLES ACTUALLY CARRY IT (WI-6075 — do not read this as "every
+    // build"): `seed/**/*` is declared ONLY in the overlays, never in the base
+    // tauri.conf.json, because the seed is ~2GB and must not ship inside the GUI
+    // product. Server installs get it via tauri.server.conf.json; the
+    // live-federation gate's deb gets it via tauri.gate.conf.json (passed by
+    // bin/build-and-archive-deb.sh). A plain `tauri build` — i.e. the GUI —
+    // deliberately ships NO seed and cold-joins. test/tauri-config-resources
+    // .test.js pins that split; it had silently regressed for a while because
+    // nothing ran it.
+    //
+    // The seed is a SIBLING of the sidecar dir, not inside it: the configs bundle
     // `seed/**` and `sidecar/**` as sibling resources, so both the packaged
     // layouts (Linux .deb `usr/lib/<Product>/seed`, macOS `Contents/Resources/
     // seed`) AND the dev layout (`src-tauri/seed` next to `src-tauri/sidecar`)

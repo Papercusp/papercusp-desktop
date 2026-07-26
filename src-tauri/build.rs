@@ -62,6 +62,14 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
 /// (see `ensure_sidecar_placeholder` above) recurring for a second gitignored
 /// resource glob added later without the same guard.
 ///
+/// STILL REQUIRED after WI-6075, but for a narrower set of builds: `seed/**/*`
+/// now lives only in the overlays (tauri.server.conf.json / tauri.gate.conf
+/// .json), never in the base tauri.conf.json, so a plain `cargo build`/`cargo
+/// test` no longer globs the seed at all. An OVERLAY build still does — and
+/// `--config` is applied at compile time too (the CLI exports the merged
+/// TAURI_CONFIG that `generate_context!` reads) — so the placeholder is what
+/// keeps a server/gate build off a cleaned tree from panicking.
+///
 /// Dev/test builds never read the seed at runtime unless the offline-restore
 /// path is actually exercised, so a placeholder file is enough to compile. A
 /// REAL bundle must still run `bin/ensure-release-seed.sh` first — every
