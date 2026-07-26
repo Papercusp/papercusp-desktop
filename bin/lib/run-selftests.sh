@@ -37,6 +37,7 @@ TESTS=(
   restart-settle-barrier.selftest.sh
   rig-wait-converged.selftest.sh
   roster-scope.selftest.sh
+  deployed-state-guards.selftest.sh
 )
 
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.

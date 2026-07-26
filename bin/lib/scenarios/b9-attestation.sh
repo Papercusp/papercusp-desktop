@@ -228,6 +228,19 @@ matrix_register attestation_membership 60 "attestation membership seeding + 2nd-
 #       our strip is, and NO ordering change can fix that — only holding the strip, or
 #       building the precondition some other way, can.
 #
+# A SECOND, FREE FINGERPRINT — THE DEVICE COUNT. The two writers restore DIFFERENT-SIZED
+# arrays, and the leg already prints both numbers:
+#   restored N == saved N (here 2)  ⇒ a wholesale REPLACE — the projection wrote the remote
+#                                     row's full attestation array back.
+#   restored 1 while saved N>1      ⇒ the ADMISSION UNION merge: every announce admission
+#                                     passes only the ANNOUNCING device (see upsertHiveMember's
+#                                     own WI-1585 comment), so union-onto-emptied yields exactly
+#                                     one entry. Ordering can only remove the announces that
+#                                     TRIGGER it; it cannot make the strip hold against one.
+# Observed in gate run 184106 at order 89: saved 2 on both frames, drift came back with 1 — the
+# admission signature. Recorded here because that number was in the log for three earlier runs
+# and nobody read it as a measurement.
+#
 # Both readings are actionable and they demand OPPOSITE fixes, which is exactly why the leg
 # must measure instead of guess. DIAGNOSTIC ONLY — never a verdict input.
 _att_row_fingerprint() {
@@ -349,7 +362,7 @@ _scn_attestation_unattested_device_core() {
     local drift_fp_a
     drift_fp_a="$(_att_row_fingerprint a "$b_gh_id")"
     echo "  · attestation(unattested-device): precondition drifted — B carries $pre_probe attestation(s) on a again after the 35s cache wait; re-stripping both frames once and re-waiting the device→user cache"
-    echo "  · attestation(unattested-device): DRIFT FINGERPRINT (see _att_row_fingerprint) — a at strip: ${strip_fp_a:-<unreadable>} → a now: ${drift_fp_a:-<unreadable>} (b at strip: ${strip_fp_b:-<unreadable>}). origin=remote+newer fed_ts ⇒ a NEWER remote op re-announced B (projection replace); origin=local ⇒ the admission path's UNION merge (upsertHiveMember) re-attested B and NO ordering change can hold the strip."
+    echo "  · attestation(unattested-device): DRIFT FINGERPRINT (see _att_row_fingerprint) — a at strip: ${strip_fp_a:-<unreadable>} → a now: ${drift_fp_a:-<unreadable>} (b at strip: ${strip_fp_b:-<unreadable>}). origin=remote+newer fed_ts ⇒ a NEWER remote op re-announced B (projection replace); origin=local ⇒ the admission path's UNION merge (upsertHiveMember) re-attested B and NO ordering change can hold the strip. Cross-check the COUNT: $pre_probe restored vs $(printf '%s' "${_ATT_SAVED_ROW}" | grep -o 'device_pubkey' | wc -l) saved — restored 1 out of a larger saved set is the admission signature (an announce carries only the announcing device)."
     drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     [ "${_ATT_SAVED_B_OK:-0}" = 1 ] && drv_psql b "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     sleep 35

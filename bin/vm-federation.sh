@@ -410,18 +410,23 @@ else
 fi
 
 # WI-6212 — DEPLOYED-STATE preconditions. Everything above verifies the rig can
-# TALK (bridge, UDP, boot); nothing verified WHAT IS RUNNING. Both checks below
-# exist because their absence produced confident, reproducible, wrong results:
+# TALK (bridge, UDP, boot); nothing verified WHAT IS RUNNING. Every check below
+# exists because its absence produced confident, reproducible, wrong results:
 #   - heterogeneous builds: fed-a ran a sidecar WITH the holepunch fix under test
 #     and fed-b one WITHOUT it, so the single failing direction was simply the one
 #     dialed by the stale VM (WI-6209).
+#   - uniform BUT STALE: the uniformity check proves the VMs match EACH OTHER, and
+#     is structurally blind to both being equally out of date — a uniformly-wrong
+#     rig disagrees with nothing. The app's own /api/health carries the baked build
+#     provenance, so ask it (an unprovenanced artifact reports version 0.0.0).
 #   - public DHT: a relaunch that omits ~/fed.env silently joins the PUBLIC DHT,
 #     pulling outside peers into a rig everyone believes is isolated.
-# Both are cheap, and both fail CLOSED — an unverifiable precondition is a stop,
+# All are cheap, and all fail CLOSED — an unverifiable precondition is a stop,
 # not a warning (EI-18160721229588594: a WARN in a long boot log is reliably missed).
 if [ "$VMS" = 2 ] && [ "${FED_KIND[a]}" != local ] && [ "${FED_KIND[b]}" != local ]; then
-  fed_log "asserting deployed state (WI-6212: uniform build + DHT isolation)"
+  fed_log "asserting deployed state (WI-6212: uniform build + provenance + DHT isolation)"
   vm_assert_uniform_sidecar "${FED_VM[a]}" "${FED_VM[b]}"
+  vm_assert_build_provenance "${FED_VM[a]}" "${FED_VM[b]}"
 fi
 if [ -n "${BOOTSTRAP:-}" ]; then
   for inst in a b; do

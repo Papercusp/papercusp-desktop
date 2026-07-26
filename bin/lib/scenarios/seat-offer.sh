@@ -78,7 +78,12 @@ _soffer_diag_b_to_a() {
   #                   `opts.ownLogKeyHex ? {…} : {}` fallback silently degrading).
   # Without this field the FAIL line cannot separate those two, which is exactly the
   # ambiguity that cost a wake of forward-reasoning on run 174655.
-  a_break="$(drv_psql a "SELECT COALESCE(string_agg(o||'/'||s||'/'||au||'='||n, ' '), '<no row for this fleet>') FROM (SELECT COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, CASE WHEN author_pubkey IS NULL THEN 'author:NULL' WHEN author_pubkey ~ '^[0-9a-f]{64}\$' THEN 'author:64hex' ELSE 'author:other' END au, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2,3) t;" 2>/dev/null | tr '\n' ' ')"
+  # WI-6179: the breakdown is grouped BY offer_id@publisher too, so each token names a ROW,
+  # not just a shape. Grouped on the shape alone it reported "local/open/author:64hex=1" for
+  # a fleet — which frame a can hold for its OWN offer just as easily as for b's — and run
+  # 184106 was read as "b's offer arrived and was re-stamped" off exactly that ambiguity.
+  # A count is not evidence about a row until the row is named.
+  a_break="$(drv_psql a "SELECT COALESCE(string_agg(k||' '||o||'/'||s||'/'||au||'='||n, ' '), '<no row for this fleet>') FROM (SELECT offer_id||'@'||publisher_github_user_id k, COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, CASE WHEN author_pubkey IS NULL THEN 'author:NULL' WHEN author_pubkey ~ '^[0-9a-f]{64}\$' THEN 'author:64hex' ELSE 'author:other' END au, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2,3,4) t;" 2>/dev/null | tr '\n' ' ')"
   # WI-6210 CLOCK-PROVENANCE PROBE — the 3-way decision procedure for an
   # ARRIVED-NOT-REMOTE row. Capture stamps the wire op's clock FROM the source row
   # (mig 423/528: substrate_outbox.ts = row.fed_ts, op_hlc = row.fed_hlc), and the
@@ -98,9 +103,23 @@ _soffer_diag_b_to_a() {
   #                            its 'local' default — an apply-path/provenance bug.
   # Two cheap SELECTs, and they separate three faults that are otherwise identical in
   # every observable column (verified against the banked run-174655 row pair).
-  local b_clock a_clock
+  #
+  # ⚠ THE CLOCKS ONLY DECIDE ANYTHING IF BOTH SIDES NAME THE SAME ROW. Run 184106 read
+  # "differing clocks ⇒ a LOCAL write re-stamped an applied remote row" off an a-side read
+  # scoped by fleet_slug ALONE against a b-side read scoped by table+harness alone — so
+  # "these are the same offer, re-stamped" and "these are two DIFFERENT offers (b's never
+  # arrived; the row on a is one frame a authored itself for the same fleet)" produced the
+  # IDENTICAL output. A fleet slug is not an identity: `resource:delegate` can emit more than
+  # one offer for a fleet, and the honor/spawn path on a publishes its own rows against the
+  # same fleet. So every clock is now emitted KEYED BY offer_id@publisher, and b's own stored
+  # row is read too — capture stamps the outbox op straight from that row (mig 423/528:
+  # ts = row.fed_ts, op_hlc = row.fed_hlc), so b.row is the wire clock with an identity
+  # attached. Pair by the key FIRST; only compare clocks within one key. If no key appears on
+  # both sides, the answer is "b's offer never arrived", NOT "it arrived and was re-stamped".
+  local b_clock a_clock b_row_clock
   b_clock="$(drv_psql b "SELECT COALESCE(string_agg(ts||'|'||COALESCE(op_hlc,'<null-hlc>'), ' '), '<no outbox row>') FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr '\n' ' ')"
-  a_clock="$(drv_psql a "SELECT COALESCE(string_agg(COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  b_row_clock="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  a_clock="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
   if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then
     verdict="NEVER-LEFT-B (outbox QUARANTINED on b — the row crossed the retry threshold and is excluded from the drain batch, mig 645; a b-side publish fault, NOT convergence timing)"
   elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
@@ -112,7 +131,7 @@ _soffer_diag_b_to_a() {
   else
     verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
   fi
-  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} vs a.row(fed_ts|fed_hlc)=${a_clock:-<unreadable>} [equal ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default]"
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default]"
 }
 
 scn_seat_offer() {

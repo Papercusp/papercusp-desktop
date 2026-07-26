@@ -250,6 +250,84 @@ vm_assert_uniform_sidecar() {
   done
 }
 
+# vm_build_provenance <vmname> — echo "<sha>|<version>" as reported by the app's
+# OWN GET /api/health, or empty when no operator answers.
+#
+# Discovers the operator port in-VM (the packaged app binds a DYNAMIC loopback
+# port each boot, and other listeners exist) by probing each listening 127.0.0.1
+# port and keeping the one whose /api/health identifies as papercusp-operator.
+vm_build_provenance() {
+  vm_ssh "$1" '
+    for p in $(ss -ltnH 2>/dev/null | grep -o "127\.0\.0\.1:[0-9]*" | cut -d: -f2 | sort -u); do
+      r="$(curl -s --max-time 3 "http://127.0.0.1:$p/api/health" 2>/dev/null)" || continue
+      case "$r" in
+        *papercusp-operator*)
+          s="$(printf "%s" "$r" | sed -n "s/.*\"sha\":\"\([^\"]*\)\".*/\1/p")"
+          v="$(printf "%s" "$r" | sed -n "s/.*\"version\":\"\([^\"]*\)\".*/\1/p")"
+          printf "%s|%s\n" "$s" "$v"
+          exit 0 ;;
+      esac
+    done' 2>/dev/null | tr -d '\r' | head -1
+}
+
+# vm_assert_build_provenance <vmname>... — die unless every named VM runs a build
+# that can IDENTIFY ITSELF (and, when RIG_EXPECT_SHA is set, identifies as the
+# commit under test).
+#
+# WI-6212: vm_assert_uniform_sidecar above proves the VMs match EACH OTHER. It
+# cannot see the case where they match and are BOTH stale — a uniformly-wrong rig
+# reports confident, reproducible, wrong answers with nothing anywhere disagreeing.
+#
+# The signal is free and unambiguous: PAPERCUSP_BUILD_VERSION is baked FROM
+# src-tauri/tauri.conf.json's version by bin/build-linux-local.sh and
+# bin/release-local.sh, and forwarded into the sidecar's env by main.rs, so a
+# provenance-setting build ALWAYS reports that real version. version=="0.0.0"
+# (build-info.ts's last-resort fallback) therefore means the artifact was built by
+# a path that set neither var — a bare `npx tauri build` rather than the build
+# scripts. That is exactly the state the WI-6209 rig was in: version 0.0.0 and
+# sha null while the .deb on disk was 0.0.13.
+#
+# Deliberately NOT a byte-grep of the binary for the short sha: a 7-char hex
+# string can occur incidentally in a 23MB binary, and that failure direction is a
+# FALSE PASS — the dangerous one for a guard.
+#
+# ESCAPE HATCH: RIG_ALLOW_UNPROVENANCED=1 downgrades this to a warning, for a peer
+# mid-investigation who must not be hard-blocked on a multi-GB rebuild. Precedent:
+# PAPERCUSP_ALLOW_DIRTY in bin/release-local.sh. Using it INVALIDATES any
+# "the rig ran the code under test" claim from that run — say so in the report.
+vm_assert_build_provenance() {
+  local vm rec sha ver
+  for vm in "$@"; do
+    rec="$(vm_build_provenance "$vm")"
+    if [ -z "$rec" ]; then
+      die "no operator answered /api/health on '$vm' — cannot establish which build this" \
+        "VM is running. REFUSING: a rig that cannot identify its build produces confident" \
+        "wrong answers (WI-6209/WI-6212)."
+    fi
+    sha="${rec%%|*}"; ver="${rec#*|}"
+    echo "  $vm build: sha=${sha:-<null>} version=${ver:-<none>}"
+    if [ -z "$sha" ] || [ "$ver" = "0.0.0" ] || [ -z "$ver" ]; then
+      if [ "${RIG_ALLOW_UNPROVENANCED:-0}" = "1" ]; then
+        warn "'$vm' reports sha=${sha:-<null>} version=${ver:-<none>} — an UNPROVENANCED build." \
+          "Continuing only because RIG_ALLOW_UNPROVENANCED=1. This run CANNOT support any claim" \
+          "that the rig ran the code under test."
+        continue
+      fi
+      die "'$vm' reports sha=${sha:-<null>} version=${ver:-<none>} — this artifact carries NO" \
+        "build provenance, so it is impossible to tell whether it contains the code under test." \
+        "Both VMs being uniformly stale looks IDENTICAL to both being current (WI-6212)." \
+        "FIX: rebuild the .deb with bin/build-linux-local.sh (it sets PAPERCUSP_BUILD_SHA and" \
+        "PAPERCUSP_BUILD_VERSION; a bare 'npx tauri build' does NOT) and reinstall on both VMs." \
+        "Override for an unrelated investigation: RIG_ALLOW_UNPROVENANCED=1."
+    fi
+    if [ -n "${RIG_EXPECT_SHA:-}" ] && [ "$sha" != "$RIG_EXPECT_SHA" ]; then
+      die "'$vm' runs build sha '$sha' but this run expects '$RIG_EXPECT_SHA' — the rig is" \
+        "STALE relative to the commit under test. Reinstall both VMs from an artifact built" \
+        "at $RIG_EXPECT_SHA and re-run."
+    fi
+  done
+}
+
 # vm_assert_dht_isolated <vmname> — die when the app on that VM joined the PUBLIC
 # DHT while this run intended an isolated testnet.
 #

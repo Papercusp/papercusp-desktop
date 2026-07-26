@@ -116,9 +116,26 @@ else
   bad "substrate_outbox reads must all filter harness_slug — $_sob_scoped/$_sob_all scoped"
 fi
 
+# 8. ROW IDENTITY IN THE CLOCK PROBE. The WI-6210 clock reads decide "the same offer was
+# re-stamped locally" vs "b's offer never arrived and this is a different row a authored
+# itself" — and those two have IDENTICAL output if the clocks are emitted without a key.
+# Run 184106 was read the first way off exactly that ambiguity. Every clock read must carry
+# offer_id@publisher, and b's own stored row must be read alongside the outbox, so the two
+# sides can be paired before any clock is compared.
+_clk_all="$(grep -c 'COALESCE(fed_hlc' "$SCN")"
+_clk_keyed="$(grep -c "offer_id||'@'||publisher_github_user_id" "$SCN")"
+if [ "$_clk_all" -gt 0 ] && [ "$_clk_all" = "$_clk_keyed" ]; then
+  ok "all $_clk_all fed_hlc clock reads are keyed by offer_id@publisher (pairable, not fleet-scoped alone)"
+else
+  bad "every fed_hlc clock read must be keyed by offer_id@publisher — $_clk_keyed/$_clk_all keyed"
+fi
+grep -q 'PAIR BY offer@pub FIRST' "$SCN" \
+  && ok "the FAIL line tells the reader to pair by key BEFORE comparing clocks" \
+  || bad "the FAIL line must instruct pairing by offer@pub before comparing clocks"
+
 echo
 if [ "$fails" = 0 ]; then
-  echo "PASS — seat-offer-diag selftest (6/6)"
+  echo "PASS — seat-offer-diag selftest (all checks)"
   exit 0
 fi
 echo "FAIL — seat-offer-diag selftest: $fails check(s) failed"
