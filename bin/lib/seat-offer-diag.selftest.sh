@@ -138,6 +138,21 @@ grep -q 'PAIR BY offer@pub FIRST' "$SCN" \
   && ok "the FAIL line tells the reader to pair by key BEFORE comparing clocks" \
   || bad "the FAIL line must instruct pairing by offer@pub before comparing clocks"
 
+# 9. KIND SCOPE ON THE VERDICT READ. Step 4 asserts on offer_kind='seat'; the classifier's
+# presence count must assert on the SAME kind. Scoped by fleet_slug alone it counted EVERY
+# kind, and p2p_work_offers carries non-seat rows for the same fleet (spawn-request records
+# go through the sibling putWorkOffer call site) — so one non-seat row flipped the verdict to
+# ARRIVED-NOT-REMOTE ("arrived, apply path at fault") while the seat offer under test had
+# never arrived. Opposite diagnoses, identical output.
+grep -q "p2p_work_offers WHERE fleet_slug='\$slug' AND offer_kind='seat';" "$SCN" \
+  && ok "the ARRIVED/LOST verdict count is scoped to offer_kind='seat' (matches step 4's assert)" \
+  || bad "the verdict's presence count must filter offer_kind='seat' — an unrelated kind on the same fleet flips the verdict"
+# …while the BREAKDOWN must stay kind-UNfiltered and name the kind, so a stray non-seat row
+# is visible to the reader rather than silently filtered into '<no row for this fleet>'.
+grep -q "kind='||kd" "$SCN" \
+  && ok "the breakdown reports offer_kind per row (a stray non-seat row stays visible)" \
+  || bad "the breakdown must name offer_kind per row rather than hiding non-seat rows"
+
 echo
 if [ "$fails" = 0 ]; then
   echo "PASS — seat-offer-diag selftest (all checks)"
