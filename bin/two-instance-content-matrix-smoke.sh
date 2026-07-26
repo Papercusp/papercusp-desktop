@@ -438,7 +438,23 @@ else
   echo "owner-admits-joiner-delay=UNMEASURED (no announce_admitted/owner_admit_joiner row on A at/after the join stamp — WI-5673 probe)"
 fi
 UNPAIRED_A="$(grep -ac 'swarm:unpaired' "${FED_LOG[a]}" 2>/dev/null || true)"
-echo "A-announce-channel-unpaired-escalations=${UNPAIRED_A:-0} (>0 = a live-but-never-paired announce channel on A — the suspected source of the admission delay)"
+# THE DISCRIMINATOR between the only two mechanisms that can produce that delay (boot.ts
+# resolveSameHiveMember / swarm.ts:2569). They are mutually exclusive and this splits them:
+#  (a) DELIVERY  — the announce never reached A because the announce channel held live
+#      connections but never paired. Nothing is buffered, so there is NOTHING to retry;
+#      T is set by when pairing finally succeeds. Signature: unpaired>0 AND pending=0.
+#  (b) ADMISSION — the announce arrived but A's decision missed (A could not yet resolve
+#      its hive home / canonical ownership / the joiner's membership), so the frame was
+#      BUFFERED into pendingPeers and re-tried every 5s for up to 30min. T is set by when
+#      A's own state resolves, NOT by the network. Signature: pending>0.
+# Note the reverse direction has NO such delay by construction: a fresh joiner admits the
+# OWNER instantly via the owner-bootstrap path (boot.ts WI-787/WI-780 — it trusts the one
+# owner_device_pubkey bound by the signed hive-announce, precisely because the joiner's
+# member roster is still empty). There is no mirror of that anchor for the owner admitting
+# a joiner, which is why the delay is member→owner-only.
+PENDING_A="$(q a "SELECT count(*)::text FROM harness_shared.boot_history_events WHERE kind='announce_pending' AND ts >= ${JOIN_MS:-0};" || true)"
+PENDING_A="$(printf '%s' "$PENDING_A" | tr -dc '0-9')"
+echo "A-announce-channel-unpaired-escalations=${UNPAIRED_A:-0}  A-announce-pending-buffered=${PENDING_A:-0}  (WI-5673 discriminator: pending>0 ⇒ ADMISSION-side (announce arrived, A's own state was not ready); pending=0 AND unpaired>0 ⇒ DELIVERY-side (announce never paired through))"
 
 CONTENT_OVERALL=PASS
 [ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE
