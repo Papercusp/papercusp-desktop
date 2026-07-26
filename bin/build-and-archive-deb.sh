@@ -200,7 +200,7 @@ BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK:-$CARGO_TARGET/.deb-bundle.lock}"
 BUNDLE_LOCK_WAIT="${PAPERCUSP_DEB_BUNDLE_LOCK_WAIT:-3600}"
 mkdir -p "$(dirname "$BUNDLE_LOCK")"
 
-# --- HARD BUILD TIMEOUT (EI-18721897570279658) ------------------------------
+# --- HARD BUILD TIMEOUT (EI-18721897570279658, hardened EI-18726398328755840) -
 #
 # BUNDLE_LOCK_WAIT above bounds how long a LOSER waits to ACQUIRE the lock —
 # it does nothing to bound how long the WINNER may hold it. A build that
@@ -213,15 +213,84 @@ mkdir -p "$(dirname "$BUNDLE_LOCK")"
 # next scheduled deb build behind cargo's target-dir lock and burning a real
 # CPU core the whole time as phantom host load.
 #
-# FIX: wrap the build in `timeout` so it fails LOUDLY after a bounded duration
-# instead of squatting silently — the exact same "bounded wait, fail loud"
-# shape BUNDLE_LOCK_WAIT already applies to lock acquisition, just applied to
-# the build's own execution. Default is generous (a clean release build here
-# runs single-digit minutes) so it only fires on a genuine wedge; override
-# with PAPERCUSP_DEB_BUILD_TIMEOUT_SEC for a deliberately long build (e.g. a
-# cold cache on a fresh box). `--kill-after` escalates to SIGKILL if the
-# build ignores the initial SIGTERM.
+# FIX (original): wrap the build in `timeout` so it fails LOUDLY after a
+# bounded duration instead of squatting silently, then kill the whole PROCESS
+# GROUP on the way out (`kill -TERM/-KILL "-$BUILD_PGID"`) so a killed build
+# cannot orphan into the shared staging dir.
+#
+# HARDENING (EI-18726398328755840): that process-GROUP-based enforcement was
+# observed live to NOT fire on a real npm/tauri build — 74min+ past the
+# 3630s cap, the `timeout` monitor process had vanished from the box entirely
+# (not wedged — gone) while the real build chain kept running, its topmost
+# surviving process reparented directly under this script with no
+# setsid/timeout process left in between. Signalling one process GROUP is
+# provably defeatable the moment ANY descendant in the real
+# npm -> tauri -> cargo -> bundler chain calls setsid()/setpgid() to detach
+# itself into a NEW session (a common thing: daemonizing helpers, persistent
+# workers, cargo build-script children, ...) — proven directly on this box
+# (a `setsid`-escaped grandchild survives `kill -TERM "-$PGID"` every time),
+# while a cgroup the whole tree was born into still reaches it, because
+# cgroup-v2 membership is inherited by every fork regardless of
+# session/process-group changes, and escaping it requires a privileged
+# migration no build tool performs. This is the SAME shape already
+# established in this codebase for exactly this reason — see
+# packages/operator-core/lib/p2p/sandbox/enforcement-kill.ts, which documents
+# 'cgroup-freeze-kill' as the FULL guarantee and a bare pid/pgid kill as its
+# explicitly weaker fallback.
+#
+# So: the whole build subtree is (best-effort) placed in a dedicated cgroup
+# at launch, and TWO independent mechanisms now enforce the deadline — the
+# original `timeout` (cheap, still helps in the common case) AND a
+# from-scratch watchdog that does not trust `timeout`'s own process to
+# survive: it independently re-checks the cgroup well past the same deadline
+# and force-kills it if anything is still alive, however that happened to
+# survive — so a repeat of "the monitor itself vanished" no longer means
+# unbounded runtime. Degrades gracefully to today's process-group-only
+# behavior when cgroup v2 isn't available/delegated — never fails the build
+# over this.
 BUILD_TIMEOUT_SEC="${PAPERCUSP_DEB_BUILD_TIMEOUT_SEC:-3600}"
+WATCHDOG_GRACE_SEC="${PAPERCUSP_DEB_WATCHDOG_GRACE_SEC:-45}"
+
+CGROOT="${PAPERCUSP_CGROUP_ROOT:-/sys/fs/cgroup}"
+BUILD_CGROUP=""
+if [ "$(stat -fc %T "$CGROOT" 2>/dev/null)" = cgroup2fs ]; then
+  SELF_CG_REL="$(awk -F: '{print $3}' /proc/self/cgroup 2>/dev/null | head -1)"
+  if [ -n "$SELF_CG_REL" ]; then
+    CAND="$CGROOT$SELF_CG_REL/papercusp-deb-build-$$-$(date +%s%N 2>/dev/null || echo 0)"
+    if mkdir -p "$CAND" 2>/dev/null; then
+      BUILD_CGROUP="$CAND"
+      echo "==> build subtree bounded to cgroup $BUILD_CGROUP (kill reaches it even if a descendant escapes its process group/session)"
+    fi
+  fi
+fi
+if [ -z "$BUILD_CGROUP" ]; then
+  echo "NOTE: no delegated cgroup v2 available under $CGROOT — falling back to process-group-only enforcement (weaker: a descendant that escapes its session/process group via setsid/setpgid will not be reached by the timeout kill; see EI-18726398328755840)." >&2
+fi
+
+# Definitive kill of the whole build subtree: freeze first (stop it from
+# forking MORE escapees mid-kill), TERM everything for a graceful chance to
+# flush/exit cleanly, then the unconditional cgroup.kill (SIGKILL, cannot be
+# dodged by any process in the cgroup, escaped session or not) as the
+# backstop. Safe to call repeatedly / when BUILD_CGROUP is unset or gone.
+kill_build_cgroup() {
+  [ -n "$BUILD_CGROUP" ] && [ -d "$BUILD_CGROUP" ] || return 0
+  echo 1 > "$BUILD_CGROUP/cgroup.freeze" 2>/dev/null || true
+  while IFS= read -r _p; do kill -TERM "$_p" 2>/dev/null || true; done < "$BUILD_CGROUP/cgroup.procs" 2>/dev/null || true
+  echo 0 > "$BUILD_CGROUP/cgroup.freeze" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    [ -s "$BUILD_CGROUP/cgroup.procs" ] 2>/dev/null || break
+    sleep 1
+  done
+  echo 1 > "$BUILD_CGROUP/cgroup.kill" 2>/dev/null || true
+}
+
+cleanup_build_cgroup() {
+  [ -n "$BUILD_CGROUP" ] && [ -d "$BUILD_CGROUP" ] || return 0
+  for _ in 1 2 3 4 5; do
+    rmdir "$BUILD_CGROUP" 2>/dev/null && return 0
+    sleep 1
+  done
+}
 
 BUILD_PGID=""
 stop_build_group() {
@@ -234,6 +303,8 @@ stop_build_group() {
     done
     kill -KILL "-$BUILD_PGID" 2>/dev/null || true
   fi
+  kill_build_cgroup
+  cleanup_build_cgroup
 }
 trap stop_build_group EXIT INT TERM
 
@@ -249,13 +320,48 @@ echo "==> holding deb bundle lock ($BUNDLE_LOCK)"
 
 echo "=== building ($BUILD_CMD), bounded to ${BUILD_TIMEOUT_SEC}s ==="
 set +e
-setsid timeout --signal=TERM --kill-after=30 "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
+run_build_bounded() {
+  # Self-migrate into the cgroup as our OWN very first act (before setsid /
+  # exec) so cgroup-v2 membership is inherited by every descendant from
+  # birth — no race against something forking before we get a chance to
+  # move it. $BASHPID (not $$, which bash deliberately keeps pinned to the
+  # top-level shell's pid even inside a backgrounded subshell) is the real
+  # pid of THIS process, matching what the caller's $! captured.
+  if [ -n "$BUILD_CGROUP" ]; then
+    echo "$BASHPID" > "$BUILD_CGROUP/cgroup.procs" 2>/dev/null || true
+  fi
+  exec setsid timeout --signal=TERM --kill-after=30 "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD"
+}
+run_build_bounded &
 BUILD_PGID=$!
+
+# Independent watchdog (EI-18726398328755840): does NOT trust `timeout`'s own
+# process to still be alive to enforce anything — it just re-checks the
+# CGROUP well past the same deadline (kill-after's 30s + a further grace) and
+# force-kills it if anything is still alive, however that happened to
+# survive. A no-op in the normal case: the cgroup is already empty by the
+# time this would fire, and it is killed the moment the build finishes.
+WATCHDOG_PID=""
+if [ -n "$BUILD_CGROUP" ]; then
+  ( sleep "$((BUILD_TIMEOUT_SEC + 30 + WATCHDOG_GRACE_SEC))"
+    if [ -s "$BUILD_CGROUP/cgroup.procs" ] 2>/dev/null; then
+      echo "WATCHDOG: build subtree still alive well past its ${BUILD_TIMEOUT_SEC}s+kill-after deadline — the primary timeout enforcement did not land (EI-18726398328755840). Forcing the cgroup kill." >&2
+      kill_build_cgroup
+    fi
+  ) &
+  WATCHDOG_PID=$!
+fi
+
 wait "$BUILD_PGID"
 BUILD_RC=$?
+if [ -n "$WATCHDOG_PID" ]; then
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+fi
 set -e
 BUILD_PGID=""
-if [ "$BUILD_RC" -eq 124 ] || [ "$BUILD_RC" -eq 137 ]; then
+cleanup_build_cgroup
+if [ "$BUILD_RC" -eq 124 ] || [ "$BUILD_RC" -eq 137 ] || [ "$BUILD_RC" -eq 143 ]; then
   echo "FATAL: build exceeded the ${BUILD_TIMEOUT_SEC}s timeout and was killed (rc=$BUILD_RC)." >&2
   echo "       This is very likely a WEDGED build (stuck toolchain fetch, a runaway" >&2
   echo "       linker, an orphaned process from a prior session) rather than a merely" >&2
