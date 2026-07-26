@@ -830,8 +830,15 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # conflated the cut with WI-259's content stall (false-RED); this is the true, independent proof.
 
   # K0 — B received join-time epoch keys over the wire (origin=remote ⇒ the grant + federation worked).
-  b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$b_keys" ] && [ "$b_keys" -ge 1 ] && rk_keys_ok=1
+  # WI-5828: this used to be a SINGLE-SHOT query with no retry, unlike every OTHER
+  # cross-instance assertion in this script (fed_merge_assert/fed_hive_merge_probe
+  # all poll tries*3s) — a slightly-slow epoch-key federation under host load then
+  # reads as a hard FAIL instead of "hasn't arrived yet". Poll like the rest do.
+  for _k0_i in $(seq 1 "${EPOCH_KEY_PROBE_TRIES:-20}"); do
+    b_keys="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$b_keys" ] && [ "$b_keys" -ge 1 ] && { rk_keys_ok=1; break; }
+    sleep 3
+  done
   echo "  K0 join-keys (B has wrapped epoch keys origin=remote): $([ "$rk_keys_ok" = 1 ] && echo "PASS ($b_keys)" || echo "FAIL ($b_keys)")"
 
   # CURRENT (pre-revoke) epoch on A = the max minted epoch (-1 ⇒ the grant never fired = K0 upstream fail).
@@ -862,8 +869,17 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   B_DEV="$(drv_psql a "SELECT member_device_pubkey FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH EXCEPT SELECT member_device_pubkey FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | head -1 | tr -d '[:space:]')"
 
   # K1 CONTROL — B's DEVICE held a key at the pre-revoke epoch (it COULD derive current content).
-  k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$B_DEV" ] && [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && rk_ctrl_ok=1
+  # WI-5828: poll like K0 above — same single-shot-vs-poll asymmetry against every
+  # other cross-instance assertion in this script (2 of 5 live WITNESS_PROBE=1 runs
+  # FAILed this leg alongside OTHER unrelated federation-timing flakes in the same
+  # run, consistent with a too-eager single-shot read rather than a real cut bug).
+  if [ -n "$B_DEV" ]; then
+    for _k1_i in $(seq 1 "${EPOCH_KEY_PROBE_TRIES:-20}"); do
+      k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+      [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && { rk_ctrl_ok=1; break; }
+      sleep 3
+    done
+  fi
   echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=$k1_bdev B_DEV=${B_DEV:0:12})")"
 
   # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
