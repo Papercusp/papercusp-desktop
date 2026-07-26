@@ -276,7 +276,12 @@ launch_vm_instance() {  # <inst> [wipe]   wipe=1 (first launch) clears PG state
   # DB). WIPE=0 (relaunch retry) PRESERVES the now-clean dir so the embedded-PG
   # spawn is a fast RESTART (~3s) that wins the desktop's 30s sidecar-start budget
   # instead of a fresh initdb (~20-30s) that loses it under concurrent 2-VM load.
-  WIPE="$wipe" vm_run "$name" <<'EOF'
+  # WI-6176: WIPE must be passed as a vm_run ARGUMENT, never as a `WIPE=… vm_run`
+  # shell prefix — vm_run is `ssh … 'bash -s'` and forwards no environment, so the
+  # prefix form left the guest with WIPE UNSET, took the ${WIPE:-1} wipe branch on
+  # EVERY relaunch, and made ensure_booted's preserve-the-data-dir retry (below)
+  # inert: each attempt re-ran a fresh ~20-30s initdb and lost the same race.
+  vm_run "$name" "WIPE=$wipe" <<'EOF'
 pkill -f papercusp-desktop 2>/dev/null; pkill -f 'sidecar/serve.mjs' 2>/dev/null
 pkill -f embedded-postgres 2>/dev/null; sleep 1
 rm -f ~/papercusp-app.log ~/.papercusp-workspaces/.shared/embedded-pg-data/postmaster.pid 2>/dev/null

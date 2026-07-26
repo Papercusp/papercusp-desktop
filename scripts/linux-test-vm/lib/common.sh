@@ -85,11 +85,34 @@ vm_scp() {  # vm_scp <name> <local-src> <remote-dst>
   scp $(_ssh_opts) -P "$ssh_port" "$src" "$VM_USER@127.0.0.1:$dst"
 }
 
-vm_run() {  # vm_run <name>   — run a script supplied on stdin inside the VM
-  local name="$1"
+vm_run() {  # vm_run <name> [VAR=VALUE ...]  — run a script supplied on stdin inside the VM
+  # ⚠ THIS FUNCTION FORWARDS NO ENVIRONMENT. The script arrives on the guest's
+  # stdin for `bash -s`, and _ssh_opts sets no SendEnv/SetEnv, so the shell-prefix
+  # form does NOT work and fails SILENTLY:
+  #
+  #     WIPE=0 vm_run "$name" <<'EOF'      # ✗ guest sees WIPE UNSET
+  #
+  # That sets the variable only in the LOCAL ssh process. It cost WI-6176: the
+  # federation driver's entire preserve-the-data-dir boot-retry was inert for its
+  # whole life because `${WIPE:-1}` defaulted to 1 in the guest on every relaunch,
+  # while the log line printed from the same guest affirmatively claimed otherwise.
+  #
+  # Pass guest environment as VAR=VALUE ARGUMENTS instead — they are prepended to
+  # the script stream as real assignments, so the guest genuinely sees them:
+  #
+  #     vm_run "$name" "WIPE=$wipe" <<'EOF'   # ✓
+  #
+  local name="$1"; shift
   local ssh_port; ssh_port="$(ports_for "$name" | awk '{print $1}')"
+  local pre="" kv
+  for kv in "$@"; do
+    case "$kv" in
+      [A-Za-z_]*=*) pre+="$(printf '%s=%q\n' "${kv%%=*}" "${kv#*=}")"$'\n' ;;
+      *) echo "vm_run: ignoring non-assignment argument '$kv' (expected VAR=VALUE)" >&2 ;;
+    esac
+  done
   # shellcheck disable=SC2046
-  ssh $(_ssh_opts) -p "$ssh_port" "$VM_USER@127.0.0.1" 'bash -s'
+  { printf '%s' "$pre"; cat; } | ssh $(_ssh_opts) -p "$ssh_port" "$VM_USER@127.0.0.1" 'bash -s'
 }
 
 wait_ssh() {  # wait_ssh <name> [timeout_sec]
