@@ -301,6 +301,11 @@ rig_server_gone()   { local code; code="$(rig_hz -o /dev/null -w '%{http_code}' 
 # banking must never abort or mask the run's actual verdict.
 RIG_BANK_DIR="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
 RIG_BANK_KEEP="${RIG_BANK_KEEP:-200}"
+# WI-6070 (2026-07-26): how many FAILURE bundles (fail/<stamp>/ dirs) to keep.
+# Counted in DIRECTORIES, not files, and bounded SEPARATELY from RIG_BANK_KEEP
+# so that abundant PASS banks can never evict scarce FAIL evidence — see the
+# rationale block above the fail-bundle hardlink below.
+RIG_BANK_FAIL_KEEP="${RIG_BANK_FAIL_KEEP:-60}"
 # EI-18660101091813036 (2026-07-26): this function already banked serve.log once,
 # unconditionally, in the EXIT trap — but ONLY once, at run end. serve.log is
 # CUMULATIVE across the whole matrix pass (the same "un-time-scoped" limitation
@@ -400,7 +405,58 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
       cp -f "$f" "$RIG_BANK_DIR/${base%.log}-$stamp.log" 2>/dev/null || true
     done
   fi
-  # bounded retention — keep the newest RIG_BANK_KEEP files across all patterns
+  # WI-6070 (2026-07-26): FAIL evidence must not compete with PASS noise ───────
+  # The retention below is ONE undifferentiated FIFO over every banked pattern.
+  # A single bank call writes ~20 files (2 serve + ~17 scn + 1 load) and a run
+  # that FAILS banks TWICE (the mid-run on-FAIL call from
+  # deb-hetzner-matrix.sh:350 plus the EXIT-trap call in rig_cleanup) — so
+  # RIG_BANK_KEEP=200 is only ~5-10 RUNS of history, not the open-ended window
+  # the ":394 survives for as long as RIG_BANK_KEEP" comment above implies.
+  #
+  # That FIFO is backwards for this workload: a PASS bank is regenerated FREE
+  # every hour by the gate timer, while a FAIL bank of an INTERMITTENT defect
+  # may be the ONLY copy that will ever exist. Treating them as equally
+  # disposable lets abundant PASS noise evict irreplaceable FAIL evidence — and
+  # it is self-defeating precisely when it matters most, because the more runs
+  # an investigation fires hunting an intermittent bug, the faster it evicts
+  # the one run that reproduced it. Proven live: the sole banked artifact of
+  # the WI-6043 revocation leak (stamp 090342, 13:03Z — the only
+  # revocation_kcut FAIL of the day) was GONE by 16:17Z, evicted by ~10
+  # subsequent all-PASS generations, while OLDER unrelated files from 00:55
+  # survived because they are not in the churning pattern set.
+  #
+  # A TAGGED bank IS a failure bank: deb-hetzner-matrix.sh:350 is the only
+  # caller that passes a tag, and it does so from its on-FAIL branch. So
+  # HARDLINK a tagged bank's files into fail/<stamp>/ — the same inodes, ~0
+  # extra bytes — and the FIFO below can unlink the flat name without
+  # destroying the content. Readers keep using the flat dir exactly as before;
+  # the fail/ bundle is the copy that survives, and it groups one failure's
+  # evidence into one dir, which is what a triager actually wants. Raising
+  # RIG_BANK_KEEP would NOT fix this — it only delays the eviction; the two
+  # populations have to stop competing. Best-effort/non-fatal throughout, same
+  # contract as the rest of this function.
+  if [ -n "$tag" ]; then
+    local faildir="$RIG_BANK_DIR/fail/$stamp" bf
+    if mkdir -p "$faildir" 2>/dev/null; then
+      for bf in "$RIG_BANK_DIR"/serve-*-"$stamp".log \
+                "$RIG_BANK_DIR"/load-"$stamp".txt \
+                "$RIG_BANK_DIR"/scn.*-"$stamp".log; do
+        [ -e "$bf" ] || continue
+        # hardlink first (free); fall back to a real copy if the link fails.
+        cp -l -f "$bf" "$faildir/" 2>/dev/null || cp -f "$bf" "$faildir/" 2>/dev/null || true
+      done
+      fed_log "bank: FAIL evidence bundled (prune-exempt) in $faildir — read THIS once the flat bank dir has rotated"
+      # Bounded separately, in DIRECTORIES, and far more generously: failures
+      # are rare, and these are hardlinks, so many months of them cost ~nothing.
+      ( cd "$RIG_BANK_DIR/fail" 2>/dev/null && ls -1dt */ 2>/dev/null \
+          | tail -n "+$((RIG_BANK_FAIL_KEEP + 1))" | xargs -r rm -rf -- ) 2>/dev/null || true
+    else
+      fed_log "bank: ⚠ cannot mkdir $faildir — FAIL evidence stays flat-only and WILL be FIFO-evicted by later passing runs"
+    fi
+  fi
+  # bounded retention — keep the newest RIG_BANK_KEEP files across all patterns.
+  # NOTE: this glob is deliberately non-recursive and cd-scoped, so the
+  # fail/<stamp>/ bundles above are never candidates for eviction.
   ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t serve-*.log load-*.txt scn.*-*.log 2>/dev/null \
       | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
 }
