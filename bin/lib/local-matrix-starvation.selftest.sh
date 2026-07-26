@@ -39,8 +39,15 @@ bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 # ── Extract the two starvation-downgrade functions (+ their shared whitelist var)
 #    from the REAL gate source and eval them, so this test exercises the shipping
 #    code (not a copy). ──
-FN_SRC="$(sed -n '/^STARVATION_PRONE_SCENARIOS=/p;/^local_matrix_only_starvation_prone_fails() {/,/^}/p;/^check_local_matrix_frame_starvation() {/,/^}/p' "$GATE")"
+#    _frame_lag_scan is the shared banked-serve.log scanner both the predicate and the
+#    verdict-line note (frame_pressure_note, EI-18716933933700596) are built on — it MUST be
+#    extracted too, or check_local_matrix_frame_starvation eval's fine and then fails at call
+#    time with "command not found". That failure mode is worse than a missing function: a
+#    non-zero exit reads as "not starved", so three of the cases below DEGENERATE INTO PASSES
+#    and only the two positive cases go red. Hence it is named in the presence guard as well.
+FN_SRC="$(sed -n '/^STARVATION_PRONE_SCENARIOS=/p;/^local_matrix_only_starvation_prone_fails() {/,/^}/p;/^_frame_lag_scan() {/,/^}/p;/^check_local_matrix_frame_starvation() {/,/^}/p' "$GATE")"
 if ! grep -q 'local_matrix_only_starvation_prone_fails()' <<<"$FN_SRC" \
+  || ! grep -q '_frame_lag_scan()' <<<"$FN_SRC" \
   || ! grep -q 'check_local_matrix_frame_starvation()' <<<"$FN_SRC"; then
   echo "SKIP: could not extract starvation-downgrade functions from $GATE (refactored/renamed?)"
   echo "      → if they were intentionally reshaped, update this selftest to match."
