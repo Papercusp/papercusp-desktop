@@ -58,9 +58,13 @@ function runGuard({ stampEpoch, patchEpoch, allowStale = false }) {
     // so the test exercises the REAL script text rather than a copy that can drift.
     const full = fs.readFileSync(scriptPath, 'utf8');
     const start = full.indexOf('# --- STALE-SIDECAR GUARD');
-    const end = full.indexOf('echo "=== building ($BUILD_CMD) ==="');
+    // End at the bundle-mutex block, NOT at the build echo: everything after this
+    // marker acquires a real flock (with a 1h wait) and installs signal traps, so
+    // slicing past it would make this unit test contend for the live build lock
+    // and potentially hang. Keep the extraction to the guard itself.
+    const end = full.indexOf('# --- BUNDLE MUTEX');
     assert.ok(start > 0, 'stale-sidecar guard block not found — did it get renamed or removed?');
-    assert.ok(end > start, 'guard must sit immediately before the build invocation');
+    assert.ok(end > start, 'guard must sit before the bundle-mutex block and the build');
 
     const marker = path.join(tmp, 'build-ran');
     const harness = [

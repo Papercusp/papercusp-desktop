@@ -122,8 +122,79 @@ if [[ -f "$SIDECAR_STAMP" && "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" != "1" ]]; th
   fi
 fi
 
+# --- BUNDLE MUTEX + PROCESS-GROUP OWNERSHIP (EI-18698595682442781) ----------
+#
+# The deb staging path ($CARGO_TARGET/<profile>/bundle/deb/<name>/) is a SINGLE
+# FIXED directory — not per-agent, not per-PID. On this shared box several agents
+# build concurrently, and two bundlers in that directory race on control/,
+# md5sums and data.tar.gz: one hashes a tree the other is rewriting, a file
+# vanishes mid-hash, and you get the thoroughly misleading
+#   `Failed to create md5sums file: No such file or directory (os error 2)`
+# which sends you hunting for filesystem debris instead of for a peer. Observed
+# live 2026-07-26 with three concurrent tauri builds owned by two agents.
+# Worse, a race can leave a PARTIAL .deb at the canonical output path that looks
+# complete by size — and anything selecting "the newest .deb" then ships stale
+# or truncated contents silently.
+#
+# `node_modules` has the same class of problem and got a mutex (install:safe +
+# scripts/lib/fs-mutex.mjs); this path had none. We use flock here rather than
+# that ESM helper to match the sibling build script (build-desktop-sidecar.sh
+# already locks with flock), keeping ONE locking idiom in this script family.
+#
+# fd 9 is held by THIS shell for the lock's lifetime. The build runs with fd 9
+# CLOSED (exec 9>&-) so that a daemonizing grandchild (sccache, node) cannot
+# inherit and retain the lock after we exit — the same hazard, and the same fix,
+# that test/build-desktop-sidecar-lock.test.js pins for the sidecar build.
+#
+# The build also runs via setsid, in its OWN process group, with a trap that
+# kills that group. Without this, killing the wrapper leaves `npm run build` ->
+# `tauri build` -> node ORPHANED and still writing to the shared staging dir
+# (observed: ~10 minutes of a killed build continuing to corrupt a peer's).
+# Note there is no safe pattern-kill alternative — a host-wide
+# `pkill -f 'tauri build'` kills peers' builds and is guarded against
+# (EI-18690252462401774), so owning our own process group is the only correct fix.
+BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK:-${TMPDIR:-/tmp}/papercusp-deb-bundle.lock}"
+BUNDLE_LOCK_WAIT="${PAPERCUSP_DEB_BUNDLE_LOCK_WAIT:-3600}"
+
+BUILD_PGID=""
+stop_build_group() {
+  if [ -n "$BUILD_PGID" ] && kill -0 "-$BUILD_PGID" 2>/dev/null; then
+    echo "==> stopping build process group $BUILD_PGID (so it cannot orphan into the shared staging dir)" >&2
+    kill -TERM "-$BUILD_PGID" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "-$BUILD_PGID" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "-$BUILD_PGID" 2>/dev/null || true
+  fi
+}
+trap stop_build_group EXIT INT TERM
+
+exec 9>"$BUNDLE_LOCK"
+if ! flock -w "$BUNDLE_LOCK_WAIT" 9; then
+  echo "FATAL: timed out after ${BUNDLE_LOCK_WAIT}s waiting for the deb bundle lock ($BUNDLE_LOCK)." >&2
+  echo "       Another agent is very likely mid-build against the same shared" >&2
+  echo "       \$CARGO_TARGET bundle directory. Check with:" >&2
+  echo "         pgrep -af 'tauri build'   # then read /proc/<pid>/environ for CLAUDE_CONFIG_DIR" >&2
+  exit 5
+fi
+echo "==> holding deb bundle lock ($BUNDLE_LOCK)"
+
 echo "=== building ($BUILD_CMD) ==="
-( cd "$DESKTOP_DIR" && eval "$BUILD_CMD" )
+set +e
+setsid bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
+BUILD_PGID=$!
+wait "$BUILD_PGID"
+BUILD_RC=$?
+set -e
+BUILD_PGID=""
+if [ "$BUILD_RC" -ne 0 ]; then
+  echo "FATAL: build failed (rc=$BUILD_RC)." >&2
+  echo "       If this was 'Failed to create md5sums file', suspect a CONCURRENT build" >&2
+  echo "       rather than filesystem debris — but note this script now holds a mutex," >&2
+  echo "       so a peer would have to be invoking 'npm run build' directly to collide." >&2
+  exit "$BUILD_RC"
+fi
 
 DEB_PATH="$(find "$DEB_DIR" -maxdepth 1 -iname '*.deb' -newer "$DESKTOP_DIR/package.json" 2>/dev/null | head -1)"
 if [ -z "$DEB_PATH" ]; then
