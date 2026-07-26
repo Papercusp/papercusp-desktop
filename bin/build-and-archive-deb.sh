@@ -341,9 +341,28 @@ BUILD_PGID=$!
 # force-kills it if anything is still alive, however that happened to
 # survive. A no-op in the normal case: the cgroup is already empty by the
 # time this would fire, and it is killed the moment the build finishes.
+#
+# Cooperative shutdown via a flag FILE, not a process-group kill: whether a
+# backgrounded job gets its OWN new process group here is a bash-config/
+# environment detail we cannot rely on (observed to differ between an
+# interactive top-level shell and a plain `bash -c` invocation) — a bare
+# `kill $WATCHDOG_PID` can leave its inner `sleep` orphaned (same pgid as
+# something else entirely) for the rest of a long grace window, holding this
+# script's stdout/stderr pipes open and hanging any caller reading them for
+# EOF (e.g. Node's spawnSync) well past the build's own real completion. A
+# short poll loop that exits the moment it sees the done-flag sidesteps that
+# uncertainty entirely — no reliance on pgid semantics at all.
 WATCHDOG_PID=""
+WATCHDOG_DONE_FLAG=""
 if [ -n "$BUILD_CGROUP" ]; then
-  ( sleep "$((BUILD_TIMEOUT_SEC + 30 + WATCHDOG_GRACE_SEC))"
+  WATCHDOG_DONE_FLAG="$(mktemp -u "${TMPDIR:-/tmp}/papercusp-deb-watchdog-done.XXXXXX")"
+  ( DEADLINE=$((BUILD_TIMEOUT_SEC + 30 + WATCHDOG_GRACE_SEC))
+    ELAPSED=0
+    while [ "$ELAPSED" -lt "$DEADLINE" ]; do
+      [ -e "$WATCHDOG_DONE_FLAG" ] && exit 0
+      sleep 1
+      ELAPSED=$((ELAPSED + 1))
+    done
     if [ -s "$BUILD_CGROUP/cgroup.procs" ] 2>/dev/null; then
       echo "WATCHDOG: build subtree still alive well past its ${BUILD_TIMEOUT_SEC}s+kill-after deadline — the primary timeout enforcement did not land (EI-18726398328755840). Forcing the cgroup kill." >&2
       kill_build_cgroup
@@ -355,8 +374,9 @@ fi
 wait "$BUILD_PGID"
 BUILD_RC=$?
 if [ -n "$WATCHDOG_PID" ]; then
-  kill "$WATCHDOG_PID" 2>/dev/null || true
+  : > "$WATCHDOG_DONE_FLAG" 2>/dev/null || true
   wait "$WATCHDOG_PID" 2>/dev/null || true
+  rm -f "$WATCHDOG_DONE_FLAG" 2>/dev/null || true
 fi
 set -e
 BUILD_PGID=""
