@@ -270,6 +270,60 @@ rig_local_teardown() {
 }
 if [ "$MODE" = teardown ]; then rig_local_teardown; echo "torn down."; exit 0; fi
 
+# ── gate-cycle advisory probe (EI-18723401175637819) ──────────────────────────
+# THE GAP this closes: the rig lock above only covers the RIG. It does NOT cover
+# HOST CORES — and rig_frame_exclusive() below escalates past mere affinity to a
+# cgroup-v2 exclusive partition that genuinely EVICTS the host fleet off 16-24
+# cores. live-federation-gate.sh runs a multi-phase cycle whose EARLIER phases
+# (two-instance-content-matrix-smoke.sh) are HOST-SIDE and take a *different*
+# lock ("${WORK}.flock"), reaching the rig lock only at its own local-matrix leg.
+# So during those earlier phases the rig lock is legitimately FREE, a targeted
+# `--only=...` run acquires it correctly (even with RIG_LOCK_WAIT_S=0), and the
+# eviction then lands on a gate phase with no protection from it. `pgrep -f
+# 'local-matrix.sh'` is no better: it is empty during exactly that window.
+#
+# The invariant to respect is "a host-wide core eviction is in effect", which is
+# a DIFFERENT and much shorter-lived resource than "the rig" — so this must NOT
+# be fixed by making the gate hold the rig lock for its whole ~30min cycle, which
+# would starve every agent's targeted run for half of every hour (the gate's own
+# §0z block warns about exactly that failure class, EI-18657324526667507).
+#
+# Instead: a NON-BLOCKING PROBE of the lock the gate ALREADY holds for its WHOLE
+# cycle (/tmp/pcusp-live-fed-gate.lock — see live-federation-gate.sh §GATE_SINGLETON).
+# Reuse, not a parallel lock; the exact inverse of the gate's own non-blocking rig
+# probe. It takes and immediately releases, never holds, never queues, never fails
+# the run. When a cycle IS in flight we WARN loudly with the holder and degrade
+# THIS run to affinity-only, which costs the gate nothing and costs this run only
+# some timing fidelity — the eviction, not the rig, was the harm.
+#   PCUSP_RIG_EXCLUSIVE=<n>   set explicitly ⇒ honoured as-is (no auto-degrade)
+#   PCUSP_RIG_GATE_PROBE=0    skip the probe entirely (pre-EI behaviour)
+GATE_LOCK_PATH="${PCUSP_GATE_LOCK:-/tmp/pcusp-live-fed-gate.lock}"
+
+# Echoes the in-flight gate holder and returns 0 when a cycle is running; returns
+# non-zero (silently) when idle, unprobeable, or flock is unavailable — an
+# undetectable gate must never block or alter the run.
+rig_gate_cycle_holder() {
+  local gl="$GATE_LOCK_PATH"
+  [ -f "$gl" ] || return 1                        # gate never ran here ⇒ nothing in flight
+  command -v flock >/dev/null 2>&1 || return 1    # cannot probe ⇒ stay out of the way
+  ( exec 8>>"$gl" || exit 0; flock -n 8 || exit 7; ) 2>/dev/null
+  [ $? -eq 7 ] || return 1                        # took it (idle) / could not open ⇒ not in flight
+  cat "$gl.holder" 2>/dev/null || echo 'unknown holder'
+  return 0
+}
+
+GATE_CYCLE_HOLDER=""
+if [ "${PCUSP_RIG_GATE_PROBE:-1}" = 1 ] && GATE_CYCLE_HOLDER="$(rig_gate_cycle_holder)"; then
+  log "WARN: a live-federation-gate CYCLE IS IN FLIGHT — held by: $GATE_CYCLE_HOLDER"
+  log "WARN: its host-side phases share this box's cores and take a DIFFERENT lock, so a free rig lock does NOT mean it is safe to evict cores (EI-18723401175637819)"
+  if [ -z "${PCUSP_RIG_EXCLUSIVE+set}" ]; then
+    RIG_EXCLUSIVE=0
+    log "WARN: degrading this run to AFFINITY-ONLY (no cgroup-v2 exclusive partition; host fleet NOT evicted) so the in-flight cycle is not starved — PCUSP_RIG_EXCLUSIVE=1 forces exclusive cores anyway, PCUSP_RIG_GATE_PROBE=0 skips this probe"
+  else
+    log "WARN: PCUSP_RIG_EXCLUSIVE=$PCUSP_RIG_EXCLUSIVE set explicitly — honouring it; exclusive cores WILL evict the host fleet off that gate cycle's phases"
+  fi
+fi
+
 command -v docker >/dev/null || { echo "FATAL: docker not found — the containerized rig needs it" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "FATAL: docker daemon unreachable (is the caller in the docker group?)" >&2; exit 1; }
 
