@@ -186,6 +186,16 @@ fed_log "wait embedded-PG + operator on every sidecar"
 # markers appear) on a genuinely wedged boot.
 rig_wait_all_ready 100 || exit 5
 
+# WI-6043 (2026-07-26): explicitly ARM the epoch re-key (K-cut) flag on every frame
+# BEFORE hive creation, so the owner's epoch initializes with the re-key on from the
+# start — see rig_arm_hive_rekey's doc comment (deb-hetzner-rig.sh) for why relying on
+# the flag's compiled DEFAULT-ON alone left revocation_kcut's cut-off never actually
+# engaged on this rig (epoch stuck at 0 for entire runs; the two prior clean passes were
+# very likely a propagation-lag race, not a real cut-off).
+rig_arm_hive_rekey a
+rig_arm_hive_rekey b
+[ "$FRAME3" = 1 ] && rig_arm_hive_rekey c
+
 # owner publishes the hive; every frame joins it (owner self-joins as a VIEW)
 REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
 rig_owner_publish_hive a "$REPO_URL" || exit 6

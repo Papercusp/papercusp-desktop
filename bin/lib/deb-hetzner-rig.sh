@@ -898,6 +898,41 @@ rig_wait_all_ready() {
   local inst; for inst in "${RIG_FRAMES[@]}"; do rig_wait_frame_ready "$inst" "${1:-50}" || return 5; done
 }
 
+# rig_arm_hive_rekey <inst> — explicitly ARM the papercusp-hive-rekey (POT_REKEY) flag on
+# <inst>'s sidecar via the loopback POST /api/flags/set route (auth:'loopback', same trust
+# tier rig_ban_member's bearer-gated revoke route needs 'trusted' for — this route needs
+# none). WI-6043 (2026-07-26, live-federation-gate revocation_kcut FAIL — post-ban content
+# LEAK to the banned member): although `papercusp-hive-rekey` is DEFAULT-ON in source
+# (libs/flags/src/types.ts — graduated 2026-06-29, not in DARK_FLAGS), a live rig run
+# (HEAD=bbb4404626) showed the hive epoch NEVER advanced past 0 for the WHOLE run (grepped
+# both frames' full banked serve.log — zero "epoch=1" or higher anywhere), which is
+# EXACTLY the symptom `advanceEpochOnHiveBoundary` produces when `isHiveRekeyEnabled()`
+# resolves false (it early-returns `{applied:false}` with NO throw and, before this same
+# WI's boot-history.ts fix, no stdout signal either — see rekey_boundary_skipped below).
+# With the epoch stuck at 0, post-ban content stays encrypted (or plaintext) under the
+# SAME key the banned member already holds, so of course it "leaks" — there is no
+# cryptographic cut-off to test. This is the SAME class of gap
+# two-instance-hive-from-repo-smoke.sh already hit and fixed (su-9140a, 2026-06-19): "the
+# env recipe PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 does NOT engage getFlag(HIVE_REKEY) on
+# the packaged binary (verified: owner had 0 hive_epoch_keys)" — that rig's fix was this
+# exact explicit /api/flags/set call, made BEFORE hive creation so the owner's epoch
+# initializes with the re-key on from the start. None of the deb-hetzner-*.sh rigs ever
+# did this (verified: zero references before this fix), so revocation_kcut's K-cut leg was
+# never actually armed on them — the two prior clean 2026-07-25 passes were very likely a
+# race (replication lag exceeding the negative-assert window), not a real cut-off, and
+# today's other latency fixes (WI-5980/WI-5639) sped propagation up enough to unmask it.
+# Best-effort/non-fatal (logs but never aborts the rig on a flags-route hiccup) — the
+# scenario's own negative assert is still the real pass/fail signal; this only ensures the
+# mechanism it's testing is actually turned on.
+rig_arm_hive_rekey() {
+  local inst="$1" resp
+  resp="$(drv_exec "$inst" <<EOF
+curl -s -m 15 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/flags/set -H 'content-type: application/json' -d '{"key":"papercusp-hive-rekey","enabled":true}'
+EOF
+)"
+  fed_log "[$inst] arm papercusp-hive-rekey → $(printf '%s' "$resp" | head -c 160)"
+}
+
 # ── owner publishes the hive (from-repo) → resolve hiveId/pubkey/memberLink ───
 # rig_owner_publish_hive <owner-inst> <repo_url> — POST pots/from-repo on the
 # owner, then resolve the THREE fields /api/discovery/join-pot needs

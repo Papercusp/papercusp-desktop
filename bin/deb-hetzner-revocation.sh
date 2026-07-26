@@ -271,6 +271,14 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   fed_log "wait embedded-PG + operator on all sidecars"
   rig_wait_all_ready 50 || exit 5
 
+  # WI-6043 (2026-07-26): arm the epoch re-key (K-cut) flag BEFORE hive creation — see
+  # rig_arm_hive_rekey's doc comment (deb-hetzner-rig.sh). Without this, this scenario's
+  # own cut-off assertion tests nothing: the epoch never advances, so post-ban content
+  # stays under the key the banned member already holds.
+  rig_arm_hive_rekey a
+  rig_arm_hive_rekey b
+  [ "$WITH_VALID" = 1 ] && rig_arm_hive_rekey c
+
   REPO_URL="${HIVE_REPO_URL:-https://github.com/octocat/Hello-World}"
   rig_owner_publish_hive a "$REPO_URL" || exit 6
   rig_join_all a   # a (owner self-join) + b [+ c]
