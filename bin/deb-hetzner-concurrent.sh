@@ -230,8 +230,10 @@ scenario_concurrent_lww() {
 
   # ── report ────────────────────────────────────────────────────────────────────
   fed_log "RESULT (2-frame .deb sidecar, Hetzner ${RIG_STYPE:-?} ${LOC_A:-?}+${LOC_B:-?}, public DHT)"
-  echo "disc a↔b=$([ "$disc_ab" = 0 ] && echo PASS || echo FAIL)  roster-gate(owner→joiner precond)=$([ "$roster_ok" = 1 ] && echo PASS || echo FAIL)  phase1(different-keys/no-loss)=$([ "$phase1_pass" = 1 ] && echo PASS || echo FAIL)  phase2(same-key/LWW-converge)=$([ "$phase2_pass" = 1 ] && echo PASS || echo FAIL)"
-  if [ "$disc_ab" = 0 ] && [ "$roster_ok" = 1 ] && [ "$phase1_pass" = 1 ] && [ "$phase2_pass" = 1 ]; then
+  # EI-18687938054040755: rig_wait_swarm exit 2 = build predates the
+  # peer_data_path_up emitter ⇒ discovery UNMEASURED = N/A, not FAIL (EI-505 contract).
+  echo "disc a↔b=$(case "$disc_ab" in 0) echo PASS ;; 2) echo SKIP ;; *) echo FAIL ;; esac)  roster-gate(owner→joiner precond)=$([ "$roster_ok" = 1 ] && echo PASS || echo FAIL)  phase1(different-keys/no-loss)=$([ "$phase1_pass" = 1 ] && echo PASS || echo FAIL)  phase2(same-key/LWW-converge)=$([ "$phase2_pass" = 1 ] && echo PASS || echo FAIL)"
+  if { [ "$disc_ab" = 0 ] || [ "$disc_ab" = 2 ]; } && [ "$roster_ok" = 1 ] && [ "$phase1_pass" = 1 ] && [ "$phase2_pass" = 1 ]; then
     echo "OVERALL: PASS — concurrent bidirectional writes converge conflict-free (no loss on different keys; deterministic LWW winner on the same key) across 2 separate Hetzner VMs (real public DHT)"; return 0
   fi
   echo "OVERALL: INCOMPLETE — see [swarm] diagnostics + /home/pcusp/serve.log on each frame"; return 6

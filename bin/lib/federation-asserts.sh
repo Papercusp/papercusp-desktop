@@ -715,13 +715,45 @@ EOF
 # ── discovery ───────────────────────────────────────────────────────────────
 
 # fed_wait_discovery <instA> <instB> <mode> [tries]
-#   strict — require the always-on [swarm] peer_connected line; a [swarm] join
-#            FAILED line on either side fails immediately (post-2026-06-02 debs).
-#   loose  — the older federation-smoke grep (peer_connected|peer connected|
-#            onAnnounce|admit), warn-only semantics left to the caller.
-# Echoes 1 (discovered) or 0.
+#   strict — require [swarm] peer_data_path_up, the line that proves a BYTE
+#            CROSSED. A [swarm] join FAILED line on either side fails
+#            immediately. If the running artifact predates that emitter, echoes
+#            "skip" (see the capability preflight below) — callers must treat
+#            skip as N/A, not FAIL, when computing OVERALL.
+#   loose  — legacy signalling-level markers. NEVER a discovery verdict: it
+#            echoes WARN, never HIT, and fed_wait_discovery never returns 1 for
+#            it. Kept only so an old caller can still surface a hint.
+# Echoes 1 (data path proven) · 0 (not proven / join FAILED) · skip (N/A).
+#
+# EI-18687938054040755 — WHY THIS ASSERTS ON peer_data_path_up AND NOT
+# peer_connected. The product deliberately reports a tri-state: boot.ts logs
+# `peer_connected(signalling-only) (data path NOT yet demonstrated)` for a
+# connection that has NOT carried a byte. The old strict leg grepped a bare
+# `[swarm] peer_connected` with no word boundary, so it MATCHED that very line
+# — "peers discovered" passed on connections that never moved data, and every
+# federation green before 2026-07-26 is suspect because of it. Verified
+# mechanically: printf that line | grep -qE '\[swarm\] peer_connected' MATCHES.
+# The negative regression in federation-asserts.selftest.sh exists so that
+# loosening this pattern later fails a test instead of silently restoring the
+# false-PASS. DO NOT re-add a peer_connected fallback anywhere in this path.
 fed_wait_discovery() {
-  local a="$1" b="$2" mode="$3" tries="${4:-30}" i out
+  local a="$1" b="$2" mode="$3" tries="${4:-30}" i out capa capb
+  # `loose` is not a verdict mode — it can only ever hint. Resolve it up front
+  # so no amount of polling can turn a legacy marker into a discovery PASS.
+  if [ "$mode" != "strict" ]; then
+    out="$(_fed_disc_probe "$a" "$mode")$(_fed_disc_probe "$b" "$mode")"
+    case "$out" in *WARN*) echo "⚠ loose discovery marker seen — NOT a data-path verdict" >&2 ;; esac
+    echo 0; return 1
+  fi
+  # CAPABILITY PREFLIGHT (the EI-505 shape, generalized). An artifact packed
+  # before the emitter landed cannot satisfy the assertion, so asserting on it
+  # would fail CLOSED and read exactly like a genuine product failure. Probe
+  # once per instance, before polling: the answer is static for the run.
+  capa="$(_fed_disc_capability "$a")"; capb="$(_fed_disc_capability "$b")"
+  if [ "$capa" = no ] || [ "$capb" = no ]; then
+    echo "⊘ discovery N/A — this build predates the [swarm] peer_data_path_up emitter (a=$capa b=$capb, EI-18687938054040755)" >&2
+    echo skip; return 0
+  fi
   for i in $(seq 1 "$tries"); do
     out="$(_fed_disc_probe "$a" "$mode")$(_fed_disc_probe "$b" "$mode")"
     case "$out" in
@@ -732,16 +764,57 @@ fed_wait_discovery() {
   done
   echo 0; return 1
 }
-_fed_disc_probe() {  # <inst> <mode> → HIT / FAILED / ""
+
+# _fed_disc_capability <inst> → yes | no | unknown   (memoized per instance)
+#
+# Does the build this instance is RUNNING contain the peer_data_path_up
+# emitter at all? Resolved from the serve.mjs the live process actually
+# loaded (via /proc), so it is immune to install-path drift and to a
+# hotpatch having swapped the bundle underneath us; falls back to the path
+# the .deb installs.
+#
+# THE POSITIVE CONTROL IS LOAD-BEARING, DO NOT REMOVE IT. If the bundle read
+# fails for any reason — missing path, unreadable as this user, a driver that
+# cannot see the process — a naive probe reports "token absent", which means
+# SKIP, which means every run silently goes N/A and the rig stops asserting
+# anything at all. That is this bug's own disease in a new costume: green (or
+# rather, unfalsifiable) by default. So a known-present token must be found in
+# the SAME bundle before "absent" is allowed as a verdict. No control ⇒
+# "unknown" ⇒ we do NOT skip, and the strict assertion runs normally.
+declare -A FED_DISC_CAP=()
+_fed_disc_capability() {
+  local inst="$1" verdict
+  if [ -n "${FED_DISC_CAP[$inst]:-}" ]; then echo "${FED_DISC_CAP[$inst]}"; return 0; fi
+  verdict="$(drv_exec "$inst" <<'CAPEOF'
+bundle=""
+for pid in $(pgrep -f 'serve\.mjs' 2>/dev/null); do
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+  [ -n "$cwd" ] && [ -r "$cwd/serve.mjs" ] && { bundle="$cwd/serve.mjs"; break; }
+done
+[ -n "$bundle" ] || { [ -r /usr/lib/Papercusp/sidecar/serve.mjs ] && bundle=/usr/lib/Papercusp/sidecar/serve.mjs; }
+[ -n "$bundle" ] || { echo unknown; exit 0; }
+grep -qF 'peer_connected' "$bundle" 2>/dev/null || { echo unknown; exit 0; }
+if grep -qF 'peer_data_path_up' "$bundle" 2>/dev/null; then echo yes; else echo no; fi
+CAPEOF
+)"
+  case "$verdict" in yes|no) ;; *) verdict=unknown ;; esac
+  FED_DISC_CAP[$inst]="$verdict"
+  echo "$verdict"
+}
+
+_fed_disc_probe() {  # <inst> <mode> → HIT / FAILED / WARN / ""
   local inst="$1" mode="$2" logf; logf="$(drv_applog "$inst")"
   if [ "$mode" = "strict" ]; then
+    # The trailing space is a safe anchor: swarm.ts emits
+    # `[swarm] peer_data_path_up topic=<hex>…` and that ` topic=` is
+    # unconditional — every later field is a conditional concatenation.
     drv_exec "$inst" <<EOF
 if grep -qE '\[swarm\] join FAILED' "$logf" 2>/dev/null; then echo FAILED;
-elif grep -qE '\[swarm\] peer_connected' "$logf" 2>/dev/null; then echo HIT; fi
+elif grep -qE '\[swarm\] peer_data_path_up ' "$logf" 2>/dev/null; then echo HIT; fi
 EOF
   else
     drv_exec "$inst" <<EOF
-grep -qiE 'peer_connected|peer connected|onAnnounce|admit' "$logf" 2>/dev/null && echo HIT || true
+grep -qiE 'peer_connected|peer connected|onAnnounce|admit' "$logf" 2>/dev/null && echo WARN || true
 EOF
   fi
 }

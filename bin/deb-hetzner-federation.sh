@@ -133,8 +133,14 @@ echo "--- B [swarm]/drain diag ---"; drv_exec b <<<"grep -aE '\[swarm\]|joined t
 
 fed_log "wait swarm peer discovery over the PUBLIC DHT (~210s — sidecar-process swarm boot adds latency; longer window rules out DHT timing vs a real peering bug, D-043)"
 disc="$(fed_wait_discovery a b strict 70 || true)"
-[ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~210s"
-if [ "$disc" != 1 ]; then
+case "$disc" in
+  1)    echo "✓ sidecar data path proven across machines (bytes crossed)" ;;
+  skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755)" ;;
+  *)    echo "⚠ no data path proven in ~210s" ;;
+esac
+# `skip` is N/A, not a stall — DISC-DIAG would dump a wall of swarm state for a
+# question that was never asked. Only diagnose a real negative.
+if [ "$disc" != 1 ] && [ "$disc" != skip ]; then
   # D-043 DISC-DIAG: the sidecar JOINED its topic but did not peer. Dump the swarm/DHT
   # detail (announce/lookup/holepunch/bootstrap/flush) on BOTH frames to settle
   # 'joined-but-not-peering' = real sidecar-process transport bug vs public-DHT timing.

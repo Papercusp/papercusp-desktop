@@ -238,7 +238,11 @@ if [ "$links_ok" = 1 ]; then
   if [ "$join_ok" = 1 ]; then
     log "wait for swarm discovery between A and B on the harness topic"
     disc="$(fed_wait_discovery a b strict 60 || true)"
-    [ "$disc" = 1 ] && echo "✓ peers discovered each other" || echo "⚠ no peer_connected in ~90s"
+    case "$disc" in
+      1)    echo "✓ data path proven between instances (bytes crossed)" ;;
+      skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755)" ;;
+      *)    echo "⚠ no data path proven in ~90s" ;;
+    esac
     log "A→B: INSERT feature on A → expect origin=remote in B (federation through a directory-discovered join)"
     fed_ok="$(fed_merge_assert a b "$SLUG" F-DIR2B "joined via directory" todo 100 || true)"
     # EI-681 diagnostics: localize a federation stall (capture vs workspace_id-stamp vs drain vs apply).

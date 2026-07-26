@@ -407,7 +407,11 @@ fi
 # ── 10. discovery ([swarm] peer_connected across a real network hop) ────────
 fed_log "wait for swarm peer discovery + admission (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
-[ "$disc" = 1 ] && echo "✓ peers discovered each other across machines" || echo "⚠ no peer_connected in ~90s"
+case "$disc" in
+  1)    echo "✓ data path proven across machines (bytes crossed)" ;;
+  skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755)" ;;
+  *)    echo "⚠ no data path proven in ~90s" ;;
+esac
 
 # ── 11. the bidirectional MERGE gate (slug-agnostic hive probe) ─────────────
 # The hive model may remap harness_slug across peers, so poll the dst for the

@@ -121,7 +121,11 @@ echo "B: $(fed_share_finalize b "$SLUG" "$STATE" | grep -oE '"bindingPublished":
 # ── wait for mutual swarm admission ([swarm] peer_connected — always logged) ────
 log "wait for swarm peer discovery + admission (~90s)"
 disc="$(fed_wait_discovery a b strict 30 || true)"
-[ "$disc" = 1 ] && echo "✓ peers discovered each other" || echo "⚠ no peer_connected in ~90s"
+case "$disc" in
+  1)    echo "✓ data path proven between instances (bytes crossed)" ;;
+  skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755)" ;;
+  *)    echo "⚠ no data path proven in ~90s" ;;
+esac
 
 # ── A→B MERGE: write a feature on A, assert it federates into B's PG ────────────
 log "A→B: INSERT feature on A (origin=local) → expect origin=remote in B"

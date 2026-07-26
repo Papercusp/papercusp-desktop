@@ -461,6 +461,92 @@ else
 fi
 rm -rf "$WAPI_WORK" "$WAPI_STDERR"
 
+# 10) EI-18687938054040755: the discovery gate must assert on a DATA-PATH proof,
+# never on bare `[swarm] peer_connected`. The product deliberately logs
+# `peer_connected(signalling-only) (data path NOT yet demonstrated)` for a
+# connection that has carried no bytes, and the old strict grep had no word
+# boundary — so it MATCHED that line and "peers discovered" passed on a dead
+# connection. These cases exist so that loosening the pattern back fails HERE
+# instead of silently restoring a false-PASS months later.
+#
+# Hermetic: real log files + the real local drv_exec (`bash -s`), so the actual
+# greps run — only drv_applog is redirected at the temp logs.
+DISC_WORK="$(mktemp -d /tmp/fed-disc-selftest.XXXXXX)"
+declare -A DISC_LOG=( [a]="$DISC_WORK/a.log" [b]="$DISC_WORK/b.log" )
+drv_applog() { echo "${DISC_LOG[$1]}"; }
+
+SIGNALLING_ONLY='2026-07-26T07:00:00Z [swarm] peer_connected(signalling-only) harness=hello-world peer=1ea65f92c8a4… relayed=false'
+DATA_PATH_UP='2026-07-26T07:00:01Z [swarm] peer_data_path_up topic=8f2a1c9b4e6d0537… peer=1ea65f92c8a4… bytesReceived=4096 packetsReceived=7 relayed=false remoteHost=203.0.113.9'
+
+# --- the control that documents the bug: the OLD pattern matched the honest line
+if printf '%s\n' "$SIGNALLING_ONLY" | grep -qE '\[swarm\] peer_connected'; then
+  ok "CONTROL: the OLD bare-peer_connected pattern DOES match the signalling-only line (this was the false-PASS)"
+else
+  bad "CONTROL FAILED: the old pattern no longer matches the signalling-only line — this selftest's premise is wrong, re-derive the bug before trusting anything below"
+fi
+
+# --- THE NEGATIVE REGRESSION: strict must NOT hit on a signalling-only log
+printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[a]}"; : > "${DISC_LOG[b]}"
+res="$(_fed_disc_probe a strict)"
+[ -z "$res" ] && ok "_fed_disc_probe strict does NOT hit on peer_connected(signalling-only) — the false-PASS stays fixed" \
+              || bad "_fed_disc_probe strict HIT on a signalling-only line (got '$res') — THE FALSE-PASS IS BACK"
+
+# --- the positive control: strict DOES hit the real data-path line
+printf '%s\n' "$DATA_PATH_UP" > "${DISC_LOG[a]}"
+res="$(_fed_disc_probe a strict)"
+[ "$res" = HIT ] && ok "_fed_disc_probe strict HITs on a real [swarm] peer_data_path_up line" \
+                 || bad "_fed_disc_probe strict missed a real peer_data_path_up line (got '$res') — the gate can never pass"
+
+# --- join FAILED still short-circuits
+printf '%s\n' '2026-07-26T07:00:00Z [swarm] join FAILED topic=abc' > "${DISC_LOG[a]}"
+res="$(_fed_disc_probe a strict)"
+[ "$res" = FAILED ] && ok "_fed_disc_probe strict still reports FAILED on a [swarm] join FAILED line" \
+                    || bad "_fed_disc_probe strict lost the join-FAILED short-circuit (got '$res')"
+
+# --- capability preflight: emitter ABSENT ⇒ skip (N/A), NEVER a peer_connected fallback.
+# The log deliberately contains ONLY a signalling-only line: if any fallback to
+# the old pattern survives anywhere in this path, this case returns 1 and fails.
+printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[a]}"; printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[b]}"
+_fed_disc_capability() { echo no; }
+FED_DISC_CAP=()
+res="$(fed_wait_discovery a b strict 1 2>/dev/null)"
+[ "$res" = skip ] && ok "fed_wait_discovery echoes 'skip' when the build predates the peer_data_path_up emitter (EI-505 shape)" \
+                  || bad "fed_wait_discovery expected 'skip' for an emitter-less build, got '$res'"
+[ "$res" != 1 ] && ok "fed_wait_discovery does NOT fall back to peer_connected on skip — skip means NO verdict, not 'discovery passed'" \
+                || bad "fed_wait_discovery PASSED on a signalling-only log via a fallback — the false-PASS is back through the skip path"
+
+# --- capability present ⇒ the honest assertion runs and can pass
+printf '%s\n' "$DATA_PATH_UP" > "${DISC_LOG[a]}"
+_fed_disc_capability() { echo yes; }
+FED_DISC_CAP=()
+res="$(fed_wait_discovery a b strict 1 2>/dev/null)"
+[ "$res" = 1 ] && ok "fed_wait_discovery returns 1 when the emitter is present AND the data path is proven" \
+               || bad "fed_wait_discovery expected 1 (capability yes + data-path line present), got '$res'"
+
+# --- capability UNKNOWN must NOT skip (an unreadable bundle must not silence the gate)
+printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[a]}"; printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[b]}"
+_fed_disc_capability() { echo unknown; }
+FED_DISC_CAP=()
+res="$(fed_wait_discovery a b strict 1 2>/dev/null)"
+[ "$res" = 0 ] && ok "fed_wait_discovery does NOT skip on an UNKNOWN capability — an unreadable bundle can't silently N/A the gate" \
+               || bad "fed_wait_discovery returned '$res' for unknown capability; expected 0 (assert normally, never auto-skip)"
+
+# --- loose mode can never be a discovery verdict
+printf '%s\n' "$SIGNALLING_ONLY" > "${DISC_LOG[a]}"
+res="$(fed_wait_discovery a b loose 1 2>/dev/null)"
+[ "$res" != 1 ] && ok "fed_wait_discovery never returns 1 for loose mode — legacy markers are a hint, not a verdict" \
+                || bad "fed_wait_discovery returned 1 for loose mode — a legacy marker just became a discovery PASS"
+
+# --- the positive control inside the capability probe is load-bearing; guard it
+if grep -q "grep -qF 'peer_connected' \"\$bundle\"" "$DIR/federation-asserts.sh"; then
+  ok "_fed_disc_capability still carries its positive control (a failed bundle read cannot masquerade as 'emitter absent')"
+else
+  bad "_fed_disc_capability LOST its positive control — an unreadable bundle now reads as 'emitter absent' ⇒ every run silently SKIPs ⇒ unfalsifiable-by-default"
+fi
+
+unset -f drv_applog _fed_disc_capability
+rm -rf "$DISC_WORK"
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1

@@ -393,7 +393,11 @@ do_hotpatch() {
   echo "--- A [swarm] diag ---"; drv_exec a <<<"grep -aE '\[swarm\]|peer_connected|joined topic|drain|attempted=' /home/pcusp/serve.log | tail -8"
   echo "--- B [swarm] diag ---"; drv_exec b <<<"grep -aE '\[swarm\]|peer_connected|joined topic|drain|attempted=' /home/pcusp/serve.log | tail -8"
   disc="$(fed_wait_discovery a b strict 20 || true)"   # 20×3s ≈ 60s
-  [ "$disc" = 1 ] && echo "✓ peer_connected across machines" || echo "⚠ no peer_connected in ~60s"
+  case "$disc" in
+    1)    echo "✓ data path proven across machines (bytes crossed)" ;;
+    skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755)" ;;
+    *)    echo "⚠ no data path proven in ~60s" ;;
+  esac
 
   # 5. re-run the merge probes with SHORT timeouts (20 iters × 3s ≈ 60s each)
   fed_log "A→B MERGE (hive probe; A member='$A_MEMBER_SLUG')"

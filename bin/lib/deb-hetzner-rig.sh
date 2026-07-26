@@ -1016,8 +1016,12 @@ rig_wait_swarm() {
   # "PUBLIC DHT" here is equally misleading on those runs.
   fed_log "wait swarm peer discovery $a↔$b over the DHT ${RIG_DHT_BOOTSTRAP:-PUBLIC} (~$(( tries * 3 ))s)"
   disc="$(fed_wait_discovery "$a" "$b" strict "$tries" || true)"
-  [ "$disc" = 1 ] && { echo "✓ $a↔$b peer_connected across machines"; return 0; }
-  echo "⚠ no $a↔$b peer_connected in ~$(( tries * 3 ))s"; return 1
+  [ "$disc" = 1 ] && { echo "✓ $a↔$b data path proven across machines (bytes crossed)"; return 0; }
+  # EI-18687938054040755: skip = the build predates the peer_data_path_up
+  # emitter, so no discovery verdict exists. Return 2 (distinct from 1) so a
+  # caller can tell "not measured" apart from "measured and failed".
+  [ "$disc" = skip ] && { echo "⊘ $a↔$b discovery N/A — build predates the peer_data_path_up emitter (EI-18687938054040755)"; return 2; }
+  echo "⚠ no $a↔$b data path proven in ~$(( tries * 3 ))s"; return 1
 }
 
 # rig_wait_converged [joiner] [pot] — the REAL pre-scenario join-convergence barrier.

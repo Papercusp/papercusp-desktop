@@ -158,9 +158,15 @@ done
 # ── THE KEY TEST: peer_connected across regions + through B's NAT (holepunch) ──
 fed_log "wait swarm peer_connected a↔b (SUCCESS = holepunch worked cross-region + behind B's NAT)"
 disc="$(fed_wait_discovery a b strict 180 || true)"   # generous window: cross-continent + holepunch adds latency (doubled 90→180 tries, try5)
+# EI-18687938054040755: `skip` means the build cannot emit the data-path proof at
+# all — that is N/A, NOT a holepunch failure. Reporting it as "✗ FAILED" would
+# manufacture a Brief-8 finding out of an artifact-age mismatch.
 hp=0; [ "$disc" = 1 ] && hp=1
-[ "$hp" = 1 ] && echo "✓ peer_connected a↔b — holepunch succeeded across [$LOC_A↔$LOC_B]${NAT:+ + NAT=$NAT}" \
-             || echo "✗ NO peer_connected in ~270s — holepunch/cross-region peering FAILED (a real Brief-8 finding; see diag)"
+case "$disc" in
+  1)    echo "✓ data path proven a↔b — holepunch succeeded across [$LOC_A↔$LOC_B]${NAT:+ + NAT=$NAT} (bytes crossed)" ;;
+  skip) echo "⊘ holepunch verdict N/A — this build predates the peer_data_path_up emitter, so the data path was never measured (NOT a Brief-8 finding; EI-18687938054040755)" ;;
+  *)    echo "✗ NO data path proven in ~270s — holepunch/cross-region peering FAILED (a real Brief-8 finding; see diag)" ;;
+esac
 
 # ── content federation A→B and B→A over the NAT/geo topology ──────────────────
 fed_log "A→B MERGE (hive slug-agnostic probe) over the distant/NAT topology"

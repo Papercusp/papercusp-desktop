@@ -182,7 +182,11 @@ scenario_coord_controlplane() {
   echo "--- B [swarm]/drain diag ---"; drv_exec "$MEMBER" <<<"grep -aE '\[swarm\]|joined topic|peer_connected|drain|federate' /home/pcusp/serve.log | tail -6"
   fed_log "wait swarm peer discovery over the PUBLIC DHT"
   disc="$(fed_wait_discovery "$OWNER" "$MEMBER" strict 70 || true)"
-  [ "$disc" = 1 ] && echo "✓ sidecars peer_connected across machines" || echo "⚠ no peer_connected in ~210s (probes still run; a LOCAL verdict below could be a false negative if the wire never came up — read the BASELINE)"
+  case "$disc" in
+    1)    echo "✓ sidecar data path proven across machines (bytes crossed)" ;;
+    skip) echo "⊘ discovery SKIPPED — this build predates the peer_data_path_up emitter (N/A, not a failure; EI-18687938054040755). The LOCAL verdicts below stand on their own; the wire state is simply unmeasured." ;;
+    *)    echo "⚠ no data path proven in ~210s (probes still run; a LOCAL verdict below could be a false negative if the wire never came up — read the BASELINE)" ;;
+  esac
 
   # ── BASELINE: content feature federates A→B (proves the wire is live) ──────
   # ADAPTIVE (WI-1378, ported from deb-hetzner-revocation.sh STEP 1): on a fresh

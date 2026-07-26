@@ -130,8 +130,12 @@ fi
 
 # ── report ────────────────────────────────────────────────────────────────────
 fed_log "RESULT (3-frame .deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B+$LOC_C, public DHT)"
-echo "disc a↔b=$([ "$disc_ab" = 0 ] && echo PASS || echo FAIL)  disc a↔c=$([ "$disc_ac" = 0 ] && echo PASS || echo FAIL)  owner→b=$([ "$ab2b" = 1 ] && echo PASS || echo FAIL)  owner→c=$([ "$ab2c" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc_ab" = 0 ] && [ "$disc_ac" = 0 ] && [ "$ab2b" = 1 ] && [ "$ab2c" = 1 ]; then
-  echo "OVERALL: PASS — owner federates a write to BOTH members across 3 separate Hetzner VMs (real public DHT)"; exit 0
+# EI-18687938054040755: rig_wait_swarm exit 2 = build predates the
+# peer_data_path_up emitter ⇒ discovery UNMEASURED = N/A, not FAIL (EI-505 contract).
+d(){ case "$1" in 0) echo PASS ;; 2) echo SKIP ;; *) echo FAIL ;; esac; }
+dok(){ [ "$1" = 0 ] || [ "$1" = 2 ]; }
+echo "disc a↔b=$(d "$disc_ab")  disc a↔c=$(d "$disc_ac")  owner→b=$([ "$ab2b" = 1 ] && echo PASS || echo FAIL)  owner→c=$([ "$ab2c" = 1 ] && echo PASS || echo FAIL)"
+if dok "$disc_ab" && dok "$disc_ac" && [ "$ab2b" = 1 ] && [ "$ab2c" = 1 ]; then
+  echo "OVERALL: PASS — owner federates a write to BOTH members across 3 separate Hetzner VMs (real public DHT)$(case "$disc_ab$disc_ac" in *2*) echo " (discovery N/A — build predates the peer_data_path_up emitter; the merges are the wire proof)" ;; esac)"; exit 0
 fi
 echo "OVERALL: INCOMPLETE — see [swarm] diagnostics + /home/pcusp/serve.log on each frame"; exit 6

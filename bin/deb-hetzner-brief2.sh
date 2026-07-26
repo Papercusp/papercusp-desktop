@@ -173,14 +173,21 @@ fi
 
 # ── report ────────────────────────────────────────────────────────────────────
 p(){ [ "$1" = 1 ] && echo PASS || echo FAIL; }
-d(){ [ "$1" = 0 ] && echo PASS || echo FAIL; }
+# EI-18687938054040755: rig_wait_swarm exits 2 when the build predates the
+# [swarm] peer_data_path_up emitter — discovery was never MEASURED. That is
+# N/A, not FAIL (same contract as the EI-505 plan-part SKIP leg). The merge
+# legs below are themselves proof the wire carried bytes, so a run may still
+# PASS with discovery unmeasured — it just must SAY so rather than claim it.
+d(){ case "$1" in 0) echo PASS ;; 2) echo SKIP ;; *) echo FAIL ;; esac; }
+dok(){ [ "$1" = 0 ] || [ "$1" = 2 ]; }
+dnote(){ case "$1$2$3" in *2*) echo " (discovery N/A — build predates the peer_data_path_up emitter; the merges above are the wire proof)" ;; esac; }
 fed_log "RESULT (Brief 2: 3-frame multi-member fanout, Hetzner $STYPE $LOC_A+$LOC_B+$LOC_C, public DHT, forceReFold .deb, NO restart)"
 echo "discovery:   a↔b=$(d "$disc_ab")  a↔c=$(d "$disc_ac")  b↔c=$(d "$disc_bc")"
 echo "feature:     owner→b=$(p "$o2b")  owner→c=$(p "$o2c")  member b→a=$(p "$b2a")  member b→c=$(p "$b2c")"
 echo "plan-part:   owner→b=$(p "$ppo2b")  owner→c=$(p "$ppo2c")  member b→a=$(p "$ppb2a")  member b→c=$(p "$ppb2c")"
 echo "coord:       owner→b=$(p "$co2b")  owner→c=$(p "$co2c")  member b→a=$(p "$cb2a")  member b→c=$(p "$cb2c")"
-if [ "$disc_ab" = 0 ] && [ "$disc_ac" = 0 ] && [ "$disc_bc" = 0 ] && [ "$allpass" = 1 ]; then
-  echo "OVERALL: PASS — 3-machine multi-member FANOUT proven (owner→both members AND member→owner+member) for features, per-part plans, AND coord over real public DHT, no restart"
+if dok "$disc_ab" && dok "$disc_ac" && dok "$disc_bc" && [ "$allpass" = 1 ]; then
+  echo "OVERALL: PASS — 3-machine multi-member FANOUT proven (owner→both members AND member→owner+member) for features, per-part plans, AND coord over real public DHT, no restart$(dnote "$disc_ab" "$disc_ac" "$disc_bc")"
   exit 0
 fi
 echo "OVERALL: INCOMPLETE — see [swarm] diag + roster dump + /home/pcusp/serve.log on each frame"
