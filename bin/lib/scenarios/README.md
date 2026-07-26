@@ -84,9 +84,19 @@ federating 2-node pot.
   coord control-plane). Leave frames healthy.
 - **50–70** — disruptive-but-restorative (reconnect/offline-catchup, restart
   durability). MUST restore healthy.
-- **80–89** — **terminal/destructive, but the member still works** (e.g.
-  attestation_unattested_device/89 strips one member's device attestations on the
+- **71–79** — **terminal/destructive, but the member still works** (e.g.
+  attestation_unattested_device/79 strips one member's device attestations on the
   owner frame). May leave narrow admission state mutated for the rest of the run.
+  ⚠ Below 80 **on purpose**: a leg here holds an ANTI-MONOTONE precondition (a
+  value removed locally), and the churn legs at 80–89 reconnect the swarm, which
+  makes each member re-announce — and both writers of a member row restore an
+  announced device (the projection replaces from a newer remote op; the admission
+  path UNION-merges with no clock guard at all). A leg of this shape registered
+  above the churn band has its precondition silently undone mid-flight and reports
+  a product defect that is not there. Registering ABOVE 80 is a real ordering
+  decision — read `b9-attestation.sh`'s ORDERING INVARIANT header first.
+- **80–89** — **churn** (restart durability, settle barrier, reconnect/catch-up,
+  replication soak). Restart/reconnect-heavy; MUST restore healthy frames.
 - **90+** — **member-disabling** (revocation/ban k-cut). Runs LAST; may leave the
   member unable to receive **or send**.
 

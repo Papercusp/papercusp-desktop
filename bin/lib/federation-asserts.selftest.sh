@@ -690,6 +690,60 @@ fi
 unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os
 rm -rf "$BOOT_WORK"
 
+# ── fed_diagnose_unmerged (WI-6209) ────────────────────────────────────────
+# A merge probe reading 0 has two utterly different causes and the bare 0 cannot
+# tell them apart: a MIS-TARGETED write (enqueued to a tuple this frame never
+# booted → nothing ever drains it) vs a GENUINE replication failure. Conflating
+# them cost two separate misdirected transport investigations on WI-6209. These
+# assertions pin the classification.
+#
+# Fixtures use the REAL wire format: the SQL emits explicit Y/N tokens because
+# `boolean || text` casts via boolean::text ('true'/'false'), NOT psql's 't'/'f'
+# — an earlier cut of this guard compared against 't' and misclassified every
+# row, and a fixture test that had encoded the same wrong assumption passed
+# anyway. Keep these fixtures in the shape the database actually returns.
+DIAG_FIXTURE=""
+drv_psql() { printf '%s\n' "$DIAG_FIXTURE"; }
+diag_out() { DIAG_FIXTURE="$1"; fed_diagnose_unmerged frameA F-TEST-1 2>&1 >/dev/null; }
+
+if diag_out "" | grep -qF "never reached substrate_outbox"; then
+  ok "fed_diagnose_unmerged: no outbox row → the write was never federated at all"
+else
+  bad "fed_diagnose_unmerged did NOT flag a missing outbox row"
+fi
+
+if diag_out "workspace-319be5e5|spoon-knife|N|N" | grep -qF "NEVER DRAINED"; then
+  ok "fed_diagnose_unmerged: enqueued-but-undrained → TEST-TARGETING bug (the WI-6209 trap)"
+else
+  bad "fed_diagnose_unmerged did NOT flag an undrained outbox row — the WI-6209 silent false-negative is back"
+fi
+
+if diag_out "workspace-319be5e5|spoon-knife|N|N" | grep -qF "pots.public_key"; then
+  ok "fed_diagnose_unmerged: the undrained diagnosis names the actual fix (pair frames by pots.public_key)"
+else
+  bad "fed_diagnose_unmerged's undrained diagnosis no longer tells the reader how to fix it"
+fi
+
+if diag_out "workspace-b31a7a01|octocat-spoon-knife|Y|N" | grep -qF "genuine replication/transport failure"; then
+  ok "fed_diagnose_unmerged: drained-but-never-arrived → genuine replication failure"
+else
+  bad "fed_diagnose_unmerged did NOT report a drained-but-unarrived row as a real replication failure"
+fi
+
+if diag_out "workspace-b31a7a01|spoon-knife|N|Y" | grep -qF "QUARANTINED"; then
+  ok "fed_diagnose_unmerged: quarantined row is reported as refused-to-publish"
+else
+  bad "fed_diagnose_unmerged did NOT surface a quarantined outbox row"
+fi
+
+# Non-vacuity: the two headline classes must never collapse to the same verdict.
+if [ "$(diag_out 'ws|slug|N|N')" = "$(diag_out 'ws|slug|Y|N')" ]; then
+  bad "CONTROL: fed_diagnose_unmerged gives IDENTICAL output for drained vs undrained — the guard is vacuous"
+else
+  ok "CONTROL: fed_diagnose_unmerged distinguishes the two failure classes (guard is not vacuous)"
+fi
+unset -f drv_psql diag_out
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1

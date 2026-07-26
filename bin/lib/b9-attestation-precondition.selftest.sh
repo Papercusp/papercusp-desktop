@@ -104,6 +104,14 @@ _att_restore_b_devices >"$TMPOUT" 2>&1; out="$(cat "$TMPOUT")"
 [ "$(printf '%s' "$out" | grep -c 'WARN')" -ge 2 ] \
   && ok "read-back 0 on both frames → WARN on both" \
   || bad "read-back 0 should WARN on both frames, got: $out"
+# 3b. …and it must RETRY before warning. The leg now runs at 79, ahead of the churn band,
+#     so a lost restore strands FOUR later legs (restart/reconnect/soak/revocation) against a
+#     device-less member instead of only revocation_kcut(90). A single-shot write that loses a
+#     race is exactly the failure that would produce four unexplained reds, so the write is
+#     bounded-retried until the read-back confirms it. This pins the retry, not just the WARN.
+[ "${WROTE[a]:-0}" -ge 2 ] && [ "${WROTE[b]:-0}" -ge 2 ] \
+  && ok "read-back 0 → the restore RETRIES on both frames (a=${WROTE[a]} b=${WROTE[b]} writes)" \
+  || bad "read-back 0 should retry the restore on both frames, got a=${WROTE[a]:-0} b=${WROTE[b]:-0}"
 
 # 4. Nothing saved at all ⇒ a complete no-op (the leg failed before the strip).
 reset_case
@@ -174,6 +182,19 @@ static_not "no live verdict prints the RIG/ENVIRONMENTAL suppression that misdia
            "RIG/ENVIRONMENTAL"
 static_not "no live line CLASSIFIES off the recency-ordered \$reasons read (that read is diagnostic-only now)" \
            "printf '%s' \"\\\$reasons\" \\| grep -q"
+# 10-12. DRIFT ATTRIBUTION (2026-07-26). The leg used to name a SUSPECT for the restored
+# precondition ("re-federated from the other replica") without ever measuring it — and the two
+# candidate writers demand OPPOSITE fixes (a re-announcing PROJECTION write is fixed by
+# ordering; the admission path's clock-free UNION merge cannot be fixed by ordering at all).
+# One paired row fingerprint separates them, so the leg must take it and print it.
+static "a per-frame row fingerprint helper exists (origin + clock + author + device count)" \
+       "_att_row_fingerprint\(\) \{"
+static "the fingerprint is baselined at strip time, so 'newer than the strip' is decidable" \
+       "strip_fp_a=\"\\\$\(_att_row_fingerprint a"
+static "the UNHOLDABLE verdict names WHICH writer by fingerprint, not by suspicion" \
+       "WHICH WRITER — read the fingerprint, do not guess"
+static "the ordering ceiling below the churn band is recorded where the leg is registered" \
+       "matrix_register attestation_unattested_device 79"
 
 echo
 if [ "$fails" = 0 ]; then

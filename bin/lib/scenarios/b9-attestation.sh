@@ -154,8 +154,31 @@ matrix_register attestation_membership 60 "attestation membership seeding + 2nd-
 # to no member, then waits out the comms-tier device→user cache TTL and asserts the
 # identity_unresolved refusal + counter bump.
 #
-# ⚠ ORDERING INVARIANT — THIS LEG MUST RUN **BEFORE** revocation_kcut(90). DO NOT "restore"
-# it to 91; that ordering is the WI-5064 defect, not a convention.
+# ⚠ ORDERING INVARIANT — TWO CEILINGS, BOTH LOAD-BEARING. This leg runs at **79**:
+#   (1) strictly BELOW revocation_kcut(90) — DO NOT "restore" it to 91; that ordering is the
+#       WI-5064 defect, not a convention (full argument immediately below); and
+#   (2) strictly BELOW the churn legs — restart_durability(80), restart_settle_barrier(82),
+#       reconnect_catchup(85), replication_soak(87) — because THIS LEG'S PRECONDITION IS
+#       ANTI-MONOTONE AND EVERY RECONNECT UNDOES IT (2026-07-26, the second half of the fix).
+#       The leg empties B's device_attestations; both writers of that column put it BACK on an
+#       announce, and a reconnect is what triggers an announce:
+#         · the PROJECTION (hive-members.ts:145-158) REPLACES the column from a remote op —
+#           guarded by fed_order_key >= , which our trigger-stamped strip beats, so only a
+#           genuinely NEWER announce can win; and
+#         · the ADMISSION path (upsertHiveMember, hive-membership-store.ts:364-393)
+#           UNION-merges the column with NO clock guard at all (WI-1585 merge-never-replace),
+#           so an announce restores it regardless of how new the strip is.
+#       Neither can be beaten by waiting longer, which is why the fix is ordering and never a
+#       widened timeout. replication_soak(87) alone performs 5 kill/restart cycles; running
+#       after it, the leg failed PRECONDITION UNHOLDABLE with the strip undone TWICE.
+#       Matching controlled evidence, churn absent vs present:
+#         --only=attestation_membership,attestation_unattested_device → LEG4 PASS
+#         full 17-leg matrix with this leg at 89                      → PRECONDITION UNHOLDABLE
+#       If it drifts even at 79, the leg now prints a DRIFT FINGERPRINT naming which of the two
+#       writers did it (see _att_row_fingerprint) — read that before changing anything else.
+#       Blast radius of the earlier slot is self-limiting: the leg restores what it strips, and
+#       in exactly the environment where the restore could fail (announces flowing) the same
+#       announce that breaks the strip also re-attests B.
 #   WHY: this leg's probe requires B to still be able to SEND — B writes a p2p_receipt that
 #   must federate b→a so that A applies-and-refuses it with identity_unresolved. revocation_kcut
 #   BANS B (b3-revocation.sh:10 "may be unable to receive afterward"), and revocation is
@@ -181,6 +204,37 @@ matrix_register attestation_membership 60 "attestation membership seeding + 2nd-
 #   deviceToUser() → resolveAuthorCommsTier(), bound solely in INBOUND hyperbee projections,
 #   whereas that probe is a→b content authored by A and resolved against B's own pot_members
 #   copy. The ban step, not the baseline, is what the strip broke.)
+# ── WHICH WRITER PUT THE ATTESTATION BACK? (2026-07-26) ──────────────────────────────
+# The leg has failed PRECONDITION UNHOLDABLE with a fix DIRECTION but no fix, because the
+# message names its suspect ("re-federated from the other replica") without ever measuring
+# it. There are exactly TWO writers of pot_members.device_attestations, and they stamp the
+# row DIFFERENTLY — so one paired read discriminates them, where no further reading of the
+# apply path can (the fingerprint-beats-a-mechanism-story move that settled WI-6210):
+#
+#   origin='remote', fed_ts NEWER than the strip
+#     ⇒ the hyperbee PROJECTION applied a remote pot_members op.
+#       hive-members.ts:145-158 REPLACES device_attestations, guarded by
+#       fed_order_key(EXCLUDED) >= fed_order_key(existing). Our strip is a local UPDATE on a
+#       table carrying stamp_local_federated_write (mig 214 installs it on `hive_members`,
+#       renamed `pot_members` by mig 557), so the strip BUMPS fed_ts/fed_hlc — a REPLAYED
+#       older op cannot beat it. A remote fingerprint therefore means a genuinely NEWER
+#       remote op (B re-announced its device), not a replay.
+#
+#   origin='local'
+#     ⇒ a LOCAL write on this frame put it back — i.e. the ADMISSION path,
+#       upsertHiveMember (hive-membership-store.ts:364-393), which UNION-merges
+#       device_attestations by device_pubkey with NO clock guard at all (WI-1585: merge,
+#       never replace). Every announce/admission therefore re-attests B no matter how new
+#       our strip is, and NO ordering change can fix that — only holding the strip, or
+#       building the precondition some other way, can.
+#
+# Both readings are actionable and they demand OPPOSITE fixes, which is exactly why the leg
+# must measure instead of guess. DIAGNOSTIC ONLY — never a verdict input.
+_att_row_fingerprint() {
+  local frame="$1" gh="$2"
+  drv_psql "$frame" "SELECT COALESCE(origin,'?')||'|fed_ts='||COALESCE(fed_ts::text,'NULL')||'|fed_hlc='||COALESCE(fed_hlc,'NULL')||'|author='||COALESCE(left(author_pubkey,12),'NULL')||'|devs='||COALESCE(jsonb_array_length(device_attestations),0)::text FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$gh;" 2>/dev/null | tr -d '[:space:]'
+}
+
 _scn_attestation_unattested_device_core() {
   local rid="$MATRIX_RUN_ID" oslug="${FRAME_MEMBER_SLUG[a]:-}" mslug="${FRAME_MEMBER_SLUG[b]:-}"
   [ -n "$oslug" ] && [ -n "$mslug" ] || { echo "attestation(unattested-device): frames not joined"; return 1; }
@@ -274,6 +328,13 @@ _scn_attestation_unattested_device_core() {
     [ -n "$stripped" ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP UNVERIFIED: the member row exists on frame a but device_attestations could not be read back after the strip; refusing to score this leg"; return 1; }
     [ "$stripped" = 0 ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP DID NOT APPLY: B still carries $stripped device attestation(s) on frame a after the strip UPDATE (frame a degraded / PG unavailable?). The precondition was never established, so a non-refusal below would NOT be a product defect"; return 1; }
   fi
+  # Baseline for the drift fingerprint below: what the row looked like the moment the strip
+  # was verified. Without a BEFORE reading, a later `fed_ts=...` is just a number — with one,
+  # "newer than the strip" is decidable and the two writers separate.
+  local strip_fp_a strip_fp_b
+  strip_fp_a="$(_att_row_fingerprint a "$b_gh_id")"
+  strip_fp_b="$(_att_row_fingerprint b "$b_gh_id")"
+
   sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default 30_000ms — wait out the device→user cache
 
   # WI-5064 FOLLOW-UP: RE-ASSERT the precondition immediately before the probe. The verification
@@ -285,13 +346,19 @@ _scn_attestation_unattested_device_core() {
   local pre_probe
   pre_probe="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
   if [ "${pre_probe:-0}" -gt 0 ] 2>/dev/null; then
-    echo "  · attestation(unattested-device): precondition drifted — B carries $pre_probe attestation(s) on a again after the 35s cache wait (re-federated from the other replica); re-stripping both frames once and re-waiting the device→user cache"
+    local drift_fp_a
+    drift_fp_a="$(_att_row_fingerprint a "$b_gh_id")"
+    echo "  · attestation(unattested-device): precondition drifted — B carries $pre_probe attestation(s) on a again after the 35s cache wait; re-stripping both frames once and re-waiting the device→user cache"
+    echo "  · attestation(unattested-device): DRIFT FINGERPRINT (see _att_row_fingerprint) — a at strip: ${strip_fp_a:-<unreadable>} → a now: ${drift_fp_a:-<unreadable>} (b at strip: ${strip_fp_b:-<unreadable>}). origin=remote+newer fed_ts ⇒ a NEWER remote op re-announced B (projection replace); origin=local ⇒ the admission path's UNION merge (upsertHiveMember) re-attested B and NO ordering change can hold the strip."
     drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     [ "${_ATT_SAVED_B_OK:-0}" = 1 ] && drv_psql b "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     sleep 35
     pre_probe="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
     if [ "${pre_probe:-0}" -gt 0 ] 2>/dev/null; then
-      echo "attestation(unattested-device) FAIL — PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times ($pre_probe attestation(s) at the second check). Something is actively re-federating B's pot_members row inside this leg's window — most likely the reconnect/catch-up sync from replication_soak(87) or a peer-log replay. FIX DIRECTION: hold the strip against re-sync for the leg's duration (pause the pot_members projection for B, or move this leg ahead of the churn legs into the 80-89 member-still-works band), rather than widening any timeout."
+      local drift_fp_a2 drift_fp_b2
+      drift_fp_a2="$(_att_row_fingerprint a "$b_gh_id")"
+      drift_fp_b2="$(_att_row_fingerprint b "$b_gh_id")"
+      echo "attestation(unattested-device) FAIL — PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times ($pre_probe attestation(s) at the second check). WHICH WRITER — read the fingerprint, do not guess: a at strip ${strip_fp_a:-<unreadable>} → a now ${drift_fp_a2:-<unreadable>}; b at strip ${strip_fp_b:-<unreadable>} → b now ${drift_fp_b2:-<unreadable>}. origin=remote with a fed_ts NEWER than the strip ⇒ the PROJECTION applied a genuinely newer remote op (hive-members.ts replaces under an LWW guard our strip's stamp would have beaten, so this is a re-announce, not a replay) ⇒ FIX by moving this leg ahead of the churn legs that trigger reconnect-announces (it must stay strictly below revocation_kcut/90). origin=local ⇒ the ADMISSION path re-attested B: upsertHiveMember UNION-merges device_attestations with no clock guard (WI-1585), so every announce restores it and NO ordering change can hold the strip — the leg must then stop stripping and build its precondition another way (author the probe from a device pubkey that was never attested). Either way: do NOT widen a timeout."
       return 1
     fi
   fi
@@ -429,6 +496,32 @@ _scn_attestation_unattested_device_core() {
   echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, strip-at-scoring=${strip_at_scoring:-<unreadable>}, all reasons: $reasons"
   return 1
 }
+# Restore ONE frame's device_attestations, bounded-retrying until the read-back confirms it.
+# Echoes the final read-back count (empty ⇒ unreadable). The single-shot write this replaces
+# was tolerable while the leg ran at 89 with only revocation_kcut(90) downstream; at 79 a lost
+# restore would silently strand FOUR later legs against a device-less member, so the write now
+# has to be verified rather than fired and hoped for. Still best-effort by design — a failed
+# restore warns, it never converts this leg's own verdict into a FAIL.
+#
+# ⚠ RESULT COMES BACK IN THE GLOBAL `_ATT_RESTORE_BACK`, NOT ON STDOUT — deliberately, so the
+# caller never has to wrap it in `$(...)`. A command substitution forks a SUBSHELL, and this
+# function's whole job is the WRITE side: any bookkeeping the write touches (notably the
+# b9-attestation-precondition selftest's per-frame `WROTE[]` stub) would be discarded with that
+# subshell, leaving "did we actually write frame a?" unobservable. The selftest's own header
+# already documents that trap for the wrapper; the same rule binds every helper it calls.
+_ATT_RESTORE_BACK=''
+_att_restore_one() {
+  local frame="$1" saved="$2" i
+  _ATT_RESTORE_BACK=''
+  for i in 1 2 3; do
+    drv_psql "$frame" "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${saved}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
+    _ATT_RESTORE_BACK="$(drv_psql "$frame" "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" 2>/dev/null | tr -d '[:space:]')"
+    { [ "${_ATT_RESTORE_BACK:-0}" -gt 0 ]; } 2>/dev/null && return 0
+    [ "$i" = 3 ] || sleep 2
+  done
+  return 0
+}
+
 # WI-5064 RESTORE HELPER. Puts B's device_attestations back on frame A after the leg has taken
 # its measurements. Dollar-quoted so the stored JSON needs no escaping. Best-effort by design:
 # a failed restore must NOT turn this leg's real verdict into a false FAIL — it warns instead,
@@ -438,20 +531,18 @@ _att_restore_b_devices() {
   # legitimately owns B's own member row, so putting it back there lets normal federation
   # re-converge a even if a's direct UPDATE below were to lose an LWW race.
   if [ "${_ATT_SAVED_B_OK:-0}" = 1 ]; then
-    drv_psql b "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${_ATT_SAVED_ROW_B}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
     local back_b
-    back_b="$(drv_psql b "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" 2>/dev/null | tr -d '[:space:]')"
+    _att_restore_one b "${_ATT_SAVED_ROW_B}"; back_b="$_ATT_RESTORE_BACK"
     if [ "${back_b:-0}" -gt 0 ] 2>/dev/null; then
       echo "  · attestation(unattested-device): restored B's device_attestations on frame b ($back_b attestation(s))"
     else
-      echo "  · attestation(unattested-device): WARN — restore of B's device_attestations on frame b did NOT take (read back '${back_b:-<empty>}'); B's own replica is left device-less, which can affect legs after 89"
+      echo "  · attestation(unattested-device): WARN — restore of B's device_attestations on frame b did NOT take after 3 attempts (read back '${back_b:-<empty>}'); B's own replica is left device-less, which can affect EVERY leg after this one (79) — restart_durability/80, reconnect_catchup/85, replication_soak/87 and revocation_kcut/90"
     fi
     _ATT_SAVED_B_OK=0
   fi
   [ "${_ATT_SAVED_OK:-0}" = 1 ] || return 0
-  drv_psql a "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${_ATT_SAVED_ROW}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
   local back
-  back="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" 2>/dev/null | tr -d '[:space:]')"
+  _att_restore_one a "${_ATT_SAVED_ROW}"; back="$_ATT_RESTORE_BACK"
   if [ "${back:-0}" -gt 0 ] 2>/dev/null; then
     echo "  · attestation(unattested-device): restored B's device_attestations on frame a ($back attestation(s)) — revocation_kcut(90) needs them to resolve B's pubkeys"
   else
@@ -471,4 +562,4 @@ scn_attestation_unattested_device() {
   _att_restore_b_devices || true
   return "$rc"
 }
-matrix_register attestation_unattested_device 89 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL — must precede revocation_kcut/90)" scn_attestation_unattested_device
+matrix_register attestation_unattested_device 79 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL — must precede the churn legs/80+ AND revocation_kcut/90)" scn_attestation_unattested_device

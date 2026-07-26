@@ -886,9 +886,55 @@ EOF
 
 # ── the MERGE assert (the hard bidirectional gate) ──────────────────────────
 
+# fed_diagnose_unmerged <src> <key>
+# Explain WHY a merge probe did not land, instead of leaving a bare "0".
+#
+# WI-6209: a merge probe that reads 0 has TWO utterly different causes, and the
+# bare 0 cannot tell them apart — which cost hours of misdirected transport
+# debugging, twice. The probe INSERT can be MIS-TARGETED (written to a
+# (workspace_id, harness_slug) tuple this frame has never booted), in which case
+# it enqueues and NO binding ever drains it — indistinguishable, from the dst
+# side, from a dead wire. The trap is easy to fall into because the two frames
+# name the SAME pot differently: pots.public_key is identical across machines
+# while (workspace_id, pot_home_slug) is LOCAL to each (fed-a
+# workspace-319be5e5/spoon-knife-pot vs fed-b workspace-b31a7a01/octocat-spoon-knife).
+# Resolve a workspace_id on one frame, write it on the other, and the row lands
+# in a tuple that publishes nothing. It does not even error: the
+# assert_work_item_pot_membership trigger FAILS OPEN when
+# workspace_platform_pot() is NULL for an unknown workspace.
+#
+# harness_shared.substrate_outbox.drained_at is the mechanism-level
+# discriminator (verified on the live rig — orphans drained=f, both genuinely
+# federated probes drained=t). Diagnostics go to STDERR on purpose: every caller
+# captures these functions' stdout in `$(...)` to read the 1/0.
+fed_diagnose_unmerged() {
+  local src="$1" key="$2" rec ws slug drained quar
+  # Emit EXPLICIT Y/N tokens rather than letting the booleans render themselves:
+  # `boolean || text` casts via boolean::text, which yields 'true'/'false' — NOT
+  # psql's 't'/'f'. A guard comparing against 't' therefore misclassifies every
+  # row. Caught only by running this against the live rig; the fixture test had
+  # encoded the same wrong assumption and passed happily (WI-6209).
+  rec="$(drv_psql "$src" "SELECT coalesce(workspace_id,'?')||'|'||coalesce(harness_slug,'?')||'|'||CASE WHEN drained_at IS NOT NULL THEN 'Y' ELSE 'N' END||'|'||CASE WHEN quarantined_at IS NOT NULL THEN 'Y' ELSE 'N' END FROM harness_shared.substrate_outbox WHERE key='$key' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$rec" ]; then
+    echo "DIAG($src,$key): the write never reached substrate_outbox at all — the capture trigger did not enqueue it, so the INSERT targeted something not federated. TEST-TARGETING bug, not a replication failure." >&2
+    return 0
+  fi
+  ws="${rec%%|*}"; rec="${rec#*|}"
+  slug="${rec%%|*}"; rec="${rec#*|}"
+  drained="${rec%%|*}"; quar="${rec#*|}"
+  if [ "$quar" = "Y" ]; then
+    echo "DIAG($src,$key): outbox row $ws/$slug is QUARANTINED — the substrate refused to publish it. Not a transport failure." >&2
+  elif [ "$drained" != "Y" ]; then
+    echo "DIAG($src,$key): outbox row $ws/$slug enqueued but NEVER DRAINED — no booted substrate binding on '$src' owns ($ws,$slug), so nothing will ever publish it. TEST-TARGETING bug, NOT a replication failure: a workspace_id/slug was almost certainly resolved on the OTHER frame. Pair frames by harness_shared.pots.public_key and resolve each frame's OWN (workspace_id,harness_slug). See WI-6209." >&2
+  else
+    echo "DIAG($src,$key): outbox row $ws/$slug DRAINED to a peer log but never arrived at the destination — this IS a genuine replication/transport failure, OR the arrival was simply slower than the poll window (WI-6209 observed a legitimate >90s arrival on a healthy link)." >&2
+  fi
+}
+
 # fed_merge_assert <src> <dst> <slug> <feature_id> <title> <status> [tries]
 # INSERT origin='local' on src; poll dst for the row with origin='remote'.
-# Echoes 1 (merged) or 0.
+# Echoes 1 (merged) or 0. On failure, prints a fed_diagnose_unmerged line to
+# stderr naming which of the two failure classes this was (WI-6209).
 fed_merge_assert() {
   local src="$1" dst="$2" slug="$3" fid="$4" title="$5" status="$6" tries="${7:-30}" i row ts
   ts="$(date +%s)000"
@@ -898,6 +944,7 @@ fed_merge_assert() {
     [ "$row" = "remote" ] && { echo 1; return 0; }
     sleep 3
   done
+  fed_diagnose_unmerged "$src" "$fid"
   echo 0; return 1
 }
 
@@ -976,6 +1023,9 @@ fed_hive_merge_probe() {
     [ -n "$row" ] && { echo "1 $row"; return 0; }
     sleep 3
   done
+  # WI-6209: distinguish a mis-targeted write (enqueued, never drained) from a
+  # genuine replication failure — a bare "0" conflates them.
+  fed_diagnose_unmerged "$src" "$fid"
   echo "0"; return 1
 }
 
