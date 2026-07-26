@@ -93,20 +93,24 @@ launch needs right-click → Open, or
 `xattr -dr com.apple.quarantine /Applications/Papercusp.app`. Updater
 payloads are still minisign-signed.
 
-### Windows (NSIS, built on the Windows VM)
+### Windows (Inno Setup, cross-compiled on Linux — no VM)
 
-`WITH_WINDOWS=1` does NOT cross-compile — it drives a native MSVC build on
-the local QEMU Windows 11 VM via `bin/build-windows-on-vm.sh` (the old
-`x86_64-pc-windows-gnu` cross lane never worked and MSVC is Tauri's
-supported Windows story). Plan + decisions:
-`windows-desktop-release-readiness-2026-06-11`.
+> **WI-5651 (2026-07-20) retired the QEMU Windows 11 VM leg** (`bin/build-windows-on-vm.sh`
+> — fragile, slow, lease-contended; its VM heartbeat deaths caused 3 of WI-5600's failed
+> builds). `WITH_WINDOWS=1` now drives `bin/build-windows-cross.sh`: a real cross-compile on
+> THIS Linux box — `cargo-xwin` builds the MSVC target, Inno Setup 6.7.3 under `wine`
+> (headless via `xvfb`) packs the installer — no VM, no SSH, no `x86_64-pc-windows-gnu` cross
+> (that lane never worked; MSVC is Tauri's supported Windows story, same toolchain the VM
+> used, minus the VM). Proven end-to-end 2026-07-20 (all four gates: cross-compile, Inno
+> packing, Server-role disk-spanning, Authenticode signing). Plan + decisions:
+> `windows-desktop-release-readiness-2026-06-11` (superseded by the WI-5651 cross-compile
+> migration for the build mechanism; the feature-parity/uninstall findings below still hold).
 
 Per-release prereqs (the script checks all of these and fails early):
 
-1. **VM booted** — `~/windows-vm/boot-windows.sh` (ssh `-p 2223`, key
-   `~/.ssh/papercup-vm-win`; spice `:5931`; qemu monitor
-   `qemu-monitor.sock` — a black screen + dead ssh usually means
-   `paused (io-error)`: check `info status`, then `cont`).
+1. **Cross toolchain installed** (one-time) — `rustup target add x86_64-pc-windows-msvc`,
+   `cargo install cargo-xwin`, Inno Setup 6.7.3 + `wine` + `xvfb` on the host. The script
+   fails early naming whatever's missing.
 2. **Sidecar built** — `bin/build-desktop-sidecar.sh` (release-local.sh
    does this anyway).
 3. **WSL rootfs tarball** — `scripts/build-rootfs.sh` (docker; ~250 MB
@@ -114,30 +118,48 @@ Per-release prereqs (the script checks all of these and fails early):
    The Windows app imports this as the `papercup-runtime` WSL2 distro on
    first run — an installer built without it cannot onboard.
 
-The artifact is the NSIS `*-setup.exe` (+ minisign `.sig`); MSI is not
-built by default. Artifacts land in
-`src-tauri/target/windows-vm/bundle/nsis/` on the host. The Windows app is
-unsigned (no Authenticode cert yet) — SmartScreen will warn on install;
-revisit before public distribution.
+The artifact is the Inno Setup `*-setup.exe` (+ `*-setup-N.bin` span slices for
+the Server role, + minisign `.sig`) — NSIS is retired along with the VM; MSI is
+still not built by default. Artifacts land in
+`src-tauri/target/windows-vm/bundle/inno/` on the host (the `windows-vm` path
+segment is kept only for `release-local.sh`'s collector compatibility — nothing
+under it is VM-produced anymore). Authenticode signing (`osslsigncode`) is
+cert-conditional: unset `WINDOWS_CERT_BASE64` ⇒ unsigned build (byte-identical
+to current prod), same as before — SmartScreen will warn on install until the
+owner supplies a code-signing cert (see the `windows-authenticode-signing-runbook`
+agent insight).
 
-#### Fast LOCAL Windows-cfg compile gate (before the VM trip)
+#### Fast LOCAL Windows-cfg compile gate
 
 The desktop's ~68 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]` regions
 (main.rs, wsl_setup.rs, native_console.rs, pty.rs, …) are invisible to a plain
 `cargo check` on the Linux dev box — so a type/import/borrow error in a
-Windows-only block used to surface only 15-25 min into `build-windows-on-vm.sh`
-on the VM. `bin/check-windows-cfg.sh` compiles that exact surface locally in
+Windows-only block used to surface only 15-25 min into the old VM build.
+`bin/check-windows-cfg.sh` compiles that exact surface locally in
 ~40 s (~4 s warm) via `cargo xwin check --target x86_64-pc-windows-msvc`
 (cargo-xwin shims the MSVC toolchain so the `ring`/C build scripts that block a
 naive cross-`cargo check` resolve). One-time setup (the script prints the exact
 command if any piece is missing): `rustup target add x86_64-pc-windows-msvc`,
 `sudo apt-get install -y --no-install-recommends clang lld llvm`,
-`cargo install cargo-xwin`. `build-windows-on-vm.sh` runs it as an opt-out
-pre-flight (`SKIP_WINDOWS_CFG_PRECHECK=1` to skip) and aborts before the VM
-trip on a compile error — but skips gracefully (warn + continue) when the local
-toolchain isn't set up, and is deliberately NOT in the green-checkpoint suite
+`cargo install cargo-xwin`. It is no longer wired as an automatic pre-flight
+into either Windows producer (confirmed: neither `build-windows-cross.sh` nor
+`release-local.sh` invokes it) — run it manually before a Windows cut to catch
+a Windows-only compile error in ~40s instead of discovering it deep into the
+real build. It is deliberately NOT in the green-checkpoint suite
 (it needs the SDK). It is a compile check, not a build — the runnable `.exe` is
-still the VM's job.
+still `build-windows-cross.sh`'s job.
+
+> **⚠ VM-era content below (per-release gate, feature-parity verification, and
+> uninstall/reinstall semantics).** These were verified against the QEMU Windows
+> VM that WI-5651 retired. The findings about the SHIPPED APP's behavior
+> (two-bundle split, autostart, quit semantics, uninstall/reinstall handling)
+> still describe the real app and haven't changed — only the *mechanism* that
+> produced the artifact under test has (VM build → `build-windows-cross.sh`
+> cross-build). The exact VM-specific verification STEPS below (qcow2 snapshot
+> resets, `~/windows-vm/...` paths) are preserved for historical reference; no
+> equivalent hands-off install-smoke procedure against the cross-built artifact
+> has been documented yet as of this sweep (EI-18189710880191611) — someone
+> doing a Windows release should re-verify by hand until one exists.
 
 #### Windows per-release gate: install smoke + snapshot convention
 

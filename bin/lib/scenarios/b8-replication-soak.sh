@@ -79,9 +79,23 @@ scn_replication_soak() {
     # soak's own stall. Scoping to the soak's own harness slugs makes the pin
     # mean what it claims to mean. Falls back to the old unscoped check only
     # if oslug/mslug somehow never resolved (shouldn't happen post-join).
+    #
+    # WI-5833 follow-up (2026-07-25): the scoped match above still missed a
+    # REAL stall on a genuinely-failing soak (banked stamp=153415) because it
+    # required a literal trailing space after the slug — but one hypercore is
+    # reported under BOTH "harness=<slug>" and its "-pot" sibling label (the
+    # same aliasing deb-hetzner-restart.sh:391-401 documents and handles for
+    # its own detector-noise assert; oslug==mslug=="hello-world" in
+    # production, and the real stall line logged harness=hello-world-pot).
+    # The old space-anchored regex never matches the "-pot" spelling, so a
+    # genuine fire was scored as a false "DETECTOR REGRESSION". Allow an
+    # optional "-pot" suffix before the word boundary so both label spellings
+    # count as the detector having seen the soak's own stall. Offline-verified
+    # against serve-a-153415.log: 0 matches under the old pattern, 1 (the real
+    # stall line) under this one.
     for frame in a b; do
       if [ -n "$oslug$mslug" ]; then
-        if drv_exec "$frame" <<<"grep -qE 'replication_stalled.*harness=(${oslug}|${mslug}) ' /home/pcusp/serve.log" 2>/dev/null; then
+        if drv_exec "$frame" <<<"grep -qE 'replication_stalled.*harness=(${oslug}|${mslug})(-pot)?[[:space:]]' /home/pcusp/serve.log" 2>/dev/null; then
           hit=1
         fi
       elif drv_exec "$frame" <<<'grep -q "replication-liveness.*replication_stalled" /home/pcusp/serve.log' 2>/dev/null; then
