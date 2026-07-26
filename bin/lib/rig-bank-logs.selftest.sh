@@ -191,6 +191,60 @@ else
   bad "scn.*.log bank missing/empty: $scn_bank"
 fi
 
+# ── 7. WI-6070: a TAGGED (on-FAIL) bank also lands a prune-exempt fail/ bundle ─
+reset_env
+RIG_WORK="$WORK_TMP"
+echo "the leak line" >"$RIG_WORK/scn.revocation_kcut.log"
+rig_bank_logs "revocation_kcut"
+fail_dir="$(ls -1d "$RIG_BANK_DIR"/fail/*/ 2>/dev/null | head -1)"
+if [ -n "$fail_dir" ] \
+  && ls "$fail_dir"/serve-a-*.log >/dev/null 2>&1 \
+  && grep -rq "the leak line" "$fail_dir" 2>/dev/null; then
+  ok "tagged (on-FAIL) bank ALSO bundles its evidence into a prune-exempt fail/<stamp>/ dir"
+else
+  bad "no fail/<stamp>/ bundle for a tagged bank — dir has: $(ls -R "$RIG_BANK_DIR" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# ── 7b. THE REGRESSION WI-6070 EXISTS TO PREVENT: later PASSING runs trip the ─
+#       flat FIFO and unlink the flat names — the FAIL evidence must SURVIVE
+#       that, because it is hardlinked into fail/. This is exactly what
+#       destroyed the only banked artifact of the WI-6043 revocation leak.
+reset_env
+RIG_WORK="$WORK_TMP"
+RIG_BANK_KEEP=1               # tiny, so the very next bank prunes almost everything
+echo "the leak line" >"$RIG_WORK/scn.revocation_kcut.log"
+rig_bank_logs "revocation_kcut"                     # the FAIL bank
+rm -f "$RIG_WORK"/scn.*.log                          # later runs have their own scn logs
+rig_bank_logs                                        # a PASSING run banks + prunes
+rig_bank_logs                                        # ...and another
+flat_left="$(ls "$RIG_BANK_DIR"/scn.revocation_kcut-*.log 2>/dev/null | wc -l)"
+if grep -rq "the leak line" "$RIG_BANK_DIR"/fail/ 2>/dev/null; then
+  ok "FAIL evidence survives later PASSING runs tripping the flat FIFO (flat copies left: $flat_left) — WI-6070 regression guarded"
+else
+  bad "FAIL evidence was destroyed by subsequent passing runs — WI-6070 has regressed (this is the exact WI-6043 evidence loss)"
+fi
+
+# ── 7c. an UNTAGGED (end-of-run) bank must NOT create a fail/ bundle ──────────
+reset_env
+rig_bank_logs
+if [ ! -d "$RIG_BANK_DIR/fail" ]; then
+  ok "untagged (ordinary end-of-run) bank creates no fail/ bundle — only FAIL banks are prune-exempt"
+else
+  bad "untagged bank wrongly created a fail/ bundle: $(ls -1d "$RIG_BANK_DIR"/fail/*/ 2>/dev/null | tr '\n' ' ')"
+fi
+
+# ── 7d. the fail/ bundles are themselves bounded (in DIRS, by ─────────────────
+#       RIG_BANK_FAIL_KEEP) so this can never grow without limit.
+reset_env
+RIG_BANK_FAIL_KEEP=2
+rig_bank_logs "scn_one"; rig_bank_logs "scn_two"; rig_bank_logs "scn_three"
+n_fail_dirs="$(ls -1d "$RIG_BANK_DIR"/fail/*/ 2>/dev/null | wc -l)"
+if [ "$n_fail_dirs" -le 2 ] && [ "$n_fail_dirs" -ge 1 ]; then
+  ok "fail/ bundles are bounded separately by RIG_BANK_FAIL_KEEP dirs (kept $n_fail_dirs of 3)"
+else
+  bad "RIG_BANK_FAIL_KEEP=2 did not bound the fail/ bundles — got $n_fail_dirs dirs"
+fi
+
 echo
 if [ "$FAILS" = 0 ]; then echo "PASS — rig_bank_logs selftest"; exit 0; fi
 echo "FAIL — $FAILS check(s) failed"; exit 1

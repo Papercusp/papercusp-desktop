@@ -15,6 +15,7 @@
     "test:live-fed-reaper": "bash bin/lib/live-federation-gate-reaper.selftest.sh",
     "test:release-leg-reaper": "bash bin/lib/release-local-leg-reaper.selftest.sh",
     "test:local-matrix-starvation": "bash bin/lib/local-matrix-starvation.selftest.sh",
+    "test:rig-bank-logs": "bash bin/lib/rig-bank-logs.selftest.sh",
     "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:dev-operator-reaper": "node --test test/dev-operator-ifneeded-reaper.test.js",
     "test:stale-sidecar-guard": "node --test test/build-deb-stale-sidecar-guard.test.js",
