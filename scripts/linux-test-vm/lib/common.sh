@@ -205,6 +205,75 @@ _warn_if_deb_stale() {
   fi
 }
 
+# ── deployed-state provenance (WI-6212) ─────────────────────────────────────
+# _warn_if_deb_stale (above) guards the ARTIFACT PICK — it only runs when a rig
+# INSTALLS a .deb via default_deb(), and it compares a FILE's mtime to source
+# commits. It therefore cannot see the case that burned WI-6209: a long-lived rig
+# whose VMs were installed by EARLIER runs, at DIFFERENT times, and are now
+# running DIFFERENT builds. Measured there:
+#     fed-a  sidecar 2026-07-26 15:37Z  — HAD the holepunch fix under test
+#     fed-b  sidecar 2026-07-26 09:26Z  — did NOT (cut 37 min before it landed)
+# Nothing anywhere compared them, so the rig produced a confident, reproducible,
+# and completely wrong bug report: the one direction that failed was exactly the
+# one dialed by the stale VM. This is the THIRD instance of the class already
+# recorded on _warn_if_deb_stale (WI-1334, EI-18160721229588594) — each previous
+# fix hardened artifact SELECTION and left DEPLOYED STATE unchecked.
+#
+# So: assert what is actually ON THE VM, not what we think we installed.
+
+# vm_deployed_sidecar_id <vmname> — echo "<sha256-12> <bytes>" for the sidecar
+# bundle actually installed on that VM, or empty when it cannot be read. The
+# bundle is the real unit of behaviour here: serve.mjs is an esbuild bundle that
+# INLINES the operator, its deps, and the patched hyperdht, so its hash is a
+# faithful identity for "which code is this VM running".
+vm_deployed_sidecar_id() {
+  vm_ssh "$1" 'p="$(ls -1 "/usr/lib/Papercusp GUI/sidecar/serve.mjs" /usr/lib/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; [ -n "$p" ] && printf "%s %s\n" "$(sha256sum "$p" | cut -c1-12)" "$(stat -c%s "$p")"' 2>/dev/null | tr -d '\r' | head -1
+}
+
+# vm_assert_uniform_sidecar <vmname>... — die unless EVERY named VM runs the same
+# sidecar bundle. A heterogeneous rig makes every cross-VM result uninterpretable:
+# a difference between the two ends is then indistinguishable from a difference
+# between the two BUILDS, which is precisely how WI-6209 was misdiagnosed.
+vm_assert_uniform_sidecar() {
+  local first="" first_vm="" vm id
+  for vm in "$@"; do
+    id="$(vm_deployed_sidecar_id "$vm")"
+    [ -n "$id" ] || die "cannot read the deployed sidecar bundle on '$vm'." \
+      "REFUSING to run: an unidentifiable build cannot be verified against, and a rig" \
+      "that measures unknown bytes produces confident wrong answers (WI-6209/WI-6212)."
+    echo "  $vm sidecar: $id"
+    if [ -z "$first" ]; then first="$id"; first_vm="$vm"; continue; fi
+    [ "$id" = "$first" ] || die "rig is HETEROGENEOUS — '$first_vm' runs sidecar [$first]" \
+      "but '$vm' runs [$id]. Every cross-VM result would be uninterpretable (a difference" \
+      "between the ends is indistinguishable from a difference between the BUILDS — exactly" \
+      "the WI-6209 misdiagnosis). Reinstall/hotpatch both from ONE artifact and re-run."
+  done
+}
+
+# vm_assert_dht_isolated <vmname> — die when the app on that VM joined the PUBLIC
+# DHT while this run intended an isolated testnet.
+#
+# WI-6209: launching the app WITHOUT sourcing ~/fed.env (which carries
+# PAPERCUSP_DHT_BOOTSTRAP) silently falls back to the public DHT. Nothing fails —
+# the app boots, peers, and logs normally — it just quietly pulls unrelated outside
+# peers into the rig and invalidates every federation measurement. Step 8 printed
+# "isolated by construction (separate VMs)", which is PROCESS isolation and says
+# nothing about which DHT the app joined. Assert the app's own verdict instead.
+vm_assert_dht_isolated() {
+  local vm="$1" line
+  line="$(vm_ssh "$vm" 'grep -ah "DHT bootstrap" ~/.papercusp/logs/serve.log 2>/dev/null | tail -1' 2>/dev/null | tr -d '\r')"
+  [ -n "$line" ] || die "no '[swarm] DHT bootstrap' line in the app log on '$vm' — cannot" \
+    "confirm which DHT it joined, so no federation result from this rig is trustworthy."
+  case "$line" in
+    *ISOLATED*) echo "  $vm DHT: ${line#*DHT bootstrap = }" ;;
+    *) die "'$vm' joined the PUBLIC DHT: ${line#*DHT bootstrap = }" \
+         "This rig is supposed to be isolated. Outside peers can join, and every" \
+         "peering/merge result becomes meaningless (WI-764 class; hit again in WI-6209" \
+         "when a relaunch omitted ~/fed.env). Relaunch WITH the bootstrap env:" \
+         "  set -a; . ~/fed.env; set +a; setsid bash -c 'exec /usr/bin/papercusp-desktop'" ;;
+  esac
+}
+
 require_golden() {
   [ -f "$GOLDEN" ] || die "golden image not found ($GOLDEN). Run: vmctl provision"
 }

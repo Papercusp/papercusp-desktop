@@ -409,6 +409,28 @@ else
   fed_assert_isolated a b || exit 5
 fi
 
+# WI-6212 — DEPLOYED-STATE preconditions. Everything above verifies the rig can
+# TALK (bridge, UDP, boot); nothing verified WHAT IS RUNNING. Both checks below
+# exist because their absence produced confident, reproducible, wrong results:
+#   - heterogeneous builds: fed-a ran a sidecar WITH the holepunch fix under test
+#     and fed-b one WITHOUT it, so the single failing direction was simply the one
+#     dialed by the stale VM (WI-6209).
+#   - public DHT: a relaunch that omits ~/fed.env silently joins the PUBLIC DHT,
+#     pulling outside peers into a rig everyone believes is isolated.
+# Both are cheap, and both fail CLOSED — an unverifiable precondition is a stop,
+# not a warning (EI-18160721229588594: a WARN in a long boot log is reliably missed).
+if [ "$VMS" = 2 ] && [ "${FED_KIND[a]}" != local ] && [ "${FED_KIND[b]}" != local ]; then
+  fed_log "asserting deployed state (WI-6212: uniform build + DHT isolation)"
+  vm_assert_uniform_sidecar "${FED_VM[a]}" "${FED_VM[b]}"
+fi
+if [ -n "${BOOTSTRAP:-}" ]; then
+  for inst in a b; do
+    [ "$VMS" = 2 ] || [ "$inst" = a ] || continue
+    [ "${FED_KIND[$inst]}" = local ] && continue
+    vm_assert_dht_isolated "${FED_VM[$inst]}"
+  done
+fi
+
 # ── 9. create-from-repo on A (auto-publish) → discover → join on B ──────────
 # The per-harness /share/finalize step was RETIRED (comb-retire-per-harness-
 # sharing-2026-06-11 → the HIVE model). Current federation-setup: A creates a hive
