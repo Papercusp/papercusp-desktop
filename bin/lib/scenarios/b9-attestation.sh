@@ -121,6 +121,12 @@ scn_attestation_membership() {
   [ -n "$rc_before" ] || { echo "attestation FAIL — LEG3 baseline UNMEASURED: the responder_mismatch counter probe on frame a returned nothing, so 'counter is 0' and 'probe never ran' are indistinguishable; refusing to score this leg"; return 1; }
   rid_wrong="att-wrong-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_wrong','refusal','work-offer:claim','att wrong-gh probe ($rid)',${a_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
+  # WI-6046: record whether the probe actually landed on b — DIAGNOSTIC ONLY (see the LEG4
+  # note below for why this must not hard-fail: a federated receipt may legitimately leave b).
+  # Surfaced in the scoring message so a silently-failed INSERT stops reading as "the feature
+  # did not bump the counter".
+  local wrong_on_b
+  wrong_on_b="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_wrong';" 2>/dev/null | tr -d '[:space:]')"
   rc_after=""; rc_after_measured=0
   for i in $(seq 1 40); do
     rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
@@ -134,7 +140,7 @@ scn_attestation_membership() {
   # failure message names the real fault instead of blaming the feature under test.
   [ "$rc_after_measured" = 1 ] || { echo "attestation FAIL — LEG3 post-probe UNMEASURED: all 40 responder_mismatch reads on frame a returned empty (the probe never ran — this is NOT evidence the counter failed to bump)"; return 1; }
   rid_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_wrong';" 2>/dev/null | tr -d '[:space:]')"
-  { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null || { echo "attestation FAIL — LEG3 wrong-gh-user refused-op across the container boundary (responder_mismatch $rc_before→$rc_after, row-on-a=$rid_on_a)"; return 1; }
+  { [ "$rc_after" -gt "$rc_before" ] && [ "$rid_on_a" = 0 ]; } 2>/dev/null || { echo "attestation FAIL — LEG3 wrong-gh-user refused-op across the container boundary (responder_mismatch $rc_before→$rc_after, row-on-a=$rid_on_a, probe-on-b=${wrong_on_b:-<unmeasured>} [WI-6046: probe-on-b=0/<unmeasured> means the probe receipt may never have been emitted — suspect the rig, not the feature])"; return 1; }
 
   echo "attestation OK on a GENUINE second frame (container boundary, not same-box): LEG1 A attests B + B roster seeded origin=remote, LEG2 second-device merge no-clobber, LEG3 wrong-gh-user refused-op counter $rc_before→$rc_after"
   return 0
@@ -181,10 +187,42 @@ scn_attestation_unattested_device() {
   # Strip B's attestation on A (author device now maps to no member) — safe here: this is
   # the LAST scenario in the run, so no downstream scenario depends on B's device row.
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
+  # WI-6046 (2026-07-26): the strip above is this leg's ENTIRE precondition, and it swallowed
+  # every error (>/dev/null 2>&1, no rc check, no read-back). If frame a's PG is degraded when
+  # it runs — likely, since this leg runs LAST after four invasive scenarios, exactly as the
+  # WI-5788 comment below already warns — the UPDATE silently no-ops. B's device then still
+  # resolves to a member, A correctly does NOT refuse, and the scoring assert at the bottom
+  # reports "identity_unresolved 0→0" as though the FEATURE under test had failed.
+  # Observed live: gate run 083840 (12:38Z UTC) failed exactly this way while frame a was
+  # recovering from 3 SIGTERMs. Verify the setup and fail as SETUP, naming the real fault —
+  # the same UNMEASURED⇒FAIL discipline the read path already gets, applied to the write path.
+  # Probe with count(*) FIRST: it ALWAYS returns exactly one row, so an empty result means the
+  # query never ran (frame a down / psql refused) rather than "no such member". Without that
+  # split, a member row that legitimately does not exist on a — a state in which the
+  # precondition (B's device resolves to no member) is ALREADY satisfied and this leg passes
+  # today — would read as UNVERIFIED and turn a genuine PASS into a FAIL. That would be the
+  # mirror image of the bug this change fixes, so it is worth the extra query.
+  local member_rows stripped
+  member_rows="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$member_rows" ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP UNVERIFIED: the pot_members probe on frame a returned nothing after the strip (count(*) always returns a row, so this means the query never ran — frame a down / psql refused), leaving 'strip applied' and 'probe never ran' indistinguishable; refusing to score this leg"; return 1; }
+  if [ "$member_rows" != 0 ]; then
+    stripped="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$stripped" ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP UNVERIFIED: the member row exists on frame a but device_attestations could not be read back after the strip; refusing to score this leg"; return 1; }
+    [ "$stripped" = 0 ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP DID NOT APPLY: B still carries $stripped device attestation(s) on frame a after the strip UPDATE (frame a degraded / PG unavailable?). The precondition was never established, so a non-refusal below would NOT be a product defect"; return 1; }
+  fi
   sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default 30_000ms — wait out the device→user cache
 
   rid_rem="att-unatt-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_rem','refusal','work-offer:claim','att unattested-device probe ($rid)',${b_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
+  # WI-6046: same class as the strip above — if this INSERT silently fails (frame b degraded),
+  # no receipt ever federates, the counter cannot bump, and the scoring assert blames the
+  # feature for a probe that was never emitted. Record whether the row landed, DIAGNOSTIC ONLY:
+  # deliberately NOT a hard fail, because a receipt may legitimately leave b once it federates,
+  # so "absent" here cannot distinguish never-inserted from already-drained. Hard-failing on it
+  # would manufacture the very false-FAIL class this change removes. It is surfaced in the
+  # scoring message below, where it separates "rig never emitted the probe" from "A failed to refuse".
+  local probe_on_b
+  probe_on_b="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   rc_after=""; rc_after_measured=0
   local i
   for i in $(seq 1 40); do
@@ -198,7 +236,7 @@ scn_attestation_unattested_device() {
   [ "$rc_after_measured" = 1 ] || { echo "attestation(unattested-device) FAIL — LEG4 post-probe UNMEASURED: all 40 identity_unresolved reads on frame a returned empty (the probe never ran — NOT evidence the counter failed to bump)"; return 1; }
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
-  { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, all reasons: $reasons"; return 1; }
+  { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons [WI-6046: the strip precondition IS verified above, so this is a genuine non-refusal unless probe-on-b=0/<unmeasured>, which points at the rig rather than the feature]"; return 1; }
 
   echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
   return 0
