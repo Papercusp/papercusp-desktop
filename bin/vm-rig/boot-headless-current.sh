@@ -31,9 +31,31 @@ LOG="/tmp/serve-current.log"
 PIDFILE="/tmp/serve-current.pid"
 HONO_PORT="${PAPERCUSP_HONO_PORT:-3070}"
 
-for f in "$NODE" "$SERVE" "$CUR/db-sql" "$CUR/node_modules"; do
+for f in "$NODE" "$SERVE" "$CUR/db-sql" "$CUR/node_modules" "$CUR/sql"; do
   [ -e "$f" ] || { echo "FATAL: missing $f" >&2; exit 1; }
 done
+
+# --- GUARD (2026-07-26): $CUR/sql must be the LOCKS migration set, NOT the main one.
+# The composed dir carries TWO distinct sql dirs and they are easy to swap:
+#   $CUR/db-sql  → the MAIN papercusp migrations (000-baseline + 6xx), consumed
+#                  via PAPERCUSP_PG_SQL_DIR by serve's embedded-PG boot runner.
+#   $CUR/sql     → the ~21-file LOCKS set (001-bootstrap … 0NN-*), consumed by
+#                  @papercusp/locks' su-lock-store, whose SQL_DIR is
+#                  `dirname(import.meta.url)/sql`. In an ESBUILD BUNDLE that
+#                  collapses to the bundle's own directory — i.e. THIS dir —
+#                  so whatever sits at $CUR/sql IS the locks migration set.
+# When the main set was copied here by mistake, locks bootstrap tried to apply
+# 000-baseline.sql to the `papercusp_su` side-DB, which has no extensions, and
+# died on `type "public.vector" does not exist`. The whole txn rolls back, so
+# ensureBootstrap throws and FILE LOCKING + git-sync locks are dead rig-wide
+# ("[git-sync] lock infra unavailable"). Silent apart from that one line.
+# Refresh with: rsync -a libs/papercusp/packages/locks/src/sql/ <vm>:$CUR/sql/
+if [ -e "$CUR/sql/000-baseline.sql" ] || [ ! -e "$CUR/sql/001-bootstrap.sql" ]; then
+  echo "FATAL: $CUR/sql is not the locks migration set." >&2
+  echo "  expected 001-bootstrap.sql (locks); found $(ls "$CUR"/sql/*.sql 2>/dev/null | wc -l) files$([ -e "$CUR/sql/000-baseline.sql" ] && echo ', including 000-baseline.sql — that is the MAIN set, wrong dir')." >&2
+  echo "  fix: rsync -a libs/papercusp/packages/locks/src/sql/ \"\$VM:$CUR/sql/\"" >&2
+  exit 1
+fi
 
 # --- stop any prior rig operator variant (bundle / dev-source / current)
 for pf in /tmp/serve-headless.pid /tmp/serve-devsource.pid "$PIDFILE"; do
