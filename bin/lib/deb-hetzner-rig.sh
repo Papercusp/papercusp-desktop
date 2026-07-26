@@ -673,7 +673,15 @@ INSTEOF
       fed_log "[$inst] db-sql hotpatch SKIPPED — $dbsql not found"
     fi
   fi
-  fed_log "[$inst] launch headless serve.mjs as non-root pcusp (PUBLIC DHT, identity ${FRAME_USER[$inst]})"
+  # EI-18685765921613818: print the DHT bootstrap this launch actually RESOLVED
+  # (RIG_DHT_BOOTSTRAP, forwarded to the frame below as DHTB), not a hardcoded
+  # "PUBLIC DHT" literal — this path DOES support an isolated bootstrap
+  # (local-matrix.sh:449 sets RIG_DHT_BOOTSTRAP for the docker rig), so the old
+  # literal actively contradicted the real config on every isolated run. The
+  # authoritative runtime signal stays getSharedSwarm's own
+  # "[swarm] DHT bootstrap = ISOLATED/PUBLIC" log (swarm.ts) — this is just the
+  # launch-time label no longer lying about it ahead of that.
+  fed_log "[$inst] launch headless serve.mjs as non-root pcusp (DHT ${RIG_DHT_BOOTSTRAP:-PUBLIC}, identity ${FRAME_USER[$inst]})"
   rig_ssh_wait "$ip" || { echo "FATAL ssh $inst (pre-launch)"; return 1; }
   # embedded-postgres REFUSES to initdb as root (Hetzner's ubuntu image logs in as
   # root); the .deb is a desktop app that runs as a normal user, so launch the
@@ -980,11 +988,14 @@ rig_join_all() {
 }
 
 # rig_wait_swarm <instA> <instB> [tries] — wait for [swarm] peer_connected between
-# two frames over the public DHT (thin fed_wait_discovery strict wrapper). The
+# two frames over the resolved DHT (thin fed_wait_discovery strict wrapper). The
 # sidecar-process swarm boot adds latency, so the default window is generous.
 rig_wait_swarm() {
   local a="$1" b="$2" tries="${3:-70}" disc
-  fed_log "wait swarm peer discovery $a↔$b over the PUBLIC DHT (~$(( tries * 3 ))s)"
+  # EI-18685765921613818: same class as the launch-line fix above — this helper
+  # is shared by isolated-bootstrap rigs (local-matrix.sh) too, so a hardcoded
+  # "PUBLIC DHT" here is equally misleading on those runs.
+  fed_log "wait swarm peer discovery $a↔$b over the DHT ${RIG_DHT_BOOTSTRAP:-PUBLIC} (~$(( tries * 3 ))s)"
   disc="$(fed_wait_discovery "$a" "$b" strict "$tries" || true)"
   [ "$disc" = 1 ] && { echo "✓ $a↔$b peer_connected across machines"; return 0; }
   echo "⚠ no $a↔$b peer_connected in ~$(( tries * 3 ))s"; return 1
