@@ -59,7 +59,18 @@ _soffer_diag_b_to_a() {
   b_total="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr -d '[:space:]')"
   b_pending="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND drained_at IS NULL;" 2>/dev/null | tr -d '[:space:]')"
   b_quar="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND quarantined_at IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
-  a_any="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr -d '[:space:]')"
+  # ⚠ THE VERDICT READ MUST MATCH THE ASSERT IT EXPLAINS. Step 4 asserts on
+  # `offer_kind='seat' AND origin='remote'`; this count used to be scoped by fleet_slug
+  # ALONE, across EVERY offer_kind. p2p_work_offers holds more than seats for the same
+  # fleet — spawn-request records are published through the sibling putWorkOffer call site
+  # (spawn-request-publish.ts:141) against the same fleet_slug — so a single non-seat row on
+  # frame a was enough to flip the verdict to ARRIVED-NOT-REMOTE ("the record arrived, the
+  # apply path is the fault") while the SEAT offer the leg actually tests had never arrived
+  # at all. Two opposite diagnoses, identical output: the same scoped-vs-identified confusion
+  # the clock probe below was already rewritten to remove. Scope the verdict to the kind
+  # under test; the breakdown below deliberately does NOT filter kind, so a stray non-seat
+  # row stays VISIBLE (named by kind) instead of being silently filtered into "no row".
+  a_any="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' AND offer_kind='seat';" 2>/dev/null | tr -d '[:space:]')"
   # WI-6210 WRITER DISCRIMINATOR (added with the origin/status breakdown, not instead
   # of it): on an ARRIVED-NOT-REMOTE row, the AUTHOR_PUBKEY SHAPE names WHICH writer
   # produced it, and the two answers point at completely different bugs:
@@ -83,7 +94,7 @@ _soffer_diag_b_to_a() {
   # a fleet — which frame a can hold for its OWN offer just as easily as for b's — and run
   # 184106 was read as "b's offer arrived and was re-stamped" off exactly that ambiguity.
   # A count is not evidence about a row until the row is named.
-  a_break="$(drv_psql a "SELECT COALESCE(string_agg(k||' '||o||'/'||s||'/'||au||'='||n, ' '), '<no row for this fleet>') FROM (SELECT offer_id||'@'||publisher_github_user_id k, COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, CASE WHEN author_pubkey IS NULL THEN 'author:NULL' WHEN author_pubkey ~ '^[0-9a-f]{64}\$' THEN 'author:64hex' ELSE 'author:other' END au, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2,3,4) t;" 2>/dev/null | tr '\n' ' ')"
+  a_break="$(drv_psql a "SELECT COALESCE(string_agg(k||' kind='||kd||' '||o||'/'||s||'/'||au||'='||n, ' '), '<no row for this fleet>') FROM (SELECT offer_id||'@'||publisher_github_user_id k, COALESCE(offer_kind,'<null>') kd, COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, CASE WHEN author_pubkey IS NULL THEN 'author:NULL' WHEN author_pubkey ~ '^[0-9a-f]{64}\$' THEN 'author:64hex' ELSE 'author:other' END au, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2,3,4,5) t;" 2>/dev/null | tr '\n' ' ')"
   # WI-6210 CLOCK-PROVENANCE PROBE — the 3-way decision procedure for an
   # ARRIVED-NOT-REMOTE row. Capture stamps the wire op's clock FROM the source row
   # (mig 423/528: substrate_outbox.ts = row.fed_ts, op_hlc = row.fed_hlc), and the
@@ -118,8 +129,8 @@ _soffer_diag_b_to_a() {
   # both sides, the answer is "b's offer never arrived", NOT "it arrived and was re-stamped".
   local b_clock a_clock b_row_clock
   b_clock="$(drv_psql b "SELECT COALESCE(string_agg(ts||'|'||COALESCE(op_hlc,'<null-hlc>'), ' '), '<no outbox row>') FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr '\n' ' ')"
-  b_row_clock="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
-  a_clock="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  b_row_clock="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||'/'||COALESCE(offer_kind,'?')||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  a_clock="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||'/'||COALESCE(offer_kind,'?')||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
   if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then
     verdict="NEVER-LEFT-B (outbox QUARANTINED on b — the row crossed the retry threshold and is excluded from the drain batch, mig 645; a b-side publish fault, NOT convergence timing)"
   elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
