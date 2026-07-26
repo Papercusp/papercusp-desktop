@@ -236,9 +236,30 @@ scn_attestation_unattested_device() {
   [ "$rc_after_measured" = 1 ] || { echo "attestation(unattested-device) FAIL — LEG4 post-probe UNMEASURED: all 40 identity_unresolved reads on frame a returned empty (the probe never ran — NOT evidence the counter failed to bump)"; return 1; }
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
-  { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null || { echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons [WI-6046: the strip precondition IS verified above, so this is a genuine non-refusal unless probe-on-b=0/<unmeasured>, which points at the rig rather than the feature]"; return 1; }
+  if { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null; then
+    echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
+    return 0
+  fi
 
-  echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
-  return 0
+  # EI-18717083046734203 (WI-6046 follow-up, 2026-07-26): the FAIL message below used to model
+  # a BINARY (setup unverified => rig fault; setup verified => genuine feature non-refusal) —
+  # but there is a THIRD branch this leg cannot rule out, and asserting "genuine non-refusal"
+  # across it is CONFIDENTLY WRONG, worse than no guard at all. This leg's probe receipt is
+  # fabricated via a raw drv_psql INSERT straight into p2p_receipts (line ~216), bypassing
+  # emitP2pReceipt and the whole production emission path. When frame a's most-recently-bumped
+  # refusal reason is responder_mismatch — NOT this leg's own target signal identity_unresolved
+  # — that is the self-authoring invariant correctly refusing a fabricated-authorship probe, the
+  # SAME already-diagnosed class as WI-5779 (done, 3-agent-verified) / EI-18662963598796485
+  # (closed as its duplicate): an a<->b roster-convergence TIMING effect (WI-5763/WI-5715
+  # family), environmental (host-CPU/event-loop contention under load), tracked live at WI-5639
+  # — not a fresh product defect. Name it as that instead of asserting a feature bug, so the
+  # next agent investigating this run doesn't chase a non-refusal that isn't there.
+  if [ "$rem_on_a" = 0 ] && printf '%s' "$reasons" | grep -q '^receipt-apply:responder_mismatch='; then
+    echo "attestation(unattested-device) FAIL — RIG/ENVIRONMENTAL, not a fresh feature defect: identity_unresolved $rc_before→$rc_after (never bumped this leg), but frame a's most-recently-refused reason was responder_mismatch (all reasons: $reasons), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. This leg's raw-INSERT probe bypasses emitP2pReceipt and is being refused by the (correct) self-authoring invariant instead of exercising the strip — same already-diagnosed class as WI-5779/EI-18662963598796485 (a<->b roster-convergence timing, environmental — see WI-5639, the live tracking item for the underlying SLA). Do not open a fresh investigation off this signature alone; escalate to WI-5639 only if it recurs persistently rather than intermittently."
+    return 1
+  fi
+
+  echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons"
+  return 1
 }
 matrix_register attestation_unattested_device 91 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL)" scn_attestation_unattested_device

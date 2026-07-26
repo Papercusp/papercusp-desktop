@@ -64,7 +64,9 @@ function scriptDelegatingDriver(
 
 /**
  * Register every driver papercusp can use. Linux is the kit's own driver
- * (the parity target). Windows + Mac are owner-gated (need the VMs + certs);
+ * (the parity target). Windows + Mac are owner-gated (need signing certs; both
+ * are cross-compiled natively on this Linux box since WI-5651 retired their
+ * QEMU build VMs — no VM is needed for the build itself anymore, see below);
  * they're registered but only run when the corresponding target is requested.
  */
 export function registerPapercuspDrivers(): void {

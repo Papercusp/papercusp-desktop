@@ -326,7 +326,17 @@ for id in "${RUN_IDS[@]}"; do
   "$fn" >"$out" 2>&1; rc=$?
   SCN_RC[$id]=$rc
   SCN_LINE[$id]="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -1)"
-  if [ "$rc" -eq 0 ]; then echo "  ✓ PASS $id — ${SCN_LINE[$id]}"
+  if [ "$rc" -eq 0 ]; then
+    echo "  ✓ PASS $id — ${SCN_LINE[$id]}"
+    # WI-6057: a PASS used to surface ONLY the last non-blank line, so a scenario's
+    # INTENTIONAL diagnostics were discarded on exactly the runs that need them. The
+    # discriminating value (e.g. b3-revocation.sh's "· revocation: revoke.live=…",
+    # which tells you whether the K-cut was genuinely ARMED or the cut merely appeared
+    # to work) is not the last line, so it was visible only on FAIL — backwards, since
+    # a PASSING run is what you need to confirm a fix. $RIG_WORK/scn.$id.log holds it
+    # but is torn down without --keep-up, so it was genuinely lost. Surface the marked
+    # lines on PASS too. Additive: no assertion or exit-code semantics change.
+    grep -a '^[[:space:]]*·' "$out" 2>/dev/null | sed 's/^[[:space:]]*/    /' || true
   else
     echo "  ✗ FAIL $id (rc=$rc) — ${SCN_LINE[$id]}"
     echo "    ── last 12 lines of $id ──"; tail -12 "$out" 2>/dev/null | sed 's/^/    /'
