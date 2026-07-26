@@ -159,8 +159,27 @@ fi
 # Note there is no safe pattern-kill alternative — a host-wide
 # `pkill -f 'tauri build'` kills peers' builds and is guarded against
 # (EI-18690252462401774), so owning our own process group is the only correct fix.
-BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK:-${TMPDIR:-/tmp}/papercusp-deb-bundle.lock}"
+#
+# EI-18721802836296042: the default lock path used to be a single fixed
+# /tmp path regardless of CARGO_TARGET_DIR. That's correct for the common case
+# (CARGO_TARGET_DIR unset, everyone sharing $HOME/.cargo-target — the whole
+# reason this mutex exists), but it also means an agent who deliberately
+# isolates CARGO_TARGET_DIR (the documented workaround for this exact
+# collision class — see the memory note this script's own header references)
+# still contends the SAME global lock as every other build on the box, even
+# though their bundle dir is provably disjoint and there is no real collision
+# risk. Hit live 2026-07-26: an isolated-target build queued 11+ minutes
+# behind an unrelated peer's ~5h-old build on the shared default target dir,
+# nearly hitting the 3600s timeout on a critical-path deb.
+#
+# FIX: default the lock path OFF CARGO_TARGET so it naturally follows the same
+# isolation an agent already opted into — no separate env var to remember, no
+# risk of eating a spurious stall/timeout just for not knowing the trick. An
+# explicit PAPERCUSP_DEB_BUNDLE_LOCK still overrides this for anyone who wants
+# a different scheme.
+BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK:-$CARGO_TARGET/.deb-bundle.lock}"
 BUNDLE_LOCK_WAIT="${PAPERCUSP_DEB_BUNDLE_LOCK_WAIT:-3600}"
+mkdir -p "$(dirname "$BUNDLE_LOCK")"
 
 BUILD_PGID=""
 stop_build_group() {
