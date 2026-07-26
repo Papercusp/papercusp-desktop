@@ -580,6 +580,70 @@ done
 [ -z "$missing" ] && ok "every driver overriding drv_applog also overrides drv_appbundle (no driver can silently resolve no bundle)" \
                   || bad "driver(s) override drv_applog but NOT drv_appbundle:$missing — those runs resolve no bundle ⇒ capability unknown ⇒ strict fires fail-closed on an emitter-less build"
 
+# --- RECURRENCE GUARD (WI-6012, leader su-e3b21216): ANY script that JUDGES a
+# discovery verdict must handle the "not measured" state EXPLICITLY.
+# fed_wait_discovery echoes 1|0|skip and rig_wait_swarm exits 0|1|2. A script that
+# compares the result variable against 1/0 WITHOUT also handling skip/2 scores
+# "not measured" as FAIL — a false-FAIL indistinguishable from a real product
+# break, which is exactly the residue this guard was written for (four OVERALL
+# computations survived the original preflight landing).
+#
+# ENUMERATED BY PRODUCER → RESULT-VARIABLE-NAME → COMPARISON, deliberately, because
+# neither half alone finds these: a name-based sweep for `disc*` misses
+# two-instance-hive-from-repo-smoke.sh (its variable is `prepeer_ok`), and a
+# caller-based sweep finds only ASSIGNMENT lines while the verdict that breaks
+# lives on a DIFFERENT line. Widening a contract breaks where a value is JUDGED,
+# not where it is produced.
+_disc_judge_offenders() {  # <dir-of-scripts>... → offenders on stdout
+  local f v
+  for f in "$@"; do
+    case "$f" in *federation-asserts.sh|*selftest*) continue ;; esac
+    [ -f "$f" ] || continue
+    # (i) string-verdict layer:  VAR="$(fed_wait_discovery …)"
+    for v in $(grep -oE '[A-Za-z_][A-Za-z0-9_]*="\$\(fed_wait_discovery' "$f" 2>/dev/null \
+               | sed 's/="\$(fed_wait_discovery//' | sort -u); do
+      if grep -qE "\"\\\$$v\" *(=|!=) *1" "$f" && ! grep -qE "\"\\\$$v\" *(=|!=) *skip" "$f"; then
+        echo "$(basename "$f"):\$$v(string-verdict)"
+      fi
+    done
+    # (ii) exit-code layer:  rig_wait_swarm …; VAR=$?   (a dok()-style helper counts as handling)
+    for v in $(grep -oE 'rig_wait_swarm[^;]*; *[A-Za-z_][A-Za-z0-9_]*=\$\?' "$f" 2>/dev/null \
+               | grep -oE '[A-Za-z_][A-Za-z0-9_]*=\$\?$' | sed 's/=\$?//' | sort -u); do
+      if grep -qE "\"\\\$$v\" *(=|!=) *[01]" "$f" \
+         && ! grep -qE "\"\\\$$v\" *(=|!=) *2" "$f" && ! grep -qE '^ *dok\(\)' "$f"; then
+        echo "$(basename "$f"):\$$v(exit-code)"
+      fi
+    done
+  done
+}
+
+# CONTROL FIRST: prove the detector can actually FAIL, so a green result below is
+# evidence and not a tautology. (Same discipline as the OLD-pattern control above.)
+_DJ_CTRL="$(mktemp -d)"
+cat > "$_DJ_CTRL/bad-rig.sh" <<'BADRIG'
+disc="$(fed_wait_discovery a b strict 30 || true)"
+if [ "$disc" = 1 ] && [ "$ab" = 1 ]; then echo "OVERALL: PASS"; fi
+BADRIG
+if [ -n "$(_disc_judge_offenders "$_DJ_CTRL/bad-rig.sh")" ]; then
+  ok "CONTROL: the discovery-judge guard DOES flag a script that scores skip as FAIL (the guard is not vacuous)"
+else
+  bad "CONTROL FAILED: the discovery-judge guard did not flag a deliberately-broken script — the green result below would be meaningless"
+fi
+cat > "$_DJ_CTRL/good-rig.sh" <<'GOODRIG'
+disc="$(fed_wait_discovery a b strict 30 || true)"
+if { [ "$disc" = 1 ] || [ "$disc" = skip ]; } && [ "$ab" = 1 ]; then echo "OVERALL: PASS"; fi
+GOODRIG
+[ -z "$(_disc_judge_offenders "$_DJ_CTRL/good-rig.sh")" ] \
+  && ok "CONTROL: the guard does NOT flag a script that correctly accepts skip (no false positives)" \
+  || bad "CONTROL FAILED: the guard flagged a correctly-written script — it would block legitimate work"
+rm -rf "$_DJ_CTRL"
+
+# THE REAL SWEEP over every rig script.
+unjudged="$(_disc_judge_offenders "$DIR"/../*.sh "$DIR"/*.sh | sort -u | tr '\n' ' ')"
+[ -z "$unjudged" ] && ok "every script that judges a discovery verdict handles 'not measured' (skip/exit-2) explicitly — no OVERALL scores unmeasured discovery as FAIL" \
+                   || bad "script(s) score an UNMEASURED discovery as FAIL: $unjudged — that is a false-FAIL indistinguishable from a real product break (accept skip alongside 1, and label the PASS line so it is visibly N/A; see WI-6012 / EI-18687938054040755)"
+unset -f _disc_judge_offenders
+
 unset -f drv_applog _fed_disc_capability
 rm -rf "$DISC_WORK"
 
