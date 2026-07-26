@@ -43,11 +43,30 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- SEED OVERLAY (WI-6075) ---
+#
+# The multi-GB hive seed (src-tauri/seed, ~2GB) is deliberately NOT in the base
+# tauri.conf.json: it must never ship inside the GUI product. But the debs this
+# script archives are what bin/live-federation-gate.sh SCAVENGES as its BASE_DEB
+# (it repacks only the sidecar dir; it never runs `tauri build` itself), so the
+# gate's supply line is exactly this build — which is why the seed kept being
+# re-added to the base config and kept getting reverted. That tug-of-war (added
+# 16ced93f -> removed 1c6d9e74 -> re-added 06b78818) is what this overlay ends:
+# the gate build opts INTO the seed explicitly here, so the GUI product stays
+# seed-free without starving the gate.
+#
+# Do NOT "simplify" this by putting seed/**/* back in tauri.conf.json — that is
+# the exact regression test/tauri-config-resources.test.js exists to catch.
+# NOTE: `tauri build --config` OVERWRITES conflicting values rather than merging
+# them, so tauri.gate.conf.json must repeat the COMPLETE resources list, not just
+# the extra seed entry (same contract as tauri.server.conf.json).
+SEED_OVERLAY="src-tauri/tauri.gate.conf.json"
+
 PROFILE_DIR="release"
-BUILD_CMD="npm run build"
+BUILD_CMD="npm run build -- --config $SEED_OVERLAY"
 if [ "$DEBUG" = 1 ]; then
   PROFILE_DIR="debug"
-  BUILD_CMD="npm run build:debug"
+  BUILD_CMD="npm run build:debug -- --config $SEED_OVERLAY"
 fi
 
 DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"
