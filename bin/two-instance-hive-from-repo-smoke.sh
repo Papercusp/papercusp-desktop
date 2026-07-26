@@ -383,6 +383,13 @@ log "wait: A↔B swarm peering BEFORE create (≤120s) — r5 exposed this race 
 prepeer_ok="$(fed_wait_discovery a b strict 40 || true)"
 if [ "$prepeer_ok" = 1 ]; then
   echo "✓ A↔B peered before create"
+elif [ "$prepeer_ok" = skip ]; then
+  # EI-18687938054040755: skip = this build predates the peer_data_path_up emitter,
+  # so pre-peering was never MEASURED. Reporting that as "did NOT peer" narrates an
+  # UNMEASURED leg as a failure. Non-fatal either way — prepeer_ok is deliberately
+  # NOT part of OVERALL (the create-time announce race is what this rig tests), so
+  # this is an honesty fix to the report, not a scoring fix. (leader, WI-6012)
+  echo "⊘ A↔B pre-peering N/A — this build predates the peer_data_path_up emitter, so it was never measured (EI-18687938054040755) — proceeding (non-fatal, not part of OVERALL)"
 else
   echo "⚠ A↔B did NOT peer within ~120s before create — proceeding anyway (the create-time announce race is what r6 is testing)"
   echo "--- A [swarm] tail ---"; grep -aE '\[swarm\]' "${FED_LOG[a]}" 2>/dev/null | tail -15
@@ -1050,7 +1057,7 @@ fi
 
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "pre-peered=$([ "$prepeer_ok" = 1 ] && echo PASS || echo FAIL)  create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
+echo "pre-peered=$(case "$prepeer_ok" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac)  create=$([ "$create_ok" = 1 ] && echo PASS || echo FAIL)  announced=$([ "$announce_ok" = 1 ] && echo PASS || echo FAIL)  degraded-cupboard=$([ "$degraded_ok" = 1 ] && echo PASS || echo FAIL)  discovered=$([ "$discover_ok" = 1 ] && echo PASS || echo FAIL)  member-links=$([ "$links_ok" = 1 ] && echo PASS || echo FAIL)  join-offer=$([ "$offer_ok" = 1 ] && echo PASS || echo FAIL)  offer-from-directory=$([ "$offer_dir_ok" = 1 ] && echo PASS || echo FAIL)  join=$([ "$join_ok" = 1 ] && echo PASS || echo FAIL)  join-clone=$([ "$clone_ok" = 1 ] && echo PASS || echo FAIL)  federate-A→B=$([ "$hive_merge_ok" = 1 ] && echo PASS || echo FAIL)  federate-B→A=$([ "$hive_rev_ok" = 1 ] && echo PASS || echo FAIL)  federate-continuous=$([ "$hive_cont_ok" = 1 ] && echo PASS || echo FAIL)"
 if [ "$witness_ran" = 1 ]; then
   CONTENT_CUT_REPORT="$([ "$rk_content_applicable" = 1 ] && { [ "$rk_content_cut_ok" = 1 ] && echo PASS || echo FAIL; } || echo INCONCLUSIVE)"
   echo "WITNESS (AK + P-008): AK0-default-off=$([ "$ak_default_ok" = 1 ] && echo PASS || echo FAIL)  AK-ban=$([ "$ak_ban_ok" = 1 ] && echo PASS || echo FAIL)  AK-unban-teeth=$([ "$ak_unban_ok" = 1 ] && echo PASS || echo FAIL)  K0-join-keys=$([ "$rk_keys_ok" = 1 ] && echo PASS || echo FAIL)  K1-control=$([ "$rk_ctrl_ok" = 1 ] && echo PASS || echo FAIL)  K2-revoke=$([ "$rk_revoke_ok" = 1 ] && echo PASS || echo FAIL)  K3-CUT=$([ "$rk_cut_ok" = 1 ] && echo PASS || echo FAIL)  K4-CONTENT-CUT=$CONTENT_CUT_REPORT"
