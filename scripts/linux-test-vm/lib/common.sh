@@ -169,9 +169,14 @@ default_deb() {
 # an explicit choice is always respected), or set PCUSP_ALLOW_STALE_DEB=1 for a
 # genuinely deliberate regression test against an older build (the legitimate case
 # this check must not block, just no longer silently satisfy by default).
-_warn_if_deb_stale() {
-  local deb="$1" deb_ts newest_ts t outer desktop_ts outer_ts papercusp_ts
-  deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
+# _newest_bundle_input_commit_ts — epoch seconds of the newest commit touching the
+# code that feeds a packaged artifact (this repo, the outer monorepo's
+# apps/operator, and the libs/papercusp submodule). Extracted so the .deb check
+# below and the sidecar-hotpatch check (vm_hotpatch_sidecar) share ONE definition
+# of "what counts as newer than this artifact" — two drifting notions of freshness
+# would be its own silent-wrong-answer bug.
+_newest_bundle_input_commit_ts() {
+  local t outer desktop_ts outer_ts papercusp_ts newest_ts
   desktop_ts="$(git -C "$DESKTOP_REPO" log -1 --format=%ct 2>/dev/null || echo 0)"
   outer="$DESKTOP_REPO/.."
   outer_ts=0; papercusp_ts=0
@@ -185,6 +190,13 @@ _warn_if_deb_stale() {
   for t in "$outer_ts" "$papercusp_ts"; do
     [ -n "$t" ] && [ "$t" -gt "$newest_ts" ] 2>/dev/null && newest_ts="$t"
   done
+  echo "${newest_ts:-0}"
+}
+
+_warn_if_deb_stale() {
+  local deb="$1" deb_ts newest_ts
+  deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
+  newest_ts="$(_newest_bundle_input_commit_ts)"
   if [ -n "$newest_ts" ] && [ "$newest_ts" -gt "$deb_ts" ] 2>/dev/null; then
     local age_days=$(( (newest_ts - deb_ts) / 86400 ))
     if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
@@ -226,8 +238,15 @@ _warn_if_deb_stale() {
 # bundle is the real unit of behaviour here: serve.mjs is an esbuild bundle that
 # INLINES the operator, its deps, and the patched hyperdht, so its hash is a
 # faithful identity for "which code is this VM running".
+# In-VM shell that sets $SIDE to the installed sidecar DIRECTORY (empty when the
+# app is not installed). ONE definition, shared by every function that has to
+# find the deployed bundle — the install path has already changed shape once
+# (the "Papercusp GUI" productName rename), and a second copy of this glob is a
+# second thing to forget to update.
+_VM_SIDE_DIR_SH='p="$(ls -1 "/usr/lib/Papercusp GUI/sidecar/serve.mjs" /usr/lib/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; SIDE=""; [ -n "$p" ] && SIDE="$(dirname "$p")"'
+
 vm_deployed_sidecar_id() {
-  vm_ssh "$1" 'p="$(ls -1 "/usr/lib/Papercusp GUI/sidecar/serve.mjs" /usr/lib/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; [ -n "$p" ] && printf "%s %s\n" "$(sha256sum "$p" | cut -c1-12)" "$(stat -c%s "$p")"' 2>/dev/null | tr -d '\r' | head -1
+  vm_ssh "$1" "$_VM_SIDE_DIR_SH"'; [ -n "$SIDE" ] && printf "%s %s\n" "$(sha256sum "$SIDE/serve.mjs" | cut -c1-12)" "$(stat -c%s "$SIDE/serve.mjs")"' 2>/dev/null | tr -d '\r' | head -1
 }
 
 # vm_assert_uniform_sidecar <vmname>... — die unless EVERY named VM runs the same
@@ -248,6 +267,127 @@ vm_assert_uniform_sidecar() {
       "between the ends is indistinguishable from a difference between the BUILDS — exactly" \
       "the WI-6209 misdiagnosis). Reinstall/hotpatch both from ONE artifact and re-run."
   done
+}
+
+# ── fast sidecar swap: the hotpatch path (WI-6212) ──────────────────────────
+# Rebuilding the .deb to test a JS change is ~3.5GB of cargo work for a bundle
+# that bin/build-desktop-sidecar.sh can rebuild by itself in minutes — and in
+# every federation bug so far the unit under test WAS that bundle (serve.mjs
+# inlines the operator, its deps, and the patched hyperdht). The Hetzner rig has
+# had this fast path for a long time (RIG_SERVE_HOTPATCH, bin/lib/deb-hetzner-rig.sh
+# :734); the local VM rig never did, which is why the WI-6209 investigation ended
+# up hand-rolling an scp — untracked, unrecorded, and invisible to every guard.
+# Same env var name as the Hetzner rig on purpose: one lever, two rigs.
+#
+# ⚠ THE TRAP THIS MUST NOT SPRING. A hotpatch DIVORCES the running JS from the
+# .deb's identity, and the .deb's identity is the only one /api/health knows:
+# `sha` comes from the RUST binary (option_env!("PAPERCUSP_BUILD_SHA"), forwarded
+# to the sidecar's env by main.rs:4657), so swapping serve.mjs cannot change it —
+# verified, not assumed. A naive port of the Hetzner lever would therefore leave
+# a VM confidently self-reporting a build whose JS it is no longer running: WI-6212's
+# exact failure class, re-created by the tool built to fix it. So every hotpatch
+# WRITES A MARKER beside the bundle, and vm_hotpatch_provenance re-verifies that
+# marker against the bundle actually on disk before believing a word of it.
+
+# vm_hotpatch_sidecar <vmname> [serve.mjs] — replace the installed sidecar bundle
+# (and its db-sql) with a locally-built one, and record what was installed.
+# Source precedence: $2 > $RIG_SERVE_HOTPATCH > the tree's built sidecar.
+# Does NOT restart the app — the caller relaunches (vmctl hotpatch, or
+# vm-federation.sh's launch_vm_instance). Overwriting the file a running node
+# process already read is harmless; it simply has no effect until the relaunch.
+vm_hotpatch_sidecar() {
+  local vm="$1" src="${2:-${RIG_SERVE_HOTPATCH:-$DESKTOP_REPO/src-tauri/sidecar/serve.mjs}}"
+  [ -f "$src" ] || die "no sidecar bundle to hotpatch at '$src'." \
+    "Build one first:  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh" \
+    "(or pass a path / set RIG_SERVE_HOTPATCH)."
+
+  # Same freshness question _warn_if_deb_stale asks of a .deb, asked of the
+  # bundle — hotpatching a stale bundle is the WI-6212 class with a faster loop.
+  local src_ts newest_ts
+  src_ts="$(stat -c %Y "$src" 2>/dev/null || echo 0)"
+  newest_ts="$(_newest_bundle_input_commit_ts)"
+  if [ "$newest_ts" -gt "$src_ts" ] 2>/dev/null; then
+    local age_min=$(( (newest_ts - src_ts) / 60 ))
+    if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
+      warn "'$src' was built ~${age_min}min BEFORE the newest commit touching the bundle" \
+           "inputs — it may not contain the code under test. Continuing (PCUSP_ALLOW_STALE_DEB=1)."
+    else
+      die "'$src' was built ~${age_min}min BEFORE the newest commit touching the bundle inputs," \
+          "so hotpatching it would deploy code that predates the fix under test — the exact" \
+          "37-minute gap that produced the WI-6209 misdiagnosis. Rebuild:" \
+          "  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh" \
+          "Deliberate regression test against an older bundle: PCUSP_ALLOW_STALE_DEB=1."
+    fi
+  fi
+
+  local side; side="$(vm_ssh "$vm" "$_VM_SIDE_DIR_SH"'; printf "%s\n" "$SIDE"' 2>/dev/null | tr -d '\r' | head -1)"
+  [ -n "$side" ] || die "no installed Papercusp sidecar found on '$vm' — a hotpatch REPLACES an" \
+    "installed bundle, it cannot create one. Install first:  vmctl install $vm"
+
+  # Identity recorded at patch time. The bundle sha256 is the load-bearing field
+  # (it is re-checkable against the file itself); the tree shas are labels for
+  # RIG_EXPECT_SHA. `dirty` is recorded, not rejected: this shared tree is
+  # continuously dirty by design (git-sync commits every few minutes), so failing
+  # on it would make the lever unusable and push people to the escape hatch.
+  local bsha desktop_sha outer_sha dirty="clean" now
+  bsha="$(sha256sum "$src" | cut -c1-12)"
+  desktop_sha="$(git -C "$DESKTOP_REPO" rev-parse --short HEAD 2>/dev/null || echo none)"
+  outer_sha="$(git -C "$DESKTOP_REPO/.." rev-parse --short HEAD 2>/dev/null || echo none)"
+  [ -n "$(git -C "$DESKTOP_REPO" status --porcelain 2>/dev/null)" ] && dirty="dirty"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  log "hotpatch $vm: $side/serve.mjs ← $src  (bundle $bsha, desktop $desktop_sha, outer $outer_sha, $dirty)"
+  vm_scp "$vm" "$src" /tmp/serve.mjs.hotpatch >/dev/null \
+    || die "could not copy '$src' to '$vm'"
+  vm_ssh "$vm" "sudo install -m 0644 /tmp/serve.mjs.hotpatch '$side/serve.mjs' && rm -f /tmp/serve.mjs.hotpatch" \
+    || die "could not install the hotpatched bundle on '$vm'"
+
+  # WI-1544 schema-drift guard, same as the Hetzner rig: a hotpatched serve.mjs
+  # runs CURRENT-tree code against the .deb's FROZEN migrations (the sidecar's
+  # db-sql is what the launch pins), so any migration added since the .deb build
+  # silently never applies. Ship the tree's top-level *.sql alongside the bundle.
+  local dbsql="${RIG_DBSQL_HOTPATCH:-$DESKTOP_REPO/../libs/papercusp/libs/db/sql}"
+  if [ -d "$dbsql" ] && [ -n "$(ls "$dbsql"/*.sql 2>/dev/null)" ]; then
+    log "hotpatch $vm: $side/db-sql ← $dbsql"
+    (cd "$dbsql" && tar -cf - ./*.sql) | vm_ssh "$vm" "sudo tar -C '$side/db-sql' -xf -" \
+      || die "could not sync db-sql to '$vm' — a hotpatched bundle against frozen migrations" \
+             "fails in ways that look like product bugs (WI-1544)."
+  else
+    warn "db-sql hotpatch SKIPPED on $vm — '$dbsql' has no *.sql. The bundle now runs current" \
+         "code against the .deb's frozen migrations (WI-1544); expect schema-drift failures."
+  fi
+
+  # The marker. Read back and VERIFIED below — a guard whose own write is never
+  # checked is how this whole class starts.
+  printf 'hotpatch %s %s %s %s %s %s\n' "$bsha" "$desktop_sha" "$outer_sha" "$dirty" "$now" "$(basename "$src")" \
+    | vm_ssh "$vm" "sudo tee '$side/.hotpatch-provenance' >/dev/null" \
+    || die "could not write the hotpatch provenance marker on '$vm'"
+
+  local check; check="$(vm_hotpatch_provenance "$vm")"
+  [ -n "$check" ] || die "hotpatched '$vm' but the provenance marker does NOT verify against the" \
+    "bundle now on disk. The rig would run unidentifiable code — refusing to leave it in that" \
+    "state. Investigate before re-running (did the install land? is $side writable?)."
+  log "hotpatch $vm OK — verified $check  (relaunch the app for it to take effect)"
+}
+
+# vm_hotpatch_provenance <vmname> — echo "<bundle-sha12>|<desktop-sha>|<outer-sha>|<clean|dirty>"
+# for a hotpatch that is STILL IN FORCE on that VM, else empty.
+#
+# "Still in force" is the whole point: the marker is only believed when its
+# recorded bundle hash equals the hash of the bundle actually on disk RIGHT NOW.
+# A later `vmctl install` (or a second hotpatch that failed halfway) replaces the
+# bundle and leaves the old marker behind — and a marker outliving the bytes it
+# describes is a provenance system that lies, which is worse than none.
+vm_hotpatch_provenance() {
+  vm_ssh "$1" "$_VM_SIDE_DIR_SH"'
+    [ -n "$SIDE" ] || exit 0
+    m="$SIDE/.hotpatch-provenance"
+    [ -f "$m" ] || exit 0
+    read -r tag b d o dirty rest < "$m" || exit 0
+    [ "$tag" = hotpatch ] || exit 0
+    live="$(sha256sum "$SIDE/serve.mjs" 2>/dev/null | cut -c1-12)"
+    [ -n "$live" ] && [ "$live" = "$b" ] && printf "%s|%s|%s|%s\n" "$b" "$d" "$o" "$dirty"
+  ' 2>/dev/null | tr -d '\r' | head -1
 }
 
 # vm_build_provenance <vmname> — echo "<sha>|<version>" as reported by the app's
@@ -295,8 +435,16 @@ vm_build_provenance() {
 # mid-investigation who must not be hard-blocked on a multi-GB rebuild. Precedent:
 # PAPERCUSP_ALLOW_DIRTY in bin/release-local.sh. Using it INVALIDATES any
 # "the rig ran the code under test" claim from that run — say so in the report.
+#
+# HOTPATCH. A VM whose sidecar was swapped by vm_hotpatch_sidecar reports the
+# .deb's provenance (or none) while running entirely different JS, so this guard
+# consults the hotpatch marker FIRST. A marker still in force is ACCEPTED as
+# provenance — and is in fact a stronger identity than the .deb's baked sha,
+# because it is re-verified against the bundle's own hash rather than trusted —
+# but the divergence is always PRINTED: nothing here may quietly imply that the
+# self-reported build describes the code actually running.
 vm_assert_build_provenance() {
-  local vm rec sha ver
+  local vm rec sha ver hp hp_bundle hp_desktop hp_outer hp_dirty
   for vm in "$@"; do
     rec="$(vm_build_provenance "$vm")"
     if [ -z "$rec" ]; then
@@ -306,6 +454,22 @@ vm_assert_build_provenance() {
     fi
     sha="${rec%%|*}"; ver="${rec#*|}"
     echo "  $vm build: sha=${sha:-<null>} version=${ver:-<none>}"
+
+    hp="$(vm_hotpatch_provenance "$vm")"
+    if [ -n "$hp" ]; then
+      hp_bundle="${hp%%|*}"; hp="${hp#*|}"
+      hp_desktop="${hp%%|*}"; hp="${hp#*|}"
+      hp_outer="${hp%%|*}"; hp_dirty="${hp#*|}"
+      echo "  $vm HOTPATCHED: sidecar bundle $hp_bundle from desktop=$hp_desktop outer=$hp_outer ($hp_dirty)"
+      echo "    ↳ the running JS is NOT the .deb's build — the sha above describes the native shell only."
+      if [ -n "${RIG_EXPECT_SHA:-}" ] \
+         && [ "$hp_desktop" != "$RIG_EXPECT_SHA" ] && [ "$hp_outer" != "$RIG_EXPECT_SHA" ]; then
+        die "'$vm' runs a sidecar hotpatched from desktop=$hp_desktop / outer=$hp_outer, but this" \
+          "run expects '$RIG_EXPECT_SHA'. Re-hotpatch from a tree at $RIG_EXPECT_SHA and re-run."
+      fi
+      continue
+    fi
+
     if [ -z "$sha" ] || [ "$ver" = "0.0.0" ] || [ -z "$ver" ]; then
       if [ "${RIG_ALLOW_UNPROVENANCED:-0}" = "1" ]; then
         warn "'$vm' reports sha=${sha:-<null>} version=${ver:-<none>} — an UNPROVENANCED build." \
@@ -316,8 +480,12 @@ vm_assert_build_provenance() {
       die "'$vm' reports sha=${sha:-<null>} version=${ver:-<none>} — this artifact carries NO" \
         "build provenance, so it is impossible to tell whether it contains the code under test." \
         "Both VMs being uniformly stale looks IDENTICAL to both being current (WI-6212)." \
-        "FIX: rebuild the .deb with bin/build-linux-local.sh (it sets PAPERCUSP_BUILD_SHA and" \
-        "PAPERCUSP_BUILD_VERSION; a bare 'npx tauri build' does NOT) and reinstall on both VMs." \
+        "FIX (full): rebuild the .deb with bin/build-linux-local.sh (it sets PAPERCUSP_BUILD_SHA" \
+        "and PAPERCUSP_BUILD_VERSION; a bare 'npx tauri build' does NOT) and reinstall on both VMs." \
+        "FIX (fast, minutes not GB): if the code under test is JS — which it is for anything" \
+        "federation, sync, or operator — rebuild ONLY the sidecar and hotpatch it:" \
+        "  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh && vmctl hotpatch <vm>" \
+        "That records a VERIFIED bundle identity, which this guard accepts in place of the .deb's." \
         "Override for an unrelated investigation: RIG_ALLOW_UNPROVENANCED=1."
     fi
     if [ -n "${RIG_EXPECT_SHA:-}" ] && [ "$sha" != "$RIG_EXPECT_SHA" ]; then
