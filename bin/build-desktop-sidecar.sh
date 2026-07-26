@@ -347,7 +347,16 @@ if [[ "$dep_check_ok" -ne 1 ]]; then
 fi
 
 echo "→ building operator-vite SPA (vite build → dist/)"
-(cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)
+# PAPERCUSP_RETAIN_DIST_CHUNKS=0 — this is a PACKAGING build: line ~816 does a
+# `cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"`, so whatever is in dist/ SHIPS
+# inside the desktop bundle. Retention (the default since
+# `dist-chunk-retention-default-2026-07-26`) keeps old hashed chunks around to
+# stop live windows 404-ing their pinned lazy imports — correct on a working
+# tree, dead weight in a distributable. So this one caller opts out explicitly.
+# Note the tradeoff this makes visible rather than introduces: the build runs in
+# $REPO_ROOT (the shared tree), so it empties that tree's dist/ and any desktop
+# window open against it will need a reload. Packaging is deliberate and rare.
+(cd "$REPO_ROOT" && PAPERCUSP_RETAIN_DIST_CHUNKS=0 npm --workspace @papercusp/operator-vite run build)
 if [[ ! -f "$VITE_DIR/dist/index.html" ]]; then
   echo "ERROR: expected $VITE_DIR/dist/index.html after the Vite build"
   exit 1
