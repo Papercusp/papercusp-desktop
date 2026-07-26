@@ -241,9 +241,23 @@ if [ "$NET" = bridge ]; then
     fi
   done
   if [ "$VMS" = 2 ]; then
-    r="$(fednet_guest_ping "${FED_VM[a]}" "$(fednet_bridge_ip "${FED_IDX[b]}")")"
+    b_ip="$(fednet_bridge_ip "${FED_IDX[b]}")"
+    r="$(fednet_guest_ping "${FED_VM[a]}" "$b_ip")"
     echo "  ${FED_VM[a]} → ${FED_VM[b]}: $r"
     [ "$r" = reachable ] || { echo "FATAL: VM↔VM bridge reachability failed"; exit 3; }
+    # WI-760: the UDX data path is a DIRECT VM↔VM UDP stream, on a different
+    # firewall path than guest→host (FORWARD, not INPUT — br_netfilter pushes
+    # bridged frames through iptables and ufw's routed policy is deny). With this
+    # blocked the rig still announces, still logs `peer_connected`, and carries
+    # ZERO bytes — a false green. Assert it.
+    u="$(fednet_guest_udp_pair "${FED_VM[a]}" "${FED_VM[b]}" "$b_ip")"
+    echo "  ${FED_VM[a]} → ${FED_VM[b]} UDP: $u"
+    if [ "$u" != ok ]; then
+      echo "FATAL: VM↔VM UDP is BLOCKED — the UDX data path can never carry bytes"
+      echo "  Expect `peer_connected` followed by 'data path NEVER came up'. Fix:"
+      echo "    sudo ufw route allow in on ${FEDBR_IF:-pcusp-fedbr0} out on ${FEDBR_IF:-pcusp-fedbr0}"
+      exit 3
+    fi
   fi
 fi
 

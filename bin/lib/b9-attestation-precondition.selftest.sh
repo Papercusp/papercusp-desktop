@@ -135,6 +135,46 @@ static "the applied-not-refused case names its two candidate readings" \
 static "PASS verdict also reports strip-at-scoring (a PASS on a broken precondition is not a PASS)" \
        "refused-op OK on a GENUINE second frame.*strip-at-scoring"
 
+# 10-16. EI-18737225233571148 — THE MISDIAGNOSIS GUARD. The leg's FAIL explanation used to key
+# off `reasons` (a hive-wide `LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3` read) and,
+# on merely SEEING responder_mismatch in it, printed "RIG/ENVIRONMENTAL ... Do not open a fresh
+# investigation off this signature alone". In gate run 133957 that verdict was WRONG and it
+# suppressed the real WI-5064 first-green investigation for hours: LEG3(60) bumps
+# responder_mismatch, and the churn legs between 60 and 89 RETRY that same receipt until it is
+# the most-recently-updated reason at scoring time — while THIS leg's probe caused no refusal at
+# all. The counter ASSERT had been hardened against exactly this stale-rebump hazard (WI-5779:
+# scope to the one reason this leg causes); the EXPLANATION never was.
+#
+# The fix is a per-reason before/after DIFF (`reasons_moved`), so a verdict cites only refusals
+# that moved inside this leg's window. Both halves are load-bearing and neither is visible to
+# any other test, so pin them — INCLUDING the negative: reading recency-ordered `reasons` to
+# CLASSIFY is the defect itself, and a well-meaning "simplification" back to it would restore a
+# confident wrong answer with no other guard in the tree noticing.
+static_not() {
+  local label="$1" pat="$2"
+  # Comments are allowed to quote the old behaviour (the file documents its own history) —
+  # only a LIVE line may not. Strip comment-only lines before matching.
+  if grep -vE '^[[:space:]]*#' "$SCN" | grep -Eq "$pat"; then
+    bad "$label — pattern IS present on a live (non-comment) line in $SCN: $pat"
+  else
+    ok "$label"
+  fi
+}
+static "reasons_before is snapshotted BEFORE the probe, sorted by REASON and UNBOUNDED (a stable set, no LIMIT window a reason can fall out of)" \
+       "reasons_before=.*ORDER BY reason;"
+static "reasons_after is read the same stable way at scoring time" \
+       "reasons_after=.*ORDER BY reason;"
+static "the before/after DIFF is actually computed (reasons_moved)" \
+       "for _tok in \\\$reasons_after"
+static "the responder_mismatch verdict is gated on reasons_MOVED, not on whatever was most recent" \
+       "printf '%s' \"\\\$reasons_moved\" \\| grep -q 'receipt-apply:responder_mismatch='"
+static "the 'nothing moved at all' case is reported as a probe that never reached receipt-apply" \
+       "PROBE NEVER REACHED THE APPLY PATH"
+static_not "no live verdict prints the RIG/ENVIRONMENTAL suppression that misdiagnosed 3/3 runs" \
+           "RIG/ENVIRONMENTAL"
+static_not "no live line CLASSIFIES off the recency-ordered \$reasons read (that read is diagnostic-only now)" \
+           "printf '%s' \"\\\$reasons\" \\| grep -q"
+
 echo
 if [ "$fails" = 0 ]; then
   echo "PASS — b9-attestation-precondition selftest (all checks)"

@@ -167,3 +167,55 @@ EOF
   wait "$listener" 2>/dev/null || true
   if grep -q "$tag" "$rx" 2>/dev/null; then rm -f "$rx"; echo ok; else rm -f "$rx"; echo BLOCKED; fi
 }
+
+# fednet_guest_udp_pair <src_vm> <dst_vm> <dst_ip> [port] — assert one guest can
+# DELIVER a UDP datagram to the OTHER guest across the rig bridge. Echoes "ok" or
+# "BLOCKED".
+#
+# WHY THIS IS SEPARATE from fednet_guest_udp_ok (WI-760): guest→host and
+# guest→guest are different firewall paths and failed INDEPENDENTLY here.
+#   - guest→host  traverses the INPUT chain  (ufw default-deny incoming)
+#   - guest→guest traverses the FORWARD chain, because br_netfilter
+#     (bridge-nf-call-iptables=1) pushes bridged frames through iptables, and
+#     ufw's routed policy is deny.
+# Fixing only the first gets you a rig that reaches the DHT, announces fine, and
+# reports `peer_connected` — while the UDX data path carries ZERO bytes, because
+# signalling is host-relayed but the stream is direct VM↔VM. That is precisely
+# the state this rig was in, and the app's own log named it:
+#   "data path NEVER came up ... `peer_connected` for this peer was a false
+#    success report, not a working connection."
+# So assert BOTH paths, or a green preflight still yields an unpeerable rig.
+fednet_guest_udp_pair() {
+  local src="$1" dst="$2" dst_ip="$3" port="${4:-45998}"
+  local tag="fednet-pair-$$-$RANDOM"
+  vm_run "$dst" <<EOF >/dev/null 2>&1
+rm -f /tmp/fednet-udp-pair.txt
+setsid python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', $port)); s.settimeout(20)
+try:
+    d, _ = s.recvfrom(4096)
+    open('/tmp/fednet-udp-pair.txt','w').write(d.decode('utf-8','replace'))
+except Exception:
+    open('/tmp/fednet-udp-pair.txt','w').write('TIMEOUT')
+" </dev/null >/dev/null 2>&1 &
+EOF
+  sleep 3
+  vm_run "$src" <<EOF >/dev/null 2>&1
+python3 -c "
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(5):
+    s.sendto(b'$tag', ('$dst_ip', $port)); time.sleep(0.4)
+"
+EOF
+  local out
+  out="$(vm_run "$dst" <<EOF 2>/dev/null
+for _ in \$(seq 1 8); do [ -s /tmp/fednet-udp-pair.txt ] && break; sleep 3; done
+cat /tmp/fednet-udp-pair.txt 2>/dev/null
+EOF
+)"
+  case "$out" in *"$tag"*) echo ok ;; *) echo BLOCKED ;; esac
+}
