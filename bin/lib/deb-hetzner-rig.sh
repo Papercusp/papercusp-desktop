@@ -1100,12 +1100,28 @@ rig_read_content() {
   drv_psql "$inst" "SELECT harness_slug||'|'||origin FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]'
 }
 
-# rig_read_roster <inst> — echo the hive_members roster on <inst>, one row per
+# rig_read_roster <inst> [pot] — echo the pot_members roster on <inst>, one row per
 # line as "<github_user_id>|<binding_status>|<#device_attestations>". The decisive
 # receive-side state (empty roster → decideMemberContentOp drops every peer op).
+#
+# SCOPED to this run's workspace + pot (EI-18656746187879489: this used to have NO
+# workspace_id/pot_home_slug predicate at all, so a frame hosting more than one pot
+# — a reused frame across scenario runs, e.g. — could report an unrelated pot's
+# members as THIS pot's roster: several callers gate PASS/FAIL directly on
+# "roster non-empty" (deb-hetzner-restart.sh, deb-hetzner-reconnect.sh), so an
+# unscoped read is a false-PASS available from any other pot on the frame, same
+# family as _cl_roster_ids/EI-18656746187879489). `pot` defaults to RIG_HIVE_ID
+# (the pot under test); RIG_WORKSPACE_ID is always set by rig_init before this can
+# run. Passing an explicit `pot` of '' (empty) intentionally widens to every pot
+# in the workspace — no caller does this today, but it stays available.
 rig_read_roster() {
-  local inst="$1"
-  drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members ORDER BY github_user_id;" 2>/dev/null
+  local inst="$1" pot="${2:-${RIG_HIVE_ID:-}}" conds="" where=""
+  [ -n "${RIG_WORKSPACE_ID:-}" ] && conds="workspace_id='${RIG_WORKSPACE_ID}'"
+  if [ -n "$pot" ]; then
+    [ -n "$conds" ] && conds="$conds AND pot_home_slug='$pot'" || conds="pot_home_slug='$pot'"
+  fi
+  [ -n "$conds" ] && where=" WHERE $conds"
+  drv_psql "$inst" "SELECT github_user_id||'|'||binding_status||'|'||COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members${where} ORDER BY github_user_id;" 2>/dev/null
 }
 
 # ── revoke / ban (the Brief 3 revocation primitive) ───────────────────────────

@@ -88,8 +88,22 @@ _cl_poll_present() {
   done
   echo 0; return 1
 }
-# _cl_roster_ids <inst> — the frame's hive_members github_user_id set (sorted, comma-joined).
-_cl_roster_ids() { drv_psql "$1" "SELECT COALESCE(string_agg(github_user_id::text,',' ORDER BY github_user_id),'') FROM harness_shared.pot_members;" 2>/dev/null | tr -d '[:space:]'; }
+# _cl_roster_ids <inst> [pot] — the frame's pot_members github_user_id set (sorted,
+# comma-joined), SCOPED to this run's workspace + pot (EI-18656746187879489: the
+# query used to have NO workspace_id/pot_home_slug predicate at all, so it
+# aggregated across every unrelated pot the frame happens to host — a false
+# CONVERGED roster-gate PASS is available the moment any other pot on the frame
+# contributes the expected github_user_id). `pot` defaults to RIG_HIVE_ID (the pot
+# under test); RIG_WORKSPACE_ID is always set by rig_init before this can run.
+_cl_roster_ids() {
+  local inst="$1" pot="${2:-${RIG_HIVE_ID:-}}" conds="" where=""
+  [ -n "${RIG_WORKSPACE_ID:-}" ] && conds="workspace_id='${RIG_WORKSPACE_ID}'"
+  if [ -n "$pot" ]; then
+    [ -n "$conds" ] && conds="$conds AND pot_home_slug='$pot'" || conds="pot_home_slug='$pot'"
+  fi
+  [ -n "$conds" ] && where=" WHERE $conds"
+  drv_psql "$inst" "SELECT COALESCE(string_agg(github_user_id::text,',' ORDER BY github_user_id),'') FROM harness_shared.pot_members${where};" 2>/dev/null | tr -d '[:space:]'
+}
 
 # ── the scenario (operates on already-provisioned+joined frames a=owner, b=member) ─
 # Reads the rig globals FRAME_MEMBER_SLUG[a|b], FRAME_IP[*], FED_PG[*] (filled by

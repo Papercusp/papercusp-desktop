@@ -75,10 +75,21 @@ _rv_poll_remote() {
   return 1
 }
 
-# _rv_roster_empty <inst> — true (0) iff <inst>'s hive_members roster has NO rows (the
-# WI-1378 no-restart symptom that drops every owner op).
+# _rv_roster_empty <inst> — true (0) iff <inst>'s pot_members roster for THIS pot
+# has NO rows (the WI-1378 no-restart symptom that drops every owner op). SCOPED
+# to this run's workspace + RIG_HIVE_ID (EI-18656746187879489: an unscoped count
+# here reads "non-empty" from ANY unrelated pot on a reused frame, sending the
+# baseline-fail branch above down the wrong diagnosis — "a different federation
+# fault, not the ban" — when the real WI-1378 empty-roster gap was masked by
+# another pot's rows).
 _rv_roster_empty() {
-  local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.pot_members;" 2>/dev/null | tr -d '[:space:]')"
+  local inst="$1" pot="${RIG_HIVE_ID:-}" conds="" where="" n
+  [ -n "${RIG_WORKSPACE_ID:-}" ] && conds="workspace_id='${RIG_WORKSPACE_ID}'"
+  if [ -n "$pot" ]; then
+    [ -n "$conds" ] && conds="$conds AND pot_home_slug='$pot'" || conds="pot_home_slug='$pot'"
+  fi
+  [ -n "$conds" ] && where=" WHERE $conds"
+  n="$(drv_psql "$inst" "SELECT count(*) FROM harness_shared.pot_members${where};" 2>/dev/null | tr -d '[:space:]')"
   [ "${n:-0}" = "0" ]
 }
 
