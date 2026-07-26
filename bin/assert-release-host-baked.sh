@@ -9,9 +9,11 @@
 #
 # A packaged install has no runtime env, so the BAKED value is the only one that
 # will ever exist in the field. `option_env!` reads the env of the CARGO PROCESS —
-# and for mac and windows that process runs on a BUILD VM, reached over ssh. Env
-# does not cross ssh. If the var is not explicitly exported into the remote build,
-# cargo bakes an EMPTY STRING and the compile SUCCEEDS.
+# and for mac that process runs on a BUILD VM, reached over ssh (WI-5651 retired
+# the Windows VM leg; bin/build-windows-cross.sh cross-compiles in-process on the
+# release host, no ssh hop). Env does not cross ssh. If the var is not explicitly
+# exported into the remote build, cargo bakes an EMPTY STRING and the compile
+# SUCCEEDS.
 #
 # The result is the worst shape of bug this repo keeps re-learning: the installer
 # works, the bundle is signed, latest.json is valid, the signature verifies — and
@@ -106,11 +108,13 @@ for target in "$@"; do
     echo "    It would NOT look broken: the installer works, the bundle verifies, and the" >&2
     echo "    Tauri updater renders the failed check as 'up to date' — permanently." >&2
     echo "" >&2
-    echo "    CAUSE (almost always): the cargo build ran on a BUILD VM over ssh, and" >&2
-    echo "    PAPERCUSP_RELEASE_HOST was not in the env list exported into that remote" >&2
-    echo "    build. option_env! then baked an empty string and the compile SUCCEEDED." >&2
+    echo "    CAUSE (almost always): PAPERCUSP_RELEASE_HOST was not in the env reaching the" >&2
+    echo "    cargo build. option_env! then baked an empty string and the compile SUCCEEDED." >&2
     echo "      · mac     → the export block in release-local.sh's detached ssh command" >&2
-    echo "      · windows → the \$env: block in build-windows-on-vm.sh" >&2
+    echo "        (the mac leg still builds on a VM over ssh — env does not cross ssh)" >&2
+    echo "      · windows → build-windows-cross.sh cross-compiles in-process (no ssh since" >&2
+    echo "        WI-5651), so check the shell/CI env this script itself ran under —" >&2
+    echo "        it also self-checks this same bake at its own build-windows-cross.sh:274" >&2
     echo "" >&2
     rc=1
   fi
