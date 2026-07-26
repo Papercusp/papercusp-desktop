@@ -11,9 +11,17 @@
 #
 # Usage:  bin/live-federation-gate.sh
 # Env:
-#   LOAD_GATE         (default max(15, nproc/4)) — SKIP (not fail) if /proc/loadavg 1-min
-#                                     exceeds this. Core-aware (P-013): an absolute 15 made the
-#                                     gate skip EVERY window on the 128-core fleet box.
+#   PRESSURE_GATE     (default 30) — THE ADMISSION SIGNAL (WI-6151). SKIP (not fail) if
+#                                     cgroup-v2 CPU PSI `some avg60` exceeds this, i.e. real
+#                                     CPU STALL, not mere busyness. Unlike loadavg this is
+#                                     nice-AWARE, so deferential fleet work that yields to the
+#                                     gate does not lock it out. See §1 for the whole story.
+#   PRESSURE_FIELD    (default avg60) — which PSI window admission reads (avg10|avg60|avg300).
+#   CPU_PRESSURE_FILE (default /sys/fs/cgroup/cpu.pressure) — test seam.
+#   LOADAVG_FILE      (default /proc/loadavg) — test seam.
+#   LOAD_GATE         (default max(15, 85% of nproc)) — NO LONGER THE ADMISSION SIGNAL. Kept
+#                                     as the fallback used only when the kernel exposes no PSI,
+#                                     and still logged alongside every admission decision.
 #   STORM_GATE        (default nproc*0.6) — a FAIL with end-of-run load above this is
 #                                     downgraded to SKIPPED-STORM (starvation, not signal).
 #   GATE_SUCCESS_TTL_H(default 22)  — a GREEN younger than this ⇒ instant FRESH exit
@@ -130,6 +138,13 @@ LOAD_GATE="${LOAD_GATE:-$(( NPROC * 85 / 100 > 15 ? NPROC * 85 / 100 : 15 ))}"
 # serve.logs (grep '[event-loop-lag]'), which the verdict reader checks per WI-5319. Keep
 # the downgrade only as a last-resort guard at genuine saturation.
 STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
+# PRESSURE_GATE (WI-6151) is the ADMISSION threshold, and it is NOT a load number: it is
+# cgroup-v2 CPU PSI `some avg60` — the percentage of the last 60s during which at least one
+# task was STALLED waiting for CPU. It REPLACES loadavg at §1 (full rationale + calibration
+# data there); LOAD_GATE above is untouched and survives only as the no-PSI fallback.
+# Default 30 = genuine contention, ~12x this box's observed steady state (`some avg60`
+# 2.18-2.41 while loadavg read 78-85, sampled 2026-07-26).
+PRESSURE_GATE="${PRESSURE_GATE:-30}"
 REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-1}"
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
@@ -535,22 +550,95 @@ if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
   fi
 fi
 
-# ── 1. load gate ──────────────────────────────────────────────────────────────
-LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
-if awk "BEGIN{exit !($LOAD1 > $LOAD_GATE)}"; then
+# ── 1. admission gate — CPU PRESSURE, not host loadavg (WI-6151) ──────────────
+# WHAT CHANGED + WHY (2026-07-26): admission used to skip on the host 1-min loadavg, which
+# made this gate UNRUNNABLE BY CONSTRUCTION on the shared fleet box — 14:42 "GATE: SKIPPED
+# (load 165.71 > 108)", 15:42 "(load 149.81 > 108)", ~10 SKIPPED fires in 24h and no verdict
+# all day, while P-402/WI-5137 (gate-first-green) waited on it. A SKIPPED gate exits 0, so
+# the pipeline read "not failing" the whole time. Two independent reasons that signal is wrong:
+#
+#  (a) It is the SAME number this file's OWN verdict path already documents as
+#      non-representative of the rig (see :128, :909, :929, EI-18716933933700596: "Host
+#      loadavg is a SHARED-BOX aggregate and does not measure these frames"). That path was
+#      hardened against it; this admission path kept reading it raw — one file, two code
+#      paths, opposite conclusions about whether host loadavg means anything.
+#  (b) loadavg is NICE-BLIND. It counts runnable tasks, not CPU contention, so a task at
+#      nice 19 weighs exactly as much as one at nice 0. The fleet's heavy work is
+#      DELIBERATELY deferential (green-checkpoint runs its heavy legs at nice 10 via
+#      scripts/pc-heavy.sh — WI-6140), so it yields to this gate by construction and still
+#      counts in full against LOAD_GATE. Measured here 2026-07-26 19:46Z: ~89 cores of
+#      nice>=10 work vs ~63 of nice<=0, loadavg ~150. No amount of nice/ionice/throttling
+#      can lower that number — the old gate was unsatisfiable by any remedy short of an
+#      idle box, which is why WI-6140's throttle worked perfectly and changed nothing here.
+#
+# THE SIGNAL WE ACTUALLY WANT is "would our smokes be starved of CPU", and cgroup-v2 PSI
+# answers exactly that: it measures STALL TIME (runnable but waiting on CPU), so deferential
+# work that yields does not register. Same kernel facility, same reasoning as
+# _rd_remote_cpu_pressure() in bin/deb-hetzner-restart.sh (WI-5639) one level up: that helper
+# reads a FRAME's own cgroup, this reads the host root cgroup.
+#
+# CALIBRATION (this box, 128 cores, 2026-07-26, sampled every 4s across loadavg 78-85 —
+# i.e. an ordinary busy fleet hour): `some avg10` bounced 0.11-3.25 while `some avg60` held
+# 2.18-2.41 and `some avg300` 1.41-1.49. Two field choices follow from that data:
+#   • `some`, not `full` — `full` is structurally useless here (full total=0: on 128 cores
+#     EVERY task has never once been stalled simultaneously), so it can never discriminate.
+#   • avg60, not avg10 — this gate fires hourly and then runs for ~25min, so the question is
+#     "will the next half hour be contended", which a 10s window answers badly: avg10 moved
+#     30x inside one calm minute above. avg60 is the stable predictor. It is also the right
+#     ASYMMETRY: a false SKIP is the expensive failure (it is the entire bug being fixed
+#     here — a whole day with no verdict), while a false PROCEED is cheap and already
+#     defended twice over by the mid-run STORM downgrade and the frame-scoped
+#     event-loop-lag starvation check at the verdict. So prefer the spike-immune signal and
+#     let the in-run guards catch a storm that starts after admission.
+# PRESSURE_GATE 30 therefore sits ~12x above this box's observed steady state.
+#
+# THIS IS NOT A LOAD_GATE RAISE (owner decision D-003 forbids that, and LOAD_GATE is
+# untouched — it still governs the no-PSI fallback below). What changed is WHICH QUANTITY is
+# measured. D-003's prescribed remedy — isolation — is already in place (local-matrix.sh
+# pins frames to a reserved cpuset); this gate was refusing to let that isolated run START,
+# on the strength of work the isolation already excludes.
+#
+# Both numbers are logged on every path (and carried on the SKIPPED line) so the next
+# investigator can recalibrate from real data instead of re-deriving this.
+gate_cpu_pressure_some() {
+  # echo the host root-cgroup CPU PSI `some <field>` (a 0-100 percentage; field defaults to
+  # avg60), or "" when the kernel or cgroup mount does not expose PSI. NEVER fatal and never
+  # a wrong number: an unreadable file, a non-PSI format, a missing field or a non-numeric
+  # value all return "" so the caller falls back explicitly instead of silently reading 0
+  # (which would admit blind — the opposite of what an unknown signal should do).
+  local field="${1:-avg60}" f="${CPU_PRESSURE_FILE:-/sys/fs/cgroup/cpu.pressure}" line v
+  [ -r "$f" ] || return 0
+  line="$(grep -m1 '^some ' "$f" 2>/dev/null)" || return 0
+  case "$line" in *"$field="*) ;; *) return 0 ;; esac
+  v="${line#*"$field"=}"; v="${v%% *}"
+  case "$v" in ''|*[!0-9.]*) return 0 ;; esac
+  printf '%s' "$v"
+}
+
+LOAD1="$(cut -d' ' -f1 "${LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || echo 0)"
+PRESSURE60="$(gate_cpu_pressure_some "${PRESSURE_FIELD:-avg60}")"
+if [ -n "$PRESSURE60" ]; then
+  ADMIT_SIGNAL="cpu-pressure-some-${PRESSURE_FIELD:-avg60}"; ADMIT_VALUE="$PRESSURE60"; ADMIT_GATE="$PRESSURE_GATE"
+else
+  # No PSI (non-PSI kernel / cgroup v1): fall back to the historical loadavg gate rather than
+  # admitting blind. Expected to be rare on this fleet; named in the log so it is never silent.
+  ADMIT_SIGNAL="loadavg-fallback-no-psi"; ADMIT_VALUE="$LOAD1"; ADMIT_GATE="$LOAD_GATE"
+fi
+ADMIT_CONTEXT="host loadavg $LOAD1 vs LOAD_GATE $LOAD_GATE — SHARED-BOX aggregate, nice-blind, NOT the admission signal (WI-6151)"
+if awk "BEGIN{exit !($ADMIT_VALUE > $ADMIT_GATE)}"; then
   if [ "${GATE_FORCE:-0}" = 1 ]; then
     # GATE_FORCE means FORCE (WI-1861 follow-up): a forced run is an ATTENDED validation —
     # skip only the unattended-admission gate; the mid-run STORM downgrade still protects
     # the verdict if the box saturates while the smokes run.
-    log "load $LOAD1 > LOAD_GATE $LOAD_GATE but GATE_FORCE=1 — proceeding anyway (storm downgrade still armed)."
+    log "$ADMIT_SIGNAL $ADMIT_VALUE > gate $ADMIT_GATE but GATE_FORCE=1 — proceeding anyway (storm downgrade still armed); $ADMIT_CONTEXT."
   else
-    log "SKIP: 1-min load $LOAD1 > LOAD_GATE $LOAD_GATE — smokes get killed under load; retry next window (not a failure)."
+    log "SKIP: $ADMIT_SIGNAL $ADMIT_VALUE > gate $ADMIT_GATE — the box is genuinely CPU-contended, so the smokes would be starved; retry next window (not a failure). $ADMIT_CONTEXT."
     check_staleness
     skip_cleanup
-    echo "GATE: SKIPPED (load $LOAD1 > $LOAD_GATE)"; exit 0
+    echo "GATE: SKIPPED ($ADMIT_SIGNAL $ADMIT_VALUE > $ADMIT_GATE; $ADMIT_CONTEXT)"; exit 0
   fi
 else
-  log "load $LOAD1 OK (<= $LOAD_GATE); proceeding."
+  log "admission OK: $ADMIT_SIGNAL $ADMIT_VALUE <= gate $ADMIT_GATE; proceeding. $ADMIT_CONTEXT."
 fi
 
 # ── 1b. GitHub credentialed-REST preflight (2026-07-16 outage class) ───────────
