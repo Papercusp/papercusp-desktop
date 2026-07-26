@@ -596,16 +596,21 @@ fi
 # untouched — it still governs the no-PSI fallback below). What changed is WHICH QUANTITY is
 # measured.
 #
-# ON D-003's PRESCRIBED REMEDY (isolation): partially in place, and be precise about it —
-# local-matrix.sh asks for a cgroup-v2 exclusive cpuset, but on this box it has been
-# DEGRADING to affinity-only ("WARN: degrading this run to AFFINITY-ONLY (no cgroup-v2
-# exclusive partition; host fleet NOT evicted)" — observed in run /tmp/live-fed-gate-
-# 20260726-133957, WI-6133). So do NOT justify this change with "the frames are isolated
-# anyway". The honest justification is the measurement: across the three most recent
-# completed runs (12:17, 13:28, 14:25) the gate's own frame-scoped verdict read "frames NOT
-# starved — worst [event-loop-lag] maxMs 0ms" while host loadavg sat in the 100-160 band.
-# Even with isolation degraded, the frames were not starved and the host number said
-# nothing about them — which is exactly why admission must not be decided by that number.
+# ON D-003's PRESCRIBED REMEDY (isolation): do NOT lean this change on "the frames are
+# isolated anyway", because that is not reliably true — the 13:39 run logged "WARN: degrading
+# this run to AFFINITY-ONLY (no cgroup-v2 exclusive partition; host fleet NOT evicted)"
+# (/tmp/live-fed-gate-20260726-133957). Read that carefully though: that run PREDATES the
+# WI-6133 self-or-ancestor fix (which first appears in the tree at commit ba5bed69, 14:24,
+# one minute before that very run's verdict), so it is evidence that the degradation existed,
+# NOT evidence that the fix fails. Whether exclusivity engages now is an open question for
+# the first run after 14:24 — see WI-6133.
+#
+# The justification that does NOT depend on any of that is the measurement: across the three
+# most recent completed runs (12:17, 13:28, 14:25) the gate's own frame-scoped verdict read
+# "frames NOT starved — worst [event-loop-lag] maxMs 0ms" while host loadavg sat in the
+# 100-160 band. Whatever isolation was or was not in force, the frames were not starved and
+# the host number said nothing about them — which is exactly why admission must not be
+# decided by that number.
 #
 # Both numbers are logged on every path (and carried on the SKIPPED line) so the next
 # investigator can recalibrate from real data instead of re-deriving this.
@@ -648,6 +653,16 @@ if awk "BEGIN{exit !($ADMIT_VALUE > $ADMIT_GATE)}"; then
   fi
 else
   log "admission OK: $ADMIT_SIGNAL $ADMIT_VALUE <= gate $ADMIT_GATE; proceeding. $ADMIT_CONTEXT."
+  # ALSO on stdout, deliberately (WI-6151). log() writes to stderr, and stderr does NOT reach
+  # this unit's journal — verified empirically: the whole 13:39-14:25 run emitted ZERO
+  # "[live-fed-gate …]" lines to journald while its stdout `echo` verdict landed fine. So on
+  # the PROCEED path the single most consequential branch in this script was invisible to
+  # anyone watching the journal: you saw "Starting", then 45 minutes of silence, then a
+  # verdict, with no record of what admission decided or on what numbers. (The SKIP path was
+  # only visible by luck — its verdict happens to be an echo.) One line closes that.
+  # Deliberately NOT prefixed "GATE: " — that namespace is the run's VERDICT and is pattern-
+  # matched by consumers; this is a progress marker and must not be mistaken for one.
+  echo "ADMISSION: PROCEED ($ADMIT_SIGNAL $ADMIT_VALUE <= $ADMIT_GATE; $ADMIT_CONTEXT)"
 fi
 
 # ── 1b. GitHub credentialed-REST preflight (2026-07-16 outage class) ───────────

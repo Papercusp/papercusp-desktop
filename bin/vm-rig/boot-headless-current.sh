@@ -108,6 +108,15 @@ export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
 # keep it armed by default on the rig so a reboot never silently drops the
 # evidence stream (su-71c69's reverse-leg legs depend on it).
 export HGDIALDEBUG="${HGDIALDEBUG:-1}"
+# EI-18740968796318403: the swarm CONNECTION close path (swarm.ts churnDbg —
+# ageMs / precededByError / UDX wire counters) is env-gated, which is why the
+# rig showed 1,192 `peer_connected` in 20min against ZERO logged disconnects:
+# the teardowns were invisible, not absent. Connections here live ~1s, taking
+# every pot-git hello channel down with them, so the close REASON is the whole
+# diagnosis. Same rationale as HGDIALDEBUG above — armed by default so a reboot
+# never silently drops the evidence stream. Cheap: ~1 line/sec at rig churn
+# rates, and only for the first topic on each socket (`!alreadyLoggedSocket`).
+export PAPERCUSP_SWARM_CHURN_DEBUG="${PAPERCUSP_SWARM_CHURN_DEBUG:-1}"
 
 echo "boot-current: serve=$SERVE"
 echo "boot-current: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  PG_SQL_DIR=$PAPERCUSP_PG_SQL_DIR"
