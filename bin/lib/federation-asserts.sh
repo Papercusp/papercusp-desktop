@@ -368,17 +368,27 @@ drv_appbundle() { drv_appbundle_local "$@"; }
 # fills would die in the subshell). On failure sets FED_BOOT_ERR and returns 1.
 declare -g FED_BOOT_ERR=""
 fed_wait_boot() {
-  local inst="$1" tries="${2:-50}" i out pg sc logf
+  local inst="$1" tries="${2:-50}" i out pg sc logf slog
   logf="$(drv_applog "$inst")"
+  # WI-6180: scan the sidecar's OWN log as well as the GUI stdout capture — the
+  # packaged app's boot markers live in the former, so grepping only the latter
+  # false-REDed every 2-VM run as BOOT_TIMEOUT against a healthy, fully-booted
+  # app. Resolved through the driver vtable (empty for host-local instances, so
+  # a local probe can never pick up the HOST operator's ports) and guarded with
+  # command -v so drivers that predate drv_sidecar_log keep working unchanged.
+  slog=""
+  if command -v drv_sidecar_log >/dev/null 2>&1; then slog="$(drv_sidecar_log "$inst")"; fi
   for i in $(seq 1 "$tries"); do
     out="$(drv_exec "$inst" <<EOF
 log="$logf"
-pg=\$(grep -oE 'ready on localhost:[0-9]+ db=papercusp' "\$log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
-[ -n "\$pg" ] || pg=\$(grep -oE 'embedded-postgres-server ready on 127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
-sc=\$(grep -oE '\[serve\] listening on http://127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
-[ -n "\$sc" ] || sc=\$(grep -oE 'hono-host\] listening on http://127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
-[ -n "\$sc" ] || sc=\$(grep -oE '(operator|sidecar) ready on :[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
-if grep -qiE 'falling through to pglite|initdb may have failed|failed to spawn embedded-postgres-server|\[serve\] fatal' "\$log" 2>/dev/null; then echo "PGFAIL"; exit 0; fi
+slog="$slog"
+logs="\$log"; [ -n "\$slog" ] && [ -f "\$slog" ] && logs="\$log \$slog"
+pg=\$(grep -hoE 'ready on localhost:[0-9]+ db=papercusp' \$logs 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+[ -n "\$pg" ] || pg=\$(grep -hoE 'embedded-postgres-server ready on 127\.0\.0\.1:[0-9]+' \$logs 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
+sc=\$(grep -hoE '\[serve\] listening on http://127\.0\.0\.1:[0-9]+' \$logs 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
+[ -n "\$sc" ] || sc=\$(grep -hoE 'hono-host\] listening on http://127\.0\.0\.1:[0-9]+' \$logs 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
+[ -n "\$sc" ] || sc=\$(grep -hoE '(operator|sidecar) ready on :[0-9]+' \$logs 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+if grep -qiE 'falling through to pglite|initdb may have failed|failed to spawn embedded-postgres-server|\[serve\] fatal' \$logs 2>/dev/null; then echo "PGFAIL"; exit 0; fi
 [ -n "\$pg" ] && [ -n "\$sc" ] && echo "\$pg \$sc"
 EOF
 )"
@@ -409,10 +419,16 @@ EOF
   # marker-drift on the '[serve] listening' line no longer false-REDs a healthy
   # boot. Called DIRECTLY (not in $(…)) so the FED_SC fill survives.
   local pg2
+  # WI-6180: this recovery re-read PG from the SAME log as the main loop, so when
+  # the whole log had moved (not merely the sidecar marker drifting) pg2 came back
+  # empty and the recovery short-circuited before fed_discover_sidecar_os() was
+  # ever consulted. Scan the same candidate list the loop uses.
   pg2="$(drv_exec "$inst" <<EOF
 log="$logf"
-pg=\$(grep -oE 'ready on localhost:[0-9]+ db=papercusp' "\$log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
-[ -n "\$pg" ] || pg=\$(grep -oE 'embedded-postgres-server ready on 127\.0\.0\.1:[0-9]+' "\$log" 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
+slog="$slog"
+logs="\$log"; [ -n "\$slog" ] && [ -f "\$slog" ] && logs="\$log \$slog"
+pg=\$(grep -hoE 'ready on localhost:[0-9]+ db=papercusp' \$logs 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+[ -n "\$pg" ] || pg=\$(grep -hoE 'embedded-postgres-server ready on 127\.0\.0\.1:[0-9]+' \$logs 2>/dev/null | grep -oE '[0-9]+\$' | tail -1)
 echo "\$pg"
 EOF
 )"

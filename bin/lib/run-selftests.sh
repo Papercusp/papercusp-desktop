@@ -2,7 +2,7 @@
 # run-selftests.sh — aggregate runner for the papercusp-desktop bash
 # self-tests (EI-18725214765732588).
 #
-# These 7 selftests guard the live-federation rig + release-leg scripts —
+# These selftests guard the live-federation rig + release-leg scripts —
 # exactly the code whose failures are expensive and hard to reproduce — but
 # were referenced by NOTHING: no aggregate script, no CI workflow, no green
 # gate. Only federation-asserts had a single live caller
@@ -31,6 +31,7 @@ TESTS=(
   release-local-leg-reaper.selftest.sh
   local-matrix-starvation.selftest.sh
   rig-bank-logs.selftest.sh
+  vm-run-env.selftest.sh
 )
 
 FAILED=()

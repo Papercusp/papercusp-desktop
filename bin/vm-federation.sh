@@ -110,6 +110,24 @@ drv_applog() {
     vm)    echo "/home/tester/papercusp-app.log" ;;
   esac
 }
+# WI-6180: ~/papercusp-app.log is ONLY the Tauri GUI process's stdout capture
+# (see launch_vm_instance) — in the current packaged build its entire contents
+# are libEGL DRI warnings. The sidecar writes its boot markers ("…ready on
+# localhost:PORT db=papercusp", "[serve] listening on …") to its OWN structured
+# log, so fed_wait_boot grepping the GUI capture alone could never match and
+# false-REDed every 2-VM run as BOOT_TIMEOUT against a perfectly healthy app.
+#
+# Deliberately EMPTY for the `local` kind: on a host-local instance this path is
+# the HOST operator's own serve.log, and letting the probe read it would resolve
+# a FOREIGN operator's ports — a false positive that would also defeat
+# fed_assert_isolated's distinct-ports check. VM guests have no such ambiguity.
+drv_sidecar_log() {
+  local inst="$1"
+  case "${FED_KIND[$inst]}" in
+    local) echo "" ;;
+    vm)    echo "/home/tester/.papercusp/logs/serve.log" ;;
+  esac
+}
 # EI-18687938054040755: the data-path capability probe needs the bundle path on
 # whichever machine hosts this instance. Hybrid like the rest of this vtable —
 # a local instance resolves through fed_local_launch_sidecar's registry, a vm
