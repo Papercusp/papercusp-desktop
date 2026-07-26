@@ -61,6 +61,31 @@ scn_revocation_kcut() {
   local rvlive; rvlive="$(printf '%s' "$ban" | grep -oE '"live":[a-z]+' | head -1)"
   echo "  · revocation: revoke.live=${rvlive:-ABSENT} (true ⇒ real read cut applied; false/ABSENT ⇒ write-plane block only)"
 
+  # WI-6043: OPTIONAL ban→write gap, for discriminating the two live leak hypotheses.
+  #
+  # WHY THIS KNOB EXISTS. hive-epoch-state.ts:50-58 documents a v1 scope gap: a producer that
+  # advances the epoch (member-ban) and then writes post-boundary content while a DIFFERENT
+  # process still holds a cached pre-boundary epoch (EPOCH_CACHE_TTL_MS = 5000,
+  # hive-epoch-op-gate.ts:160-169) re-uses the STALE epoch — and at the 0→1 boundary that hits
+  # the epoch === BASELINE_EPOCH plaintext bypass and federates post-ban content UNENCRYPTED to
+  # the member just revoked. If that TTL is the mechanism, delaying the write past 5s must make
+  # the leak disappear; if the leak persists across the delay, the TTL story is dead and the
+  # "epoch never armed at all" branch leads instead.
+  #
+  # NOTE the gap is ~0s by default: the ban above and the write below are adjacent with only a
+  # grep+echo between them. So the "<5s" arm of that experiment is what EVERY run already does
+  # and is not forceable — which is itself evidence, because a gap-only mechanism would then
+  # predict a ~100% leak rate rather than the intermittency actually observed. Only the >5s arm
+  # carries new information, which is what this knob buys.
+  #
+  # DEFAULT IS UNSET ⇒ ZERO behaviour change: the gate, and every existing run, take the exact
+  # path they took before. This is deliberately a defaulted knob and not a hardcoded sleep, so
+  # it can live in the tree permanently without ever slowing or altering the real gate.
+  if [ -n "${RIG_REVOKE_WRITE_DELAY_SEC:-}" ]; then
+    echo "  · revocation: RIG_REVOKE_WRITE_DELAY_SEC=$RIG_REVOKE_WRITE_DELAY_SEC — delaying post-ban write to probe the epoch-cache TTL window (WI-6043)"
+    sleep "$RIG_REVOKE_WRITE_DELAY_SEC"
+  fi
+
   # 3. post-ban owner write (triggers the re-key; revoke.live is false until it lands) must
   #    NOT reach B. rig_assert_absent waits the full window and passes only if it never appears.
   rig_write_content a "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned B)" todo >/dev/null
