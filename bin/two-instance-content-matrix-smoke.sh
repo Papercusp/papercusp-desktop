@@ -307,6 +307,10 @@ PY
 )"
 jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-pot" -H 'content-type: application/json' -d "$JOIN_BODY")"
 [ "$(jget "$jr" "d.get('ok')")" = True ] && echo "✓ B joined" || { echo "✗ B join failed: $(echo "$jr"|head -c 200)"; exit 6; }
+# WI-5673 instrumentation: stamp the join moment so the report can measure how long
+# the OWNER (A) took to admit the JOINER's (B's) log core. That delay is the single
+# quantity that decides the incr-B→A matrix — see the report section for why.
+JOIN_MS="$(( $(date +%s) * 1000 ))"
 sleep 5
 # WS_B RE-DERIVE (2026-07-03, WI-971 differential): the pre-join `LIMIT 1` read can
 # return a meta-only workspace row (e.g. the seeded 'papercusp-workspace' carrying
@@ -403,6 +407,39 @@ if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-i
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
 if [ -n "$BA_LATE_TABLE" ]; then echo; echo "INCREMENTAL B→A LATE-RECHECK (post-window re-poll — PASS here + FAIL above = latency/warm-up, not death; see WI-5673):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$BA_LATE_TABLE"; fi
 echo; echo "negative-isolation=$NEG  topic-equal=$TEQ  b-to-a-directory=$BA_DIR"
+
+# ── WI-5673 ADMISSION-DELAY PROBE — the ONE number that explains the incr-B→A matrix ──
+# ROOT-CAUSE MODEL (2026-07-26, derived from 4 gate runs + the §6a late-recheck):
+# the incr-B→A failures are NOT a per-type capture/writer defect. write_all() issues all
+# 10 INSERTs back-to-back, then check_all() polls the types SEQUENTIALLY at tries=24 ×
+# sleep 3 = 72s each — so type k is only polled during t=[72(k-1), 72k] after the checks
+# start. A SINGLE unblock event at t=T (the owner finally admitting the joiner's log core,
+# after which A backfills B's whole log at once) therefore FAILS exactly the types whose
+# poll window closed before T and PASSES every later one. Hence the failing set is always
+# a PREFIX of $TYPES, with N_failing ≈ T/72s — the "first 4 types" / "first 7 types"
+# pattern is an artifact of the POLL ORDER, not a property of those types.
+#   observed: 07-20 T≈5min → first 4 FAIL · 07-26 ×3 T≈8min → first 7 FAIL · 07-26 10:40
+#   T<72s → all 10 PASS. Every failing run's §6a LATE-RECHECK passes all 10 → nothing is
+#   ever lost, and src outbox=0/1 confirms capture+drain were fine all along.
+# WHY MEMBER→OWNER ONLY: B learns A's log core out-of-band from the directory memberLinks
+# at join time, so A→B is live immediately; A can only learn B's core from B's SIGNED
+# ANNOUNCE over the paired announce channel, so any announce-channel pairing delay
+# ([swarm:unpaired] in A's log) is a member→owner-ONLY outage. That asymmetry is the bug.
+# This probe prints T every run so the model is CHECKED rather than re-argued: if the
+# actual B→A FAIL count stops tracking delay/72s, the model above is REFUTED — say so.
+ADMIT_MS="$(q a "SELECT COALESCE(min(ts)::text,'') FROM harness_shared.boot_history_events WHERE kind='announce_admitted' AND message LIKE '%owner_admit_joiner%' AND ts >= ${JOIN_MS:-0};" || true)"
+ADMIT_MS="$(printf '%s' "$ADMIT_MS" | tr -dc '0-9')"
+if [ -n "$ADMIT_MS" ] && [ -n "${JOIN_MS:-}" ]; then
+  ADMIT_DELAY_S=$(( (ADMIT_MS - JOIN_MS) / 1000 ))
+  PREDICTED_PREFIX=$(( (ADMIT_DELAY_S + 71) / 72 )); [ "$PREDICTED_PREFIX" -gt 10 ] && PREDICTED_PREFIX=10
+  ACTUAL_BA_FAILS="$(printf '%b' "$BA_TABLE" | grep -c 'incr-B→A | FAIL' || true)"
+  echo "owner-admits-joiner-delay=${ADMIT_DELAY_S}s  predicted-B→A-FAIL-prefix=${PREDICTED_PREFIX}/10  actual-B→A-FAIL=${ACTUAL_BA_FAILS}/10  (WI-5673 model: FAIL count ≈ delay/72s; a mismatch REFUTES it)"
+else
+  echo "owner-admits-joiner-delay=UNMEASURED (no announce_admitted/owner_admit_joiner row on A at/after the join stamp — WI-5673 probe)"
+fi
+UNPAIRED_A="$(grep -ac 'swarm:unpaired' "${FED_LOG[a]}" 2>/dev/null || true)"
+echo "A-announce-channel-unpaired-escalations=${UNPAIRED_A:-0} (>0 = a live-but-never-paired announce channel on A — the suspected source of the admission delay)"
+
 CONTENT_OVERALL=PASS
 [ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE
 case "$TEQ" in PASS*) ;; *) CONTENT_OVERALL=INCOMPLETE ;; esac
