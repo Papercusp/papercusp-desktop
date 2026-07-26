@@ -175,6 +175,11 @@ scn_attestation_unattested_device() {
   # bump is a false PASS, never actually proving this leg's own claim. Scope to the one reason
   # this leg actually causes.
   local rc_before rc_after rid_rem rem_on_a reasons now_ms rc_after_measured
+  # EI-18737225233571148 (2026-07-26): reasons_before/after/moved. The scoring below used to
+  # explain its FAIL from `reasons` alone — a hive-wide `ORDER BY updated_at DESC LIMIT 3` read
+  # — which cannot distinguish a refusal THIS leg caused from an unrelated leg's retry. That is
+  # not a hypothetical: see the diff-based rationale at the reasons_moved computation below.
+  local reasons_before reasons_after reasons_moved
   # WI-5788 (P-411 residual): UNMEASURED baseline ⇒ FAIL, never coerce to 0. See the LEG3
   # comment above — and note this leg is MORE exposed to it, because it runs LAST (order 91)
   # after four invasive scenarios (restart_durability/reconnect_catchup/replication_soak/
@@ -213,6 +218,11 @@ scn_attestation_unattested_device() {
   sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default 30_000ms — wait out the device→user cache
 
   rid_rem="att-unatt-${rid}-$RANDOM"; now_ms="$(date +%s)000"
+  # EI-18737225233571148: snapshot the FULL per-reason counter vector immediately BEFORE the
+  # probe. Sorted by REASON (not updated_at) so it is a stable set, and unbounded (no LIMIT 3)
+  # so a reason cannot fall out of the window and read as "new" later. Diffing this against the
+  # same read after the probe is what lets the scoring below cite ONLY reasons THIS leg caused.
+  reasons_before="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY reason;" 2>/dev/null | awk '{gsub(/[ \t]/,""); if($0!="") printf "%s ", $0}')"
   drv_psql b "INSERT INTO harness_shared.p2p_receipts (workspace_id,harness_slug,receipt_id,kind,action,detail,responder_github_user_id,receipt_ts,origin) VALUES ('$ws','$RIG_HIVE_ID','$rid_rem','refusal','work-offer:claim','att unattested-device probe ($rid)',${b_gh_id:-999999999},$now_ms,'local');" >/dev/null 2>&1
   # WI-6046: same class as the strip above — if this INSERT silently fails (frame b degraded),
   # no receipt ever federates, the counter cannot bump, and the scoring assert blames the
@@ -236,6 +246,32 @@ scn_attestation_unattested_device() {
   [ "$rc_after_measured" = 1 ] || { echo "attestation(unattested-device) FAIL — LEG4 post-probe UNMEASURED: all 40 identity_unresolved reads on frame a returned empty (the probe never ran — NOT evidence the counter failed to bump)"; return 1; }
   rem_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
   reasons="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY updated_at DESC LIMIT 3;" 2>/dev/null | tr '\n' ' ')"
+  # EI-18737225233571148: compute which reasons ACTUALLY MOVED during this leg. A token is
+  # 'reason=count', so a changed count OR a brand-new reason both surface as a token absent from
+  # the before-set — exactly the "moved" set, with no extra bookkeeping.
+  #
+  # WHY THIS EXISTS. The FAIL explanation below used to key off `reasons` (top-3 by updated_at)
+  # and, on seeing responder_mismatch there, declared "RIG/ENVIRONMENTAL ... Do not open a fresh
+  # investigation off this signature alone". Observed live in gate run 133957 (2026-07-26): that
+  # verdict was WRONG and it suppressed the real investigation for hours. LEG3 (order 60) emits
+  # ONE receipt with responder=a_gh_id and bumps responder_mismatch 0->2; the four invasive
+  # scenarios that run between LEG3 and this one (restart_durability/reconnect_catchup/
+  # replication_soak/revocation_kcut — restart_settle_barrier took 604s that run) then RETRIED
+  # that same receipt until the counter read 10, every retry logged with the identical
+  # responder=279242982. So responder_mismatch was the most-recently-updated reason at scoring
+  # time while THIS leg's probe had caused no refusal at all — none of the 10 carried this leg's
+  # own responder. The counter assert above was already hardened against exactly this
+  # stale-rebump hazard (see the WI-5779 comment: scope to the ONE reason this leg causes); the
+  # hardening simply was never applied to the EXPLANATION. Diffing closes that gap.
+  reasons_after="$(drv_psql a "SELECT reason||'='||count FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason LIKE 'receipt-apply:%' ORDER BY reason;" 2>/dev/null | awk '{gsub(/[ \t]/,""); if($0!="") printf "%s ", $0}')"
+  reasons_moved=""
+  local _tok
+  for _tok in $reasons_after; do
+    case " $reasons_before " in
+      *" $_tok "*) ;;
+      *) reasons_moved="$reasons_moved$_tok " ;;
+    esac
+  done
   if { [ "$rc_after" -gt "$rc_before" ] && [ "$rem_on_a" = 0 ]; } 2>/dev/null; then
     echo "unattested-device refused-op OK on a GENUINE second frame: author device attested to no member → A refuses (identity_unresolved $rc_before→$rc_after; all reasons: $reasons; row-on-a=$rem_on_a)"
     return 0
@@ -254,8 +290,27 @@ scn_attestation_unattested_device() {
   # family), environmental (host-CPU/event-loop contention under load), tracked live at WI-5639
   # — not a fresh product defect. Name it as that instead of asserting a feature bug, so the
   # next agent investigating this run doesn't chase a non-refusal that isn't there.
-  if [ "$rem_on_a" = 0 ] && printf '%s' "$reasons" | grep -q '^receipt-apply:responder_mismatch='; then
-    echo "attestation(unattested-device) FAIL — RIG/ENVIRONMENTAL, not a fresh feature defect: identity_unresolved $rc_before→$rc_after (never bumped this leg), but frame a's most-recently-refused reason was responder_mismatch (all reasons: $reasons), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. This leg's raw-INSERT probe bypasses emitP2pReceipt and is being refused by the (correct) self-authoring invariant instead of exercising the strip — same already-diagnosed class as WI-5779/EI-18662963598796485 (a<->b roster-convergence timing, environmental — see WI-5639, the live tracking item for the underlying SLA). Do not open a fresh investigation off this signature alone; escalate to WI-5639 only if it recurs persistently rather than intermittently."
+  # EI-18737225233571148 branch 1 — NOTHING MOVED. If no receipt-apply reason changed at all
+  # while this leg ran, then A never refused this probe for ANY reason: the receipt never
+  # reached the apply path. That is a materially different fault from "A failed to refuse", and
+  # it is the single most useful thing this leg can report, so say it plainly and point at the
+  # question it raises. Note LEG3 proves the raw-INSERT emission path itself works (it uses the
+  # byte-identical drv_psql INSERT and its receipt does federate and get refused), so a silent
+  # probe here is NOT explained by "raw INSERT bypasses emitP2pReceipt".
+  if [ "$rem_on_a" = 0 ] && [ -z "${reasons_moved// /}" ]; then
+    echo "attestation(unattested-device) FAIL — PROBE NEVER REACHED THE APPLY PATH: no receipt-apply refusal reason moved AT ALL while this leg ran (identity_unresolved $rc_before→$rc_after; full before-vector: ${reasons_before:-<empty>}; after: ${reasons_after:-<empty>}), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. A refused receipt ALWAYS bumps some reason, so this is not 'A failed to refuse' — the receipt never arrived at frame a's receipt-apply. Suspect the b→a link rather than the feature: this leg runs LAST (order 91) after four invasive scenarios (restart_durability/reconnect_catchup/replication_soak/revocation_kcut) that can leave federation unconverged — check restart_settle_barrier's settle time for this run, and whether receipt_id '$rid_rem' appears in frame a's logs at all (absent ⇒ never federated; present ⇒ federated then dropped/deduped). Do NOT read a stale responder_mismatch elsewhere in the counters as this leg's own refusal (EI-18737225233571148)."
+    return 1
+  fi
+
+  # EI-18737225233571148 branch 2 — responder_mismatch ACTUALLY MOVED during this leg. Only now
+  # is the self-authoring-invariant reading supported by evidence, because we are looking at a
+  # refusal this leg's own probe caused rather than at whatever happened to be most recent.
+  # Deliberately NOT phrased as "do not investigate": this leg has been red 3/3 with an
+  # identical signature, and a blanket suppression on a deterministic failure is what let that
+  # go unexamined for hours. State the hypothesis, name its escalation target, and let the
+  # reader judge.
+  if [ "$rem_on_a" = 0 ] && printf '%s' "$reasons_moved" | grep -q 'receipt-apply:responder_mismatch='; then
+    echo "attestation(unattested-device) FAIL — this leg's probe WAS refused, but as responder_mismatch rather than identity_unresolved (identity_unresolved $rc_before→$rc_after; reasons that moved during THIS leg: $reasons_moved; top-3 by recency: $reasons), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. Reading: the strip did not make the author device unresolvable, so A resolved it to a DIFFERENT user than the probe's claimed responder — the self-authoring invariant firing ahead of the identity check (product order is no_author_device → identity_unresolved → responder_mismatch, see sync/hyperbee/projections/p2p-receipts.ts). Candidate causes: the device→user map was still cached (PAPERCUSP_COMMS_TIER_CACHE_MS, this leg sleeps 35s against a 30s default), or the strip targeted a member row that is not the one backing the author device. Related class: WI-5779 / EI-18662963598796485, SLA tracked at WI-5639 — but a persistent, byte-identical recurrence is a defect to investigate, not an environmental write-off. CAVEAT, read before trusting this line: the diff narrows attribution to this leg's WINDOW, not to this leg's PROBE. An earlier leg's receipt being retried inside that window (LEG3's was retried ~8x across 13min in run 133957) still lands here. To rule that out, check frame a's serve.log for 'REFUSED inbound receipt op (responder_mismatch)' and compare the logged responder= against THIS probe's responder (${b_gh_id:-?}); a different id means it was not this probe (EI-18737225233571148)."
     return 1
   fi
 
