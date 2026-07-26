@@ -243,6 +243,12 @@ check_matrix_staleness() { # EI-18657324526667507: "when did the local-matrix le
 # Marker appended to the echoed verdict line whenever the leg is dark, so "GATE: GREEN" can
 # never again read as "everything ran and was fine" while local-matrix has decided nothing.
 matrix_stale_suffix() { [ "$MATRIX_LEG_STALE" = 1 ] && printf ' [WARN: local-matrix leg STALE — no verdict in >%sh]' "$MATRIX_STALE_H"; return 0; }
+# EI-18715623477356990: the same treatment for THIS window's suppression. Observed 2026-07-26:
+# content-matrix was red on incr-B→A, so §3b silently skipped local-matrix every hourly window —
+# and two agents each waited on a run for revocation/attestation evidence that structurally could
+# not arrive, because the skip is not announced anywhere, it simply does not appear. Silence is
+# the whole defect: a leg that did not decide must never be indistinguishable from one that did.
+matrix_skip_suffix() { [ -n "${MATRIX_SKIP_REASON:-}" ] && printf ' [local-matrix DID NOT DECIDE: %s]' "$MATRIX_SKIP_REASON"; return 0; }
 check_staleness() { # called on every non-GREEN exit path: silence must never look like green
   # Leg-level staleness is checked FIRST and unconditionally: the gate-wide green-age early-return
   # below must never suppress it (a fresh gate-wide green is precisely how a dark leg stays hidden).
@@ -869,9 +875,29 @@ fi
 # leg piggybacks ONLY on a window whose content-matrix smoke PASSED — running the heavy,
 # newly-landed matrix on a window whose cheap smoke already failed just burns the box and
 # pollutes the verdict (exactly what the 2026-07-03 validation run showed).
+#
+# EI-18715623477356990 — the four declines above/below were ONE compound `if`, so a window that
+# skipped the leg left MATRIXFULL_RES="SKIPPED" with no way to tell WHICH gate closed (or that
+# one had). Split into explicit branches that each name themselves in MATRIX_SKIP_REASON; the
+# content-red decline additionally gets its OWN result token so the verdict SUMMARY carries it
+# too. Deliberately NOT a decoupling of the two legs (that is a scenario-level call for the
+# p2p-release lane, suggestion 2 on the EI) — this makes the existing coupling ANNOUNCE itself.
 MATRIXFULL_RES="SKIPPED"
-if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_RES" = PASS-971 ]; } && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
-  if [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ]; then
+if [ "${RUN_LOCAL_MATRIX:-1}" != 1 ]; then
+  MATRIX_SKIP_REASON="leg disabled for this run (RUN_LOCAL_MATRIX=${RUN_LOCAL_MATRIX:-1})"
+elif [ ! -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
+  MATRIX_SKIP_REASON="wrapper bin/local-matrix.sh not present"
+elif ! { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_RES" = PASS-971 ]; }; then
+  # A DISTINCT token (still SKIPPED* so is_skip_result keeps treating it as "nothing proven"),
+  # because this is the decline that blocks a whole second verification plane indefinitely: a
+  # persistently-red content-matrix means revocation_kcut (order 90) and
+  # attestation_unattested_device (order 91) — which ONLY this leg runs — never execute at all.
+  MATRIXFULL_RES="SKIPPED-CONTENT-RED"
+  MATRIX_SKIP_REASON="content-matrix=$MATRIX_RES — the leg is gated on a green cheap smoke, so revocation_kcut + attestation_unattested_device did NOT run this window (workaround: run papercusp-desktop/bin/local-matrix.sh directly; it takes its own blocking rig flock)"
+elif [ "$(age_h "$STATE_DIR/last-matrix-green")" -lt "${MATRIX_TTL_H:-144}" ]; then
+  MATRIX_SKIP_REASON="cadence window (last matrix green $(age_h "$STATE_DIR/last-matrix-green")h ago < MATRIX_TTL_H=${MATRIX_TTL_H:-144}h)"
+else
+  {
     log "running local-matrix (weekly cadence) …"
     # Pass the gate's freshly-repacked .deb — without it the leg's default_deb()
     # picks the newest PREBUILT bundle, which can be days stale (the 2026-07-16 RED
@@ -909,8 +935,14 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_
       [ "$MATRIXFULL_RES" = FAIL ] && { echo "$(now_s)" >"$STATE_DIR/last-matrix-verdict"; rm -f "$STATE_DIR/matrix-stale-ei-filed"; }
     fi
     log "local-matrix → $MATRIXFULL_RES"
-  fi
+    # The starvation downgrade is ALSO a "did not decide" (D-005: the restart-heavy class was
+    # never proven) — carry it on the same reason string so it reads like every other decline.
+    [ "$MATRIXFULL_RES" = SKIPPED-STARVATION ] && MATRIX_SKIP_REASON="frame-starvation downgrade — the restart-heavy scenario class was NOT proven this run"
+  }
 fi
+# One line, always, whenever the leg did not decide — journald gets the reason even for the
+# windows whose verdict line a reader never sees.
+[ -n "$MATRIX_SKIP_REASON" ] && log "local-matrix DID NOT DECIDE this window: $MATRIX_SKIP_REASON"
 
 # ── 4. verdict ────────────────────────────────────────────────────────────────
 REDS=()
@@ -935,7 +967,7 @@ echo "$(now_s)" >"$STATE_DIR/last-run"
 if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_result "$MATRIXFULL_RES" && [ "$FAIL_BUILD" != 1 ]; then
   log "all smoke legs SKIPPED — nothing proven; NOT recording a green."
   check_staleness
-  echo "GATE: SKIPPED (no legs ran — $SUMMARY)"; exit 0
+  echo "GATE: SKIPPED (no legs ran — $SUMMARY)$(matrix_skip_suffix)"; exit 0
 fi
 
 if [ ${#REDS[@]} -eq 0 ]; then
@@ -946,7 +978,7 @@ if [ ${#REDS[@]} -eq 0 ]; then
   if [ "$MATRIXFULL_RES" = SKIPPED-STARVATION ]; then
     echo "$(now_s)" >"$STATE_DIR/last-downgrade"
     check_staleness
-    echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)"; exit 0
+    echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)$(matrix_skip_suffix)"; exit 0
   fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs"
   # EI-18657324526667507 — THE load-bearing call. check_staleness() is (correctly) not invoked on
@@ -955,7 +987,7 @@ if [ ${#REDS[@]} -eq 0 ]; then
   # days. Note matrix-stale-ei-filed is deliberately NOT cleared here (unlike stale-ei-filed) —
   # only a real local-matrix verdict clears the leg's clock; a green gate is not evidence it ran.
   check_matrix_staleness
-  echo "GATE: GREEN — $SUMMARY$(matrix_stale_suffix)"; exit 0
+  echo "GATE: GREEN — $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix)"; exit 0
 fi
 
 # Storm downgrade: if the box got SATURATED mid-run, a FAIL is likelier starvation than a
@@ -965,10 +997,10 @@ LOAD1_END="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
 if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
   log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal)."
   check_staleness
-  echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]})"; exit 0
+  echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]})$(matrix_skip_suffix)"; exit 0
 fi
 
-echo "GATE: RED (${REDS[*]}) — $SUMMARY ; logs in $WORK"
+echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; logs in $WORK"
 
 # ── 5. file an EI on RED (best-effort curl-MCP; the loud echo + $WORK logs are the fallback) ─
 # Dedup (RED_REFILE_H, see header): only file once per window per still-red condition —
