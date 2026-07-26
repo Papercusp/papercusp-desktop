@@ -361,6 +361,25 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
       drv_exec "$inst" <<<"cat /proc/loadavg 2>/dev/null" 2>/dev/null
     } >"$RIG_BANK_DIR/serve-$inst-$stamp.log" 2>/dev/null \
       || echo "(bank fetch failed for frame $inst — ssh/frame may already be gone)" >"$RIG_BANK_DIR/serve-$inst-$stamp.log"
+    # EI-18687774064705397 (2026-07-26, "evidence-scoping trap"): serve.log is
+    # CUMULATIVE for the whole rig session (grows across every scenario since the
+    # last provision/--reuse), not scoped to one scenario or run — so a reader
+    # comparing several serve-$inst-*.log bank files can mistake NESTED snapshots
+    # of one growing log for independent runs (proven live: three bank files
+    # 020217/021834/022802 from one night's session all began at the identical
+    # first log line 05:59:08.366Z — one continuous log, not three). Stamp each
+    # bank file's OWN first/last in-content timestamp up front, so the nesting
+    # risk is visible at read time instead of something the next reader has to
+    # re-derive by diffing files. See agent-insights/establish-evidence-scope-before-reading.
+    _bank_file="$RIG_BANK_DIR/serve-$inst-$stamp.log"
+    if [ -s "$_bank_file" ]; then
+      _first_ts="$(grep -m1 -oE '^\[[0-9TZ:.+-]+\]' "$_bank_file" 2>/dev/null || true)"
+      _last_ts="$(grep -oE '^\[[0-9TZ:.+-]+\]' "$_bank_file" 2>/dev/null | tail -1 || true)"
+      { printf '=== bank %s: frame %s — serve.log is CUMULATIVE for the whole rig session, NOT scoped to one scenario/run. This snapshot'\''s own content spans %s .. %s — before treating this file as an independent run from another bank file, check whether ITS first timestamp matches (same session, nested snapshot) rather than diffing/summing counts between them. ===\n' \
+          "$stamp" "$inst" "${_first_ts:-?}" "${_last_ts:-?}"
+        cat "$_bank_file"
+      } >"$_bank_file.tmp" 2>/dev/null && mv -f "$_bank_file.tmp" "$_bank_file" || rm -f "$_bank_file.tmp" 2>/dev/null
+    fi
   done
   { echo "=== bank $stamp: host /proc/loadavg ==="; cat /proc/loadavg 2>/dev/null || true
     echo "=== bank $stamp: host docker stats (informational — n/a for a pure-Hetzner rig) ==="

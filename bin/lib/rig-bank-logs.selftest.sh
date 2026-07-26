@@ -148,6 +148,37 @@ else
 fi
 unset -f gh
 
+# ── 5d. EI-18687774064705397 fix: banked serve.log gets a coverage-window ─────
+#       header (first/last in-content timestamp) so nested/cumulative captures
+#       are visible at read time instead of silently read as independent runs.
+reset_env
+drv_exec() {  # override: emit two bracketed timestamps so first != last
+  local inst="$1" cmd; cmd="$(cat)"
+  case "$cmd" in
+    *loadavg*) echo "FAKE-LOADAVG-$inst" ;;
+    *) printf '[2026-07-26T05:59:08.366Z] [serve] boot %s\n[2026-07-26T06:02:16.650Z] [serve] tail %s\n' "$inst" "$inst" ;;
+  esac
+}
+rig_bank_logs
+ts_file="$(ls "$RIG_BANK_DIR"/serve-a-*.log 2>/dev/null | head -1)"
+if [ -f "$ts_file" ] \
+  && head -1 "$ts_file" | grep -q "CUMULATIVE for the whole rig session" \
+  && head -1 "$ts_file" | grep -qF '05:59:08.366Z' \
+  && head -1 "$ts_file" | grep -qF '06:02:16.650Z' \
+  && grep -q "\[serve\] boot a" "$ts_file"; then
+  ok "banked serve.log is stamped with its own first/last content timestamp + a cumulative-log warning, ahead of the real content"
+else
+  bad "coverage-window header missing/wrong in banked file: $(head -1 "$ts_file" 2>/dev/null)"
+fi
+# restore the original stub for any later checks in this file
+drv_exec() {
+  local inst="$1" cmd; cmd="$(cat)"
+  case "$cmd" in
+    *loadavg*) echo "FAKE-LOADAVG-$inst" ;;
+    *)         echo "FAKE-SERVE-LOG-CONTENT-$inst" ;;
+  esac
+}
+
 # ── 6. RIG_WORK's scn.*.log files are still copied in (untouched by the fix) ──
 reset_env
 RIG_WORK="$WORK_TMP"
