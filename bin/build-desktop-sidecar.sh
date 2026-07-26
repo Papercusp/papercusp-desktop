@@ -241,7 +241,25 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 # FIX: install BOTH workspaces in ONE npm call so npm reconciles against the
 # UNION of their declared dependency graphs — nothing either one needs gets
 # pruned, regardless of which one the vite alias actually resolves through.
-(cd "$REPO_ROOT" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund --ignore-scripts \
+#
+# ── `--prefer-offline` REMOVED (2026-07-25, WI-5769) — root cause of the
+# whole "fix one missing dep, VM build finds another" saga ──────────────────
+# On a fresh/remote VM (its npm cache never saw a just-declared package
+# before), `npm install --prefer-offline --workspace=X --workspace=Y` prints
+# "up to date" and EXITS WITHOUT ERROR while silently leaving that package
+# missing from node_modules — the lockfile (and node_modules/.package-lock.json)
+# both correctly list it as resolved, but the tarball is never actually
+# extracted to disk. `npm ls <pkg>` then reports "(empty)". This is an npm
+# workspace-scoped-install quirk, not flakiness: reproduced deterministically
+# 3x — dropping just this one flag (keeping --legacy-peer-deps --no-audit
+# --no-fund --ignore-scripts) made every one of 4 independently-diagnosed
+# "missing dependency" bugs (@mantine/hooks, ajv-errors, slate,
+# @anthropic-ai/sdk) resolve in the SAME single install, instead of needing
+# 6+ separate full universal-arch rebuild retries (each tens of minutes) to
+# discover them one at a time. Do not re-add `--prefer-offline` here without
+# re-verifying against a VM whose npm cache is cold for the packages in
+# question.
+(cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
   --workspace=@papercusp/operator --workspace=@papercusp/operator-vite)
 
 echo "→ verifying workspace deps resolved"
@@ -249,6 +267,27 @@ echo "  apps/operator/node_modules/@restart/ contents:"
 ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart subdir)"
 echo "  apps/operator/node_modules/@papercusp/ contents:"
 ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercusp subdir)"
+# FAIL-FAST GUARD (2026-07-25, WI-5769): the two `ls` checks above are purely
+# informational — neither fails the build, so the exact "npm said up to date
+# but a declared dep never got extracted to node_modules" bug this whole
+# section's header comment documents used to sail straight through this
+# "verification" and only surface ~10 minutes later as a cryptic Rolldown
+# "failed to resolve" error, and again ~45 minutes after THAT inside the
+# 6+-minute-a-pop full universal-arch Rust/Swift build if the vite build step
+# were ever skipped. `npm ls --all` walks the ACTUAL installed tree (not the
+# lockfile) for every declared dependency of both workspaces and prints an
+# "missing:" line + a non-zero exit for anything that resolved-but-not-really
+# installed — catch it HERE, before the expensive steps, with a message that
+# names the actual root cause instead of leaving the next agent to
+# re-diagnose an npm quirk as a phantom bundler bug.
+if ! (cd "$REPO_ROOT" && npm ls --all --workspace=@papercusp/operator --workspace=@papercusp/operator-vite >/tmp/npm-ls-verify.log 2>&1); then
+  if grep -q '^npm error missing:' /tmp/npm-ls-verify.log; then
+    echo "FATAL: npm install reported \"up to date\" but left declared dependencies un-extracted on disk (see build-desktop-sidecar.sh:244 comment — a known --prefer-offline-class npm quirk, now removed; if you see this, something ELSE is re-triggering the same failure mode):"
+    grep '^npm error missing:' /tmp/npm-ls-verify.log
+    exit 1
+  fi
+  echo "WARN: npm ls --all reported non-missing issues (peer-dep conflicts etc. under --legacy-peer-deps are expected) — continuing. Full output: /tmp/npm-ls-verify.log"
+fi
 
 echo "→ building operator-vite SPA (vite build → dist/)"
 (cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)
