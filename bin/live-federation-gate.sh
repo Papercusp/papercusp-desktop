@@ -189,6 +189,10 @@ MATRIX_LEG_STALE=0
 # the leg sets this, so the suppression is always attributable at the verdict line.
 MATRIX_SKIP_REASON=""
 now_s() { date +%s 2>/dev/null || echo 0; }
+# Wall-clock start of THIS gate run — the default evidence window for frame_pressure_note()
+# below, so a verdict reached BEFORE the local-matrix leg ran (MATRIX_LEG_START_TS unset)
+# still scopes its frame evidence to this run instead of reading a stale bank file.
+GATE_RUN_START_TS="$(now_s)"
 age_h() { local f="$1"; [ -f "$f" ] || { echo 999999; return; }; echo $(( ( $(now_s) - $(cat "$f" 2>/dev/null || echo 0) ) / 3600 )); }
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$1"; }
 file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK logs are the fallback
