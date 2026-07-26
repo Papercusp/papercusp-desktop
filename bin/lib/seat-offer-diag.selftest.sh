@@ -104,10 +104,16 @@ fi
 # 7. TENANT SCOPE. substrate_outbox is keyed (workspace_id, harness_slug), so a bare
 # table_name filter counts OTHER hives' rows — an unrelated undrained row would then
 # read as NEVER-LEFT-B for this offer. Every outbox read must carry harness_slug.
-if [ "$(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")" = 3 ]; then
-  ok "all 3 substrate_outbox reads are harness_slug-scoped (multi-tenant table)"
+# Asserted as an INVARIANT (every read is scoped), not as an exact count: the old
+# `= 3` form made the guard rot the moment a legitimate fourth outbox read was added
+# (WI-6210's clock probe), reporting "4/3" — a green-looking invariant failing for
+# growth rather than for the unscoped read it exists to catch.
+_sob_all="$(grep -c 'harness_shared\.substrate_outbox' "$SCN")"
+_sob_scoped="$(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")"
+if [ "$_sob_all" -gt 0 ] && [ "$_sob_all" = "$_sob_scoped" ]; then
+  ok "all $_sob_all substrate_outbox reads are harness_slug-scoped (multi-tenant table)"
 else
-  bad "substrate_outbox reads must all filter harness_slug — found $(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")/3"
+  bad "substrate_outbox reads must all filter harness_slug — $_sob_scoped/$_sob_all scoped"
 fi
 
 echo

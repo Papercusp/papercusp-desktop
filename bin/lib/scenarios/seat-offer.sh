@@ -60,7 +60,47 @@ _soffer_diag_b_to_a() {
   b_pending="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND drained_at IS NULL;" 2>/dev/null | tr -d '[:space:]')"
   b_quar="$(drv_psql b "SELECT count(*) FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID' AND quarantined_at IS NOT NULL;" 2>/dev/null | tr -d '[:space:]')"
   a_any="$(drv_psql a "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr -d '[:space:]')"
-  a_break="$(drv_psql a "SELECT COALESCE(string_agg(o||'/'||s||'='||n, ' '), '<no row for this fleet>') FROM (SELECT COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2) t;" 2>/dev/null | tr '\n' ' ')"
+  # WI-6210 WRITER DISCRIMINATOR (added with the origin/status breakdown, not instead
+  # of it): on an ARRIVED-NOT-REMOTE row, the AUTHOR_PUBKEY SHAPE names WHICH writer
+  # produced it, and the two answers point at completely different bugs:
+  #   author:NULL   — offer-store.ts publishOffer wrote it (its column list omits
+  #                   author_pubkey/origin/fed_ts entirely, so origin lands on the
+  #                   column DEFAULT 'local'). That is a LOCAL publish on frame a —
+  #                   an MCP-routing / scenario fault, NOT the federation apply path.
+  #   author:64hex  — a PROJECTION apply (work-offers.ts is the only other writer, and
+  #                   it always stamps an author) that nonetheless computed
+  #                   origin='local'. Given projection.ts resolveOpProvenance, origin
+  #                   can only be 'local' when sourceLogKeyHex === ownLogKeyHex OR
+  #                   ownLogKeyHex is UNDEFINED — and the first is impossible here
+  #                   because work-offers sets skipOwnOps:true, which DROPS such a put
+  #                   before any write. So author:64hex + origin='local' PROVES the
+  #                   apply ran without ownLogKeyHex (register-all.ts's
+  #                   `opts.ownLogKeyHex ? {…} : {}` fallback silently degrading).
+  # Without this field the FAIL line cannot separate those two, which is exactly the
+  # ambiguity that cost a wake of forward-reasoning on run 174655.
+  a_break="$(drv_psql a "SELECT COALESCE(string_agg(o||'/'||s||'/'||au||'='||n, ' '), '<no row for this fleet>') FROM (SELECT COALESCE(origin,'<null>') o, COALESCE(status,'<null>') s, CASE WHEN author_pubkey IS NULL THEN 'author:NULL' WHEN author_pubkey ~ '^[0-9a-f]{64}\$' THEN 'author:64hex' ELSE 'author:other' END au, count(*) n FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug' GROUP BY 1,2,3) t;" 2>/dev/null | tr '\n' ' ')"
+  # WI-6210 CLOCK-PROVENANCE PROBE — the 3-way decision procedure for an
+  # ARRIVED-NOT-REMOTE row. Capture stamps the wire op's clock FROM the source row
+  # (mig 423/528: substrate_outbox.ts = row.fed_ts, op_hlc = row.fed_hlc), and the
+  # projection apply writes fed_ts/fed_hlc VERBATIM from that wire clock. So
+  # comparing a's stored clock against b's outbox clock names the writer:
+  #   a.fed_hlc == b.op_hlc  → the projection stamped it from the wire op. Origin is
+  #                            then whatever resolveOpProvenance computed — read it.
+  #   a.fed_hlc != b.op_hlc, b.op_hlc NOT NULL → a's clock was generated LOCALLY, i.e.
+  #                            harness_shared.hlc_now() inside stamp_local_federated_write
+  #                            (mig 490/517) ran. Its INSERT branch stamps ONLY when
+  #                            fed_ts IS NULL — which cannot hold when the wire carried a
+  #                            clock — so the stamp came from its UPDATE branch, which
+  #                            ALSO forces `NEW.origin := 'local'`. That is a LOCAL WRITE
+  #                            re-stamping an already-applied remote row, NOT an apply bug.
+  #   b.op_hlc IS NULL       → the op crossed the wire CLOCKLESS; the trigger's INSERT
+  #                            branch legitimately filled the clock, and origin stayed at
+  #                            its 'local' default — an apply-path/provenance bug.
+  # Two cheap SELECTs, and they separate three faults that are otherwise identical in
+  # every observable column (verified against the banked run-174655 row pair).
+  local b_clock a_clock
+  b_clock="$(drv_psql b "SELECT COALESCE(string_agg(ts||'|'||COALESCE(op_hlc,'<null-hlc>'), ' '), '<no outbox row>') FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr '\n' ' ')"
+  a_clock="$(drv_psql a "SELECT COALESCE(string_agg(COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
   if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then
     verdict="NEVER-LEFT-B (outbox QUARANTINED on b — the row crossed the retry threshold and is excluded from the drain batch, mig 645; a b-side publish fault, NOT convergence timing)"
   elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
@@ -72,7 +112,7 @@ _soffer_diag_b_to_a() {
   else
     verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
   fi
-  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status: ${a_break:-<unreadable>}"
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} vs a.row(fed_ts|fed_hlc)=${a_clock:-<unreadable>} [equal ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default]"
 }
 
 scn_seat_offer() {
