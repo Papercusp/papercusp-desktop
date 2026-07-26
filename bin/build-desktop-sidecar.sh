@@ -1253,8 +1253,18 @@ if [[ -n "$_pg_otool" ]]; then
       # `set -euo pipefail` the failing command-substitution assignment tripped
       # errexit (exit 2, no error text) — invisible when the block is run
       # interactively without errexit, caught only by a clean in-script rebuild.
+      # Portable equivalent of `mapfile -t` (avoid — macOS ships bash 3.2
+      # system-wide (GPLv3 license cutoff after bash 3.2), which predates
+      # `mapfile`/`readarray` (bash 4.0+); a remote build invoked over ssh
+      # without an explicit Homebrew-bash PATH override resolves `bash` to
+      # that ancient system one and dies here with "mapfile: command not
+      # found" (WI-5769 — 5th independently-discovered missing-dependency-
+      # class packaging bug, this one an interpreter-version bug not a
+      # missing npm dep). `while read` is bash-3.2-safe.
       _pg_cands=()
-      mapfile -t _pg_cands < <(compgen -G "$_pg_native/lib/${_ref%.dylib}.*.dylib" || true)
+      while IFS= read -r _pg_cand; do
+        [[ -n "$_pg_cand" ]] && _pg_cands+=("$_pg_cand")
+      done < <(compgen -G "$_pg_native/lib/${_ref%.dylib}.*.dylib" || true)
       [[ ${#_pg_cands[@]} -gt 0 ]] || continue
       ln -sf "$(basename "${_pg_cands[0]}")" "$_pg_native/lib/$_ref" && _pg_made=$((_pg_made + 1))
     done

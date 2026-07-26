@@ -60,6 +60,30 @@ WORK="${PAPERCUSP_MATRIX_WORK:-$HOME/.papercusp-lane-a-fed}"
 # verification reruns). Reap whatever a PRIOR invocation left behind, with its
 # OWN self-scoped stop.sh (pgrep -f "$WORK", excludes the invoker chain — safe,
 # never a binary-name-pattern kill), BEFORE wiping $WORK out from under it.
+# EI-18659596698001601: two concurrent invocations sharing this SAME fixed $WORK
+# (the default path, or any custom PAPERCUSP_MATRIX_WORK two callers happen to
+# share) used to race straight into the reap-then-rm-rf below — the second
+# invocation's startup reap (stop.sh + rm -rf) tears down the FIRST invocation's
+# still-running sidecars/probes out from under it, mid-scenario, forging an
+# indistinguishable-from-real `A->B FAIL (probe=0)` federation-regression
+# signature (observed live 2026-07-25: an 18:38 GATE_FORCE run's sidecars were
+# `Killed` by an 18:43 hourly-timer run's teardown of this same lane dir).
+# Serialize on a lock file scoped to THIS $WORK path (never rm -rf'd, so the
+# lock survives across the whole reap+rerun cycle): a second invocation queues
+# here instead of clobbering the first, and by the time it acquires the lock
+# the first invocation's script process has genuinely exited (either a clean
+# completion that intentionally leaves the pair running for lanes E/G — in
+# which case the reap below is the SAME intended recycle-old-run behavior it
+# always was — or an early-abort whose own EXIT trap already ran
+# fed_cleanup_scoped). This does not change the leave-it-running-for-E/G design
+# (WI-2115) at all; it only stops a run in progress from being reaped by a
+# sibling that started too soon.
+LOCK_FILE="${WORK}.flock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another invocation holds $LOCK_FILE (lane dir busy) — queuing until it exits, to avoid EI-18659596698001601's collision"
+  flock 9
+fi
 [ -x "$WORK/stop.sh" ] && { "$WORK/stop.sh" >/dev/null 2>&1 || true; }
 rm -rf "$WORK" 2>/dev/null; mkdir -p "$WORK"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
