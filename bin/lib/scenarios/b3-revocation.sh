@@ -52,11 +52,29 @@ scn_revocation_kcut() {
   local ban; ban="$(rig_ban_member a "$bid" hive)"
   printf '%s' "$ban" | grep -q '"ok":true' || { echo "revocation: REVOKE FAILED — $(printf '%s' "$ban" | head -c 160)"; return 1; }
 
+  # EI-18712383368117845: SURFACE revoke.live. The revoke response carries {ok,revokedPubkeys,live}
+  # and `live` is THE diagnostic for this leg — true = the epoch advance applied a real read cut,
+  # false = PG-only write-plane block with no read cut-off, so a LEAK below is EXPECTED rather than
+  # mysterious. It was being captured into $ban and discarded (only "ok":true was grepped), which
+  # is why 5 FAIL / 1 PASS gave no way to tell "the cut-off ran and lost a race" from "no cut-off
+  # ever applied". Diagnostic only — the assertion below is deliberately UNCHANGED.
+  local rvlive; rvlive="$(printf '%s' "$ban" | grep -oE '"live":[a-z]+' | head -1)"
+  echo "  · revocation: revoke.live=${rvlive:-ABSENT} (true ⇒ real read cut applied; false/ABSENT ⇒ write-plane block only)"
+
   # 3. post-ban owner write (triggers the re-key; revoke.live is false until it lands) must
   #    NOT reach B. rig_assert_absent waits the full window and passes only if it never appears.
   rig_write_content a "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned B)" todo >/dev/null
   local absent; absent="$(rig_assert_absent b "$FPOST" 30)"
-  [ "$absent" = 1 ] || { echo "revocation: LEAK — $FPOST reached banned member B after the ban (cut-off failed)"; return 1; }
+  if [ "$absent" != 1 ]; then
+    # EI-18712383368117845: on a LEAK, also record whether B can actually READ the leaked content.
+    # rig_assert_absent only proves the row reached B's consolidated table; this distinguishes a
+    # plaintext disclosure from replicated-but-undecryptable bytes, which is what sets the real
+    # severity. Diagnostic only — the FAIL verdict is unchanged either way.
+    local leaked; leaked="$(rig_read_content b "$FPOST" 2>/dev/null)"
+    echo "  · revocation: LEAK detail — revoke.live=${rvlive:-ABSENT}; B read of $FPOST => '${leaked:-<unreadable>}' (a '*|remote' value = READABLE plaintext disclosure)"
+    echo "revocation: LEAK — $FPOST reached banned member B after the ban (cut-off failed)"
+    return 1
+  fi
 
   # pre-ban content stays readable on B (revocation is not retroactive — matches the repro's
   # readable epoch-0). A WARN (not FAIL): the cut-off assertion above is the gate.
