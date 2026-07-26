@@ -182,6 +182,12 @@ MATRIX_STALE_H="${MATRIX_STALE_H:-$(( ${MATRIX_TTL_H:-144} + 48 ))}"
 # Set by check_matrix_staleness so the human-facing verdict line can carry the leg-dark marker
 # too — an EI in a queue and a line in journald are both easy to miss; the GATE: line is not.
 MATRIX_LEG_STALE=0
+# EI-18715623477356990 — THE ONE "why did the matrix leg not decide this window?" reason string.
+# MATRIX_LEG_STALE only fires after MATRIX_STALE_H (default 192h ≈ 8 days) of silence; a lane
+# waiting on revocation_kcut / attestation_unattested_device (the two scenarios ONLY this leg
+# runs) needs the answer THIS window, not eight days later. Every §3b path that declines to run
+# the leg sets this, so the suppression is always attributable at the verdict line.
+MATRIX_SKIP_REASON=""
 now_s() { date +%s 2>/dev/null || echo 0; }
 age_h() { local f="$1"; [ -f "$f" ] || { echo 999999; return; }; echo $(( ( $(now_s) - $(cat "$f" 2>/dev/null || echo 0) ) / 3600 )); }
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$1"; }
