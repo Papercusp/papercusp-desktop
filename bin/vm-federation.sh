@@ -437,15 +437,25 @@ ba="$(fed_hive_merge_probe b a "$MEMBER_SLUG" F-B2A 30 || true)"; ba="${ba%% *}"
 
 # ── 12. report ──────────────────────────────────────────────────────────────
 fed_log "RESULT (vms=$VMS dht=$DHT net=$NET reset=$RESET)"
-if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
+if { [ "$disc" != 1 ] && [ "$disc" != skip ]; } || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   echo "── [swarm] diagnostics ──"
   for inst in a b; do
     echo "[$inst] $(drv_exec "$inst" <<<"grep -E '\[swarm\]' $(drv_applog "$inst") 2>/dev/null | tail -5" )"
   done
 fi
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B-merge=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-merge=$([ "$ba" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ]; then
-  echo "OVERALL: PASS — packaged cross-machine federation proven (real OS × $((VMS)), real network hop, write-free admission)"
+# EI-18687938054040755: fed_wait_discovery echoes 1|0|skip. `skip` = this build
+# predates the peer_data_path_up emitter, so no discovery verdict exists — N/A,
+# not a failure, and it must not sink OVERALL. The merge legs are themselves proof
+# that bytes crossed, so a run MAY pass with discovery unmeasured — it just has to
+# SAY so, never render as an unqualified green.
+disc_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
+echo "discovery=$(disc_label "$disc")  A→B-merge=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-merge=$([ "$ba" = 1 ] && echo PASS || echo FAIL)"
+if { [ "$disc" = 1 ] || [ "$disc" = skip ]; } && [ "$ab" = 1 ] && [ "$ba" = 1 ]; then
+  if [ "$disc" = skip ]; then
+    echo "OVERALL: PASS (⊘ discovery SKIPPED — build predates the peer_data_path_up emitter, EI-18687938054040755; the merges are the wire proof) — packaged cross-machine federation proven (real OS × $((VMS)), real network hop, write-free admission)"
+  else
+    echo "OVERALL: PASS — packaged cross-machine federation proven (real OS × $((VMS)), real network hop, write-free admission)"
+  fi
   exit 0
 else
   if [ "$DHT" = public ]; then

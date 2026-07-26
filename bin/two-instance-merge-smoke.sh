@@ -139,5 +139,20 @@ ba="$(fed_merge_assert b a "$SLUG" F-B2A "from $P_B_USER" in-progress 30 || true
 
 # ── report ───────────────────────────────────────────────────────────────────────
 log "RESULT"
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B-merge=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-merge=$([ "$ba" = 1 ] && echo PASS || echo FAIL)"
-[ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { echo "OVERALL: PASS — write-free packaged merge proven"; exit 0; } || { echo "OVERALL: INCOMPLETE — see [swarm] log lines in ${FED_LOG[a]} / ${FED_LOG[b]}"; exit 6; }
+# EI-18687938054040755: fed_wait_discovery echoes 1|0|skip. `skip` = this build
+# predates the peer_data_path_up emitter, so NO discovery verdict exists — that is
+# N/A, not a failure, and it must not sink OVERALL (scoring "not measured" as FAIL
+# is a false-FAIL indistinguishable from a real product break). The merge legs are
+# themselves proof that bytes crossed, so a run MAY pass with discovery unmeasured
+# — it just has to SAY so, never render as an unqualified green.
+disc_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
+echo "discovery=$(disc_label "$disc")  A→B-merge=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A-merge=$([ "$ba" = 1 ] && echo PASS || echo FAIL)"
+if { [ "$disc" = 1 ] || [ "$disc" = skip ]; } && [ "$ab" = 1 ] && [ "$ba" = 1 ]; then
+  if [ "$disc" = skip ]; then
+    echo "OVERALL: PASS (⊘ discovery SKIPPED — build predates the peer_data_path_up emitter, EI-18687938054040755; the merges are the wire proof) — write-free packaged merge proven"
+  else
+    echo "OVERALL: PASS — write-free packaged merge proven"
+  fi
+  exit 0
+fi
+echo "OVERALL: INCOMPLETE — see [swarm] log lines in ${FED_LOG[a]} / ${FED_LOG[b]}"; exit 6

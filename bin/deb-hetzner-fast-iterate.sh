@@ -433,9 +433,16 @@ do_hotpatch() {
   # 6. report
   fed_log "HOTPATCH RESULT"
   pp_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
-  echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
-  if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
-    echo "OVERALL: PASS — hotpatched serve.mjs federates cross-machine (features + plan-parts + coord)"
+  # EI-18687938054040755: discovery now shares the plan-part legs' three-way
+  # contract — 1|0|skip, where skip = this build predates the peer_data_path_up
+  # emitter so no verdict exists. N/A, not a failure; must not sink OVERALL.
+  echo "discovery=$(pp_label "$disc")  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
+  if { [ "$disc" = 1 ] || [ "$disc" = skip ]; } && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+    if [ "$disc" = skip ]; then
+      echo "OVERALL: PASS (⊘ discovery SKIPPED — build predates the peer_data_path_up emitter, EI-18687938054040755; the merges are the wire proof) — hotpatched serve.mjs federates cross-machine (features + plan-parts + coord)"
+    else
+      echo "OVERALL: PASS — hotpatched serve.mjs federates cross-machine (features + plan-parts + coord)"
+    fi
     echo "  (VMs still UP — iterate again with --hotpatch, or --teardown when done)"
     exit 0
   fi

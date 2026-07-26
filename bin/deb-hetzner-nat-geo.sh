@@ -161,7 +161,12 @@ disc="$(fed_wait_discovery a b strict 180 || true)"   # generous window: cross-c
 # EI-18687938054040755: `skip` means the build cannot emit the data-path proof at
 # all — that is N/A, NOT a holepunch failure. Reporting it as "✗ FAILED" would
 # manufacture a Brief-8 finding out of an artifact-age mismatch.
-hp=0; [ "$disc" = 1 ] && hp=1
+# hp is THREE-STATE, mirroring disc: 1 = proven, skip = not measurable on this
+# build, 0 = measured and failed. Collapsing skip into 0 here would print
+# "FAIL — no data path" and sink OVERALL, i.e. exactly the Brief-8 finding the
+# comment above refuses to manufacture. (The case below already got this right
+# for the printed line; the SCORING did not — leader su-e3b21216, WI-6012.)
+hp=0; case "$disc" in 1) hp=1 ;; skip) hp=skip ;; esac
 case "$disc" in
   1)    echo "✓ data path proven a↔b — holepunch succeeded across [$LOC_A↔$LOC_B]${NAT:+ + NAT=$NAT} (bytes crossed)" ;;
   skip) echo "⊘ holepunch verdict N/A — this build predates the peer_data_path_up emitter, so the data path was never measured (NOT a Brief-8 finding; EI-18687938054040755)" ;;
@@ -189,7 +194,7 @@ fed_log "BRIEF 8 NAT/GEO RESULT (2-frame .deb sidecar, Hetzner $STYPE, public DH
 cat <<REPORT
   region pair          : $LOC_A ↔ $LOC_B  (cross-continent by default)
   NAT on frame B       : $([ "$NAT" = on ] && { [ "$nat_applied" = 1 ] && echo 'on — APPLIED (stateful restricted-cone approximation)' || echo 'on — REQUESTED BUT NOT APPLIED (⚠ NAT axis UNPROVEN)'; } || echo 'off (geo-only)')
-  holepunch/peering    : $([ "$hp" = 1 ] && echo 'PASS — peer_connected' || echo 'FAIL — no peer_connected')
+  holepunch/peering    : $(case "$hp" in 1) echo 'PASS — data path proven (bytes crossed)' ;; skip) echo 'SKIP — N/A, this build predates the peer_data_path_up emitter (EI-18687938054040755)' ;; *) echo 'FAIL — no data path proven' ;; esac)
   content A→B          : $([ "$ab" = 1 ] && echo PASS || echo FAIL)
   content B→A          : $([ "$ba" = 1 ] && echo PASS || echo FAIL)
 
@@ -201,6 +206,18 @@ REPORT
 nat_ok=1; [ "$NAT" = "on" ] && [ "$nat_applied" != 1 ] && nat_ok=0
 if [ "$hp" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$nat_ok" = 1 ]; then
   echo "OVERALL: PASS — federation works cross-region${NAT:+ + behind a NAT firewall} (real public DHT holepunch)"; exit 0
+fi
+# EI-18687938054040755 — DELIBERATE ASYMMETRY vs the other rigs (leader su-e3b21216,
+# WI-6012). Elsewhere an unmeasured discovery leg is N/A and the merges carry the
+# proof, so the run may PASS-with-SKIP. HERE IT MAY NOT: this rig's headline claim
+# IS the holepunch/data-path axis, so "merges landed but the data path was never
+# measured" proves peering happened in SOME form while leaving the very thing this
+# rig exists to prove unmeasured. Calling that PASS would be a false-PASS on the
+# Brief-8 claim; calling it FAIL would manufacture a Brief-8 finding out of an
+# artifact-age mismatch. It is neither — it is INCONCLUSIVE (exit 7, same
+# convention as vm-federation.sh's best-effort case).
+if [ "$hp" = skip ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && [ "$nat_ok" = 1 ]; then
+  echo "OVERALL: INCONCLUSIVE — content federated cross-region both ways (the merges prove bytes crossed), but the HOLEPUNCH/DATA-PATH AXIS WAS NEVER MEASURED: this build predates the peer_data_path_up emitter (EI-18687938054040755). Not a Brief-8 finding, and NOT a holepunch proof. Re-run on a build that carries the emitter to score this axis."; exit 7
 fi
 [ "$nat_ok" = 1 ] || echo "OVERALL: INCOMPLETE — NAT firewall was requested but never applied (frame IP unresolved); the NAT axis is UNPROVEN even if peering/merge passed"
 echo "OVERALL: INCOMPLETE — federation degraded under geo/NAT; see [swarm]/holepunch diag + serve.log on each frame"

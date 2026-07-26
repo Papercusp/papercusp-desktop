@@ -216,16 +216,29 @@ fi
 
 # ── 6. report ─────────────────────────────────────────────────────────────────
 fed_log "RESULT (.deb sidecar, Hetzner $STYPE $LOC_A+$LOC_B, public DHT)"
-if [ "$disc" != 1 ] || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
+if { [ "$disc" != 1 ] && [ "$disc" != skip ]; } || [ "$ab" != 1 ] || [ "$ba" != 1 ]; then
   for inst in a b; do echo "[$inst] $(drv_exec "$inst" <<<"grep -E '\[swarm\]' /home/pcusp/serve.log 2>/dev/null | tail -5")"; done
 fi
 # EI-505: plan-part legs report PASS/SKIP/FAIL — SKIP (table absent, pre-plan-parts
 # .deb) is N/A, not a failure, and must not sink OVERALL.
+# EI-18687938054040755: the DISCOVERY leg now has the same three-way contract —
+# fed_wait_discovery echoes 1|0|skip, where skip = this build predates the
+# peer_data_path_up emitter so no verdict exists. Same rule: N/A, not a failure.
+# The merge + coord legs are themselves proof that bytes crossed, so a run MAY
+# pass with discovery unmeasured — it just has to SAY so.
 pp_label() { case "$1" in 1) echo PASS ;; skip) echo SKIP ;; *) echo FAIL ;; esac; }
-echo "discovery=$([ "$disc" = 1 ] && echo PASS || echo FAIL)  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
-if [ "$disc" = 1 ] && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+echo "discovery=$(pp_label "$disc")  A→B=$([ "$ab" = 1 ] && echo PASS || echo FAIL)  B→A=$([ "$ba" = 1 ] && echo PASS || echo FAIL)  plan-part A→B=$(pp_label "$ppab")  plan-part B→A=$(pp_label "$ppba")  coord A→B=$([ "${cab:-0}" = 1 ] && echo PASS || echo FAIL)  coord B→A=$([ "${cba:-0}" = 1 ] && echo PASS || echo FAIL)"
+if { [ "$disc" = 1 ] || [ "$disc" = skip ]; } && [ "$ab" = 1 ] && [ "$ba" = 1 ] && { [ "$ppab" = 1 ] || [ "$ppab" = skip ]; } && { [ "$ppba" = 1 ] || [ "$ppba" = skip ]; } && [ "${cab:-0}" = 1 ] && [ "${cba:-0}" = 1 ]; then
+  # Name EVERY skipped lane in the PASS line — a skip must never render as an
+  # unqualified green, or we re-introduce the false-PASS this lane exists to kill.
+  fed_skipped=""
+  [ "$disc" = skip ] && fed_skipped="discovery (build predates the peer_data_path_up emitter, EI-18687938054040755)"
   if [ "$ppab" = skip ] || [ "$ppba" = skip ]; then
-    echo "OVERALL: PASS (plan-part lane SKIPPED — harness_plan_parts absent, this .deb predates the plan-parts migration, EI-505) — the .deb federates cross-machine incl. coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"
+    [ -n "$fed_skipped" ] && fed_skipped="$fed_skipped + "
+    fed_skipped="${fed_skipped}plan-part lane (harness_plan_parts absent, this .deb predates the plan-parts migration, EI-505)"
+  fi
+  if [ -n "$fed_skipped" ]; then
+    echo "OVERALL: PASS (⊘ SKIPPED: $fed_skipped) — the .deb federates cross-machine incl. coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"
   else
     echo "OVERALL: PASS — the .deb federates cross-machine incl. per-part plans AND coord COMMUNICATION (2 separate Hetzner VMs, real public DHT)"
   fi
