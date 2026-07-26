@@ -544,6 +544,42 @@ else
   bad "_fed_disc_capability LOST its positive control — an unreadable bundle now reads as 'emitter absent' ⇒ every run silently SKIPs ⇒ unfalsifiable-by-default"
 fi
 
+# --- drv_appbundle: the LOCAL driver must genuinely resolve a bundle.
+# Leader ruling (ms1heq5g): "unknown ⇒ don't skip" is only safe if LOCAL actually
+# resolves one — otherwise local ⇒ unknown ⇒ don't skip ⇒ strict fires ⇒
+# fail-closed, i.e. the original disease wearing the fix as a costume.
+FED_LOG[t]="$DISC_WORK/t.log"
+FED_BUNDLE_BY_LOG["$DISC_WORK/t.log"]="$DISC_WORK/side/serve.mjs"
+res="$(drv_appbundle_local t)"
+[ "$res" = "$DISC_WORK/side/serve.mjs" ] \
+  && ok "drv_appbundle_local reverse-maps inst → FED_LOG → the recorded bundle" \
+  || bad "drv_appbundle_local failed to resolve a registered bundle (got '$res')"
+
+unset 'FED_LOG[t]'
+res="$(drv_appbundle_local t)"
+[ -z "$res" ] && ok "drv_appbundle_local returns empty (not an error) for an unknown instance" \
+              || bad "drv_appbundle_local should return empty for an unknown instance, got '$res'"
+
+# --- the launcher must REGISTER the bundle, or the local map is always empty
+if grep -q 'FED_BUNDLE_BY_LOG\["\$logf"\]="\$side/serve.mjs"' "$DIR/federation-asserts.sh"; then
+  ok "fed_local_launch_sidecar registers the bundle it launches (local driver can resolve without call-site changes)"
+else
+  bad "fed_local_launch_sidecar no longer registers FED_BUNDLE_BY_LOG — the local driver resolves NOTHING, so every local run degrades to capability=unknown and strict fires fail-closed on old builds"
+fi
+
+# --- RECURRENCE GUARD: any driver that overrides drv_applog must also override
+# drv_appbundle. This is what stops the next driver from silently reintroducing
+# the "local resolves nothing" hole the leader flagged.
+missing=""
+for f in "$DIR"/../*.sh "$DIR"/*.sh; do
+  case "$f" in *federation-asserts.sh|*selftest*) continue ;; esac
+  if grep -q '^drv_applog()' "$f" 2>/dev/null && ! grep -q '^drv_appbundle()' "$f" 2>/dev/null; then
+    missing="$missing $(basename "$f")"
+  fi
+done
+[ -z "$missing" ] && ok "every driver overriding drv_applog also overrides drv_appbundle (no driver can silently resolve no bundle)" \
+                  || bad "driver(s) override drv_applog but NOT drv_appbundle:$missing — those runs resolve no bundle ⇒ capability unknown ⇒ strict fires fail-closed on an emitter-less build"
+
 unset -f drv_applog _fed_disc_capability
 rm -rf "$DISC_WORK"
 

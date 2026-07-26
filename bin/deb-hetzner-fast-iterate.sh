@@ -146,6 +146,10 @@ load_state() {
 # ── driver vtable: SSH into each frame by public IP (same as the full rig) ─────
 drv_exec()   { hssh "${FRAME_IP[$1]}" 'bash -s'; }
 drv_applog() { echo "/home/pcusp/serve.log"; }
+# EI-18687938054040755: $SIDECAR_SERVE is exactly what --hotpatch scp's onto, so
+# the data-path capability probe reads the bundle CURRENTLY installed — which is
+# the whole point here: after a hotpatch the running code is NOT the .deb's.
+drv_appbundle() { echo "$SIDECAR_SERVE"; }
 drv_psql()   { printf '%s\n' "$2" | hssh "${FRAME_IP[$1]}" \
                  "psql 'postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp' -tA"; }
 

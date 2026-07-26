@@ -610,6 +610,13 @@ rig_provision() {
 # SSH driver. A scenario sources this lib AFTER federation-asserts.sh so these win.
 drv_exec()   { rig_ssh "${FRAME_IP[$1]}" 'bash -s'; }
 drv_applog() { echo "/home/pcusp/serve.log"; }
+# EI-18687938054040755: where the .deb actually installs the sidecar. NOTE THE
+# SPACE — the product is "Papercusp GUI", so the path is
+# "/usr/lib/Papercusp GUI/sidecar/serve.mjs". Verified on a live frame
+# (10.99.0.11): /usr/lib/Papercusp/sidecar does NOT exist. The capability probe
+# also globs /usr/lib/Papercusp*/sidecar as a backstop, so an older-layout .deb
+# still resolves.
+drv_appbundle() { echo "/usr/lib/Papercusp GUI/sidecar/serve.mjs"; }
 drv_psql()   { printf '%s\n' "$2" | rig_ssh "${FRAME_IP[$1]}" \
                  "psql 'postgresql://harness_admin:harness_admin_pwd@localhost:${FED_PG[$1]}/papercusp' -tA"; }
 

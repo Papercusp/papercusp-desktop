@@ -110,6 +110,17 @@ drv_applog() {
     vm)    echo "/home/tester/papercusp-app.log" ;;
   esac
 }
+# EI-18687938054040755: the data-path capability probe needs the bundle path on
+# whichever machine hosts this instance. Hybrid like the rest of this vtable —
+# a local instance resolves through fed_local_launch_sidecar's registry, a vm
+# instance through the packaged .deb layout.
+drv_appbundle() {
+  local inst="$1"
+  case "${FED_KIND[$inst]}" in
+    local) drv_appbundle_local "$inst" ;;
+    vm)    echo "/usr/lib/Papercusp/sidecar/serve.mjs" ;;
+  esac
+}
 drv_psql() {   # SQL goes over stdin — robust against nested quoting
   local inst="$1" sql="$2"
   case "${FED_KIND[$inst]}" in

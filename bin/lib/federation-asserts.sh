@@ -333,10 +333,23 @@ drv_exec_local()   { bash -s; }
 drv_applog_local() { echo "${FED_LOG[$1]}"; }
 drv_psql_local()   { psql "${FED_DB[$1]}" -tA -c "$2"; }
 
-# Default vtable = local. vm-federation.sh overrides these three.
-drv_exec()   { drv_exec_local "$@"; }
-drv_applog() { drv_applog_local "$@"; }
-drv_psql()   { drv_psql_local "$@"; }
+# drv_appbundle <inst> → absolute path, ON THAT INSTANCE'S MACHINE, of the
+# serve.mjs it is running (empty = cannot resolve). Fourth vtable entry, added
+# for EI-18687938054040755 so the data-path CAPABILITY probe is driver-agnostic
+# like every other assert here instead of hardcoding the packaged .deb layout.
+# The local driver reverse-maps inst → FED_LOG[inst] → the bundle recorded by
+# fed_local_launch_sidecar; the SSH/rig drivers override it with their own path.
+declare -A FED_BUNDLE_BY_LOG=()
+drv_appbundle_local() {
+  local lg="${FED_LOG[$1]:-}"
+  [ -n "$lg" ] && echo "${FED_BUNDLE_BY_LOG[$lg]:-}" || echo ""
+}
+
+# Default vtable = local. vm-federation.sh / deb-hetzner-rig.sh override these.
+drv_exec()      { drv_exec_local "$@"; }
+drv_applog()    { drv_applog_local "$@"; }
+drv_psql()      { drv_psql_local "$@"; }
+drv_appbundle() { drv_appbundle_local "$@"; }
 
 # ── boot / isolation ────────────────────────────────────────────────────────
 
@@ -792,20 +805,47 @@ fed_wait_discovery() {
 # "unknown" ⇒ we do NOT skip, and the strict assertion runs normally.
 declare -A FED_DISC_CAP=()
 _fed_disc_capability() {
-  local inst="$1" verdict
+  local inst="$1" verdict hint script
   if [ -n "${FED_DISC_CAP[$inst]:-}" ]; then echo "${FED_DISC_CAP[$inst]}"; return 0; fi
-  verdict="$(drv_exec "$inst" <<'CAPEOF'
+  # Driver-supplied path first (drv_appbundle), then the running process's own
+  # bundle via /proc, then the packaged .deb layout. Three independent
+  # resolutions so no single driver quirk silently yields "unknown".
+  hint="$(drv_appbundle "$inst" 2>/dev/null || true)"
+  script="BUNDLE_HINT=$(printf '%q' "${hint:-}")
+$(cat <<'CAPEOF'
 bundle=""
-for pid in $(pgrep -f 'serve\.mjs' 2>/dev/null); do
-  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
-  [ -n "$cwd" ] && [ -r "$cwd/serve.mjs" ] && { bundle="$cwd/serve.mjs"; break; }
-done
-[ -n "$bundle" ] || { [ -r /usr/lib/Papercusp/sidecar/serve.mjs ] && bundle=/usr/lib/Papercusp/sidecar/serve.mjs; }
+# (1) driver-supplied path.
+[ -n "$BUNDLE_HINT" ] && [ -r "$BUNDLE_HINT" ] && bundle="$BUNDLE_HINT"
+# (2) the ABSOLUTE serve.mjs path out of a running process's own argv. This is
+# the resolution that actually survives a container: /proc/<pid>/cwd reads back
+# EMPTY on the docker frames local-matrix.sh builds (verified on 10.99.0.11 —
+# both sidecar pids returned an empty cwd), while argv is readable. The greedy
+# sed keeps paths containing SPACES intact, which matters: the installed
+# directory is "/usr/lib/Papercusp GUI/sidecar".
+if [ -z "$bundle" ]; then
+  cand="$(pgrep -af 'serve\.mjs' 2>/dev/null | sed -n 's|.* \(/.*serve\.mjs\).*|\1|p' | head -1)"
+  [ -n "$cand" ] && [ -r "$cand" ] && bundle="$cand"
+fi
+# (3) cwd of a running process (works where /proc is not restricted).
+if [ -z "$bundle" ]; then
+  for pid in $(pgrep -f 'serve\.mjs' 2>/dev/null); do
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+    [ -n "$cwd" ] && [ -r "$cwd/serve.mjs" ] && { bundle="$cwd/serve.mjs"; break; }
+  done
+fi
+# (4) installed layout, GLOBBED — the product was renamed to "Papercusp GUI",
+# so a hardcoded /usr/lib/Papercusp/sidecar path silently resolves nothing.
+if [ -z "$bundle" ]; then
+  for c in /usr/lib/Papercusp*/sidecar/serve.mjs; do
+    [ -r "$c" ] && { bundle="$c"; break; }
+  done
+fi
 [ -n "$bundle" ] || { echo unknown; exit 0; }
 grep -qF 'peer_connected' "$bundle" 2>/dev/null || { echo unknown; exit 0; }
 if grep -qF 'peer_data_path_up' "$bundle" 2>/dev/null; then echo yes; else echo no; fi
 CAPEOF
 )"
+  verdict="$(drv_exec "$inst" <<<"$script")"
   case "$verdict" in yes|no) ;; *) verdict=unknown ;; esac
   FED_DISC_CAP[$inst]="$verdict"
   echo "$verdict"
