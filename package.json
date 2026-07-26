@@ -11,6 +11,7 @@
     "dev:preview": "bin/desktop-preview-prod",
     "test:fed-asserts": "bash bin/lib/federation-asserts.selftest.sh",
     "test:release-artifacts": "bash bin/lib/release-artifacts.selftest.sh",
+    "test:gen-latest-manifest": "bash bin/lib/gen-latest-manifest.selftest.sh",
     "test:live-fed-reaper": "bash bin/lib/live-federation-gate-reaper.selftest.sh",
     "test:release-leg-reaper": "bash bin/lib/release-local-leg-reaper.selftest.sh",
     "test:local-matrix-starvation": "bash bin/lib/local-matrix-starvation.selftest.sh",
