@@ -263,6 +263,15 @@ fed_local_launch_sidecar() {
     echo "fed_local_launch_sidecar: hono_port/pg_port must be DISTINCT non-empty (got hono='$hono_port' pg='$pg_port') — use staggered fed_pick_free_port starts (e.g. 18071/18532, B offset from A)" >&2
     return 1
   fi
+  # EI-18687938054040755: record the bundle this instance is about to RUN, keyed
+  # by its log path (the one identifier every local caller already threads
+  # through FED_LOG). drv_appbundle_local reverse-maps inst → log → bundle, so
+  # every existing call site is wired with NO change at the call site and a new
+  # caller cannot forget to register it. That "cannot forget" property is the
+  # point: a local driver that silently resolves NO bundle degrades to
+  # capability=unknown ⇒ don't-skip ⇒ strict fires ⇒ fail-closed on an old
+  # build — the original disease wearing the fix as a costume.
+  FED_BUNDLE_BY_LOG["$logf"]="$side/serve.mjs"
   local sc_node="$side/bin/node"; [ -x "$sc_node" ] || sc_node="$(command -v node)"
   mkdir -p "$home/.config" "$home/.papercusp"
   ln -sf "$HOME/.config/gh" "$home/.config/gh"
