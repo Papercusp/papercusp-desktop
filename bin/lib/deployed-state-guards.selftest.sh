@@ -47,6 +47,18 @@ run_guard() {
 # ssh to a VM that does not exist and hang on the connect timeout.
 NOHP='vm_hotpatch_provenance() { echo ""; }; '
 
+# run_guard_out — same, but returns the guard's combined output instead of only its
+# exit code. Needed wherever several DIFFERENT refusals all exit non-zero: asserting
+# on the code alone would pass whichever one fired, which is a vacuous test.
+run_guard_out() {
+  local stub="$1" call="$2"; shift 2
+  env "$@" bash -c "
+    source '$COMMON' >/dev/null 2>&1
+    $stub
+    $call
+  " 2>&1
+}
+
 echo "=== vm_assert_uniform_sidecar ==="
 run_guard 'vm_deployed_sidecar_id() { echo "abc123def456 43001503"; }' \
   'vm_assert_uniform_sidecar vm1 vm2' \
@@ -162,22 +174,29 @@ out="$(env VM_SIDE_ROOT="$FIXTURE" bash -c "
 # That is checked EXACTLY (hash equality against what the VM already runs), not by
 # an mtime heuristic — see the rationale in vm_hotpatch_sidecar.
 SRCB="$FIXTURE/tree-serve.mjs"; printf 'the bundle actually on disk\n' > "$SRCB"
-run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
-  "vm_hotpatch_sidecar vm1 '$SRCB'" \
-  && bad "CONTROL: hotpatching a bundle IDENTICAL to the installed one was accepted — a forgotten rebuild reads as a successful test" \
-  || ok "CONTROL: bundle identical to what the VM already runs → refused (forgotten rebuild)"
+NOOP_STUB='vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }; vm_ssh() { return 1; }; '
 
-run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
-  "vm_hotpatch_sidecar vm1 '$SRCB'" RIG_HOTPATCH_ALLOW_NOOP=1 \
-  && bad "RIG_HOTPATCH_ALLOW_NOOP=1 should proceed PAST the no-op check (it then fails later, offline)" \
-  || ok "RIG_HOTPATCH_ALLOW_NOOP=1 passes the no-op check (halts later — no VM in this sandbox)"
+# These three cases all END in a non-zero exit (there is no VM in this sandbox),
+# so exit code alone would pass them VACUOUSLY. Assert on WHICH refusal fired.
+noop_msg='ALREADY runs this exact bundle'
+
+out="$(run_guard_out "$NOOP_STUB" "vm_hotpatch_sidecar vm1 '$SRCB'")"
+case "$out" in
+  *"$noop_msg"*) ok "CONTROL: bundle identical to what the VM already runs → refused (forgotten rebuild)" ;;
+  *) bad "CONTROL: an identical bundle did NOT trip the no-op refusal — a forgotten rebuild would read as a successful test (got: ${out:-<silence>})" ;;
+esac
+
+out="$(run_guard_out "$NOOP_STUB" "vm_hotpatch_sidecar vm1 '$SRCB'" RIG_HOTPATCH_ALLOW_NOOP=1)"
+case "$out" in
+  *"$noop_msg"*) bad "RIG_HOTPATCH_ALLOW_NOOP=1 did not bypass the no-op check" ;;
+  *) ok "RIG_HOTPATCH_ALLOW_NOOP=1 bypasses the no-op check (stops later, at the absent VM)" ;;
+esac
 
 printf 'a DIFFERENT bundle\n' > "$SRCB"
-out="$(run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
-  "vm_hotpatch_sidecar vm1 '$SRCB'" 2>&1; echo "rc=$?")"
+out="$(run_guard_out "$NOOP_STUB" "vm_hotpatch_sidecar vm1 '$SRCB'")"
 case "$out" in
-  *rc=0*) bad "a CHANGED bundle somehow succeeded with no VM present — the stub is not exercising the real path" ;;
-  *) ok "a CHANGED bundle passes the no-op check and proceeds to the VM (fails there, as expected offline)" ;;
+  *"$noop_msg"*) bad "a CHANGED bundle was refused as a no-op — the hash comparison is inverted" ;;
+  *) ok "a CHANGED bundle clears the no-op check and proceeds to the VM" ;;
 esac
 
 rm -f "$FIXTURE/Papercusp GUI/sidecar/.hotpatch-provenance"
