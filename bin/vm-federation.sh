@@ -285,6 +285,27 @@ launch_local_instance() {  # <inst> — the --vms=1 host-side instance
   STARTED_XVFB="$(fed_ensure_display "$DISPLAY_NUM" "$WORK")"
   local envs=(GH_TOKEN="${FED_TOKEN[$inst]}")
   [ -n "$BOOTSTRAP" ] && envs+=(PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP")
+  # EI-502: the --vms=1 HOST-side instance must ANNOUNCE a bridge-reachable address.
+  # Without this it binds hyperdht to 0.0.0.0 and the DHT learns its address as
+  # loopback / the host's default-route (non-bridge) address, which fed-a cannot reach
+  # for the holepunch — so both sides log `[swarm] joined topic` and NEITHER ever logs
+  # `[swarm] peer_connected`. (fed-a→host is reachable; it is the REVERSE handshake
+  # that has nowhere to go.) The VM-side instances never hit this: their only
+  # interface IS the bridge, so the address they advertise is reachable by construction.
+  #
+  # PAPERCUSP_DHT_HOST already exists for exactly this case — its doc names "the
+  # fed-a/fed-b VM rig" as the motivating caller, because Hyperswarm does not forward
+  # `host` to HyperDHT, so operator-core constructs HyperDHT itself and passes it via
+  # Hyperswarm's `dht` option (packages/operator-core/lib/sync/hyperbee/swarm.ts:
+  # parseDhtHost -> swarmConstructorOpts -> getSharedSwarm -> new DHT({ host })).
+  # The knob was built and then never wired up here, which is why EI-502 read as
+  # "no env knob exists" and proposed building one.
+  #
+  # Bridge mode only: FEDBR_HOST_IP is the host's address ON the rig bridge, and it is
+  # already the address the testnet DHT itself is started on (fed_start_testnet_dht
+  # ... "$FEDBR_HOST_IP"). Under --net=socket there is no bridge and no such address,
+  # so leave it unset and let hyperdht bind 0.0.0.0 as before.
+  [ "$NET" = bridge ] && [ -n "${FEDBR_HOST_IP:-}" ] && envs+=(PAPERCUSP_DHT_HOST="$FEDBR_HOST_IP")
   fed_local_launch "$WORK/inst-$inst" "${FED_LOG[$inst]}" "$BIN" "$DISPLAY_NUM" "${envs[@]}"
 }
 launch_instance() {  # <inst> [wipe]
