@@ -770,23 +770,65 @@ local_matrix_only_starvation_prone_fails() { # <local-matrix.out path>
   done <<<"$fails"
   [ "$saw_any" = 1 ] && [ "$all_known" = 1 ]
 }
+_frame_lag_scan() { # <leg-start-epoch-s> — echo "<files> <worst_maxms> <starved_files>" for the
+  # banked frame serve.logs belonging to THIS run (mtime after the leg started). The single
+  # scanner behind BOTH the starvation downgrade predicate and the verdict-line note below, so
+  # the number a verdict PRINTS can never disagree with the number the downgrade DECIDED on.
+  local start_ts="${1:-0}" bank_dir="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
+  local f maxms files=0 hits=0 worst=0 marker
+  [ -d "$bank_dir" ] || { echo "0 0 0"; return 0; }
+  marker="$(mktemp -u 2>/dev/null || echo "/tmp/.lfg-starvation-marker.$$")"
+  touch -d "@$start_ts" "$marker" 2>/dev/null || touch "$marker" 2>/dev/null
+  while IFS= read -r -d '' f; do
+    files=$((files + 1))
+    maxms="$(grep -aoE 'maxMs: [0-9.]+' "$f" 2>/dev/null | grep -oE '[0-9.]+' \
+      | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{print m+0}')"
+    awk "BEGIN{exit !($maxms > $worst)}" 2>/dev/null && worst="$maxms"
+    if awk "BEGIN{exit !($maxms > 1000)}" 2>/dev/null; then hits=$((hits + 1)); fi
+  done < <(find "$bank_dir" -maxdepth 1 -name 'serve-*.log' -newer "$marker" -print0 2>/dev/null)
+  rm -f "$marker" 2>/dev/null
+  echo "$files $worst $hits"
+}
 check_local_matrix_frame_starvation() { # <leg-start-epoch-s> — true iff a banked frame
   # serve.log from THIS run (mtime after the leg started) shows severe frame-local CPU
   # starvation. 1000ms is conservative: healthy runs on this fleet box see occasional
   # sub-300ms event-loop blips; a >1s single-threaded stall is enough to blow the 30s
   # substrate-boot budget by a wide margin on its own.
-  local start_ts="$1" bank_dir="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
-  local f maxms hits=0 marker
-  [ -d "$bank_dir" ] || return 1
-  marker="$(mktemp -u 2>/dev/null || echo "/tmp/.lfg-starvation-marker.$$")"
-  touch -d "@$start_ts" "$marker" 2>/dev/null || touch "$marker" 2>/dev/null
-  while IFS= read -r -d '' f; do
-    maxms="$(grep -aoE 'maxMs: [0-9.]+' "$f" 2>/dev/null | grep -oE '[0-9.]+' \
-      | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{print m+0}')"
-    if awk "BEGIN{exit !($maxms > 1000)}" 2>/dev/null; then hits=$((hits + 1)); fi
-  done < <(find "$bank_dir" -maxdepth 1 -name 'serve-*.log' -newer "$marker" -print0 2>/dev/null)
-  rm -f "$marker" 2>/dev/null
-  [ "$hits" -gt 0 ]
+  local hits
+  hits="$(_frame_lag_scan "$1" | awk '{print $3+0}')"
+  [ "${hits:-0}" -gt 0 ]
+}
+# frame_pressure_note — EI-18716933933700596. Echo the FRAME-SCOPED reading that must be
+# printed ALONGSIDE any host-loadavg number on a verdict/downgrade line.
+#
+# WHY THIS EXISTS: every load-flavoured line this gate emits ("SKIPPED (load …)",
+# "SKIPPED-STORM (load …)", the RED verdict) used to carry the HOST 1-min loadavg and nothing
+# else. That number is a shared-box aggregate and is NOT cgroup-scoped (WI-5639: read from
+# inside a frame it still reports the host), so it cannot tell "this rig's frames were starved"
+# from "a hundred unrelated containers on the shared dev box were busy" — and by naming ONLY
+# load, the line actively invites the reader to conclude "the box was too loaded" and stop.
+# Observed live 2026-07-26: host loadavg 129.64 while the rig frames sat at CPU 8.21%/2.34%
+# with frame-scoped cpu.pressure some+full avg10/60/300 all 0.00 — the frames were idle and the
+# real generator was three unrelated long-lived pgvector containers doing D-state I/O. An
+# investigator reading the failure line alone had no way to see that without hand-correlating
+# docker stats. So: state the frame-scoped verdict on the same line, including the explicit
+# "do NOT read the host number as frame starvation" when the frames are provably clean.
+#
+# Best-effort and never fatal: with no banked frame evidence it says exactly that (an unknown
+# is reported as unknown, never silently as "not starved").
+frame_pressure_note() { # [start-epoch-s] -> one-line frame-scoped reading
+  local start_ts="${1:-${MATRIX_LEG_START_TS:-${GATE_RUN_START_TS:-0}}}" scan files worst hits
+  scan="$(_frame_lag_scan "$start_ts" 2>/dev/null || echo "0 0 0")"
+  files="$(printf '%s' "$scan" | awk '{print $1+0}')"
+  worst="$(printf '%s' "$scan" | awk '{print $2+0}')"
+  hits="$(printf '%s' "$scan" | awk '{print $3+0}')"
+  if [ "${files:-0}" -eq 0 ]; then
+    echo "frame-scoped: UNKNOWN (no frame serve.log banked for this run — the host load number below neither rules frame starvation in nor out)"
+  elif [ "${hits:-0}" -gt 0 ]; then
+    echo "frame-scoped: STARVED — $hits/$files banked frame log(s) from this run show [event-loop-lag] maxMs up to ${worst}ms (>1000ms): the frames themselves were genuinely stalled"
+  else
+    echo "frame-scoped: frames NOT starved — $files banked frame log(s) from this run, worst [event-loop-lag] maxMs ${worst}ms (<=1000ms). Host loadavg is a SHARED-BOX aggregate and does not measure these frames (WI-5639) — do NOT conclude 'the box was too loaded' from it; look for a real regression"
+  fi
 }
 
 MATRIX_RES="SKIPPED"
@@ -998,13 +1040,18 @@ fi
 # regression (the exact false-RED seen when a fleet storm hit load 94 mid-run) — downgrade
 # to SKIPPED-STORM, no EI, retry next window. A real regression re-fails on a calm window.
 LOAD1_END="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
+# EI-18716933933700596: every line below that names the host load ALSO names the frame-scoped
+# reading, so "the box was too loaded" can be confirmed or ruled out from the verdict line
+# itself instead of a manual docker-stats correlation. Computed once — the scan walks the bank
+# dir, and the STORM branch exits before the RED line, so at most one of these two is emitted.
+FRAME_NOTE="$(frame_pressure_note)"
 if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
-  log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal)."
+  log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal). $FRAME_NOTE"
   check_staleness
-  echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]})$(matrix_skip_suffix)"; exit 0
+  echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]}; $FRAME_NOTE)$(matrix_skip_suffix)"; exit 0
 fi
 
-echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; logs in $WORK"
+echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; $FRAME_NOTE ; logs in $WORK"
 
 # ── 5. file an EI on RED (best-effort curl-MCP; the loud echo + $WORK logs are the fallback) ─
 # Dedup (RED_REFILE_H, see header): only file once per window per still-red condition —
@@ -1015,7 +1062,7 @@ echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; logs in $WORK"
 # a forgotten/dropped tracking item doesn't go dark forever.
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
 TITLE_PREFIX="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ("
-BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Owner: shared-hive release lane. NOTE (updated 2026-07-25, WI-5775): WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is now VERIFIED FIXED — a bare from-repo RED is a NEW regression, investigate. Only a from-repo-witness RED is currently EXPECTED, while WI-5783 (AK-ban policy-only drop not enforced) is open; a content-matrix, local-matrix, from-repo, or build RED is a NEW regression — investigate."
+BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Host 1-min loadavg at verdict: $LOAD1_END (SHARED-BOX aggregate — not frame-scoped). $FRAME_NOTE (EI-18716933933700596: read the frame-scoped line, not the host load, before concluding this was environmental). Owner: shared-hive release lane. NOTE (updated 2026-07-25, WI-5775): WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is now VERIFIED FIXED — a bare from-repo RED is a NEW regression, investigate. Only a from-repo-witness RED is currently EXPECTED, while WI-5783 (AK-ban policy-only drop not enforced) is open; a content-matrix, local-matrix, from-repo, or build RED is a NEW regression — investigate."
 RED_MARKER="$STATE_DIR/red-ei-filed"
 # Dedup is PER failing-leg-set, not global (2026-07-16: a brand-new local-matrix
 # RED was silently suppressed for 12h under the marker of an already-fixed
