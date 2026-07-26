@@ -1692,12 +1692,28 @@ _darwin_vendor_keg_dylibs() {
 # (rewriting the load commands invalidates the signature, and a stale one
 # SIGKILLs on load). rcodesign's `verify` is buggy (exits 0 on error) — the sign
 # step's exit code is the reliable signal.
+# EI-3620: `vendor_dir` is an ABSOLUTE vendor-lib directory (was a bin/-relative
+# subdir NAME, which silently assumed every $tool lives directly in
+# $SIDECAR_DIR/bin/ — true for the flat pg_dump/psql/etc layout, but WRONG for
+# git's nested bin/.git-vendor/{bin,libexec/git-core}/ tree, where two
+# different real-Mach-O directories sit at two different depths relative to
+# bin/). @executable_path is resolved by dyld relative to $tool's OWN
+# directory at runtime, so the relative offset to nlibdir/vendor_dir is now
+# computed PER TOOL via `python3 -c os.path.relpath(...)` instead of a single
+# hardcoded "../" — this generalizes correctly to any nesting depth and is a
+# no-op behavior change for the existing flat pg callers (relpath from
+# $SIDECAR_DIR/bin/<tool> reduces to the same "../…"/".pg-lib" strings as
+# before). Caught live on papercup-vm-mac (2026-07-26): the naive
+# bin/-relative version shipped a `git` whose dyld load failed with "Library
+# not loaded: @executable_path/.git-lib/libpcre2-8.0.dylib" because bin/git
+# actually lived two directories deeper, under bin/.git-vendor/bin/.
 _cross_darwin_vendor_pg_tool() {
   local tool="$1"
-  local vendor_subdir="${2:-.pg-lib}"   # EI-3620: caller-scoped fallback vendor dir
+  local vendor_dir="${2:-$SIDECAR_DIR/bin/.pg-lib}"   # absolute vendor-lib dir
   local nlibdir="${EMBEDDED_PG_BIN_DIR%/bin}/lib"
-  local emb_lib_rel="${EMBEDDED_PG_BIN_DIR#"$SIDECAR_DIR"/}"   # node_modules/.../native/bin
-  emb_lib_rel="../${emb_lib_rel%/bin}/lib"                     # ../node_modules/.../native/lib (relative to bin/)
+  local tool_dir; tool_dir="$(cd "$(dirname "$tool")" && pwd)"
+  local emb_lib_rel; emb_lib_rel="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$nlibdir" "$tool_dir")"
+  local vendor_rel; vendor_rel="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$vendor_dir" "$tool_dir")"
   chmod +w "$tool"
   local dep base stem m tgt
   while IFS= read -r dep; do
@@ -1714,11 +1730,11 @@ _cross_darwin_vendor_pg_tool() {
     fi
     if [[ -n "$tgt" ]]; then
       llvm-install-name-tool-18 -change "$dep" "@executable_path/$emb_lib_rel/$tgt" "$tool"
-    elif [[ -e "$SIDECAR_DIR/bin/$vendor_subdir/$base" ]]; then
-      llvm-install-name-tool-18 -change "$dep" "@executable_path/$vendor_subdir/$base" "$tool"
+    elif [[ -e "$vendor_dir/$base" ]]; then
+      llvm-install-name-tool-18 -change "$dep" "@executable_path/$vendor_rel/$base" "$tool"
     else
       echo "ERROR: $(basename "$tool") links '$dep' ($base) — neither in the embedded darwin"
-      echo "  native/lib ($nlibdir) nor vendored in bin/$vendor_subdir. It would dangle on a clean Mac."
+      echo "  native/lib ($nlibdir) nor vendored in $vendor_dir. It would dangle on a clean Mac."
       return 1
     fi
   done < <(llvm-otool-18 -L "$tool" 2>/dev/null | awk 'NR>1{print $1}' | grep -vE '^@(executable_path|loader_path|rpath)/' || true)
@@ -2354,21 +2370,134 @@ if [[ "$_cross_darwin" == "1" ]]; then
   fi
 fi
 
+# EI-3620 (darwin, cross-build only): vendor a relocatable git for the macOS
+# sidecar. A fresh, Xcode-CLT-less Mac has only the `/usr/bin/git` STUB, which
+# on non-interactive invocation prints "xcode-select: no developer tools were
+# found …" and exits non-zero — so the dogfood `git clone` fails ("Setting up
+# Papercusp workspace failed", found on an owner Mac VM 2026-06-25). Until this
+# shipped, the wizard's only mitigations were (a) prepending /opt/homebrew/bin
+# to the sidecar PATH (tool-path.ts) to find a Homebrew git, and (b) an
+# actionable "run `xcode-select --install`" hint when git is genuinely absent
+# (clone-github.ts git_missing) — both stay in place as the fallback for a
+# native (non-cross) macOS build, which this block does not yet cover.
+#
+# Mechanism (verified empirically 2026-07-26 on papercup-vm-mac, see EI-3620
+# thread): Homebrew's darwin git bottle (+ its only two REAL, non-
+# uses_from_macos deps — pcre2 and gettext/libintl; curl+expat are
+# uses_from_macos, i.e. system-provided) ships every dylib load command as a
+# literal `@@HOMEBREW_PREFIX@@`/`@@HOMEBREW_CELLAR@@` placeholder TOKEN string
+# (brew's own `pour` step does the substitution at real-install time) — NOT a
+# baked absolute path — so the SAME WI-3314 token-rewrite mechanism already
+# proven for postgresql/readline (_cross_darwin_vendor_pg_tool, generalized
+# above to take a vendor-subdir arg) applies directly, reusing embedded-pg's
+# already-shipped libintl when its exact/compat filename matches and falling
+# back to a dedicated bin/.git-lib vendor otherwise.
+#
+# git's own libexec/git-core/ is Homebrew's busybox-style multi-call layout —
+# ~150 of its ~183 entries are plain symlinks (mostly to ../../bin/git, a few
+# to ../../bin/{git-shell,git-cvsserver,scalar}, one same-dir git-remote-https
+# -> git-remote-http) — so the whole upstream bin/+libexec/git-core/+
+# share/git-core/templates/ tree is copied VERBATIM (cp -a preserves the
+# relative symlinks byte-identical, still valid since we preserve the same
+# relative nesting depth), then every REAL (non-symlink) Mach-O anywhere in
+# that copy is rewritten + ad-hoc re-signed in place; the ~30 real files that
+# are shell/perl/python scripts are left untouched — gated via `file -b`
+# reporting a `Mach-O` prefix, NOT `llvm-otool-18`'s own exit code: verified
+# empirically that `llvm-otool-18 -h` exits 0 on a non-Mach-O input too (it
+# only differs in printing "is not an object file" to stdout), so exit-code
+# gating silently let a script reach rcodesign and fail the whole build.
+#
+# git --exec-path compiles to a hardcoded absolute Homebrew path (this bottle
+# was not built with RUNTIME_PREFIX) regardless of which relocation mechanism
+# is used for the dylibs, so GIT_EXEC_PATH + GIT_TEMPLATE_DIR must be set as
+# env vars at spawn time — wired process-wide in tool-path.ts's
+# ensureToolPathEnv() (inherited by every child spawn that doesn't override
+# `env`) rather than patched into each of the ~80 individual git spawn call
+# sites in the codebase.
+_cross_darwin_git_keg=""
+if [[ "$_cross_darwin" == "1" ]]; then
+  # `file -b` gates which vendored files get Mach-O rewrite+sign below — if it's
+  # missing, that gate silently degrades to "nothing looks like Mach-O" instead
+  # of erroring, which would ship git's real binaries with dangling
+  # @@HOMEBREW_PREFIX@@ tokens. Hard-fail now rather than discover it at runtime
+  # on a clean Mac.
+  command -v file >/dev/null 2>&1 || { echo "ERROR: 'file' not found on the build host — required to distinguish Mach-O binaries from scripts while vendoring git (EI-3620)"; exit 1; }
+  _brew_git_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/git.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
+  [[ -n "$_brew_git_ver" ]] || { echo "ERROR: could not resolve git stable version from the brew formula api"; exit 1; }
+  echo "  → cross: fetching git ${_brew_git_ver} darwin-${TARGET_ARCH} bottle from ghcr (no brew on ${_host_os})"
+  _cross_darwin_git_keg="$(fetch_brew_keg git "$_brew_git_ver" "$TARGET_ARCH" "homebrew/core/git" "$(mktemp -d)/gitkeg")" \
+    || { echo "ERROR: git darwin bottle fetch failed (see above)"; exit 1; }
+  [[ -f "$_cross_darwin_git_keg/bin/git" && -d "$_cross_darwin_git_keg/libexec/git-core" ]] \
+    || { echo "ERROR: git bottle keg missing bin/git or libexec/git-core ($_cross_darwin_git_keg)"; exit 1; }
+
+  mkdir -p "$SIDECAR_DIR/bin/.git-lib"
+  # pcre2 + gettext: git's only two non-uses_from_macos deps (confirmed via
+  # llvm-otool-18 --dylibs-used across every Mach-O in the bottle — identical
+  # dep set for git/git-shell/scalar and every libexec/git-core/* helper).
+  # Vendored via the SAME readline-style -id rewrite + sign pattern used above
+  # for libreadline: both dylibs' own non-system deps are libSystem/libiconv/
+  # CoreFoundation/CoreServices only (all system-provided), so no recursive
+  # dep-rewrite is needed — just fix each dylib's own self-reference.
+  for _gd_formula in pcre2 gettext; do
+    case "$_gd_formula" in
+      pcre2)   _gd_expect_base="libpcre2-8.0.dylib" ;;
+      gettext) _gd_expect_base="libintl.8.dylib" ;;
+    esac
+    # Reuse-check FIRST — cheap, and skips a whole bottle fetch when embedded-pg
+    # already ships a compatible libintl (native/lib) for the server.
+    if [[ -e "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base" || -e "${EMBEDDED_PG_BIN_DIR%/bin}/lib/$_gd_expect_base" ]]; then
+      echo "  ✓ cross: $_gd_expect_base already available (embedded-pg native/lib or bin/.git-lib) — reusing, no fetch needed"
+      continue
+    fi
+    _gd_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/${_gd_formula}.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
+    [[ -n "$_gd_ver" ]] || { echo "ERROR: could not resolve $_gd_formula stable version from the brew formula api"; exit 1; }
+    echo "  → cross: fetching $_gd_formula ${_gd_ver} darwin-${TARGET_ARCH} bottle (git dep)"
+    _gd_keg="$(fetch_brew_keg "$_gd_formula" "$_gd_ver" "$TARGET_ARCH" "homebrew/core/$_gd_formula" "$(mktemp -d)/${_gd_formula}keg")" \
+      || { echo "ERROR: $_gd_formula darwin bottle fetch failed (see above)"; exit 1; }
+    _gd_src="$(find "$_gd_keg/lib" -maxdepth 1 -name "$_gd_expect_base" ! -type l | head -1)"
+    [[ -n "$_gd_src" && -f "$_gd_src" ]] || { echo "ERROR: $_gd_expect_base not found in the $_gd_formula bottle ($_gd_keg/lib)"; exit 1; }
+    cp -L "$_gd_src" "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base"
+    chmod 755 "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base"
+    llvm-install-name-tool-18 -id "@executable_path/.git-lib/$_gd_expect_base" "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base"
+    rcodesign sign "$SIDECAR_DIR/bin/.git-lib/$_gd_expect_base" >/dev/null 2>&1 \
+      || { echo "ERROR: rcodesign ad-hoc sign failed for vendored $_gd_expect_base"; exit 1; }
+    echo "  ✓ cross: vendored + signed $_gd_expect_base into bin/.git-lib"
+  done
+
+  echo "→ vendoring git ${_brew_git_ver} (darwin-${TARGET_ARCH}) into bin/.git-vendor"
+  rm -rf "$SIDECAR_DIR/bin/.git-vendor"
+  mkdir -p "$SIDECAR_DIR/bin/.git-vendor/libexec" "$SIDECAR_DIR/bin/.git-vendor/share/git-core"
+  cp -a "$_cross_darwin_git_keg/bin" "$SIDECAR_DIR/bin/.git-vendor/bin"
+  cp -a "$_cross_darwin_git_keg/libexec/git-core" "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core"
+  if [[ -d "$_cross_darwin_git_keg/share/git-core/templates" ]]; then
+    cp -a "$_cross_darwin_git_keg/share/git-core/templates" "$SIDECAR_DIR/bin/.git-vendor/share/git-core/templates"
+  fi
+
+  _git_vendor_count=0
+  while IFS= read -r -d '' _gv_file; do
+    if file -b "$_gv_file" 2>/dev/null | grep -q '^Mach-O'; then
+      _cross_darwin_vendor_pg_tool "$_gv_file" "$SIDECAR_DIR/bin/.git-lib" || exit 1
+      _git_vendor_count=$((_git_vendor_count + 1))
+    fi
+  done < <(find "$SIDECAR_DIR/bin/.git-vendor" -type f -print0)
+  echo "  ✓ cross: rewrote + signed $_git_vendor_count Mach-O binaries under bin/.git-vendor"
+
+  # A clean Mac must find `git` on PATH without knowing the vendor layout —
+  # bin/ is already the sidecar's PATH-priority dir (tool-path.ts composeToolPath
+  # puts PAPERCUSP_SIDECAR_BIN first), so a plain symlink at bin/git is enough;
+  # GIT_EXEC_PATH/GIT_TEMPLATE_DIR (set in tool-path.ts) point INTO .git-vendor.
+  ln -sfn ".git-vendor/bin/git" "$SIDECAR_DIR/bin/git"
+  [[ -e "$SIDECAR_DIR/bin/git" ]] || { echo "ERROR: bin/git symlink to .git-vendor/bin/git did not resolve"; exit 1; }
+  echo "  ✓ cross: vendored git ${_brew_git_ver} — bin/git -> .git-vendor/bin/git"
+fi
+
 # MinGit-busybox (Windows only) — provides BOTH `git.exe` and a busybox-
 # backed `bash.exe`, plus the small POSIX util set the harness scripts
 # expect (sed, grep, sort, …). Tauri main prepends `git/cmd` and `git/usr/bin`
 # to PATH on Windows so all bundled tools resolve by name.
 #
-# ⚠ macOS does NOT ship a working git by default: a fresh, Xcode-CLT-less Mac
-#   has only the `/usr/bin/git` STUB, which on non-interactive invocation prints
-#   "xcode-select: no developer tools were found …" and exits non-zero — so the
-#   dogfood `git clone` fails ("Setting up Papercusp workspace failed", found on
-#   an owner Mac VM 2026-06-25). We currently DON'T vendor git on macOS, so the
-#   wizard now (a) prepends /opt/homebrew/bin to the sidecar PATH (tool-path.ts)
-#   to find a Homebrew git/gh, and (b) surfaces an actionable "run
-#   `xcode-select --install`" hint when git is genuinely absent (clone-github.ts
-#   git_missing). Vendoring a relocatable macOS git is the robust fix — tracked
-#   as a follow-up. Linux ships git via the distro, so we skip vendoring there.
+# Linux ships git via the distro, so we skip vendoring there — only Windows
+# (MinGit, below) and macOS (EI-3620, above) lack a reliable system git.
 #
 # We pin to the busybox flavor of MinGit (vs. the full MinGit) because it
 # includes the POSIX shell + utils the harness needs; the regular MinGit
