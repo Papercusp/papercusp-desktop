@@ -45,6 +45,16 @@ drv_exec() {  # <inst> — reads the remote "command" off stdin, ignored; return
 }
 drv_applog() { echo "/home/pcusp/serve.log"; }
 fed_log() { : ; }
+# WI-6070: rig_bank_logs' host-load capture runs `command -v docker && docker
+# stats --no-stream`. On a box that HAS docker that is a real ~4s call against
+# the live daemon, once per bank — which made this "purely local, <1s" selftest
+# take 40s AND quietly depend on the host's docker state (it would report other
+# agents' containers, or hang if the daemon were wedged). `command -v` resolves
+# a shell function, so stubbing it here keeps the code path exercised while
+# cutting the runtime ~40x and making the test genuinely hermetic. Runtime is
+# not cosmetic here: a 40s test is one nobody wires into a gate, which is how
+# these selftests ended up dark in the first place (EI-18725214765732588).
+docker() { echo "FAKE-DOCKER-STATS"; }
 
 BANK_TMP="$(mktemp -d)"
 WORK_TMP="$(mktemp -d)"
