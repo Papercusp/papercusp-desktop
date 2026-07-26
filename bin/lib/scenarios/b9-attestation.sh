@@ -169,13 +169,19 @@ matrix_register attestation_membership 60 "attestation membership seeding + 2nd-
 #     --only=attestation_membership,revocation_kcut,attestation_unattested_device  → LEG4 FAIL
 #   So the ban is the cause; the churn legs are NOT. (Both logs banked under
 #   ~/.papercusp/live-fed-gate/triage.)
-#   SAFE IN THE OTHER DIRECTION: this leg's strip cannot break revocation_kcut's own baseline.
-#   The stripped row feeds only deviceToUser() (comms-tier-gate.ts:47), whose sole consumer
-#   resolveAuthorCommsTier() is bound exclusively in INBOUND hyperbee projections — it resolves
-#   the author of an ARRIVING op. revocation_kcut's baseline is a CONTENT probe in the a→b
-#   direction, authored by A and resolved against B's own copy of pot_members, which a strip
-#   on A never touches.
-scn_attestation_unattested_device() {
+#   THE OTHER DIRECTION IS NOT FREE — THIS LEG MUST RESTORE WHAT IT STRIPS. Moving it before
+#   the ban is necessary but NOT sufficient: revocation_kcut BANS B by revoking B's device
+#   PUBKEYS, which it reads out of the very column this leg empties. Verified live (fix-
+#   verification run, 2026-07-26 16:23 EDT, order 89): LEG4 PASSED and revocation_kcut then
+#   FAILED with {"error":"The target contributor has no known devices"}. So the leg saves
+#   device_attestations before the strip and restores them afterwards via a wrapper that runs
+#   on every exit path. Do not remove the restore — without it, fixing this leg simply breaks
+#   revocation instead, and the gate stays red.
+#   (Its baseline CONTENT probe is genuinely unaffected: the stripped row feeds only
+#   deviceToUser() → resolveAuthorCommsTier(), bound solely in INBOUND hyperbee projections,
+#   whereas that probe is a→b content authored by A and resolved against B's own pot_members
+#   copy. The ban step, not the baseline, is what the strip broke.)
+_scn_attestation_unattested_device_core() {
   local rid="$MATRIX_RUN_ID" oslug="${FRAME_MEMBER_SLUG[a]:-}" mslug="${FRAME_MEMBER_SLUG[b]:-}"
   [ -n "$oslug" ] && [ -n "$mslug" ] || { echo "attestation(unattested-device): frames not joined"; return 1; }
   [ -n "${RIG_HIVE_ID:-}" ] || { echo "attestation(unattested-device) FAIL — RIG_HIVE_ID unset"; return 1; }
@@ -211,9 +217,22 @@ scn_attestation_unattested_device() {
   rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$rc_before" ] || { echo "attestation(unattested-device) FAIL — LEG4 baseline UNMEASURED: the identity_unresolved counter probe on frame a returned nothing, so 'counter is 0' and 'probe never ran' are indistinguishable; refusing to score this leg"; return 1; }
 
-  # Strip B's attestation on A (author device now maps to no member) — safe here: the only
-  # scenario after this one is revocation_kcut(90), which does not depend on B's device row
-  # on A (see the SAFE IN THE OTHER DIRECTION note in this scenario's header).
+  # WI-5064: SAVE B's device attestations BEFORE the strip so the wrapper can RESTORE them on
+  # every exit path. This leg is no longer allowed to leave B device-less: revocation_kcut(90)
+  # runs after it and BANS B by revoking B's device PUBKEYS, which it reads out of exactly this
+  # column — with the column emptied the ban fails outright ("The target contributor has no
+  # known devices"). Verified live: the fix-verification run at 16:23 EDT had LEG4 PASS at
+  # order 89 and revocation_kcut FAIL with that exact error. Capture-then-restore is what makes
+  # 89 a legal slot; do not drop it.
+  _ATT_SAVED_OK=0
+  _ATT_SAVED_GH_ID="$b_gh_id"
+  _ATT_SAVED_ROW="$(drv_psql a "SELECT COALESCE(device_attestations::text,'[]') FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$_ATT_SAVED_ROW" in
+    '['*) _ATT_SAVED_OK=1 ;;
+    *) echo "  · attestation(unattested-device): WARN — could not read B's device_attestations before the strip (got '${_ATT_SAVED_ROW:-<empty>}'); will not attempt a restore, so revocation_kcut(90) may fail to find B's pubkeys" ;;
+  esac
+
+  # Strip B's attestation on A (author device now maps to no member).
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
   # WI-6046 (2026-07-26): the strip above is this leg's ENTIRE precondition, and it swallowed
   # every error (>/dev/null 2>&1, no rc check, no read-back). If frame a's PG is degraded when
@@ -339,5 +358,33 @@ scn_attestation_unattested_device() {
 
   echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons"
   return 1
+}
+# WI-5064 RESTORE HELPER. Puts B's device_attestations back on frame A after the leg has taken
+# its measurements. Dollar-quoted so the stored JSON needs no escaping. Best-effort by design:
+# a failed restore must NOT turn this leg's real verdict into a false FAIL — it warns instead,
+# and revocation_kcut(90) will then fail loudly on its own with a message that names the cause.
+_att_restore_b_devices() {
+  [ "${_ATT_SAVED_OK:-0}" = 1 ] || return 0
+  drv_psql a "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${_ATT_SAVED_ROW}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
+  local back
+  back="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" 2>/dev/null | tr -d '[:space:]')"
+  if [ "${back:-0}" -gt 0 ] 2>/dev/null; then
+    echo "  · attestation(unattested-device): restored B's device_attestations on frame a ($back attestation(s)) — revocation_kcut(90) needs them to resolve B's pubkeys"
+  else
+    echo "  · attestation(unattested-device): WARN — restore of B's device_attestations did NOT take (read back '${back:-<empty>}'). revocation_kcut(90) will likely fail with 'target contributor has no known devices'; that is THIS leg's fault, not a revocation regression."
+  fi
+  _ATT_SAVED_OK=0
+  return 0
+}
+
+# WI-5064 WRAPPER — the ONLY entry point the matrix registers. The core returns from a dozen
+# places (setup-unverified, probe-unmeasured, four scoring branches); restoring inline at each
+# would silently rot the moment someone adds a seventh. Wrapping guarantees the restore runs on
+# EVERY path, including one added later, while preserving the core's exact return code.
+scn_attestation_unattested_device() {
+  local rc=0
+  _scn_attestation_unattested_device_core || rc=$?
+  _att_restore_b_devices || true
+  return "$rc"
 }
 matrix_register attestation_unattested_device 89 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL — must precede revocation_kcut/90)" scn_attestation_unattested_device

@@ -594,9 +594,18 @@ fi
 #
 # THIS IS NOT A LOAD_GATE RAISE (owner decision D-003 forbids that, and LOAD_GATE is
 # untouched — it still governs the no-PSI fallback below). What changed is WHICH QUANTITY is
-# measured. D-003's prescribed remedy — isolation — is already in place (local-matrix.sh
-# pins frames to a reserved cpuset); this gate was refusing to let that isolated run START,
-# on the strength of work the isolation already excludes.
+# measured.
+#
+# ON D-003's PRESCRIBED REMEDY (isolation): partially in place, and be precise about it —
+# local-matrix.sh asks for a cgroup-v2 exclusive cpuset, but on this box it has been
+# DEGRADING to affinity-only ("WARN: degrading this run to AFFINITY-ONLY (no cgroup-v2
+# exclusive partition; host fleet NOT evicted)" — observed in run /tmp/live-fed-gate-
+# 20260726-133957, WI-6133). So do NOT justify this change with "the frames are isolated
+# anyway". The honest justification is the measurement: across the three most recent
+# completed runs (12:17, 13:28, 14:25) the gate's own frame-scoped verdict read "frames NOT
+# starved — worst [event-loop-lag] maxMs 0ms" while host loadavg sat in the 100-160 band.
+# Even with isolation degraded, the frames were not starved and the host number said
+# nothing about them — which is exactly why admission must not be decided by that number.
 #
 # Both numbers are logged on every path (and carried on the SKIPPED line) so the next
 # investigator can recalibrate from real data instead of re-deriving this.
