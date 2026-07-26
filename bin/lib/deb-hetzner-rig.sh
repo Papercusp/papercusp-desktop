@@ -85,9 +85,21 @@ declare -g RIG_STYPE RIG_IMAGE RIG_HONO_PORT RIG_PG_PORT
 declare -g RIG_WORK RIG_PKG RIG_SLUG RIG_SERVERS_FILE RIG_KEEP_UP
 declare -g RIG_HIVE_ID RIG_HIVE_PUBKEY RIG_HIVE_LINK RIG_REPO_URL
 declare -g RIG_QUOTA_LOCK_ID
+# EI-18657462128167571: a monotonic "were frames EVER registered this run"
+# counter, separate from RIG_FRAMES itself. RIG_FRAMES is legitimately empty
+# in TWO different situations that rig_bank_logs must tell apart: (a) this run
+# never got as far as rig_set_identity (e.g. rig_gate_artifact exited early on
+# a stale/invalid .deb) — nothing was ever registered, so "zero frames banked"
+# is the CORRECT, expected outcome, not a bug; (b) frames WERE registered and
+# something later wiped RIG_FRAMES mid-run — the genuine WI-5380 state-loss
+# signal. Same re-source discipline as RIG_FRAMES/RIG_QUOTA_LOCK_ID above: only
+# reset on a FRESH source, never on a re-source (a re-source must not erase
+# that frames were already registered earlier in this same run).
+declare -g RIG_FRAMES_EVER_REGISTERED
 if [ -z "${__RIG_LIB_SOURCED:-}" ]; then
   RIG_FRAMES=()
   RIG_QUOTA_LOCK_ID=""
+  RIG_FRAMES_EVER_REGISTERED=0
 fi
 declare -g __RIG_LIB_SOURCED=1
 RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
@@ -305,13 +317,27 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
   stamp="$(date +%H%M%S 2>/dev/null || echo now)"
   [ -n "$tag" ] && stamp="${stamp}-${tag}"
   fed_log "bank: persisting per-frame serve.log + load markers to $RIG_BANK_DIR (stamp=$stamp)${tag:+ [on-FAIL mid-run bank]}"
-  # Empty frame state must be LOUD, never a silent zero-file bank (WI-5380): the
-  # serve.log is the single most important triage artifact and its absence was
-  # invisible until someone went looking for it a run too late.
+  # Empty frame state must be LOUD ONLY when it is genuinely suspicious. Two
+  # different situations both show up as "RIG_FRAMES is empty at bank time":
+  #   (a) this run never got as far as rig_set_identity (e.g. rig_gate_artifact
+  #       exited on a stale/invalid .deb, before any frame was ever registered)
+  #       — zero frames banked is the CORRECT, expected outcome; alarming on it
+  #       sends the next agent root-causing a "wiped state" bug that never
+  #       happened (EI-18657462128167571).
+  #   (b) frames WERE registered earlier in this run and RIG_FRAMES is now
+  #       empty — the genuine WI-5380 state-loss signal (a lib re-source that
+  #       clobbered live state). This one must stay LOUD.
+  # RIG_FRAMES_EVER_REGISTERED (bumped once per rig_set_identity call, and
+  # itself immune to a re-source — same guard as RIG_FRAMES) is the cheap
+  # discriminator between the two.
   if [ "${#RIG_FRAMES[@]}" -eq 0 ]; then
-    fed_log "bank: ⚠ RIG_FRAMES is EMPTY at bank time — NOTHING to bank (WI-5380 class: frame state was lost mid-run, e.g. a lib re-source)"
-    echo "RIG_FRAMES was empty when rig_bank_logs ran (stamp=$stamp) — zero serve logs banked (WI-5380 class)." \
-      >"$RIG_BANK_DIR/BANK-EMPTY-$stamp.txt" 2>/dev/null || true
+    if [ "${RIG_FRAMES_EVER_REGISTERED:-0}" -gt 0 ]; then
+      fed_log "bank: ⚠ RIG_FRAMES is EMPTY at bank time — NOTHING to bank (WI-5380 class: frame state was lost mid-run, e.g. a lib re-source)"
+      echo "RIG_FRAMES was empty when rig_bank_logs ran (stamp=$stamp) — zero serve logs banked (WI-5380 class)." \
+        >"$RIG_BANK_DIR/BANK-EMPTY-$stamp.txt" 2>/dev/null || true
+    else
+      fed_log "bank: no frames were ever registered this run — nothing to bank (expected for a run that exited before rig_set_identity, e.g. an early rig_gate_artifact failure; not WI-5380)"
+    fi
   fi
   for inst in "${RIG_FRAMES[@]}"; do
     [ -n "${FRAME_IP[$inst]:-}" ] || continue
@@ -496,6 +522,7 @@ rig_gate_artifact() {
 rig_set_identity() {
   local inst="$1" ghuser="$2" tok
   case " ${RIG_FRAMES[*]} " in *" $inst "*) : ;; *) RIG_FRAMES+=("$inst") ;; esac
+  RIG_FRAMES_EVER_REGISTERED=$((RIG_FRAMES_EVER_REGISTERED + 1))
   FRAME_USER[$inst]="$ghuser"
   tok="$(gh auth token --user "$ghuser" 2>/dev/null)"
   [ -n "$tok" ] || { echo "FATAL: need a gh token for '$ghuser' (frame $inst)" >&2; return 1; }

@@ -289,10 +289,28 @@ ls -la "$WEB_DIR/node_modules/@papercusp" 2>&1 | head -10 || echo "(no @papercus
 # that is the exact shape of the original bug (a declared dep silently
 # un-extracted) without inheriting every third-party package's own optional
 # peer graph.
-node -e '
+#
+# RETRY-WITH-DELAY (2026-07-26, WI-5769 retry8): a live mac-VM run hit this
+# guard firing on a genuinely-transient miss — @restart/@papercusp missing
+# immediately after "up to date in 19s" — that could NOT be reproduced by
+# re-running the identical scoped install + immediate check twice afterward
+# (both came back MISSING COUNT: 0 instantly). That is the signature of a
+# filesystem-sync race (the VM's disk/extraction hadn't settled by the time
+# this check ran), not a real un-extracted dependency — but the guard used to
+# fail HARD on the very first check, turning a ~3-second race into a wasted
+# 15-30min full universal-arch rebuild retry. Give the filesystem a few
+# seconds to settle before declaring a real miss: retry the same check up to
+# 3x with a short delay: a persistent miss across all 3 attempts (spanning 6s)
+# is a real un-extracted dependency and still fails the build; a miss that
+# clears on retry is the race, logged but non-fatal.
+dep_check_attempts=3
+dep_check_ok=0
+for dep_check_attempt in $(seq 1 "$dep_check_attempts"); do
+  if node -e '
 const fs = require("fs");
 const path = require("path");
 const repoRoot = process.argv[1];
+const attempt = process.argv[2];
 const pkgs = ["apps/operator/package.json", "apps/operator-vite/package.json"];
 const missing = [];
 for (const rel of pkgs) {
@@ -310,11 +328,23 @@ for (const rel of pkgs) {
   }
 }
 if (missing.length > 0) {
-  console.error("FATAL: npm install reported \"up to date\" but left the following DIRECTLY-DECLARED dependencies un-extracted on disk (see build-desktop-sidecar.sh:244 comment — a known --prefer-offline-class npm quirk, now removed; if you see this, something ELSE is re-triggering the same failure mode):");
+  console.error(`dep-check attempt ${attempt}: npm install reported "up to date" but left the following DIRECTLY-DECLARED dependencies un-extracted on disk (see build-desktop-sidecar.sh comment above — a known --prefer-offline-class npm quirk; if this persists across all retries it is a real miss, not a filesystem-sync race):`);
   for (const m of missing) console.error(`  - ${m}`);
   process.exit(1);
 }
-' "$REPO_ROOT" || exit 1
+' "$REPO_ROOT" "$dep_check_attempt"; then
+    dep_check_ok=1
+    break
+  fi
+  if [[ "$dep_check_attempt" -lt "$dep_check_attempts" ]]; then
+    echo "dep-check: retrying in 2s (attempt $dep_check_attempt/$dep_check_attempts missed — could be a filesystem-sync race; WI-5769)"
+    sleep 2
+  fi
+done
+if [[ "$dep_check_ok" -ne 1 ]]; then
+  echo "FATAL: dependency-resolution check still failing after $dep_check_attempts attempts with delay — this is a REAL un-extracted dependency, not a transient race. See the dep-check output above for exactly which package(s)."
+  exit 1
+fi
 
 echo "→ building operator-vite SPA (vite build → dist/)"
 (cd "$REPO_ROOT" && npm --workspace @papercusp/operator-vite run build)

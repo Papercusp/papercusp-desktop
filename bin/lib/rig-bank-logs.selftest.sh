@@ -104,16 +104,49 @@ else
   bad "expected exactly 1 file per tag, got scenario_one=$n_one scenario_two=$n_two"
 fi
 
-# ── 5. RIG_FRAMES empty → still LOUD (WI-5380 regression), tag or not ─────────
+# ── 5. RIG_FRAMES empty AFTER frames were registered → still LOUD (WI-5380 ───
+#      regression), tag or not. This is the genuine state-loss case: frames
+#      WERE registered earlier in the run (RIG_FRAMES_EVER_REGISTERED>0) and
+#      something wiped RIG_FRAMES since.
 reset_env
 declare -ga RIG_FRAMES=()
+RIG_FRAMES_EVER_REGISTERED=1
 rig_bank_logs "some_scenario"
 empty_marker="$(ls "$RIG_BANK_DIR"/BANK-EMPTY-*.txt 2>/dev/null | head -1)"
 if [ -f "$empty_marker" ]; then
-  ok "RIG_FRAMES empty (even with a tag) still writes the loud BANK-EMPTY marker — WI-5380 class not silently reintroduced"
+  ok "RIG_FRAMES empty AFTER frames were registered (even with a tag) still writes the loud BANK-EMPTY marker — WI-5380 class not silently reintroduced"
 else
-  bad "no BANK-EMPTY marker written when RIG_FRAMES was empty"
+  bad "no BANK-EMPTY marker written when RIG_FRAMES was empty after frames were registered (genuine WI-5380 case)"
 fi
+
+# ── 5b. EI-18657462128167571 fix: RIG_FRAMES empty because NO frame was ever ──
+#       registered (e.g. a run that exited before rig_set_identity, such as an
+#       early rig_gate_artifact failure) must NOT write the loud BANK-EMPTY
+#       alarm — there was never anything to lose.
+reset_env
+declare -ga RIG_FRAMES=()
+RIG_FRAMES_EVER_REGISTERED=0
+rig_bank_logs "some_scenario"
+empty_marker="$(ls "$RIG_BANK_DIR"/BANK-EMPTY-*.txt 2>/dev/null | head -1)"
+if [ -z "$empty_marker" ]; then
+  ok "RIG_FRAMES empty with NO frame ever registered stays quiet — no false-positive WI-5380 alarm (EI-18657462128167571)"
+else
+  bad "BANK-EMPTY marker wrongly written when no frame was ever registered this run: $empty_marker"
+fi
+
+# ── 5c. rig_set_identity bumps RIG_FRAMES_EVER_REGISTERED (the discriminator ──
+#       itself, not just its downstream effect on rig_bank_logs) ──────────────
+reset_env
+declare -ga RIG_FRAMES=()
+RIG_FRAMES_EVER_REGISTERED=0
+gh() { echo "FAKE-GH-TOKEN"; }  # stub: rig_set_identity shells out to `gh auth token`
+rig_set_identity a fakeuser >/dev/null 2>&1
+if [ "${RIG_FRAMES_EVER_REGISTERED:-0}" -gt 0 ]; then
+  ok "rig_set_identity bumps RIG_FRAMES_EVER_REGISTERED"
+else
+  bad "rig_set_identity did not bump RIG_FRAMES_EVER_REGISTERED (got '$RIG_FRAMES_EVER_REGISTERED')"
+fi
+unset -f gh
 
 # ── 6. RIG_WORK's scn.*.log files are still copied in (untouched by the fix) ──
 reset_env
