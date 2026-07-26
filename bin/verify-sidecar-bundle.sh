@@ -244,15 +244,19 @@ if [[ "$TARGET_OS_N" == "darwin" ]]; then
   # linux needs this scan too. Native mac uses otool; the linux cross host uses
   # llvm-otool-<N>. Also catch the Homebrew bottle placeholder TOKENS
   # (@@HOMEBREW_CELLAR@@/@@HOMEBREW_PREFIX@@) a cross vendor must have rewritten,
-  # not just the resolved /opt/homebrew|/usr/local keg paths. Scan bin/ AND
-  # bin/.pg-lib/ (vendored dylibs).
+  # not just the resolved /opt/homebrew|/usr/local keg paths. Scan bin/, AND
+  # bin/.pg-lib/ + bin/.git-vendor/** + bin/.git-lib/ (vendored dylibs — EI-3620
+  # extends this to the vendored git tree, which is recursive because git's own
+  # keg-shaped layout nests real Mach-Os under both bin/ and libexec/git-core/).
   _otool=""
   for _c in otool llvm-otool-18 llvm-otool; do command -v "$_c" >/dev/null 2>&1 && _otool="$_c" && break; done
   if [[ -z "$_otool" ]]; then
     fail "no otool/llvm-otool on build host — cannot verify Mach-O linkage (xcode-select --install, or apt install llvm)"
   else
     _keg_bad=0
-    for f in "$BIN"/* "$BIN"/.pg-lib/*; do
+    _keg_scan_set=( "$BIN"/* "$BIN"/.pg-lib/* "$BIN"/.git-lib/* )
+    while IFS= read -r _m; do _keg_scan_set+=( "$_m" ); done < <(find "$BIN/.git-vendor" -type f 2>/dev/null)
+    for f in "${_keg_scan_set[@]}"; do
       [[ -f "$f" ]] || continue
       _is_script "$f" && continue
       _is_macho "$f" || continue
