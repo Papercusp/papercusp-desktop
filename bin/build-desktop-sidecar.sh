@@ -1685,12 +1685,16 @@ _darwin_vendor_keg_dylibs() {
 # @@HOMEBREW_CELLAR@@ / @@HOMEBREW_PREFIX@@ placeholder TOKENS. Rewrite every
 # non-system ref to REUSE the darwin native/lib already shipped for the embedded
 # server (name-matched to the exact versioned filename present — the tree ships
-# NO compat-name symlinks), or the bin/.pg-lib readline vendored above; then
-# ad-hoc re-sign (rewriting the load commands invalidates the signature, and a
-# stale one SIGKILLs on load). rcodesign's `verify` is buggy (exits 0 on error)
-# — the sign step's exit code is the reliable signal.
+# NO compat-name symlinks), or the caller's own vendored-lib dir (bin/.pg-lib by
+# default; EI-3620 reuses this for git's bin/.git-lib via the 2nd arg — same
+# placeholder-token mechanism, confirmed identical across every Homebrew bottle
+# fetched via fetch_brew_keg/_fetch_brew_bottle_raw); then ad-hoc re-sign
+# (rewriting the load commands invalidates the signature, and a stale one
+# SIGKILLs on load). rcodesign's `verify` is buggy (exits 0 on error) — the sign
+# step's exit code is the reliable signal.
 _cross_darwin_vendor_pg_tool() {
   local tool="$1"
+  local vendor_subdir="${2:-.pg-lib}"   # EI-3620: caller-scoped fallback vendor dir
   local nlibdir="${EMBEDDED_PG_BIN_DIR%/bin}/lib"
   local emb_lib_rel="${EMBEDDED_PG_BIN_DIR#"$SIDECAR_DIR"/}"   # node_modules/.../native/bin
   emb_lib_rel="../${emb_lib_rel%/bin}/lib"                     # ../node_modules/.../native/lib (relative to bin/)
@@ -1710,11 +1714,11 @@ _cross_darwin_vendor_pg_tool() {
     fi
     if [[ -n "$tgt" ]]; then
       llvm-install-name-tool-18 -change "$dep" "@executable_path/$emb_lib_rel/$tgt" "$tool"
-    elif [[ -e "$SIDECAR_DIR/bin/.pg-lib/$base" ]]; then
-      llvm-install-name-tool-18 -change "$dep" "@executable_path/.pg-lib/$base" "$tool"
+    elif [[ -e "$SIDECAR_DIR/bin/$vendor_subdir/$base" ]]; then
+      llvm-install-name-tool-18 -change "$dep" "@executable_path/$vendor_subdir/$base" "$tool"
     else
       echo "ERROR: $(basename "$tool") links '$dep' ($base) — neither in the embedded darwin"
-      echo "  native/lib ($nlibdir) nor vendored in bin/.pg-lib. It would dangle on a clean Mac."
+      echo "  native/lib ($nlibdir) nor vendored in bin/$vendor_subdir. It would dangle on a clean Mac."
       return 1
     fi
   done < <(llvm-otool-18 -L "$tool" 2>/dev/null | awk 'NR>1{print $1}' | grep -vE '^@(executable_path|loader_path|rpath)/' || true)
