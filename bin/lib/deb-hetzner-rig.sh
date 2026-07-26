@@ -439,6 +439,20 @@ RIG_QUOTA_RESOURCE="ops/hetzner-federation-quota"
 # RIG_QUOTA_LOCK_ID is initialized in the re-source-guarded state block at the
 # top of this lib — a bare reset here would wipe a HELD lock id on re-source.
 OPERATOR_MCP_URL="${OPERATOR_MCP_URL:-http://127.0.0.1:3070/api/mcp}"
+# SUPERUSER BEARER (2026-07-26, sibling of live-federation-gate.sh's own P-013/WI-1841
+# fix): `?superuser=1` alone is NOT sufficient — the handler also requires
+# `Authorization: Bearer <token>` matching ~/.papercusp/superuser-token (see
+# packages/operator-core/lib/superuser-token.ts). Without it every call here 403s with
+# superuser_invalid_bearer, so rig_quota_acquire's `ok` parse always sees "0" (never
+# "held") and the WI-1442/EI-5884 quota mutex silently NEVER acquires — every rig run
+# burns the full RIG_QUOTA_MAX_WAIT_SEC (default 1800s) "contended or unreachable" retry
+# loop before proceeding unlocked, and the 2-server-cap race the mutex exists to prevent
+# is back to being prose-only. Found live during the 2026-07-26 Hetzner 2-VM positive
+# control run (WI-5863) — holders:[] via locks:list proved zero real contention, only a
+# missing header. Missing/short token → empty bearer → same graceful degrade as before
+# (rig_quota_acquire's own timeout fallback), never fatal.
+RIG_QUOTA_TOKEN_PATH="${RIG_QUOTA_TOKEN_PATH:-$HOME/.papercusp/superuser-token}"
+RIG_QUOTA_BEARER="$(cat "$RIG_QUOTA_TOKEN_PATH" 2>/dev/null | tr -d '[:space:]' || true)"
 
 # rig_mcp_call <tool-name> <json-args> → echoes the raw JSON-RPC response.
 # Thin curl-JSONRPC helper — same shape live-federation-gate.sh /
@@ -447,6 +461,7 @@ rig_mcp_call() {
   local tool="$1" args="$2" client="${RIG_SLUG:-hetzner-rig}-quota"
   curl -s -m 30 -X POST "${OPERATOR_MCP_URL}?superuser=1&client=$client" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    ${RIG_QUOTA_BEARER:+-H "Authorization: Bearer $RIG_QUOTA_BEARER"} \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}" \
     2>/dev/null
 }
