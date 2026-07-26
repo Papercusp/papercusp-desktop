@@ -41,6 +41,12 @@ run_guard() {
   " >/dev/null 2>&1
 }
 
+# vm_assert_build_provenance also consults the hotpatch marker, which is a second
+# VM-touching primitive. Stub it OUT by default (no hotpatch in force) so the
+# non-hotpatch cases below stay hermetic — an unstubbed one would attempt a real
+# ssh to a VM that does not exist and hang on the connect timeout.
+NOHP='vm_hotpatch_provenance() { echo ""; }; '
+
 echo "=== vm_assert_uniform_sidecar ==="
 run_guard 'vm_deployed_sidecar_id() { echo "abc123def456 43001503"; }' \
   'vm_assert_uniform_sidecar vm1 vm2' \
@@ -58,41 +64,130 @@ run_guard 'vm_deployed_sidecar_id() { echo ""; }' \
   || ok "CONTROL: unreadable sidecar bundle → refused"
 
 echo "=== vm_assert_build_provenance ==="
-run_guard 'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
   'vm_assert_build_provenance vm1' \
   && ok "a provenanced build (real sha + real version) → accepted" \
   || bad "a properly-provenanced build was REJECTED"
 
 # The live WI-6209 rig state: /api/health {"sha":null,"version":"0.0.0"}.
-run_guard 'vm_build_provenance() { echo "|0.0.0"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "|0.0.0"; }' \
   'vm_assert_build_provenance vm1' \
   && bad "CONTROL: an UNPROVENANCED build (version 0.0.0) was ACCEPTED — uniform-but-stale stays invisible" \
   || ok "CONTROL: unprovenanced build (version 0.0.0, sha null) → refused"
 
-run_guard 'vm_build_provenance() { echo "|0.0.13"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "|0.0.13"; }' \
   'vm_assert_build_provenance vm1' \
   && bad "CONTROL: a build with a real version but NO sha was accepted" \
   || ok "CONTROL: version present but sha null → refused"
 
-run_guard 'vm_build_provenance() { echo ""; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo ""; }' \
   'vm_assert_build_provenance vm1' \
   && bad "CONTROL: no operator answering /api/health was accepted" \
   || ok "CONTROL: no operator answered /api/health → refused"
 
-run_guard 'vm_build_provenance() { echo "|0.0.0"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "|0.0.0"; }' \
   'vm_assert_build_provenance vm1' RIG_ALLOW_UNPROVENANCED=1 \
   && ok "RIG_ALLOW_UNPROVENANCED=1 downgrades an unprovenanced build to a warning" \
   || bad "the documented RIG_ALLOW_UNPROVENANCED escape hatch does not work"
 
-run_guard 'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
   'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=a1b2c3d \
   && ok "RIG_EXPECT_SHA matching the running build → accepted" \
   || bad "RIG_EXPECT_SHA rejected a build whose sha MATCHES the commit under test"
 
-run_guard 'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
+run_guard "$NOHP"'vm_build_provenance() { echo "a1b2c3d|0.0.13"; }' \
   'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=deadbee \
   && bad "CONTROL: a rig STALE relative to RIG_EXPECT_SHA was accepted" \
   || ok "CONTROL: build sha != RIG_EXPECT_SHA → refused as stale"
+
+echo "=== hotpatched sidecar (WI-6212 piece 2) ==="
+# A hotpatch replaces the JS but CANNOT change /api/health's sha (that comes from
+# the Rust binary's option_env! bake, forwarded by main.rs). So the .deb reads as
+# unprovenanced exactly as before, and only the marker can rescue the run.
+HP='vm_hotpatch_provenance() { echo "beefcafe1234|d35c70p|0u73r5|clean"; }; '
+
+run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
+  'vm_assert_build_provenance vm1' \
+  && ok "a VERIFIED hotpatch marker provenances an otherwise-unidentifiable .deb" \
+  || bad "a hotpatched VM was REJECTED — the fast JS loop is unusable, forcing a 3.5GB rebuild"
+
+run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
+  'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=d35c70p \
+  && ok "RIG_EXPECT_SHA matching the hotpatch's DESKTOP sha → accepted" \
+  || bad "RIG_EXPECT_SHA rejected a hotpatch built from the very commit under test"
+
+run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
+  'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=0u73r5 \
+  && ok "RIG_EXPECT_SHA matching the hotpatch's OUTER-monorepo sha → accepted" \
+  || bad "RIG_EXPECT_SHA rejected a hotpatch whose outer-repo sha IS the commit under test"
+
+run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
+  'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=deadbee \
+  && bad "CONTROL: a hotpatch from an UNRELATED commit satisfied RIG_EXPECT_SHA" \
+  || ok "CONTROL: hotpatch sha matches neither desktop nor outer expectation → refused"
+
+# The marker is only worth anything if it cannot outlive the bytes it describes.
+# This case runs the REAL vm_hotpatch_provenance against a real fixture directory
+# (VM_SIDE_ROOT + a vm_ssh stub that executes the emitted script locally), so what
+# is under test is the actual hash comparison, not a restatement of it.
+FIXTURE="$(mktemp -d)"
+trap 'rm -rf "$FIXTURE"' EXIT
+mkdir -p "$FIXTURE/Papercusp GUI/sidecar"
+printf 'the bundle actually on disk\n' > "$FIXTURE/Papercusp GUI/sidecar/serve.mjs"
+REAL_SHA="$(sha256sum "$FIXTURE/Papercusp GUI/sidecar/serve.mjs" | cut -c1-12)"
+LOCAL_SSH='vm_ssh() { shift; bash -c "$1"; }; '
+
+marker() { printf 'hotpatch %s d35c70p 0u73r5 clean 2026-07-26T00:00:00Z serve.mjs\n' "$1" \
+  > "$FIXTURE/Papercusp GUI/sidecar/.hotpatch-provenance"; }
+
+marker "$REAL_SHA"
+out="$(env VM_SIDE_ROOT="$FIXTURE" bash -c "
+  source '$COMMON' >/dev/null 2>&1
+  $LOCAL_SSH
+  vm_hotpatch_provenance vm1" 2>/dev/null)"
+[ "$out" = "$REAL_SHA|d35c70p|0u73r5|clean" ] \
+  && ok "marker matching the on-disk bundle → reported ($out)" \
+  || bad "a VALID hotpatch marker was not reported (got '$out')"
+
+marker "0000deadbeef"   # e.g. a later `vmctl install` re-laid the .deb underneath it
+out="$(env VM_SIDE_ROOT="$FIXTURE" bash -c "
+  source '$COMMON' >/dev/null 2>&1
+  $LOCAL_SSH
+  vm_hotpatch_provenance vm1" 2>/dev/null)"
+[ -z "$out" ] \
+  && ok "CONTROL: marker whose hash != the bundle on disk → NOT believed (stale marker)" \
+  || bad "CONTROL: a STALE marker was believed ('$out') — provenance would describe bytes that are gone"
+
+# The mistake this fast loop invites is pushing a bundle you forgot to rebuild.
+# That is checked EXACTLY (hash equality against what the VM already runs), not by
+# an mtime heuristic — see the rationale in vm_hotpatch_sidecar.
+SRCB="$FIXTURE/tree-serve.mjs"; printf 'the bundle actually on disk\n' > "$SRCB"
+run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
+  "vm_hotpatch_sidecar vm1 '$SRCB'" \
+  && bad "CONTROL: hotpatching a bundle IDENTICAL to the installed one was accepted — a forgotten rebuild reads as a successful test" \
+  || ok "CONTROL: bundle identical to what the VM already runs → refused (forgotten rebuild)"
+
+run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
+  "vm_hotpatch_sidecar vm1 '$SRCB'" RIG_HOTPATCH_ALLOW_NOOP=1 \
+  && bad "RIG_HOTPATCH_ALLOW_NOOP=1 should proceed PAST the no-op check (it then fails later, offline)" \
+  || ok "RIG_HOTPATCH_ALLOW_NOOP=1 passes the no-op check (halts later — no VM in this sandbox)"
+
+printf 'a DIFFERENT bundle\n' > "$SRCB"
+out="$(run_guard 'vm_deployed_sidecar_id() { echo "'"$REAL_SHA"' 27"; }' \
+  "vm_hotpatch_sidecar vm1 '$SRCB'" 2>&1; echo "rc=$?")"
+case "$out" in
+  *rc=0*) bad "a CHANGED bundle somehow succeeded with no VM present — the stub is not exercising the real path" ;;
+  *) ok "a CHANGED bundle passes the no-op check and proceeds to the VM (fails there, as expected offline)" ;;
+esac
+
+rm -f "$FIXTURE/Papercusp GUI/sidecar/.hotpatch-provenance"
+out="$(env VM_SIDE_ROOT="$FIXTURE" bash -c "
+  source '$COMMON' >/dev/null 2>&1
+  $LOCAL_SSH
+  vm_hotpatch_provenance vm1" 2>/dev/null)"
+[ -z "$out" ] \
+  && ok "CONTROL: no marker → no hotpatch claimed (a plain .deb install stays plain)" \
+  || bad "CONTROL: a hotpatch was reported with no marker present ('$out')"
 
 echo "=== vm_assert_dht_isolated ==="
 run_guard 'vm_ssh() { echo "[swarm] DHT bootstrap = ISOLATED 10.77.0.1:41286"; }' \

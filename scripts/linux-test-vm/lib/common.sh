@@ -169,14 +169,9 @@ default_deb() {
 # an explicit choice is always respected), or set PCUSP_ALLOW_STALE_DEB=1 for a
 # genuinely deliberate regression test against an older build (the legitimate case
 # this check must not block, just no longer silently satisfy by default).
-# _newest_bundle_input_commit_ts — epoch seconds of the newest commit touching the
-# code that feeds a packaged artifact (this repo, the outer monorepo's
-# apps/operator, and the libs/papercusp submodule). Extracted so the .deb check
-# below and the sidecar-hotpatch check (vm_hotpatch_sidecar) share ONE definition
-# of "what counts as newer than this artifact" — two drifting notions of freshness
-# would be its own silent-wrong-answer bug.
-_newest_bundle_input_commit_ts() {
-  local t outer desktop_ts outer_ts papercusp_ts newest_ts
+_warn_if_deb_stale() {
+  local deb="$1" deb_ts newest_ts t outer desktop_ts outer_ts papercusp_ts
+  deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
   desktop_ts="$(git -C "$DESKTOP_REPO" log -1 --format=%ct 2>/dev/null || echo 0)"
   outer="$DESKTOP_REPO/.."
   outer_ts=0; papercusp_ts=0
@@ -190,13 +185,6 @@ _newest_bundle_input_commit_ts() {
   for t in "$outer_ts" "$papercusp_ts"; do
     [ -n "$t" ] && [ "$t" -gt "$newest_ts" ] 2>/dev/null && newest_ts="$t"
   done
-  echo "${newest_ts:-0}"
-}
-
-_warn_if_deb_stale() {
-  local deb="$1" deb_ts newest_ts
-  deb_ts="$(stat -c %Y "$deb" 2>/dev/null)" || return 0
-  newest_ts="$(_newest_bundle_input_commit_ts)"
   if [ -n "$newest_ts" ] && [ "$newest_ts" -gt "$deb_ts" ] 2>/dev/null; then
     local age_days=$(( (newest_ts - deb_ts) / 86400 ))
     if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
@@ -238,15 +226,23 @@ _warn_if_deb_stale() {
 # bundle is the real unit of behaviour here: serve.mjs is an esbuild bundle that
 # INLINES the operator, its deps, and the patched hyperdht, so its hash is a
 # faithful identity for "which code is this VM running".
-# In-VM shell that sets $SIDE to the installed sidecar DIRECTORY (empty when the
-# app is not installed). ONE definition, shared by every function that has to
-# find the deployed bundle — the install path has already changed shape once
-# (the "Papercusp GUI" productName rename), and a second copy of this glob is a
-# second thing to forget to update.
-_VM_SIDE_DIR_SH='p="$(ls -1 "/usr/lib/Papercusp GUI/sidecar/serve.mjs" /usr/lib/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; SIDE=""; [ -n "$p" ] && SIDE="$(dirname "$p")"'
+# Emit the in-VM shell that sets $SIDE to the installed sidecar DIRECTORY (empty
+# when the app is not installed). ONE definition, shared by every function that
+# has to find the deployed bundle — the install path has already changed shape
+# once (the "Papercusp GUI" productName rename), and a second copy of this glob
+# is a second thing to forget to update.
+#
+# VM_SIDE_ROOT is a TEST seam, not a runtime knob: it lets the self-test point
+# this logic at a real fixture directory and exercise the marker/hash comparison
+# for real, instead of asserting by eye that the code "looks right". The value is
+# baked into the emitted script text because ssh forwards no environment.
+_vm_side_dir_sh() {
+  local root="${VM_SIDE_ROOT:-/usr/lib}"
+  printf 'R=%q; p="$(ls -1 "$R/Papercusp GUI/sidecar/serve.mjs" "$R"/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; SIDE=""; [ -n "$p" ] && SIDE="$(dirname "$p")"' "$root"
+}
 
 vm_deployed_sidecar_id() {
-  vm_ssh "$1" "$_VM_SIDE_DIR_SH"'; [ -n "$SIDE" ] && printf "%s %s\n" "$(sha256sum "$SIDE/serve.mjs" | cut -c1-12)" "$(stat -c%s "$SIDE/serve.mjs")"' 2>/dev/null | tr -d '\r' | head -1
+  vm_ssh "$1" "$(_vm_side_dir_sh)"'; [ -n "$SIDE" ] && printf "%s %s\n" "$(sha256sum "$SIDE/serve.mjs" | cut -c1-12)" "$(stat -c%s "$SIDE/serve.mjs")"' 2>/dev/null | tr -d '\r' | head -1
 }
 
 # vm_assert_uniform_sidecar <vmname>... — die unless EVERY named VM runs the same
@@ -301,26 +297,28 @@ vm_hotpatch_sidecar() {
     "Build one first:  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh" \
     "(or pass a path / set RIG_SERVE_HOTPATCH)."
 
-  # Same freshness question _warn_if_deb_stale asks of a .deb, asked of the
-  # bundle — hotpatching a stale bundle is the WI-6212 class with a faster loop.
-  local src_ts newest_ts
-  src_ts="$(stat -c %Y "$src" 2>/dev/null || echo 0)"
-  newest_ts="$(_newest_bundle_input_commit_ts)"
-  if [ "$newest_ts" -gt "$src_ts" ] 2>/dev/null; then
-    local age_min=$(( (newest_ts - src_ts) / 60 ))
-    if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
-      warn "'$src' was built ~${age_min}min BEFORE the newest commit touching the bundle" \
-           "inputs — it may not contain the code under test. Continuing (PCUSP_ALLOW_STALE_DEB=1)."
-    else
-      die "'$src' was built ~${age_min}min BEFORE the newest commit touching the bundle inputs," \
-          "so hotpatching it would deploy code that predates the fix under test — the exact" \
-          "37-minute gap that produced the WI-6209 misdiagnosis. Rebuild:" \
-          "  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh" \
-          "Deliberate regression test against an older bundle: PCUSP_ALLOW_STALE_DEB=1."
-    fi
+  # Deliberately NOT an mtime-vs-newest-commit staleness check like the .deb path's
+  # _warn_if_deb_stale. On this shared tree git-sync commits every few minutes, so
+  # EVERY bundle is "older than the newest commit" within moments of being built:
+  # the check would fire on essentially every invocation, and a guard that always
+  # fires trains its users to set the override permanently — which would also
+  # disable the .deb check that shares it. It is also the wrong instrument: the gap
+  # that produced WI-6209 was 37 MINUTES, which no usable mtime threshold catches.
+  # Identity, not recency, is the real property — RIG_EXPECT_SHA and the marker
+  # below answer it exactly. What IS checked here is the mistake this loop actually
+  # invites, and it is checked precisely: pushing a bundle you forgot to rebuild.
+  local bsha installed
+  bsha="$(sha256sum "$src" | cut -c1-12)"
+  installed="$(vm_deployed_sidecar_id "$vm")"; installed="${installed%% *}"
+  if [ -n "$installed" ] && [ "$installed" = "$bsha" ] && [ "${RIG_HOTPATCH_ALLOW_NOOP:-0}" != "1" ]; then
+    die "'$vm' ALREADY runs this exact bundle ($bsha) — hotpatching it changes nothing." \
+      "If you just edited code, the edit is not in '$src': rebuild it first." \
+      "  cd $DESKTOP_REPO && bin/build-desktop-sidecar.sh" \
+      "Believing an unchanged bundle carries your fix is precisely the WI-6209 failure." \
+      "To re-push identical bytes anyway (e.g. to re-establish the marker): RIG_HOTPATCH_ALLOW_NOOP=1."
   fi
 
-  local side; side="$(vm_ssh "$vm" "$_VM_SIDE_DIR_SH"'; printf "%s\n" "$SIDE"' 2>/dev/null | tr -d '\r' | head -1)"
+  local side; side="$(vm_ssh "$vm" "$(_vm_side_dir_sh)"'; printf "%s\n" "$SIDE"' 2>/dev/null | tr -d '\r' | head -1)"
   [ -n "$side" ] || die "no installed Papercusp sidecar found on '$vm' — a hotpatch REPLACES an" \
     "installed bundle, it cannot create one. Install first:  vmctl install $vm"
 
@@ -329,14 +327,18 @@ vm_hotpatch_sidecar() {
   # RIG_EXPECT_SHA. `dirty` is recorded, not rejected: this shared tree is
   # continuously dirty by design (git-sync commits every few minutes), so failing
   # on it would make the lever unusable and push people to the escape hatch.
-  local bsha desktop_sha outer_sha dirty="clean" now
-  bsha="$(sha256sum "$src" | cut -c1-12)"
+  local desktop_sha outer_sha dirty="clean" now built
   desktop_sha="$(git -C "$DESKTOP_REPO" rev-parse --short HEAD 2>/dev/null || echo none)"
   outer_sha="$(git -C "$DESKTOP_REPO/.." rev-parse --short HEAD 2>/dev/null || echo none)"
   [ -n "$(git -C "$DESKTOP_REPO" status --porcelain 2>/dev/null)" ] && dirty="dirty"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  built="$(date -u -d "@$(stat -c %Y "$src")" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
 
-  log "hotpatch $vm: $side/serve.mjs ← $src  (bundle $bsha, desktop $desktop_sha, outer $outer_sha, $dirty)"
+  # Print the bundle's BUILD time, not just its hash: "is this the bundle I just
+  # built?" is the question a human asks at this moment, and a timestamp answers
+  # it at a glance where a hash does not.
+  log "hotpatch $vm: $side/serve.mjs ← $src"
+  log "  bundle $bsha built $built · desktop $desktop_sha · outer $outer_sha · tree $dirty"
   vm_scp "$vm" "$src" /tmp/serve.mjs.hotpatch >/dev/null \
     || die "could not copy '$src' to '$vm'"
   vm_ssh "$vm" "sudo install -m 0644 /tmp/serve.mjs.hotpatch '$side/serve.mjs' && rm -f /tmp/serve.mjs.hotpatch" \
@@ -359,7 +361,8 @@ vm_hotpatch_sidecar() {
 
   # The marker. Read back and VERIFIED below — a guard whose own write is never
   # checked is how this whole class starts.
-  printf 'hotpatch %s %s %s %s %s %s\n' "$bsha" "$desktop_sha" "$outer_sha" "$dirty" "$now" "$(basename "$src")" \
+  printf 'hotpatch %s %s %s %s %s built=%s %s\n' \
+      "$bsha" "$desktop_sha" "$outer_sha" "$dirty" "$now" "$built" "$(basename "$src")" \
     | vm_ssh "$vm" "sudo tee '$side/.hotpatch-provenance' >/dev/null" \
     || die "could not write the hotpatch provenance marker on '$vm'"
 
@@ -379,7 +382,7 @@ vm_hotpatch_sidecar() {
 # bundle and leaves the old marker behind — and a marker outliving the bytes it
 # describes is a provenance system that lies, which is worse than none.
 vm_hotpatch_provenance() {
-  vm_ssh "$1" "$_VM_SIDE_DIR_SH"'
+  vm_ssh "$1" "$(_vm_side_dir_sh)"'
     [ -n "$SIDE" ] || exit 0
     m="$SIDE/.hotpatch-provenance"
     [ -f "$m" ] || exit 0

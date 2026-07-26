@@ -57,7 +57,17 @@ WEB_DIR="$REPO_ROOT/apps/operator"
 
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
 REMOTE_DIR="${PCUSP_RIG_SIDECAR_DIR:-/Users/aviweiss/rig-sidecar-current}"
-OUT="${PCUSP_RIG_COMPOSE_OUT:-$REPO_ROOT/.rig-sidecar-current}"
+# Staging dir for the composed bundle, rsynced to $REMOTE_DIR below. It is pure
+# build OUTPUT and MUST NOT default inside the repo: it used to default to
+# $REPO_ROOT/.rig-sidecar-current, where git-sync's blanket `git add -A` committed
+# 762 files of it on 2026-07-26 (a 58MB esbuild bundle + verbatim copies of all
+# ~549 db-sql migrations + the prompts tree). The 58MB bundle then tripped the
+# pot-git publish guard's secrets scan, which FROZE ALL GIT EGRESS for this device
+# for ~3h — "nothing this device commits is reaching peers or origin" — because
+# the guard re-judges the same range until the offending content leaves it.
+# .gitignore also covers the old path, but defaulting OUT out of the tree is the
+# real fix: nothing regenerable should be written into a shared working tree.
+OUT="${PCUSP_RIG_COMPOSE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/papercusp/rig-sidecar-current}"
 
 PUSH=1
 [ "${1:-}" = "--no-push" ] && PUSH=0

@@ -12,6 +12,8 @@
 #   vmctl ssh   [name] [cmd...]   shell / run a command in the VM
 #   vmctl install [name] [deb]    scp the newest .deb in + apt install (fresh-install test)
 #   vmctl launch  [name]          start the installed app in the VM's GUI session
+#   vmctl hotpatch [name] [serve.mjs]  swap ONLY the sidecar bundle + relaunch (fast
+#                                 JS iteration; no .deb rebuild). Records provenance.
 #   vmctl updater-e2e APPIMAGE    reset the dedicated VM and launch an isolated
 #                                 updater/revert baseline (never host PID space)
 #   vmctl gui     [name]          open a SPICE viewer (run this yourself; opens a window)
@@ -163,11 +165,43 @@ if pgrep -f papercusp-desktop >/dev/null 2>&1 || pgrep -f serve.mjs >/dev/null 2
   pkill -9 -f 'embedded-postgres' 2>/dev/null
   sleep 4
 fi
+# WI-6209: ~/fed.env carries PAPERCUSP_DHT_BOOTSTRAP (and the GH identity) on a
+# federation VM. A relaunch that omits it does not fail — the app boots, peers,
+# and logs normally — it just silently joins the PUBLIC DHT, pulling unrelated
+# outside peers into a rig that is supposed to be isolated and invalidating every
+# measurement taken from it. That cost real hours once; vm_assert_dht_isolated
+# now DETECTS it, and sourcing it here removes the way to cause it. No-op on a
+# plain VM, which has no fed.env.
+if [ -f "$HOME/fed.env" ]; then
+  set -a; . "$HOME/fed.env"; set +a
+  echo "sourced ~/fed.env (DHT bootstrap + identity — this is a federation VM)"
+fi
 echo "launching with DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"
 setsid bash -c 'exec /usr/bin/papercusp-desktop' >"$HOME/papercusp-app.log" 2>&1 </dev/null &
 sleep 1; echo "started; log → ~/papercusp-app.log"
 EOF
   log "app launching. Watch: vmctl ssh $name 'tail -f papercusp-app.log'  ·  view: vmctl gui $name"
+}
+
+# cmd_hotpatch — the fast inner loop for JS changes (WI-6212).
+#
+# `vmctl install` re-lays a full .deb: ~3.5GB of cargo work to change JavaScript
+# that bin/build-desktop-sidecar.sh rebuilds by itself in minutes. Everything
+# federation/sync/operator lives in that bundle, so this is the loop that
+# actually gets used — the Hetzner rig has had it as RIG_SERVE_HOTPATCH for a
+# long time and the local rig was the one left hand-rolling scp (WI-6209).
+#
+# Push + relaunch are ONE command on purpose: a hotpatch without a relaunch
+# changes nothing (node read the old bundle at startup), and a "did it take
+# effect?" that depends on remembering a second step is a footgun on a rig whose
+# entire failure mode is confidently measuring the wrong bytes.
+cmd_hotpatch() {
+  local name="${1:-clean}" src="${2:-}"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  vm_hotpatch_sidecar "$name" ${src:+"$src"}
+  log "relaunching the app so the hotpatched bundle is what actually runs…"
+  cmd_launch "$name"
+  log "hotpatched + relaunched. Verify identity: vmctl status $name  ·  log: vmctl ssh $name 'tail -f papercusp-app.log'"
 }
 
 # ── destructive updater/revert E2E preparation ────────────────────────────
@@ -460,6 +494,7 @@ case "$cmd" in
   ssh)       cmd_ssh "$@" ;;
   install)   cmd_install "$@" ;;
   launch)    cmd_launch "$@" ;;
+  hotpatch)  cmd_hotpatch "$@" ;;
   updater-e2e) cmd_updater_e2e "$@" ;;
   gui)       cmd_gui "$@" ;;
   verify)    cmd_verify "$@" ;;

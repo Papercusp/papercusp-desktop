@@ -108,8 +108,8 @@ fi
 # `= 3` form made the guard rot the moment a legitimate fourth outbox read was added
 # (WI-6210's clock probe), reporting "4/3" — a green-looking invariant failing for
 # growth rather than for the unscoped read it exists to catch.
-_sob_all="$(grep -c 'harness_shared\.substrate_outbox' "$SCN")"
-_sob_scoped="$(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")"
+_sob_all="$(grep -c 'harness_shared\.substrate_outbox' "$SCN")" # assert-integrity-ok: $SCN is hard-asserted `-f` at the top of this file (exit 1), so grep -c cannot return a phantom 0 from a missing file; the `-gt 0` check below independently fails an empty stream.
+_sob_scoped="$(grep -c "substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug=" "$SCN")" # assert-integrity-ok: same — $SCN existence is enforced upstream, and this count is only ever compared against _sob_all, which is itself `-gt 0`-guarded.
 if [ "$_sob_all" -gt 0 ] && [ "$_sob_all" = "$_sob_scoped" ]; then
   ok "all $_sob_all substrate_outbox reads are harness_slug-scoped (multi-tenant table)"
 else
@@ -127,8 +127,8 @@ fi
 # independent counts. The count form redded the moment a NON-clock read legitimately started
 # carrying the key too, reporting "3/2" — a guard failing for growth instead of for the
 # unkeyed read it exists to catch, which is the same rot check 7 above was rewritten out of.
-_clk_all="$(grep -c 'COALESCE(fed_hlc' "$SCN")"
-_clk_keyed="$(grep 'COALESCE(fed_hlc' "$SCN" | grep -c "offer_id||'@'||publisher_github_user_id")"
+_clk_all="$(grep -c 'COALESCE(fed_hlc' "$SCN")" # assert-integrity-ok: $SCN is hard-asserted `-f` at the top of this file (exit 1), so grep -c cannot return a phantom 0 from a missing file; the `-gt 0` check below independently fails an empty stream.
+_clk_keyed="$(grep 'COALESCE(fed_hlc' "$SCN" | grep -c "offer_id||'@'||publisher_github_user_id")" # assert-integrity-ok: same — the upstream grep's stream is non-empty whenever _clk_all is `-gt 0`, which is the guarded precondition for this comparison.
 if [ "$_clk_all" -gt 0 ] && [ "$_clk_all" = "$_clk_keyed" ]; then
   ok "all $_clk_all fed_hlc clock reads are keyed by offer_id@publisher (pairable, not fleet-scoped alone)"
 else
