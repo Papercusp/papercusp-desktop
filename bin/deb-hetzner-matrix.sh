@@ -307,6 +307,14 @@ for id in "${RUN_IDS[@]}"; do
   else
     echo "  ✗ FAIL $id (rc=$rc) — ${SCN_LINE[$id]}"
     echo "    ── last 12 lines of $id ──"; tail -12 "$out" 2>/dev/null | sed 's/^/    /'
+    # EI-18660101091813036: serve.log is cumulative across the whole run and
+    # rig_bank_logs() (lib/deb-hetzner-rig.sh) otherwise only fires once, in the
+    # EXIT trap, at run end — so bank it NOW too, tagged with this scenario id,
+    # so a serve-<frame>-<HHMMSS>-<id>.log exists at the moment of THIS failure
+    # specifically (survives a later scenario overwriting the picture, and a
+    # run that's later killed before reaching a clean exit). Best-effort/
+    # non-fatal, same contract as the end-of-run bank; never blocks the matrix.
+    rig_bank_logs "$id" 2>/dev/null || true
   fi
 done
 

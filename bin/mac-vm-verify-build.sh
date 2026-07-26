@@ -40,6 +40,27 @@ SCRATCH="${MAC_VERIFY_BUILD_SCRATCH_ROOT:-/tmp/mac-verify-build}/mac-build-$SHA"
 mkdir -p "$SCRATCH/dmg"
 echo "=== mac-verify-build sha=$SHA ver=$VER scratch=$SCRATCH $(date -u +%H:%M:%SZ) ==="
 
+# ── EI-18656687593660627: no concurrent-run clobber ─────────────────────────
+# VMDIR above is a FIXED remote path (no per-run isolation) — two agents each
+# independently running this script (the common shape after a cold wake /
+# identity churn re-lands two of them on the same lane) rsync + npm install +
+# build into the SAME remote directory at once. Observed 2026-07-25: one run's
+# `npm run build` (rolldown) died with a misleading "failed to resolve
+# @mantine/hooks" while the other run's rsync/npm install was writing the same
+# tree — a real, reproducible dependency was momentarily missing mid-write, so
+# the failure looked like a product bug and wasted a full ~universal-arch
+# build cycle chasing it. Serialize whole runs on this host with a flock
+# (mirrors the exact `desktop-sidecar` EI-160 pattern in
+# build-desktop-sidecar.sh) so a second concurrent invocation waits its turn
+# instead of racing into the same VMDIR.
+MAC_VM_BUILD_LOCKFILE="${MAC_VM_BUILD_LOCKFILE:-$HOME/.papercusp/locks/mac-vm-verify-build.lock}"
+mkdir -p "$(dirname "$MAC_VM_BUILD_LOCKFILE")"
+exec 9>"$MAC_VM_BUILD_LOCKFILE"
+if ! flock -n 9; then
+  echo "→ another mac-vm-verify-build.sh run holds $MAC_VM_BUILD_LOCKFILE (same fixed VMDIR=$VMDIR) — waiting for it"
+  flock 9
+fi
+
 step() { echo; echo "### [$(date -u +%H:%M:%SZ)] $*"; }
 
 step "1/6 VM reachable?"

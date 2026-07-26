@@ -289,11 +289,22 @@ rig_server_gone()   { local code; code="$(rig_hz -o /dev/null -w '%{http_code}' 
 # banking must never abort or mask the run's actual verdict.
 RIG_BANK_DIR="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
 RIG_BANK_KEEP="${RIG_BANK_KEEP:-200}"
-rig_bank_logs() {
-  local stamp inst path
+# EI-18660101091813036 (2026-07-26): this function already banked serve.log once,
+# unconditionally, in the EXIT trap — but ONLY once, at run end. serve.log is
+# CUMULATIVE across the whole matrix pass (the same "un-time-scoped" limitation
+# WI-5715/P-411 already had to work around for the detector ASSERT), so a
+# single end-of-run snapshot conflates every scenario in the run, and a run that
+# never reaches a clean EXIT (SIGKILL, host OOM) bank NOTHING at all — the exact
+# gap that made 4 agents hand-roll ad-hoc rescue scripts (see the EI's evidence).
+# Accept an optional `tag` (a scenario id) so the scenario loop in
+# deb-hetzner-matrix.sh can call this on EVERY FAIL, not just once at the end —
+# each call is still fully best-effort/non-fatal, same contract as before.
+rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded into the stamp
+  local tag="${1:-}" stamp inst path
   mkdir -p "$RIG_BANK_DIR" 2>/dev/null || { fed_log "bank: cannot mkdir $RIG_BANK_DIR — skipping (best-effort)"; return 0; }
   stamp="$(date +%H%M%S 2>/dev/null || echo now)"
-  fed_log "bank: persisting per-frame serve.log + load markers to $RIG_BANK_DIR (stamp=$stamp) before teardown"
+  [ -n "$tag" ] && stamp="${stamp}-${tag}"
+  fed_log "bank: persisting per-frame serve.log + load markers to $RIG_BANK_DIR (stamp=$stamp)${tag:+ [on-FAIL mid-run bank]}"
   # Empty frame state must be LOUD, never a silent zero-file bank (WI-5380): the
   # serve.log is the single most important triage artifact and its absence was
   # invisible until someone went looking for it a run too late.
