@@ -33,6 +33,7 @@ TESTS=(
   rig-bank-logs.selftest.sh
   vm-run-env.selftest.sh
   seat-offer-diag.selftest.sh
+  b9-attestation-precondition.selftest.sh
 )
 
 # NOTE (WI-6181): this array is HAND-MAINTAINED, so a newly added *.selftest.sh is

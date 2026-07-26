@@ -232,8 +232,25 @@ _scn_attestation_unattested_device_core() {
     *) echo "  · attestation(unattested-device): WARN — could not read B's device_attestations before the strip (got '${_ATT_SAVED_ROW:-<empty>}'); will not attempt a restore, so revocation_kcut(90) may fail to find B's pubkeys" ;;
   esac
 
-  # Strip B's attestation on A (author device now maps to no member).
+  # WI-5064 FOLLOW-UP (gate run 164022): ALSO save + strip on frame B. `pot_members` is a
+  # FEDERATED table, so stripping only A leaves the value intact on B — and any b→a re-sync
+  # during this leg's ~155s window puts it straight back, silently destroying the precondition.
+  # That is not hypothetical: this leg runs at 89, immediately after replication_soak(87), which
+  # performs 5 kill/restart cycles — every reconnect triggers exactly such a catch-up re-sync.
+  # It also explains the otherwise-baffling isolated-vs-matrix split measured on 2026-07-26:
+  # `--only=attestation_membership,attestation_unattested_device` PASSES (no soak, no reconnect,
+  # nothing to re-federate the row) while the full 17-leg matrix FAILS with the receipt APPLIED
+  # instead of refused. Strip BOTH replicas so neither side can restore it.
+  _ATT_SAVED_ROW_B="$(drv_psql b "SELECT COALESCE(device_attestations::text,'[]') FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$_ATT_SAVED_ROW_B" in
+    '['*) _ATT_SAVED_B_OK=1 ;;
+    *) _ATT_SAVED_B_OK=0; echo "  · attestation(unattested-device): WARN — could not read B's device_attestations on frame b before the strip (got '${_ATT_SAVED_ROW_B:-<empty>}'); stripping b anyway would risk an unrestorable member row, so b is left intact and the precondition may be re-federated back (the strip-at-scoring check below will report it)" ;;
+  esac
+
+  # Strip B's attestation on A (author device now maps to no member) — and on B when we hold a
+  # restorable copy of it, so the row cannot be re-federated back from the other replica.
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
+  [ "${_ATT_SAVED_B_OK:-0}" = 1 ] && drv_psql b "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
   # WI-6046 (2026-07-26): the strip above is this leg's ENTIRE precondition, and it swallowed
   # every error (>/dev/null 2>&1, no rc check, no read-back). If frame a's PG is degraded when
   # it runs — likely, since this leg runs LAST after four invasive scenarios, exactly as the
@@ -258,6 +275,26 @@ _scn_attestation_unattested_device_core() {
     [ "$stripped" = 0 ] || { echo "attestation(unattested-device) FAIL — LEG4 SETUP DID NOT APPLY: B still carries $stripped device attestation(s) on frame a after the strip UPDATE (frame a degraded / PG unavailable?). The precondition was never established, so a non-refusal below would NOT be a product defect"; return 1; }
   fi
   sleep 35   # PAPERCUSP_COMMS_TIER_CACHE_MS default 30_000ms — wait out the device→user cache
+
+  # WI-5064 FOLLOW-UP: RE-ASSERT the precondition immediately before the probe. The verification
+  # above ran 35s ago and the strip is racing federation, so this is the last point at which a
+  # re-federated row can be caught BEFORE the probe rather than diagnosed afterwards. One bounded
+  # repair attempt (re-strip both replicas + another cache TTL), then give up and say so — a leg
+  # that quietly proceeds on a broken precondition is what produced three runs of "identity
+  # unresolved 0→0" read as a feature failure.
+  local pre_probe
+  pre_probe="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
+  if [ "${pre_probe:-0}" -gt 0 ] 2>/dev/null; then
+    echo "  · attestation(unattested-device): precondition drifted — B carries $pre_probe attestation(s) on a again after the 35s cache wait (re-federated from the other replica); re-stripping both frames once and re-waiting the device→user cache"
+    drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
+    [ "${_ATT_SAVED_B_OK:-0}" = 1 ] && drv_psql b "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
+    sleep 35
+    pre_probe="$(drv_psql a "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" 2>/dev/null | tr -d '[:space:]')"
+    if [ "${pre_probe:-0}" -gt 0 ] 2>/dev/null; then
+      echo "attestation(unattested-device) FAIL — PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times ($pre_probe attestation(s) at the second check). Something is actively re-federating B's pot_members row inside this leg's window — most likely the reconnect/catch-up sync from replication_soak(87) or a peer-log replay. FIX DIRECTION: hold the strip against re-sync for the leg's duration (pause the pot_members projection for B, or move this leg ahead of the churn legs into the 80-89 member-still-works band), rather than widening any timeout."
+      return 1
+    fi
+  fi
 
   rid_rem="att-unatt-${rid}-$RANDOM"; now_ms="$(date +%s)000"
   # EI-18737225233571148: snapshot the FULL per-reason counter vector immediately BEFORE the
@@ -397,6 +434,20 @@ _scn_attestation_unattested_device_core() {
 # a failed restore must NOT turn this leg's real verdict into a false FAIL — it warns instead,
 # and revocation_kcut(90) will then fail loudly on its own with a message that names the cause.
 _att_restore_b_devices() {
+  # Restore frame B first when we stripped it (WI-5064 follow-up): b is the replica that
+  # legitimately owns B's own member row, so putting it back there lets normal federation
+  # re-converge a even if a's direct UPDATE below were to lose an LWW race.
+  if [ "${_ATT_SAVED_B_OK:-0}" = 1 ]; then
+    drv_psql b "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${_ATT_SAVED_ROW_B}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
+    local back_b
+    back_b="$(drv_psql b "SELECT COALESCE(jsonb_array_length(device_attestations),0) FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" 2>/dev/null | tr -d '[:space:]')"
+    if [ "${back_b:-0}" -gt 0 ] 2>/dev/null; then
+      echo "  · attestation(unattested-device): restored B's device_attestations on frame b ($back_b attestation(s))"
+    else
+      echo "  · attestation(unattested-device): WARN — restore of B's device_attestations on frame b did NOT take (read back '${back_b:-<empty>}'); B's own replica is left device-less, which can affect legs after 89"
+    fi
+    _ATT_SAVED_B_OK=0
+  fi
   [ "${_ATT_SAVED_OK:-0}" = 1 ] || return 0
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations=\$att\$${_ATT_SAVED_ROW}\$att\$::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=${_ATT_SAVED_GH_ID};" >/dev/null 2>&1
   local back

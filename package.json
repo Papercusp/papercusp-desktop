@@ -18,6 +18,7 @@
     "test:local-matrix-starvation": "bash bin/lib/local-matrix-starvation.selftest.sh",
     "test:rig-bank-logs": "bash bin/lib/rig-bank-logs.selftest.sh",
     "test:seat-offer-diag": "bash bin/lib/seat-offer-diag.selftest.sh",
+    "test:b9-attestation-precondition": "bash bin/lib/b9-attestation-precondition.selftest.sh",
     "test:selftests": "bash bin/lib/run-selftests.sh",
     "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:dev-operator-reaper": "node --test test/dev-operator-ifneeded-reaper.test.js",
