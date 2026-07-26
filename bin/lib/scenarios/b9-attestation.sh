@@ -23,12 +23,14 @@
 #     LEG3 wrong-gh-user-id refused-op. All three are ADDITIVE (approve a pending join,
 #     union a 2nd device, insert one throwaway mis-attributed receipt that gets refused)
 #     and leave both frames HEALTHY for downstream scenarios — safe in the 10-70 band.
-#   attestation_unattested_device (91) — LEG4 unattested-device refused-op. TERMINAL: it
+#   attestation_unattested_device (89) — LEG4 unattested-device refused-op. TERMINAL: it
 #     permanently STRIPS member B's device_attestations on frame a (simulating an author
 #     device that resolves to no member) to trigger 'identity_unresolved'. This mutates
-#     admission-relevant state for the rest of the run, so — like revocation_kcut(90) — it
-#     is registered to run LAST (order ≥90), never before restart_durability/
-#     reconnect_catchup/replication_soak/revocation_kcut. It also needs a real 35s sleep
+#     admission-relevant state for the rest of the run, so it belongs in the terminal band,
+#     AFTER the restorative churn legs (restart_durability/reconnect_catchup/
+#     replication_soak) — but it MUST run BEFORE revocation_kcut(90). See the ordering
+#     invariant at the scenario body below: this leg needs B able to SEND, and the ban
+#     revokes exactly that. It also needs a real 35s sleep
 #     to wait out the receiver's comms-tier device→user cache TTL (PAPERCUSP_COMMS_TIER_
 #     CACHE_MS, default 30_000ms) — acceptable at the very end of a run, not mid-matrix.
 #
@@ -147,12 +149,32 @@ scn_attestation_membership() {
 }
 matrix_register attestation_membership 60 "attestation membership seeding + 2nd-device + wrong-gh refused-op, on a GENUINE 2nd frame (P-413/WI-5779)" scn_attestation_membership
 
-# ── attestation_unattested_device (91, TERMINAL): LEG4 unattested-device refused-op ──
-# Runs LAST (after revocation_kcut/90): permanently strips B's device_attestations on A to
-# simulate an author device that resolves to no member, then waits out the comms-tier
-# device→user cache TTL and asserts the identity_unresolved refusal + counter bump. Mirrors
-# revocation_kcut's "may leave the member unable to receive" terminal contract — do NOT
-# reorder this before restart_durability/reconnect_catchup/replication_soak/revocation_kcut.
+# ── attestation_unattested_device (89, TERMINAL): LEG4 unattested-device refused-op ──
+# Permanently strips B's device_attestations on A to simulate an author device that resolves
+# to no member, then waits out the comms-tier device→user cache TTL and asserts the
+# identity_unresolved refusal + counter bump.
+#
+# ⚠ ORDERING INVARIANT — THIS LEG MUST RUN **BEFORE** revocation_kcut(90). DO NOT "restore"
+# it to 91; that ordering is the WI-5064 defect, not a convention.
+#   WHY: this leg's probe requires B to still be able to SEND — B writes a p2p_receipt that
+#   must federate b→a so that A applies-and-refuses it with identity_unresolved. revocation_kcut
+#   BANS B (b3-revocation.sh:10 "may be unable to receive afterward"), and revocation is
+#   STICKY/MONOTONE (hive-membership-store.ts:355, union-never-replace), so once it has run
+#   B's pubkey is on A's admission blocklist for the REST OF THE RUN. The probe then never
+#   reaches A's apply path, no refusal counter moves, and this leg reports
+#   "identity_unresolved 0→0" as though the FEATURE had failed. It red-pinned the standing
+#   release gate 3/3 and blocked first-green (WI-5064).
+#   PROVEN BY CONTROLLED EXPERIMENT (2026-07-26), one variable, restart/soak absent from both:
+#     --only=attestation_membership,attestation_unattested_device                  → LEG4 PASS
+#     --only=attestation_membership,revocation_kcut,attestation_unattested_device  → LEG4 FAIL
+#   So the ban is the cause; the churn legs are NOT. (Both logs banked under
+#   ~/.papercusp/live-fed-gate/triage.)
+#   SAFE IN THE OTHER DIRECTION: this leg's strip cannot break revocation_kcut's own baseline.
+#   The stripped row feeds only deviceToUser() (comms-tier-gate.ts:47), whose sole consumer
+#   resolveAuthorCommsTier() is bound exclusively in INBOUND hyperbee projections — it resolves
+#   the author of an ARRIVING op. revocation_kcut's baseline is a CONTENT probe in the a→b
+#   direction, authored by A and resolved against B's own copy of pot_members, which a strip
+#   on A never touches.
 scn_attestation_unattested_device() {
   local rid="$MATRIX_RUN_ID" oslug="${FRAME_MEMBER_SLUG[a]:-}" mslug="${FRAME_MEMBER_SLUG[b]:-}"
   [ -n "$oslug" ] && [ -n "$mslug" ] || { echo "attestation(unattested-device): frames not joined"; return 1; }
@@ -167,9 +189,9 @@ scn_attestation_unattested_device() {
   # scoped to the EXACT reason 'receipt-apply:identity_unresolved', never a loose
   # `LIKE 'receipt-apply:%'` total. LEG3 (attestation_membership, order 60, same run) already
   # bumped 'receipt-apply:responder_mismatch' earlier, AND restart_durability(80)/
-  # reconnect_catchup(85)/replication_soak(87)/revocation_kcut(90) — all invasive scenarios
-  # that can trigger re-federation/retries of prior receipts — run BETWEEN leg3 and this
-  # scenario(91). A loose total-based `tot_after > tot_before` can therefore go true from a
+  # reconnect_catchup(85)/replication_soak(87) — all invasive scenarios that can trigger
+  # re-federation/retries of prior receipts — run BETWEEN leg3 and this scenario(89).
+  # A loose total-based `tot_after > tot_before` can therefore go true from a
   # STRAY re-bump of responder_mismatch (or any other receipt-apply reason) without
   # identity_unresolved ever firing — a guaranteed-nonzero baseline plus an unrelated further
   # bump is a false PASS, never actually proving this leg's own claim. Scope to the one reason
@@ -181,16 +203,17 @@ scn_attestation_unattested_device() {
   # not a hypothetical: see the diff-based rationale at the reasons_moved computation below.
   local reasons_before reasons_after reasons_moved
   # WI-5788 (P-411 residual): UNMEASURED baseline ⇒ FAIL, never coerce to 0. See the LEG3
-  # comment above — and note this leg is MORE exposed to it, because it runs LAST (order 91)
-  # after four invasive scenarios (restart_durability/reconnect_catchup/replication_soak/
-  # revocation_kcut) that can leave frame a briefly unreachable. A dead baseline probe there
+  # comment above — and note this leg is MORE exposed to it, because it runs late (order 89)
+  # after the invasive churn scenarios (restart_durability/reconnect_catchup/
+  # replication_soak) that can leave frame a briefly unreachable. A dead baseline probe there
   # coerces to 0, and then a single real identity_unresolved bump from ANY source reads as
   # this leg's own proof.
   rc_before="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:identity_unresolved';" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$rc_before" ] || { echo "attestation(unattested-device) FAIL — LEG4 baseline UNMEASURED: the identity_unresolved counter probe on frame a returned nothing, so 'counter is 0' and 'probe never ran' are indistinguishable; refusing to score this leg"; return 1; }
 
-  # Strip B's attestation on A (author device now maps to no member) — safe here: this is
-  # the LAST scenario in the run, so no downstream scenario depends on B's device row.
+  # Strip B's attestation on A (author device now maps to no member) — safe here: the only
+  # scenario after this one is revocation_kcut(90), which does not depend on B's device row
+  # on A (see the SAFE IN THE OTHER DIRECTION note in this scenario's header).
   drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
   # WI-6046 (2026-07-26): the strip above is this leg's ENTIRE precondition, and it swallowed
   # every error (>/dev/null 2>&1, no rc check, no read-back). If frame a's PG is degraded when
@@ -298,7 +321,7 @@ scn_attestation_unattested_device() {
   # byte-identical drv_psql INSERT and its receipt does federate and get refused), so a silent
   # probe here is NOT explained by "raw INSERT bypasses emitP2pReceipt".
   if [ "$rem_on_a" = 0 ] && [ -z "${reasons_moved// /}" ]; then
-    echo "attestation(unattested-device) FAIL — PROBE NEVER REACHED THE APPLY PATH: no receipt-apply refusal reason moved AT ALL while this leg ran (identity_unresolved $rc_before→$rc_after; full before-vector: ${reasons_before:-<empty>}; after: ${reasons_after:-<empty>}), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. A refused receipt ALWAYS bumps some reason, so this is not 'A failed to refuse' — the receipt never arrived at frame a's receipt-apply. Suspect the b→a link rather than the feature: this leg runs LAST (order 91) after four invasive scenarios (restart_durability/reconnect_catchup/replication_soak/revocation_kcut) that can leave federation unconverged — check restart_settle_barrier's settle time for this run, and whether receipt_id '$rid_rem' appears in frame a's logs at all (absent ⇒ never federated; present ⇒ federated then dropped/deduped). Do NOT read a stale responder_mismatch elsewhere in the counters as this leg's own refusal (EI-18737225233571148)."
+    echo "attestation(unattested-device) FAIL — PROBE NEVER REACHED THE APPLY PATH: no receipt-apply refusal reason moved AT ALL while this leg ran (identity_unresolved $rc_before→$rc_after; full before-vector: ${reasons_before:-<empty>}; after: ${reasons_after:-<empty>}), row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes. A refused receipt ALWAYS bumps some reason, so this is not 'A failed to refuse' — the receipt never arrived at frame a's receipt-apply. Suspect the b→a link rather than the feature. FIRST CHECK — the known cause (WI-5064): did revocation_kcut run BEFORE this leg? SCN_RC[revocation_kcut]=${SCN_RC[revocation_kcut]:-<did-not-run>}. A value other than <did-not-run> means member B was BANNED earlier in this run, revocation is sticky/monotone, and B's receipts are blocked at A's admission — this leg's ordering invariant (it must run before revocation_kcut/90) has been violated, and this FAIL is that ordering bug rather than a product defect. Otherwise check whether receipt_id '$rid_rem' appears in frame a's logs at all (absent ⇒ never federated; present ⇒ federated then dropped/deduped), and whether any churn leg that actually ran this run (restart_durability/reconnect_catchup/replication_soak — check restart_settle_barrier's settle time) left federation unconverged. Do NOT read a stale responder_mismatch elsewhere in the counters as this leg's own refusal (EI-18737225233571148)."
     return 1
   fi
 
@@ -317,4 +340,4 @@ scn_attestation_unattested_device() {
   echo "attestation(unattested-device) FAIL — across the container boundary: identity_unresolved $rc_before→$rc_after, row-on-a=$rem_on_a, probe-on-b=${probe_on_b:-<unmeasured>}, strip-verified=yes, all reasons: $reasons"
   return 1
 }
-matrix_register attestation_unattested_device 91 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL)" scn_attestation_unattested_device
+matrix_register attestation_unattested_device 89 "unattested-device refused-op witness, on a GENUINE 2nd frame (P-413/WI-5779, TERMINAL — must precede revocation_kcut/90)" scn_attestation_unattested_device

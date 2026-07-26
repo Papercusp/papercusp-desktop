@@ -84,8 +84,26 @@ federating 2-node pot.
   coord control-plane). Leave frames healthy.
 - **50–70** — disruptive-but-restorative (reconnect/offline-catchup, restart
   durability). MUST restore healthy.
-- **90+** — **terminal/destructive** (revocation/ban k-cut). Runs LAST; may leave the
-  member unable to receive.
+- **80–89** — **terminal/destructive, but the member still works** (e.g.
+  attestation_unattested_device/89 strips one member's device attestations on the
+  owner frame). May leave narrow admission state mutated for the rest of the run.
+- **90+** — **member-disabling** (revocation/ban k-cut). Runs LAST; may leave the
+  member unable to receive **or send**.
+
+> ⚠ **Ordering rule INSIDE the terminal band — "runs LAST" is not a property two
+> scenarios can both have.** A member-ban leg (`revocation_kcut`/90) revokes the
+> member's pubkey, and revocation is **sticky/monotone** — once it runs, that member
+> can no longer send or receive **for the rest of the run**. So any scenario that
+> needs the member to still SEND must be registered **strictly below 90**. Do not
+> add a scenario at 91+ without re-reading this.
+>
+> This is not hypothetical: `attestation_unattested_device` was registered at **91**,
+> after the ban. It dutifully followed the old "terminal ⇒ 90+, runs LAST" wording,
+> and its probe — a receipt B must federate to A — was silently blocked at A's
+> admission on every run. It reported `identity_unresolved 0→0`, which reads as a
+> product defect, and red-pinned the standing release gate 3/3, blocking first-green
+> for hours (WI-5064). The band rule, not either scenario, was the bug. Guard:
+> `packages/operator-core/lib/matrix-scenario-terminal-order-guard.test.ts`.
 
 ### Hand-off + self-check
 
