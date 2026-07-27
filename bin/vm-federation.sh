@@ -480,38 +480,43 @@ else
   echo "✗ A from-repo create failed — body above"; drv_exec a <<<"tail -25 $(drv_applog a)"; exit 6
 fi
 
-# B discovers A's hive over the wire (proves the directory announce crossed) and
-# reads its memberLinks; fall back to the create response's OWN memberLinks
-# (not a re-query of A's discovery listing — WI-6190, that route can never
-# list a locally-owned pot) if the announce hasn't landed in B's directory
-# yet — the join + merge legs then still prove federation independent of the
-# directory-announce projection.
-fed_log "B: poll GET /api/discovery/hives for '$HIVE_SLUG' (~$(( ${DISCOVERY_RETRIES:-40} * 3 ))s)"
-MEMBER_LINKS="[]"; links_via="directory(B)"
-for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
-  brow="$(fed_hive_dir_row b "$HIVE_SLUG")"
-  if [ -n "$brow" ]; then
-    MEMBER_LINKS="$(fed_json "$brow" "json.dumps(d.get('memberLinks') or [])")"
-    [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ] && break
-  fi
-  sleep 3
-done
-if [ -z "$MEMBER_LINKS" ] || [ "$MEMBER_LINKS" = "[]" ]; then
-  # WI-6190: A's own /api/discovery/pots can NEVER list a locally-owned pot —
-  # buildHiveDirectoryRows only returns peer-learned discovered rows plus
-  # JOINED-remote projects (remote_hive===true); a pot A itself created is
-  # neither, so `fed_hive_dir_row a` here always misses and this leg always
-  # hard-exited. Read memberLinks from the create response's OWN `publish`
-  # outcome instead — from-repo already synthesizes a self-link there when
-  # publish succeeded but returned no memberLinks (WI-3577), so it's
-  # populated as soon as $a_resp exists, no re-query needed.
-  MEMBER_LINKS="$(fed_json "$a_resp" "json.dumps(d.get('publish', {}).get('memberLinks') or [])")"
-  links_via="local(A-create-response)"
-fi
+# WI-6191: prefer memberLinks straight off A's OWN create response FIRST —
+# the from-repo route already returns them (hive-publish-from-repo.ts's
+# PublishCreatedPotOutcome.memberLinks, surfaced on `publish`; from-repo
+# already synthesizes a self-link there when publish succeeded but returned
+# no memberLinks, WI-3577), specifically so a joiner can join WITHOUT any
+# directory round-trip. Proven live (WI-760): POSTing $a_resp's memberLinks
+# straight to B's /api/discovery/join-pot joined successfully with ZERO
+# directory involvement. The OLD order (poll B's directory for up to ~120s,
+# THEN fall back to $a_resp) discarded a value already in hand and made the
+# join leg depend on an unrelated gossip/discovery subsystem — an unrelated
+# gossip hiccup then red-failed a run that was only testing substrate
+# federation. Only fall back to polling B's directory (which, as a side
+# effect, also proves A's announce actually crossed the wire — kept as a
+# non-fatal observability signal, never a gate) when the create response
+# didn't carry any links. A's own /api/discovery/pots is NOT a further
+# fallback (WI-6190: that route can never list a locally-owned pot — it only
+# returns peer-learned/joined-remote rows — so re-querying it always misses).
+MEMBER_LINKS="$(fed_json "$a_resp" "json.dumps(d.get('publish', {}).get('memberLinks') or [])")"
 if [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ]; then
+  links_via="create-response(A)"
   echo "✓ memberLinks resolved via $links_via: $(fed_json "$MEMBER_LINKS" 'len(d)') link(s)"
 else
-  echo "✗ no memberLinks from B's discovery OR A's local listing — cannot join"; exit 6
+  fed_log "B: no memberLinks on A's create response — poll GET /api/discovery/pots for '$HIVE_SLUG' (~$(( ${DISCOVERY_RETRIES:-40} * 3 ))s)"
+  MEMBER_LINKS="[]"; links_via="directory(B)"
+  for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
+    brow="$(fed_hive_dir_row b "$HIVE_SLUG")"
+    if [ -n "$brow" ]; then
+      MEMBER_LINKS="$(fed_json "$brow" "json.dumps(d.get('memberLinks') or [])")"
+      [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ] && break
+    fi
+    sleep 3
+  done
+  if [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ]; then
+    echo "✓ memberLinks resolved via $links_via: $(fed_json "$MEMBER_LINKS" 'len(d)') link(s)"
+  else
+    echo "✗ no memberLinks from A's create response OR B's discovery — cannot join"; exit 6
+  fi
 fi
 
 fed_log "B: JOIN '$HIVE_SLUG' via POST /api/discovery/join-hive"

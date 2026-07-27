@@ -101,11 +101,15 @@ for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
   sleep 3
 done
 if [ -z "$MEMBER_LINKS" ] || [ "$MEMBER_LINKS" = "[]" ]; then
-  # Fall back to A's own listing — the demo still federates via the join even
-  # if B's directory projection lags the announce.
-  arow="$(fed_hive_dir_row a "$SLUG")"
-  MEMBER_LINKS="$(fed_json "$arow" "json.dumps(d.get('memberLinks') or [])")"
-  links_via="local(A-fallback)"
+  # WI-6190: A's own /api/discovery/pots can NEVER list a locally-owned pot
+  # (buildHiveDirectoryRows only returns peer-learned + joined-remote rows),
+  # so `fed_hive_dir_row a` here always missed. Read memberLinks from the
+  # create response's own `publish` outcome instead — from-repo already
+  # synthesizes a self-link there when publish succeeded with no memberLinks
+  # (WI-3577) — the demo still federates via the join even if B's directory
+  # projection lags the announce.
+  MEMBER_LINKS="$(fed_json "$a_resp" "json.dumps(d.get('publish', {}).get('memberLinks') or [])")"
+  links_via="local(A-create-response)"
 fi
 if [ -z "$MEMBER_LINKS" ] || [ "$MEMBER_LINKS" = "[]" ]; then
   echo "FATAL: no memberLinks via B's directory or A's local listing — cannot join"; exit 6

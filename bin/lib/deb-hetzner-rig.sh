@@ -380,7 +380,16 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
     if [ -s "$_bank_file" ]; then
       _first_ts="$(grep -m1 -oE '^\[[0-9TZ:.+-]+\]' "$_bank_file" 2>/dev/null || true)"
       _last_ts="$(grep -oE '^\[[0-9TZ:.+-]+\]' "$_bank_file" 2>/dev/null | tail -1 || true)"
-      { printf '=== bank %s: frame %s — serve.log is CUMULATIVE for the whole rig session, NOT scoped to one scenario/run. This snapshot'\''s own content spans %s .. %s — before treating this file as an independent run from another bank file, check whether ITS first timestamp matches (same session, nested snapshot) rather than diffing/summing counts between them. ===\n' \
+      # EI-18744109084137549 (2026-07-27, "manufactured absence" — 3rd instance
+      # of this shape in one day): this file's content NEVER records a
+      # scenario/subject id (e.g. an offer's mx-<scenario>-<runid> slug) — that
+      # is true for EVERY scenario, passing or failing, not just the one that
+      # triggered this bank. A reader who greps this file for a failing
+      # subject's id and gets zero hits has learned NOTHING, because the same
+      # grep against a KNOWN-PASSING leg's id from the same run also returns
+      # zero. Say so up front, in the file itself, so the absence a reader
+      # finds here can never again look like scoped evidence by default.
+      { printf '=== bank %s: frame %s — serve.log is CUMULATIVE for the whole rig session, NOT scoped to one scenario/run. This snapshot'\''s own content spans %s .. %s — before treating this file as an independent run from another bank file, check whether ITS first timestamp matches (same session, nested snapshot) rather than diffing/summing counts between them. ⚠ ALSO: this log format does NOT record scenario/subject ids at all (for any scenario) — an id'\''s ABSENCE here is NOT evidence the corresponding operation never happened. Before concluding that from a grep miss, confirm the format truly carries no subject ids by grepping a KNOWN-GOOD id from a PASSING leg of the SAME run; if that is also absent, this file carries no information about your question and you must look elsewhere (application-level receipts/DB state) to tell arrive-vs-refuse apart. ===\n' \
           "$stamp" "$inst" "${_first_ts:-?}" "${_last_ts:-?}"
         cat "$_bank_file"
       } >"$_bank_file.tmp" 2>/dev/null && mv -f "$_bank_file.tmp" "$_bank_file" || rm -f "$_bank_file.tmp" 2>/dev/null
@@ -445,7 +454,29 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
         # hardlink first (free); fall back to a real copy if the link fails.
         cp -l -f "$bf" "$faildir/" 2>/dev/null || cp -f "$bf" "$faildir/" 2>/dev/null || true
       done
-      fed_log "bank: FAIL evidence bundled (prune-exempt) in $faildir — read THIS once the flat bank dir has rotated"
+      # EI-18744109084137549: a standalone, impossible-to-miss caveat file (the
+      # per-serve-log header above says the same thing, but a triager who opens
+      # the bundle and greps every *.log for their subject id before reading any
+      # one file's header in full will still walk straight into the trap — this
+      # file is the thing `ls "$faildir"` surfaces first).
+      cat >"$faildir/README-SCOPE-CAVEAT.txt" <<EOF
+This bundle's serve-*.log files are per-frame application logs. They are
+CUMULATIVE for the whole rig session (see each file's own header for its
+in-content time span) and they do NOT record scenario/subject ids (e.g. an
+offer's mx-<scenario>-<runid> slug) AT ALL, for any scenario.
+
+Grepping these files for a failing subject's id and finding zero hits is
+NOT evidence that the corresponding operation (offer publish/apply,
+membership change, etc.) never happened — the same grep against a
+KNOWN-PASSING leg's id from this same run also returns zero. Confirm that
+control before drawing any conclusion from an absence here. If the control
+id is also absent, these logs carry no information about your question;
+look at application-level state (receipts/DB rows) instead.
+
+Background: EI-18744109084137549 (2026-07-27) — the 3rd instance in one day
+of a surface manufacturing a misleading absence.
+EOF
+      fed_log "bank: FAIL evidence bundled (prune-exempt) in $faildir — read THIS once the flat bank dir has rotated (⚠ see $faildir/README-SCOPE-CAVEAT.txt before reasoning from an absence in the serve-*.log files)"
       # Bounded separately, in DIRECTORIES, and far more generously: failures
       # are rare, and these are hardlinks, so many months of them cost ~nothing.
       ( cd "$RIG_BANK_DIR/fail" 2>/dev/null && ls -1dt */ 2>/dev/null \

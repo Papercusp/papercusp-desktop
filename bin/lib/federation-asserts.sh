@@ -159,7 +159,7 @@ fed_fresh_display() {
 
 # ── local testnet DHT (deterministic discovery without the public DHT) ──────
 
-# fed_start_testnet_dht <operator_dir> <work> [advertise_host]
+# fed_start_testnet_dht <operator_dir> <work> [advertise_host] [keep_up]
 # Spins a hyperdht/testnet on the host — ALWAYS 3 nodes. A single-node testnet
 # can NEVER work (WI-1910 root cause): dht-rpc sends announce commits only to
 # closestReplies and bootstrap nodes never take commits, so a bootstrap-only DHT
@@ -173,13 +173,29 @@ fed_fresh_display() {
 # match current testnet.js — bindHost is 0.0.0.0 whenever host≠127.0.0.1. If a
 # bridge rig ever shows secondaries advertising an unreachable addr, fall back
 # to the containerized 3-node shape in local-matrix.sh.)
-# Echoes the bootstrap list (host:port,…); appends the node pid to FED_KILL_PIDS.
+# Echoes the bootstrap list (host:port,…); appends the node pid to FED_KILL_PIDS
+# UNLESS keep_up=1 (WI-6192). --keep-up's whole purpose is a working rig left
+# standing for follow-up work, but a caller's cleanup() still runs
+# fed_cleanup_scoped($work) unconditionally, which kills every process whose
+# argv carries $work — including this node's, since $work normally rides its
+# argv as a cleanup marker (see below). Under keep_up=1 we tag the node with a
+# DIFFERENT marker fed_cleanup_scoped's `grep -F "$work"` can never match, and
+# skip the FED_KILL_PIDS append (belt-and-suspenders: today's callers all
+# invoke this via `$(...)` command substitution, which already runs the whole
+# function — including that append — in a throwaway subshell, but a future
+# direct caller should still get the keep_up contract for free). We print the
+# surviving pid + bootstrap so the caller can reap it manually or point a
+# follow-up run at it via --dht-bootstrap=HOST:PORT.
 fed_start_testnet_dht() {
-  local operator_dir="$1" work="$2" host="${3:-}"
-  fed_log "spin local testnet DHT (hyperdht/testnet, 3 nodes${host:+, advertised on $host})" >&2
+  local operator_dir="$1" work="$2" host="${3:-}" keep_up="${4:-0}"
+  fed_log "spin local testnet DHT (hyperdht/testnet, 3 nodes${host:+, advertised on $host}${keep_up:+$([ "$keep_up" = 1 ] && echo ", kept up past cleanup")})" >&2
   # $work rides argv as a cleanup marker: killing the launching subshell pid
   # orphans the node child, but fed_cleanup_scoped's `grep -F "$work"` over
-  # ps args catches it (the pre-refactor smokes leaked these DHT nodes).
+  # ps args catches it (the pre-refactor smokes leaked these DHT nodes). Under
+  # keep_up=1 we deliberately use a marker that ISN'T $work, so that same scan
+  # leaves this node alone.
+  local marker="$work"
+  [ "$keep_up" = 1 ] && marker="${work}.persist-dht"
   ( cd "$operator_dir" && PAPERCUSP_DHT_HOST="$host" node --input-type=module -e '
       import createTestnet from "hyperdht/testnet.js";
       const host = process.env.PAPERCUSP_DHT_HOST || undefined;
@@ -188,13 +204,20 @@ fed_start_testnet_dht() {
       console.log("BOOTSTRAP=" + t.bootstrap.map(b => b.host + ":" + b.port).join(","));
       console.error("[testnet] nodes=" + t.nodes.length + " bootstrap=" + JSON.stringify(t.bootstrap));
       process.stdin.resume();
-    ' "$work" ) >"$work/dht.log" 2>&1 & FED_KILL_PIDS+=("$!")
+    ' "$marker" ) >"$work/dht.log" 2>&1 &
+  local launch_pid=$!
+  [ "$keep_up" = 1 ] || FED_KILL_PIDS+=("$launch_pid")
   local i bootstrap=""
   for i in $(seq 1 20); do
     bootstrap=$(grep -oE 'BOOTSTRAP=[^ ]+' "$work/dht.log" 2>/dev/null | head -1 | cut -d= -f2)
     [ -n "$bootstrap" ] && break; sleep 1
   done
   [ -n "$bootstrap" ] || { echo "FATAL: testnet DHT did not start"; cat "$work/dht.log"; return 1; }
+  if [ "$keep_up" = 1 ]; then
+    local dht_pid
+    dht_pid="$(pgrep -f "$marker" 2>/dev/null | head -1)"
+    fed_log "testnet DHT kept up: pid=${dht_pid:-unknown} bootstrap=$bootstrap — survives cleanup; reap manually (kill ${dht_pid:-<pid>}) or reuse with --dht-bootstrap=$bootstrap" >&2
+  fi
   echo "$bootstrap"
 }
 
