@@ -32,24 +32,29 @@
 #   REBUILD           (default 1)   — rebuild the sidecar from HEAD first (test current code).
 #   GATE_DEB          (unset)       — use this prebuilt .deb instead of rebuild+repack.
 #   SKIP_MATRIX       (default 0)   — skip the content-matrix leg (reliable, needs a .deb).
-#   SKIP_FROMREPO     (default 1)   — skip the from-repo leg. HISTORICAL: this leg was
-#                                     WI-971-RED by design (outbox drain never wired for
-#                                     joined/created hive harnesses; WI-259 was closed as its
-#                                     duplicate). WI-971's fix is now VERIFIED (WI-5775,
-#                                     2026-07-25: standalone + gate-flags runs both PASS —
-#                                     bidirectional + continuous post-join federation all
-#                                     green). The default stays 1 regardless — this is a
-#                                     STANDING skip-by-default (WI-5629, 2026-07-20): the
-#                                     production systemd unit already forces this via
-#                                     Environment=SKIP_FROMREPO=1, and flipping the script's
-#                                     own default to opt every ad-hoc/manual invocation back in
-#                                     is a separate decision flagged to the p2p-release leader
-#                                     (su-e3b21), not made unilaterally here. The leg's WITNESS
-#                                     sub-probe (AK-ban) is currently FAILING for an UNRELATED
-#                                     reason — see WI-5783 — which run_smoke's plain
-#                                     `OVERALL: PASS` grep does not by itself catch; the
-#                                     from-repo-witness REDS entry below does.
-#                                     Set SKIP_FROMREPO=0 explicitly to opt back in.
+#   SKIP_FROMREPO     (default 0)   — run the from-repo leg. DEFAULT FLIPPED 1→0 2026-07-27
+#                                     by the p2p-release leader (su-e3b21) — this is the
+#                                     decision the previous version of this comment explicitly
+#                                     deferred to that leader. Recorded as D-016 on plan
+#                                     p2p-public-release-remaining-lanes-2026-07-16.
+#                                     Both reasons for the standing skip are now closed:
+#                                     (a) WI-971 (outbox drain never wired for joined/created
+#                                     hive harnesses; WI-259 closed as its duplicate) is
+#                                     RESOLVED + live-verified twice on the packaged binary
+#                                     (WI-5775: standalone AND gate-flag runs both PASS,
+#                                     bidirectional + continuous post-join federation green);
+#                                     (b) the leg's WITNESS sub-probe (AK-ban write-plane drop)
+#                                     was failing for an unrelated reason, WI-5783 — that is
+#                                     now RESOLVED too (root cause: two concurrent boot/merge
+#                                     passes on the owner's instance, pot/home slug vs the
+#                                     owner's own member sub-harness slug).
+#                                     WHY THIS MATTERS: with the skip in place the gate could
+#                                     report GREEN while never running this leg — its first
+#                                     green (2026-07-27T02:00:39Z) reads "from-repo=SKIPPED
+#                                     from-repo-witness=SKIPPED". A skipped leg is NOT a green
+#                                     leg (D-015). Set SKIP_FROMREPO=1 to opt out for a one-off
+#                                     ad-hoc run; do not restore 1 as the standing default to
+#                                     quiet a red without recording why on the plan.
 #   RUN_LOCAL_MATRIX  (default 1)   — run the full local matrix leg on a weekly cadence,
 #                                     once P-002's bin/local-matrix.sh exists (no-op until then).
 #   MATRIX_TTL_H      (default 144) — spacing between local-matrix runs (6 days).
@@ -146,7 +151,7 @@ STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
 # 2.18-2.41 while loadavg read 78-85, sampled 2026-07-26).
 PRESSURE_GATE="${PRESSURE_GATE:-30}"
 REBUILD="${REBUILD:-1}"
-SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-1}"
+SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"  # from-repo default 1→0, 2026-07-27, D-016 (WI-971 + WI-5783 both resolved)
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
 # invalid_request_context (needs harness/workspace/role/run/spawn params or superuser) — the
 # 13:00 red's EI filing died on exactly this and only the loud fallback saved the verdict.
