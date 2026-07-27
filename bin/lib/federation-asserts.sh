@@ -230,13 +230,21 @@ fed_local_launch() {
     # collapse the instance onto the caller's real shared operator home, the
     # identical isolation leak. Same env-inheritance class as the DATABASE_URL
     # family (an unlisted `env VAR=val cmd` var is inherited, never cleared).
+    # EI-18729820545388373: a BOOT_TIMEOUT'd run's rescued log came back as a
+    # single 315-byte dbind warning even after ~6 min across 3 boot attempts —
+    # a diagnostic gap, not proof the app printed nothing. Redirecting to a
+    # file makes glibc stdio fully block-buffer stdout/stderr, and a hard
+    # `setsid`-group kill on timeout never gives the process a chance to
+    # flush; whatever it *did* print is lost with it. `stdbuf -oL -eL` forces
+    # line buffering on the wrapped command's own streams so a future failed
+    # attempt actually yields a diagnosable log instead of an empty one.
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
       -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
       -u PAPERCUSP_HOME \
       DISPLAY=":$disp" HOME="$home" PATH="$(dirname "$(command -v node)"):$PATH" \
       PAPERCUSP_BACKGROUND_WORKERS=1 \
       PAPERCUSP_DHT_HOST= PAPERCUSP_DHT_BOOTSTRAP= "$@" \
-      setsid nohup vglrun -d egl0 "$bin" >"$logf" 2>&1 < /dev/null ) &
+      setsid nohup stdbuf -oL -eL vglrun -d egl0 "$bin" >"$logf" 2>&1 < /dev/null ) &
   FED_KILL_PIDS+=("$!")
 }
 
