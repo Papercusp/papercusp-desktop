@@ -744,6 +744,63 @@ else
 fi
 unset -f drv_psql diag_out
 
+# ── fed_merge_assert / fed_hive_merge_probe extended-window (WI-6217) ──────
+# A `fed_merge_assert`/`fed_hive_merge_probe` fast-path timeout on a row that
+# genuinely DRAINED (confirmed in flight, not a dead wire or a mis-targeted
+# write) must get one further, equally-sized window before reporting FAILED —
+# a legitimately-slow-but-healthy delivery must not read as a dead wire (the
+# WI-6209 misdiagnosis this observation traces to). A row that never drains
+# (the mis-targeted-write class) must NOT get the extra window — waiting
+# longer can never make an undrained row arrive, so it must still fail at the
+# original `tries`, unchanged from before.
+#
+# drv_psql runs inside a command-substitution subshell on every call, so a
+# plain shell variable can't count calls across invocations — use a tempfile
+# counter (same technique two-instance smoke's run_smoke fixture above uses).
+WI6217_COUNTER="$(mktemp /tmp/wi6217-selftest-counter.XXXXXX)"; echo 0 > "$WI6217_COUNTER"
+WI6217_DRAINED="N"
+drv_psql() {
+  local inst="$1" sql="$2" n
+  case "$sql" in
+    *"INSERT INTO harness_shared.harness_features_consolidated"*) : ;;
+    *"SELECT origin FROM harness_shared.harness_features_consolidated"*|*"SELECT harness_slug FROM harness_shared.harness_features_consolidated"*)
+      n=$(( $(cat "$WI6217_COUNTER") + 1 )); echo "$n" > "$WI6217_COUNTER"
+      if [ "$n" -ge 2 ]; then
+        case "$sql" in *harness_slug*) echo "$SLUG_ECHO" ;; *) echo remote ;; esac
+      fi
+      ;;
+    *"SELECT CASE WHEN drained_at IS NOT NULL"*) echo "$WI6217_DRAINED" ;;
+    *"coalesce(workspace_id"*) : ;;  # fed_diagnose_unmerged's own probe — empty is fine, not under test here
+  esac
+}
+
+# Case 1: drained but slow — the fast-path window (tries=1) expires with no
+# arrival, drained_at is confirmed Y, and the row arrives on the SECOND call
+# (i.e. inside the extended window) — must succeed, not report FAILED.
+echo 0 > "$WI6217_COUNTER"; WI6217_DRAINED="Y"; SLUG_ECHO=""
+res="$(fed_merge_assert src dst slug F-WI6217-SLOW title status 1 2>/dev/null)"
+[ "$res" = 1 ] && ok "fed_merge_assert: drained-but-slow delivery succeeds in the extended window instead of reporting FAILED (WI-6217)" \
+               || bad "fed_merge_assert did not extend the window for a drained-but-slow delivery (got '$res') — the WI-6217 false-FAIL is back"
+
+# Case 2: never drains — must NOT get the extended window; fails at the
+# original `tries` exactly like before this change (the mis-targeted-write /
+# dead-wire classes fed_diagnose_unmerged distinguishes — waiting longer
+# can't help either one).
+echo 0 > "$WI6217_COUNTER"; WI6217_DRAINED="N"
+res="$(fed_merge_assert src dst slug F-WI6217-NEVER title status 1 2>/dev/null)"
+[ "$res" = 0 ] && ok "fed_merge_assert: a never-drained row still reports FAILED (no pointless extended wait) (WI-6217)" \
+               || bad "fed_merge_assert regression: a never-drained row should still FAIL, got '$res'"
+
+# Case 3: fed_hive_merge_probe gets the identical treatment.
+echo 0 > "$WI6217_COUNTER"; WI6217_DRAINED="Y"; SLUG_ECHO="dst-slug"
+res="$(fed_hive_merge_probe src dst srcslug F-WI6217-HIVE-SLOW 1 2>/dev/null)"
+[ "$res" = "1 dst-slug" ] && ok "fed_hive_merge_probe: drained-but-slow delivery succeeds in the extended window (WI-6217)" \
+                          || bad "fed_hive_merge_probe did not extend the window for a drained-but-slow delivery (got '$res')"
+
+rm -f "$WI6217_COUNTER"
+unset -f drv_psql
+unset WI6217_COUNTER WI6217_DRAINED SLUG_ECHO
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1
