@@ -130,6 +130,11 @@ fi
 # — the same idiom __PAPERCUSP_BUNDLED_SIDECAR__ already uses below — so the
 # baked literal IS the thing build-info.ts references, with no alias for
 # esbuild to miss.
+PAPERCUSP_DESKTOP_VERSION="$(node -e "try{process.stdout.write(require('$ROOT/src-tauri/tauri.conf.json').version||'')}catch(e){}" 2>/dev/null)"
+# Built as an array (not a bare --define string) so the UNREADABLE case omits
+# the flag ENTIRELY rather than baking an empty string: `?? '0.0.0'`-style
+# fallbacks only trigger on undefined/null, so `--define:...="\"\""` would bake
+# a WORSE empty-string version than today's unset-env fallback.
 VERSION_DEFINE_ARGS=()
 if [[ -n "$PAPERCUSP_DESKTOP_VERSION" ]]; then
   VERSION_DEFINE_ARGS=(--define:__PAPERCUSP_SIDECAR_VERSION__="\"${PAPERCUSP_DESKTOP_VERSION}\"")
@@ -433,12 +438,13 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # dogfoodRef() reads process.env.PAPERCUP_DOGFOOD_REPO_REF). release-local.sh
 # exports it (= the release tag) + tags the monorepo. Unset (a plain dev sidecar
 # build) bakes "" → the bootstrap falls back to the remote default branch (main).
-# --define:process.env.npm_package_version (WI-2644): bake the real shipped
-# version (read from tauri.conf.json above) so build-info.ts's health endpoint
-# + serve.ts's own VERSION const report the actual installed version instead
-# of their unset-env fallback ('0.0.0' / '0.1.0-dev'). Empty when unreadable
-# (plain dev run outside this script) → both call sites keep their existing
-# fallback, unchanged from today.
+# --define:__PAPERCUSP_SIDECAR_VERSION__ (WI-2644 / EI-18751304112302229):
+# bake the real shipped version (read from tauri.conf.json above) so
+# build-info.ts's health endpoint + serve.ts's own VERSION const (which reads
+# getBuildInfo()) report the actual installed version instead of their
+# unset-env fallback ('0.0.0'). Empty VERSION_DEFINE_ARGS when unreadable
+# (plain dev run outside this script) → build-info.ts keeps its existing
+# npm_package_version / '0.0.0' fallback, unchanged from today.
 # --minify-whitespace + --minify-syntax (deliberately NOT --minify-identifiers):
 # strip comments/whitespace and apply safe syntax compaction on every bundle.
 # We do NOT rename identifiers — DBOS registers workflows/steps by function name
