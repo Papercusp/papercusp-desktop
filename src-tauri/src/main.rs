@@ -219,6 +219,13 @@ pub static SELECTED_API_PORT: std::sync::atomic::AtomicU16 =
 /// isolated test stack or fault proxy) must never silently dial another
 /// operator's socket: it either publishes its own per-port file or is
 /// reached over HTTP at exactly that port.
+///
+/// EI-18763945004822208: the runtime `IpcClientHandle` socket-source site now
+/// uses `read_dev_ipc_socket_for_port_validated` (this raw form dials a
+/// restart-orphaned advertisement straight into ENOENT). Kept as the pure
+/// parser exercised directly by `helper_tests` below — `#[allow(dead_code)]`
+/// because that's now its only caller in a non-test build.
+#[allow(dead_code)]
 fn read_dev_ipc_socket_for_port(papercusp_dir: &std::path::Path, port: u16) -> Option<String> {
     let per_port = read_dev_ipc_socket(&papercusp_dir.join(format!("endpoint-ipc.{port}.json")));
     if per_port.is_some() || !matches!(port, 3070 | 3170) {
@@ -1690,9 +1697,15 @@ mod http_ready_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        bundled_path_env, endpoint_ipc_socket_path_supported_for_target, find_endpoint_ipc_socket,
-        is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port, url_encode,
+        bundled_path_env, discovery_socket_still_live, endpoint_ipc_socket_path_supported_for_target,
+        find_endpoint_ipc_socket, is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port,
+        read_dev_ipc_socket_for_port_validated, read_dev_ipc_socket_validated, url_encode,
     };
+
+    /// Well above any realistic pid_max (and positive as i32) → ESRCH / no
+    /// `/proc` entry → definitely dead. Same convention as
+    /// `dev_bridge::pid_alive_false_for_an_unused_high_pid`.
+    const DEFINITELY_DEAD_PID: u32 = 2_000_000_000;
 
     // ── url_encode (RFC 3986 component encoding) ────────────────────────────
 
@@ -1911,6 +1924,183 @@ mod helper_tests {
     fn per_port_discovery_returns_none_when_nothing_published() {
         let dir = temp_dir("ipc-empty");
         assert_eq!(read_dev_ipc_socket_for_port(&dir, 3070), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── discovery_socket_still_live / *_validated (EI-18763945004822208) ────
+    // Confirmed live: a restarted operator's discovery file briefly still
+    // names the PREVIOUS (dead) pid/socket until the new instance rewrites
+    // it, and dialing that window produced a measured 160/160 ENOENT
+    // failure rate. These validate the fix closes exactly that window
+    // without breaking the tcp:// / unknown-pid cases that must fail OPEN.
+
+    #[test]
+    fn discovery_socket_still_live_true_for_tcp_endpoint_regardless_of_filesystem() {
+        // A `tcp://` endpoint has nothing on the local filesystem to check —
+        // only the pid is validated (here: unknown pid → fail open).
+        assert!(discovery_socket_still_live(
+            "tcp://127.0.0.1:35745",
+            0,
+            false
+        ));
+        // Dead pid still fails a tcp:// endpoint — pid liveness is checked
+        // regardless of transport.
+        assert!(!discovery_socket_still_live(
+            "tcp://127.0.0.1:35745",
+            DEFINITELY_DEAD_PID,
+            false
+        ));
+    }
+
+    #[test]
+    fn discovery_socket_still_live_false_for_dead_pid() {
+        let dir = temp_dir("ipc-live-dead-pid");
+        let sock = dir.join("real.sock");
+        std::fs::write(&sock, b"").unwrap(); // the socket FILE exists…
+        // …but the advertised pid is dead → the whole advertisement is stale.
+        assert!(!discovery_socket_still_live(
+            &sock.to_string_lossy(),
+            DEFINITELY_DEAD_PID,
+            false
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_socket_still_live_false_when_socket_file_missing() {
+        let dir = temp_dir("ipc-live-missing-sock");
+        let sock = dir.join("gone.sock"); // never created
+        // Pid is alive (this test process) but the socket file itself is
+        // gone — still stale (e.g. the operator died between writing the
+        // discovery file and this read).
+        assert!(!discovery_socket_still_live(
+            &sock.to_string_lossy(),
+            std::process::id(),
+            false
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_socket_still_live_true_for_alive_pid_and_existing_socket() {
+        let dir = temp_dir("ipc-live-good");
+        let sock = dir.join("real.sock");
+        std::fs::write(&sock, b"").unwrap();
+        assert!(discovery_socket_still_live(
+            &sock.to_string_lossy(),
+            std::process::id(),
+            false
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_socket_still_live_true_for_unknown_pid_zero_fail_open() {
+        // pid==0 means the discovery file predates the pid field / didn't
+        // parse one — we can't validate liveness, so don't reject on it.
+        let dir = temp_dir("ipc-live-unknown-pid");
+        let sock = dir.join("real.sock");
+        std::fs::write(&sock, b"").unwrap();
+        assert!(discovery_socket_still_live(&sock.to_string_lossy(), 0, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_dev_ipc_socket_validated_rejects_a_restart_orphaned_advertisement() {
+        let dir = temp_dir("ipc-validated-stale");
+        let sock = dir.join("stale.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let file = dir.join("endpoint-ipc.json");
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                sock.to_string_lossy(),
+                DEFINITELY_DEAD_PID
+            ),
+        )
+        .unwrap();
+        // The raw parser still returns the (stale) path…
+        assert_eq!(
+            read_dev_ipc_socket(&file),
+            Some(sock.to_string_lossy().to_string())
+        );
+        // …but the validated read treats it as no advertisement at all.
+        assert_eq!(read_dev_ipc_socket_validated(&file, false), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_dev_ipc_socket_validated_accepts_a_fresh_advertisement() {
+        let dir = temp_dir("ipc-validated-fresh");
+        let sock = dir.join("fresh.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let file = dir.join("endpoint-ipc.json");
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                sock.to_string_lossy(),
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_dev_ipc_socket_validated(&file, false),
+            Some(sock.to_string_lossy().to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_port_discovery_validated_falls_back_past_a_stale_per_port_file() {
+        // Mirrors per_port_discovery_prefers_the_port_file_then_falls_back,
+        // but the per-port file names a DEAD pid — a fixed dev-box port
+        // (3070/3170) must fall through to the legacy singleton exactly as
+        // it would if the per-port file were simply absent.
+        let dir = temp_dir("ipc-port-validated");
+        let stale_sock = dir.join("staging.sock");
+        std::fs::write(&stale_sock, b"").unwrap();
+        std::fs::write(
+            dir.join("endpoint-ipc.3170.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                stale_sock.to_string_lossy(),
+                DEFINITELY_DEAD_PID
+            ),
+        )
+        .unwrap();
+        let legacy_sock = dir.join("legacy.sock");
+        std::fs::write(&legacy_sock, b"").unwrap();
+        std::fs::write(
+            dir.join("endpoint-ipc.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                legacy_sock.to_string_lossy(),
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_dev_ipc_socket_for_port_validated(&dir, 3170, false),
+            Some(legacy_sock.to_string_lossy().to_string()),
+            "a stale per-port file on a fixed dev port must fall back to a live singleton"
+        );
+        // A CUSTOM port (EI-296) must NOT fall back even when its own
+        // per-port file is merely stale, not absent.
+        std::fs::write(
+            dir.join("endpoint-ipc.3271.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                stale_sock.to_string_lossy(),
+                DEFINITELY_DEAD_PID
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_dev_ipc_socket_for_port_validated(&dir, 3271, false),
+            None
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
