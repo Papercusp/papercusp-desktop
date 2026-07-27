@@ -131,6 +131,20 @@ _soffer_diag_b_to_a() {
   b_clock="$(drv_psql b "SELECT COALESCE(string_agg(ts||'|'||COALESCE(op_hlc,'<null-hlc>'), ' '), '<no outbox row>') FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr '\n' ' ')"
   b_row_clock="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||'/'||COALESCE(offer_kind,'?')||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
   a_clock="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||'@'||publisher_github_user_id||'/'||COALESCE(offer_kind,'?')||':'||COALESCE(fed_ts::text,'<null-ts>')||'|'||COALESCE(fed_hlc,'<null-hlc>'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  # THE TWO-WRITE SIGNATURE (2026-07-26, run 233227). The clock pair above proves the row was
+  # re-stamped locally; THIS pair proves it was written TWICE and names what the second write
+  # touched. created_at is stamped by whoever INSERTed (the projection sets it to its own
+  # apply-time `now`), updated_at by whoever last wrote — so `updated_at > created_at` on a row
+  # the projection created is a SECOND, LOCAL write, and the gap is how long after apply it
+  # landed. md5(record_json)+signature identify WHOSE record the row now carries: identical to
+  # b's ⇒ the signed payload survived and only the provenance columns were clobbered; different
+  # ⇒ the local writer REPLACED the publisher's signed bytes, which is the more serious defect.
+  # Captured here because the frames are TORN DOWN at run end — this evidence had to be raced by
+  # hand out of a live container once (23:5x, run 233227) and was lost on the second attempt.
+  local a_write b_write
+  a_write="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||' created='||created_at||' updated='||updated_at||' md5='||left(md5(record_json),8)||' sig='||left(signature,8)||' disp='||COALESCE(local_disposition,'-'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+  b_write="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||' created='||created_at||' updated='||updated_at||' md5='||left(md5(record_json),8)||' sig='||left(signature,8)||' disp='||COALESCE(local_disposition,'-'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
+
   if [ "${b_quar:-0}" -gt 0 ] 2>/dev/null; then
     verdict="NEVER-LEFT-B (outbox QUARANTINED on b — the row crossed the retry threshold and is excluded from the drain batch, mig 645; a b-side publish fault, NOT convergence timing)"
   elif [ "${b_pending:-0}" -gt 0 ] 2>/dev/null; then
@@ -142,7 +156,7 @@ _soffer_diag_b_to_a() {
   else
     verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
   fi
-  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default]"
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default] · WRITE SIGNATURE a=${a_write:-<unreadable>} vs b=${b_write:-<unreadable>} [updated_at > created_at on a row the projection created ⇒ a SECOND, LOCAL write landed after the apply; compare md5/sig against b to see whether it clobbered only provenance or the publisher's SIGNED BYTES]"
 }
 
 scn_seat_offer() {
