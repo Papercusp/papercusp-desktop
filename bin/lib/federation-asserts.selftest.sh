@@ -321,10 +321,16 @@ else
   RS_WORK="$(mktemp -d /tmp/fed-selftest-runsmoke-work.XXXXXX)"
   RS_COUNTER="$RS_WORK/calls"
   # attempt 1: empty-body create failure (the boot-readiness flake); attempt 2: PASS.
+  # A marker-EXISTENCE test, deliberately not a `$(cat … || echo 0)` call counter:
+  # that counter shape is exactly R1-permissive-coercion (a command-substitution-derived
+  # value coerced on empty, then numerically asserted), which check-assert-integrity
+  # scans this tree for and rejects. The fixture must not model the very anti-pattern the
+  # rig lints against — and existence is all this stand-in ever needed, since nothing
+  # reads the count. Same behaviour: first call fails empty-body, every later call PASSes,
+  # and the `rm -f "$RS_COUNTER"` below still resets it between cases.
   cat >"$RS_BIN_DIR/flaky-then-pass.sh" <<EOF
 #!/usr/bin/env bash
-n=\$(( \$(cat "$RS_COUNTER" 2>/dev/null || echo 0) + 1 )); echo "\$n" >"$RS_COUNTER"
-if [ "\$n" -eq 1 ]; then echo '✗ create failed: '; else echo 'OVERALL: PASS'; fi
+if [ -e "$RS_COUNTER" ]; then echo 'OVERALL: PASS'; else : >"$RS_COUNTER"; echo '✗ create failed: '; fi
 EOF
   chmod +x "$RS_BIN_DIR/flaky-then-pass.sh"
   # a genuine (non-empty-body) failure must NOT retry — stays FAIL every attempt.
