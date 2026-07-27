@@ -43,7 +43,8 @@
 #   bin/deb-hetzner-matrix.sh --locs=ash,nbg1 --type=cpx31 --keep-up
 #
 # ⚠ COSTS REAL MONEY (provisions 2 Hetzner cpx31). Opt-in / manual only — NEVER wire
-#   into automatic push CI. See the "CI / cron" note at the bottom of README.md.
+#   into automatic push CI. See the "⚠ CI / cron — opt-in + gated, NEVER on push"
+#   note in bin/lib/scenarios/README.md (there is no bin/README.md).
 #   npm alias: `npm run --prefix papercusp-desktop test:federation:live-matrix`.
 set -uo pipefail
 
