@@ -58,20 +58,55 @@ if [ -e "$CUR/sql/000-baseline.sql" ] || [ ! -e "$CUR/sql/001-bootstrap.sql" ]; 
 fi
 
 # --- stop any prior rig operator variant (bundle / dev-source / current)
-for pf in /tmp/serve-headless.pid /tmp/serve-devsource.pid "$PIDFILE"; do
-  if [ -f "$pf" ]; then
-    op=$(cat "$pf" 2>/dev/null)
-    if [ -n "${op:-}" ] && kill -0 "$op" 2>/dev/null; then
-      echo "stopping operator pid=$op ($pf)…"; kill "$op" 2>/dev/null
-      for i in $(seq 1 10); do kill -0 "$op" 2>/dev/null || break; sleep 1; done
-      kill -0 "$op" 2>/dev/null && kill -9 "$op" 2>/dev/null
-    fi
+#
+# EI-18757045027579334, hardened 2026-07-27 (WI-6243 wake): the pid-file pass
+# below is NECESSARY BUT NOT SUFFICIENT, and the gap bit three times. A pid file
+# records ONE pid; an incumbent that CRASHED (the sidecar OOMs at the 4GB heap
+# limit) leaves that pid dead while a sibling/child serve.mjs keeps running,
+# reparented to init. The loop then finds a dead pid, does nothing, and we
+# launch a SECOND operator against the same embedded PG. Both then present as
+# the same DBOS executor (executor_id is the constant 'local'), so the
+# split-brain is invisible in every status surface — it showed up only as a
+# workflow being recovered out from under the live process.
+#
+# So: after the pid-file pass, sweep by IDENTITY (any live serve.mjs), then
+# REFUSE to launch if the port is still held. Nothing we could match here can be
+# ours — we have not launched yet — so this cannot self-terminate.
+stop_pid() { # pid, label — TERM, wait, then KILL (observed twice: TERM ignored)
+  local op="$1" label="$2" i
+  kill -0 "$op" 2>/dev/null || return 0
+  echo "stopping operator pid=$op ($label)…"
+  kill "$op" 2>/dev/null
+  for i in $(seq 1 10); do kill -0 "$op" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$op" 2>/dev/null; then
+    echo "  pid=$op ignored SIGTERM — SIGKILL"; kill -9 "$op" 2>/dev/null; sleep 1
   fi
+}
+
+for pf in /tmp/serve-headless.pid /tmp/serve-devsource.pid "$PIDFILE"; do
+  [ -f "$pf" ] || continue
+  op=$(cat "$pf" 2>/dev/null)
+  [ -n "${op:-}" ] && stop_pid "$op" "$pf"
 done
+
+# Identity sweep — catches every incumbent the pid files missed.
+for op in $(pgrep -f 'serve\.mjs' 2>/dev/null); do
+  [ "$op" = "$$" ] && continue
+  stop_pid "$op" "orphan serve.mjs (no/stale pid file)"
+done
+
 for i in $(seq 1 10); do
   curl -fsS -m 2 "http://127.0.0.1:${HONO_PORT}/api/health" >/dev/null 2>&1 || break
   sleep 1
 done
+
+# Hard gate: a still-held port means something we could not identify owns the
+# operator. Launching anyway is what produced the split-brain — fail loudly.
+if lsof -nP -iTCP:"${HONO_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "FATAL: port ${HONO_PORT} is still held after the stop sweep — refusing to start a second operator." >&2
+  lsof -nP -iTCP:"${HONO_PORT}" -sTCP:LISTEN >&2
+  exit 1
+fi
 
 # --- env: bundle-variant parity; current db-sql/prompts; bundle resources else
 export HOME="$REAL_HOME"; export USERPROFILE="$REAL_HOME"
