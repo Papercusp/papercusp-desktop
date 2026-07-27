@@ -983,10 +983,35 @@ fed_diagnose_unmerged() {
   fi
 }
 
+# _fed_outbox_drained <src> <key> → "Y" / "N" (bare token, no error text)
+# Shared drained_at check used by both fed_merge_assert and fed_hive_merge_probe
+# to decide whether a fast-path timeout deserves a second, extended window (see
+# WI-6217 below) — kept as one helper so the two callers can't drift on the
+# boolean-cast trap fed_diagnose_unmerged's own comment already warns about
+# (`boolean || text` casts to 'true'/'false', not psql's 't'/'f' — this query
+# emits an explicit Y/N token instead, same as fed_diagnose_unmerged does).
+_fed_outbox_drained() {
+  local src="$1" key="$2"
+  drv_psql "$src" "SELECT CASE WHEN drained_at IS NOT NULL THEN 'Y' ELSE 'N' END FROM harness_shared.substrate_outbox WHERE key='$key' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]'
+}
+
 # fed_merge_assert <src> <dst> <slug> <feature_id> <title> <status> [tries]
 # INSERT origin='local' on src; poll dst for the row with origin='remote'.
 # Echoes 1 (merged) or 0. On failure, prints a fed_diagnose_unmerged line to
 # stderr naming which of the two failure classes this was (WI-6209).
+#
+# WI-6217: the fast-path window (tries*3s, default 90s) can expire on a
+# perfectly HEALTHY link — one observed delivery took >90s while a sibling
+# probe on the same rig moments earlier landed in 6s (~15x spread), and the
+# 0 this produced was misread as a dead wire, costing a multi-hour
+# misdiagnosis on WI-6209. Once the fast-path window expires, check
+# src's substrate_outbox.drained_at: if the write has genuinely DRAINED (left
+# this frame), it is neither a dead wire nor a mis-targeted write (the other
+# two classes fed_diagnose_unmerged distinguishes) — it is CONFIRMED in
+# flight, so give it one further, equally-sized window before giving up. A
+# write that never drains (a mis-targeted probe, WI-6209's other class) is
+# NOT retried — it fails at the original `tries`, same as before, since
+# waiting longer can never make an undrained row arrive.
 fed_merge_assert() {
   local src="$1" dst="$2" slug="$3" fid="$4" title="$5" status="$6" tries="${7:-30}" i row ts
   ts="$(date +%s)000"
@@ -996,6 +1021,13 @@ fed_merge_assert() {
     [ "$row" = "remote" ] && { echo 1; return 0; }
     sleep 3
   done
+  if [ "$(_fed_outbox_drained "$src" "$fid")" = "Y" ]; then
+    for i in $(seq 1 "$tries"); do
+      row="$(drv_psql "$dst" "SELECT origin FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' AND feature_id='$fid';" 2>/dev/null | tr -d '[:space:]')"
+      [ "$row" = "remote" ] && { echo 1; return 0; }
+      sleep 3
+    done
+  fi
   fed_diagnose_unmerged "$src" "$fid"
   echo 0; return 1
 }
@@ -1075,6 +1107,18 @@ fed_hive_merge_probe() {
     [ -n "$row" ] && { echo "1 $row"; return 0; }
     sleep 3
   done
+  # WI-6217: same extended-window treatment as fed_merge_assert — a fast-path
+  # timeout on a row that has genuinely DRAINED (confirmed in flight, not a
+  # dead wire or mis-targeted write) gets one further equally-sized window
+  # before giving up, instead of reading a legitimately-slow-but-healthy
+  # delivery as FAILED.
+  if [ "$(_fed_outbox_drained "$src" "$fid")" = "Y" ]; then
+    for i in $(seq 1 "$tries"); do
+      row="$(drv_psql "$dst" "SELECT harness_slug FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+      [ -n "$row" ] && { echo "1 $row"; return 0; }
+      sleep 3
+    done
+  fi
   # WI-6209: distinguish a mis-targeted write (enqueued, never drained) from a
   # genuine replication failure — a bare "0" conflates them.
   fed_diagnose_unmerged "$src" "$fid"
