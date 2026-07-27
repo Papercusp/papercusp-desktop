@@ -33,6 +33,21 @@ declare -ga FED_PORT_LOCK_FDS FED_PORT_LOCK_PATHS
 
 fed_log() { printf '\n=== %s ===\n' "$*"; }
 
+# scn_diag [prefix] — EI-18762718908280875: a scenario's diagnostic output only
+# SURVIVES a PASSING matrix run if every line starts with the `·` marker
+# (deb-hetzner-matrix.sh greps for it after a scenario returns 0 — see WI-6057).
+# An unmarked line is silently dropped from the run's live/terminal output, and
+# is indistinguishable from a probe that never executed at all — which is
+# exactly backwards, since the PASS run is usually the one you need the detail
+# from (e.g. confirming a fix actually took effect). Pipe any diagnostic dump
+# through this instead of hand-writing `sed 's/^/  ·   .../'` at each call site,
+# so the marker can never accidentally be typo'd/dropped/"tidied" away by a
+# later edit: `drv_psql a "SELECT …" 2>&1 | scn_diag "a: "`. `prefix` (default
+# empty) is inserted after the marker, before each line — pass a frame label
+# ("a: " / "b: ") to keep multi-frame dumps disambiguated, same as the
+# hand-written convention it replaces.
+scn_diag() { awk -v p="${1:-}" '{ print "  ·   " p $0 }'; }
+
 # fed_run_with_heartbeat <label> <heartbeat_interval_sec> -- <command...>
 # Runs <command...> synchronously (stdout+stderr captured, echoed on completion —
 # a `x="$(fed_run_with_heartbeat ...)"` caller works exactly like a bare

@@ -110,21 +110,27 @@ scn_revocation_kcut() {
   # first; the assertion lands once the real shape is known. Non-fatal by construction.
   echo "  · WI-560 K-CUT witness — pot_epoch_keys AFTER ban+re-key (expect: owner has N+1 for remaining device only; B has N but NOT N+1)"
   # EVERY line below MUST carry the `·` marker. The matrix runner surfaces a PASSING
-  # scenario's output by grepping `^[[:space:]]*·` (deb-hetzner-matrix.sh:351, WI-6057) and
-  # then DESTROYS $RIG_WORK/scn.<id>.log at teardown unless --keep-up. So an unmarked
-  # diagnostic line is discarded on exactly the runs that need it — a PASS — and is then
-  # unrecoverable. Verified the hard way on run m1785118654: this block's header (marked)
-  # printed while the psql rows (unmarked, indented with spaces) vanished entirely, which
-  # looked identical to the dump never having run. Marking each row via sed is what makes
-  # the evidence survive; do not "tidy" these into plain indentation.
+  # scenario's LIVE/terminal output by grepping `^[[:space:]]*·` (deb-hetzner-matrix.sh:351,
+  # WI-6057) — an unmarked diagnostic line is silently dropped from that live output on
+  # exactly the runs that need it (a PASS), and looks identical to the dump never having
+  # run. Verified the hard way on run m1785118654: this block's header (marked) printed
+  # while the psql rows (unmarked, indented with spaces) vanished entirely from the log.
+  # (The underlying $RIG_WORK/scn.<id>.log itself is separately banked to
+  # ~/.papercusp/live-fed-gate/triage/ by rig_bank_logs — WI-5481, 2026-07-19 — regardless
+  # of pass/fail and BEFORE $RIG_WORK is torn down, so the raw psql output is not actually
+  # lost forever; it's just absent from the run's own printed summary unless marked.)
+  # EI-18762718908280875: use the shared `scn_diag` helper (federation-asserts.sh) instead
+  # of a hand-written `sed 's/^/…/'` at each call site, so the marker can never be
+  # typo'd/dropped/"tidied" away by a later edit.
   #
-  # No `|| echo "dump failed"` fallback: piping into sed makes the pipeline's exit status
-  # sed's, never drv_psql's, so such a guard could never fire. `2>&1` is the real mechanism —
-  # a psql/transport error is captured and printed inline as a marked line instead.
+  # No `|| echo "dump failed"` fallback: piping into scn_diag makes the pipeline's exit
+  # status scn_diag's (awk), never drv_psql's, so such a guard could never fire. `2>&1` is
+  # the real mechanism — a psql/transport error is captured and printed inline as a marked
+  # line instead.
   echo "  · WI-560 K-CUT — frame a (owner, wrap record):"
-  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/  ·   a: /'
+  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | scn_diag "a: "
   echo "  · WI-560 K-CUT — frame b (banned joiner, own view):"
-  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/  ·   b: /'
+  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | scn_diag "b: "
 
   # ── WI-560 K-CUT ASSERTION (the CRYPTO form; the content assert below is the behavioral one) ──
   #

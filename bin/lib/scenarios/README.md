@@ -60,7 +60,27 @@ federating 2-node pot.
   `rig_restart_sidecar <inst>` (relaunch) · `rig_wait_frame_ready <inst>`
   (re-discover `FED_PG`/`FED_SC` after a restart)
 
-### Rules (MUST)
+### Diagnostics that must survive a PASS
+
+The matrix only ever prints your scenario's **last non-blank line** on PASS,
+plus any line that starts with a `·` marker (WI-6057). If you add a diagnostic
+dump (e.g. a `drv_psql` read to witness some internal state) and want it to
+show up on a PASSING run — not just on FAIL, where the last-12-lines tail
+already covers you — **every line of it must carry that marker**, or it is
+silently dropped and looks identical to the dump never having run
+(EI-18762718908280875).
+
+Don't hand-write the marker with your own `sed`/`awk` — pipe through the
+shared helper instead, so it can't be typo'd or "tidied" away later:
+
+```bash
+echo "  · my diagnostic — what this shows and why"
+drv_psql a "SELECT …" 2>&1 | scn_diag "a: "   # scn_diag (federation-asserts.sh)
+```
+
+`scn_diag [prefix]` prefixes every line with the marker plus your optional
+`prefix` (use a frame label like `"a: "` / `"b: "` when dumping the same
+query against multiple frames, so the rows stay disambiguated).
 
 1. **Do NOT provision or tear down VMs.** The matrix owns the lifecycle.
 2. **Be self-bounding.** Use the bounded `fed_*`/`rig_assert_*` helpers (they cap
