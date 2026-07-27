@@ -234,6 +234,18 @@ fi
   echo "── WS-DIAG (WI-5672) start — home-harness-slug=${RIG_HOME_HARNESS_SLUG:-unset} ──"
   echo "── pot_epoch_keys (frame a) ── (WI-5672 fix: table renamed hive_epoch_keys->pot_epoch_keys by mig 557; harness_slug column NOT renamed)"
   drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin, fed_ts FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;"
+  # WI-560 (2026-07-27): dump the JOINER's OWN epoch-key table too. Frame a's dump above is
+  # the OWNER-SIDE wrap record — it proves the owner wrapped epoch N *for* B's device pubkey,
+  # which the 20260726-213733 run showed it does (2 rows at epoch 0: owner-home nctBLYTs… AND
+  # joiner aviynw EpcM+C31…). What it CANNOT show is whether B ever RECEIVED that key, because
+  # the pot_epoch_keys projection rides the HOME substrate and a joiner that never boots the
+  # home would hold zero rows while the owner's side looks perfect. That B-side receipt is
+  # exactly WI-560's K0 leg, and it has never been measured on any rig — not failing, simply
+  # never queried (frame a only, since WI-5672 added this block). An `origin=remote` row here
+  # for B's own device pubkey IS the K0 witness; its absence localizes the gap to home-substrate
+  # boot/transport (the WI-559 lane) rather than to the re-key mechanism.
+  echo "── pot_epoch_keys (frame b, joiner's OWN view) ── (WI-560 K0: origin=remote rows here = B genuinely RECEIVED the wrapped key; empty = owner-side-only grant)"
+  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin, fed_ts FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;"
   echo "── pot_members device_attestations, as seen by frame a (owner) ── (WI-5672 fix: column renamed username->github_username by mig 185/557)"
   drv_psql a "SELECT github_username, pot_home_slug, origin, fed_ts, device_attestations FROM harness_shared.pot_members;"
   echo "── pot_members device_attestations, as seen by frame b (joiner, own view) ──"

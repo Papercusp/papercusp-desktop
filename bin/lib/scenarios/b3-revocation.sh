@@ -90,6 +90,30 @@ scn_revocation_kcut() {
   #    NOT reach B. rig_assert_absent waits the full window and passes only if it never appears.
   rig_write_content a "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned B)" todo >/dev/null
   local absent; absent="$(rig_assert_absent b "$FPOST" 30)"
+
+  # WI-560 K-CUT CRYPTO WITNESS (diagnostic — the assertion above is deliberately UNCHANGED).
+  #
+  # The pass/fail leg of this scenario is BEHAVIORAL and self-describes as "mechanism-agnostic"
+  # (header line 14): it proves post-ban content did not REACH B. That is a real cut, but it is
+  # a row-arrival fact — rig_assert_absent checks B's consolidated table, so a write-plane
+  # admission block (revoked_pubkeys) satisfies it identically to a cryptographic key cut. It
+  # therefore cannot distinguish "B held epoch N and was cut off at N+1" (the K-CUT WI-560 asks
+  # to witness) from "B never held a key at all", and it never queries an epoch-key table.
+  #
+  # These two dumps close that gap by capturing the K-sequence on BOTH sides at the one moment
+  # it is decidable — after the ban's re-key has landed, before teardown destroys the frames:
+  #   owner (a): epoch N wrapped to BOTH devices, epoch N+1 wrapped to the REMAINING device only
+  #              ⇒ the owner-side cut. (The 20260726-213733 run already showed the epoch-0 half.)
+  #   joiner (b): its OWN rows — epoch N present, epoch N+1 ABSENT ⇒ the live B-side K-CUT.
+  # Deliberately dumped rather than asserted: B-side receipt has never been measured on any rig,
+  # so asserting a shape nobody has observed would red a shared gate on a prediction. Measure
+  # first; the assertion lands once the real shape is known. Non-fatal by construction.
+  echo "  · WI-560 K-CUT witness — pot_epoch_keys AFTER ban+re-key (expect: owner has N+1 for remaining device only; B has N but NOT N+1)"
+  echo "    ── frame a (owner, wrap record) ──"
+  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/      /' || echo "      (dump failed — non-fatal)"
+  echo "    ── frame b (banned joiner, own view) ──"
+  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/      /' || echo "      (dump failed — non-fatal)"
+
   if [ "$absent" != 1 ]; then
     # EI-18712383368117845: on a LEAK, also record whether B can actually READ the leaked content.
     # rig_assert_absent only proves the row reached B's consolidated table; this distinguishes a
