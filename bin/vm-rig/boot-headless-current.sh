@@ -215,7 +215,25 @@ cd "$CUR" || exit 1
 # Deliberately NOT paired with a raised --max-old-space-size: enlarging the heap
 # would suppress the very event we need to capture, and 1.2GB steady-state
 # against a 4.2GB ceiling means this is a genuine leak, not a tight margin.
-# Snapshots land in CWD ($CUR) as Heap.<date>.<pid>.<seq>.heapsnapshot.
+# Snapshots land in CWD ($CUR) as Heap.<date>.<pid>.<seq>.heapsnapshot — NOT in
+# ~/.papercusp/heap-snapshots/, which is a DIFFERENT, unrelated capture system
+# (event-loop-lag-monitor.ts's heap-snapshot-on-high-RSS, gated OFF by default
+# behind PAPERCUSP_HEAP_SNAPSHOT/PAPERCUSP_FULL_HEAP_SNAPSHOT and never armed
+# here). WI-6264 traced a "no snapshot fired" report to exactly this mismatch:
+# the investigator checked ~/.papercusp/heap-snapshots/ (the conventional
+# location for the OTHER system) and found only a stale unrelated file, while
+# this flag's own output — when it did fire — would have been sitting in $CUR
+# the whole time. Sweep any snapshot(s) left by a just-crashed prior boot into
+# the canonical dir now, before the new process claims $CUR, so the next
+# investigation finds them where it will actually look.
+HEAP_SNAPSHOT_DIR="$REAL_HOME/.papercusp/heap-snapshots"
+mkdir -p "$HEAP_SNAPSHOT_DIR" 2>/dev/null || true
+shopt -s nullglob
+for f in "$CUR"/Heap.*.heapsnapshot; do
+  mv -f "$f" "$HEAP_SNAPSHOT_DIR/" 2>/dev/null \
+    && echo "boot-current: swept prior heap snapshot to $HEAP_SNAPSHOT_DIR/$(basename "$f")"
+done
+shopt -u nullglob
 perl -e '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); exec @ARGV or die "exec: $!"' -- \
   "$NODE" --heapsnapshot-near-heap-limit=1 "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
 sleep 2

@@ -1934,6 +1934,40 @@ mod helper_tests {
     // failure rate. These validate the fix closes exactly that window
     // without breaking the tcp:// / unknown-pid cases that must fail OPEN.
 
+    /// `discovery_pid_alive` is STRENGTHENED with a cmdline check (WI-3282) —
+    /// alive-but-not-`serve.mjs`/`serve.ts` reads as dead, same as this test
+    /// process's own pid would. Spawn a short-lived child whose argv0 is
+    /// rewritten to `serve.mjs` (bash `exec -a`) so "an alive advertised
+    /// operator pid" tests exercise the real check instead of a weaker one.
+    /// Killed on drop so a panicking assertion never leaks the process.
+    struct FakeServeProcess(std::process::Child);
+
+    impl FakeServeProcess {
+        fn spawn() -> Self {
+            let child = std::process::Command::new("bash")
+                .args(["-c", "exec -a serve.mjs sleep 30"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a fake serve.mjs-cmdline process for the test");
+            // Give /proc a moment to reflect the exec'd argv0 before any
+            // caller reads /proc/<pid>/cmdline.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Self(child)
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+    }
+
+    impl Drop for FakeServeProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn discovery_socket_still_live_true_for_tcp_endpoint_regardless_of_filesystem() {
         // A `tcp://` endpoint has nothing on the local filesystem to check —
@@ -1986,9 +2020,10 @@ mod helper_tests {
         let dir = temp_dir("ipc-live-good");
         let sock = dir.join("real.sock");
         std::fs::write(&sock, b"").unwrap();
+        let fake_operator = FakeServeProcess::spawn();
         assert!(discovery_socket_still_live(
             &sock.to_string_lossy(),
-            std::process::id(),
+            fake_operator.pid(),
             false
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2035,13 +2070,14 @@ mod helper_tests {
         let dir = temp_dir("ipc-validated-fresh");
         let sock = dir.join("fresh.sock");
         std::fs::write(&sock, b"").unwrap();
+        let fake_operator = FakeServeProcess::spawn();
         let file = dir.join("endpoint-ipc.json");
         std::fs::write(
             &file,
             format!(
                 r#"{{"socketPath":"{}","pid":{}}}"#,
                 sock.to_string_lossy(),
-                std::process::id()
+                fake_operator.pid()
             ),
         )
         .unwrap();
@@ -2072,12 +2108,13 @@ mod helper_tests {
         .unwrap();
         let legacy_sock = dir.join("legacy.sock");
         std::fs::write(&legacy_sock, b"").unwrap();
+        let fake_operator = FakeServeProcess::spawn();
         std::fs::write(
             dir.join("endpoint-ipc.json"),
             format!(
                 r#"{{"socketPath":"{}","pid":{}}}"#,
                 legacy_sock.to_string_lossy(),
-                std::process::id()
+                fake_operator.pid()
             ),
         )
         .unwrap();
