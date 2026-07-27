@@ -735,14 +735,33 @@ copy_pkg_closure() {
     fi
     mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
     cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
-    # WI-5638: strip runtime model-download scratch. @huggingface/transformers
-    # writes fetched ONNX models to node_modules/@huggingface/transformers/.cache
-    # at RUNTIME (default cache_dir); on a dev box this grew to 3.6GB (harrier-oss
-    # 2.3GB + embeddinggemma 1.2GB + bge-small 127MB) and rode into the .deb via the
-    # bundle.resources "sidecar/**/*" glob → a 4.2GB installer. The cache is pure
-    # download scratch — never needed in the bundle (models re-download on first
-    # use), so drop any package-local `.cache` from every copied closure package.
-    rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"
+    # WI-5638 (2026-07-20, revised 2026-07-27): strip runtime model-download
+    # scratch — but NOT the two embedding models the desktop app actually
+    # needs at runtime. @huggingface/transformers' DEFAULT cacheDir resolves
+    # to a path INSIDE its own package dir (src/env.js: `DEFAULT_CACHE_DIR =
+    # path.join(dirname__, '/.cache/')` when RUNNING_LOCALLY, which is always
+    # true under Node) — there is no env.cacheDir/localModelPath override
+    # anywhere in libs/generic/memory, so that in-bundle path is the ONLY
+    # place the packaged app looks. A .deb installs its resources tree
+    # root-owned/read-only for the running (non-root) user, so "models
+    # re-download on first use" — the ORIGINAL assumption behind a blanket
+    # `rm -rf .cache` here — does not hold: a stripped harrier/gemma cache
+    # cannot be regenerated at runtime, it just breaks local embedding
+    # silently. Per owner [owner 2026-07-20, recorded in memory]: the desktop
+    # app runs a LIVE HYBRID of the harrier + embeddinggemma embedders (both
+    # intentionally bundled, not dead weight) — keep BOTH. Only bge-small
+    # (Xenova/bge-small-en-v1.5, 'local' mode) and any other/future scratch
+    # under `.cache` is genuinely unused and safe to strip.
+    _transformers_cache="$SIDECAR_DIR/node_modules/$cur/.cache"
+    if [[ "$cur" == "@huggingface/transformers" && -d "$_transformers_cache" ]]; then
+      find "$_transformers_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' -exec rm -rf {} +
+      if [[ -d "$_transformers_cache/onnx-community" ]]; then
+        find "$_transformers_cache/onnx-community" -mindepth 1 -maxdepth 1 \
+          ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' -exec rm -rf {} +
+      fi
+    else
+      rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"
+    fi
     prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
     prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
