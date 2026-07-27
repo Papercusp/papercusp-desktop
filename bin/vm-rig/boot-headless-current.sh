@@ -90,9 +90,36 @@ for pf in /tmp/serve-headless.pid /tmp/serve-devsource.pid "$PIDFILE"; do
 done
 
 # Identity sweep — catches every incumbent the pid files missed.
-for op in $(pgrep -f 'serve\.mjs' 2>/dev/null); do
-  [ "$op" = "$$" ] && continue
-  stop_pid "$op" "orphan serve.mjs (no/stale pid file)"
+#
+# LABELLING (WI-6271, 2026-07-27): the main operator DELIBERATELY spawns a
+# staging operator on :3170 — "[env-operators] spawned staging on :3170
+# (bundled, request-only, pid=N)" — so TWO live serve.mjs processes is the
+# DESIGNED steady state, not a fault. The operator's own connection budgeter
+# says as much: "~78 direct across 2 proc(s) vs live max_connections=100 — ok".
+#
+# Calling that child "orphan serve.mjs (no/stale pid file)" reads as the
+# split-brain hazard the header comment above describes, and has now sent at
+# least two separate OOM investigations down a false path (see WI-6271). The
+# BEHAVIOUR here is correct — stopping the child before relaunch is right, and
+# the parent respawns it — so only the wording changes.
+#
+# Identity must be resolved BEFORE the first kill: once the parent is stopped
+# its child reparents to init and the lineage evidence is gone for good.
+sweep_pids="$(pgrep -f 'serve\.mjs' 2>/dev/null | grep -vx "$$" || true)"
+staging_pid="$(lsof -nP -iTCP:"${PAPERCUSP_STAGING_PORT:-3170}" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+sweep_lineage="$(for op in $sweep_pids; do
+  echo "$op $(ps -o ppid= -p "$op" 2>/dev/null | tr -d ' ')"
+done)"
+
+for op in $sweep_pids; do
+  pp="$(printf '%s\n' "$sweep_lineage" | awk -v p="$op" '$1==p{print $2}')"
+  if [ -n "${staging_pid:-}" ] && [ "$op" = "$staging_pid" ]; then
+    stop_pid "$op" "staging operator on :${PAPERCUSP_STAGING_PORT:-3170} — EXPECTED child of pid ${pp:-?}, not an orphan"
+  elif [ -n "${pp:-}" ] && printf '%s\n' $sweep_pids | grep -qx "$pp"; then
+    stop_pid "$op" "EXPECTED child of live serve.mjs pid $pp, not an orphan"
+  else
+    stop_pid "$op" "genuine orphan serve.mjs (no/stale pid file, ppid=${pp:-?})"
+  fi
 done
 
 for i in $(seq 1 10); do
