@@ -225,6 +225,21 @@ _soffer_diag_b_to_a() {
   # ⇒ the local writer REPLACED the publisher's signed bytes, which is the more serious defect.
   # Captured here because the frames are TORN DOWN at run end — this evidence had to be raced by
   # hand out of a live container once (23:5x, run 233227) and was lost on the second attempt.
+  # WI-6210 ECHO PROBE (the other half of the two-write signature). The writer audit
+  # names the STATEMENT that re-stamped the row; this names where its OP came from.
+  # Frame a does not publish these offers — b does — so a's substrate_outbox must
+  # hold NOTHING for p2p_work_offers. A row here means a's CDC capture re-enqueued a
+  # record a merely RECEIVED, i.e. a re-published b's offer under a's own identity and
+  # then merged its own echo back (which is exactly what a's node id inside a.fed_hlc
+  # implies). That distinguishes the two remaining mechanisms, which are otherwise
+  # identical downstream:
+  #   a.outbox EMPTY    → the second write came from an apply of a op a never authored
+  #                       (an apply-path/provenance fault: read the WI-6210 detector
+  #                       stack in a's serve.log for the un-threaded caller).
+  #   a.outbox POPULATED→ the capture echo-guard failed to skip a received row, so the
+  #                       defect is upstream of the apply, in capture.
+  local a_outbox
+  a_outbox="$(drv_psql a "SELECT COALESCE(string_agg(COALESCE(harness_slug,'<null>')||':'||COALESCE(ts::text,'<null-ts>')||'|'||COALESCE(op_hlc,'<null-hlc>'), ' '), '<no outbox row on a — a authored nothing>') FROM harness_shared.substrate_outbox WHERE table_name='p2p_work_offers' AND harness_slug='$RIG_HIVE_ID';" 2>/dev/null | tr '\n' ' ')"
   local a_write b_write a_audit b_audit
   a_audit="$(_soffer_write_audit a)"
   b_audit="$(_soffer_write_audit b)"
@@ -242,7 +257,7 @@ _soffer_diag_b_to_a() {
   else
     verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
   fi
-  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default] · WRITE SIGNATURE a=${a_write:-<unreadable>} vs b=${b_write:-<unreadable>} [updated_at > created_at on a row the projection created ⇒ a SECOND, LOCAL write landed after the apply; compare md5/sig against b to see whether it clobbered only provenance or the publisher's SIGNED BYTES] · WRITER AUDIT a=${a_audit:-<unreadable>} vs b=${b_audit:-<unreadable>} [every INSERT/UPDATE on p2p_work_offers since this scenario started, with the STATEMENT that ran it — read a's entries in order: the first is the projection apply, and whatever entry moved origin to 'local' NAMES the second writer in its own SQL. b's entries are the control (its own publish through putWorkOffer), so an empty a-audit next to a populated b-audit means the capture, not the write, is missing]"
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default] · WRITE SIGNATURE a=${a_write:-<unreadable>} vs b=${b_write:-<unreadable>} [updated_at > created_at on a row the projection created ⇒ a SECOND, LOCAL write landed after the apply; compare md5/sig against b to see whether it clobbered only provenance or the publisher's SIGNED BYTES] · WRITER AUDIT a=${a_audit:-<unreadable>} vs b=${b_audit:-<unreadable>} [every INSERT/UPDATE on p2p_work_offers since this scenario started, with the STATEMENT that ran it — read a's entries in order: the first is the projection apply, and whatever entry moved origin to 'local' NAMES the second writer in its own SQL. b's entries are the control (its own publish through putWorkOffer), so an empty a-audit next to a populated b-audit means the capture, not the write, is missing] · ECHO PROBE a.outbox(p2p_work_offers)=${a_outbox:-<unreadable>} [frame a publishes NO offers, so any row here means a's capture re-enqueued a record it merely RECEIVED — a re-published b's offer under its own identity and merged its own echo back; EMPTY instead points at the apply path, where the WI-6210 detector stack in a's serve.log names the un-threaded caller]"
 }
 
 scn_seat_offer() {

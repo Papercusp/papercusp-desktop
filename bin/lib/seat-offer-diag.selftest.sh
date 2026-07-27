@@ -50,6 +50,11 @@ drv_psql() {
     # would otherwise swallow it and feed the origin/status breakdown's fixture into
     # the audit field (a silently wrong-but-plausible diag line).
     *:*rig_offer_write_audit*)     printf '%s\n' "$CASE_AUDIT" ;;
+    # WI-6210 ECHO PROBE (a's own outbox) — same trap as the audit read above: it is
+    # an `a:` read that uses string_agg, so without this case the breakdown's fixture
+    # would answer it and the probe would report a's ROW BREAKDOWN as if it were a's
+    # outbox — a wrong-but-plausible line pointing at the wrong half of the mechanism.
+    a:*substrate_outbox*)          printf '%s\n' "$CASE_ECHO" ;;
     a:*string_agg*)                printf '%s\n' "$CASE_BREAK" ;;
     a:*count*)                     printf '%s\n' "$CASE_ANY" ;;
     *)                             printf '\n' ;;
@@ -72,6 +77,9 @@ RIG_HIVE_ID='mx-selftest-pot'
 # fixtures set only the reads their verdict turns on); a global default keeps `set -u`
 # from aborting the classifier before it reaches the branch under test.
 CASE_AUDIT='1) INSERT off-1@7 t=1 pid=9 app=sc origin=->remote fed_ts=->63 q<INSERT INTO harness_shared.p2p_work_offers ...>'
+# Same for the WI-6210 echo probe (a's own substrate_outbox): answered for every branch
+# case, so `set -u` cannot abort the classifier before the branch under test is reached.
+CASE_ECHO='<no outbox row on a — a authored nothing>'
 
 # 1. Quarantined outbox row on b ⇒ it never left b. Outranks every later branch:
 #    a quarantined row is excluded from the drain batch (mig 645), so "a has
@@ -197,6 +205,30 @@ if printf '%s' "$_audit_out" | grep -q 'WRITER AUDIT a=2) UPDATE off-1@7 origin=
   ok "the audit field carries the captured writes (not the origin/status breakdown)"
 else
   bad "the audit field must be fed by the rig_offer_write_audit read — got: $_audit_out"
+fi
+
+# WI-6210 ECHO PROBE. The writer audit names the STATEMENT that re-stamped the row;
+# the echo probe names where its OP came from — a's own outbox is empty iff a never
+# authored one. The two together separate "apply-path fault" from "capture echoed a
+# received row", which are identical in every other observable column.
+grep -q 'substrate_outbox' "$SCN" && grep -q 'ECHO PROBE a.outbox' "$SCN" \
+  && ok "the echo probe (a's own outbox) exists and is surfaced on the FAIL line" \
+  || bad "the FAIL line must report whether frame a AUTHORED an op for a record it only received"
+# It must be scoped like every other outbox read (multi-tenant table) — the
+# harness_slug invariant above covers the read; this pins that it is a's, not b's.
+grep -q "drv_psql a \"SELECT COALESCE(string_agg(COALESCE(harness_slug" "$SCN" \
+  && ok "the echo probe reads frame A's outbox (not b's)" \
+  || bad "the echo probe must read frame a — reading b's outbox answers a question we already have"
+# And it must be answered by its OWN read, not by the breakdown's fixture (the exact
+# trap the writer-audit read hit): prove a distinct value reaches the echo field.
+CASE_TOTAL=3 CASE_PENDING=0 CASE_QUAR=0 CASE_ANY=1 CASE_BREAK='local/open=1' \
+  CASE_ECHO='mx-selftest-pot:63|1-<A-NODE>' \
+  CASE_AUDIT='2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'
+_echo_out="$(_soffer_diag_b_to_a mx-seatoffer-selftest)"
+if printf '%s' "$_echo_out" | grep -q 'ECHO PROBE a.outbox(p2p_work_offers)=mx-selftest-pot:63|1-<A-NODE>'; then
+  ok "the echo field carries a's outbox read (not the origin/status breakdown)"
+else
+  bad "the echo field must be fed by a's substrate_outbox read — got: $_echo_out"
 fi
 
 echo
