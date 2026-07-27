@@ -481,9 +481,11 @@ else
 fi
 
 # B discovers A's hive over the wire (proves the directory announce crossed) and
-# reads its memberLinks; fall back to A's OWN listing if the announce hasn't landed
-# in B's directory yet — the join + merge legs then still prove federation
-# independent of the directory-announce projection.
+# reads its memberLinks; fall back to the create response's OWN memberLinks
+# (not a re-query of A's discovery listing — WI-6190, that route can never
+# list a locally-owned pot) if the announce hasn't landed in B's directory
+# yet — the join + merge legs then still prove federation independent of the
+# directory-announce projection.
 fed_log "B: poll GET /api/discovery/hives for '$HIVE_SLUG' (~$(( ${DISCOVERY_RETRIES:-40} * 3 ))s)"
 MEMBER_LINKS="[]"; links_via="directory(B)"
 for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
@@ -495,9 +497,16 @@ for _ in $(seq 1 "${DISCOVERY_RETRIES:-40}"); do
   sleep 3
 done
 if [ -z "$MEMBER_LINKS" ] || [ "$MEMBER_LINKS" = "[]" ]; then
-  arow="$(fed_hive_dir_row a "$HIVE_SLUG")"
-  MEMBER_LINKS="$(fed_json "$arow" "json.dumps(d.get('memberLinks') or [])")"
-  links_via="local(A-fallback)"
+  # WI-6190: A's own /api/discovery/pots can NEVER list a locally-owned pot —
+  # buildHiveDirectoryRows only returns peer-learned discovered rows plus
+  # JOINED-remote projects (remote_hive===true); a pot A itself created is
+  # neither, so `fed_hive_dir_row a` here always misses and this leg always
+  # hard-exited. Read memberLinks from the create response's OWN `publish`
+  # outcome instead — from-repo already synthesizes a self-link there when
+  # publish succeeded but returned no memberLinks (WI-3577), so it's
+  # populated as soon as $a_resp exists, no re-query needed.
+  MEMBER_LINKS="$(fed_json "$a_resp" "json.dumps(d.get('publish', {}).get('memberLinks') or [])")"
+  links_via="local(A-create-response)"
 fi
 if [ -n "$MEMBER_LINKS" ] && [ "$MEMBER_LINKS" != "[]" ]; then
   echo "✓ memberLinks resolved via $links_via: $(fed_json "$MEMBER_LINKS" 'len(d)') link(s)"
