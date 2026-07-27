@@ -109,14 +109,50 @@ HOST_EXTERNALS=(
 )
 for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 
+# ── 1a. BUILD STAMP (EI-18781869842495729) ──────────────────────────────────
+# WHY: this bundle is minified and git-sync EXCLUDES it, so "does the deployed
+# process contain fix X?" was answerable only by grepping serve.mjs for marker
+# strings and then reasoning about what esbuild preserves. That reasoning is a
+# trap: a PROPERTY (`state.drainWaiters`) survives minification while a
+# module-local FUNCTION (`flushDrainWaiters`) is renamed away — so the same fix
+# reads as "present" or "absent" depending purely on which identifier you
+# happened to grep. On 2026-07-27 that produced a CONFIDENTLY WRONG attribution
+# claim ("converged on fix A alone") that reached a `confidence: verified` fact
+# and a work-item completion record before being caught.
+#
+# `composedAt` is the field that actually settles it: compare it against the
+# mtime of the source file carrying your fix. No string archaeology.
+# Do NOT mutate HOST_BANNER itself — it is shared with the packaged sidecar.
+BUILD_SHA="$(cd "$REPO_ROOT" && git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+BUILD_DIRTY=0
+[ -n "$(cd "$REPO_ROOT" && git status --porcelain 2>/dev/null | head -1)" ] && BUILD_DIRTY=1
+COMPOSED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_STAMP="sha=$BUILD_SHA dirty=$BUILD_DIRTY composedAt=$COMPOSED_AT"
+# Single-quoted JS string; the stamp is [0-9a-z=:.TZ -] only, so it cannot break out.
+STAMP_BANNER="${HOST_BANNER}console.log('[sidecar] build ${BUILD_STAMP}');"
+
 echo "→ esbuild-bundling serve entry → $OUT/serve.mjs"
+echo "  build stamp: $BUILD_STAMP"
 ( cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
     --bundle --platform=node --format=esm --target=node22 \
     "${HOST_EXTERNALS[@]}" \
     --outfile="$OUT/serve.mjs" \
-    --banner:js="$HOST_BANNER" \
+    --banner:js="$STAMP_BANNER" \
     --define:__PAPERCUSP_BUNDLED_SIDECAR__=true )
 [ -s "$OUT/serve.mjs" ] || { echo "FATAL: esbuild produced no serve.mjs" >&2; exit 1; }
+
+# Sidecar stamp file: lets you answer the question with a `cat` instead of
+# grepping a 61MB minified file, and the sha256 proves the far side's serve.mjs
+# is byte-identical to what was built here (catches a truncated/partial rsync).
+SERVE_SHA256="$(sha256sum "$OUT/serve.mjs" | cut -d' ' -f1)"
+printf '%s\nserveSha256=%s\nserveBytes=%s\n' \
+  "$BUILD_STAMP" "$SERVE_SHA256" "$(wc -c < "$OUT/serve.mjs" | tr -d ' ')" \
+  > "$OUT/BUILD-STAMP.txt"
+
+# Post-condition: the stamp must be REACHABLE in the artifact, or the whole
+# point is lost silently (this is the recurrence guard for the bug above).
+grep -aq "\[sidecar\] build sha=$BUILD_SHA" "$OUT/serve.mjs" \
+  || { echo "FATAL: build stamp missing from composed serve.mjs" >&2; exit 1; }
 
 # ── 2. the two sql dirs (see the note at the top) ───────────────────────────
 echo "→ db-sql/  ← MAIN migrations   ($(ls "$MAIN_SQL_SRC"/*.sql | wc -l | tr -d ' ') files)"
@@ -143,10 +179,15 @@ if [ "$PUSH" = "1" ]; then
   # NOTE: no --delete at the top level — node_modules/ and any local state on
   # the far side must survive. Each subtree below IS mirrored exactly.
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_DIR/serve.mjs"
+  rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_DIR/BUILD-STAMP.txt"
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_DIR/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_DIR/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_DIR/prompts/"
   echo "→ pushed. Restart the far side:  ssh $VM 'bash ~/boot-headless-current.sh'"
+  echo "→ verify what the far side is RUNNING (not what you think it is):"
+  echo "     ssh $VM 'cat $REMOTE_DIR/BUILD-STAMP.txt; shasum -a 256 $REMOTE_DIR/serve.mjs'"
+  echo "     ssh $VM 'grep -ao \"\\[sidecar\\] build [^\"\\\`]*\" $REMOTE_DIR/serve.mjs | head -1'"
+  echo "   after a restart the stamp is also the first line in the sidecar log."
 else
   echo "→ built locally at $OUT (not pushed)"
 fi
