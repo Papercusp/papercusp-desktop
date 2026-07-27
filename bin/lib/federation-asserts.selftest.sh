@@ -763,11 +763,13 @@ drv_psql() {
   local inst="$1" sql="$2" n
   case "$sql" in
     *"INSERT INTO harness_shared.harness_features_consolidated"*) : ;;
-    *"SELECT origin FROM harness_shared.harness_features_consolidated"*|*"SELECT harness_slug FROM harness_shared.harness_features_consolidated"*)
+    "SELECT origin FROM harness_shared.harness_features_consolidated"*)
       n=$(( $(cat "$WI6217_COUNTER") + 1 )); echo "$n" > "$WI6217_COUNTER"
-      if [ "$n" -ge 2 ]; then
-        case "$sql" in *harness_slug*) echo "$SLUG_ECHO" ;; *) echo remote ;; esac
-      fi
+      [ "$n" -ge 2 ] && echo remote
+      ;;
+    "SELECT harness_slug FROM harness_shared.harness_features_consolidated"*)
+      n=$(( $(cat "$WI6217_COUNTER") + 1 )); echo "$n" > "$WI6217_COUNTER"
+      [ "$n" -ge 2 ] && echo "$SLUG_ECHO"
       ;;
     *"SELECT CASE WHEN drained_at IS NOT NULL"*) echo "$WI6217_DRAINED" ;;
     *"coalesce(workspace_id"*) : ;;  # fed_diagnose_unmerged's own probe — empty is fine, not under test here
