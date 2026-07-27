@@ -7193,7 +7193,7 @@ pub fn run() {
                     // treated as "not ready yet" rather than dialed straight
                     // into a measured 100%-failure ENOENT storm.
                     let dir_src = papercusp_dir.clone();
-                    let dev_via_wsl = should_route_via_wsl(&app.handle());
+                    let dev_via_wsl = should_route_via_wsl(app.handle());
                     let handle = endpoint_ipc::IpcClientHandle::new(move || {
                         let port =
                             SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
