@@ -2903,21 +2903,40 @@ _stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || ech
 } > "$SIDECAR_TMP_DIR/.sidecar-build-stamp"
 echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, P-004)"
 
-# WI-5638 recurrence guard: node_modules/@huggingface/transformers/.cache (and
-# any sibling package's runtime download scratch) must never reach the .deb —
-# it is not source, it re-downloads on first use, and left unchecked it grew
-# to 3.6GB on a dev box (harrier-oss 2.3GB + embeddinggemma 1.2GB + bge-small
-# 127MB), turning a ~0.6GB installer into a 4.2GB one. copy_pkg_closure's
-# `rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"` (above) is the primary
-# defense; this is the class-level backstop — it fails the BUILD if ANY
-# `.cache` dir survives staging, from that path or a future one (a new
-# closure entry point, the embedded-postgres/node-pty copies, …). One `find`
-# over the fully-staged tree, run once, right before publish.
-_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null)
+# WI-5638 recurrence guard (revised 2026-07-27 — see the copy_pkg_closure
+# comment above for why the strip is no longer blanket): every runtime
+# download-scratch `.cache` dir must still never reach the .deb from any
+# OTHER path (a new closure entry point, the embedded-postgres/node-pty
+# copies, a future package, …) — that class-level backstop stays absolute.
+# The ONE exception is the transformers package's own `.cache`, which now
+# deliberately CARRIES the two owner-confirmed live embedding models
+# (harrier-oss + embeddinggemma); this guard still fails the build if
+# anything else survives there (a stray third model, a future regression
+# reintroducing the full scratch tree, …), so the exception can't silently
+# widen.
+_expected_cache="$SIDECAR_DIR/node_modules/@huggingface/transformers/.cache"
+_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null | grep -v -F -x "$_expected_cache")
 if [[ -n "$_stray_caches" ]]; then
   echo "FATAL: runtime .cache dir(s) found in staged sidecar node_modules — these are download scratch that must never ship (WI-5638):" >&2
   echo "$_stray_caches" >&2
   exit 1
+fi
+if [[ -d "$_expected_cache" ]]; then
+  _unexpected_cache_entries=$(find "$_expected_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' 2>/dev/null)
+  if [[ -n "$_unexpected_cache_entries" ]]; then
+    echo "FATAL: unexpected top-level entries in the preserved transformers .cache — only onnx-community/{harrier-oss,embeddinggemma} should survive (WI-5638):" >&2
+    echo "$_unexpected_cache_entries" >&2
+    exit 1
+  fi
+  if [[ -d "$_expected_cache/onnx-community" ]]; then
+    _unexpected_model_entries=$(find "$_expected_cache/onnx-community" -mindepth 1 -maxdepth 1 \
+      ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' 2>/dev/null)
+    if [[ -n "$_unexpected_model_entries" ]]; then
+      echo "FATAL: unexpected model dir(s) survived the transformers .cache strip — only harrier-oss + embeddinggemma are owner-confirmed live (WI-5638):" >&2
+      echo "$_unexpected_model_entries" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
