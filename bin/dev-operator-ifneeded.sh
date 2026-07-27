@@ -238,16 +238,51 @@ GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
 # TERM INT HUP` tells "we were asked to stop" apart from "the command
 # crashed on its own", closing that narrow theoretical race as cheap
 # defense-in-depth.
+export -f in_use
+# EI-18745117818375852: under load, the sidecar this loop just spawned can
+# still be alive (mid-shutdown, or the memory-watchdog's own exiting process
+# hasn't released its listen socket yet) when the 3s backoff expires — the
+# blind restart then dies INSTANTLY on EADDRINUSE against its own still-live
+# predecessor, and because that death is itself non-zero, the loop restarts
+# again just as fast: a self-sustaining restart storm that squats the port
+# with a growing pile of dead-on-arrival children while `verify-tauri-
+# headless.sh` (or the Tauri window) sits waiting for a bridge that will
+# never come up. Two changes close this:
+#   1. Before EVERY restart, wait (bounded) for $PORT to actually be free —
+#      not a fixed sleep — so a restart only ever fires once the previous
+#      listener is gone.
+#   2. If $PORT never frees, or the child keeps dying immediately regardless,
+#      abort the loop with a clear diagnosis after a bounded number of
+#      consecutive failures instead of restarting forever.
 setsid bash -c 'echo "$$" > "$1"; shift
+  port="$1"; shift
   stopping=0
   trap "stopping=1" TERM INT HUP
+  fails=0
+  max_fails=8
   while :; do
     ( eval "$1" ); code=$?
     [ "$stopping" = 1 ] && exit 0
     [ "$code" -eq 0 ] && exit 0
-    echo "[tauri] operator dev server exited code=$code — restarting in 3s (WI-3042 supervision)" >&2
-    sleep 3
-  done' _ "$GROUP_FILE" "$DEV_CMD" &
+    fails=$((fails + 1))
+    if in_use "$port"; then
+      echo "[tauri] operator dev server exited code=$code (attempt $fails/$max_fails) — :$port is STILL held (likely by the exiting process itself); waiting up to 30s for it to free before restarting (WI-3042 / EI-18745117818375852)" >&2
+      waited=0
+      while in_use "$port" && [ "$waited" -lt 30 ]; do
+        sleep 1; waited=$((waited + 1))
+      done
+      if in_use "$port"; then
+        echo "[tauri] FATAL: :$port never freed after 30s and the operator dev server has failed $fails time(s) in a row (code=$code) — refusing to keep restarting into EADDRINUSE. Find + kill the squatter by hand: ss -ltnp | grep :$port (WI-3042 / EI-18745117818375852)" >&2
+        exit 98
+      fi
+    fi
+    if [ "$fails" -ge "$max_fails" ]; then
+      echo "[tauri] FATAL: operator dev server has exited $fails times in a row (code=$code) — aborting instead of restarting forever (WI-3042 / EI-18745117818375852)" >&2
+      exit 99
+    fi
+    echo "[tauri] operator dev server exited code=$code — restarting (attempt $fails/$max_fails) (WI-3042 supervision)" >&2
+    sleep 1
+  done' _ "$GROUP_FILE" "$PORT" "$DEV_CMD" &
 CHILD=$!
 # EI-256 (the REAL root cause found while writing the reaper's first
 # hermetic test — the theoretical race above was NOT it; A/B-testing that

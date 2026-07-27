@@ -255,6 +255,28 @@ else
   bad "RIG_BANK_FAIL_KEEP=2 did not bound the fail/ bundles — got $n_fail_dirs dirs"
 fi
 
+# ── 8. EI-18744109084137549: a FAIL bundle must be HONEST about the fact that ─
+#      serve-*.log carries no scenario/subject ids — both as a standalone
+#      README a triager finds by `ls`, and inline in every serve-*.log's own
+#      header (so the caveat travels with the file even if it's copied out of
+#      the bundle on its own).
+reset_env
+rig_bank_logs "seat_offer"
+fail_dir="$(ls -1d "$RIG_BANK_DIR"/fail/*/ 2>/dev/null | head -1)"
+if [ -n "$fail_dir" ] \
+  && [ -f "$fail_dir/README-SCOPE-CAVEAT.txt" ] \
+  && grep -qi "do not record scenario/subject ids" "$fail_dir/README-SCOPE-CAVEAT.txt" 2>/dev/null; then
+  ok "FAIL bundle carries a standalone README-SCOPE-CAVEAT.txt warning that serve-*.log has no subject ids"
+else
+  bad "FAIL bundle is missing (or has a wrong) README-SCOPE-CAVEAT.txt — dir has: $(ls "$fail_dir" 2>/dev/null | tr '\n' ' ')"
+fi
+serve_bank="$(ls "$RIG_BANK_DIR"/serve-a-*.log 2>/dev/null | head -1)"
+if [ -f "$serve_bank" ] && grep -q "ABSENCE here is NOT evidence" "$serve_bank" 2>/dev/null; then
+  ok "every banked serve-*.log's own header carries the subject-id-absence caveat (survives being copied out of the fail/ bundle alone)"
+else
+  bad "serve-*.log header is missing the subject-id-absence caveat: $serve_bank"
+fi
+
 echo
 if [ "$FAILS" = 0 ]; then echo "PASS — rig_bank_logs selftest"; exit 0; fi
 echo "FAIL — $FAILS check(s) failed"; exit 1

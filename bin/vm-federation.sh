@@ -24,7 +24,13 @@
 #                      default is a pristine `vmctl reset` per VM + fresh
 #                      install (the clean-boot acceptance run)
 #   --skip-install     don't (re)install the .deb (with --no-reset)
-#   --keep-up          leave the VMs running after the run (debugging)
+#   --keep-up          leave the VMs running after the run (debugging); also
+#                      (WI-6192) leaves the host-run testnet DHT standing
+#                      instead of killing it in cleanup, so a follow-up run
+#                      can reuse it via --dht-bootstrap=HOST:PORT
+#   --dht-bootstrap=HOST:PORT  attach to an already-running testnet (e.g. one
+#                      left up by a prior --keep-up run) instead of spawning
+#                      a new one
 #   --deb=PATH         .deb to test (default: newest in the bundle output)
 #
 # Pass criteria (the local merge proof, now cross-machine): both instances
@@ -48,7 +54,7 @@ VMCTL="$DESKTOP_DIR/scripts/linux-test-vm/vmctl"
 set +e
 
 # ── args ────────────────────────────────────────────────────────────────────
-VMS=2; DHT=testnet; NET=bridge; RESET=1; INSTALL=1; KEEP_UP=0; DEB=""
+VMS=2; DHT=testnet; NET=bridge; RESET=1; INSTALL=1; KEEP_UP=0; DEB=""; DHT_BOOTSTRAP_OVERRIDE=""
 for arg in "$@"; do
   case "$arg" in
     --vms=1) VMS=1 ;;
@@ -61,6 +67,9 @@ for arg in "$@"; do
     --skip-install) INSTALL=0 ;;
     --keep-up)     KEEP_UP=1 ;;
     --deb=*)       DEB="${arg#--deb=}" ;;
+    # WI-6192: attach to an already-running persistent testnet (e.g. one left
+    # standing by a prior --keep-up run) instead of spawning a new one.
+    --dht-bootstrap=*) DHT_BOOTSTRAP_OVERRIDE="${arg#--dht-bootstrap=}" ;;
     -h|--help)     sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown arg: $arg (see --help)" ;;
   esac
@@ -304,8 +313,13 @@ for inst in a b; do [ "${FED_KIND[$inst]}" = vm ] && install_vm "$inst"; done
 BOOTSTRAP=""
 case "$DHT" in
   testnet)
-    if [ "$NET" = bridge ]; then
-      BOOTSTRAP="$(fed_start_testnet_dht "$OPERATOR_DIR" "$WORK" "$FEDBR_HOST_IP")" || exit 3
+    if [ -n "$DHT_BOOTSTRAP_OVERRIDE" ]; then
+      # WI-6192: attach to an already-running testnet (typically one left up by
+      # a prior --keep-up run) instead of spawning our own.
+      BOOTSTRAP="$DHT_BOOTSTRAP_OVERRIDE"
+      fed_log "reusing existing testnet DHT bootstrap: $BOOTSTRAP (--dht-bootstrap)"
+    elif [ "$NET" = bridge ]; then
+      BOOTSTRAP="$(fed_start_testnet_dht "$OPERATOR_DIR" "$WORK" "$FEDBR_HOST_IP" "$KEEP_UP")" || exit 3
     else
       # socket mode: host is not on the fed L2 — bootstrap runs inside fed-a
       # (the .deb's own bundled node + a host-side esbuild bundle of
