@@ -723,12 +723,32 @@ except Exception: pass
 # POST /api/harness/pots/from-repo — clone + blueprint + hive home + member +
 # auto-publish. runTests:false + shallow keep it light (route timeoutSec is 600).
 # Echoes the raw JSON: { ok, created:{potSlug,memberSlug}, publish:{announced}, … } (potSlug was hiveSlug pre-rename).
+#
+# force:true (WI-6186): every fed run WIPEs the instance's ~/.papercusp before
+# this call (§7), so A never has a local hive for this repo — but a PRIOR run
+# against the same REPO_URL (default octocat/Hello-World) auto-published to
+# the Cupboard central index, which is NOT wiped (it's an external, persistent
+# service). So the paste-time lookup (lookup-hive-for-repo.ts leg 3) finds that
+# stale global record and the route returns `{ok:true, existing:{...}}` instead
+# of `{ok:true, created:{...}}` — every re-run against the same repo hard-fails.
+# That `existing` hit carries only `potId` (a repo coordinate or a display
+# title fallback — NOT the real local slug), `hivePubkey`, and `memberLinks`;
+# none of it resolves to a usable LOCAL potSlug/memberSlug for A, because the
+# instance that originally created that hive has itself long since been wiped.
+# There is nothing to recover — the correct behavior is a fresh local
+# hive+member every run, which is exactly what `force:true` does: it skips the
+# existing-lookup short-circuit (_create_from_repo.ts: `if (!opts.force) return
+# {ok:true, existing:found}`) and always clones + creates a brand-new pot/member
+# with its own locally-unique slug, flagged `duplicateOf` for the supersede
+# flow. The best-effort re-publish may then report a Cupboard uniqueness
+# conflict in `publish.cupboard.errors` — harmless here; the P2P
+# discover→join→merge legs below only need A's own local hive to exist.
 fed_hive_create_from_repo() {
   local inst="$1" repo="$2" extra="${3:-}"
   drv_exec "$inst" <<EOF
 curl -s -m 610 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/harness/pots/from-repo" \
   -H 'content-type: application/json' \
-  -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true$extra}'
+  -d '{"githubUrl":"$repo","visibility":"public","runTests":false,"shallow":true,"force":true$extra}'
 EOF
 }
 
