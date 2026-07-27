@@ -176,7 +176,9 @@ case "$cmd" in
       exit 1
     fi
     if _resolve; then
-      code=$(_ssh "curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:$op/api/desktop/preflight 2>/dev/null || echo 000")
+      # curl already emits 000 on refuse/timeout via -w; don't append a second one
+      code=$(_ssh "curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:$op/api/desktop/preflight 2>/dev/null")
+      [ -n "$code" ] || code=000
       case "$code" in
         2*) echo "ok   operator  port=$op (preflight $code)" ;;
         *)  echo "FAIL operator  port=$op (preflight $code) — try \`fed.sh $vm rediscover\`"; rc=1 ;;
