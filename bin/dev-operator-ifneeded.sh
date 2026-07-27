@@ -280,8 +280,8 @@ setsid bash -c 'echo "$$" > "$1"; shift
       echo "[tauri] FATAL: operator dev server has exited $fails times in a row (code=$code) — aborting instead of restarting forever (WI-3042 / EI-18745117818375852)" >&2
       exit 99
     fi
-    echo "[tauri] operator dev server exited code=$code — restarting (attempt $fails/$max_fails) (WI-3042 supervision)" >&2
-    sleep 1
+    echo "[tauri] operator dev server exited code=$code — restarting in 3s (attempt $fails/$max_fails) (WI-3042 supervision)" >&2
+    sleep 3
   done' _ "$GROUP_FILE" "$PORT" "$DEV_CMD" &
 CHILD=$!
 # EI-256 (the REAL root cause found while writing the reaper's first

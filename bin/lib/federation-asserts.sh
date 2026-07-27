@@ -192,10 +192,11 @@ fed_start_testnet_dht() {
   # $work rides argv as a cleanup marker: killing the launching subshell pid
   # orphans the node child, but fed_cleanup_scoped's `grep -F "$work"` over
   # ps args catches it (the pre-refactor smokes leaked these DHT nodes). Under
-  # keep_up=1 we deliberately use a marker that ISN'T $work, so that same scan
-  # leaves this node alone.
+  # keep_up=1 we deliberately use a marker that does NOT contain $work as a
+  # substring (grep -F is a substring match, so "$work-suffix" would still be
+  # caught), so that same scan leaves this node alone.
   local marker="$work"
-  [ "$keep_up" = 1 ] && marker="${work}.persist-dht"
+  [ "$keep_up" = 1 ] && marker="papercusp-persist-dht-$$"
   ( cd "$operator_dir" && PAPERCUSP_DHT_HOST="$host" node --input-type=module -e '
       import createTestnet from "hyperdht/testnet.js";
       const host = process.env.PAPERCUSP_DHT_HOST || undefined;
