@@ -111,23 +111,28 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
 
-# WI-2644: the packaged sidecar's serve.mjs runs standalone (no `npm run`
-# context), so process.env.npm_package_version is unset at runtime and
-# build-info.ts / serve.ts fall back to their (differing) hardcoded defaults
-# — the installed app's /api/health + UI footer report a fake '0.0.0'/dev
-# version instead of the real shipped one. tauri.conf.json's `version` is the
-# authoritative shipped version (release.config.ts's versionFiles bumps
-# package.json + tauri.conf.json + Cargo.toml together on every release), so
-# read it here and bake it into the bundle via esbuild --define below —
-# same mechanism as the existing PAPERCUP_DOGFOOD_REPO_REF bake.
-PAPERCUSP_DESKTOP_VERSION="$(node -e "try{process.stdout.write(require('$ROOT/src-tauri/tauri.conf.json').version||'')}catch(e){}" 2>/dev/null)"
-# Built as an array (not a bare --define string) so the UNREADABLE case omits
-# the flag ENTIRELY rather than baking an empty string: `?? '0.0.0'`-style
-# fallbacks only trigger on undefined/null, so `--define:...="\"\""` would bake
-# a WORSE empty-string version than today's unset-env fallback.
+# WI-2644 / EI-18751304112302229: the packaged sidecar's serve.mjs runs
+# standalone (no `npm run` context), so process.env.npm_package_version is
+# unset at runtime and build-info.ts / serve.ts fall back to their (differing)
+# hardcoded defaults — the installed app's /api/health + UI footer report a
+# fake '0.0.0'/dev version instead of the real shipped one. tauri.conf.json's
+# `version` is the authoritative shipped version (release.config.ts's
+# versionFiles bumps package.json + tauri.conf.json + Cargo.toml together on
+# every release), so read it here and bake it into the bundle via esbuild
+# --define below.
+#
+# EI-18751304112302229: this used to bake --define:process.env.npm_package_version
+# directly, but esbuild's --define is a SYNTACTIC rewrite of the exact member
+# expression named — and build-info.ts never writes that literal expression,
+# it reads through an injectable-seam alias (`const env = opts.env ??
+# process.env; env.npm_package_version`), so the define had nothing to match
+# and silently baked into nothing. Bake a dedicated global identifier instead
+# — the same idiom __PAPERCUSP_BUNDLED_SIDECAR__ already uses below — so the
+# baked literal IS the thing build-info.ts references, with no alias for
+# esbuild to miss.
 VERSION_DEFINE_ARGS=()
 if [[ -n "$PAPERCUSP_DESKTOP_VERSION" ]]; then
-  VERSION_DEFINE_ARGS=(--define:process.env.npm_package_version="\"${PAPERCUSP_DESKTOP_VERSION}\"")
+  VERSION_DEFINE_ARGS=(--define:__PAPERCUSP_SIDECAR_VERSION__="\"${PAPERCUSP_DESKTOP_VERSION}\"")
 else
   echo "WARN: could not read version from $ROOT/src-tauri/tauri.conf.json — sidecar will report its unstamped fallback version"
 fi
