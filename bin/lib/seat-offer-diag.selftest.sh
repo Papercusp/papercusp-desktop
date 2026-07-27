@@ -46,6 +46,10 @@ drv_psql() {
     b:*quarantined_at*)            printf '%s\n' "$CASE_QUAR" ;;
     b:*"drained_at IS NULL"*)      printf '%s\n' "$CASE_PENDING" ;;
     b:*substrate_outbox*)          printf '%s\n' "$CASE_TOTAL" ;;
+    # WI-6210 writer audit — matched BEFORE the generic a:*string_agg* case, which
+    # would otherwise swallow it and feed the origin/status breakdown's fixture into
+    # the audit field (a silently wrong-but-plausible diag line).
+    *:*rig_offer_write_audit*)     printf '%s\n' "$CASE_AUDIT" ;;
     a:*string_agg*)                printf '%s\n' "$CASE_BREAK" ;;
     a:*count*)                     printf '%s\n' "$CASE_ANY" ;;
     *)                             printf '\n' ;;
@@ -64,6 +68,10 @@ echo "── seat-offer-diag.selftest: WI-6179 b→a discriminator ──"
 # harness_slug-scoped by it (multi-tenant table). Set it here or `set -u` aborts the
 # classifier mid-way and the branch cases below fail for the wrong reason.
 RIG_HIVE_ID='mx-selftest-pot'
+# The WI-6210 writer-audit read is answered for every branch case below (the branch
+# fixtures set only the reads their verdict turns on); a global default keeps `set -u`
+# from aborting the classifier before it reaches the branch under test.
+CASE_AUDIT='1) INSERT off-1@7 t=1 pid=9 app=sc origin=->remote fed_ts=->63 q<INSERT INTO harness_shared.p2p_work_offers ...>'
 
 # 1. Quarantined outbox row on b ⇒ it never left b. Outranks every later branch:
 #    a quarantined row is excluded from the drain batch (mig 645), so "a has
@@ -152,6 +160,44 @@ grep -q "p2p_work_offers WHERE fleet_slug='\$slug' AND offer_kind='seat';" "$SCN
 grep -q "kind='||kd" "$SCN" \
   && ok "the breakdown reports offer_kind per row (a stray non-seat row stays visible)" \
   || bad "the breakdown must name offer_kind per row rather than hiding non-seat rows"
+
+# 10. WRITER AUDIT (WI-6210). The clock probe proves the row was re-stamped LOCALLY but
+# cannot say by WHAT — and a full static enumeration of p2p_work_offers' four writers
+# rules out all four, so the next static pass would just re-run the enumeration that has
+# already failed twice. The audit trigger answers it empirically by recording
+# current_query() for every write, which is only useful if it is (a) armed before the row
+# exists, (b) actually surfaced in the FAIL line, and (c) capturing the statement text
+# rather than just the columns.
+declare -f _soffer_install_write_audit >/dev/null \
+  && ok "the writer-audit installer exists" \
+  || bad "_soffer_install_write_audit missing — the WI-6210 writer probe was removed"
+declare -f _soffer_write_audit >/dev/null \
+  && ok "the writer-audit reader exists" \
+  || bad "_soffer_write_audit missing — captured writes would never be surfaced"
+grep -q '_soffer_install_write_audit a b' "$SCN" \
+  && ok "the audit is armed on BOTH frames before the fleet/delegate steps run" \
+  || bad "scn_seat_offer must arm the writer audit on a AND b before any offer row exists (b is the control sample)"
+grep -q 'current_query()' "$SCN" \
+  && ok "the capture records the writing STATEMENT, not just the columns it moved" \
+  || bad "the audit trigger must capture current_query() — without it the writer is still only inferred"
+grep -q 'WRITER AUDIT a=' "$SCN" \
+  && ok "the FAIL line surfaces the captured writes" \
+  || bad "the discriminator must emit the writer audit — a capture nobody reads is not a probe"
+# The capture must never be able to fail a product write: an exception block, and an
+# AFTER trigger that returns NULL.
+grep -q 'EXCEPTION WHEN OTHERS THEN NULL' "$SCN" \
+  && ok "a capture failure cannot unwind the product write it observed" \
+  || bad "the audit trigger body must swallow its own errors (EXCEPTION WHEN OTHERS) — a diagnostic must not be able to fail the path it watches"
+# And the audit read must be answered on its own, not by the breakdown's fixture: prove
+# the classifier reads a DIFFERENT value into the audit field than into the breakdown.
+CASE_TOTAL=3 CASE_PENDING=0 CASE_QUAR=0 CASE_ANY=1 CASE_BREAK='local/open=1' \
+  CASE_AUDIT='2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'
+_audit_out="$(_soffer_diag_b_to_a mx-seatoffer-selftest)"
+if printf '%s' "$_audit_out" | grep -q 'WRITER AUDIT a=2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'; then
+  ok "the audit field carries the captured writes (not the origin/status breakdown)"
+else
+  bad "the audit field must be fed by the rig_offer_write_audit read — got: $_audit_out"
+fi
 
 echo
 if [ "$fails" = 0 ]; then

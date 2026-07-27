@@ -33,6 +33,90 @@ _soffer_row_present() {
   echo 0
 }
 
+# WI-6210 WRITER AUDIT — the probe that ENDS the "which writer restamped the row?"
+# hunt instead of narrowing it one more notch.
+#
+# WHY A TRIGGER AND NOT MORE GREPPING. Run 233227 settled WHAT happens (b's seat
+# offer arrives, the projection applies it, and ~120ms later a SECOND, LOCAL write
+# re-stamps origin='local' with a newer clock, after which every redelivery of b's
+# genuine op loses the LWW compare — 9 lww_superseded drops, permanent shadowing).
+# It did NOT settle WHO writes second, and a full static enumeration of the writers
+# (2026-07-27) leaves a CONTRADICTION rather than an answer: p2p_work_offers has
+# exactly four write statements in the tree — the projection upsert
+# (projections/work-offers.ts:300), putWorkOffer (offer-store.ts:257) and the two
+# local_disposition UPDATEs (offer-store.ts:317/354) — and NONE of them fits:
+#   · the local_disposition writes touch only mask-EXCLUDED columns
+#     (local_disposition + updated_at), so stamp_local_federated_write (mig 490/517)
+#     provably cannot fire on them;
+#   · putWorkOffer refuses any record_version that does not advance, and the row is
+#     record_version=1 on BOTH frames;
+#   · a projection re-apply carries the wire fed_ts, which either takes the trigger's
+#     "fed_ts moved ⇒ respect it verbatim" early return or compares byte-identical
+#     under the mask.
+# One of those readings is wrong, and no further reading of .ts files can say which
+# — the same trap that cost WI-6210 its first pass (I enumerated the TypeScript
+# writers and called it "the writers"; a PL/pgSQL trigger was writing two of the
+# three columns). So stop inferring the writer and RECORD it: an AFTER INSERT OR
+# UPDATE trigger that captures current_query() names the second write in its own
+# words, whether it comes from .ts, a trigger, a rule, or a column default.
+#
+# Non-invasive by construction: a NEW table + a trigger that only ever INSERTs into
+# it, wrapped in its own exception block so a capture failure can never fail or
+# unwind a product write. Installed per-run on the rig's throwaway frames only.
+_soffer_install_write_audit() {
+  local inst
+  for inst in "$@"; do
+    drv_psql "$inst" "
+CREATE TABLE IF NOT EXISTS harness_shared.rig_offer_write_audit (
+  seq        bigserial PRIMARY KEY,
+  at_ms      bigint NOT NULL,
+  op         text   NOT NULL,
+  offer_id   text,
+  publisher  bigint,
+  pid        int,
+  app_name   text,
+  query      text,
+  old_origin text, new_origin text,
+  old_fed_ts bigint, new_fed_ts bigint,
+  old_md5    text, new_md5    text,
+  old_ver    bigint, new_ver  bigint,
+  old_disp   text, new_disp   text
+);
+CREATE OR REPLACE FUNCTION harness_shared.rig_capture_offer_write() RETURNS trigger LANGUAGE plpgsql AS \$rigfn\$
+BEGIN
+  BEGIN
+    INSERT INTO harness_shared.rig_offer_write_audit
+      (at_ms, op, offer_id, publisher, pid, app_name, query,
+       old_origin, new_origin, old_fed_ts, new_fed_ts, old_md5, new_md5, old_ver, new_ver, old_disp, new_disp)
+    VALUES
+      ((extract(epoch FROM clock_timestamp())*1000)::bigint, TG_OP, NEW.offer_id, NEW.publisher_github_user_id,
+       pg_backend_pid(), current_setting('application_name', true),
+       left(regexp_replace(current_query(), '[[:space:]]+', ' ', 'g'), 400),
+       CASE WHEN TG_OP='UPDATE' THEN OLD.origin END, NEW.origin,
+       CASE WHEN TG_OP='UPDATE' THEN OLD.fed_ts END, NEW.fed_ts,
+       CASE WHEN TG_OP='UPDATE' THEN left(md5(OLD.record_json),8) END, left(md5(NEW.record_json),8),
+       CASE WHEN TG_OP='UPDATE' THEN OLD.record_version END, NEW.record_version,
+       CASE WHEN TG_OP='UPDATE' THEN OLD.local_disposition END, NEW.local_disposition);
+  EXCEPTION WHEN OTHERS THEN NULL;
+  END;
+  RETURN NULL;
+END;
+\$rigfn\$;
+DROP TRIGGER IF EXISTS rig_capture_offer_write_trg ON harness_shared.p2p_work_offers;
+CREATE TRIGGER rig_capture_offer_write_trg AFTER INSERT OR UPDATE ON harness_shared.p2p_work_offers
+  FOR EACH ROW EXECUTE FUNCTION harness_shared.rig_capture_offer_write();
+" >/dev/null 2>&1 || true
+  done
+}
+
+# Render one frame's captured writes, oldest first. Each entry names the statement
+# that wrote (q<…>), the backend that ran it (pid/app), and what it moved
+# (origin / fed_ts / record_version / record_json md5 / local_disposition), so the
+# +120ms write is identified rather than inferred.
+_soffer_write_audit() {
+  drv_psql "$1" "SELECT COALESCE(string_agg(seq||') '||op||' '||COALESCE(offer_id,'?')||'@'||COALESCE(publisher::text,'?')||' t='||at_ms||' pid='||COALESCE(pid::text,'?')||' app='||COALESCE(app_name,'-')||' origin='||COALESCE(old_origin,'-')||'>'||COALESCE(new_origin,'-')||' fed_ts='||COALESCE(old_fed_ts::text,'-')||'>'||COALESCE(new_fed_ts::text,'-')||' v='||COALESCE(old_ver::text,'-')||'>'||COALESCE(new_ver::text,'-')||' md5='||COALESCE(old_md5,'-')||'>'||COALESCE(new_md5,'-')||' disp='||COALESCE(old_disp,'-')||'>'||COALESCE(new_disp,'-')||' q<'||COALESCE(query,'?')||'>', ' ;; ' ORDER BY seq), '<no captured write>') FROM harness_shared.rig_offer_write_audit;" 2>/dev/null | tr '\n' ' '
+}
+
 # WI-6179 b→a DISCRIMINATOR. "published on b but not applied on a" collapses three
 # materially different faults into one sentence, and the banked 1.3MB serve.log pair
 # cannot separate them (verified on the 170106-seat_offer bundle: grepping the offer
@@ -141,7 +225,9 @@ _soffer_diag_b_to_a() {
   # ⇒ the local writer REPLACED the publisher's signed bytes, which is the more serious defect.
   # Captured here because the frames are TORN DOWN at run end — this evidence had to be raced by
   # hand out of a live container once (23:5x, run 233227) and was lost on the second attempt.
-  local a_write b_write
+  local a_write b_write a_audit b_audit
+  a_audit="$(_soffer_write_audit a)"
+  b_audit="$(_soffer_write_audit b)"
   a_write="$(drv_psql a "SELECT COALESCE(string_agg(offer_id||' created='||created_at||' updated='||updated_at||' md5='||left(md5(record_json),8)||' sig='||left(signature,8)||' disp='||COALESCE(local_disposition,'-'), ' '), '<no row>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
   b_write="$(drv_psql b "SELECT COALESCE(string_agg(offer_id||' created='||created_at||' updated='||updated_at||' md5='||left(md5(record_json),8)||' sig='||left(signature,8)||' disp='||COALESCE(local_disposition,'-'), ' '), '<no row on b>') FROM harness_shared.p2p_work_offers WHERE fleet_slug='$slug';" 2>/dev/null | tr '\n' ' ')"
 
@@ -156,7 +242,7 @@ _soffer_diag_b_to_a() {
   else
     verdict="LOST-OR-REFUSED-BEFORE-APPLY (b drained every outbox row and frame a has NOTHING for this fleet — either the record never reached a, or a dropped it before the projection wrote a row; check a's inbound refusal counters, and only THEN read this as the late-apply/timing case)"
   fi
-  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default] · WRITE SIGNATURE a=${a_write:-<unreadable>} vs b=${b_write:-<unreadable>} [updated_at > created_at on a row the projection created ⇒ a SECOND, LOCAL write landed after the apply; compare md5/sig against b to see whether it clobbered only provenance or the publisher's SIGNED BYTES]"
+  echo "$verdict | b.outbox(p2p_work_offers): total=${b_total:-<unreadable>} undrained=${b_pending:-<unreadable>} quarantined=${b_quar:-<unreadable>} · a.rows(fleet=$slug) by origin/status/author: ${a_break:-<unreadable>} · clock b.outbox(ts|op_hlc)=${b_clock:-<unreadable>} · b.row(offer@pub:fed_ts|fed_hlc)=${b_row_clock:-<unreadable>} vs a.row(offer@pub:fed_ts|fed_hlc)=${a_clock:-<unreadable>} [PAIR BY offer@pub FIRST — a key present on b and ABSENT on a means b's offer never arrived, whatever else a holds for this fleet. Within ONE key: equal clocks ⇒ projection stamped from the wire; differing with a non-null b.op_hlc ⇒ a LOCAL write re-stamped via stamp_local_federated_write's UPDATE branch, which also forces origin='local'; b.op_hlc null ⇒ clockless wire op + apply-path origin default] · WRITE SIGNATURE a=${a_write:-<unreadable>} vs b=${b_write:-<unreadable>} [updated_at > created_at on a row the projection created ⇒ a SECOND, LOCAL write landed after the apply; compare md5/sig against b to see whether it clobbered only provenance or the publisher's SIGNED BYTES] · WRITER AUDIT a=${a_audit:-<unreadable>} vs b=${b_audit:-<unreadable>} [every INSERT/UPDATE on p2p_work_offers since this scenario started, with the STATEMENT that ran it — read a's entries in order: the first is the projection apply, and whatever entry moved origin to 'local' NAMES the second writer in its own SQL. b's entries are the control (its own publish through putWorkOffer), so an empty a-audit next to a populated b-audit means the capture, not the write, is missing]"
 }
 
 scn_seat_offer() {
@@ -169,6 +255,12 @@ scn_seat_offer() {
 
   local slug="mx-seatoffer-${MATRIX_RUN_ID}" out
   slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
+
+  # WI-6210: arm the writer audit BEFORE any offer row exists on either frame, so
+  # the capture covers the projection's INSERT and every write after it. Purely
+  # additive and best-effort — a frame where it fails to install simply reports
+  # '<no captured write>' in the FAIL line instead of failing the leg here.
+  _soffer_install_write_audit a b
 
   # 1. OWNER (a): create the fleet the member will delegate seats to.
   out="$(_fdir_mcp_call a 'fleet:create' "{\"name\":\"$slug\",\"description\":\"matrix seat-offer probe $MATRIX_RUN_ID\"}")"
