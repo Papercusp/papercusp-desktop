@@ -1102,7 +1102,18 @@ else
     # picks the newest PREBUILT bundle, which can be days stale (the 2026-07-16 RED
     # ran a Jul-11 deb against current-tree expectations and its own WARN said so).
     MATRIX_LEG_START_TS="$(now_s)"
-    if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
+    # MATRIX_FRAMES (default 3) — 2026-07-27, P-425, executing D-007's own stated trigger
+    # ("do NOT pass --frames=3 yet; flip it the moment the 2-frame gate is genuinely green"),
+    # which the earned first green at 2026-07-27T02:00:39Z MET. Until this line the gate
+    # invoked local-matrix.sh with no --frames, so it ran FRAMES=2 and order-35
+    # membership_churn resolved to SKIP on EVERY run — it has never executed in the gate's
+    # history, and before EI-18660392396897977 that exclusion was silent.
+    # Third-frame prerequisites VERIFIED before flipping: this box has nproc=128 (>=24), so
+    # local-matrix.sh derives _def_cpuset_c=104-111 (a real dedicated cpuset, not empty —
+    # below 24 cores it disables pinning entirely), plus CN_C=pcusp-rig-c and IP_C=10.99.0.13.
+    # A first-ever membership_churn RED is COVERAGE, not a regression: triage it, do not
+    # revert to 2 frames to hide it. Set MATRIX_FRAMES=2 for a one-off cheaper run.
+    if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" --frames="${MATRIX_FRAMES:-3}" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
       # EI-18657324526667507: last-matrix-green answers "when was it last GOOD"; last-matrix-verdict
       # answers "when did it last DECIDE anything". They must stay separate — a leg that only ever
