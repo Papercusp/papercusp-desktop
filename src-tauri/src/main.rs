@@ -227,6 +227,80 @@ fn read_dev_ipc_socket_for_port(papercusp_dir: &std::path::Path, port: u16) -> O
     read_dev_ipc_socket(&papercusp_dir.join("endpoint-ipc.json"))
 }
 
+/// Like `read_dev_ipc_socket` but also returns the advertised `pid` (0 when
+/// absent/non-numeric/unparseable) — the input `discovery_socket_still_live`
+/// needs to tell a genuinely-fresh advertisement from a stale one.
+fn read_dev_ipc_socket_with_pid(path: &std::path::Path) -> Option<(String, u32)> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let socket_path = parse_endpoint_ipc_socket(&txt)?;
+    let pid = serde_json::from_str::<serde_json::Value>(&txt)
+        .ok()
+        .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+        .unwrap_or(0) as u32;
+    Some((socket_path, pid))
+}
+
+/// CONFIRMED bug (EI-18763945004822208, measured live 2026-07-27): after an
+/// operator restart, its discovery file briefly still names the PREVIOUS
+/// (now-dead) pid/socket until the new instance boots and rewrites the file —
+/// dialing during that window produces a resolvable-but-ENOENT connect on
+/// EVERY `/api` call (measured 160/160 failed invokes). Restarts are constant
+/// on this dev box (every agent's `dev:restart`, every deploy, every
+/// green-checkpoint promotion), so this window is entered many times a day.
+///
+/// Validate before trusting: an advertisement is only "live" when (a) its pid
+/// is actually running (`discovery_pid_alive`, which itself is strengthened
+/// with a cmdline check so a recycled pid can't false-positive), AND (b), for
+/// a real unix-domain-socket path (not a `tcp://` loopback endpoint or a
+/// Windows named pipe — neither has anything to check on the local
+/// filesystem), the socket file itself still exists. Treating a stale
+/// advertisement as "no advertisement yet" lets `IpcClientHandle` fall back to
+/// HTTP / keep retrying instead of handing it a socket guaranteed to fail.
+fn discovery_socket_still_live(socket_path: &str, pid: u32, via_wsl: bool) -> bool {
+    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
+        return false;
+    }
+    if !is_tcp_endpoint(socket_path)
+        && !is_windows_named_pipe_path(socket_path)
+        && !std::path::Path::new(socket_path).exists()
+    {
+        return false;
+    }
+    true
+}
+
+/// `read_dev_ipc_socket`, validated per `discovery_socket_still_live` — the
+/// form every RUNTIME connect site should use (the raw parser stays available
+/// for the WSL cat-based read and for tests that only care about parsing).
+fn read_dev_ipc_socket_validated(path: &std::path::Path, via_wsl: bool) -> Option<String> {
+    let (socket_path, pid) = read_dev_ipc_socket_with_pid(path)?;
+    if discovery_socket_still_live(&socket_path, pid, via_wsl) {
+        Some(socket_path)
+    } else {
+        None
+    }
+}
+
+/// `read_dev_ipc_socket_for_port`, validated (see `read_dev_ipc_socket_validated`).
+/// A stale per-port file (dead pid, or its socket file gone) is treated exactly
+/// like a missing one, so the EI-296 custom-port / fixed-dev-port fallback
+/// logic below is unchanged — it just now also re-runs on staleness, not only
+/// on absence.
+fn read_dev_ipc_socket_for_port_validated(
+    papercusp_dir: &std::path::Path,
+    port: u16,
+    via_wsl: bool,
+) -> Option<String> {
+    let per_port = read_dev_ipc_socket_validated(
+        &papercusp_dir.join(format!("endpoint-ipc.{port}.json")),
+        via_wsl,
+    );
+    if per_port.is_some() || !matches!(port, 3070 | 3170) {
+        return per_port;
+    }
+    read_dev_ipc_socket_validated(&papercusp_dir.join("endpoint-ipc.json"), via_wsl)
+}
+
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
 /// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
 /// `.deb` launch inherits a minimal PATH), so a bare `Command::new("node")`
@@ -2169,6 +2243,26 @@ fn find_endpoint_ipc_socket(workspace_home: &std::path::Path, via_wsl: bool) -> 
     #[cfg(not(target_os = "windows"))]
     let _ = via_wsl;
     read_dev_ipc_socket(&workspace_home.join(".papercusp/endpoint-ipc.json"))
+}
+
+/// `find_endpoint_ipc_socket`, validated (see `discovery_socket_still_live`) —
+/// used at the production/spawned-sidecar `IpcClientHandle` socket-source site
+/// so a restart-orphaned advertisement is treated as "not ready yet" instead
+/// of dialed straight into ENOENT. The WSL cat-read branch (Windows-only,
+/// un-exercisable on this fleet's Linux dev boxes) is left as a raw read for
+/// now — it does not carry a pid to validate against without a matching
+/// change to `read_endpoint_ipc_socket_via_wsl`, and this fix targets the
+/// measured, reproducible failure (a Linux/mac local discovery file naming a
+/// dead pid), not a hypothetical WSL-side one.
+fn find_endpoint_ipc_socket_validated(workspace_home: &std::path::Path, via_wsl: bool) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    if via_wsl {
+        if let Some(s) = read_endpoint_ipc_socket_via_wsl() {
+            return Some(s);
+        }
+        return None;
+    }
+    read_dev_ipc_socket_validated(&workspace_home.join(".papercusp/endpoint-ipc.json"), via_wsl)
 }
 
 /// WI-1869: given the operator port the webview is CURRENTLY pointed at and the
