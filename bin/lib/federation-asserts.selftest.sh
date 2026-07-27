@@ -772,6 +772,7 @@ drv_psql() {
       [ "$n" -ge 2 ] && echo "$SLUG_ECHO"
       ;;
     *"SELECT CASE WHEN drained_at IS NOT NULL"*) echo "$WI6217_DRAINED" ;;
+    *"SELECT workspace_id FROM harness_shared.pot_members"*) echo "wi6217-fake-ws" ;;  # fed_hive_merge_probe's ws resolution
     *"coalesce(workspace_id"*) : ;;  # fed_diagnose_unmerged's own probe — empty is fine, not under test here
   esac
 }
