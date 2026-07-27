@@ -74,6 +74,22 @@ OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/
 # PAPERCUSP_FED_REPO_URL. Needs VM→github egress (slirp user-net provides NAT).
 REPO_URL="${PAPERCUSP_FED_REPO_URL:-https://github.com/octocat/Hello-World}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-149}"   # only used by --vms=1's host instance
+# EI-18729820545388373: fed_ensure_display is called via `$(...)` command
+# substitution (launch_local_instance below), which runs it in a SUBSHELL — any
+# FED_KILL_PIDS+=() it did internally would be lost the instant that subshell
+# exits, so fed_cleanup_scoped's PID-kill loop can never see the Xvfb it started.
+# two-instance-federation-smoke.sh (the sibling one-box driver using the same
+# fed_ensure_display helper) already carries the correct fix for this: track
+# whether THIS run started Xvfb via the STARTED_XVFB flag (fed_ensure_display's
+# own stdout, captured across the subshell boundary) and reap it by DISPLAY
+# NUMBER — not by PID — in cleanup(). vm-federation.sh had copied the
+# fed_ensure_display call but dropped that matching cleanup half, so every
+# --vms=1 run leaked its Xvfb :149 past teardown (confirmed live: pid 1674673
+# still alive and DISPLAY :149 still busy after cleanup() had already run).
+# Must be initialized before `trap cleanup EXIT` — set -u means an unset
+# reference in cleanup() (e.g. an early exit before launch_local_instance ever
+# ran) would abort the trap itself instead of running it.
+STARTED_XVFB=0
 WORK="$(mktemp -d /tmp/vm-fed.XXXXXX)"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
 SLUG="vmfed${WORK##*.}"   # per-run unique → reused embedded-PG state can't false-pass the merge
@@ -164,6 +180,11 @@ cleanup() {
     log "--keep-up: preserved host/local instance logs → $dest"
   fi
   fed_cleanup_scoped "$WORK"
+  # fed_cleanup_scoped's scan can't catch this one: it kills FED_KILL_PIDS (never
+  # populated here — see the STARTED_XVFB comment above) plus any process whose
+  # cmdline carries $WORK, and Xvfb's own argv (`Xvfb :149 -screen 0 …`) never
+  # does — $WORK only appears in the redirect target, which isn't part of argv.
+  [ "$STARTED_XVFB" = "1" ] && pkill -f "Xvfb :$DISPLAY_NUM" 2>/dev/null || true
   if [ "$KEEP_UP" = 0 ]; then
     local n
     for n in $(fed_vm_names); do "$VMCTL" down "$n" || true; done
