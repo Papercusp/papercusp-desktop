@@ -126,6 +126,45 @@ scn_revocation_kcut() {
   echo "  · WI-560 K-CUT — frame b (banned joiner, own view):"
   drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/  ·   b: /'
 
+  # ── WI-560 K-CUT ASSERTION (the CRYPTO form; the content assert below is the behavioral one) ──
+  #
+  # WI-560 asks to witness: B has epoch N but NOT epoch N+1 — "its machine never gets the new key".
+  # Measured live on run m1785119xxx, and the OBVIOUS form of this assert would have been WRONG:
+  #
+  #   epoch 0 → owner wraps to BOTH devices; B holds both, origin=remote
+  #   epoch 1 → owner wraps to the REMAINING device ONLY (K-cut on the owner side)
+  #   ...but B STILL RECEIVES the epoch-1 ROW, origin=remote — wrapped to the OWNER's pubkey.
+  #
+  # So "B has no epoch-N+1 row" is FALSE and asserting it would red this gate on correct behavior.
+  # Revocation is a DECRYPT cut, not a replication cut, for this table: the row that reaches B is
+  # a blob sealed to a key B does not hold. The true invariant is DEVICE-SCOPED —
+  #   *** no epoch-key row wrapped to B'S OWN device pubkey exists at the post-ban epoch ***
+  # — which is exactly what makes B unable to read post-ban content, and is what we assert.
+  #
+  # Fail-closed on VACUITY: if the epoch never advanced (max epoch still 0) there was no re-key to
+  # cut, so a device-scoped absence would pass trivially and prove nothing — the exact
+  # "a probe that cannot fail is not a probe" trap this file's rig_assert_* helpers were rewritten
+  # for (WI-5768). We therefore require maxep>=1 and FAIL loudly if it did not advance. Likewise a
+  # blank pubkey means the identity lookup failed, not that the cut held — also a FAIL, never a pass.
+  local bpub maxep
+  bpub="$(drv_psql b "SELECT jsonb_array_elements(device_attestations::jsonb)->>'device_pubkey' FROM harness_shared.pot_members WHERE github_username='${FRAME_USER[b]}' LIMIT 1;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  maxep="$(drv_psql a "SELECT COALESCE(MAX(epoch),0) FROM harness_shared.pot_epoch_keys;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  echo "  · WI-560 K-CUT assert — B device=${bpub:-<UNRESOLVED>} post-ban maxEpoch=${maxep:-<UNRESOLVED>}"
+  if [ -z "$bpub" ]; then
+    echo "revocation: K-CUT UNMEASURED — could not resolve B's device pubkey (identity lookup failed); an unmeasurable probe is not a pass"; return 1
+  fi
+  case "${maxep:-}" in
+    ''|*[!0-9]*) echo "revocation: K-CUT UNMEASURED — could not read max epoch on the owner ('${maxep:-}'); not a pass"; return 1 ;;
+  esac
+  if [ "$maxep" -lt 1 ]; then
+    echo "revocation: K-CUT VACUOUS — epoch never advanced past 0, so there was no re-key to cut (papercusp-hive-rekey not armed? see rig_arm_hive_rekey); refusing to pass a probe that cannot fail"; return 1
+  fi
+  local kcut; kcut="$(rig_assert_row_absent b "harness_shared.pot_epoch_keys WHERE epoch=$maxep AND member_device_pubkey='$bpub'" 12)"
+  if [ "$kcut" != 1 ]; then
+    echo "revocation: K-CUT FAILED — banned member B still holds an epoch-$maxep key wrapped to its OWN device ($bpub); the re-key did not cut it off"; return 1
+  fi
+  echo "  · WI-560 K-CUT VERIFIED — B holds NO epoch-$maxep key for its own device (pre-ban epochs retained; the epoch-$maxep row B did receive is sealed to the owner's device, unreadable by B)"
+
   if [ "$absent" != 1 ]; then
     # EI-18712383368117845: on a LEAK, also record whether B can actually READ the leaked content.
     # rig_assert_absent only proves the row reached B's consolidated table; this distinguishes a
