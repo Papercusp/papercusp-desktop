@@ -158,10 +158,39 @@ echo "boot-current: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  PG_SQL_DIR=$PAPERCUSP_PG
 echo "boot-current: DHT=$PAPERCUSP_DHT_BOOTSTRAP  PORT=$PAPERCUSP_HONO_PORT"
 
 # --- fully detach (perl setsid; nohup alone dies with the ssh session)
+#
+# LOG ROTATION (EI-18754979589749712, 2026-07-27). This was `: > "$LOG"`, which
+# TRUNCATED the log on every boot. That single line is why the cause of death of
+# the 2026-07-26 22:35 process is permanently unrecoverable: it died, something
+# relaunched it, and the relaunch erased the only evidence of why. A crash log is
+# worth the most at exactly the moment the next boot destroys it — and because
+# the supervisor relaunches automatically, the destructive boot always follows
+# the crash immediately. Keep one generation; at ~15MB/40min that costs nothing.
+if [ -s "$LOG" ]; then
+  mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+  echo "boot-current: previous run's log preserved at $LOG.1"
+fi
 : > "$LOG"
 cd "$CUR" || exit 1
+
+# HEAP-SNAPSHOT-ON-OOM (EI-18754979589749712). The sidecar has died of
+# "JavaScript heap out of memory" at the ~4288MB V8 limit leaving only a native
+# stack trace, which names the GC frame (MinorGCJob → Heap::CollectGarbage →
+# FatalProcessOutOfMemory) but NOT the retainer — so every diagnosis so far has
+# been a plausible story rather than evidence. --heapsnapshot-near-heap-limit
+# makes V8 write a heap snapshot as it approaches the limit; its dominator tree
+# names the retaining object graph directly.
+#
+# Count is 1, not 2: steady-state RSS here is ~1.2GB against the 4.2GB limit, so
+# a near-limit snapshot is multi-GB and the rig's data volume has ~34GB free.
+# One snapshot answers the question; two risk filling the disk during a crash.
+#
+# Deliberately NOT paired with a raised --max-old-space-size: enlarging the heap
+# would suppress the very event we need to capture, and 1.2GB steady-state
+# against a 4.2GB ceiling means this is a genuine leak, not a tight margin.
+# Snapshots land in CWD ($CUR) as Heap.<date>.<pid>.<seq>.heapsnapshot.
 perl -e '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); exec @ARGV or die "exec: $!"' -- \
-  "$NODE" "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
+  "$NODE" --heapsnapshot-near-heap-limit=1 "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
 sleep 2
 pid="$(pgrep -f 'serve.mjs --ensure' | head -1)"
 echo "${pid:-}" > "$PIDFILE"
