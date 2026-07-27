@@ -3595,7 +3595,7 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // /api on the capped HTTP fallback.
         let disc_home = workspace_home.clone();
         let handle = endpoint_ipc::IpcClientHandle::new(move || {
-            find_endpoint_ipc_socket(&disc_home, via_wsl).map(std::path::PathBuf::from)
+            find_endpoint_ipc_socket_validated(&disc_home, via_wsl).map(std::path::PathBuf::from)
         });
         app_handle.manage(handle.clone());
         let ipc_app_handle = app_handle.clone();
@@ -6961,11 +6961,16 @@ pub fn run() {
                     // (the dev wrapper's build switcher), re-read on every
                     // (re)connect — so /api deliberately follows the chosen
                     // build instead of the singleton's restart-order accident.
+                    // EI-18763945004822208: VALIDATED read — a restart-orphaned
+                    // advertisement (dead pid, or its socket file gone) is
+                    // treated as "not ready yet" rather than dialed straight
+                    // into a measured 100%-failure ENOENT storm.
                     let dir_src = papercusp_dir.clone();
+                    let dev_via_wsl = should_route_via_wsl(&app.handle());
                     let handle = endpoint_ipc::IpcClientHandle::new(move || {
                         let port =
                             SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                        read_dev_ipc_socket_for_port(&dir_src, port)
+                        read_dev_ipc_socket_for_port_validated(&dir_src, port, dev_via_wsl)
                             .map(std::path::PathBuf::from)
                     });
                     app.manage(handle.clone());
