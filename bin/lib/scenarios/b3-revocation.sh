@@ -109,13 +109,22 @@ scn_revocation_kcut() {
   # so asserting a shape nobody has observed would red a shared gate on a prediction. Measure
   # first; the assertion lands once the real shape is known. Non-fatal by construction.
   echo "  · WI-560 K-CUT witness — pot_epoch_keys AFTER ban+re-key (expect: owner has N+1 for remaining device only; B has N but NOT N+1)"
-  # NOTE: no `|| echo "dump failed"` fallback here — piping into sed makes the pipeline's exit
-  # status sed's, never drv_psql's, so such a guard could never fire. `2>&1` is the real
-  # mechanism: a psql/transport error is captured and printed inline (indented) instead.
-  echo "    ── frame a (owner, wrap record) ──"
-  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/      /'
-  echo "    ── frame b (banned joiner, own view) ──"
-  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/      /'
+  # EVERY line below MUST carry the `·` marker. The matrix runner surfaces a PASSING
+  # scenario's output by grepping `^[[:space:]]*·` (deb-hetzner-matrix.sh:351, WI-6057) and
+  # then DESTROYS $RIG_WORK/scn.<id>.log at teardown unless --keep-up. So an unmarked
+  # diagnostic line is discarded on exactly the runs that need it — a PASS — and is then
+  # unrecoverable. Verified the hard way on run m1785118654: this block's header (marked)
+  # printed while the psql rows (unmarked, indented with spaces) vanished entirely, which
+  # looked identical to the dump never having run. Marking each row via sed is what makes
+  # the evidence survive; do not "tidy" these into plain indentation.
+  #
+  # No `|| echo "dump failed"` fallback: piping into sed makes the pipeline's exit status
+  # sed's, never drv_psql's, so such a guard could never fire. `2>&1` is the real mechanism —
+  # a psql/transport error is captured and printed inline as a marked line instead.
+  echo "  · WI-560 K-CUT — frame a (owner, wrap record):"
+  drv_psql a "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/  ·   a: /'
+  echo "  · WI-560 K-CUT — frame b (banned joiner, own view):"
+  drv_psql b "SELECT harness_slug, epoch, member_device_pubkey, origin FROM harness_shared.pot_epoch_keys ORDER BY epoch, member_device_pubkey;" 2>&1 | sed 's/^/  ·   b: /'
 
   if [ "$absent" != 1 ]; then
     # EI-18712383368117845: on a LEAK, also record whether B can actually READ the leaked content.
