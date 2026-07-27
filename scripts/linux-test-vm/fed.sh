@@ -19,6 +19,16 @@
 #   fed.sh <a|b> mcp  <tool> [json-args]    # superuser MCP tool call
 #   fed.sh <a|b> ssh  <cmd...>              # raw ssh into the VM
 #   fed.sh <a|b> rediscover                 # force a fresh port probe (clear cache)
+#   fed.sh <a|b> health                     # ssh + operator + PG precondition check
+#                                           # (prints per-check lines; exit 0 healthy / 1 not)
+#
+# NO `restart` SUBCOMMAND — deliberately. Restarting a VM's app goes through
+# `vmctl` (`vmctl status|verify|reset|down|up fed-<a|b>`), which auto-reaps the
+# orphaned sidecar/operator that a naive relaunch would stack on top of (a
+# documented mis-diagnosis source), and an operator restart DROPS that peer's gh
+# auth (WI-757) leaving it silently local-only — so it must be coordinated with
+# whoever owns the live federation work, not fired from a driver one-liner.
+# Recovery procedures: /internal/docs/agent-insights/federation-rig-restart-runbook
 #
 # DISCOVERY: SSH in (stable host-forward port), gather candidate loopback ports
 # (the app log's listening lines ∪ every LISTENing 127.0.0.1 port), and pick the
@@ -51,7 +61,7 @@ vm="${1:-}"; cmd="${2:-}"; shift 2 2>/dev/null || true
 case "$vm" in
   a) sshp="${FED_SSH_A:-2225}" ;;
   b) sshp="${FED_SSH_B:-2226}" ;;
-  *) echo "usage: fed.sh <a|b> <ports|sql|api|mcp|ssh|rediscover|restart> ..." >&2; exit 2 ;;
+  *) echo "usage: fed.sh <a|b> <ports|sql|api|mcp|ssh|rediscover|health> ..." >&2; exit 2 ;;
 esac
 
 _ssh() { ssh "${SSHOPT[@]}" -p "$sshp" "$SSH_USER@$SSH_HOST" "$@"; }
@@ -151,6 +161,43 @@ case "$cmd" in
     _ssh "$@"
     ;;
 
+  health)
+    # Precondition check for fed.sh's OWN driver path — the three hops every
+    # sql/api/mcp call depends on: ssh reachable → operator answering → PG
+    # accepting. Exits 0/1 so a smoke can gate on it. This is NOT the
+    # VM-lifecycle check: for "is the VM/app up, reset it, relaunch it" use
+    # `vmctl status|verify fed-$vm` (see the header note on `restart`).
+    rc=0
+    if _ssh true >/dev/null 2>&1; then
+      echo "ok   ssh       vm=$vm port=$sshp"
+    else
+      echo "FAIL ssh       vm=$vm port=$sshp — VM down or key rejected (\`vmctl status fed-$vm\`)"
+      echo "vm=$vm UNHEALTHY (see /internal/docs/agent-insights/federation-rig-restart-runbook)"
+      exit 1
+    fi
+    if _resolve; then
+      code=$(_ssh "curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:$op/api/desktop/preflight 2>/dev/null || echo 000")
+      case "$code" in
+        2*) echo "ok   operator  port=$op (preflight $code)" ;;
+        *)  echo "FAIL operator  port=$op (preflight $code) — try \`fed.sh $vm rediscover\`"; rc=1 ;;
+      esac
+      out=$(_ssh "P=\$(command -v psql || echo '/usr/lib/Papercusp GUI/sidecar/bin/psql'); \"\$P\" 'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$pg/papercusp' -tAc 'select 1' 2>&1")
+      if [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "1" ]; then
+        echo "ok   postgres  port=$pg"
+      else
+        echo "FAIL postgres  port=$pg — $(printf '%s' "$out" | head -1)"; rc=1
+      fi
+    else
+      rc=1   # _resolve already explained the failure on stderr
+    fi
+    if [ "$rc" = 0 ]; then
+      echo "vm=$vm HEALTHY (operator=$op pg=$pg)"
+    else
+      echo "vm=$vm UNHEALTHY (see /internal/docs/agent-insights/federation-rig-restart-runbook)"
+    fi
+    exit "$rc"
+    ;;
+
   *)
-    echo "fed.sh: unknown cmd '$cmd' (ports|sql|api|mcp|ssh|rediscover)" >&2; exit 2 ;;
+    echo "fed.sh: unknown cmd '$cmd' (ports|sql|api|mcp|ssh|rediscover|health)" >&2; exit 2 ;;
 esac
