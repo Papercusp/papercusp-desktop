@@ -89,6 +89,26 @@ FORBIDDEN_PATH = [
     # last had in the buffer. Never source, never shippable.
     ("editor-swapfile", re.compile(r"(^|/)\.?[^/]*\.(swp|swo|swn)$|(^|/)[^/]*~$"),
      ["*.swp", "*.swo", "*.swn", "*~"]),
+    # node-gyp build scaffolding. A compiled native module needs exactly ONE thing
+    # at runtime — its addon binary, build/Release/*.node. Everything node-gyp
+    # leaves beside it (Makefile, binding.Makefile, config.gypi, *.target.mk, the
+    # Release/.deps/*.o.d dependency lists, Release/obj.target/ objects) records
+    # this box's ABSOLUTE paths verbatim, and is needed only to RE-build, never to
+    # run. That is what failed the 0.0.13 cut: 587 hits on /home/<user> across 22
+    # files under node_modules/{ssh2,cpu-features}. The sidecar copy is pruned at
+    # assembly (build-desktop-sidecar.sh), but source.tar.zst ships node_modules
+    # too — the SAME residue by a second route — so the rule belongs here, where
+    # the exclude and the gate that catches a missed exclude stay one rule.
+    # Scoped to the scaffolding ONLY: no glob here can match build/Release/*.node.
+    ("node-gyp-build-scaffolding",
+     re.compile(r"(^|/)build/(Makefile|binding\.Makefile)$"
+                r"|(^|/)build/.*\.(mk|gypi)$"
+                r"|(^|/)build/Release/(\.deps|obj\.target|obj)/"),
+     # BARE globs — print_tar_excludes() adds the `./X` and `*/X` forms itself, and
+     # `*` matches `/`, so `*/build/*.mk` also reaches build/deps/**/x.target.mk.
+     ["build/Makefile", "build/binding.Makefile", "build/config.gypi",
+      "build/*.mk", "build/*.gypi",
+      "build/Release/.deps", "build/Release/obj.target", "build/Release/obj"]),
     ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+|\.vite|\.vite-temp)/|(^|/)(junit\.xml|\.modules\.yaml)$"),
      ["scratch", "scratchpad", "test-results", ".agent-tmp", ".vitest-tmp", ".tmp",
       ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*",
