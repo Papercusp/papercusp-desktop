@@ -99,6 +99,11 @@ CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-versio
 CROSS_EXE="$CARGO_TARGET_ROOT/$TARGET/release/papercusp-desktop.exe"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+# Pinned tauri CLI, resolved via `npx --yes -p @tauri-apps/cli@VER` — NEVER a bare
+# `npx tauri` / `npm run tauri`, which resolve node_modules/.bin/tauri (ABSENT in the
+# release checkout) and die with "could not determine executable to run" (the
+# attempt-8 rc=1: the updater-.sig signer step below). Same idiom as release-local.sh.
+TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 WINEPREFIX_INNO="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
 ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$WINEPREFIX_INNO/drive_c/InnoSetup6/ISCC.exe}"
 WINDOWS_SIGN_DIGEST="${WINDOWS_SIGN_DIGEST:-sha256}"
@@ -314,7 +319,7 @@ for SETUP_EXE in "${SETUP_EXES[@]}"; do
   # Strip the two signing env vars a newer tauri CLI hard-rejects alongside
   # --private-key-path, so ONLY the explicit key path is seen (2026-07-08 fix).
   ( cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
-      npx tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$SETUP_EXE" >/dev/null )
+      npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$SETUP_EXE" >/dev/null )
   [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
 done
 

@@ -141,6 +141,11 @@ HFSPLUS_TOOL="$MAC_TOOLS/hfsplus"
 LIPO_BIN="${PAPERCUSP_LLVM_LIPO:-llvm-lipo-18}"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+# Pinned tauri CLI, resolved via `npx --yes -p @tauri-apps/cli@VER` — NEVER a bare
+# `npx tauri`, which resolves node_modules/.bin/tauri (ABSENT in the release checkout)
+# and dies with "could not determine executable to run" (attempt-8 rc=1 class — the
+# updater-.sig signer step below). Same idiom as release-local.sh / build-appimage.sh.
+TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 ENTITLEMENTS="$SRC_TAURI/entitlements.plist"
 DARWIN_SIDECAR="${PAPERCUSP_DARWIN_SIDECAR_DIR:-/var/tmp/darwin-sidecar-test}"
 # stage-source-tree is OFF for cross by default (wrong-arch node_modules; see the
@@ -331,7 +336,7 @@ make_updater() { # $1=app $2=productName
   ( cd "$(dirname "$app")" && tar czf "$tgz" "$name.app" ) || fail "tar of $name.app failed"
   # Strip the two env vars a newer tauri CLI rejects alongside --private-key-path.
   ( cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
-      npx tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$tgz" >/dev/null ) \
+      npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$tgz" >/dev/null ) \
     || fail "tauri signer failed for $tgz"
   [[ -f "$tgz.sig" ]] || fail "tauri signer produced no .sig for $tgz"
 }
