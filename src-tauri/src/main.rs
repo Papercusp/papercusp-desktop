@@ -4155,6 +4155,22 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             }
             handle.keep_warm(probe).await;
         });
+    } else {
+        // IPC switched OFF. Register a handle that SAYS SO rather than leaving
+        // the state unmanaged: Tauri's generic "state not managed" is
+        // indistinguishable from the startup window before this same handle
+        // gets registered, and the webview must treat those OPPOSITELY — wait
+        // through the startup window (falling back there strands a long-lived
+        // stream on one of ~6 HTTP sockets for the session, WI-6257), but fall
+        // back to HTTP when IPC is deliberately off. With `requireIpc` on,
+        // guessing wrong here turns this kill switch into an app-wide hang
+        // instead of the rollback it exists to be.
+        app_handle.manage(endpoint_ipc::IpcClientHandle::disabled(
+            "PAPERCUSP_DESKTOP_IPC=0",
+        ));
+        println!(
+            "[papercusp-desktop] endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
+        );
     }
 
     // Tell the bootstrap page where the sidecar is. The JS in web/index.html
@@ -7513,6 +7529,19 @@ pub fn run() {
                     // into a measured 100%-failure ENOENT storm.
                     let dir_src = papercusp_dir.clone();
                     let dev_via_wsl = should_route_via_wsl(app.handle());
+                    // Honour the same kill switch the packaged path does. It
+                    // was previously ignored here, so `PAPERCUSP_DESKTOP_IPC=0`
+                    // silently did nothing in dev — the one place people
+                    // actually reach for it while debugging transport issues.
+                    if std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() == Some("0") {
+                        app.manage(endpoint_ipc::IpcClientHandle::disabled(
+                            "PAPERCUSP_DESKTOP_IPC=0",
+                        ));
+                        println!(
+                            "[papercusp-desktop] dev endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
+                        );
+                        return;
+                    }
                     let handle = endpoint_ipc::IpcClientHandle::new(move || {
                         let port =
                             SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);

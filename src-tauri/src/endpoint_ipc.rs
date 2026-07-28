@@ -680,7 +680,7 @@ pub struct IpcStatus {
     /// Live re-resolution performed at status time (a pure filesystem read).
     pub resolved_path: Option<String>,
     pub resolution_detail: String,
-    /// `connected` · `dead` · `never-connected` · `dial-in-flight`.
+    /// `connected` · `dead` · `never-connected` · `dial-in-flight` · `disabled`.
     ///
     /// `dial-in-flight` means the connection lock was held when we looked.
     /// Seeing it persist across repeated calls is itself the diagnosis: a
@@ -722,6 +722,10 @@ pub struct IpcStatus {
 pub struct IpcClientHandle {
     client: Mutex<Option<Arc<IpcClient>>>,
     socket_source: Box<dyn Fn() -> SocketResolution + Send + Sync>,
+    /// `Some` when IPC is switched OFF for this session. Every call then fails
+    /// with an `ipc_disabled:`-prefixed error, which the webview treats as
+    /// "use HTTP" rather than "wait" — see `IpcClientHandle::disabled`.
+    disabled_reason: Option<String>,
     stats: DialStats,
     /// Last failure reason, and the path of the current connection. Plain
     /// `std::sync` mutexes: held only for the duration of a string swap,
@@ -740,6 +744,34 @@ impl IpcClientHandle {
         Arc::new(Self {
             client: Mutex::new(None),
             socket_source: Box::new(socket_source),
+            disabled_reason: None,
+            stats: DialStats::default(),
+            last_error: std::sync::Mutex::new(None),
+            connected_path: std::sync::Mutex::new(None),
+            last_logged: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// A handle that will never dial, because the operator turned IPC off
+    /// (`PAPERCUSP_DESKTOP_IPC=0`).
+    ///
+    /// Registering this is deliberate, and better than the obvious alternative
+    /// of simply not `.manage()`-ing anything. An unmanaged state makes every
+    /// invoke fail with Tauri's generic "state not managed", which is
+    /// **indistinguishable from the prod startup window** where the handle is
+    /// not registered *yet*. The webview needs to tell those apart: it should
+    /// WAIT through the startup window (falling back there strands a
+    /// long-lived stream on one of ~6 HTTP sockets for the session — WI-6257),
+    /// but it must FALL BACK when IPC is switched off, or this kill switch
+    /// would hang the app instead of rolling it back. So say which one it is.
+    pub fn disabled(reason: impl Into<String>) -> Arc<Self> {
+        let reason = reason.into();
+        Arc::new(Self {
+            client: Mutex::new(None),
+            socket_source: Box::new(|| {
+                SocketResolution::missing("endpoint-ipc is disabled for this session")
+            }),
+            disabled_reason: Some(reason),
             stats: DialStats::default(),
             last_error: std::sync::Mutex::new(None),
             connected_path: std::sync::Mutex::new(None),
@@ -779,13 +811,17 @@ impl IpcClientHandle {
     /// reveal it hang too.
     pub fn status(&self) -> IpcStatus {
         let resolution = self.resolve_now();
-        let client = match self.client.try_lock() {
-            Ok(guard) => match guard.as_ref() {
-                Some(c) if c.is_alive() => "connected",
-                Some(_) => "dead",
-                None => "never-connected",
-            },
-            Err(_) => "dial-in-flight",
+        let client = if self.disabled_reason.is_some() {
+            "disabled"
+        } else {
+            match self.client.try_lock() {
+                Ok(guard) => match guard.as_ref() {
+                    Some(c) if c.is_alive() => "connected",
+                    Some(_) => "dead",
+                    None => "never-connected",
+                },
+                Err(_) => "dial-in-flight",
+            }
         };
         let now = now_ms();
         let since = |v: u64| if v == 0 { None } else { Some(now.saturating_sub(v)) };
@@ -808,6 +844,9 @@ impl IpcClientHandle {
 
     /// Return a live client, reconnecting if the current one is dead/absent.
     async fn live(&self) -> Result<Arc<IpcClient>, String> {
+        if let Some(reason) = &self.disabled_reason {
+            return Err(format!("ipc_disabled: {reason}"));
+        }
         let mut guard = self.client.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.is_alive() {
