@@ -68,9 +68,19 @@ rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/n
 
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.
+#
+#    Invoke the CLI through `npx -p @tauri-apps/cli@<pinned>`, exactly as every leg
+#    in release-local.sh does — NOT `npm run tauri`. The npm-script form resolves
+#    `tauri` from node_modules/.bin, which exists only where the desktop workspace's
+#    devDependencies were installed; the RELEASE checkout (papercup-release) never
+#    installs them, so the 0.0.13 cut died right here with `sh: 1: tauri: not found`
+#    and then "FATAL: no AppDir" — a whole release lost to a build-host install
+#    detail. npx fetches the pinned CLI on demand, so this step no longer depends
+#    on which checkout it runs in.
+TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 echo "==> tauri build --bundles appimage (the linuxdeploy sidecar-scan crash is EXPECTED and ignored)"
 PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-}" PAPERCUSP_BUILD_VERSION="${PAPERCUSP_BUILD_VERSION:-$VERSION}" \
-  npm run tauri -- build --bundles appimage \
+  npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage \
   || echo "   (tauri appimage step exited non-zero as expected — finishing with appimagetool)"
 
 # 2. Locate the AppDir tauri produced (GUI bundle).
