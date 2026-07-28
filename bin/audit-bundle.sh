@@ -136,18 +136,27 @@ for artifact in "$@"; do
     continue
   fi
 
-  TMPDIR=$(mktemp -d)
-  trap 'rm -rf "$TMPDIR"' EXIT
+  # Per-artifact scratch dir. NOTE: do NOT name this variable TMPDIR — that is a
+  # magic env var `mktemp` honours as its base directory. Naming it TMPDIR made
+  # each iteration set TMPDIR to a dir we then `rm -rf` at the end of the loop
+  # (line below), so the NEXT artifact's bare `mktemp -d` resolved against the
+  # just-deleted dir and died with "failed to create directory via template
+  # '<deleted>/tmp.XXXXXXXXXX': No such file or directory" — which failed the
+  # entire release cut at the mac audit (two dmgs → 2nd iteration) after every
+  # platform had built and signed. Anchor the template at the REAL ambient
+  # TMPDIR (which we never touch now) so it is immune to that class entirely.
+  EXDIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-bundle-XXXXXX")
+  trap 'rm -rf "$EXDIR"' EXIT
 
   case "$artifact" in
     *.deb)
-      dpkg-deb -x "$artifact" "$TMPDIR" 2>/dev/null
+      dpkg-deb -x "$artifact" "$EXDIR" 2>/dev/null
       ;;
     *.rpm)
       if command -v rpm2cpio >/dev/null 2>&1; then
-        (cd "$TMPDIR" && rpm2cpio "$artifact" | cpio -idm --quiet 2>/dev/null) || { echo "FAIL: $artifact rpm2cpio extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
+        (cd "$EXDIR" && rpm2cpio "$artifact" | cpio -idm --quiet 2>/dev/null) || { echo "FAIL: $artifact rpm2cpio extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
       elif command -v 7z >/dev/null 2>&1; then
-        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || { echo "FAIL: $artifact 7z extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
+        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || { echo "FAIL: $artifact 7z extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
       else
         echo "FAIL: $artifact — neither rpm2cpio nor 7z available" >&2
         FAIL=$((FAIL+1))
@@ -155,58 +164,58 @@ for artifact in "$@"; do
       fi
       ;;
     *.AppImage)
-      cp "$artifact" "$TMPDIR/app.AppImage"
-      chmod +x "$TMPDIR/app.AppImage"
-      (cd "$TMPDIR" && ./app.AppImage --appimage-extract >/dev/null 2>&1) || true
+      cp "$artifact" "$EXDIR/app.AppImage"
+      chmod +x "$EXDIR/app.AppImage"
+      (cd "$EXDIR" && ./app.AppImage --appimage-extract >/dev/null 2>&1) || true
       ;;
     *.dmg)
       # On Linux: use 7z to extract. On macOS: hdiutil. Try both.
       if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
       elif command -v hdiutil >/dev/null 2>&1; then
         MOUNT=$(hdiutil attach -nobrowse -readonly "$artifact" | grep '/Volumes/' | head -1 | awk '{print $NF}')
-        cp -R "$MOUNT" "$TMPDIR/"
+        cp -R "$MOUNT" "$EXDIR/"
         hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
       else
         echo "WARN: $artifact — neither 7z nor hdiutil available, scanning as binary blob" >&2
-        cp "$artifact" "$TMPDIR/blob.dmg"
+        cp "$artifact" "$EXDIR/blob.dmg"
       fi
       ;;
     *.msi)
       # Use 7z (handles MSI containers). Fall back to raw scan.
       if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
       else
         echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
-        cp "$artifact" "$TMPDIR/blob.msi"
+        cp "$artifact" "$EXDIR/blob.msi"
       fi
       ;;
     *.exe)
       # NSIS .exe installers — 7z can usually crack them.
       if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$TMPDIR" "$artifact" >/dev/null 2>&1 || true
+        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
       else
         echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
-        cp "$artifact" "$TMPDIR/blob.exe"
+        cp "$artifact" "$EXDIR/blob.exe"
       fi
       ;;
     *)
       if [[ -d "$artifact" ]]; then
-        cp -R "$artifact" "$TMPDIR/"
+        cp -R "$artifact" "$EXDIR/"
       else
-        cp "$artifact" "$TMPDIR/"
+        cp "$artifact" "$EXDIR/"
       fi
       ;;
   esac
 
-  if scan_path "$TMPDIR" "$artifact"; then
+  if scan_path "$EXDIR" "$artifact"; then
     echo "OK:   $artifact"
     PASSED=$((PASSED+1))
   else
     FAIL=$((FAIL+1))
   fi
 
-  rm -rf "$TMPDIR"
+  rm -rf "$EXDIR"
   trap - EXIT
 done
 
