@@ -3425,9 +3425,25 @@ fn spawn_operator_watcher(
 /// Pure + unit-tested. The general liveness watcher may fail open when a
 /// cmdline read is flaky so it does not tear down a healthy connection; the
 /// destructive orphan sweep has a separate fail-CLOSED authority check.
-fn cmdline_looks_like_serve(cmdline: &str) -> bool {
+fn cmdline_looks_like_operator(cmdline: &str) -> bool {
     let lower = cmdline.to_ascii_lowercase();
-    lower.contains("serve.mjs") || lower.contains("serve.ts")
+    // `serve` is the SUPERVISOR (embedded PG, migrations) …
+    lower.contains("serve.mjs")
+        || lower.contains("serve.ts")
+        // … and `hono-host` is the HTTP/IPC host it then runs. Both are "our
+        // operator" for liveness purposes, and the host is the one that
+        // actually writes the endpoint-ipc advertisement and owns the socket.
+        //
+        // Omitting the host was a silent, total false-negative (WI-6512):
+        // measured 2026-07-28, 9 of 9 live operators on this box failed this
+        // check — release/staging run `node …/dist-host/hono-host.mjs`, dev runs
+        // `node --require tsx/preflight.cjs --import tsx/loader.mjs
+        // bin/hono-host.ts` — so `discovery_pid_alive` reported EVERY live
+        // operator as dead. Downstream that meant `/api` could never dial IPC
+        // (it read every advertisement as a restart orphan) and the respawn /
+        // orphan-sweep call sites were reasoning about live operators as dead.
+        || lower.contains("hono-host.mjs")
+        || lower.contains("hono-host.ts")
 }
 
 /// Session roots are never valid cleanup targets, even if a copied record is
