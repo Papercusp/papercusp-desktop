@@ -615,6 +615,96 @@ async fn reader_loop(
     in_flight.clear();
 }
 
+/// Where the operator's IPC endpoint lives — **and, when it can't be found,
+/// why**.
+///
+/// Why this is a struct and not `Option<PathBuf>`: the resolver is the only
+/// code that knows the difference between "the operator hasn't advertised
+/// itself yet", "it advertised a pid that is gone", and "it advertised a
+/// socket file that has since been deleted". Collapsing all three to `None`
+/// discarded that at the exact moment it mattered, and left a stuck IPC
+/// bridge with no signal but a single misleading startup line
+/// (`no socket after 60s — /api on HTTP until operator is up`, which in fact
+/// gates nothing). WI-6512 burned hours re-deriving by hand, from the
+/// filesystem, a reason the resolver had already computed and thrown away.
+///
+/// `detail` is a short human phrase, safe to log and to surface through
+/// `endpoint_ipc_status`. It must never contain secrets — it names discovery
+/// file paths, pids and socket paths only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocketResolution {
+    pub path: Option<PathBuf>,
+    pub detail: String,
+}
+
+impl SocketResolution {
+    pub fn found(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
+        Self { path: Some(path.into()), detail: detail.into() }
+    }
+
+    pub fn missing(detail: impl Into<String>) -> Self {
+        Self { path: None, detail: detail.into() }
+    }
+}
+
+/// Monotonic counters + last-seen strings describing the dial history of one
+/// `IpcClientHandle`. Read by `endpoint_ipc_status` without taking the
+/// connection lock, so it stays answerable even while a dial is in flight.
+#[derive(Default)]
+struct DialStats {
+    /// `live()` calls that had to (re)dial — i.e. no live client to reuse.
+    attempts: AtomicU64,
+    /// `live()` calls satisfied by the existing connection.
+    reuses: AtomicU64,
+    /// Dials abandoned because the resolver had no path to offer.
+    resolve_misses: AtomicU64,
+    /// Dials that had a path but failed to connect to it.
+    connect_errors: AtomicU64,
+    /// Dials that produced a live connection.
+    connects: AtomicU64,
+    /// `endpoint_invoke` calls that reached this handle.
+    invokes: AtomicU64,
+    last_attempt_ms: AtomicU64,
+    last_connect_ms: AtomicU64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A snapshot of IPC bridge health, as returned by `endpoint_ipc_status`.
+///
+/// This is the answer to "is /api actually riding IPC right now, and if not
+/// what precisely is stopping it" — a question that previously could only be
+/// answered by correlating `ss`, the discovery JSON files, and process
+/// liveness by hand.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IpcStatus {
+    /// Live re-resolution performed at status time (a pure filesystem read).
+    pub resolved_path: Option<String>,
+    pub resolution_detail: String,
+    /// `connected` · `dead` · `never-connected` · `dial-in-flight`.
+    ///
+    /// `dial-in-flight` means the connection lock was held when we looked.
+    /// Seeing it persist across repeated calls is itself the diagnosis: a
+    /// dial is hung, and every `/api` call is queued behind it.
+    pub client: &'static str,
+    pub attempts: u64,
+    pub reuses: u64,
+    pub resolve_misses: u64,
+    pub connect_errors: u64,
+    pub connects: u64,
+    pub invokes: u64,
+    pub ms_since_last_attempt: Option<u64>,
+    pub ms_since_last_connect: Option<u64>,
+    pub last_error: Option<String>,
+    pub connected_path: Option<String>,
+}
+
 /// Reconnecting wrapper around `IpcClient` — the managed Tauri state.
 ///
 /// `endpoint_invoke` / `endpoint_cancel` go through this so a dropped
@@ -628,20 +718,99 @@ async fn reader_loop(
 ///   - dev:  re-reads `~/.papercusp/endpoint-ipc.json`, so a restarted
 ///           operator's NEW socket is picked up automatically.
 ///
+/// There is NO time gate on this path: a dial is attempted on every call that
+/// has no live connection to reuse, and a unix-socket connect is sub-millisecond.
+/// The only thing anyone waits for is the operator itself becoming reachable.
+///
 /// A failed (re)connect returns an `invoke_failed:`-prefixed error so the
 /// webview's `ipc-fetch.ts` treats IPC as unavailable and falls back to
-/// HTTP, exactly as before IPC was wired.
+/// HTTP, exactly as before IPC was wired. The prefix is load-bearing —
+/// `isIpcUnavailableMessage` in `libs/generic/desktop-ipc` matches on it.
 pub struct IpcClientHandle {
     client: Mutex<Option<Arc<IpcClient>>>,
-    socket_source: Box<dyn Fn() -> Option<PathBuf> + Send + Sync>,
+    socket_source: Box<dyn Fn() -> SocketResolution + Send + Sync>,
+    stats: DialStats,
+    /// Last failure reason, and the path of the current connection. Plain
+    /// `std::sync` mutexes: held only for the duration of a string swap,
+    /// never across an `.await`.
+    last_error: std::sync::Mutex<Option<String>>,
+    connected_path: std::sync::Mutex<Option<String>>,
+    /// The last line we logged, so a retry loop dialing every 500ms reports a
+    /// CHANGE in state rather than printing the same failure 120 times.
+    last_logged: std::sync::Mutex<Option<String>>,
 }
 
 impl IpcClientHandle {
-    pub fn new(socket_source: impl Fn() -> Option<PathBuf> + Send + Sync + 'static) -> Arc<Self> {
+    pub fn new(
+        socket_source: impl Fn() -> SocketResolution + Send + Sync + 'static,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: Mutex::new(None),
             socket_source: Box::new(socket_source),
+            stats: DialStats::default(),
+            last_error: std::sync::Mutex::new(None),
+            connected_path: std::sync::Mutex::new(None),
+            last_logged: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Print `msg` only if it differs from the previous transition we printed.
+    /// The startup warm loop and ~10 concurrent SSE consumers all drive
+    /// `live()`, so an unconditional log makes the real transition unfindable.
+    fn log_transition(&self, msg: String) {
+        let mut last = match self.last_logged.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if last.as_deref() == Some(msg.as_str()) {
+            return;
+        }
+        println!("[endpoint_ipc] {msg}");
+        *last = Some(msg);
+    }
+
+    fn set_last_error(&self, err: Option<String>) {
+        if let Ok(mut g) = self.last_error.lock() {
+            *g = err;
+        }
+    }
+
+    /// Resolve the endpoint fresh, without dialing. Used by the status command
+    /// so an operator can see what the resolver sees, right now.
+    pub fn resolve_now(&self) -> SocketResolution {
+        (self.socket_source)()
+    }
+
+    /// Health snapshot. Deliberately takes NO `.await` and never blocks on the
+    /// connection lock — a hung dial must not make the diagnostic that would
+    /// reveal it hang too.
+    pub fn status(&self) -> IpcStatus {
+        let resolution = self.resolve_now();
+        let client = match self.client.try_lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(c) if c.is_alive() => "connected",
+                Some(_) => "dead",
+                None => "never-connected",
+            },
+            Err(_) => "dial-in-flight",
+        };
+        let now = now_ms();
+        let since = |v: u64| if v == 0 { None } else { Some(now.saturating_sub(v)) };
+        IpcStatus {
+            resolved_path: resolution.path.as_ref().map(|p| p.display().to_string()),
+            resolution_detail: resolution.detail,
+            client,
+            attempts: self.stats.attempts.load(Ordering::Relaxed),
+            reuses: self.stats.reuses.load(Ordering::Relaxed),
+            resolve_misses: self.stats.resolve_misses.load(Ordering::Relaxed),
+            connect_errors: self.stats.connect_errors.load(Ordering::Relaxed),
+            connects: self.stats.connects.load(Ordering::Relaxed),
+            invokes: self.stats.invokes.load(Ordering::Relaxed),
+            ms_since_last_attempt: since(self.stats.last_attempt_ms.load(Ordering::Relaxed)),
+            ms_since_last_connect: since(self.stats.last_connect_ms.load(Ordering::Relaxed)),
+            last_error: self.last_error.lock().ok().and_then(|g| g.clone()),
+            connected_path: self.connected_path.lock().ok().and_then(|g| g.clone()),
+        }
     }
 
     /// Return a live client, reconnecting if the current one is dead/absent.
@@ -649,21 +818,102 @@ impl IpcClientHandle {
         let mut guard = self.client.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.is_alive() {
+                self.stats.reuses.fetch_add(1, Ordering::Relaxed);
                 return Ok(c.clone());
             }
         }
-        let path = (self.socket_source)()
-            .ok_or_else(|| "invoke_failed: no endpoint-ipc socket available".to_string())?;
-        let c = IpcClient::connect(&path)
-            .await
-            .map_err(|e| format!("invoke_failed: endpoint-ipc connect: {e}"))?;
-        *guard = Some(c.clone());
-        Ok(c)
+        self.stats.attempts.fetch_add(1, Ordering::Relaxed);
+        self.stats.last_attempt_ms.store(now_ms(), Ordering::Relaxed);
+
+        let resolution = (self.socket_source)();
+        let Some(path) = resolution.path else {
+            self.stats.resolve_misses.fetch_add(1, Ordering::Relaxed);
+            let msg = format!(
+                "invoke_failed: no endpoint-ipc socket available — {}",
+                resolution.detail
+            );
+            self.set_last_error(Some(msg.clone()));
+            self.log_transition(format!("not dialing: {}", resolution.detail));
+            return Err(msg);
+        };
+
+        match IpcClient::connect(&path).await {
+            Ok(c) => {
+                self.stats.connects.fetch_add(1, Ordering::Relaxed);
+                self.stats.last_connect_ms.store(now_ms(), Ordering::Relaxed);
+                self.set_last_error(None);
+                if let Ok(mut g) = self.connected_path.lock() {
+                    *g = Some(path.display().to_string());
+                }
+                self.log_transition(format!(
+                    "connected to {} ({})",
+                    path.display(),
+                    resolution.detail
+                ));
+                *guard = Some(c.clone());
+                Ok(c)
+            }
+            Err(e) => {
+                self.stats.connect_errors.fetch_add(1, Ordering::Relaxed);
+                let msg = format!("invoke_failed: endpoint-ipc connect: {e}");
+                self.set_last_error(Some(msg.clone()));
+                self.log_transition(format!(
+                    "dial FAILED for {} ({}): {e}",
+                    path.display(),
+                    resolution.detail
+                ));
+                Err(msg)
+            }
+        }
     }
 
     /// Eagerly (re)connect — used to warm the connection at startup.
     pub async fn warm(&self) -> Result<(), String> {
         self.live().await.map(|_| ())
+    }
+
+    /// Keep a live IPC connection at all times, for the life of the process.
+    ///
+    /// Replaces a bounded "try 120 times over 60s then give up" warm-up whose
+    /// give-up line (`no socket after 60s — /api on HTTP until operator is up`)
+    /// described a fallback that does not exist: expiry gated nothing, and the
+    /// real wait was never the transport — it was the operator sidecar booting
+    /// (embedded PG + migrations), which routinely takes longer than 60s. So
+    /// the loop stopped warming precisely when the operator was about to
+    /// appear, leaving the first connection to whatever `/api` call happened
+    /// next.
+    ///
+    /// Now: dial fast until connected (the operator may appear at any second),
+    /// then supervise — a dropped connection is re-established immediately
+    /// rather than at the next webview call.
+    pub async fn keep_warm(self: Arc<Self>, fast_probe: std::time::Duration) {
+        let started = std::time::Instant::now();
+        let mut announced_slow = false;
+        loop {
+            match self.warm().await {
+                Ok(()) => {
+                    // Connected (or still connected). Supervise cheaply: this
+                    // is a lock + an atomic read when nothing is wrong.
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(_) => {
+                    let waited = started.elapsed();
+                    if !announced_slow && waited >= std::time::Duration::from_secs(60) {
+                        announced_slow = true;
+                        let s = self.status();
+                        println!(
+                            "[endpoint_ipc] still no IPC after {}s — /api is on the capped HTTP \
+                             fallback until this clears. This is the OPERATOR not being reachable \
+                             yet, not a transport timeout: there is no time gate on the dial. \
+                             Resolver says: {}",
+                            waited.as_secs(),
+                            s.resolution_detail
+                        );
+                    }
+                    tokio::time::sleep(fast_probe).await;
+                }
+            }
+        }
     }
 
     /// Drop the current connection so the NEXT call re-resolves the socket
@@ -688,6 +938,7 @@ impl IpcClientHandle {
         input: serde_json::Value,
         channel: Channel<EndpointEvent>,
     ) -> Result<u64, String> {
+        self.stats.invokes.fetch_add(1, Ordering::Relaxed);
         self.live().await?.invoke(tool_name, input, channel).await
     }
 
@@ -758,6 +1009,24 @@ pub async fn endpoint_cancel(
     call_id: u64,
 ) -> Result<(), String> {
     state.cancel(call_id).await
+}
+
+/// Tauri command — IPC bridge health, for humans and agents.
+///
+/// The observability hole this fills (WI-6512): when `/api` silently stayed on
+/// the capped HTTP transport there was no way to ask the app *why*. The only
+/// signal was a startup line that named the wrong cause, so the actual state —
+/// which discovery file was consulted, whether the pid it named was alive,
+/// whether a dial had even been attempted — had to be reconstructed by hand
+/// from `ss`, `/proc` and the JSON files, per investigation.
+///
+/// Cheap and side-effect-free (one small filesystem read); safe to poll.
+#[tauri::command]
+#[specta::specta]
+pub async fn endpoint_ipc_status(
+    state: tauri::State<'_, Arc<IpcClientHandle>>,
+) -> Result<IpcStatus, String> {
+    Ok(state.status())
 }
 
 /// Wait for the sidecar to print `PAPERCUSP_IPC_READY socket=<path>` on
