@@ -265,16 +265,16 @@ fn read_dev_ipc_socket_with_pid(path: &std::path::Path) -> Option<(String, u32)>
 /// advertisement as "no advertisement yet" lets `IpcClientHandle` fall back to
 /// HTTP / keep retrying instead of handing it a socket guaranteed to fail.
 fn discovery_socket_still_live(socket_path: &str, pid: u32, via_wsl: bool) -> bool {
-    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
-        return false;
-    }
-    if !is_tcp_endpoint(socket_path)
-        && !is_windows_named_pipe_path(socket_path)
-        && !std::path::Path::new(socket_path).exists()
-    {
-        return false;
-    }
-    true
+    classify_advertisement(socket_path, pid, via_wsl).live_socket().is_some()
+}
+
+/// Is the endpoint this advertisement names something that could exist on this
+/// machine right now? A `tcp://` loopback endpoint and a Windows named pipe
+/// have nothing to check on the local filesystem, so they pass by construction.
+fn discovery_socket_file_present(socket_path: &str) -> bool {
+    is_tcp_endpoint(socket_path)
+        || is_windows_named_pipe_path(socket_path)
+        || std::path::Path::new(socket_path).exists()
 }
 
 /// Why one discovery advertisement is — or is not — usable.
@@ -324,10 +324,22 @@ impl AdvertisementState {
     }
 }
 
-/// Read one discovery file and classify it. The single implementation of the
-/// validation rules — `read_dev_ipc_socket_validated` and
-/// `resolve_dev_ipc_socket` both go through here so a "is it usable?" answer
-/// and a "why not?" answer can never disagree.
+/// Classify an already-parsed advertisement. THE single implementation of the
+/// validation rules: `discovery_socket_still_live` (the boolean façade) and
+/// `inspect_advertisement` (the file-reading form) both route through here, so
+/// a "is it usable?" answer and a "why not?" answer can never disagree.
+fn classify_advertisement(socket_path: &str, pid: u32, via_wsl: bool) -> AdvertisementState {
+    let socket = socket_path.to_string();
+    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
+        return AdvertisementState::DeadPid { socket, pid };
+    }
+    if !discovery_socket_file_present(&socket) {
+        return AdvertisementState::SocketGone { socket, pid };
+    }
+    AdvertisementState::Live { socket, pid }
+}
+
+/// Read one discovery file and classify it.
 fn inspect_advertisement(path: &std::path::Path, via_wsl: bool) -> AdvertisementState {
     let Some((socket, pid)) = read_dev_ipc_socket_with_pid(path) else {
         return if path.exists() {
@@ -336,25 +348,7 @@ fn inspect_advertisement(path: &std::path::Path, via_wsl: bool) -> Advertisement
             AdvertisementState::Absent
         };
     };
-    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
-        return AdvertisementState::DeadPid { socket, pid };
-    }
-    if !is_tcp_endpoint(&socket)
-        && !is_windows_named_pipe_path(&socket)
-        && !std::path::Path::new(&socket).exists()
-    {
-        return AdvertisementState::SocketGone { socket, pid };
-    }
-    AdvertisementState::Live { socket, pid }
-}
-
-/// `read_dev_ipc_socket`, validated per `discovery_socket_still_live` — the
-/// form every RUNTIME connect site should use (the raw parser stays available
-/// for the WSL cat-based read and for tests that only care about parsing).
-fn read_dev_ipc_socket_validated(path: &std::path::Path, via_wsl: bool) -> Option<String> {
-    inspect_advertisement(path, via_wsl)
-        .live_socket()
-        .map(str::to_string)
+    classify_advertisement(&socket, pid, via_wsl)
 }
 
 /// Resolve the dev `/api` operator's IPC endpoint for `port`, **explaining the
