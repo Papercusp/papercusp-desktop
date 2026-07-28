@@ -7341,22 +7341,33 @@ pub fn run() {
     // (Tauri loads localhost:3055 served by apps/operator). Frontend
     // imports as `import { commands } from '@/lib/tauri-bindings'`.
     //
-    // ⚠ This path is relative to the CRATE dir (papercusp-desktop/src-tauri), and
-    // specta CREATES missing parent directories, so a wrong path silently
-    // "succeeds" — it just writes the bindings somewhere nothing imports. That is
-    // exactly what happened from the papercup→papercusp rename until 2026-07-28:
-    // it pointed at `../../papercup/apps/operator/lib/tauri-bindings.ts`, which
-    // conjured a one-file `papercup/` tree at the repo root and left the real
-    // bindings 52 lines stale for ~7 weeks (every command added in that window,
-    // incl. `endpoint_ipc_status`, was uncallable from the typed frontend).
-    // `apps/operator/lib/tauri-bindings-sync.test.ts` now asserts BOTH that this
-    // literal resolves to the canonical file and that every collected command has
-    // a binding in it — so the same drift cannot recur silently.
+    // ⚠ Anchored at CARGO_MANIFEST_DIR *deliberately* — do not make this a bare
+    // relative path again. Two independent failure modes bit this line:
+    //
+    //  1. WRONG PREFIX. From the papercup→papercusp rename until 2026-07-28 it read
+    //     `../../papercup/apps/operator/lib/tauri-bindings.ts`. specta CREATES
+    //     missing parent directories, so a wrong path cannot fail — it just writes
+    //     the bindings where nothing imports them. That conjured a one-file
+    //     `papercup/` tree and left the real bindings 52 lines stale for ~7 weeks;
+    //     every command added in that window (incl. `endpoint_ipc_status`) was
+    //     uncallable from the typed frontend.
+    //  2. A RELATIVE path resolves against the process CWD, which is NOT stable
+    //     here. Cleanup found the SAME misdirected file at three different depths
+    //     (`papercup/…`, `tools/papercup/…`, `src-tauri/papercup/…`), which is only
+    //     possible if the binary ran from three different working directories. A
+    //     compile-time anchor removes that variable entirely.
+    //
+    // `apps/operator/lib/tauri-bindings-sync.test.ts` asserts both that this path
+    // resolves to the canonical bindings file and that every collected command has
+    // a binding in it, so neither mode can recur silently.
     #[cfg(debug_assertions)]
     specta_builder
         .export(
             specta_typescript::Typescript::default(),
-            "../../apps/operator/lib/tauri-bindings.ts",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/operator/lib/tauri-bindings.ts"
+            ),
         )
         .ok();
 
