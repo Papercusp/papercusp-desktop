@@ -7533,6 +7533,9 @@ pub fn run() {
                     // was previously ignored here, so `PAPERCUSP_DESKTOP_IPC=0`
                     // silently did nothing in dev — the one place people
                     // actually reach for it while debugging transport issues.
+                    // (An if/else, not an early return: this closure is Tauri's
+                    // `setup`, and returning here would skip everything after
+                    // it — env_switch init, the docs palette, the lot.)
                     if std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() == Some("0") {
                         app.manage(endpoint_ipc::IpcClientHandle::disabled(
                             "PAPERCUSP_DESKTOP_IPC=0",
@@ -7540,24 +7543,25 @@ pub fn run() {
                         println!(
                             "[papercusp-desktop] dev endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
                         );
-                        return;
+                    } else {
+                        let handle = endpoint_ipc::IpcClientHandle::new(move || {
+                            let port =
+                                SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                            resolve_dev_ipc_socket(&dir_src, port, dev_via_wsl)
+                        });
+                        app.manage(handle.clone());
+                        // Supervise for the life of the process. The dev
+                        // operator is routinely restarted (every agent's
+                        // dev:restart, every deploy) and its embedded-PG boot
+                        // can exceed a minute, so the old bounded 60s warm-up
+                        // regularly expired BEFORE the operator it was waiting
+                        // for existed — and then stopped trying. `keep_warm`
+                        // connects the instant an advertisement appears and
+                        // re-connects if it drops.
+                        tauri::async_runtime::spawn(
+                            handle.keep_warm(Duration::from_millis(500)),
+                        );
                     }
-                    let handle = endpoint_ipc::IpcClientHandle::new(move || {
-                        let port =
-                            SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                        resolve_dev_ipc_socket(&dir_src, port, dev_via_wsl)
-                    });
-                    app.manage(handle.clone());
-                    // Supervise for the life of the process. The dev operator
-                    // is routinely restarted (every agent's dev:restart, every
-                    // deploy) and its embedded-PG boot can exceed a minute, so
-                    // the old bounded 60s warm-up regularly expired BEFORE the
-                    // operator it was waiting for existed — and then stopped
-                    // trying. `keep_warm` connects the instant an
-                    // advertisement appears and re-connects if it drops.
-                    tauri::async_runtime::spawn(
-                        handle.keep_warm(Duration::from_millis(500)),
-                    );
                 }
 
                 // Env-switch startup (env_switch::init): install the dev-rail
