@@ -326,7 +326,11 @@ impl AdvertisementState {
 /// a "is it usable?" answer and a "why not?" answer can never disagree.
 fn classify_advertisement(socket_path: &str, pid: u32, via_wsl: bool) -> AdvertisementState {
     let socket = socket_path.to_string();
-    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
+    // `discovery_pid_exists`, NOT `discovery_pid_alive` — see the note on
+    // `discovery_pid_exists`. A false negative here silently costs the whole
+    // IPC transport, so this gate refuses only on proof (the pid is gone), not
+    // on a cmdline heuristic that cannot know every entrypoint we might run.
+    if pid != 0 && !discovery_pid_exists(pid, via_wsl) {
         return AdvertisementState::DeadPid { socket, pid };
     }
     if !discovery_socket_file_present(&socket) {
@@ -1200,19 +1204,19 @@ mod discovery_tests {
     // WI-3282 fix direction 1: cmdline verification guards a recycled pid in a
     // stale operator.json from false-positively reading as "our live operator".
     use super::{
-        cmdline_is_protected_session_process, cmdline_looks_like_serve,
+        cmdline_is_protected_session_process, cmdline_looks_like_operator,
         linux_process_identity_from_stat,
     };
 
     #[test]
     fn cmdline_check_matches_serve_mjs_and_ts() {
-        assert!(cmdline_looks_like_serve("node /opt/papercusp/sidecar/serve.mjs --ensure"));
-        assert!(cmdline_looks_like_serve(
+        assert!(cmdline_looks_like_operator("node /opt/papercusp/sidecar/serve.mjs --ensure"));
+        assert!(cmdline_looks_like_operator(
             "/usr/bin/tsx apps/operator/bin/serve.ts --ensure"
         ));
         // /proc/<pid>/cmdline is NUL-joined; callers replace NUL with a space
         // before calling this, so a space-joined argv must still match.
-        assert!(cmdline_looks_like_serve("node serve.mjs --ensure"));
+        assert!(cmdline_looks_like_operator("node serve.mjs --ensure"));
     }
 
     #[test]
@@ -1220,14 +1224,55 @@ mod discovery_tests {
         // The exact class this guards: the OS reassigns a stale operator.json's
         // pid to an unrelated process (a shell, `cat`, another app) — bare
         // pid-aliveness would wrongly call this "our operator".
-        assert!(!cmdline_looks_like_serve("/bin/bash -c sleep 100"));
-        assert!(!cmdline_looks_like_serve("cat /home/user/.papercusp/operator.json"));
-        assert!(!cmdline_looks_like_serve(""));
+        assert!(!cmdline_looks_like_operator("/bin/bash -c sleep 100"));
+        assert!(!cmdline_looks_like_operator("cat /home/user/.papercusp/operator.json"));
+        assert!(!cmdline_looks_like_operator(""));
     }
 
     #[test]
     fn cmdline_check_is_case_insensitive() {
-        assert!(cmdline_looks_like_serve("NODE SERVE.MJS --ensure"));
+        assert!(cmdline_looks_like_operator("NODE SERVE.MJS --ensure"));
+    }
+
+    /// REGRESSION GUARD (WI-6512). These are VERBATIM `/proc/<pid>/cmdline`
+    /// strings captured from live operators on the dev box 2026-07-28, NUL
+    /// replaced by space exactly as `discovery_pid_alive` does before calling.
+    ///
+    /// They are here because the matcher previously accepted only
+    /// `serve.mjs`/`serve.ts` — the SUPERVISOR — while the process that
+    /// actually writes the endpoint-ipc advertisement and owns the socket is
+    /// the HOST, `hono-host`. Every one of these returned false, so
+    /// `discovery_pid_alive` declared every live operator dead and `/api`
+    /// could never dial IPC. Nothing failed loudly; the app just felt slow.
+    ///
+    /// If you rename or re-wrap the operator entrypoint, THIS test is what
+    /// tells you — instead of a silent transport outage discovered months
+    /// later. Add the new cmdline here and to `cmdline_looks_like_operator`.
+    #[test]
+    fn cmdline_check_accepts_the_real_operator_entrypoints() {
+        // Release / staging: the built host, run directly by node.
+        assert!(cmdline_looks_like_operator(
+            "/home/u/.linuxbrew/Cellar/node/25.9.0_1/bin/node \
+             /home/u/papercupai-workspace/papercup-release/apps/operator/dist-host/hono-host.mjs "
+        ));
+        assert!(cmdline_looks_like_operator("node dist-host/hono-host.mjs "));
+        // Dev: the TypeScript host behind the tsx loader. Note the entrypoint
+        // is the LAST argv entry, preceded by loader flags — a matcher that
+        // anchored on argv[1] would miss it.
+        assert!(cmdline_looks_like_operator(
+            "/home/u/.linuxbrew/Cellar/node/25.9.0_1/bin/node \
+             --require /home/u/papercupai-workspace/papercusp/node_modules/tsx/dist/preflight.cjs \
+             --import file:///home/u/papercupai-workspace/papercusp/node_modules/tsx/dist/loader.mjs \
+             bin/hono-host.ts "
+        ));
+    }
+
+    /// The recycled-pid guard must still bite: widening the matcher to cover
+    /// the host must not turn it into "anything with node in it".
+    #[test]
+    fn cmdline_check_still_rejects_an_unrelated_node_process() {
+        assert!(!cmdline_looks_like_operator("node /home/u/some-other-app/index.mjs"));
+        assert!(!cmdline_looks_like_operator("node dist-host/other-host.mjs"));
     }
 
     #[test]
@@ -1793,8 +1838,9 @@ mod http_ready_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        bundled_path_env, classify_advertisement, endpoint_ipc_socket_path_supported_for_target,
-        inspect_advertisement, AdvertisementState,
+        bundled_path_env, classify_advertisement, cmdline_looks_like_operator,
+        endpoint_ipc_socket_path_supported_for_target,
+        inspect_advertisement, local_process_cmdline, AdvertisementState,
         find_endpoint_ipc_socket, is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port,
         resolve_dev_ipc_socket, url_encode,
     };
@@ -2132,6 +2178,35 @@ mod helper_tests {
             fake_operator.pid(),
             false
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE WI-6512 GUARD for the IPC leg.
+    ///
+    /// This test process is unambiguously alive, and its cmdline (a cargo test
+    /// binary) looks nothing like an operator entrypoint. The advertisement
+    /// gate must STILL accept it, because it refuses only on proof that the
+    /// pid is gone — never on a name heuristic.
+    ///
+    /// That distinction is the entire bug: when this gate consulted
+    /// `discovery_pid_alive` (pid existence AND a `serve.mjs`/`serve.ts`
+    /// cmdline match), every real operator — which runs as `hono-host` — was
+    /// classified a restart orphan, so `/api` never dialed IPC at all.
+    #[test]
+    fn advertisement_gate_accepts_a_live_pid_whose_cmdline_is_unrecognized() {
+        let dir = temp_dir("ipc-live-unrecognized-cmdline");
+        let sock = dir.join("real.sock");
+        std::fs::write(&sock, b"").unwrap();
+        // Precondition — without this the test could pass for the wrong reason.
+        let me = local_process_cmdline(std::process::id()).unwrap_or_default();
+        assert!(
+            !cmdline_looks_like_operator(&me),
+            "precondition: this test binary must not look like an operator, got {me:?}"
+        );
+        assert!(
+            still_live(&sock.to_string_lossy(), std::process::id(), false),
+            "a LIVE pid must never be vetoed for having an unanticipated cmdline"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3531,7 +3606,7 @@ fn recorded_operator_kill_authority(discovery: &OperatorDiscovery, via_wsl: bool
     let Some(cmdline) = local_process_cmdline(discovery.pid) else {
         return false;
     };
-    cmdline_looks_like_serve(&cmdline) && !cmdline_is_protected_session_process(&cmdline)
+    cmdline_looks_like_operator(&cmdline) && !cmdline_is_protected_session_process(&cmdline)
 }
 
 /// Best-effort cmdline read for a LOCAL (non-WSL) pid: `/proc/<pid>/cmdline`
@@ -3571,22 +3646,12 @@ fn local_process_cmdline(pid: u32) -> Option<String> {
 /// probe its /proc entry through wsl.exe (`kill` doesn't exist on Windows,
 /// and a Windows pid check would be meaningless for it).
 fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
+    if !discovery_pid_exists(pid, via_wsl) {
+        return false;
+    }
     if via_wsl {
         #[cfg(target_os = "windows")]
         {
-            let mut cmd = Command::new("wsl.exe");
-            cmd.args([
-                "--distribution",
-                wsl_setup::DISTRO_NAME_PUB,
-                "-e",
-                "test",
-                "-d",
-                &format!("/proc/{}", pid),
-            ]);
-            no_console_window(&mut cmd);
-            if !cmd.status().map(|s| s.success()).unwrap_or(false) {
-                return false;
-            }
             // Best-effort cmdline check via the same wsl.exe route; a failed
             // read (UNC flakiness, distro busy) falls back to "alive" per the
             // fail-open contract above.
@@ -3600,37 +3665,66 @@ fn discovery_pid_alive(pid: u32, via_wsl: bool) -> bool {
             ]);
             no_console_window(&mut cat_cmd);
             return match cat_cmd.output() {
-                Ok(out) if out.status.success() => {
-                    cmdline_looks_like_serve(&String::from_utf8_lossy(&out.stdout).replace('\0', " "))
-                }
+                Ok(out) if out.status.success() => cmdline_looks_like_operator(
+                    &String::from_utf8_lossy(&out.stdout).replace('\0', " "),
+                ),
                 _ => true,
             };
         }
     }
+    match local_process_cmdline(pid) {
+        Some(cmdline) => cmdline_looks_like_operator(&cmdline),
+        None => true, // couldn't read (raced exit, perms) — fail open
+    }
+}
+
+/// Does a process with this pid exist AT ALL — signal-0 equivalent, with **no
+/// cmdline heuristic**.
+///
+/// Split out from `discovery_pid_alive` because the two questions have
+/// opposite failure costs, and conflating them cost WI-6512 two months.
+/// "Is it still OUR operator?" is a guard against a RECYCLED pid, and a wrong
+/// answer there is cheap. "Does the pid exist?" gates whether `/api` will dial
+/// IPC at all, and a wrong answer there is catastrophic AND silent: an
+/// unanticipated entrypoint name makes every live operator read as dead, so
+/// IPC never connects, every stream falls back to the webview's ~6-socket HTTP
+/// pool, and the only symptom is that the app feels slow.
+///
+/// So the endpoint-ipc advertisement path uses THIS — a name-free check that
+/// can never false-negative on a live process. It still fully preserves the
+/// measured fix that motivated the validation (EI-18763945004822208), whose
+/// failure mode was a restart orphan naming a pid that no longer EXISTS.
+/// A recycled pid slips past, and that is a deliberate trade: the cost is one
+/// cheap failed connect, which `IpcClientHandle::live` reports precisely and
+/// retries — versus a silent, permanent loss of the transport.
+fn discovery_pid_exists(pid: u32, via_wsl: bool) -> bool {
+    if via_wsl {
+        #[cfg(target_os = "windows")]
+        {
+            let mut cmd = Command::new("wsl.exe");
+            cmd.args([
+                "--distribution",
+                wsl_setup::DISTRO_NAME_PUB,
+                "-e",
+                "test",
+                "-d",
+                &format!("/proc/{}", pid),
+            ]);
+            no_console_window(&mut cmd);
+            return cmd.status().map(|s| s.success()).unwrap_or(false);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
-        if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-            return false;
-        }
-        match local_process_cmdline(pid) {
-            Some(cmdline) => cmdline_looks_like_serve(&cmdline),
-            None => true, // couldn't read (raced exit, perms) — fail open
-        }
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        if !Command::new("kill")
+        Command::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-        {
-            return false;
-        }
-        match local_process_cmdline(pid) {
-            Some(cmdline) => cmdline_looks_like_serve(&cmdline),
-            None => true, // couldn't read (raced exit, perms) — fail open
-        }
     }
 }
 
