@@ -19,6 +19,13 @@
 //! it for compositing, so the compositor repaints the whole viewport regardless.
 //! Turning the second one on makes the compositor honour the damage rects.
 //!
+//! ⚠ THAT IS THE THEORY, AND MEASUREMENT DID NOT BEAR IT OUT. See
+//! DAMAGE_DEFAULT_ON below: with the control arm actually run, the flag did not
+//! help a single keystroke (already free without it) and made sustained typing
+//! WORSE. It is applied only when explicitly asked for. Everything above this
+//! line is the hypothesis this module was built to test, not a description of
+//! how the app is configured -- do not read it as the latter.
+//!
 //! Related and deliberately NOT the fix here (both measured, both dead ends):
 //!   - compositing-layer promotion (`will-change`, `contain:paint`) of the heavy
 //!     decorative surfaces: +1ms / +2ms, null in every paired round. Expected —
@@ -46,8 +53,20 @@ const DESIRED_FEATURES: &[(&str, bool)] = &[
 const DAMAGE_ENV: &str = "PAPERCUSP_WEBKIT_DAMAGE_COMPOSITING";
 
 /// Whether the damage-compositing feature is applied when the env var is unset.
+///
+/// FALSE — measured 2026-07-28, run13. This defaulted to true on the strength of
+/// a dmgON-only measurement whose base arm read ~= its sham arm. Running the
+/// dmgOFF control with the same probe showed stock WebKit does the SAME (paired
+/// base-sham median 0 in both arms), so that was never evidence the flag helped;
+/// a single keystroke is already free either way. On SUSTAINED typing -- 20 chars
+/// at the 33ms key-repeat interval, which is the owner's actual complaint -- the
+/// flag measured WORSE, with no overlap across 8 rounds per arm:
+///     wall time for 20 chars (ideal 660ms):  OFF 862..982   ON 1099..1424
+///     worst frame during the burst:          OFF 48..76     ON 78..144
+/// Left OFF pending a counterbalanced repeat (run14) that rules out boot order.
+/// Do not flip this back on without an in-run sham control on the BURST arm.
 #[cfg(target_os = "linux")]
-const DAMAGE_DEFAULT_ON: bool = true;
+const DAMAGE_DEFAULT_ON: bool = false;
 
 #[cfg(target_os = "linux")]
 fn damage_compositing_wanted() -> bool {
