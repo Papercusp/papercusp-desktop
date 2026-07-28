@@ -2938,7 +2938,27 @@ echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, 
 # reintroducing the full scratch tree, …), so the exception can't silently
 # widen.
 _expected_cache="$SIDECAR_DIR/node_modules/@huggingface/transformers/.cache"
-_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null | grep -v -F -x "$_expected_cache")
+# `|| true` IS LOAD-BEARING — do not remove it (EI-18885442084466501).
+# `grep -v` exits 1 when it filters out every line, and under this script's
+# `set -euo pipefail` that non-zero status kills the whole build. The healthy
+# case — no stray caches, so grep emits nothing — is therefore the case that
+# died, silently and with no message, making this guard's ONLY non-fatal path
+# a fatal one.
+#
+# It failed here rather than anywhere else because of WHERE this line sits: the
+# destructive `mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"` has already run, and the
+# EXIT trap installed at the top then `rm -rf`s the staged tmp dir. So each run
+# moved the previous sidecar aside, built a complete bundle, verified it
+# ("verify-sidecar-bundle: OK"), printed its freshness stamp — and then deleted
+# the result and left the tree with NO sidecar at all, worse off than before.
+# The last line printed was success-shaped, so it read as a clean build.
+#
+# 11 orphaned sidecar.old.<pid> dirs were sitting in src-tauri/ when this was
+# found: one per build that died right here. That litter had already been filed
+# as a cleanup omission (EI-18882950272344248) — it is not. The script never
+# reaches its cleanup because it never gets past this line.
+_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null \
+  | { grep -v -F -x "$_expected_cache" || true; })
 if [[ -n "$_stray_caches" ]]; then
   echo "FATAL: runtime .cache dir(s) found in staged sidecar node_modules — these are download scratch that must never ship (WI-5638):" >&2
   echo "$_stray_caches" >&2
