@@ -2399,6 +2399,89 @@ mod helper_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// D-008 (`no-http-anywhere-2026-07-28`). The webview decides whether
+    /// `/api/desktop/*` may ride IPC purely from this flag, so getting it wrong in
+    /// either direction is a user-visible bug — and the two directions cost very
+    /// differently, which is why this asserts both.
+    ///
+    /// A false NEGATIVE costs one native HTTP request per poll (the old behaviour).
+    /// A false POSITIVE routes a content-origin-scoped call to a FOREIGN operator,
+    /// where it 404s and silently hides the env-switcher bar — the exact failure the
+    /// original blanket carve-out was added to prevent. So the singleton-fallback
+    /// case must never claim content origin, however convenient that would be.
+    #[test]
+    fn per_port_resolution_proves_content_origin_but_the_singleton_fallback_does_not() {
+        let dir = temp_dir("ipc-resolve-content-origin");
+
+        // (1) Per-port advertisement: published BY the operator on :3070, which is
+        // the origin serving this webview. Proven same operator.
+        let sock = dir.join("live.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let per_port_operator = FakeServeProcess::spawn();
+        std::fs::write(
+            dir.join("endpoint-ipc.3070.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                sock.to_string_lossy(),
+                per_port_operator.pid()
+            ),
+        )
+        .unwrap();
+        let per_port = resolve_dev_ipc_socket(&dir, 3070, false);
+        assert!(
+            per_port.owner_is_content_origin,
+            "a per-port advertisement is published by the operator on that port, so it \
+             proves the IPC owner is the content origin: {}",
+            per_port.detail
+        );
+
+        // (2) Same directory, a port whose per-port file is STALE, so resolution
+        // falls back to the last-writer-wins singleton. That socket may belong to
+        // any operator on the box, so content origin is NOT proven.
+        let stale_sock = dir.join("stale.sock");
+        std::fs::write(&stale_sock, b"").unwrap();
+        std::fs::write(
+            dir.join("endpoint-ipc.3170.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                stale_sock.to_string_lossy(),
+                DEFINITELY_DEAD_PID
+            ),
+        )
+        .unwrap();
+        let singleton_sock = dir.join("singleton.sock");
+        std::fs::write(&singleton_sock, b"").unwrap();
+        let singleton_operator = FakeServeProcess::spawn();
+        std::fs::write(
+            dir.join("endpoint-ipc.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                singleton_sock.to_string_lossy(),
+                singleton_operator.pid()
+            ),
+        )
+        .unwrap();
+        let fell_back = resolve_dev_ipc_socket(&dir, 3170, false);
+        assert_eq!(
+            fell_back.path,
+            Some(std::path::PathBuf::from(singleton_sock.to_string_lossy().as_ref())),
+            "precondition: this case must actually take the singleton fallback"
+        );
+        assert!(
+            !fell_back.owner_is_content_origin,
+            "the singleton is last-writer-wins and may name a DIFFERENT operator, so it \
+             must never claim content origin: {}",
+            fell_back.detail
+        );
+
+        // (3) A miss proves nothing either — there is no owner at all.
+        let absent = resolve_dev_ipc_socket(&dir, 3271, false);
+        assert_eq!(absent.path, None);
+        assert!(!absent.owner_is_content_origin);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
