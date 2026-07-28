@@ -7340,11 +7340,23 @@ pub fn run() {
     // Export to the operator app — that's where the desktop UI lives
     // (Tauri loads localhost:3055 served by apps/operator). Frontend
     // imports as `import { commands } from '@/lib/tauri-bindings'`.
+    //
+    // ⚠ This path is relative to the CRATE dir (papercusp-desktop/src-tauri), and
+    // specta CREATES missing parent directories, so a wrong path silently
+    // "succeeds" — it just writes the bindings somewhere nothing imports. That is
+    // exactly what happened from the papercup→papercusp rename until 2026-07-28:
+    // it pointed at `../../papercup/apps/operator/lib/tauri-bindings.ts`, which
+    // conjured a one-file `papercup/` tree at the repo root and left the real
+    // bindings 52 lines stale for ~7 weeks (every command added in that window,
+    // incl. `endpoint_ipc_status`, was uncallable from the typed frontend).
+    // `apps/operator/lib/tauri-bindings-sync.test.ts` now asserts BOTH that this
+    // literal resolves to the canonical file and that every collected command has
+    // a binding in it — so the same drift cannot recur silently.
     #[cfg(debug_assertions)]
     specta_builder
         .export(
             specta_typescript::Typescript::default(),
-            "../../papercup/apps/operator/lib/tauri-bindings.ts",
+            "../../apps/operator/lib/tauri-bindings.ts",
         )
         .ok();
 
