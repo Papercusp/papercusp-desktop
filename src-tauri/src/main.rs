@@ -52,6 +52,7 @@ mod fd_limit;
 mod localstorage_wal;
 mod native_console;
 mod native_terminal;
+mod webkit_render;
 mod pty;
 mod workspaces;
 mod wsl_setup;
@@ -7019,6 +7020,12 @@ pub fn run() {
         })
         .setup(|app| {
             let role = app_role::detect(&app.config().identifier);
+            // WI-6502: make the WebKitGTK compositor honour the damage rects it
+            // already computes, instead of repainting the whole viewport on
+            // every keystroke. Unconditional (NOT dev-gated like env_switch
+            // below) — the typing lag it fixes is a shipped-product symptom.
+            // Fail-soft: logs and continues if the feature is unavailable.
+            webkit_render::init(app);
             // WI-1803: BEFORE any boot diagnostic prints, route THIS process's
             // own stdout/stderr to a rotated on-disk log in packaged (release)
             // builds — a Finder/launchd/login-item launch has no console, so

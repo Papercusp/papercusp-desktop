@@ -105,7 +105,11 @@ pub fn init(app: &tauri::App) {
     use tauri::Manager;
 
     let Some(window) = app.get_webview_window("main") else {
-        return; // headless / non-GUI role: nothing to tune
+        // Headless / non-GUI role has no window and legitimately wants none.
+        // Logged rather than silently skipped: a silent no-op here is
+        // indistinguishable from "the renderer fix didn't help".
+        eprintln!("[webkit-render] no main webview window at setup — features not applied");
+        return;
     };
 
     let want_damage = damage_compositing_wanted();
