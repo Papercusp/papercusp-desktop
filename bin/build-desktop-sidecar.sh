@@ -713,6 +713,35 @@ prune_foreign_onnx_bins() {
   [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign onnx bin dir(s), kept ${_bare_node_platform}/${_bare_node_arch}"
   return 0
 }
+# node-gyp SCAFFOLDING carries the build box's absolute paths — and therefore the
+# owner's identity — into the shipped bundle (WI-4419). A compiled native module
+# needs only its addon binary at build/Release/*.node; everything else node-gyp
+# leaves behind (Makefile, binding.Makefile, config.gypi, *.target.mk, the
+# Release/.deps/*.o.d dependency lists, obj.target/ objects) embeds
+# /home/<user>/... literally. That is what failed the 0.0.13 identity gate: 22
+# files across cpu-features/ and ssh2/, every one of them build residue with no
+# runtime role.
+#
+# Prune it at the SOURCE — which is exactly what the gate demands ("prune the
+# leaking file from the sidecar copy … never add an exclude here"), because the
+# scan deliberately honors no path-exclude list. Runs in EVERY build, not just a
+# release: a dev sidecar that differs structurally from the shipped one is how
+# this class of leak hides until the release gate. Safe against the dev tree —
+# the sidecar holds real COPIES (the closure walker cp's each package), and
+# `find -type d` never follows a symlink, so a symlinked package is skipped.
+prune_gyp_build_intermediates() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  local bd pruned=0
+  while IFS= read -r -d '' bd; do
+    rm -rf "$bd/Release/.deps" "$bd/Release/obj.target" "$bd/Release/obj" "$bd/deps"
+    rm -f  "$bd/Makefile" "$bd/binding.Makefile" "$bd/config.gypi" "$bd"/*.mk "$bd"/gyp-*-tool
+    find "$bd" \( -name '*.target.mk' -o -name '*.o.d' -o -name '*.gypi' \) -type f -delete 2>/dev/null || true
+    pruned=$((pruned+1))
+  done < <(find "$root" -type d -name build -path '*/node_modules/*' -print0 2>/dev/null)
+  [[ $pruned -gt 0 ]] && echo "  ✂ pruned node-gyp build scaffolding from $pruned native-module build/ dir(s) (WI-4419: they embed build-box paths)"
+  return 0
+}
 # Walks a package's dependency closure and copies each package into the sidecar.
 #
 # ⚠ It follows BOTH `dependencies` AND `optionalDependencies`, and it must:
@@ -994,6 +1023,13 @@ fi
 #       cannot be. Hard-fail is release-gated (PAPERCUSP_RELEASE_AUDIT=1) so a dev
 #       sidecar on the build box — whose own identity legitimately pervades its
 #       compiled binaries — still builds; the prune runs in every build regardless.
+#   (3) PRUNE node-gyp build scaffolding from every native module in the sidecar.
+#       Same exposure, different source: these are build residue (Makefile,
+#       config.gypi, *.target.mk, .deps/*.o.d) that embed the build box's absolute
+#       paths. Must run BEFORE the identity scan below, which is what catches them.
+echo "→ pruning node-gyp build scaffolding from sidecar native modules (release-privacy, WI-4419)"
+prune_gyp_build_intermediates "$SIDECAR_DIR"
+
 _audit_py="$HERE/audit-release-bundle.py"
 if [[ -f "$_audit_py" ]]; then
   echo "→ pruning internal-build-infra docs from sidecar (release-privacy, WI-4419)"
