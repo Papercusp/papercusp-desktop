@@ -109,6 +109,26 @@ FORBIDDEN_PATH = [
      ["build/Makefile", "build/binding.Makefile", "build/config.gypi",
       "build/*.mk", "build/*.gypi",
       "build/Release/.deps", "build/Release/obj.target", "build/Release/obj"]),
+    # ssh2's OPTIONAL native crypto accelerator (sshcrypto.node). Unlike the
+    # scaffolding above, THIS is the addon binary — but node-gyp compiles it on
+    # this box and the compiler bakes the build-box home path into a .rodata
+    # __FILE__ string (/home/<user>/.cache/node-gyp/<ver>/include/node/node_object_wrap.h,
+    # from an assert() macro). That is a CONTENT leak: phase B catches it (grep -a
+    # over all bytes), but phase C cannot ATTRIBUTE it (the member is binary — NUL in
+    # the first 4KB) and the stager's sed scrub cannot REDACT it (source_leakers skips
+    # binaries), so exclusion is the only mechanism that reaches it (this failed the
+    # 0.0.13 cut AFTER the scaffolding rule above cleared the path scan). Safe to drop:
+    # ssh2 wraps `require('.../sshcrypto.node')` in try/catch and falls back to pure-JS
+    # crypto when it is absent (node_modules/ssh2/lib/protocol/crypto.js). Scoped to
+    # THIS addon BY NAME on purpose — better-sqlite3 / cpu-features addons are
+    # needed-and-clean and MUST ship (better-sqlite3 has NO JS fallback), so this is
+    # deliberately NOT the build/Release/*.node class the rule above preserves.
+    # FOLLOW-UP (durable class fix, not release-blocking): compile native addons with
+    # -ffile-prefix-map / a neutral node-gyp cache dir so __FILE__ never captures the
+    # box path — that would remove the leak at the source for ALL addons.
+    ("ssh2-native-crypto-addon",
+     re.compile(r"(^|/)sshcrypto\.node$"),
+     ["sshcrypto.node"]),
     ("scratch-or-tmp", re.compile(r"(^|/)(scratch|scratchpad|test-results|\.agent-tmp|\.vitest-tmp|\.tmp|\.tmp-[^/]*|\.pcv-socktest|\.nx|__pycache__|docs\.old\.[0-9]+|\.vite|\.vite-temp)/|(^|/)(junit\.xml|\.modules\.yaml)$"),
      ["scratch", "scratchpad", "test-results", ".agent-tmp", ".vitest-tmp", ".tmp",
       ".tmp-*", ".pcv-socktest", ".nx", "__pycache__", "docs.old.*",
