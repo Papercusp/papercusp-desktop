@@ -264,10 +264,6 @@ fn read_dev_ipc_socket_with_pid(path: &std::path::Path) -> Option<(String, u32)>
 /// filesystem), the socket file itself still exists. Treating a stale
 /// advertisement as "no advertisement yet" lets `IpcClientHandle` fall back to
 /// HTTP / keep retrying instead of handing it a socket guaranteed to fail.
-fn discovery_socket_still_live(socket_path: &str, pid: u32, via_wsl: bool) -> bool {
-    classify_advertisement(socket_path, pid, via_wsl).live_socket().is_some()
-}
-
 /// Is the endpoint this advertisement names something that could exist on this
 /// machine right now? A `tcp://` loopback endpoint and a Windows named pipe
 /// have nothing to check on the local filesystem, so they pass by construction.
@@ -407,20 +403,6 @@ fn resolve_dev_ipc_socket(
     }
 }
 
-/// `read_dev_ipc_socket_for_port`, validated (see `read_dev_ipc_socket_validated`).
-/// A stale per-port file (dead pid, or its socket file gone) is treated exactly
-/// like a missing one, so the EI-296 custom-port / fixed-dev-port fallback
-/// logic is unchanged — it just now also re-runs on staleness, not only on
-/// absence. Thin wrapper over `resolve_dev_ipc_socket` so the two cannot drift.
-fn read_dev_ipc_socket_for_port_validated(
-    papercusp_dir: &std::path::Path,
-    port: u16,
-    via_wsl: bool,
-) -> Option<String> {
-    resolve_dev_ipc_socket(papercusp_dir, port, via_wsl)
-        .path
-        .map(|p| p.to_string_lossy().into_owned())
-}
 
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
 /// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
@@ -1811,9 +1793,10 @@ mod http_ready_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        bundled_path_env, discovery_socket_still_live, endpoint_ipc_socket_path_supported_for_target,
+        bundled_path_env, classify_advertisement, endpoint_ipc_socket_path_supported_for_target,
+        inspect_advertisement, AdvertisementState,
         find_endpoint_ipc_socket, is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port,
-        read_dev_ipc_socket_for_port_validated, read_dev_ipc_socket_validated, url_encode,
+        resolve_dev_ipc_socket, url_encode,
     };
 
     /// Well above any realistic pid_max (and positive as i32) → ESRCH / no
@@ -2041,7 +2024,16 @@ mod helper_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── discovery_socket_still_live / *_validated (EI-18763945004822208) ────
+    /// Test façade over `classify_advertisement`. The production code has no
+    /// boolean form of this question — it always wants the REASON — so the
+    /// predicate lives here rather than shipping an unused one.
+    fn still_live(socket_path: &str, pid: u32, via_wsl: bool) -> bool {
+        classify_advertisement(socket_path, pid, via_wsl)
+            .live_socket()
+            .is_some()
+    }
+
+    // ── advertisement classification / resolution (EI-18763945004822208) ────
     // Confirmed live: a restarted operator's discovery file briefly still
     // names the PREVIOUS (dead) pid/socket until the new instance rewrites
     // it, and dialing that window produced a measured 160/160 ENOENT
@@ -2086,14 +2078,14 @@ mod helper_tests {
     fn discovery_socket_still_live_true_for_tcp_endpoint_regardless_of_filesystem() {
         // A `tcp://` endpoint has nothing on the local filesystem to check —
         // only the pid is validated (here: unknown pid → fail open).
-        assert!(discovery_socket_still_live(
+        assert!(still_live(
             "tcp://127.0.0.1:35745",
             0,
             false
         ));
         // Dead pid still fails a tcp:// endpoint — pid liveness is checked
         // regardless of transport.
-        assert!(!discovery_socket_still_live(
+        assert!(!still_live(
             "tcp://127.0.0.1:35745",
             DEFINITELY_DEAD_PID,
             false
@@ -2106,7 +2098,7 @@ mod helper_tests {
         let sock = dir.join("real.sock");
         std::fs::write(&sock, b"").unwrap(); // the socket FILE exists…
         // …but the advertised pid is dead → the whole advertisement is stale.
-        assert!(!discovery_socket_still_live(
+        assert!(!still_live(
             &sock.to_string_lossy(),
             DEFINITELY_DEAD_PID,
             false
@@ -2121,7 +2113,7 @@ mod helper_tests {
         // Pid is alive (this test process) but the socket file itself is
         // gone — still stale (e.g. the operator died between writing the
         // discovery file and this read).
-        assert!(!discovery_socket_still_live(
+        assert!(!still_live(
             &sock.to_string_lossy(),
             std::process::id(),
             false
@@ -2135,7 +2127,7 @@ mod helper_tests {
         let sock = dir.join("real.sock");
         std::fs::write(&sock, b"").unwrap();
         let fake_operator = FakeServeProcess::spawn();
-        assert!(discovery_socket_still_live(
+        assert!(still_live(
             &sock.to_string_lossy(),
             fake_operator.pid(),
             false
@@ -2150,7 +2142,7 @@ mod helper_tests {
         let dir = temp_dir("ipc-live-unknown-pid");
         let sock = dir.join("real.sock");
         std::fs::write(&sock, b"").unwrap();
-        assert!(discovery_socket_still_live(&sock.to_string_lossy(), 0, false));
+        assert!(still_live(&sock.to_string_lossy(), 0, false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2174,8 +2166,20 @@ mod helper_tests {
             read_dev_ipc_socket(&file),
             Some(sock.to_string_lossy().to_string())
         );
-        // …but the validated read treats it as no advertisement at all.
-        assert_eq!(read_dev_ipc_socket_validated(&file, false), None);
+        // …but the validated read treats it as no advertisement at all — and,
+        // unlike the old bare `None`, SAYS WHY (the whole point of WI-6512's
+        // instrumentation: the reason existed here and was being discarded).
+        let state = inspect_advertisement(&file, false);
+        assert_eq!(state.live_socket(), None);
+        assert!(
+            matches!(state, AdvertisementState::DeadPid { .. }),
+            "a restart orphan must be distinguishable from an absent file, got {state:?}"
+        );
+        assert!(
+            state.describe().contains("not running"),
+            "the reason must be legible to a human reading a log: {}",
+            state.describe()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2196,8 +2200,8 @@ mod helper_tests {
         )
         .unwrap();
         assert_eq!(
-            read_dev_ipc_socket_validated(&file, false),
-            Some(sock.to_string_lossy().to_string())
+            inspect_advertisement(&file, false).live_socket(),
+            Some(sock.to_string_lossy().as_ref())
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2232,9 +2236,10 @@ mod helper_tests {
             ),
         )
         .unwrap();
+        let fixed = resolve_dev_ipc_socket(&dir, 3170, false);
         assert_eq!(
-            read_dev_ipc_socket_for_port_validated(&dir, 3170, false),
-            Some(legacy_sock.to_string_lossy().to_string()),
+            fixed.path,
+            Some(std::path::PathBuf::from(legacy_sock.to_string_lossy().as_ref())),
             "a stale per-port file on a fixed dev port must fall back to a live singleton"
         );
         // A CUSTOM port (EI-296) must NOT fall back even when its own
@@ -2248,9 +2253,68 @@ mod helper_tests {
             ),
         )
         .unwrap();
+        let custom = resolve_dev_ipc_socket(&dir, 3271, false);
+        assert_eq!(custom.path, None);
+        // The EI-296 no-fallback rule is CORRECT but was invisible: a custom-port
+        // shell that never connected reported nothing at all, which is the exact
+        // dead end WI-6512 hit. The refusal must now name itself and the file it
+        // wanted, or the next investigator re-derives it from the filesystem again.
+        assert!(
+            custom.detail.contains("3271") && custom.detail.contains("endpoint-ipc.3271.json"),
+            "a custom-port refusal must name the port and the advertisement it wanted: {}",
+            custom.detail
+        );
+        assert!(
+            custom.detail.contains("no singleton fallback"),
+            "a custom-port refusal must say it deliberately did not fall back: {}",
+            custom.detail
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_dev_ipc_socket_reports_a_port_that_never_advertised() {
+        // The plain "operator isn't up yet" case. It must be distinguishable in
+        // the detail string from a stale advertisement, because the operator
+        // response differs: wait, versus a restart left an orphan behind.
+        let dir = temp_dir("ipc-resolve-absent");
+        let r = resolve_dev_ipc_socket(&dir, 3070, false);
+        assert_eq!(r.path, None);
+        assert!(
+            r.detail.contains("no advertisement published"),
+            "an absent advertisement must say so plainly: {}",
+            r.detail
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_dev_ipc_socket_explains_a_successful_resolution_too() {
+        // A resolution that WORKS still has to say which advertisement it used:
+        // "IPC is connected" is not actionable without knowing to WHICH operator,
+        // and on this box several are live on different ports at once.
+        let dir = temp_dir("ipc-resolve-live");
+        let sock = dir.join("live.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let fake_operator = FakeServeProcess::spawn();
+        std::fs::write(
+            dir.join("endpoint-ipc.3070.json"),
+            format!(
+                r#"{{"socketPath":"{}","pid":{}}}"#,
+                sock.to_string_lossy(),
+                fake_operator.pid()
+            ),
+        )
+        .unwrap();
+        let r = resolve_dev_ipc_socket(&dir, 3070, false);
         assert_eq!(
-            read_dev_ipc_socket_for_port_validated(&dir, 3271, false),
-            None
+            r.path,
+            Some(std::path::PathBuf::from(sock.to_string_lossy().as_ref()))
+        );
+        assert!(
+            r.detail.contains("3070") && r.detail.contains(&fake_operator.pid().to_string()),
+            "a successful resolution must name the port and the pid it reached: {}",
+            r.detail
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2586,30 +2650,17 @@ fn find_endpoint_ipc_socket(workspace_home: &std::path::Path, via_wsl: bool) -> 
     read_dev_ipc_socket(&workspace_home.join(".papercusp/endpoint-ipc.json"))
 }
 
-/// `find_endpoint_ipc_socket`, validated (see `discovery_socket_still_live`) —
-/// used at the production/spawned-sidecar `IpcClientHandle` socket-source site
-/// so a restart-orphaned advertisement is treated as "not ready yet" instead
-/// of dialed straight into ENOENT. The WSL cat-read branch (Windows-only,
-/// un-exercisable on this fleet's Linux dev boxes) is left as a raw read for
-/// now — it does not carry a pid to validate against without a matching
-/// change to `read_endpoint_ipc_socket_via_wsl`, and this fix targets the
-/// measured, reproducible failure (a Linux/mac local discovery file naming a
-/// dead pid), not a hypothetical WSL-side one.
-fn find_endpoint_ipc_socket_validated(workspace_home: &std::path::Path, via_wsl: bool) -> Option<String> {
-    #[cfg(target_os = "windows")]
-    if via_wsl {
-        if let Some(s) = read_endpoint_ipc_socket_via_wsl() {
-            return Some(s);
-        }
-        return None;
-    }
-    read_dev_ipc_socket_validated(&workspace_home.join(".papercusp/endpoint-ipc.json"), via_wsl)
-}
-
-/// `find_endpoint_ipc_socket_validated`, explaining the outcome — the
-/// production/spawned-sidecar counterpart of `resolve_dev_ipc_socket`. Same
-/// reason: a bare `None` here told an operator nothing about whether the
-/// sidecar had yet advertised, had died, or had left a stale file behind.
+/// `find_endpoint_ipc_socket`, validated AND explaining the outcome — the
+/// production/spawned-sidecar counterpart of `resolve_dev_ipc_socket`, used at
+/// that `IpcClientHandle` socket-source site so a restart-orphaned
+/// advertisement is treated as "not ready yet" instead of dialed straight into
+/// ENOENT. Same reason for the `SocketResolution`: a bare `None` told an
+/// operator nothing about whether the sidecar had yet advertised, had died, or
+/// had left a stale file behind.
+///
+/// The WSL cat-read branch (Windows-only, un-exercisable on this fleet's Linux
+/// dev boxes) stays a raw read — it carries no pid to validate against without
+/// a matching change to `read_endpoint_ipc_socket_via_wsl`.
 fn find_endpoint_ipc_socket_resolved(
     workspace_home: &std::path::Path,
     via_wsl: bool,
