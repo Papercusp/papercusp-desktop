@@ -19,12 +19,12 @@
 //! it for compositing, so the compositor repaints the whole viewport regardless.
 //! Turning the second one on makes the compositor honour the damage rects.
 //!
-//! ⚠ THAT IS THE THEORY, AND MEASUREMENT DID NOT BEAR IT OUT. See
-//! DAMAGE_DEFAULT_ON below: with the control arm actually run, the flag did not
-//! help a single keystroke (already free without it) and made sustained typing
-//! WORSE. It is applied only when explicitly asked for. Everything above this
-//! line is the hypothesis this module was built to test, not a description of
-//! how the app is configured -- do not read it as the latter.
+//! ⚠ THAT IS THE THEORY, AND IT IS STILL UNPROVEN. See DAMAGE_DEFAULT_ON below:
+//! the flag is applied only when explicitly asked for, because a counterbalanced
+//! A/B could not resolve any effect from it -- boot order moved the numbers more
+//! than the feature did. Everything above this line is the hypothesis this module
+//! was built to test, not a description of how the app is configured, and not a
+//! finding -- do not read it as either.
 //!
 //! Related and deliberately NOT the fix here (both measured, both dead ends):
 //!   - compositing-layer promotion (`will-change`, `contain:paint`) of the heavy
@@ -54,17 +54,36 @@ const DAMAGE_ENV: &str = "PAPERCUSP_WEBKIT_DAMAGE_COMPOSITING";
 
 /// Whether the damage-compositing feature is applied when the env var is unset.
 ///
-/// FALSE — measured 2026-07-28, run13. This defaulted to true on the strength of
-/// a dmgON-only measurement whose base arm read ~= its sham arm. Running the
-/// dmgOFF control with the same probe showed stock WebKit does the SAME (paired
-/// base-sham median 0 in both arms), so that was never evidence the flag helped;
-/// a single keystroke is already free either way. On SUSTAINED typing -- 20 chars
-/// at the 33ms key-repeat interval, which is the owner's actual complaint -- the
-/// flag measured WORSE, with no overlap across 8 rounds per arm:
-///     wall time for 20 chars (ideal 660ms):  OFF 862..982   ON 1099..1424
-///     worst frame during the burst:          OFF 48..76     ON 78..144
-/// Left OFF pending a counterbalanced repeat (run14) that rules out boot order.
-/// Do not flip this back on without an in-run sham control on the BURST arm.
+/// FALSE — but for "unproven", NOT for "measured harmful". Measured 2026-07-28.
+///
+/// It first defaulted to true on a dmgON-ONLY boot. Adding the dmgOFF control
+/// showed stock WebKit measures the same, so that was never evidence it helped.
+/// A second pass then looked like it proved the opposite -- and did not:
+///
+///   run13 (OFF booted first, ON second): OFF 936ms, ON 1181ms  -> "ON is worse"
+///   run14 (ON booted first, OFF second): ON 1103ms, OFF 1167ms -> "OFF is worse"
+///   (median wall time to type 20 chars at the 33ms key-repeat interval)
+///
+/// In BOTH runs the arm that booted SECOND was the slower one, whichever flag it
+/// carried. That is a boot-order effect, and it is larger than any flag effect
+/// present -- so this A/B design cannot resolve the feature at all, in either
+/// direction. Counterbalancing is the only reason we know that; a single-order
+/// A/B would have "confirmed" whichever answer it was run in the order of.
+///
+/// So: no demonstrated benefit and no demonstrated harm. It stays OFF because an
+/// experimental WebKit feature with no measured benefit should not ship enabled,
+/// not because it was shown to hurt. To settle it properly you need a design that
+/// survives the order confound (alternate arms across many boots, or flip the
+/// feature WITHIN one boot if WebKit ever allows it at runtime) plus the
+/// stale-pixel check -- damage-based compositing that under-reports a dirty rect
+/// leaves torn/ghosted pixels, which no timing probe can see.
+///
+/// Measurement note for whoever picks this up: the marginal cost of a character
+/// is (burst - shamburst)/N against an in-run NO-TYPING control. 20 chained
+/// setTimeout(33) already take ~715ms on this box with nothing typed, so raw
+/// "drift vs 660ms ideal" is mostly the probe. Do NOT use a single-keystroke
+/// worst-frame metric to clear anything: it read 0 in both arms in the same boot
+/// where the burst metric measured ~18-22ms/char, i.e. it is blind at that scale.
 #[cfg(target_os = "linux")]
 const DAMAGE_DEFAULT_ON: bool = false;
 
