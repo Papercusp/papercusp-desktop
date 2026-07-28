@@ -370,10 +370,16 @@ fn resolve_dev_ipc_socket(
     let per_port_path = papercusp_dir.join(format!("endpoint-ipc.{port}.json"));
     let per_port = inspect_advertisement(&per_port_path, via_wsl);
     if let Some(socket) = per_port.live_socket() {
+        // The per-port advertisement is published BY the operator listening on
+        // `port`, which is the origin that served this webview — so resolving
+        // through it PROVES the IPC owner is the content origin. That fact is what
+        // lets `/api/desktop/*` ride IPC instead of being excluded wholesale
+        // (D-008). The singleton fallback below deliberately does NOT claim it.
         return endpoint_ipc::SocketResolution::found(
             socket,
             format!("selected port {port}: {}", per_port.describe()),
-        );
+        )
+        .from_content_origin();
     }
 
     if !matches!(port, 3070 | 3170) {
@@ -2755,10 +2761,15 @@ fn find_endpoint_ipc_socket_resolved(
     let path = workspace_home.join(".papercusp/endpoint-ipc.json");
     let state = inspect_advertisement(&path, via_wsl);
     match state.live_socket() {
+        // Production: the sidecar we spawned IS the operator serving this
+        // webview, so the IPC owner is the content origin by construction. (The
+        // WSL branch above must not claim this — it is D-005's one declared
+        // HTTP exception, and it carries no pid to validate against.)
         Some(socket) => endpoint_ipc::SocketResolution::found(
             socket,
             format!("sidecar discovery file: {}", state.describe()),
-        ),
+        )
+        .from_content_origin(),
         None => endpoint_ipc::SocketResolution::missing(format!(
             "sidecar discovery file {}: {}",
             path.display(),

@@ -635,15 +635,58 @@ async fn reader_loop(
 pub struct SocketResolution {
     pub path: Option<PathBuf>,
     pub detail: String,
+    /// TRUE only when the operator owning this socket is PROVABLY the same
+    /// operator that served the webview's document (its content origin).
+    ///
+    /// This exists to retire an undeclared HTTP carve-out, not as a diagnostic.
+    /// `desktop-bootstrap.ts` excluded the whole `/api/desktop/*` prefix from the
+    /// IPC reroute — permanently, on every platform — because those endpoints
+    /// describe *the operator serving this webview*, and on a dev box the IPC
+    /// bridge may target a DIFFERENT operator, where they would 404 and silently
+    /// hide the env-switcher bar. The concern is real; the blunt fix violated
+    /// D-005 (`no-http-anywhere-2026-07-28`), which admits exactly ONE HTTP
+    /// exception (WSL2) and requires it be declared rather than inferred.
+    ///
+    /// MEASURED 2026-07-28 (D-008): that carve-out is the entire reason webview
+    /// HTTP egress is nonzero — 9 escapes/minute, recurring on the 30 s poll tick
+    /// long after the polyfill installs, so it was never the startup race P-011
+    /// blamed.
+    ///
+    /// The resolver ALREADY knows the answer and was throwing it away: a per-port
+    /// advertisement (`endpoint-ipc.<port>.json`) is published BY the operator on
+    /// that port, so resolving through it proves owner == content origin. Only the
+    /// legacy last-writer-wins singleton fallback can dial a foreign operator.
+    ///
+    /// Defaults to `false` at every constructor, and is opted into explicitly via
+    /// [`SocketResolution::from_content_origin`], because the two error directions
+    /// are NOT symmetric: a false negative costs one native HTTP request (today's
+    /// behaviour), while a false positive routes a content-origin-scoped call to
+    /// the wrong operator and reintroduces the silent 404 this carve-out was added
+    /// to prevent. Never derive it from `detail` — parsing that prose is precisely
+    /// the infer-from-a-string class D-005 retires.
+    pub owner_is_content_origin: bool,
 }
 
 impl SocketResolution {
     pub fn found(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
-        Self { path: Some(path.into()), detail: detail.into() }
+        Self { path: Some(path.into()), detail: detail.into(), owner_is_content_origin: false }
     }
 
     pub fn missing(detail: impl Into<String>) -> Self {
-        Self { path: None, detail: detail.into() }
+        Self { path: None, detail: detail.into(), owner_is_content_origin: false }
+    }
+
+    /// Mark this resolution as belonging to the webview's own content origin.
+    ///
+    /// Only two call sites may use it, and both are structural rather than
+    /// heuristic: the per-port dev advertisement, and the production sidecar
+    /// (which IS the operator serving the webview). The singleton fallback and
+    /// the WSL cat-read path must NOT — the former can name a foreign operator,
+    /// and the latter is D-005's one declared HTTP exception.
+    #[must_use]
+    pub fn from_content_origin(mut self) -> Self {
+        self.owner_is_content_origin = true;
+        self
     }
 }
 
@@ -696,6 +739,11 @@ pub struct IpcStatus {
     pub ms_since_last_connect: Option<u64>,
     pub last_error: Option<String>,
     pub connected_path: Option<String>,
+    /// Whether the operator owning the IPC socket is provably the one that served
+    /// this webview — see [`SocketResolution::owner_is_content_origin`]. The
+    /// webview reads this to decide whether content-origin-scoped paths
+    /// (`/api/desktop/*`) may ride IPC, instead of excluding them unconditionally.
+    pub owner_is_content_origin: bool,
 }
 
 /// Reconnecting wrapper around `IpcClient` — the managed Tauri state.
@@ -839,6 +887,7 @@ impl IpcClientHandle {
             ms_since_last_connect: since(self.stats.last_connect_ms.load(Ordering::Relaxed)),
             last_error: self.last_error.lock().ok().and_then(|g| g.clone()),
             connected_path: self.connected_path.lock().ok().and_then(|g| g.clone()),
+            owner_is_content_origin: resolution.owner_is_content_origin,
         }
     }
 
