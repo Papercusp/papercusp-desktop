@@ -668,13 +668,6 @@ struct DialStats {
     last_connect_ms: AtomicU64,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// A snapshot of IPC bridge health, as returned by `endpoint_ipc_status`.
 ///
 /// This is the answer to "is /api actually riding IPC right now, and if not
