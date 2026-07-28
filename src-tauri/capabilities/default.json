@@ -65,6 +65,7 @@
 
     "allow-endpoint-invoke",
     "allow-endpoint-cancel",
+    "allow-endpoint-ipc-status",
 
     "allow-list-envs",
     "allow-open-docs-search-palette",

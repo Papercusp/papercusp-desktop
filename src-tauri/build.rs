@@ -276,6 +276,7 @@ fn main() {
         // collect_commands! exposes it, so grant to stay in sync)
         "endpoint_invoke",
         "endpoint_cancel",
+        "endpoint_ipc_status",
         // env switcher
         "list_envs",
         // docs search palette
