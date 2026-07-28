@@ -681,7 +681,7 @@ fn now_ms() -> u64 {
 /// what precisely is stopping it" — a question that previously could only be
 /// answered by correlating `ss`, the discovery JSON files, and process
 /// liveness by hand.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct IpcStatus {
     /// Live re-resolution performed at status time (a pure filesystem read).

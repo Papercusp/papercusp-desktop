@@ -277,36 +277,155 @@ fn discovery_socket_still_live(socket_path: &str, pid: u32, via_wsl: bool) -> bo
     true
 }
 
+/// Why one discovery advertisement is — or is not — usable.
+///
+/// These four failure shapes were previously all collapsed into `None` at the
+/// `Option`-returning readers below, which is precisely what made a stuck IPC
+/// bridge un-diagnosable from inside the app (WI-6512). Keeping them distinct
+/// costs nothing and lets `resolve_dev_ipc_socket` say which one happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdvertisementState {
+    /// No discovery file — this operator has never published on this port.
+    Absent,
+    /// File exists but carries no usable `socketPath`.
+    Unparseable,
+    /// Names a pid that is no longer running (the classic restart orphan).
+    DeadPid { socket: String, pid: u32 },
+    /// Names a socket file that has since been removed.
+    SocketGone { socket: String, pid: u32 },
+    Live { socket: String, pid: u32 },
+}
+
+impl AdvertisementState {
+    fn live_socket(&self) -> Option<&str> {
+        match self {
+            AdvertisementState::Live { socket, .. } => Some(socket.as_str()),
+            _ => None,
+        }
+    }
+
+    /// One short phrase, suitable for a log line or the status command.
+    fn describe(&self) -> String {
+        match self {
+            AdvertisementState::Absent => "no advertisement published".to_string(),
+            AdvertisementState::Unparseable => {
+                "advertisement present but has no usable socketPath".to_string()
+            }
+            AdvertisementState::DeadPid { socket, pid } => {
+                format!("advertises {socket} for pid {pid}, which is not running (restart orphan)")
+            }
+            AdvertisementState::SocketGone { socket, pid } => {
+                format!("advertises {socket} (pid {pid}) but that socket file is gone")
+            }
+            AdvertisementState::Live { socket, pid } => {
+                format!("live advertisement {socket} (pid {pid})")
+            }
+        }
+    }
+}
+
+/// Read one discovery file and classify it. The single implementation of the
+/// validation rules — `read_dev_ipc_socket_validated` and
+/// `resolve_dev_ipc_socket` both go through here so a "is it usable?" answer
+/// and a "why not?" answer can never disagree.
+fn inspect_advertisement(path: &std::path::Path, via_wsl: bool) -> AdvertisementState {
+    let Some((socket, pid)) = read_dev_ipc_socket_with_pid(path) else {
+        return if path.exists() {
+            AdvertisementState::Unparseable
+        } else {
+            AdvertisementState::Absent
+        };
+    };
+    if pid != 0 && !discovery_pid_alive(pid, via_wsl) {
+        return AdvertisementState::DeadPid { socket, pid };
+    }
+    if !is_tcp_endpoint(&socket)
+        && !is_windows_named_pipe_path(&socket)
+        && !std::path::Path::new(&socket).exists()
+    {
+        return AdvertisementState::SocketGone { socket, pid };
+    }
+    AdvertisementState::Live { socket, pid }
+}
+
 /// `read_dev_ipc_socket`, validated per `discovery_socket_still_live` — the
 /// form every RUNTIME connect site should use (the raw parser stays available
 /// for the WSL cat-based read and for tests that only care about parsing).
 fn read_dev_ipc_socket_validated(path: &std::path::Path, via_wsl: bool) -> Option<String> {
-    let (socket_path, pid) = read_dev_ipc_socket_with_pid(path)?;
-    if discovery_socket_still_live(&socket_path, pid, via_wsl) {
-        Some(socket_path)
-    } else {
-        None
+    inspect_advertisement(path, via_wsl)
+        .live_socket()
+        .map(str::to_string)
+}
+
+/// Resolve the dev `/api` operator's IPC endpoint for `port`, **explaining the
+/// outcome either way** (see `endpoint_ipc::SocketResolution`).
+///
+/// Order: the per-port advertisement `endpoint-ipc.<port>.json`, then — for the
+/// fixed dev-box operators only — the legacy last-writer-wins singleton.
+/// EI-296: a CUSTOM target (an isolated test stack, a fault proxy) deliberately
+/// gets NO singleton fallback; silently dialing whichever operator happened to
+/// boot last would send `/api` to the wrong process. That is correct, but until
+/// now it was also invisible — a custom-port shell with no per-port file simply
+/// reported nothing at all, which is exactly the state WI-6512 had to diagnose
+/// by hand. The `missing` detail below now names the file it wanted.
+fn resolve_dev_ipc_socket(
+    papercusp_dir: &std::path::Path,
+    port: u16,
+    via_wsl: bool,
+) -> endpoint_ipc::SocketResolution {
+    let per_port_path = papercusp_dir.join(format!("endpoint-ipc.{port}.json"));
+    let per_port = inspect_advertisement(&per_port_path, via_wsl);
+    if let Some(socket) = per_port.live_socket() {
+        return endpoint_ipc::SocketResolution::found(
+            socket,
+            format!("selected port {port}: {}", per_port.describe()),
+        );
+    }
+
+    if !matches!(port, 3070 | 3170) {
+        return endpoint_ipc::SocketResolution::missing(format!(
+            "selected port {port}: {} at {}. A custom port gets no singleton fallback \
+             (EI-296) — that operator must publish its own per-port advertisement, or \
+             /api stays on HTTP at :{port}.",
+            per_port.describe(),
+            per_port_path.display()
+        ));
+    }
+
+    let singleton_path = papercusp_dir.join("endpoint-ipc.json");
+    let singleton = inspect_advertisement(&singleton_path, via_wsl);
+    match singleton.live_socket() {
+        Some(socket) => endpoint_ipc::SocketResolution::found(
+            socket,
+            format!(
+                "selected port {port}: {} — fell back to the shared singleton, which is {}",
+                per_port.describe(),
+                singleton.describe()
+            ),
+        ),
+        None => endpoint_ipc::SocketResolution::missing(format!(
+            "selected port {port}: per-port {} at {}; singleton {} at {}",
+            per_port.describe(),
+            per_port_path.display(),
+            singleton.describe(),
+            singleton_path.display()
+        )),
     }
 }
 
 /// `read_dev_ipc_socket_for_port`, validated (see `read_dev_ipc_socket_validated`).
 /// A stale per-port file (dead pid, or its socket file gone) is treated exactly
 /// like a missing one, so the EI-296 custom-port / fixed-dev-port fallback
-/// logic below is unchanged — it just now also re-runs on staleness, not only
-/// on absence.
+/// logic is unchanged — it just now also re-runs on staleness, not only on
+/// absence. Thin wrapper over `resolve_dev_ipc_socket` so the two cannot drift.
 fn read_dev_ipc_socket_for_port_validated(
     papercusp_dir: &std::path::Path,
     port: u16,
     via_wsl: bool,
 ) -> Option<String> {
-    let per_port = read_dev_ipc_socket_validated(
-        &papercusp_dir.join(format!("endpoint-ipc.{port}.json")),
-        via_wsl,
-    );
-    if per_port.is_some() || !matches!(port, 3070 | 3170) {
-        return per_port;
-    }
-    read_dev_ipc_socket_validated(&papercusp_dir.join("endpoint-ipc.json"), via_wsl)
+    resolve_dev_ipc_socket(papercusp_dir, port, via_wsl)
+        .path
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
@@ -2493,6 +2612,41 @@ fn find_endpoint_ipc_socket_validated(workspace_home: &std::path::Path, via_wsl:
     read_dev_ipc_socket_validated(&workspace_home.join(".papercusp/endpoint-ipc.json"), via_wsl)
 }
 
+/// `find_endpoint_ipc_socket_validated`, explaining the outcome — the
+/// production/spawned-sidecar counterpart of `resolve_dev_ipc_socket`. Same
+/// reason: a bare `None` here told an operator nothing about whether the
+/// sidecar had yet advertised, had died, or had left a stale file behind.
+fn find_endpoint_ipc_socket_resolved(
+    workspace_home: &std::path::Path,
+    via_wsl: bool,
+) -> endpoint_ipc::SocketResolution {
+    #[cfg(target_os = "windows")]
+    if via_wsl {
+        return match read_endpoint_ipc_socket_via_wsl() {
+            Some(s) => endpoint_ipc::SocketResolution::found(
+                s,
+                "read from the WSL distro's ~/.papercusp/endpoint-ipc.json",
+            ),
+            None => endpoint_ipc::SocketResolution::missing(
+                "no endpoint-ipc.json readable inside the WSL distro yet",
+            ),
+        };
+    }
+    let path = workspace_home.join(".papercusp/endpoint-ipc.json");
+    let state = inspect_advertisement(&path, via_wsl);
+    match state.live_socket() {
+        Some(socket) => endpoint_ipc::SocketResolution::found(
+            socket,
+            format!("sidecar discovery file: {}", state.describe()),
+        ),
+        None => endpoint_ipc::SocketResolution::missing(format!(
+            "sidecar discovery file {}: {}",
+            path.display(),
+            state.describe()
+        )),
+    }
+}
+
 /// WI-1869: given the operator port the webview is CURRENTLY pointed at and the
 /// latest operator.json discovery, decide whether to re-navigate — and to which
 /// port. Returns Some(new_port) iff a discovery is present and names a DIFFERENT
@@ -3823,26 +3977,28 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // /api on the capped HTTP fallback.
         let disc_home = workspace_home.clone();
         let handle = endpoint_ipc::IpcClientHandle::new(move || {
-            find_endpoint_ipc_socket_validated(&disc_home, via_wsl).map(std::path::PathBuf::from)
+            find_endpoint_ipc_socket_resolved(&disc_home, via_wsl)
         });
         app_handle.manage(handle.clone());
         let ipc_app_handle = app_handle.clone();
         let warm_home = workspace_home.clone();
+        // Record the socket in SidecarState on the FIRST successful connect,
+        // then hand off to the permanent supervisor (`keep_warm`), which keeps
+        // dialing for the life of the process instead of giving up at 60s.
         tauri::async_runtime::spawn(async move {
-            for _ in 0..120 {
+            let probe = Duration::from_millis(500);
+            loop {
                 if handle.warm().await.is_ok() {
                     println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
                     if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
                         let state: tauri::State<SidecarState> = ipc_app_handle.state();
                         *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
                     }
-                    return;
+                    break;
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(probe).await;
             }
-            eprintln!(
-                "[papercusp-desktop] endpoint-ipc: no socket after 60s — /api stays on HTTP this session"
-            );
+            handle.keep_warm(probe).await;
         });
     }
 
@@ -6909,6 +7065,7 @@ pub fn run() {
             terminal_set_layout,
             endpoint_ipc::endpoint_invoke,
             endpoint_ipc::endpoint_cancel,
+            endpoint_ipc::endpoint_ipc_status,
             dev_bridge::__dev_bridge_result,
             env_switch::list_envs,
             docs_search::open_docs_search_palette,
@@ -7204,22 +7361,19 @@ pub fn run() {
                     let handle = endpoint_ipc::IpcClientHandle::new(move || {
                         let port =
                             SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                        read_dev_ipc_socket_for_port_validated(&dir_src, port, dev_via_wsl)
-                            .map(std::path::PathBuf::from)
+                        resolve_dev_ipc_socket(&dir_src, port, dev_via_wsl)
                     });
                     app.manage(handle.clone());
-                    // Warm in the background — the operator may boot after the
-                    // webview; first /api call would reconnect anyway.
-                    tauri::async_runtime::spawn(async move {
-                        for _ in 0..120 {
-                            if handle.warm().await.is_ok() {
-                                println!("[papercusp-desktop] dev endpoint-ipc connected (reconnecting)");
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                        }
-                        eprintln!("[papercusp-desktop] dev endpoint-ipc: no socket after 60s — /api on HTTP until operator is up");
-                    });
+                    // Supervise for the life of the process. The dev operator
+                    // is routinely restarted (every agent's dev:restart, every
+                    // deploy) and its embedded-PG boot can exceed a minute, so
+                    // the old bounded 60s warm-up regularly expired BEFORE the
+                    // operator it was waiting for existed — and then stopped
+                    // trying. `keep_warm` connects the instant an
+                    // advertisement appears and re-connects if it drops.
+                    tauri::async_runtime::spawn(
+                        handle.keep_warm(Duration::from_millis(500)),
+                    );
                 }
 
                 // Env-switch startup (env_switch::init): install the dev-rail
