@@ -36,8 +36,9 @@
     "test:federation:live-matrix": "bash bin/deb-hetzner-matrix.sh",
     "test:rust": "node ../scripts/report-cargo-tests.mjs --manifest-path papercusp-desktop/src-tauri/Cargo.toml",
     "dev:hmr": "tauri dev --config '{\"build\":{\"devUrl\":\"http://localhost:3055\"}}'",
-    "build": "tauri build",
-    "build:debug": "tauri build --debug",
+    "build": "tauri build --bundles deb",
+    "build:debug": "tauri build --debug --bundles deb",
+    "build:all-bundles": "tauri build",
     "build:archived": "bash bin/build-and-archive-deb.sh",
     "test:config": "node --test test/tauri-config-resources.test.js",
     "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '\u2713 tauri-bindings.ts regenerated'"
