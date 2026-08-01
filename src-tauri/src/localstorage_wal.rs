@@ -390,7 +390,9 @@ mod tests {
         reader.execute_batch("COMMIT;").unwrap();
         drop(reader);
         drop(writer);
+        eprintln!("DEBUG pre-retry wal size = {}", file_len(&wal));
         let report2 = reclaim_localstorage_wals(&dir);
+        eprintln!("DEBUG report2 = {report2:?}, wal now = {}", file_len(&wal));
         assert_eq!(report2.checkpointed, 1, "once the reader is gone, the retry must fully reclaim");
         assert_eq!(report2.failed_reclaim, 0);
         drop(_keepalive);

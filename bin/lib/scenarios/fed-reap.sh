@@ -26,8 +26,9 @@
 #      discipline: an absence is only a cut-off if presence came first).
 #   2. b is running foreign work for that fleet (an 'active'
 #      p2p_foreign_workspaces row).
-#   3. OWNER (a) revokes the fleet grant through the real product path
-#      (MCP p2p-grant-set action=revoke).
+#   3. OWNER (a) revokes the fleet grant through the real product path — the
+#      same loopback owner route the desktop Peers page writes through
+#      (POST /api/agent-mcp/p2p-grant-set, action=revoke).
 #   4. The REVOKED row federates to b (origin='remote', status='revoked') and
 #      b's projection reaps b's OWN session: state='reaped' + a grant-revoked
 #      refusal receipt threaded by offer_id.
@@ -67,19 +68,47 @@ _freap_row_present() {
   echo 0
 }
 
-scn_fed_reap() {
-  # The MCP driver lives in fleet-directory.sh — the runner sources every
-  # scenario file before executing any, so this reuse is load-order-safe
-  # (seat-offer.sh does the same).
-  if ! declare -f _fdir_mcp_call >/dev/null; then
-    echo "fed-reap FAIL — _fdir_mcp_call missing (fleet-directory.sh not loaded)"
+# On-frame REST call to an /api/agent-mcp/* route. $1=inst $2=route $3=json-body.
+#
+# NOT _fdir_mcp_call: p2p-grant-set is NOT a registered MCP tool — it is a REST
+# route (endpoint-route/routes/agent-mcp/p2p-grant-set.ts) declared
+# `auth: 'loopback'` + isLoopbackRequest, with no tools/call entry anywhere. A
+# tools/call for "p2p-grant-set" resolves to nothing. Hence a REST driver, run
+# ON the frame so the request is genuinely loopback (no bearer required).
+#
+# WI-1564: grant-store REFUSES writes under the 'default' partition (a grant
+# that never federates is dead config; a stranded revocation is a security
+# hole), and the product path supplies the partition by stamping
+# x-papercusp-workspace on every request — the GUI does exactly this. So the
+# header is not decoration: without it the writes below are refused outright
+# (that was run-1's finding in the single-box drill).
+_freap_rest_call() {
+  local inst="$1" route="$2" body="$3" ws
+  if ! ws="$(rig_resolve_ws "$inst")"; then
+    echo '{"ok":false,"error":"could not resolve a real workspace_id (D-050/WI-5399 class)"}'
     return 1
   fi
+  rig_pcusp_run "$inst" <<EOS
+curl -s -m 60 -X POST "http://127.0.0.1:${FED_SC[$inst]}/api/agent-mcp/${route}" \
+  -H 'content-type: application/json' \
+  -H "x-papercusp-workspace: ${ws}" \
+  -d '${body}'
+EOS
+}
 
+scn_fed_reap() {
   local rid="$MATRIX_RUN_ID"
   local aslug="${FRAME_MEMBER_SLUG[a]:-}" bslug="${FRAME_MEMBER_SLUG[b]:-}"
   [ -n "$aslug" ] && [ -n "$bslug" ] || {
     echo "fed-reap FAIL — frames not joined (owner='$aslug' member='$bslug')"; return 1; }
+
+  # The GRANT is scoped to the POT, not to a frame's member slug. RIG_HIVE_ID is
+  # the pot home slug (rig_resolve_ws queries it as pot_members.pot_home_slug,
+  # and deb-hetzner-rig.sh sends it as the endpoint's `potSlug` field) —
+  # FRAME_MEMBER_SLUG[a] is a different identifier and would scope the grant to
+  # a pot that does not exist.
+  local pot="${RIG_HIVE_ID:-}"
+  [ -n "$pot" ] || { echo "fed-reap FAIL — RIG_HIVE_ID unset (no published pot to grant on)"; return 1; }
 
   local fleet="mx-fedreap-${rid}" offer="mx-fedreap-offer-${rid}" out bws
   fleet="$(printf '%s' "$fleet" | tr '[:upper:]' '[:lower:]')"
@@ -93,10 +122,10 @@ scn_fed_reap() {
   fi
 
   # 1. OWNER (a): grant the fleet work-offer rights on the shared pot.
-  out="$(_fdir_mcp_call a 'p2p-grant-set' \
-    "{\"action\":\"set\",\"potSlug\":\"$aslug\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$fleet\",\"preset\":\"delegate\",\"note\":\"matrix fed-reap $rid\"}")"
-  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
-    echo "fed-reap FAIL — p2p-grant-set(set) on frame a errored: $(printf '%s' "$out" | tail -c 300)"
+  out="$(_freap_rest_call a 'p2p-grant-set' \
+    "{\"action\":\"set\",\"potSlug\":\"$pot\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$fleet\",\"preset\":\"delegate\",\"note\":\"matrix fed-reap $rid\"}")"
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"ok" *: *false|"error"|"refusal"|forbidden'; then
+    echo "fed-reap FAIL — p2p-grant-set(set) on frame a refused: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi
   if [ "$(_freap_row_present a p2p_peer_grants "grantee_ref='$fleet' AND status='active'" 30)" != 1 ]; then
@@ -125,10 +154,10 @@ scn_fed_reap() {
   fi
 
   # 4. OWNER (a): withdraw consent through the real product path.
-  out="$(_fdir_mcp_call a 'p2p-grant-set' \
-    "{\"action\":\"revoke\",\"potSlug\":\"$aslug\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$fleet\"}")"
-  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|FDIR_NO_TOKEN'; then
-    echo "fed-reap FAIL — p2p-grant-set(revoke) on frame a errored: $(printf '%s' "$out" | tail -c 300)"
+  out="$(_freap_rest_call a 'p2p-grant-set' \
+    "{\"action\":\"revoke\",\"potSlug\":\"$pot\",\"granteeKind\":\"fleet\",\"granteeRef\":\"$fleet\"}")"
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"ok" *: *false|"error"|"refusal"|forbidden'; then
+    echo "fed-reap FAIL — p2p-grant-set(revoke) on frame a refused: $(printf '%s' "$out" | tail -c 300)"
     return 1
   fi
 
