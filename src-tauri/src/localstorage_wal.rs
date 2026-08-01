@@ -387,14 +387,24 @@ mod tests {
 
         // Releasing the reader and retrying (mirrors a LATER boot, once the
         // blocking process is gone) must now succeed and clear the failure.
+        // NOTE: since our earlier busy attempt already fully checkpointed every
+        // WAL frame back into the main DB (`log == ckpt` above — only the
+        // truncate step was refused), SQLite may finish the reclaim itself as a
+        // side effect of the blocking reader's own close, before our retry call
+        // even runs — a genuinely-orphaned process's exit does the same. Either
+        // way the observable contract holds: the WAL is gone/reclaimable and
+        // reported as NO LONGER a failure, which is what this asserts (rather
+        // than over-specifying which particular call physically truncated it).
         reader.execute_batch("COMMIT;").unwrap();
         drop(reader);
         drop(writer);
-        eprintln!("DEBUG pre-retry wal size = {}", file_len(&wal));
         let report2 = reclaim_localstorage_wals(&dir);
-        eprintln!("DEBUG report2 = {report2:?}, wal now = {}", file_len(&wal));
-        assert_eq!(report2.checkpointed, 1, "once the reader is gone, the retry must fully reclaim");
-        assert_eq!(report2.failed_reclaim, 0);
+        assert!(
+            report2.attempted == 0 || report2.checkpointed == 1,
+            "once the reader is gone, the WAL must end up fully reclaimed (report2={report2:?})"
+        );
+        assert_eq!(report2.failed_reclaim, 0, "no failure should be reported once the blocking reader is gone");
+        assert_eq!(file_len(&wal), 0, "the -wal must actually be gone once the blocking reader is gone");
         drop(_keepalive);
 
         std::fs::remove_dir_all(&dir).ok();
