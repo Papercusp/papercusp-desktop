@@ -197,7 +197,26 @@ fi
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
 # Clean the temp tree (and the darwin lockdir) on any exit; after the
 # publish rename the tmp half is a no-op.
-trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"}' EXIT
+#
+# WI-6557: OLD_DIR is ALSO reaped here, even though `OLD_DIR` is not assigned
+# until much later (the `mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"` swap just before
+# publish) — this trap string is single-quoted, so `${OLD_DIR:+...}` is
+# re-expanded at FIRE time, by which point OLD_DIR is whatever the run has
+# reached (unset/empty before the swap, the real path after it). `:+` never
+# trips `set -u` for an unset var, so this is safe on every exit before the
+# swap too. Before this fix, the ONLY reap of OLD_DIR was the explicit
+# `rm -rf "$OLD_DIR"` on the success path — so ANY failure between the swap
+# and that line (a `set -e` death, an explicit `exit 1` guard, e.g. the
+# stray-runtime-.cache check) permanently stranded the ENTIRE outgoing
+# sidecar tree (multiple GB) with no cleanup path at all. 11 orphaned
+# `sidecar.old.<pid>` dirs — one per such death, one of them 2.5G — were
+# found stranded on this box from exactly this gap. Safe to add
+# unconditionally: on the success path OLD_DIR is already removed by the
+# explicit `rm -rf` below by the time this trap fires, so `rm -rf` on an
+# already-gone path is a silent no-op; the trap never fires MID-run (only at
+# actual process exit), so it cannot race the overlay-preservation read that
+# copies FROM OLD_DIR just after the swap.
+trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}' EXIT
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
