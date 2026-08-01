@@ -294,6 +294,10 @@ mod tests {
         let report = reclaim_localstorage_wals(&dir);
         assert_eq!(report.attempted, 1, "should have found the one DB");
         assert_eq!(report.checkpointed, 1, "TRUNCATE should have completed (busy=0)");
+        assert_eq!(
+            report.failed_reclaim, 0,
+            "a fully-completed checkpoint (busy=0) must never count as a failed reclaim"
+        );
 
         let after = file_len(&wal);
         assert!(
@@ -315,6 +319,73 @@ mod tests {
             .unwrap();
         assert_eq!(n2, 1500, "data must survive across a reopen");
         drop(reopened);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// EI-18794661891306642: the actual reported bug — a checkpoint that reports
+    /// `busy=1` and reclaims ZERO bytes must be counted + logged as a FAILED
+    /// remediation, not silently folded into the same success path as a fully
+    /// completed checkpoint. Simulated by holding a second connection inside an
+    /// open read transaction (a `BEGIN` + `SELECT` with no `COMMIT`) — SQLite's
+    /// TRUNCATE checkpoint cannot pass that reader's mark, so it comes back busy
+    /// while leaving the `-wal` exactly as it was, the precise shape from the
+    /// bug's log excerpt (`wal 553348992 -> 553348992 bytes`).
+    #[test]
+    fn a_busy_checkpoint_that_reclaims_nothing_is_reported_as_a_failed_reclaim() {
+        let dir = unique_tmp_dir("busy-noop");
+        let db = dir.join("http_127.0.0.1_34270.localstorage");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer
+            .execute("CREATE TABLE kv(k INTEGER PRIMARY KEY, v BLOB)", [])
+            .unwrap();
+        for i in 0..1500 {
+            writer
+                .execute(
+                    "INSERT INTO kv(k, v) VALUES (?1, zeroblob(8192))",
+                    rusqlite::params![i],
+                )
+                .unwrap();
+        }
+
+        let wal = wal_path(&db);
+        let before = file_len(&wal);
+        assert!(before > 4_000_000, "precondition: -wal should have grown, got {before}");
+
+        // A second, still-open reader holding a read mark on the pre-checkpoint
+        // WAL contents — this is what a lingering orphaned webview process (or
+        // any other still-alive reader) looks like from the checkpointer's side.
+        let reader = rusqlite::Connection::open(&db).unwrap();
+        reader.execute_batch("BEGIN; SELECT count(*) FROM kv;").unwrap();
+
+        let report = reclaim_localstorage_wals(&dir);
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.checkpointed, 0, "the open reader must block a full (busy=0) checkpoint");
+        assert_eq!(
+            report.failed_reclaim, 1,
+            "busy + zero bytes reclaimed must be counted as a FAILED reclaim, not silently ignored"
+        );
+
+        let after = file_len(&wal);
+        assert!(
+            after >= before,
+            "precondition of this test: the reader must fully block reclamation (before={before} after={after})"
+        );
+
+        // Releasing the reader and retrying (mirrors a LATER boot, once the
+        // blocking process is gone) must now succeed and clear the failure.
+        reader.execute_batch("COMMIT;").unwrap();
+        drop(reader);
+        drop(writer);
+        let report2 = reclaim_localstorage_wals(&dir);
+        eprintln!("DEBUG report2 = {report2:?}, wal now = {}", file_len(&wal));
+        assert_eq!(report2.checkpointed, 1, "once the reader is gone, the retry must fully reclaim");
+        assert_eq!(report2.failed_reclaim, 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

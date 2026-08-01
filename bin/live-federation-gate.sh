@@ -240,9 +240,19 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
   id_match="$(printf '%s' "$resp" | grep -oaE '\\?"id\\?":\\?"WI-[0-9]+' | head -1)"
   if [ -n "$id_match" ]; then
     log "EI filed OK → $(printf '%s' "$id_match" | grep -oaE 'WI-[0-9]+')"
+    return 0
   else
     log "EI filing DID NOT CONFIRM (no WI id in response) — resp head: ${resp:0:200}"
     log "EI filing FALLBACK: verdict + logs remain in $WORK and journald; file manually if this red is real."
+    # 2026-08-01: this now RETURNS NON-ZERO so the caller can refuse to write the
+    # "already tracked" markers. Previously every caller ignored the outcome and stamped
+    # the markers unconditionally, which turned an unconfirmed filing into a SUPPRESSED
+    # one: the 2026-07-31T23:00Z from-repo-witness RED stamped red-ei-filed at 23:00:55
+    # with NO work-item ever created (verified against harness_shared.engineer_issues —
+    # no row carries that leg-set, and no open duplicate existed to legitimately suppress
+    # it), after which the per-leg marker suppressed re-filing for the whole RED_REFILE_H
+    # window. A gate whose reds can vanish is worse than a gate that is merely red.
+    return 1
   fi
 }
 check_matrix_staleness() { # EI-18657324526667507: "when did the local-matrix leg last DECIDE?"
@@ -1299,9 +1309,17 @@ else
   else
     [ -n "$prev_legs" ] && [ "$prev_legs" != "${REDS[*]}" ] && [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] \
       && log "failing-leg set changed ('$prev_legs' → '${REDS[*]}') — filing despite the ${red_marker_age_h}h-old marker."
-    file_ei "$TITLE" "$BODY"
-    echo "$(now_s)" >"$RED_MARKER"
-    printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
+    # 2026-08-01: the markers are written ONLY when the filing is CONFIRMED. They mean
+    # "this red is tracked somewhere durable" and are read as permission to stay quiet;
+    # stamping them after an unconfirmed filing converts a transient operator/curl failure
+    # into a permanently-lost red. On failure we leave them untouched so the NEXT window
+    # re-attempts — a duplicate item is cheap, a silently-dropped release-gate red is not.
+    if file_ei "$TITLE" "$BODY"; then
+      echo "$(now_s)" >"$RED_MARKER"
+      printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
+    else
+      log "EI filing NOT CONFIRMED — deliberately NOT stamping red-ei-filed/red-ei-legs, so the next window re-attempts instead of suppressing this red as 'already tracked'."
+    fi
   fi
 fi
 check_staleness

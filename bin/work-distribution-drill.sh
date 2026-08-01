@@ -10,6 +10,13 @@
 # evidence that those legs are unproven. As the owning lanes wire each leg, its SKIP
 # flips to a live assert and this drill goes greener with zero re-authoring.
 #
+# ⚠ THAT LAST SENTENCE WAS A LIE FOR THREE WEEKS (D-018, 2026-08-01). The census was six
+# HARDCODED STRINGS; nothing detected wiring, so as the lanes landed their legs the reasons
+# rotted into falsehood while still reading as authoritative release evidence. Five of six
+# were factually wrong by 2026-08-01 — one of them contradicted THIS FILE'S OWN HEADER.
+# The census below now DETECTS every reason from the artifact under test (see its comment).
+# If you are adding a leg: never write a literal reason. Write a probe.
+#
 # LIVE legs driven today (single-box, one packaged sidecar):
 #   G   grant Delegate    p2p-grant-set { preset:'delegate' } → p2p_peer_grants row,
 #                         capabilities expanded {chat,steer,work-offer,wake}, epoch stamped
@@ -22,24 +29,12 @@
 #                         grantor high-water epoch bumped, grant status flipped
 #   T   p2p:trace         M21 — the timeline assembles the reap receipt by offer_id
 #
-# UNWIRED legs (SKIP census; owner = p2p-work-distribution-2026-07-02 lanes):
-#   OFFER-PUBLISH  WIRED 2026-07-04 (WI-1935): store mig 490 + offer-store.ts +
-#                  projections/work-offers.ts + publish leg offer-store-publish.ts;
-#                  production caller = the D-005 seat-offer hook on resource:delegate
-#                  agent_slot (reaper deferred #2 also wired: host-local offer
-#                  disposition on revocation). Cross-node proof = matrix scenario
-#                  seat_offer (order 56, lib/scenarios/seat-offer.sh).
-#   PULL           P-103 standing-puller DORMANT by design — X11 PULLER_ACTIVATION_LANDED
-#                  unflipped pending the P-003 claim-path soak
-#   SPAWN          P-104 offer-executor REQUIRED injections have no production caller
-#   RESULTS D-018  rides SPAWN (foreign-git-sync exists but nothing spawns to exercise it)
-#   METERING       P-205 substrate LANDED (mig 483 + metering-store.ts, WI-1938 passed
-#                  07-03) but NO production writer yet — spend rides the owner-gated
-#                  executor leg (WI-1937), contribution rides the soak-gated puller
-#                  (WI-1936); this SKIP flips only when real rows flow
-#   NUDGE          P-303 push-nudge pure module unwired ("deferred to P-305 rig")
-#   FED-REAP       revoke on A → reap on B needs the peer-grants projection-apply hook
-#                  (revocation-reaper.ts deferred #3); the LOCAL reap path is leg R
+# UNWIRED legs: NOT LISTED HERE ON PURPOSE (D-018). A hand-maintained list of which legs
+# are wired is exactly the thing that rotted — it is a SECOND COPY of state whose only
+# source of truth is the build itself, and it silently stopped matching. The live census
+# at the bottom of this file computes the list on every run. Read the run output, not a
+# comment. (Historical reasons, all of them now false, are in D-018 on plan
+# p2p-public-release-remaining-lanes-2026-07-16.)
 #
 # Cross-node (2-node rig) variant: WI-1910 CLOSED 2026-07-03 (leader verdict — connect
 # symptom non-repro on the current deb; the 07-02 pin is lifted). WI-2006 WIRED
@@ -225,30 +220,136 @@ gs2="$(q "SELECT status FROM harness_shared.p2p_peer_grants WHERE grantee_ref='$
 log "LEG T — p2p:trace (M21 offer-id thread)"
 # run-1 finding: mcp-call reads $HOME/.papercusp/superuser-token — must be the
 # DRILL SIDECAR's home (its own token), not the host operator's.
-tr_out="$(cd "$REPO_DIR" && HOME="${AHOME[a]}" PAPERCUSP_HONO_PORT="${FED_SC[a]}" timeout 60 node scripts/mcp-call.mjs p2p:trace \
-  "{\"hive\":\"$HIVE_SLUG\",\"offerId\":\"$DRILL_OFFER\"}" --harness "$HIVE_SLUG" --workspace "$WS" 2>&1)"
+# run-2 finding (2026-08-01): this leg FAILED the whole drill on a load artifact —
+# "operator event loop critically saturated — request shed, retry shortly", which the
+# operator itself stamps `retryable:true`. Failing a release drill on a shed the server
+# explicitly asked us to retry manufactures a red that says nothing about federation.
+# Retry the RETRYABLE class only; a non-retryable miss is still a hard FAIL on the
+# first try, so a genuinely broken trace is never masked by waiting.
+tr_out=""; tr_try=0
+while [ "$tr_try" -lt 5 ]; do
+  tr_try=$((tr_try+1))
+  tr_out="$(cd "$REPO_DIR" && HOME="${AHOME[a]}" PAPERCUSP_HONO_PORT="${FED_SC[a]}" timeout 60 node scripts/mcp-call.mjs p2p:trace \
+    "{\"hive\":\"$HIVE_SLUG\",\"offerId\":\"$DRILL_OFFER\"}" --harness "$HIVE_SLUG" --workspace "$WS" 2>&1)"
+  echo "$tr_out" | grep -q "work-offer:reap" && break
+  echo "$tr_out" | grep -qE '"retryable":true|critically saturated' || break
+  echo "  … p2p:trace shed under load (retryable), retry $tr_try/5"
+  sleep 5
+done
 if echo "$tr_out" | grep -q "work-offer:reap"; then
-  ok "p2p:trace shows the reap receipt for $DRILL_OFFER"
+  [ "$tr_try" -gt 1 ] && ok "p2p:trace shows the reap receipt for $DRILL_OFFER (after $tr_try attempts — shed under load)" \
+                      || ok "p2p:trace shows the reap receipt for $DRILL_OFFER"
+elif echo "$tr_out" | grep -qE '"retryable":true|critically saturated'; then
+  # Still shedding after 5 tries: a REAL capacity finding, but not a federation one —
+  # the receipt row itself is already hard-asserted in LEG R above.
+  skipp "p2p:trace — DETECTED: operator shed the request on all $tr_try attempts (event loop saturated). The reap receipt IS proven by LEG R's direct row assert; this is a host-capacity finding, not a lost receipt."
 else
-  # soft: the receipts row is already asserted in LEG R; trace failure here is a
-  # tool/identity-scoping finding, not a lost receipt
   bad "p2p:trace did not surface the reap receipt (out: $(echo "$tr_out" | head -c 250))"
 fi
 
-# ── SKIP census: the unwired legs (release evidence, not silence) ────────────
-log "SKIP census — legs with NO runtime wiring at HEAD (owners: p2p-work-distribution lanes)"
-# Reasons agreed with su-35c3b (p2p-work-distribution leader, 2026-07-03 msg mr58yse5):
-# wiring sequence = (1) claim-path soak → flip puller; (2) P-102 store + publish caller;
-# (3) metering table; (4) executor LAST — OWNER-AUTHORITY-GATED (P-105 sandbox unbuilt,
-# 4/5 axes; owner must ring the trust model). The executor gate is the hard line:
-# this drill must NEVER pressure that leg green — SKIP, don't wire.
-log  "OFFER-PUBLISH — WIRED (WI-1935 2026-07-04): mig-490 store + publish leg + D-005 seat-offer hook on resource:delegate; verified by matrix scenario seat_offer (order 56) — no longer a SKIP"
-skipp "PULL — SKIP(activation gated on claim-path soak: X11 PULLER_ACTIVATION_LANDED unflipped by design)"
-skipp "SPAWN — SKIP(owner-authority: P-105 foreign-work sandbox unbuilt; owner sign-off required — DO NOT WIRE)"
-skipp "RESULTS(D-018) — SKIP(rides SPAWN; foreign-git-sync exists but nothing reaches it)"
-skipp "METERING — SKIP(P-205 durable ledger table absent; needs a migration, not gated)"
-skipp "NUDGE — SKIP(P-303 push-nudge wiring deferred to P-305 rig)"
-skipp "FED-REAP — SKIP(peer-grants projection-apply hook missing, reaper deferred #3); LOCAL reap proven in LEG R"
+# ── wiring census: every reason DETECTED, never authored (D-018) ─────────────
+# This block replaces six hardcoded SKIP strings that had rotted into falsehood while
+# still reading as release evidence (see the ⚠ note in the header). The rule now:
+#
+#     A LEG MAY NOT STATE A REASON. IT MAY ONLY RUN A PROBE.
+#
+# Every probe below interrogates THE ARTIFACT UNDER TEST — this packaged sidecar's own
+# bundle, its own database, its own log — never the repo and never a human's memory of
+# either. Three oracles, in order of strength:
+#
+#   1. THE BUNDLE IS TREE-SHAKEN, so it is an honest witness to reachability: a symbol
+#      that no production path reaches is not merely uncalled, it is ABSENT FROM THE
+#      SHIPPED FILE. (Verified 2026-08-01: executeClaimedOffer/pullAndExecuteOffer/
+#      reapForeignSessionsForRevocation present; recordSpendDurable/onOfferAvailable
+#      absent — exactly matching which legs have production callers. Identifiers are
+#      not minified in this build, so absence is signal, not noise.)
+#   2. THE SIDECAR'S OWN PG — a relation either exists in the instance under test or
+#      does not. ("is the table there" is not a question to answer from a migration
+#      filename: mig 483 is on disk in the repo AND its tables are in this database,
+#      but those are two different facts and only the second one is the drill's.)
+#   3. THE SIDECAR'S OWN LOG — where the build EXPLAINS ITSELF (the p2p-host-routines
+#      seeder prints precisely why a routine did not seed). A reason the artifact
+#      states about itself cannot go stale relative to the artifact.
+#
+# Consequence, and the whole point: a lane that wires its leg makes this drill greener
+# on the NEXT RUN with zero edits here — and a lane that UNWIRES one turns it red
+# instead of leaving a comment that lies for three weeks.
+bundle_has()    { grep -qF -- "$1" "$SIDE/serve.mjs" 2>/dev/null; }
+table_present() { [ "$(q "SELECT to_regclass('harness_shared.$1') IS NOT NULL;")" = "t" ]; }
+routine_seeded(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' LIMIT 1;")" ]; }
+# The artifact's own words for why it did what it did (oracle 3). Falls back to a
+# HONEST 'no reason logged' — never to an invented one.
+log_reason() {
+  local line; line="$(grep -F -- "$1" "${FED_LOG[a]}" 2>/dev/null | tail -1)"
+  [ -n "$line" ] && printf '%s' "${line#*] }" || printf 'no reason logged by the sidecar'
+}
+
+log "wiring census — reasons DETECTED from the packaged artifact (bundle / its PG / its log)"
+
+# OFFER-PUBLISH — store + publish leg (WI-1935).
+if bundle_has 'listWorkOffers' && table_present p2p_work_offers; then
+  ok "OFFER-PUBLISH wired: publish leg ships and p2p_work_offers exists in this instance"
+else
+  skipp "OFFER-PUBLISH — DETECTED: listWorkOffers in bundle=$(bundle_has 'listWorkOffers' && echo yes || echo no), p2p_work_offers table=$(table_present p2p_work_offers && echo yes || echo no)"
+fi
+
+# PULL — X11 activation + the WI-3629 puller boundary.
+if bundle_has 'PULLER_ACTIVATION_LANDED' && bundle_has 'pullAndExecuteOffer'; then
+  ok "PULL wired: X11 activation constant + the WI-3629 evaluatePull→pullAndExecuteOffer seam both ship"
+else
+  skipp "PULL — DETECTED: activation=$(bundle_has 'PULLER_ACTIVATION_LANDED' && echo present || echo absent), pull-seam=$(bundle_has 'pullAndExecuteOffer' && echo present || echo absent) in the shipped bundle"
+fi
+
+# SPAWN — the P-104 executor. Owner decision D-001 ships this LIVE with no sandbox, so
+# the ONLY question is whether a production path ticks it. It does not tick until the
+# p2p-work-intake routine seeds, and the seeder logs its own reason when it cannot.
+if ! bundle_has 'executeClaimedOffer'; then
+  skipp "SPAWN — DETECTED: executeClaimedOffer absent from the shipped bundle (no production path reaches the executor)"
+elif routine_seeded 'p2p-work-intake'; then
+  ok "SPAWN wired: executor ships AND the p2p-work-intake routine is seeded in this instance"
+else
+  skipp "SPAWN — DETECTED, sidecar's own words: $(log_reason 'p2p-work-intake:')"
+fi
+
+# RESULTS — rides SPAWN by construction (nothing spawns ⇒ nothing to sync back).
+if routine_seeded 'p2p-work-intake' && bundle_has 'runForeignGitSyncTick'; then
+  ok "RESULTS wired: foreign-git-sync ships and an intake path exists to produce work for it"
+else
+  skipp "RESULTS — DETECTED: rides SPAWN (intake seeded=$(routine_seeded 'p2p-work-intake' && echo yes || echo no), foreign-git-sync in bundle=$(bundle_has 'runForeignGitSyncTick' && echo yes || echo no))"
+fi
+
+# METERING — P-205's own lane. Substrate and writer are SEPARATE facts; the old reason
+# conflated them and got both wrong.
+if table_present p2p_metering_spend && table_present p2p_metering_contribution; then
+  ok "METERING substrate live: p2p_metering_spend + p2p_metering_contribution exist in this instance (mig 483)"
+  if bundle_has 'recordSpendDurable'; then
+    spend_rows="$(q "SELECT count(*) FROM harness_shared.p2p_metering_spend;")"
+    [ "${spend_rows:-0}" != "0" ] && ok "METERING writer live: $spend_rows spend row(s) recorded" \
+      || skipp "METERING — DETECTED: writer ships but no spend rows flowed this run"
+  else
+    skipp "METERING — DETECTED: recordSpendDurable is absent from the shipped bundle — the ledger has NO production writer (tables exist and are read by host-availability, but nothing writes them)"
+  fi
+else
+  skipp "METERING — DETECTED: substrate missing from this instance (spend=$(table_present p2p_metering_spend && echo yes || echo no), contribution=$(table_present p2p_metering_contribution && echo yes || echo no))"
+fi
+
+# NUDGE — P-303. The one leg whose original reason survived re-verification.
+if bundle_has 'onOfferAvailable'; then
+  ok "NUDGE wired: the push-nudge publisher reaches a live offer path"
+else
+  skipp "NUDGE — DETECTED: onOfferAvailable is absent from the shipped bundle (push-nudge-service.ts is dormant by construction — P-303, latency-only, deferred on purpose)"
+fi
+
+# FED-REAP — revoke on A → reap on B. The hook ships; its gate is provenance
+# origin='remote', so a local op NEVER reaches it (skipOwnOps). This leg is
+# UNPROVABLE ON ONE BOX BY CONSTRUCTION — hence the cross-machine leg below.
+if ! bundle_has 'reapForeignSessionsForRevocation'; then
+  skipp "FED-REAP — DETECTED: reapForeignSessionsForRevocation absent from the shipped bundle"
+elif [ -n "${DRILL_PEER:-}" ]; then
+  ok "FED-REAP hook ships and a peer node is configured (DRILL_PEER=$DRILL_PEER) — see LEG FR"
+else
+  skipp "FED-REAP — DETECTED: the projection-apply hook SHIPS, but it fires only for provenance origin='remote' (a local op never reaches writeToPg). Unprovable on one box by construction; set DRILL_PEER=<host> to drive it."
+fi
 
 echo
 echo "════════════════════════════════════════════════════════"
