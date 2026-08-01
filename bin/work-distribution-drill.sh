@@ -341,14 +341,17 @@ else
 fi
 
 # FED-REAP — revoke on A → reap on B. The hook ships; its gate is provenance
-# origin='remote', so a local op NEVER reaches it (skipOwnOps). This leg is
-# UNPROVABLE ON ONE BOX BY CONSTRUCTION — hence the cross-machine leg below.
+# origin='remote', so a local op NEVER reaches it (skipOwnOps: a local write does
+# not go through writeToPg at all). This leg is UNPROVABLE ON ONE BOX BY
+# CONSTRUCTION — one box can only ever produce a vacuous green for it. It is
+# therefore NOT re-implemented here: it lives where the repo puts every other
+# cross-node proof, as a registered matrix scenario driven on real frames —
+#   bin/lib/scenarios/fed-reap.sh (order 59), via bin/local-matrix.sh.
+# This drill's job is to report honestly that the single-box run does not cover it.
 if ! bundle_has 'reapForeignSessionsForRevocation'; then
-  skipp "FED-REAP — DETECTED: reapForeignSessionsForRevocation absent from the shipped bundle"
-elif [ -n "${DRILL_PEER:-}" ]; then
-  ok "FED-REAP hook ships and a peer node is configured (DRILL_PEER=$DRILL_PEER) — see LEG FR"
+  skipp "FED-REAP — DETECTED: reapForeignSessionsForRevocation absent from the shipped bundle (the federated withdrawal path does not ship at all)"
 else
-  skipp "FED-REAP — DETECTED: the projection-apply hook SHIPS, but it fires only for provenance origin='remote' (a local op never reaches writeToPg). Unprovable on one box by construction; set DRILL_PEER=<host> to drive it."
+  skipp "FED-REAP — DETECTED: the projection-apply hook SHIPS, but fires only for provenance origin='remote', which a single box cannot produce. NOT COVERED BY THIS RUN BY CONSTRUCTION — prove it with: bin/local-matrix.sh --only=fed_reap"
 fi
 
 echo

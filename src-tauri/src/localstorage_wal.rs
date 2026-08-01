@@ -391,9 +391,9 @@ mod tests {
         drop(reader);
         drop(writer);
         let report2 = reclaim_localstorage_wals(&dir);
-        eprintln!("DEBUG report2 = {report2:?}, wal now = {}", file_len(&wal));
         assert_eq!(report2.checkpointed, 1, "once the reader is gone, the retry must fully reclaim");
         assert_eq!(report2.failed_reclaim, 0);
+        drop(_keepalive);
 
         std::fs::remove_dir_all(&dir).ok();
     }
