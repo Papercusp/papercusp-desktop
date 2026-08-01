@@ -216,7 +216,7 @@ SIDECAR_DIR="$SIDECAR_TMP_DIR"
 # already-gone path is a silent no-op; the trap never fires MID-run (only at
 # actual process exit), so it cannot race the overlay-preservation read that
 # copies FROM OLD_DIR just after the swap.
-trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}' EXIT
+trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"}' EXIT
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
