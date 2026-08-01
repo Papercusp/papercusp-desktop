@@ -285,8 +285,19 @@ fi
 bundle_has()    { grep -qF -- "$1" "$SIDE/serve.mjs" 2>/dev/null; }
 table_present() { [ "$(q "SELECT to_regclass('harness_shared.$1') IS NOT NULL;")" = "t" ]; }
 routine_seeded(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' LIMIT 1;")" ]; }
-# The artifact's own words for why it did what it did (oracle 3). Falls back to a
+# The artifact's own words for why it did what it did (oracle 3). Falls back to an
 # HONEST 'no reason logged' — never to an invented one.
+#
+# ⚠ MATCH THE SUBSYSTEM MARKER, NOT ONE EXPECTED SENTENCE. A first draft grepped
+# for 'p2p-work-intake:' — the reason string seen on one run — and on the very
+# next run the seeder failed EARLIER, by a different path, emitting a different
+# sentence that did not contain that substring. The probe then reported
+# 'no reason logged' while the sidecar had in fact logged a perfectly good (and
+# more serious) reason. A probe narrowed to one known answer is a probe that
+# goes blind exactly when the answer changes — which is the whole failure mode
+# this census exists to prevent. Grep the SUBSYSTEM tag and print whatever it
+# says. (The honest fallback is what made that discrepancy visible rather than
+# silently reporting the previous run's reason — keep it.)
 log_reason() {
   local line; line="$(grep -F -- "$1" "${FED_LOG[a]}" 2>/dev/null | tail -1)"
   [ -n "$line" ] && printf '%s' "${line#*] }" || printf 'no reason logged by the sidecar'
@@ -316,7 +327,7 @@ if ! bundle_has 'executeClaimedOffer'; then
 elif routine_seeded 'p2p-work-intake'; then
   ok "SPAWN wired: executor ships AND the p2p-work-intake routine is seeded in this instance"
 else
-  skipp "SPAWN — DETECTED, sidecar's own words: $(log_reason 'p2p-work-intake:')"
+  skipp "SPAWN — DETECTED, sidecar's own words: $(log_reason '[p2p-host-routines]')"
 fi
 
 # RESULTS — rides SPAWN by construction (nothing spawns ⇒ nothing to sync back).
