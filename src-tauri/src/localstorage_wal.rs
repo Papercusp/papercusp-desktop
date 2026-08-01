@@ -357,6 +357,14 @@ mod tests {
         let before = file_len(&wal);
         assert!(before > 4_000_000, "precondition: -wal should have grown, got {before}");
 
+        // A third, merely-idle connection held open for the WHOLE test so that
+        // dropping `reader` (and later `writer`) is never the LAST connection to
+        // close — SQLite auto-checkpoints on the last connection's close, which
+        // would silently truncate the WAL as a side effect of `drop()` and mask
+        // the thing this test actually exercises (an explicit boot-time TRUNCATE
+        // checkpoint succeeding once the BLOCKING reader, specifically, is gone).
+        let _keepalive = rusqlite::Connection::open(&db).unwrap();
+
         // A second, still-open reader holding a read mark on the pre-checkpoint
         // WAL contents — this is what a lingering orphaned webview process (or
         // any other still-alive reader) looks like from the checkpointer's side.
