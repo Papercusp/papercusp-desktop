@@ -1026,7 +1026,7 @@ EOF
 # ({ hiveId, hivePubkey, memberLinks }) from whichever response shape came back
 # (fresh-create vs existing). Sets RIG_HIVE_ID / RIG_HIVE_PUBKEY / RIG_HIVE_LINK.
 rig_owner_publish_hive() {
-  local owner="$1" repo="${2:-https://github.com/octocat/Hello-World}" a_resp fields
+  local owner="$1" repo="${2:-https://github.com/octocat/Hello-World}" a_resp fields try
   RIG_REPO_URL="$repo"
   fed_log "[$owner=OWNER] POST pots/from-repo ($repo, force) → resolve hive memberLink + hiveId + hivePubkey"
   # WI-1331 (Brief 5 live run): force:true is REQUIRED. The test repo
@@ -1040,10 +1040,31 @@ rig_owner_publish_hive() {
   # force:true skips the early-return and CREATES a FRESH isolated hive per run
   # (own slug + own hivePubkey → own federation topic), returning the
   # {created,publish:{memberLinks,hivePubkey}} shape the parse below expects.
-  a_resp="$(drv_exec "$owner" <<EOF
+  # WI-6723: this POST performs a LIVE `git clone` of github.com from INSIDE the
+  # frame, and it was the only leg here with no retry — while rig_join_hive just
+  # below has retried transients since 2026-07-01. One transient
+  # `Recv failure: Connection reset by peer` (code clone_network_timeout) returns
+  # 6, and all ten callers wire that to `|| exit 6`, so a one-second blip at
+  # minute 2 destroys the frames and throws away a whole ~40-min matrix run
+  # (observed 2026-08-01 19:51Z — zero of 18 scenarios executed).
+  # Retry ONLY on transient network/clone shapes: a genuine API refusal must
+  # still fail fast and loud, so this cannot mask a real regression. Safe to
+  # retry because force:true creates a FRESH isolated hive per attempt (see the
+  # note above), so a retry can never collide with a half-created one.
+  for try in 1 2 3; do
+    a_resp="$(drv_exec "$owner" <<EOF
 curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$owner]}/api/harness/pots/from-repo -H 'content-type: application/json' -d '{"githubUrl":"$repo","force":true,"visibility":"public","runTests":false,"shallow":true}'
 EOF
 )"
+    case "$a_resp" in
+      ''|*clone_network_timeout*|*'Recv failure'*|*'Connection reset'*|*'unable to access'*|*'Could not resolve host'*|*'Operation timed out'*)
+        [ "$try" -lt 3 ] || break
+        echo "  ⚠ $owner from-repo attempt $try/3 hit a TRANSIENT clone/network failure — retrying in $((try * 20))s: $(printf '%s' "$a_resp" | head -c 160)"
+        sleep "$((try * 20))"
+        ;;
+      *) break ;;
+    esac
+  done
   echo "[$owner] from-repo → $(printf '%s' "$a_resp" | head -c 200)"
   # The fields live in different shapes:
   #   fresh-create → {created:{potSlug}, publish:{memberLinks,hivePubkey}} (WI-931;
