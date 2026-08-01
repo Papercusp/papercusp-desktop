@@ -220,6 +220,14 @@ gs2="$(q "SELECT status FROM harness_shared.p2p_peer_grants WHERE grantee_ref='$
 log "LEG T — p2p:trace (M21 offer-id thread)"
 # run-1 finding: mcp-call reads $HOME/.papercusp/superuser-token — must be the
 # DRILL SIDECAR's home (its own token), not the host operator's.
+# ⚠ ARG NAME IS `pot`, NOT `hive` (run-3 finding, 2026-08-01). This call passed
+# {"hive":…} — the pre-rename name — and p2p:trace REFUSES an undeclared arg rather
+# than ignoring it (EI-10883), so the leg had been hard-broken since the
+# cup-lexicon-full-rename-2026-07-09 hive→pot rename. It read as a flaky/load
+# failure for weeks because the saturation shed below fired FIRST and masked the
+# real error; only retrying past the shed surfaced it. If you rename a wire field,
+# grep the drills — they call tools by hand-written JSON and no typechecker covers them.
+#
 # run-2 finding (2026-08-01): this leg FAILED the whole drill on a load artifact —
 # "operator event loop critically saturated — request shed, retry shortly", which the
 # operator itself stamps `retryable:true`. Failing a release drill on a shed the server
@@ -230,7 +238,7 @@ tr_out=""; tr_try=0
 while [ "$tr_try" -lt 5 ]; do
   tr_try=$((tr_try+1))
   tr_out="$(cd "$REPO_DIR" && HOME="${AHOME[a]}" PAPERCUSP_HONO_PORT="${FED_SC[a]}" timeout 60 node scripts/mcp-call.mjs p2p:trace \
-    "{\"hive\":\"$HIVE_SLUG\",\"offerId\":\"$DRILL_OFFER\"}" --harness "$HIVE_SLUG" --workspace "$WS" 2>&1)"
+    "{\"pot\":\"$HIVE_SLUG\",\"offerId\":\"$DRILL_OFFER\"}" --harness "$HIVE_SLUG" --workspace "$WS" 2>&1)"
   echo "$tr_out" | grep -q "work-offer:reap" && break
   echo "$tr_out" | grep -qE '"retryable":true|critically saturated' || break
   echo "  … p2p:trace shed under load (retryable), retry $tr_try/5"

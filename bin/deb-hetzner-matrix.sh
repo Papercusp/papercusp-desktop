@@ -367,7 +367,26 @@ done
 # ── the PASS/FAIL matrix ───────────────────────────────────────────────────────
 echo
 echo "════════ LIVE FEDERATION MATRIX ════════"
-echo "  rig: Hetzner $STYPE ($LOC_A + $LOC_B), 2-frame, real public DHT   run=$MATRIX_RUN_ID"
+# The rig line DESCRIBES THE ENVIRONMENT EVERY VERDICT BELOW WAS PRODUCED IN, so
+# it must be derived, never asserted. It used to be the literal string
+# "Hetzner $STYPE ($LOC_A + $LOC_B), 2-frame, real public DHT" — printed
+# unconditionally, and wrong in THREE ways on a BYO run (found 2026-08-01 on a
+# local run that reported itself as "Hetzner cpx31 (ash + ash) ... real public
+# DHT" while actually running local docker frames against a private
+# containerized testnet DHT):
+#   · STYPE/LOC_* are the Hetzner PROVISIONING defaults — they retain their
+#     default values on a BYO run, where nothing was provisioned at all;
+#   · "real public DHT" is false whenever RIG_DHT_BOOTSTRAP pins a testnet
+#     (local-matrix.sh always does — announce deliberately stays OFF the public DHT);
+#   · "2-frame" is false on --frames=3.
+# This is release evidence: a reader quoting this header would misstate the test
+# environment of every green in the table. Mirrors the honest
+# `${RIG_DHT_BOOTSTRAP:-PUBLIC}` pattern deb-hetzner-rig.sh:797 already uses.
+if [ -n "${RIG_FRAME_IPS:-}" ]; then _rig_where="BYO frames ($RIG_FRAME_IPS)"
+else _rig_where="Hetzner $STYPE ($LOC_A + $LOC_B)"; fi
+if [ -n "${RIG_DHT_BOOTSTRAP:-}" ]; then _rig_dht="private testnet DHT @ $RIG_DHT_BOOTSTRAP"
+else _rig_dht="real public DHT"; fi
+echo "  rig: $_rig_where, ${#RIG_FRAMES[@]}-frame, $_rig_dht   run=$MATRIX_RUN_ID"
 fails=0; passes=0
 for id in "${RUN_IDS[@]}"; do
   if [ "${SCN_RC[$id]}" -eq 0 ]; then st="PASS"; passes=$((passes+1))
