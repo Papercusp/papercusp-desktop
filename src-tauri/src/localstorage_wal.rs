@@ -66,6 +66,18 @@ pub struct WalReclaimReport {
     pub runaway_seen: usize,
     /// Total `-wal` bytes reclaimed across all DBs (best-effort, pre − post).
     pub bytes_reclaimed: u64,
+    /// EI-18794661891306642: DBs where the checkpoint attempt was `busy` AND
+    /// reclaimed ZERO bytes (`wal_after >= wal_before`) — a remediation that
+    /// ran and did nothing, previously logged as if it were a normal outcome.
+    /// This is the detector-failure half of the bug: we must be able to tell
+    /// "attempted + reclaimed nothing" apart from "attempted + reclaimed
+    /// something" without re-deriving it from the busy/log/ckpt numbers by
+    /// hand. A DB counted here almost always means a PERSISTENT reader (most
+    /// often an orphaned webview process from a prior crash/`pkill -9`, not a
+    /// transient writer) is holding the store open — a boot-time retry with a
+    /// short sleep cannot fix that, so this is surfaced as a loud alarm
+    /// instead of silently retried.
+    pub failed_reclaim: usize,
 }
 
 fn file_len(p: &Path) -> u64 {
@@ -142,12 +154,29 @@ pub fn reclaim_localstorage_wals(localstorage_dir: &Path) -> WalReclaimReport {
                 if busy == 0 {
                     report.checkpointed += 1;
                 }
-                println!(
-                    "[papercusp-desktop] localstorage checkpoint {}: busy={busy} log={log} ckpt={ckpt} wal {} -> {} bytes",
-                    db.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                    wal_before,
-                    wal_after,
-                );
+                // EI-18794661891306642: `busy != 0` alone is not a failure — SQLite
+                // legitimately reports transient busy while still reclaiming SOME
+                // frames. The FAILED remediation is the combination the bug named:
+                // busy AND zero bytes reclaimed. That combination previously logged
+                // through the exact same `println!` as every successful checkpoint,
+                // so a completely no-op remediation read as if an action had been
+                // taken. Name it as its own, louder log line instead.
+                let reclaimed_nothing = busy != 0 && wal_after >= wal_before;
+                if reclaimed_nothing {
+                    report.failed_reclaim += 1;
+                    eprintln!(
+                        "[papercusp-desktop] localstorage WAL RECLAIM FAILED: {} busy={busy} log={log} ckpt={ckpt} wal unchanged at {} bytes — a reader (most likely an orphaned webview process from a prior crash/kill, since this checkpoint runs before this process's OWN webview opens the store) is holding the store open and will keep it from truncating on every boot until it exits. Find and end that process; this WAL will keep growing until then.",
+                        db.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        wal_before,
+                    );
+                } else {
+                    println!(
+                        "[papercusp-desktop] localstorage checkpoint {}: busy={busy} log={log} ckpt={ckpt} wal {} -> {} bytes",
+                        db.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        wal_before,
+                        wal_after,
+                    );
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -169,11 +198,23 @@ pub fn reclaim_on_boot(app_local_data_dir: &Path) {
     let report = reclaim_localstorage_wals(&dir);
     if report.attempted > 0 {
         println!(
-            "[papercusp-desktop] localstorage WAL reclaim: {} attempted, {} truncated, {} runaway, {} bytes reclaimed ({})",
+            "[papercusp-desktop] localstorage WAL reclaim: {} attempted, {} truncated, {} runaway, {} failed (reader busy, 0 bytes reclaimed), {} bytes reclaimed ({})",
             report.attempted,
             report.checkpointed,
             report.runaway_seen,
+            report.failed_reclaim,
             report.bytes_reclaimed,
+            dir.display(),
+        );
+    }
+    // EI-18794661891306642: a per-boot summary line is easy to scroll past (exactly
+    // the complaint that motivated this fix) — a SEPARATE, unmissable alarm when
+    // this boot leaves a genuinely runaway WAL still unreclaimed, so the failure
+    // mode doesn't just quietly repeat forever across restarts.
+    if report.failed_reclaim > 0 {
+        eprintln!(
+            "[papercusp-desktop] WARNING: {} localstorage WAL(s) could NOT be reclaimed this boot (reader still busy) — disk usage under {} will keep growing until the blocking process is found and ended.",
+            report.failed_reclaim,
             dir.display(),
         );
     }
