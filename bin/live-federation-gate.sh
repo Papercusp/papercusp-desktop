@@ -1038,12 +1038,19 @@ fi
 # live gate must cover them too. STATUS (2026-07-25, WI-5775 verify): the outbox-drain leg
 # itself (WI-971/WI-259) is now VERIFIED FIXED — two live runs both PASS, bidirectional +
 # continuous federation. WI-280/WI-1666 (re-key K0-K3) also verified PASS this run. The
-# WITNESS sub-probe's AK-ban leg (policy-only ban, revoke:false) is a SEPARATE, currently-
-# FAILING concern (WI-5783, filed 2026-07-25) — B's write still lands on A after a ban. Because
-# `run_smoke` only greps this smoke's own top-level `OVERALL: PASS` line, a WITNESS-only
-# failure would otherwise pass silently (the smoke's own OVERALL line does not fold WITNESS
-# in) — the explicit WITNESS_RES check below closes that gap so this leg reds until WI-5783
-# is fixed, distinctly from the from-repo/outbox-drain concern SKIP_FROMREPO tracks.
+# WITNESS sub-probe's AK-ban leg (policy-only ban, revoke:false) WAS a separate failing
+# concern (WI-5783, filed 2026-07-25) — B's write still landed on A after a ban. WI-5783 is
+# now RESOLVED (2026-07-26, live-verified PASS on 3 consecutive from-repo WITNESS runs): the
+# owner instance ran TWO merge loops for the same Hive, and the member-scoped one resolved its
+# policy lookup as opts.harnessSlug — missing the ban policy written under the pot/home slug —
+# so enforcement silently fell back to a no-op apply. Because `run_smoke` only greps this
+# smoke's own top-level `OVERALL: PASS` line, a WITNESS-only failure would otherwise pass
+# silently (the smoke's own OVERALL line does not fold WITNESS in) — the explicit WITNESS_RES
+# check below closes that gap.
+# ⚠ 2026-08-01: that check is now a REGRESSION DETECTOR, not an expected-red. With WI-5783
+# closed there is no longer ANY leg whose red is expected, so a from-repo-witness FAIL must be
+# investigated like any other — never waved through as "the known witness red". Two such REDs
+# fired 2026-07-31 (23:00Z, 00:02Z) while this file still described the leg as expected.
 FROMREPO_RES="SKIPPED"
 WITNESS_RES="SKIPPED"
 if [ "$SKIP_FROMREPO" != 1 ]; then
@@ -1226,7 +1233,7 @@ echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; $FRAME_NOTE ; l
 # a forgotten/dropped tracking item doesn't go dark forever.
 TITLE="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ($STAMP)"
 TITLE_PREFIX="live-federation-gate RED: ${REDS[*]} failed on the packaged binary ("
-BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Host 1-min loadavg at verdict: $LOAD1_END (SHARED-BOX aggregate — not frame-scoped). $FRAME_NOTE (EI-18716933933700596: read the frame-scoped line, not the host load, before concluding this was environmental). Owner: shared-hive release lane. NOTE (updated 2026-07-25, WI-5775): WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is now VERIFIED FIXED — a bare from-repo RED is a NEW regression, investigate. Only a from-repo-witness RED is currently EXPECTED, while WI-5783 (AK-ban policy-only drop not enforced) is open; a content-matrix, local-matrix, from-repo, or build RED is a NEW regression — investigate."
+BODY="Automated live-federation gate (WI-261/P-013) caught a RED on the real binary the hermetic suite would not (green-rig/red-binary class). Failing legs: ${REDS[*]}. Verdict: $SUMMARY. Logs: $WORK/*.out. Host 1-min loadavg at verdict: $LOAD1_END (SHARED-BOX aggregate — not frame-scoped). $FRAME_NOTE (EI-18716933933700596: read the frame-scoped line, not the host load, before concluding this was environmental). Owner: shared-hive release lane. NOTE (updated 2026-07-25, WI-5775): WI-971 (outbox drain never wired for joined/created hive harnesses; WI-259 closed as its dup) is now VERIFIED FIXED — a bare from-repo RED is a NEW regression, investigate. NOTE (updated 2026-08-01): WI-5783 (AK-ban policy-only drop not enforced) is RESOLVED and live-verified, so a from-repo-witness RED is NO LONGER EXPECTED — it is a NEW regression like every other leg. There is currently NO leg whose red is expected: content-matrix, local-matrix, from-repo, from-repo-witness and build ALL mean investigate. (Prior wording told the reader a witness red was expected; it outlived its own condition by ~6 days and rode into filed tickets — see WI-6540.)"
 RED_MARKER="$STATE_DIR/red-ei-filed"
 # Dedup is PER failing-leg-set, not global (2026-07-16: a brand-new local-matrix
 # RED was silently suppressed for 12h under the marker of an already-fixed
