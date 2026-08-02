@@ -925,6 +925,7 @@ fn spawn_external_with(
             cmd.env(k, v);
         }
     }
+    strip_terminal_context_env(&mut cmd);
     for a in args {
         cmd.arg(a);
     }
@@ -1072,6 +1073,59 @@ const LINUX_TERMINALS: &[(&str, &[&str])] = &[
     ("xterm", &["-e"]),
 ];
 
+/// Env vars that IDENTIFY the terminal (or multiplexer) THIS process was
+/// started in. A launch's terminal identity is re-derived, never inherited.
+///
+/// `std::process::Command` inherits our env by default, and the desktop is
+/// routinely started by `npm run dev` from inside a gnome-terminal tab — so
+/// without this we hand the new emulator a `GNOME_TERMINAL_SCREEN` naming a tab
+/// that no longer exists. gnome-terminal then asks the factory for that screen,
+/// fails, prints `# Error creating terminal: Failed to get screen from object
+/// path …`, and EXITS 0 having opened no window at all.
+///
+/// Kept in sync with `TERMINAL_CONTEXT_ENV_KEYS` in
+/// `packages/operator-core/lib/terminal-spawn.ts`, which fixes the same defect
+/// on the operator side (EI-19385011811175105).
+#[cfg(any(target_os = "linux", test))]
+const TERMINAL_CONTEXT_ENV_KEYS: &[&str] = &[
+    // GNOME / VTE
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "VTE_VERSION",
+    // KDE
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "KONSOLE_PROFILE_NAME",
+    // others
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "ITERM_SESSION_ID",
+    "TERM_SESSION_ID",
+    "TERMINATOR_UUID",
+    "TILIX_ID",
+    "WINDOWID",
+    // multiplexers
+    "TMUX",
+    "TMUX_PANE",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+    "STY",
+];
+
+/// Drop {@link TERMINAL_CONTEXT_ENV_KEYS} from `cmd`'s environment. Call AFTER
+/// applying the envelope's own vars, so an inherited-or-explicit stale terminal
+/// id can never survive either way.
+#[cfg(target_os = "linux")]
+fn strip_terminal_context_env(cmd: &mut std::process::Command) {
+    for k in TERMINAL_CONTEXT_ENV_KEYS {
+        cmd.env_remove(k);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_linux_new_window(
     envelope: &ConsoleEnvelope,
@@ -1118,6 +1172,7 @@ fn spawn_linux_with(
             cmd.env(k, v);
         }
     }
+    strip_terminal_context_env(&mut cmd);
     for a in args {
         cmd.arg(a);
     }
@@ -1611,6 +1666,39 @@ mod tests {
             assert!(
                 bins.contains(must_have),
                 "{must_have} missing from LINUX_TERMINALS"
+            );
+        }
+    }
+
+    // EI-19385011811175105: inheriting the launching tab's GNOME_TERMINAL_SCREEN
+    // made gnome-terminal exit 0 with no window at all. Both Linux spawners must
+    // strip it, and must NOT strip what a window actually needs to open.
+    #[test]
+    fn terminal_context_env_keys_cover_the_tab_identity_vars() {
+        for must_have in &[
+            "GNOME_TERMINAL_SCREEN",
+            "GNOME_TERMINAL_SERVICE",
+            "TMUX",
+            "ZELLIJ",
+            "WINDOWID",
+        ] {
+            assert!(
+                TERMINAL_CONTEXT_ENV_KEYS.contains(must_have),
+                "{must_have} missing from TERMINAL_CONTEXT_ENV_KEYS"
+            );
+        }
+        for must_keep in &[
+            "DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "XAUTHORITY",
+            "PATH",
+            "HOME",
+            "TERM",
+        ] {
+            assert!(
+                !TERMINAL_CONTEXT_ENV_KEYS.contains(must_keep),
+                "{must_keep} must NOT be scrubbed — the new window needs it"
             );
         }
     }
