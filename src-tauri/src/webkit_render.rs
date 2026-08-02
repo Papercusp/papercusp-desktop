@@ -89,7 +89,23 @@ const DAMAGE_DEFAULT_ON: bool = false;
 
 #[cfg(target_os = "linux")]
 fn damage_compositing_wanted() -> bool {
-    match std::env::var(DAMAGE_ENV).ok().as_deref() {
+    parse_damage_compositing_wanted(std::env::var(DAMAGE_ENV).ok().as_deref())
+}
+
+/// The pure parsing half of `damage_compositing_wanted`, split out so the unit
+/// tests below can exercise every branch by passing a value in directly instead
+/// of mutating the process-global env var.
+///
+/// EI-18869717910251502: Rust runs unit tests for one binary on multiple
+/// threads in a single process, so two tests that both call
+/// `std::env::set_var`/`remove_var` on the SAME key race each other — a
+/// different one flakes on every run, which is exactly what was observed here.
+/// Reading the env only at the one real call site above (`damage_compositing_wanted`)
+/// and testing this function instead removes the shared mutable state the race
+/// needed, rather than locking around it.
+#[cfg(target_os = "linux")]
+fn parse_damage_compositing_wanted(raw: Option<&str>) -> bool {
+    match raw {
         Some("0") | Some("false") => false,
         Some("1") | Some("true") => true,
         _ => DAMAGE_DEFAULT_ON,
@@ -236,33 +252,25 @@ pub fn init(_app: &tauri::App) {}
 mod tests {
     use super::*;
 
-    fn with_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let prev = std::env::var(DAMAGE_ENV).ok();
-        match value {
-            Some(v) => std::env::set_var(DAMAGE_ENV, v),
-            None => std::env::remove_var(DAMAGE_ENV),
-        }
-        let out = f();
-        match prev {
-            Some(p) => std::env::set_var(DAMAGE_ENV, p),
-            None => std::env::remove_var(DAMAGE_ENV),
-        }
-        out
-    }
-
+    // EI-18869717910251502: these used to go through a `with_env` helper that
+    // mutated the shared process env var, which raced other tests in the same
+    // binary (Rust runs unit tests multi-threaded in one process) — a
+    // different test failed on every run. Calling the pure parsing function
+    // directly needs no shared mutable state at all, so there is nothing left
+    // to race.
     #[test]
     fn env_overrides_default_both_ways() {
-        assert!(with_env(Some("1"), damage_compositing_wanted));
-        assert!(with_env(Some("true"), damage_compositing_wanted));
-        assert!(!with_env(Some("0"), damage_compositing_wanted));
-        assert!(!with_env(Some("false"), damage_compositing_wanted));
+        assert!(parse_damage_compositing_wanted(Some("1")));
+        assert!(parse_damage_compositing_wanted(Some("true")));
+        assert!(!parse_damage_compositing_wanted(Some("0")));
+        assert!(!parse_damage_compositing_wanted(Some("false")));
     }
 
     #[test]
     fn unset_and_garbage_fall_back_to_the_default() {
-        assert_eq!(with_env(None, damage_compositing_wanted), DAMAGE_DEFAULT_ON);
+        assert_eq!(parse_damage_compositing_wanted(None), DAMAGE_DEFAULT_ON);
         assert_eq!(
-            with_env(Some("yes-please"), damage_compositing_wanted),
+            parse_damage_compositing_wanted(Some("yes-please")),
             DAMAGE_DEFAULT_ON
         );
     }
