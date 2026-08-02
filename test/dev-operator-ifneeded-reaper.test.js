@@ -251,6 +251,125 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
   }
 });
 
+// EI-18745117818375852: under load, a just-recycled sidecar's own exiting
+// process (or the memory-watchdog's predecessor) can still hold $PORT when
+// the fixed-3s-backoff restart fires — a blind respawn then died INSTANTLY on
+// EADDRINUSE against its own still-live predecessor, and because that death
+// was itself non-zero the loop restarted again just as fast: a self-
+// sustaining restart storm. The fix (see this script's own EI-18745117818375852
+// comments) waits, bounded, for the port to actually free before every
+// restart, and gives up with a clear diagnosis instead of restarting forever
+// when it never does. Neither branch had a regression test before this file
+// gained them — a revert of either half would have shipped silently.
+test('restart-storm guard: waits for the port to actually free before restarting, then retries', async () => {
+  const port = testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-portwait-'));
+  const marker = path.join(tmp, 'attempts');
+  let wrapper;
+  try {
+    // Each invocation appends an attempt marker, then backgrounds a node
+    // server that binds $PORT and holds it for ~1.5s (simulating a still-live
+    // predecessor / slow-releasing exiting process) before releasing it and
+    // exiting — DEV_CMD itself still exits 1 immediately every time.
+    const holderScript = `require('node:net').createServer().listen(${port},'127.0.0.1',()=>{setTimeout(()=>process.exit(0),1500)})`;
+    const devCmd = `echo x >> '${marker}'; node -e "${holderScript}" & disown; sleep 0.3; exit 1`;
+    wrapper = spawn('bash', [script], {
+      env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
+    });
+    let stderr = '';
+    wrapper.stderr.on('data', (d) => {
+      stderr += d;
+    });
+
+    // A second attempt marker proves the loop did NOT give up after the
+    // first failure — it waited for the transient hold to clear and retried.
+    const twoAttempts = await waitFor(
+      () =>
+        fs.existsSync(marker) &&
+        fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length >= 2,
+      { timeoutMs: 15_000 },
+    );
+    assert(twoAttempts, `expected a restart after the port freed — stderr was: ${stderr}`);
+    assert.match(stderr, /STILL held.*waiting up to 30s/, 'wrapper did not log the bounded port-wait diagnosis');
+    assert.doesNotMatch(
+      stderr,
+      /never freed after 30s/,
+      'wrapper wrongly gave up while the port was only transiently held',
+    );
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        process.kill(wrapper.pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('restart-storm guard: gives up with a clear diagnosis (and stops restarting) when the port never frees', async () => {
+  const port = testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-portstuck-'));
+  const marker = path.join(tmp, 'attempts');
+  const pidfile = path.join(tmp, 'holder-pid');
+  let wrapper;
+  try {
+    // Binds $PORT and NEVER releases it — a wedged predecessor that never
+    // frees the port — while DEV_CMD itself still exits 1 immediately.
+    const holderScript = `const s=require('node:net').createServer();s.listen(${port},'127.0.0.1',()=>{require('node:fs').writeFileSync('${pidfile}',String(process.pid))})`;
+    const devCmd = `echo x >> '${marker}'; node -e "${holderScript}" & disown; sleep 0.3; exit 1`;
+    wrapper = spawn('bash', [script], {
+      env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
+    });
+    let stderr = '';
+    wrapper.stderr.on('data', (d) => {
+      stderr += d;
+    });
+
+    const gaveUp = await waitFor(() => /never freed after 30s/.test(stderr), { timeoutMs: 40_000 });
+    assert(gaveUp, `wrapper never logged the never-freed diagnosis — stderr was: ${stderr}`);
+    assert.match(stderr, new RegExp(`FATAL: :${port} never freed after 30s`));
+
+    // It must actually have STOPPED restarting, not merely logged and kept
+    // looping — only the first attempt's marker line should exist.
+    const attempts = fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length;
+    assert.equal(attempts, 1, 'wrapper kept restarting after giving up — the abort did not stop the loop');
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        process.kill(wrapper.pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    // The lingering node holder outlives the wrapper's own loop-bash by
+    // design (that's the scenario under test); the detached watchdog reaps
+    // the whole group once the wrapper is gone. Give it a moment, then
+    // force-kill the holder directly as a backstop so it can't squat the
+    // port for other tests.
+    await waitFor(
+      () => {
+        if (!fs.existsSync(pidfile)) return false;
+        const p = Number(fs.readFileSync(pidfile, 'utf8').trim());
+        return Number.isInteger(p) && p > 1 ? !pidAlive(p) : true;
+      },
+      { timeoutMs: 5000 },
+    );
+    if (fs.existsSync(pidfile)) {
+      const p = Number(fs.readFileSync(pidfile, 'utf8').trim());
+      if (Number.isInteger(p) && p > 1 && pidAlive(p)) {
+        try {
+          process.kill(p, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('TERM path: signaling the wrapper reaps the whole dev-stack process group', async () => {
   await withRetry(() => runReapCycle((wrapper) => wrapper.kill('SIGTERM')));
 });
