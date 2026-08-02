@@ -261,10 +261,52 @@ if wants wakebridge || wants receipts; then
   #    false-wakeable zombie. Federated presence freshness is the better signal.
   # Note heartbeat freshness is NOT sessionState — a warm-dead session still
   # gossips fresh rows — so this narrows the target, it does not guarantee it.
-  AGENT="${PCUSP_PARITY_PROBE_AGENT:-$(psql "$TOWER_DSN" -tA -c "SELECT owner_id FROM harness_shared.shared_session_presence WHERE machine_label='$VM_MACHINE_LABEL' AND last_seen_at > now() - interval '180 seconds' ORDER BY last_seen_at DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')}"
+  #
+  # ⚠ WI-7029 — WHY THIS IS AN INTERSECTION AND NOT "the newest roster row".
+  # Taking `ORDER BY last_seen_at DESC LIMIT 1` off the tower roster alone is
+  # WRONG, and reliably so: every `/tmp/vmcall.sh` invocation on the Mac (which
+  # probe-session.sh itself makes, twice per 30s beat) mints a fresh ephemeral
+  # `mcp-call-<pid>` presence row that is NEWER than the dedicated probe's own
+  # beat. Measured 2026-08-02 12:32Z: discovery selected `mcp-call-67431`, which
+  # has NO coord:inbox-wake await of any kind on the Mac, so the send had
+  # nothing to deliver to and leg 2 red with "no delivered inbox-wake" — a THIRD
+  # distinct runner fault wearing the same costume as a dead wake rail.
+  # So satisfy BOTH constraints the block above derives instead of picking one:
+  #   · ADDRESSABILITY — the candidate must be on the TOWER's roster and fresh
+  #     (coord:send resolves recipients against the SENDER's roster);
+  #   · WAKEABILITY   — it must have an ARMED standing inbox-wake await on the
+  #     VM (not cancelled, not expired), or there is no subscriber to deliver to.
+  # Intersecting also disposes of the zombie concern noted above: a crashed
+  # session's uncancelled await cannot be selected, because a corpse stops
+  # gossiping and so falls out of the 180s roster window.
+  AGENT="${PCUSP_PARITY_PROBE_AGENT:-}"
+  CAND_N=0
   if [ -z "$AGENT" ]; then
-    wants wakebridge && record wakebridge FAIL "no roster-visible VM-homed session on $VM_HOSTNAME to address (runner/infra, not the bridge)"
-    wants receipts   && record receipts   FAIL "not attempted — no addressable VM-homed target"
+    CANDIDATES="$(psql "$TOWER_DSN" -tA -c "SELECT owner_id FROM harness_shared.shared_session_presence WHERE machine_label='$VM_MACHINE_LABEL' AND last_seen_at > now() - interval '180 seconds' ORDER BY last_seen_at DESC LIMIT 25;" 2>/dev/null | tr -d '\r')"
+    CANDIDATES="$(printf '%s\n' "$CANDIDATES" | sed '/^[[:space:]]*$/d')"
+    [ -n "$CANDIDATES" ] && CAND_N="$(printf '%s\n' "$CANDIDATES" | wc -l | tr -d '[:space:]')"
+    if [ "$CAND_N" -gt 0 ]; then
+      # SQL-quote the candidate list, then ask the VM which of them are armed.
+      inlist="$(printf '%s\n' "$CANDIDATES" | sed "s/'/''/g; s/^/'/; s/\$/'/" | paste -sd, -)"
+      ARMED="$(drv_psql vm "SELECT DISTINCT subscriber_id FROM harness_shared.event_awaits WHERE event_key = 'coord:inbox-wake:' || subscriber_id AND subscriber_id IN ($inlist) AND cancelled_at IS NULL AND (expires_ts IS NULL OR expires_ts > now());" 2>/dev/null | tr -d '\r')"
+      # Newest-first order is preserved: take the first candidate that is armed.
+      while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        if printf '%s\n' "$ARMED" | grep -qxF "$cand"; then AGENT="$cand"; break; fi
+      done <<< "$CANDIDATES"
+    fi
+  fi
+  if [ -z "$AGENT" ]; then
+    # Name WHICH of the two constraints failed — they have different remedies
+    # (bring a Mac session up  vs  arm its inbox-wake await), and conflating
+    # them cost a whole diagnosis round on 2026-08-02.
+    if [ "$CAND_N" -eq 0 ]; then
+      why="no roster-visible VM-homed session on $VM_HOSTNAME to address (runner/infra, not the bridge) — start bin/vm-rig/probe-session.sh"
+    else
+      why="$CAND_N roster-visible VM-homed session(s), but NONE has an armed coord:inbox-wake await on $VM_HOSTNAME (runner/infra, not the bridge) — probe-session.sh's coord:await-inbox beat arms it"
+    fi
+    wants wakebridge && record wakebridge FAIL "$why"
+    wants receipts   && record receipts   FAIL "not attempted — no addressable+wakeable VM-homed target"
   else
     echo "  target (roster-visible, homed on $VM_HOSTNAME): $AGENT" | scn_diag
     SINCE_W="$(dst_now_ms vm)"
