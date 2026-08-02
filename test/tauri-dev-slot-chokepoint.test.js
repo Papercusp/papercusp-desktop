@@ -101,7 +101,11 @@ test('no launcher routes around the chokepoint with a bare `tauri dev`', () => {
     }
     text.split('\n').forEach((line, i) => {
       // Comments and docs discuss `tauri dev` constantly — only real invocations count.
-      const code = line.replace(/^\s*#.*$/, '');
+      // Quoted spans go too: these scripts pass "tauri dev exited before the bridge
+      // came up" to their diagnostics, and a guard that cries wolf on error prose is
+      // one somebody eventually deletes. An invocation is unquoted by construction
+      // (`tauri dev --config '{...}'` keeps its command words outside the quotes).
+      const code = line.replace(/^\s*#.*$/, '').replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
       if (!/\btauri\s+dev\b/.test(code)) return;
       // `npm run tauri -- dev` (and `npm run tauri dev`) IS the chokepoint.
       if (/npm\s+run\s+tauri\b/.test(code)) return;
