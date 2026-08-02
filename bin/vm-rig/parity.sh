@@ -9,7 +9,7 @@
 #   1 fed_assert_wake_bridge            (P-002/P-003)
 #   2 fed_assert_delivery_receipts      (P-008 + M5a)
 #   3 fed_assert_federated_events       (P-009)
-#   4 fed_assert_presence_gossip        (P-004/P-005)
+#   4 fed_assert_presence_gossip        (P-004/P-005)  — run BOTH directions
 #   5 fed_assert_claim_spec_federation  (P-016 + M7)
 #
 # The LIVE-1 runbook's own follow-up asked for exactly this — "codify surfaces
@@ -39,12 +39,17 @@
 #
 # Usage:   bin/vm-rig/parity.sh [--only <leg,leg,...>] [--tries N]
 #          legs: fedevents wakebridge receipts claimspec presence
+#          (`presence` emits TWO verdict rows — `presence` = vm->tower and
+#           `presence-rev` = tower->vm. WI-7029: a one-directional presence
+#           green was being read as a cross-machine one.)
 # Env:     PCUSP_VM_SSH     ssh target        (default aviweiss@172.31.44.2)
 #          PCUSP_TOWER_DSN  tower PG DSN      (default harness_admin@127.0.0.1:5432)
 #          PCUSP_TOWER_PORT tower operator    (default 3270 — the bg-host SUBSTRATE
 #                           PRIMARY that holds in-process events/coord state;
 #                           :3070 is request-only and gives false negatives)
-#          PCUSP_VM_MACHINE_LABEL  override the derived Mac machine_label
+#          PCUSP_VM_MACHINE_LABEL     override the derived Mac machine_label
+#          PCUSP_TOWER_MACHINE_LABEL  override the derived tower machine_label
+#                           (leg 5's tower->vm direction asserts against it)
 # Exit:    0 all legs green · 1 one or more red · 2 preflight failed (NO verdict)
 #
 # Prereq:  bin/vm-rig/deploy.sh  — the VM's /tmp is wiped on reboot, which takes
@@ -192,10 +197,15 @@ if [ "$TOWER_HOST" = "$VM_HOSTNAME" ]; then
 fi
 
 VM_MACHINE_LABEL="${PCUSP_VM_MACHINE_LABEL:-$(printf '%s' "$VM_HOSTNAME" | tr '.' '_')-$VM_USER}"
+# The tower's OWN label, derived by the same rule the operator uses (hostname
+# with dots folded to underscores, then '-' + the owning unix user) so leg 5 can
+# assert the tower->vm direction too. WI-7029: asserting only vm->tower let the
+# reverse direction stay dead while the leg reported green.
+TOWER_MACHINE_LABEL="${PCUSP_TOWER_MACHINE_LABEL:-$(printf '%s' "$TOWER_HOST" | tr '.' '_')-$(id -un)}"
 
 echo ""
 echo "  ══ LIVE-1 parity run $RUN ══"
-echo "  src (tower) : $TOWER_HOST"
+echo "  src (tower) : $TOWER_HOST  [machine_label: $TOWER_MACHINE_LABEL]"
 echo "  dst (vm)    : $VM_HOSTNAME  [machine_label: $VM_MACHINE_LABEL]"
 echo "  tower operator port: $TOWER_PORT"
 
@@ -308,17 +318,42 @@ if wants claimspec; then
   fi
 fi
 
-# ── LEG 5 — presence gossip (P-004/P-005) ──────────────────────────────────
+# ── LEG 5 — presence gossip (P-004/P-005) — BOTH DIRECTIONS ────────────────
 # Read-only: no flag flip needed. PRESENCE_GOSSIP GRADUATED 2026-07-16 (LIVE-1
 # P-059 cutover) and is default-ON — the runbook-era "flip it on both machines
-# first" step is obsolete. Asserted in the VM->tower direction: the tower must
-# carry fresh (<120s) rows for the Mac in BOTH presence tables.
+# first" step is obsolete.
+#
+# ⚠ WI-7029 — WHY THIS LEG ASSERTS TWICE, AND MUST NEVER GO BACK TO ONCE.
+# fed_assert_presence_gossip takes <dst> <src_machine_label> and proves only
+# that DST can see SRC. A single invocation therefore proves ONE direction, but
+# the leg's name ("presence gossip") and its green get read as "presence gossip
+# works cross-machine" — the D-018 / WI-7012 / WI-6680 failure class, where the
+# instrument does not measure what its green is read to mean. Measured
+# 2026-08-02: the tower carried ZERO rows for the Mac while the Mac carried
+# fresh tower rows in both tables, and this leg had been reported green
+# cross-machine (runbook run 1785661381) with the reverse direction dead the
+# whole time.
+#
+# So: two recorded rows, each a hard red/green (no skip path — D-018). Both are
+# selected by `--only presence`; a one-directional green is no longer expressible.
 if wants presence; then
-  fed_log "LEG 5/5 — presence gossip (P-004/P-005)"
+  fed_log "LEG 5/5 — presence gossip (P-004/P-005), both directions"
+
+  # vm -> tower: the tower's roster must carry the Mac. This is the direction
+  # target discovery (legs 2+3, parity.sh:254) depends on, so its red also
+  # explains a "no roster-visible VM-homed session" wakebridge/receipts red.
   if [ "$(fed_assert_presence_gossip tower "$VM_MACHINE_LABEL" "$TRIES")" = "1" ]; then
-    record presence PASS "$TOWER_HOST carries fresh presence+session rows for $VM_MACHINE_LABEL"
+    record presence PASS "vm->tower: $TOWER_HOST carries fresh presence+session rows for $VM_MACHINE_LABEL"
   else
-    record presence FAIL "no fresh (<120s) rows for machine_label '$VM_MACHINE_LABEL' on $TOWER_HOST"
+    record presence FAIL "vm->tower: no fresh (<120s) rows for machine_label '$VM_MACHINE_LABEL' on $TOWER_HOST"
+  fi
+
+  # tower -> vm: the Mac's roster must carry the tower. Never assume this from
+  # the leg above — they are independent rails and were observed disagreeing.
+  if [ "$(fed_assert_presence_gossip vm "$TOWER_MACHINE_LABEL" "$TRIES")" = "1" ]; then
+    record presence-rev PASS "tower->vm: $VM_HOSTNAME carries fresh presence+session rows for $TOWER_MACHINE_LABEL"
+  else
+    record presence-rev FAIL "tower->vm: no fresh (<120s) rows for machine_label '$TOWER_MACHINE_LABEL' on $VM_HOSTNAME"
   fi
 fi
 
