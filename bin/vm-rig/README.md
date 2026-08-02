@@ -53,7 +53,7 @@ The probes above prove the *transport*. `parity.sh` proves the five LIVE-1
 | `wakebridge` | P-002/P-003 wake bridge | a tower `coord:send` fires the VM's inbox-wake |
 | `receipts` | P-008 + M5a delivery receipts | exactly one receipt, `delivered=true` |
 | `claimspec` | P-016 + M7 claim-spec federation | spec lands on the VM `origin=remote` with `fed_hlc`+`fed_ts` |
-| `presence` | P-004/P-005 presence gossip | tower carries fresh presence+session rows for the VM |
+| `presence` | P-004/P-005 presence gossip | **both directions**, as two verdict rows: `presence` = the tower carries fresh presence+session rows for the VM, `presence-rev` = the VM carries them for the tower (WI-7029 — asserting only one direction let the reverse stay dead under a green leg) |
 
 Exit: `0` all green · `1` one or more red · `2` **preflight failed, NO verdict**.
 
