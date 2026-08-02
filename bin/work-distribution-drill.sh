@@ -285,6 +285,18 @@ fi
 bundle_has()    { grep -qF -- "$1" "$SIDE/serve.mjs" 2>/dev/null; }
 table_present() { [ "$(q "SELECT to_regclass('harness_shared.$1') IS NOT NULL;")" = "t" ]; }
 routine_seeded(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' LIMIT 1;")" ]; }
+# ⚠ SEEDED IS NOT TICKING — WI-6680 introduced a THIRD state and broke that equivalence.
+# Before it, the row either existed-and-was-active or did not exist, so `routine_seeded`
+# was a sound proxy for "a production path ticks this". WI-6680 now seeds the row
+# `active=false` on a packaged install (no resolvable sourceRepoPath), so an existence
+# check reports ✓ SPAWN wired for a routine that never fires — a FALSE GREEN on exactly
+# the row release-blocker #1 is judged by. Judge on `active`; keep `routine_seeded` only
+# to tell "no row at all" apart from "row, deliberately off", which is what makes the
+# skip reason honest. Same class as D-018: a probe whose premise rotted underneath it.
+routine_active(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' AND active LIMIT 1;")" ]; }
+routine_inactive_reason(){
+  q "SELECT coalesce(trigger_config->>'inactiveReason','(no inactiveReason recorded)') FROM harness_shared.routines WHERE name='$1' LIMIT 1;"
+}
 # The artifact's own words for why it did what it did (oracle 3). Falls back to an
 # HONEST 'no reason logged' — never to an invented one.
 #
