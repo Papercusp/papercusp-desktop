@@ -240,23 +240,38 @@ if wants wakebridge || wants receipts; then
   # The watch is always-armed at session start (turn-lifecycle-control);
   # coord:await-inbox refreshes that same standing row, which is what an MCP
   # call under a fresh --client identity needs to materialise it.
-  AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-parity-probe}"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "/tmp/vmcall.sh coord:await-inbox '{\"note\":\"LIVE-1 parity probe — standing inbox watch (WI-7000)\"}' --client $AGENT --workspace papercusp-workspace --harness papercusp" >/dev/null 2>&1
-  armed="$(drv_psql vm "SELECT count(*) FROM harness_shared.event_awaits WHERE subscriber_id='$AGENT' AND event_key='coord:inbox-wake:$AGENT';" 2>/dev/null | tr -d '[:space:]')"
-  if [ -z "$armed" ] || [ "$armed" = "0" ]; then
-    wants wakebridge && record wakebridge FAIL "could not arm probe watch for $AGENT on $VM_HOSTNAME (runner/infra, not the bridge)"
-    wants receipts   && record receipts   FAIL "not attempted — probe watch unarmed"
+  # Discover the target from the TOWER'S OWN ROSTER, not from the VM's await
+  # rows. Two hard-won reasons:
+  #  · Addressability. coord:send resolves recipients against the SENDER's
+  #    roster, so an identity that exists only on the Mac is refused
+  #    `unknown_recipient` — a dedicated probe armed VM-side cannot be messaged
+  #    from the tower at all (measured 2026-08-02 with su-live1-parity-probe).
+  #  · Liveness. A CRASHED session's standing inbox-wake await is never
+  #    cancelled, so picking "whoever has an await row" reliably selects a
+  #    false-wakeable zombie. Federated presence freshness is the better signal.
+  # Note heartbeat freshness is NOT sessionState — a warm-dead session still
+  # gossips fresh rows — so this narrows the target, it does not guarantee it.
+  AGENT="${PCUSP_PARITY_PROBE_AGENT:-$(psql "$TOWER_DSN" -tA -c "SELECT owner_id FROM harness_shared.shared_session_presence WHERE machine_label='$VM_MACHINE_LABEL' AND last_seen_at > now() - interval '180 seconds' ORDER BY last_seen_at DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')}"
+  if [ -z "$AGENT" ]; then
+    wants wakebridge && record wakebridge FAIL "no roster-visible VM-homed session on $VM_HOSTNAME to address (runner/infra, not the bridge)"
+    wants receipts   && record receipts   FAIL "not attempted — no addressable VM-homed target"
   else
-    echo "  armed standing inbox watch for probe identity $AGENT ($armed row/s)" | scn_diag
+    echo "  target (roster-visible, homed on $VM_HOSTNAME): $AGENT" | scn_diag
     SINCE_W="$(dst_now_ms vm)"
     # coord:send REQUIRES `summary` and `expects` (there is deliberately no
     # default for expects — an FYI must say 'none' explicitly), and `body` is an
     # ARRAY of sections; a plain string is refused. Getting this wrong reds BOTH
     # legs 2 and 3 for a runner reason that looks exactly like a dead wake rail.
     send_out="$(tower_mcp coord:send "{\"to\":[\"$AGENT\"],\"summary\":\"LIVE-1 parity wake-bridge probe $RUN\",\"body\":[{\"text\":\"Automated LIVE-1 cross-machine parity probe (WI-7000). No action needed — this message exists to prove the wake bridge and the delivery-receipt rail.\"}],\"expects\":\"none\",\"wake\":\"required\",\"scope\":\"hive\"}")"
-    echo "$send_out" | tail -3 | scn_diag "send: "
     MSG_ID="$(printf '%s' "$send_out" | grep -oE '"msg_id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed 's/.*: *"//; s/"$//')"
+    # On success a 3-line tail is plenty; on FAILURE it swallowed the actual
+    # error line (`unknown_recipient`) and cost a whole diagnostic round-trip,
+    # so a failed send dumps every error-bearing line instead.
+    if [ -n "$MSG_ID" ]; then
+      echo "$send_out" | tail -3 | scn_diag "send: "
+    else
+      echo "$send_out" | grep -iE '"(error|message|reason)"|unknown_recipient|failed' | head -8 | scn_diag "send-ERR: "
+    fi
 
     if wants wakebridge; then
       if [ "$(fed_assert_wake_bridge vm "$AGENT" "$SINCE_W" "$TRIES")" = "1" ]; then
