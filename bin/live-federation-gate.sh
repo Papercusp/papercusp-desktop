@@ -307,9 +307,27 @@ check_matrix_staleness() { # EI-18657324526667507: "when did the local-matrix le
   [ "$filed_age_h" -lt "$MATRIX_STALE_H" ] && return 0
   local since; if [ -f "$STATE_DIR/last-matrix-verdict" ]; then since="${verdict_age_h}h ago"; else since="NEVER (no verdict ever recorded)"; fi
   log "STALE-LEG: local-matrix has produced NO verdict — last decision: $since (threshold ${MATRIX_STALE_H}h). This leg is DARK; the gate's overall green does not cover it."
-  file_ei "live-federation-gate LEG STALE: local-matrix has produced no verdict ($since) — the matrix leg is dark behind an all-green gate" \
-    "The local-matrix leg of the WI-261/P-013 live-federation gate has not produced a PASS/FAIL verdict — last decision: $since (threshold ${MATRIX_STALE_H}h = MATRIX_TTL_H + 48h grace). The leg has three independent suppression paths that each exit 0 and look identical to success: the LOAD_GATE defer (load-*.txt banks in \$STATE_DIR/triage/), the MATRIX_TTL_H (default 144h) cadence window, and the §0z rig-busy pre-check skip. The gate-wide staleness check does NOT cover this: the cheap content-matrix leg keeps last-green fresh on its own, so the gate can report GREEN indefinitely while the containerized 8-scenario matrix never runs — anything waiting on it for verification stalls silently. Check: ls -la \$STATE_DIR (last-matrix-verdict / last-matrix-green); ls \$STATE_DIR/triage/ | tail; journalctl --user -u papercup-live-federation-gate.service. To force a verdict now: GATE_FORCE=1 RIG_WAIT=1 papercusp-desktop/bin/live-federation-gate.sh (RIG_WAIT queues behind a rig holder instead of skipping). Per owner decision D-003 (2026-07-17) the durable fix for the load path is isolation, NOT raising LOAD_GATE. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."
-  echo "$(now_s)" >"$STATE_DIR/matrix-stale-ei-filed"
+  # P-005: same two corrections as check_staleness below — dedup against a still-OPEN item
+  # (the matrix-stale-ei-filed marker is local + ephemeral, so it cannot see one), and stamp
+  # the marker ONLY on a CONFIRMED filing. This path has produced just one item so far, but
+  # the structure is identical to the gate-wide one that re-filed four times; fixing only
+  # the path that has already misfired leaves the same trap armed on its sibling.
+  # MATRIX_LEG_STALE is set REGARDLESS of the filing outcome: it drives the human-facing
+  # verdict suffix, and a dark leg must be announced on the verdict line even when the
+  # filing could not be confirmed.
+  local existing_leg_open; existing_leg_open="$(find_open_duplicate "live-federation-gate LEG STALE:")"
+  if [ -n "$existing_leg_open" ]; then
+    log "matrix-leg staleness already tracked as still-OPEN $existing_leg_open — skipping duplicate filing."
+    echo "$(now_s)" >"$STATE_DIR/matrix-stale-ei-filed"
+    MATRIX_LEG_STALE=1
+    return 0
+  fi
+  if file_ei "live-federation-gate LEG STALE: local-matrix has produced no verdict ($since) — the matrix leg is dark behind an all-green gate" \
+    "The local-matrix leg of the WI-261/P-013 live-federation gate has not produced a PASS/FAIL verdict — last decision: $since (threshold ${MATRIX_STALE_H}h = MATRIX_TTL_H + 48h grace). The leg has three independent suppression paths that each exit 0 and look identical to success: the LOAD_GATE defer (load-*.txt banks in \$STATE_DIR/triage/), the MATRIX_TTL_H (default 144h) cadence window, and the §0z rig-busy pre-check skip. The gate-wide staleness check does NOT cover this: the cheap content-matrix leg keeps last-green fresh on its own, so the gate can report GREEN indefinitely while the containerized 8-scenario matrix never runs — anything waiting on it for verification stalls silently. Check: ls -la \$STATE_DIR (last-matrix-verdict / last-matrix-green); ls \$STATE_DIR/triage/ | tail; journalctl --user -u papercup-live-federation-gate.service. To force a verdict now: GATE_FORCE=1 RIG_WAIT=1 papercusp-desktop/bin/live-federation-gate.sh (RIG_WAIT queues behind a rig holder instead of skipping). Per owner decision D-003 (2026-07-17) the durable fix for the load path is isolation, NOT raising LOAD_GATE. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."; then
+    echo "$(now_s)" >"$STATE_DIR/matrix-stale-ei-filed"
+  else
+    log "matrix-leg staleness EI filing NOT CONFIRMED — deliberately NOT stamping matrix-stale-ei-filed, so the next window re-attempts."
+  fi
   MATRIX_LEG_STALE=1
 }
 # Marker appended to the echoed verdict line whenever the leg is dark, so "GATE: GREEN" can
