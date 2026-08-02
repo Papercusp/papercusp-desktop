@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# tauri-guarded — the ONE chokepoint every `tauri dev` in this repo goes through.
+#
+# WHY THIS EXISTS (EI-19369470572700441, hardening WI-7101)
+# WI-7101 put the target-dir claim in `bin/lib/claim-target-dir.sh` and sourced it
+# from `bin/desktop-dev-nohmr` (the `npm run dev` path). That protects exactly ONE
+# caller, and leaves the protection as a convention every FUTURE launcher has to
+# remember. It was then forgotten three times:
+#
+#   scripts/verify-tauri-headless.sh   the DOCUMENTED agent UI-verification path
+#   package.json  dev:hmr              bare `tauri dev`
+#   bin/desktop-preview-prod           `npm run tauri -- dev`
+#
+# The first is the expensive one: root CLAUDE.md tells agents to verify UI by
+# booting a headless instance, and that path launched an UNPROTECTED concurrent
+# build against the shared ~/.cargo-target. So the documented safe practice was
+# itself the corruption path — the same shape as the original WI-7101 incident,
+# where the agent that took down the owner's live desktop was following the
+# documented advice.
+#
+# Rather than add a fourth "remember to source it", the claim moves HERE: the
+# `tauri` npm script. Every launcher already runs `npm run tauri -- dev`, so they
+# are all covered without touching any of them, and a launcher added tomorrow is
+# covered by construction. That is the difference between a convention and a
+# chokepoint.
+#
+# Claiming is scoped to the `dev` subcommand deliberately. `tauri build` shares
+# the same target dir, but release cuts have their own peer-detection
+# (bin/release-local.sh) and their own isolation needs; widening this to build
+# would change release behaviour, which is out of scope for the bug this fixes.
+
+set -euo pipefail
+
+__here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find the subcommand: the first argument that is not a flag (and not the value
+# of one we care about). `tauri` takes its subcommand first in every documented
+# form used in this repo, so a plain scan is enough — and being wrong here is
+# fail-safe in one direction only: a missed `dev` claims nothing (status quo),
+# never a wrong target dir.
+__subcommand=""
+for __arg in "$@"; do
+  case "$__arg" in
+    -*) continue ;;
+    *) __subcommand="$__arg"; break ;;
+  esac
+done
+
+if [[ "$__subcommand" == "dev" ]]; then
+  # Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd on the
+  # claimed slot. A POSIX lock lives on the open file DESCRIPTION, so it survives
+  # the `exec` below and is released when the tauri process dies — which is
+  # exactly the lifetime we want the slot held for.
+  #
+  # Already claimed upstream (bin/desktop-dev-nohmr sources it too, then execs
+  # `npm run tauri -- dev`)? Then CARGO_TARGET_DIR is already exported and the
+  # helper honours it and returns without taking a second lock. Double-sourcing
+  # is idempotent by design, so belt-and-braces callers cost nothing.
+  . "$__here/lib/claim-target-dir.sh"
+fi
+
+# `tauri` here is node_modules/.bin/tauri (@tauri-apps/cli), NOT this script:
+# npm puts .bin on PATH for run-scripts, and this file is only ever reached via
+# the `tauri` npm SCRIPT. No recursion.
+exec tauri "$@"

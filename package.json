@@ -5,7 +5,7 @@
   "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
   "scripts": {
     "test": "npm run test:config && npm run test:shell && npm run test:selftests",
-    "tauri": "tauri",
+    "tauri": "bin/tauri-guarded",
     "dev": "bin/desktop-dev-nohmr",
     "dev:nohmr": "bin/desktop-dev-nohmr",
     "dev:quickpanel": "PAPERCUSP_DEV_OPEN_QUICK_PANEL=only bin/desktop-dev-nohmr",
@@ -37,7 +37,7 @@
     "test:updater-e2e-vm": "node --test test/updater-e2e-vm.test.js",
     "test:federation:live-matrix": "bash bin/deb-hetzner-matrix.sh",
     "test:rust": "node ../scripts/report-cargo-tests.mjs --manifest-path papercusp-desktop/src-tauri/Cargo.toml",
-    "dev:hmr": "tauri dev --config '{\"build\":{\"devUrl\":\"http://localhost:3055\"}}'",
+    "dev:hmr": "npm run tauri -- dev --config '{\"build\":{\"devUrl\":\"http://localhost:3055\"}}'",
     "prebuild": "node bin/check-spa-freshness.js",
     "build": "tauri build --bundles deb",
     "prebuild:debug": "node bin/check-spa-freshness.js",
