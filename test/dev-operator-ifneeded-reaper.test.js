@@ -318,7 +318,17 @@ test('restart-storm guard: gives up with a clear diagnosis (and stops restarting
     // Binds $PORT and NEVER releases it — a wedged predecessor that never
     // frees the port — while DEV_CMD itself still exits 1 immediately.
     const holderScript = `const s=require('node:net').createServer();s.listen(${port},'127.0.0.1',()=>{require('node:fs').writeFileSync('${pidfile}',String(process.pid))})`;
-    const devCmd = `echo x >> '${marker}'; node -e "${holderScript}" & disown; sleep 0.3; exit 1`;
+    // WAIT for the holder to ACTUALLY bind before exiting, rather than a fixed
+    // `sleep 0.3` (WI-7185). The pidfile is written inside the listen callback, so
+    // its existence PROVES the port is held. The old fixed sleep was a load race:
+    // when a loaded box took >300ms to start `node -e`, DEV_CMD exited while the
+    // port was still free, the wrapper correctly took its "restarting in 3s" branch
+    // instead of the never-freed branch, and each ~3.3s retry ate the budget before
+    // the 30s window could even start — the gate saw 8 restarts (and 8 EADDRINUSE
+    // crashes from the losing holders) where a quiet box sees exactly 1.
+    const devCmd =
+      `echo x >> '${marker}'; node -e "${holderScript}" & disown; ` +
+      `for _ in $(seq 1 100); do [ -f '${pidfile}' ] && break; sleep 0.1; done; exit 1`;
     wrapper = spawn('bash', [script], {
       env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
     });
@@ -327,7 +337,12 @@ test('restart-storm guard: gives up with a clear diagnosis (and stops restarting
       stderr += d;
     });
 
-    const gaveUp = await waitFor(() => /never freed after 30s/.test(stderr), { timeoutMs: 40_000 });
+    // The wrapper must burn a FIXED 30s wall-clock wait before it can log this, so
+    // a 40s budget left only ~8s of headroom (measured: 32.3s on an idle box) and
+    // failed a correct-but-slow run under gate load. Widening the budget costs a
+    // slow machine time, never correctness — the two assertions below still pin the
+    // exact diagnosis AND that it stopped restarting.
+    const gaveUp = await waitFor(() => /never freed after 30s/.test(stderr), { timeoutMs: 75_000 });
     assert(gaveUp, `wrapper never logged the never-freed diagnosis — stderr was: ${stderr}`);
     assert.match(stderr, new RegExp(`FATAL: :${port} never freed after 30s`));
 
