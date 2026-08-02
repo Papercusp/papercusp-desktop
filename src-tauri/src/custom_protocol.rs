@@ -190,16 +190,23 @@ fn upstream_base(app: &tauri::AppHandle) -> Option<String> {
 }
 
 /// Serve the webview straight off the bundled SPA dist (sidecar/spa/**) —
-/// the pre-operator path. On a clean Windows machine the sidecar can't
-/// spawn until WSL onboarding finishes, but the onboarding UI
+/// the pre-operator path AND (EI-18892233692082064) the operator-forward-failed
+/// fallback for document navigations. On a clean Windows machine the sidecar
+/// can't spawn until WSL onboarding finishes, but the onboarding UI
 /// (WslOnboardingGate, mounted in the SPA's __root) needs the SPA rendered
-/// to exist. Statics come from disk; /api/* answers 503 so the frontend
-/// sees clean fetch failures instead of HTML-shaped JSON. (D-009)
+/// to exist; separately, `forward()` also calls this when a *known* upstream
+/// port fails to answer the document request (connect error / 5xx) so a
+/// transient sidecar miss shows the bundled shell (which can retry / show its
+/// own connection state) instead of a plaintext 502 that bricks the window
+/// forever. Statics come from disk; /api/* answers 503 so the frontend sees
+/// clean fetch failures instead of HTML-shaped JSON. (D-009)
+///
+/// Thin `tauri::AppHandle`-resolving wrapper around [`render_bundled_spa`] —
+/// the app-independent core the unit tests below exercise directly against a
+/// real temp directory, mirroring [`try_serve_static_asset`] /
+/// [`resolve_static_or_forward`]'s split (WI-3225).
 fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
     use tauri::Manager;
-    if path.starts_with("/api/") || path == "/api" {
-        return error_response(503, "papercusp: operator not running yet (pre-onboarding)");
-    }
     let spa_root = match app
         .path()
         .resolve("sidecar/spa", tauri::path::BaseDirectory::Resource)
@@ -207,6 +214,17 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
         Ok(p) => p,
         Err(e) => return error_response(500, &format!("papercusp: no bundled spa: {e}")),
     };
+    render_bundled_spa(&spa_root, path)
+}
+
+/// The app-independent core of [`serve_bundled_spa`]: given an already-resolved
+/// SPA root and the request path, serve the bundled onboarding/fallback SPA from
+/// disk. `/api/*` answers 503 (clean fetch failure, not HTML-shaped JSON); a
+/// nonexistent / route-shaped path falls back to `index.html` (SPA routing).
+fn render_bundled_spa(spa_root: &std::path::Path, path: &str) -> Response<Vec<u8>> {
+    if path.starts_with("/api/") || path == "/api" {
+        return error_response(503, "papercusp: operator not running yet (pre-onboarding)");
+    }
     // Normalize + reject traversal. Windows ALSO treats `\` as a separator
     // and `join` with an absolute/drive path REPLACES the base, so reject
     // those shapes outright, then enforce containment on the canonicalized
@@ -220,7 +238,7 @@ fn serve_bundled_spa(app: &tauri::AppHandle, path: &str) -> Response<Vec<u8>> {
     {
         return error_response(400, "papercusp: bad path");
     }
-    let spa_root_canon = match std::fs::canonicalize(&spa_root) {
+    let spa_root_canon = match std::fs::canonicalize(spa_root) {
         Ok(p) => p,
         Err(e) => return error_response(500, &format!("papercusp: spa root unreadable: {e}")),
     };
@@ -263,6 +281,17 @@ fn mime_for(file: &std::path::Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
+}
+
+/// EI-18892233692082064: is `path` a top-level document / SPA-route navigation
+/// (i.e. NOT an `/api/*` request)? `forward()` falls back to the bundled SPA
+/// ([`serve_bundled_spa`]) for this class of request when the operator forward
+/// fails outright (connect error) or answers 5xx — the document is the single
+/// request whose failure cannot be recovered from (nothing reloads a plaintext
+/// 502 body), whereas an `/api/*` failure is left to the caller (the SPA's own
+/// fetch/IPC-polyfill error handling) exactly as before.
+fn is_document_navigation(path: &str) -> bool {
+    !(path == "/api" || path.starts_with("/api/"))
 }
 
 /// Fix B (WI-2902): is `path` eligible to be served from the bundled SPA on disk
@@ -392,13 +421,13 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
     }
 
     // papercusp://localhost/<path>?<query>  →  <base>/<path>?<query>
+    let path = request.uri().path().to_string();
     let path_and_query = request
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
     let Some(base) = upstream_base(app) else {
-        let path = request.uri().path().to_string();
         return serve_bundled_spa(app, &path);
     };
     let target = format!("{}{}", base, path_and_query);
@@ -450,6 +479,22 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
     match req.send() {
         Ok(up) => {
             let status = up.status().as_u16();
+            // EI-18892233692082064: an upstream 5xx for the document/SPA-route
+            // navigation is just as unrecoverable to the webview as a connect
+            // error below — fall back to the bundled SPA rather than turning a
+            // transient sidecar hiccup into a permanently-bricked plaintext
+            // error page. /api/* failures are left exactly as before (status
+            // relayed to the caller unchanged) — those have their own
+            // fetch/IPC-polyfill error handling on the JS side.
+            if status >= 500 && is_document_navigation(&path) {
+                if debug {
+                    eprintln!(
+                        "[custom_protocol]   ← {} {} — document nav, falling back to bundled SPA",
+                        status, path_and_query
+                    );
+                }
+                return serve_bundled_spa(app, &path);
+            }
             let headers = up.headers().clone();
             let body = up.bytes().map(|b| b.to_vec()).unwrap_or_default();
             if debug {
@@ -479,7 +524,24 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
                 .body(body)
                 .unwrap_or_else(|_| error_response(500, "papercusp: failed to build response"))
         }
-        Err(e) => error_response(502, &format!("papercusp: upstream error: {e}")),
+        Err(e) => {
+            // EI-18892233692082064: a connect/timeout failure on the document
+            // request otherwise bricks the window permanently (no retry, no
+            // reload, no error UI — see the module doc). Fall back to the
+            // bundled SPA for document navigations so the app can still boot
+            // and show its own connection state; /api/* failures still relay
+            // the 502 to the caller unchanged.
+            if is_document_navigation(&path) {
+                if debug {
+                    eprintln!(
+                        "[custom_protocol]   ← upstream error for {} ({e}) — document nav, falling back to bundled SPA",
+                        path_and_query
+                    );
+                }
+                return serve_bundled_spa(app, &path);
+            }
+            error_response(502, &format!("papercusp: upstream error: {e}"))
+        }
     }
 }
 
@@ -514,6 +576,77 @@ mod tests {
             String::from_utf8_lossy(r.body()),
             "papercusp: upstream error: boom",
         );
+    }
+
+    // --- document-navigation fallback eligibility (EI-18892233692082064) ---
+    // is_document_navigation is the pure gate deciding whether forward() falls back
+    // to the bundled SPA (instead of relaying a plaintext error page) when the
+    // upstream forward fails outright or answers 5xx. Every non-/api path — the
+    // document root, SPA routes, and even asset-shaped paths (which would normally
+    // be intercepted earlier by try_serve_static_asset, but a defense-in-depth gate
+    // here still must agree) — is a document navigation; /api* must NOT be, since
+    // those failures are left to the SPA's own fetch/IPC-polyfill error handling.
+
+    #[test]
+    fn document_navigation_covers_root_and_spa_routes() {
+        assert!(is_document_navigation("/"));
+        assert!(is_document_navigation(""));
+        assert!(is_document_navigation("/adv"));
+        assert!(is_document_navigation("/harness/some-slug"));
+        assert!(is_document_navigation("/assets/index-a1b2c3.js"));
+    }
+
+    #[test]
+    fn document_navigation_excludes_api_paths() {
+        assert!(!is_document_navigation("/api"));
+        assert!(!is_document_navigation("/api/health"));
+        assert!(!is_document_navigation("/api/sync/stream"));
+    }
+
+    // --- render_bundled_spa (the app-independent core of serve_bundled_spa) ---
+    // Same disk-serve behavior serve_bundled_spa exercises via a real AppHandle;
+    // tested directly here (mirroring resolve_static_or_forward vs
+    // try_serve_static_asset, WI-3225) against a real temp directory so a refactor
+    // can't silently change the pre-operator OR the forward-failed-fallback path
+    // without a test failing.
+
+    #[test]
+    fn render_bundled_spa_serves_index_html_for_the_root_path() {
+        let root = TempSpaRoot::new("render-root");
+        let resp = render_bundled_spa(&root.dir, "/");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(String::from_utf8_lossy(resp.body()), "<html>real index</html>");
+    }
+
+    #[test]
+    fn render_bundled_spa_serves_index_html_for_an_unknown_spa_route() {
+        let root = TempSpaRoot::new("render-spa-route");
+        let resp = render_bundled_spa(&root.dir, "/harness/some-slug");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(String::from_utf8_lossy(resp.body()), "<html>real index</html>");
+    }
+
+    #[test]
+    fn render_bundled_spa_serves_an_existing_asset_from_disk() {
+        let root = TempSpaRoot::new("render-asset");
+        let resp = render_bundled_spa(&root.dir, "/assets/index-a1b2c3.js");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(String::from_utf8_lossy(resp.body()), "console.log('hi')");
+    }
+
+    #[test]
+    fn render_bundled_spa_answers_api_paths_with_a_clean_503_not_html() {
+        let root = TempSpaRoot::new("render-api");
+        let resp = render_bundled_spa(&root.dir, "/api/health");
+        assert_eq!(resp.status().as_u16(), 503);
+        assert!(!String::from_utf8_lossy(resp.body()).contains("<html>"));
+    }
+
+    #[test]
+    fn render_bundled_spa_rejects_path_traversal() {
+        let root = TempSpaRoot::new("render-traversal");
+        let resp = render_bundled_spa(&root.dir, "/../../etc/passwd");
+        assert_eq!(resp.status().as_u16(), 400);
     }
 
     // --- Fix B static-asset disk-serve eligibility (release-blocking card, WI-2902) ---
