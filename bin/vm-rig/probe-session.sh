@@ -49,15 +49,52 @@
 # wake"). Left at the default standing floor it can swallow the drill's probe
 # wake, reddening leg 2 for a reason indistinguishable from a dead bridge.
 #
+# ROSTER VISIBILITY IS NOT WAKEABILITY (WI-7029, measured 2026-08-02)
+# ---------------------------------------------------------------------
+# Beating presence makes the probe ADDRESSABLE — coord:send resolves it and the
+# wake crosses to the Mac — but it does NOT make it WAKEABLE. A stateless
+# `mcp-call --client` identity has no session, so captureWakeHandleForOwner
+# (events/await/handle.ts:33) finds no adv_sessions row and stamps a NULL wake
+# handle. wake-executor.ts:1369-1389 then finds no handle, finds no live psu-pty
+# socket, sees presence FRESH — and PARKS:
+#     status='parked'  last_error='no wake handle; presence live — inbox only'
+# That is a real delivery outcome, not a bridge fault, and it reds leg 2 forever.
+#
+# The fix is to give the probe a handle the executor can actually act on.
+# handle.ts:27-31 takes a plan-run handle straight from `plan_run_id` (no
+# validation), and wake-executor.ts:1392-1406 resumes it via
+# resumePlanRunForWake → status='delivered' channel='plan-run-resume'.
+# So: mint a plan run ON THE MAC once, then pass its id here.
+#
+#   /tmp/vmcall.sh plans:new    '{"harness":"papercusp","slug":"…","force":true}'
+#   /tmp/vmcall.sh plans:launch '{"harness":"papercusp","slug":"…","await":false}'
+#
+# ⚠ The run must NOT be left in status='running': markPlanRunResumed
+# (plans/runs.ts:279-287) claims only `WHERE status <> 'running'`, so a wake
+# against a running row returns "already running — wake skipped" (an ERROR
+# outcome, not a delivery). A settled run — `failed` included — is claimable.
+#
+# ⚠ SCOPE LIMIT, state it whenever you quote a green leg 2: plan-run-wake.ts:36-54
+# fires executePlanAgentTurn FIRE-AND-FORGET and returns ok:true immediately, so
+# 'delivered' proves the wake CROSSED and the Mac CLAIMED + DISPATCHED a turn —
+# it does NOT prove the turn ran. On this rig it provably cannot: the Mac has
+# zero gateway accounts and org-disabled local Claude credentials (fact
+# `mac-rig-has-no-llm-credentials`), so the dispatched turn always fails.
+#
 # Usage:  bin/vm-rig/probe-session.sh [start|stop|status]
 # Env:    PCUSP_VM_SSH             ssh target (default aviweiss@172.31.44.2)
 #         PCUSP_PARITY_PROBE_AGENT probe identity (default su-live1-imac-probe)
 #         PCUSP_PROBE_BEAT_SEC     beat interval (default 30)
+#         PCUSP_PROBE_PLAN_RUN_ID  Mac-side plan_runs id → a plan-run WAKE HANDLE.
+#                                  Unset ⇒ addressable but NOT wakeable (leg 2
+#                                  reds 'parked'). Default 1 (the run minted for
+#                                  plan live1-wake-bridge-probe-2026-08-02).
 set -uo pipefail
 
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
 AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-imac-probe}"
 BEAT="${PCUSP_PROBE_BEAT_SEC:-30}"
+PLAN_RUN="${PCUSP_PROBE_PLAN_RUN_ID:-1}"
 TOWER_DSN="${PCUSP_TOWER_DSN:-postgresql://harness_admin:harness_admin_pwd@127.0.0.1:5432/papercusp}"
 
 REMOTE_LOOP="/tmp/live1-probe-session-loop.sh"
@@ -125,7 +162,7 @@ case "${1:-start}" in
     ;;
 
   start)
-    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM"
+    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)}"
 
     # Preflight: the driver must be deployed (VM /tmp is wiped on reboot).
     if ! "${SSH[@]}" 'test -x /tmp/vmcall.sh && test -f /tmp/mcp-call.mjs' 2>/dev/null; then
@@ -142,8 +179,16 @@ case "${1:-start}" in
 # Mac-homed coord_presence row + the standing inbox-wake await so the TOWER has
 # a fresh, addressable, WAKEABLE target for parity.sh legs 2+3. See the
 # controller script for the full rationale (WI-7029).
-AGENT="$1"; BEAT="$2"
+AGENT="$1"; BEAT="$2"; PLAN_RUN="${3:-}"
 WS="papercusp-workspace"; H="papercusp"
+# The arm payload must carry plan_run_id on EVERY beat, not just the first.
+# armInboxWake re-captures the handle each call (inbox-wake-arm.ts:73-76) and
+# upserts the ONE standing row, so a later beat that omitted it would overwrite
+# the plan-run handle back to NULL and silently return the probe to 'parked'.
+ARM_ARGS='{"note":"LIVE-1 parity probe target — idle by design (WI-7029)","min_sleep_sec":0}'
+if [ -n "$PLAN_RUN" ]; then
+  ARM_ARGS="{\"note\":\"LIVE-1 parity probe target — idle by design (WI-7029)\",\"min_sleep_sec\":0,\"plan_run_id\":$PLAN_RUN}"
+fi
 while :; do
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   /tmp/vmcall.sh coord:declare-intent \
@@ -151,11 +196,10 @@ while :; do
     --client "$AGENT" --workspace "$WS" --harness "$H" >/dev/null 2>&1
   rc1=$?
   # min_sleep_sec=0: never let the standing wake FLOOR coalesce away the drill's probe wake.
-  /tmp/vmcall.sh coord:await-inbox \
-    '{"note":"LIVE-1 parity probe target — idle by design (WI-7029)","min_sleep_sec":0}' \
+  /tmp/vmcall.sh coord:await-inbox "$ARM_ARGS" \
     --client "$AGENT" --workspace "$WS" --harness "$H" >/dev/null 2>&1
   rc2=$?
-  echo "$ts beat declare=$rc1 arm=$rc2"
+  echo "$ts beat declare=$rc1 arm=$rc2 planrun=${PLAN_RUN:-none}"
   sleep "$BEAT"
 done
 LOOP_EOF
@@ -168,7 +212,7 @@ LOOP_EOF
       chmod +x '$REMOTE_LOOP'
       : > '$LOG'
       perl -e '\$SIG{HUP}=\"IGNORE\"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,\"<\",\"/dev/null\"); exec @ARGV or die' -- \
-        /bin/bash '$REMOTE_LOOP' '$AGENT' '$BEAT' >> '$LOG' 2>&1 &
+        /bin/bash '$REMOTE_LOOP' '$AGENT' '$BEAT' '$PLAN_RUN' >> '$LOG' 2>&1 &
       sleep 3
       p=\$(pgrep -f 'live1-probe-session-loop.sh' | head -1)
       echo \"\${p:-}\" > '$PIDFILE'
