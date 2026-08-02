@@ -255,6 +255,44 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
     return 1
   fi
 }
+find_open_duplicate() { # <title-prefix, no timestamp> -> prints an existing open WI id, or nothing
+  # P-005 (2026-08-02): MOVED here from below the RED block. It was defined at ~L1272, but
+  # check_staleness — which now uses it — is invoked from a dozen earlier exit paths (L316,
+  # 326, 367, 421, 665, 714, 1196, 1207, 1231), ALL of which run before that point. Under
+  # `set -uo pipefail` (no -e) a call to a not-yet-defined function is not fatal: it returns
+  # 127 into a command substitution, yields the empty string, and reads as "no duplicate
+  # exists" — i.e. it would have failed in the FILE-ANYWAY direction, silently, which is
+  # exactly the dedup this closes. Pure relocation; the body is unchanged and the RED
+  # caller below is unaffected. Its only deps (OPERATOR_MCP_URL L158,
+  # GATE_SUPERUSER_BEARER L168) are set well above here.
+  local prefix="$1" resp
+  local -a auth_hdr=()
+  [ -n "$GATE_SUPERUSER_BEARER" ] && auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
+  resp="$(curl -s -m 15 -X POST "$OPERATOR_MCP_URL" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:list\",\"arguments\":{\"kind\":\"bug\",\"harness\":\"papercusp\",\"state\":\"open\",\"limit\":500}}}" 2>/dev/null || true)"
+  GATE_DUP_PREFIX="$prefix" python3 -c '
+import sys, json, os
+prefix = os.environ.get("GATE_DUP_PREFIX", "")
+raw = sys.stdin.read()
+items = []
+for line in raw.splitlines():
+    line = line.strip()
+    if line.startswith("data:"):
+        payload = line[len("data:"):].strip()
+        try:
+            obj = json.loads(payload)
+            text = obj["result"]["content"][0]["text"]
+            items = json.loads(text)
+        except Exception:
+            continue
+for it in items:
+    t = it.get("title", "")
+    if isinstance(t, str) and t.startswith(prefix):
+        print(it.get("id", ""))
+        break
+' <<<"$resp" 2>/dev/null
+}
 check_matrix_staleness() { # EI-18657324526667507: "when did the local-matrix leg last DECIDE?"
   # The leg's suppression paths (LOAD_GATE defer, MATRIX_TTL_H window, §0z rig-busy skip) are
   # each individually correct, cheap, well-logged no-ops that exit 0 — and are therefore
@@ -291,10 +329,44 @@ check_staleness() { # called on every non-GREEN exit path: silence must never lo
   [ "$green_age_h" -lt $(( GATE_STALE_DAYS * 24 )) ] && return 0
   local filed_age_h; filed_age_h="$(age_h "$STATE_DIR/stale-ei-filed")"
   [ "$filed_age_h" -lt $(( GATE_STALE_DAYS * 24 )) ] && return 0
-  log "STALE: no GREEN gate run for ${green_age_h}h (> ${GATE_STALE_DAYS}d) — filing staleness EI"
-  file_ei "live-federation-gate STALE: no green run for ${green_age_h}h — the shared-hive release signal is dark" \
-    "The WI-261/P-013 standing live-federation gate has not completed a GREEN run for ${green_age_h}h (threshold ${GATE_STALE_DAYS}d). Every window either load-skipped, storm-downgraded, all-legs-skipped, or failed — the shared-hive P2P green/red signal is DARK, which must never read as green. Check: systemctl --user list-timers papercup-live-federation-gate.timer; journalctl --user -u papercup-live-federation-gate.service; state in ~/.papercusp/live-fed-gate/. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."
-  echo "$(now_s)" >"$STATE_DIR/stale-ei-filed"
+  # ── P-005 (a): SENTINEL LEAKAGE. age_h returns 999999 when the marker file does not
+  # exist, which means NEVER — not "114 years". Every OTHER age_h consumer is guarded by an
+  # `-lt` comparison that the sentinel deliberately fails, so it never reaches prose; here
+  # the `-lt` IS the early return above, so this is the one path the sentinel falls THROUGH
+  # into a human-facing message. It shipped as the literal "no green run for 999999h" on
+  # four work-items (WI-3235, WI-3442, WI-5629, WI-5718 — the last two still open). The
+  # distinction is diagnostic, not cosmetic: "went stale after a green" and "has never once
+  # been green" are different failures with different first moves. Same shape as the
+  # `since` idiom check_matrix_staleness above already uses for its own verdict.
+  local stale_clause
+  if [ -f "$STATE_DIR/last-green" ]; then
+    stale_clause="no green run for ${green_age_h}h"
+  else
+    stale_clause="NO GREEN RUN EVER RECORDED (no last-green marker has ever been written)"
+  fi
+  log "STALE: ${stale_clause} (> ${GATE_STALE_DAYS}d) — filing staleness EI"
+  # ── P-005 (b): the gate-wide STALE path never received the two corrections the RED path
+  # below already carries, so it re-filed the same condition four times.
+  #   (1) find_open_duplicate (bug-drain-200k, 2026-07-20): stale-ei-filed is LOCAL,
+  #       EPHEMERAL state, so once it ages out a STILL-OPEN item does not stop a re-file.
+  #       WI-5629 (07-20) and WI-5718 (07-23) are both open and identical RIGHT NOW — and
+  #       both were filed AFTER the helper existed; it was simply never wired in here.
+  #   (2) stamp the marker ONLY on a CONFIRMED filing (2026-08-01): stamping it
+  #       unconditionally converts a transient curl/operator failure into a SUPPRESSED
+  #       alarm for the whole window — a gate whose staleness can vanish is worse than one
+  #       that is merely stale. The `if file_ei` form is the RED path's, verbatim.
+  local existing_open; existing_open="$(find_open_duplicate "live-federation-gate STALE:")"
+  if [ -n "$existing_open" ]; then
+    log "gate staleness already tracked as still-OPEN $existing_open — skipping duplicate filing (the ${GATE_STALE_DAYS}d local marker had aged out)."
+    echo "$(now_s)" >"$STATE_DIR/stale-ei-filed"
+    return 0
+  fi
+  if file_ei "live-federation-gate STALE: ${stale_clause} — the shared-hive release signal is dark" \
+    "The WI-261/P-013 standing live-federation gate reports: ${stale_clause} (threshold ${GATE_STALE_DAYS}d). Every window either load-skipped, storm-downgraded, all-legs-skipped, or failed — the shared-hive P2P green/red signal is DARK, which must never read as green. If this says NO GREEN RUN EVER RECORDED, the gate has never once completed green on this box (a fresh/never-working install), which is a different diagnosis from a gate that went stale. Check: systemctl --user list-timers papercup-live-federation-gate.timer; journalctl --user -u papercup-live-federation-gate.service; state in ~/.papercusp/live-fed-gate/. Owner: shared-hive release lane (plan shared-hive-p2p-release-readiness-2026-07-03 P-013)."; then
+    echo "$(now_s)" >"$STATE_DIR/stale-ei-filed"
+  else
+    log "staleness EI filing NOT CONFIRMED — deliberately NOT stamping stale-ei-filed, so the next window re-attempts instead of suppressing this staleness as 'already tracked'."
+  fi
 }
 skip_cleanup() { # SKIP/FRESH exits carry no diagnostic value — drop the near-empty run dir so
   # hourly SKIP windows don't rotate real RED/GREEN evidence dirs out of GATE_KEEP_RUNS
@@ -1269,35 +1341,7 @@ prev_legs="$(cat "$RED_LEGS_MARKER" 2>/dev/null || true)"
 # same leg-set title template (ignoring the per-run timestamp) and skip filing if
 # so. Best-effort — any curl/parse failure here falls through to filing as before,
 # never suppressing a genuine new regression because this check itself broke.
-find_open_duplicate() { # <title-prefix, no timestamp> -> prints an existing open WI id, or nothing
-  local prefix="$1" resp
-  local -a auth_hdr=()
-  [ -n "$GATE_SUPERUSER_BEARER" ] && auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
-  resp="$(curl -s -m 15 -X POST "$OPERATOR_MCP_URL" \
-    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:list\",\"arguments\":{\"kind\":\"bug\",\"harness\":\"papercusp\",\"state\":\"open\",\"limit\":500}}}" 2>/dev/null || true)"
-  GATE_DUP_PREFIX="$prefix" python3 -c '
-import sys, json, os
-prefix = os.environ.get("GATE_DUP_PREFIX", "")
-raw = sys.stdin.read()
-items = []
-for line in raw.splitlines():
-    line = line.strip()
-    if line.startswith("data:"):
-        payload = line[len("data:"):].strip()
-        try:
-            obj = json.loads(payload)
-            text = obj["result"]["content"][0]["text"]
-            items = json.loads(text)
-        except Exception:
-            continue
-for it in items:
-    t = it.get("title", "")
-    if isinstance(t, str) and t.startswith(prefix):
-        print(it.get("id", ""))
-        break
-' <<<"$resp" 2>/dev/null
-}
+# (find_open_duplicate moved to ~L258, above check_staleness's earlier callers — see there.)
 if [ "$red_marker_age_h" -lt "$RED_REFILE_H" ] && [ "$prev_legs" = "${REDS[*]}" ]; then
   log "RED already tracked (EI filed ${red_marker_age_h}h ago for same legs '${REDS[*]}', < RED_REFILE_H ${RED_REFILE_H}h) — skipping duplicate filing. $TITLE"
 else
