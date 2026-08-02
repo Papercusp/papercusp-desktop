@@ -32,7 +32,17 @@
 # work (the SPA dist is fed by the staging `vite build --watch`).
 
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Resolve BEFORE the cd — `$0` may be relative, and a relative dirname re-evaluated
+# after cd'ing resolves against the NEW cwd (silently sourcing nothing, or worse).
+__here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$__here/.."
+
+# Claim a Rust target dir this instance can own alone, so a second desktop cannot
+# corrupt the shared generated app-manifest and take the FIRST one down with it
+# (WI-7101 — it took down the owner's live desktop). Sourced, not executed: it
+# exports CARGO_TARGET_DIR and holds a lock fd that the `exec` below inherits.
+# Single-instance launches keep the shared dir and its warm cache, unchanged.
+. "$__here/lib/claim-target-dir.sh"
 
 # Pin content + /api to the session's own operator (EI-296 seam) — outranks a
 # previously persisted prod/staging bar selection, and is never persisted, so
