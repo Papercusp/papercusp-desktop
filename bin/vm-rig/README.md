@@ -35,7 +35,40 @@ bin/vm-rig/diag.sh
 # 4. the P-059 acceptance probes
 bin/vm-rig/probe-fwd.sh    # tower→VM : PASS = key in VM coord:feed AND VM events:status shows a wake record created before the 600s await window expired
 bin/vm-rig/probe-rev.sh    # VM→tower : PASS = key in tower coord:feed AND tower events:status shows a wake record created before the 600s await window expired
+
+# 5. the LIVE-1 coordination parity run (all five surfaces, one green/red exit)
+bin/vm-rig/parity.sh                      # all legs
+bin/vm-rig/parity.sh --only fedevents     # legs: fedevents wakebridge receipts claimspec presence
 ```
+
+## `parity.sh` — the LIVE-1 parity runner (WI-7000)
+
+The probes above prove the *transport*. `parity.sh` proves the five LIVE-1
+**coordination surfaces** on top of it, by driving the `fed_assert_*` helpers in
+`bin/lib/federation-asserts.sh` against this rig:
+
+| Leg | Surface | Proves |
+| --- | --- | --- |
+| `fedevents` | P-009 federated events | key fired EXACTLY once on the VM (positive control — run it first) |
+| `wakebridge` | P-002/P-003 wake bridge | a tower `coord:send` fires the VM's inbox-wake |
+| `receipts` | P-008 + M5a delivery receipts | exactly one receipt, `delivered=true` |
+| `claimspec` | P-016 + M7 claim-spec federation | spec lands on the VM `origin=remote` with `fed_hlc`+`fed_ts` |
+| `presence` | P-004/P-005 presence gossip | tower carries fresh presence+session rows for the VM |
+
+Exit: `0` all green · `1` one or more red · `2` **preflight failed, NO verdict**.
+
+- **It cannot emit a single-box false green.** Preflight aborts with exit 2
+  unless two distinct real hosts both answer, and there is no skip path — the
+  D-018 lesson (a drill whose legs quietly SKIP produces a plausible, quotable,
+  WRONG release reading). Never report a LIVE-1 surface proven from a run whose
+  banner does not name two distinct hosts.
+- **Why it exists at all:** those five helpers shipped in July with their named
+  caller being the retired `deb-hetzner-federation.sh`, so *nothing invoked
+  them* for a month and four of five surfaces stayed "unproven cross-machine,
+  manual PG inspection". `npm run lint:assert-integrity` (rule R6) now fails the
+  build if any assert helper becomes unreachable again — but that guard proves
+  a runner **exists**, not that anyone **ran** it. This rig is manual: running
+  it is step 5 above.
 
 P-059 SUCCESS = both probes green AND still green after a VM reboot
 (reboot → re-run `deploy.sh` → re-run both probes). Read PASS off each
