@@ -35,10 +35,44 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const script = path.join(root, 'bin/dev-operator-ifneeded.sh');
 
-/** A port unlikely to collide with anything real (dev default is 3270) or
- *  with a concurrent run of this same test elsewhere in the fleet. */
-function testPort() {
-  return 41000 + (process.pid % 4000) + Math.floor(Math.random() * 500);
+/** Can we actually take this port right now? Asks the kernel, rather than guessing. */
+function bindable(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)));
+  });
+}
+
+/**
+ * A port in 41000-45499 that is VERIFIED FREE at the moment it is returned.
+ *
+ * This used to pick one blindly — `41000 + (pid % 4000) + random(500)` — under
+ * the comment "unlikely to collide with anything real". That assumption is
+ * false on a loaded shared box: the range sits INSIDE Linux's ephemeral range
+ * (net.ipv4.ip_local_port_range defaults to 32768-60999), so the kernel hands
+ * the very same port to some unrelated process as an ephemeral source port.
+ *
+ * Losing that race does NOT fail where you would look for it. The scenario's
+ * port holder dies of EADDRINUSE as an UNHANDLED 'error' event, so it never
+ * writes its pidfile, the scenario under test is therefore never set up, and
+ * the assertion fails ~45s later with a stderr full of `node:events:487 throw
+ * er` and no mention of a port at all. WI-7065 caught exactly this on
+ * 127.0.0.1:42948, and on 2026-08-02 it red-pinned the green gate.
+ *
+ * A real bind is the only check that cannot be fooled: we ask the kernel to
+ * give us the port and immediately hand it back. A TOCTOU window remains
+ * between that close and the caller's own bind, but it is milliseconds wide
+ * instead of spanning the whole test.
+ */
+async function testPort(attempts = 25) {
+  for (let i = 0; i < attempts; i += 1) {
+    const candidate = 41000 + (process.pid % 4000) + Math.floor(Math.random() * 500);
+    if (await bindable(candidate)) return candidate;
+  }
+  // Better a named failure than a test that silently runs against a port it
+  // does not own — which is the whole bug this helper exists to prevent.
+  throw new Error(`testPort: no free port in 41000-45499 after ${attempts} attempts`);
 }
 
 /** Poll `check` every `stepMs` until it returns truthy or `timeoutMs` elapses. */
@@ -67,7 +101,7 @@ function pidAlive(pid) {
  * stand-in is gone. Returns nothing; throws on failure (via assert).
  */
 async function runReapCycle(signalTheWrapper) {
-  const port = testPort();
+  const port = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-reaper-'));
   const marker = path.join(tmp, 'pid');
   let wrapper;
@@ -147,7 +181,7 @@ async function withRetry(fn, attempts = 3) {
 }
 
 test('reuse path: an already-bound port exits fast without spawning DEV_CMD', async () => {
-  const port = testPort();
+  const port = await testPort();
   const server = net.createServer();
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -189,7 +223,7 @@ test('reuse path: an already-bound port exits fast without spawning DEV_CMD', as
 // port while bg-host is enabled, redirecting to the next free port instead —
 // verified here via a fake `systemctl` shim (no real systemd unit required).
 test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is enabled, picks a different one instead (EI-13139)', async () => {
-  const reservedPort = testPort();
+  const reservedPort = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-bghost-'));
   const marker = path.join(tmp, 'pid');
   const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-fake-systemctl-'));
@@ -262,7 +296,7 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
 // when it never does. Neither branch had a regression test before this file
 // gained them — a revert of either half would have shipped silently.
 test('restart-storm guard: waits for the port to actually free before restarting, then retries', async () => {
-  const port = testPort();
+  const port = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-portwait-'));
   const marker = path.join(tmp, 'attempts');
   let wrapper;
@@ -271,7 +305,11 @@ test('restart-storm guard: waits for the port to actually free before restarting
     // server that binds $PORT and holds it for ~1.5s (simulating a still-live
     // predecessor / slow-releasing exiting process) before releasing it and
     // exiting — DEV_CMD itself still exits 1 immediately every time.
-    const holderScript = `require('node:net').createServer().listen(${port},'127.0.0.1',()=>{setTimeout(()=>process.exit(0),1500)})`;
+    // Same WI-7065 recurrence guard as the never-frees case below.
+    const holderScript =
+      `const s=require('node:net').createServer();` +
+      `s.on('error',e=>{console.error('HOLDER-BIND-FAILED '+e.code+' on ${port}');process.exit(9)});` +
+      `s.listen(${port},'127.0.0.1',()=>{setTimeout(()=>process.exit(0),1500)})`;
     const devCmd = `echo x >> '${marker}'; node -e "${holderScript}" & disown; sleep 0.3; exit 1`;
     wrapper = spawn('bash', [script], {
       env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
@@ -309,7 +347,7 @@ test('restart-storm guard: waits for the port to actually free before restarting
 });
 
 test('restart-storm guard: gives up with a clear diagnosis (and stops restarting) when the port never frees', async () => {
-  const port = testPort();
+  const port = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-portstuck-'));
   const marker = path.join(tmp, 'attempts');
   const pidfile = path.join(tmp, 'holder-pid');
@@ -317,7 +355,15 @@ test('restart-storm guard: gives up with a clear diagnosis (and stops restarting
   try {
     // Binds $PORT and NEVER releases it — a wedged predecessor that never
     // frees the port — while DEV_CMD itself still exits 1 immediately.
-    const holderScript = `const s=require('node:net').createServer();s.listen(${port},'127.0.0.1',()=>{require('node:fs').writeFileSync('${pidfile}',String(process.pid))})`;
+    // The 'error' handler is the recurrence guard for WI-7065: without it a
+    // bind collision dies as an UNHANDLED 'error' event, and the only trace is
+    // `node:events:487 throw er` in a stderr dump 45s later — which names
+    // neither the port nor the cause. `testPort()` now verifies the port is
+    // free, so this should be unreachable; if it ever fires again it says so.
+    const holderScript =
+      `const s=require('node:net').createServer();` +
+      `s.on('error',e=>{console.error('HOLDER-BIND-FAILED '+e.code+' on ${port}');process.exit(9)});` +
+      `s.listen(${port},'127.0.0.1',()=>{require('node:fs').writeFileSync('${pidfile}',String(process.pid))})`;
     // WAIT for the holder to ACTUALLY bind before exiting, rather than a fixed
     // `sleep 0.3` (WI-7185). The pidfile is written inside the listen callback, so
     // its existence PROVES the port is held. The old fixed sleep was a load race:
@@ -404,7 +450,7 @@ test('KILL path: the detached watchdog still reaps the dev stack when the wrappe
 // detect the mismatch, terminate the squatter, and spawn a fresh
 // wrapper-supervised (reaped) instance in its place instead of reusing it.
 test('squatter path: a dbosEnabled:true process on $PORT is killed and replaced by a fresh supervised instance', async () => {
-  const port = testPort();
+  const port = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-squatter-'));
   const marker = path.join(tmp, 'pid');
   let squatter;
