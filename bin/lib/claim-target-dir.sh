@@ -91,7 +91,10 @@ __pc_claim_target_dir() {
     if flock -n 8; then
       export CARGO_TARGET_DIR="$dir"
       if ((i == 0)); then
-        echo "→ target dir: $dir (shared slot 0 — no other desktop instance is building)" >&2
+        # "no other SLOT-HOLDING instance" — deliberately not "no other instance".
+        # An unlocked bypasser is invisible to the flock, and the advisory just below
+        # may well contradict a broader claim two lines later.
+        echo "→ target dir: $dir (shared slot 0 — no other slot-holding desktop instance)" >&2
         # Slot 0 was free, yet a desktop build appears to be running: it did not come
         # through this wrapper (a bare `npm run tauri dev`, or an instance started
         # before slots existed), so it holds no lock and we are about to share its
