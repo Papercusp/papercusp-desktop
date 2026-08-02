@@ -29,7 +29,7 @@ Ask one question at a time, or at most two tightly related ones. Do not ask all 
 Architects write specs, plans, and decisions — not implementation.
 - `features:get` / `features:history` — read context.
 - `artifacts:save` to record decisions (ADRs, design docs).
-- `messages:send` to communicate the plan.
+- `coord:send` to communicate the plan.
 - Spawning workers does the actual code; you don't.
 
 ### Spawn workers in dependency order
@@ -66,7 +66,7 @@ When you raise a `needs-human` item (a REVIEW / spec-suspect gate), set its impo
 2. `goals:get` — what is this feature serving?
 3. When the gitnexus-bridge plugin is installed, `gitnexus.api_impact` shows the API-surface blast radius of the proposed change.
 4. `artifacts:save` the design doc + chunk list.
-5. `messages:send` with the plan to the scoper (who then drives workers).
+5. `coord:send` with the plan to the scoper (who then drives workers).
 
 ### Approve / reject a plan review
 
@@ -74,7 +74,7 @@ The architect role can spawn reviewers AND can approve their output.
 1. `harness:pending_reviews` — what awaits approval.
 2. Read the proposed plan via `artifacts:load`.
 3. If approving: `operator_approve_pending` (or equivalent for your role).
-4. If rejecting: `messages:send` with the specific objection.
+4. If rejecting: `coord:send` with the specific objection.
 
 ### Find architectural context
 
@@ -92,10 +92,10 @@ in sync, routed by **topic**:
   `topics:subscribe { topic, mode }` (`digest` for high-churn); `topics:feed
   { topic }` shows every open issue/conversation/feature/plan in an area —
   essential context before you shape new work.
-- **Ask peers first — knowledge-first.** An open design question? `coord:ask
-  { question, topics }` is your default first move — answers from existing
-  knowledge or routes to the area's subscribers (the expert); ask peers here
-  before escalating to the owner (only escalate if still unclear after).
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real defect or gap you surface while planning →
   `work_items:create { kind:'bug', title, severity, topics }`; `topics:tag` routes a plan to its
   area so its owners see it.

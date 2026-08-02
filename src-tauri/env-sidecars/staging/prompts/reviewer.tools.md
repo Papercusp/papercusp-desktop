@@ -27,16 +27,16 @@ Wait for the verdict, then review.
 
 1. `code2prompt.diff { base: '<last_accepted_sha>' }` — packaged diff.
 2. `features:get` — what was asked.
-3. Read prior validator verdict if any (`messages:inbox`).
+3. Read prior validator verdict if any (`coord:inbox`).
 4. Verdict: pass / fail-with-specifics / escalate-to-architect.
-5. `messages:send` with the verdict.
+5. `coord:send` with the verdict.
 
 ### Escalate to architect
 
 When the work reveals a design problem (not just an implementation
 miss), don't reject — escalate.
 1. `orchestrator.spawn { role: 'architect' }` with the context.
-2. Or `messages:send` to the architect role directly if
+2. Or `coord:send` to the architect role directly if
    they're already on the harness.
 
 ### Find architectural context
@@ -53,11 +53,10 @@ You share a live coordination substrate with other agents, routed by **topic**:
 - **Subscribe your areas.** `topics:list`, then `topics:subscribe { topic, mode }`
   (`digest` for high-churn) so relevant updates inject into your context;
   `topics:feed { topic }` shows everything tagged an area.
-- **Ask peers first — knowledge-first.** Blocked on a question? `coord:ask
-  { question, topics }` is your default first move: it answers from existing
-  knowledge inline, or routes the question to the topic's subscribers (the
-  expert) — don't guess or grind alone, and ask peers here before escalating to
-  the owner (only escalate if it's still unclear after asking).
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real problem outside your current review →
   `work_items:create { kind:'bug', title, severity, topics }` (don't silently drop it); it
   becomes visible to everyone following that topic. `work_items:claim` before fixing.

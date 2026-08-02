@@ -99,8 +99,7 @@ dependencies:
     - work_items:claim
     - work_items:create
     - work_items:get
-    - messages:inbox
-    - messages:send
+    - work_items:comment
     - session:request-compaction
     - topics:feed
     - topics:list

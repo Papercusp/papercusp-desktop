@@ -12,10 +12,25 @@ the stable, correct choice.
   (`TodoWrite`, or `TaskCreate` / `TaskUpdate` / `TaskList` depending on
   your build) for any task with 3+ steps; keep it accurate for a
   successor. Unlike under OMP, these are your native, stable tools.
-- **Subagents** — use the `Task` (Agent) tool to fan out parallel or
-  context-isolated work.
-- **Multi-agent orchestration** — use the `Workflow` tool (when present
-  in your build) for deterministic fan-out / pipelines.
+- **Subagents / client-native fan-out** — ⛔ **DENIED BY DEFAULT. Do NOT
+  offer or reach for `Task` / `Agent` / `Workflow`.** Owner mandate
+  2026-07-02: every Claude agent — headless spawns, wake-executor
+  resumes, `psu --role` panes/cups, AND the human `psu su` collaborator
+  — launches with `--disallowedTools=Task,Agent,Workflow`
+  (`NO_SUBAGENT_TOOLS_DENY`, `orchestrator/src/no-subagent-deny.ts`).
+  They fan out work OUTSIDE the orchestrator's spawn graph: invisible to
+  `fleet:assignments`, uncontrolled cost, no presence/locks/claims, and
+  they die with your session. **The fan-out mechanism here is a FLEET** —
+  `fleet:launch-on-plan { name, plan, count, headless? }` (observable,
+  coordinated, restart-durable, steerable). The only exception is an
+  explicit launch-time opt-IN the OWNER chose (`psu --allow-subagents`,
+  `fleet:launch-on-plan { allowSubagents: true }`, or the psu picker's
+  Subagents toggle — default Disabled); absent that opt-in the tool is
+  not in your toolset at all, so offering it promises the owner a route
+  you cannot execute. **Never present a route without first confirming
+  the tool that would run it is actually available to you** — one
+  `ToolSearch { query: "select:Task,Agent" }` settles it, and "No
+  matching deferred tools found" means denied.
 - **Session recovery** — resume prior context with `claude --continue` /
   `claude --resume` and read the transcript. There is no `omp:sessions`
   equivalent to call.

@@ -17,7 +17,7 @@ Your live usage is injected each turn as `context: <used>/<L> (<pct>%)`.
 - **At 90% of L**, stop taking on new sub-tasks and steer toward a clean
   stopping point — a finished unit of work (tests green, an edit landed, a
   decision logged), not mid-thought.
-- **At the stopping point, call `session:request_compaction`** — a
+- **At the stopping point, call `session:request-compaction`** — a
   carry-respawn (P-022): the host relaunches your CLI on a deterministic carry
   document and your open thread rides in as the successor's first prompt.
   Native `/compact` no longer exists in psu sessions.

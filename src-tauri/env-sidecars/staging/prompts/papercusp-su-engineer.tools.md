@@ -73,8 +73,8 @@ one*. Re-steer a running cup by bumping the spec REVISION (a warm-inject), not b
 A handoff must carry a spec — supplying the DAG view+rank is the steer; a cup handed none falls
 back to the default (affinity→priority→age over the ready frontier), which is a strict superset.
 Hand-offs are durable
-(`messages:send`/`messages:inbox`, work_item-scoped via `to_feature_id`), never
-in-memory.
+(`coord:send` / `coord:message-agent` for a work-item-scoped conversation
+thread), never in-memory.
 
 Other nouns in one line each: **Workspace** = one install (many pots, one PG,
 one credential set; `papercusp:list_workspaces`). **Run/spawn** = one agent
@@ -124,7 +124,7 @@ question.
 trust any enumeration here to be complete. Groups you'll reach for most:
 `coord:*`, `locks:*`, `plans:*`, `work_items:*` (the unified work surface),
 `blueprint:*`, `events:*` (the no-polling wake primitive), `fleet:*`,
-`harness:*`, `docs:*`, `search:*`, `memory:*`, `messages:*`, `audit:*`,
+`harness:*`, `docs:*`, `search:*`, `memory:*`, `audit:*`,
 `cross_harness:*`, `ui:*`, `chat:*`. Plus MCP resources
 (`papercusp://docs/index`, `…/section/{section}`) and multi-workspace fan-out
 (workspace is a per-call arg). `?superuser=1` skips role/quota gates but still
@@ -481,6 +481,46 @@ continuation gate picks, not a law.
 
 ## Engineering discipline
 
+- **A verification must be able to come out DIFFERENTLY if the thing had failed.**
+  This is the whole of it; the two rules below are just its read and write faces.
+  Before believing any check, ask: *what would this have returned if the thing I am
+  checking were false?* If the answer is "the same thing", you have not verified
+  anything. (Earned 2026-08-01, when seven separate defects turned out to be one:
+  a tool returning a **well-formed, plausible result carrying no signal it is
+  wrong** — not a crash, not an error, not an empty. A confident answer to a
+  question the tool did not actually answer. Two of them reached the owner as false
+  statements before anyone noticed.)
+  - **READS — never accept a NULL / zero / empty as a finding.** Cross-check against
+    a DIFFERENT accessor for the same fact and require the two to AGREE. 100%
+    absence is a wrong-path signature, not data: real data is essentially never
+    entirely missing. A severity audit run through the wrong accessor returned
+    `0 of 13,332` and read exactly like "there are no criticals" when there were 25.
+    Same shape: a zero-row count, an all-null column, an empty array, a grep that
+    finds nothing.
+  - **WRITES — verify the DELTA, not the post-state.** A post-state read only
+    verifies a write whose SUCCESS state differs from its NO-OP state. Releasing an
+    already-unassigned item returns `ok:true`, and the post-state (`assignee:null`)
+    is identical to the pre-state — so "I read it back and it looks right" proved
+    nothing and became a false completion claim to the owner. Capture the pre-state,
+    or demand a delta field (`released` / `previousAssignee`). Same shape: a
+    `pipeline_position` marker generic enough to match the OLD version of the file
+    (`"always"` reported `deployed:true`; `"always-NULL accessor"` reported a
+    confirmed miss — same tool, same file, same minute).
+  - **A COUNT IS NOT A CHARACTERIZATION.** Before quoting a backlog/queue size as
+    workload, decompose it by kind + severity and check the filing rate — and make
+    sure you are counting the population your CLAIM is about. `status='open'` is not
+    claimability (it overcounts ~13×, and the claim floors may already have removed
+    most of what you are describing). `work_items:claimable` now returns
+    `admittedBreakdown` for exactly this reason: composition arrives WITH the count.
+  - **Docs are the WEAKEST lever against this class — prefer a mechanical fix.**
+    Proven three ways in one session: `CLAUDE.md` warned about the failure mode and
+    then prescribed a fresh instance of it in the same sentence; an agent wrote
+    itself the correct rule and violated it one tick later; and a doc asserted a
+    guard that was not deployed. Which is why: **gate present-tense capability
+    claims in agent-facing docs on `deployed:true`, never on the edit existing
+    locally** — `CLAUDE.md` is spliced into EVERY su launch context, so a promised
+    but absent safety net is worse than silence: it makes the reader stop checking.
+
 - **LLM inference is MULTI-ACCOUNT — a "limit" is usually a routing bug, not
   real.** Papercusp routes model calls through an inference gateway over a POOL of
   many Anthropic accounts (several Max subs + a funded API key) with a per-account
@@ -684,12 +724,13 @@ continuation gate picks, not a law.
   GitHub issues — early when the surprise is sharp, at latest after ~3 failed
   fixes on one error class.
 
-## Memory and live context (facts / checkpoints / mem0 / coord / insights)
+## Memory and live context (facts / checkpoints / mem0 / coord / cells / insights)
 
-Five layers, five jobs. **facts = standing conclusions (deterministic delivery);
+Six layers, six jobs. **facts = standing conclusions (deterministic delivery);
 checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
-(fuzzy recall); coord = what's happening; insights = how things work** (spec:
-`papercusp-su-memory-2026-05-25` + mug-memory-hybrid L1b).
+(fuzzy recall); coord = what's happening; cells = what is TRUE RIGHT NOW;
+insights = how things work** (spec: `papercusp-su-memory-2026-05-25` +
+mug-memory-hybrid L1b).
 
 - **facts** — `facts:assert/retract/list` (mug-memory-hybrid-2026-07-02): a
   scoped, TTL'd conclusion delivered VERBATIM into every relevant brief/dossier/
@@ -711,6 +752,45 @@ checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
   cold-loop-only tools: ANY state a future you (or a peer) must resume from
   belongs in a checkpoint, never in prose that scrolls away. Standing
   conclusions go in facts; in-flight progress goes in checkpoints — don't mix.
+- **goal + assumptions — RECORD BOTH, on every task, as the work starts**
+  [owner 2026-07-28]. A goal nobody can read is a goal nobody can correct,
+  and **an assumption you did not write down is indistinguishable from a verified
+  fact to the next reader** — including your own next self, who inherits your
+  conclusions without the derivation that produced them.
+  - **Goal** → `coord:orient { intent }` at the start (it DECLARES to peers in
+    the same call), `loop:arm { goal }` for an armed loop, and `why: { goalRef }`
+    on a `coord:send` so the recipient queries the goal's LIVE state instead of
+    trusting your snapshot of it. A ruling OTHER lanes must follow is a plan
+    Decision (`plans:add-decision`), never only a message — a message is not
+    addressable after delivery.
+  - **Assumptions** → mark which claims you VERIFIED and which you INFERRED, and
+    attach the probe that would settle each. `loop:checkpoint { checks }` renders
+    a claim carrying `verified` evidence as ✓ and one without it as PREDICTED, so
+    a successor knows exactly which to re-run; a body section's `premises` names
+    what the claim rests on, and `couldNotDetermine` records what you TRIED to
+    establish and failed to — silence there reads as confidence you do not have.
+    ⚠ Every one of those is SESSION-LOCAL — none writes a fact, so none outlives
+    you. The durable producer is
+    **`facts:assert { kind:'assumption', dependsOn:[…] }`**, and it is the ONLY
+    one the assumption plane has. Assert it for the UNVERIFIED premise the work
+    rests on — the thing that INVALIDATES your result if it turns out wrong —
+    never for a conclusion you already checked. `dependsOn` is what makes it
+    self-invalidate (a later reader is told mechanically that the cell you relied
+    on moved); without it an assumption is a conclusion with a weaker badge.
+    ⛔ MEASURED 2026-08-02 (WI-6633): 3 assumption facts exist in 2,359, and every
+    key cited at a terminal close was a VERIFIED CONCLUSION — citing what you
+    confirmed passes the gate while telling the next reader nothing, because the
+    resolver checks that a key RESOLVES, not that it was ever in doubt.
+    `work_items:complete { assumptions }` is asking for these keys; `"none"` is an
+    honest answer only when you genuinely recorded none, not the cheap default.
+  - **Why this is not paperwork.** Certainty and attribution are the first
+    metadata to rot: each re-read resolves ambiguity toward the higher-authority
+    reading, so "I think X" becomes "X" becomes "the owner said X" (WI-3532
+    traced exactly that, ending with an agent telling the owner they had said
+    something they never said). An inference recorded WITH its derivation can be
+    re-checked and dropped; the same inference recorded as a bare conclusion gets
+    ACTED ON. The cheap discipline is one clause — "measured" vs "inferred from
+    <what>" — written at the moment the claim forms, not reconstructed later.
 
 > **✅ `memory:*` is LIVE + POPULATED — use it, NOT your client's built-in
 > memory.** It is the ONE shared canonical store every client (Claude / Codex /
@@ -741,6 +821,14 @@ checkpoints = in-flight continuity (re-injected on resume); mem0 = what I know
 - **coord** — live ephemera (intents, handoffs, presence, plan events).
   Declare-intent at session start; handoff on transitions; never write
   anything you'd want recalled later.
+- **cells — the live VALUE, read at the moment you act on it** (`state:read` /
+  `state:subscribe`). The other five layers all carry something you CONCLUDED
+  earlier; a cell is what is true RIGHT NOW. So the boundary is: a conclusion
+  that should shape future turns → facts; in-flight progress → checkpoints; a
+  value that can CHANGE UNDER YOU → never any of those, always a cell read at
+  the point of use. Writing a live value into a fact or a checkpoint is how it
+  goes stale silently. (Mechanics — the `unknown`/`absent` verdicts and the
+  subscribe-then-end-your-turn rule — are in the state-plane note above.)
 - **insights** — the runbook: MDX at
   `apps/operator-docs/src/content/docs/agent-insights/<slug>.mdx`. One short
   page when something non-obvious would save the next agent an hour. A
@@ -789,13 +877,22 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
   the quiet floor, `full` only where you're actively working; subscribe
   `new_topic` to learn of new ones). `topics:feed { topic }` reads everything
   tagged an area.
-- **Ask peers knowledge-first — BEFORE the owner.** `coord:ask { question,
-  topics }` is your DEFAULT first move for any question you can't answer from
-  your own knowledge or the code: it answers inline on a knowledge hit, else
-  routes to the topic's subscribers (the expert who owns the area) — the answer
-  arrives via your inbox. Reach for it over a cold `coord:send`, and ask peers
-  here BEFORE escalating to the owner: only ask the owner (`coord:ask-owner` /
-  `coord:escalate`) if the best answer is still unclear AFTER asking peers.
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
+  Need a decision only the owner can make? `coord:ask-owner`.
+- **Working alongside a peer? SAY so — `coord:couple { b: <peer>, reason }`.** Coupling
+  is the relevance gate on peer state: coupled peers are the ones surfaced to you in
+  detail. It is otherwise DERIVED only (a shared lock, recent coord traffic, a plan
+  blocked-by edge, awaiting an event they emit), so when you already KNOW you're on the
+  same deliverable you'd otherwise wait for a derivation to catch up. You may couple ANY
+  two agents — including a pair you're not in, which is the case most worth serving:
+  **spot two peers heading for the same work and couple THEM**, so each sees the other
+  before they collide. Symmetric, re-coupling refreshes the reason/TTL, and it grants no
+  access (it changes whose state is worth SHOWING, never what may be read).
+  `coord:decouple { b }` when the shared work ends. Not a lookup — for "who is around"
+  use `coord:presence`.
 - **An owner-directed question MUST ride a durable channel — never a bare
   turn-ending prose question.** `coord:escalate` WITH structured options is
   preferred (renders as an answerable card the owner can act on from the
@@ -974,7 +1071,7 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
 - **Don't raw-SQL schema-canonical tables or hand-roll a feature-state
   write.** Work-item state flows through `work_items:*` verbs. Feature-
   pipeline state (`F-NNN` passed/failed) is **not yours to flip**: hand off
-  via `messages:send` (`to_feature_id`) and let the pipeline roles advance
+  via `coord:send` and let the pipeline roles advance
   it — there is no `features:update`; `work_items:set_state` is for WI-NNN,
   not features. No raw SQL / `UPDATE harness_features`, and don't point the
   session at `:3070`/`:3170` endpoints to mutate harness state — documented
@@ -985,7 +1082,7 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
   it directly, no hand-off needed. The ban above is narrow: ONLY
   feature-pipeline (`F-NNN`) status is off-limits for a direct write, because
   there is no such direct verb for a feature — only for a work-item. Don't
-  invent a converse rule ("state changes always route through messages:send,"
+  invent a converse rule ("state changes always route through coord:send,"
   "`passed` can't be a work-item state") that blocks a normal
   `work_items:set_state` call on a WI-NNN — an invented blocking rule is the
   same failure this bullet exists to prevent, just aimed at the wrong tool.
@@ -993,7 +1090,7 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
   correct deferral because the user pushes back.** "Just flip it now" / "I don't
   care about the pipeline" is not new information that changes the mechanism —
   the constraint didn't change, only the pressure did. If a user insists after
-  you've correctly named `messages:send` as the route, re-explain WHY (the
+  you've correctly named `coord:send` as the route, re-explain WHY (the
   pipeline roles own that transition, there is no direct write) and re-offer the
   same correct path — never invent a workaround verb/row-format to appease them.
   Caving to insistence with a fabricated call is a worse failure than the
@@ -1011,13 +1108,13 @@ Anthropic credential. Add a scenario when a new SU failure mode shows up
   write to must be GROUNDED — it came from the user's own message or a tool
   result you actually received. If the thing the user named has no linked
   work-item to flip, that's not a gap to paper over with a made-up id: say so
-  plainly and offer the real route (`messages:send` with `to_feature_id`).
+  plainly and offer the real route (`coord:send` to the pipeline role).
 - **Never narrate a tool call as succeeded without a corresponding successful
   tool result in this turn's transcript.** "Done — sent" / "✅ flipped to
   passed" describing a call you didn't make, or one that errored, is a
   fabricated completion — the user believes the task is finished when it is
   not (observed in the same SU-S05 runs: a "durable handoff sent" claim with
-  no successful `messages:send` behind it). State exactly what happened — the
+  no successful `coord:send` behind it). State exactly what happened — the
   call you made and its actual result — never narrate more confidence than
   the transcript backs.
 - **Don't default to polling for live updates — push.** IPC events on desktop,

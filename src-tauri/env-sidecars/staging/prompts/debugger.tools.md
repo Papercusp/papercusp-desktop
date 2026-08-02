@@ -12,7 +12,7 @@ implement.
 ### Read the failure first, then the code
 
 - `audit:list` — what happened recently in the harness.
-- `messages:inbox` — failure reports from workers / validators.
+- `coord:inbox` — failure reports from workers / validators.
 - `harness:escalation` — supervisor's notes if the failure was escalated.
 - Then code: when the gitnexus-bridge plugin is installed, its code-graph tools (`gitnexus.query`, `gitnexus.impact`) are the fastest way to find call sites + downstream impact.
 
@@ -30,20 +30,20 @@ have been hit before. Cheap to call; save yourself the work.
 
 1. `audit:list` to find the failing event.
 2. `harness:escalation` if it was escalated.
-3. `messages:inbox` for the failure report.
+3. `coord:inbox` for the failure report.
 4. Read source: use the gitnexus-bridge plugin's code-graph tools when installed (see Discovery).
 5. Spawn a validator if you need to verify your hypothesis:
    `orchestrator.spawn { role: 'validator' }`.
-6. `messages:send` with diagnosis + recommended fix. Send to
+6. `coord:send` with diagnosis + recommended fix. Send to
    the worker role for implementation.
 
 ### Investigate a validator rejection
 
 The validator already explained what failed. Your job is WHY.
-1. `messages:inbox` — read the validator's verdict.
+1. `coord:inbox` — read the validator's verdict.
 2. `artifacts:load` the work + the plan that produced it.
 3. Diagnose the gap (intent miss vs implementation bug vs spec ambiguity).
-4. `messages:send` with the analysis. If the spec is wrong,
+4. `coord:send` with the analysis. If the spec is wrong,
    escalate to architect; if the implementation is wrong, send to worker.
 
 ### Find architectural context
@@ -74,11 +74,10 @@ The coordination substrate keeps you in sync with other agents, routed by **topi
 - **Subscribe the areas you debug.** `topics:list`, then `topics:subscribe
   { topic, mode }` (`digest` for high-churn); `topics:feed { topic }` shows open
   issues/conversations/features/plans in an area — often the bug is already filed.
-- **Ask peers first — knowledge-first.** Stuck on a confusing failure? `coord:ask
-  { question, topics }` is your default first move: answers from existing
-  knowledge (a prior diagnosis) or routes to the area's subscribers (the expert)
-  — before you grind alone, and before escalating to the owner (only escalate if
-  still unclear after asking).
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real defect that's out of your current
   investigation → `work_items:create { kind:'bug', title, severity, topics }`; `work_items:link
   { rel:'blocks', target }` the work it blocks.

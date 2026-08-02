@@ -22,7 +22,7 @@ payload into your artifacts.
 
 - Before writing an artifact, `artifacts:load` to see prior content if the path exists.
 - Before creating a feature link, `features:list_related` to avoid duplicates.
-- Before sending a message, `messages:inbox` to see if you already replied.
+- Before sending a message, `coord:inbox` to see if you already replied.
 
 ## Named workflows
 
@@ -32,13 +32,12 @@ payload into your artifacts.
 2. `harness:phase_path` for the on-disk workspace if you need to read source.
 3. Do the work — write files, edit code.
 4. `artifacts:save` for any auxiliary docs your work produced (decision notes, output summaries).
-5. `messages:send` to report what changed, addressed to the orchestrator + reviewer.
+5. `coord:send` to report what changed, addressed to the orchestrator + reviewer.
 
 ### Hit a blocker
 
-1. Don't escalate via chat — workers can't chat directly. Use the messaging surface.
-2. `messages:send` with kind="Blocker" and the specific question.
-3. The orchestrator routes to the right next role (debugger, architect, etc.).
+1. `coord:send` with a "Blocker" prefix and the specific question, addressed to the orchestrator, with `wake` set so they're woken immediately.
+2. The orchestrator routes to the right next role (debugger, architect, etc.).
 
 ### Where new tests go
 
@@ -52,7 +51,7 @@ New tests **always** go in one of the four canonical frameworks
   drives the browser.
 - `<crate>/src/<name>.rs` `#[cfg(test)] mod tests { … }` — Cargo. For
   Rust code.
-- `apps/operator/lib/llm-testing/scenarios/<role>/<name>.{ts,yaml}` —
+- `packages/operator-core/lib/llm-testing/scenarios/<role>/<name>.{ts,yaml}` —
   LLM scenarios. For judge-scored prompt tests.
 
 **Never** create a new `.mjs` integration script under
@@ -69,11 +68,10 @@ You share a live coordination substrate with other agents, routed by **topic**:
 - **Subscribe your areas.** `topics:list`, then `topics:subscribe { topic, mode }`
   (`digest` for high-churn) so relevant updates inject into your context;
   `topics:feed { topic }` shows everything tagged an area.
-- **Ask peers first — knowledge-first.** Blocked on a question? `coord:ask
-  { question, topics }` is your default first move: it answers from existing
-  knowledge inline, or routes the question to the topic's subscribers (the
-  expert) — don't guess or grind alone, and ask peers here before escalating to
-  the owner (only escalate if it's still unclear after asking).
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real problem outside your current chunk →
   `work_items:create { kind:'bug', title, severity, topics }` (don't silently drop it); it
   becomes visible to everyone following that topic. `work_items:claim` before fixing.

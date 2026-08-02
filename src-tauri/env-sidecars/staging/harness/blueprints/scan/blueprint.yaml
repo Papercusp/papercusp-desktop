@@ -75,7 +75,6 @@ dependencies:
     - improvements:capture
     - improvements:digest
     - work_items:list
-    - messages:inbox
     - pending_events:list
     - plans:attention
     - plans:items

@@ -72,7 +72,7 @@ worse than a slow one. Take the time.** In order:
    `work_items:get` / `features:get` them. Often the two intents are compatible once you
    know them, and the integration becomes obvious.
 2. **Ask the author** — only if still ambiguous. `coord:presence` to see if an authoring
-   agent is alive; if so, `coord:ask` the specific question (or `coord:send` it directly) —
+   agent is alive; if so, `coord:send` them the specific question directly (it wakes them) —
    e.g. *"you and <other> both changed `foo()`'s signature; which contract is canonical?"* —
    and `coord:await-inbox` for a **short, bounded** window. Integrate per their answer.
    - ⚠ **Never hold the exclusive `git-sync` lock idle while you wait.** Keep the ask

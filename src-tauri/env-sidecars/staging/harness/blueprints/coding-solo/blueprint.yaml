@@ -78,7 +78,7 @@ knobs:
 # task. The native read / edit / bash / test-exec / search capabilities ride the spawned
 # agent's runtime, identical to the full arm's worker. This list DELIBERATELY EXCLUDES
 # the coordination / hand-off / decomposition surface that the full `coding` blueprint
-# grants its worker (coord:* / messages:* / plans:add-*/new/promote/set-* / topics:* /
+# grants its worker (coord:* / plans:add-*/new/promote/set-* / topics:* /
 # issues:* / features:history|list_related / harness:escalation|pending_reviews) — that
 # surface IS the multi-agent treatment being ablated (D-004), and a lone worker has no
 # peer to coordinate with. Holding the BASE capabilities identical while removing ONLY

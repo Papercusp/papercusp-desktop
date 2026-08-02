@@ -183,6 +183,29 @@ there and redo it.
   can't resolve it — and then bring your diagnosis + a proposed durable fix, not just the
   blocker. Record what you found/did durably (work-item / plan) and carry any still-open item
   forward; never silently drop it.
+- **Before you report a number, find the code that WRITES it.** A metric, a count, a score, a
+  status field — none of them mean what their NAME implies until you have read the writer. The
+  failure is not "I was wrong"; it is asserting a conclusion from a single artifact you never
+  verified measures what you assumed. Three real instances in ONE session (2026-07-28): a chat
+  message ("the finding never made it onto WI-6512" — it was there, as a comment, unread); a grep
+  count (`0 matches for minScore` in one file → "the precision floor is unimplemented" — it was
+  implemented, in a different file); and a stats column (`memory_recall_stats.top_score` at 0.03
+  vs a 0.45 floor → "99.9% of injections are below the floor" — the column holds COSINE on one
+  path and post-fusion RRF, whose ceiling is 0.0328, on another, so the comparison was
+  meaningless). Each was reported to the owner as a confident finding and each had to be
+  retracted. **The tells:** a number far outside its expected range (suspect the SCALE, not the
+  system); a suspiciously round rate (0.0% or 99.9% across thousands of samples is usually a
+  definitional artifact, not a real distribution); an absence proved by one grep in one file;
+  and any claim about what someone else did or didn't do that you have not read the record of.
+  **The corrective is cheap and mandatory: open the writer, confirm the units and the scale, and
+  only then report.** Cheaper still when the claim is alarming — the more damning a finding
+  looks, the more likely you are misreading its units, because a real regression rarely produces
+  a perfectly clean 99.9%.
+- **A retraction is OWED and is owed FAST.** If you reported a number or a conclusion that turns
+  out wrong, say so plainly and IMMEDIATELY, before continuing — to whoever received it, and in
+  the durable record (a plan Decision / work-item comment / memory) so it cannot propagate. Name
+  what was wrong, why, and what survives the correction. A quietly-dropped bad finding is worse
+  than the original error: the owner keeps acting on it, and the next agent inherits it as fact.
 - **Never blame "high load" without the mechanism.** Even when load is extreme, "the load is
   high" is not a cause — it is a symptom you have not explained yet. Blaming it requires hard
   evidence tying YOUR symptom to the pressure (a latency that tracks it and recovers when it
@@ -310,7 +333,13 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
 
 - **Confirm the execution route BEFORE executing — always offer these options
   (AskUserQuestion), then wait; never infer the route:**
-  - **A. Yourself** — you implement it directly, now, in this session.
+  - **A. Yourself** — you implement it directly, now, in this session. "Yourself" means
+    THIS session doing the work — **NOT** a client-native subagent/Workflow fan-out
+    dressed up as A. Parallelism is what options C/D/E are for; a fleet is observable
+    (presence, claims, `fleet:tree`), coordinated (locks, scheduler), durable across
+    restarts, and steerable, and a client-native swarm is invisible to ALL of it. On
+    Claude clients `Task`/`Agent`/`Workflow` are DENIED by default anyway (owner mandate
+    2026-07-02), so offering one is offering a route you cannot execute.
   - **B. Hand to the Mug (pot auto-loop)** — enqueue for the mug→cup→blender loop to
     pick up. ⚠️ State the caveat when offering it: this auto-loop flow is not fully working
     yet, so B may not actually get picked up.
@@ -349,6 +378,17 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     beeCount, no fleet, no leader) — never conflate them. Availability is identical to D (both
     are `fleet:launch-on-plan`), so offer D and E together or neither; visible-vs-headless is
     just the `headless` knob, INDEPENDENT of the carry knob below.
+- **NEVER OFFER A ROUTE YOU HAVE NOT CONFIRMED YOU CAN EXECUTE.** Before a route reaches
+  the owner's menu, verify the tool that would RUN it is actually in your toolset this
+  session — `ToolSearch { query:"select:<Tool>" }` / `tools:find`, one call. A denied or
+  absent tool answers "no matching deferred tools found", and a route built on it is a
+  FABRICATED CAPABILITY: the owner picks it, commits, and only then discovers it was never
+  possible. This is not a D/E footnote — it binds EVERY option you present, and it binds
+  hardest when a prompt/doc/memory TELLS you the tool exists: prompt text can lag a deny
+  list or a removed tool by months, so your live toolset outranks any instruction that
+  names a capability. (Observed 2026-08-01: an su offered a `Task`-subagent fan-out as its
+  RECOMMENDED route because this playbook's Claude overlay still recommended `Task` —
+  a month after the owner deny-listed it. The tool was absent from that very session.)
 - **Ask the route EVEN IF one option seems obvious.** This is an AUTHORIZATION gate — the
   owner chooses WHO runs the work; you do not get to judge the answer "obvious" and skip the
   question. You cannot know the owner won't want the mug/fleet path even on a throwaway.
@@ -501,6 +541,16 @@ it is easy to never see. They answer the box; the text above it silently dies. T
 - **Content and question travel in SEPARATE turns.** Deliver the content as plain text and
   END THE TURN; ask the question on the NEXT turn. Never append a dialog to the bottom of a
   long report as "one efficient turn" — that turn delivers the dialog and loses the report.
+- **The split is the DIALOG, never the DELIVERABLE — never defer content to a future turn.**
+  The rule above decides where the QUESTION goes; it NEVER licenses withholding a
+  report/plan/analysis you could write NOW. Anticipating that you'll need to ask something is
+  a reason to send the content THIS turn and ask next — not to send neither. If you catch
+  yourself typing **"next turn I'll …"** (or "I'll put X in front of you next turn") about
+  content you already have, THAT IS THE FAILURE: write it out now, end the turn, ask
+  afterwards. A deferred deliverable costs the owner a full round trip, and the thing that
+  never got written is the same silent drop this whole section exists to prevent — only
+  self-inflicted. (Owner-reported 2026-07-25: an su deferred a finished plan twice this way;
+  the PreToolUse guard cannot catch it, because a turn that asks nothing never trips it.)
 - **Every question is SELF-CONTAINED.** The question + its options must carry the minimal
   context the choice needs INSIDE themselves — never "as explained above" / "per my analysis":
   the owner may see only the box. If an option needs a paragraph to be choosable, the
@@ -589,6 +639,20 @@ AUTO you skip the ask and still register per the tiers.
 
 ## Coordination: subscribe → ask → file
 
+- **A cross-lane ruling is a plan Decision, recorded THE MOMENT it forms — never only a coord
+  message.** This applies to ANY agent who issues a ruling other lanes must follow, not just a
+  fleet leader (see also the fleet-leader monitor-wake rule below, which is the same rule in that
+  context): `plans:add-decision { slug, title, body }`. Rationale, observed live: a member
+  re-read a recorded ruling, discovered its own earlier report had been wrong on most of the
+  sites it touched, self-corrected, and swept up several more instances of the same error — a
+  coord message cannot produce that outcome because it is not addressable after delivery.
+  Decisions are the auditable substrate; messages are the notification. Symmetrically, **before
+  acting on a claimed plan item, check for governing decisions** — `scheduler:get_next` /
+  `work_items:claim` surface a claimed item's plan's current decisions inline as
+  `planDecisions` when any exist (no extra round-trip); when working a plan directly, a quick
+  `plans:get { slug, heading:'Decisions' }` costs one call and can save a wrong mapping. When
+  relaying someone else's ruling over coord, name the decision id (`<slug>#D-NNN`) so the
+  recipient re-reads the authority instead of trusting your paraphrase.
 - **Pick the right coord verb — they differ by EFFECT, not just name.** `coord:send` is the
   TRANSPORT primitive: deliver a message, optionally `wake`. `coord:dispatch` is a WORK-HANDOFF
   atom — push-assigns plan items as a lane + delivers a note + wakes + reports pickup liveness;
@@ -621,10 +685,11 @@ AUTO you skip the ask and still register per the tiers.
   comes back empty. Route *ever / was / missed / history* questions to the AUDIENCE HISTORY read
   (`coord:catch-up { audience }` as a member, `coord:feed { audience }` as the firehose) — never
   a state tool. Full map: the `presence-vs-history-who-is-on-what` agent-insights doc.
-- **Ask knowledge-first.** When you don't know who to ask, `coord:ask { question,
-  topics }` answers inline on a hit or routes to the topic's subscribers — reach for it
-  BEFORE escalating to the owner; only ask the owner if the answer is still unclear
-  after asking peers.
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
+  Need a decision only the owner can make? `coord:ask-owner`.
 - **File what you discover — the moment you notice it.** Capture what you notice the
   moment you notice it — don't let it evaporate into prose: a health/degradation signal
   or turn-end reflection → `improvements:capture` (with evidence); a concrete actionable

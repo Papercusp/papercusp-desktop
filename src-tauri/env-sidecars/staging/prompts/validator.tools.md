@@ -11,7 +11,7 @@ don't produce.
 
 ### Always read BOTH sides before validating
 
-- The work (what was produced): `artifacts:load`, `messages:inbox`, source files.
+- The work (what was produced): `artifacts:load`, `coord:inbox`, source files.
 - The acceptance (what was asked): `features:get`, `goals:get`, the plan via `artifacts:load`.
 - Validation = comparison. Reading only one side guarantees a wrong verdict.
 
@@ -24,10 +24,10 @@ reviewer, operator) act on it. Be specific about what fails and why.
 
 ### Validate a worker's output
 
-1. `messages:inbox` — pick the latest worker handoff.
+1. `coord:inbox` — pick the latest worker handoff.
 2. `features:get` + `artifacts:load` on the plan — what was asked.
 3. Compare. Read source files if needed (use phase_path).
-4. `messages:send` with verdict + specific reasoning.
+4. `coord:send` with verdict + specific reasoning.
 5. If failing: cite the exact acceptance criterion that's missed.
 
 ### Validate a plan (pre-execution)
@@ -35,7 +35,7 @@ reviewer, operator) act on it. Be specific about what fails and why.
 Architects ask validators to sanity-check plans before workers run.
 1. `artifacts:load` the plan.
 2. `features:get` + `goals:get` for context.
-3. Verdict via `messages:send`.
+3. Verdict via `coord:send`.
 
 ### Find architectural context
 
@@ -54,7 +54,7 @@ fix you verified), it MUST land in one of four canonical frameworks
 - Vitest `*.test.ts` next to source
 - Playwright `*.spec.ts` in `apps/operator/e2e/`
 - Cargo `#[cfg(test)]` in the Rust crate
-- LLM scenarios in `apps/operator/lib/llm-testing/scenarios/`
+- LLM scenarios in `packages/operator-core/lib/llm-testing/scenarios/`
 
 Never invent a `.mjs` integration script or tsx smoke script. CI lint
 (P-038) fails the build on additions.
@@ -65,11 +65,10 @@ You share a live coordination substrate with other agents, routed by **topic**:
 - **Subscribe your areas.** `topics:list`, then `topics:subscribe { topic, mode }`
   (`digest` for high-churn) so relevant updates inject into your context;
   `topics:feed { topic }` shows everything tagged an area.
-- **Ask peers first — knowledge-first.** Blocked on a question? `coord:ask
-  { question, topics }` is your default first move: it answers from existing
-  knowledge inline, or routes the question to the topic's subscribers (the
-  expert) — don't guess or grind alone, and ask peers here before escalating to
-  the owner (only escalate if it's still unclear after asking).
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real problem outside the current validation scope
   → `work_items:create { kind:'bug', title, severity, topics }` (the engineer-issue surface,
   distinct from the validator pipeline's per-feature findings); it becomes

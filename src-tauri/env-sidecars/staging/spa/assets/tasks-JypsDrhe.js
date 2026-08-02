@@ -1,0 +1,1 @@
+import{t}from"./jsx-runtime-BmDUFisN.js";import{t as s}from"./TasksClient-CiaXgCeJ.js";import{t as e}from"./AdminShell-CyvR_cag.js";var r=t();function n(){return(0,r.jsx)(e,{title:"Tasks",children:(0,r.jsx)(s,{})})}export{n as component};

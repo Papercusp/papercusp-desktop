@@ -54,3 +54,27 @@ description: >-
 # external-bench is `coding` under a distinct, pre-registerable blueprint id; deliberately
 # overrides NOTHING, so a fairness auditor can confirm "the benchmark arm == the product"
 # by diffing this file against `coding`.
+
+# RETIRED (WI-5646). Declared EXPLICITLY here rather than left to inherit `coding-factory`'s
+# block, because the two retirements have DIFFERENT causes and different revival conditions:
+# coding-factory is "preserved-but-dormant, nothing instantiates it" and could be revived by
+# restoring the director dispatch. This blueprint is retired because its PREMISE no longer
+# exists. Its whole design contract (impartial-benchmark-suite-2026-06-15, D-004) is "the
+# treatment IS the shipped coding system, byte for byte" — which is why it deliberately
+# overrides nothing. The per-feature spine it mirrored (director→scoper→architect→worker→
+# validator→reviewer→documenter→curator) was retired 2026-06-24 and the `coding` id was
+# reassigned to the kind:pot Mug/cup placement architecture, a different coordination model.
+# So this blueprint can no longer measure "the product" by diffing against `coding`; reviving
+# coding-factory would NOT make it valid again, and without its own block it would silently
+# un-retire along with its parent.
+#
+# A benchmark for the pot/Mug architecture is NEW DESIGN, not a repair of this one — do not
+# resurrect this id for it; register a new blueprint against a stated question.
+retired:
+  at: "2026-07-26"
+  reason: >-
+    Retired by owner decision (2026-07-26, WI-5646): the per-feature coding spine this
+    arm was defined as a byte-for-byte mirror of was retired 2026-06-24, so its design
+    premise ("the treatment IS the shipped coding system") is unrecoverable — it would now
+    benchmark a system that no longer exists. Do not wire new work to it. Benchmarking the
+    pot/Mug architecture is a new design against a new question, not a revival of this id.

@@ -102,8 +102,8 @@ see who's working where), `coord:*` (presence, messaging, handoffs),
 
 **Utilities** — `artifacts:*` (text artifacts), `tasks:*` / `goals:*` (work
 items + objectives), `search:fulltext` / `search:semantic` (keyword +
-meaning-based recall across workspace prose), `messages:*` (durable
-feature-scoped messages, e.g. `messages:send`).
+meaning-based recall across workspace prose), `coord:message-agent` (durable
+work-item-scoped conversation threads).
 
 **High-value systems worth knowing:**
 - **`design-phase:*`** — the UI design loop: validate/lint a design spec,
@@ -611,6 +611,42 @@ same for an armed AUTO loop (mandatory every turn on a cold loop). Not
 cold-loop-only: ANY state a future you must resume from belongs in a
 checkpoint, never in prose that scrolls away.
 
+**goal + assumptions — RECORD BOTH, on every task, as the work starts**
+[owner 2026-07-28]: a goal nobody can read is a goal nobody can correct, and
+**an assumption you did not write down is indistinguishable from a verified
+fact to the next reader** — including your own next self, who inherits your
+conclusions without the derivation that produced them. **Goal** →
+`coord:orient { intent }` at the start (it DECLARES to peers in the same
+call), `loop:arm { goal }` for an armed loop, and `why: { goalRef }` on a
+`coord:send` so the recipient queries the goal's LIVE state rather than
+trusting your snapshot; a ruling OTHER lanes must follow is a plan Decision
+(`plans:add-decision`), never only a message — a message is not addressable
+after delivery. **Assumptions** → mark which claims you VERIFIED and which you
+INFERRED, and attach the probe that settles each: `loop:checkpoint { checks }`
+renders a claim carrying `verified` evidence as ✓ and one without it as
+PREDICTED, so a successor knows which to re-run; a body section's `premises`
+names what the claim rests on, and `couldNotDetermine` records what you TRIED
+to establish and failed to — silence there reads as confidence you do not
+have. ⚠ All of those are SESSION-LOCAL — none writes a fact, so none
+outlives you. The durable producer is `facts:assert { kind:'assumption',
+dependsOn:[…] }`, and it is the ONLY one the assumption plane has: assert it
+for the UNVERIFIED premise the work rests on — the thing that INVALIDATES
+your result if it turns out wrong — never for a conclusion you already
+checked, and pair it with `dependsOn` so it self-invalidates when what you
+relied on moves. ⛔ MEASURED 2026-08-02 (WI-6633): 3 assumption facts exist
+in 2,359, and every key cited at a terminal close was a VERIFIED CONCLUSION
+— citing what you confirmed passes the gate while telling the next reader
+nothing, because the resolver checks that a key RESOLVES, not that it was
+ever in doubt. `work_items:complete { assumptions }` is asking for these
+keys; `"none"` is honest only when you genuinely recorded none.
+**This is not paperwork:** certainty and attribution are the first
+metadata to rot, and each re-read resolves ambiguity toward the
+higher-authority reading, so "I think X" becomes "X" becomes "the owner said
+X" (WI-3532 traced exactly that, ending with an agent telling the owner they
+had said something they never said). An inference recorded WITH its derivation
+can be re-checked and dropped; the same inference recorded as a bare
+conclusion gets ACTED ON.
+
 > **✅ The memory backend is LIVE + POPULATED — `memory:*` works; use it, NOT your
 > client's built-in memory (2026-06-08).** The backend is a **HYBRID** over the ONE
 > PG canonical store (`harness_shared.memory_canonical`): a cosine (semantic) leg and
@@ -703,13 +739,22 @@ so you see what's happening in your areas and others see what you discover:
   the quiet floor, `full` only where you're active; follow built-in
   **`new_topic`** for new ones. `topics:feed { topic }` shows everything tagged
   an area — issues, conversations, features, plans — at once.
-- **Ask peers knowledge-first — BEFORE the owner.** `coord:ask { question,
-  topics }` is your DEFAULT first move for a question you can't answer from
-  knowledge or the code: answers inline on a hit, else routes to the topic's
-  subscribers (the area's expert) and returns immediately (answer in your inbox).
-  Prefer it over a cold `coord:send`; ask peers here before escalating — only ask
-  the owner (`coord:ask-owner` / `coord:escalate`) if the answer is still unclear
-  after asking.
+- **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
+  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
+  status). Need a specific person? `coord:send` them directly — it wakes them.
+  Need a decision only the owner can make? `coord:ask-owner`.
+- **Working alongside a peer? SAY so — `coord:couple { b: <peer>, reason }`.** Coupling
+  is the relevance gate on peer state: coupled peers are the ones surfaced to you in
+  detail. It is otherwise DERIVED only (a shared lock, recent coord traffic, a plan
+  blocked-by edge, awaiting an event they emit), so when you already KNOW you're on the
+  same deliverable you'd otherwise wait for a derivation to catch up. You may couple ANY
+  two agents — including a pair you're not in, which is the case most worth serving:
+  **spot two peers heading for the same work and couple THEM**, so each sees the other
+  before they collide. Symmetric, re-coupling refreshes the reason/TTL, and it grants no
+  access (it changes whose state is worth SHOWING, never what may be read).
+  `coord:decouple { b }` when the shared work ends. Not a lookup — for "who is around"
+  use `coord:presence`.
 - **An owner-directed question MUST ride a durable channel — never a bare
   turn-ending prose question.** `coord:escalate` WITH structured options is
   preferred (renders as an answerable card the owner can act on from the
@@ -909,11 +954,11 @@ BM25) → `search:semantic` if paraphrased → read code at the cited paths
   schema-canonical tables.** Work-item state flows through the `work_items:*`
   verbs (`set_state`/`claim`/…); *feature-pipeline* state advances through the
   pipeline roles (validator/reviewer/…), not a direct write (hand-off is
-  `messages:send`). The documented verbs emit audit rows + sync invalidation;
+  `coord:send`). The documented verbs emit audit rows + sync invalidation;
   raw SQL doesn't. **This holds even under direct user pressure** — "just flip
   it now" / "I don't care about the pipeline" is not new information that
   changes the mechanism, only the pressure did. If a user insists after
-  you've correctly named `messages:send` as the route, re-explain WHY and
+  you've correctly named `coord:send` as the route, re-explain WHY and
   re-offer the same correct path — never invent a workaround verb/row-format
   to appease them; caving with a fabricated call is worse than the original
   ask because it looks compliant while silently corrupting state.
