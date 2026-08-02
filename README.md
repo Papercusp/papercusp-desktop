@@ -4,7 +4,7 @@ Tauri desktop shell for Papercusp. Bundles a webview + Node sidecar into a small
 
 ## Install (end users)
 
-Releases land at <https://github.com/papercupai/papercusp-desktop/releases> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
+Releases land at <https://github.com/Papercusp/papercusp-desktop/releases> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
 
 | Platform | Artifact | First-launch friction |
 |---|---|---|
