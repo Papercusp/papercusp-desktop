@@ -1188,16 +1188,44 @@ fed_coord_merge_probe() {
 
 # fed_assert_wake_bridge <dst> <dst_agent> <since_epoch_ms> [tries]
 # Surface 1 (P-002/P-003, wake bridge): after the drill sends a directed
-# wake:'required' scope:'hive' message to <dst_agent> (homed on dst), the
-# agent's standing inbox-wake await on dst must FIRE — fired_at stamped after
-# <since_epoch_ms>. Echoes 1 (fired) or 0.
+# wake:'required' scope:'hive' message to <dst_agent> (homed on dst), the wake
+# must actually be DELIVERED to that agent on dst — a
+# harness_shared.event_wake_deliveries row for the agent's
+# `coord:inbox-wake:<agent>` key, created after <since_epoch_ms>, reaching
+# status='delivered'. Echoes 1 (delivered) or 0.
+#
+# ⚠ Do NOT "simplify" this back to event_awaits.fired_at (WI-7012). That was the
+# original predicate and it is STRUCTURALLY DEAD for this key: the inbox-wake
+# watch is always-armed (once=false), and fireAwaitsForKey fires a STANDING row
+# with a plain SELECT — "match without consuming" (store.ts:541-548) — while only
+# the once=true branch UPDATEs fired_at. So the column is never written for the
+# row class the assert targets. Measured on the tower 2026-08-02: once=false =>
+# 28,569 rows, 0 EVER fired; once=true => 58 rows, 55 fired. The assert did not
+# error and did not warn — it returned a confident, quotable, WRONG 0 for a rail
+# that was doing ~350 deliveries an hour.
+#
+# `delivered` is asserted rather than mere row existence so this cannot pass on a
+# wake that queued and then died; dropped/dead/pending are reported as such
+# below. Verified satisfiable before being relied on (tower, same moment):
+# delivered=33,684 (74 in the last hour), dropped=62 (none since 2026-07-10),
+# dead=17 (none since 2026-07-19), and no pending/parked/delivering backlog.
+#
+# Deliberately NOT workspace-scoped: subscriber_id is a globally-unique agent id,
+# so the pair (subscriber_id, event_key) already pins one identity, and pinning a
+# workspace here could only ever re-introduce a false negative on a machine whose
+# workspace differs from the sender's.
 fed_assert_wake_bridge() {
-  local dst="$1" agent="$2" since="$3" tries="${4:-30}" i n
+  local dst="$1" agent="$2" since="$3" tries="${4:-30}" i n seen
+  local where="subscriber_id='$agent' AND event_key='coord:inbox-wake:$agent' AND created_at > to_timestamp($since/1000.0)"
   for i in $(seq 1 "$tries"); do
-    n="$(drv_psql "$dst" "SELECT count(*) FROM harness_shared.event_awaits WHERE subscriber_id='$agent' AND event_key='coord:inbox-wake:$agent' AND fired_at IS NOT NULL AND fired_at > to_timestamp($since/1000.0);" 2>/dev/null | tr -d '[:space:]')"
+    n="$(drv_psql "$dst" "SELECT count(*) FROM harness_shared.event_wake_deliveries WHERE $where AND status='delivered';" 2>/dev/null | tr -d '[:space:]')"
     if [ -n "$n" ] && [ "$n" -ge 1 ] 2>/dev/null; then echo 1; return 0; fi
     sleep 3
   done
+  # Name WHICH failure this is: no delivery row at all (the bridge produced
+  # nothing) reads very differently from one stuck pending or already dropped.
+  seen="$(drv_psql "$dst" "SELECT coalesce(string_agg(status || '=' || n, ', ' ORDER BY status), 'no delivery rows at all') FROM (SELECT status, count(*)::text AS n FROM harness_shared.event_wake_deliveries WHERE $where GROUP BY status) s;" 2>/dev/null | tr -d '\n')"
+  echo "✗ wake-bridge: no 'delivered' inbox-wake for $agent after ${since}ms — observed: ${seen:-<query failed>}" >&2
   echo 0; return 1
 }
 

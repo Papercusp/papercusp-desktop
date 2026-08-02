@@ -275,9 +275,9 @@ if wants wakebridge || wants receipts; then
 
     if wants wakebridge; then
       if [ "$(fed_assert_wake_bridge vm "$AGENT" "$SINCE_W" "$TRIES")" = "1" ]; then
-        record wakebridge PASS "inbox-wake fired on $VM_HOSTNAME for $AGENT"
+        record wakebridge PASS "inbox-wake delivered on $VM_HOSTNAME for $AGENT"
       else
-        record wakebridge FAIL "inbox-wake never fired on $VM_HOSTNAME for $AGENT"
+        record wakebridge FAIL "no delivered inbox-wake on $VM_HOSTNAME for $AGENT (see wake-bridge: line above for the statuses actually observed)"
       fi
     fi
     if wants receipts; then
