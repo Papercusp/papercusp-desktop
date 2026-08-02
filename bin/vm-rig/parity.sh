@@ -228,12 +228,27 @@ fi
 # SENDER (0 = dead receipt rail; 2 = the M5a N-1 false-delivered bug).
 if wants wakebridge || wants receipts; then
   fed_log "LEGS 2+3 — wake bridge (P-002/P-003) + delivery receipts (P-008 + M5a)"
-  AGENT="$(drv_psql vm "SELECT subscriber_id FROM harness_shared.event_awaits WHERE event_key LIKE 'coord:inbox-wake:%' AND fired_at IS NULL ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  if [ -z "$AGENT" ]; then
-    wants wakebridge && record wakebridge FAIL "no VM-homed agent holds a standing coord:inbox-wake await"
-    wants receipts   && record receipts   FAIL "not attempted — no VM-homed target agent"
+  # Target a DEDICATED probe identity homed on the VM — never an ambient agent
+  # that merely happens to have an inbox-wake row. An ambient row is usually a
+  # DEAD session's leftover (they are created at session start and are not
+  # expired on death): sending to one reds this leg with "wake never fired"
+  # while proving nothing about the bridge, because nothing was ever going to
+  # service that corpse. Measured 2026-08-02: the only inbox-wake awaits that
+  # have EVER fired on the Mac belong to `su-live1-imac-probe`, the LIVE-1
+  # drill's own registered probe client — this mirrors that precedent.
+  #
+  # The watch is always-armed at session start (turn-lifecycle-control);
+  # coord:await-inbox refreshes that same standing row, which is what an MCP
+  # call under a fresh --client identity needs to materialise it.
+  AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-parity-probe}"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "/tmp/vmcall.sh coord:await-inbox '{\"note\":\"LIVE-1 parity probe — standing inbox watch (WI-7000)\"}' --client $AGENT --workspace papercusp-workspace --harness papercusp" >/dev/null 2>&1
+  armed="$(drv_psql vm "SELECT count(*) FROM harness_shared.event_awaits WHERE subscriber_id='$AGENT' AND event_key='coord:inbox-wake:$AGENT';" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$armed" ] || [ "$armed" = "0" ]; then
+    wants wakebridge && record wakebridge FAIL "could not arm probe watch for $AGENT on $VM_HOSTNAME (runner/infra, not the bridge)"
+    wants receipts   && record receipts   FAIL "not attempted — probe watch unarmed"
   else
-    echo "  target agent (homed on $VM_HOSTNAME): $AGENT" | scn_diag
+    echo "  armed standing inbox watch for probe identity $AGENT ($armed row/s)" | scn_diag
     SINCE_W="$(dst_now_ms vm)"
     # coord:send REQUIRES `summary` and `expects` (there is deliberately no
     # default for expects — an FYI must say 'none' explicitly), and `body` is an
