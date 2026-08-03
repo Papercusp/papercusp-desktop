@@ -2714,54 +2714,23 @@ else
   echo "  (none found)"
 fi
 
-# Bake a seed dump (Part 2 — build-time data sync to Mac/Windows).
+# Seed-dump bake REMOVED — the mechanism it fed no longer exists (EI-19455334533123459).
 #
-# When PAPERCUSP_SEED_PG_URL is set, pg_dump that DB into sidecar/seed.dump.
-# On first launch in a fresh install, the desktop's Rust main detects an
-# empty data dir AND the presence of seed.dump, then runs pg_restore so
-# the user's Mac/Windows install starts with the same data as Linux at
-# build time.
+# This block used to pg_dump into $SIDECAR_DIR/seed.dump, and when no dump was
+# present it printed "bundle will boot empty". NOTHING has consumed seed.dump
+# since the restore path was retired in self-contained-migration-baseline-2026-06-02
+# (D-004), so that line described a defect that could not occur — and it had
+# already misdiagnosed the seed twice by the time this was removed.
 #
-# Typical invocation:
-#   PAPERCUSP_SEED_PG_URL=$(jq -r .url ~/.papercusp/embedded-pg.json) \
-#     bin/build-desktop-sidecar.sh
+# Verified at removal (2026-08-03), so a future reader need not re-derive it:
+#   • src-tauri/src/ contains NO seed.dump detection and NO pg_restore — the
+#     comment here previously asserted the Rust main did both. It did not.
+#   • startEmbeddedPostgresServer() accepts no seedDumpPath/pgRestoreBin; the
+#     tombstone is at embedded-postgres-server/src/index.js:499.
 #
-# When PAPERCUSP_SEED_PG_URL is unset, the seed step is skipped entirely
-# and the resulting bundle behaves like before (empty PG on first boot,
-# only schema applied via migrations).
-if [[ -n "${PAPERCUSP_SEED_PG_URL:-}" ]]; then
-  echo "→ baking seed.dump from $PAPERCUSP_SEED_PG_URL"
-  # --no-owner / --no-acl keep the dump portable across PG roles (the
-  # restored DB owns rows as harness_admin, regardless of source owner).
-  # --no-publications skips zero_harness publication (recreated by the
-  # embedded-pg-server's startup code, post-migrations).
-  # Custom format (-F c) is compressed and supports parallel restore.
-  if "$SIDECAR_DIR/bin/pg_dump" \
-        -d "$PAPERCUSP_SEED_PG_URL" \
-        -F c --no-owner --no-acl --no-publications --no-subscriptions \
-        --exclude-schema='_zero_*' --exclude-schema='zero_0*' \
-        -f "$SIDECAR_DIR/seed.dump" 2>&1; then
-    seed_size=$(du -h "$SIDECAR_DIR/seed.dump" | awk '{print $1}')
-    echo "  ✓ seed.dump baked ($seed_size)"
-  else
-    echo "  ⚠ pg_dump failed; bundle will ship without seed (fresh installs start empty)"
-    rm -f "$SIDECAR_DIR/seed.dump"
-  fi
-else
-  # The temp build dir never carries a prior seed — pull it forward from
-  # the last PUBLISHED bundle when present (the cross-platform bake flow).
-  if [[ -f "$SIDECAR_FINAL_DIR/seed.dump" && ! -f "$SIDECAR_DIR/seed.dump" ]]; then
-    cp -a "$SIDECAR_FINAL_DIR/seed.dump" "$SIDECAR_DIR/seed.dump"
-  fi
-  if [[ -f "$SIDECAR_DIR/seed.dump" ]]; then
-    seed_size=$(du -h "$SIDECAR_DIR/seed.dump" | awk '{print $1}')
-    echo "→ no PAPERCUSP_SEED_PG_URL set; reusing existing seed.dump ($seed_size)"
-    echo "  (this is the cross-platform path: bake on Linux once, rsync to Mac/Win,"
-    echo "   then run this script without the env var so the pre-baked dump survives.)"
-  else
-    echo "→ no PAPERCUSP_SEED_PG_URL set and no existing seed.dump; bundle will boot empty"
-  fi
-fi
+# A fresh install now builds its schema by applying 000-baseline.sql + migrations
+# directly, so an empty first boot is the DESIGNED path, not a missing seed.
+# Re-introducing a build-time data seed means restoring the consumer FIRST.
 
 # ── chat dock: pui + companion wasm + zellij 0.44.3 (cross-platform) ─────────
 # The desktop chat dock runs `pui chat` (zellij hosting the pui-companion plugin).
