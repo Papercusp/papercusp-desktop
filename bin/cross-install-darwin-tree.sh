@@ -113,18 +113,49 @@ echo "==> cross-install-darwin-tree: npm ci (npm_config_os=darwin npm_config_cpu
 
 echo "==> cross-install-darwin-tree: verifying node_modules has no unexplained linux-native compile fallback"
 # A .node file is judged bad only if it is NOT Mach-O *and* no sibling .node
-# file anywhere under the SAME top-level package directory is Mach-O either —
-# a package that bundles multi-platform prebuilds (the common convention: a
-# `prebuilds/<platform>-<arch>/` or `bin/napi-v6/<platform>/<arch>/` layout,
-# e.g. rabin-native, onnxruntime-node, bufferutil) always ships inert
-# other-platform binaries alongside the darwin one, and those are never loaded
-# at runtime (node-gyp-build / the package's own loader picks by the ACTUAL
-# running platform) — flagging them was the prior version of this check's
-# false-positive: it failed on files like
+# file anywhere in its "platform-variant family" is Mach-O either. Two
+# unrelated conventions both need this, so the grouping key (`family_key`
+# below) is defined to subsume both:
+#   1. A SINGLE package bundles multiple platforms' prebuilds as files inside
+#      itself (`prebuilds/<platform>-<arch>/` or `bin/napi-v6/<platform>/
+#      <arch>/`, e.g. rabin-native, onnxruntime-node, bufferutil) — inert
+#      other-platform binaries never loaded at runtime (the package's own
+#      loader picks by the ACTUAL running platform). Family key = the
+#      package's own directory (unsuffixed package names pass through
+#      unchanged, so this case is just "group by package dir").
+#   2. A package FAMILY ships as several SEPARATE sibling npm packages, one
+#      per platform, selected via `optionalDependencies` (e.g. `@unrs/
+#      resolver-binding-{linux,darwin,win32,...}-<arch>[-<libc>]`) — the exact
+#      convention esbuild/rollup/swc/lightningcss/sharp/oxc-resolver/tailwind-
+#      oxide/nx/rolldown all use too. npm's optionalDependencies platform
+#      filtering is USUALLY exclusive (only the matching variant installs),
+#      but was observed 2026-08-03 to install BOTH the darwin-x64 (correct)
+#      AND linux-x64-gnu (harmless extra) variants of `@unrs/resolver-
+#      binding-*` in the same `npm ci` — a real npm resolver quirk, not
+#      something an env var controls. Family key = the package name with a
+#      trailing `-<platform>[-<arch>[-<libc>]]` suffix stripped, so
+#      `@unrs/resolver-binding-linux-x64-gnu` and `@unrs/resolver-binding-
+#      darwin-x64` both normalize to `@unrs/resolver-binding`.
+# The prior version of this check flagged every file independently and had
+# two classes of false-positive from this: (1) failed on e.g.
 # `rabin-native/prebuilds/android-x64/rabin-native.node` even though that same
-# package's `prebuilds/darwin-x64/rabin-native.node` was present and correct.
+# package's `prebuilds/darwin-x64/rabin-native.node` was present and correct;
+# (2) failed on `@unrs/resolver-binding-linux-x64-gnu` even though the sibling
+# `@unrs/resolver-binding-darwin-x64` package was present and correct.
 KNOWN_OPTIONAL_NATIVE_FALLBACK_PKGS="cpu-features ssh2"  # see header comment
-declare -a all_nodefiles=() pkgroots=() ismacho=()
+family_key() {  # $1 = pkgroot (e.g. "pkg" or "@scope/pkg") -> family key
+  local pkgroot="$1" scope="" name="$1"
+  if [[ "$pkgroot" == @*/* ]]; then
+    scope="${pkgroot%%/*}/"
+    name="${pkgroot#*/}"
+  fi
+  name="$(printf '%s' "$name" | sed -E \
+    -e 's/-(gnu|musl|msvc|gnueabihf|musleabihf)$//' \
+    -e 's/-(x64|arm64|ia32|arm|riscv64|ppc64|s390x|wasm32)$//' \
+    -e 's/-(linux|darwin|win32|android|freebsd|ios)$//')"
+  printf '%s%s' "$scope" "$name"
+}
+declare -a all_nodefiles=() pkgroots=() families=() ismacho=()
 while IFS= read -r nodefile; do
   rel="${nodefile#"$OUT"/node_modules/}"
   case "$rel" in
@@ -133,6 +164,7 @@ while IFS= read -r nodefile; do
   esac
   all_nodefiles+=("$nodefile")
   pkgroots+=("$pkgroot")
+  families+=("$(family_key "$pkgroot")")
   if file "$nodefile" 2>/dev/null | grep -q 'Mach-O'; then
     ismacho+=(1)
   else
@@ -140,18 +172,19 @@ while IFS= read -r nodefile; do
   fi
 done < <(find "$OUT/node_modules" -name '*.node' -type f 2>/dev/null)
 
-declare -A pkg_has_macho=()
+declare -A family_has_macho=()
 for i in "${!all_nodefiles[@]}"; do
-  [[ "${ismacho[$i]}" == "1" ]] && pkg_has_macho["${pkgroots[$i]}"]=1
+  [[ "${ismacho[$i]}" == "1" ]] && family_has_macho["${families[$i]}"]=1
 done
 
 declare -a bad=() excused=()
 for i in "${!all_nodefiles[@]}"; do
   [[ "${ismacho[$i]}" == "1" ]] && continue
-  pkgroot="${pkgroots[$i]}"
-  if [[ "${pkg_has_macho[$pkgroot]:-0}" == "1" ]]; then
-    continue  # a Mach-O sibling exists elsewhere in this same package — inert other-platform bundle, ignore
+  fam="${families[$i]}"
+  if [[ "${family_has_macho[$fam]:-0}" == "1" ]]; then
+    continue  # a Mach-O sibling exists elsewhere in this same platform-variant family — inert other-platform bundle, ignore
   fi
+  pkgroot="${pkgroots[$i]}"
   pkgname="${pkgroot#@*/}"; pkgname="${pkgname:-$pkgroot}"
   is_known=0
   for k in $KNOWN_OPTIONAL_NATIVE_FALLBACK_PKGS; do
