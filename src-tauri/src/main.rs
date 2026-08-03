@@ -3259,12 +3259,18 @@ fn point_window_at_operator<R: tauri::Runtime>(
     //
     // ⚠ That re-eval is a BOUNDED BURST, not a guarantee of convergence: the loop
     // below runs `reinject_ticks` times 300ms apart (callers pass 10 or 30 => a
-    // 3-9s window) and there is NO on_page_load re-inject, so ANY reload after
-    // that window leaves all three globals permanently unset. That is EXPECTED,
-    // not a bug — measured on two normal `npm run tauri dev` instances 2026-08-03
-    // (both ~27min uptime, all three null, __TAURI_INTERNALS__.invoke still a
-    // function; Vite full-reloads had wiped them). It is exactly why every live
-    // consumer treats these as OPTIONAL OVERRIDES rather than requirements:
+    // 3-9s window) and there is NO on_page_load re-inject, so once that window
+    // closes nothing ever sets these globals again.
+    // MEASURED 2026-08-03 (WI-7982), three normal `npm run tauri dev` webviews:
+    // all three globals null in every one, while __TAURI_INTERNALS__.invoke was
+    // still a function — two instances ~27min into their life AND one only ~30s
+    // after a rebuild-restart, i.e. already past the burst. So in a dev shell the
+    // steady state is ABSENT, and the burst evidently does not survive (or never
+    // lands on) the Vite SPA's document commit. WHICH of those two it is has NOT
+    // been determined — the burst races the page load with no readback, so
+    // deciding it needs a log line here plus one in the SPA. Do not assume.
+    // This is EXPECTED, not a bug: it is exactly why every live consumer treats
+    // these as OPTIONAL OVERRIDES rather than requirements:
     // pty-tauri.ts:43-49 keys native-detection off __TAURI_INTERNALS__ and only
     // REJECTS on an explicitly non-native __PAPERCUSP_TAURI__ (a requirement there
     // made the wizard's buttons vanish after a reload — found live on Windows
