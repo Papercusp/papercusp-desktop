@@ -216,6 +216,18 @@ done
   || fail "darwin sidecar not found at $DARWIN_SIDECAR — build it: TARGET_OS=darwin TARGET_ARCH=x64 PAPERCUSP_SIDECAR_OUT=$DARWIN_SIDECAR bin/build-desktop-sidecar.sh"
 file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -q 'Mach-O' \
   || fail "sidecar at $DARWIN_SIDECAR is NOT darwin (bin/node is not Mach-O) — rebuild the darwin sidecar"
+# ...and it must be a build that carries what this cut is shipping (EI-19446480107603858).
+# The two asserts above are loud when the sidecar is MISSING or the WRONG ARCH, and
+# completely silent when it is merely OLD — which is the common case, because this
+# script never rebuilds the sidecar and rebuilding it is a separate manual step. This
+# prints the sidecar's recorded age/gitHead unconditionally (the silence WAS the bug),
+# and refuses the build only when the caller asserted a commit it does not carry
+# (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS=<sha>). It deliberately does NOT fail on
+# "gitHead != HEAD" — see bin/lib/sidecar-freshness.js for why that would be a
+# false-positive machine on this shared checkout.
+node "$HERE/check-sidecar-freshness.js" \
+  --sidecar "$DARWIN_SIDECAR" --repo-root "$ROOT/.." --label "sidecar-freshness:darwin" \
+  || fail "darwin sidecar freshness check refused this build (see above)"
 
 echo "===== mac cross-build start $(date) ====="
 echo "  roles=$ROLES  target=$MAC_BUILD_TARGET  version=$VERSION  sha=${PAPERCUSP_BUILD_SHA:-<none>}"

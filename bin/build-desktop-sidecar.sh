@@ -3064,6 +3064,42 @@ fi
 rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 
+# ── Provenance (EI-19446480107603858) ────────────────────────────────────────
+# Record WHAT SOURCE this sidecar was baked from, using the SAME shared emitter
+# and schema as the mac/windows/linux release legs (bin/emit-build-provenance.sh)
+# — no second provenance shape, so verify-provenance-parity.sh stays satisfied.
+#
+# WHY: the cross-build legs CONSUME a sidecar they did not build, and gated it on
+# existence + arch only. Both guards are loud when it is MISSING and silent when
+# it is STALE — and stale is the common case, because rebuilding it is a separate
+# manual step. On 2026-08-03 (WI-3307) that shipped a bundle carrying a 9-hour-old
+# operator while the bundle's OTHER half (the rsync'd source tree) was current, so
+# the acceptance criteria all passed on the fresh half. Without this file the
+# staleness is not merely unguarded, it is UNKNOWABLE — nothing on disk records
+# when the sidecar was baked or from which commit.
+#
+# Non-fatal by design: a metadata emit must never kill a fully-built, verified
+# sidecar (the EI-9899 lesson that produced bin/lib/portable-sha256.sh). Consumers
+# treat an absent file as "cannot judge", never as a pass.
+if [[ -x "$HERE/emit-build-provenance.sh" ]]; then
+  PROVENANCE_GIT_ROOT="$REPO_ROOT" \
+    bash "$HERE/emit-build-provenance.sh" \
+      "$SIDECAR_DIR" \
+      "${PAPERCUSP_DESKTOP_VERSION:-unknown}" \
+      "${PAPERCUSP_BUILD_SHA:-}" \
+      false \
+      "$SIDECAR_DIR/serve.mjs" \
+      "$SIDECAR_DIR/bin/node" \
+      >/dev/null \
+    || echo "→ WARN: sidecar provenance emit failed (non-fatal; consumers will report 'cannot judge')"
+  # Explicit `if`, not `[[ ... ]] && echo` — a trailing AND-list leaves the block's
+  # exit status at 1 when the test fails, which is a set -e footgun in a script that
+  # has already done 20 minutes of work.
+  if [[ -f "$SIDECAR_DIR/build-provenance.json" ]]; then
+    echo "→ provenance recorded at $SIDECAR_DIR/build-provenance.json"
+  fi
+fi
+
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
 echo "✓ sidecar built at $SIDECAR_DIR ($total_size)"
