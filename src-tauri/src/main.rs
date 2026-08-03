@@ -3259,8 +3259,11 @@ fn point_window_at_operator<R: tauri::Runtime>(
     //
     // ⚠ That re-eval is a BOUNDED BURST, not a guarantee of convergence: the loop
     // below runs `reinject_ticks` times 300ms apart (callers pass 10 or 30 => a
-    // 3-9s window) and there is NO on_page_load re-inject, so once that window
-    // closes nothing ever sets these globals again.
+    // 3-9s window) and NOTHING re-injects afterwards, so once that window closes
+    // nothing ever sets these globals again. (There IS an on_page_load handler —
+    // main.rs:7521, on PageLoadEvent::Started — but it only flushes IPC callbacks
+    // and retargets /api via env_switch::retarget_for_url; it does not touch these
+    // three. It is, however, exactly where a re-inject would belong.)
     // MEASURED 2026-08-03 (WI-7982), three normal `npm run tauri dev` webviews:
     // all three globals null in every one, while __TAURI_INTERNALS__.invoke was
     // still a function — two instances ~27min into their life AND one only ~30s
@@ -3279,8 +3282,9 @@ fn point_window_at_operator<R: tauri::Runtime>(
     // the webview loads devUrl directly — this page isn't used", index.html:46),
     // so in dev nothing polls for a late set at all.
     // => If you add a consumer, make absence INERT. Do not "fix" this by requiring
-    //    the global; if a future consumer genuinely needs it post-reload, add an
-    //    on_page_load re-inject rather than widening the burst. (WI-7982)
+    //    the global; if a future consumer genuinely needs it post-reload, add the
+    //    re-inject to the EXISTING on_page_load handler (main.rs:7521) rather than
+    //    widening this burst. (WI-7982)
     let inject = format!(
         "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
         base, app_base
