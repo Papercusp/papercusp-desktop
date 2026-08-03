@@ -181,29 +181,61 @@ sparse_args=()
 
 log "cutting installer seed (hive=$SEED_HIVE rev=$SEED_REV depth=${SEED_DEPTH:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=${PAPERCUSP_SEED_REUSE_CORESTORE:-auto} sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0) emit-epoch-key=${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1})"
 
-set +e
-(
-  cd "$OPERATOR_DIR"
-  OPATH="$PATH"
-  set -a
-  [[ -f ./.env.local ]] && . ./.env.local
-  set +a
-  export PATH="$OPATH:$PATH"
-  PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
-    npx tsx lib/release/cut-seed-cli.ts \
-      --out "$SEED_OUT" \
-      --repo "$SEED_REPO" \
-      --origin "$SEED_ORIGIN" \
-      --workspace-id "$SEED_WORKSPACE" \
-      --hive "$SEED_HIVE" \
-      --rev "$SEED_REV" \
-      "${depth_args[@]}" \
-      "${core_args[@]}" \
-      "${sparse_args[@]}" \
-      "${emit_args[@]}"
-)
+# The cut is a function so the P-014 sparse fallback below can re-run it verbatim with a
+# different flag set. Output is TEE'd (not swallowed) so it stays visible in the build log
+# AND is greppable for the specific refusal we know how to recover from. `pipefail` is on,
+# so `$?` after the pipeline is the CLI's exit code, not tee's.
+CUT_LOG="$(mktemp -t papercusp-seed-cut-XXXXXX.log)"
+run_cut() {
+  set +e
+  (
+    cd "$OPERATOR_DIR"
+    OPATH="$PATH"
+    set -a
+    [[ -f ./.env.local ]] && . ./.env.local
+    set +a
+    export PATH="$OPATH:$PATH"
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
+      npx tsx lib/release/cut-seed-cli.ts \
+        --out "$SEED_OUT" \
+        --repo "$SEED_REPO" \
+        --origin "$SEED_ORIGIN" \
+        --workspace-id "$SEED_WORKSPACE" \
+        --hive "$SEED_HIVE" \
+        --rev "$SEED_REV" \
+        "${depth_args[@]}" \
+        "${core_args[@]}" \
+        "${emit_args[@]}" \
+        "$@"
+  ) 2>&1 | tee -a "$CUT_LOG"
+  local rc=$?
+  set -e 2>/dev/null || true
+  return "$rc"
+}
+
+run_cut "${sparse_args[@]}"
 cut_rc=$?
-set -e 2>/dev/null || true
+
+# P-014 (D-012) — the sparse fallback. cut-seed-cli now REFUSES --sparse when it cannot
+# append a fresh head __snapshot__ (only a writable/quiesced open can; the WI-4487
+# live-operator read-only path holds no write lock). Before that refusal existed the cut
+# "succeeded" and silently shipped the FULL core: the 2026-07-21 release carried 461,475
+# blocks / 1.9 GB labelled sparse and nobody noticed for three weeks.
+#
+# A hard failure here would be worse than the bug — the build would fall back to the STALE
+# committed seed. So retry ONCE as a full cut: the release still gets a CURRENT, honestly
+# labelled seed (no coreSparseFrom key at all), and the size cost is stated out loud with
+# the remedy rather than hidden behind a console.warn.
+if [[ "$cut_rc" -ne 0 && ${#sparse_args[@]} -gt 0 ]] \
+  && grep -q -- '--sparse requires a fresh head snapshot' "$CUT_LOG"; then
+  log "WARN: SPARSE CUT REFUSED — the live operator holds the store, so no fresh head snapshot"
+  log "WARN: could be appended, and a sparse cut without one silently ships the FULL core."
+  log "WARN: retrying as a FULL cut: the bundle will carry the ENTIRE own-log history (~2GB)."
+  log "WARN: to ship a genuinely sparse seed, quiesce the operator on this box and re-run."
+  sparse_args=()
+  run_cut
+  cut_rc=$?
+fi
 
 if [[ "$cut_rc" -ne 0 ]]; then
   log "WARN: seed cut FAILED (rc=$cut_rc)"
