@@ -47,25 +47,42 @@ pub const SCHEME: &str = "papercusp";
 
 /// Whether the window loads `papercusp://localhost` instead of the HTTP base.
 ///
-/// DEFAULT: **Linux only**. The custom scheme exists to dodge WebKitGTK's
-/// ~6-connection libsoup pool cap (the connection-pool bug this scheme was
-/// built to kill) — a WebKitGTK/Linux problem. macOS `WKWebView` and Windows
-/// `WebView2` have no such cap AND the buffered scheme handler renders a BLANK
-/// webview there (found live 2026-07-01 on macOS: the operator SPA loads fine
-/// over HTTP in Safari + with the scheme off, but never mounts under
-/// `papercusp://` in WKWebView). So default the scheme ON only on Linux and let
-/// the webview ride plain loopback HTTP on macOS/Windows (WKWebView/WebView2
-/// pool many connections fine).
+/// DEFAULT: **Linux only** — for ONE surviving reason, not the two this comment
+/// used to give. The custom scheme exists to dodge WebKitGTK's ~6-connection
+/// libsoup pool cap (the connection-pool bug this scheme was built to kill) — a
+/// WebKitGTK/Linux problem. macOS `WKWebView` and Windows `WebView2` have no
+/// such cap, so the scheme buys them nothing. **That reason stands.**
+///
+/// ⚠ The second reason — "AND the buffered scheme handler renders a BLANK
+/// webview there (found live 2026-07-01 on macOS)" — is **REFUTED**. P-017
+/// re-tested on REAL hardware 2026-08-03: macOS/WKWebView mounts and fully
+/// renders under `papercusp://localhost`, and Windows/WebView2 under
+/// `http://papercusp.localhost` (D-054, `no-http-anywhere-2026-07-28`; the
+/// Windows half was already refuted 2026-07-04 by WI-2734). The 2026-07-01
+/// observation was confounded — `install_load_failure_recovery` is Linux-only
+/// (EI-19425361953094049), so any operator boot-race presents as a permanent
+/// blank window that is indistinguishable from a scheme failure.
+///
+/// So the default stays Linux-only because the scheme is POINTLESS elsewhere,
+/// not because it is BROKEN elsewhere. Flipping it is P-031, gated on the
+/// packaged E2E battery under the override plus cross-platform load-failure
+/// recovery.
 ///
 /// Explicit override wins on every platform: `PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL=1`
 /// forces it on, `=0` forces it off. With NO override the default is
-/// **Linux-only ON** — macOS `WKWebView` / Windows `WebView2` render the
-/// buffered scheme handler BLANK (found live 2026-07-01 on macOS: the operator
-/// SPA mounts fine over plain loopback HTTP but never mounts under
-/// `papercusp://`), and neither has the WebKitGTK connection-pool cap the scheme
-/// exists to dodge, so they ride HTTP by default. (Before this, the default was
-/// ON on every platform — the documented Linux-only intent above was never
-/// implemented, which shipped a blank webview in the packaged macOS app.)
+/// **Linux-only ON**, because neither macOS nor Windows has the WebKitGTK
+/// connection-pool cap the scheme exists to dodge, so they ride HTTP by default.
+/// (The "render the buffered scheme handler BLANK" rationale that used to appear
+/// here is REFUTED — see the note above.)
+///
+/// (Before this, the default was ON on every platform — the documented
+/// Linux-only intent above was never implemented, which shipped a blank webview
+/// in the packaged macOS app. Note the CAUSE of that blank is now in doubt: the
+/// scheme itself renders fine on real macOS hardware, so the 2026-07-01 blank is
+/// better explained by the missing cross-platform load-failure recovery. The
+/// LESSON stands regardless, and is why `scheme_default` is a pure function with
+/// Linux-runnable tests: an intent expressed only in a `cfg!` + a docstring is
+/// an intent nothing verifies.)
 pub fn enabled() -> bool {
     scheme_default(
         std::env::var("PAPERCUSP_DESKTOP_CUSTOM_PROTOCOL")
@@ -112,15 +129,33 @@ fn scheme_default(env_override: Option<&str>, target_os: &str) -> bool {
 ///     the window strands on the dead `:3070` frontendDist, the gate never
 ///     renders, WSL never bootstraps, and the GUI FATALs at 120s — the shipped
 ///     Windows first-run dead-end.
-///   - macOS: **NO** — WKWebView renders the raw `papercusp://` scheme blank
-///     (verified live 2026-07-01) AND macOS has no long pre-operator onboarding
-///     (the operator spawns natively), so the bundled bootstrap page covers it.
+///   - macOS: **NO** — but NOT for the reason this comment used to give. The
+///     "WKWebView renders the raw `papercusp://` scheme blank (verified live
+///     2026-07-01)" claim is **REFUTED**: P-017 re-tested on REAL macOS
+///     hardware 2026-08-03 and WKWebView mounts and fully renders under
+///     `papercusp://localhost` (D-054, `no-http-anywhere-2026-07-28`). The
+///     2026-07-01 observation was confounded — see the note on
+///     `install_load_failure_recovery` being Linux-only
+///     (EI-19425361953094049), which makes any operator boot-race present as a
+///     permanent blank window and is indistinguishable from a scheme failure.
+///     What SURVIVES as the reason to stay off: macOS has no long pre-operator
+///     onboarding (the operator spawns natively), so the bundled bootstrap page
+///     already covers it — this default buys nothing here. Flipping it is
+///     P-031, gated on the packaged E2E battery under the override.
 ///
 /// Post-operator the window still navigates to the real loopback HTTP port on
 /// Windows/macOS (see `point_window_at_operator` gated on [`enabled()`]), so
-/// steady-state SSE streams natively rather than through this buffered handler
-/// — which matters on Windows where endpoint-IPC is unavailable (the WSL
-/// operator publishes a Unix socket the Windows host rejects).
+/// steady-state SSE streams natively rather than through this buffered handler.
+///
+/// ⚠ The trailing clause here used to read "which matters on Windows where
+/// endpoint-IPC is unavailable (the WSL operator publishes a Unix socket the
+/// Windows host rejects)". That is **STALE** — WI-3395 fixed exactly this. The
+/// launcher now sets `PAPERCUSP_IPC_TCP=1` across `WSLENV` when routing via
+/// WSL, so the sidecar binds `tcp://127.0.0.1:0` instead of a Unix socket and
+/// the Windows host dials it as loopback TCP (`IpcStream::Tcp`,
+/// `endpoint_ipc.rs`). Endpoint-IPC IS available on Windows, and that TCP path
+/// is what lights up the `/api` connection-cap bypass there (D-065/D-066,
+/// `no-http-anywhere-2026-07-28`).
 ///
 /// Same explicit env override as [`enabled()`]: `=1` forces on, `=0` forces off.
 pub fn onboarding_origin_enabled() -> bool {
@@ -682,7 +717,16 @@ mod tests {
     // --- scheme-default regression guard (blank-macOS-webview, 2026-07-01) ---
     // These assert the invariant that the earlier bug violated: with NO env
     // override the custom scheme defaults ON *only* on Linux, because macOS
-    // WKWebView / Windows WebView2 render the buffered scheme handler BLANK.
+    // ⚠ This comment used to read "WKWebView / Windows WebView2 render the
+    // buffered scheme handler BLANK." Both halves are now REFUTED on real
+    // hardware: Windows/WebView2 on 2026-07-04 (WI-2734) and macOS/WKWebView on
+    // 2026-08-03 (D-054, `no-http-anywhere-2026-07-28`, P-017). The defaults
+    // below still assert OFF, but that is now a NOT-YET-VERIFIED-END-TO-END
+    // decision (P-031: needs the packaged E2E battery under the override, plus
+    // cross-platform `install_load_failure_recovery` — EI-19425361953094049),
+    // NOT a rendering limitation. Do not re-justify these defaults with "renders
+    // blank"; that claim is dead.
+    //
     // scheme_default() is pure, so CI (which builds on Linux) can exercise the
     // macOS/Windows arms it could never reach through a raw `cfg!(target_os)`.
 
@@ -694,11 +738,15 @@ mod tests {
         );
         assert!(
             !scheme_default(None, "macos"),
-            "macOS must default OFF — WKWebView renders papercusp:// blank",
+            "macOS must default OFF — pending P-031's packaged E2E battery under \
+             the override (NOT because WKWebView renders papercusp:// blank; \
+             that claim is REFUTED on real hardware, D-054)",
         );
         assert!(
             !scheme_default(None, "windows"),
-            "windows must default OFF — WebView2 renders papercusp:// blank",
+            "windows must default OFF — pending P-031's packaged E2E battery under \
+             the override (NOT because WebView2 renders papercusp:// blank; that \
+             claim is REFUTED, WI-2734 2026-07-04)",
         );
         assert!(
             !scheme_default(None, "ios"),
@@ -733,7 +781,10 @@ mod tests {
     // must be served on Windows (as well as Linux), because a truly-cold Windows
     // machine renders the WslOnboardingGate ONLY through this handler — the gate
     // is what bootstraps WSL, which is what lets the operator (and thus the real
-    // app) come up at all. macOS stays OFF (WKWebView renders papercusp:// blank).
+    // app) come up at all. macOS stays OFF because it has no equivalent
+    // pre-operator onboarding phase (the operator spawns natively) — NOT because
+    // "WKWebView renders papercusp:// blank", which is REFUTED on real hardware
+    // (D-054, `no-http-anywhere-2026-07-28`).
 
     #[test]
     fn onboarding_origin_defaults_to_linux_and_windows() {
@@ -748,8 +799,10 @@ mod tests {
         );
         assert!(
             !onboarding_origin_default(None, "macos"),
-            "macOS stays OFF — WKWebView renders papercusp:// blank and it has no \
-             long pre-operator onboarding phase",
+            "macOS stays OFF — it has no long pre-operator onboarding phase (the \
+             operator spawns natively), so this buys nothing. NOT because \
+             WKWebView renders papercusp:// blank — that claim is REFUTED on real \
+             hardware (D-054); only the no-onboarding-phase reason survives",
         );
         assert!(
             !onboarding_origin_default(None, "ios"),
