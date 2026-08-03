@@ -114,7 +114,35 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # worker) — this explicit =0 pin stays anyway as defense-in-depth: it is still
 # correct for CLUSTER_WORKERS to win over CLUSTER, so an agent that sets
 # CLUSTER_WORKERS to ANY nonzero value here would still shadow this pin.
-DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+#
+# NOTE (WI-7344, 2026-08-03): PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 and
+# PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 offload the git execs in
+# dev-deploy-state.ts (`git()`, the Deploy panel) and system-health/compute.ts
+# (`runGit`) to the spawn sidecar instead of fork()ing them from this process.
+#
+# WHY THIS HOST NEEDS IT MOST, and why it was missing here: fork()'s parent-side
+# cost scales with the PARENT's RSS and is charged as SYNCHRONOUS main-thread
+# system time (WI-7160, ~40ms of blocked event loop per GB of parent RSS). This
+# operator is (a) PINNED single-process by the CLUSTER=0 note above, so there is
+# no sibling worker to absorb a stall, and (b) routinely 3-5 GB RSS — i.e. the
+# worst case for that mechanism, not the best. Measured 2026-08-03 on the owner's
+# live desktop (pid 3129329, 3.68 GB RSS): the trivial /api/health endpoint,
+# median 1.7ms, simultaneously returned 2.7-3.2s while a HUD transcript search
+# took 13.5s on the same host that answers the same query in ~0.5s when idle.
+# The UI symptom was an apparently-hung search; the cause was the whole event
+# loop stopping in multi-second chunks around batched git spawns.
+#
+# WI-7160 shipped this fix as systemd drop-ins on papercup-dev-api.service and
+# papercup-staging-api.service ONLY. This operator is spawned by `npm run dev`,
+# NOT by systemd, so it inherited nothing and stayed on the unfixed path — the
+# one host the owner actually looks at was the one host the rollout skipped.
+# Host-level perf env belongs HERE, in the launcher, for exactly that reason.
+# `test/dev-operator-perf-env.test.js` fails if either var is dropped again.
+#
+# Degrades safely: git-via-sidecar falls back to a local spawn on ANY sidecar
+# problem (unreachable, stale build, a real git error), so this can only change
+# performance, never correctness.
+DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"

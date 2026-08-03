@@ -68,17 +68,23 @@
 #                             (base64 PKCS#12). Unset => ad-hoc signature (same
 #                             gatekeeper posture as the current prod dmgs).
 #
-# KNOWN CROSS-BUILD GAPS (disclosed; both need mac-native artifacts a Linux host
-# cannot produce — the kept mac VM remains the place to generate them):
-#   - libPapercuspTermShim.dylib is Swift, built on macOS only. Absent here, the
-#     embedded terminal degrades to NewWindow at runtime (mac-vm-build.sh's own
-#     documented fallback). Vendor a prebuilt universal dylib at
-#     src-tauri/resources/libPapercuspTermShim.dylib to ship it.
-#   - source.tar.zst (the dev/local "run from source" buttons, WI-3308) is NOT
-#     staged for cross builds: it would carry THIS box's LINUX-native node_modules,
-#     which break under the bundled darwin node. The 3 bundled-sidecar buttons
-#     work; the 2 from-source buttons are the gap. Set PAPERCUSP_STAGE_SOURCE=1 to
-#     force-stage anyway (wrong-arch — testing only).
+# KNOWN CROSS-BUILD GAPS (disclosed):
+#   - libPapercuspTermShim.dylib is Swift, built on macOS only (a real mac-native
+#     artifact this Linux host cannot produce — the kept mac VM remains the place
+#     to generate it). Absent here, the embedded terminal degrades to NewWindow at
+#     runtime (mac-vm-build.sh's own documented fallback). Vendor a prebuilt
+#     universal dylib at src-tauri/resources/libPapercuspTermShim.dylib to ship it.
+#   - source.tar.zst (the dev/local "run from source" buttons, WI-3308): OFF by
+#     default for cross builds (PAPERCUSP_STAGE_SOURCE=0). When opted in
+#     (PAPERCUSP_STAGE_SOURCE=1), this script now cross-installs a genuinely-darwin
+#     node_modules FIRST via bin/cross-install-darwin-tree.sh (WI-3307 — same
+#     npm_config_platform/arch prebuild-fetch trick build-desktop-sidecar.sh
+#     already uses for the sidecar's own better-sqlite3 dep) before staging, so
+#     the shipped tree's node_modules is real darwin output, not this box's
+#     linux-native one. x64 only (Rosetta-compatible on Apple Silicon too) — see
+#     cross-install-darwin-tree.sh's header. Still opt-in (not yet verified
+#     end-to-end on a real .dmg boot) — code landed, `dev`/`local` runtime
+#     verification pending (WI-3307).
 #
 # TOOLCHAIN (one-time, already provisioned on this box — WI-5651):
 #   - rustup targets x86_64-apple-darwin + aarch64-apple-darwin; cargo-zigbuild;
@@ -286,10 +292,19 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
   cp -a "$DARWIN_SIDECAR" "$app/Contents/Resources/sidecar"
   stage_env_sidecars "$app/Contents/Resources/sidecar"
 
-  # source.tar.zst (server-only 5-buttons) — see KNOWN GAPS; opt-in only.
+  # source.tar.zst (dev/local "run from source" buttons) — see KNOWN GAPS; opt-in.
   if [[ "$PAPERCUSP_STAGE_SOURCE" == "1" ]]; then
-    echo "    ⚠ PAPERCUSP_STAGE_SOURCE=1 — staging THIS box's (LINUX) source tree; the dev/local buttons will carry wrong-arch node_modules"
-    PAPERCUSP_STAGE_SOURCE=1 bash "$HERE/stage-source-tree.sh"
+    # WI-3307: cross-install a genuinely-darwin node_modules tree FIRST, so the
+    # staged source doesn't carry this Linux box's native modules under the
+    # bundled darwin node. v1 always cross-installs x86_64 only, even for a
+    # universal-apple-darwin build — x64 .node prebuilts run fine under Rosetta 2
+    # on Apple Silicon, and staging one arch instead of two keeps the (large,
+    # GB-scale) npm ci + tar cost to a single pass. Revisit if a native-arm64
+    # dev/local tree is ever required.
+    DARWIN_TREE="${PAPERCUSP_DARWIN_SOURCE_TREE_DIR:-/var/tmp/darwin-source-tree-x64}"
+    echo "    ⚠ PAPERCUSP_STAGE_SOURCE=1 — cross-installing a darwin(x64) source tree for the dev/local buttons (WI-3307; not yet end-to-end runtime-verified)"
+    bash "$HERE/cross-install-darwin-tree.sh" x64 "$DARWIN_TREE"
+    PAPERCUSP_STAGE_SOURCE=1 PAPERCUSP_STAGE_SOURCE_ROOT="$DARWIN_TREE" bash "$HERE/stage-source-tree.sh"
     [[ -f "$SRC_TAURI/sidecar/source.tar.zst" ]] \
       && cp -a "$SRC_TAURI/sidecar/source.tar.zst" "$app/Contents/Resources/sidecar/source.tar.zst"
   fi

@@ -39,7 +39,12 @@ set -euo pipefail
 {
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
-MONO="$(cd "$ROOT/.." && pwd)"                  # monorepo root (apps/, libs/, node_modules/)
+# monorepo root (apps/, libs/, node_modules/) — override via
+# PAPERCUSP_STAGE_SOURCE_ROOT (WI-3307: the mac cross-build leg points this at
+# a darwin-arch cross-installed tree from cross-install-darwin-tree.sh instead
+# of this box's own linux-native tree, so the shipped node_modules matches the
+# bundled darwin node instead of breaking at runtime).
+MONO="$(cd "${PAPERCUSP_STAGE_SOURCE_ROOT:-$ROOT/..}" && pwd)"
 SIDECAR="$ROOT/src-tauri/sidecar"
 
 if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" != "1" ]]; then
