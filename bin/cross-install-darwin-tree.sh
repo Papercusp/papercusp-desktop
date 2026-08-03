@@ -39,6 +39,34 @@
 # better-sqlite3 (a prebuild-install consumer) fetch a genuine darwin binary
 # too.
 #
+# ABI GAP FOUND + FIXED 2026-08-03 by REAL boot verification on Mac VM hardware
+# (:2222) — the Mach-O check above only verifies FILE FORMAT (darwin/x64), not
+# NODE ABI COMPATIBILITY, and those are two independent axes. Extracting a
+# cross-installed tree onto the real Mac VM and loading better-sqlite3 under
+# the SAME bundled sidecar node the dev/local buttons actually run under
+# (stage-source-tree.sh: "the bundled node (sidecar/bin/node) ... run under
+# the bundled node") threw:
+#   "compiled against ... NODE_MODULE_VERSION 141. This version of Node.js
+#    requires NODE_MODULE_VERSION 137."
+# Root cause: `prebuild-install` (see its rc.js) defaults its ABI `target` to
+# `process.versions.node` — i.e. THIS LINUX BOX's own running node (v25.9.0,
+# ABI 141) — UNLESS `npm_config_target` is set. Neither `npm_config_os/cpu`
+# (controls npm's own optionalDependency platform/arch pick) nor
+# `npm_config_platform/arch` (controls prebuild-install's OS/arch asset pick)
+# constrains WHICH ABI/version asset prebuild-install fetches, so it silently
+# fetched a genuinely-darwin, genuinely-Mach-O, but WRONG-ABI better-sqlite3
+# binary — passing the Mach-O check while still dying at runtime with
+# ERR_DLOPEN_FAILED. build-desktop-sidecar.sh already special-cased this for
+# better-sqlite3 alone (its own `--target="${NODE_VERSION#v}"` prebuild-install
+# re-fetch, L2469) — this fix generalizes the same idea to the WHOLE npm ci via
+# `npm_config_target`/`npm_config_runtime`, so it also covers bufferutil (the
+# other prebuild-install consumer) with no special-casing. Packages built on
+# N-API (ABI-stable across node versions) are unaffected either way — see
+# prebuild-install's own `napi.isNapiRuntime()` short-circuit in rc.js.
+# NODE_VERSION must match the ACTUAL runtime the dev/local buttons boot under
+# (the bundled sidecar node), not this build box's node — keep it in sync with
+# build-desktop-sidecar.sh's own NODE_VERSION default.
+#
 # KNOWN RESIDUAL GAPS even with both env-var pairs set (verified 2026-08-03) —
 # neither is fixable by an env var; both require an actual osxcross-style
 # darwin toolchain on this Linux box to close for real, and both are FUNCTIONALLY
@@ -82,6 +110,10 @@ if [[ -z "$ARCH" || -z "$OUT" ]]; then
   echo "usage: cross-install-darwin-tree.sh <x64|arm64> <out-dir>" >&2
   exit 1
 fi
+# Must match the runtime the dev/local buttons actually boot under — the
+# BUNDLED SIDECAR node (build-desktop-sidecar.sh's own NODE_VERSION default),
+# never this build box's node. See the "ABI GAP" header comment above.
+NODE_VERSION="${NODE_VERSION:-v24.15.0}"
 case "$ARCH" in
   x64|arm64) : ;;
   *) echo "ERROR: arch must be x64 or arm64 (got '$ARCH')" >&2; exit 1 ;;
@@ -108,8 +140,8 @@ rsync -a --delete \
 [[ -f "$OUT/package.json" && -f "$OUT/package-lock.json" ]] \
   || { echo "ERROR: $OUT is missing package.json/package-lock.json after rsync — refusing to npm ci" >&2; exit 1; }
 
-echo "==> cross-install-darwin-tree: npm ci (npm_config_os=darwin npm_config_cpu=$ARCH for npm's own optionalDependency resolution + npm_config_platform=darwin npm_config_arch=$ARCH for prebuild-install consumers — this box's real npm/node, cross-arch env override; see the header comment for why BOTH pairs are required)"
-( cd "$OUT" && npm_config_os=darwin npm_config_cpu="$ARCH" npm_config_platform=darwin npm_config_arch="$ARCH" npm ci --no-audit --no-fund )
+echo "==> cross-install-darwin-tree: npm ci (npm_config_os=darwin npm_config_cpu=$ARCH for npm's own optionalDependency resolution + npm_config_platform=darwin npm_config_arch=$ARCH for prebuild-install consumers + npm_config_target=${NODE_VERSION#v}/npm_config_runtime=node so prebuild-install fetches the ABI the BUNDLED SIDECAR NODE actually requires, not this box's own node's ABI — see the header comment's ABI GAP section for why all three are required)"
+( cd "$OUT" && npm_config_os=darwin npm_config_cpu="$ARCH" npm_config_platform=darwin npm_config_arch="$ARCH" npm_config_target="${NODE_VERSION#v}" npm_config_runtime=node npm ci --no-audit --no-fund )
 
 echo "==> cross-install-darwin-tree: verifying node_modules has no unexplained linux-native compile fallback"
 # A .node file is judged bad only if it is NOT Mach-O *and* no sibling .node
