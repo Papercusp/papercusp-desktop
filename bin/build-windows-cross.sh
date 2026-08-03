@@ -130,6 +130,13 @@ command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not installed (apt install
 # ── Payload presence (fail-closed, mirror of the VM script's asserts). This
 # script never REBUILDS these — release-local.sh does; we ship them as-is.
 [[ -d "$SRC_TAURI/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
+# "we ship them as-is" is exactly why staleness here is invisible (EI-19446480107603858):
+# the assert above is loud when the sidecar is MISSING and silent when it is merely OLD.
+# Announce its recorded age/gitHead, and refuse only when the caller asserted a commit it
+# does not carry (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS=<sha>). Never fails on mere staleness.
+node "$ROOT/bin/check-sidecar-freshness.js" \
+  --sidecar "$SRC_TAURI/sidecar" --repo-root "$ROOT/.." --label "sidecar-freshness:windows" \
+  || fail "sidecar freshness check refused this build (see above)"
 [[ -f "$SRC_TAURI/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
 [[ -f "$SRC_TAURI/icons/icon.ico" ]] || fail "src-tauri/icons/icon.ico missing (papercusp.iss SetupIconFile)"
 
