@@ -20,6 +20,14 @@ pub enum FrameType {
     Error = 0x04,
     EventBin = 0x05,
     Cancel = 0x06,
+    /// Client -> Server payload for an in-flight call
+    /// (no-http-anywhere-2026-07-28 P-012). Request + Cancel alone make the
+    /// channel server-STREAMING: once a call is open the client can only
+    /// abandon it, never feed it. Data is what makes it full duplex, so a
+    /// long-lived stream (the P-013 WebSocket shim, and the PTY/voice
+    /// connections behind P-014) can ride this channel instead of holding a
+    /// real socket.
+    Data = 0x07,
 }
 
 impl FrameType {
@@ -31,6 +39,7 @@ impl FrameType {
             0x04 => Some(Self::Error),
             0x05 => Some(Self::EventBin),
             0x06 => Some(Self::Cancel),
+            0x07 => Some(Self::Data),
             _ => None,
         }
     }
@@ -57,6 +66,8 @@ pub enum FrameError {
     EventBinTooShort(usize),
     #[error("EVENT_BIN nameLen={0} exceeds payload ({1} bytes)")]
     EventBinNameLenOverflow(u32, usize),
+    #[error("DATA payload too short: {0} bytes")]
+    DataTooShort(usize),
 }
 
 /// Encode a frame into a freshly-allocated Vec<u8>. Use when you want
@@ -106,6 +117,41 @@ pub fn decode_event_bin_payload(payload: &[u8]) -> Result<DecodedEventBin, Frame
         id,
         name,
         binary: rest.to_vec(),
+    })
+}
+
+/// Encode a DATA payload. Layout: [8B id BE][payload].
+///
+/// Deliberately thinner than EVENT_BIN: that frame is self-describing because
+/// the server multiplexes *named* events onto one call, whereas DATA is an
+/// opaque byte run for an ALREADY-open call, so `id` is the only routing key
+/// needed. No length prefix on the tail either — the frame header's own length
+/// already bounds it, and duplicating that would create two sources of truth
+/// that can disagree.
+pub fn encode_data_payload(id: u64, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.put_u64(id);
+    out.extend_from_slice(payload);
+    out
+}
+
+#[derive(Debug)]
+pub struct DecodedData {
+    pub id: u64,
+    pub payload: Vec<u8>,
+}
+
+pub fn decode_data_payload(payload: &[u8]) -> Result<DecodedData, FrameError> {
+    if payload.len() < 8 {
+        return Err(FrameError::DataTooShort(payload.len()));
+    }
+    let mut cursor = &payload[..];
+    let id = cursor.get_u64();
+    Ok(DecodedData {
+        id,
+        // A zero-byte tail is legal and meaningful — it is how a sender signals
+        // "end of stream, no bytes" without tearing the call down.
+        payload: cursor.to_vec(),
     })
 }
 
