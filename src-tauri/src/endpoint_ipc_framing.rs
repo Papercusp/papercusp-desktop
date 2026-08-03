@@ -1,7 +1,15 @@
-//! Rust mirror of apps/operator/lib/endpoint-ipc/framing.ts. Encoder
-//! output and decoder behavior must match byte-for-byte.
+//! Rust mirror of the TS frame codec. Encoder output and decoder behavior must
+//! match byte-for-byte.
 //!
-//! Frame format (per apps/operator/lib/endpoint-ipc/PROTOCOL.md):
+//! ⚠ The TS source of truth is `libs/generic/ipc-framing/src/index.ts`. It was
+//! extracted there (papercusp-systems-abstraction-2026-05-29 P-030);
+//! `packages/operator-core/lib/endpoint-ipc/framing.ts` is now only a
+//! re-export shim, and the `apps/operator/...` path this comment used to name
+//! no longer exists at all. The byte-for-byte contract is pinned by a shared
+//! golden-vector test asserted on BOTH sides — see `golden_data_frame_matches_ts`
+//! below and its twin in `libs/generic/ipc-framing/src/index.test.ts`.
+//!
+//! Frame format (per packages/operator-core/lib/endpoint-ipc/PROTOCOL.md):
 //!   [4B length BE][1B type][payload (length bytes)]
 //!
 //! Big-endian for all multi-byte integers. 16 MiB per-frame cap.
@@ -361,5 +369,78 @@ mod tests {
             .unwrap();
         assert_eq!(dec.drain().len(), 1);
         assert_eq!(dec.drain().len(), 0);
+    }
+
+    // ---- DATA (0x07) — no-http-anywhere-2026-07-28 P-012 ----
+    //
+    // The plan's binding requirement is that this frame is "mirrored
+    // byte-for-byte" with the TS codec. GOLDEN_DATA_FRAME is the shared
+    // fixture: libs/generic/ipc-framing/src/index.test.ts asserts the SAME
+    // bytes. If either encoder changes, both suites fail together — which is
+    // the point. A round-trip test alone cannot catch a mirrored-but-wrong
+    // layout, because each side would happily agree with itself.
+    const GOLDEN_DATA_FRAME: &[u8] = &[
+        0x00, 0x00, 0x00, 0x0a, // length = 10 (8B id + 2B payload)
+        0x07, // type = Data
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // id = 1 (u64 BE)
+        0xaa, 0xbb, // payload
+    ];
+
+    #[test]
+    fn golden_data_frame_matches_ts() {
+        let frame = encode_frame(FrameType::Data, &encode_data_payload(1, &[0xaa, 0xbb])).unwrap();
+        assert_eq!(frame.as_slice(), GOLDEN_DATA_FRAME);
+    }
+
+    #[test]
+    fn data_payload_round_trips() {
+        let p = encode_data_payload(0xdead_beef, &[1, 2, 3]);
+        let d = decode_data_payload(&p).unwrap();
+        assert_eq!(d.id, 0xdead_beef);
+        assert_eq!(d.payload, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn data_payload_preserves_a_full_u64_id() {
+        let big = 0xffff_ffff_ffff_fffe_u64;
+        let d = decode_data_payload(&encode_data_payload(big, &[])).unwrap();
+        assert_eq!(d.id, big);
+    }
+
+    #[test]
+    fn data_payload_accepts_a_zero_byte_tail() {
+        // End-of-stream without tearing the call down — legal, not malformed.
+        let p = encode_data_payload(7, &[]);
+        assert_eq!(p.len(), 8);
+        let d = decode_data_payload(&p).unwrap();
+        assert_eq!(d.id, 7);
+        assert!(d.payload.is_empty());
+    }
+
+    #[test]
+    fn data_payload_rejects_too_short_for_an_id() {
+        assert!(matches!(
+            decode_data_payload(&[0u8; 7]),
+            Err(FrameError::DataTooShort(7))
+        ));
+    }
+
+    #[test]
+    fn data_decodes_through_the_streaming_decoder() {
+        let mut dec = FrameDecoder::new();
+        dec.push(&encode_frame(FrameType::Data, &encode_data_payload(9, &[0xff])).unwrap())
+            .unwrap();
+        let out = dec.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].frame_type, FrameType::Data);
+        assert_eq!(decode_data_payload(&out[0].payload).unwrap().id, 9);
+    }
+
+    #[test]
+    fn data_tag_is_recognised_by_from_u8() {
+        assert_eq!(FrameType::from_u8(0x07), Some(FrameType::Data));
+        // 0x08 is still unassigned — guards against a silent tag collision if
+        // someone adds a frame type without checking what is already taken.
+        assert_eq!(FrameType::from_u8(0x08), None);
     }
 }
