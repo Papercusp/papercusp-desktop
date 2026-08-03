@@ -6,7 +6,7 @@
 //! `packages/operator-core/lib/endpoint-ipc/framing.ts` is now only a
 //! re-export shim, and the `apps/operator/...` path this comment used to name
 //! no longer exists at all. The byte-for-byte contract is pinned by a shared
-//! golden-vector test asserted on BOTH sides — see `golden_data_frame_matches_ts`
+//! golden-vector test asserted on BOTH sides — see `golden_request_frame_matches_ts`
 //! below and its twin in `libs/generic/ipc-framing/src/index.test.ts`.
 //!
 //! Frame format (per packages/operator-core/lib/endpoint-ipc/PROTOCOL.md):
@@ -28,14 +28,12 @@ pub enum FrameType {
     Error = 0x04,
     EventBin = 0x05,
     Cancel = 0x06,
-    /// Client -> Server payload for an in-flight call
-    /// (no-http-anywhere-2026-07-28 P-012). Request + Cancel alone make the
-    /// channel server-STREAMING: once a call is open the client can only
-    /// abandon it, never feed it. Data is what makes it full duplex, so a
-    /// long-lived stream (the P-013 WebSocket shim, and the PTY/voice
-    /// connections behind P-014) can ride this channel instead of holding a
-    /// real socket.
-    Data = 0x07,
+    // 0x07 is RESERVED, not free. It was DATA, a client -> server frame added by
+    // no-http-anywhere-2026-07-28 P-012 to make the channel full duplex. Removed
+    // on that same plan (WI-7545): both of its stated consumers went away — P-014
+    // (PTY/voice onto the shim) was refuted, and P-013 shipped a WebSocket GUARD
+    // rather than a data-carrying shim, so nothing ever sent one. Do not reuse
+    // 0x07 for a new frame type; `from_u8` rejects it and a test pins that.
 }
 
 impl FrameType {
@@ -47,7 +45,6 @@ impl FrameType {
             0x04 => Some(Self::Error),
             0x05 => Some(Self::EventBin),
             0x06 => Some(Self::Cancel),
-            0x07 => Some(Self::Data),
             _ => None,
         }
     }
@@ -74,8 +71,6 @@ pub enum FrameError {
     EventBinTooShort(usize),
     #[error("EVENT_BIN nameLen={0} exceeds payload ({1} bytes)")]
     EventBinNameLenOverflow(u32, usize),
-    #[error("DATA payload too short: {0} bytes")]
-    DataTooShort(usize),
 }
 
 /// Encode a frame into a freshly-allocated Vec<u8>. Use when you want
@@ -128,40 +123,6 @@ pub fn decode_event_bin_payload(payload: &[u8]) -> Result<DecodedEventBin, Frame
     })
 }
 
-/// Encode a DATA payload. Layout: [8B id BE][payload].
-///
-/// Deliberately thinner than EVENT_BIN: that frame is self-describing because
-/// the server multiplexes *named* events onto one call, whereas DATA is an
-/// opaque byte run for an ALREADY-open call, so `id` is the only routing key
-/// needed. No length prefix on the tail either — the frame header's own length
-/// already bounds it, and duplicating that would create two sources of truth
-/// that can disagree.
-pub fn encode_data_payload(id: u64, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + payload.len());
-    out.put_u64(id);
-    out.extend_from_slice(payload);
-    out
-}
-
-#[derive(Debug)]
-pub struct DecodedData {
-    pub id: u64,
-    pub payload: Vec<u8>,
-}
-
-pub fn decode_data_payload(payload: &[u8]) -> Result<DecodedData, FrameError> {
-    if payload.len() < 8 {
-        return Err(FrameError::DataTooShort(payload.len()));
-    }
-    let mut cursor = &payload[..];
-    let id = cursor.get_u64();
-    Ok(DecodedData {
-        id,
-        // A zero-byte tail is legal and meaningful — it is how a sender signals
-        // "end of stream, no bytes" without tearing the call down.
-        payload: cursor.to_vec(),
-    })
-}
 
 /// Streaming decoder. Push bytes via `push`; drain ready frames via `drain`.
 /// On `FrameError`, caller should close the underlying socket.
@@ -371,74 +332,37 @@ mod tests {
         assert_eq!(dec.drain().len(), 0);
     }
 
-    // ---- DATA (0x07) — no-http-anywhere-2026-07-28 P-012 ----
+    // ---- The cross-language byte-for-byte pin ----
     //
-    // The plan's binding requirement is that this frame is "mirrored
-    // byte-for-byte" with the TS codec. GOLDEN_DATA_FRAME is the shared
-    // fixture: libs/generic/ipc-framing/src/index.test.ts asserts the SAME
-    // bytes. If either encoder changes, both suites fail together — which is
-    // the point. A round-trip test alone cannot catch a mirrored-but-wrong
-    // layout, because each side would happily agree with itself.
-    const GOLDEN_DATA_FRAME: &[u8] = &[
-        0x00, 0x00, 0x00, 0x0a, // length = 10 (8B id + 2B payload)
-        0x07, // type = Data
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // id = 1 (u64 BE)
-        0xaa, 0xbb, // payload
+    // This module's binding requirement is that its encoder output matches the
+    // TS codec byte-for-byte. GOLDEN_REQUEST_FRAME is the shared fixture:
+    // libs/generic/ipc-framing/src/index.test.ts asserts the SAME bytes. If
+    // either encoder changes, both suites fail together — which is the point.
+    // Round-trip tests alone cannot catch a mirrored-but-wrong layout, because
+    // each side would happily agree with itself.
+    //
+    // It pins REQUEST (0x01) because that is a frame this client actually
+    // sends. It used to pin DATA (0x07), which was removed with the frame
+    // (WI-7545) — the pin was re-pointed rather than dropped, so deleting dead
+    // protocol surface did not silently cost the live frames their coverage.
+    const GOLDEN_REQUEST_FRAME: &[u8] = &[
+        0x00, 0x00, 0x00, 0x08, // length = 8
+        0x01, // type = Request
+        b'{', b'"', b'i', b'd', b'"', b':', b'1', b'}', // payload
     ];
 
     #[test]
-    fn golden_data_frame_matches_ts() {
-        let frame = encode_frame(FrameType::Data, &encode_data_payload(1, &[0xaa, 0xbb])).unwrap();
-        assert_eq!(frame.as_slice(), GOLDEN_DATA_FRAME);
+    fn golden_request_frame_matches_ts() {
+        let frame = encode_frame(FrameType::Request, br#"{"id":1}"#).unwrap();
+        assert_eq!(frame.as_slice(), GOLDEN_REQUEST_FRAME);
     }
 
     #[test]
-    fn data_payload_round_trips() {
-        let p = encode_data_payload(0xdead_beef, &[1, 2, 3]);
-        let d = decode_data_payload(&p).unwrap();
-        assert_eq!(d.id, 0xdead_beef);
-        assert_eq!(d.payload, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn data_payload_preserves_a_full_u64_id() {
-        let big = 0xffff_ffff_ffff_fffe_u64;
-        let d = decode_data_payload(&encode_data_payload(big, &[])).unwrap();
-        assert_eq!(d.id, big);
-    }
-
-    #[test]
-    fn data_payload_accepts_a_zero_byte_tail() {
-        // End-of-stream without tearing the call down — legal, not malformed.
-        let p = encode_data_payload(7, &[]);
-        assert_eq!(p.len(), 8);
-        let d = decode_data_payload(&p).unwrap();
-        assert_eq!(d.id, 7);
-        assert!(d.payload.is_empty());
-    }
-
-    #[test]
-    fn data_payload_rejects_too_short_for_an_id() {
-        assert!(matches!(
-            decode_data_payload(&[0u8; 7]),
-            Err(FrameError::DataTooShort(7))
-        ));
-    }
-
-    #[test]
-    fn data_decodes_through_the_streaming_decoder() {
-        let mut dec = FrameDecoder::new();
-        dec.push(&encode_frame(FrameType::Data, &encode_data_payload(9, &[0xff])).unwrap())
-            .unwrap();
-        let out = dec.drain();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].frame_type, FrameType::Data);
-        assert_eq!(decode_data_payload(&out[0].payload).unwrap().id, 9);
-    }
-
-    #[test]
-    fn data_tag_is_recognised_by_from_u8() {
-        assert_eq!(FrameType::from_u8(0x07), Some(FrameType::Data));
+    fn removed_and_unassigned_tags_are_rejected() {
+        // 0x07 was DATA and is RESERVED, not free — see the note on FrameType.
+        // Reusing it would silently mean one thing to an old build and another
+        // to a new one, so it must keep decoding as "unknown".
+        assert_eq!(FrameType::from_u8(0x07), None);
         // 0x08 is still unassigned — guards against a silent tag collision if
         // someone adds a frame type without checking what is already taken.
         assert_eq!(FrameType::from_u8(0x08), None);

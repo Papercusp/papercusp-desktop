@@ -592,7 +592,7 @@ async fn reader_loop(
                         }
                     }
                 }
-                FrameType::Request | FrameType::Cancel | FrameType::Data => {
+                FrameType::Request | FrameType::Cancel => {
                     // Server should never send these to the client.
                     eprintln!(
                         "[endpoint_ipc] unexpected server frame type 0x{:02x}",
