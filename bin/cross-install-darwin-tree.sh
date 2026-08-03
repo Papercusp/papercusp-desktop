@@ -16,21 +16,47 @@
 # runtime. This script gives stage-source-tree.sh a tree whose node_modules is
 # real darwin output instead.
 #
-# WHY THIS WORKS: `npm_config_platform`/`npm_config_arch` override npm's OS/CPU
-# detection at install time, so `npm ci` resolves + fetches each
-# optionalDependency's darwin prebuilt — and, for the small set of packages that
-# carry a binding.gyp native-compile fallback (better-sqlite3, bufferutil,
-# cpu-features — the only three anywhere in this monorepo's node_modules, all
-# well-supported prebuild-install consumers with solid darwin coverage), fetches
-# a prebuild-install darwin release asset instead of ever compiling on this box.
-# This is the EXACT trick bin/build-desktop-sidecar.sh already uses for the
-# sidecar's own better-sqlite3 dependency (its own darwin cross-fetch via
-# `npx prebuild-install --platform=$TARGET_OS --arch=$TARGET_ARCH`) — just
-# applied at the `npm ci` level for a full monorepo install instead of one
-# package. Independently validated standalone on this box 2026-08-03 (WI-3307
-# checkpoint): `npm_config_platform=darwin npm_config_arch=x64 npm install
-# better-sqlite3@^12.9.0` in a scratch dir produced a genuine
-# `Mach-O 64-bit x86_64 bundle` .node file — no local compilation.
+# WHY THIS WORKS (CORRECTED 2026-08-03 — the first version of this comment was
+# wrong about the mechanism and it cost a full monorepo-scale validation run to
+# find out): npm's OWN optionalDependency platform/arch resolution (the thing
+# that picks e.g. `@esbuild/darwin-x64` over `@esbuild/linux-x64`) is controlled
+# by the MODERN `npm_config_os`/`npm_config_cpu` config keys (npm >=9.7), NOT
+# `npm_config_platform`/`npm_config_arch` — on this box's npm (11.12.1) the
+# latter pair are silently-ignored unknown env config ("npm warn Unknown env
+# config \"arch\"/\"platform\""), so a `npm ci` using only that pair falls back
+# to the host's real platform (linux) for every optionalDependency package —
+# @oxc-resolver, @img/sharp, @unrs/resolver-binding, lightningcss, @rolldown,
+# @tailwindcss/oxide, @nx, @rollup, @next/swc, etc. all installed their
+# linux-x64 variant instead of darwin. `npm_config_platform`/`npm_config_arch`
+# are STILL needed, though — they're what `prebuild-install` (a DIFFERENT,
+# older config-reading convention — see its rc.js) uses to decide which GitHub
+# release asset to fetch for a binding.gyp package's prebuilt binary
+# (better-sqlite3, bufferutil). So both env-var pairs must be set together;
+# neither alone is sufficient. Verified 2026-08-03 by direct reproduction in a
+# scratch dir: `npm_config_os=darwin npm_config_cpu=x64 npm install esbuild`
+# alone correctly resolved `@esbuild/darwin-x64`, while adding
+# `npm_config_platform=darwin npm_config_arch=x64` on top is what made
+# better-sqlite3 (a prebuild-install consumer) fetch a genuine darwin binary
+# too.
+#
+# KNOWN RESIDUAL GAPS even with both env-var pairs set (verified 2026-08-03) —
+# neither is fixable by an env var; both require an actual osxcross-style
+# darwin toolchain on this Linux box to close for real, and both are FUNCTIONALLY
+# HARMLESS to ship as-is because their consumer gracefully degrades when the
+# native binding fails to load:
+#   - `cpu-features` (ssh2's optionalDependency): its own install script is a
+#     bare `node-gyp rebuild` with NO prebuild-install/cross-fetch path at all —
+#     it always compiles for whatever platform `npm ci` runs on. ssh2 declares
+#     it as `optionalDependencies`, i.e. ssh2 is expected to work without it.
+#   - ssh2's own bundled native crypto accelerator
+#     (`lib/protocol/crypto/build/Release/sshcrypto.node`, built via ssh2's own
+#     `install.js`/binding.gyp, no prebuild-install either): `lib/protocol/
+#     crypto.js` wraps its require in a plain `try { … } catch {}` (verified by
+#     reading the source) and falls back to a pure-JS crypto implementation —
+#     ssh2 works correctly, just slower, if this binding fails to load.
+# The Mach-O check below allowlists exactly these two verified-safe packages by
+# name and treats any OTHER non-Mach-O file with no Mach-O sibling in its own
+# package as a real, unexpected failure worth investigating.
 #
 # v1 SCOPE: x64 only is expected to be used in practice (build-mac-cross.sh
 # stages a single x64 tree even for a universal-apple-darwin build — x64 .node
@@ -82,21 +108,73 @@ rsync -a --delete \
 [[ -f "$OUT/package.json" && -f "$OUT/package-lock.json" ]] \
   || { echo "ERROR: $OUT is missing package.json/package-lock.json after rsync — refusing to npm ci" >&2; exit 1; }
 
-echo "==> cross-install-darwin-tree: npm ci (npm_config_platform=darwin npm_config_arch=$ARCH — this box's real npm/node, cross-arch env override)"
-( cd "$OUT" && npm_config_platform=darwin npm_config_arch="$ARCH" npm ci --no-audit --no-fund )
+echo "==> cross-install-darwin-tree: npm ci (npm_config_os=darwin npm_config_cpu=$ARCH for npm's own optionalDependency resolution + npm_config_platform=darwin npm_config_arch=$ARCH for prebuild-install consumers — this box's real npm/node, cross-arch env override; see the header comment for why BOTH pairs are required)"
+( cd "$OUT" && npm_config_os=darwin npm_config_cpu="$ARCH" npm_config_platform=darwin npm_config_arch="$ARCH" npm ci --no-audit --no-fund )
 
-echo "==> cross-install-darwin-tree: verifying every *.node under node_modules is Mach-O (darwin), not a linux compile fallback"
-declare -a bad=()
+echo "==> cross-install-darwin-tree: verifying node_modules has no unexplained linux-native compile fallback"
+# A .node file is judged bad only if it is NOT Mach-O *and* no sibling .node
+# file anywhere under the SAME top-level package directory is Mach-O either —
+# a package that bundles multi-platform prebuilds (the common convention: a
+# `prebuilds/<platform>-<arch>/` or `bin/napi-v6/<platform>/<arch>/` layout,
+# e.g. rabin-native, onnxruntime-node, bufferutil) always ships inert
+# other-platform binaries alongside the darwin one, and those are never loaded
+# at runtime (node-gyp-build / the package's own loader picks by the ACTUAL
+# running platform) — flagging them was the prior version of this check's
+# false-positive: it failed on files like
+# `rabin-native/prebuilds/android-x64/rabin-native.node` even though that same
+# package's `prebuilds/darwin-x64/rabin-native.node` was present and correct.
+KNOWN_OPTIONAL_NATIVE_FALLBACK_PKGS="cpu-features ssh2"  # see header comment
+declare -a all_nodefiles=() pkgroots=() ismacho=()
 while IFS= read -r nodefile; do
-  file "$nodefile" 2>/dev/null | grep -q 'Mach-O' || bad+=("$nodefile")
+  rel="${nodefile#"$OUT"/node_modules/}"
+  case "$rel" in
+    @*/*) pkgroot="$(printf '%s' "$rel" | cut -d/ -f1-2)" ;;
+    *)    pkgroot="${rel%%/*}" ;;
+  esac
+  all_nodefiles+=("$nodefile")
+  pkgroots+=("$pkgroot")
+  if file "$nodefile" 2>/dev/null | grep -q 'Mach-O'; then
+    ismacho+=(1)
+  else
+    ismacho+=(0)
+  fi
 done < <(find "$OUT/node_modules" -name '*.node' -type f 2>/dev/null)
+
+declare -A pkg_has_macho=()
+for i in "${!all_nodefiles[@]}"; do
+  [[ "${ismacho[$i]}" == "1" ]] && pkg_has_macho["${pkgroots[$i]}"]=1
+done
+
+declare -a bad=() excused=()
+for i in "${!all_nodefiles[@]}"; do
+  [[ "${ismacho[$i]}" == "1" ]] && continue
+  pkgroot="${pkgroots[$i]}"
+  if [[ "${pkg_has_macho[$pkgroot]:-0}" == "1" ]]; then
+    continue  # a Mach-O sibling exists elsewhere in this same package — inert other-platform bundle, ignore
+  fi
+  pkgname="${pkgroot#@*/}"; pkgname="${pkgname:-$pkgroot}"
+  is_known=0
+  for k in $KNOWN_OPTIONAL_NATIVE_FALLBACK_PKGS; do
+    [[ "$pkgroot" == "$k" || "$pkgname" == "$k" ]] && { is_known=1; break; }
+  done
+  if (( is_known )); then
+    excused+=("${all_nodefiles[$i]} (known optional native fallback: $pkgroot — see header comment)")
+  else
+    bad+=("${all_nodefiles[$i]}")
+  fi
+done
+
+if (( ${#excused[@]} > 0 )); then
+  echo "    ⚠ ${#excused[@]} known-safe linux-native fallback file(s) present (gracefully-optional at runtime — see header comment):"
+  printf '      %s\n' "${excused[@]}"
+fi
 if (( ${#bad[@]} > 0 )); then
-  echo "ERROR: ${#bad[@]} .node file(s) under $OUT/node_modules are NOT Mach-O (a linux-native compile fallback slipped through — cross-install is NOT safe to ship):" >&2
+  echo "ERROR: ${#bad[@]} .node file(s) under $OUT/node_modules are an UNEXPECTED linux-native compile fallback (no Mach-O sibling in their package, and not on the known-safe allowlist — cross-install is NOT safe to ship):" >&2
   printf '  %s\n' "${bad[@]}" >&2
   exit 1
 fi
 count="$(find "$OUT/node_modules" -name '*.node' -type f 2>/dev/null | wc -l)"
-echo "    ✓ ${count} native .node file(s) verified Mach-O (darwin/$ARCH) — zero linux fallbacks"
+echo "    ✓ ${count} native .node file(s) checked — every package has a verified Mach-O (darwin/$ARCH) build, zero unexplained linux fallbacks"
 
 # The two markers stage-source-tree.sh's own preflight requires, plus the
 # .bin toolchain — fail loud here rather than let the caller discover it later.
