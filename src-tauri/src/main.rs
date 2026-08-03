@@ -3256,6 +3256,25 @@ fn point_window_at_operator<R: tauri::Runtime>(
     // __PAPERCUSP_TAURI__ tells PiPanel to use the native pty path. The page may
     // (re)load around this thread's timing, dropping __papercuspBase, so re-eval
     // on a short timer — web/index.html's tick() polls it, so a late set lands.
+    //
+    // ⚠ That re-eval is a BOUNDED BURST, not a guarantee of convergence: the loop
+    // below runs `reinject_ticks` times 300ms apart (callers pass 10 or 30 => a
+    // 3-9s window) and there is NO on_page_load re-inject, so ANY reload after
+    // that window leaves all three globals permanently unset. That is EXPECTED,
+    // not a bug — measured on two normal `npm run tauri dev` instances 2026-08-03
+    // (both ~27min uptime, all three null, __TAURI_INTERNALS__.invoke still a
+    // function; Vite full-reloads had wiped them). It is exactly why every live
+    // consumer treats these as OPTIONAL OVERRIDES rather than requirements:
+    // pty-tauri.ts:43-49 keys native-detection off __TAURI_INTERNALS__ and only
+    // REJECTS on an explicitly non-native __PAPERCUSP_TAURI__ (a requirement there
+    // made the wizard's buttons vanish after a reload — found live on Windows
+    // 2026-06-11), and PiPanel.tsx:72 is likewise a set-only branch.
+    // ⚠ Also note web/index.html's tick() is the PRODUCTION bootstrap only ("Dev:
+    // the webview loads devUrl directly — this page isn't used", index.html:46),
+    // so in dev nothing polls for a late set at all.
+    // => If you add a consumer, make absence INERT. Do not "fix" this by requiring
+    //    the global; if a future consumer genuinely needs it post-reload, add an
+    //    on_page_load re-inject rather than widening the burst. (WI-7982)
     let inject = format!(
         "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
         base, app_base
