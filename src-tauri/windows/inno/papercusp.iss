@@ -165,31 +165,55 @@ const
 function UninstallTargetExists(const UninstallString: String): Boolean;
 var
   Target: String;
+  Candidate: String;
   QuotePos: Integer;
-  SpacePos: Integer;
+  I: Integer;
 begin
+  Result := False;
   Target := Trim(UninstallString);
   if Target = '' then
-    Result := False
-  else
+    Exit;
+
+  { UninstallString is normally a quoted path followed by arguments. }
+  if Copy(Target, 1, 1) = '"' then
   begin
-    { UninstallString is normally a quoted path followed by arguments. }
-    if Copy(Target, 1, 1) = '"' then
-    begin
-      Delete(Target, 1, 1);
-      QuotePos := Pos('"', Target);
-      if QuotePos > 0 then
-        Delete(Target, QuotePos, Length(Target) - QuotePos + 1)
-      else
-        Target := '';
-    end
+    Delete(Target, 1, 1);
+    QuotePos := Pos('"', Target);
+    if QuotePos > 0 then
+      Delete(Target, QuotePos, Length(Target) - QuotePos + 1)
     else
-    begin
-      SpacePos := Pos(' ', Target);
-      if SpacePos > 0 then
-        Delete(Target, SpacePos, Length(Target) - SpacePos + 1);
-    end;
+      Target := '';
     Result := (Target <> '') and FileExists(Target);
+    Exit;
+  end;
+
+  { Unquoted: the executable path may ITSELF contain spaces. Every real
+    Papercusp path does ("Papercusp GUI", "Papercusp Server"), and the
+    NSIS-era scheme these legacy keys come from writes UninstallString
+    unquoted — so truncating at the first space judges a LIVE uninstaller
+    missing and deletes a real install's entry, stranding an install that can
+    then never be removed. That is precisely the harm this guard exists to
+    prevent (EI-19481728463683227), so FAIL SAFE: the target counts as
+    present if the whole string, or ANY space-delimited prefix of it, is an
+    existing file; only when none of them exists is the entry a genuine
+    ghost. FileExists is False for directories, so a prefix that merely names
+    a folder never rescues a real ghost. }
+  if FileExists(Target) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  for I := 1 to Length(Target) do
+  begin
+    if Target[I] = ' ' then
+    begin
+      Candidate := Copy(Target, 1, I - 1);
+      if (Candidate <> '') and FileExists(Candidate) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
   end;
 end;
 
