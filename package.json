@@ -23,6 +23,7 @@
     "test:restart-settle-barrier": "bash bin/lib/restart-settle-barrier.selftest.sh",
     "test:rig-wait-converged": "bash bin/lib/rig-wait-converged.selftest.sh",
     "test:roster-scope": "bash bin/lib/roster-scope.selftest.sh",
+    "test:inno-legacy-reaper": "bash bin/lib/inno-legacy-reaper.selftest.sh",
     "test:selftests": "bash bin/lib/run-selftests.sh",
     "test:sidecar-lock": "node --test test/build-desktop-sidecar-lock.test.js",
     "test:target-dir-slots": "node --test test/claim-target-dir.test.js test/tauri-dev-slot-chokepoint.test.js",
