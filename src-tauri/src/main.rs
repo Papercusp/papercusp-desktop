@@ -5247,7 +5247,7 @@ fn bring_up_sidecar(
 /// here too. `wslenv_forwards_every_var_the_sidecar_reads` pins the ones we know
 /// are load-bearing.
 const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
-     PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
+     PAPERCUSP_DESKTOP:PAPERCUSP_DESKTOP_PARENT_PID:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
      PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
      PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
      PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
@@ -5480,6 +5480,17 @@ fn spawn_serve(
             rubrics_dir.to_string_lossy().to_string(),
         )
         .env("PAPERCUSP_DESKTOP", "1")
+        // (EI-19486216732882752) Declare OUR pid so the sidecar's parent-death
+        // watch has an IDENTITY to check rather than an observation to race.
+        // Reading `process.ppid` on the sidecar side is only correct if it happens
+        // before we die; if we die while it is still booting (concurrent packaged
+        // e2e runs contend on its cold-start lock for seconds), it records the
+        // already-reparented ppid as its "original" and goes blind forever — 8
+        // orphans burning 3 cores and 18.4GB, measured 2026-08-08. With this set,
+        // the sidecar can also ask "is that pid still alive?", which no amount of
+        // ppid-watching can answer. Sidecar side: resolveExpectedParentPid() in
+        // apps/operator/bin/serve.ts.
+        .env("PAPERCUSP_DESKTOP_PARENT_PID", std::process::id().to_string())
         // Autonomous loop (packaged-build fix): the DBOS routines engine +
         // orchestrator must be ON in the shipped sidecar — without these the
         // operator boots normally but schedules NO work (the loop is silently
