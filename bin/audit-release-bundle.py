@@ -57,6 +57,8 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
+import zipfile
 
 # ── PATH rules — the class that actually bit us: a scratch/state dir sweeping in
 # wholesale. Cheap, and applied to every member name.
@@ -685,6 +687,70 @@ def prune_docs(dirs):
     return 0
 
 
+# Archives whose CONTENTS are invisible to a byte-level grep: the payload is
+# compressed, so a plaintext identity literal inside is simply not present in the
+# file's bytes. `grep -a` fixes binary files; only expansion fixes these.
+# `.dump` is here because pg_dump's custom format is zlib-compressed internally.
+ARCHIVE_SUFFIXES = (
+    ".tar.zst", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar",
+    ".zip", ".jar", ".asar", ".gz", ".zst", ".bz2", ".xz", ".dump",
+)
+
+
+def _iter_archives(dirs):
+    """Every archive file under the scanned roots, as absolute paths."""
+    for root in dirs:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                low = fn.lower()
+                if low.endswith(ARCHIVE_SUFFIXES):
+                    yield os.path.join(dirpath, fn)
+
+
+def _expand_archive(path, dest):
+    """Expand ONE archive into dest.
+
+    Returns True when the contents were made available for scanning, False when
+    the format could not be opened. A False is NOT treated as 'nothing to see' —
+    the caller fails the gate on it, because an archive the scan cannot read is
+    exactly the blind spot this pass exists to remove (unknown is not absent).
+    """
+    os.makedirs(dest, exist_ok=True)
+    low = path.lower()
+    try:
+        if low.endswith(".zip") or low.endswith(".jar") or low.endswith(".asar"):
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed
+            return True
+        if low.endswith(".tar.zst"):
+            r = sh(f"zstd -dc {q(path)} | tar -xf - -C {q(dest)}")
+            return r.returncode == 0
+        if tarfile.is_tarfile(path):
+            with tarfile.open(path) as tf:
+                tf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed
+            return True
+        if low.endswith(".zst"):
+            return sh(f"zstd -dc {q(path)} > {q(os.path.join(dest, 'payload'))}").returncode == 0
+        if low.endswith(".gz"):
+            return sh(f"gzip -dc {q(path)} > {q(os.path.join(dest, 'payload'))}").returncode == 0
+        if low.endswith(".bz2"):
+            return sh(f"bzip2 -dc {q(path)} > {q(os.path.join(dest, 'payload'))}").returncode == 0
+        if low.endswith(".xz"):
+            return sh(f"xz -dc {q(path)} > {q(os.path.join(dest, 'payload'))}").returncode == 0
+        if low.endswith(".dump"):
+            # pg_dump custom format — zlib-compressed internally. pg_restore -f -
+            # renders it as SQL text, which is what we need to scan.
+            return sh(
+                f"pg_restore -f {q(os.path.join(dest, 'payload.sql'))} {q(path)}"
+            ).returncode == 0
+    except Exception as e:  # noqa: BLE001 — any failure means "could not inspect"
+        print(f"    scan-dir: cannot expand {path}: {type(e).__name__}: {e}")
+        return False
+    return False
+
+
 def scan_dir(dirs):
     """Ultimate backstop: identity-scan the ASSEMBLED bytes that actually ship,
     honoring NO path-exclude. If a known-sensitive or build-box identity literal
@@ -707,14 +773,22 @@ def scan_dir(dirs):
     print(f"    low-entropy (non-vendor):  {', '.join(low) or '(none)'}")
     files = set()
 
-    def grep_l(pats, scoped):
+    def grep_l(pats, scoped, roots, label=None):
+        """P-012: `-a` (treat binary as text), NEVER `-I`.
+
+        This used to pass `-I`, which SKIPS binary files entirely — so the scan
+        billed as "the assembled bytes that actually ship" silently never looked
+        at a database dump, a corestore, or any compiled artifact, and printed
+        "✓ CLEAN". A scan that inspects nothing is indistinguishable from a scan
+        that found nothing. phase_b_content already used `-a` for this reason.
+        """
         if not pats:
             return
-        for root in dirs:
+        for root in roots:
             if not os.path.isdir(root):
                 print(f"    scan-dir: {root} absent — skipping")
                 continue
-            cmd = ["grep", "-rIlE"]
+            cmd = ["grep", "-ralE"]
             if scoped:
                 cmd.append("--exclude-dir=node_modules")
             for p in pats:
@@ -723,12 +797,42 @@ def scan_dir(dirs):
             r = subprocess.run(cmd, capture_output=True, text=True)
             for line in r.stdout.splitlines():
                 if line.strip():
-                    files.add(line.strip())
+                    hit = line.strip()
+                    files.add(f"{label}!{os.path.relpath(hit, root)}" if label else hit)
 
-    grep_l(high, False)
-    grep_l(low, True)
+    grep_l(high, False, dirs)
+    grep_l(low, True, dirs)
+
+    # P-012 archive pass: a compressed archive's payload is not present in its own
+    # bytes, so no grep — binary-aware or not — can see inside it. Expand, scan the
+    # contents, discard. An archive we cannot open is reported and FAILS: the whole
+    # point of this pass is that "not inspected" must stop reading as "clean".
+    archives = sorted(set(_iter_archives(dirs)))
+    uninspectable = []
+    if archives:
+        print(f"    archives: expanding {len(archives)} archive(s) to scan contents")
+        with tempfile.TemporaryDirectory(prefix="papercusp-audit-arch-") as tmp:
+            for idx, arc in enumerate(archives):
+                dest = os.path.join(tmp, f"a{idx}")
+                if not _expand_archive(arc, dest):
+                    uninspectable.append(arc)
+                    continue
+                grep_l(high, False, [dest], label=arc)
+                grep_l(low, True, [dest], label=arc)
+                shutil.rmtree(dest, ignore_errors=True)
+
+    if uninspectable:
+        print(f"\n    ✗ {len(uninspectable)} ARCHIVE(S) COULD NOT BE INSPECTED — "
+              f"refusing to report CLEAN on bytes nobody read\n")
+        for f in uninspectable[:40]:
+            print(f"        {f}")
+        print("\n  An archive this gate cannot open is a hole in the identity scan, not a pass.")
+        print("  Either teach _expand_archive its format, or stop shipping it.")
+        return 1
+
     if not files:
-        print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle")
+        print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
+              f"({len(archives)} archive(s) expanded and scanned)")
         return 0
     print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
           f"({len(files)} file(s))\n")
@@ -807,6 +911,9 @@ def source_leakers(argv):
             aroot = os.path.join(mono, root)
             if not os.path.exists(aroot):
                 continue
+            # `-I` (skip binaries) is DELIBERATE here, unlike in scan_dir: this hunts
+            # SOURCE files to hand to the scrubber, and you do not text-scrub a binary.
+            # scan_dir audits the bytes that SHIP and must use `-a` (P-012).
             cmd = ["grep", "-rIlE", "--exclude-dir=node_modules"]
             for p in pats:
                 cmd += ["-e", lit_ere(p)]
