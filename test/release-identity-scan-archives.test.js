@@ -1,0 +1,135 @@
+// P-012 (plan memory-corpus-hygiene-and-release-distribution-2026-08-03) —
+// the release identity scan must read the bytes that ACTUALLY ship: binary files
+// and the contents of archives.
+//
+// WHY THIS TEST EXISTS
+// audit-release-bundle.py --scan-dir calls itself "the ultimate backstop … scan the
+// bytes that ship" and honours no path-exclude. It ran `grep -rIlE`, and `-I` SKIPS
+// BINARY FILES — so it never opened a database dump, a corestore, or any archive,
+// and printed "✓ CLEAN". A scan that inspected nothing is indistinguishable from a
+// scan that found nothing; this is the same do-nothing-reads-as-success family as
+// `tsc -p .` checking zero files. Compression makes it worse: even with `-a`, an
+// archive's payload is not present in its own bytes, so it must be EXPANDED.
+//
+// Measured 2026-08-08 against the real 5.8G assembled sidecar: of db-seed.tar.gz's
+// 3,836 members, exactly one leaked — postmaster.opts, which Postgres writes at
+// startup containing the full postmaster ARGV, i.e. the BUILDER's absolute home
+// path, username and workspace layout. It had been shipping in every desktop
+// bundle, invisible to the gate that exists to catch precisely that.
+//
+// These assertions are BEHAVIOURAL: they run the real script against fixtures and
+// check its exit code, rather than grepping it for flags. A flag-grep would pass
+// against a rewrite that reintroduced the hole by another route.
+
+const assert = require('node:assert/strict');
+const { execFileSync, spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+
+const root = path.resolve(__dirname, '..');
+const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
+
+/** A real high-entropy identity literal, from the gate's OWN source of truth. */
+function identityLiteral() {
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
+  for (const line of r.stdout.split('\n')) {
+    const value = line.split('\t')[0];
+    // Long enough to be high-entropy (scanned in ALL files, not just non-vendor).
+    if (value && value.length > 12) return value;
+  }
+  throw new Error('no high-entropy identity literal available on this host');
+}
+
+function scanDir(dir) {
+  return spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8' });
+}
+
+function fixture(name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `p012-${name}-`));
+  fs.mkdirSync(path.join(dir, 'bundle'));
+  return dir;
+}
+
+test('a literal in a BINARY file fails the scan (the -I regression)', () => {
+  const lit = identityLiteral();
+  const dir = fixture('bin');
+  try {
+    // NUL bytes make grep classify this as binary; `-I` skipped it entirely.
+    fs.writeFileSync(
+      path.join(dir, 'bundle/blob.bin'),
+      Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(lit), Buffer.from([0, 3])]),
+    );
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `expected FAIL on a binary carrying an identity literal:\n${r.stdout}`);
+    assert.match(r.stdout, /blob\.bin/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a literal INSIDE a .tar.gz fails the scan and names the member', () => {
+  const lit = identityLiteral();
+  const dir = fixture('arc');
+  try {
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, 'secret.txt'), `leaked ${lit}\n`);
+    execFileSync('tar', ['-czf', path.join(dir, 'bundle/db-seed.tar.gz'), '-C', stage, 'secret.txt']);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `expected FAIL on an archive carrying an identity literal:\n${r.stdout}`);
+    // The member must be named — "some archive is dirty" is not actionable.
+    assert.match(r.stdout, /db-seed\.tar\.gz!secret\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// CALIBRATION CONTROL: without this, a scan that failed on EVERYTHING would satisfy
+// both assertions above while being useless.
+test('a clean bundle — including a clean archive and a clean binary — passes', () => {
+  const dir = fixture('clean');
+  try {
+    fs.writeFileSync(path.join(dir, 'bundle/a.txt'), 'nothing sensitive here\n');
+    fs.writeFileSync(path.join(dir, 'bundle/b.bin'), Buffer.from([0, 1, 2, 3, 4]));
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, 'ok.txt'), 'harmless\n');
+    execFileSync('tar', ['-czf', path.join(dir, 'bundle/src.tar.gz'), '-C', stage, 'ok.txt']);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 0, `expected PASS on a clean bundle:\n${r.stdout}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an archive the gate cannot open FAILS rather than being skipped', () => {
+  const dir = fixture('bad');
+  try {
+    fs.writeFileSync(path.join(dir, 'bundle/broken.tar.gz'), 'not actually gzip');
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `an uninspectable archive must not report CLEAN:\n${r.stdout}`);
+    assert.match(r.stdout, /COULD NOT BE INSPECTED/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
+  // The actual leak found in the shipping bundle. Both record build-box absolute
+  // paths; PG rewrites both on next start, so neither is needed to restore a seed.
+  const seed = fs.readFileSync(
+    path.join(root, '../libs/papercusp/packages/embedded-postgres-server/bin/build-seed.mjs'),
+    'utf8',
+  );
+  for (const f of ['./postmaster.pid', './postmaster.opts']) {
+    assert.equal(
+      seed.includes(`'${f}'`),
+      true,
+      `build-seed.mjs no longer excludes ${f} from db-seed.tar.gz — it records the ` +
+        "builder's absolute paths and the archive ships inside the public desktop bundle (P-012).",
+    );
+  }
+});
