@@ -13,7 +13,7 @@
 # becomes ready LATER, merged onto what's already live.
 #
 # Usage:
-#   bin/publish-platform-incremental.sh <version> <channel: alpha|beta|stable> <platform: linux|windows|mac>
+#   bin/publish-platform-incremental.sh <version> <channel: alpha|beta|stable|nightly> <platform: linux|windows|mac>
 #
 # What it does:
 #   1. Globs the platform's already-built artifacts from the SAME version-scoped
@@ -62,7 +62,7 @@ source "$HERE/lib/release-artifacts.sh"
 source "$HERE/lib/release-host.sh"
 
 if [[ $# -lt 3 ]]; then
-  echo "usage: $0 <version> <channel: alpha|beta|stable> <platform: linux|windows|mac>" >&2
+  echo "usage: $0 <version> <channel: alpha|beta|stable|nightly> <platform: linux|windows|mac>" >&2
   exit 2
 fi
 VERSION="$1"

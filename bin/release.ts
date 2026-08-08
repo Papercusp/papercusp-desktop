@@ -25,6 +25,7 @@
  *     always.
  */
 import {
+  CHANNELS,
   assertValidVersion,
   defaultTagFor,
   fetchHttpGetPort,
@@ -75,13 +76,13 @@ async function main(): Promise<void> {
   const [version, channel = 'stable'] = argv.filter((a) => !a.startsWith('--'));
 
   if (!version) {
-    console.error('usage: release.ts <version> <channel: alpha|beta|stable> [--plan] [--with-arm64] [--with-windows] [--with-mac]');
+    console.error(`usage: release.ts <version> <channel: ${CHANNELS.join('|')}> [--plan] [--with-arm64] [--with-windows] [--with-mac]`);
     console.error('   or: release.ts publish --platform <linux|darwin|windows> --incremental <version> <channel>');
     process.exit(1);
   }
   assertValidVersion(version);
   if (!isValidChannel(channel)) {
-    console.error(`ERROR: channel must be alpha|beta|stable (got "${channel}")`);
+    console.error(`ERROR: channel must be ${CHANNELS.join('|')} (got "${channel}")`);
     process.exit(1);
   }
 

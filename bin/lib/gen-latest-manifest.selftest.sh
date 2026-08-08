@@ -53,7 +53,10 @@ echo "gen-latest-manifest self-test (version=$VER)"
 [[ "$(desktop_release_tag "$VER" alpha)"  == "desktop-v${VER}-alpha" ]] && ok "alpha tag"  || bad "alpha tag mismatch"
 [[ "$(desktop_release_tag "$VER" beta)"   == "desktop-v${VER}-beta"  ]] && ok "beta tag"   || bad "beta tag mismatch"
 [[ "$(desktop_release_tag "$VER" stable)" == "desktop-v${VER}"       ]] && ok "stable tag" || bad "stable tag mismatch"
-if desktop_release_tag "$VER" nightly >/dev/null 2>&1; then
+# `nightly` used to be this check's example of an unknown channel; it became a
+# real (side-by-side) channel with the channel model, so the probe moved to a
+# name that is genuinely not one. Section 6 below covers nightly properly.
+if desktop_release_tag "$VER" insider >/dev/null 2>&1; then
   bad "an unknown channel should be rejected, but desktop_release_tag succeeded"
 else
   ok "an unknown channel is rejected"
@@ -154,6 +157,80 @@ if [[ -f "$NOBASE_JSON" ]] && grep -q "papercusp-update-base-unset://SET-PAPERCU
   ok "unset PAPERCUSP_UPDATE_BASE_URL emits the obviously-invalid placeholder url"
 else
   bad "unset PAPERCUSP_UPDATE_BASE_URL did not emit the expected placeholder"
+fi
+
+
+# ── 6. CHANNEL MODEL: tags, feed paths, strictness ──────────────────────────
+# Mirrors @papercusp/tauri-release-kit's ChannelRegistry. The load-bearing
+# property is that `nightly` — a SIDE-BY-SIDE build with its own bundle id and
+# data home — never writes the permanent root manifest, which every installed
+# copy of the MAIN app polls forever.
+echo
+echo "channel model"
+
+for pair in "alpha:desktop-v${VER}-alpha" "beta:desktop-v${VER}-beta" \
+            "nightly:desktop-v${VER}-nightly" "stable:desktop-v${VER}"; do
+  ch="${pair%%:*}"; want="${pair#*:}"
+  got="$(desktop_release_tag "$VER" "$ch" 2>/dev/null)"
+  if [[ "$got" == "$want" ]]; then ok "tag $ch -> $got"
+  else bad "tag $ch: expected '$want', got '$got'"; fi
+done
+
+if desktop_release_tag "$VER" bogus >/dev/null 2>&1; then
+  bad "desktop_release_tag accepted an unknown channel"
+else
+  ok "desktop_release_tag rejects an unknown channel"
+fi
+
+for ch in alpha beta stable; do
+  got="$(desktop_channel_feed_paths "$ch" | tr '\n' ' ')"
+  if [[ "$got" == "$ch/latest.json latest.json " ]]; then
+    ok "$ch publishes its own feed AND the root manifest, root LAST"
+  else
+    bad "$ch feed paths: got '$got'"
+  fi
+done
+
+# THE ONE THAT MATTERS: a side-by-side channel must never touch the root.
+got="$(desktop_channel_feed_paths nightly | tr '\n' ' ')"
+if [[ "$got" == "nightly/latest.json " ]]; then
+  ok "nightly publishes ONLY its own feed — never the permanent root address"
+else
+  bad "nightly feed paths: expected 'nightly/latest.json ', got '$got'"
+fi
+if desktop_channel_feed_paths nightly | grep -qx 'latest.json'; then
+  bad "nightly would publish to the root manifest — every installed app polls it"
+else
+  ok "nightly emits no bare 'latest.json' key"
+fi
+
+got="$(desktop_channel_feed_paths stable latest-server.json | tr '\n' ' ')"
+if [[ "$got" == "stable/latest-server.json latest-server.json " ]]; then
+  ok "a custom manifest name flows through both legs"
+else
+  bad "custom manifest name: got '$got'"
+fi
+
+# An unknown channel must emit NOTHING before failing: the caller reads this on a
+# process substitution, where a nonzero return does not abort its read loop.
+got="$(desktop_channel_feed_paths bogus 2>/dev/null)"
+rc=$?
+if [[ "$rc" -ne 0 && -z "$got" ]]; then
+  ok "an unknown channel fails closed — nonzero AND no path emitted"
+else
+  bad "unknown channel: rc=$rc output='$got' (must be nonzero with empty output)"
+fi
+
+for ch in beta stable; do
+  if desktop_channel_is_strict "$ch"; then ok "$ch is strict"; else bad "$ch should be strict"; fi
+done
+for ch in alpha nightly; do
+  if desktop_channel_is_strict "$ch"; then bad "$ch should be lenient"; else ok "$ch is lenient"; fi
+done
+if desktop_channel_is_strict bogus; then
+  ok "an unknown channel defaults to STRICT (fails closed)"
+else
+  bad "an unknown channel must default to strict"
 fi
 
 echo

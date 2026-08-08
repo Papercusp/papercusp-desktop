@@ -17,7 +17,14 @@
 # domain maps the bucket root to https://dl.papercusp.com/):
 #
 #   <secret>/latest.json                 ← the updater manifest. PERMANENT address.
+#   <secret>/<channel>/latest.json       ← the per-channel feed (additive)
 #   <secret>/<tag>/<artifact>            ← installers + their .sig files
+#
+# The per-channel feed is ADDITIVE and changes nothing for an existing install:
+# every shipped binary polls the permanent root address, which is still written
+# exactly as before. A side-by-side channel (nightly — its own bundle id, name
+# and data home) writes ONLY its own feed and never the root, because the root
+# is polled by every installed copy of the MAIN app.
 #
 # The <secret> path segment (not a subdomain — D-002: a random subdomain is
 # published to Certificate Transparency the moment it gets a cert) comes from
@@ -143,6 +150,9 @@ fi
 # One list, written by the builder, read here — no drift.
 # shellcheck source=lib/release-artifacts.sh
 . "$HERE/lib/release-artifacts.sh"
+# desktop_channel_feed_paths — which manifest keys this channel publishes.
+# shellcheck source=lib/gen-latest-manifest.sh
+. "$HERE/lib/gen-latest-manifest.sh"
 mapfile -t ARTIFACTS < <(release_artifacts_read "$TAG") || {
   echo "ERROR: could not resolve this cut's artifacts for $TAG — run bin/release-local.sh $VERSION $CHANNEL first (it writes the manifest this reads)." >&2
   exit 1
@@ -205,14 +215,35 @@ for f in "${ARTIFACTS[@]}"; do
   s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
 done
 
-echo "==> uploading latest.json (LAST — this is what publishes the update)"
-s3 cp "$LATEST_JSON" "s3://${R2_BUCKET}/${KEY_PREFIX}/latest.json" \
-  --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+# The manifest goes to EVERY feed path this channel publishes:
+#   <secret>/<channel>/latest.json   ← the per-channel feed (always)
+#   <secret>/latest.json             ← the PERMANENT address, for update lanes only
+#
+# The per-channel feed is written FIRST and the root LAST, deliberately: if this
+# dies partway, the address every installed app polls forever is still pointing
+# at the previous, known good release rather than at a half-published one.
+#
+# The root leg is exactly what this script has always done — it is preserved
+# byte-for-byte so no existing install is affected. The per-channel legs are
+# purely additive: nothing reads them until a build ships that knows to.
+upload_manifest() {
+  local src="$1" manifest_name="$2" label="$3" path
+  while IFS= read -r path; do
+    if [[ "$path" == "$manifest_name" ]]; then
+      echo "==> uploading ${label} to the PERMANENT root address (LAST — this is what publishes the update)"
+    else
+      echo "==> uploading ${label} to the ${CHANNEL} channel feed (${path})"
+    fi
+    s3 cp "$src" "s3://${R2_BUCKET}/${KEY_PREFIX}/${path}" \
+      --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+  done < <(desktop_channel_feed_paths "$CHANNEL" "$manifest_name")
+}
+
+upload_manifest "$LATEST_JSON" "latest.json" "latest.json"
 
 if [[ -f "$LATEST_SERVER_JSON" ]]; then
-  echo "==> uploading latest-server.json (publishes the Server product's update — WI-4404)"
-  s3 cp "$LATEST_SERVER_JSON" "s3://${R2_BUCKET}/${KEY_PREFIX}/latest-server.json" \
-    --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+  echo "==> publishing the Server product's manifest (WI-4404)"
+  upload_manifest "$LATEST_SERVER_JSON" "latest-server.json" "latest-server.json"
 else
   echo "==> no latest-server.json for this cut — Server product's manifest left as-is"
 fi

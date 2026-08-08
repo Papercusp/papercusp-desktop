@@ -14,11 +14,13 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
+  type AppIdentity,
   type Channel,
   type TargetDriver,
   type TauriReleaseConfig,
   collectArtifacts,
   defaultClassifyArtifact,
+  defineChannelRegistry,
   linuxArm64Driver,
   linuxX86Driver,
   registerTargetDriver,
@@ -101,6 +103,73 @@ export function registerPapercuspDrivers(): void {
     ),
   );
 }
+
+/**
+ * Papercusp's release channels — the single declaration every channel-dependent
+ * surface derives from (feed layout, cut strictness, bundle identity).
+ *
+ * ROOT FEED. `alpha`, `beta` and `stable` all publish to the permanent
+ * `<base>/latest.json`, which is what this app has always done and must keep
+ * doing: that address is baked into every shipped binary and polled forever, and
+ * the operator applies the lane gate downstream (updates-manifest.ts
+ * `visibleChannels`). Restricting it to one channel would silently stop the
+ * others reaching any existing install.
+ *
+ * ALPHA IS THE SHIPPING LANE, not a pre-release backwater — every public cut so
+ * far has shipped on it (the last eight consecutive tags are `-alpha`), which is
+ * why `DEFAULT_CHANNEL` in the operator is `alpha` and why alpha is lenient
+ * about a dirty tree.
+ *
+ * NIGHTLY IS A DIFFERENT APPLICATION. It is `side-by-side`, so the registry
+ * gives it its own bundle id (`com.papercusp.gui.nightly`), its own product name
+ * and — the part that matters — its own data home (`.papercusp-nightly`). It
+ * publishes ONLY to `<base>/nightly/latest.json` and never to the root, so it
+ * can never be offered to someone's working desktop as an update.
+ */
+export const PAPERCUSP_CHANNELS = defineChannelRegistry([
+  {
+    id: 'alpha',
+    distribution: 'update-lane',
+    rootFeed: true,
+    prerelease: true,
+    strict: false,
+    promotesFrom: ['nightly'],
+  },
+  {
+    id: 'beta',
+    distribution: 'update-lane',
+    rootFeed: true,
+    prerelease: true,
+    strict: true,
+    promotesFrom: ['alpha'],
+  },
+  {
+    id: 'stable',
+    distribution: 'update-lane',
+    rootFeed: true,
+    prerelease: false,
+    strict: true,
+    promotesFrom: ['beta'],
+  },
+  {
+    id: 'nightly',
+    distribution: 'side-by-side',
+    identitySuffix: 'nightly',
+    prerelease: true,
+    strict: false,
+  },
+]);
+
+/**
+ * The base app identity a channel resolves against. Mirrors
+ * `src-tauri/tauri.conf.json` (identifier + productName) and the desktop's data
+ * home (`workspaces::shared_sidecar_home()` → `$HOME/.papercusp`).
+ */
+export const PAPERCUSP_BASE_IDENTITY: AppIdentity = {
+  bundleId: 'com.papercusp.gui',
+  productName: 'Papercusp GUI',
+  dataHomeDirName: '.papercusp',
+};
 
 export function makePapercuspConfig(opts: {
   version: string;

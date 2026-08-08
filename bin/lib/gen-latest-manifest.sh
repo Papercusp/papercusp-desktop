@@ -46,14 +46,66 @@
 # All three "*_path" helpers are pure string functions (no I/O) so a caller can
 # resolve where the manifest WILL land before/after calling gen_latest_manifest.
 
+# Must stay in lockstep with the kit's defaultTagFor()
+# (libs/generic/tauri-release-kit/src/tag.ts) AND with the operator's
+# classifyChannel(), which reads the channel back OFF this tag and whose
+# fall-through is `stable`. A channel that can be cut here but is unknown there
+# is not rejected — it is served to stable users.
 desktop_release_tag() {
   local version="$1" channel="$2"
   case "$channel" in
-    alpha)  printf 'desktop-v%s-alpha\n' "$version" ;;
-    beta)   printf 'desktop-v%s-beta\n' "$version" ;;
-    stable) printf 'desktop-v%s\n' "$version" ;;
-    *) echo "gen-latest-manifest: channel must be alpha|beta|stable (got '$channel')" >&2; return 1 ;;
+    alpha)   printf 'desktop-v%s-alpha\n' "$version" ;;
+    beta)    printf 'desktop-v%s-beta\n' "$version" ;;
+    nightly) printf 'desktop-v%s-nightly\n' "$version" ;;
+    stable)  printf 'desktop-v%s\n' "$version" ;;
+    *) echo "gen-latest-manifest: channel must be alpha|beta|stable|nightly (got '$channel')" >&2; return 1 ;;
   esac
+}
+
+# Does a cut on $channel enforce the strict preconditions (clean tree, verified
+# submodule freshness) rather than warning and continuing?
+#
+# Mirrors ChannelSpec.strict in @papercusp/tauri-release-kit. This exists as a
+# NAMED predicate because the callers used to spell it `[[ "$CHANNEL" != "alpha" ]]`
+# — a test whose meaning silently inverts the moment a second non-strict channel
+# exists. `nightly` is cut from trunk daily on a shared tree that is almost
+# always dirty, so under the old spelling every nightly cut would have been
+# blocked by a guard that was never aimed at it.
+#
+# Exit 0 = strict (block), 1 = lenient (warn and continue).
+desktop_channel_is_strict() {
+  case "$1" in
+    beta|stable)   return 0 ;;
+    alpha|nightly) return 1 ;;
+    *) echo "gen-latest-manifest: unknown channel '$1'" >&2; return 0 ;;
+  esac
+}
+
+# Which manifest object keys a cut on $channel publishes, relative to the
+# release-host base — the per-channel feed always, plus the permanent root
+# manifest for an update lane.
+#
+# Mirrors ChannelRegistry.feedPathsFor() in @papercusp/tauri-release-kit.
+# ORDER IS DELIBERATE: per-channel feed first, root LAST, so a publish that dies
+# partway leaves the permanently-polled manifest on the last known good release.
+#
+# `nightly` is SIDE-BY-SIDE — its own bundle id, name and data home — so it must
+# NEVER write the root manifest: that address is polled by every installed copy
+# of the main app, and a nightly build reaching it offers those users an update
+# into a different application.
+desktop_channel_feed_paths() {
+  local channel="$1" manifest="${2:-latest.json}" writes_root
+  # Validate BEFORE emitting anything. A caller reads this on a pipe
+  # (`while read … < <(…)`), where a nonzero return does NOT abort the loop — so
+  # emitting a path and then failing would still publish to it.
+  case "$channel" in
+    alpha|beta|stable) writes_root=1 ;;
+    nightly)           writes_root=0 ;;
+    *) echo "gen-latest-manifest: unknown channel '$channel'" >&2; return 1 ;;
+  esac
+  printf '%s/%s\n' "$channel" "$manifest"
+  (( writes_root )) && printf '%s\n' "$manifest"
+  return 0
 }
 
 gen_latest_manifest_json_path()        { printf '/tmp/papercusp-latest-%s.json\n' "$1"; }

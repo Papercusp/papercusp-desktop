@@ -74,7 +74,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <version> <channel: alpha|beta|stable>"
+  echo "usage: $0 <version> <channel: alpha|beta|stable|nightly>"
   exit 1
 fi
 
@@ -289,8 +289,8 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
 fi
 
 case "$CHANNEL" in
-  alpha|beta|stable) ;;
-  *) echo "ERROR: channel must be alpha|beta|stable"; exit 1 ;;
+  alpha|beta|stable|nightly) ;;
+  *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
 esac
 
 # Tag convention matches the operator's manifest classifier
@@ -367,9 +367,15 @@ fi
 # on any machine without an authenticated gh (e.g. the mac/windows VM legs, which
 # drive this same script). A local build must never require a GitHub credential.
 
-# Refuse to publish from a dirty tree on stable/beta. On alpha we
-# allow it for fast iteration.
-if [[ "$CHANNEL" != "alpha" ]]; then
+# Refuse to publish from a dirty tree on a STRICT channel (stable/beta). The
+# lenient channels (alpha, nightly) allow it for fast iteration — nightly is cut
+# from trunk daily on a tree the fleet edits continuously, so a clean-tree
+# requirement there would block every cut.
+#
+# Asks the channel's `strict` property rather than testing `!= "alpha"`: that
+# spelling means "every channel except alpha", which silently swept in each new
+# lenient channel as it was added.
+if desktop_channel_is_strict "$CHANNEL"; then
   if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
     echo "ERROR: tree dirty — commit or stash before a $CHANNEL release"
     git -C "$ROOT" status --short
@@ -401,8 +407,8 @@ fi
 # intentional offline cut is still possible, but must be DELIBERATE and is logged as such.
 _wi3047_unverified() {
   local reason="$1"
-  if [[ "$CHANNEL" == "alpha" ]]; then
-    echo "WARN: $reason — libs/papercusp freshness UNVERIFIED (continuing — alpha channel)"
+  if ! desktop_channel_is_strict "$CHANNEL"; then
+    echo "WARN: $reason — libs/papercusp freshness UNVERIFIED (continuing — lenient '$CHANNEL' channel)"
   elif [[ "${PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE:-0}" == "1" ]]; then
     echo "WARN: $reason — libs/papercusp freshness UNVERIFIED; continuing because"
     echo "      PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE=1 (deliberate operator override)."
@@ -444,12 +450,12 @@ if git -C "$PAPERCUSP_SUBMODULE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     SUB_BEHIND="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_LOCAL_SHA..$SUB_REMOTE_SHA" 2>/dev/null || echo '?')"
     if [[ "$SUB_BEHIND" != "0" ]]; then
       SUB_MSG="libs/papercusp is $SUB_BEHIND commit(s) behind origin/$SUBMODULE_BRANCH (local=${SUB_LOCAL_SHA:0:12} remote=${SUB_REMOTE_SHA:0:12}) — a release cut now may ship migrations/code that lag what's already merged (WI-3047 class)."
-      if [[ "$CHANNEL" != "alpha" ]]; then
+      if desktop_channel_is_strict "$CHANNEL"; then
         echo "ERROR: $SUB_MSG"
         echo "       Run: git -C libs/papercusp pull origin $SUBMODULE_BRANCH   (then re-stage the submodule pointer)"
         exit 1
       else
-        echo "WARN: $SUB_MSG (continuing — alpha channel)"
+        echo "WARN: $SUB_MSG (continuing — lenient '$CHANNEL' channel)"
       fi
     elif [[ "$SUB_LOCAL_SHA" != "$SUB_REMOTE_SHA" ]]; then
       SUB_AHEAD="$(git -C "$PAPERCUSP_SUBMODULE_DIR" rev-list --count "$SUB_REMOTE_SHA..$SUB_LOCAL_SHA" 2>/dev/null || echo '?')"

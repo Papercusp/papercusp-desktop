@@ -16,7 +16,7 @@
 # logic (bin/lib/gen-latest-manifest.sh) bin/release-local.sh itself now calls.
 #
 # Usage:
-#   bin/gen-latest-manifest.sh <version> <channel: alpha|beta|stable> <artifact>...
+#   bin/gen-latest-manifest.sh <version> <channel: alpha|beta|stable|nightly> <artifact>...
 #
 #   # e.g. after bin/build-linux-local.sh finishes:
 #   PAPERCUSP_UPDATE_BASE_URL=https://release.example.com bin/gen-latest-manifest.sh \
@@ -42,7 +42,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/gen-latest-manifest.sh"
 
 if [[ $# -lt 3 ]]; then
-  echo "usage: $0 <version> <channel: alpha|beta|stable> <artifact>..." >&2
+  echo "usage: $0 <version> <channel: alpha|beta|stable|nightly> <artifact>..." >&2
   exit 1
 fi
 
