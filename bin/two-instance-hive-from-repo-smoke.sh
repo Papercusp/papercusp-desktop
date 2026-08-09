@@ -879,8 +879,27 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # not advance" — the two readings have opposite remediations, and the from-repo witness banks no
   # serve log (unlike the local-matrix rig), so a K2 FAIL was undiagnosable after teardown. Four
   # days of identical reds could not be triaged for exactly this reason.
+  # K2 PRE-FLIGHT (WI-37144) — MEASURED 2026-08-09: the captured K2 DIAG below returned
+  # `{"ok":false,"code":"not_owner"}`, i.e. the revoke is REJECTED at the OWNER GATE
+  # (hive-revoke-contributor.ts:205-215) and never reaches loadTargetPubkeys or the epoch
+  # advance. That gate asks loadHiveKeyStatus(workspaceId, potHomeSlug), which RECOMPUTES the
+  # keychain id as `hive:${ws}:${slug}` (identity/hive-keypair.ts:49-52) — whereas
+  # ensureHiveIdentity (hive-identity.ts:46-63) treats pots.keychain_id as AUTHORITATIVE, and
+  # its own comment records that recompute-and-mint is exactly what orphaned the hive key on
+  # the 2026-06-19 rename. So print BOTH strings: if they differ, the gate is correctly saying
+  # it holds no key under the id it computed and the root cause is UPSTREAM of the gate.
+  # Printed BEFORE the revoke on purpose — this rig banks no serve log and destroys its
+  # instances at teardown, which is why four days of reds were undiagnosable.
+  pots_row="$(drv_psql a "SELECT workspace_id || ' | ' || pot_home_slug || ' | keychain_id=' || COALESCE(keychain_id,'<NULL>') || ' | pub=' || COALESCE(left(public_key::text,12),'<NULL>') FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG';" 2>&1 | tr -d '\r' | sed '/^[[:space:]]*$/d')"
+  # ⚠ an EMPTY result here is NOT "no such row" — it is equally "the query never ran". Label it.
+  echo "  [K2 PRE] pots row(s) on A       : ${pots_row:-<EMPTY — undetermined: no row OR the query failed; NOT evidence of absence>}"
+  echo "  [K2 PRE] gate recomputes id as  : hive:${WS_ID}:${HIVE_SLUG}"
   rk_revoke_out="$(mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"potSlug\":\"$HIVE_SLUG\"}" 2>&1 || true)"  # request field renamed hiveSlug→potSlug (revoke-contributor.ts zod refine accepts only potSlug)
-  echo "  [K2 DIAG] revoke_contributor → $(printf '%s' "${rk_revoke_out:-<no output>}" | tr '\n' ' ' | cut -c1-500)"
+  # WI-37195 landed a TRI-STATE owner gate, so this line now discriminates the two states the old
+  # boolean gate collapsed: `not_owner` = no key held under the recomputed id; `owner_key_unreadable`
+  # = a key IS there but could not be read (its `detail` names the reason). Widened 500→900 chars so
+  # that detail survives the cut — the code alone does not say WHY.
+  echo "  [K2 DIAG] revoke_contributor → $(printf '%s' "${rk_revoke_out:-<no output>}" | tr '\n' ' ' | cut -c1-900)"
   # WI-37144: POLL the epoch instead of one read after `sleep 4`. Every other cross-instance
   # assertion here polls (K0/K1 20x/3s); K2 was the last single-shot read, and the K1 comment
   # directly below cites WI-5828 for precisely that asymmetry producing false FAILs. Polling can
