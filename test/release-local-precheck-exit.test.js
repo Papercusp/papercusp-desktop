@@ -73,7 +73,7 @@ test('the precheck-only exit exists and is reachable', () => {
 
 test('the precheck exit is ABOVE the version bump — the first tree write', () => {
   const text = src();
-  const guard = firstLine(text, /if \[\[ "\$\{PAPERCUSP_RELEASE_PRECHECK_ONLY:-0\}" == "1" \]\]/);
+  const guard = firstLine(text, PRECHECK_BRANCH);
   const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
 
   assert(guard > 0, 'the PAPERCUSP_RELEASE_PRECHECK_ONLY branch was removed or reworded');
