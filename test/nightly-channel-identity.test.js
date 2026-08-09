@@ -241,6 +241,22 @@ test('the scans are falsifiable (permanent controls, never mutate the tree)', ()
   );
 });
 
+/**
+ * A `*.selftest.sh` is not a build path — it is the test OF the chokepoint, so
+ * it necessarily reads the arrays and states the overlay's expected name. Both
+ * scans would flag it, and both flags would be wrong: nothing there builds a
+ * bundle.
+ *
+ * This is an exclusion by FILE CATEGORY, deliberately, not by content. The
+ * tempting alternative — only flag lines that also say `tauri build` — narrows
+ * the RULE instead of the SUBJECT, and it fails in the expensive direction: a
+ * future build site that shells out any other way stops being checked at all,
+ * silently. Keeping the rule broad means every new script under bin/ is
+ * scanned; the only thing carved out is the one category that exists to
+ * examine these arrays.
+ */
+const isSelfTest = (name) => /\.selftest\.sh$/.test(name);
+
 function buildScripts() {
   const dirs = [path.join(root, 'bin'), path.join(root, 'bin', 'lib')];
   const files = [];
@@ -249,11 +265,16 @@ function buildScripts() {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
       if (!/\.(sh|ts|mjs|js)$/.test(entry.name)) continue;
+      if (isSelfTest(entry.name)) continue;
       const p = path.join(dir, entry.name);
       files.push({ name: path.relative(root, p), text: fs.readFileSync(p, 'utf8') });
     }
   }
   assert(files.length > 0, 'scanned nothing — the scan roots moved, so a clean result would be meaningless');
+  assert(
+    !files.some((f) => isSelfTest(f.name)),
+    'a *.selftest.sh reached the scan set — the exclusion above stopped matching',
+  );
   return files;
 }
 
