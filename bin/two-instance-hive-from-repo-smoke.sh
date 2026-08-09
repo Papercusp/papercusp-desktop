@@ -616,6 +616,14 @@ fi
 # NB hive_members is keyed by pot_home_slug (NOT harness_slug); the refused-op counters live in
 # harness_shared.p2p_refused_op_counters (M15, mig 468) keyed by (workspace_id, harness_slug=hive
 # home, reason) and are bumped by projections/p2p-receipts.ts's receiver-side identity gate.
+# WI-37222: the SUBSET probes (WITNESS / MODERATION / ATTESTATION) each publish their own
+# `<NAME> OVERALL:` line and are scored as SEPARATE gate legs (live-federation-gate.sh:1166-1173),
+# so they deliberately do NOT gate this script's core exit verdict — that separation is what keeps
+# "core federation broke" distinguishable from "re-key broke". What was MISSING is that a subset
+# failure also skipped the failure branch entirely, so the instance logs were never preserved.
+# This accumulator lets a subset failure (a) preserve those logs and (b) put an unmissable warning
+# on the artifact's LAST line, without touching the core verdict. See the report block at EOF.
+FAILED_SUBSETS=""
 att_seed_A_ok=0; att_seed_B_ok=0; att_2dev_ok=0; att_wrong_ok=0; att_removed_ok=0; attestation_ran=0
 att_removed_reason=""
 if [ "${ATTESTATION_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
@@ -1068,6 +1076,7 @@ if [ "$witness_ran" = 1 ]; then
     echo "WITNESS OVERALL: PASS — owner-enforcement (ban + unban-teeth) + the C-001 re-key CUT (key-level, device-filtered: B's device HAD the pre-revoke epoch key, has NO post-revoke epoch key while remaining members were re-keyed)$([ "$rk_content_applicable" = 1 ] && echo " + the CONTENT-level cut (B read pre-revoke content, can NO LONGER read post-revoke content; remaining member A reads it)" || echo "") proven on the binary"
   else
     echo "WITNESS OVERALL: INCOMPLETE — see the per-leg results + the inline K-stage/AK/K4 diagnostics above"
+    FAILED_SUBSETS="$FAILED_SUBSETS witness"
   fi
 fi
 if [ "$moderation_ran" = 1 ]; then
@@ -1082,6 +1091,7 @@ if [ "$moderation_ran" = 1 ]; then
     echo "MODERATION OVERALL: PARTIAL — takedown federation PROVEN (A→B); report leg INCONCLUSIVE (moderation.reportable could not be enabled this run — see the [reportable] diagnostics)"
   else
     echo "MODERATION OVERALL: INCOMPLETE — see the per-leg MOD-LEG results + diagnostics above"
+    FAILED_SUBSETS="$FAILED_SUBSETS moderation"
   fi
 fi
 if [ "$attestation_ran" = 1 ]; then
@@ -1092,16 +1102,50 @@ if [ "$attestation_ran" = 1 ]; then
     echo "ATTESTATION OVERALL: PASS — second-device attestation + membership seeding proven on the 2-node rig; refused-op counters increment on BOTH adversarial probes (wrong gh-user-id, removed/unattested device)"
   else
     echo "ATTESTATION OVERALL: INCOMPLETE — see the per-leg ATTESTATION/LEG results + diagnostics above"
+    FAILED_SUBSETS="$FAILED_SUBSETS attestation"
   fi
 fi
+# ── final verdict ───────────────────────────────────────────────────────────────
+# SCOPE (WI-37222): the condition below covers the TWELVE CORE federation legs ONLY. The WITNESS
+# (C-001 re-key), MODERATION and ATTESTATION subsets are scored as SEPARATE gate legs off their own
+# `<NAME> OVERALL:` lines — do NOT fold them into this condition, or a witness-only failure would
+# also report the core leg red and the two would stop being distinguishable.
+#
+# What WAS broken, and why it was expensive: a subset failure with green core legs took the `exit 0`
+# branch, so the log preservation below NEVER RAN. $WORK is a mktemp cleaned on exit, so the frame
+# serve.log went with it — and that file holds the ONLY copy of the rekey_boundary_skipped /
+# rekey_boundary_applied boot events (boot-history is in-memory only, EI-18655247267756605). Those
+# events were built by WI-280 + WI-6043's reopen precisely so a K2 `epoch advanced 0→0` names its own
+# cause. The harness was deleting the evidence for the breach it had just detected, which is why
+# WI-37195 (a live C-001 read-plane breach) survived 5 consecutive gate reds un-root-caused.
+# Two rules follow, and both matter independently:
+#   (1) preserve instance logs whenever ANYTHING failed — core legs OR any subset that ran;
+#   (2) never let the artifact's LAST line be reassuring when the run was not. A subset failure now
+#       emits a trailing ⚠ line, the inverse of the EI-19940993365684927 shape (a ✓ sub-assertion
+#       BELOW a verdict, which made a failed scenario's last line read as a pass).
+# `OVERALL: PASS` stays at line-start and keeps meaning CORE-LEGS-PASS: that is the string the gate
+# greps for this leg. Note the gate discards this script's exit code entirely (`|| true` at
+# live-federation-gate.sh:899), so the exit codes here serve STANDALONE/human runs — which is exactly
+# why a subset failure must not exit 0 and read as success to someone running this by hand.
+DBG="/tmp/hive-fromrepo-smoke-debug-$$"
+preserve_instance_logs() {
+  mkdir -p "$DBG" \
+    && cp "${FED_LOG[a]}" "$DBG/a.log" 2>/dev/null
+  cp "${FED_LOG[b]}" "$DBG/b.log" 2>/dev/null
+}
 if [ "$create_ok" = 1 ] && [ "$announce_ok" = 1 ] && [ "$degraded_ok" = 1 ] && [ "$discover_ok" = 1 ] && [ "$links_ok" = 1 ] && [ "$offer_ok" = 1 ] && [ "$offer_dir_ok" = 1 ] && [ "$join_ok" = 1 ] && [ "$clone_ok" = 1 ] && [ "$hive_merge_ok" = 1 ] && [ "$hive_rev_ok" = 1 ] && [ "$hive_cont_ok" = 1 ]; then
   echo "OVERALL: PASS — create-from-repo → discover → join → BIDIRECTIONAL + continuous hive federation proven end-to-end ($RUN_MODE mode)"
+  if [ -n "${FAILED_SUBSETS:-}" ]; then
+    preserve_instance_logs
+    echo "⚠ SUBSET FAILURES —${FAILED_SUBSETS} — the OVERALL line above covers the TWELVE CORE federation legs ONLY and is NOT a clean-run verdict. Read the <NAME> OVERALL lines above. Instance logs (incl. the rekey_boundary_* boot events that diagnose a K2 epoch 0→0) preserved at $DBG"
+    exit 7
+  fi
   exit 0
 else
-  DBG="/tmp/hive-fromrepo-smoke-debug-$$"
-  mkdir -p "$DBG" && cp "${FED_LOG[a]}" "$DBG/a.log" 2>/dev/null; cp "${FED_LOG[b]}" "$DBG/b.log" 2>/dev/null
+  preserve_instance_logs
   echo "OVERALL: INCOMPLETE — instance logs preserved at $DBG"
   grep -iE "hive-directory|\[swarm\]|from-repo|publish|error" "${FED_LOG[a]}" 2>/dev/null | tail -12
   grep -iE "hive-directory|\[swarm\]|join" "${FED_LOG[b]}" 2>/dev/null | tail -8
+  [ -n "${FAILED_SUBSETS:-}" ] && echo "⚠ SUBSET FAILURES ALSO —${FAILED_SUBSETS} — see the <NAME> OVERALL lines above; instance logs preserved at $DBG"
   exit 6
 fi
