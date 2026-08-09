@@ -32,7 +32,14 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const SCRIPT = path.join(root, 'bin', 'release-local.sh');
+// The subject is overridable ONLY so falsifiability can be proved against a
+// COPY outside the tree (scripts/mutation-probe.sh --file … , the default
+// copy-out tier). Mutating the real bin/release-local.sh in place to test this
+// guard would be the same class of mistake the guard exists to prevent: on this
+// shared checkout git-sync commits the whole tree every few minutes, so a probe
+// that holds a mutation for the length of a test run can have it swept into a
+// commit even when nothing goes wrong. One line here removes that need.
+const SCRIPT = process.env.PROBE_RELEASE_LOCAL || path.join(root, 'bin', 'release-local.sh');
 const src = () => fs.readFileSync(SCRIPT, 'utf8');
 
 /** 1-based line index of the first line matching `re`, or -1. */
