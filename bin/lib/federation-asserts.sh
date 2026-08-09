@@ -1425,8 +1425,19 @@ fed_cleanup_scoped() {
   # Kill every process whose cmdline carries THIS run's $work — except self/ancestors
   # (above) and the scan pipeline itself (`grep -v grep`).
   victims="$(ps -eo pid,args 2>/dev/null | grep -F "$work" | grep -v grep | awk '{print $1}')"
-  n="$(printf '%s\n' "$victims" | grep -c '^[0-9]\+$' || true)"
-  if [ "${n:-0}" -gt "$FED_CLEANUP_MAX_VICTIMS" ]; then
+  # Count in-shell rather than with `grep -c`: grep prints 0 and exits 1 both for a
+  # genuine no-match AND for a read failure, so the old `|| true` made an UNMEASURABLE
+  # count indistinguishable from a real zero (R3-grep-c-unguarded). That is not a
+  # cosmetic shape here — this count IS the WI-36926 blast-radius cap, so a false zero
+  # silently DISABLES the cap and re-opens the box-wide sweep it exists to stop. A
+  # shell loop has no exit code to swallow, and applies the SAME pid filter as the kill
+  # loop below, so the cap now counts exactly the set that would be signalled.
+  n=0
+  while IFS= read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    n=$((n + 1))
+  done <<< "$victims"
+  if [ "$n" -gt "$FED_CLEANUP_MAX_VICTIMS" ]; then
     echo "fed_cleanup_scoped: REFUSING — marker '$work' matched $n processes (cap $FED_CLEANUP_MAX_VICTIMS). One run's leftovers are never this many; killing them would be a box-wide sweep (WI-36926). Nothing was signalled and \$work was NOT removed." >&2
     return 3
   fi
