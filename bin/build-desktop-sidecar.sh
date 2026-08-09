@@ -868,6 +868,21 @@ echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
 copy_pkg_closure luxon
 echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"
 
+# EI-19981394187273902 (2026-08-09) — IDENTICAL createRequire gotcha as rrule/luxon
+# above, caught by the sidecar-createrequire-bundling.test.ts recurrence guard
+# (EI-1589). device-push-dispatcher.ts loads BOTH
+# `createRequire(import.meta.url)('google-auth-library')` (FCM push — signs a
+# service-account JWT) AND `createRequire(import.meta.url)('jose')` (APNs push —
+# signs the ES256 provider JWT). Both are pure-JS (not in NATIVE_PKGS), so esbuild
+# can't see the dynamic createRequire and never inlined either — the packaged
+# operator would crash at boot with `Cannot find module 'google-auth-library'` (or
+# 'jose') the first time a push dispatch actually ran. Copy both (+ closures) so
+# the runtime createRequire(...) calls from sidecar/serve.mjs resolve.
+echo "→ copying createRequire runtime deps google-auth-library, jose (+ closures) into the sidecar"
+copy_pkg_closure google-auth-library
+copy_pkg_closure jose
+echo "  google-auth-library/jose closures copied ($nat_copied total package(s), $nat_missing missing)"
+
 # WI-5651: cross-bake the darwin native addons npm SKIPPED on this linux host.
 # copy_pkg_closure silently drops foreign-platform optionalDeps (correct on a
 # native build — npm never installed @img/sharp-darwin-* on linux). For a cross
