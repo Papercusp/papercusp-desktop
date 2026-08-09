@@ -53,6 +53,39 @@
 # under a live holder would let a second instance claim a slot that is still in use.
 __pc_slot_lockdir="${HOME}/.papercusp/desktop-dev-slots"
 
+# Is a live process EXECUTING out of this target dir?
+#
+# The flock below proves only that a LAUNCHER is alive. It is held by the launcher
+# process (`npm run tauri dev`, or the tauri CLI on the `npm run tauri -- dev` path)
+# and is NOT inherited by the desktop binary that CLI spawns. Measured 2026-08-09 on a
+# desktop running 57min past its build: `fuser` reported ONLY npm (pid 599420) holding
+# slot0.lock, while the app (pid 599886) held no fd on it at all. So a desktop whose
+# launcher was reaped — routine here, where a service-cgroup restart takes out
+# agent-owned children (EI-9748) — keeps running out of its target dir holding NO lock,
+# and the next launcher correctly sees a free slot and builds into a dir a live desktop
+# depends on. That is the gap this closes.
+#
+# `fuser` answers from the kernel's exe MAPPING, which is the whole point: it cannot be
+# fooled by argv. The check this replaces could, and did. `pgrep -af '[t]auri dev'`
+# matched the wrapper's OWN ANCESTOR on every `npm run tauri -- dev` launch, because npm
+# rewrites its process title to `npm run tauri dev …` — and it also matched any peer
+# agent's shell that had merely typed the string. Bracketing `[t]auri` guards the pgrep's
+# own argv only, never an ancestor's. That false positive is why this file used to print
+# "a desktop build is already running but holds NO slot lock" on launches where nothing
+# else was running at all, and it is the reason a warning was never enough here (WI-37452).
+#
+# KNOWN BLIND SPOTS, measured rather than assumed:
+#   - If the binary was REPLACED after the app started, the running process holds the old
+#     inode and this returns false. Catching that needs a /proc-wide exe scan: ~18s across
+#     the ~5600 processes on this box, far too slow for a launch path.
+#   - A build started OUTSIDE this wrapper (a bare `cargo tauri dev`) has no app running
+#     yet, so nothing here can see it. That path is unprotected by construction.
+__pc_desktop_running_in() {
+  local dir="$1"
+  command -v fuser >/dev/null 2>&1 || return 1
+  fuser -s "${dir}/debug/papercusp-desktop" 2>/dev/null
+}
+
 __pc_claim_target_dir() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
