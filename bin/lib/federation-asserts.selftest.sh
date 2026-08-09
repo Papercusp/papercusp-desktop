@@ -186,6 +186,57 @@ else
   bad "two-instance-hive-from-repo-smoke sc_launch no longer scrubs PAPERCUSP_HOME (EI-15308 regression)"
 fi
 
+# 7c) WI-37222 — SUBSET-FAILURE HONESTY + EVIDENCE PRESERVATION.
+# The from-repo smoke's core exit verdict covers the TWELVE CORE federation legs only; the WITNESS
+# (C-001 re-key) / MODERATION / ATTESTATION subsets are scored as separate gate legs. That split is
+# correct, but it had two teeth missing: a subset failure took the `exit 0` branch, so (a) the
+# artifact's LAST line read `OVERALL: PASS ... proven end-to-end` on a run containing a C-001
+# read-plane BREACH, and (b) the instance-log preservation never ran — deleting the frame serve.log
+# that holds the ONLY copy of the rekey_boundary_* boot events (boot-history is in-memory only,
+# EI-18655247267756605). That is why WI-37195 survived 5 consecutive gate reds un-root-caused: the
+# harness destroyed the evidence for the breach it had just detected.
+# Subject paths are env-overridable so falsifiability can be proven by the COPY-OUT mutation-probe
+# tier (scripts/mutation-probe.sh) without ever mutating this shared tree.
+FROMREPO_SMOKE_FILE="${PROBE_FROMREPO_SMOKE:-$DIR/../two-instance-hive-from-repo-smoke.sh}"
+GATE_FILE="${PROBE_GATE_FILE:-$DIR/../live-federation-gate.sh}"
+
+# (i) Every subset verdict block that can print "<NAME> OVERALL: INCOMPLETE" must record that
+# failure in the FAILED_SUBSETS accumulator. Anchored to the PROPERTY (one append per failure
+# branch), NOT to the three subset names — so a fourth subset added later is covered automatically
+# instead of silently escaping the guard.
+subset_incomplete_n="$(grep -cE 'echo "[A-Z]+ OVERALL: INCOMPLETE' "$FROMREPO_SMOKE_FILE" 2>/dev/null || true)"
+subset_recorded_n="$(grep -cE 'FAILED_SUBSETS="\$FAILED_SUBSETS ' "$FROMREPO_SMOKE_FILE" 2>/dev/null || true)"
+if [ "${subset_incomplete_n:-0}" -gt 0 ] && [ "${subset_recorded_n:-0}" -ge "${subset_incomplete_n:-0}" ]; then
+  ok "from-repo smoke records every subset failure in FAILED_SUBSETS ($subset_recorded_n appends >= $subset_incomplete_n INCOMPLETE branches, WI-37222)"
+else
+  bad "from-repo smoke has $subset_incomplete_n subset INCOMPLETE branch(es) but only $subset_recorded_n FAILED_SUBSETS append(s) — a subset failure will exit 0 silently and its instance logs will be DESTROYED (WI-37222)"
+fi
+
+# (ii) The core-PASS branch must ITSELF test FAILED_SUBSETS and preserve the instance logs.
+# ⚠ This is deliberately SLICED to the pass-branch region, not grepped file-wide. The first version
+# of this guard grepped the whole file and SURVIVED its own mutation probe (replacing the pass
+# branch's `if [ -n "${FAILED_SUBSETS:-}" ]` with `if false` left the guard green), because the
+# else-branch carries the same two tokens — it matched a SPELLING that occurs twice rather than the
+# PROPERTY that the PASS path consults the accumulator. Bind guards to the property, not the token.
+# Fails CLOSED: if the region can't be sliced (the verdict block was restructured), it reports bad.
+pass_branch="$(sed -n '/\$create_ok" = 1/,/^  exit 0$/p' "$FROMREPO_SMOKE_FILE" 2>/dev/null || true)"
+if printf '%s\n' "$pass_branch" | grep -q 'preserve_instance_logs' \
+  && printf '%s\n' "$pass_branch" | grep -qE '\[ -n "\$\{FAILED_SUBSETS'; then
+  ok "from-repo smoke's core-PASS branch itself tests FAILED_SUBSETS and preserves instance logs (WI-37222)"
+else
+  bad "from-repo smoke's core-PASS branch no longer tests FAILED_SUBSETS / preserves instance logs — a subset failure exits 0 and the rekey_boundary_* boot events that diagnose a K2 epoch 0→0 are DESTROYED on exit (WI-37222)"
+fi
+
+# (iii) The gate's CORE-leg verdict pattern must be ANCHORED. Unanchored, `OVERALL: PASS` also
+# matches `WITNESS OVERALL: PASS` / `MODERATION OVERALL: PASS` / `ATTESTATION OVERALL: PASS`, so a
+# run whose core legs FAILED scores the core leg green off a subset's line — a false GREEN on the
+# release gate. The subset legs are scored separately by design and must never stand in for it.
+if grep -qE "grep -qaE 'OVERALL: PASS'" "$GATE_FILE"; then
+  bad "live-federation-gate run_smoke matches a BARE 'OVERALL: PASS' — a subset verdict line satisfies the CORE leg's verdict (WI-37222). Anchor it: '^OVERALL: PASS'"
+else
+  ok "live-federation-gate core-leg verdict pattern is anchored so subset lines cannot satisfy it (WI-37222)"
+fi
+
 # 8) Route-cutover guard (WI-2929): the live federation driver runs against the
 # current pot route. A stale /hives/from-repo call hard-404s on current packaged
 # binaries before the matrix can exercise federation at all.

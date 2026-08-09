@@ -898,7 +898,16 @@ run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   for i in $(seq 1 "$attempts"); do
     log "running $label (attempt $i/$attempts) …"
     ( cd "$DESKTOP_DIR/.." && env "$@" bash "papercusp-desktop/bin/$script" ${deb:+"$deb"} ) >"$out" 2>&1 || true
-    if grep -qaE 'OVERALL: PASS' "$out" 2>/dev/null; then echo PASS; return; fi
+    # ANCHORED (WI-37222). This pattern was `OVERALL: PASS` unanchored, which also matches the
+    # SUBSET verdict lines the smokes emit — `WITNESS OVERALL: PASS`, `MODERATION OVERALL: PASS`,
+    # `ATTESTATION OVERALL: PASS`. A run whose CORE legs failed but whose witness/moderation/
+    # attestation subset passed therefore scored this leg PASS off the subset's line. Latent, never
+    # observed firing (the one banked from-repo.out has core=1/subsetPASS=0), but a false GREEN on
+    # the release gate is not a defect to leave armed — and the subsets are scored separately below
+    # precisely so they cannot stand in for the core verdict. Both scripts run_smoke invokes emit
+    # their core `OVERALL: PASS` at column 0 (verified: content-matrix:466, from-repo:1137), and no
+    # smoke in bin/ emits an indented bare one, so anchoring cannot false-FAIL a genuine pass.
+    if grep -qaE '^OVERALL: PASS' "$out" 2>/dev/null; then echo PASS; return; fi
     if grep -qaE 'busy — set PAPERCUSP_SMOKE_DISPLAY to a free one' "$out" 2>/dev/null; then
       log "$label: display busy (a long-lived pair — likely evidence for another investigation — already holds it) — SKIPPING, not a regression"
       echo SKIPPED-BUSY; return
