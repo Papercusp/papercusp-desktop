@@ -338,8 +338,8 @@ for id in "${RUN_IDS[@]}"; do
   out="$RIG_WORK/scn.$id.log"
   "$fn" >"$out" 2>&1; rc=$?
   SCN_RC[$id]=$rc
-  SCN_LINE[$id]="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -1)"
   if [ "$rc" -eq 0 ]; then
+    SCN_LINE[$id]="$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -1)"
     echo "  ✓ PASS $id — ${SCN_LINE[$id]}"
     # WI-6057: a PASS used to surface ONLY the last non-blank line, so a scenario's
     # INTENTIONAL diagnostics were discarded on exactly the runs that need them. The
