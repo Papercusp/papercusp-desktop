@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "papercusp-desktop"
-version = "0.0.13"
+version = "9.9.9"
 dependencies = [
  "base64 0.22.1",
  "bytes",

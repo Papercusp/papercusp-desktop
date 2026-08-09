@@ -233,6 +233,79 @@ else
   bad "an unknown channel must default to strict"
 fi
 
+# ── desktop_channel_identity / desktop_channel_is_side_by_side (WI-36794) ─────
+#
+# The shell table is a MIRROR of bin/release.config.ts. A mirror nobody compares
+# is just a second source of truth, so every value below is cross-checked against
+# the declaration it mirrors rather than retyped here.
+RELEASE_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/release.config.ts"
+declared_base_home="$(sed -n "s/.*dataHomeDirName:[[:space:]]*'\([^']*\)'.*/\1/p" "$RELEASE_CONFIG" | head -1)"
+declared_suffix="$(sed -n "s/.*identitySuffix:[[:space:]]*'\([^']*\)'.*/\1/p" "$RELEASE_CONFIG" | head -1)"
+
+if [[ -n "$declared_base_home" && -n "$declared_suffix" ]]; then
+  ok "release.config.ts declares dataHomeDirName='$declared_base_home' identitySuffix='$declared_suffix'"
+else
+  bad "could not read dataHomeDirName/identitySuffix out of $RELEASE_CONFIG (the cross-check below would be vacuous)"
+fi
+
+if [[ "$DESKTOP_BASE_DATA_HOME_DIR_NAME" == "$declared_base_home" ]]; then
+  ok "DESKTOP_BASE_DATA_HOME_DIR_NAME matches release.config.ts"
+else
+  bad "DESKTOP_BASE_DATA_HOME_DIR_NAME='$DESKTOP_BASE_DATA_HOME_DIR_NAME' != release.config.ts '$declared_base_home'"
+fi
+
+# An UPDATE LANE must stay un-stamped and un-overlaid. A stable build that
+# started carrying a channel stamp is a regression, not a nicety: every build
+# ever cut is un-stamped, and workspaces::resolve_data_home_dir_name() treats an
+# absent stamp as the existing ~/.papercusp precisely so they keep working.
+for ch in alpha beta stable; do
+  desktop_channel_identity "$ch"
+  if [[ "${#DESKTOP_CHANNEL_BUILD_CFG[@]}" -eq 0 && "${#DESKTOP_CHANNEL_BUILD_ENV[@]}" -eq 0 ]]; then
+    ok "$ch (update-lane) gets no overlay and no stamps"
+  else
+    bad "$ch emitted cfg='${DESKTOP_CHANNEL_BUILD_CFG[*]}' env='${DESKTOP_CHANNEL_BUILD_ENV[*]}' — an update lane must stay un-stamped"
+  fi
+  if desktop_channel_is_side_by_side "$ch"; then bad "$ch must not be side-by-side"; else ok "$ch is an update lane"; fi
+done
+
+desktop_channel_identity nightly
+if [[ "${DESKTOP_CHANNEL_BUILD_CFG[*]}" == "--config src-tauri/tauri.nightly.conf.json" ]]; then
+  ok "nightly applies its identity overlay"
+else
+  bad "nightly overlay: got '${DESKTOP_CHANNEL_BUILD_CFG[*]}'"
+fi
+want_env="PAPERCUSP_CHANNEL=${declared_suffix} PAPERCUSP_CHANNEL_DATA_HOME=${declared_base_home}-${declared_suffix}"
+if [[ "${DESKTOP_CHANNEL_BUILD_ENV[*]}" == "$want_env" ]]; then
+  ok "nightly bakes both stamps, derived from release.config.ts"
+else
+  bad "nightly stamps: got '${DESKTOP_CHANNEL_BUILD_ENV[*]}' want '$want_env'"
+fi
+# The invariant resolveChannelIdentity() throws on, restated where the shell can
+# break it: a side-by-side data home identical to the base is the whole bug.
+if [[ "${declared_base_home}-${declared_suffix}" != "$declared_base_home" ]]; then
+  ok "the nightly data home is distinct from the base app's"
+else
+  bad "nightly resolves the BASE data home — it would write to the state of the app in daily use"
+fi
+if desktop_channel_is_side_by_side nightly; then ok "nightly is side-by-side"; else bad "nightly must be side-by-side"; fi
+
+# Fail-closed on an unknown channel, in BOTH functions. desktop_channel_identity
+# must also leave no half-populated arrays behind for a caller that ignores rc.
+if desktop_channel_identity bogus 2>/dev/null; then
+  bad "desktop_channel_identity accepted an unknown channel"
+else
+  if [[ "${#DESKTOP_CHANNEL_BUILD_CFG[@]}" -eq 0 && "${#DESKTOP_CHANNEL_BUILD_ENV[@]}" -eq 0 ]]; then
+    ok "an unknown channel fails closed — nonzero AND both arrays empty"
+  else
+    bad "unknown channel left cfg='${DESKTOP_CHANNEL_BUILD_CFG[*]}' env='${DESKTOP_CHANNEL_BUILD_ENV[*]}'"
+  fi
+fi
+if desktop_channel_is_side_by_side bogus 2>/dev/null; then
+  ok "an unknown channel defaults to SIDE-BY-SIDE (fails closed — callers refuse legs on it)"
+else
+  bad "an unknown channel must default to side-by-side"
+fi
+
 echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "gen-latest-manifest self-test: ALL PASS"

@@ -132,37 +132,116 @@ test('the Rust chokepoint and the release config agree on the base data home', (
 // ---------------------------------------------------------------------------
 
 const OVERLAY = 'tauri.nightly.conf.json';
+const CFG_ARRAY = 'DESKTOP_CHANNEL_BUILD_CFG';
+const ENV_ARRAY = 'DESKTOP_CHANNEL_BUILD_ENV';
+
+// ⚠ THE GUARD'S SUBJECT MOVED, so the guard did too — read this before
+// "simplifying" it back.
+//
+// The first version of this scan looked for lines containing the literal
+// `tauri.nightly.conf.json` and required both stamps on that same line. That was
+// right for a build path that names the overlay inline. It is now VACUOUS:
+// `desktop_channel_identity` derives the overlay path as
+// `src-tauri/tauri.${channel}.conf.json`, so the literal appears in no build
+// script at all and a literal-scan reports clean while checking nothing. A
+// guard that goes quiet because the thing it guards was refactored is worse
+// than no guard — it certifies the change that blinded it.
+//
+// So the property is enforced where it now lives, in three parts:
+//   (A) CONTAINMENT — no build script hand-rolls the overlay; the chokepoint is
+//       the only producer.
+//   (B) JOINT USE — wherever a build site expands the overlay array, it expands
+//       the stamp array on the same command.
+//   (C) COMPLETENESS — the chokepoint actually emits both halves, checked by
+//       RUNNING it rather than by reading it.
 
 /**
- * Every line that applies the nightly overlay must also set both stamps.
- * Returns the offending lines (file + line number + text); empty means clean.
+ * Physical lines joined into LOGICAL ones across `\` continuations.
+ *
+ * The property being checked is "the overlay and the stamps reach the same
+ * COMMAND", and a shell command spans continuations — a real build invocation is
+ * routinely four lines long with its env prefix on the first and its arguments
+ * on the last. Scanning physical lines answers a different, narrower question
+ * and fails on correct code (it did, on build-appimage.sh), which is the kind of
+ * false positive that gets a guard deleted rather than fixed.
  */
+function logicalLines(text) {
+  const out = [];
+  let buf = null;
+  text.split('\n').forEach((line, i) => {
+    if (buf === null) buf = { line: i + 1, text: '' };
+    buf.text += line.replace(/\\$/, ' ');
+    if (!/\\$/.test(line)) {
+      out.push({ line: buf.line, text: buf.text.trim() });
+      buf = null;
+    }
+  });
+  if (buf !== null) out.push({ line: buf.line, text: buf.text.trim() });
+  return out;
+}
+
+/** Sites that expand the overlay array without the stamps on the same command. */
 function scanForUnstamped(files) {
+  const bad = [];
+  for (const { name, text } of files) {
+    for (const l of logicalLines(text)) {
+      // An ASSIGNMENT (`FOO=()`) defines the array; only an EXPANSION
+      // (`"${FOO[@]}"`) applies it to a build. Distinguishing them is what lets
+      // the chokepoint declare the arrays separately without tripping this.
+      if (!new RegExp(`\\$\\{${CFG_ARRAY}\\[`).test(l.text)) continue;
+      if (new RegExp(`\\$\\{${ENV_ARRAY}\\[`).test(l.text)) continue;
+      bad.push({ name, line: l.line, text: l.text });
+    }
+  }
+  return bad;
+}
+
+/** Build scripts that name a side-by-side overlay instead of deriving it. */
+function scanForHandRolledOverlay(files) {
   const bad = [];
   for (const { name, text } of files) {
     text.split('\n').forEach((line, i) => {
       if (!line.includes(OVERLAY)) return;
-      const stamped =
-        /PAPERCUSP_CHANNEL\s*=/.test(line) && /PAPERCUSP_CHANNEL_DATA_HOME\s*=/.test(line);
-      if (!stamped) bad.push({ name, line: i + 1, text: line.trim() });
+      bad.push({ name, line: i + 1, text: line.trim() });
     });
   }
   return bad;
 }
 
-test('scanForUnstamped is falsifiable (permanent controls, never mutates the tree)', () => {
-  const stamped = `PAPERCUSP_CHANNEL=nightly PAPERCUSP_CHANNEL_DATA_HOME=.papercusp-nightly tauri build --config src-tauri/${OVERLAY}`;
-  const unstamped = `tauri build --config src-tauri/${OVERLAY}`;
-  const halfStamped = `PAPERCUSP_CHANNEL=nightly tauri build --config src-tauri/${OVERLAY}`;
+test('the scans are falsifiable (permanent controls, never mutate the tree)', () => {
+  const joined = `env "\${${ENV_ARRAY}[@]}" tauri build "\${${CFG_ARRAY}[@]}"`;
+  const cfgOnly = `tauri build "\${${CFG_ARRAY}[@]}"`;
+  const envOnly = `env "\${${ENV_ARRAY}[@]}" tauri build`;
+  const declaration = `${CFG_ARRAY}=()`;
 
-  assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: stamped }]), []);
-  assert.equal(scanForUnstamped([{ name: 'ctl', text: unstamped }]).length, 1);
-  // The half-stamped case is the one the Rust guard turns into a refusal to
-  // boot; catching it here means it never gets built in the first place.
-  assert.equal(scanForUnstamped([{ name: 'ctl', text: halfStamped }]).length, 1);
+  assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: joined }]), []);
+  // The overlay applied with no stamps: a separate installed application
+  // pointed at ~/.papercusp. This is the case that must never build.
+  assert.equal(scanForUnstamped([{ name: 'ctl', text: cfgOnly }]).length, 1);
+  // Stamps with no overlay is the mirror defect, but the Rust guard refuses to
+  // boot on it and it cannot silently write to the wrong home — so it is not
+  // this scan's subject, and it must not be reported as one.
+  assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: envOnly }]), []);
+  // A bare declaration is not an application.
+  assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: declaration }]), []);
+  // Continuation-joined: correct, and the shape build-appimage.sh actually
+  // uses. A physical-line scan reports this as a violation — the false positive
+  // that motivated logicalLines().
+  const continued = `env "\${${ENV_ARRAY}[@]}" \\\n  tauri build \\\n  "\${${CFG_ARRAY}[@]}"`;
+  assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: continued }]), []);
+  // ...but continuation-joining must not paper over two genuinely SEPARATE
+  // commands that merely sit next to each other.
+  const adjacent = `env "\${${ENV_ARRAY}[@]}" true\ntauri build "\${${CFG_ARRAY}[@]}"`;
+  assert.equal(scanForUnstamped([{ name: 'ctl', text: adjacent }]).length, 1);
+
+  assert.deepEqual(scanForHandRolledOverlay([{ name: 'ctl', text: joined }]), []);
+  assert.equal(
+    scanForHandRolledOverlay([{ name: 'ctl', text: `tauri build --config src-tauri/${OVERLAY}` }]).length,
+    1,
+  );
 });
 
-test('no build path applies the nightly overlay without baking both channel stamps', () => {
+function buildScripts() {
   const dirs = [path.join(root, 'bin'), path.join(root, 'bin', 'lib')];
   const files = [];
   for (const dir of dirs) {
@@ -175,12 +254,91 @@ test('no build path applies the nightly overlay without baking both channel stam
     }
   }
   assert(files.length > 0, 'scanned nothing — the scan roots moved, so a clean result would be meaningless');
+  return files;
+}
+
+test('(A) no build script hand-rolls the nightly overlay — the chokepoint derives it', () => {
+  const bad = scanForHandRolledOverlay(buildScripts());
+  assert.deepEqual(
+    bad,
+    [],
+    `these name ${OVERLAY} directly instead of calling desktop_channel_identity, so the ` +
+      `overlay can be applied without the stamps that go with it:\n` +
+      bad.map((b) => `  ${b.name}:${b.line}  ${b.text}`).join('\n'),
+  );
+});
+
+test('(B) every build site applies the overlay and the channel stamps together', () => {
+  const files = buildScripts();
+
+  // NON-VACUITY FIRST. This scan reports "clean" for a tree with no wiring at
+  // all, which is exactly what deleting the wiring looks like — so assert the
+  // sites exist before believing they are correct.
+  const sites = files.flatMap(({ name, text }) =>
+    logicalLines(text)
+      .map((l) => ({ name, line: l.line, text: l.text }))
+      .filter((l) => new RegExp(`\\$\\{${CFG_ARRAY}\\[`).test(l.text)),
+  );
+  assert(
+    sites.length >= 3,
+    `expected the linux deb, appimage and arm64 build sites to expand ${CFG_ARRAY}; found ${sites.length}. ` +
+      `The wiring was removed or renamed, which makes the joint-use check below vacuous.`,
+  );
 
   const bad = scanForUnstamped(files);
   assert.deepEqual(
     bad,
     [],
-    `these apply ${OVERLAY} without baking PAPERCUSP_CHANNEL + PAPERCUSP_CHANNEL_DATA_HOME:\n` +
+    `these apply the channel identity overlay without baking its stamps on the same command:\n` +
       bad.map((b) => `  ${b.name}:${b.line}  ${b.text}`).join('\n'),
   );
+});
+
+test('(C) the chokepoint emits both halves, and they agree with release.config.ts', () => {
+  // RUN the function rather than reading it: what matters is what a build site
+  // actually receives, and a text scan of a shell function cannot tell a
+  // correct derivation from a plausible-looking broken one.
+  const run = (channel) => {
+    const script = `
+      set -euo pipefail
+      . "${path.join(root, 'bin', 'lib', 'gen-latest-manifest.sh')}"
+      desktop_channel_identity "${channel}"
+      printf 'CFG:%s\\n' "\${${CFG_ARRAY}[@]:-}"
+      printf 'ENV:%s\\n' "\${${ENV_ARRAY}[@]:-}"
+    `;
+    const out = require('node:child_process').execFileSync('bash', ['-c', script], {
+      encoding: 'utf8',
+    });
+    const pick = (tag) =>
+      out
+        .split('\n')
+        .filter((l) => l.startsWith(tag))
+        .map((l) => l.slice(tag.length))
+        .filter(Boolean);
+    return { cfg: pick('CFG:'), env: pick('ENV:') };
+  };
+
+  const suffix = declaredIdentitySuffix();
+  const baseHome = declaredBaseDataHomeDirName();
+
+  const nightly = run(CHANNEL);
+  assert.deepEqual(nightly.cfg, ['--config', `src-tauri/tauri.${CHANNEL}.conf.json`]);
+  // The stamp is compared by workspaces::verify_channel_identity() against the
+  // bundle identifier's extra dot segment, which is the identitySuffix.
+  assert.deepEqual(nightly.env, [
+    `PAPERCUSP_CHANNEL=${suffix}`,
+    // resolveChannelIdentity()'s formula: `${base.dataHomeDirName}-${suffix}`.
+    `PAPERCUSP_CHANNEL_DATA_HOME=${baseHome}-${suffix}`,
+  ]);
+  assert.notEqual(`${baseHome}-${suffix}`, baseHome, 'the nightly data home collides with the base app');
+
+  // An update lane must stay un-stamped. All 24 builds ever cut carry no stamp,
+  // and resolve_data_home_dir_name() treats an absent stamp as the existing
+  // ~/.papercusp precisely so they keep working — a stable build that started
+  // carrying one would be a regression, not a nicety.
+  for (const lane of ['alpha', 'beta', 'stable']) {
+    const r = run(lane);
+    assert.deepEqual(r.cfg, [], `${lane} must not apply an identity overlay`);
+    assert.deepEqual(r.env, [], `${lane} must not bake channel stamps`);
+  }
 });

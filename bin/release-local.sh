@@ -165,6 +165,22 @@ source "$HERE/lib/release-artifacts.sh"
 # single-leg (per-platform) cut can produce the same manifest this multi-leg
 # script does, instead of nobody generating one.
 source "$HERE/lib/gen-latest-manifest.sh"
+# WI-36794 / WI-7101: claim a Rust target-dir SLOT before any cargo runs. This
+# script drives `tauri build` directly (npx, not the guarded `tauri` npm
+# script), so it was routing around the only chokepoint that claims one — and a
+# release cut is the longest cargo build on the box, i.e. the widest window in
+# which to interleave writes to the shared generated app-manifest and take down
+# a concurrently-running desktop (the owner's included).
+#
+# Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd this
+# process must keep. Slot 0 IS the pre-existing shared dir, so a cut on an idle
+# box is unchanged and keeps its warm cache; it isolates only when something
+# else genuinely holds the dir. It honours a preset CARGO_TARGET_DIR and
+# degrades safely where flock(1) is absent (the mac VM leg drives this script).
+# CARGO_TARGET_ROOT below is derived from `cargo metadata`, so artifact
+# collection follows the claimed dir automatically.
+# shellcheck source=lib/claim-target-dir.sh
+source "$HERE/lib/claim-target-dir.sh"
 require_release_host
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
