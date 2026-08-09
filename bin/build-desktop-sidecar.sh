@@ -514,6 +514,41 @@ if [[ ! -f "$SIDECAR_DIR/git-ext-bridge.mjs" ]]; then
   exit 1
 fi
 
+# WORKER SCRIPTS — the SAME dirname(import.meta.url) gotcha as git-ext-bridge.mjs
+# above, and it has been silently live in the packaged desktop app (WI-37555,
+# measured 2026-08-09). Each of these modules spawns `new Worker(resolve(dirname(
+# here), '<name>.script.mjs'))`, which inside this bundle resolves to $SIDECAR_DIR
+# — and NOTHING was copying them here, so the spawn failed with ENOENT on every
+# packaged install. Measured on the 2026-08-09 06:06 sidecar build: serve.mjs
+# REFERENCES local-embedder-worker.script.mjs, and no *.script.mjs existed beside
+# it at all.
+#
+# Every one of these workers has a deliberate INLINE fallback, which is exactly
+# why this went unnoticed — the app keeps working and merely moves the work onto
+# the main event loop:
+#   - local-embedder-worker  → every embed runs inline ONNX (~6s vs ~36ms; WI-4196)
+#   - cpu-task-worker        → large responses JSON.stringify on the loop (EI-19465075959589134)
+#   - local-reranker-worker  → rerank blocks the loop AND its timeout bound stops
+#                              being exact, re-opening EI-20005411672741677 on the
+#                              no-sidecar desktop install, which is that bug's
+#                              entire exposed case.
+# WARN rather than exit, matching bundle-host.sh: a missing worker is slow, not
+# broken, and a hard failure here would block a desktop build over a perf asset.
+# `packages/operator-core/lib/worker-scripts-bundled.test.ts` fails if a NEW
+# worker script is added without a copy step in BOTH bundlers.
+for _worker_src in \
+  "$REPO_ROOT/libs/generic/memory/src/local-embedder-worker.script.mjs" \
+  "$REPO_ROOT/packages/operator-core/lib/cpu-task-worker.script.mjs" \
+  "$REPO_ROOT/libs/generic/rerank/src/local-reranker-worker.script.mjs"; do
+  _worker_name="$(basename "$_worker_src")"
+  if [[ -f "$_worker_src" ]]; then
+    cp "$_worker_src" "$SIDECAR_DIR/$_worker_name"
+    echo "    ✓ staged $_worker_name next to serve.mjs"
+  else
+    echo "WARNING: worker script not found at $_worker_src — that subsystem will run INLINE on the main event loop in the packaged app"
+  fi
+done
+
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
 # opusscript's JS shim (voice-node/codec.ts's lazy `import('opusscript')`) into
