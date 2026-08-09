@@ -42,20 +42,29 @@ function firstLine(text, re) {
   return -1;
 }
 
-// The four files the version bump writes. Named here so that adding a fifth
-// without moving the precheck exit above it is a visible edit to this list,
-// not an invisible widening of the blast radius.
-const WRITTEN_MANIFESTS = [
-  'package.json',
-  'src-tauri/Cargo.toml',
-  'src-tauri/Cargo.lock',
-  'src-tauri/tauri.conf.json',
-];
+// The files the version-bump block itself WRITES. Named here so that adding a
+// fourth without moving the precheck exit above it is a visible edit to this
+// list, not an invisible widening of the blast radius.
+//
+// Cargo.lock is deliberately NOT in this list, and the distinction is load-
+// bearing rather than pedantic: the bump writes three files, and Cargo.lock
+// picks the version up LATER, when some cargo invocation re-resolves it from
+// Cargo.toml. It still ends up carrying the version — that is how it reached
+// 9.9.9 in the incident — but it is downstream of Cargo.toml, not a fourth
+// write here. Listing it as one made this very test fail against a correct
+// script, which is the sort of false red that gets a guard deleted.
+const WRITTEN_MANIFESTS = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/tauri.conf.json'];
+
+/** The line of the actual `if` branch — NOT the header comment that names it. */
+const PRECHECK_BRANCH = /if \[\[ "\$\{PAPERCUSP_RELEASE_PRECHECK_ONLY:-0\}" == "1" \]\]/;
 
 test('the precheck-only exit exists and is reachable', () => {
   const text = src();
-  const guard = firstLine(text, /PAPERCUSP_RELEASE_PRECHECK_ONLY/);
-  assert(guard > 0, 'PAPERCUSP_RELEASE_PRECHECK_ONLY has been removed from bin/release-local.sh');
+  // Anchor on the BRANCH, not on any mention of the variable: the header
+  // documents it ~500 lines earlier, so a bare name match lands in a comment
+  // and then reports the branch missing when it is present and correct.
+  const guard = firstLine(text, PRECHECK_BRANCH);
+  assert(guard > 0, 'the PAPERCUSP_RELEASE_PRECHECK_ONLY branch has been removed from bin/release-local.sh');
   assert(
     /exit 0/.test(text.split('\n').slice(guard - 1, guard + 8).join('\n')),
     'the PAPERCUSP_RELEASE_PRECHECK_ONLY branch no longer exits 0',
