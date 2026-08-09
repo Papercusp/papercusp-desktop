@@ -1325,8 +1325,88 @@ fed_self_and_ancestors() {
   printf '%s' "$out"
 }
 
+# ── WI-36926: three independent floors under the kill loop ──────────────────
+# On 2026-08-08 20:32:15 this function SIGKILLed 1,896 processes in one second —
+# including gnome-session-binary, which logged the owner out of their desktop. A
+# fuzz harness (sweep-5472.sh) had enumerated every fed_* function via
+# `declare -F` and called each with placeholder args `a b c d 1 e f`, so $work
+# arrived as the single character "a" and `grep -F "a"` matched nearly every
+# process on the box.
+#
+# The validation existed — `fed_is_rig_work` — but it guarded `fed_cleanup_run`,
+# the PUBLIC DOOR, while this function, the one that actually signals, trusted its
+# caller. That is the whole bug: a guard on a door is not a guard on the thing
+# behind it. Validation now lives HERE, at the kill site, so no caller (selftest,
+# fuzzer, future rig, a human sourcing this file) can route around it.
+#
+# Three floors, deliberately independent — any ONE of them alone stops the 2026-08-08
+# incident, so this is not defence-in-depth theatre:
+#   1. MARKER SANITY  — $work must be specific enough that `grep -F` over the full
+#      process table can only plausibly match one run.
+#   2. BLAST-RADIUS CAP — if the scan matches more than N processes then whatever it
+#      matched, it is not "one run's leftovers". Refuse rather than guess. This is
+#      the floor that needs no knowledge of what a valid marker looks like, which is
+#      why it is here even though (1) already rejects "a".
+#   3. SESSION FLOOR  — never signal a pid belonging to the owner's login session,
+#      no matter how the victim set was derived (scripts/lib/session-floor.sh).
+FED_CLEANUP_MAX_VICTIMS="${FED_CLEANUP_MAX_VICTIMS:-40}"
+
+# Load the canonical session floor from the superproject when reachable. This file
+# also has to work in a STANDALONE papercusp-desktop checkout, where that path does
+# not exist — so an equivalent inline floor follows. `session-floor-parity.test.ts`
+# asserts the two agree, so the fallback cannot silently drift weaker.
+_FED_SF="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)/scripts/lib/session-floor.sh"
+# shellcheck source=/dev/null
+[ -r "$_FED_SF" ] && . "$_FED_SF" 2>/dev/null || true
+
+# Session-critical comms, ALREADY truncated to the kernel's 15-char comm limit.
+# Writing `gnome-session-binary` here would match nothing: /proc/<pid>/comm is
+# clipped to 15 chars, so the long name silently never compares equal — which is
+# exactly how a floor grows a hole that only shows up during an incident.
+FED_SESSION_FLOOR_COMMS="${FED_SESSION_FLOOR_COMMS:-systemd gnome-session-b gnome-shell gnome-session-c Xorg Xwayland gdm-x-session gdm-wayland-ses gdm3 gdm plasmashell sddm ksmserver}"
+
+fed_pid_is_session_critical() {
+  local pid="$1" comm
+  [ -n "$pid" ] || return 0                          # fail closed on garbage
+  case "$pid" in ''|*[!0-9]*) return 0;; esac
+  # Prefer the canonical oracle when the superproject was reachable above.
+  if command -v session_floor_is_protected >/dev/null 2>&1; then
+    session_floor_is_protected "$pid"; return $?
+  fi
+  [ "$pid" -eq 1 ] 2>/dev/null && return 0
+  [ -r "/proc/$pid/comm" ] || return 1               # gone => not protected
+  comm="$(tr -d '\n' < "/proc/$pid/comm" 2>/dev/null)"
+  [ -n "$comm" ] || return 1
+  case " $FED_SESSION_FLOOR_COMMS " in *" $comm "*) return 0;; esac
+  return 1
+}
+
+# fed_is_safe_kill_marker <work> — is $work specific enough to be used as a
+# `grep -F` needle against the whole process table? This deliberately does NOT
+# reuse `fed_is_rig_work`: that one keys on a hardcoded /tmp/<rig>. prefix list,
+# and a real caller (two-instance-content-matrix-smoke.sh) legitimately uses
+# $HOME/.papercusp-lane-a-fed. Keying on the PREFIX LIST would have broken a live
+# rig while still not describing the actual hazard. The hazard is non-specificity,
+# so that is what is measured here.
+fed_is_safe_kill_marker() {
+  local work="$1" leaf
+  [ -n "$work" ] || return 1
+  case "$work" in /*) ;; *) return 1;; esac          # must be an absolute path
+  [ "${#work}" -ge 12 ] || return 1                  # "a", "/tmp" -> refused
+  case "$work" in
+    /|/tmp|/tmp/|/home|/home/*/|/usr|/usr/*|/var|/var/*|/etc|/etc/*|/opt|/root|/run|"$HOME"|"$HOME/") return 1;;
+  esac
+  leaf="${work##*/}"
+  [ "${#leaf}" -ge 6 ] || return 1                   # a bare or 1-char final segment
+  return 0
+}
+
 fed_cleanup_scoped() {
-  local work="$1" p pid
+  local work="$1" p pid victims n
+  if ! fed_is_safe_kill_marker "$work"; then
+    echo "fed_cleanup_scoped: REFUSING '$work' — not a specific per-run marker. This function kills every process whose cmdline CONTAINS \$work, so a short/relative value is a box-wide kill. On 2026-08-08 \$work=\"a\" SIGKILLed 1,896 processes and logged the owner out (WI-36926)." >&2
+    return 2
+  fi
   # Protect the current process + its ancestors: a STANDALONE caller
   # (`cleanup-run.sh <WORK>`, an agent's shell) carries $work in its OWN argv, so an
   # unguarded `pkill -f "$work"` would match — and kill — the caller / its shell
@@ -1336,12 +1416,27 @@ fed_cleanup_scoped() {
   for p in "${FED_KILL_PIDS[@]:-}"; do
     [ -n "$p" ] || continue
     case "$protect" in *" $p "*) continue;; esac
+    if fed_pid_is_session_critical "$p"; then
+      echo "fed_cleanup_scoped: REFUSING FED_KILL_PIDS entry $p — owner login session (WI-36926)" >&2
+      continue
+    fi
     kill -9 "$p" 2>/dev/null || true
   done
   # Kill every process whose cmdline carries THIS run's $work — except self/ancestors
   # (above) and the scan pipeline itself (`grep -v grep`).
-  ps -eo pid,args 2>/dev/null | grep -F "$work" | grep -v grep | awk '{print $1}' | while read -r pid; do
+  victims="$(ps -eo pid,args 2>/dev/null | grep -F "$work" | grep -v grep | awk '{print $1}')"
+  n="$(printf '%s\n' "$victims" | grep -c '^[0-9]\+$' || true)"
+  if [ "${n:-0}" -gt "$FED_CLEANUP_MAX_VICTIMS" ]; then
+    echo "fed_cleanup_scoped: REFUSING — marker '$work' matched $n processes (cap $FED_CLEANUP_MAX_VICTIMS). One run's leftovers are never this many; killing them would be a box-wide sweep (WI-36926). Nothing was signalled and \$work was NOT removed." >&2
+    return 3
+  fi
+  printf '%s\n' "$victims" | while read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue;; esac
     case "$protect" in *" $pid "*) continue;; esac
+    if fed_pid_is_session_critical "$pid"; then
+      echo "fed_cleanup_scoped: REFUSING pid $pid — owner login session (WI-36926)" >&2
+      continue
+    fi
     kill -9 "$pid" 2>/dev/null || true
   done
   rm -rf "$work" 2>/dev/null || true
