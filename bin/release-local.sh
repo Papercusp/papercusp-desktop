@@ -26,6 +26,17 @@
 #   5. Commits the version bump and creates a LOCAL git tag (never pushed)
 #   6. Prints the local artifacts + sha256s, and stops.
 #
+# ⚠ THIS SCRIPT IS NOT READ-ONLY, and its first ~550 lines look like it is.
+# Step 1 writes FOUR tracked files in the SHARED tree (package.json,
+# src-tauri/{Cargo.toml,Cargo.lock,tauri.conf.json}). git-sync commits that
+# within minutes, and every running `tauri dev` watches this tree — so the write
+# to tauri.conf.json restarts EVERY desktop on the box, the owner's included.
+# Do NOT run it "to see where it stops" when testing a preflight change:
+#
+#   PAPERCUSP_RELEASE_PRECHECK_ONLY=1 bin/release-local.sh <version> <channel>
+#
+# runs every gate and exits 0 before the first write, having modified nothing.
+#
 # NOTE: it DOES `git commit` the version bump and `git tag -f` locally (neither
 # is pushed to origin). It also pushes a dogfood *monorepo* tag — see the
 # PAPERCUP_DOGFOOD_REPO_REF block below; that is a source-pin, not a release.
