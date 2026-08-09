@@ -26,7 +26,11 @@ const { join, relative } = require('node:path');
 const DESKTOP_DIR = join(__dirname, '..');
 const REPO_ROOT = join(DESKTOP_DIR, '..');
 const GUARD = join(DESKTOP_DIR, 'bin', 'tauri-guarded');
-const CLAIM = join(DESKTOP_DIR, 'bin', 'lib', 'claim-target-dir.sh');
+// Overridable so falsifiability can be proven against a COPY of the script, outside the
+// tree (scripts/mutation-probe.sh). git-sync commits the whole working tree every few
+// minutes, so mutating the real file in place risks committing the mutant — that has
+// already happened once here (db6d7b02b1). Defaults to the real path.
+const CLAIM = process.env.PROBE_CLAIM_SCRIPT || join(DESKTOP_DIR, 'bin', 'lib', 'claim-target-dir.sh');
 
 /**
  * Run the guard with a stub `tauri` first on PATH, in a sandboxed HOME, and
