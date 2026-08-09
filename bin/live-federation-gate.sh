@@ -26,6 +26,9 @@
 #                                     downgraded to SKIPPED-STORM (starvation, not signal).
 #   GATE_SUCCESS_TTL_H(default 22)  — a GREEN younger than this ⇒ instant FRESH exit
 #                                     (pairs with the hourly timer: ~daily actual run).
+#   GATE_RED_TTL_H    (default 6)   — a TRACKED RED younger than this ⇒ instant FRESH exit.
+#                                     Without it a red gate had NO suppression at all and ran
+#                                     the FULL heavy gate every hour, forever (WI-37464).
 #   GATE_STALE_DAYS   (default 3)   — no GREEN for this long ⇒ file a LOUD staleness EI
 #                                     (silence must never look like green).
 #   GATE_FORCE        (default 0)   — set 1 to ignore the freshness TTL and run now.
@@ -193,6 +196,21 @@ GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 # after this SHORTER TTL: long enough to avoid a starvation→expensive-rerun→more-starvation
 # loop, short enough that a real red surfaces same-day.
 GATE_DOWNGRADE_TTL_H="${GATE_DOWNGRADE_TTL_H:-3}"
+# WI-37464: a RED had NO backoff of any kind. last-green is written on the GREEN path ONLY
+# (see the verdict block), and it is the sole input to the cheap hourly fresh-exit above — so
+# the moment the gate went red, last-green stopped advancing and EVERY hourly fire ran the
+# full heavy gate again, indefinitely. That is not a hypothetical: the five consecutive reds of
+# 2026-08-06 were five consecutive full heavy runs, and the resulting churn on the owner's box
+# is what got the timer stopped ("nvmd i know what it is, just stop it" — see the wall fact
+# wall:live-federation-gate-timer-owner-stopped). So a red must back off like a downgrade does.
+#
+# LONGER than the downgrade TTL, deliberately, because the two states differ in kind: a
+# starvation downgrade is ENVIRONMENTAL and may clear on its own, so retrying soon is
+# informative; a RED is a STABLE code fact, and re-running unchanged code just reproduces the
+# same red at full cost. The red has ALREADY been reported (verdict line + a tracked EI), so
+# further runs add no signal until something changes. GATE_FORCE=1 bypasses this (as it does
+# every fresh-exit), which is how you verify a fix without waiting.
+GATE_RED_TTL_H="${GATE_RED_TTL_H:-6}"
 GATE_STALE_DAYS="${GATE_STALE_DAYS:-3}"
 RED_REFILE_H="${RED_REFILE_H:-24}"
 # Local-matrix LEG staleness (EI-18657324526667507) — see the MATRIX_STALE_H header note.
