@@ -551,6 +551,36 @@ else
   _wi3047_unverified "$PAPERCUSP_SUBMODULE_DIR is not a git repo"
 fi
 
+# ── PRECHECK-ONLY EXIT ────────────────────────────────────────────────────────
+# THE LAST POINT AT WHICH THIS SCRIPT HAS TOUCHED NOTHING. Everything above is
+# validation, provenance and preflight; the very next statement is the first
+# WRITE to the shared working tree.
+#
+# WHY THIS EXISTS (2026-08-09). An agent verifying the channel-identity guards
+# ~250 lines above ran `release-local.sh 9.9.9 alpha` as a probe, expecting it to
+# refuse early. Nothing refuses an alpha cut, so it ran on to the version bump
+# and stamped 9.9.9 into all FOUR manifests below. On this shared tree that is
+# not a local mistake: git-sync swept it into a commit within a minute, and
+# because every running `tauri dev` watches this same source tree, the write to
+# src-tauri/tauri.conf.json rebuilt and restarted EVERY desktop on the box —
+# the owner's included. Target-dir isolation does not prevent that; the two
+# mechanisms are independent.
+#
+# The trap is that the script READS as a preflight for its first ~550 lines, so
+# "just run it and see where it stops" is the natural way to test a guard, and
+# it is wrong. Rather than warn about it, make the safe run available:
+#
+#   PAPERCUSP_RELEASE_PRECHECK_ONLY=1 bin/release-local.sh <version> <channel>
+#
+# runs every gate above and exits 0 having written nothing. Use it to verify a
+# preflight change; use a real cut for a real cut.
+if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]; then
+  echo "==> PRECHECK-ONLY: all preflight gates passed for version=$VERSION channel=$CHANNEL tag=$TAG"
+  echo "    Stopping HERE — the next step writes package.json, src-tauri/Cargo.toml,"
+  echo "    src-tauri/tauri.conf.json and src-tauri/Cargo.lock. Nothing has been modified."
+  exit 0
+fi
+
 echo "==> bumping version in manifests"
 python3 - "$VERSION" "$ROOT" <<'PY'
 import json, sys, re, pathlib
