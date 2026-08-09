@@ -1361,6 +1361,11 @@ LOAD1_END="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
 FRAME_NOTE="$(frame_pressure_note)"
 if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
   log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal). $FRAME_NOTE"
+  # WI-37464: a storm downgrade is the SECOND unsuppressed expensive outcome — it costs a FULL
+  # heavy run and, before this, stamped nothing at all, so it too re-fired every hour. It is the
+  # same CLASS as the starvation downgrade above (environmental, not a verdict, may clear on its
+  # own), so it takes the same marker and the same SHORT retry TTL rather than the red one.
+  echo "$(now_s)" >"$STATE_DIR/last-downgrade"
   check_staleness
   echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]}; $FRAME_NOTE)$(matrix_skip_suffix)"; exit 0
 fi
