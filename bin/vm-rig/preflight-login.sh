@@ -15,7 +15,10 @@
 # Usage:  bin/vm-rig/preflight-login.sh [user@vm-ip]
 # Env:    PCUSP_VM_SSH   default ssh target (default aviweiss@172.31.44.2)
 # Exit:   0 = rig login healthy (app already up, OR auto-login invariant intact)
-#         2 = kcpassword DRIFT — auto-login WILL fail; human GUI login needed
+#         2 = kcpassword DRIFT — auto-login WILL fail. NOT owner-blocking: recover
+#             it yourself with bin/vm-rig/boot-headless-current.sh RUN ON THE VM
+#             (the operator runs headless at the loginwindow). A GUI login is
+#             needed only to repair AUTO-login, i.e. durability across a reboot.
 #         3 = app down for a DIFFERENT reason (invariant OK / unverifiable)
 #         4 = VM unreachable over SSH
 #
@@ -78,8 +81,26 @@ PREFLIGHT: FAIL(2) — kcpassword DRIFT DETECTED.
   auto-login will NOT fire: the VM sits at the loginwindow and the entire
   federation rig stays DARK (procs=0, no origin='remote' rows on the tower).
   This is the WI-4070 / EI-13010 silent-death class — NOT a network/DHT wedge.
-  RECOVERY: a human must log in the GUI once at spice://127.0.0.1:5930
-  (Secure Token blocks any headless password reset). Then re-run bin/vm-rig/deploy.sh.
+
+  RECOVERY (you can do this YOURSELF — no human, no GUI, ~40s):
+      scp bin/vm-rig/boot-headless-current.sh $VM:/tmp/
+      ssh $VM 'bash /tmp/boot-headless-current.sh'
+  The operator runs headless over ssh even while the VM sits at the loginwindow;
+  that is what this rig actually needs. Verified 2026-08-09: this preflight went
+  2 -> 0 and the tower's open-channel samples went 0/4086 to 57/1597.
+  ⚠ RUN IT ON THE VM, NOT THE TOWER. From the tower it dies "FATAL: missing
+  /Applications/Papercusp Server.app/.../bin/node" — it is checking the TOWER's
+  Linux filesystem. That FATAL looks like a broken rig and is not.
+
+  A HUMAN IS NEEDED ONLY FOR DURABILITY, and only eventually: a GUI login at
+  spice://127.0.0.1:5930 is what repairs macOS AUTO-LOGIN (Secure Token blocks
+  any headless password reset), so until then the app does NOT come back by
+  itself after a VM reboot and the headless boot above must be re-run by hand.
+  ⚠ DO NOT BLOCK A LANE ON THAT. This text used to say only "a human must log in",
+  which reads as "the rig cannot run without the owner" — it is false, and on
+  2026-08-09 it cost multiple wakes of an agent's lane sitting idle behind an
+  owner escalation that was never actually required (fact:
+  rig-dark-is-recoverable-headless-no-gui-login).
   See EI-13010 for the durable fix (keep kcpassword in sync on any password change).
 EOF
 exit 2
