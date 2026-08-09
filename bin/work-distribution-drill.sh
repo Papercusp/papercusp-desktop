@@ -318,10 +318,22 @@ log_reason() {
 log "wiring census — reasons DETECTED from the packaged artifact (bundle / its PG / its log)"
 
 # OFFER-PUBLISH — store + publish leg (WI-1935).
-if bundle_has 'listWorkOffers' && table_present p2p_work_offers; then
-  ok "OFFER-PUBLISH wired: publish leg ships and p2p_work_offers exists in this instance"
+# ⚠ THE PROBE SYMBOL IS PART OF THE CONTRACT — a rename silently inverts this leg.
+# This probed `listWorkOffers` until 2026-08-09, when that function was renamed to
+# `listOffers` (D-023 item 5, 12 files). The rename made the probe a FALSE NEGATIVE:
+# the symbol is absent from any bundle built after it, so a perfectly wired publish
+# leg would report SKIP "in bundle=no". It had not fired yet only because the deb on
+# disk predated the rename — i.e. the bug was MASKED by a stale artifact and armed to
+# fire on the next repackage, which is the one action a reader of this drill is most
+# likely to take. Exactly the D-018 class this census exists to prevent, one level up:
+# the probe was honest about the artifact but stale about the NAME it asked for.
+# Guarded since: bin/work-distribution-drill-probe-symbols.test.ts fails if any
+# bundle_has symbol here no longer exists in the TypeScript source.
+# Witness BOTH halves of "store + publish": the read seam and the write seam.
+if bundle_has 'listOffers' && bundle_has 'putWorkOffer' && table_present p2p_work_offers; then
+  ok "OFFER-PUBLISH wired: read+write seams ship and p2p_work_offers exists in this instance"
 else
-  skipp "OFFER-PUBLISH — DETECTED: listWorkOffers in bundle=$(bundle_has 'listWorkOffers' && echo yes || echo no), p2p_work_offers table=$(table_present p2p_work_offers && echo yes || echo no)"
+  skipp "OFFER-PUBLISH — DETECTED: listOffers in bundle=$(bundle_has 'listOffers' && echo yes || echo no), putWorkOffer in bundle=$(bundle_has 'putWorkOffer' && echo yes || echo no), p2p_work_offers table=$(table_present p2p_work_offers && echo yes || echo no)"
 fi
 
 # PULL — X11 activation + the WI-3629 puller boundary.
