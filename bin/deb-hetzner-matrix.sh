@@ -351,6 +351,24 @@ for id in "${RUN_IDS[@]}"; do
     # lines on PASS too. Additive: no assertion or exit-code semantics change.
     grep -a '^[[:space:]]*·' "$out" 2>/dev/null | sed 's/^[[:space:]]*/    /' || true
   else
+    # EI-19940993365684927 (gate-artifact honesty). A FAIL row's message used to be
+    # the log's LAST non-blank line, whatever that happened to be. Scenarios emit
+    # trailing ✓ sub-assertions (b8's detector fire-path pin is one), so a FAILED
+    # scenario rendered as `FAIL  replication_soak  ✓ detector fire-path pin: …` —
+    # a failure whose human-readable message is a reassuring ✓ that never says what
+    # failed. A peer read the banked matrix exactly that way and reported "all 18
+    # green" for a run in which this scenario failed 5 of its 10 probe legs; that
+    # reading was one step from the signed RELEASE-READINESS ledger.
+    #
+    # Fixing the tail of ONE scenario only hides this: the row is wrong for ANY
+    # scenario that fails while ending on a ✓. So on FAIL, draw the message from the
+    # FAILURE lines — the scenario's own OVERALL: verdict, else its first ✗. Only if
+    # the log carries NEITHER fall back to the last line, and then LABEL it so it can
+    # never be read as a verdict.
+    _fail_msg="$(grep -a '^[[:space:]]*OVERALL:' "$out" 2>/dev/null | tail -1)"
+    [ -n "$_fail_msg" ] || _fail_msg="$(grep -a '✗' "$out" 2>/dev/null | head -1)"
+    [ -n "$_fail_msg" ] || _fail_msg="(rc=$rc; log has no OVERALL:/✗ line) $(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -1)"
+    SCN_LINE[$id]="$(printf '%s' "$_fail_msg" | sed 's/^[[:space:]]*//')"
     echo "  ✗ FAIL $id (rc=$rc) — ${SCN_LINE[$id]}"
     echo "    ── last 12 lines of $id ──"; tail -12 "$out" 2>/dev/null | sed 's/^/    /'
     # EI-18660101091813036: serve.log is cumulative across the whole run and
