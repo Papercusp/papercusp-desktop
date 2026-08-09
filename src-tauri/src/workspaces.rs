@@ -608,6 +608,113 @@ pub fn delete(id: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    // ---- WI-36794: channel-aware data home -------------------------------
+    //
+    // These drive the PURE resolver, never the baked `option_env!` stamps — a
+    // test that read the stamps would only ever exercise the un-stamped build
+    // it happens to be compiled as, i.e. exactly one of the seven cases below.
+
+    #[test]
+    fn unstamped_build_keeps_the_existing_home() {
+        // The load-bearing default: every build ever cut carries no stamp, so
+        // changing this breaks every install.
+        assert_eq!(
+            resolve_data_home_dir_name("", "").unwrap(),
+            BASE_DATA_HOME_DIR_NAME
+        );
+        // option_env! that baked an empty string, and whitespace, are the same
+        // thing as absent — mirrors baked_release_host()'s blank handling.
+        assert_eq!(
+            resolve_data_home_dir_name("  ", " ").unwrap(),
+            BASE_DATA_HOME_DIR_NAME
+        );
+    }
+
+    #[test]
+    fn update_lane_channel_shares_the_base_home() {
+        // alpha/beta/stable are the SAME application reached by a different
+        // feed — the kit resolves them to the base data home on purpose, so
+        // switching lanes must preserve the user's state.
+        assert_eq!(
+            resolve_data_home_dir_name("beta", ".papercusp").unwrap(),
+            BASE_DATA_HOME_DIR_NAME
+        );
+    }
+
+    #[test]
+    fn side_by_side_channel_gets_a_distinct_home() {
+        assert_eq!(
+            resolve_data_home_dir_name("nightly", ".papercusp-nightly").unwrap(),
+            ".papercusp-nightly"
+        );
+    }
+
+    #[test]
+    fn channel_without_a_data_home_refuses_to_boot() {
+        // The drift case the whole guard exists for: a channel-stamped build
+        // that did not resolve a home must NOT fall back to the base one.
+        let err = resolve_data_home_dir_name("nightly", "").unwrap_err();
+        assert!(err.contains("PAPERCUSP_CHANNEL_DATA_HOME"), "{err}");
+    }
+
+    #[test]
+    fn distinct_home_without_a_channel_refuses_to_boot() {
+        let err = resolve_data_home_dir_name("", ".papercusp-nightly").unwrap_err();
+        assert!(err.contains("PAPERCUSP_CHANNEL"), "{err}");
+    }
+
+    #[test]
+    fn a_data_home_stamp_can_never_escape_home() {
+        for bad in [
+            "../.ssh",
+            ".papercusp/../..",
+            ".papercusp-night/ly",
+            ".papercusp-night\\ly",
+            "..",
+            ".",
+            "papercusp-nightly", // not hidden
+        ] {
+            assert!(
+                resolve_data_home_dir_name("nightly", bad).is_err(),
+                "expected {bad:?} to be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_channel_suffix_is_read_from_the_identifier_itself() {
+        assert_eq!(channel_suffix_of_identifier("com.papercusp.gui"), None);
+        assert_eq!(channel_suffix_of_identifier("com.papercusp.server"), None);
+        assert_eq!(
+            channel_suffix_of_identifier("com.papercusp.gui.nightly"),
+            Some("nightly")
+        );
+        assert_eq!(
+            channel_suffix_of_identifier("com.papercusp.server.nightly"),
+            Some("nightly")
+        );
+    }
+
+    #[test]
+    fn identity_and_stamp_must_agree_in_both_directions() {
+        // The compiled-in stamp is empty in a test build, so an un-suffixed
+        // identifier agrees and a suffixed one does not — which is precisely
+        // the "overlay applied, stamp forgotten" half of the invariant.
+        assert!(verify_channel_identity("com.papercusp.gui").is_ok());
+        assert!(verify_channel_identity("com.papercusp.server").is_ok());
+        let err = verify_channel_identity("com.papercusp.gui.nightly").unwrap_err();
+        assert!(err.contains("channel identity mismatch"), "{err}");
+    }
+
+    #[test]
+    fn workspaces_root_is_a_sibling_of_the_data_home() {
+        // Both roots move together under one chokepoint: for the un-stamped
+        // build this is byte-identical to the pre-WI-36794 behavior.
+        assert_eq!(workspaces_root(), shared_sidecar_home().join(WORKSPACES_DIR_NAME));
+        assert_eq!(shared_sidecar_home(), real_home());
+        assert_eq!(workspaces_root(), real_home().join(".papercusp-workspaces"));
+    }
+
     #[test]
     fn slugify_basic() {
         assert_eq!(slugify("My Cool Workspace"), "my-cool-workspace");

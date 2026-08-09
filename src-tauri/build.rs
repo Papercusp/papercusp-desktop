@@ -193,6 +193,13 @@ fn main() {
     // a STALE (or empty) host and the shipped app would silently poll the wrong
     // address — the same silent-failure class the release-host work exists to fix.
     println!("cargo:rerun-if-env-changed=PAPERCUSP_RELEASE_HOST");
+    // WI-36794 — same mechanism again for the release CHANNEL and the data home
+    // it resolves to (see workspaces::shared_sidecar_home()). Without these
+    // rerun keys cargo would cache a main.rs compiled with a STALE (or absent)
+    // channel stamp, and a side-by-side build would silently open the base
+    // app's `~/.papercusp` — the exact state of the desktop in daily use.
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_CHANNEL");
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_CHANNEL_DATA_HOME");
 
     // WI-1976 / WI-2143 — allow the renderer to invoke the native-shell app commands.
     // The operator SPA loads from a REMOTE http origin (http://127.0.0.1:<port>),

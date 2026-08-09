@@ -4389,7 +4389,10 @@ fn on_second_instance(app: &AppHandle, args: Vec<String>, cwd: String) {
 fn pending_route_path() -> Option<std::path::PathBuf> {
     // WI-36794: resolve through the channel chokepoint, not a raw HOME read —
     // a side-by-side (nightly) GUI must never hand a route off through the live
-    // desktop's `~/.papercusp`.
+    // desktop's `~/.papercusp`. The HOME probe is kept only to preserve the
+    // pre-existing "no HOME ⇒ no hand-off file" contract (real_home() would
+    // otherwise fall back to `.`).
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     Some(
         workspaces::shared_sidecar_home()
             .join(workspaces::BASE_DATA_HOME_DIR_NAME)
@@ -7550,6 +7553,15 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
             }
         })
         .setup(|app| {
+            // WI-36794 — FIRST, before anything touches a state dir: the tauri
+            // identity overlay and the baked channel stamp are set INDEPENDENTLY
+            // at build time, and either one without the other is a build that
+            // writes to the wrong app's state. Refuse to boot on a mismatch
+            // rather than discover it by corrupting `~/.papercusp`.
+            if let Err(msg) = workspaces::verify_channel_identity(&app.config().identifier) {
+                eprintln!("[papercusp-desktop] FATAL: {msg}");
+                return Err(msg.into());
+            }
             let role = app_role::detect(&app.config().identifier);
             // WI-6502: make the WebKitGTK compositor honour the damage rects it
             // already computes, instead of repainting the whole viewport on
