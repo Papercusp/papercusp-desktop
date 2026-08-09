@@ -157,6 +157,23 @@ assert_serve_supports_from_repo() {
       return 1
     fi
     echo "✓ $label serve.mjs carries the WI-280 join-time membership+grant seam (witness static check)"
+    # WI-37144/WI-37195 (2026-08-09): the K2 owner gate must be the TRI-STATE one. Pre-fix,
+    # hive-revoke-contributor.ts gated on `loadHivePubkey(...) !== null`, which FLATTENS "no key
+    # held" and "a key is here but unreadable" into a single `not_owner` — so a K2 FAIL could not
+    # say which, and the two have opposite remediations. Marker: `owner_key_unreadable`, a runtime
+    # CODE STRING literal (hive-revoke-contributor.ts:209), so it survives esbuild minification.
+    #
+    # This guard exists because the failure it prevents ALREADY COST A RUN. The smoke script does
+    # NOT build the sidecar — it only asserts serve.mjs EXISTS (see the FATAL below) — so a bundle
+    # predating an operator-core fix is used silently. On 2026-08-09 a witness probe ran against a
+    # bundle built 02:27Z, ~7h before the fix, and dutifully printed `not_owner`: a well-formed,
+    # confident answer measured against code that no longer exists. Nothing looked wrong.
+    # An existence check is not a freshness check.
+    if ! grep -qaF 'owner_key_unreadable' "$serve" 2>/dev/null; then
+      echo "✗ $label serve.mjs lacks the WI-37195 tri-state owner gate (string 'owner_key_unreadable') — built before that fix, so K2 will report a FLATTENED 'not_owner' that cannot distinguish no-key from unreadable-key; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
+      return 1
+    fi
+    echo "✓ $label serve.mjs carries the WI-37195 tri-state owner gate (witness static check)"
   fi
   # Moderation-witness staleness gate (MODERATION_PROBE only). The EN-3 report backend must be
   # present or LEG 2 false-FAILs on an OLD build (report route absent → no-op). Marker survives
