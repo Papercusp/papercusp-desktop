@@ -195,16 +195,41 @@ pub fn channel_suffix_of_identifier(identifier: &str) -> Option<&str> {
 ///     the same bundle id while pointing at different state.
 ///
 /// Needs no channel table: the identifier's own suffix IS the channel.
+///
+/// ⚠ The rule is keyed on the resolved DATA HOME, not on the baked channel id,
+/// and that distinction is load-bearing. An `update-lane` build may legitimately
+/// bake `PAPERCUSP_CHANNEL=stable` while keeping the BASE data home — it is the
+/// same application, so its identifier correctly carries NO channel segment. A
+/// naive `baked == identifier_suffix` comparison would read that as a mismatch
+/// and refuse to boot every stable/beta/alpha build that ever stamped itself.
 pub fn verify_channel_identity(identifier: &str) -> Result<(), String> {
-    let baked = baked_channel();
     let from_identifier = channel_suffix_of_identifier(identifier).unwrap_or("");
+    let resolved = data_home_dir_name();
+
+    if resolved == BASE_DATA_HOME_DIR_NAME {
+        // No distinct identity. The bundle id must not claim one either — an
+        // identifier with a channel segment here is a SEPARATE installed app
+        // pointed at the state of the app in daily use.
+        if from_identifier.is_empty() {
+            return Ok(());
+        }
+        return Err(format!(
+            "bundle identifier {identifier:?} carries channel {from_identifier:?}, but this build resolves the \
+             BASE data home {BASE_DATA_HOME_DIR_NAME:?}. Refusing to boot: that is a separate installed \
+             application pointed at the operator state of the app in daily use. The tauri identity overlay was \
+             applied without baking PAPERCUSP_CHANNEL + PAPERCUSP_CHANNEL_DATA_HOME."
+        ));
+    }
+
+    // Distinct data home ⇒ side-by-side ⇒ the identifier must name the channel.
+    let baked = baked_channel();
     if baked.eq_ignore_ascii_case(from_identifier) {
         return Ok(());
     }
     Err(format!(
-        "channel identity mismatch: bundle identifier {identifier:?} carries channel {from_identifier:?} \
-         but this build baked PAPERCUSP_CHANNEL={baked:?}. Refusing to boot — a side-by-side build whose \
-         identity and data home disagree writes to the wrong app's state."
+        "channel identity mismatch: bundle identifier {identifier:?} carries channel {from_identifier:?} but \
+         this build baked PAPERCUSP_CHANNEL={baked:?} and data home {resolved:?}. Refusing to boot — a \
+         side-by-side build whose identity and data home disagree writes to the wrong app's state."
     ))
 }
 
@@ -704,13 +729,16 @@ mod tests {
 
     #[test]
     fn identity_and_stamp_must_agree_in_both_directions() {
-        // The compiled-in stamp is empty in a test build, so an un-suffixed
-        // identifier agrees and a suffixed one does not — which is precisely
-        // the "overlay applied, stamp forgotten" half of the invariant.
+        // A test build is un-stamped, so it resolves the BASE data home. Both
+        // base identifiers agree with that; a channel-suffixed one does not —
+        // which is precisely the "overlay applied, stamp forgotten" half of the
+        // invariant, and the half that would silently point a separate installed
+        // app at `~/.papercusp`.
         assert!(verify_channel_identity("com.papercusp.gui").is_ok());
         assert!(verify_channel_identity("com.papercusp.server").is_ok());
         let err = verify_channel_identity("com.papercusp.gui.nightly").unwrap_err();
-        assert!(err.contains("channel identity mismatch"), "{err}");
+        assert!(err.contains("BASE data home"), "{err}");
+        assert!(err.contains("PAPERCUSP_CHANNEL"), "{err}");
     }
 
     #[test]
