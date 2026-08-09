@@ -768,12 +768,20 @@ mod tests {
     }
 
     #[test]
-    fn workspaces_root_is_a_sibling_of_the_data_home() {
-        // Both roots move together under one chokepoint: for the un-stamped
-        // build this is byte-identical to the pre-WI-36794 behavior.
-        assert_eq!(workspaces_root(), shared_sidecar_home().join(WORKSPACES_DIR_NAME));
-        assert_eq!(shared_sidecar_home(), real_home());
-        assert_eq!(workspaces_root(), real_home().join(".papercusp-workspaces"));
+    fn an_unstamped_build_resolves_exactly_the_pre_wi36794_paths() {
+        // Deliberately does NOT call shared_sidecar_home()/workspaces_root():
+        // those read the ambient HOME, and a sibling test in this binary
+        // (ensure_initialized_...) REASSIGNS HOME while cargo runs tests in
+        // parallel threads — so an env-reading assertion here is a coin flip,
+        // not a guard. Resolve the real home ONCE and drive the pure function
+        // instead; the wiring from workspaces_root() through shared_sidecar_home()
+        // is what the mutation probe covers.
+        let real = real_home();
+        assert_eq!(home_for(real.clone(), BASE_DATA_HOME_DIR_NAME), real);
+        assert_eq!(
+            home_for(real.clone(), BASE_DATA_HOME_DIR_NAME).join(WORKSPACES_DIR_NAME),
+            real.join(".papercusp-workspaces"),
+        );
     }
 
     #[test]
