@@ -873,11 +873,24 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "  K4a CONTENT CONTROL (B reads pre-revoke encrypted content F-RKCTRL): $([ "$rk_content_ctrl_ok" = 1 ] && echo "PASS (content federation A→B healthy ⇒ K4b will assert the cut)" || echo "INCONCLUSIVE (content A→B unhealthy this run — WI-259; key-level K3-CUT governs)")"
 
   # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
-  mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"potSlug\":\"$HIVE_SLUG\"}" >/dev/null 2>&1  # request field renamed hiveSlug→potSlug (revoke-contributor.ts zod refine accepts only potSlug)
-  sleep 4
-  NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
-  { [ -n "$CUR_EPOCH" ] && [ -n "$NEW_EPOCH" ] && [ "$NEW_EPOCH" -gt "$CUR_EPOCH" ]; } 2>/dev/null && rk_revoke_ok=1
-  echo "  K2 REVOKE (A revokes B, epoch advanced $CUR_EPOCH→$NEW_EPOCH): $([ "$rk_revoke_ok" = 1 ] && echo "PASS" || echo "FAIL (epoch did not advance)")"
+  # WI-37144: CAPTURE the call's own result. This was `>/dev/null 2>&1`, which discarded the one
+  # piece of evidence separating "the revoke ERRORED" from "the revoke succeeded but the epoch did
+  # not advance" — the two readings have opposite remediations, and the from-repo witness banks no
+  # serve log (unlike the local-matrix rig), so a K2 FAIL was undiagnosable after teardown. Four
+  # days of identical reds could not be triaged for exactly this reason.
+  rk_revoke_out="$(mcp_call a "substrate:revoke_contributor" "{\"workspaceId\":\"$WS_ID\",\"githubUserId\":$B_GH_ID,\"potSlug\":\"$HIVE_SLUG\"}" 2>&1 || true)"  # request field renamed hiveSlug→potSlug (revoke-contributor.ts zod refine accepts only potSlug)
+  echo "  [K2 DIAG] revoke_contributor → $(printf '%s' "${rk_revoke_out:-<no output>}" | tr '\n' ' ' | cut -c1-500)"
+  # WI-37144: POLL the epoch instead of one read after `sleep 4`. Every other cross-instance
+  # assertion here polls (K0/K1 20x/3s); K2 was the last single-shot read, and the K1 comment
+  # directly below cites WI-5828 for precisely that asymmetry producing false FAILs. Polling can
+  # only remove a FALSE fail: an epoch that genuinely never advances still fails, just later.
+  NEW_EPOCH="$CUR_EPOCH"
+  for _k2_i in $(seq 1 "${EPOCH_KEY_PROBE_TRIES:-20}"); do
+    NEW_EPOCH="$(drv_psql a "SELECT COALESCE(max(epoch),-1) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG';" 2>/dev/null | tr -d '[:space:]')"
+    { [ -n "$CUR_EPOCH" ] && [ -n "$NEW_EPOCH" ] && [ "$NEW_EPOCH" -gt "$CUR_EPOCH" ]; } 2>/dev/null && { rk_revoke_ok=1; break; }
+    sleep 3
+  done
+  echo "  K2 REVOKE (A revokes B, epoch advanced $CUR_EPOCH→$NEW_EPOCH): $([ "$rk_revoke_ok" = 1 ] && echo "PASS" || echo "FAIL (epoch did not advance after ${EPOCH_KEY_PROBE_TRIES:-20} polls)")"
 
   # B_DEV — the cut-off device = A's CUR-epoch member devices EXCEPT A's NEW-epoch (remaining) devices.
   # In a 2-member hive this is exactly B's device (A stays a member ⇒ A_DEV is in both epochs, excluded).
