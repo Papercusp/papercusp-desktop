@@ -1092,6 +1092,30 @@ if [[ -f "$COORD_HOOK_SRC" ]]; then
   cp -a "$COORD_HOOK_SRC" "$COORD_HOOK_DST"
 fi
 
+# Same reason again, for the CONTEXT-INJECTION pair
+# (omp-context-injection-parity-2026-08-09 P-003): the shared dispatcher
+# apps/operator/scripts/hooks/inject/** and the omp artifact
+# apps/operator/scripts/hooks/omp/inject-hook.ts are read at runtime by
+# lib/desktop-install/papercusp-files.ts, not imported, so esbuild does not
+# trace them.
+#
+# ⚠ SHIP BOTH OR NEITHER. The artifact locates the dispatcher relative to
+# itself; shipping the hook without the dispatcher yields a packaged app whose
+# omp sessions load the hook, find nothing, and fail-silently inject NOTHING on
+# every turn — indistinguishable from "no memories were relevant". That is the
+# EI-8191 shape exactly: fail-open looks like success, so it stays invisible.
+# The `.mjs` set is the dispatcher; adapters/ is a required subdirectory.
+INJECT_SRC_DIR="$WEB_DIR/scripts/hooks/inject"
+OMP_INJECT_HOOK_SRC="$WEB_DIR/scripts/hooks/omp/inject-hook.ts"
+if [[ -d "$INJECT_SRC_DIR" && -f "$OMP_INJECT_HOOK_SRC" ]]; then
+  INJECT_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/inject"
+  echo "→ copying context-injection dispatcher → sidecar/apps/operator/scripts/hooks/inject/"
+  mkdir -p "$INJECT_DST_DIR/adapters" "$SIDECAR_DIR/apps/operator/scripts/hooks/omp"
+  cp -a "$INJECT_SRC_DIR"/*.mjs "$INJECT_DST_DIR"/
+  cp -a "$INJECT_SRC_DIR"/adapters/*.mjs "$INJECT_DST_DIR"/adapters/
+  cp -a "$OMP_INJECT_HOOK_SRC" "$SIDECAR_DIR/apps/operator/scripts/hooks/omp/inject-hook.ts"
+fi
+
 # Same reason: the Claude/Codex CC hooks (statusline-fleet + lock/coord/activity/
 # lifecycle/objective-title/bash-gate/workitem-nudge) under
 # apps/operator/scripts/hooks/cc/ are read at runtime by
