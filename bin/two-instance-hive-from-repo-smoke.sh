@@ -963,11 +963,59 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
   # WHILE the NEW epoch DID federate to B for the REMAINING members (so the 0 is a true cut, not a
   # federation miss) and A holds the NEW epoch rows. This IS the C-001 read-cut — key-level, device-filtered.
+  #
+  # WI-37144 (2026-08-09): `k3_remaining` was a SINGLE-SHOT read fired immediately after K2's
+  # epoch-advance poll broke — and K1 above breaks on its FIRST iteration (B's epoch-$CUR_EPOCH row
+  # crossed long ago), so B had ~0 seconds to receive the remaining member's epoch-$NEW_EPOCH row.
+  # It read 0 every time, and `k3_remaining >= 1` was the SOLE failing conjunct of this six-way AND
+  # while both cut conjuncts passed. I previously recorded that as "structurally unsatisfiable at 2
+  # members" (the reasoning: after revoking B only A remains, so the only new-epoch row is A's OWN
+  # and there is nothing for B to receive). ⛔ THAT WAS WRONG — REFUTED BY MEASUREMENT, do not
+  # reinstate it: epoch-key rows federate to B *sealed to the holder's device*, so the remaining
+  # member's row is EXPECTED to reach B and be undecryptable there. The adjacent matrix rig
+  # (lib/scenarios/b3-revocation.sh, same revoke endpoint — potSlug/hive scope) observes exactly
+  # that and says so in its own witness: banked run 232013 has B holding
+  # `hello-world-pot|1|sXuPh9DH…|remote` — the OWNER's device row at the NEW epoch — under the note
+  # "the epoch-1 row B did receive is sealed to the owner's device, unreadable by B". Run
+  # 223519 shows TWO such rows. So the condition is satisfiable at this member count; the smoke was
+  # simply measuring before federation had a chance to deliver. The matrix reads the same tables
+  # only after its post-ban content probe, i.e. tens of seconds later, which is why it never saw 0.
+  #
+  # Same single-shot-vs-poll asymmetry WI-5828 fixed for K1 and WI-37144 fixed for K2 — these were
+  # the last un-polled cross-instance reads in this script, so the K2 comment above claiming K2 was
+  # "the last single-shot read" is now the accurate statement rather than an aspirational one.
+  #
+  # ⚠ The two reads are polled ASYMMETRICALLY on purpose, because they assert opposite things:
+  #   · `k3_remaining` asserts PRESENCE — poll until it appears (a bounded wait can only remove a
+  #     FALSE fail; a row that genuinely never crosses still fails, just later).
+  #   · `k3_bdev` asserts ABSENCE — polling "until absent" is meaningless, so it is read ONCE, AFTER
+  #     the presence loop settles. That is deliberately the LATEST decidable moment, which makes the
+  #     cut assertion STRICTLY STRONGER than the old early read: B has now had the full delivery
+  #     window in which to wrongly receive a NEW-epoch key for its own device, and still holds none.
+  k3_remaining=""
+  for _k3_i in $(seq 1 "${EPOCH_KEY_PROBE_TRIES:-20}"); do
+    k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+    { [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ]; } 2>/dev/null && break
+    sleep 3
+  done
+  # Read the ABSENCE only now — see the asymmetry note above.
   k3_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
-  k3_remaining="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH AND member_device_pubkey<>'$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
   a_new="$(drv_psql a "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$NEW_EPOCH;" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$B_DEV" ] && [ "$k3_bdev" = 0 ] && [ -n "$k3_remaining" ] && [ "$k3_remaining" -ge 1 ] && [ -n "$a_new" ] && [ "$a_new" -ge 1 ] && rk_cut_ok=1
-  echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $([ "$rk_cut_ok" = 1 ] && echo "PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)" || echo "FAIL (B_DEV-new=$k3_bdev remaining-on-B=$k3_remaining A-new=$a_new)")"
+  # Name WHICH conjunct failed. A six-way AND rendered as the single word FAIL is what let
+  # "the anti-confound could not be measured" read as "the revocation cut is broken" for two wakes.
+  if [ "$rk_cut_ok" = 1 ]; then
+    k3_why="PASS (B_DEV new-keys=0, remaining-on-B=$k3_remaining, A-new=$a_new)"
+  elif [ -z "$B_DEV" ]; then
+    k3_why="INCONCLUSIVE (B_DEV unresolvable — K2 left the epoch at $CUR_EPOCH; this leg is NOT evidence about the cut)"
+  elif [ "${k3_bdev:-x}" != 0 ]; then
+    k3_why="FAIL — CUT BROKEN: B's own device HOLDS an epoch-$NEW_EPOCH key (B_DEV-new=${k3_bdev:-<unread>})"
+  elif [ -z "$k3_remaining" ] || [ "$k3_remaining" -lt 1 ] 2>/dev/null; then
+    k3_why="FAIL — ANTI-CONFOUND UNMEASURABLE, the cut itself is NOT contradicted (B_DEV-new=0 ✓ but remaining-on-B=${k3_remaining:-<unread>} after ${EPOCH_KEY_PROBE_TRIES:-20} polls: no remaining member's epoch-$NEW_EPOCH row ever reached B, so connected-but-cut cannot be separated from disconnected)"
+  else
+    k3_why="FAIL (A does not hold the new epoch: A-new=${a_new:-<unread>})"
+  fi
+  echo "  K3 CUT (B's device has NO epoch-$NEW_EPOCH key; remaining DID cross; A holds new epoch): $k3_why"
 
   # ── K4b CONTENT CUT (post-revoke, P-008 — the work-item's LITERAL assertion) ──────────────────
   # The data-plane consequence of the key-level K3 cut: owner A authors NEW content (F-RKCUT) AFTER

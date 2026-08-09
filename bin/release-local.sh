@@ -184,6 +184,13 @@ WITH_MAC="${WITH_MAC:-0}"
 # WI-5559 had suppressed the Windows Server here on the false premise it was
 # unpublished throwaway output; a gui-only Windows cut actually ships a dead
 # build (WI-5600), so that suppression is reversed.
+#
+# WI-36794: remember whether the caller ASKED for these roles or merely inherited
+# the default. A side-by-side channel (below) narrows the default to gui — but an
+# explicit `PAPERCUSP_BUILD_ROLES="gui server"` must be REFUSED there rather than
+# silently narrowed, because silently building less than the caller asked for is
+# how a cut ships a missing product.
+PAPERCUSP_BUILD_ROLES_EXPLICIT="${PAPERCUSP_BUILD_ROLES:+1}"
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 export PAPERCUSP_BUILD_ROLES
 # Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
@@ -292,6 +299,60 @@ case "$CHANNEL" in
   alpha|beta|stable|nightly) ;;
   *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
 esac
+
+# ── CHANNEL IDENTITY (WI-36794) ───────────────────────────────────────────────
+# THE ONE derivation for this cut, from the shared chokepoint. It sets
+# DESKTOP_CHANNEL_BUILD_CFG (the tauri `--config` identity overlay) and
+# DESKTOP_CHANNEL_BUILD_ENV (the baked PAPERCUSP_CHANNEL +
+# PAPERCUSP_CHANNEL_DATA_HOME stamps). Both are EMPTY for an update lane, so
+# every build site below expands them unconditionally and an alpha/beta/stable
+# cut is byte-for-byte the command it ran before this existed.
+#
+# Expand the two arrays TOGETHER, always. Splitting them is the one mistake that
+# matters here: the overlay alone is a separate installed application pointed at
+# ~/.papercusp — the operator state of the desktop in daily use.
+desktop_channel_identity "$CHANNEL" || exit 1
+
+if desktop_channel_is_side_by_side "$CHANNEL"; then
+  echo "==> channel '$CHANNEL' is SIDE-BY-SIDE: ${DESKTOP_CHANNEL_BUILD_CFG[*]} + ${DESKTOP_CHANNEL_BUILD_ENV[*]}"
+
+  # A side-by-side cut has exactly ONE identity overlay, and it is the GUI's.
+  # There is no tauri.<channel>-server.conf.json: a Server-role build would take
+  # tauri.server.conf.json AND the channel overlay, and the later `--config`
+  # wins the identifier — producing a Server-role bundle wearing the GUI's
+  # nightly identity. On Linux that role is not needed at all (main.rs's
+  # #[cfg(target_os = "linux")] arm self-hosts the operator sidecar inside the
+  # GUI process, WI-2902), which is why the overlay was only ever built for GUI.
+  # Refuse rather than emit an incoherent bundle.
+  if [[ " $PAPERCUSP_BUILD_ROLES " == *" server "* ]]; then
+    if [[ -n "${PAPERCUSP_BUILD_ROLES_EXPLICIT:-}" ]]; then
+      echo "ERROR: channel '$CHANNEL' is side-by-side and has no Server identity overlay" >&2
+      echo "       (src-tauri/tauri.${CHANNEL}-server.conf.json does not exist), so a Server-role" >&2
+      echo "       build would wear the GUI's '$CHANNEL' bundle identity. Linux does not need it:" >&2
+      echo "       the GUI self-hosts the sidecar (WI-2902). Re-run with PAPERCUSP_BUILD_ROLES=gui." >&2
+      exit 1
+    fi
+    echo "==> [$CHANNEL] narrowing PAPERCUSP_BUILD_ROLES to 'gui' (no Server identity overlay for a side-by-side channel; the Linux GUI self-hosts the sidecar — WI-2902)"
+    PAPERCUSP_BUILD_ROLES="gui"
+    export PAPERCUSP_BUILD_ROLES
+  fi
+
+  # Cross-platform legs do NOT carry the overlay: the mac/windows producers run
+  # over ssh with their own build commands, and the two-bundle split there still
+  # needs a channel-aware SERVER_BUNDLE_ID (main.rs:4350) that has not been
+  # built. Shipping them under a nightly TAG with stable IDENTITY is the
+  # LABELED != PACKED class this script guards against everywhere else, so
+  # refuse instead of publishing it.
+  for leg in WITH_WINDOWS WITH_MAC; do
+    if [[ "${!leg}" == "1" ]]; then
+      echo "ERROR: $leg=1 with side-by-side channel '$CHANNEL' — that leg has no channel identity" >&2
+      echo "       overlay yet (the mac/windows two-bundle split needs a channel-aware" >&2
+      echo "       SERVER_BUNDLE_ID, WI-36794 item 5 defers it), so it would build STABLE-identity" >&2
+      echo "       artifacts and publish them under the '$CHANNEL' tag. Cut $CHANNEL on Linux only." >&2
+      exit 1
+    fi
+  done
+fi
 
 # Tag convention matches the operator's manifest classifier
 # (apps/operator/app/api/updates/manifest/route.ts):
@@ -869,7 +930,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     # see the collection globs) AND its multi-GB payload compression wedged the
     # 0.0.3-alpha linux leg for 33min+. deb only.
     echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
   # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
   # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
@@ -877,6 +938,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
        TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+       PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" \
        "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
   fi
 ) >"$LINUX_LEG_LOG" 2>&1 &
@@ -961,7 +1023,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}")
+    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")

@@ -41,6 +41,35 @@ APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 AUDIT_PY="$DESK/bin/audit-release-bundle.py"
 
+# ── CHANNEL IDENTITY (WI-36794) ───────────────────────────────────────────────
+# This is a SEPARATE bash process from release-local.sh, and arrays do not cross
+# a process boundary — so this leg derives the channel identity itself, through
+# the same chokepoint, rather than being handed half of it. release-local.sh
+# passes the channel in PAPERCUSP_RELEASE_CHANNEL.
+#
+# Deliberately NOT named PAPERCUSP_CHANNEL: that is the BAKED STAMP, and an
+# ambiently-exported one would be inherited by every build in the process tree,
+# including ones that never receive the matching `--config` overlay. That
+# combination is exactly what workspaces::verify_channel_identity() refuses to
+# boot on. "Which channel is this cut" and "what identity is baked into THIS
+# binary" are different questions and get different variable names.
+#
+# Unset ⇒ no overlay, no stamps: the base app, byte-for-byte what this script
+# built before channels existed. That is the safe default — an un-stamped build
+# resolves the existing ~/.papercusp.
+DESKTOP_CHANNEL_BUILD_CFG=()
+DESKTOP_CHANNEL_BUILD_ENV=()
+if [ -n "${PAPERCUSP_RELEASE_CHANNEL:-}" ]; then
+  # shellcheck source=lib/gen-latest-manifest.sh
+  . "$DESK/bin/lib/gen-latest-manifest.sh" || {
+    echo "FATAL: cannot source bin/lib/gen-latest-manifest.sh — refusing to build a channel bundle without its identity" >&2; exit 1; }
+  desktop_channel_identity "$PAPERCUSP_RELEASE_CHANNEL" || {
+    echo "FATAL: unknown channel '$PAPERCUSP_RELEASE_CHANNEL' — refusing to build" >&2; exit 1; }
+  if [ "${#DESKTOP_CHANNEL_BUILD_CFG[@]}" -gt 0 ]; then
+    echo "==> channel '$PAPERCUSP_RELEASE_CHANNEL': ${DESKTOP_CHANNEL_BUILD_CFG[*]} + ${DESKTOP_CHANNEL_BUILD_ENV[*]}"
+  fi
+fi
+
 # 0. PURGE any stale AppDir from a PRIOR build BEFORE tauri runs (WI-4736 / EI-11730).
 #    A leftover *.AppDir from an OLDER sidecar can ship the mac-VM sudo/login passwords +
 #    build-box identity inside its rendered docs, even though the .deb (packed straight
@@ -80,7 +109,9 @@ rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/n
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 echo "==> tauri build --bundles appimage (the linuxdeploy sidecar-scan crash is EXPECTED and ignored)"
 PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-}" PAPERCUSP_BUILD_VERSION="${PAPERCUSP_BUILD_VERSION:-$VERSION}" \
+  "${DESKTOP_CHANNEL_BUILD_ENV[@]}" \
   npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage \
+  "${DESKTOP_CHANNEL_BUILD_CFG[@]}" \
   || echo "   (tauri appimage step exited non-zero as expected — finishing with appimagetool)"
 
 # 2. Locate the AppDir tauri produced (GUI bundle).
