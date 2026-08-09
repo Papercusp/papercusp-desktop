@@ -764,6 +764,7 @@ fi
 #      octocat fixture → seed claim_status or use a papercupai-owned repo for those).
 ak_default_ok=0; ak_ban_ok=0; ak_unban_ok=0
 rk_keys_ok=0; rk_ctrl_ok=0; rk_revoke_ok=0; rk_cut_ok=0; witness_ran=0
+rk_ctrl_measurable=1  # WI-37144: 0 ⇒ the K1 CONTROL leg could not run at all (empty B_DEV) ⇒ INCONCLUSIVE, not FAIL
 # P-008 CONTENT-level cut (the work-item's literal assertion). rk_content_applicable=1 only
 # when the K4a pre-revoke content control proves content federation A→B is healthy THIS run
 # (else WI-259 stalls content → K4b is INCONCLUSIVE, never a false-RED; the key-level K3 governs).
@@ -901,14 +902,27 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   # other cross-instance assertion in this script (2 of 5 live WITNESS_PROBE=1 runs
   # FAILed this leg alongside OTHER unrelated federation-timing flakes in the same
   # run, consistent with a too-eager single-shot read rather than a real cut bug).
+  k1_bdev=""; rk_ctrl_measurable=1
   if [ -n "$B_DEV" ]; then
     for _k1_i in $(seq 1 "${EPOCH_KEY_PROBE_TRIES:-20}"); do
       k1_bdev="$(drv_psql b "SELECT count(*) FROM harness_shared.pot_epoch_keys WHERE harness_slug='$HIVE_SLUG' AND epoch=$CUR_EPOCH AND member_device_pubkey='$B_DEV' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
       [ -n "$k1_bdev" ] && [ "$k1_bdev" -ge 1 ] && { rk_ctrl_ok=1; break; }
       sleep 3
     done
+  else
+    # WI-37144: B_DEV is an EXCEPT of the CUR- and NEW-epoch device sets, so it is EMPTY BY
+    # CONSTRUCTION whenever K2 did not advance the epoch. The poll above then never ran, `k1_bdev`
+    # stayed unset, and `set -u` killed the echo's own subshell — printing an EMPTY verdict while
+    # the summary still reported `K1-control=FAIL`. That is a verdict-shaped non-verdict: the
+    # CONTROL leg executed zero queries, so its "FAIL" carried no information about the cut, yet
+    # read as a fourth independent breakage in every triage of this red.
+    rk_ctrl_measurable=0
   fi
-  echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=$k1_bdev B_DEV=${B_DEV:0:12})")"
+  if [ "$rk_ctrl_measurable" = 1 ]; then
+    echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): $([ "$rk_ctrl_ok" = 1 ] && echo "PASS (k1=$k1_bdev B_DEV=${B_DEV:0:12}…)" || echo "FAIL (k1=${k1_bdev:-<unread>} B_DEV=${B_DEV:0:12})")"
+  else
+    echo "  K1 CONTROL (B's device HAD the pre-revoke epoch-$CUR_EPOCH key): INCONCLUSIVE (B_DEV unresolvable — K2 left the epoch at $CUR_EPOCH, so the CUR/NEW device sets are identical and their EXCEPT is empty; this leg ran NO query and is NOT evidence about the cut)"
+  fi
 
   # K3 CUT — B's DEVICE has NO key at the NEW epoch (can't derive post-revoke content = the read-cut),
   # WHILE the NEW epoch DID federate to B for the REMAINING members (so the 0 is a true cut, not a
