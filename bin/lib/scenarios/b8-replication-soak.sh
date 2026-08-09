@@ -107,6 +107,26 @@ scn_replication_soak() {
     else
       echo "      ✗ DETECTOR REGRESSION: soak failed its SLA but NO replication_stalled line for this soak's own harness (oslug=$oslug mslug=$mslug) on either frame — the WI-1840 detector was blind to a real stall (check lastSwarmConnections via substrate:getReplicationLiveness RPC)"
     fi
+    # ── EI-19940993365684927: THE LAST LINE MUST BE THE VERDICT ──────────────
+    # A gate artifact's final line must BE its verdict, or be MORE alarming than
+    # it — never less. Readers (human and agent) read the tail.
+    #
+    # The detector pin above is a SUB-ASSERTION about the WI-1840 detector, not
+    # about this soak. On the ✓ branch it is true on its own terms and reads as
+    # reassuring, and it used to be the FINAL line this function emitted on a
+    # FAILED soak. So `tail -1` on scn.replication_soak.log showed a ✓ for a
+    # scenario that had just FAILED its SLA: a peer read exactly that tail and
+    # concluded "all 18 scenarios green" while this one was INCOMPLETE.
+    #
+    # Re-emit the verdict LAST so the reassuring sub-assertion can never be the
+    # tail. Unconditional and self-authored on purpose: replaying $out's own
+    # OVERALL: line would print NOTHING when the soak died before emitting one,
+    # which silently restores the very bug this fixes.
+    # SAFE BY CONSTRUCTION: local-matrix.sh takes this scenario's verdict from
+    # the RETURN CODE (return "$rc"), never by parsing this log, so this line
+    # changes only what a reader sees. It also cannot be mistaken for a pass by
+    # the unanchored `grep -qaE 'OVERALL: PASS'` in live-federation-gate.sh.
+    echo "OVERALL: INCOMPLETE — replication-liveness soak FAILED (rc=$rc). The ✓/✗ line above is a sub-assertion about the DETECTOR, not this scenario's verdict."
   fi
   return "$rc"
 }
