@@ -238,11 +238,18 @@ pub fn workspace_dir(id: &str) -> PathBuf {
 /// `~/.papercusp-nightly/`; an un-stamped build resolves to the real HOME
 /// exactly as before.
 pub fn shared_sidecar_home() -> PathBuf {
-    let dir = data_home_dir_name();
-    if dir == BASE_DATA_HOME_DIR_NAME {
-        real_home()
+    home_for(real_home(), data_home_dir_name())
+}
+
+/// The channel HOME for a given real home + resolved data-home dir name. Split
+/// out from `shared_sidecar_home()` so BOTH branches are testable: the baked
+/// stamps are compile-time, so a test that went through them could only ever
+/// exercise the un-stamped build it happens to be compiled as.
+fn home_for(real: PathBuf, data_home_dir_name: &str) -> PathBuf {
+    if data_home_dir_name == BASE_DATA_HOME_DIR_NAME {
+        real
     } else {
-        real_home().join(dir)
+        real.join(data_home_dir_name)
     }
 }
 
@@ -704,6 +711,32 @@ mod tests {
         assert!(verify_channel_identity("com.papercusp.server").is_ok());
         let err = verify_channel_identity("com.papercusp.gui.nightly").unwrap_err();
         assert!(err.contains("channel identity mismatch"), "{err}");
+    }
+
+    #[test]
+    fn a_side_by_side_home_moves_both_state_roots_off_the_base() {
+        // The claim the whole chokepoint rests on: move ONE path and BOTH of the
+        // roots the desktop writes move with it — `<home>/.papercusp` (operator
+        // state, reached through the sidecar's HOME) and `<home>/.papercusp-
+        // workspaces` (the registry, passed explicitly as PAPERCUSP_WORKSPACES_ROOT).
+        let real = PathBuf::from("/home/u");
+        let base = home_for(real.clone(), BASE_DATA_HOME_DIR_NAME);
+        let night = home_for(real.clone(), ".papercusp-nightly");
+
+        assert_eq!(base, real, "an un-stamped build must not move at all");
+        assert_eq!(night, real.join(".papercusp-nightly"));
+
+        // Neither root may resolve to — or underneath — the base app's.
+        assert_ne!(
+            night.join(BASE_DATA_HOME_DIR_NAME),
+            base.join(BASE_DATA_HOME_DIR_NAME)
+        );
+        assert_ne!(
+            night.join(WORKSPACES_DIR_NAME),
+            base.join(WORKSPACES_DIR_NAME)
+        );
+        assert!(!night.join(BASE_DATA_HOME_DIR_NAME).starts_with(base.join(BASE_DATA_HOME_DIR_NAME)));
+        assert!(!night.join(WORKSPACES_DIR_NAME).starts_with(base.join(WORKSPACES_DIR_NAME)));
     }
 
     #[test]

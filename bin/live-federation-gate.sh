@@ -434,6 +434,18 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     check_matrix_staleness
     echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)$(matrix_stale_suffix)"; exit 0
   fi
+  # WI-37464: a TRACKED red backs off too. Checked LAST of the three so it can never mask a
+  # fresher green or downgrade. `last-red` is stamped ONLY where the red was confirmed tracked
+  # (see the verdict block) — an untracked red deliberately re-runs next window rather than
+  # going quiet, because a silently-dropped release-gate red is worse than the churn.
+  # NOTE age_h() returns 999999 for a MISSING file, so a box that has never red'd is unaffected.
+  RED_AGE_H="$(age_h "$STATE_DIR/last-red")"
+  if [ "$RED_AGE_H" -lt "$GATE_RED_TTL_H" ]; then
+    log "fresh: last window was a TRACKED RED ${RED_AGE_H}h ago (< ${GATE_RED_TTL_H}h retry TTL) — the red is already reported and re-running unchanged code reproduces it at full cost; nothing to do this window. GATE_FORCE=1 to run anyway."
+    skip_cleanup
+    check_matrix_staleness
+    echo "GATE: FRESH-RED (red ${RED_AGE_H}h ago — still red, already tracked; NOT a green)$(matrix_stale_suffix)"; exit 0
+  fi
 fi
 
 # ── 0y. gate SINGLETON lock (WI-5137/P-402, 2026-07-25) ────────────────────────
@@ -1321,10 +1333,14 @@ if [ ${#REDS[@]} -eq 0 ]; then
   # 2026-07-19 and hid WI-5481. So record last-downgrade (short retry TTL) instead — never a green.
   if [ "$MATRIXFULL_RES" = SKIPPED-STARVATION ]; then
     echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    # WI-37464: this window was NOT red, so clear any red backoff — otherwise the longer red TTL
+    # would keep governing after the state has already moved on, over-suppressing the shorter
+    # downgrade retry this branch deliberately asks for.
+    rm -f "$STATE_DIR/last-red"
     check_staleness
     echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)$(matrix_skip_suffix)"; exit 0
   fi
-  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs"
+  echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs" "$STATE_DIR/last-red"
   # EI-18657324526667507 — THE load-bearing call. check_staleness() is (correctly) not invoked on
   # the green path, so without this the leg check would never run in exactly the state that hides
   # it: gate GREEN off the cheap content-matrix leg while local-matrix has decided nothing for
@@ -1369,6 +1385,13 @@ RED_MARKER="$STATE_DIR/red-ei-filed"
 RED_LEGS_MARKER="$STATE_DIR/red-ei-legs"
 red_marker_age_h="$(age_h "$RED_MARKER")"
 prev_legs="$(cat "$RED_LEGS_MARKER" 2>/dev/null || true)"
+# WI-37464 run-backoff. Deliberately a SEPARATE marker from red-ei-filed, not a reuse of it:
+# red-ei-filed answers "is this red already FILED?" (dedup, RED_REFILE_H) and last-red answers
+# "should we spend an hour of this box's CPU re-running it?". They are different questions with
+# different clocks, and collapsing two questions onto one marker is precisely the defect that
+# produced both this bug and EI-19305010835660160 (the same TTL failing the opposite way).
+# Default 1 = tracked; only an UNCONFIRMED filing clears it, mirroring red-ei-filed's own rule.
+red_tracked=1
 # find_open_duplicate (bug-drain-200k fleet finding, 2026-07-20): the RED_REFILE_H
 # marker above is LOCAL, EPHEMERAL state — it is deliberately cleared on every GREEN
 # (below, "rm -f ... red-ei-filed red-ei-legs"), so an INTERMITTENT regression
@@ -1408,8 +1431,19 @@ else
       printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
     else
       log "EI filing NOT CONFIRMED — deliberately NOT stamping red-ei-filed/red-ei-legs, so the next window re-attempts instead of suppressing this red as 'already tracked'."
+      red_tracked=0
     fi
   fi
+fi
+# WI-37464: back off ONLY on a red somebody can actually see. An untracked red (the filing
+# failed and no open duplicate was found) still re-runs next window — the same trade the
+# red-ei markers above make, for the same reason: a duplicate item is cheap, a silently-dropped
+# release-gate red is not. Stamped after the filing block so all three tracked branches — marker
+# still fresh, existing open duplicate, freshly filed — reach it.
+if [ "$red_tracked" = 1 ]; then
+  echo "$(now_s)" >"$STATE_DIR/last-red"
+else
+  log "red is NOT tracked anywhere durable — deliberately NOT stamping last-red, so the next hourly window RE-RUNS and re-attempts the filing rather than going quiet on an unreported red."
 fi
 check_staleness
 exit 1
