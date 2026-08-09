@@ -56,8 +56,162 @@ pub fn real_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// The BASE app's data-home directory name. Mirrors
+/// `PAPERCUSP_BASE_IDENTITY.dataHomeDirName` in `bin/release.config.ts` — the
+/// kit resolves a side-by-side channel's home as `<base>-<identitySuffix>`.
+pub const BASE_DATA_HOME_DIR_NAME: &str = ".papercusp";
+
+/// The per-workspace registry root, always a sibling of the data home under the
+/// same channel HOME (`<home>/.papercusp-workspaces`).
+pub const WORKSPACES_DIR_NAME: &str = ".papercusp-workspaces";
+
+/// How many dot-segments a CHANNEL-LESS bundle identifier has
+/// (`com.papercusp.gui`, `com.papercusp.server`). A side-by-side channel appends
+/// one more (`com.papercusp.gui.nightly`), which is what makes it a separate
+/// installed application — see `resolveChannelIdentity()` in the release kit.
+const BASE_IDENTIFIER_SEGMENTS: usize = 3;
+
+/// The channel id baked at build time (`nightly`, …); empty for every build cut
+/// so far. Same mechanism as `PAPERCUSP_BUILD_SHA` / `baked_release_host()`,
+/// with a matching `rerun-if-env-changed` in `build.rs` so cargo cannot freeze a
+/// stale value.
+fn baked_channel() -> &'static str {
+    option_env!("PAPERCUSP_CHANNEL").unwrap_or("").trim()
+}
+
+/// The data-home directory name baked at build time. The VALUE comes from the
+/// kit's `resolveChannelIdentity()` (one exit, so bundle id / product name /
+/// data home cannot drift); Rust only validates it.
+fn baked_channel_data_home() -> &'static str {
+    option_env!("PAPERCUSP_CHANNEL_DATA_HOME")
+        .unwrap_or("")
+        .trim()
+}
+
+/// A data-home stamp must be a single hidden directory segment directly under
+/// the real HOME — never a path, never an escape, never a visible dir.
+fn validate_data_home_segment(name: &str) -> Result<(), String> {
+    if name == "." || name == ".." {
+        return Err(format!("data home {name:?} is a relative path component"));
+    }
+    if !name.starts_with('.') {
+        return Err(format!(
+            "data home {name:?} must be a hidden directory (start with '.')"
+        ));
+    }
+    if name.len() > 64 {
+        return Err(format!("data home {name:?} is longer than 64 characters"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "data home {name:?} contains characters outside [A-Za-z0-9._-] — a path separator or traversal would escape HOME"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the data-home directory name from the two baked stamps.
+///
+/// FAIL-CLOSED IN BOTH DIRECTIONS, and they are OPPOSITE — do not collapse them
+/// into one rule (WI-36794, confirmed by EI-14941 / EI-14960):
+///
+///   * An ABSENT stamp resolves to the EXISTING `~/.papercusp`. Every build ever
+///     cut carries no stamp, so any other default would break every install.
+///   * A stamp naming a SIDE-BY-SIDE channel must resolve to a DISTINCT dir, or
+///     the process refuses to boot. A nightly build that silently opened
+///     `~/.papercusp` would be writing the live desktop's operator state.
+///
+/// An `update-lane` channel (alpha/beta/stable) is the SAME application reached
+/// by a different feed, so it legitimately stamps the BASE home and shares state
+/// — that is why `stamped == BASE` is an accept, not a reject.
+pub fn resolve_data_home_dir_name<'a>(channel: &'a str, stamped: &'a str) -> Result<&'a str, String> {
+    let channel = channel.trim();
+    let stamped = stamped.trim();
+
+    if stamped.is_empty() {
+        if channel.is_empty() {
+            // Un-stamped build — today's behavior, and the only safe default.
+            return Ok(BASE_DATA_HOME_DIR_NAME);
+        }
+        // The drift case: someone baked a channel but not the home it resolves
+        // to. We cannot tell whether it is side-by-side, so we must not guess.
+        return Err(format!(
+            "this build is stamped PAPERCUSP_CHANNEL={channel:?} but carries no PAPERCUSP_CHANNEL_DATA_HOME. \
+             Refusing to boot rather than guess: a side-by-side channel that fell back to the base home would \
+             write to the state of the app in daily use. Bake both stamps from resolveChannelIdentity()."
+        ));
+    }
+
+    if stamped == BASE_DATA_HOME_DIR_NAME {
+        // update-lane: same app, different feed, shared state.
+        return Ok(BASE_DATA_HOME_DIR_NAME);
+    }
+
+    if channel.is_empty() {
+        return Err(format!(
+            "this build bakes PAPERCUSP_CHANNEL_DATA_HOME={stamped:?} (distinct from the base {BASE_DATA_HOME_DIR_NAME:?}) \
+             but no PAPERCUSP_CHANNEL. A distinct data home with no channel is unattributable — refusing to boot."
+        ));
+    }
+
+    validate_data_home_segment(stamped)
+        .map_err(|e| format!("invalid PAPERCUSP_CHANNEL_DATA_HOME for channel {channel:?}: {e}"))?;
+    Ok(stamped)
+}
+
+/// The resolved data-home directory name for THIS build, or a refusal to boot.
+///
+/// A bad stamp is a build-time misconfiguration that cannot be recovered from at
+/// runtime, and continuing would mean writing to the wrong home — so this exits
+/// rather than returning a plausible-looking wrong path.
+fn data_home_dir_name() -> &'static str {
+    match resolve_data_home_dir_name(baked_channel(), baked_channel_data_home()) {
+        Ok(name) => name,
+        Err(msg) => {
+            eprintln!("[papercusp-desktop] FATAL (channel data home): {msg}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The channel suffix carried by a bundle identifier, if any —
+/// `com.papercusp.gui.nightly` ⇒ `Some("nightly")`, `com.papercusp.gui` ⇒ `None`.
+pub fn channel_suffix_of_identifier(identifier: &str) -> Option<&str> {
+    let segs: Vec<&str> = identifier.split('.').filter(|s| !s.is_empty()).collect();
+    segs.get(BASE_IDENTIFIER_SEGMENTS).copied()
+}
+
+/// Cross-check the two facts a side-by-side build sets INDEPENDENTLY: the tauri
+/// identity overlay (which makes it a separate installed app) and the baked
+/// channel stamp (which moves its data home). Either one applied without the
+/// other is the failure this exists to catch, and it is symmetric:
+///
+///   * overlay applied, stamp forgotten ⇒ a separate app writing the base home
+///     — the exact disaster;
+///   * stamp applied, overlay forgotten ⇒ one app whose two installs fight over
+///     the same bundle id while pointing at different state.
+///
+/// Needs no channel table: the identifier's own suffix IS the channel.
+pub fn verify_channel_identity(identifier: &str) -> Result<(), String> {
+    let baked = baked_channel();
+    let from_identifier = channel_suffix_of_identifier(identifier).unwrap_or("");
+    if baked.eq_ignore_ascii_case(from_identifier) {
+        return Ok(());
+    }
+    Err(format!(
+        "channel identity mismatch: bundle identifier {identifier:?} carries channel {from_identifier:?} \
+         but this build baked PAPERCUSP_CHANNEL={baked:?}. Refusing to boot — a side-by-side build whose \
+         identity and data home disagree writes to the wrong app's state."
+    ))
+}
+
 pub fn workspaces_root() -> PathBuf {
-    real_home().join(".papercusp-workspaces")
+    // Sibling of the data home under the SAME channel HOME. Identical to
+    // `real_home().join(".papercusp-workspaces")` for an un-stamped build.
+    shared_sidecar_home().join(WORKSPACES_DIR_NAME)
 }
 
 fn registry_path() -> PathBuf {
