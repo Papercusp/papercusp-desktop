@@ -21,6 +21,12 @@
 #   desktop_release_tag <version> <channel>
 #     -> echoes the release tag ("desktop-vX.Y.Z[-alpha|-beta]"), matching the
 #        operator's manifest classifier (apps/operator/app/api/updates/manifest/route.ts).
+#   desktop_channel_identity <channel>
+#     -> sets DESKTOP_CHANNEL_BUILD_CFG + DESKTOP_CHANNEL_BUILD_ENV, the tauri
+#        `--config` identity overlay and the baked channel stamps that a
+#        side-by-side channel needs TOGETHER (empty for an update lane).
+#   desktop_channel_is_side_by_side <channel>
+#     -> exit 0 when the channel installs alongside the main app.
 #   gen_latest_manifest_json_path <tag>          -> latest.json path for the tag
 #   gen_latest_manifest_server_json_path <tag>   -> latest-server.json path for the tag
 #   gen_latest_manifest_notes_path <tag>         -> release-notes.md path for the tag
@@ -106,6 +112,85 @@ desktop_channel_feed_paths() {
   printf '%s/%s\n' "$channel" "$manifest"
   (( writes_root )) && printf '%s\n' "$manifest"
   return 0
+}
+
+# The base app's data-home directory NAME. Mirrors PAPERCUSP_BASE_IDENTITY
+# .dataHomeDirName in bin/release.config.ts AND workspaces::BASE_DATA_HOME_DIR_NAME
+# in Rust — three spellings of one directory, cross-checked by
+# test/nightly-channel-identity.test.js and by this file's self-test.
+DESKTOP_BASE_DATA_HOME_DIR_NAME='.papercusp'
+
+# desktop_channel_identity <channel>
+#
+# THE SINGLE EXIT that joins the two halves of a side-by-side channel's identity,
+# mirroring resolveChannelIdentity() in @papercusp/tauri-release-kit. It sets two
+# arrays, and every build site must expand BOTH on the same invocation:
+#
+#   DESKTOP_CHANNEL_BUILD_CFG  the tauri `--config <overlay>` args (bundle id,
+#                              product name, icons — what makes the OS treat this
+#                              as a second application)
+#   DESKTOP_CHANNEL_BUILD_ENV  the baked stamps PAPERCUSP_CHANNEL +
+#                              PAPERCUSP_CHANNEL_DATA_HOME (what makes
+#                              workspaces::shared_sidecar_home() open a distinct
+#                              data home)
+#
+# WHY ONE FUNCTION RATHER THAN TWO. Either half applied without the other is a
+# build that writes to the wrong app's state, and the two failure directions are
+# not symmetric. A stamp with no overlay, or an overlay with no stamp, is caught
+# at runtime by workspaces::verify_channel_identity() — it refuses to boot. But
+# that refusal costs a whole release cut, and it can only fire AFTER someone has
+# installed the thing. Deriving both from one call means a build path cannot
+# express the broken combination in the first place; the scan in
+# test/nightly-channel-identity.test.js enforces that no build path hand-rolls
+# the overlay around this function.
+#
+# An UPDATE-LANE channel deliberately gets EMPTY arrays: same app, same identity,
+# same data home, reached by a different feed. A stable build that started
+# carrying a stamp would be a regression, not a nicety — every one of the 24
+# builds ever cut is un-stamped, and workspaces::resolve_data_home_dir_name()
+# treats an absent stamp as the existing ~/.papercusp precisely so they keep
+# working.
+#
+# Exit 0 with both arrays set (possibly empty); nonzero on an unknown channel.
+desktop_channel_identity() {
+  local channel="$1" suffix
+  DESKTOP_CHANNEL_BUILD_CFG=()
+  DESKTOP_CHANNEL_BUILD_ENV=()
+  case "$channel" in
+    # update-lane: no overlay, no stamps. Nothing to set.
+    alpha|beta|stable) return 0 ;;
+    # side-by-side. `suffix` is the channel's identitySuffix from
+    # release.config.ts — NOT necessarily its id. It is what the bundle
+    # identifier carries as its extra dot segment, and
+    # workspaces::verify_channel_identity() compares the baked PAPERCUSP_CHANNEL
+    # against THAT segment, so the stamp must be the suffix.
+    nightly) suffix='nightly' ;;
+    *) echo "gen-latest-manifest: unknown channel '$channel'" >&2; return 1 ;;
+  esac
+
+  DESKTOP_CHANNEL_BUILD_CFG=(--config "src-tauri/tauri.${channel}.conf.json")
+  DESKTOP_CHANNEL_BUILD_ENV=(
+    "PAPERCUSP_CHANNEL=${suffix}"
+    # resolveChannelIdentity()'s formula: `${base.dataHomeDirName}-${suffix}`.
+    "PAPERCUSP_CHANNEL_DATA_HOME=${DESKTOP_BASE_DATA_HOME_DIR_NAME}-${suffix}"
+  )
+  return 0
+}
+
+# Does a cut on $channel install ALONGSIDE the main app (its own bundle id, name
+# and data home) rather than updating it in place? Mirrors
+# ChannelSpec.distribution === 'side-by-side'.
+#
+# Exit 0 = side-by-side, 1 = update-lane. Unknown channels are side-by-side (the
+# fail-closed answer: callers use this to REFUSE cross-platform legs and role
+# combinations that have no identity overlay yet, and a wrong "no" there ships a
+# stable-identity artifact under a nightly tag).
+desktop_channel_is_side_by_side() {
+  case "$1" in
+    alpha|beta|stable) return 1 ;;
+    nightly)           return 0 ;;
+    *) echo "gen-latest-manifest: unknown channel '$1'" >&2; return 0 ;;
+  esac
 }
 
 gen_latest_manifest_json_path()        { printf '/tmp/papercusp-latest-%s.json\n' "$1"; }
