@@ -122,25 +122,24 @@ __pc_claim_target_dir() {
     # and a launch path can end up holding both.
     exec 8>>"$lockfile" || continue
     if flock -n 8; then
+      # The lock was free — but that only means no LAUNCHER is alive. Before building
+      # into this dir, ask the question that actually decides safety: is a desktop still
+      # RUNNING out of it? If so, skip the slot and isolate. Failing safe costs a cold
+      # target dir; failing open costs a peer their window, which is the WI-7101
+      # incident this whole file exists to prevent. Acting beats warning: the old
+      # warning was printed at second ~1 of a ~19s build and scrolled past under cargo
+      # output, so the damage was committed before anyone could read it.
+      if __pc_desktop_running_in "$dir"; then
+        echo "→ slot $i SKIPPED: a desktop is still running out of $dir but holds no slot lock (its launcher is gone) — isolating so we cannot corrupt its app-manifest (WI-7101)" >&2
+        exec 8>&-
+        continue
+      fi
       export CARGO_TARGET_DIR="$dir"
       if ((i == 0)); then
-        # "no other SLOT-HOLDING instance" — deliberately not "no other instance".
-        # An unlocked bypasser is invisible to the flock, and the advisory just below
-        # may well contradict a broader claim two lines later.
-        echo "→ target dir: $dir (shared slot 0 — no other slot-holding desktop instance)" >&2
-        # Slot 0 was free, yet a desktop build appears to be running: it did not come
-        # through this wrapper (a bare `npm run tauri dev`, or an instance started
-        # before slots existed), so it holds no lock and we are about to share its
-        # target dir. We cannot stop it — only say so loudly, because the symptom it
-        # produces is a mystery JSON parse error in a file git says is clean.
-        #
-        # `[t]auri` is bracketed deliberately: an unbracketed pattern matches this
-        # very command's own argv, so the check would always "find" a peer.
-        if pgrep -af '[t]auri dev' >/dev/null 2>&1; then
-          echo "⚠ a desktop build is already running but holds NO slot lock — it bypassed this wrapper (bare \`npm run tauri dev\`?) or predates it." >&2
-          echo "  Both builds now share $dir and may corrupt each other's generated app-manifest (WI-7101)." >&2
-          echo "  Safest: stop it and relaunch it with \`npm run dev\`, or set PAPERCUSP_DESKTOP_TARGET_SLOTS to force this one onto its own slot." >&2
-        fi
+        # Both halves of this claim are now CHECKED: the flock says no launcher holds
+        # the slot, and the exe probe says nothing is running out of the dir. It used to
+        # claim only the first half while an advisory two lines later contradicted it.
+        echo "→ target dir: $dir (shared slot 0 — no launcher holds it, nothing running out of it)" >&2
       else
         echo "→ target dir: $dir (slot $i — another desktop instance holds the shared dir; isolating so we cannot corrupt its app-manifest, WI-7101)" >&2
         echo "  first build in this slot is a COLD build; later launches reuse its cache" >&2

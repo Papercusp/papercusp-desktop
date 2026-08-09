@@ -229,8 +229,21 @@ pub fn workspace_dir(id: &str) -> PathBuf {
 /// set operator-side from the job's workspace (P-051). Operator state itself is
 /// already workspace-scoped via `papercuspRoot()` (P-052), so a shared sidecar
 /// HOME is safe. Returns the process's real HOME, NOT a per-workspace dir.
+///
+/// WI-36794 — this is the SINGLE CHOKEPOINT for channel isolation. Everything
+/// the app and the sidecar write is `$HOME`-derived (`~/.papercusp`,
+/// `~/.papercusp-workspaces`, and Node's `os.homedir()` inside the sidecar,
+/// which reads the `HOME` we spawn it with), so moving this one path moves ALL
+/// of it. A side-by-side channel (`nightly`) resolves to
+/// `~/.papercusp-nightly/`; an un-stamped build resolves to the real HOME
+/// exactly as before.
 pub fn shared_sidecar_home() -> PathBuf {
-    real_home()
+    let dir = data_home_dir_name();
+    if dir == BASE_DATA_HOME_DIR_NAME {
+        real_home()
+    } else {
+        real_home().join(dir)
+    }
 }
 
 /// Phase E (P-050 / D-006): the shared embedded-PG (and code-server) data dir.
@@ -436,7 +449,13 @@ pub fn ensure_initialized() -> io::Result<Registry> {
 
     // Migrate ~/.papercusp -> workspaces/<initial_id>/.papercusp if present and
     // the destination doesn't already exist.
-    let home = real_home();
+    //
+    // WI-36794: this MUST read the channel HOME, not the real one. A nightly
+    // build resolving `real_home()` here would `fs::rename` the LIVE desktop's
+    // `~/.papercusp` into its own workspace on first launch — the single most
+    // destructive thing a side-by-side build could do. Under a channel HOME the
+    // legacy dir simply does not exist, so nightly starts fresh, which is right.
+    let home = shared_sidecar_home();
     let legacy = home.join(".papercusp");
     let migrated = initial_dir.join(".papercusp");
     if legacy.exists() && !migrated.exists() {

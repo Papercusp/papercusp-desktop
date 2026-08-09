@@ -4387,10 +4387,12 @@ fn on_second_instance(app: &AppHandle, args: Vec<String>, cwd: String) {
 /// navigates. On Linux/dev the palette and `main` share ONE process, so
 /// `open_route_in_app` takes the in-process branch and never touches this file.
 fn pending_route_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    // WI-36794: resolve through the channel chokepoint, not a raw HOME read —
+    // a side-by-side (nightly) GUI must never hand a route off through the live
+    // desktop's `~/.papercusp`.
     Some(
-        std::path::PathBuf::from(home)
-            .join(".papercusp")
+        workspaces::shared_sidecar_home()
+            .join(workspaces::BASE_DATA_HOME_DIR_NAME)
             .join("gui-pending-route"),
     )
 }
