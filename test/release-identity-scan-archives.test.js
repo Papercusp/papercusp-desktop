@@ -233,3 +233,75 @@ test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
     );
   }
 });
+
+// ── WI-37553: owner-authorised seed-corestore content ────────────────────────
+// The seed corestore IS the pot's own hive log and this alpha ships the pot
+// READABLE by explicit owner decision, so the build box's MACHINE LABEL is
+// present there in two forms: a `presence` row inside a signed hypercore block
+// (editing it breaks content-addressing) and RocksDB `host.identity` table
+// properties in the *.sst files. The gate accepts exactly those two literals,
+// exactly under a seed corestore path — an ACCEPTANCE, not an exclude.
+//
+// The THIRD test is the one that matters: it proves the acceptance is
+// PATH-SCOPED. A whitelist that had accidentally gone global would still pass
+// the first two while silently no longer catching the build hostname anywhere
+// else in the bundle — a far bigger hole than the one deliberately allowed.
+function gateLiterals() {
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
+  return r.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
+}
+
+function seedFixture(name, bytes) {
+  const dir = fixture(name);
+  const db = path.join(dir, 'bundle/seed/corestore/db');
+  fs.mkdirSync(db, { recursive: true });
+  fs.writeFileSync(path.join(db, '000009.sst'), bytes);
+  return dir;
+}
+
+test('seed corestore carrying ONLY the build machine label is ACCEPTED', (t) => {
+  const host = os.hostname();
+  if (!gateLiterals().includes(host)) return t.skip('hostname is not a gate literal here');
+  const dir = seedFixture('seed-ok', `host.identity${host}\n`);
+  try {
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 0, `expected the owner-authorised seed to PASS:\n${r.stdout}`);
+    assert.match(r.stdout, /ACCEPTED 1 seed-corestore file/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('seed corestore carrying a NON-authorised literal still FAILS', (t) => {
+  const host = os.hostname();
+  const home = os.homedir();
+  const lits = gateLiterals();
+  if (!lits.includes(host) || !lits.includes(home)) return t.skip('literals unavailable here');
+  // The authorised label is present too, so the failure must come from the home
+  // path alone — proving acceptance is per-LITERAL, not per-file.
+  const dir = seedFixture('seed-bad', `host.identity${host}\nargv=${home}/x\n`);
+  try {
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `a home path inside the seed must still FAIL:\n${r.stdout}`);
+    assert.match(r.stdout, /NON-authorised identity/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the machine label is accepted ONLY under a seed corestore path', (t) => {
+  const host = os.hostname();
+  if (!gateLiterals().includes(host)) return t.skip('hostname is not a gate literal here');
+  const dir = fixture('seed-scope');
+  try {
+    // Same bytes, ordinary bundle path: must still fail, or the acceptance has
+    // become a global whitelist for the build hostname.
+    fs.writeFileSync(path.join(dir, 'bundle/notes.txt'), `built on ${host}\n`);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `the hostname outside the seed must still FAIL:\n${r.stdout}`);
+    assert.match(r.stdout, /notes\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -461,6 +461,24 @@ def lit_ere(lit):
     return rf"\b{re.escape(lit)}\b" if needs_word_boundary(lit) else re.escape(lit)
 
 
+def _literal_in_file(path, lit):
+    """Is this ONE literal in this ONE file, with the scan's binary/text asymmetry?
+
+    Used to decide whether a seed-corestore hit carries anything BEYOND the
+    owner-authorised machine label. Fails CLOSED: a path we cannot read returns
+    True, so "could not prove absence" keeps the file failing rather than
+    quietly accepting it.
+    """
+    if not os.path.isfile(path):
+        return True
+    flag = "-qIE" if is_low_entropy(lit) else "-aqE"
+    try:
+        return subprocess.run(["grep", flag, lit_ere(lit), path],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return True
+
+
 def is_low_entropy(lit):
     """A literal so short/common that VENDOR code hits it by coincidence.
 
@@ -1039,6 +1057,59 @@ def scan_dir(dirs):
         print("\n  An archive this gate cannot open is a hole in the identity scan, not a pass.")
         print("  Either teach _expand_archive its format, or stop shipping it.")
         return 1
+
+    # ── Owner-authorised seed content (WI-37553, [owner 2026-08-10]) ───────────
+    # The seed corestore IS the pot's own hive log, and this alpha ships the pot
+    # READABLE by explicit owner decision (the same call as WI-3232's
+    # epoch-keys.json). TWO different things put the build box's machine label in
+    # there and only ONE of them is content — the distinction is the whole reason
+    # this is an acceptance and not an exclude:
+    #   • 000011.log — a `presence` row inside a hypercore BLOCK:
+    #     "machine_label":"<hostname>-<user>". That is signed log content; the
+    #     merkle tree covers those bytes, so editing them breaks
+    #     content-addressing outright. Owner ruled: "Ship it — it's the pot's
+    #     content."
+    #   • *.sst — RocksDB TABLE PROPERTIES (`host.identity`, sitting beside
+    #     `creating.db.identity` / `data.size` / `filter.policy`). NOT hypercore
+    #     data and NOT content-addressed: RocksDB stamps the creating machine's
+    #     hostname into every SST it writes. This one SHOULD be stripped at
+    #     source (DBOptions::db_host_id = ""), but rocksdb-native exposes no such
+    #     option today — tracked separately, and it is why the owner's "strip it
+    #     if that is possible" resolves to "not yet" rather than "never".
+    # Accepts ONLY those two literals, ONLY under a seed corestore path, and
+    # NEVER inside an archive member (which we cannot re-read to prove the
+    # negative). Every other identity literal still hard-fails there — a home
+    # path, git email or git name in the seed is a real leak and is NOT covered
+    # by the owner's ruling. Measured on the 0.0.14 seed those three are at ZERO,
+    # so this keeps genuine power instead of blanket-excluding the directory,
+    # which is what the "never add an exclude" rule below exists to prevent.
+    seed_ok = {lits[k] for k in ("build-hostname", "build-user-name") if k in lits}
+    accepted = []
+    if files and seed_ok:
+        others = [p for p in (high + low) if p not in seed_ok]
+        kept = set()
+        for f in sorted(files):
+            norm = f.replace(os.sep, "/")
+            if "!" in f or "/seed/corestore/" not in norm:
+                kept.add(f)
+                continue
+            unauth = [p for p in others if _literal_in_file(f, p)]
+            if unauth:
+                print(f"    seed: {os.path.basename(f)} carries NON-authorised "
+                      f"identity ({', '.join(unauth)}) — still FAILING")
+                kept.add(f)
+            else:
+                accepted.append(f)
+        files = kept
+    if accepted:
+        print(f"\n    ⚠ ACCEPTED {len(accepted)} seed-corestore file(s) carrying the "
+              f"build-box machine label — owner-authorised; the pot ships READABLE.")
+        for f in accepted[:10]:
+            print(f"        {f}")
+        print("      Hypercore block content cannot be edited without breaking "
+              "content-addressing;\n      the *.sst copies are RocksDB host.identity "
+              "table properties (strippable only at source).\n"
+              "      Any OTHER identity literal here would still have failed.")
 
     if not files:
         print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
