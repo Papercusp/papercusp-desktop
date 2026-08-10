@@ -216,6 +216,18 @@ fn upstream_base(app: &tauri::AppHandle) -> Option<String> {
     // discovery file on each miss (only reached when the fast path above is None),
     // so /api follows the running operator instead of dead-ending the whole app.
     if let Some(port) = crate::operator_discovery_port_from_home() {
+        // LATCH it (WI-37798): this branch is reached per /api request while the
+        // port is unlatched, and on Windows each re-resolve is a `wsl.exe` spawn.
+        // Storing it promotes every subsequent request to the fast path above, so
+        // the self-heal costs one probe rather than one per request. Only fills a
+        // None — never overwrites a port the boot/restart watcher owns.
+        if let Some(state) = app.try_state::<SidecarState>() {
+            if let Ok(mut guard) = state.port.lock() {
+                if guard.is_none() {
+                    *guard = Some(port);
+                }
+            }
+        }
         return Some(format!("http://127.0.0.1:{}", port));
     }
     if cfg!(debug_assertions) {

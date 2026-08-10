@@ -1219,13 +1219,70 @@ mod discovery_tests {
     use std::time::Duration;
 
     use super::{
-        next_operator_port, operator_boot_timeout, parse_operator_discovery, OperatorDiscovery,
+        next_operator_port, operator_boot_timeout, parse_operator_discovery, self_heal_probe_due,
+        OperatorDiscovery, SELF_HEAL_WSL_PROBE_MIN_INTERVAL,
     };
 
     #[test]
     fn wsl_cold_boot_budget_covers_database_recovery() {
         assert_eq!(operator_boot_timeout(true), Duration::from_secs(600));
         assert_eq!(operator_boot_timeout(false), Duration::from_secs(120));
+    }
+
+    /// WI-37798: `upstream_base`'s self-heal is reached PER `/api` request while
+    /// the port is unlatched, and on Windows each probe is a `wsl.exe` spawn.
+    /// Unthrottled that is the spawn storm `distro_exec_wedged` documents as able
+    /// to wedge the WSL2 interop layer — i.e. the "fix" would be worse than the
+    /// 503 it repairs. These assertions pin the throttle that prevents it.
+    #[test]
+    fn self_heal_probe_is_throttled_between_wsl_spawns() {
+        let t0 = std::time::Instant::now();
+        let min = SELF_HEAL_WSL_PROBE_MIN_INTERVAL;
+
+        // First probe of the process: nothing recorded yet, so it must run —
+        // otherwise the self-heal could never fire at all.
+        assert!(
+            self_heal_probe_due(None, t0, min),
+            "the first probe must always be allowed"
+        );
+
+        // A second request arriving immediately after must NOT spawn again.
+        assert!(
+            !self_heal_probe_due(Some(t0), t0, min),
+            "a back-to-back request must be throttled"
+        );
+        assert!(
+            !self_heal_probe_due(Some(t0), t0 + min - Duration::from_millis(1), min),
+            "still throttled one millisecond before the interval elapses"
+        );
+
+        // Once the interval has elapsed, probing resumes — the operator may have
+        // come up since, so this must not latch permanently closed.
+        assert!(
+            self_heal_probe_due(Some(t0), t0 + min, min),
+            "probing must resume exactly at the interval boundary"
+        );
+        assert!(
+            self_heal_probe_due(Some(t0), t0 + min * 3, min),
+            "probing must resume well after the interval"
+        );
+    }
+
+    /// A clock that appears to move BACKWARDS must not wedge the throttle shut
+    /// forever. `Instant` is monotonic per-process, but `duration_since` panics
+    /// on an earlier instant, so the implementation uses `saturating_*`; this
+    /// pins that choice rather than leaving it to a future refactor.
+    #[test]
+    fn self_heal_probe_survives_a_non_monotonic_reading() {
+        let t0 = std::time::Instant::now();
+        let future = t0 + Duration::from_secs(60);
+        // `last` in the future relative to `now` → saturates to zero elapsed →
+        // throttled, but must NOT panic.
+        assert!(!self_heal_probe_due(
+            Some(future),
+            t0,
+            SELF_HEAL_WSL_PROBE_MIN_INTERVAL
+        ));
     }
 
     #[test]
@@ -2675,10 +2732,64 @@ fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorD
 /// miss instead of dead-ending the whole app on a permanent 503.
 ///
 /// HOME-based (matches env_switch's persisted_target_path): on Linux/mac the
-/// operator's workspace HOME is the user's `$HOME`, where it writes the file. This
-/// is a fallback only — on Windows (operator.json lives inside WSL) it returns
-/// None, i.e. no worse than the pre-fix behaviour.
+/// operator's workspace HOME is the user's `$HOME`, where it writes the file.
+///
+/// WINDOWS (WI-37798): the HOME read alone is a GUARANTEED no-op here — the
+/// sidecar runs inside WSL and writes operator.json to the distro user's
+/// `/home/papercup/.papercusp`, and Windows doesn't even set `HOME`. This used
+/// to just `return None` ("no worse than the pre-fix behaviour"), which quietly
+/// made WI-3282's self-heal Linux-only: `upstream_base`'s only remaining step
+/// is a `debug_assertions`-gated :3070 guess that is COMPILED OUT of a release
+/// build, so a packaged Windows build that ever missed the port latch answered
+/// EVERY `/api` with a 503 for the life of the process, with no recovery path —
+/// a permanent "Operator connection lost" banner. So probe the distro the same
+/// way `find_operator_discovery` already does.
+///
+/// THROTTLED on purpose: this runs per `/api` request whenever the latched port
+/// is None, and each Windows probe is a `wsl.exe` spawn. An unthrottled spawn
+/// per request is exactly the pressure `distro_exec_wedged` documents as able to
+/// wedge the WSL2 interop layer — that would trade a recoverable 503 for an
+/// unrecoverable one. `upstream_base` also LATCHES a resolved port, so in the
+/// normal case this probe runs once and then stops being reached at all.
+#[cfg(any(target_os = "windows", test))]
+const SELF_HEAL_WSL_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether a throttled probe is due. Pure + platform-independent so the
+/// throttle is unit-testable on every dev platform, not just a Windows build
+/// (same rationale as `windows_path_to_wsl`'s `cfg(any(..., test))`).
+#[cfg(any(target_os = "windows", test))]
+fn self_heal_probe_due(last: Option<Instant>, now: Instant, min_interval: Duration) -> bool {
+    match last {
+        None => true,
+        Some(prev) => now.saturating_duration_since(prev) >= min_interval,
+    }
+}
+
 pub(crate) fn operator_discovery_port_from_home() -> Option<u16> {
+    #[cfg(target_os = "windows")]
+    {
+        static LAST_WSL_PROBE: std::sync::OnceLock<Mutex<Option<Instant>>> =
+            std::sync::OnceLock::new();
+        // A poisoned lock / not-yet-due probe both mean "skip the spawn", never
+        // "no operator" — we still fall through to the HOME read below.
+        let due = match LAST_WSL_PROBE.get_or_init(|| Mutex::new(None)).lock() {
+            Ok(mut last) => {
+                let now = Instant::now();
+                if self_heal_probe_due(*last, now, SELF_HEAL_WSL_PROBE_MIN_INTERVAL) {
+                    *last = Some(now);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+        if due {
+            if let Some(d) = read_operator_discovery_via_wsl() {
+                return Some(d.port);
+            }
+        }
+    }
     let home = std::env::var_os("HOME")?;
     read_operator_discovery(std::path::Path::new(&home)).map(|d| d.port)
 }
