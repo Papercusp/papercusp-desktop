@@ -253,7 +253,11 @@ test('build-mac-cross scrubs BEFORE the assembled-bytes scan, and before signing
 
   // 3. Main flow order: assemble (which scrubs) → scan → sign.
   const assembleAt = src.indexOf('assemble_app "$app_id"');
-  const scanAt = src.indexOf('--scan-dir');
+  // ⚠ Anchor on the SPECIFIC scan, not a bare '--scan-dir'. There are now TWO scans —
+  // the cheap post-lipo one on the isolated binary, and this authoritative one on the
+  // assembled bundle — and a bare substring silently matched the EARLY one first,
+  // turning this assertion into a claim about the wrong object.
+  const scanAt = src.indexOf('--scan-dir "$app"');
   const signAt = src.indexOf('sign_app "$app"');
   for (const [n, v] of [['assemble', assembleAt], ['scan', scanAt], ['sign', signAt]]) {
     assert.ok(v > -1, `main flow must still call ${n}`);
@@ -262,6 +266,33 @@ test('build-mac-cross scrubs BEFORE the assembled-bytes scan, and before signing
     'scrub (inside assemble_app) must precede the assembled-bytes identity scan');
   assert.ok(scanAt < signAt,
     'the scan must precede signing — signing seals already-scrubbed, already-scanned bytes');
+});
+
+test('build-mac-cross fails fast: the binary is scrubbed + scanned right after lipo', () => {
+  // WHY THIS EXISTS: the authoritative assembled-bytes gate runs AFTER assemble_app
+  // copies a ~2.4GB sidecar per role. Measured on the 0.0.14 cut that is ~58min into a
+  // ~75min mac leg, and the mac leg is ~96% of the whole release's wall clock. Two
+  // attempts died there, each burning a full mac build to learn something the binary
+  // already knew. So the binary gets scrubbed + scanned IN ISOLATION straight after
+  // lipo. This test pins that the early gate exists AND still precedes assembly —
+  // an early gate that drifted after assemble_app would be pure cost and no benefit.
+  const src = fs.readFileSync(MAC_CROSS, 'utf8');
+
+  const lipoAt = src.indexOf('-create');                      // llvm-lipo fuses the arches
+  const earlyScrubAt = src.indexOf('scrub_app_identity_file "$uni_bin"');
+  const earlyScanAt = src.indexOf('--scan-dir "$_early_scan"');
+  const assembleAt = src.indexOf('assemble_app "$app_id"');
+  const fullScanAt = src.indexOf('--scan-dir "$app"');
+
+  assert.ok(earlyScrubAt > -1, 'the universal binary must be scrubbed right after lipo');
+  assert.ok(earlyScanAt > -1, 'the universal binary must be identity-scanned right after lipo');
+  assert.ok(lipoAt < earlyScrubAt, 'the early scrub must come after lipo produces the binary');
+  assert.ok(earlyScrubAt < earlyScanAt, 'scrub before the early scan, else the scan just reports the leak we already fix');
+  assert.ok(earlyScanAt < assembleAt,
+    'THE POINT: the early scan must precede assemble_app — after it, the 2.4GB/role sidecar copies are already paid');
+  // The authoritative gate is NOT replaced by the cheap one.
+  assert.ok(fullScanAt > assembleAt,
+    'the assembled-bytes scan must still run after assembly — the early scan supplements it, never replaces it');
 });
 
 function* walk(dir) {

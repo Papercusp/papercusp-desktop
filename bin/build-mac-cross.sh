@@ -318,14 +318,22 @@ stage_env_sidecars() { # $1=sidecar dir (inside the .app)
 #   comment there asserted the scan ran "later still"; it does not. Guarded now by
 #   a test that asserts scrub-before-SCAN, not merely scrub-before-sign.
 # ⚠ MITIGATION, not a fix — the dead-strip root cause is EI-20044309663936316.
+# Scrub EXPLICIT executable files. The single implementation — both the early
+# post-lipo call and the assemble_app postcondition go through here, so the two
+# call sites cannot drift apart in what they consider "scrubbed".
+scrub_app_identity_file() { # $@=executables
+  (( $# > 0 )) || return 0
+  python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "$@" \
+    || fail "scrub-app-binary failed for $*"
+}
+
 scrub_app_identity() { # $1=app
   local app="$1" _macos_dir="$1/Contents/MacOS" _exes=()
   [[ -d "$_macos_dir" ]] || return 0
   while IFS= read -r -d '' _f; do _exes+=("$_f"); done \
     < <(find "$_macos_dir" -maxdepth 1 -type f -perm -u+x -print0)
   (( ${#_exes[@]} > 0 )) || return 0
-  python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "${_exes[@]}" \
-    || fail "scrub-app-binary failed for $app"
+  scrub_app_identity_file "${_exes[@]}"
 }
 
 assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
@@ -596,6 +604,29 @@ for role in $ROLES; do
     LC_ALL=C grep -aqF -- "$needle" "$uni_bin" \
       || fail "[$role] PAPERCUSP_RELEASE_HOST authority '$needle' is NOT baked into the binary — cargo cached a stale/empty host. Clean the crate and rebuild."
   fi
+
+  # ── FAIL FAST on identity, while the leg is still cheap to abandon ──
+  # The authoritative gate is the assembled-bytes scan below, and it stays. But it
+  # runs AFTER assemble_app copies a ~2.4GB sidecar per role — measured on the 0.0.14
+  # cut, that gate fires ~58min into a ~75min mac leg, and the mac leg is ~96% of the
+  # whole release's wall clock (win done at 24min, linux at 29min, mac at 75min).
+  # Attempts 3 and 5 both died there, each burning a full mac build to learn something
+  # the binary already knew: every identity leak we have actually hit lives in THIS
+  # file, which is complete right here.
+  #
+  # So: scrub at the source (once, before the per-role copies — assemble_app's scrub
+  # then finds nothing left to do, which is fine: it is idempotent and length-preserving),
+  # then scan the binary in isolation so a NEW leak fails in seconds instead of an hour.
+  # Isolation is what makes this cheap AND meaningful — scan-dir on a directory holding
+  # only this binary attributes any hit to the binary itself, with no bundle noise.
+  scrub_app_identity_file "$uni_bin"
+  _early_scan="$(mktemp -d)"
+  cp "$uni_bin" "$_early_scan/" || fail "[$role] could not stage the binary for the early identity scan"
+  if ! python3 "$HERE/audit-release-bundle.py" --scan-dir "$_early_scan"; then
+    rm -rf "$_early_scan"
+    fail "[$role] app binary carries a sensitive identity (scan above) — failing NOW, right after lipo, rather than ~35min later after the sidecar copies. Fix the SOURCE (build-desktop-sidecar.sh / the leaking value); never add a path-exclude."
+  fi
+  rm -rf "$_early_scan"
 
   app="$OUT_BUNDLE/macos/$product.app"
   echo "    [$role] assembling $product.app"
