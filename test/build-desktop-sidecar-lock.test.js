@@ -8,12 +8,73 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
 
-test('every cargo build closes the sidecar flock fd before sccache can daemonize', () => {
-  const cargoBuilds = builder.match(/cargo build /g) || [];
-  const protectedBuilds = builder.match(/\( exec 9>&-; cd [^\n]+&& cargo build /g) || [];
+// The guard is PROPERTY-based, not SHAPE-based, and that is a deliberate
+// rewrite (2026-08-10). It used to match a literal `( exec 9>&-; cd <x>&& cargo
+// build ` and compare two counts. That shape silently went stale the moment a
+// `RUSTFLAGS="..."` (and `PATH=`/`SDKROOT=` on the cross line) was inserted
+// between the `&&` and the `cargo`: every build was STILL correctly wrapped in
+// the fd-closing subshell, but the pattern matched 0 of them, so the guard
+// reported `0 !== 2` — a FALSE RED against a script that had not regressed.
+//
+// A guard that fails when the code is fine is worse than no guard: it costs a
+// real diagnosis every time, and it trains the next reader to assume its red is
+// spurious — which is exactly when it stops catching the real thing. So assert
+// the PROPERTY (every real cargo invocation sits inside the fd-closing
+// subshell) per-occurrence, and report WHICH line is unprotected rather than a
+// bare count mismatch.
+//
+// `cargo zigbuild` (the darwin-cross pui build) is now covered too — it spawns
+// the same daemon-capable rustc wrapper and was never counted by the old
+// `cargo build ` match. Mentions inside comments and `echo` strings are
+// excluded: the script legitimately talks ABOUT bare `cargo build` in several
+// places, and matching prose is the spelling-vs-property error one level up.
+const CARGO_INVOCATION = /cargo (?:build|zigbuild) /;
+const FD_CLOSING_SUBSHELL = /\( exec 9>&-;/;
 
-  assert.equal(cargoBuilds.length, 2, 'update this guard when another cargo build is added');
-  assert.equal(protectedBuilds.length, cargoBuilds.length);
+const cargoInvocationLines = builder
+  .split('\n')
+  .map((line, i) => ({ line, lineNo: i + 1 }))
+  .filter(({ line }) => CARGO_INVOCATION.test(line) && !/^\s*(?:#|echo\b)/.test(line));
+
+test('every cargo build closes the sidecar flock fd before sccache can daemonize', () => {
+  const unprotected = cargoInvocationLines
+    .filter(({ line }) => !FD_CLOSING_SUBSHELL.test(line))
+    .map(({ lineNo, line }) => `${lineNo}: ${line.trim()}`);
+
+  assert.deepEqual(
+    unprotected,
+    [],
+    'each of these cargo invocations runs WITHOUT `( exec 9>&-; …)`, so RUSTC_WRAPPER (sccache) ' +
+      'can daemonize holding the inherited sidecar flock fd 9 and wedge every later build',
+  );
+
+  // Tripwire, kept from the original guard: a NEW cargo invocation should make
+  // someone re-read this file rather than silently inherit its coverage.
+  assert.equal(
+    cargoInvocationLines.length,
+    3,
+    `update this guard when another cargo build is added (found ${cargoInvocationLines.length}: ` +
+      `${cargoInvocationLines.map(({ lineNo }) => lineNo).join(', ')})`,
+  );
+});
+
+// The falsifiability proof the old guard never had — asserted against SYNTHETIC
+// source, never by mutating the real script (this tree is swept into commits
+// every few minutes, so a briefly-mutated file gets committed even when nothing
+// goes wrong).
+test('the guard actually catches an unprotected cargo build', () => {
+  const unprotectedSample = 'cd "$REPO/apps/tui" && RUSTFLAGS="-x" cargo build --release';
+  const protectedSample = '( exec 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="-x" cargo build --release )';
+  const proseSample = '# it does NOT protect a plain `cargo build`/`cargo check` under src-tauri';
+  const echoSample = 'echo "    → cross: cargo zigbuild pui for ${_pui_triple}"';
+
+  const isCounted = (l) => CARGO_INVOCATION.test(l) && !/^\s*(?:#|echo\b)/.test(l);
+
+  assert.equal(isCounted(unprotectedSample) && !FD_CLOSING_SUBSHELL.test(unprotectedSample), true);
+  assert.equal(isCounted(protectedSample) && FD_CLOSING_SUBSHELL.test(protectedSample), true);
+  // The two exclusions, pinned: prose and log strings must NOT read as invocations.
+  assert.equal(isCounted(proseSample), false);
+  assert.equal(isCounted(echoSample), false);
 });
 
 test('a daemon-capable child with fd 9 closed cannot retain the parent flock', () => {
