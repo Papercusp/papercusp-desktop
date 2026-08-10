@@ -97,6 +97,15 @@ CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-versio
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
 [[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$SRC_TAURI/target"
 CROSS_EXE="$CARGO_TARGET_ROOT/$TARGET/release/papercusp-desktop.exe"
+
+# DISK PREFLIGHT (EI-20090527288494606) — a cross-compile plus Inno packing writes
+# several GB into the cargo target root (a release target tree, then the setup.exe
+# + DiskSpan .bin slices per role). Fail at second zero with an actionable message
+# instead of dying deep in a build log, which is how the 0.0.11 mac cut lost a
+# whole role to ENOSPC and read as a mysterious hang.
+# shellcheck source=lib/disk-preflight.sh
+source "$HERE/lib/disk-preflight.sh"
+papercusp_require_free_gb "$CARGO_TARGET_ROOT" "${PAPERCUSP_WINCROSS_MIN_FREE_GB:-12}" "Windows cross-compile + Inno packing" || exit $?
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 # Pinned tauri CLI, resolved via `npx --yes -p @tauri-apps/cli@VER` — NEVER a bare

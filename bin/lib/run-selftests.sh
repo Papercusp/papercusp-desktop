@@ -40,6 +40,7 @@ TESTS=(
   deployed-state-guards.selftest.sh
   inno-legacy-reaper.selftest.sh
   rust-path-remap.selftest.sh
+  disk-preflight.selftest.sh
 )
 
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.

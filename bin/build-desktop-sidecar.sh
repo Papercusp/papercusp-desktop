@@ -195,6 +195,19 @@ else
   echo "$$" > "$SIDECAR_LOCKDIR/pid"
 fi
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
+
+# DISK PREFLIGHT (EI-20090527288494606) — refuse now, not 3 minutes into the copy.
+# This script stages a multi-GB tree (node_modules + the ~2.4GB sidecar payload)
+# and, at publish time, briefly holds BOTH the old and new trees during the
+# OLD_DIR swap — so the requirement is roughly twice the payload plus slack. On
+# 2026-08-10 this ran with the root fs at 100% and died mid-`cp` with
+# `No space left on device`, leaving a partially-staged tree that still looked
+# valid to later steps. Measured against the dir we actually stage INTO, which is
+# not necessarily $PWD.
+# shellcheck source=lib/disk-preflight.sh
+source "$HERE/lib/disk-preflight.sh"
+papercusp_require_free_gb "$SIDECAR_DIR" "${PAPERCUSP_SIDECAR_MIN_FREE_GB:-8}" "sidecar staging" || exit $?
+
 # Clean the temp tree (and the darwin lockdir) on any exit; after the
 # publish rename the tmp half is a no-op.
 #
