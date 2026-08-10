@@ -22,6 +22,44 @@ extends: base
 # instantiation. Every other built-in blueprint defaults to kind:'harness'.
 kind: pot
 version: 0.1.0
+
+# Structured retirement (WI-5645 no-retirement-launch-guard, applied by
+# retire-mug-kettle-su-only-2026-08-09 P-062).
+#
+# ⚠ READ THE ID BEFORE YOU PANIC: `coding` here is the POT/HIVE blueprint — the
+# Mug's own launch blueprint (kind:'pot', spine.decider:'mug') — NOT the
+# user-project coding pipeline. Conflating the two is a recorded trap (EI-15663).
+# Retiring this does NOT retire coding harnesses; it retires the Queen.
+#
+# WHY the whole blueprint and not just the `- id: mug` role declaration below:
+# this blueprint's SPINE DECIDER is `mug` (spine.decider, ~line 47). Deleting the
+# role while the decider still names it leaves a dangling reference that
+# validate.ts only *warns* about (`decider-undeclared`) — a blueprint that looks
+# live, resolves fine, and fails at dispatch. The roles list is therefore left
+# INTACT (the coding-factory precedent does the same) and the retirement is
+# declared once, structurally, where a guard actually reads it.
+#
+# `retired` deep-merges through `extends`, so `work` (extends: coding) inherits
+# this. That is CORRECT, not collateral: `work` overrides neither the spine nor
+# the decider, so it is equally mug-driven and equally undispatchable.
+#
+# This is the second, independent lock: the `mug` role is already refused at all
+# three role-admission doors (RETIRED_TIER_ROLES, D-018/D-022) — including the
+# `/invoke` route every launch-blueprint and wake path traverses. That guard
+# refuses a role NAME; this one refuses the BLUEPRINT before anything spends
+# against it.
+#
+# To revive (the flag is `case:'cutover'` — reversibility is the point): delete
+# this block AND flip `FLAGS.MUG_KETTLE_SYSTEM` ON.
+retired:
+  at: "2026-08-09"
+  reason: >-
+    The Mug/Kettle/Cup tier is retired — su + GOAL mode are the only way to drive
+    the app (retire-mug-kettle-su-only-2026-08-09, D-020, owner-directed). This is
+    the pot/hive blueprint whose spine decider is the `mug` role, which no longer
+    admits at any spawn door, so no run started from it can dispatch a turn.
+    Inherited by `work`. Does NOT affect user-project coding harnesses.
+
 description: >-
   The Hive/Hive operator — the Queen in charge of the bee fleet. Wakes on its
   own self-declared schedule (or an event it subscribed to), surveys the work

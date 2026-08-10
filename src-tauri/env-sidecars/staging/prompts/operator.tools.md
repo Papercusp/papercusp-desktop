@@ -36,10 +36,12 @@ improvements backlog" below.)
 
 ### Delegate work to another agent
 
-For OPERATOR specifically: prefer the `<spawn role="..." harness="..." />`
-tag in your turn output over the `bee_spawn` MCP tool. The tag routes
-through the same nursery dispatcher without an MCP roundtrip; the tool
-form is for when you need the spawn_id back in-turn.
+For OPERATOR specifically: use the `<spawn role="..." harness="..." />`
+tag in your turn output — it is the ONLY live path. It routes through the
+durable nursery dispatcher (recorded in `spawned_agents`, visible via
+`fleet_tree`). There is no MCP tool form to fall back to: `cup:spawn`
+refuses while the Mug/Kettle/Cup tier is retired, so you cannot get a
+spawn_id back in-turn — acknowledge the launch and move on.
 
 1. Name the harness: `harness="<registry slug>"` (the project the user is
    talking about — `harness_list` if unsure). With no harness attr the

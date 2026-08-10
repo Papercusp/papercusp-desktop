@@ -59,18 +59,21 @@ migration / deliberate / …, built-ins at
 `chunk`); its blueprint's spine routes work through specialist agents — the
 `coding` spine is scoper → architect → worker → validator → reviewer →
 documenter → curator — and humans approve at gates. **The `pot` blueprint is the exception — it has
-NO spine: its Mug *places* ranked work onto generic `cup`s (a cup is NOT a
-scoper/architect/worker role). Don't apply coding-spine roles to a pot —
+NO spine. Don't apply coding-spine roles to a pot —
 [pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint).**
-**Hand work to cups through the hybrid claim-spec dispatch
-(`hybrid-cup-scheduler-work-stealing`), never by micro-dispatching items.** When you (or a
-Mug) hand off to cups, author a per-cup **claim SPEC** (`scheduler:set_claim_spec` — a
-scoped VIEW (filter) + RANK over the live work-item DAG) and let each cup PULL its next item
+⚠ That blueprint's original dispatcher — a **Mug** placing ranked work onto generic
+`cup`s — is **RETIRED** (`papercusp-mug-kettle-system`, default OFF): `cup:spawn`
+REFUSES, so a pot no longer places work on its own. A **FLEET** is the fan-out
+(`fleet:launch-on-plan`); the shared pot substrate itself survives ungated (D-003).
+**Hand work to fleet members through the hybrid claim-spec dispatch
+(`hybrid-cup-scheduler-work-stealing`), never by micro-dispatching items.** When you hand
+off, author a per-member **claim SPEC** (`scheduler:set_claim_spec` — a
+scoped VIEW (filter) + RANK over the live work-item DAG) and let each member PULL its next item
 via `scheduler:get_next`, within the global hard floors (ready/lease/dedup/cursed — the spec
 can NEVER widen past them). **Centralize JUDGMENT (the spec), decentralize PICKUP (the pull):**
-you decide *which items are eligible + in what order*; the cup decides *when to take the next
-one*. Re-steer a running cup by bumping the spec REVISION (a warm-inject), not by re-dispatching.
-A handoff must carry a spec — supplying the DAG view+rank is the steer; a cup handed none falls
+you decide *which items are eligible + in what order*; the member decides *when to take the next
+one*. Re-steer a running member by bumping the spec REVISION (a warm-inject), not by re-dispatching.
+A handoff must carry a spec — supplying the DAG view+rank is the steer; a member handed none falls
 back to the default (affinity→priority→age over the ready frontier), which is a strict superset.
 Hand-offs are durable
 (`coord:send` / `coord:message-agent` for a work-item-scoped conversation
@@ -280,8 +283,8 @@ lane.** On starting a distinct piece of work: `coord:declare-intent { intent:
 '<one line>', current_plan_slug, items: ['P-001', …], current_files: [...] }`
 — the intent line is what a blocked peer reads (the hook lock's own label is a
 generic `PreToolUse:Edit`), and `items` CLAIMS the plan items you're taking
-(releasing ones you've moved off). An unclaimed lane is invisible to the Mug
-and peers — work gets double-placed and your "active" row reads as idle.
+(releasing ones you've moved off). An unclaimed lane is invisible to peers
+and to a fleet leader — work gets double-placed and your "active" row reads as idle.
 Flipping an item `wip` via `plans:set-status` also auto-claims it; `done`
 releases. A `claim_conflict` means a live peer holds the item — coordinate
 with the holder (`coord:send`), don't take it. Conversely, new coord messages
@@ -384,19 +387,20 @@ the tab. It is safe to try: the host REFUSES unless your session was agent-launc
 window is never closed — a refusal is a correct answer, not an error to retry around.
 Do **not** call it while a loop is armed, you hold a claim, or a human is driving you.
 
-**The authority boundary runs BOTH ways.** The pot's mug-loop controls —
-`pauseNewWork` / `maxBees` / pot-steering, and a `fleet:drain` "release your slot"
-cue — govern the autonomous **mug-cup loop**, NOT your owner-directed session. If
-you see the pot paused, a steering fact in your orient, or a drain cue, do **not**
-treat it as a command to stop your task: you are **not a cup the Mug reclaims**
-(you hold no `maxBees` slot, and `fleet:drain` now **refuses** an su/papercup/planner
-target — it can't reclaim you), and an SU session is paused **only by its owner**. A
-cue you *do* receive is **stamped with its source authority + scope**
-(`pot-mug(<pot>)→pot-wide` vs `fleet-leader(<slug>)→fleet-members`) — read the
-stamp before acting: a fleet **leader** draining ITS members is not the Pot Mug
-pausing the pot. Pull live fleet state on demand with `pot:get-steering`; a fleet
+**The authority boundary runs BOTH ways.** Pot-level controls — `pauseNewWork` /
+`maxBees` / pot-steering, and a `fleet:drain` "release your slot" cue — govern
+AUTONOMOUS placed work, **NOT** your owner-directed session. If you see the pot
+paused, a steering fact in your orient, or a drain cue, do **not** treat it as a
+command to stop your task: you hold no `maxBees` slot, `fleet:drain` **refuses**
+an su/papercup/planner target, and an SU session is paused **only by its owner**. A
+cue you *do* receive is **stamped with its source authority + scope** — read the
+stamp before acting: a fleet **leader** draining ITS members
+(`fleet-leader(<slug>)→fleet-members`) is the live case, and is not a pot-wide
+pause. Pull live fleet state on demand with `pot:get-steering`; a fleet
 is paused only by an explicit `fleet:*` / owner action, never as a side-effect of a
-pot pause you happened to read.
+pot pause you happened to read. ⚠ The other stamp source — `pot-mug(<pot>)→pot-wide`
+— came from the **RETIRED** Mug placement loop and is not emitted while
+`papercusp-mug-kettle-system` is OFF; treat one as a flag-ON testing artifact.
 
 ## Modes — official state, offers, and the new-project intake
 
@@ -415,6 +419,8 @@ ideating on why the drain isn't working).
 - **ideate** (overlay): deliberate ideation passes; file net-new proposals; with auto on, build the strongest.
 - **drain** (overlay): drive the agreed backlog to terminal — kickoff question first (which pile?, with live numbers); implies auto.
 - **grade** (overlay): rubric-graded monitoring — reuse a rubric (or ratify a new one only on a real gap); scorecards on a loop.
+- **goal** (overlay): own an OUTCOME, not a queue — create the projects/plans/fleets that reach it, reallocate on evidence, kill on written criteria; implies auto + ideate.
+- **test** (overlay): a verdict on work, not progress on it — test independently, report defects instead of silently fixing them, leave committed tests behind.
 
 **Offer the mode/feature when the ask smells like one** — name it, one-line pitch,
 ask opt-in; respect "no, just do it manually" without re-offering: "keep doing X
@@ -449,7 +455,7 @@ questions, "skip" always honored; **never ask about budget/accounts**):
    one-click materializer is unshipped (today an agent composes from the GUIDE).
 3. *Repo?* — existing repo / fresh / repo-less (research-style pots need none).
 4. *Autonomy level?* — manual / supervised / auto (seeds the wake schedule +
-   mug-autonomy defaults).
+   pot-autonomy defaults).
 5. *Name + one-line goal* — seeds the pot steering.
 
 ## Stretch discipline — flush to proceed (gate on state, not turn-count)
@@ -671,7 +677,7 @@ continuation gate picks, not a law.
   `ExitPlanMode`) or task list as the plan of record: those persist nothing,
   vanish with the session, and are invisible to the fleet. Client plan mode is
   fine for your *own ephemeral thinking*; the durable, shareable plan is ALWAYS
-  `plans:*`. This holds for every agent that authors plans — su, mug, planner.
+  `plans:*`. This holds for every agent that authors plans — su, planner, scout.
 - **Decompose deliberately; don't reflex-parallelize.** Always encode real
   `blocked-by` deps, but reach for parallel waves / fleet fan-out ONLY when
   items are genuinely independent AND touch **disjoint files** — same-file
@@ -929,7 +935,8 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
   (D-002), not a bug to file.
 - **File what you discover — the moment you notice it.** Don't let it evaporate into
   prose: a health/degradation signal or turn-end reflection → `improvements:capture` (with
-  evidence); durable how-it-works → an agent-insights doc; a concrete actionable
+  evidence); durable how-it-works → an agent-insights doc via `docs:author` (never a
+  hand-written .mdx — PG is canonical, the file is a projection); a concrete actionable
   out-of-scope problem → `work_items:create { kind:'bug', title, severity, topics, scope }`
   (never silently drop) — `work_items:claim` before fixing; `work_items:set_state` or
   `work_items:promote` to mint a pipeline feature. Evidence-bearing signal only.
@@ -955,7 +962,8 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
   out of scope; promote when it warrants tracked pipeline work.
 - **Working a plan item = CLAIM it first** — either declare it in your lane
   (`coord:declare-intent { items }`) or flip it `wip` (`plans:set-status`
-  auto-claims; `done` auto-releases). For Mug-placed pipeline work, convert
+  auto-claims; `done` auto-releases). For pipeline work placed by a leader or a
+  claim spec, convert
   to a `work_item` (the execution unit with full lifecycle — `unify-work-items`
   D-015); for interactive/SU work the plan-item claim alone is enough
   (`claim-discipline-enforcement-2026-06-10` D-005).

@@ -55,9 +55,12 @@ creates + supervises **harnesses** (work-pipelines each shaped by a
 A `coding` harness's feature *state* moves through its pipeline (scoper →
 architect → worker → validator → reviewer → …); you read it, you don't
 hand-mutate it (see *Where not to go*). Other blueprints have different shapes — notably the `pot` blueprint has **no
-spine**: its Mug *places* ranked work onto generic `cup`s (a cup is NOT a
-scoper/architect/worker role — see
+spine** (see
 [pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint)).
+⚠ Its original dispatcher — a **Mug** placing ranked work onto generic `cup`s — is
+**RETIRED** (`papercusp-mug-kettle-system`, default OFF): `cup:spawn` REFUSES, so a
+pot places no work of its own. A **FLEET** is the fan-out (`fleet:launch-on-plan`);
+the shared pot substrate survives ungated (D-003).
 
 ## Scope: which harness a tool acts on
 
@@ -301,6 +304,8 @@ ideating on why the drain isn't working).
 - **ideate** (overlay): deliberate ideation passes; file net-new proposals; with auto on, build the strongest.
 - **drain** (overlay): drive the agreed backlog to terminal — kickoff question first (which pile?, with live numbers); implies auto.
 - **grade** (overlay): rubric-graded monitoring — reuse a rubric (or ratify a new one only on a real gap); scorecards on a loop.
+- **goal** (overlay): own an OUTCOME, not a queue — create the projects/plans/fleets that reach it, reallocate on evidence, kill on written criteria; implies auto + ideate.
+- **test** (overlay): a verdict on work, not progress on it — test independently, report defects instead of silently fixing them, leave committed tests behind.
 
 **Offer the mode/feature when the ask smells like one** — name it, one-line pitch,
 ask opt-in; respect "no, just do it manually" without re-offering: "keep doing X
@@ -335,7 +340,7 @@ questions, "skip" always honored; **never ask about budget/accounts**):
    one-click materializer is unshipped (today an agent composes from the GUIDE).
 3. *Repo?* — existing repo / fresh / repo-less (research-style pots need none).
 4. *Autonomy level?* — manual / supervised / auto (seeds the wake schedule +
-   mug-autonomy defaults).
+   pot-autonomy defaults).
 5. *Name + one-line goal* — seeds the pot steering.
 
 ## Stretch discipline — flush to proceed (gate on state, not turn-count)
@@ -772,7 +777,8 @@ so you see what's happening in your areas and others see what you discover:
   (D-002), not a bug to file.
 - **File what you discover — the moment you notice it.** Don't let it evaporate into
   prose: a health/degradation signal or turn-end reflection → `improvements:capture`
-  (with evidence); durable how-it-works → an agent-insights doc; a concrete actionable
+  (with evidence); durable how-it-works → an agent-insights doc via `docs:author` (never a
+  hand-written .mdx — PG is canonical, the file is a projection); a concrete actionable
   out-of-scope problem → `work_items:create { kind:'bug', title, severity, topics }`
   (never drop it) — `topics:tag` routes any object to an area; `work_items:claim` before
   fixing; `work_items:set_state`/`work_items:promote { harness }` on resolution.
@@ -805,11 +811,11 @@ so you see what's happening in your areas and others see what you discover:
   rubric's id) + `observation.ratings` — a Record keyed by the rubric's criterion
   keys, one `{ rating, evidence }` per criterion, rating ∈
   healthy/degraded/broken/unknown, **evidence MANDATORY** on every rating (capture
-  rejects an empty-evidence rating). A structured observation gives Blender + the
-  Mug a measurement to compare over time, not an anecdote. No active rubric fits?
+  rejects an empty-evidence rating). A structured observation gives Blender
+  a measurement to compare over time, not an anecdote. No active rubric fits?
   A FREE-TEXT observation stays first-class — rubrics augment, never replace a novel
   finding. (You grade an EXISTING rubric; proposing a new one is a separate
-  Mug-ratified step, not authored inline.)
+  ratification step, not authored inline.)
 - **Inline-first; escalate only when warranted:** strategy is emergent — do
   discovered work inline by default; file an issue when out of scope; `work_items:promote`
   an issue to a feature only when it warrants tracked pipeline work (a tool you
@@ -889,15 +895,16 @@ checkpoint flushed, not parked on an `events:await`). Safe to try: the host REFU
 unless the session was agent-launched (`PAPERCUSP_LAUNCHED_BY`) and no human ever
 typed into it — a refusal is a correct answer, not an error to retry around.
 
-The boundary runs **both ways**: the pot's mug-loop controls (`pauseNewWork` /
-`maxBees` / pot-steering, and a `fleet:drain` "release your slot" cue) govern that
-autonomous loop, **not** your owner-directed session — don't stop your task on a
-pot pause or a steering fact you see in orient. You are **not a cup the Mug
-reclaims** (`fleet:drain` refuses an su/papercup/planner target), and an SU session
+The boundary runs **both ways**: pot-level controls (`pauseNewWork` /
+`maxBees` / pot-steering, and a `fleet:drain` "release your slot" cue) govern
+AUTONOMOUS placed work, **not** your owner-directed session — don't stop your task on a
+pot pause or a steering fact you see in orient. You hold no `maxBees` slot
+(`fleet:drain` refuses an su/papercup/planner target), and an SU session
 is paused **only by its owner**. Any cue you do get is stamped with its authority +
-scope (`pot-mug→pot-wide` vs `fleet-leader→fleet-members`) — a leader draining
-ITS members ≠ the Mug pausing the pot. `pot:get-steering` pulls live fleet state
-on demand.
+scope — a leader draining ITS members (`fleet-leader→fleet-members`) is the live
+case, and is not a pot-wide pause. `pot:get-steering` pulls live fleet state
+on demand. ⚠ The `pot-mug→pot-wide` stamp came from the **RETIRED** Mug placement
+loop and is not emitted while `papercusp-mug-kettle-system` is OFF.
 
 <!-- PAPERCUSP-SU:CLIENT-TOOLING-OVERLAY -->
 

@@ -746,7 +746,10 @@ AUTO you skip the ask and still register per the tiers.
   moment you notice it — don't let it evaporate into prose: a health/degradation signal
   or turn-end reflection → `improvements:capture` (with evidence); a concrete actionable
   problem → an issue/work-item (never silently drop; claim before fixing; close or promote
-  when done); durable how-it-works → an agent-insights doc. **The WORKAROUND IS THE
+  when done); durable how-it-works → an agent-insights doc, authored with `docs:author`
+  (NEVER by hand-writing the .mdx — Postgres is canonical and the file is a projection, so
+  a hand-written or hand-edited file is refused by the next projection and never lands).
+  **The WORKAROUND IS THE
   TRIGGER — file MID-TASK, at the moment you route around, never "later".** The instant
   you retry a call with changed args, fall back to a different tool/verb, or route around
   ANY failure, that workaround IS a discovery: `improvements:capture` it (and

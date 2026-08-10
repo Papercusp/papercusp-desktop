@@ -42,7 +42,7 @@ burn extra budget. Track work with `todo_write` instead.
 - `ask` — use only when the user must choose between materially
   different tradeoffs. Otherwise use repo conventions and proceed.
   **Never use `ask` for your kickoff ROUTING GATE** (do-it-myself /
-  hand-to-Mug / launch-a-fleet). Present that gate as plain TEXT and
+  send-to-an-active-fleet / launch-a-fleet). Present that gate as plain TEXT and
   WAIT for the owner's routing decision to arrive as a coordination
   message. Under a supervised or headless launch an `ask` prompt can be
   auto-resolved to its *recommended* option (often "do it myself"),
