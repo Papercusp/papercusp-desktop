@@ -223,18 +223,45 @@ test('--scrub-app-binary takes EXPLICIT files and never sweeps a directory', () 
   }
 });
 
-test('build-mac-cross signs only AFTER scrubbing — the ordering invariant', () => {
-  // Scrubbing after rcodesign would invalidate the signature; the scan at the end
-  // of the producer runs later still. The scrub lives INSIDE sign_app precisely so
-  // a new caller cannot reorder it, so assert that structural fact, not a comment.
-  const src = fs.readFileSync(path.join(root, 'bin/build-mac-cross.sh'), 'utf8');
-  const body = src.slice(src.indexOf('sign_app() {'));
-  const scrubAt = body.indexOf('--scrub-app-binary');
-  const signAt = body.indexOf('rcodesign sign');
-  assert.ok(scrubAt > -1, 'sign_app must scrub the app executable (WI-37553)');
-  assert.ok(signAt > -1, 'sign_app must still sign');
-  assert.ok(scrubAt < signAt,
-    'the scrub must run BEFORE rcodesign — signing first would invalidate the signature');
+// PROBE_SCRIPT lets scripts/mutation-probe.sh point these at a mutated COPY
+// outside the tree, so falsifiability can be proven without ever mutating the
+// shared working tree (a sweep would commit the mutant).
+const MAC_CROSS = process.env.PROBE_SCRIPT || path.join(root, 'bin/build-mac-cross.sh');
+
+test('build-mac-cross scrubs BEFORE the assembled-bytes scan, and before signing', () => {
+  // ⚠ THE INVARIANT THAT ACTUALLY MATTERS, and the one whose absence shipped.
+  // The previous version of this test sliced from 'sign_app() {' and asserted
+  // scrub-before-rcodesign INSIDE that slice. That was true and useless: the
+  // producer runs assemble_app → scan → sign_app, so the scan hard-fails the cut
+  // BEFORE sign_app is ever entered. The scrub sat in sign_app, never executed,
+  // and the 0.0.14 cut died at the scan with the leak intact while this test was
+  // green. Assert the ORDER OF THE THREE CONSUMERS in the real call flow.
+  const src = fs.readFileSync(MAC_CROSS, 'utf8');
+
+  // 1. The scrub is a postcondition of assemble_app, not of a call site.
+  const asmStart = src.indexOf('assemble_app() {');
+  assert.ok(asmStart > -1, 'assemble_app must exist');
+  const asmBody = src.slice(asmStart, src.indexOf('\n}\n', asmStart));
+  assert.ok(asmBody.includes('scrub_app_identity'),
+    'assemble_app must scrub before returning — "assembled" has to MEAN "scrubbed" (WI-37553)');
+
+  // 2. sign_app must NOT scrub: that placement is the exact bug being guarded.
+  const signStart = src.indexOf('sign_app() {');
+  const signBody = src.slice(signStart, src.indexOf('\n}\n', signStart));
+  assert.ok(!signBody.includes('--scrub-app-binary'),
+    'the scrub must NOT live in sign_app — it is called AFTER the scan, so it never runs');
+
+  // 3. Main flow order: assemble (which scrubs) → scan → sign.
+  const assembleAt = src.indexOf('assemble_app "$app_id"');
+  const scanAt = src.indexOf('--scan-dir');
+  const signAt = src.indexOf('sign_app "$app"');
+  for (const [n, v] of [['assemble', assembleAt], ['scan', scanAt], ['sign', signAt]]) {
+    assert.ok(v > -1, `main flow must still call ${n}`);
+  }
+  assert.ok(assembleAt < scanAt,
+    'scrub (inside assemble_app) must precede the assembled-bytes identity scan');
+  assert.ok(scanAt < signAt,
+    'the scan must precede signing — signing seals already-scrubbed, already-scanned bytes');
 });
 
 function* walk(dir) {

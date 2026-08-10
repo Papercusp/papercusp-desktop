@@ -298,6 +298,36 @@ stage_env_sidecars() { # $1=sidecar dir (inside the .app)
 }
 
 # ── Hand-assemble the .app to Tauri's macOS layout. ───────────────────────────
+# ── WI-37553: strip the build box's absolute CARGO_MANIFEST_DIR out of the app's
+# executables. The mac binary retains it (one occurrence per lipo'd arch slice)
+# from tauri's permission/ACL codegen; the LINUX binary is clean from the same
+# codegen, so the difference is the LINK (Mach-O ld vs ELF --gc-sections
+# dead-strip), not the source — and --remap-path-prefix provably cannot reach it
+# (the remap works here: 86 /build-home strings survive, yet the remapped form of
+# this path is in neither binary). Byte length is preserved exactly, so every
+# Mach-O offset stays valid.
+#
+# ⚠ ORDERING INVARIANT — scrub must run BEFORE the assembled-bytes identity scan
+# AND before rcodesign. It is called from the END of assemble_app so that
+# "assembled" *means* "scrubbed": any future caller inherits it, and the two
+# consumers downstream (the scan, then the signature) both see scrubbed bytes.
+# Scrubbing after rcodesign would invalidate the signature; scrubbing after the
+# scan is useless, because the scan hard-fails the cut first.
+#   This previously sat inside sign_app(), which is called AFTER the scan — so it
+#   never executed and the 0.0.14 cut died at the scan with the leak intact. The
+#   comment there asserted the scan ran "later still"; it does not. Guarded now by
+#   a test that asserts scrub-before-SCAN, not merely scrub-before-sign.
+# ⚠ MITIGATION, not a fix — the dead-strip root cause is EI-20044309663936316.
+scrub_app_identity() { # $1=app
+  local app="$1" _macos_dir="$1/Contents/MacOS" _exes=()
+  [[ -d "$_macos_dir" ]] || return 0
+  while IFS= read -r -d '' _f; do _exes+=("$_f"); done \
+    < <(find "$_macos_dir" -maxdepth 1 -type f -perm -u+x -print0)
+  (( ${#_exes[@]} > 0 )) || return 0
+  python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "${_exes[@]}" \
+    || fail "scrub-app-binary failed for $app"
+}
+
 assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
   local ident="$1" name="$2" bin="$3" app="$4"
   rm -rf "$app"
@@ -349,6 +379,11 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
   else
     echo "    (no libPapercuspTermShim.dylib — embedded terminal degrades to NewWindow; see KNOWN GAPS)"
   fi
+
+  # Postcondition of assemble_app: the .app's executables carry no build-box
+  # identity. MUST stay last, and MUST stay inside this function — the caller
+  # scans the assembled bytes immediately after this returns.
+  scrub_app_identity "$app"
 }
 
 # ── rcodesign deep-sign the bundle (ad-hoc, or the supplied cert). The nested
@@ -357,29 +392,11 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
 sign_app() { # $1=app
   local app="$1" args=(--entitlements-xml-path "$ENTITLEMENTS")
 
-  # WI-37553: scrub build-box identity out of the app executable BEFORE signing.
-  # The mac binary carries the crate's absolute CARGO_MANIFEST_DIR (…/src-tauri),
-  # one occurrence per lipo'd arch slice, from tauri's permission/ACL codegen. The
-  # linux binary is CLEAN from the same codegen, so the difference is the LINK
-  # (Mach-O ld vs ELF --gc-sections dead-strip), not the source — and
-  # --remap-path-prefix provably cannot reach it (the remap works here: 86
-  # /build-home strings are present, yet the remapped form of this path is in
-  # neither binary). Left in, the L564 identity scan hard-fails the whole cut.
-  #
-  # ⚠ THIS IS THE CHOKEPOINT ON PURPOSE. It sits INSIDE sign_app rather than at a
-  # call site so the ordering invariant cannot be routed around: scrubbing AFTER
-  # rcodesign would invalidate the signature, and the scan at L564 runs later
-  # still. Byte length is preserved exactly, so every Mach-O offset stays valid.
-  # ⚠ MITIGATION, not a fix — the dead-strip root cause is tracked separately.
-  local _macos_dir="$app/Contents/MacOS" _exes=()
-  if [[ -d "$_macos_dir" ]]; then
-    while IFS= read -r -d '' _f; do _exes+=("$_f"); done \
-      < <(find "$_macos_dir" -maxdepth 1 -type f -perm -u+x -print0)
-    if (( ${#_exes[@]} > 0 )); then
-      python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "${_exes[@]}" \
-        || fail "scrub-app-binary failed for $app"
-    fi
-  fi
+  # WI-37553: the build-box identity scrub does NOT live here. It runs at the end
+  # of assemble_app(), because the assembled-bytes identity scan sits BETWEEN
+  # assemble_app and sign_app and hard-fails the cut before this function is ever
+  # reached. Signing therefore seals already-scrubbed bytes. Do not reintroduce a
+  # scrub here: post-signature mutation would invalidate the signature.
 
   [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
