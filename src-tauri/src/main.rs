@@ -4208,6 +4208,84 @@ fn wait_for_operator(
 /// thread so the main thread reaches the event loop immediately and the
 /// window paints the bootstrap page while serve boots.
 fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
+    // WI-37771: register the endpoint-IPC handle FIRST, before the boot-outcome
+    // branch below — NOT after a successful discovery.
+    //
+    // Every early return in that branch (the Windows WSL-onboarding deferral,
+    // the reachable-fallback-env hop, and the FATAL boot-error inject) used to
+    // leave `tauri::State<Arc<IpcClientHandle>>` UNMANAGED for the life of the
+    // process. Nothing re-registers it later, so once any of them fired, every
+    // `endpoint_invoke` failed with Tauri's generic "state not managed" — and
+    // with `requireIpc` on, the webview is forbidden from falling back to HTTP,
+    // so the app sat permanently dead ("Operator connection lost", "Failed to
+    // load Pots") even after the operator came up healthy seconds later.
+    //
+    // Runtime-reproduced on a clean Windows 11 install: the first launch must
+    // create the WSL distro and init embedded PG, which exceeds the cold-boot
+    // budget, so the operator is legitimately not up yet — exactly the case
+    // those returns hand off to. Registering here costs nothing when the
+    // operator IS up (the same handle, a few ms earlier) and is what makes the
+    // hand-off actually work when it is not: the socket source re-reads the
+    // discovery file on EVERY (re)connect and `keep_warm` retries for the life
+    // of the process, so the handle connects by itself whenever the operator
+    // appears — after the onboarding gate's finalize restart included.
+    //
+    // This mirrors the dev branch in setup(), which has always registered
+    // before any operator exists. See endpoint_ipc.rs `IpcClientHandle::disabled`
+    // for why "leave it unmanaged" is never the right shape: the webview must
+    // be able to tell "not ready YET" (wait) from "switched off" (fall back),
+    // and an unmanaged state is indistinguishable from the startup window.
+    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
+    if ipc_enabled {
+        // WI-3395: on Windows the sidecar runs in WSL2 and writes
+        // endpoint-ipc.json to its WSL-native ~/.papercusp — a DIFFERENT
+        // filesystem from `workspace_home`. `find_endpoint_ipc_socket` reads it
+        // from inside the distro when routed via WSL (else the local path), so
+        // the client actually finds the `tcp://` endpoint instead of stranding
+        // /api on the capped HTTP fallback.
+        let disc_home = workspace_home.clone();
+        let handle = endpoint_ipc::IpcClientHandle::new(move || {
+            find_endpoint_ipc_socket_resolved(&disc_home, via_wsl)
+        });
+        app_handle.manage(handle.clone());
+        let ipc_app_handle = app_handle.clone();
+        let warm_home = workspace_home.clone();
+        // Record the socket in SidecarState on the FIRST successful connect,
+        // then hand off to the permanent supervisor (`keep_warm`), which keeps
+        // dialing for the life of the process instead of giving up at 60s.
+        tauri::async_runtime::spawn(async move {
+            let probe = Duration::from_millis(500);
+            loop {
+                if handle.warm().await.is_ok() {
+                    println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
+                    if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
+                        let state: tauri::State<SidecarState> = ipc_app_handle.state();
+                        *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
+                    }
+                    break;
+                }
+                tokio::time::sleep(probe).await;
+            }
+            handle.keep_warm(probe).await;
+        });
+    } else {
+        // IPC switched OFF. Register a handle that SAYS SO rather than leaving
+        // the state unmanaged: Tauri's generic "state not managed" is
+        // indistinguishable from the startup window before this same handle
+        // gets registered, and the webview must treat those OPPOSITELY — wait
+        // through the startup window (falling back there strands a long-lived
+        // stream on one of ~6 HTTP sockets for the session, WI-6257), but fall
+        // back to HTTP when IPC is deliberately off. With `requireIpc` on,
+        // guessing wrong here turns this kill switch into an app-wide hang
+        // instead of the rollback it exists to be.
+        app_handle.manage(endpoint_ipc::IpcClientHandle::disabled(
+            "PAPERCUSP_DESKTOP_IPC=0",
+        ));
+        println!(
+            "[papercusp-desktop] endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
+        );
+    }
+
     let discovery = match wait_for_operator(
         &app_handle,
         &workspace_home,
@@ -4296,63 +4374,14 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         port, discovery.pid
     );
 
-    // Endpoint-IPC: runBootstrap inside serve starts the IPC server and
-    // writes ~/.papercusp/endpoint-ipc.json (the discovery file also covers
-    // the --ensure reuse case, where there is no fresh child stdout to
-    // parse). Manage a reconnecting handle whose socket source re-reads the
-    // file — same pattern as the dev branch — and warm it in the background.
-    // If the socket never appears, /api falls back to HTTP (ipcFetch
-    // polyfill).
-    let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
-    if ipc_enabled {
-        // WI-3395: on Windows the sidecar runs in WSL2 and writes
-        // endpoint-ipc.json to its WSL-native ~/.papercusp — a DIFFERENT
-        // filesystem from `workspace_home`. `find_endpoint_ipc_socket` reads it
-        // from inside the distro when routed via WSL (else the local path), so
-        // the client actually finds the `tcp://` endpoint instead of stranding
-        // /api on the capped HTTP fallback.
-        let disc_home = workspace_home.clone();
-        let handle = endpoint_ipc::IpcClientHandle::new(move || {
-            find_endpoint_ipc_socket_resolved(&disc_home, via_wsl)
-        });
-        app_handle.manage(handle.clone());
-        let ipc_app_handle = app_handle.clone();
-        let warm_home = workspace_home.clone();
-        // Record the socket in SidecarState on the FIRST successful connect,
-        // then hand off to the permanent supervisor (`keep_warm`), which keeps
-        // dialing for the life of the process instead of giving up at 60s.
-        tauri::async_runtime::spawn(async move {
-            let probe = Duration::from_millis(500);
-            loop {
-                if handle.warm().await.is_ok() {
-                    println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
-                    if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
-                        let state: tauri::State<SidecarState> = ipc_app_handle.state();
-                        *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
-                    }
-                    break;
-                }
-                tokio::time::sleep(probe).await;
-            }
-            handle.keep_warm(probe).await;
-        });
-    } else {
-        // IPC switched OFF. Register a handle that SAYS SO rather than leaving
-        // the state unmanaged: Tauri's generic "state not managed" is
-        // indistinguishable from the startup window before this same handle
-        // gets registered, and the webview must treat those OPPOSITELY — wait
-        // through the startup window (falling back there strands a long-lived
-        // stream on one of ~6 HTTP sockets for the session, WI-6257), but fall
-        // back to HTTP when IPC is deliberately off. With `requireIpc` on,
-        // guessing wrong here turns this kill switch into an app-wide hang
-        // instead of the rollback it exists to be.
-        app_handle.manage(endpoint_ipc::IpcClientHandle::disabled(
-            "PAPERCUSP_DESKTOP_IPC=0",
-        ));
-        println!(
-            "[papercusp-desktop] endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
-        );
-    }
+    // Endpoint-IPC was already registered at the TOP of this function (WI-37771)
+    // — runBootstrap inside serve starts the IPC server and writes
+    // ~/.papercusp/endpoint-ipc.json (the discovery file also covers the
+    // --ensure reuse case, where there is no fresh child stdout to parse), and
+    // the handle registered above re-reads that file on every (re)connect, so
+    // it picks the socket up here without a second registration. Registering
+    // it at this point instead was the bug: none of the early returns above
+    // ever reached it, leaving the state unmanaged for the life of the process.
 
     // Tell the bootstrap page where the sidecar is. The JS in web/index.html
     // will poll /api/desktop/preflight on that base, render any
