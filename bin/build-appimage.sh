@@ -95,6 +95,20 @@ rm -rf "$APPIMG_DIR"/*.AppDir
 echo "==> purging tauri resource-staging intermediates under $CT/release (EI-11730: disk hygiene, reclaims ~15G — does NOT by itself fix the leak; see step 2b)"
 rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/null || true
 
+# Strip build-box $HOME from the Rust binary's embedded source paths, BEFORE the
+# `tauri build` below compiles it. This script used to own no copy of the flag and
+# relied entirely on inheriting RUSTFLAGS from release-local.sh — true for a release
+# cut, false for a DIRECT `bin/build-appimage.sh` run, which then failed its own
+# identity gate ~10 min in with a message pointing at the sidecar rather than at the
+# missing flag (measured 2026-08-10: 691 build-box-$HOME strings standalone vs 0 via
+# the release cut). Sourcing it here makes the artifact identical from either entry
+# point; the helper is a no-op when a parent already exported a remap, so the release
+# path is unchanged and its cargo cache is not busted.
+# shellcheck source=lib/rust-path-remap.sh
+. "$DESK/bin/lib/rust-path-remap.sh" || {
+  echo "FATAL: cannot source bin/lib/rust-path-remap.sh — refusing to build a bundle that would embed build-box paths" >&2; exit 1; }
+papercusp_export_rust_path_remap
+
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.
 #

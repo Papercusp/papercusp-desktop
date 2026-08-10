@@ -39,6 +39,7 @@ TESTS=(
   roster-scope.selftest.sh
   deployed-state-guards.selftest.sh
   inno-legacy-reaper.selftest.sh
+  rust-path-remap.selftest.sh
 )
 
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.
