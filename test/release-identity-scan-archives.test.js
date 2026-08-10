@@ -305,3 +305,72 @@ test('the machine label is accepted ONLY under a seed corestore path', (t) => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── EI-20097383942651504: the PASS PATH must prove it did work ───────────────
+// The `-I` regression above taught this scan to READ binaries; it stayed free to
+// read NOTHING AT ALL. `--scan-dir <absent>` printed "✓ CLEAN" and exited 0, so a
+// release gate wired to a typo'd / renamed / unset-variable path was a rubber
+// stamp that could never fail — output identical to a genuine pass. Found by
+// fat-fingering an unset shell variable into a scan path during the 0.0.14 cut.
+// Same BEHAVIOURAL shape as the rest of this file: real script, real fixtures,
+// real exit codes — never a grep for a flag.
+
+test('an ABSENT scan target FAILS — a gate pointed at nothing must not "pass"', () => {
+  const dir = fixture('absent');
+  try {
+    const r = scanDir(path.join(dir, 'no-such-directory'));
+    assert.notEqual(r.status, 0,
+      `an absent scan dir must NOT exit 0:\n${r.stdout}${r.stderr}`);
+    assert.match(`${r.stdout}${r.stderr}`, /SCAN TARGET MISSING/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan that reads ZERO files FAILS (empty dir)', () => {
+  const dir = fixture('empty');
+  try {
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.notEqual(r.status, 0,
+      `a scan covering 0 files must NOT exit 0:\n${r.stdout}${r.stderr}`);
+    assert.match(`${r.stdout}${r.stderr}`, /SCAN READ NOTHING/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stage dir of SYMLINKS scans as empty and FAILS, naming the untraversed link', () => {
+  // `grep -r` does not descend into a symlinked directory, so a gate aimed at a
+  // symlinked staging tree reads nothing and used to report CLEAN. The second
+  // false-clean route in the same defect.
+  const dir = fixture('symlinked');
+  try {
+    fs.mkdirSync(path.join(dir, 'realsrc'));
+    fs.writeFileSync(path.join(dir, 'realsrc/f.txt'), 'nothing sensitive\n');
+    fs.symlinkSync(path.join(dir, 'realsrc'), path.join(dir, 'bundle/sidecar'));
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.notEqual(r.status, 0,
+      `a symlink-only stage dir must NOT exit 0:\n${r.stdout}${r.stderr}`);
+    assert.match(`${r.stdout}${r.stderr}`, /SCAN READ NOTHING/);
+    assert.match(r.stdout, /symlinked director/,
+      'the untraversed symlink must be named, not silently skipped');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a CLEAN verdict reports the file count it actually read (falsifiable pass)', () => {
+  // "Found no problems" and "looked at nothing" must not render identically.
+  const dir = fixture('coverage');
+  try {
+    fs.writeFileSync(path.join(dir, 'bundle/a.txt'), 'nothing sensitive\n');
+    fs.writeFileSync(path.join(dir, 'bundle/b.txt'), 'also fine\n');
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 0, `a clean bundle must pass:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /✓ CLEAN/);
+    assert.match(r.stdout, /2 file\(s\)/,
+      'the CLEAN line must state the coverage that backs it');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1011,6 +1011,31 @@ def scrub_binaries(dirs):
     return 0
 
 
+def _scan_coverage(dirs):
+    """Count what a `grep -r` pass over `dirs` will ACTUALLY read.
+
+    Deliberately mirrors grep's own recursion rules rather than estimating
+    optimistically: `grep -r` does not descend into a symlinked DIRECTORY and does
+    not follow a symlinked FILE found during recursion, and `os.walk(...,
+    followlinks=False)` matches that exactly. So this is the scan's real coverage
+    — the number that makes a CLEAN falsifiable — not an upper bound on it.
+
+    Returns (regular_file_count, [symlinked directories that will be skipped]).
+    """
+    n_files = 0
+    symlinked_dirs = []
+    for root in dirs:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            for d in dirnames:
+                p = os.path.join(dirpath, d)
+                if os.path.islink(p):
+                    symlinked_dirs.append(p)
+            for f in filenames:
+                if not os.path.islink(os.path.join(dirpath, f)):
+                    n_files += 1
+    return n_files, symlinked_dirs
+
+
 def scan_dir(dirs):
     """Ultimate backstop: identity-scan the ASSEMBLED bytes that actually ship,
     honoring NO path-exclude. If a known-sensitive or build-box identity literal
@@ -1024,6 +1049,34 @@ def scan_dir(dirs):
     incl node_modules; a low-entropy bare first name is hunted non-vendor only —
     the same anti-false-positive scoping as phase B/C.
     """
+    # ── THE PASS PATH MUST PROVE IT DID WORK (EI-20097383942651504) ────────────
+    # This gate used to print "✓ CLEAN" and exit 0 for a directory that DOES NOT
+    # EXIST: every root was skipped, no bytes were read, `files` stayed empty, and
+    # empty read as clean. A release gate wired to a typo'd, renamed or unset-var
+    # path is then a rubber stamp that can never fail — the most dangerous shape a
+    # check can have, because its output is identical to a real pass. Found by
+    # fat-fingering an unset shell variable into a scan path during the 0.0.14 cut.
+    #
+    # Same family as the `-I` hole this scan already closed (grep_l's docstring:
+    # "A scan that inspects nothing is indistinguishable from a scan that found
+    # nothing") — that fix taught the scan to READ binaries but left it free to
+    # read NOTHING AT ALL. "Found no problems" and "looked at nothing" must not be
+    # the same exit code, so coverage is asserted here and REPORTED on success.
+    if not dirs:
+        print("AUDIT ERROR: --scan-dir needs at least one directory", file=sys.stderr)
+        return 2
+    missing = [d for d in dirs if not os.path.isdir(d)]
+    if missing:
+        print(f"\n    ✗ SCAN TARGET MISSING — refusing to report CLEAN on a "
+              f"directory that does not exist ({len(missing)} of {len(dirs)})\n",
+              file=sys.stderr)
+        for d in missing:
+            print(f"        {d}", file=sys.stderr)
+        print("\n  A gate pointed at a path that isn't there scans nothing and would "
+              "'pass' forever.\n  Fix the caller's path (an unset shell variable "
+              "expands to an empty argument).", file=sys.stderr)
+        return 2
+
     lits = identity_literals()
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     high = sorted({v for v in lits.values() if not is_low_entropy(v)})
@@ -1031,6 +1084,30 @@ def scan_dir(dirs):
     print("==> identity-scan of assembled tree (honors NO path-exclude — WI-4419)")
     print(f"    high-entropy (all files):  {', '.join(high) or '(none)'}")
     print(f"    low-entropy (non-vendor):  {', '.join(low) or '(none)'}")
+
+    covered, symlinked_dirs = _scan_coverage(dirs)
+    print(f"    coverage: {covered:,} file(s) reachable by the scan")
+    if symlinked_dirs:
+        # `grep -r` does not descend into a symlinked directory, so these ship but
+        # are NOT scanned. Naming them keeps the blind spot visible instead of
+        # letting it hide inside a CLEAN.
+        print(f"    ⚠ {len(symlinked_dirs)} symlinked director(ies) are NOT traversed "
+              f"by this scan (grep -r does not follow them):")
+        for d in symlinked_dirs[:10]:
+            print(f"        {d}")
+        if len(symlinked_dirs) > 10:
+            print(f"        … and {len(symlinked_dirs) - 10:,} more")
+    if covered == 0:
+        print(f"\n    ✗ SCAN READ NOTHING — refusing to report CLEAN on 0 files\n",
+              file=sys.stderr)
+        for d in dirs:
+            print(f"        {d}", file=sys.stderr)
+        print("\n  The director(ies) exist but hold no regular files the scan can "
+              "read.\n  A directory of SYMLINKS scans as empty for exactly this "
+              "reason — point the gate\n  at the assembled tree, not at a staging "
+              "dir of links.", file=sys.stderr)
+        return 2
+
     files = set()
 
     def grep_l(pats, scoped, roots, label=None, binary=True):
@@ -1180,7 +1257,7 @@ def scan_dir(dirs):
 
     if not files:
         print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
-              f"({len(archives)} archive(s) expanded and scanned)")
+              f"({covered:,} file(s), {len(archives)} archive(s) expanded and scanned)")
         return 0
     print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
           f"({len(files)} file(s))\n")
