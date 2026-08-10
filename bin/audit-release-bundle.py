@@ -931,14 +931,31 @@ def scan_dir(dirs):
     print(f"    low-entropy (non-vendor):  {', '.join(low) or '(none)'}")
     files = set()
 
-    def grep_l(pats, scoped, roots, label=None):
-        """P-012: `-a` (treat binary as text), NEVER `-I`.
+    def grep_l(pats, scoped, roots, label=None, binary=True):
+        """P-012: `-a` (treat binary as text), NEVER `-I` — for HIGH-entropy literals.
 
-        This used to pass `-I`, which SKIPS binary files entirely — so the scan
-        billed as "the assembled bytes that actually ship" silently never looked
-        at a database dump, a corestore, or any compiled artifact, and printed
+        This used to pass `-I` for everything, which SKIPS binary files entirely — so
+        the scan billed as "the assembled bytes that actually ship" silently never
+        looked at a database dump, a corestore, or any compiled artifact, and printed
         "✓ CLEAN". A scan that inspects nothing is indistinguishable from a scan
         that found nothing. phase_b_content already used `-a` for this reason.
+
+        ⚠ BUT `-a` IS WRONG FOR A LOW-ENTROPY LITERAL (`binary=False`), and applying
+        it to one made the gate cry wolf at scale (WI-37553). A bare first name is
+        ~3 characters; word-boundary-matched across GIGABYTES of compiled and
+        compressed bytes it matches CONSTANTLY by chance, and such a hit carries no
+        information. Measured on the 0.0.14 AppDir: 9 of 16 "leaks" were noise —
+        glibc's own `libm.so.6` matched; the GitHub CLI matched a Go symbol in
+        `mimetype/internal/magic` naming the AVI VIDEO FORMAT; and the seed's git
+        bundles matched random bytes inside zlib-compressed packfile data while
+        containing ZERO plaintext author lines. That noise very nearly cost days of
+        work removing a real feature to fix nothing.
+
+        The asymmetry is the point, and it costs the gate NO power: a high-entropy
+        literal (home path, username, email, hostname) stays hunted EVERYWHERE
+        including binaries, because such a string cannot appear by chance. Only the
+        low-entropy name is restricted to TEXT, where a word-boundary match is
+        actually evidence. This is the P-012 fix kept intact, not walked back.
         """
         if not pats:
             return
@@ -946,7 +963,7 @@ def scan_dir(dirs):
             if not os.path.isdir(root):
                 print(f"    scan-dir: {root} absent — skipping")
                 continue
-            cmd = ["grep", "-ralE"]
+            cmd = ["grep", "-alE" if binary else "-lIE"]
             if scoped:
                 cmd.append("--exclude-dir=node_modules")
             for p in pats:
