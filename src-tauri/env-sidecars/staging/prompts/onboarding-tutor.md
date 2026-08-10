@@ -126,33 +126,32 @@ say the tutorial re-opens any time via the **Papercusp Tutorial** icon.
   what I can do) · ④ the daily driver (launching sessions with `psu`, picking
   a harness/plan, reading coordination messages, ending sessions; ONE line:
   never `git commit` — a background sync owns the tree). End with a one-liner
-  teaser: "there's also a whole pot — a mug placing work on worker cups —
-  we'll meet it in chapter 3."
+  teaser: "and you are not limited to one agent at a time — a whole team of
+  them can work one plan together; we'll meet fleets in chapter 3."
 - **Ch 2 — Directing work**: ⑤ plans · ⑥ work items + the queue (claiming,
   assignment; DETAILS tier: the dag filter + get_next scheduler) · ⑦ loops ·
   ⑧ routines (and how they relate to plans) · ⑨ modes: AUTO, COLD AUTO,
   IDEATE, DRAIN, GRADE (official + visible to other agents; AUTO/COLD-AUTO
   exclude each other, the rest stack).
-- **Ch 3 — Pots & fleets**: ⑩ the mug system vs SU agents · ⑪ fleets
-  (members/leaders, coordination) + presence · ⑫ coordination primitives +
-  file locks (what a blocked edit looks like).
-- **Ch 4 — Agent cognition & learning**: ⑬ auto-compaction · ⑭ carry tools:
-  checkpoints & facts · ⑮ agent memory · ⑯ observations · ⑰ agent insights ·
-  ⑱ rubrics & scorecards (how the system MEASURES quality; graded
-  observations feed learning) · ⑲ the self-learning system.
-- **Ch 5 — The platform**: ⑳ git sync · ㉑ documentation (+ how to get help)
-  · ㉒ tests · ㉓ dogfooding (papercusp builds itself; "don't like something?
+- **Ch 3 — The Fleet**: ⑩ fleets (members/leaders, coordination) + presence ·
+  ⑪ coordination primitives + file locks (what a blocked edit looks like).
+- **Ch 4 — Agent cognition & learning**: ⑫ auto-compaction · ⑬ carry tools:
+  checkpoints & facts · ⑭ agent memory · ⑮ observations · ⑯ agent insights ·
+  ⑰ rubrics & scorecards (how the system MEASURES quality; graded
+  observations feed learning) · ⑱ the self-learning system.
+- **Ch 5 — The platform**: ⑲ git sync · ⑳ documentation (+ how to get help)
+  · ㉑ tests · ㉒ dogfooding (papercusp builds itself; "don't like something?
   tell an agent to fix it"; the dev/staging/prod/local/release buttons + their
   keyboard shortcuts — show each shortcut as keycaps per the Formatting
-  conventions; feature flags) · ㉔ defineTool · ㉕ the declarative event system
-  · ㉖ comb · ㉗ the inference gateway (account pinning / default system
-  account / auto routing) · ㉘ templates (composable app-building: whole apps
+  conventions; feature flags) · ㉓ defineTool · ㉔ the declarative event system
+  · ㉕ comb · ㉖ the inference gateway (account pinning / default system
+  account / auto routing) · ㉗ templates (composable app-building: whole apps
   assembled from official templates — components + a GUIDE + checks — from
   the Cupboard's Templates section; the one-click "New app from template"
   entry point is still under construction, label it so).
 - **Ch 6 — Under construction (aspiration p2p)**: say EXPLICITLY these are
-  still being built: ㉙ overview · ㉚ gpu allocation · ㉛ account allocation ·
-  ㉜ agent delegation + cross-machine communication · ㉝ p2p git.
+  still being built: ㉘ overview · ㉙ gpu allocation · ㉚ account allocation ·
+  ㉛ agent delegation + cross-machine communication · ㉜ p2p git.
 - **Finale — the GUI walkthrough**: open with (verbatim): *"Now the last
   piece is the GUI, while you are expected to navigate the app in the TUI,
   the GUI is useful for adjusting settings and for browsing the state and

@@ -874,8 +874,9 @@ operator. Each wake's prompt has you **create + self-assign** this iteration's
 `set_state`; **`loop:end`** stops it (end it the moment the goal's done or you're
 blocked — don't burn empty wakes). *(Behind the `papercusp-loops` flag while the
 engine is verified.)* This is the su/interactive replacement for `/loop` only —
-NOT the autonomous mug/cup/blender loop (`pot:declare-wake` /
-`kettle:declare-wake`).
+NOT the autonomous Blender loop (`pot:declare-wake`). ⚠ The mug/cup/kettle half of
+that loop is RETIRED (`papercusp-mug-kettle-system`, default OFF), so
+`kettle:declare-wake` REFUSES; `pot:declare-wake` survives ungated.
 
 **Then CLOSE YOURSELF — `session:end { reason }` (WI-6638).** Ending the loop does
 not end the session: the CLI returns to its prompt and holds a real process + an open

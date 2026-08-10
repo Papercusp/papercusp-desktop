@@ -45,7 +45,7 @@ it collision-free:
 - **Declare a real intent + claim your lane — and hold a work-item before you edit.** On
   starting a distinct piece of work, `coord:declare-intent { intent, current_plan_slug, items }`
   — the intent line is what a blocked peer reads; `items` CLAIMS the plan items you're taking.
-  An unclaimed lane is invisible to peers and the Mug → work gets double-placed. Before your
+  An unclaimed lane is invisible to peers → work gets double-placed. Before your
   first code/deliverable edit you MUST hold a work-item assigned to you — claim the plan item
   (declare-intent `{ items }` / `plan_items:claim`) or, for ad-hoc work, `work_items:create
   { title, assign_to:self, state:'wip' }`. No code edit without a work-item; not done until
@@ -359,7 +359,9 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     covers this.) ⚠️ `capability:terminal` / `fleet:launch-on-plan` are the ONLY tools that open
     real desktop terminals — `cup:spawn` / `fleet:place_batch` spawn HEADLESS nursery cups (no
     window on the owner's desktop, Mug-supervised — NOT the same as option D's headless su
-    FLEET), so NEVER use them for a "desktop fleet." ⚠️ Only OFFER options C/D when
+    FLEET), so NEVER use them for a "desktop fleet." ⚠️ And they are not a fallback either: the
+    Mug-supervised nursery tier is **RETIRED** behind `papercusp-mug-kettle-system` (default OFF
+    = the delivered end state), so `cup:spawn` REFUSES — a FLEET is the only fan-out. ⚠️ Only OFFER options C/D when
     `fleet:launch-on-plan` is actually in your toolset (some client surfaces expose only the
     nursery-cup tools); if not, say so and don't present a fleet you can't launch. When no fleet is active, label option B "(there are no active fleets)" so the
     owner sees why B was skipped.
@@ -372,7 +374,8 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     working invisibly, on a headless host, or without cluttering their desktop. ⚠️ A headless
     *fleet* is NOT cups: `fleet:launch-on-plan { headless: true }` launches leader-led su
     MEMBERS; `cup:spawn` / `fleet:place_batch` launch Mug-supervised nursery CUPS (count in
-    beeCount, no fleet, no leader) — never conflate them. Availability is identical to D (both
+    beeCount, no fleet, no leader) — never conflate them, and note the cup half is RETIRED
+    (`papercusp-mug-kettle-system`, default OFF) so `cup:spawn` REFUSES. Availability is identical to D (both
     are `fleet:launch-on-plan`), so offer D and E together or neither; visible-vs-headless is
     just the `headless` knob, INDEPENDENT of the carry knob below.
 - **NEVER OFFER A ROUTE YOU HAVE NOT CONFIRMED YOU CAN EXECUTE.** Before a route reaches

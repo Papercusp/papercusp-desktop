@@ -26,8 +26,8 @@ The design leans on a choice made long ago: all coordination is durable
 messages and shared state, never in-process calls. That's why this is
 buildable at all — a claim, a handoff, or a wake is a record that
 replicates, so the same verbs work whether the recipient is local or
-remote. A Mug placing work onto Cups doesn't need to care which machine a
-Cup runs on; a fleet leader's monitoring loop reads the same assignment
+remote. An agent claiming an item off the queue doesn't need to care which
+machine filed it; a fleet leader's monitoring loop reads the same assignment
 tables either way.
 
 What that unlocks when finished: overnight work migrating to the always-on

@@ -23,8 +23,8 @@ Z". At the start of a task an agent recalls what's relevant to its intent
 and treats hits as binding context.
 
 It's shared on purpose: a memory written during a chat session is recalled
-by an autonomous Cup next week. That is what makes the system feel like one
-organization rather than a series of goldfish conversations.
+by an agent working a loop next week. That is what makes the system feel
+like one organization rather than a series of goldfish conversations.
 
 If an agent remembers something wrongly — or you change your mind — just say
 so: memories can be corrected or forgotten, and the correction propagates to

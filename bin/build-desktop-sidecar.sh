@@ -2873,7 +2873,21 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   _pui_triple="${_pui_rust_arch}-apple-darwin"
   echo "    → cross: cargo zigbuild pui for ${_pui_triple}"
   rustup target add "$_pui_triple" >/dev/null 2>&1 || true
-  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="/tmp/zig:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" cargo zigbuild --release --target "$_pui_triple" )
+  # WI-37553: zig lives at a PERSISTENT path now. This call site used to hardcode
+  # the EPHEMERAL /tmp/zig. build-mac-cross.sh was fixed to prefer
+  # ~/.papercusp/zig, but THIS site was not — so the mac leg kept dying with the
+  # opaque `Failed to find zig / cannot find binary path` even after zig had been
+  # installed and the "fix" was believed to be in. Resolve identically, honour the
+  # same env override, and FAIL LOUDLY naming the path so the next occurrence is
+  # self-diagnosing rather than a cargo-zigbuild riddle.
+  _zig_dir="${PAPERCUSP_ZIG_DIR:-$HOME/.papercusp/zig}"
+  [ -x "$_zig_dir/zig" ] || { [ -x /tmp/zig/zig ] && _zig_dir=/tmp/zig; }
+  [ -x "$_zig_dir/zig" ] || {
+    echo "    ✗ zig not found at $_zig_dir/zig (set PAPERCUSP_ZIG_DIR, or install:" >&2
+    echo "      curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C \"\$HOME/.papercusp\" && mv \"\$HOME/.papercusp/zig-linux-x86_64-0.13.0\" \"\$HOME/.papercusp/zig\")" >&2
+    exit 1
+  }
+  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" cargo zigbuild --release --target "$_pui_triple" )
   _pui_target_sub="$_pui_triple/release/pui"
 else
   ( exec 9>&-; cd "$REPO/apps/tui" && cargo build --release )

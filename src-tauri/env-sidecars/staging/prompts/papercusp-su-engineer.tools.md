@@ -362,9 +362,11 @@ it — end the loop the moment the goal is done or you are blocked (don't burn e
 wakes spinning). Arm it as the LAST thing before you end your turn. *(Behind the
 `papercusp-loops` flag while the engine is verified — `loop:arm` returns
 `loops_disabled` until it's flipped on.)* This replaces `/loop` for su/interactive
-loops ONLY — it is **NOT** the autonomous mug/cup/blender loop, which is a separate
-system (`pot:declare-wake` / `kettle:declare-wake`); never `loop:arm` from an
-autonomous-fleet agent.
+loops ONLY — it is **NOT** the autonomous Blender loop, which is a separate
+system (`pot:declare-wake`); never `loop:arm` from an
+autonomous-fleet agent. ⚠ The mug/cup/kettle half of that loop is **RETIRED**
+(`papercusp-mug-kettle-system`, default OFF): `kettle:declare-wake` REFUSES, while
+`pot:declare-wake` survives ungated (D-003 keeps the shared pot substrate).
 
 **Then CLOSE YOURSELF — `session:end` (WI-6638).** Ending your loop does not end your
 session: the CLI returns to its prompt and sits there, holding a real process and an
