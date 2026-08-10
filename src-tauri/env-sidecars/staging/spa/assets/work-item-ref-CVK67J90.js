@@ -1,1 +1,0 @@
-var l=/^(WI|EI|F)-\d+$/i;function i(t){if(!t)return null;const n=t.split(/[:#]/).pop();return n&&l.test(n)?n.toUpperCase():null}function e(t){const n=i(t);if(!n)return{harness:null,id:null};const s=String(t),r=s.lastIndexOf("#");return r<0?{harness:null,id:n}:{harness:s.slice(0,r).split(/[:#]/).pop()||null,id:n}}export{e as n,i as r,l as t};
