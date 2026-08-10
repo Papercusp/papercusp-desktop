@@ -1323,8 +1323,8 @@ mod discovery_tests {
     use std::time::Duration;
 
     use super::{
-        next_operator_port, operator_boot_timeout, parse_operator_discovery, self_heal_probe_due,
-        OperatorDiscovery, SELF_HEAL_WSL_PROBE_MIN_INTERVAL,
+        next_operator_port, operator_boot_timeout, parse_operator_discovery, resolve_route_upgrade,
+        self_heal_probe_due, OperatorDiscovery, SELF_HEAL_WSL_PROBE_MIN_INTERVAL,
     };
 
     #[test]
