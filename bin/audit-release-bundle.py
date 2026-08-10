@@ -891,8 +891,18 @@ def scrub_binaries(dirs):
                     data = data.replace(b, rep)
                 if data != orig:
                     assert len(data) == len(orig), "scrub must preserve byte length"
-                    with open(p, "wb") as fh:
+                    # Write a NEW inode and rename over it, never in place: the
+                    # sidecar copier hardlinks where the FS supports it (this file's
+                    # sidecar copy carries 3 links), and an in-place write would
+                    # reach through every one of them. Measured: the sidecar copy and
+                    # the repo's own node_modules are DIFFERENT inodes, so the shared
+                    # tree is not at risk today — but that is a property of how the
+                    # copier happens to run, not a guarantee, and rename costs nothing.
+                    tmp_p = p + ".scrub.tmp"
+                    with open(tmp_p, "wb") as fh:
                         fh.write(data)
+                    shutil.copymode(p, tmp_p)
+                    os.replace(tmp_p, p)
                     scrubbed += 1
                     print(f"    ✂ scrubbed {os.path.relpath(p, root)}: {', '.join(hits)}")
     print(f"    scrub-binaries: {scrubbed} compiled addon(s) scrubbed")
