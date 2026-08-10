@@ -400,9 +400,18 @@ echo "    ✓ env-sidecars/staging staged ($(du -sh "$ENV_SC" | cut -f1) apparen
 # (same rationale as the env-sidecars staging above). The archive ships in the
 # SERVER app only — see the per-role stash in the build loop below.
 bash bin/stage-source-tree.sh
-if [[ "${PAPERCUSP_STAGE_SOURCE:-0}" == "1" ]]; then
+# WI-37790: this verification defaulted to :-0 while the stager it verifies
+# defaults to :-1 (stage-source-tree.sh:50) and the call above is unconditional.
+# The mismatch meant the mac leg STAGED the tree but never CHECKED that it
+# landed — so a silent staging failure would ship a Server app with no
+# source.tar.zst, and the dev/local buttons would degrade to 'no-source-tree'
+# with nothing in the build log to explain it. Windows runs the identical check
+# at :-1 (build-windows-cross.sh:206); mac now matches, so the two legs agree
+# and an unset env verifies rather than skips.
+if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
   [[ -f src-tauri/sidecar/source.tar.zst ]] \
     || { echo "ERROR: PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no src-tauri/sidecar/source.tar.zst"; exit 1; }
+  echo "    ✓ source.tar.zst staged ($(du -h src-tauri/sidecar/source.tar.zst | cut -f1)) — SERVER role ships it; the GUI role stashes it out (see the build loop)"
 fi
 
 echo "--- tauri build ($MAC_BUILD_TARGET) ---"
