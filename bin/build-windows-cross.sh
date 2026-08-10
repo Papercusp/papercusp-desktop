@@ -295,6 +295,25 @@ for role in $ROLES; do
   EXE="$CROSS_EXE"
   [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role' at $EXE"
 
+  # ── Identity: scrub the ONE path --remap-path-prefix cannot reach ────────────
+  # _WIN_REMAP takes this binary from 359 leaked $HOME occurrences to exactly 1.
+  # The survivor is tauri's permission/ACL codegen baking an absolute
+  # CARGO_MANIFEST_DIR via env!(), which remap never rewrites (it only rewrites
+  # rustc SOURCE paths) — the same residue, same cause, as macOS
+  # (EI-20044309663936316). PE/COFF retains it because, unlike the ELF link, it
+  # does not dead-strip the unreferenced rodata string.
+  #
+  # ⚠ ORDERING INVARIANT — this MUST run BEFORE run_iscc() packs the exe.
+  # Scrubbing after packaging is useless: the installer already carries the
+  # leaky bytes. (On mac this exact call once sat in sign_app(), which runs
+  # AFTER the identity scan, so it never executed and the 0.0.14 cut died with
+  # the leak intact — placement, not presence, is what makes it work.)
+  # Length-preserving, so every PE offset stays valid: verified on this binary
+  # at 22,564,864 bytes in and out, leak 1 -> 0, still `PE32+ executable (GUI)`.
+  # ⚠ MITIGATION, not a fix — the dead-strip root cause is EI-20044309663936316.
+  python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "$EXE" \
+    || fail "scrub-app-binary failed for $EXE — refusing to package a binary carrying build-box identity"
+
   # Assert the release host was actually baked (the 0.0.8 defect: an empty host
   # compiles fine and the updater reads it as "up to date" forever).
   # grep the binary directly (-a) rather than `strings … | grep -q`: under
