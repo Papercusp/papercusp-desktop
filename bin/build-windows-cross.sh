@@ -88,6 +88,14 @@ source "$HERE/lib/release-host.sh"
 load_release_host
 
 TARGET="x86_64-pc-windows-msvc"
+# Identity: keep build-box paths OUT of the shipped .exe. rustc embeds source paths
+# (~/.cargo registry deps, ~/.rustup std) as rodata panic locations; the ELF link
+# dead-strips the unreferenced ones but PE/COFF RETAINS them, exactly as Mach-O does
+# (EI-20044309663936316). Measured on the 0014e cut: papercusp-desktop.exe carried 359
+# occurrences of $HOME while the linux binary carried zero, and Windows runs no identity
+# scan to say so (EI-20094260886633250 / EI-12889). Same flag that took pui 544 -> 0 in
+# build-desktop-sidecar.sh (_PUI_REMAP). $HOME alone covers .cargo, .rustup and the repo.
+_WIN_REMAP="--remap-path-prefix=$HOME=/build"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 # Resolve the cargo target dir ONCE, deterministically — this box relocates it
 # via ~/.cargo/config.toml (target-dir = ~/.cargo-target) AND src-tauri/target is
