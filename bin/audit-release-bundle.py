@@ -645,8 +645,14 @@ def _rule_rx(name):
     sys.exit(2)
 
 
-def prune_docs(dirs):
-    """Delete internal-build-infra docs from an ASSEMBLED (un-staged) docs tree.
+#: FORBIDDEN_PATH rules the sidecar prune applies. Both are LEAK CLASSES that the
+#: tar-exclude path already strips from source.tar.zst but which reach the sidecar
+#: by a different route, so both must be re-applied here.
+SIDECAR_PRUNE_RULES = ("internal-build-infra-docs", "pagefind-search-index")
+
+
+def prune_docs(dirs, rules=SIDECAR_PRUNE_RULES):
+    """Delete generated leak-classes from an ASSEMBLED (un-staged) docs tree.
 
     Why this exists: the stager's --tar-excludes only filters source.tar.zst. The
     desktop sidecar's two doc copies (build-desktop-sidecar.sh: rendered
@@ -655,10 +661,25 @@ def prune_docs(dirs):
     in-build audit, which scans source.tar.zst, is structurally blind to them, and
     0.0.9 shipped the mac VM's sudo/login passwords inside the sidecar while every
     leg's source audit passed CLEAN (WI-4419 follow-up). Prune the SAME paths the
-    release audit forbids, using the gate's own `internal-build-infra-docs` rule as
-    the single source of truth — no second list to drift.
+    release audit forbids, using the gate's OWN rules as the single source of
+    truth — no second list to drift.
+
+    ⚠ WHY `pagefind-search-index` IS IN THAT SET (WI-37620, and it is a REGRESSION
+    of a leak this file already documents): this function applied ONLY the
+    internal-build-infra-docs rule, so the pagefind shards under the sidecar's
+    internal-docs/ shipped unpruned. tar-excludes strips them from source.tar.zst,
+    which is exactly the blind spot this function exists to cover — and it was left
+    half-covered. The 0.0.14 cut then red'd on the owner's bare git user.name baked
+    into internal-docs/pagefind/index/en_7148dd0.pf_index — the SAME literal in the
+    SAME artifact class that red'd the 0.0.9 cut. Note the source markdown is clean:
+    zero shipping .mdx contains that name standalone, so pruning docs alone could
+    never have fixed it — only the generated INDEX carries the indexed word.
     """
-    rx = _rule_rx("internal-build-infra-docs")
+    rxs = [_rule_rx(name) for name in rules]
+
+    def _forbidden(rel_path):
+        return any(rx.search(rel_path) for rx in rxs)
+
     for root in dirs:
         if not os.path.isdir(root):
             print(f"    prune-docs: {root} absent — skipping")
@@ -670,7 +691,7 @@ def prune_docs(dirs):
                 rel = os.path.relpath(os.path.join(dirpath, d), root)
                 # test dirs WITH a trailing slash so `.../build-system/` hits the
                 # rule's `(^|/)build-system/` alternative and the whole subtree goes.
-                if rx.search(rel.replace(os.sep, "/") + "/"):
+                if _forbidden(rel.replace(os.sep, "/") + "/"):
                     shutil.rmtree(os.path.join(dirpath, d), ignore_errors=True)
                     removed.append(rel + "/")
                 else:
@@ -678,7 +699,7 @@ def prune_docs(dirs):
             dirnames[:] = keep
             for fn in filenames:
                 rel = os.path.relpath(os.path.join(dirpath, fn), root)
-                if rx.search(rel.replace(os.sep, "/")):
+                if _forbidden(rel.replace(os.sep, "/")):
                     os.remove(os.path.join(dirpath, fn))
                     removed.append(rel)
         print(f"    prune-docs: {root} — removed {len(removed)} internal-infra path(s)")
@@ -802,6 +823,80 @@ def _expand_archive(path, dest):
         print(f"    scan-dir: cannot expand {path}: {type(e).__name__}: {e}")
         return False
     return False
+
+
+#: Compiled native addons. A build-box path inside one is baked in by the COMPILER
+#: (an assert()/__FILE__ expansion in .rodata), so it is reachable by neither of the
+#: gate's other two remedies: `strip` cannot remove it (verified: `strip
+#: --strip-debug` leaves it — it is .rodata, not debug info), and the file cannot be
+#: pruned because it is loaded at runtime.
+SCRUBBABLE_BINARY_SUFFIXES = (".node", ".so", ".dylib")
+
+
+def scrub_binaries(dirs):
+    """Scrub build-box identity literals out of COMPILED NATIVE ADDONS, in place.
+
+    The gate's remedy line offers two fixes — "prune the leaking file … or scrub the
+    value". For a compiled addon only the second is available, which is why this
+    exists (WI-37620): the 0.0.14 cut red'd on
+    node_modules/ssh2/…/Release/sshcrypto.node carrying the builder's node-gyp
+    include path, sitting in .rodata between a __PRETTY_FUNCTION__ and its
+    neighbours — i.e. an assert() __FILE__ expansion. Deleting the file happens to
+    be safe for THAT package (ssh2 wraps the require in try/catch and falls back to
+    JS crypto), but that is a property of ssh2, not of addons, so a delete rule
+    would be one un-guarded require away from shipping a broken app. Scrubbing is
+    safe for ALL of them and keeps the accelerator.
+
+    Deliberately restricted to compiled addons: a literal in TEXT belongs to a
+    source that should be fixed, and silently rewriting source would hide it.
+
+    Byte-length is PRESERVED exactly (placeholder truncated/padded), so every ELF
+    offset, section size and relocation stays valid — the bytes changed are an
+    assert message, never read for control flow. Literals are applied
+    LONGEST-FIRST so '/home/<user>' is scrubbed before the bare '<user>' inside it.
+    """
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    pairs = sorted(
+        ((v, REDACTION_BY_KEY.get(k, "redacted")) for k, v in lits.items()
+         if v and not is_low_entropy(v)),
+        key=lambda p: -len(p[0]),
+    )
+    if not pairs:
+        print("    scrub-binaries: no high-entropy literals on this box — nothing to do")
+        return 0
+
+    scrubbed = 0
+    for root in dirs:
+        if not os.path.isdir(root):
+            print(f"    scrub-binaries: {root} absent — skipping")
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if not fn.endswith(SCRUBBABLE_BINARY_SUFFIXES):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    data = open(p, "rb").read()
+                except OSError:
+                    continue
+                orig = data
+                hits = []
+                for lit, placeholder in pairs:
+                    b = lit.encode()
+                    if b not in data:
+                        continue
+                    rep = placeholder.encode()[:len(b)].ljust(len(b), b"_")
+                    hits.append(f"{lit} x{data.count(b)}")
+                    data = data.replace(b, rep)
+                if data != orig:
+                    assert len(data) == len(orig), "scrub must preserve byte length"
+                    with open(p, "wb") as fh:
+                        fh.write(data)
+                    scrubbed += 1
+                    print(f"    ✂ scrubbed {os.path.relpath(p, root)}: {', '.join(hits)}")
+    print(f"    scrub-binaries: {scrubbed} compiled addon(s) scrubbed")
+    return 0
 
 
 def scan_dir(dirs):
@@ -1002,6 +1097,8 @@ def main():
         return source_leakers(sys.argv[2:])
     if sys.argv[1] == "--prune-docs":
         return prune_docs(sys.argv[2:])
+    if sys.argv[1] == "--scrub-binaries":
+        return scrub_binaries(sys.argv[2:])
     if sys.argv[1] == "--scan-dir":
         return scan_dir(sys.argv[2:])
     bundle = sys.argv[1]

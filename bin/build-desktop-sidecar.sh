@@ -1137,6 +1137,11 @@ if [[ -f "$_audit_py" ]]; then
   python3 "$_audit_py" --prune-docs \
     "$SIDECAR_DIR/internal-docs" \
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+  # WI-37620: a build-box path baked into a COMPILED addon (.rodata assert string)
+  # is reachable by neither of the gate's other remedies — `strip` leaves it and the
+  # file is needed at runtime — so scrub it. Must run BEFORE the scan below.
+  echo "→ scrubbing build-box identity from compiled native addons (release-privacy, WI-37620)"
+  python3 "$_audit_py" --scrub-binaries "$SIDECAR_DIR/node_modules"
   if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
     echo "→ identity-scanning assembled sidecar (release gate, honors NO path-exclude)"
     if ! python3 "$_audit_py" --scan-dir "$SIDECAR_DIR"; then
