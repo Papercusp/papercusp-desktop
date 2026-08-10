@@ -963,7 +963,7 @@ def scan_dir(dirs):
             if not os.path.isdir(root):
                 print(f"    scan-dir: {root} absent — skipping")
                 continue
-            cmd = ["grep", "-alE" if binary else "-lIE"]
+            cmd = ["grep", "-ralE" if binary else "-rlIE"]
             if scoped:
                 cmd.append("--exclude-dir=node_modules")
             for p in pats:

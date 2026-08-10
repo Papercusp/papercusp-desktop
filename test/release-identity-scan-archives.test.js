@@ -163,6 +163,57 @@ test('an identity literal in an archive member PATH is caught, not just in conte
   }
 });
 
+// WI-37553 — the HIGH/LOW entropy asymmetry. `-a` (read binary as text) is correct
+// for a high-entropy literal and WRONG for a low-entropy one: a ~3-char bare first
+// name word-boundary-matched across gigabytes of compiled/compressed bytes matches
+// constantly by chance and carries no information. Measured on the 0.0.14 AppDir,
+// 9 of 16 "leaks" were exactly that noise — including glibc's own libm.so.6 and a
+// Go symbol naming the AVI video format — and it nearly cost days of work removing
+// a real feature to fix nothing. These two tests pin BOTH directions, because
+// "stop crying wolf" and "stop catching real leaks" are one edit apart.
+function lowEntropyLiteral() {
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
+  for (const line of r.stdout.split('\n')) {
+    const [value, , low] = line.split('\t');
+    if (value && low === '1') return value;
+  }
+  return null; // this host declares no low-entropy identity — nothing to assert
+}
+
+test('a LOW-entropy literal in a BINARY file does NOT fail the scan (noise, not evidence)', () => {
+  const lit = lowEntropyLiteral();
+  if (!lit) return; // no low-entropy literal on this host
+  const dir = fixture('lowbin');
+  try {
+    // NUL bytes ⇒ grep classifies it binary, exactly like a .so / packfile / corestore.
+    fs.writeFileSync(
+      path.join(dir, 'bundle/blob.bin'),
+      Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(`x${lit}=`), Buffer.from([0, 3])]),
+    );
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 0,
+      `a bare first name inside BINARY bytes is chance, not a leak:\n${r.stdout}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a LOW-entropy literal in a TEXT file STILL fails the scan (the gate keeps its power)', () => {
+  const lit = lowEntropyLiteral();
+  if (!lit) return;
+  const dir = fixture('lowtext');
+  try {
+    fs.writeFileSync(path.join(dir, 'bundle/notes.txt'), `written by ${lit} today\n`);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1,
+      `a bare first name in TEXT is still a real leak and must fail:\n${r.stdout}`);
+    assert.match(r.stdout, /notes\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
   // The actual leak found in the shipping bundle. Both record build-box absolute
   // paths; PG rewrites both on next start, so neither is needed to restore a seed.
