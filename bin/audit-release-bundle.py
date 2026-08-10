@@ -730,6 +730,23 @@ def _iter_archives(dirs):
                     yield os.path.join(dirpath, fn)
 
 
+#: An expanded archive is treated as an OS ROOTFS when it has `usr/` plus at least
+#: one other top-level system directory. Deliberately conservative — requiring the
+#: PAIR keeps a source tree that merely happens to contain a `usr/` fixture from
+#: being waved through, and everything here is still subject to the high-entropy
+#: pass, which is what actually catches a leaked path/email/hostname.
+SYSTEM_IMAGE_MARKERS = ("etc", "bin", "sbin", "lib", "var", "root")
+
+
+def _looks_like_system_image(root):
+    """Is this expanded archive an OS rootfs (a WSL/container image) rather than ours?"""
+    try:
+        top = {e.name for e in os.scandir(root) if e.is_dir()}
+    except OSError:
+        return False
+    return "usr" in top and bool(top & set(SYSTEM_IMAGE_MARKERS))
+
+
 def _expand_tar_memberwise(path, dest):
     """Read a tar by MEMBER, never by path.
 
@@ -993,7 +1010,25 @@ def scan_dir(dirs):
                     uninspectable.append(arc)
                     continue
                 grep_l(high, False, [dest], label=arc)
-                grep_l(low, True, [dest], label=arc, binary=False)
+                # A SYSTEM IMAGE (an OS rootfs tarball, e.g. the WSL runtime) is
+                # vendor content end to end, so a bare first name inside it is never
+                # evidence — it is some upstream author's. Measured on the 0.0.14
+                # AppDir: the only low-entropy hit in papercup-runtime.tar.gz was
+                # `asm/vmx.h` line 21, the Linux kernel header crediting KVM's
+                # co-creator, who happens to share the owner's first name. That is
+                # the same class the gate already excludes node_modules for.
+                # HIGH-entropy literals are STILL hunted here (see the call above):
+                # a real build path, email or hostname baked into a rootfs is a
+                # genuine leak and must still fail.
+                # ⚠ Detected per-archive rather than by excluding directory NAMES:
+                # `--exclude-dir` matches a BASENAME, so excluding `lib`/`include`
+                # would also blind the scan inside our OWN source.tar.zst.
+                if _looks_like_system_image(dest):
+                    print(f"    archives: {os.path.basename(arc)} is an OS image — "
+                          f"low-entropy (bare-name) pass skipped as vendor; "
+                          f"high-entropy pass still applied")
+                else:
+                    grep_l(low, True, [dest], label=arc, binary=False)
                 shutil.rmtree(dest, ignore_errors=True)
 
     if uninspectable:
