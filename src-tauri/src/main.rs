@@ -1285,6 +1285,89 @@ mod discovery_tests {
         ));
     }
 
+    /// The WI-37798 guard's predicate, split out from the file read so it can be
+    /// proven FALSIFIABLE against a synthetic body. Proving it the obvious way —
+    /// editing main.rs to break it and watching the test go red — is unsafe in
+    /// this repo: git-sync sweeps the whole tree on a schedule and would commit
+    /// the deliberately-broken intermediate. So the mutant is a string here, and
+    /// the shared tree is never dirtied.
+    fn assert_windows_discovery_recovery(body: &str) {
+        assert!(
+            body.contains("target_os = \"windows\""),
+            "WI-37798 REGRESSION: operator_discovery_port_from_home() no longer has a \
+             Windows-specific branch, so on Windows it can only read $HOME — which Windows \
+             does not set. upstream_base() would then have NO recovery in a release build \
+             and every /api call would 503 forever after a missed port latch."
+        );
+        assert!(
+            body.contains("read_operator_discovery_via_wsl"),
+            "WI-37798 REGRESSION: the Windows branch of operator_discovery_port_from_home() \
+             no longer consults the WSL distro. The sidecar writes its discovery file INSIDE \
+             the distro (/home/papercup/.papercusp), so a $HOME-only read on Windows always \
+             returns None and the self-heal silently stops healing."
+        );
+    }
+
+    /// WI-37798 CLASS guard — the regression this whole fix exists to prevent,
+    /// and the one no other test can see.
+    ///
+    /// On a PACKAGED WINDOWS build, `upstream_base()`'s only recovery from a
+    /// missed port latch is `operator_discovery_port_from_home()`: the
+    /// `cfg!(debug_assertions)` :3070 branch below it is compiled OUT of release.
+    /// If that function ever goes back to reading `$HOME` ALONE, the recovery
+    /// becomes a GUARANTEED no-op on Windows — Windows sets no HOME, and the
+    /// sidecar runs inside the WSL distro writing to /home/papercup/.papercusp —
+    /// so every /api request 503s for the life of the process, with no way back.
+    /// That is the original defect verbatim.
+    ///
+    /// What makes it worth a guard rather than care: the regression is INVISIBLE
+    /// everywhere it would normally be caught. Linux and macOS have a real HOME,
+    /// and every dev build still answers via the debug-only :3070 branch, so it
+    /// reappears only in a release Windows bundle — the one artifact no unit test
+    /// runs in. A source-shape assertion is crude, but it fails on ANY host, and
+    /// that is the property that matters here.
+    #[test]
+    fn windows_discovery_recovery_is_not_home_only() {
+        let src = include_str!("main.rs");
+        // ASSEMBLED at runtime, never written as one literal: a guard that scans
+        // its own file will otherwise match the needle inside THIS test and slice
+        // the wrong "body". That is not hypothetical — it is what this test did on
+        // its first run, and it failed pointing at the real function, which is the
+        // most misleading way a source-shape guard can be wrong.
+        let needle = format!(
+            "pub(crate) fn {}() -> Option<u16> {{",
+            "operator_discovery_port_from_home"
+        );
+        let start = src.find(&needle).expect(
+            "operator_discovery_port_from_home() must exist — it is upstream_base()'s \
+                 ONLY recovery path in a release build (WI-37798)",
+        );
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("operator_discovery_port_from_home() must be brace-terminated");
+        assert_windows_discovery_recovery(&body[..end]);
+    }
+
+    /// A guard that has never failed is a guard nobody has tested. This feeds the
+    /// predicate the exact body the fix REPLACED — the pre-WI-37798 `$HOME`-only
+    /// read — and asserts it is rejected. Without this, a typo'd `contains(...)`
+    /// needle would make the guard above pass unconditionally and silently police
+    /// nothing.
+    #[test]
+    fn the_windows_discovery_guard_rejects_a_home_only_body() {
+        // Body only — deliberately WITHOUT the signature line, so this fixture can
+        // never be the thing the scanning test above finds and measures.
+        let pre_fix_body = "    let home = std::env::var_os(\"HOME\")?;\n\
+                            read_operator_discovery(std::path::Path::new(&home)).map(|d| d.port)";
+        let verdict = std::panic::catch_unwind(|| assert_windows_discovery_recovery(pre_fix_body));
+        assert!(
+            verdict.is_err(),
+            "the WI-37798 guard accepted the very body the fix replaced — it is not \
+             actually checking anything"
+        );
+    }
+
     #[test]
     fn parses_valid_payload() {
         let d = parse_operator_discovery(
