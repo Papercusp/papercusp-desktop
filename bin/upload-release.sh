@@ -189,6 +189,62 @@ for f in "${ARTIFACTS[@]}"; do
 done
 echo
 
+# ── GUARD (WI-37738): do the BINARIES point at the prefix we are publishing to? ──
+# The failure this exists to stop, which shipped for real on 2026-07-28:
+# the release host is baked into the binary at COMPILE time (option_env!
+# PAPERCUSP_RELEASE_HOST → baked_release_host() in main.rs), while the publish
+# target below is read from the environment at UPLOAD time. Re-point the host
+# between build and upload — or build on a box with a stale release-host.env —
+# and you produce binaries that ask the OLD prefix forever, then upload them to
+# the NEW one. Nothing errors. Every install from that build is permanently
+# stranded: the old prefix keeps answering 200 with a frozen manifest, so the
+# app is told it is current and never updates again. It took ~2 weeks and a
+# real-VM verification pass to notice.
+#
+# Fails on a PROVEN mismatch; warns (never blocks) when it cannot see inside the
+# artifacts, because a compressed artifact yielding no strings is not evidence of
+# anything. Set ALLOW_HOST_MISMATCH=1 to override deliberately.
+BASE_HOST="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
+echo "==> verifying baked release host in artifacts (expect prefix: <secret>)"
+host_checked=0
+host_bad=0
+for f in "${ARTIFACTS[@]}"; do
+  # Only uncompressed artifacts expose the baked string; a .tar.gz/.zip legitimately
+  # yields nothing and is SKIPPED rather than counted as agreement.
+  found="$(strings -a "$f" 2>/dev/null \
+    | grep -oE "https?://${BASE_HOST}/[A-Za-z0-9_-]+" \
+    | sed -E "s#^https?://${BASE_HOST}/##" | sort -u)" || true
+  [[ -z "$found" ]] && continue
+  host_checked=$((host_checked + 1))
+  while IFS= read -r prefix; do
+    [[ -z "$prefix" ]] && continue
+    if [[ "$prefix" != "$KEY_PREFIX" ]]; then
+      host_bad=$((host_bad + 1))
+      echo "    ✗ $(basename "$f") is baked to a DIFFERENT prefix than we are publishing to" >&2
+    fi
+  done <<< "$found"
+done
+
+if [[ "$host_bad" -gt 0 ]]; then
+  if [[ "${ALLOW_HOST_MISMATCH:-0}" == "1" ]]; then
+    echo "    ⚠ baked-host mismatch OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — every install from this build will be stranded on the wrong prefix." >&2
+  else
+    echo >&2
+    echo "ERROR: these binaries ask a DIFFERENT release prefix than the one being published to." >&2
+    echo "       Shipping them strands every install from this build PERMANENTLY: the prefix they" >&2
+    echo "       ask keeps answering, so the app is told it is up to date and never updates again." >&2
+    echo "       Rebuild with the CURRENT ~/.papercusp/release-host.env in the environment, so the" >&2
+    echo "       baked host matches the upload target. (WI-37738. ALLOW_HOST_MISMATCH=1 to override.)" >&2
+    exit 1
+  fi
+elif [[ "$host_checked" -eq 0 ]]; then
+  echo "    ⚠ could not read a baked host from ANY artifact — host/target agreement is UNVERIFIED for this cut." >&2
+  echo "      (Not fatal: compressed artifacts expose no strings. But nothing here proves the binaries point at this prefix.)" >&2
+else
+  echo "    ✓ ${host_checked} artifact(s) carry the prefix being published to"
+fi
+echo
+
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "DRY_RUN=1 — nothing uploaded."
   exit 0
