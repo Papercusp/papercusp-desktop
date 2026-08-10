@@ -783,6 +783,36 @@ prune_foreign_onnx_bins() {
 # this class of leak hides until the release gate. Safe against the dev tree —
 # the sidecar holds real COPIES (the closure walker cp's each package), and
 # `find -type d` never follows a symlink, so a symlinked package is skipped.
+# Vendored TEST FIXTURES have no runtime role, and they are where HOSTILE archives
+# live: tar-fs ships test/fixtures/invalid.tar, a tar whose links deliberately
+# escape the extraction root (it exists precisely to prove tar-fs rejects it). The
+# WI-4419 identity scan correctly refuses to report CLEAN on bytes it could not
+# read, so that one vendored fixture failed the 0.0.14 release at minute 22 of a
+# 22-minute cut (WI-37620). audit-release-bundle.py now reads tars member-wise and
+# is no longer stoppable by such a member — this prune is the other half: the junk
+# should not be in what ships at all.
+#
+# Prune at the SOURCE, per the same doctrine as prune_gyp_build_intermediates
+# ("never add an exclude here" — the scan honors no path-exclude list), and in
+# EVERY build, so a dev sidecar never differs structurally from the shipped one.
+#
+# Deliberately NARROW: only `<pkg>/test|tests/fixtures`. A blanket `-name test`
+# would also match a legitimately-named PACKAGE (node_modules/test), and a wrong
+# prune breaks the app at runtime for a beta tester — far worse than shipping junk.
+prune_vendored_test_fixtures() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  local d pruned=0
+  while IFS= read -r -d '' d; do
+    rm -rf "$d"
+    pruned=$((pruned+1))
+  done < <(find "$root" -type d \( \
+             -path '*/node_modules/*/test/fixtures'  -o \
+             -path '*/node_modules/*/tests/fixtures' -o \
+             -path '*/node_modules/*/test/fixture'   \) -print0 2>/dev/null)
+  [[ $pruned -gt 0 ]] && echo "  ✂ pruned $pruned vendored test-fixture dir(s) (WI-37620: no runtime role, and they carry deliberately-hostile archives)"
+  return 0
+}
 prune_gyp_build_intermediates() {
   local root="$1"
   [[ -d "$root" ]] || return 0
@@ -1098,6 +1128,8 @@ fi
 #       paths. Must run BEFORE the identity scan below, which is what catches them.
 echo "→ pruning node-gyp build scaffolding from sidecar native modules (release-privacy, WI-4419)"
 prune_gyp_build_intermediates "$SIDECAR_DIR"
+echo "→ pruning vendored test fixtures from sidecar (release-privacy, WI-37620)"
+prune_vendored_test_fixtures "$SIDECAR_DIR"
 
 _audit_py="$HERE/audit-release-bundle.py"
 if [[ -f "$_audit_py" ]]; then

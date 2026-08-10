@@ -117,6 +117,52 @@ test('an archive the gate cannot open FAILS rather than being skipped', () => {
   }
 });
 
+// WI-37620. The test above is right that an UNREADABLE archive must fail. But the
+// gate applied that verdict to a READABLE tar it merely refused to WRITE: tar-fs
+// vendors test/fixtures/invalid.tar, whose links deliberately escape the extraction
+// root, and `tarfile.extractall` on Python >=3.12 raises on it (the `data` filter is
+// correct to refuse). That halted the 0.0.14 release at minute 22 of a 22-minute cut
+// on bytes that were perfectly readable. Reading member-wise fixes it WITHOUT
+// weakening anything — which is exactly what these two assertions pin: a hostile
+// member must not stop the scan, AND a literal hiding behind one must still be caught.
+test('a tar whose links escape the root is still SCANNED, and a literal inside it is caught', () => {
+  const lit = identityLiteral();
+  const dir = fixture('hostile');
+  try {
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.symlinkSync('../', path.join(stage, 'foo'));           // the escaping member
+    fs.writeFileSync(path.join(stage, 'secret.txt'), `leaked ${lit}\n`);
+    execFileSync('tar', ['-cf', path.join(dir, 'bundle/hostile.tar'), '-C', stage, 'foo', 'secret.txt']);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `a hostile member must not hide a literal:\n${r.stdout}`);
+    // The specific regression: it must FAIL on the literal, not on inspectability.
+    assert.doesNotMatch(r.stdout, /COULD NOT BE INSPECTED/);
+    assert.match(r.stdout, /hostile\.tar!secret\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Coverage extractall never had: it materialises member paths as real directories,
+// and the scan greps file CONTENTS — so an identity literal that appears only in a
+// member's PATH was invisible. Member names are now written to a manifest and read.
+test('an identity literal in an archive member PATH is caught, not just in contents', () => {
+  const lit = identityLiteral();
+  const dir = fixture('pathlit');
+  try {
+    const stage = path.join(dir, 'stage', `home-${lit}`);
+    fs.mkdirSync(stage, { recursive: true });
+    fs.writeFileSync(path.join(stage, 'harmless.txt'), 'nothing sensitive here\n');
+    execFileSync('tar', ['-czf', path.join(dir, 'bundle/paths.tar.gz'),
+                         '-C', path.join(dir, 'stage'), `home-${lit}`]);
+    const r = scanDir(path.join(dir, 'bundle'));
+    assert.equal(r.status, 1, `a literal in a member PATH must fail the scan:\n${r.stdout}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
   // The actual leak found in the shipping bundle. Both record build-box absolute
   // paths; PG rewrites both on next start, so neither is needed to restore a seed.

@@ -709,6 +709,59 @@ def _iter_archives(dirs):
                     yield os.path.join(dirpath, fn)
 
 
+def _expand_tar_memberwise(path, dest):
+    """Read a tar by MEMBER, never by path.
+
+    `tarfile.extractall` MATERIALISES member paths, so one member whose link
+    escapes the destination makes the whole call raise — Python >=3.12's default
+    `data` filter is right to refuse it. But "I refused to write this member" is
+    not "I could not read these bytes", and conflating the two is expensive: a
+    vendored security FIXTURE (tar-fs ships test/fixtures/invalid.tar, a tar whose
+    links deliberately escape the root) halted the 0.0.14 release at minute 22 of
+    a 22-minute cut on an archive whose bytes are perfectly readable (WI-37620).
+
+    Reading members individually needs no path TRUST at all: only regular-file
+    payloads are written, under a SANITISED relative path ('/', '.' and '..'
+    components dropped), so nothing lands outside dest and no link is ever
+    followed — strictly safer than extractall, not a relaxation of it. The
+    sanitised path deliberately keeps the member's own name, because the caller
+    reports findings as `archive!member` and "some archive is dirty" is not
+    actionable. Member NAMES and link targets additionally go into a manifest, so
+    an identity literal embedded in a member's PATH is scanned too: coverage
+    extractall never had, because the scan greps file CONTENTS and a materialised
+    directory name is not content.
+
+    Returns False when a payload genuinely cannot be read — unknown is not absent.
+    """
+    os.makedirs(dest, exist_ok=True)
+    names = []
+    with tarfile.open(path) as tf:
+        for idx, member in enumerate(tf):
+            names.append(member.name)
+            if member.linkname:
+                names.append(member.linkname)
+            if not member.isfile():
+                continue
+            src = tf.extractfile(member)
+            if src is None:
+                # A regular file whose payload will not open IS a hole in the scan.
+                print(f"    scan-dir: {path}: member {member.name!r} payload unreadable")
+                return False
+            parts = [p for p in member.name.replace("\\", "/").split("/")
+                     if p not in ("", ".", "..")]
+            out = os.path.join(dest, *parts) if parts else os.path.join(dest, f"member{idx}")
+            # Two members can sanitise to one path ('a/../b' and 'b'); never clobber.
+            while os.path.exists(out):
+                out = f"{out}.{idx}"
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as fh:
+                shutil.copyfileobj(src, fh)
+    with open(os.path.join(dest, "__member_names__.txt"), "w",
+              encoding="utf-8", errors="replace") as fh:
+        fh.write("\n".join(names))
+    return True
+
+
 def _expand_archive(path, dest):
     """Expand ONE archive into dest.
 
@@ -728,9 +781,9 @@ def _expand_archive(path, dest):
             r = sh(f"zstd -dc {q(path)} | tar -xf - -C {q(dest)}")
             return r.returncode == 0
         if tarfile.is_tarfile(path):
-            with tarfile.open(path) as tf:
-                tf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed
-            return True
+            # Member-wise on purpose — see _expand_tar_memberwise. A hostile member
+            # must not be able to halt a release on bytes that are readable.
+            return _expand_tar_memberwise(path, dest)
         if low.endswith(".zst"):
             return sh(f"zstd -dc {q(path)} > {q(os.path.join(dest, 'payload'))}").returncode == 0
         if low.endswith(".gz"):
