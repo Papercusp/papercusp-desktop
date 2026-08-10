@@ -356,6 +356,31 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
 # sign seals them into CodeResources. ─────────────────────────────────────────
 sign_app() { # $1=app
   local app="$1" args=(--entitlements-xml-path "$ENTITLEMENTS")
+
+  # WI-37553: scrub build-box identity out of the app executable BEFORE signing.
+  # The mac binary carries the crate's absolute CARGO_MANIFEST_DIR (…/src-tauri),
+  # one occurrence per lipo'd arch slice, from tauri's permission/ACL codegen. The
+  # linux binary is CLEAN from the same codegen, so the difference is the LINK
+  # (Mach-O ld vs ELF --gc-sections dead-strip), not the source — and
+  # --remap-path-prefix provably cannot reach it (the remap works here: 86
+  # /build-home strings are present, yet the remapped form of this path is in
+  # neither binary). Left in, the L564 identity scan hard-fails the whole cut.
+  #
+  # ⚠ THIS IS THE CHOKEPOINT ON PURPOSE. It sits INSIDE sign_app rather than at a
+  # call site so the ordering invariant cannot be routed around: scrubbing AFTER
+  # rcodesign would invalidate the signature, and the scan at L564 runs later
+  # still. Byte length is preserved exactly, so every Mach-O offset stays valid.
+  # ⚠ MITIGATION, not a fix — the dead-strip root cause is tracked separately.
+  local _macos_dir="$app/Contents/MacOS" _exes=()
+  if [[ -d "$_macos_dir" ]]; then
+    while IFS= read -r -d '' _f; do _exes+=("$_f"); done \
+      < <(find "$_macos_dir" -maxdepth 1 -type f -perm -u+x -print0)
+    if (( ${#_exes[@]} > 0 )); then
+      python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "${_exes[@]}" \
+        || fail "scrub-app-binary failed for $app"
+    fi
+  fi
+
   [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
   rcodesign sign "${args[@]}" "$app" >/dev/null 2>&1 \

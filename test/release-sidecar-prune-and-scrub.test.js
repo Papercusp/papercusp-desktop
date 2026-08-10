@@ -154,6 +154,89 @@ test('scrub-binaries leaves a CLEAN addon byte-identical', () => {
   }
 });
 
+// ── WI-37553: --scrub-app-binary (the mac .app executable) ───────────────────
+// A THIRD scrub case, separate from --scrub-binaries: that one walks a tree by
+// SCRUBBABLE_BINARY_SUFFIXES and would never match an extension-less executable
+// like Contents/MacOS/papercusp-desktop. The mac binary carries the crate's
+// absolute CARGO_MANIFEST_DIR from tauri's permission codegen (the linux binary
+// is clean from the same codegen — a Mach-O vs ELF dead-strip difference), and
+// --remap-path-prefix provably cannot reach it.
+//
+// The byte-length assertion is the load-bearing one: the scrub rewrites bytes
+// inside an already-linked binary, so every Mach-O offset, section size and
+// relocation stays valid ONLY because the placeholder is padded to the literal's
+// exact length. A regression there would produce a corrupt, signable, shippable
+// binary — which is exactly the failure no later gate would catch.
+function highEntropyLiteral() {
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
+  for (const line of r.stdout.split('\n')) {
+    const value = line.split('\t')[0];
+    if (value && value.length > 12) return value;
+  }
+  throw new Error('no high-entropy identity literal available on this host');
+}
+
+test('--scrub-app-binary removes the literal and PRESERVES byte length exactly', () => {
+  const lit = highEntropyLiteral();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wi37553-app-'));
+  try {
+    // Extension-less, like a real .app executable, with NULs so it reads binary.
+    const p = path.join(dir, 'papercusp-desktop');
+    const blob = Buffer.concat([
+      Buffer.from([0, 1, 2]), Buffer.from(`prefix${lit}/src-tauri suffix`), Buffer.from([0, 3]),
+    ]);
+    fs.writeFileSync(p, blob);
+    const before = fs.statSync(p).size;
+
+    const r = spawnSync('python3', [AUDIT, '--scrub-app-binary', p], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `scrub-app-binary failed:\n${r.stdout}${r.stderr}`);
+
+    const after = fs.readFileSync(p);
+    assert.equal(after.length, before, 'scrub MUST preserve byte length exactly');
+    assert.equal(after.includes(lit), false, 'the identity literal must be gone');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--scrub-app-binary takes EXPLICIT files and never sweeps a directory', () => {
+  const lit = highEntropyLiteral();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wi37553-scope-'));
+  try {
+    // A sibling carrying the SAME literal, not named on the command line. If this
+    // is rewritten, the flag has quietly become a tree walk.
+    const named = path.join(dir, 'papercusp-desktop');
+    const bystander = path.join(dir, 'other-binary');
+    const blob = Buffer.concat([Buffer.from([0, 1]), Buffer.from(`x${lit}y`), Buffer.from([0])]);
+    fs.writeFileSync(named, blob);
+    fs.writeFileSync(bystander, blob);
+
+    const r = spawnSync('python3', [AUDIT, '--scrub-app-binary', named], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `scrub-app-binary failed:\n${r.stdout}${r.stderr}`);
+
+    assert.equal(fs.readFileSync(named).includes(lit), false, 'the named file must be scrubbed');
+    assert.ok(fs.readFileSync(bystander).equals(blob),
+      'an unnamed sibling must be byte-identical — this flag must never walk a tree');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('build-mac-cross signs only AFTER scrubbing — the ordering invariant', () => {
+  // Scrubbing after rcodesign would invalidate the signature; the scan at the end
+  // of the producer runs later still. The scrub lives INSIDE sign_app precisely so
+  // a new caller cannot reorder it, so assert that structural fact, not a comment.
+  const src = fs.readFileSync(path.join(root, 'bin/build-mac-cross.sh'), 'utf8');
+  const body = src.slice(src.indexOf('sign_app() {'));
+  const scrubAt = body.indexOf('--scrub-app-binary');
+  const signAt = body.indexOf('rcodesign sign');
+  assert.ok(scrubAt > -1, 'sign_app must scrub the app executable (WI-37553)');
+  assert.ok(signAt > -1, 'sign_app must still sign');
+  assert.ok(scrubAt < signAt,
+    'the scrub must run BEFORE rcodesign — signing first would invalidate the signature');
+});
+
 function* walk(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   yield [dir, entries.filter((e) => e.isDirectory()).map((e) => e.name),

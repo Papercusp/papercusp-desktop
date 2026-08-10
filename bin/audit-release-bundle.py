@@ -868,6 +868,104 @@ def _expand_archive(path, dest):
 SCRUBBABLE_BINARY_SUFFIXES = (".node", ".so", ".dylib")
 
 
+def _high_entropy_pairs():
+    """(literal, placeholder) pairs, LONGEST FIRST so '/home/<user>' is scrubbed
+    before the bare '<user>' nested inside it. Low-entropy literals are excluded:
+    a bare first name matches by chance in compiled bytes (WI-37553)."""
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    return sorted(
+        ((v, REDACTION_BY_KEY.get(k, "redacted")) for k, v in lits.items()
+         if v and not is_low_entropy(v)),
+        key=lambda p: -len(p[0]),
+    )
+
+
+def _scrub_one(p, pairs):
+    """Length-preserving identity scrub of ONE file, in place. Returns the hit
+    list ([] when nothing matched, so the caller can stay quiet).
+
+    Shared by --scrub-binaries and --scrub-app-binary so the two can never drift
+    on the byte-length invariant, which is the property that makes this safe:
+    every ELF/Mach-O offset, section size and relocation stays valid because the
+    placeholder is truncated/padded to the literal's exact length.
+    """
+    try:
+        data = open(p, "rb").read()
+    except OSError:
+        return []
+    orig = data
+    hits = []
+    for lit, placeholder in pairs:
+        b = lit.encode()
+        if b not in data:
+            continue
+        rep = placeholder.encode()[:len(b)].ljust(len(b), b"_")
+        hits.append(f"{lit} x{data.count(b)}")
+        data = data.replace(b, rep)
+    if not hits or data == orig:
+        return []
+    assert len(data) == len(orig), "scrub must preserve byte length"
+    # Write a NEW inode and rename over it, never in place: the sidecar copier
+    # hardlinks where the FS supports it, and an in-place write would reach
+    # through every link.
+    tmp_p = p + ".scrub.tmp"
+    with open(tmp_p, "wb") as fh:
+        fh.write(data)
+    shutil.copymode(p, tmp_p)
+    os.replace(tmp_p, p)
+    return hits
+
+
+def scrub_app_binary(paths):
+    """Scrub build-box identity out of APP EXECUTABLES named EXPLICITLY.
+
+    A THIRD case, deliberately kept separate from --scrub-binaries: that one walks
+    a TREE selecting compiled addons by SCRUBBABLE_BINARY_SUFFIXES, and would never
+    match an extension-less executable like Contents/MacOS/papercusp-desktop. This
+    one takes explicit FILE paths and can never sweep a directory.
+
+    ⚠ THIS IS A MITIGATION, NOT A FIX — the root cause is tracked separately.
+    WI-37553: the macOS .app executable carries the crate's absolute
+    CARGO_MANIFEST_DIR (…/src-tauri), one occurrence per lipo'd arch slice. It
+    comes from tauri's permission/ACL codegen, whose build-script output bakes the
+    manifest dir — and that output contains the path on BOTH targets, yet only the
+    darwin binary retains it. So the difference is the LINK (Mach-O ld vs ELF
+    --gc-sections dead-stripping), not the source, and the linux binary is clean.
+
+    Two fixes were ruled OUT with evidence rather than by assumption:
+      • --remap-path-prefix cannot reach it. The remap IS applied and IS working on
+        the mac build (86 `/build-home` + 1262 `/build-cargo` strings present), yet
+        the REMAPPED form of this path appears in NEITHER binary — so it is not a
+        rustc source-path embedding at all.
+      • Changing darwin link flags (-Wl,-dead_strip) is untestable here: the box is
+        linux and the artifact is a universal, signed Mach-O. An unverifiable link
+        change on a shipping app is a worse risk than the string.
+
+    The scrubbed bytes are an unused permission-manifest path — never read for
+    control flow in a packaged app — and byte length is preserved exactly.
+
+    ⚠ ORDERING IS LOAD-BEARING: run this BEFORE code signing. build-mac-cross.sh
+    signs with rcodesign and only then scans, so scrubbing after signing would
+    invalidate the signature.
+    """
+    pairs = _high_entropy_pairs()
+    if not pairs:
+        print("    scrub-app-binary: no high-entropy literals on this box — nothing to do")
+        return 0
+    scrubbed = 0
+    for p in paths:
+        if not os.path.isfile(p):
+            print(f"    scrub-app-binary: {p} absent — skipping")
+            continue
+        hits = _scrub_one(p, pairs)
+        if hits:
+            scrubbed += 1
+            print(f"    ✂ scrubbed {os.path.basename(p)}: {', '.join(hits)}")
+    print(f"    scrub-app-binary: {scrubbed} executable(s) scrubbed")
+    return 0
+
+
 def scrub_binaries(dirs):
     """Scrub build-box identity literals out of COMPILED NATIVE ADDONS, in place.
 
@@ -890,13 +988,7 @@ def scrub_binaries(dirs):
     assert message, never read for control flow. Literals are applied
     LONGEST-FIRST so '/home/<user>' is scrubbed before the bare '<user>' inside it.
     """
-    lits = identity_literals()
-    lits.update(KNOWN_SENSITIVE_IDENTITIES)
-    pairs = sorted(
-        ((v, REDACTION_BY_KEY.get(k, "redacted")) for k, v in lits.items()
-         if v and not is_low_entropy(v)),
-        key=lambda p: -len(p[0]),
-    )
+    pairs = _high_entropy_pairs()
     if not pairs:
         print("    scrub-binaries: no high-entropy literals on this box — nothing to do")
         return 0
@@ -911,33 +1003,8 @@ def scrub_binaries(dirs):
                 if not fn.endswith(SCRUBBABLE_BINARY_SUFFIXES):
                     continue
                 p = os.path.join(dirpath, fn)
-                try:
-                    data = open(p, "rb").read()
-                except OSError:
-                    continue
-                orig = data
-                hits = []
-                for lit, placeholder in pairs:
-                    b = lit.encode()
-                    if b not in data:
-                        continue
-                    rep = placeholder.encode()[:len(b)].ljust(len(b), b"_")
-                    hits.append(f"{lit} x{data.count(b)}")
-                    data = data.replace(b, rep)
-                if data != orig:
-                    assert len(data) == len(orig), "scrub must preserve byte length"
-                    # Write a NEW inode and rename over it, never in place: the
-                    # sidecar copier hardlinks where the FS supports it (this file's
-                    # sidecar copy carries 3 links), and an in-place write would
-                    # reach through every one of them. Measured: the sidecar copy and
-                    # the repo's own node_modules are DIFFERENT inodes, so the shared
-                    # tree is not at risk today — but that is a property of how the
-                    # copier happens to run, not a guarantee, and rename costs nothing.
-                    tmp_p = p + ".scrub.tmp"
-                    with open(tmp_p, "wb") as fh:
-                        fh.write(data)
-                    shutil.copymode(p, tmp_p)
-                    os.replace(tmp_p, p)
+                hits = _scrub_one(p, pairs)
+                if hits:
                     scrubbed += 1
                     print(f"    ✂ scrubbed {os.path.relpath(p, root)}: {', '.join(hits)}")
     print(f"    scrub-binaries: {scrubbed} compiled addon(s) scrubbed")
@@ -1232,6 +1299,8 @@ def main():
         return prune_docs(sys.argv[2:])
     if sys.argv[1] == "--scrub-binaries":
         return scrub_binaries(sys.argv[2:])
+    if sys.argv[1] == "--scrub-app-binary":
+        return scrub_app_binary(sys.argv[2:])
     if sys.argv[1] == "--scan-dir":
         return scan_dir(sys.argv[2:])
     bundle = sys.argv[1]
