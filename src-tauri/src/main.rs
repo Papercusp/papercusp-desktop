@@ -459,6 +459,110 @@ fn should_route_via_wsl(_app: &tauri::AppHandle) -> bool {
     false
 }
 
+/// How often the GUI re-checks for the WSL route while waiting. Each check is a
+/// `wsl.exe` spawn (`wsl_setup::detect`), so this matches the Server-role
+/// deferred-boot watcher's proven 10s cadence rather than the 300ms discovery
+/// poll — an unthrottled spawn loop is the exact pressure `distro_exec_wedged`
+/// documents as able to wedge the WSL2 interop layer.
+#[cfg(target_os = "windows")]
+const WSL_ROUTE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// WI-37798: re-resolve the WSL route AFTER startup, for the GUI role.
+///
+/// `should_route_via_wsl` is a snapshot of a value that CHANGES. On a cold
+/// first run the distro is not registered yet, so `gui_setup` latches
+/// `via_wsl = false` — and nothing in the GUI ever re-evaluated it. The Server
+/// bundle the GUI then launches is precisely what performs the WSL onboarding
+/// and brings the operator up INSIDE the distro
+/// (`/home/papercup/.papercusp/operator.json`). Meanwhile the GUI keeps reading
+/// the Windows-side `workspace_home` path that nothing ever writes, on the
+/// 120s NON-WSL budget, and then falls back to the dev-only :3070 — the
+/// permanent "Operator connection lost" banner, reproduced end-to-end on a cold
+/// Windows 11 install of 0.0.15 (operator answering HTTP 200 on its real port
+/// the whole time).
+///
+/// The Server role already corrects exactly this staleness for its own sidecar
+/// spawn — the deferred-boot watcher in `setup()` overrides `via_wsl = true`
+/// once `detect()` flips Ready (WI-3407). This is that same correction for the
+/// GUI's DISCOVERY leg, which was never given it. The stale flag poisons three
+/// consumers at once, which is why it is fixed here at the source rather than
+/// inside the poll loop: the boot wait's path AND budget, the endpoint-IPC
+/// socket read, and the long-lived operator watcher.
+///
+/// Waiting here costs nothing on Windows: while WSL is not Ready there is no
+/// operator to discover at all — on Windows the sidecar only ever runs inside
+/// the distro — so this replaces polling a path that cannot appear. It is
+/// bounded by the WSL boot budget and returns the ORIGINAL value on timeout,
+/// so a genuinely WSL-less machine keeps today's behaviour instead of having a
+/// route it does not have asserted for it.
+/// The wait's PURE core, with the probe, the sleep and the clock injected.
+///
+/// Compiled under `test` on every dev platform — the file's standing idiom
+/// (`windows_path_to_wsl`, `self_heal_probe_due`, `wsl_papercusp_home_dir`) —
+/// and here it is not merely convenient but the only available verification:
+/// this box has NO working Windows compile gate (`cargo check --target
+/// x86_64-pc-windows-msvc` fails in a build script for want of `lib.exe`, and
+/// no mingw toolchain is installed either — measured again 2026-08-11,
+/// matching WI-2149's finding). Anything left inside a `cfg(windows)` body is
+/// therefore not just untested but UNCOMPILED here, so the retry logic lives
+/// on this side of the line and the Windows-only part stays a thin shim.
+///
+/// Returns true when the WSL route is (or becomes) the right one to use.
+#[cfg(any(target_os = "windows", test))]
+fn resolve_route_upgrade(
+    via_wsl: bool,
+    budget: Duration,
+    poll: Duration,
+    mut ready: impl FnMut() -> bool,
+    mut wait: impl FnMut(Duration),
+    mut elapsed: impl FnMut() -> Duration,
+) -> bool {
+    if via_wsl {
+        return true;
+    }
+    while elapsed() < budget {
+        if ready() {
+            return true;
+        }
+        wait(poll);
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn await_wsl_route_ready(app: &tauri::AppHandle, via_wsl: bool) -> bool {
+    let start = Instant::now();
+    let upgraded = resolve_route_upgrade(
+        via_wsl,
+        operator_boot_timeout(true),
+        WSL_ROUTE_POLL_INTERVAL,
+        || should_route_via_wsl(app),
+        std::thread::sleep,
+        || start.elapsed(),
+    );
+    if upgraded && !via_wsl {
+        println!(
+            "[papercusp-gui] WSL became Ready post-boot — routing discovery through the \
+             distro instead of the Windows-side home (WI-37798)"
+        );
+        // Re-publish for AppHandle-less call sites (native pty), mirroring
+        // gui_setup's original set_route_active — otherwise they keep the
+        // stale non-WSL route this function just corrected.
+        wsl_setup::set_route_active(true);
+    } else if !upgraded {
+        eprintln!(
+            "[papercusp-gui] WSL never became Ready within the boot budget — continuing on the \
+             non-WSL discovery path (WI-37798)"
+        );
+    }
+    upgraded
+}
+
+#[cfg(not(target_os = "windows"))]
+fn await_wsl_route_ready(_app: &tauri::AppHandle, via_wsl: bool) -> bool {
+    via_wsl
+}
+
 /// Translate a Windows path to a WSL-visible path. Pure string
 /// manipulation — doesn't shell out to `wslpath`. Handles:
 ///
@@ -1365,6 +1469,176 @@ mod discovery_tests {
             verdict.is_err(),
             "the WI-37798 guard accepted the very body the fix replaced — it is not \
              actually checking anything"
+        );
+    }
+
+    /// An already-resolved route must not cost a `wsl.exe` spawn at all — this
+    /// runs on the GUI's boot path on EVERY launch, and the warm case (distro
+    /// already Ready at startup) is the overwhelmingly common one.
+    #[test]
+    fn route_upgrade_short_circuits_when_already_routed() {
+        let probes = std::cell::Cell::new(0u32);
+        let upgraded = resolve_route_upgrade(
+            true,
+            Duration::from_secs(600),
+            Duration::from_secs(10),
+            || {
+                probes.set(probes.get() + 1);
+                true
+            },
+            |_| panic!("an already-WSL route must not sleep on the boot path"),
+            || Duration::ZERO,
+        );
+        assert!(upgraded);
+        assert_eq!(
+            probes.get(),
+            0,
+            "the warm path must not spawn a WSL probe it does not need"
+        );
+    }
+
+    /// The cold first-run case this fix exists for: WSL is NOT Ready when the
+    /// GUI starts, the Server installs the distro, and the route must upgrade
+    /// when that lands — having WAITED between probes rather than spun (each
+    /// probe is a `wsl.exe` spawn; an unthrottled loop is the pressure that
+    /// wedges the WSL2 interop layer).
+    #[test]
+    fn route_upgrade_waits_then_upgrades_when_wsl_becomes_ready() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let probes = std::cell::Cell::new(0u32);
+        let upgraded = resolve_route_upgrade(
+            false,
+            Duration::from_secs(600),
+            Duration::from_secs(10),
+            || {
+                probes.set(probes.get() + 1);
+                probes.get() >= 3
+            },
+            |d| clock.set(clock.get() + d),
+            || clock.get(),
+        );
+        assert!(upgraded, "the route must upgrade once WSL reports Ready");
+        assert_eq!(probes.get(), 3);
+        assert_eq!(
+            clock.get(),
+            Duration::from_secs(20),
+            "must sleep the poll interval BETWEEN probes, not spin on wsl.exe"
+        );
+    }
+
+    /// A genuinely WSL-less Windows box must fall back, not hang the GUI boot
+    /// forever. The bound is what makes waiting here safe at all.
+    #[test]
+    fn route_upgrade_gives_up_at_the_budget() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let probes = std::cell::Cell::new(0u32);
+        let upgraded = resolve_route_upgrade(
+            false,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            || {
+                probes.set(probes.get() + 1);
+                false
+            },
+            |d| clock.set(clock.get() + d),
+            || clock.get(),
+        );
+        assert!(
+            !upgraded,
+            "WSL never becoming Ready must report NO upgrade — asserting a route the machine \
+             does not have would be worse than the status quo"
+        );
+        assert_eq!(probes.get(), 6, "exactly budget/poll probes, then stop");
+        assert!(clock.get() >= Duration::from_secs(60));
+    }
+
+    /// The WI-37798 GUI-leg guard's predicate, split out from the file read so
+    /// it can be proven FALSIFIABLE against a synthetic body — same reason as
+    /// `assert_windows_discovery_recovery` above: proving it by editing main.rs
+    /// and watching the test go red is unsafe here, because git-sync sweeps the
+    /// whole tree on a schedule and would commit the broken intermediate.
+    fn assert_gui_boot_reresolves_wsl_route(body: &str) {
+        let upgrade = body.find("await_wsl_route_ready");
+        assert!(
+            upgrade.is_some(),
+            "WI-37798 REGRESSION: gui_setup's boot thread no longer re-resolves the WSL route. \
+             `via_wsl` there is a STARTUP snapshot and is FALSE on every cold first run (the \
+             distro is not registered yet). Without the re-resolve, discovery reads the \
+             Windows-side workspace_home path that the WSL sidecar never writes, on the 120s \
+             non-WSL budget, and the window strands on \"Operator connection lost\" while the \
+             operator answers HTTP 200 the whole time."
+        );
+        let boot = body.find("finish_boot(").expect(
+            "gui_setup must still hand off to finish_boot — it is the GUI's whole boot wait",
+        );
+        assert!(
+            upgrade.unwrap() < boot,
+            "WI-37798 REGRESSION: gui_setup re-resolves the WSL route AFTER finish_boot, so \
+             finish_boot still receives the stale startup value — it is finish_boot that owns \
+             the discovery path, the boot budget, and the endpoint-IPC read."
+        );
+    }
+
+    /// WI-37798 GUI-leg CLASS guard. The sibling of
+    /// `windows_discovery_recovery_is_not_home_only`: that one pins the per-`/api`
+    /// self-heal, this one pins the BOOT path that strands the window in the
+    /// first place.
+    ///
+    /// Same reason a source-shape assertion earns its keep here: the regression
+    /// is invisible everywhere it would normally be caught. `via_wsl` is
+    /// hard-false on Linux and macOS by construction, and on a WARM Windows box
+    /// the distro is already Ready at startup so the snapshot happens to be
+    /// right — it reappears only on a COLD Windows install, the exact case a
+    /// polluted VM base image hides (EI-20108513273736336). A source-shape guard
+    /// is crude, but it fails on ANY host, and that is the property that matters.
+    #[test]
+    fn gui_boot_reresolves_the_wsl_route_before_discovery() {
+        let src = include_str!("main.rs");
+        // ASSEMBLED at runtime, never one literal — a guard that scans its own
+        // file otherwise matches the needle inside THIS test and measures the
+        // wrong body (the failure mode documented on the sibling guard above).
+        let needle = format!("fn {}(app: &tauri::App)", "gui_setup");
+        let start = src
+            .find(&needle)
+            .expect("gui_setup() must exist — it is the GUI role's whole boot path (WI-37798)");
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("gui_setup() must be brace-terminated");
+        assert_gui_boot_reresolves_wsl_route(&body[..end]);
+    }
+
+    /// A guard that has never failed is a guard nobody has tested. This feeds
+    /// the predicate the exact shape the fix REPLACED — the startup snapshot
+    /// passed straight into `finish_boot` — and asserts it is rejected.
+    #[test]
+    fn the_gui_boot_guard_rejects_a_stale_route_body() {
+        // Body only, deliberately without the signature line, so this fixture
+        // can never be what the scanning test above finds and measures.
+        let pre_fix_body = "    let via_wsl = should_route_via_wsl(&app.handle());\n\
+                            ensure_server_running(&app_handle, &workspace_home, via_wsl);\n\
+                            finish_boot(app_handle, workspace_home, via_wsl);";
+        let verdict =
+            std::panic::catch_unwind(|| assert_gui_boot_reresolves_wsl_route(pre_fix_body));
+        assert!(
+            verdict.is_err(),
+            "the WI-37798 GUI-leg guard accepted the very body the fix replaced — it is not \
+             actually checking anything"
+        );
+    }
+
+    /// The ORDER half of the guard has to be falsifiable too, independently: a
+    /// body that calls the re-resolve but only AFTER finish_boot still ships the
+    /// stale value into the one consumer that matters, and `contains()` alone
+    /// would wave it through.
+    #[test]
+    fn the_gui_boot_guard_rejects_a_too_late_reresolve() {
+        let too_late = "    finish_boot(app_handle, workspace_home, via_wsl);\n\
+                        let via_wsl = await_wsl_route_ready(&app_handle, via_wsl);";
+        let verdict = std::panic::catch_unwind(|| assert_gui_boot_reresolves_wsl_route(too_late));
+        assert!(
+            verdict.is_err(),
+            "the WI-37798 GUI-leg guard accepted a re-resolve that happens after finish_boot"
         );
     }
 
@@ -4807,9 +5081,16 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let workspace_home = workspaces::shared_sidecar_home();
     std::thread::spawn(move || {
         ensure_server_running(&app_handle, &workspace_home, via_wsl);
+        // WI-37798: the `via_wsl` above is a STARTUP snapshot, and on a cold
+        // first run it is false — the Server we just launched is the very thing
+        // that makes it true. Re-resolve it here, or discovery spends its whole
+        // budget reading a Windows-side path the WSL sidecar never writes and
+        // the window strands on "Operator connection lost".
+        let via_wsl = await_wsl_route_ready(&app_handle, via_wsl);
         let after = app_handle.clone();
-        // finish_boot polls operator.json (up to 120s — covers a cold Server
-        // boot), wires endpoint-IPC, and navigates the window to the operator.
+        // finish_boot polls operator.json (120s, or the 600s WSL budget once
+        // the route above resolves — covers a cold Server boot), wires
+        // endpoint-IPC, and navigates the window to the operator.
         finish_boot(app_handle, workspace_home, via_wsl);
         // WI-4827 cross-process COLD start (macOS/Windows two-bundle): if the
         // Quick Panel palette launched us to open a route and the GUI wasn't
