@@ -2872,6 +2872,24 @@ mkdir -p "$SIDECAR_DIR/bin"
 # built binaries are NOT under <crate>/target/. Same resolution release-local.sh
 # uses; empty string on failure → the standard in-crate paths below still match).
 CARGO_TGT="$(cd "$REPO/apps/tui" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+# EI-20094260886633250 / WI-4736 / EI-11730 — REMAP BUILD PATHS OUT OF THE BINARIES.
+# rustc bakes ABSOLUTE build paths into .rodata (panic locations, file!(), and the
+# std/registry paths behind them). On 2026-08-10 that made the shipped chat-dock
+# payload carry the build-box identity: `pui` held the builder's $HOME path 544
+# times and pui-companion.wasm 40 times, and the AppImage identity gate correctly
+# REFUSED to package (FATAL, LINUX_EXIT=1) — blocking the 0.0.14 Linux recut.
+#
+# `strip` DOES NOT FIX THIS, and it is the obvious wrong turn: measured on a copy,
+# `strip --strip-all` removed 3MB of DWARF and left ALL 59 matching lines intact,
+# because these strings live in .rodata, not in debug info. The only fix that works
+# is to never bake the path — hence --remap-path-prefix at COMPILE time, applied to
+# every pui/companion cargo invocation below (native, darwin-cross, and wasm).
+#
+# $REPO first: it is a prefix UNDER $HOME, and rustc takes the first match in order.
+# Safe to set RUSTFLAGS here — no cargo config on this box sets rustflags (only
+# [build] target-dir), so this overrides nothing.
+_PUI_REMAP="--remap-path-prefix=$REPO=/papercusp --remap-path-prefix=$HOME=/build"
+
 # 1. pui (apps/tui) — release build for the TARGET triple.
 # Close the sidecar lock fd in the cargo subtree. RUSTC_WRAPPER may start the
 # long-lived sccache server; if that daemon inherits fd 9 it keeps the flock
@@ -2900,10 +2918,10 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
     echo "      curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C \"\$HOME/.papercusp\" && mv \"\$HOME/.papercusp/zig-linux-x86_64-0.13.0\" \"\$HOME/.papercusp/zig\")" >&2
     exit 1
   }
-  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" cargo zigbuild --release --target "$_pui_triple" )
+  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo zigbuild --release --target "$_pui_triple" )
   _pui_target_sub="$_pui_triple/release/pui"
 else
-  ( exec 9>&-; cd "$REPO/apps/tui" && cargo build --release )
+  ( exec 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release )
   _pui_target_sub="release/pui"
 fi
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
@@ -2919,7 +2937,7 @@ cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 # 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
+( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release --target wasm32-wasip1 )
 WASM=""
 for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
   [[ -f "$_c" ]] && WASM="$_c" && break
