@@ -211,6 +211,36 @@ chmod +x "$APPDIR/AppRun"
 #     Rewrite each as a path RELATIVE to the symlink's own directory so the packed
 #     AppImage carries no absolute build path AND the link still resolves at the
 #     user's mount point.
+# 3d-pre. Evict FOREIGN project binaries from usr/bin (WI-37553).
+#     ~/.cargo/config.toml pins ONE shared target dir for the whole box
+#     (build.target-dir=~/.cargo-target), so every sibling Tauri project's release
+#     binary lands in the SAME release/ dir, and the bundler sweeps them all into
+#     usr/bin. Measured on the 0.0.14 cut: the AppDir carried oddsmith-desktop AND
+#     quartermaster-desktop beside ours — 21 MB of two unrelated apps, and
+#     oddsmith-desktop alone embedded the build-box home path 31 times, which is
+#     what red'd the identity gate below.
+#     The AppRun execs usr/bin/papercusp-desktop and nothing else, so a foreign
+#     desktop binary is pure contamination: wrong to ship, and a real leak.
+#     Deliberately NARROW (only `*-desktop` siblings, never a blanket wipe): the
+#     identity scan below stays the backstop for anything this misses, and a
+#     whitelist would silently delete a helper a future build legitimately needs.
+echo "==> evicting foreign project binaries from AppDir/usr/bin (shared cargo target dir; WI-37553)"
+_evicted=0
+for _b in "$APPDIR"/usr/bin/*-desktop; do
+  [ -e "$_b" ] || continue
+  case "$(basename "$_b")" in
+    papercusp-desktop) continue ;;
+  esac
+  rm -f "$_b"
+  echo "   evicted: usr/bin/$(basename "$_b") (belongs to another project)"
+  _evicted=$((_evicted+1))
+done
+[ "$_evicted" -gt 0 ] && echo "   $_evicted foreign binary/binaries removed"
+if [ ! -x "$APPDIR/usr/bin/papercusp-desktop" ]; then
+  echo "FATAL: usr/bin/papercusp-desktop missing after the foreign-binary eviction — refusing to package (WI-37553)." >&2
+  exit 1
+fi
+
 echo "==> relativizing absolute in-AppDir symlinks (strip build-box path from .DirIcon/.desktop; WI-4736)"
 _appdir_abs="$(cd "$APPDIR" && pwd)"
 while IFS= read -r -d '' _lnk; do
