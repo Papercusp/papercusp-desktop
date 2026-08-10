@@ -241,16 +241,64 @@ for _gl in libGLESv2.so.2 libGLdispatch.so.0 libEGL.so.1 libGLX.so.0 libOpenGL.s
 done
 
 # 2c-ii. WEBKIT HELPER-PROCESS PATH — the non-obvious half.
-#     Ubuntu's WebKitGTK 2.52 IGNORES $WEBKIT_EXEC_PATH (it is DEVELOPER_MODE-only
-#     now) and resolves its helper processes through a relocation prefix that
-#     degenerates to "." for a relocated library. Measured on the pristine VM, with
-#     the libs bundled and $WEBKIT_EXEC_PATH correctly set, it still asked for:
-#       ././/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess
-#     i.e. a path resolved against the PROCESS CWD (proven by elimination: the same
-#     tree launched from /tmp failed while $APPDIR/lib/... existed, so it is neither
-#     $APPDIR- nor argv[0]-relative). So: provide that exact relative path inside
-#     the AppDir and have the AppRun `cd "$HERE"` before exec. With both in place
-#     WebKit spawns its network/web processes and the render pipeline initialises.
+#     Bundling the libraries is necessary but NOT sufficient. With the whole WebKit
+#     chain deployed, the app still dies on a box without system WebKitGTK:
+#       ERROR: Unable to spawn a new child process: Failed to spawn child process
+#       "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess"  [exit 133]
+#     That is PKGLIBEXECDIR — an ABSOLUTE path baked into libwebkit2gtk at compile
+#     time. Nothing in the environment can redirect it: $WEBKIT_EXEC_PATH is
+#     DEVELOPER_MODE-only in WebKitGTK 2.52 and Ubuntu ships DEVELOPER_MODE off, so
+#     the variable the AppRun exports is read by nothing. The helper binaries are
+#     present and executable inside the mount — this is a path-CHOICE bug, not a
+#     missing-file bug, which is why it survives every "did we bundle everything?"
+#     check and only shows up on a host that lacks system WebKit.
+#
+#     ⚠ AN EARLIER VERSION OF THIS COMMENT CLAIMED the resolution was CWD-relative
+#     ("././/lib/x86_64-linux-gnu/...", allegedly proven by elimination) and that the
+#     symlink below plus the AppRun's `cd "$HERE"` were the fix. That was WRONG and is
+#     retracted: measured against the real PACKAGED artifact on a verified-pristine VM
+#     (0 webkit2gtk packages), the spawn attempt is the ABSOLUTE path above. The
+#     earlier finding came from a hand-assembled tree, not from a packaged AppImage.
+#     Do not restore that reasoning; re-measure with a packaged .AppImage.
+#
+#     THE FIX: rewrite the baked-in string to a RELATIVE one, IN PLACE. g_spawn
+#     resolves a relative executable path against the process CWD, and the AppRun
+#     already does `cd "$HERE"` — so "lib/x86_64-linux-gnu/webkit2gtk-4.1/…" lands
+#     inside the mount on any host. The edit never SHIFTS bytes: the replacement is
+#     shorter than the original and is NUL-padded to the original length, so every
+#     ELF offset, relocation and section size is untouched (the .so's size is
+#     byte-identical afterwards, which the guard below asserts).
+_WK_LIB="$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0"
+if [ -f "$_WK_LIB" ]; then
+  command -v python3 >/dev/null || { echo "FATAL: python3 is required to relativize WebKit's PKGLIBEXECDIR" >&2; exit 1; }
+  _WK_SIZE_BEFORE="$(stat -c%s "$_WK_LIB")"
+  python3 - "$_WK_LIB" <<'PYEOF' || { echo "FATAL: WebKit PKGLIBEXECDIR patch failed" >&2; exit 1; }
+import sys
+p = sys.argv[1]
+d = bytearray(open(p, 'rb').read())
+old = b'/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1'
+new = b'lib/x86_64-linux-gnu/webkit2gtk-4.1'
+assert len(new) < len(old), 'replacement must be shorter so no bytes shift'
+i = n = 0
+while True:
+    i = d.find(old, i)
+    if i < 0:
+        break
+    end = d.find(b'\x00', i)            # this C string's own terminator
+    orig = bytes(d[i:end])
+    repl = new + orig[len(old):]        # preserve any suffix, e.g. /injected-bundle/
+    assert len(repl) <= len(orig)
+    d[i:end] = repl + b'\x00' * (len(orig) - len(repl))
+    n += 1
+    i = end
+open(p, 'wb').write(d)
+print(f'   relativized WebKit PKGLIBEXECDIR in {n} string(s)')
+PYEOF
+  [ "$(stat -c%s "$_WK_LIB")" = "$_WK_SIZE_BEFORE" ] || { echo "FATAL: libwebkit2gtk size changed during patch — ELF offsets would be corrupt" >&2; exit 1; }
+fi
+
+#     The relative tree the patched string now points at. Kept as a symlink so the
+#     helper binaries are stored once.
 mkdir -p "$APPDIR/lib/x86_64-linux-gnu"
 ln -sfn ../../usr/lib/x86_64-linux-gnu/webkit2gtk-4.1 "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1"
 
@@ -263,6 +311,17 @@ for _need in libwebkit2gtk-4.1.so.0 libjavascriptcoregtk-4.1.so.0 libgtk-3.so.0 
 done
 [ -x "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess" ] || _missing="$_missing <cwd-relative WebKitNetworkProcess>"
 [ -f "$APPDIR/usr/lib/glfallback/libGLESv2.so.2" ] || _missing="$_missing libGLESv2.so.2(glfallback)"
+# The helper-path half of the same class (2c-ii). A bundle can pass EVERY check above
+# — all libraries present, helpers present and executable — and still hard-fail on a
+# pristine host, because libwebkit2gtk asks for its helpers at the ABSOLUTE
+# /usr/lib/... path that only exists on a box which already has system WebKitGTK.
+# That is exactly the failure this whole guard exists to prevent, so assert the
+# absolute path is GONE from the shipped library rather than trusting the patch ran.
+if [ -f "$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0" ]; then
+  if strings -a "$APPDIR/usr/lib/libwebkit2gtk-4.1.so.0" | grep -q '^/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1'; then
+    _missing="$_missing <libwebkit2gtk still carries an ABSOLUTE PKGLIBEXECDIR — helper spawn will fail on a host without system WebKitGTK>"
+  fi
+fi
 if [ -n "$_missing" ]; then
   echo "FATAL: AppDir is NOT self-contained — missing:$_missing" >&2
   echo "       Packaging it would reproduce EI-20075266271803900 (hard linker failure on a box without system WebKitGTK)." >&2
