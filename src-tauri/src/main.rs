@@ -781,6 +781,64 @@ mod tests {
         }
     }
 
+    /// WI-37736 — the INVERSE of the test above, and the reason it exists:
+    /// forwarding is not always the safe default. Some vars are actively
+    /// DANGEROUS across the WSL2 boundary, and this pins the one that shipped a
+    /// completely dead Windows 0.0.14-alpha.
+    ///
+    /// `PAPERCUSP_DESKTOP_PARENT_PID` carries the desktop process's
+    /// WINDOWS-NATIVE pid. The sidecar runs inside WSL2 and compares it against
+    /// its own `process.ppid` — a value from a different kernel and a different
+    /// PID namespace, so the two can never legitimately match. The sidecar's
+    /// parent-death watch therefore concluded "my parent died" on EVERY launch
+    /// and self-terminated ~1s in, before writing operator.json. The UI rendered
+    /// and reported the right version; every data call failed.
+    ///
+    /// The neighbouring test makes "add it to WSLENV" the reflex for any var the
+    /// sidecar reads. That reflex is what would silently re-break Windows here,
+    /// which is exactly why the prohibition needs a test of its own rather than a
+    /// comment: a comment cannot fail a build.
+    #[test]
+    fn wslenv_never_forwards_windows_native_pids() {
+        fn names_of(wslenv: &str) -> Vec<&str> {
+            wslenv
+                .split(':')
+                .map(|e| e.trim())
+                .map(|e| e.split('/').next().unwrap_or(e))
+                .filter(|e| !e.is_empty())
+                .collect()
+        }
+
+        // FALSIFIABILITY SELF-CHECK. A guard that has never failed is a guard
+        // nobody has tested, and this one asserts an ABSENCE — the failure mode
+        // where a broken parser silently reports "not present" for everything and
+        // the guard passes forever while protecting nothing. Prove the detection
+        // fires on a string that DOES contain the forbidden var before trusting
+        // its verdict on the real one. (Done with an in-test fixture rather than
+        // by mutating SIDECAR_WSLENV: git-sync commits the whole tree on a timer,
+        // so a temporarily-mutated shared file can be committed mid-probe.)
+        let poisoned = "PAPERCUSP_DESKTOP:PAPERCUSP_DESKTOP_PARENT_PID:HOME/p";
+        assert!(
+            names_of(poisoned).contains(&"PAPERCUSP_DESKTOP_PARENT_PID"),
+            "the name parser failed to spot the forbidden var in a string that \
+             definitely contains it — so a PASS below would prove nothing"
+        );
+
+        let wslenv = super::SIDECAR_WSLENV;
+        let names = names_of(wslenv);
+
+        for forbidden in ["PAPERCUSP_DESKTOP_PARENT_PID"] {
+            assert!(
+                !names.contains(&forbidden),
+                "{forbidden} is in WSLENV, but it holds a WINDOWS-NATIVE pid and the sidecar \
+                 compares it against a WSL2 (Linux) ppid — two different PID namespaces, so it \
+                 can NEVER match. This kills the sidecar on every launch and ships a Windows \
+                 build whose UI renders while every data call fails (WI-37736). It is set only \
+                 on the non-WSL branch in spawn_serve. WSLENV = {wslenv}"
+            );
+        }
+    }
+
     /// WI-5305: `PAPERCUSP_HOME` must actually redirect the WSL-side discovery
     /// paths a caller reads back (`operator.json` / `endpoint-ipc.json`), not
     /// just cross the WSLENV boundary — a var that arrives but isn't consulted
@@ -5252,7 +5310,7 @@ fn bring_up_sidecar(
 /// here too. `wslenv_forwards_every_var_the_sidecar_reads` pins the ones we know
 /// are load-bearing.
 const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
-     PAPERCUSP_DESKTOP:PAPERCUSP_DESKTOP_PARENT_PID:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
+     PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
      PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
      PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
      PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
@@ -5410,6 +5468,39 @@ fn spawn_serve(
         // (host-bootstrap.ts) was false inside WSL2 and the IPC server never
         // even STARTED on Windows — the deeper reason the bypass was off.
         cmd.env("PAPERCUSP_IPC_TCP", "1");
+        // WI-37736 — DO NOT set PAPERCUSP_DESKTOP_PARENT_PID on this path, and do
+        // not re-add it to SIDECAR_WSLENV (a test pins its absence).
+        //
+        // It carried OUR pid, which is a WINDOWS-NATIVE pid. The sidecar runs
+        // inside WSL2 and compares that declared value against its own
+        // `process.ppid` — a number from a DIFFERENT KERNEL and PID namespace.
+        // The two can never legitimately be equal, so the parent-death watch
+        // concluded "my parent died" on EVERY launch and shut the sidecar down
+        // ~1s in, before it wrote operator.json. Windows 0.0.14-alpha shipped
+        // with the UI rendering fine and every single data call failing.
+        //
+        // Unset is the CORRECT state, not a workaround: resolveExpectedParentPid()
+        // then falls back to the module-load ppid, so both sides of the comparison
+        // come from the same (WSL2) kernel — the documented reparent-only
+        // semantics. It also disables the `declaredByLauncher` liveness leg, which
+        // would otherwise pidAlive() a Windows pid number inside Linux and fire for
+        // the same reason. BOTH legs have to stay off; fixing only one still kills
+        // the sidecar.
+    } else {
+        // (EI-19486216732882752) Declare OUR pid so the sidecar's parent-death
+        // watch has an IDENTITY to check rather than an observation to race.
+        // Reading `process.ppid` on the sidecar side is only correct if it happens
+        // before we die; if we die while it is still booting (concurrent packaged
+        // e2e runs contend on its cold-start lock for seconds), it records the
+        // already-reparented ppid as its "original" and goes blind forever — 8
+        // orphans burning 3 cores and 18.4GB, measured 2026-08-08. With this set,
+        // the sidecar can also ask "is that pid still alive?", which no amount of
+        // ppid-watching can answer. Sidecar side: resolveExpectedParentPid() in
+        // apps/operator/bin/serve.ts.
+        //
+        // Same-kernel platforms only (Linux/macOS, and any future non-WSL Windows
+        // route) — see the WI-37736 note in the `if` branch for why WSL2 is excluded.
+        cmd.env("PAPERCUSP_DESKTOP_PARENT_PID", std::process::id().to_string());
     }
     cmd.env("PATH", &new_path)
         // The bundled bin dir, as its own var: on the WSL route it crosses
@@ -5485,17 +5576,9 @@ fn spawn_serve(
             rubrics_dir.to_string_lossy().to_string(),
         )
         .env("PAPERCUSP_DESKTOP", "1")
-        // (EI-19486216732882752) Declare OUR pid so the sidecar's parent-death
-        // watch has an IDENTITY to check rather than an observation to race.
-        // Reading `process.ppid` on the sidecar side is only correct if it happens
-        // before we die; if we die while it is still booting (concurrent packaged
-        // e2e runs contend on its cold-start lock for seconds), it records the
-        // already-reparented ppid as its "original" and goes blind forever — 8
-        // orphans burning 3 cores and 18.4GB, measured 2026-08-08. With this set,
-        // the sidecar can also ask "is that pid still alive?", which no amount of
-        // ppid-watching can answer. Sidecar side: resolveExpectedParentPid() in
-        // apps/operator/bin/serve.ts.
-        .env("PAPERCUSP_DESKTOP_PARENT_PID", std::process::id().to_string())
+        // NOTE: PAPERCUSP_DESKTOP_PARENT_PID is deliberately NOT set here — it is
+        // set in the `else` branch of the `if via_wsl` block above, because it is
+        // MEANINGLESS (and actively harmful) across the WSL2 boundary. See WI-37736.
         // Autonomous loop (packaged-build fix): the DBOS routines engine +
         // orchestrator must be ON in the shipped sidecar — without these the
         // operator boots normally but schedules NO work (the loop is silently
