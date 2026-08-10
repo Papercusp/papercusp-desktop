@@ -155,6 +155,107 @@ for _res in sidecar resources seed; do
   fi
 done
 
+# 2c. DEPLOY THE GTK/WEBKIT RUNTIME CLOSURE (EI-20075266271803900). ────────────
+#     The header above claimed "by the time linuxdeploy crashes it has ALREADY
+#     deployed all gtk/webkit libs into usr/lib". THAT PREMISE IS FALSE, measured
+#     against the PUBLISHED 0.0.14 AppImage: its usr/lib held exactly ONE .so
+#     (libayatana-appindicator3.so.1) and its usr/lib/x86_64-linux-gnu held only
+#     webkit2gtk-4.1/{WebKitWebProcess,WebKitNetworkProcess,injected-bundle}. Both
+#     of those are things TAURI's own bundler copies by hand — linuxdeploy
+#     contributed ZERO libraries, because it crashes at the sidecar ELF-scan
+#     BEFORE its deploy phase does anything useful. So the AppImage has NEVER been
+#     self-contained: it hard-fails on a box without libwebkit2gtk-4.1-0 with
+#       usr/bin/papercusp-desktop: error while loading shared libraries:
+#       libwebkit2gtk-4.1.so.0: cannot open shared object file
+#     Every clean-room verification missed it because each one installed the .deb
+#     FIRST (vmctl updater-e2e literally "installs the existing desktop .deb to
+#     provision WebKit/GTK runtime dependencies"), so the AppImage always ran on a
+#     host that already had system WebKit.
+#
+#     THE FIX: run linuxdeploy ourselves against an ISOLATED staging AppDir that
+#     contains ONLY the app binary — no sidecar, so the ELF-scan crash cannot
+#     happen — then merge the libraries it deployed into the real AppDir. This
+#     REUSES linuxdeploy (correct excludelist, $ORIGIN rpath patching) and its gtk
+#     plugin (gdk-pixbuf loaders + loaders.cache, gio TLS modules, gschemas,
+#     immodules, Adwaita) instead of hand-rolling a dependency walker.
+DEPLOY_STAGE="$CT/release/bundle/appimage/.libdeploy-stage"
+LD_APPIMG="$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage"
+if [ ! -x "$LD_APPIMG" ]; then
+  echo "FATAL: $LD_APPIMG missing — cannot deploy the GTK/WebKit closure (step 2c)" >&2; exit 1
+fi
+echo "==> deploying the GTK/WebKit runtime closure into the AppDir (EI-20075266271803900)"
+rm -rf "$DEPLOY_STAGE"; mkdir -p "$DEPLOY_STAGE/usr/share/applications" "$DEPLOY_STAGE/usr/share/icons/hicolor/256x256/apps"
+cat > "$DEPLOY_STAGE/usr/share/applications/papercusp-libdeploy.desktop" <<'DESK'
+[Desktop Entry]
+Type=Application
+Name=Papercusp libdeploy
+Exec=papercusp-desktop
+Icon=papercusp-libdeploy
+Categories=Development;
+Terminal=false
+DESK
+# linuxdeploy validates icon resolution, so hand it a real 256x256 from the AppDir.
+_ldicon="$(find "$APPDIR/usr/share/icons" -path '*256x256*' -name '*.png' 2>/dev/null | head -1)"
+[ -n "$_ldicon" ] || _ldicon="$(find "$APPDIR/usr/share/icons" -name '*.png' 2>/dev/null | sort -V | tail -1)"
+cp "$_ldicon" "$DEPLOY_STAGE/usr/share/icons/hicolor/256x256/apps/papercusp-libdeploy.png"
+(
+  export PATH="$HOME/.cache/tauri:$PATH" LINUXDEPLOY="$LD_APPIMG" DEPLOY_GTK_VERSION=3
+  "$LD_APPIMG" --appdir "$DEPLOY_STAGE" \
+    -e "$APPDIR/usr/bin/papercusp-desktop" \
+    -d "$DEPLOY_STAGE/usr/share/applications/papercusp-libdeploy.desktop" \
+    -i "$DEPLOY_STAGE/usr/share/icons/hicolor/256x256/apps/papercusp-libdeploy.png"
+) || echo "   (linuxdeploy exited non-zero — icon/desktop deploy is cosmetic; the library payload is verified below)"
+# Merge WITHOUT clobbering the real AppDir's own icons/desktop entries.
+cp -an "$DEPLOY_STAGE/usr/lib/." "$APPDIR/usr/lib/" 2>/dev/null || true
+[ -d "$DEPLOY_STAGE/usr/share/glib-2.0" ] && mkdir -p "$APPDIR/usr/share" && cp -an "$DEPLOY_STAGE/usr/share/glib-2.0" "$APPDIR/usr/share/" 2>/dev/null
+[ -d "$DEPLOY_STAGE/apprun-hooks" ] && cp -an "$DEPLOY_STAGE/apprun-hooks" "$APPDIR/" 2>/dev/null
+rm -rf "$DEPLOY_STAGE"
+
+# 2c-i. GL/EGL FALLBACK (last on LD_LIBRARY_PATH, never overriding the host).
+#     linuxdeploy's excludelist deliberately drops the libglvnd dispatch libs
+#     because they are driver-coupled — correct on a box that HAS them, fatal on
+#     one that does not: WebKitGTK dlopen()s libGLESv2.so.2 and aborts with
+#     "Couldn't open libGLESv2.so.2" (measured on the pristine VM). Shipping them
+#     in a directory appended LAST to LD_LIBRARY_PATH gives the host's own copy
+#     priority whenever it exists, and a working fallback when it does not.
+mkdir -p "$APPDIR/usr/lib/glfallback"
+for _gl in libGLESv2.so.2 libGLdispatch.so.0 libEGL.so.1 libGLX.so.0 libOpenGL.so.0; do
+  _src="$(readlink -f "/usr/lib/x86_64-linux-gnu/$_gl" 2>/dev/null)"
+  [ -f "$_src" ] || continue
+  cp -n "$_src" "$APPDIR/usr/lib/glfallback/" 2>/dev/null || true
+  ln -sfn "$(basename "$_src")" "$APPDIR/usr/lib/glfallback/$_gl"
+done
+
+# 2c-ii. WEBKIT HELPER-PROCESS PATH — the non-obvious half.
+#     Ubuntu's WebKitGTK 2.52 IGNORES $WEBKIT_EXEC_PATH (it is DEVELOPER_MODE-only
+#     now) and resolves its helper processes through a relocation prefix that
+#     degenerates to "." for a relocated library. Measured on the pristine VM, with
+#     the libs bundled and $WEBKIT_EXEC_PATH correctly set, it still asked for:
+#       ././/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess
+#     i.e. a path resolved against the PROCESS CWD (proven by elimination: the same
+#     tree launched from /tmp failed while $APPDIR/lib/... existed, so it is neither
+#     $APPDIR- nor argv[0]-relative). So: provide that exact relative path inside
+#     the AppDir and have the AppRun `cd "$HERE"` before exec. With both in place
+#     WebKit spawns its network/web processes and the render pipeline initialises.
+mkdir -p "$APPDIR/lib/x86_64-linux-gnu"
+ln -sfn ../../usr/lib/x86_64-linux-gnu/webkit2gtk-4.1 "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1"
+
+# 2c-iii. FAIL CLOSED. This is the recurrence guard: the whole class of bug here is
+#     "the AppImage silently ships without its WebKit runtime and only a host that
+#     already has system WebKit can launch it". Never package that again.
+_missing=""
+for _need in libwebkit2gtk-4.1.so.0 libjavascriptcoregtk-4.1.so.0 libgtk-3.so.0 libsoup-3.0.so.0 libgio-2.0.so.0 libglib-2.0.so.0; do
+  find "$APPDIR/usr/lib" -maxdepth 2 -name "$_need" | grep -q . || _missing="$_missing $_need"
+done
+[ -x "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess" ] || _missing="$_missing <cwd-relative WebKitNetworkProcess>"
+[ -f "$APPDIR/usr/lib/glfallback/libGLESv2.so.2" ] || _missing="$_missing libGLESv2.so.2(glfallback)"
+if [ -n "$_missing" ]; then
+  echo "FATAL: AppDir is NOT self-contained — missing:$_missing" >&2
+  echo "       Packaging it would reproduce EI-20075266271803900 (hard linker failure on a box without system WebKitGTK)." >&2
+  exit 1
+fi
+echo "   self-containment OK: $(find "$APPDIR/usr/lib" -maxdepth 2 -name '*.so*' -type f | wc -l) libraries deployed"
+
 # 3. appimagetool requires the desktop file's Icon=<name> to exist as <name>.png at
 #    the AppDir ROOT. linuxdeploy names the root icon after the productName, but the
 #    .desktop uses the binary/icon name — so copy the largest bundled icon into place.
@@ -180,11 +281,15 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 # Robust shell AppRun (replaces linuxdeploy's crashing compiled AppRun) — WI-2902.
 HERE="$(dirname "$(readlink -f "${0}")")"
 export APPDIR="${APPDIR:-$HERE}"
-export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# glfallback is LAST on purpose: the host's own libglvnd/GL wins whenever it exists;
+# our copy only rescues a box that has none (EI-20075266271803900).
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$HERE/usr/lib/glfallback"
 export PATH="$HERE/usr/bin:$PATH"
 export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# linuxdeploy plugin hooks (gtk plugin: GSETTINGS_SCHEMA_DIR, GTK_PATH, immodules, …)
+for _hook in "$HERE"/apprun-hooks/*.sh; do [ -r "$_hook" ] && . "$_hook"; done
 # gdk-pixbuf image loaders
-_pbcache="$(ls "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | head -1)"
+_pbcache="$(ls "$HERE"/usr/lib/*/gdk-pixbuf-*/*/loaders.cache "$HERE"/usr/lib/gdk-pixbuf-*/*/loaders.cache 2>/dev/null | head -1)"
 [ -n "$_pbcache" ] && export GDK_PIXBUF_MODULE_FILE="$_pbcache"
 # gio modules (tls etc.)
 for _gio in "$HERE/usr/lib/x86_64-linux-gnu/gio/modules" "$HERE/usr/lib/gio/modules"; do
@@ -198,6 +303,11 @@ for _wk in "$HERE/usr/libexec/webkit2gtk-4.1" "$HERE/usr/lib/webkit2gtk-4.1" "$H
 done
 # single-process webkit sandbox off (AppImage helper processes can't sandbox)
 export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
+# REQUIRED, not cosmetic (EI-20075266271803900): Ubuntu's WebKitGTK 2.52 resolves its
+# helper processes against the PROCESS CWD (./lib/x86_64-linux-gnu/webkit2gtk-4.1/…)
+# and ignores WEBKIT_EXEC_PATH. $HERE carries that exact relative tree as a symlink,
+# so cd'ing here is what lets the network/web processes spawn from the bundle.
+cd "$HERE" || true
 exec "$HERE/usr/bin/papercusp-desktop" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
