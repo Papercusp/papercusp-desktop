@@ -385,6 +385,22 @@ exec "$HERE/usr/bin/papercusp-desktop" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
+# 3b-ii. FAIL CLOSED on the AppRun's `cd "$HERE"` (EI-20075266271803900).
+#     2c-ii rewrote libwebkit2gtk's PKGLIBEXECDIR to the RELATIVE
+#     "lib/x86_64-linux-gnu/webkit2gtk-4.1", and WebKitGTK resolves that against the
+#     PROCESS CWD — measured on a pristine VM: the running WebKitWebProcess's argv[0]
+#     is that literal relative path and its /proc/<pid>/cwd is the AppImage mount root,
+#     which it only is because the AppRun chdir'd there. So that one line is now
+#     LOad-BEARING for helper spawn, and deleting it breaks the bundle ONLY on a host
+#     without system WebKitGTK — invisible on every dev box, i.e. exactly the silent
+#     regression this whole guard exists to prevent. Assert it survives.
+if ! grep -qE '^cd "\$HERE"' "$APPDIR/AppRun"; then
+  echo "FATAL: AppRun does not 'cd \"\$HERE\"' — the relativized WebKit PKGLIBEXECDIR (2c-ii)" >&2
+  echo "       resolves against the process CWD, so helper spawn would fail on any host" >&2
+  echo "       without system WebKitGTK. Reproduces EI-20075266271803900." >&2
+  exit 1
+fi
+
 # 3c. RELATIVIZE any absolute symlink whose target points INSIDE the AppDir.
 #     linuxdeploy creates the AppDir-root `.DirIcon` and `<productName>.desktop`
 #     symlinks with ABSOLUTE targets (/home/<builder>/.cargo-target/.../*.AppDir/…),
