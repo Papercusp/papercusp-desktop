@@ -187,9 +187,12 @@ test('a LOW-entropy literal in a BINARY file does NOT fail the scan (noise, not 
   const dir = fixture('lowbin');
   try {
     // NUL bytes ⇒ grep classifies it binary, exactly like a .so / packfile / corestore.
+    // ⚠ The literal MUST sit at a real word boundary (space before, `=` after) or this
+    // test passes vacuously: the scan matches `\bLit\b`, so an `xLit=` fixture never
+    // matches at all and the assertion proves nothing. That mistake was made here once.
     fs.writeFileSync(
       path.join(dir, 'bundle/blob.bin'),
-      Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(`x${lit}=`), Buffer.from([0, 3])]),
+      Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(` ${lit}=`), Buffer.from([0, 3])]),
     );
     const r = scanDir(path.join(dir, 'bundle'));
     assert.equal(r.status, 0,

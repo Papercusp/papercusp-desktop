@@ -976,7 +976,7 @@ def scan_dir(dirs):
                     files.add(f"{label}!{os.path.relpath(hit, root)}" if label else hit)
 
     grep_l(high, False, dirs)
-    grep_l(low, True, dirs)
+    grep_l(low, True, dirs, binary=False)
 
     # P-012 archive pass: a compressed archive's payload is not present in its own
     # bytes, so no grep — binary-aware or not — can see inside it. Expand, scan the
@@ -993,7 +993,7 @@ def scan_dir(dirs):
                     uninspectable.append(arc)
                     continue
                 grep_l(high, False, [dest], label=arc)
-                grep_l(low, True, [dest], label=arc)
+                grep_l(low, True, [dest], label=arc, binary=False)
                 shutil.rmtree(dest, ignore_errors=True)
 
     if uninspectable:

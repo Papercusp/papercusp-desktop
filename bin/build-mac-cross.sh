@@ -139,7 +139,16 @@ case "$MAC_BUILD_TARGET" in
   *) fail "unsupported MAC_BUILD_TARGET '$MAC_BUILD_TARGET' (use universal-apple-darwin | x86_64-apple-darwin | aarch64-apple-darwin)" ;;
 esac
 
-ZIG_DIR="${PAPERCUSP_ZIG_DIR:-/tmp/zig}"
+# WI-37553: zig used to default to /tmp/zig, which is EPHEMERAL — every other mac
+# prereq already lives under ~/.papercusp (SDK, mac-cross-tools, signing key), and
+# zig was the lone exception. A reboot or tmp sweep silently removed it, and the
+# 0.0.14 mac leg then died with `Failed to find zig / cannot find binary path` —
+# a MISSING TOOL presenting as a build failure, unrelated to anything in the code.
+# Prefer the persistent install; fall back to /tmp/zig so an existing box that
+# still has one there keeps working, and honour PAPERCUSP_ZIG_DIR above both.
+_zig_default="$HOME/.papercusp/zig"
+[ -x "$_zig_default/zig" ] || { [ -x /tmp/zig/zig ] && _zig_default=/tmp/zig; }
+ZIG_DIR="${PAPERCUSP_ZIG_DIR:-$_zig_default}"
 export SDKROOT="${SDKROOT:-$HOME/.papercusp/macos-sdk/MacOSX.sdk}"
 MAC_TOOLS="${PAPERCUSP_MAC_CROSS_TOOLS:-$HOME/.papercusp/mac-cross-tools}"
 DMG_TOOL="$MAC_TOOLS/dmg"
