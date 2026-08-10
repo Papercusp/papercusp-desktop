@@ -203,8 +203,8 @@ owns it. Two front doors:
 - `pot:ask` — a **question** the peer Pot is the authority on. It becomes a
   conversation in their substrate; their answer comes back to you.
 - `pot:request_work` — hand the peer a **piece of work** in its domain. It
-  becomes a `change` work_item in *their* backlog that *their* Mug triages and
-  prioritizes. Steer-don't-dispatch, fractally: you request; the peer Mug stays
+  becomes a `change` work_item in *their* backlog that *they* triage and
+  prioritize. Steer-don't-dispatch, fractally: you request; the peer Pot stays
   the authority over whether and when it runs. You cannot jump their priorities.
 
 **Dedupe first.** Before initiating, `discovery:pots` to confirm the peer + its
@@ -220,7 +220,7 @@ for the same thing.
    an `answeredEvent` key (`cross-pot:answered:<correlationId>`).
 3. `events:await { event: <answeredEvent> }` then **END YOUR TURN**. The peer's
    answer/decline arrives through the boundary, transitions the ledger row, and
-   fires that event — re-invoking a sleeping Mug with the reply. (`pot:asks`
+   fires that event — re-invoking a sleeping agent with the reply. (`pot:asks`
    is the read-back if you need to review state; the wake is the no-poll path.)
 
 **Owner-escalation before first contact.** Outbound is default-deny to a peer you

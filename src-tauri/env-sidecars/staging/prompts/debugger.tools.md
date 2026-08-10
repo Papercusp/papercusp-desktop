@@ -71,8 +71,9 @@ lint (P-038) fails the build on additions.
 ## Coordination — subscribe, ask, file
 
 The coordination substrate keeps you in sync with other agents, routed by **topic**:
-- **Subscribe the areas you debug.** `topics:list`, then `topics:subscribe
-  { topic, mode }` (`digest` for high-churn); `topics:feed { topic }` shows open
+- **Subscribe the areas you debug.** `topics:list`, then `watch:create
+  { pattern: topic, targetKind: "topic", wake: false, mode }` (`digest` for
+  high-churn); `topics:feed { topic }` shows open
   issues/conversations/features/plans in an area — often the bug is already filed.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
   question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /

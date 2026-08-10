@@ -193,8 +193,8 @@ turn carries the payload. Use it for anything a source or peer announces
 key you're awaiting; emit the key a peer told you they await. A rate-limit
 `retryAfterMs` is a wake-at-reset (`event: 'rate-limit:reset:<scope>',
 timeout_sec: ceil(ms/1000)`). **notify ≠ wake — the axis that picks your verb.**
-The follow verbs split cleanly: `topics:subscribe`, `work_items:subscribe`, and
-a standing event-key watch (`watch { wake:false }`) are **inject-only** — their
+The follow verbs split cleanly: `work_items:subscribe` and any standing
+`watch:create { wake:false }` (topic or event key) are **inject-only** — their
 updates land in your context at your NEXT turn and NEVER re-invoke you, so an
 idle session never hears them. `events:await` is the ONLY verb that WAKES you,
 and it is one-shot by construction — it fires once then it's gone (re-await to
@@ -365,6 +365,22 @@ wakes spinning). Arm it as the LAST thing before you end your turn. *(Behind the
 loops ONLY — it is **NOT** the autonomous mug/cup/blender loop, which is a separate
 system (`pot:declare-wake` / `kettle:declare-wake`); never `loop:arm` from an
 autonomous-fleet agent.
+
+**Then CLOSE YOURSELF — `session:end` (WI-6638).** Ending your loop does not end your
+session: the CLI returns to its prompt and sits there, holding a real process and an
+open terminal tab **forever**. Measured 2026-08-03: **52 agent trees from fleets that
+finished days ago — the oldest 14 — holding 14.4 GB**, while the box thrashed at PSI
+memory-full 12.5 against a threshold of 5. No reaper can clear them: an agent's open
+tab is indistinguishable from the owner's, so every layer correctly refuses (su
+sessions are `driveMode:'responsive'`, excluded by the owner-authority ruling
+P-001/D-001, and behind that the window guard spares a live terminal). **Only you can
+end you.** So when your work is genuinely finished and nothing will wake you again —
+loop ended, claims completed/released, checkpoint flushed, not parked on an
+`events:await` — call **`session:end { reason }`** as your last act; psu exiting closes
+the tab. It is safe to try: the host REFUSES unless your session was agent-launched
+(`PAPERCUSP_LAUNCHED_BY`) and no human has ever typed into it, so an owner-attended
+window is never closed — a refusal is a correct answer, not an error to retry around.
+Do **not** call it while a loop is armed, you hold a claim, or a human is driving you.
 
 **The authority boundary runs BOTH ways.** The pot's mug-loop controls —
 `pauseNewWork` / `maxBees` / pot-steering, and a `fleet:drain` "release your slot"
@@ -873,7 +889,8 @@ mug-memory-hybrid L1b).
 A live **subscribe→inject** substrate routes work across agents by **topic**:
 
 - **Subscribe your areas once at start.** `topics:list` (the taxonomy) →
-  `topics:subscribe { topic, mode }` (`digest` for high-churn, `mention` for
+  `watch:create { pattern: topic, targetKind: "topic", wake: false, mode }`
+  (`digest` for high-churn, `mention` for
   the quiet floor, `full` only where you're actively working; subscribe
   `new_topic` to learn of new ones). `topics:feed { topic }` reads everything
   tagged an area.

@@ -23,6 +23,13 @@
 -- floor that is too EARLY only widens the candidate set, while one that is too
 -- LATE hides mail.
 
+-- FORWARD-COMPAT: the SET NOT NULL below is preceded by SET DEFAULT now() (three
+-- statements down), so any INSERT that omits the column — which is every deployed
+-- INSERT, since the column postdates the release — gets the default automatically;
+-- Postgres never requires an omitted DEFAULT-bearing column to be listed explicitly.
+-- Checked against deployed sha 1e0ddc5864 directly (adv-sessions.ts recordAdvSession,
+-- both the ported and non-ported INSERT column lists): neither mentions `first_seen_at`.
+-- (WI-6842)
 ALTER TABLE harness_shared.adv_sessions
   ADD COLUMN IF NOT EXISTS first_seen_at timestamptz;
 

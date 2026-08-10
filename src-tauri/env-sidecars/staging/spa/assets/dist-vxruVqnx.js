@@ -1,0 +1,1 @@
+var r=!!(typeof window<"u"&&window.document&&window.document.createElement);function u(n,t,{checkForDefaultPrevented:d=!0}={}){return function(e){if(n?.(e),d===!1||!e.defaultPrevented)return t?.(e)}}export{u as t};

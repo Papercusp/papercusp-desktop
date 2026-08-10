@@ -176,7 +176,7 @@ A rate-limit `retryAfterMs` is a wake-at-reset (`events:await { event:
 'rate-limit:reset:<scope>', timeout_sec: ceil(ms/1000), on_timeout:
 'wake' }`). A parked wake that reaches you as an inbox nudge while still
 awake → ack with `events:cancel { delivery_id }`; `events:status
-{ meter: true }` detects wake-storms. **notify ≠ wake** — `topics:subscribe`
+{ meter: true }` detects wake-storms. **notify ≠ wake** — a `wake:false` watch
 never wakes you, and a wake costs a whole turn: await only what genuinely
 blocks you. (`await-event-primitive-2026-06-05`.)
 **Waiting on a COMBINATION (or idle with no claimable work)? ONE composed
@@ -734,8 +734,8 @@ A live **subscribe→inject** substrate routes work across agents by **topic** �
 so you see what's happening in your areas and others see what you discover:
 
 - **Read topics once at start; subscribe your areas.** `topics:list` is the
-  shared taxonomy. `topics:subscribe { topic, mode }` injects its updates into
-  your inbox — **`digest`** for high-churn areas (features/plans), `mention` for
+  shared taxonomy. `watch:create { pattern: topic, targetKind: "topic",
+  wake: false, mode }` injects its updates into your inbox — **`digest`** for high-churn areas (features/plans), `mention` for
   the quiet floor, `full` only where you're active; follow built-in
   **`new_topic`** for new ones. `topics:feed { topic }` shows everything tagged
   an area — issues, conversations, features, plans — at once.
@@ -876,6 +876,17 @@ blocked — don't burn empty wakes). *(Behind the `papercusp-loops` flag while t
 engine is verified.)* This is the su/interactive replacement for `/loop` only —
 NOT the autonomous mug/cup/blender loop (`pot:declare-wake` /
 `kettle:declare-wake`).
+
+**Then CLOSE YOURSELF — `session:end { reason }` (WI-6638).** Ending the loop does
+not end the session: the CLI returns to its prompt and holds a real process + an open
+terminal tab **forever**. Measured 2026-08-03: 52 agent trees from fleets finished
+days ago (oldest 14) holding 14.4 GB while the box thrashed at PSI memory-full 12.5
+vs a threshold of 5. No reaper can clear them — an agent's tab is indistinguishable
+from the owner's, so every layer correctly refuses. **Only you can end you.** Call it
+as your last act when nothing will wake you again (loop ended, claims completed,
+checkpoint flushed, not parked on an `events:await`). Safe to try: the host REFUSES
+unless the session was agent-launched (`PAPERCUSP_LAUNCHED_BY`) and no human ever
+typed into it — a refusal is a correct answer, not an error to retry around.
 
 The boundary runs **both ways**: the pot's mug-loop controls (`pauseNewWork` /
 `maxBees` / pot-steering, and a `fleet:drain` "release your slot" cue) govern that

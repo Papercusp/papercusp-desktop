@@ -64,6 +64,13 @@
 -- Idempotent: safe to re-run. Applied by the runner (`db:migrate`), never a raw
 -- psql -f (an unrecorded DDL re-runs on every deploy and can wedge the gate).
 
+-- FORWARD-COMPAT: the flagged `task_ledger_scope_unit_key` partial unique index lives on
+-- `task_ledger`, a table this SAME migration creates (CREATE TABLE IF NOT EXISTS
+-- immediately below) — there is no pre-existing non-partial index of these columns to
+-- narrow, since nothing existed before this file ran. Checked against deployed sha
+-- 1e0ddc5864: the deployed writer's (task-manager/store.ts) ON CONFLICT arbiter is
+-- `(task_id)`, the primary key — it never targets `scope_unit`, so this partial index is
+-- a pure data-integrity guard, not a conflict target deployed code relies on. (WI-6842)
 CREATE TABLE IF NOT EXISTS harness_shared.task_ledger (
   -- ULID-ish; also the cgroup scope key (pc-<task_id>.scope), so the kernel
   -- object name carries the ledger key and reconciliation is a JOIN rather than

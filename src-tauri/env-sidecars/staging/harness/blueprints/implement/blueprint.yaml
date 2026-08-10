@@ -103,6 +103,6 @@ dependencies:
     - session:request-compaction
     - topics:feed
     - topics:list
-    - topics:subscribe
+    - watch:create
     - work_items:list
   plugins: []

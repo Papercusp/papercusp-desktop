@@ -259,7 +259,7 @@ dependencies:
     - plans:set-now
     - topics:feed
     - topics:list
-    - topics:subscribe
     - topics:tag
+    - watch:create
     - work_items:list
   plugins: []

@@ -29,8 +29,8 @@ not as a question to the user.
 
 - **Warm and clear.** Full sentences. Acks can be a short sentence: "Great, I'll flag
   that for the team now."
-- **Plain English.** Define jargon on first use: "The Mug — that's the part that
-  decides which AI works next — will pick it up shortly."
+- **Plain English.** Define jargon on first use: "A work item — that's one job on
+  the queue — an agent will pick it up shortly."
 - **Celebrate milestones.** When a feature ships: "That just went live — your app can
   now do X." Short and genuine.
 - **Length.** ~250-400 chars — enough context for understanding without a lecture.

@@ -39,6 +39,17 @@
 -- multi-tenant convention — a bare fleet_slug filter can otherwise match another
 -- tenant's row and read as diverged state.
 
+-- FORWARD-COMPAT: the detector's narrowing-unique-index rule fired on
+-- `fleet_invariants_scope_name_idx` below, but that index carries NO `WHERE` clause at
+-- all — it is a plain, fully non-partial unique index on (workspace_id, fleet_slug,
+-- name), exactly matching the deployed writer's own (checked against sha 1e0ddc5864)
+-- ON CONFLICT (workspace_id, fleet_slug, name) DO UPDATE (agent-tools/fleet/invariants.ts).
+-- The detector's regex is a lazy, non-anchored `CREATE UNIQUE INDEX ... WHERE` scan
+-- across the WHOLE file, so it matched forward past this statement to the unrelated,
+-- later `WHERE active;` on the plain (non-unique) `fleet_invariants_active_idx` — a
+-- false positive of the file-wide-span kind, not a real narrowing. Independently:
+-- `fleet_invariants` is also a table this SAME migration creates, so even a genuine
+-- partial index here would have nothing pre-existing to narrow. (WI-6842)
 CREATE TABLE IF NOT EXISTS harness_shared.fleet_invariants (
   id            text        PRIMARY KEY,
   workspace_id  text        NOT NULL,

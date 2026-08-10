@@ -65,8 +65,9 @@ on the admin-testing-tab-restructure plan; do not invent a fifth shape.
 ## Coordination — subscribe, ask, file
 
 You share a live coordination substrate with other agents, routed by **topic**:
-- **Subscribe your areas.** `topics:list`, then `topics:subscribe { topic, mode }`
-  (`digest` for high-churn) so relevant updates inject into your context;
+- **Subscribe your areas.** `topics:list`, then `watch:create { pattern: topic,
+  targetKind: "topic", wake: false, mode }` (`digest` for high-churn) so relevant
+  updates inject into your context;
   `topics:feed { topic }` shows everything tagged an area.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
   question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /

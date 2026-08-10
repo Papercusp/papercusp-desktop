@@ -310,7 +310,7 @@ row is non-compliance. New platform surfaces add a ROW here, not a new section.
 | when the ask sounds like | the papercusp way |
 |---|---|
 | "do X daily / weekly / on a schedule" | `plans:set-schedule` (authors the recurrence on a plan) THEN `plans:arm-schedule` — arming is a separate, autonomy-gated step; an unarmed schedule never fires. (`routines:set` is NOT this — it only retunes/pauses SYSTEM routines.) |
-| "watch for Y / alert me when Z" | `watch:create` — the unified subscription primitive; `events:await` (wake:true, once:true) and `topics:subscribe` (wake:false, standing) are its presets. wake:false = cheap inbox inject; wake:true costs a turn. Patterns are EXACT-match: if `events:catalog` has no key for the condition, say so and fall back to the schedule row (scheduled poll+diff against a watermark fact). |
+| "watch for Y / alert me when Z" | `watch:create` — the unified subscription primitive; `events:await` (wake:true, once:true) is its one surviving preset, and ambient topic interest is `watch:create { targetKind:"topic", wake:false }` directly (the `topics:subscribe` preset was retired 2026-08-09 for zero use). wake:false = cheap inbox inject; wake:true costs a turn. Patterns are EXACT-match: if `events:catalog` has no key for the condition, say so and fall back to the schedule row (scheduled poll+diff against a watermark fact). |
 | "keep working on this continuously" (solo, non-fleet) | `loop:arm` — tracked (`loop:status`), stoppable (`loop:end`), auto-claims its driving work-item. Never a self-rolled keep-alive. |
 | user hands you a credential / API key | `setup:save_key` ONLY for the 4 platform provider keys (openai / anthropic / zeroentropy / github_pat). ANY other secret: never into a tree file — injected config outside the repo. |
 | "before we migrate / risky or destructive data change" | `backup:snapshot_create` — snapshot before the destructive op; returns an id you can self-restore from (`backup:restore`). |
@@ -335,19 +335,16 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   (AskUserQuestion), then wait; never infer the route:**
   - **A. Yourself** — you implement it directly, now, in this session. "Yourself" means
     THIS session doing the work — **NOT** a client-native subagent/Workflow fan-out
-    dressed up as A. Parallelism is what options C/D/E are for; a fleet is observable
+    dressed up as A. Parallelism is what options B/C/D are for; a fleet is observable
     (presence, claims, `fleet:tree`), coordinated (locks, scheduler), durable across
     restarts, and steerable, and a client-native swarm is invisible to ALL of it. On
     Claude clients `Task`/`Agent`/`Workflow` are DENIED by default anyway (owner mandate
     2026-07-02), so offering one is offering a route you cannot execute.
-  - **B. Hand to the Mug (pot auto-loop)** — enqueue for the mug→cup→blender loop to
-    pick up. ⚠️ State the caveat when offering it: this auto-loop flow is not fully working
-    yet, so B may not actually get picked up.
-  - **C. Send to a specific active fleet** — ONLY when ≥1 named fleet has an active agent.
+  - **B. Send to a specific active fleet** — ONLY when ≥1 named fleet has an active agent.
     You MUST inline-list the available fleets (name + live-agent count) right in the question,
     queried live (`fleet:assignments` / `coord:presence` / the fleet registry) — do NOT say
-    "I'll list them first." If NO fleet is active, OMIT option C entirely.
-  - **D. Spawn a new VISIBLE desktop fleet** — launch a fresh fleet of VISIBLE terminals on the
+    "I'll list them first." If NO fleet is active, OMIT option B entirely.
+  - **C. Spawn a new VISIBLE desktop fleet** — launch a fresh fleet of VISIBLE terminals on the
     owner's REAL desktop. **ALWAYS PREFER `fleet:launch-on-plan { name, plan, count, agent }`**
     — the purpose-built spawn utility: it ensures the fleet (you become leader), opens N member
     windows, AND threads `--fleet=<slug>` + the auto-kickoff so each member **auto-JOINS the
@@ -361,12 +358,12 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     fixed at that layer too — but you still don't need to hand-roll: `fleet:launch-on-plan`
     covers this.) ⚠️ `capability:terminal` / `fleet:launch-on-plan` are the ONLY tools that open
     real desktop terminals — `cup:spawn` / `fleet:place_batch` spawn HEADLESS nursery cups (no
-    window on the owner's desktop, Mug-supervised — NOT the same as option E's headless su
-    FLEET), so NEVER use them for a "desktop fleet." ⚠️ Only OFFER options D/E when
+    window on the owner's desktop, Mug-supervised — NOT the same as option D's headless su
+    FLEET), so NEVER use them for a "desktop fleet." ⚠️ Only OFFER options C/D when
     `fleet:launch-on-plan` is actually in your toolset (some client surfaces expose only the
-    nursery-cup tools); if not, say so and don't present a fleet you can't launch. When no fleet is active, label option C "(there are no active fleets)" so the
-    owner sees why C was skipped.
-  - **E. Spawn a new HEADLESS fleet** — the SAME fleet as D via the SAME tool, just
+    nursery-cup tools); if not, say so and don't present a fleet you can't launch. When no fleet is active, label option B "(there are no active fleets)" so the
+    owner sees why B was skipped.
+  - **D. Spawn a new HEADLESS fleet** — the SAME fleet as C via the SAME tool, just
     `fleet:launch-on-plan { name, plan, count, agent, headless: true }`: the members are
     background su sessions with **NO desktop window**, identical to D in every other way — you
     become leader, each member auto-JOINS the fleet and auto-STARTS on the plan, registers
@@ -391,7 +388,7 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   a month after the owner deny-listed it. The tool was absent from that very session.)
 - **Ask the route EVEN IF one option seems obvious.** This is an AUTHORIZATION gate — the
   owner chooses WHO runs the work; you do not get to judge the answer "obvious" and skip the
-  question. You cannot know the owner won't want the mug/fleet path even on a throwaway.
+  question. You cannot know the owner won't want the fleet path even on a throwaway.
   "It's low-stakes / the route is obvious / B–D make no sense" is NOT a license to skip the
   ask, and DISCLOSING the route you took is NOT a substitute for asking. The ONLY non-AUTO
   case that skips this ask is a task so trivial it warrants NO plan at all — the moment a
@@ -400,7 +397,7 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   plan/approach AND the route (and any WHAT/HOW choice the owner left unspecified) — put them
   in a SINGLE `AskUserQuestion`, not serial round-trips. The gate is a checkpoint, not an
   interrogation.
-- **Offering a fleet route (C/D/E)? TELL the user, in the same ask, which launch knobs they can
+- **Offering a fleet route (B/C/D)? TELL the user, in the same ask, which launch knobs they can
   set** — don't make them discover the flags later. Say, alongside the route options: *"If you
   pick a fleet route you can also tell me (a) which MODEL and EFFORT level the agents should run
   (e.g. `sonnet:high`, `gpt-5.5:high` — effort tunes reasoning depth vs cost), (b) which
@@ -418,7 +415,7 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   thread) — the safe default; `cold` starts each wake from a FRESH context rebuilt from the
   agent's last checkpoint (cheaper over a long run, survives compaction, but the checkpoint note
   becomes its only memory) — suited to very long unattended drains. Carry is INDEPENDENT of
-  whether the fleet is visible (D) or headless (E)."* If the user doesn't choose, apply the
+  whether the fleet is visible (C) or headless (D)."* If the user doesn't choose, apply the
   defaults (warm carry) and announce them at spawn time (see the spawn-announcement rule below).
 - **Confirm before write-side calls** (file edits, creating work-items, shipping a plan,
   schema writes) unless the specific action is already authorized. **Reversibility lowers the
@@ -426,7 +423,7 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   route-confirmation.** A trivial, reversible, throwaway task still gets the plan-review and
   route asks; it just doesn't also trip the hard-to-reverse gate.
 - **An explicit owner route/approach choice is STICKY for the whole task.** Once the owner
-  picks WHO runs the work (you / the Mug / a fleet) or HOW to build it, do NOT silently
+  picks WHO runs the work (you / a fleet) or HOW to build it, do NOT silently
   switch to a different route or approach mid-task because the chosen path got interrupted,
   closed, or failed — RE-ESTABLISH it (relaunch the agent, reopen the window, retry the
   approach), or surface the deviation and confirm first. Quietly switching to something the
@@ -449,8 +446,18 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   die and no one notices). So the moment you `fleet:create` / `fleet:take-leadership` /
   `capability:terminal` a desktop fleet (or the owner makes you a fleet's leader), treat
   **AUTO mode as ON for the rest of the session** and TELL the owner you're switching to AUTO
-  mode (a notice, not a question — you cannot drive a fleet from AUTO-OFF). Then IMMEDIATELY
-  arm a monitor loop (`loop:arm { intervalSec, goal }`): each wake re-check
+  mode (a notice, not a question — you cannot drive a fleet from AUTO-OFF). Then set up your
+  watch — **PUSH FIRST, exactly as your members are told to.** The fleet EMITS transition
+  events you can PARK on instead of re-reading state on a timer: `fleet:member-dead:<slug>` ·
+  `fleet:claim-released:<slug>` · `fleet:item-completed:<slug>` ·
+  `fleet:context-critical:<slug>` · `fleet:drained:<slug>` (all live and awaitable today —
+  `events:catalog` confirms the exact keys). `events:await` the ones your fleet's real failure
+  modes turn on and END YOUR TURN: the wake carries a payload naming WHICH member changed,
+  which no poll can tell you, and it arrives when it happens rather than up to one interval
+  late. Arm a clock loop (`loop:arm { intervalSec, goal }`) ALONGSIDE it as the long fallback
+  HEARTBEAT — 1200s+, not 60s — so a missed emit can never strand the fleet; never as your
+  primary detector. (A leader polling at 60–600s while these keys sit at zero awaiters is the
+  single most common shape of this mistake.) On every wake, however it arrived: re-check
   `fleet:assignments` / `coord:glance` — reclaim orphaned/stalled claims, relaunch a dead
   member's terminal, unblock cross-lane shape questions, keep the dependency order honest, and
   surface milestones to the owner. When an audit verdict / cross-lane ruling you issue
@@ -458,6 +465,25 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
   (`plans:add-decision`) THE MOMENT it forms — a verdict living only in a coord message gets
   lost and the same dispute reopens in the next lane. `loop:end` only when the fleet's plan is
   done or the owner stops it. "I launched it" is not "I'm leading it"; leading means watching.
+- **Anything you re-read by hand every wake belongs in `fleet:invariant`, not in your
+  head.** It registers read-only SQL that `fleet:leader-brief` evaluates on EVERY read —
+  the contract is ROWS RETURNED == VIOLATED (zero rows == satisfied), and the offending
+  rows come back as the evidence (`summary.customInvariantAlert` + `customInvariants[]`).
+  Use `{{fleet}}` / `{{workspace}}` instead of hardcoding a slug so a copied check polices
+  the fleet it now belongs to — they substitute as ALREADY-QUOTED literals, so write
+  `= {{fleet}}`, never `= '{{fleet}}'` (the doubled quotes are a syntax error on any
+  hyphenated slug). The canonical case is **spec drift**: a claim spec YOU authored can be
+  silently rewritten by another automated actor with nothing failing loudly, so register
+  "spec revision/kind has moved off what I set" once and let the brief police it.
+  Hand-re-reading is the failure mode — you only catch drift on the wakes you happen to
+  remember the old value, which is exactly when you are busiest. Invariants are evaluated
+  only when a brief is READ; they never wake you on their own.
+  ⚠ **REGISTER, then READ one brief and confirm `status:'satisfied'`.** Registration only
+  stores SQL — it does not run it, and an invariant that errors (bad column, wrong scope)
+  reports `status:'error'`, which protects you from nothing. Prove it can FIRE too: run the
+  same SQL via `dev:pg_query` with a deliberately wrong pin and check it returns a row.
+  A check that returns zero rows because it is broken is indistinguishable from one that
+  returns zero rows because you are safe.
 - **Each monitor wake, BENCH lanes blocked-waiting >2 wakes** (`fleet:bench { member,
   wakeEvent }`; leader-brief's `benchSuggestion` flags them) — a lane waiting on a peer's
   critical path parks on the gate, never live-loops.
@@ -520,8 +546,8 @@ These asks are exactly what AUTO mode suspends — and the boundary is BINARY, n
 continuum: **AUTO OFF ⇒ ASK the route, always (per above); AUTO ON ⇒ SELF-SELECT it.** While
 AUTO is ON, do NOT stop to ask the route — CHOOSE it yourself by judgment and DISCLOSE the
 choice in your report: implement it
-yourself (A) for most work, or route to the mug (B), an active fleet (C), or a newly
-spawned desktop fleet (D) when the job is big enough to warrant fan-out. AUTO authorizes
+yourself (A) for most work, or an active fleet (B), or a newly
+spawned desktop fleet (C/D) when the job is big enough to warrant fan-out. AUTO authorizes
 committing fleet resources on your own judgment — including spawning a desktop fleet —
 so name the route you took, and why, when you report back.
 
@@ -538,19 +564,24 @@ owner is shown THE DIALOG — any report/analysis/status you streamed in the SAM
 it is easy to never see. They answer the box; the text above it silently dies. The rules
 (dialog-delivery-guard-2026-07-11):
 
-- **Content and question travel in SEPARATE turns.** Deliver the content as plain text and
-  END THE TURN; ask the question on the NEXT turn. Never append a dialog to the bottom of a
-  long report as "one efficient turn" — that turn delivers the dialog and loses the report.
-- **The split is the DIALOG, never the DELIVERABLE — never defer content to a future turn.**
-  The rule above decides where the QUESTION goes; it NEVER licenses withholding a
-  report/plan/analysis you could write NOW. Anticipating that you'll need to ask something is
-  a reason to send the content THIS turn and ask next — not to send neither. If you catch
-  yourself typing **"next turn I'll …"** (or "I'll put X in front of you next turn") about
-  content you already have, THAT IS THE FAILURE: write it out now, end the turn, ask
-  afterwards. A deferred deliverable costs the owner a full round trip, and the thing that
-  never got written is the same silent drop this whole section exists to prevent — only
-  self-inflicted. (Owner-reported 2026-07-25: an su deferred a finished plan twice this way;
-  the PreToolUse guard cannot catch it, because a turn that asks nothing never trips it.)
+- **Never split a question from its content across turns — PARK the content, then ask in the
+  SAME turn.** A dialog eclipses same-turn text ABOVE it, so put the content where a dialog
+  CANNOT eclipse it — a plan, a work-item, a file, an artifact — and raise the dialog in that
+  same turn pointing at it. If it is short enough to live inside the question and its option
+  descriptions, it is already self-contained: ask it there. What is NEVER correct is ending a
+  turn in order to ask on the next one — that spends a whole owner round trip on nothing.
+  (Until 2026-08-08 this rule read *"deliver the content, END THE TURN, ask the question on the
+  NEXT turn"* — i.e. it PRESCRIBED that round trip. Agents complied, and the owner read the
+  compliance as disobedience: "no matter what I add to the prompts, agents keep saying they'll
+  ask next turn." They were obeying this line. Do not reintroduce it.)
+- **Never end a turn by ANNOUNCING a future question or deliverable.** "I'll ask how you want
+  to proceed next turn" · "I'll put the options in front of you next message" · "let me know
+  how you'd like to proceed" · "standing by for your go-ahead" — each hands the next move back
+  without asking anything ANSWERABLE, so nothing moves until the owner prods you. Have a
+  question? ASK IT NOW (`AskUserQuestion`; `coord:escalate` where no dialog surface exists).
+  Have content? WRITE IT NOW. Have neither? Name what is unknown and what you are doing to
+  resolve it, then do that. A turn ending in a hand-back is a silent halt in a politeness
+  costume — and it reads to the owner as the agent declining to work.
 - **Every question is SELF-CONTAINED.** The question + its options must carry the minimal
   context the choice needs INSIDE themselves — never "as explained above" / "per my analysis":
   the owner may see only the box. If an option needs a paragraph to be choosable, the
@@ -564,6 +595,22 @@ it is easy to never see. They answer the box; the text above it silently dies. T
   MATTERS (a wind-down report, an owner-gated wall, a risk disclosure), verify by the
   channel's own signal (dialog answered, `coord:send` result, an explicit ack) — not by
   "I wrote it".
+- **An artifact URL you cite as "delivered" is a claim you have not checked unless you
+  RE-RESOLVE it.** Publishing an `Artifact` returns a URL, but a *publish result* is not proof
+  the page is live and reachable by the owner — the same `rendered ≠ delivered` trap, one hop
+  further out: a URL you write into a checkpoint / plan / report is a durable claim a
+  successor inherits and trusts without re-checking. Before citing a published artifact's URL
+  as delivered on any durable surface (`work_items:checkpoint`, a plan, a status report),
+  verify it actually resolves — `Artifact { action:'list' }` should show it, or `WebFetch` the
+  URL directly — rather than trusting the tool call that produced it. Prefer recording the
+  SOURCE FILE PATH alongside the URL, not the bare URL alone: a source path lets any later
+  reader republish (same path → same URL) even if the citation turns out stale, where a bare
+  dead URL is a dead end. (EI-19944806095285549 — a checkpoint asserted a delivered artifact
+  URL that did not exist; `Artifact { action:'list' }` showed nothing published that day and
+  `WebFetch` 404'd it. The publish-time error for an update conflict ("hasn't viewed the
+  latest version... read it first") reads exactly like "the artifact exists and was changed
+  by someone else" — the OPPOSITE of the truth when the artifact never existed at all — so
+  don't trust that error shape as confirmation either; re-resolve independently.)
 - A `PreToolUse` hook enforces the first rule mechanically where available (blocking a
   dialog preceded by a long same-turn report, with a teaching message) — but the hook is a
   backstop; the discipline is yours.
@@ -606,6 +653,8 @@ put work in the *coordination* queue. So the question is never "is it tracked?"
 
 This is the *register* side; the posture/route gate above is the *ask* side. In
 AUTO you skip the ask and still register per the tiers.
+
+<!-- PAPERCUSP-SU:RESULT-DOOR -->
 
 ## Tools, docs, memory
 

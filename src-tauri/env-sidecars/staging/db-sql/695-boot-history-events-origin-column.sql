@@ -16,6 +16,15 @@
 -- read/aggregate surface defaults to `origin = 'real'` unless a caller explicitly opts
 -- into test rows for debugging the tests themselves.
 
+-- FORWARD-COMPAT: the DROP+ADD below targets `origin`, a column this SAME migration is
+-- what introduces (ADD COLUMN IF NOT EXISTS two lines down) — no deployed release
+-- predates this migration's own column, so there is nothing for old code to have relied
+-- on. Checked against deployed sha 1e0ddc5864: the deployed writer
+-- (boot-history-pg-store.ts) already writes `origin` explicitly as exactly 'real' or
+-- 'test' on every INSERT, so the DROP-then-ADD is a same-shape idempotent re-assertion
+-- (identical CHECK before and after) rather than a narrowing — deployed values remain
+-- valid under both. (WI-6842)
+
 -- NOTE: no top-level BEGIN;/COMMIT; here — the migration runner already wraps each file
 -- in its own transaction (see migration 660's own note on this).
 ALTER TABLE harness_shared.boot_history_events

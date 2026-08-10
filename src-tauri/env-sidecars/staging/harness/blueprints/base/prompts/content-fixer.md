@@ -23,7 +23,7 @@ clean so the next git-sync tick commits them.
   - `scope` — either `superproject` or a **submodule path** (e.g. `libs/generic/sync`).
   - `file` — the path **relative to that scope's repo**. From your CWD (the project
     root) the file is at `<file>` for `superproject`, or `<scope>/<file>` for a submodule.
-  - `detectorKey` — which check failed (`mdx` or `smart-quotes`).
+  - `detectorKey` — which check failed (`mdx`, `smart-quotes`, or `unsafe-deletion`).
   - `error` — the detector's message (position + reason).
 
 ---
@@ -45,9 +45,25 @@ clean so the next git-sync tick commits them.
         string — escape it (`caller\'s`) or re-delimit. Leave curly quotes that are
         legitimately inside strings / comments / JSX text ALONE (the detector only
         flags code-position ones).
+      - **`unsafe-deletion`** — **do NOT attempt to fix this yourself; always
+        escalate** (see "When you cannot fix" below). This detector fires when a
+        dirty deletion still leaves a **surviving file's import dangling** (EI-17,
+        `deletion-import-guard.ts`) — there is no syntax to fix here (the file
+        doesn't exist). The `error` text offers two options — *restore the deleted
+        file*, or *finish the deletion by removing the import(s) from the listed
+        importing file(s)* — and choosing between them is a **judgment call about
+        intent** ("was this deletion deliberate?") that you cannot verify from the
+        file system alone. **Never default to restoring the file**: that silently
+        reverts someone else's deliberate deletion (a retirement, a cleanup) while
+        making it look like nothing happened. And "finish the deletion" requires
+        editing a **different, unnamed file** (the importer) — which your own hard
+        rule below ("fix only the named offending files... no scope creep") is
+        written to forbid, precisely so you don't do it as a guess. Escalate with
+        both options spelled out and let a human decide; do not pick one.
    c. **Verify your fix passes the SAME detector** git-sync uses (one shared
       implementation — they can never disagree): run `npm run lint:mdx` for an `.mdx`
       fix, `npm run lint:smart-quotes` for a `.ts`/`.tsx` fix. It must report ✓.
+      (`unsafe-deletion` has no such lint — you're escalating it, not fixing it.)
 2. **Leave the tree clean** — the fixed files dirty-but-valid, no half-edits. Do not
    run `git add`, `git commit`, or `git push`. The next git-sync tick re-runs the
    guard; the now-valid files pass and commit normally, and the content-error
@@ -58,10 +74,13 @@ clean so the next git-sync tick commits them.
 ## When you cannot fix
 
 If a file is broken in a way you cannot safely repair without changing meaning (not a
-mechanical syntax fix), do NOT guess:
+mechanical syntax fix) — and this is **always** true for `detectorKey: 'unsafe-deletion'`,
+never just sometimes — do NOT guess:
 
 1. `coord:escalate` with the harness, the file, the detector, the error, and exactly
-   what's ambiguous, so a human decides.
+   what's ambiguous, so a human decides. For `unsafe-deletion`, state both options
+   verbatim from the error (restore vs. finish-the-deletion-by-editing-the-importer)
+   and say you are not choosing between them.
 2. Fix the offenders you can; escalate only the ones you can't. Stop.
 
 A still-quarantined file with an honest escalation is always better than a guessed
@@ -76,6 +95,12 @@ nothing breaks while it waits.)
   re-checks + commits the file once your fix makes it pass.
 - Fix **only the named offending files**, and within each, **only** the flagged
   syntax — no scope creep, no reformatting, no prose edits.
+- **Never edit a file that isn't in the offender list** — even one named in an
+  `unsafe-deletion` error as an importer to clean up. That edit is a real fix, but
+  it is also the decision the escalation exists to hand to a human. Escalate instead.
+- **Never restore a deleted file to "resolve" an `unsafe-deletion` offender.** You
+  cannot tell a deliberate retirement from an accidental deletion from the file
+  system alone; guessing wrong silently reverts someone else's real work.
 - Always verify with the matching `npm run lint:*` before finishing — a fix that
   doesn't actually pass the detector just re-quarantines next tick.
 - For a submodule-scoped file, edit it at `<scope>/<file>` (the file lives inside the

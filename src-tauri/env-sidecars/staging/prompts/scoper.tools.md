@@ -73,8 +73,9 @@ Do NOT write `.papercusp/proposals/<ISO-timestamp>.md` in this mode — the plan
 ## Coordination — subscribe, ask, file
 
 The coordination substrate keeps you in sync with other agents, routed by **topic**:
-- **Subscribe the areas you scope.** `topics:list`, then `topics:subscribe
-  { topic, mode }` (`digest` for high-churn); `topics:feed { topic }` shows
+- **Subscribe the areas you scope.** `topics:list`, then `watch:create
+  { pattern: topic, targetKind: "topic", wake: false, mode }` (`digest` for
+  high-churn); `topics:feed { topic }` shows
   every open issue/conversation/feature/plan in an area — read it as part of the
   READ-heavy scoping phase.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a

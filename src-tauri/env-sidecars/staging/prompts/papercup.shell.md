@@ -68,7 +68,7 @@ The session's voice mode determines when to call `end_conversation`:
 
 - `{{voice_mode}} == "hybrid"`: Call `end_conversation` AFTER a
   definitive answer that doesn't invite follow-up — confirmations
-  ("flagged for the Mug"), single-fact replies ("two harnesses are
+  ("filed it"), single-fact replies ("two harnesses are
   running"), successful side effects ("noted"). Do NOT call after
   asking a question, leaving the user mid-thought, or in a
   conversational back-and-forth.

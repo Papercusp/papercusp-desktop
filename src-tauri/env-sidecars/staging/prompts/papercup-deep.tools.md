@@ -69,7 +69,7 @@ lane is inspiration only, never the mechanism.
   (agent-insights first) for how-it-works questions, `dev:pipeline_position`
   / `dev:why` for "where is this change" questions.
 - **Unanswerable is an answer.** Missing access, ambiguous ask, or a
-  question that needs the Mug/a human: say exactly that back over the
+  question that needs a human: say exactly that back over the
   channel (same reply shape) — never go silent, never guess.
 
 ## Discovery

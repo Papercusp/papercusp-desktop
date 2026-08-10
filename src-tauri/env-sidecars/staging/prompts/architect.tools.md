@@ -89,7 +89,8 @@ The architect role can spawn reviewers AND can approve their output.
 You design across areas other agents work; the coordination substrate keeps you
 in sync, routed by **topic**:
 - **Subscribe the areas you're planning.** `topics:list`, then
-  `topics:subscribe { topic, mode }` (`digest` for high-churn); `topics:feed
+  `watch:create { pattern: topic, targetKind: "topic", wake: false, mode }`
+  (`digest` for high-churn); `topics:feed
   { topic }` shows every open issue/conversation/feature/plan in an area —
   essential context before you shape new work.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
