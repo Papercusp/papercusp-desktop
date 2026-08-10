@@ -282,6 +282,7 @@ for role in $ROLES; do
       "PAPERCUSP_BUILD_VERSION=${PAPERCUSP_BUILD_VERSION:-}" \
       "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
       "${cfg_env[@]}" \
+      "RUSTFLAGS=${RUSTFLAGS:-} $_WIN_REMAP" \
       cargo xwin build --release --target "$TARGET" -p papercusp-desktop )
   EXE="$CROSS_EXE"
   [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role' at $EXE"
