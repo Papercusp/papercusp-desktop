@@ -387,6 +387,14 @@ KNOWN_SENSITIVE_IDENTITIES = {
     "known-sensitive:mac-vm-user": "aviweiss",           # mac VM unix user AND its sudo password
     "known-sensitive:mac-vm-login": "avraham",           # mac VM loginwindow password
     "known-sensitive:linux-build-user": "marsh-office",  # linux build-box unix user
+    # Owner's GitHub handle. Added from a MEASURED leak, not prophylactically
+    # (EI-20108164746219771): it occurs 10x inside the shipped seed corestore,
+    # alongside two github_user_id values. It is owned by no box's `whoami`, so
+    # identity_literals() — which resolves only the building machine — could never
+    # have produced it; it is precisely the cross-identity class this denylist is
+    # the backstop for. len 6, so needs_word_boundary() is False and it is hunted
+    # EVERYWHERE as a plain substring, which is what we want for a handle.
+    "known-sensitive:owner-github-handle": "aviynw",
 }
 
 
@@ -413,6 +421,10 @@ REDACTION_BY_KEY = {
     "known-sensitive:mac-vm-user": "macuser",
     "known-sensitive:mac-vm-login": "maclogin",
     "known-sensitive:linux-build-user": "builduser",
+    # Explicit rather than relying on the "redacted" fallback: the fallback maps
+    # EVERY unlisted key to the same token, so two different leaked identities would
+    # scrub to identical bytes and become indistinguishable in the staged tree.
+    "known-sensitive:owner-github-handle": "ownerhandle",
 }
 
 
@@ -730,9 +742,16 @@ def prune_docs(dirs, rules=SIDECAR_PRUNE_RULES):
 # compressed, so a plaintext identity literal inside is simply not present in the
 # file's bytes. `grep -a` fixes binary files; only expansion fixes these.
 # `.dump` is here because pg_dump's custom format is zlib-compressed internally.
+# `.deb` is here because of a MEASURED false CLEAN, not on principle (EI-20108164746219771):
+# the 0.0.15 SERVER .deb greps 0 on its raw bytes and 3 once decompressed. Without
+# this entry the file is never handed to the expander at all, so the leak was
+# reported as a pass — the exact "not inspected reads as clean" failure the archive
+# pass exists to remove, reintroduced by an omission in the suffix list rather than
+# by a gap in the machinery.
 ARCHIVE_SUFFIXES = (
     ".tar.zst", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar",
     ".zip", ".jar", ".asar", ".gz", ".zst", ".bz2", ".xz", ".dump",
+    ".deb",
 )
 
 
@@ -836,6 +855,44 @@ def _expand_archive(path, dest):
         if low.endswith(".tar.zst"):
             r = sh(f"zstd -dc {q(path)} | tar -xf - -C {q(dest)}")
             return r.returncode == 0
+        if low.endswith(".deb"):
+            # A .deb is an `ar` archive whose payload is a NESTED data.tar.{zst,xz,gz}.
+            # Extracting the ar members would leave that nested tarball unexpanded, and
+            # this pass does NOT recurse — so the naive fix would re-create the very
+            # false CLEAN it was written to remove. `dpkg-deb --fsys-tarfile` streams
+            # the payload as a plain tar whatever the inner compression, collapsing
+            # both layers in one hop.
+            #
+            # executable=/bin/bash + pipefail is LOAD-BEARING, not style: sh() runs
+            # shell=True against /bin/sh (dash here), which has no pipefail, so a
+            # pipeline reports only the LAST command's status. Without this, a box
+            # with no dpkg-deb would fail the first stage, hand tar an empty stream,
+            # and — if tar exited 0 — return True having extracted NOTHING. That is a
+            # false CLEAN produced by the repair itself, so the check must be exact.
+            if not shutil.which("dpkg-deb"):
+                print(f"    scan-dir: cannot expand {path}: dpkg-deb not on PATH "
+                      f"(a .deb this gate cannot open is a hole, not a pass)")
+                return False
+            r = sh(f"set -o pipefail; dpkg-deb --fsys-tarfile {q(path)} "
+                   f"| tar -xf - -C {q(dest)}", executable="/bin/bash")
+            if r.returncode != 0:
+                print(f"    scan-dir: cannot expand {path}: "
+                      f"dpkg-deb/tar exited {r.returncode}: {r.stderr.strip()[:200]}")
+                return False
+            # The control archive carries maintainer/packager fields — a natural
+            # landing spot for a build-box identity, and invisible in the fsys payload.
+            ctrl = os.path.join(dest, "__control__")
+            os.makedirs(ctrl, exist_ok=True)
+            rc = sh(f"set -o pipefail; dpkg-deb --ctrl-tarfile {q(path)} "
+                    f"| tar -xf - -C {q(ctrl)}", executable="/bin/bash")
+            if rc.returncode != 0:
+                # The payload IS readable, so this is not the uninspectable case —
+                # but say so rather than let a silently-skipped control archive read
+                # as scanned.
+                print(f"    scan-dir: {os.path.basename(path)}: payload expanded, "
+                      f"control archive unreadable (exit {rc.returncode}) — "
+                      f"maintainer fields NOT scanned")
+            return True
         if tarfile.is_tarfile(path):
             # Member-wise on purpose — see _expand_tar_memberwise. A hostile member
             # must not be able to halt a release on bytes that are readable.
