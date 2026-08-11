@@ -86,6 +86,10 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
 load_release_host
+# WI-20118266632432430: keep direct Windows builds aligned with release-local's
+# span normalization and with the incremental publisher.
+# shellcheck source=lib/inno-spanned-server.sh
+source "$HERE/lib/inno-spanned-server.sh"
 
 TARGET="x86_64-pc-windows-msvc"
 # Identity: keep build-box paths OUT of the shipped .exe. rustc embeds source paths
@@ -381,6 +385,16 @@ PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
     "${PAPERCUSP_BUILD_SHA:-}" \
     false \
     "${PROV_ARTIFACTS[@]}"
+
+# A direct/windows-only build does not pass through release-local.sh's
+# collection step, so it must normalize its own Server span before returning.
+# Keep the raw files for provenance/debugging, but fail closed if the span was
+# detected and could not be converted to the one bundle that can be shipped.
+if papercusp_normalize_spanned_server "$OUT_DIR" "$VERSION"; then
+  echo "==> [$role] spanned Server normalized → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") ($(du -h "$PAPERCUSP_SPANNED_SERVER_ZIP" | cut -f1); stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s))"
+elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
+  fail "spanned Server installer detected but normalization failed (zip missing or failed) — refusing to leave a raw stub+slices set as the direct-build result"
+fi
 
 rm -rf "$STAGE"
 echo "==> done — Windows artifacts (cross-built, no VM) in $OUT_DIR"
