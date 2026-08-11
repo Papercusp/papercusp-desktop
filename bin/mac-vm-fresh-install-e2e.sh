@@ -260,6 +260,24 @@ fi
 # ── 4. replace the installed apps ───────────────────────────────────────────
 echo
 echo "=== 4. remove stale installs + install fresh (DESTRUCTIVE to /Applications) ==="
+# D-010 §1 PRE-INSTALL CENSUS. This rig's /Applications already carries Papercusp
+# bundles from a prior install, so "did my install actually replace it" has to be
+# ANSWERED rather than assumed. Record every bundle and its version BEFORE we
+# touch anything, so the post-install assertion below is read against a known
+# baseline instead of against a guess.
+PRE_CENSUS=""
+for app in /Applications/Papercusp*.app; do
+  [ -e "$app" ] || continue
+  cv=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$app/Contents/Info.plist" 2>/dev/null)
+  PRE_CENSUS="${PRE_CENSUS}${PRE_CENSUS:+; }$(basename "$app")=${cv:-unknown}"
+done
+if [ -n "$PRE_CENSUS" ]; then
+  note "pre-install census: $PRE_CENSUS"
+else
+  note "pre-install census: /Applications carries no Papercusp bundle"
+fi
+
 LSR=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
 for app in "/Applications/Papercusp GUI.app" "/Applications/Papercusp Server.app" "/Applications/Papercusp.app"; do
   [ -e "$app" ] && { "$LSR" -u "$app" 2>/dev/null; rm -rf "$app" && note "removed $app"; }
@@ -273,10 +291,36 @@ else
   pass "no prior Papercusp app remains in /Applications"
 fi
 
+INSTALLED_GUI=""; INSTALLED_SRV=""
 if [ -n "$GUIAPP" ] && [ -n "$SRVAPP" ]; then
-  cp -R "$SRVAPP" /Applications/ && note "installed $(basename "$SRVAPP")"
-  cp -R "$GUIAPP" /Applications/ && note "installed $(basename "$GUIAPP")"
+  cp -R "$SRVAPP" /Applications/ && INSTALLED_SRV="/Applications/$(basename "$SRVAPP")" \
+    && note "installed $(basename "$SRVAPP")"
+  cp -R "$GUIAPP" /Applications/ && INSTALLED_GUI="/Applications/$(basename "$GUIAPP")" \
+    && note "installed $(basename "$GUIAPP")"
 fi
+
+# D-010 §2 INSTALLED-BYTES ASSERTION. The staged-bundle check in section 3 proves
+# the DOWNLOAD is the version under test; it says nothing about what now sits in
+# /Applications. A partial or failed copy leaves the PREVIOUS install in place and
+# every assertion below would then measure the old app while reporting on the new
+# one. Read the version back out of the installed bytes — the only artifact the
+# launch below can actually execute.
+for pair in "GUI:$INSTALLED_GUI" "Server:$INSTALLED_SRV"; do
+  lbl=${pair%%:*}; ipath=${pair#*:}
+  if [ -z "$ipath" ] || [ ! -d "$ipath" ]; then
+    fail "installed $lbl bundle missing after copy — nothing for this run to bind to"
+    continue
+  fi
+  iver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+          "$ipath/Contents/Info.plist" 2>/dev/null)
+  if [ -z "$iver" ]; then
+    void "installed $lbl bundle has no readable CFBundleShortVersionString — the run cannot be bound to any version"
+  elif [ "$MAC_E2E_SOURCE" = "published" ] && [ "$iver" != "$MAC_E2E_VERSION" ]; then
+    fail "installed $lbl bundle reads $iver, expected $MAC_E2E_VERSION — /Applications is NOT the bytes under test"
+  else
+    pass "installed $lbl bundle reads CFBundleShortVersionString=$iver"
+  fi
+done
 
 # ── 5. Gatekeeper ───────────────────────────────────────────────────────────
 echo
@@ -339,14 +383,31 @@ else
     fail "operator did NOT reach /api/health 200 within 200s"
     notreached "SPA render — no operator to serve it"
   else
-    # PROVENANCE BINDING. 200 alone is liveness; this makes it provenance.
+    # D-010 §3 SERVING-PID IDENTITY. 200 alone is liveness; this makes it
+    # provenance. Bundle-NESS is not bundle-IDENTITY: a `/Applications/Papercusp*`
+    # glob is satisfied perfectly by a LEFTOVER prior-version app while the bytes
+    # under test are never exercised — which is exactly the hole this rig's
+    # contamination opens. Bind to the exact paths THIS run installed, and exclude
+    # the dev build tree explicitly: a pid served out of $HOME/papercup-build-mac
+    # is a developer process, not the shipped artifact.
+    OWNED_BY=""
+    for ipath in "$INSTALLED_SRV" "$INSTALLED_GUI"; do
+      [ -n "$ipath" ] || continue
+      case "$OPEXE" in
+        "$ipath"/*) OWNED_BY="$ipath"; break ;;
+      esac
+    done
     case "$OPEXE" in
-      /Applications/Papercusp*)
-        pass "operator UP on :$OPPORT and OWNED BY THE INSTALLED BUNDLE ($OPEXE)"
+      "$HOME"/papercup-build-mac/*)
+        fail "port :$OPPORT is served OUT OF THE DEV BUILD TREE ($OPEXE) — a developer process, not the installed artifact"
         ;;
       *)
-        fail "port :$OPPORT answers 200 but its owner is NOT the installed bundle: '${OPEXE:-unknown}'"
-        note "liveness without provenance — exactly the false-OK this binding exists to catch"
+        if [ -n "$OWNED_BY" ]; then
+          pass "operator UP on :$OPPORT and served by THE BUNDLE THIS RUN INSTALLED ($OPEXE)"
+        else
+          fail "port :$OPPORT answers 200 but its owner is NOT a bundle this run installed: '${OPEXE:-unknown}'"
+          note "liveness without provenance — exactly the false-OK this binding exists to catch"
+        fi
         ;;
     esac
 
