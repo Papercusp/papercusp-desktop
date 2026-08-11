@@ -90,6 +90,55 @@ _release_host_fp() {
   printf '"%s"' "$(printf '%s' "$h" | sha256sum | cut -d' ' -f1)"
 }
 
+# EI-20086238555902880: WHICH SIDECAR IS PACKED INTO THESE BYTES.
+#
+# THE GAP THIS CLOSES: a desktop build compiles FRESH Rust but reuses whatever
+# prebuilt sidecar bundle happens to be on disk — rebuilding it is a separate manual
+# step. So the two halves of a shipped app can be hours apart in provenance, and the
+# fields above describe only the Rust/orchestrator half. Measured on the 0.0.14
+# Windows cut: installer built 15:45:18Z from gitHead c5d848155a, while its packed
+# serve.mjs was baked 03:09:18Z — twelve and a half hours older — and a fix committed
+# at 15:38:38Z was simply absent from the shipped payload.
+#
+# Why that is dangerous beyond the one missing fix: gitHead + gitDirty READ as a
+# complete provenance claim, so a reviewer who checks this file — the right instinct,
+# and exactly what the reporter did — concludes the artifact carries everything at that
+# commit. TRUE of the Rust layer, FALSE of the sidecar, and nothing on the artifact
+# surfaced the difference.
+#
+# THIS IS DELIBERATELY INFORMATION, NOT A BLOCKING STALENESS RULE. A
+# "sidecar older than sources" assertion was already considered and REJECTED in writing
+# in bin/lib/sidecar-freshness.js: one shared checkout, HEAD moving every few minutes,
+# so such a rule fires on nearly every build for every agent and trains the bypass.
+# Recording the fact has no false-positive rate; judging it has a large one. Anyone
+# who needs a BLOCKING check still has the caller-declared
+# PAPERCUSP_REQUIRE_SIDECAR_CONTAINS=<sha> assertion, which cannot cry wolf.
+#
+# Resolved HERE rather than at each call site on purpose: four legs hand-assembling
+# the same record is how two lists drift apart (see the GLFALLBACK_SONAMES fix in
+# build-appimage.sh for the same lesson). A leg names the directory; the shape lives once.
+#
+# `null` = the leg named no sidecar. `{"status":"absent"}` = it named one that carries
+# no provenance file — which sidecar-freshness.js treats as UNDECIDABLE, never a pass,
+# so the two must stay distinguishable here too. A MISSING key = a pre-EI-20086238555902880 emitter.
+_sidecar_provenance() {
+  local d="${PROVENANCE_SIDECAR_DIR:-}"
+  if [[ -z "$d" ]]; then printf 'null'; return; fi
+  local p="$d/build-provenance.json"
+  if [[ ! -f "$p" ]]; then printf '{ "status": "absent" }'; return; fi
+  # Parsed with sed, not python3/jq: this emitter also runs on the mac VM, whose
+  # /bin/bash is 3.2 and whose interpreter set is not ours to assume. The input is
+  # THIS script's own output format, so the shape is guaranteed, not hoped for.
+  local _head _built _sha
+  _head="$(sed -n 's/.*"gitHead"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$p" | head -1)"
+  _built="$(sed -n 's/.*"builtAtUtc"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$p" | head -1)"
+  # serve.mjs's own sha256 is the CONTENT identity of the packed half — the one field
+  # that answers "are these the bytes I think they are" without trusting a timestamp.
+  _sha="$(grep '"name": "serve.mjs"' "$p" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  printf '{ "gitHead": "%s", "builtAtUtc": "%s", "serveMjsSha256": "%s" }' \
+    "${_head:-unknown}" "${_built:-unknown}" "${_sha:-unknown}"
+}
+
 # Artifact name: relative to OUT_DIR when under it, else basename (see header).
 _OUT_REAL="$(realpath "$OUT_DIR")"
 _name() {
@@ -126,6 +175,11 @@ PROV="$OUT_DIR/build-provenance.json"
   # unambiguously means "a pre-WI-37746 emitter produced this" rather than
   # "nothing was baked" — upload-release.sh treats those two cases differently.
   printf '  "releaseHostSha256": %s,\n' "$(_release_host_fp)"
+  # EI-20086238555902880: always present (null when the leg named no sidecar), so a
+  # MISSING key means "a pre-EI-20086238555902880 emitter wrote this" rather than
+  # "nothing was packed" — the same present-vs-missing distinction releaseHostSha256
+  # relies on, and the reason neither is emitted only when non-empty.
+  printf '  "sidecar": %s,\n' "$(_sidecar_provenance)"
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'
   _first=1
