@@ -59,14 +59,14 @@
 # pixel evidence use the packaged isolated verifier instead — it owns an Xvfb
 # display, scrubs WAYLAND_DISPLAY, and performs the VirtualGL check:
 #   scripts/verify-tauri-headless.sh -- <assertion-command>
+set -euo pipefail
+
 # See /internal/docs/agent-insights/wayland-tauri-agent-e2e-display for the
 # decision tree and the distinction between structural and pixel evidence.
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
   echo "NOTICE: this Tauri dev shell inherited Wayland; tauri-agent-tools screenshot/capture needs swaymsg+grim."
   echo "       For pixel evidence use scripts/verify-tauri-headless.sh (DOM/eval/check still work here)."
 fi
-
-set -euo pipefail
 # Resolve BEFORE the cd — `$0` may be relative, and a relative dirname re-evaluated
 # after cd'ing resolves against the NEW cwd (silently sourcing nothing, or worse).
 __here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
