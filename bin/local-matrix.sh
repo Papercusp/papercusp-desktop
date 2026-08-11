@@ -563,7 +563,19 @@ else
 fi
 
 # ARM teardown now (frames exist). --keep-up / --reuse leave everything running.
-[ "$KEEP_UP" = 1 ] || trap rig_local_teardown EXIT
+#
+# EI-18660101091813036: an EXIT trap alone does NOT run when bash is killed by a
+# signal — a `timeout`, a gate leg budget or a ^C would tear the process down
+# with the trap never firing, which both LEAKS the frames (and their exclusive
+# core grant) and destroys their serve.log unbanked. Handling INT/TERM with a
+# plain `exit` is the minimal fix: the handler returns through the normal exit
+# path, so the EXIT trap above runs — banking, then destroying — and the
+# conventional 128+signo status is preserved for the caller.
+if [ "$KEEP_UP" = 1 ]; then :; else
+  trap rig_local_teardown EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+fi
 
 # Promote the reserved frame cores to genuine EXCLUSIVE cgroup-v2 partitions so
 # the host fleet cannot starve them (D-003). Runs for both fresh + --reuse frames
