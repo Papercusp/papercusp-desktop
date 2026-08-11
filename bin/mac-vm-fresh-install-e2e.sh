@@ -73,7 +73,15 @@ probe_health() {
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$P/api/health" 2>/dev/null)
     if [ "$code" = "200" ]; then
       pid=$(lsof -nP -iTCP:"$P" -sTCP:LISTEN -t 2>/dev/null | head -1)
-      exe=$(ps -p "$pid" -o comm= 2>/dev/null)
+      # `ps -o comm=` is WRONG here and fails in the expensive direction: for the
+      # bundled sidecar it returns bare "node", so a correctly-installed app gets
+      # REJECTED as foreign — a false FAIL on the one process we most need to
+      # recognise. (Measured on Avis-iMac: comm="node" while the real image was
+      # /Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node.)
+      # lsof -d txt reports the actual mapped executable image, which is also not
+      # spoofable by argv the way `ps -o args=` would be. args is the fallback only.
+      exe=$(lsof -p "$pid" -a -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+      [ -z "$exe" ] && exe=$(ps -p "$pid" -o args= 2>/dev/null)
       echo "$P $pid $exe"
       return 0
     fi
@@ -177,21 +185,6 @@ note "remaining papercusp procs: $(ps aux | grep -iE '[P]apercusp' | wc -l | tr 
 # ── 2. C2 baseline: nothing may already be answering ────────────────────────
 echo
 echo "=== 2. C2 pre-launch baseline (a listener here would make any PASS meaningless) ==="
-probe_health() {
-  # echoes "PORT PID EXE" for the first port answering /api/health 200, else nothing.
-  local P code pid exe
-  for P in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '{print $9}' | grep -oE '[0-9]{4,5}$' | sort -u); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$P/api/health" 2>/dev/null)
-    if [ "$code" = "200" ]; then
-      pid=$(lsof -nP -iTCP:"$P" -sTCP:LISTEN -t 2>/dev/null | head -1)
-      exe=$(ps -p "$pid" -o comm= 2>/dev/null)
-      echo "$P $pid $exe"
-      return 0
-    fi
-  done
-  return 1
-}
-
 BASE_HIT=$(probe_health)
 if [ -n "$BASE_HIT" ]; then
   void "C2 something ALREADY answers /api/health before launch → $BASE_HIT"
@@ -399,22 +392,4 @@ else
 fi
 
 # ── VERDICT ─────────────────────────────────────────────────────────────────
-echo
-echo "=============================================================="
-if [ "$VOIDS" -gt 0 ]; then
-  echo " VERDICT: VOID ($VOIDS control(s) violated, $FAILURES failure(s))"
-  echo " This run COULD NOT HAVE FAILED honestly. Do not quote it as evidence."
-  echo "=============================================================="
-  exit 2
-fi
-if [ "$FAILURES" -gt 0 ]; then
-  echo " VERDICT: FAIL ($FAILURES failed assertion(s), $NOTREACHED not reached)"
-  echo " confidence class: $CONFIDENCE"
-  echo "=============================================================="
-  exit 1
-fi
-echo " VERDICT: PASS (0 failures, $NOTREACHED not reached)"
-echo " confidence class: $CONFIDENCE"
-echo " scope: source=$MAC_E2E_SOURCE quarantine=$MAC_E2E_QUARANTINE version=$MAC_E2E_VERSION"
-echo "=============================================================="
-exit 0
+emit_verdict
