@@ -59,6 +59,21 @@ for f in "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB"; do : > "$f"; done
 
 echo "release-artifacts self-test (tag=$TAG)"
 
+# 0a) all three Windows entry points source and invoke the same helper. This is
+# a static wiring guard: a green helper unit alone would not catch a caller
+# silently bypassing it again.
+for script in \
+  "$DIR/../build-windows-cross.sh" \
+  "$DIR/../publish-platform-incremental.sh" \
+  "$DIR/../release-local.sh"; do
+  if grep -Fq 'source "$HERE/lib/inno-spanned-server.sh"' "$script" \
+     && grep -Fq 'papercusp_normalize_spanned_server' "$script"; then
+    ok "$(basename "$script") uses shared Server span normalization"
+  else
+    bad "$(basename "$script") bypasses shared Server span normalization"
+  fi
+done
+
 # 0) every Windows entry point shares the DiskSpan normalization decision. The
 # raw stub + slices are replaced by one zip for artifact selection, while the
 # original files remain available for provenance/debugging.

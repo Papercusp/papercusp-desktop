@@ -432,6 +432,10 @@ pathlib.Path(out_path).write_text(json.dumps(manifest, indent=2) + "\n")
 # leaves the PREVIOUS cut's latest-server.json live on the host (upload-
 # release.sh only uploads what release-local.sh actually produced), so a
 # Server-only build never regresses to a false up-to-date.
+try:
+    pathlib.Path(out_server_path).unlink()
+except FileNotFoundError:
+    pass
 if server_platforms:
     server_manifest = {
         "version": version,

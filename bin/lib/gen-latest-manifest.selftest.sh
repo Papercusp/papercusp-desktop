@@ -128,7 +128,7 @@ SERVER_ZIP="$WORK/Papercusp Server_${VER}_x64-setup.zip"
 : > "$SERVER_ZIP"
 TAG_SERVER_ZIP="$(desktop_release_tag "$VER" stable)"
 SERVER_ZIP_JSON="$(gen_latest_manifest_server_json_path "$TAG_SERVER_ZIP")"
-rm -f "$SERVER_ZIP_JSON"
+printf '%s\n' '{"stale":true}' > "$SERVER_ZIP_JSON"
 GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$BASE_SERVER_ZIP" \
 PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
   gen_latest_manifest "$VER" stable "$TAG_SERVER_ZIP" "$SERVER_ZIP" >/dev/null 2>&1
