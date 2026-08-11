@@ -1063,7 +1063,7 @@ fed_merge_assert() {
 # mig 270/271 landed predates the plan-parts lane entirely, EI-505). Callers must
 # treat "skip" as N/A, not FAIL, when computing OVERALL.
 fed_plan_part_merge_assert() {
-  local src="$1" dst="$2" slug="$3" tries="${4:-30}" i row ts ws_src has_src has_dst
+  local src="$1" dst="$2" slug="$3" tries="${4:-30}" i row ts ws="" has_src has_dst
   ts="$(date +%s)000"
   # EI-505 gate: probe BOTH frames for the table before touching it. A shipped .deb
   # predating the plan-parts migration has neither the table nor the capture trigger,
@@ -1075,13 +1075,32 @@ fed_plan_part_merge_assert() {
   if [ "$has_src" != "t" ] || [ "$has_dst" != "t" ]; then
     echo skip; return 0
   fi
-  # The federated feature row (from fed_merge_assert, run earlier) carries the
-  # frame's resolved workspace_id — reuse it so the part INSERT matches the
-  # capture trigger + RLS binding. harness_plan_parts.workspace_id is NOT NULL.
-  ws_src="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
-  [ -n "$ws_src" ] || { echo 0; return 1; }
-  # D-050: workspace_id = the operator's REAL workspace (from product-written hive_members), not '$ws_src'/'default'.
-  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES (COALESCE((SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1),'$ws_src'),'$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
+  # D-050 / WI-5399 iteration 2: workspace_id = the operator's REAL workspace (the
+  # harness drains WHERE workspace_id=its boot workspace). This function was MISSED
+  # by the iteration-2 sweep that fixed its siblings (fed_hive_merge_probe,
+  # fed_coord_merge_probe, rig_resolve_ws) and kept two lottery rungs:
+  #   (a) an UNORDERED `harness_features_consolidated WHERE harness_slug=... LIMIT 1`
+  #       — once content federates IN, that table holds foreign-workspace rows too,
+  #       so the unordered LIMIT 1 is exactly the WI-5399 coin-flip, and
+  #   (b) a COALESCE onto (a) instead of failing loudly.
+  # Either one stamps the part INSERT with a workspace_id no drain scope selects:
+  # the row then sits drained_at=NULL forever, dst polls 0 rows, and this leg reads
+  # RED with no error anywhere — the WI-5399 signature. Every rung below is
+  # deterministic, and exhausting them FAILS LOUD rather than guessing.
+  if [ -n "${RIG_HIVE_ID:-}" ]; then
+    ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  # Non-rig callers (no RIG_HIVE_ID) write from the OWNER frame, where the frame's
+  # own membership row IS origin='local'; ORDER BY makes it deterministic.
+  [ -n "$ws" ] || ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  # Last resort: the frame's OWN feature row (origin='local' — never a federated-in
+  # foreign card), so the part INSERT still matches the capture trigger + RLS binding.
+  [ -n "$ws" ] || ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' AND coalesce(origin,'local')='local' ORDER BY ts LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$ws" ]; then
+    echo "FATAL fed_plan_part_merge_assert($src,$dst,$slug): could not resolve a real workspace_id — refusing to silently write under a workspace the harness never drains (D-050/WI-5399 class)" >&2
+    echo 0; return 1
+  fi
+  drv_psql "$src" "INSERT INTO harness_shared.harness_plan_parts (workspace_id,harness_slug,plan_slug,part_key,kind,body,ordinal,fed_ts,author,tombstone,origin) VALUES ('$ws','$slug','ppfed-$src','item:P-001','item','xmerge-proof-from-$src',1,$ts,'$src',false,'local');" >/dev/null
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT origin||'|'||body FROM harness_shared.harness_plan_parts WHERE plan_slug='ppfed-$src' AND part_key='item:P-001';" 2>/dev/null | tr -d '[:space:]')"
     [ "$row" = "remote|xmerge-proof-from-$src" ] && { echo 1; return 0; }
