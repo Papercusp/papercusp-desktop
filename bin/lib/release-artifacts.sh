@@ -32,6 +32,34 @@ release_artifacts_manifest_path() {
   printf '/tmp/papercusp-artifacts-%s.txt\n' "$1"
 }
 
+# release_artifacts_resolve_root <path> — print the existing directory's
+# physical path.  The dev box relocates cargo output and keeps
+# src-tauri/target as a symlink; `find` does not descend a symlink supplied as
+# its starting path unless `-L` is used.  A zero-row, zero-exit scan of the
+# unresolved path is therefore not evidence that an artifact is absent.
+release_artifacts_resolve_root() {
+  local root="${1:-}"
+  if [[ -z "$root" ]]; then
+    echo "release-artifacts: missing directory root to resolve." >&2
+    return 2
+  fi
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    echo "release-artifacts: directory root does not exist: $root" >&2
+    return 1
+  fi
+
+  local resolved
+  resolved="$(cd "$root" 2>/dev/null && pwd -P)" || {
+    echo "release-artifacts: directory root is not accessible: $root" >&2
+    return 1
+  }
+  [[ -d "$resolved" ]] || {
+    echo "release-artifacts: resolved root is not a directory: $resolved" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
 # release_artifacts_write <tag> <artifact>... — record the cut's artifact set.
 # One ABSOLUTE path per line, sorted + de-duplicated, EXISTING files only (an
 # unmatched glob expands to a literal pattern, and a vanished file is dropped —

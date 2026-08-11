@@ -72,6 +72,27 @@ verified fresh-install behavior: WI-2902 (2026-07-05).
   `sudo apt install libfuse2t64` (or run `./Papercusp*.AppImage --appimage-extract-and-run`).
   Say so in the Linux release notes. The `.deb` has no such requirement.
 
+### Artifact discovery on the build host
+
+`src-tauri/target` may be a symlink to the relocated Cargo target tree. A bare
+`find "$ROOT/src-tauri/target" ...` does not descend a symlink supplied as its
+starting path; it can return **zero rows with exit 0** even when the target contains
+release artifacts. Never report an artifact as absent from that result alone.
+
+After sourcing the shared release helper, resolve the root and follow links explicitly:
+
+```bash
+cd papercusp-desktop
+source bin/lib/release-artifacts.sh
+TARGET_ROOT="$(release_artifacts_resolve_root "$PWD/src-tauri/target")"
+find -L "$TARGET_ROOT" -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \) -print
+```
+
+For a completed cut, prefer `release_artifacts_read <tag>`; it reads the builder's
+single-source manifest and fails hard when the manifest is missing or resolves to no
+existing files. If a manual scan returns zero, verify both the resolved root and the
+expected artifact version before recording a negative finding.
+
 ### macOS (universal .dmg + updater .app.tar.gz, built on the Mac VM)
 
 `WITH_MAC=1` drives a native build on the local QEMU macOS Sonoma VM

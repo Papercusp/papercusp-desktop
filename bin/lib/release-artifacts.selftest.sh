@@ -74,6 +74,35 @@ for script in \
   fi
 done
 
+# 0b) target roots may be symlinks. Resolve the root before any manual
+# artifact scan and follow links explicitly; a bare find over the link returns
+# no rows with exit 0 on the affected host, which is indistinguishable from a
+# genuine empty tree.
+REAL_TARGET="$WORK/target-real"
+LINK_TARGET="$WORK/target-link"
+mkdir -p "$REAL_TARGET/release/bundle/appimage"
+SYMLINK_APPIMAGE="$REAL_TARGET/release/bundle/appimage/Papercusp_${VER}_amd64.AppImage"
+: > "$SYMLINK_APPIMAGE"
+ln -s "$REAL_TARGET" "$LINK_TARGET"
+EXPECTED_ROOT="$(cd "$REAL_TARGET" && pwd -P)"
+RESOLVED_ROOT="$(release_artifacts_resolve_root "$LINK_TARGET")"
+if [[ "$RESOLVED_ROOT" == "$EXPECTED_ROOT" ]]; then
+  ok "resolves a symlinked target root to its physical directory"
+else
+  bad "symlinked target root resolved to '$RESOLVED_ROOT' (expected '$EXPECTED_ROOT')"
+fi
+mapfile -t FOLLOWED_APPIMAGES < <(find -L "$LINK_TARGET" -type f -name '*.AppImage' -print)
+FOUND_APPIMAGE=""
+if [[ "${#FOLLOWED_APPIMAGES[@]}" -eq 1 ]]; then
+  FOUND_APPIMAGE="$(cd "$(dirname "${FOLLOWED_APPIMAGES[0]}")" && pwd -P)/$(basename "${FOLLOWED_APPIMAGES[0]}")"
+fi
+EXPECTED_APPIMAGE="$(cd "$(dirname "$SYMLINK_APPIMAGE")" && pwd -P)/$(basename "$SYMLINK_APPIMAGE")"
+if [[ "$FOUND_APPIMAGE" == "$EXPECTED_APPIMAGE" ]]; then
+  ok "symlink-safe artifact scan follows the target root"
+else
+  bad "symlink-safe artifact scan missed the AppImage under the target root"
+fi
+
 # 0) every Windows entry point shares the DiskSpan normalization decision. The
 # raw stub + slices are replaced by one zip for artifact selection, while the
 # original files remain available for provenance/debugging.
