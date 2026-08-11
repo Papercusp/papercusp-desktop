@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
 # Launch the desktop app in DEV mode WITHOUT HMR.
 #
-# NOTE: nohmr / :3070 is now the DEFAULT devUrl in tauri.conf.json, so this
-# explicit override is redundant — it's kept for clarity / self-documentation.
+# ⚠ THIS SCRIPT LOADS :3270 — THIS SESSION'S OWN WORKING TREE. Not :3070.
+#
+# Do not restate the port here. The `exec` at the bottom of this file is the
+# authority, and tauri.conf.json's `devUrl` is the fallback when it is bypassed.
+# A previous version of this header asserted ":3070 is now the DEFAULT devUrl",
+# which was false and contradicted this same file ~50 lines below. An agent who
+# read only the header concluded the dev shell runs the RELEASE checkout, and
+# therefore that landed fixes were broken — it cost a wasted owner test cycle
+# (WI-37858) and was then promoted into a plan decision that had to be refuted
+# (hud-session-chat-release-audit-2026-08-11 D-004 → D-005). See WI-37907.
+#   - `frontendDist` in tauri.conf.json is the PRODUCTION-build path. It is NOT
+#     what `tauri dev` loads, and reading it as the dev target is the same trap.
+#   - Because :3270 is `npx tsx bin/hono-host.ts` over apps/operator, it serves
+#     the WORKING TREE — UNCOMMITTED edits included. There is no build artifact
+#     and no git object in that path, so "is my change committed/promoted?" is
+#     the wrong question for this shell. `dev:pipeline_position` answers a git
+#     question and does not describe what :3270 is serving.
+#   - The host has NO file-watch: a :3270 started BEFORE your edit serves stale
+#     code just as confidently as :3070 would. Check the operator's start time
+#     against your file's mtime before trusting a verdict, and restart the dev
+#     shell if it is older — do not wait for a promotion that is not involved.
+#
 # HMR is the explicit opt-in: `npm run dev:hmr` (devUrl http://localhost:3055,
 # Vite dev server with the HMR client active).
 #
-# Why nohmr / :3070 is the default:
+# Why the no-HMR path is the default:
 #   - The Tauri shell is the product surface and this checkout is edited by a
 #     FLEET of agents at once. A Vite dev server (:3055) reloads the webview on
-#     fleet edits / dep re-optimization / proxy errors while :3070 redeploys,
-#     so the window "constantly refreshes". :3070 serves a STATIC bundle that
-#     only changes on a release deploy — no dev-server reload pressure.
+#     fleet edits / dep re-optimization / proxy errors, so the window
+#     "constantly refreshes". The operator serves a built SPA bundle instead —
+#     no dev-server reload pressure.
 #   - Mirrors the prod runtime path exactly (Hono host + static dist).
 #   - No `ws://localhost:3055/?token=…` HMR socket competing with SSE for the
 #     libsoup 6-connection budget.
