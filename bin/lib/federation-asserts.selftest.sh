@@ -461,6 +461,108 @@ res="$(fed_plan_part_merge_assert src dst slug 1)"
 [ "$res" = 1 ] && ok "fed_plan_part_merge_assert still MERGES (returns 1) when the table is present on both frames" \
                || bad "fed_plan_part_merge_assert expected '1' (table present, merge lands), got '$res'"
 
+# 9b) WI-5399 iteration 2 (D-050 class): fed_plan_part_merge_assert must resolve
+# workspace_id DETERMINISTICALLY, and must FAIL LOUD rather than guess.
+#
+# This function was MISSED by the iteration-2 sweep that fixed its siblings. It
+# resolved the INSERT's workspace via an UNORDERED
+#   `harness_features_consolidated WHERE harness_slug=... LIMIT 1`
+# COALESCEd under an origin='local' pot_members lookup. Once federation carries
+# foreign cards INTO those tables, the unordered LIMIT 1 is a coin flip, and on a
+# JOINER frame the origin='local' rung structurally never matches (the joiner's own
+# membership row is authored by the owner and arrives origin='remote'). Losing that
+# flip stamps the row with a workspace_id NO drain scope selects: it sits
+# drained_at=NULL forever, dst polls 0 rows, and the leg reads RED with no error
+# anywhere — the exact WI-5399 signature that burned three sessions on the
+# replication layer while the bug was on the WRITE side.
+#
+# The stub records the workspace the INSERT actually used. It must write to a FILE:
+# fed_plan_part_merge_assert is invoked via `$(...)`, so a variable assigned inside
+# the stub dies with that subshell and would silently read as empty.
+WS53_LOG="$WORK/ws5399-insert-ws.txt"
+declare -A WS53=()
+drv_psql() {
+  local inst="$1" sql="$2"
+  case "$sql" in
+    # The INSERT arm MUST come first. A regressed INSERT EMBEDS the workspace
+    # subquery (`VALUES (COALESCE((SELECT ... FROM pot_members WHERE ...`), so any
+    # read-arm listed above it would match the write and swallow it — the stub would
+    # then classify a WRITE as a READ, log nothing, and the case would fail for the
+    # wrong reason while looking right.
+    *"INSERT INTO harness_shared.harness_plan_parts"*)
+      # Log the workspace_id expression VERBATIM (up to the first comma), not just a
+      # quoted literal, so a regression that defers resolution back INTO SQL is
+      # reported as what it is instead of parsing to empty and reading as "wrote ''".
+      # The shell cannot evaluate that expression and cannot fail loud on it; the DB
+      # silently performs the old lottery.
+      printf '%s\n' "$sql" | sed -n "s/.*VALUES (\([^,]*\),.*/\1/p" | tr -d "'" >> "$WS53_LOG" ;;
+    *"to_regclass('harness_shared.harness_plan_parts')"*) echo t ;;
+    *"pot_members WHERE pot_home_slug="*)                 echo "${WS53[byslug]:-}" ;;
+    *"pot_members WHERE coalesce(origin"*)                echo "${WS53[bylocal]:-}" ;;
+    *"harness_features_consolidated WHERE harness_slug"*)
+      # the FIXED rung is origin-filtered; the LOTTERY rung is not
+      case "$sql" in
+        *"coalesce(origin,'local')='local'"*) echo "${WS53[featlocal]:-}" ;;
+        *)                                    echo "${WS53[featany]:-}" ;;
+      esac ;;
+    *"SELECT origin||'|'||body"*) echo "remote|xmerge-proof-from-src" ;;
+  esac
+}
+
+# THE FALSIFIER: RIG_HIVE_ID is set (the rig scenario family — 00-base.sh,
+# deb-hetzner-federation.sh, deb-hetzner-fast-iterate.sh all call this with it in
+# scope), the frame's real workspace is resolvable by pot_home_slug, and a FOREIGN
+# federated-in card is sitting in harness_features_consolidated waiting to win the
+# old unordered LIMIT 1. The INSERT must use the real workspace, never the foreign one.
+: > "$WS53_LOG"
+WS53=( [byslug]=real-ws-A [bylocal]="" [featlocal]="" [featany]=FOREIGN-ws-B )
+RIG_HIVE_ID=some-pot res="$(fed_plan_part_merge_assert src dst slug 1)"
+unset RIG_HIVE_ID
+used="$(tr -d '[:space:]' < "$WS53_LOG")"
+[ "$used" = real-ws-A ] \
+  && ok "fed_plan_part_merge_assert stamps the pot_home_slug-resolved workspace, not a federated-in foreign one (WI-5399)" \
+  || bad "fed_plan_part_merge_assert wrote under workspace '$used' (want real-ws-A) — the WI-5399 lottery is back; that row would never drain"
+
+# A joiner frame: pot_home_slug resolves, but origin='local' matches NOTHING (every
+# membership row federated in as 'remote'). The old code fell through to the lottery.
+: > "$WS53_LOG"
+WS53=( [byslug]=joiner-ws [bylocal]="" [featlocal]="" [featany]=FOREIGN-ws-B )
+RIG_HIVE_ID=some-pot res="$(fed_plan_part_merge_assert src dst slug 1)"
+unset RIG_HIVE_ID
+used="$(tr -d '[:space:]' < "$WS53_LOG")"
+[ "$used" = joiner-ws ] \
+  && ok "fed_plan_part_merge_assert resolves on a JOINER frame, where origin='local' structurally never matches (WI-5399 iter-2)" \
+  || bad "fed_plan_part_merge_assert wrote under '$used' (want joiner-ws) on a joiner frame"
+
+# FAIL LOUD: nothing resolves. It must NOT invent a workspace, and must say so.
+: > "$WS53_LOG"
+WS53=( [byslug]="" [bylocal]="" [featlocal]="" [featany]="" )
+err="$(fed_plan_part_merge_assert src dst slug 1 2>&1 >/dev/null)"
+used="$(tr -d '[:space:]' < "$WS53_LOG")"
+[ -z "$used" ] && case "$err" in *"could not resolve a real workspace_id"*) true ;; *) false ;; esac \
+  && ok "fed_plan_part_merge_assert FAILS LOUD instead of writing under an unresolvable workspace (D-050)" \
+  || bad "fed_plan_part_merge_assert wrote '$used' / said '$err' — expected no INSERT and a FATAL (D-050 silent-fallback regression)"
+
+# CONTROL (calibration): a non-rig caller with no RIG_HIVE_ID still resolves via the
+# owner-frame origin='local' rung, so this fix cannot have broken those callers.
+: > "$WS53_LOG"
+WS53=( [byslug]="" [bylocal]=owner-ws [featlocal]="" [featany]=FOREIGN-ws-B )
+res="$(fed_plan_part_merge_assert src dst slug 1)"
+used="$(tr -d '[:space:]' < "$WS53_LOG")"
+[ "$used" = owner-ws ] && [ "$res" = 1 ] \
+  && ok "non-rig caller (no RIG_HIVE_ID) still resolves via the owner origin='local' rung and still merges" \
+  || bad "non-rig caller wrote '$used' / returned '$res' (want owner-ws / 1) — the fix broke a pre-existing caller"
+
+# CONTROL (calibration): the last-resort feature-row rung must be the ORIGIN-FILTERED
+# one. If this ever reads FOREIGN-ws-B, the unordered lottery has been reintroduced.
+: > "$WS53_LOG"
+WS53=( [byslug]="" [bylocal]="" [featlocal]=own-feature-ws [featany]=FOREIGN-ws-B )
+res="$(fed_plan_part_merge_assert src dst slug 1)"
+used="$(tr -d '[:space:]' < "$WS53_LOG")"
+[ "$used" = own-feature-ws ] \
+  && ok "last-resort feature-row rung is origin-filtered (the frame's OWN row), not an unordered LIMIT 1" \
+  || bad "last-resort rung wrote '$used' (want own-feature-ws) — an unordered LIMIT 1 is back in the ladder"
+
 # deb-hetzner-federation.sh's OVERALL logic must treat a SKIPped plan-part leg as
 # N/A, not a failure, and must not label it FAIL in the summary line.
 FED_SCRIPT="$DIR/../deb-hetzner-federation.sh"
