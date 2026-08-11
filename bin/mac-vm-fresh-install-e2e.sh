@@ -64,6 +64,45 @@ VOIDS=0
 NOTREACHED=0
 CONFIDENCE="clean-room"
 
+probe_health() {
+  # echoes "PORT PID EXE" for the first port answering /api/health 200, else nothing.
+  # The EXE is what turns a liveness probe into a provenance one, so it is resolved
+  # here rather than at the call site where it would be easy to forget.
+  local P code pid exe
+  for P in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk '{print $9}' | grep -oE '[0-9]{4,5}$' | sort -u); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$P/api/health" 2>/dev/null)
+    if [ "$code" = "200" ]; then
+      pid=$(lsof -nP -iTCP:"$P" -sTCP:LISTEN -t 2>/dev/null | head -1)
+      exe=$(ps -p "$pid" -o comm= 2>/dev/null)
+      echo "$P $pid $exe"
+      return 0
+    fi
+  done
+  return 1
+}
+
+emit_verdict() {
+  echo
+  echo "=============================================================="
+  if [ "$VOIDS" -gt 0 ]; then
+    echo " VERDICT: VOID ($VOIDS control(s) violated, $FAILURES failure(s))"
+    echo " This run COULD NOT HAVE FAILED honestly. Do not quote it as evidence."
+    echo "=============================================================="
+    exit 2
+  fi
+  if [ "$FAILURES" -gt 0 ]; then
+    echo " VERDICT: FAIL ($FAILURES failed assertion(s), $NOTREACHED not reached)"
+    echo " confidence class: $CONFIDENCE"
+    echo "=============================================================="
+    exit 1
+  fi
+  echo " VERDICT: PASS (0 failures, $NOTREACHED not reached)"
+  echo " confidence class: $CONFIDENCE"
+  echo " scope: source=$MAC_E2E_SOURCE quarantine=$MAC_E2E_QUARANTINE version=$MAC_E2E_VERSION${CONTROLS_ONLY_NOTE}"
+  echo "=============================================================="
+  exit 0
+}
+
 pass()       { echo "  PASS  $*"; }
 fail()       { echo "  FAIL  $*"; FAILURES=$((FAILURES+1)); }
 void()       { echo "  VOID  $*"; VOIDS=$((VOIDS+1)); }
@@ -102,6 +141,25 @@ for T in cargo rustc; do
   command -v "$T" >/dev/null 2>&1 && note "host has $T (build-time only; not on a packaged app's launch path)"
 done
 note "confidence class: $CONFIDENCE"
+
+# CONTROLS-ONLY: a read-only pre-flight answering "can this box even produce an
+# honest verdict right now?" without touching /Applications or downloading 5GB.
+# It exists so the verdict machinery is DEMONSTRABLE on demand — a gate nobody
+# has watched fail is a gate nobody should trust, and requiring a destructive
+# 5GB run to see one is how that check stops being made.
+if [ -n "$MAC_E2E_CONTROLS_ONLY" ]; then
+  CONTROLS_ONLY_NOTE=" [CONTROLS-ONLY: no install/launch was performed — this is a preflight, NOT runtime evidence]"
+  echo
+  echo "=== 2. C2 pre-launch baseline (read-only; running apps NOT quit in this mode) ==="
+  BASE_HIT=$(probe_health)
+  if [ -n "$BASE_HIT" ]; then
+    void "C2 something already answers /api/health → $BASE_HIT"
+    note "with this listener up, a real run could not attribute a 200 to the artifact"
+  else
+    pass "C2 nothing answers /api/health — a real run could attribute a 200 to the artifact"
+  fi
+  emit_verdict
+fi
 
 # ── 1. quit any running instance ────────────────────────────────────────────
 echo
