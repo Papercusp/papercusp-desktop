@@ -116,7 +116,27 @@ else
   bad "mixed cut did not write both manifests (gui=$([[ -f "$MIX_JSON" ]] && echo y || echo n), server=$([[ -f "$MIX_SERVER_JSON" ]] && echo y || echo n))"
 fi
 
-# 4) MERGE MODE (EI-18111560213741904): publishing a SECOND platform onto an
+# 4) A normalized Server DiskSpan is a release-page zip, not an updater
+# installer.  A same-version merge base must not resurrect its old Windows
+# stub entry when the current artifact set contains only the normalized zip.
+BASE_SERVER_ZIP="$WORK/base-server-zip.json"
+cat > "$BASE_SERVER_ZIP" <<JSON
+{ "version": "$VER", "channel": "stable", "notes": "x", "pub_date": "2026-01-01T00:00:00Z",
+  "platforms": { "windows-x86_64": { "signature": "OLD-stub-sig", "url": "https://example.com/releases/desktop-v${VER}/Papercusp%20Server_${VER}_x64-setup.exe" } } }
+JSON
+SERVER_ZIP="$WORK/Papercusp Server_${VER}_x64-setup.zip"
+: > "$SERVER_ZIP"
+TAG_SERVER_ZIP="$(desktop_release_tag "$VER" stable)"
+SERVER_ZIP_JSON="$(gen_latest_manifest_server_json_path "$TAG_SERVER_ZIP")"
+rm -f "$SERVER_ZIP_JSON"
+GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$BASE_SERVER_ZIP" \
+PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
+  gen_latest_manifest "$VER" stable "$TAG_SERVER_ZIP" "$SERVER_ZIP" >/dev/null 2>&1
+[[ ! -f "$SERVER_ZIP_JSON" ]] \
+  && ok "normalized Server zip removes a stale same-version Windows stub entry" \
+  || bad "normalized Server zip left a stale Windows stub entry in latest-server.json"
+
+# 5) MERGE MODE (EI-18111560213741904): publishing a SECOND platform onto an
 #    already-published manifest must overlay its own entry while carrying every
 #    OTHER platform key through byte-for-byte untouched (never regenerated,
 #    never re-signed) — this is what lets bin/publish-platform-incremental.sh
@@ -150,7 +170,7 @@ else
   bad "merge mode: manifest was not written"
 fi
 
-# 5) CROSS-VERSION MERGE: starting a new release with only one ready platform
+# 6) CROSS-VERSION MERGE: starting a new release with only one ready platform
 # must not carry the previous release's other platform URLs into the new
 # top-level version. Those keys are absent until their own artifacts are ready.
 CROSS_OLD_VER="9.9.8"
@@ -196,7 +216,7 @@ else
   bad "cross-version merge did not produce version-consistent manifests (rc=$CROSS_RC)"
 fi
 
-# 6) PAPERCUSP_UPDATE_BASE_URL unset ⇒ obviously-invalid placeholder, never a
+# 7) PAPERCUSP_UPDATE_BASE_URL unset ⇒ obviously-invalid placeholder, never a
 #    plausible-but-wrong url.
 TAG_NOBASE="$(desktop_release_tag "$VER" stable)"
 ( unset PAPERCUSP_UPDATE_BASE_URL; gen_latest_manifest "$VER" stable "$TAG_NOBASE" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>/dev/null )

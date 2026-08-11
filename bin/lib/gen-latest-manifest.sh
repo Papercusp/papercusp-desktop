@@ -328,6 +328,22 @@ gui_platforms.update(build_platforms(artifacts, want_token="", reject_token="Ser
 server_platforms = load_merge_base(merge_srv)
 server_platforms.update(build_platforms(artifacts, want_token="Server", reject_token="GUI"))
 
+# EI-20118266632432430: a normalized Server DiskSpan is intentionally a zip,
+# not an updater installer.  If a same-version merge base still carries an old
+# Windows stub entry, carrying it forward would resurrect the payload-less
+# download even though the current artifact set is safe.  The release callers
+# have already filtered the raw stub/slices; remove the stale platform key here
+# so the safe result is an absent Windows Server updater entry.
+if any("Server" in art.name and art.name.endswith("-setup.zip") for art in artifacts):
+    if "windows-x86_64" in server_platforms:
+        print(
+            "WARNING: latest-server.json merge dropped windows-x86_64 because "
+            "the current Server artifact is a normalized DiskSpan zip, not an "
+            "updater installer.",
+            file=sys.stderr,
+        )
+        server_platforms.pop("windows-x86_64", None)
+
 def release_tag_from_url(url: str):
     """Return the generated desktop release tag embedded in an artifact URL."""
     try:
