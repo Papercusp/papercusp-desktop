@@ -352,14 +352,15 @@ rig_local_bank_logs() {
   # pre-matrix failures above, and it is diagnosable ONLY from here — the frames'
   # serve.log shows a bootstrap timeout, never why. Deliberately NOT named
   # serve-*.log: it is not a frame, and the gate's frame scan must not count it.
+  local dht_note=""
   if docker inspect "$NET-dht" >/dev/null 2>&1; then
-    docker logs "$NET-dht" >"$RIG_BANK_DIR/dht-$stamp.log" 2>&1 || true
+    docker logs "$NET-dht" >"$RIG_BANK_DIR/dht-$stamp.log" 2>&1 && dht_note=" + the DHT container log" || true
     ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t dht-*.log 2>/dev/null \
         | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
   fi
 
   if [ "$banked" -gt 0 ]; then
-    log "bank: $banked frame serve.log(s) + DHT log → $RIG_BANK_DIR (stamp=$stamp) before destroy"
+    log "bank: $banked frame serve.log(s)$dht_note → $RIG_BANK_DIR (stamp=$stamp) before destroy"
   else
     log "bank: no rig containers existed at teardown — nothing to bank (expected for a run that failed before provisioning)"
   fi
