@@ -373,11 +373,49 @@ fn read_registry() -> io::Result<Registry> {
     serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Write the registry ATOMICALLY (temp file + `rename`).
+///
+/// ⚠ `fs::write` — which this used to be — is `File::create` + write, and
+/// `File::create` TRUNCATES. That leaves a window in which the registry on disk
+/// is zero-length or a partial document, and a concurrent reader that lands in
+/// it gets `Unexpected end of JSON input` against a file that is perfectly valid
+/// a millisecond later. `rename` is atomic on POSIX, so a reader now sees either
+/// the whole old file or the whole new one, never a torn one.
+///
+/// This is not hypothetical and it is not desktop-only. Dozens of agent sessions
+/// on one box read this file constantly to resolve their active workspace, and a
+/// torn read there is especially nasty: an empty registry resolves
+/// `activeWorkspaceId()` to the retired `'default'` partition, where every scoped
+/// query returns zero rows and the tool surface renders that as an authoritative
+/// "does not exist" rather than "I could not determine where to look" (WI-6734).
+/// The TS half (`workspace-registry.ts`) has always written atomically for
+/// exactly this reason, and carries a retry-once read guard whose comment names
+/// this writer as the remaining hazard: *"the Rust shell also owns this file"*.
+/// That retry is a MITIGATION, not a fix — it fails whenever both reads land
+/// inside the write window, which is how this was found (a live `coord:orient`
+/// failed here 2026-08-11 while the file was valid before and after).
+///
+/// Keep this in lockstep with `writeRegistry` in
+/// `packages/operator-core/lib/workspace-registry.ts` — same temp-name shape,
+/// same directory (a cross-filesystem rename is not atomic, so the temp file must
+/// be a sibling, never in /tmp).
 fn write_registry(reg: &Registry) -> io::Result<()> {
     fs::create_dir_all(workspaces_root())?;
     let raw = serde_json::to_string_pretty(reg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(registry_path(), raw)
+    let path = registry_path();
+    let tmp = path.with_file_name(format!("registry.json.{}.tmp", std::process::id()));
+    fs::write(&tmp, raw)?;
+    match fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Never leave a stray temp sibling behind on a failed rename — the
+            // directory is scanned elsewhere, and a `registry.json.<pid>.tmp`
+            // that outlives its writer reads as debris nobody can attribute.
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Slugify a user-supplied workspace name into a filesystem-safe id.
