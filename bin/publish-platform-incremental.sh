@@ -39,13 +39,8 @@
 #      bin/upload-release.sh <version> <channel> remains the one publish step
 #      (artifacts first, manifest last, self-verified public read path).
 #
-# KNOWN GAP: a spanned Windows SERVER installer (Inno DiskSpanning stub + .bin
-# slices, normalized into one .zip by release-local.sh — see its WI-5600 block)
-# is NOT normalized here; this collects the raw inno/*_<version>_* set as-is. A
-# windows GUI incremental publish is unaffected (never spanned). Extend this
-# script's windows case the same way release-local.sh does if a spanned Windows
-# Server ever needs an incremental publish.
-#
+# Windows Server DiskSpans are normalized by the shared helper below before this
+# script builds a manifest; raw stubs must never reach the upload set.
 # Recipe + gotchas this formalizes (EI-18111560213741904): a tauri .sig is
 # ALREADY base64 — never re-encode it (silent double-encode, breaks the
 # updater); a VM→host leg (if one ever returns) needs careful quoting for
@@ -58,6 +53,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 source "$HERE/lib/gen-latest-manifest.sh"
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+# WI-20118266632432430: use the same Server DiskSpan normalization as the full
+# release cut and direct Windows cross-builder.
+# shellcheck source=lib/inno-spanned-server.sh
+source "$HERE/lib/inno-spanned-server.sh"
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
 
@@ -102,6 +101,24 @@ case "$PLATFORM" in
     for f in "$ROOT"/src-tauri/target/windows-vm/bundle/inno/*_"$VERSION"_*; do
       [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
     done
+    # A direct cross-build leaves the raw DiskSpan files beside the generated
+    # zip. Normalize here too, then replace the stub/slices in the artifact
+    # array; otherwise this path advertises the payload-less stub while the
+    # slices remain unpublished. A single-file Server (no slices) and the GUI
+    # installer are valid and pass through unchanged.
+    _win_inno_dir="$ROOT/src-tauri/target/windows-vm/bundle/inno"
+    if papercusp_normalize_spanned_server "$_win_inno_dir" "$VERSION"; then
+      _win_kept=()
+      for _a in "${NEW_ARTIFACTS[@]}"; do
+        papercusp_spanned_server_artifact "$_a" && continue
+        _win_kept+=("$_a")
+      done
+      NEW_ARTIFACTS=( "${_win_kept[@]}" "$PAPERCUSP_SPANNED_SERVER_ZIP" )
+      echo "==> normalized spanned Server → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") (stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s))"
+    elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
+      echo "ERROR: spanned Server installer detected but normalization failed — refusing to publish the raw stub+slices" >&2
+      exit 1
+    fi
     ;;
   mac)
     OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"

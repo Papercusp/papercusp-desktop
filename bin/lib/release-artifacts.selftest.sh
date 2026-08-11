@@ -25,6 +25,8 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release-artifacts.sh
 source "$DIR/release-artifacts.sh"
+# shellcheck source=inno-spanned-server.sh
+source "$DIR/inno-spanned-server.sh"
 set +e   # this self-test owns its own exit codes (some asserts intentionally fail a call)
 
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 unavailable"; exit 0; }
@@ -56,6 +58,47 @@ DEB="$LINUX/Papercusp_${VER}_amd64.deb"
 for f in "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB"; do : > "$f"; done
 
 echo "release-artifacts self-test (tag=$TAG)"
+
+# 0) every Windows entry point shares the DiskSpan normalization decision. The
+# raw stub + slices are replaced by one zip for artifact selection, while the
+# original files remain available for provenance/debugging.
+if papercusp_normalize_spanned_server "$INNO" "$VER"; then
+  ZIP="${PAPERCUSP_SPANNED_SERVER_ZIP}"
+  [[ -s "$ZIP" ]] && ok "normalizes a spanned Server into a non-empty zip" \
+    || bad "normalization reported success without a non-empty zip"
+  if python3 - "$ZIP" "$EXE" "$BIN1" "$BIN2" <<'PY'
+import sys, zipfile
+archive, *files = sys.argv[1:]
+with zipfile.ZipFile(archive) as z:
+    names = set(z.namelist())
+for path in files:
+    assert path.rsplit('/', 1)[-1] in names, (path, sorted(names))
+PY
+  then
+    ok "normalized zip contains the stub and every DiskSpan slice"
+  else
+    bad "normalized zip omitted a stub or DiskSpan slice"
+  fi
+  if papercusp_spanned_server_artifact "$EXE" \
+     && papercusp_spanned_server_artifact "$SIG" \
+     && papercusp_spanned_server_artifact "$BIN1" \
+     && papercusp_spanned_server_artifact "$ZIP"; then
+    ok "shared matcher identifies raw span inputs and normalized zip"
+  else
+    bad "shared matcher missed a raw span input or normalized zip"
+  fi
+else
+  bad "spanned Server normalization failed unexpectedly"
+fi
+
+NO_SPAN="$WORK/no-span"
+mkdir -p "$NO_SPAN"
+: > "$NO_SPAN/Papercusp Server_${VER}_x64-setup.exe"
+if papercusp_normalize_spanned_server "$NO_SPAN" "$VER"; then
+  bad "single-file Server was incorrectly classified as spanned"
+else
+  ok "single-file Server is not classified as spanned"
+fi
 
 # 1) write -> read round-trip carries the .bin slices AND the inno .exe/.sig.
 release_artifacts_write "$TAG" "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB" >/dev/null

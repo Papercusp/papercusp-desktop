@@ -391,7 +391,7 @@ PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
 # Keep the raw files for provenance/debugging, but fail closed if the span was
 # detected and could not be converted to the one bundle that can be shipped.
 if papercusp_normalize_spanned_server "$OUT_DIR" "$VERSION"; then
-  echo "==> [$role] spanned Server normalized → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") ($(du -h "$PAPERCUSP_SPANNED_SERVER_ZIP" | cut -f1); stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s))"
+  echo "==> [win] spanned Server normalized → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") ($(du -h "$PAPERCUSP_SPANNED_SERVER_ZIP" | cut -f1); stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s))"
 elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
   fail "spanned Server installer detected but normalization failed (zip missing or failed) — refusing to leave a raw stub+slices set as the direct-build result"
 fi

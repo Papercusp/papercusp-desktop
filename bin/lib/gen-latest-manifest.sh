@@ -42,7 +42,10 @@
 #        path before calling — its `platforms` entries are loaded as the STARTING
 #        point, and the freshly-classified entries from THIS call's artifacts are
 #        overlaid on top (same platform key ⇒ overwritten with the fresh one,
-#        every other key carried through untouched). This is what lets
+#        every other key carried through untouched when it belongs to THIS tag).
+#        A carried entry from another release tag is dropped loudly instead of
+#        creating a manifest whose top-level version advertises bytes from an
+#        older release. This is what lets
 #        bin/publish-platform-incremental.sh ADD one platform onto an
 #        already-published manifest without regenerating (and so re-uploading)
 #        every other platform's entry. Unset (the default) ⇒ a fresh cut, exactly
@@ -210,7 +213,7 @@ gen_latest_manifest() {
 
   python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$merge_gui" "$merge_srv" "$@" <<'PY'
 import json, os, sys, pathlib, hashlib
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 version, channel, tag, out_path, out_server_path, notes_path, merge_gui, merge_srv = sys.argv[1:9]
 artifacts = [pathlib.Path(p) for p in sys.argv[9:]]
 
@@ -316,13 +319,44 @@ def build_platforms(artifacts, want_token, reject_token):
 
 # MERGE MODE: start from the previously-published dicts (if any), then overlay
 # this call's freshly-classified entries on top — a re-published platform's key
-# is overwritten with its fresh signature+url, every OTHER platform key already
-# in the base carries through untouched (that's the whole point: adding mac onto
-# an already-live linux release must not touch the linux entry).
+# is overwritten with its fresh signature+url. A platform carried from a
+# different release tag is NOT safe to retain: the manifest has one top-level
+# version, so advertising an older URL creates an update loop. Drop those stale
+# keys loudly; an absent platform is the safe representation of "not ready yet".
 gui_platforms = load_merge_base(merge_gui)
 gui_platforms.update(build_platforms(artifacts, want_token="", reject_token="Server"))
 server_platforms = load_merge_base(merge_srv)
 server_platforms.update(build_platforms(artifacts, want_token="Server", reject_token="GUI"))
+
+def release_tag_from_url(url: str):
+    """Return the generated desktop release tag embedded in an artifact URL."""
+    try:
+        segments = [unquote(segment) for segment in urlsplit(url).path.split("/") if segment]
+    except Exception:
+        return None
+    tags = [segment for segment in segments if segment.startswith("desktop-v")]
+    return tags[-1] if tags else None
+
+def drop_stale_merge_entries(platforms, label):
+    retained = {}
+    for platform_key, entry in platforms.items():
+        url = entry.get("url") if isinstance(entry, dict) else None
+        actual_tag = release_tag_from_url(url) if isinstance(url, str) else None
+        if actual_tag != tag:
+            observed = actual_tag or "<missing>"
+            print(
+                f"WARNING: {label} merge dropped stale platform {platform_key}: "
+                f"URL tag {observed!r} does not match release tag {tag!r} "
+                f"(top-level version {version!r}); publish that platform separately "
+                "when its artifact is ready.",
+                file=sys.stderr,
+            )
+            continue
+        retained[platform_key] = entry
+    return retained
+
+gui_platforms = drop_stale_merge_entries(gui_platforms, "latest.json")
+server_platforms = drop_stale_merge_entries(server_platforms, "latest-server.json")
 
 # WI-3696/WI-4404 cut-time assertion: every entry each manifest publishes must
 # genuinely be that manifest's product (a fail-loud backstop against a FUTURE

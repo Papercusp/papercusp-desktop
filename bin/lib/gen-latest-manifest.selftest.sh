@@ -14,6 +14,8 @@
 #      (never an empty-platforms manifest that reads as false "up to date").
 #   5. PAPERCUSP_UPDATE_BASE_URL unset ⇒ the emitted url carries the obviously-
 #      invalid placeholder scheme, never a plausible-but-wrong url.
+#   6. MERGE MODE across versions drops every non-overlaid stale platform key,
+#      loudly, rather than emitting a new top-level version with old URLs.
 #
 #   bash bin/lib/gen-latest-manifest.selftest.sh      # exit 0 = PASS, 1 = FAIL
 #
@@ -148,7 +150,53 @@ else
   bad "merge mode: manifest was not written"
 fi
 
-# 5) PAPERCUSP_UPDATE_BASE_URL unset ⇒ obviously-invalid placeholder, never a
+# 5) CROSS-VERSION MERGE: starting a new release with only one ready platform
+# must not carry the previous release's other platform URLs into the new
+# top-level version. Those keys are absent until their own artifacts are ready.
+CROSS_OLD_VER="9.9.8"
+CROSS_GUI_BASE="$WORK/base-cross-version-gui.json"
+CROSS_SERVER_BASE="$WORK/base-cross-version-server.json"
+cat > "$CROSS_GUI_BASE" <<JSON
+{ "version": "$CROSS_OLD_VER", "channel": "alpha",
+  "platforms": { "linux-x86_64": { "signature": "OLD-linux-sig", "url": "https://example.com/releases/desktop-v${CROSS_OLD_VER}-alpha/old-linux.AppImage" } } }
+JSON
+cat > "$CROSS_SERVER_BASE" <<JSON
+{ "version": "$CROSS_OLD_VER", "channel": "alpha",
+  "platforms": { "windows-x86_64": { "signature": "OLD-server-sig", "url": "https://example.com/releases/desktop-v${CROSS_OLD_VER}-alpha/old-server-setup.exe" } } }
+JSON
+rm -f "$MERGED_JSON" "$(gen_latest_manifest_server_json_path "$TAG_MERGE")"
+CROSS_OUTPUT="$(
+  GEN_LATEST_MANIFEST_MERGE_GUI_JSON="$CROSS_GUI_BASE" \
+  GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$CROSS_SERVER_BASE" \
+  PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
+    gen_latest_manifest "$VER" alpha "$TAG_MERGE" "$MAC_TARGZ" "$MAC_SIG" "$SRV_APPIMAGE" "$SRV_SIG" 2>&1
+)"
+CROSS_RC=$?
+CROSS_SERVER_JSON="$(gen_latest_manifest_server_json_path "$TAG_MERGE")"
+if [[ "$CROSS_RC" -eq 0 && -f "$MERGED_JSON" && -f "$CROSS_SERVER_JSON" ]] && \
+  python3 - "$MERGED_JSON" "$CROSS_SERVER_JSON" <<'PY'
+import json, sys
+gui = json.load(open(sys.argv[1]))
+srv = json.load(open(sys.argv[2]))
+assert gui["version"] == "9.9.9", gui["version"]
+assert "linux-x86_64" not in gui["platforms"], gui["platforms"]
+assert "darwin-x86_64" in gui["platforms"], gui["platforms"]
+assert srv["version"] == "9.9.9", srv["version"]
+assert "windows-x86_64" not in srv["platforms"], srv["platforms"]
+assert "linux-x86_64" in srv["platforms"], srv["platforms"]
+PY
+then
+  if grep -q "WARNING: latest.json merge dropped stale platform linux-x86_64" <<<"$CROSS_OUTPUT" && \
+    grep -q "WARNING: latest-server.json merge dropped stale platform windows-x86_64" <<<"$CROSS_OUTPUT"; then
+    ok "cross-version merge drops stale GUI/Server platform keys and warns loudly"
+  else
+    bad "cross-version merge dropped stale keys without the expected warnings"
+  fi
+else
+  bad "cross-version merge did not produce version-consistent manifests (rc=$CROSS_RC)"
+fi
+
+# 6) PAPERCUSP_UPDATE_BASE_URL unset ⇒ obviously-invalid placeholder, never a
 #    plausible-but-wrong url.
 TAG_NOBASE="$(desktop_release_tag "$VER" stable)"
 ( unset PAPERCUSP_UPDATE_BASE_URL; gen_latest_manifest "$VER" stable "$TAG_NOBASE" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>/dev/null )
