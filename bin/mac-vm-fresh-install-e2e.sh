@@ -411,12 +411,20 @@ else
         ;;
     esac
 
+    # A probe that could not RUN must never read as a measured result. curl
+    # failing or timing out leaves $HTML empty, and `grep -c` on an empty stream
+    # prints 0 while exiting 1 — so "the fetch produced no body at all" and "the
+    # served HTML genuinely has no app shell" collapse into the SAME count, and
+    # the FAIL below would name the wrong root cause on every transport failure.
+    # Branch the unmeasured case explicitly FIRST, then match on `grep -q` exit
+    # status directly: with the empty case already excluded there is no count
+    # left to misread (R3-grep-c-unguarded, check-assert-integrity.mjs).
     HTML=$(curl -s --max-time 6 "http://127.0.0.1:$OPPORT/" 2>/dev/null)
-    ERRCARD=$(echo "$HTML" | grep -ciE 'RouteErrorBoundary|hit an error|Importing a module script failed')
-    ROOTDIV=$(echo "$HTML" | grep -c '<div id')
-    if [ "$ERRCARD" -gt 0 ]; then
+    if [ -z "$HTML" ]; then
+      fail "SPA probe INCONCLUSIVE — GET http://127.0.0.1:$OPPORT/ returned no body (curl failed or timed out); an assert that could not be measured is not a passing assert"
+    elif printf '%s' "$HTML" | grep -qiE 'RouteErrorBoundary|hit an error|Importing a module script failed'; then
       fail "SPA rendered an error card (RouteErrorBoundary / module import failure)"
-    elif [ "$ROOTDIV" -eq 0 ]; then
+    elif ! printf '%s' "$HTML" | grep -q '<div id'; then
       fail "SPA root markup missing — served HTML has no app shell"
     else
       pass "SPA renders the app shell (no error card)"
