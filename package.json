@@ -17,6 +17,7 @@
     "test:release-leg-reaper": "bash bin/lib/release-local-leg-reaper.selftest.sh",
     "test:local-matrix-starvation": "bash bin/lib/local-matrix-starvation.selftest.sh",
     "test:rig-bank-logs": "bash bin/lib/rig-bank-logs.selftest.sh",
+    "test:local-matrix-bank": "bash bin/lib/local-matrix-bank.selftest.sh",
     "test:seat-offer-diag": "bash bin/lib/seat-offer-diag.selftest.sh",
     "test:b9-attestation-precondition": "bash bin/lib/b9-attestation-precondition.selftest.sh",
     "test:vm-run-env": "bash bin/lib/vm-run-env.selftest.sh",

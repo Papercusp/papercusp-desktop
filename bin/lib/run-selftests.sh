@@ -31,6 +31,7 @@ TESTS=(
   release-local-leg-reaper.selftest.sh
   local-matrix-starvation.selftest.sh
   rig-bank-logs.selftest.sh
+  local-matrix-bank.selftest.sh
   vm-run-env.selftest.sh
   seat-offer-diag.selftest.sh
   b9-attestation-precondition.selftest.sh
