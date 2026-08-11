@@ -237,11 +237,83 @@ if [[ "$host_bad" -gt 0 ]]; then
     echo "       baked host matches the upload target. (WI-37738. ALLOW_HOST_MISMATCH=1 to override.)" >&2
     exit 1
   fi
-elif [[ "$host_checked" -eq 0 ]]; then
-  echo "    ⚠ could not read a baked host from ANY artifact — host/target agreement is UNVERIFIED for this cut." >&2
-  echo "      (Not fatal: compressed artifacts expose no strings. But nothing here proves the binaries point at this prefix.)" >&2
-else
+elif [[ "$host_checked" -gt 0 ]]; then
   echo "    ✓ ${host_checked} artifact(s) carry the prefix being published to"
+fi
+# NOTE: the host_checked==0 case is NOT decided here any more — it is decided by
+# the combined verdict below, after the provenance leg has had its say.
+
+# ── GUARD leg 2 (WI-37746): the DECISIVE, non-heuristic host check ────────────
+# The strings scan above is necessary but NOT sufficient, and its blind spot is
+# the WORSE half of the failure class. It greps for the CURRENT host
+# (${BASE_HOST}), so an artifact baked to a DIFFERENT HOST matches nothing, is
+# `continue`d rather than counted, and falls through to "could not read a baked
+# host" — which, before this leg existed, was a warning that SHIPPED.
+#
+# Measured on fixtures 2026-08-11, publishing to host H prefix P:
+#   baked H/P        -> verified OK
+#   baked H/OTHER    -> BLOCKS (exit 1)      <- the scan works for prefix drift
+#   baked OTHER/...  -> WARNS ONLY, SHIPS    <- the silent stranding path
+# Compressed artifacts (.tar.gz/.dmg) reach that same warning for an unrelated
+# reason, so on a mac-only cut the scan can verify NOTHING at all.
+#
+# Hence the evidence cannot come from the shipped bytes; it comes from the BUILD,
+# where the baked value is known for certain. emit-build-provenance.sh records it
+# as `releaseHostSha256` — a fingerprint, never the URL, because this file ships
+# next to the artifacts and the URL's path segment is the masked secret.
+EXPECTED_HOST_FP="$(printf '%s' "${BASE%/}" | sha256sum | cut -d' ' -f1)"
+prov_checked=0; prov_bad=0; prov_legacy=0
+while IFS= read -r pdir; do
+  prov="$pdir/build-provenance.json"
+  [[ -f "$prov" ]] || continue
+  got="$(python3 -c "
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print('__UNREADABLE__'); raise SystemExit(0)
+if 'releaseHostSha256' not in d: print('__MISSING__')
+elif d['releaseHostSha256'] is None: print('__NULL__')
+else: print(d['releaseHostSha256'])
+" "$prov" 2>/dev/null || printf '__UNREADABLE__')"
+  case "$got" in
+    __MISSING__|__NULL__|__UNREADABLE__|'')
+      # MISSING = a pre-WI-37746 emitter; NULL = nothing was baked. Neither is
+      # evidence of agreement, so neither counts as a check.
+      prov_legacy=$((prov_legacy + 1)) ;;
+    *)
+      prov_checked=$((prov_checked + 1))
+      if [[ "$got" != "$EXPECTED_HOST_FP" ]]; then
+        prov_bad=$((prov_bad + 1))
+        # Print only a truncated fingerprint: it is a hash of the secret base URL.
+        echo "    ✗ $(basename "$pdir")/build-provenance.json: built for release host ${got:0:12}… but publishing to ${EXPECTED_HOST_FP:0:12}…" >&2
+      fi ;;
+  esac
+done < <(printf '%s\n' "${ARTIFACTS[@]}" | xargs -r -n1 dirname | sort -u)
+
+if [[ "$prov_bad" -gt 0 ]]; then
+  if [[ "${ALLOW_HOST_MISMATCH:-0}" == "1" ]]; then
+    echo "    ⚠ provenance host mismatch OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — every install from this build will be stranded on the wrong host." >&2
+  else
+    echo >&2
+    echo "ERROR: this cut's BUILD PROVENANCE says these binaries were built for a DIFFERENT release host" >&2
+    echo "       than the one being published to. Shipping them strands every install from this build" >&2
+    echo "       PERMANENTLY: the host they ask keeps answering with a frozen manifest, so the app is" >&2
+    echo "       told it is up to date and never updates again — the WI-37738 failure, which took ~2" >&2
+    echo "       weeks and a real-VM pass to notice. Rebuild with the CURRENT ~/.papercusp/release-host.env" >&2
+    echo "       in the environment. (WI-37746. ALLOW_HOST_MISMATCH=1 to override deliberately.)" >&2
+    exit 1
+  fi
+elif [[ "$prov_checked" -gt 0 ]]; then
+  echo "    ✓ ${prov_checked} build-provenance record(s) confirm these bytes were built for this exact host"
+fi
+
+# Combined verdict: warn ONLY when NEITHER leg could establish agreement. With a
+# provenance record present this is now reachable only for a genuinely
+# un-attributable cut, rather than being the routine outcome for compressed
+# artifacts (which is what made it easy to wave through).
+if [[ "$host_checked" -eq 0 && "$prov_checked" -eq 0 ]]; then
+  echo "    ⚠ host/target agreement is UNVERIFIED for this cut — the artifacts expose no baked host" >&2
+  echo "      AND no build-provenance record carries releaseHostSha256 (${prov_legacy} legacy/absent record(s))." >&2
+  echo "      Nothing here proves these binaries point at the prefix being published to (WI-37746)." >&2
 fi
 echo
 

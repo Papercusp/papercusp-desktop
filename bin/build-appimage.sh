@@ -232,8 +232,23 @@ rm -rf "$DEPLOY_STAGE"
 #     "Couldn't open libGLESv2.so.2" (measured on the pristine VM). Shipping them
 #     in a directory appended LAST to LD_LIBRARY_PATH gives the host's own copy
 #     priority whenever it exists, and a working fallback when it does not.
+#
+#     SINGLE-SOURCED (EI-20122241900682950): the copy loop below and the fail-closed
+#     assertion in 2c-iii both iterate THIS one list. It used to be two hand-maintained
+#     literals — a 5-soname copy loop and a 1-soname spot-check — which is exactly HOW
+#     libGL.so.1 shipped missing with the guard green the whole time. Add a soname here
+#     and it is bundled AND asserted; there is no longer a way to do one without the other.
+#
+#     libGL.so.1 is NOT here for WebKitGTK's dlopen (that is libGLESv2.so.2). It is a
+#     load-time DT_NEEDED resolved by the dynamic linker BEFORE main() runs, so its
+#     absence is a hard exec failure — "error while loading shared libraries:
+#     libGL.so.1", exit 127, measured on a box with the X11/font stack but no system
+#     OpenGL — and not the graceful dlopen degradation the rest of this list guards.
+#     libglvnd ships it as a thin wrapper over the libGLdispatch.so.0 + libGLX.so.0
+#     pair already copied here, so it adds a wrapper, not a driver.
+GLFALLBACK_SONAMES="libGL.so.1 libGLESv2.so.2 libGLdispatch.so.0 libEGL.so.1 libGLX.so.0 libOpenGL.so.0"
 mkdir -p "$APPDIR/usr/lib/glfallback"
-for _gl in libGLESv2.so.2 libGLdispatch.so.0 libEGL.so.1 libGLX.so.0 libOpenGL.so.0; do
+for _gl in $GLFALLBACK_SONAMES; do
   _src="$(readlink -f "/usr/lib/x86_64-linux-gnu/$_gl" 2>/dev/null)"
   [ -f "$_src" ] || continue
   cp -n "$_src" "$APPDIR/usr/lib/glfallback/" 2>/dev/null || true
@@ -310,7 +325,20 @@ for _need in libwebkit2gtk-4.1.so.0 libjavascriptcoregtk-4.1.so.0 libgtk-3.so.0 
   find "$APPDIR/usr/lib" -maxdepth 2 -name "$_need" | grep -q . || _missing="$_missing $_need"
 done
 [ -x "$APPDIR/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess" ] || _missing="$_missing <cwd-relative WebKitNetworkProcess>"
-[ -f "$APPDIR/usr/lib/glfallback/libGLESv2.so.2" ] || _missing="$_missing libGLESv2.so.2(glfallback)"
+# Assert EVERY soname the 2c-i copy loop was asked to bundle actually landed, not one
+# representative. That loop `continue`s when the build host has no source for a soname,
+# so a spot-check renders a silently-INCOMPLETE fallback dir as a green build — which is
+# how libGL.so.1 shipped missing (EI-20122241900682950). Iterating the shared
+# GLFALLBACK_SONAMES makes bundled-set and asserted-set the same set by construction.
+#
+# This FAILS CLOSED on a build host that lacks a GL soname, where the old spot-check
+# would have shipped. That is the intended trade for this whole 2c-iii block ("never
+# package that again"): a build host missing a libglvnd soname is a broken build host,
+# not a shippable bundle. Verified all six resolve on the current builder before making
+# the assertion total, so this tightens the gate without red-pinning today's build.
+for _gl in $GLFALLBACK_SONAMES; do
+  [ -f "$APPDIR/usr/lib/glfallback/$_gl" ] || _missing="$_missing $_gl(glfallback)"
+done
 # The helper-path half of the same class (2c-ii). A bundle can pass EVERY check above
 # — all libraries present, helpers present and executable — and still hard-fail on a
 # pristine host, because libwebkit2gtk asks for its helpers at the ABSOLUTE

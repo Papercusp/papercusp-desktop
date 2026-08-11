@@ -63,6 +63,33 @@ GIT_DIRTY="$(git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && echo false || e
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
 _bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 
+# WI-37746 (closes the WI-37738 stranding class): the release host BAKED INTO
+# THESE BINARIES, recorded as a SHA-256 FINGERPRINT — never the URL itself.
+#
+# WHY A FINGERPRINT AND NOT THE URL: this file ships NEXT TO the artifacts (and
+# the release identity gate scans what ships), and the URL's path segment is the
+# unguessable secret that keeps the bucket unlisted (D-002/D-003). A fingerprint
+# still answers the only question publish time asks — "were these bytes built
+# for the prefix we are about to upload to?" — while carrying nothing secret.
+#
+# WHY IT IS NEEDED AT ALL, given upload-release.sh already greps the artifacts:
+# that check greps for the CURRENT host, so an artifact baked to a DIFFERENT
+# HOST matches nothing, is skipped rather than counted, and lands in the "could
+# not read a baked host" branch — a WARNING THAT SHIPS. Measured 2026-08-11 on
+# fixtures: same-host/wrong-prefix BLOCKS correctly, a wholly different baked
+# host WARNS AND SHIPS. Compressed artifacts (.tar.gz/.dmg) reach that same
+# warning path for an unrelated reason. The bytes therefore cannot be the
+# evidence; the BUILD is the only place the baked value is known for certain.
+#
+# `null` = no host was baked into this build. A MISSING key = emitted by a
+# pre-WI-37746 build — a distinction upload-release.sh relies on.
+_release_host_fp() {
+  local h="${PAPERCUSP_RELEASE_HOST:-}"
+  h="${h%/}"   # normalize: a trailing slash must not change the fingerprint
+  if [[ -z "$h" ]]; then printf 'null'; return; fi
+  printf '"%s"' "$(printf '%s' "$h" | sha256sum | cut -d' ' -f1)"
+}
+
 # Artifact name: relative to OUT_DIR when under it, else basename (see header).
 _OUT_REAL="$(realpath "$OUT_DIR")"
 _name() {
@@ -95,6 +122,10 @@ PROV="$OUT_DIR/build-provenance.json"
   if [[ -n "${PROVENANCE_TOOLCHAIN:-}" ]]; then
     printf '  "toolchain": %s,\n' "$PROVENANCE_TOOLCHAIN"
   fi
+  # WI-37746: always present (null when no host was baked), so a MISSING key
+  # unambiguously means "a pre-WI-37746 emitter produced this" rather than
+  # "nothing was baked" — upload-release.sh treats those two cases differently.
+  printf '  "releaseHostSha256": %s,\n' "$(_release_host_fp)"
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'
   _first=1

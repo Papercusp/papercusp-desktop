@@ -110,4 +110,59 @@ grep -q -- '-dirty"' "$RELEASE_LOCAL" \
   || fail "release-local.sh no longer carries the honest -dirty BUILD_SHA marker (P-003 single-source-of-truth reverted to a bare rev-parse?)"
 pass "centralized honest BUILD_SHA (-dirty) derivation present (P-003)"
 
+# ── Check 4: baked release host RECORDED, as a fingerprint, never the URL ──
+# WI-37746 (closes the WI-37738 stranding class). upload-release.sh's DECISIVE
+# host guard reads `releaseHostSha256`; if the emitter ever stops recording it,
+# that guard silently degrades back to the strings heuristic whose blind spot —
+# an artifact baked to a DIFFERENT HOST matches nothing and is skipped — ships a
+# warning instead of blocking. Measured on fixtures 2026-08-11: same-host/wrong-
+# prefix BLOCKS, wholly-different-host WARNS AND SHIPS. This check keeps the
+# non-heuristic evidence source alive.
+#
+# It locks the no-leak half too: the host URL's path segment is the unguessable
+# secret that keeps the bucket unlisted (D-002/D-003), and build-provenance.json
+# ships NEXT TO the artifacts — so the URL must only ever be fingerprinted.
+HOSTFIX="$TMP/hostfp"; mkdir -p "$HOSTFIX"
+printf 'fixture\n' > "$HOSTFIX/App_0.0.0_amd64.deb"
+FAKE_HOST='https://pub-parityfixture.r2.dev/NOTAREALSECRETPREFIX'
+PROVENANCE_GIT_ROOT="$ROOT" PAPERCUSP_RELEASE_HOST="$FAKE_HOST" \
+  bash "$EMITTER" "$HOSTFIX" 0.0.0 testsha false "$HOSTFIX"/*.deb >/dev/null \
+  || fail "emitter exited non-zero with PAPERCUSP_RELEASE_HOST set"
+
+EXPECT_FP="$(printf '%s' "$FAKE_HOST" | sha256sum | cut -d' ' -f1)"
+python3 - "$HOSTFIX/build-provenance.json" "$EXPECT_FP" "$FAKE_HOST" <<'PY' || fail "release-host fingerprint check failed (see above)"
+import json, sys
+path, expect, host = sys.argv[1], sys.argv[2], sys.argv[3]
+raw = open(path).read()
+d = json.loads(raw)
+if "releaseHostSha256" not in d:
+    raise SystemExit("  emitter no longer records releaseHostSha256 — upload-release.sh's decisive host guard (WI-37746) has nothing to read and degrades to the strings heuristic that ships a warning on a different baked host")
+if d["releaseHostSha256"] != expect:
+    raise SystemExit(f"  releaseHostSha256 is not sha256(PAPERCUSP_RELEASE_HOST): got {d['releaseHostSha256']!r}")
+secret = host.rsplit("/", 1)[-1]
+if host in raw or secret in raw:
+    raise SystemExit("  the release host URL (or its secret path segment) LEAKED into build-provenance.json — it must only ever be fingerprinted, because this file ships next to the artifacts")
+print("  ✓ releaseHostSha256 == sha256(baked host); raw URL + secret path segment absent from the file")
+PY
+
+# The null encoding is load-bearing, so it is asserted rather than assumed: with
+# NO host baked the key must be PRESENT-and-null. A MISSING key means "emitted by
+# a pre-WI-37746 build", which upload-release.sh reports differently from
+# "nothing was baked" — collapsing the two re-hides the gap this closed.
+NOHOST="$TMP/nohost"; mkdir -p "$NOHOST"
+printf 'fixture\n' > "$NOHOST/App_0.0.0_amd64.deb"
+PROVENANCE_GIT_ROOT="$ROOT" PAPERCUSP_RELEASE_HOST= \
+  bash "$EMITTER" "$NOHOST" 0.0.0 testsha false "$NOHOST"/*.deb >/dev/null \
+  || fail "emitter exited non-zero with PAPERCUSP_RELEASE_HOST empty"
+python3 - "$NOHOST/build-provenance.json" <<'PY' || fail "null-host encoding check failed (see above)"
+import json, sys
+d = json.load(open(sys.argv[1]))
+if "releaseHostSha256" not in d:
+    raise SystemExit("  releaseHostSha256 must be PRESENT-and-null when no host is baked, not omitted (upload-release.sh distinguishes missing from null)")
+if d["releaseHostSha256"] is not None:
+    raise SystemExit(f"  expected null with no baked host, got {d['releaseHostSha256']!r}")
+print("  ✓ no baked host encodes as present-and-null (distinct from a missing key)")
+PY
+pass "baked release host recorded as a fingerprint, never the URL (WI-37746)"
+
 echo "PROVENANCE-PARITY OK — one emitter, one schema, no leg re-forked."
