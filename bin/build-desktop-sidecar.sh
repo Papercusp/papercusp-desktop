@@ -395,24 +395,33 @@ if [[ "$dep_check_ok" -ne 1 ]]; then
   exit 1
 fi
 
-echo "→ building operator-vite SPA (vite build → dist/)"
-# PAPERCUSP_RETAIN_DIST_CHUNKS=0 — this is a PACKAGING build: line ~816 does a
-# `cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"`, so whatever is in dist/ SHIPS
-# inside the desktop bundle. Retention (the default since
+# Prepare the sidecar staging root before the Vite build. The singleflight seam
+# captures the completed SPA into this directory while its build lock is still
+# held; later packaging steps consume that stable snapshot instead of rereading
+# the shared live dist/ after another build can start.
+rm -rf "$SIDECAR_DIR"
+mkdir -p "$SIDECAR_DIR/spa" "$SIDECAR_DIR/node_modules/@lydell"
+
+echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"
+# PAPERCUSP_RETAIN_DIST_CHUNKS=0 — this is a PACKAGING build. The
+# `VITE_BUILD_SNAPSHOT_DIR` handoff is captured by vite-build-singleflight while
+# it holds the Vite build lock, so the SPA that ships is not invalidated by a
+# concurrent build after this command exits. Retention (the default since
 # `dist-chunk-retention-default-2026-07-26`) keeps old hashed chunks around to
 # stop live windows 404-ing their pinned lazy imports — correct on a working
 # tree, dead weight in a distributable. So this one caller opts out explicitly.
 # Note the tradeoff this makes visible rather than introduces: the build runs in
 # $REPO_ROOT (the shared tree), so it empties that tree's dist/ and any desktop
 # window open against it will need a reload. Packaging is deliberate and rare.
-(cd "$REPO_ROOT" && PAPERCUSP_RETAIN_DIST_CHUNKS=0 npm --workspace @papercusp/operator-vite run build)
-if [[ ! -f "$VITE_DIR/dist/index.html" ]]; then
-  echo "ERROR: expected $VITE_DIR/dist/index.html after the Vite build"
+(cd "$REPO_ROOT" && PAPERCUSP_RETAIN_DIST_CHUNKS=0 \
+  VITE_BUILD_SNAPSHOT_DIR="$SIDECAR_DIR/spa" \
+  npm --workspace @papercusp/operator-vite run build)
+if [[ ! -f "$SIDECAR_DIR/spa/index.html" ]]; then
+  echo "ERROR: expected locked Vite snapshot at $SIDECAR_DIR/spa/index.html after the build"
   exit 1
 fi
 
 echo "→ building sidecar into $SIDECAR_DIR (atomic publish to $SIDECAR_FINAL_DIR at the end)"
-rm -rf "$SIDECAR_DIR"
 mkdir -p "$SIDECAR_DIR" "$SIDECAR_DIR/node_modules/@lydell"
 
 echo "→ esbuild-bundling the serve entry (headless operator boot) → $SIDECAR_DIR/serve.mjs"
@@ -1004,8 +1013,11 @@ fi
 # Static payloads the host serves. host-spa.ts / host-docs.ts resolve these
 # from the PAPERCUSP_SPA_DIST / PAPERCUSP_DOCS_ROOT env vars Tauri main.rs
 # sets — see those files' root-resolution comments.
-echo "→ copying operator-vite/dist → sidecar/spa"
-cp -a "$VITE_DIR/dist" "$SIDECAR_DIR/spa"
+echo "→ using locked operator-vite snapshot → sidecar/spa"
+if [[ ! -f "$SIDECAR_DIR/spa/index.html" ]]; then
+  echo "ERROR: locked Vite SPA snapshot disappeared before packaging"
+  exit 1
+fi
 # WI-3172 / WI-3063 — trim dead weight from the copied SPA so the Windows payload
 # clears the NSIS 4GiB datablock cap WITHOUT dropping the offline seed. The Vite
 # dist is a wholesale copy of web/public, which bundles the whole Starlight site

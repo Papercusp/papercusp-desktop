@@ -58,6 +58,27 @@ test('every cargo build closes the sidecar flock fd before sccache can daemonize
   );
 });
 
+// EI-20186539588704262 follow-up: the Vite build lock must cover the SPA
+// handoff too. A desktop build that returns to copying the live operator-vite
+// dist/ after the singleflight process exits reopens the stale-hash race.
+test('desktop sidecar consumes the lock-held Vite snapshot, not live dist/', () => {
+  assert.match(
+    builder,
+    /VITE_BUILD_SNAPSHOT_DIR="\$SIDECAR_DIR\/spa"/,
+    'build-desktop-sidecar.sh must request a Vite snapshot in its staging tree',
+  );
+  assert.match(
+    builder,
+    /using locked operator-vite snapshot/,
+    'the packaging step must identify and consume the stable snapshot',
+  );
+  assert.doesNotMatch(
+    builder,
+    /cp -a "\$VITE_DIR\/dist" "\$SIDECAR_DIR\/spa"/,
+    'copying live Vite dist/ after the build lock is released reopens the stale-hash race',
+  );
+});
+
 // The falsifiability proof the old guard never had — asserted against SYNTHETIC
 // source, never by mutating the real script (this tree is swept into commits
 // every few minutes, so a briefly-mutated file gets committed even when nothing
