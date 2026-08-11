@@ -651,6 +651,7 @@ done
 if [[ -x "$HERE/emit-build-provenance.sh" && ${#PROV_ARTIFACTS[@]} -gt 0 ]]; then
   PROVENANCE_GIT_ROOT="$ROOT" \
   PROVENANCE_SIGNED="$([[ -n "$MAC_CERT_P12" ]] && echo true || echo false)" \
+  PROVENANCE_SIDECAR_DIR="$DARWIN_SIDECAR" \
     bash "$HERE/emit-build-provenance.sh" \
       "$OUT_BUNDLE" \
       "$VERSION" \

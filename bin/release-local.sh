@@ -1243,6 +1243,7 @@ done
 _tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
 _tc_node="$(node --version 2>/dev/null)"
 PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${_tc_rustc:-unknown}" "${_tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
+PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
 PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
   "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" false \
   "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
@@ -1337,6 +1338,15 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # record of what was actually inside (the LABELED!=PACKED class). Emit the
   # same provenance (each file's sha256 + a `reused` flag) next to the mac
   # artifacts. Best-effort: a provenance hiccup must never fail a good release.
+  # NOTE: PROVENANCE_SIDECAR_DIR is deliberately NOT set here, so `sidecar` records
+  # null — "this leg did not record which sidecar was packed" (EI-20086238555902880).
+  # Setting it to a local path would be actively WRONG on both of this block's paths:
+  # these artifacts were built on the mac VM (their sidecar is the darwin one, not
+  # $ROOT/src-tauri/sidecar), and on the MAC_REUSE path they were SALVAGED from an
+  # earlier cut entirely. Naming a local directory here would stamp a provenance
+  # record for bytes it never packed — manufacturing exactly the LABELED != PACKED
+  # claim this file exists to prevent. An honest null beats a confident wrong value.
+  # The darwin sidecar IS recorded, at the leg that actually packs it: build-mac-cross.sh.
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
     "$MAC_OUT" "$VERSION" "$BUILD_SHA" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \

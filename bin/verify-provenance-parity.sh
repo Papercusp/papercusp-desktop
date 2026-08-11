@@ -71,6 +71,19 @@ def check(name, d, extra_expected):
         raise SystemExit(f"  {name}: leg-specific fields {got_extra} != expected {extra_expected}")
 check("mac/linux", lin, set())
 check("windows", win, {"packedSrcFingerprint","signed"})
+# EI-20086238555902880: `sidecar` is ALWAYS emitted (null when the leg named none), so a
+# MISSING key means "a pre-EI-20086238555902880 emitter wrote this" and not "nothing was
+# packed". Neither fixture sets PROVENANCE_SIDECAR_DIR, so both must be present-and-null:
+# that is the case that would silently regress if the field were emitted only when set.
+for _n, _d in (("mac/linux", lin), ("windows", win)):
+    if "sidecar" not in _d:
+        raise SystemExit(f"  {_n}: missing `sidecar` key — the packed-sidecar record must "
+                         "always be emitted, so present-vs-missing stays meaningful")
+    if _d["sidecar"] is not None:
+        raise SystemExit(f"  {_n}: `sidecar` must be null when no PROVENANCE_SIDECAR_DIR "
+                         f"was given, got {_d['sidecar']!r} — a fabricated record is worse "
+                         "than an absent one (LABELED != PACKED)")
+print("  ✓ EI-20086238555902880: `sidecar` always emitted; null when no sidecar dir named")
 # WI-4243 invariants: subdir artifacts keep their OUT_DIR-relative subpath name
 # (no more symlink stages for verify), sig reflects the co-located .sig, and
 # the windows *-setup-*.bin payload slices are enumerated.

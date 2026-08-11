@@ -18,6 +18,11 @@
 #   PROVENANCE_PACKED_SRC_FINGERPRINT — Windows: a hash of the exact tree packed
 #     to the VM (its strongest anti-LABELED!=PACKED signal; Mac/Linux have none).
 #   PROVENANCE_SIGNED (true|false)    — Windows: whether Authenticode was configured.
+#   PROVENANCE_SIDECAR_DIR            — the packed sidecar's directory. The emitter
+#     reads THAT dir's own build-provenance.json and folds a compact `sidecar` record
+#     (gitHead / builtAtUtc / serve.mjs sha256) in beside the Rust-layer fields, so the
+#     artifact records WHICH sidecar it shipped and not merely which commit built the
+#     binary. EI-20086238555902880 — the two halves refresh on different policies.
 #   PROVENANCE_TOOLCHAIN (json)       — the build toolchain as a JSON object
 #     (rustc/node/tauriCli), recorded by the leg whose emitter runs ON the builder
 #     (the Linux leg: host == builder). P-014 reproducibility hygiene.

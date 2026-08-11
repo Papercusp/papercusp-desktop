@@ -374,6 +374,7 @@ PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
 shopt -u nullglob
 PROVENANCE_GIT_ROOT="$ROOT" \
 PROVENANCE_SIGNED="$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)" \
+PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
   bash "$ROOT/bin/emit-build-provenance.sh" \
     "$OUT_DIR" \
     "$VERSION" \

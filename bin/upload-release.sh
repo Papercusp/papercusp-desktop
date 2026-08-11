@@ -306,14 +306,37 @@ elif [[ "$prov_checked" -gt 0 ]]; then
   echo "    ✓ ${prov_checked} build-provenance record(s) confirm these bytes were built for this exact host"
 fi
 
-# Combined verdict: warn ONLY when NEITHER leg could establish agreement. With a
-# provenance record present this is now reachable only for a genuinely
-# un-attributable cut, rather than being the routine outcome for compressed
-# artifacts (which is what made it easy to wave through).
+# Combined verdict: NEITHER leg could establish agreement ⇒ REFUSE.
+#
+# This used to be a warning that shipped, and measurement is what changed it.
+# Running this script against the REAL, already-published 0.0.15 cut on
+# 2026-08-11 produced host_checked=0 AND prov_checked=0: all 16 artifacts are
+# compressed (AppImage/.deb/.dmg/.tar.gz/.exe/.zip), so `strings` exposed no
+# baked host in ANY of them, and the one provenance record predated
+# releaseHostSha256. So "UNVERIFIED" was not a rare corner — it was the ROUTINE
+# outcome on the release that actually shipped, which is exactly how a warning
+# gets waved through and how WI-37738 stranded every install for ~2 weeks.
+#
+# Now that emit-build-provenance.sh always records releaseHostSha256, a cut
+# built through the normal path ALWAYS has decisive evidence, so reaching here
+# means something genuinely unusual: artifacts assembled outside the build, or a
+# provenance file that never made it next to them. Fail closed and make the
+# operator say so out loud, rather than letting the routine case stay silent.
 if [[ "$host_checked" -eq 0 && "$prov_checked" -eq 0 ]]; then
-  echo "    ⚠ host/target agreement is UNVERIFIED for this cut — the artifacts expose no baked host" >&2
-  echo "      AND no build-provenance record carries releaseHostSha256 (${prov_legacy} legacy/absent record(s))." >&2
-  echo "      Nothing here proves these binaries point at the prefix being published to (WI-37746)." >&2
+  if [[ "${ALLOW_HOST_MISMATCH:-0}" == "1" ]]; then
+    echo "    ⚠ UNVERIFIED host/target agreement OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — nothing proves these binaries point at this prefix." >&2
+  else
+    echo >&2
+    echo "ERROR: host/target agreement is UNVERIFIED for this cut, so this upload is REFUSED." >&2
+    echo "       The artifacts expose no baked host to \`strings\` (all compressed is normal), AND no" >&2
+    echo "       build-provenance record carries releaseHostSha256 (${prov_legacy} legacy/absent record(s))." >&2
+    echo "       Nothing here proves these binaries poll the prefix being published to — and shipping a" >&2
+    echo "       build that polls the WRONG one strands every install from it permanently (WI-37738)." >&2
+    echo "       Re-cut so bin/emit-build-provenance.sh records the baked host, or, if you are" >&2
+    echo "       deliberately re-uploading a pre-WI-37746 cut whose host you have confirmed by hand," >&2
+    echo "       re-run with ALLOW_HOST_MISMATCH=1. (WI-37746.)" >&2
+    exit 1
+  fi
 fi
 echo
 
