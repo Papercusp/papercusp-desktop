@@ -851,6 +851,84 @@ mod tests {
         assert_eq!(unique_id(&reg, "b"), "b");
     }
 
+    // The atomicity guard for `write_registry`.
+    //
+    // WHY AN INODE ASSERTION AND NOT A ROUND-TRIP: the obvious test — write it,
+    // read it back, assert it parses — passes just as happily against the
+    // `fs::write` this replaced, so it could never fail for the one thing it
+    // exists to guard. A guard that cannot fail is not a guard.
+    //
+    // Inode identity IS the observable difference, deterministically and with no
+    // racing: `fs::write` opens the EXISTING path with truncate, so the inode
+    // survives across writes; temp-file + `rename` swaps a NEW inode into place,
+    // so it must change. Revert `write_registry` to
+    // `fs::write(registry_path(), raw)` and this fails on the second write.
+    //
+    // The discriminator was VERIFIED rather than assumed — but out-of-tree, in a
+    // scratch dir, NOT by restoring the old body here. Mutating a shared-checkout
+    // source to prove a guard can fail is forbidden in this repo precisely because
+    // the git-sync sweep can commit the mutant while the probe is still running.
+    // Measured: two consecutive truncating writes to one path kept inode
+    // 5418554290 unchanged, while a temp-file + rename over the same path moved it
+    // to 5418554291. So `assert_ne!` on consecutive inodes is a real falsifier for
+    // this specific revert, not a tautology.
+    #[test]
+    fn write_registry_replaces_the_inode_rather_than_truncating_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        // Same crate-wide lock as the other HOME-mutating test: `registry_path()`
+        // resolves through the process-global HOME, and `cargo test` runs test
+        // fns on separate threads in ONE process.
+        let _home_guard = crate::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("pcusp-ws-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &tmp);
+
+        let mk = |id: &str| Registry {
+            current: id.into(),
+            workspaces: vec![Workspace {
+                id: id.into(),
+                name: id.to_uppercase(),
+                created_at: 1,
+            }],
+        };
+
+        write_registry(&mk("w1")).unwrap();
+        let first_inode = fs::metadata(registry_path()).unwrap().ino();
+
+        write_registry(&mk("w2")).unwrap();
+        let second_inode = fs::metadata(registry_path()).unwrap().ino();
+
+        assert_ne!(
+            first_inode, second_inode,
+            "write_registry must rename a fresh file into place, not truncate the live one: a \
+             truncating write leaves a window where a concurrent reader sees a partial document, \
+             and an unreadable registry resolves activeWorkspaceId() to the retired 'default' \
+             partition where every scoped query answers a false NOT-FOUND (WI-6734)"
+        );
+
+        // The replacement must be the WHOLE new document, not a merge or a stub.
+        assert_eq!(read_registry().unwrap().current, "w2");
+
+        // And it must leave no temp debris a later reader would have to attribute.
+        let strays: Vec<String> = fs::read_dir(workspaces_root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "stray temp files left behind: {strays:?}");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     // WI-5321 (root-causing WI-2381 Blocker A): a fresh install used to mint its
     // ONE real workspace with the literal id "default", which collides with
     // DEFAULT_COORD_WORKSPACE — the p2p/allotment layer's coordination-shared
