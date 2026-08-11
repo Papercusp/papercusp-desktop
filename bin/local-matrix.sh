@@ -256,8 +256,122 @@ if ! flock -n 9; then
 fi
 printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${RIG_LOCK_LABEL:-${USER:-?}:local-matrix $*}" >"$RIG_LOCK.holder"
 
+# ── bank the frames' evidence BEFORE destroying them (EI-18660101091813036) ───
+# This wrapper's teardown `docker rm -f`s the frames, and each frame's
+# /home/pcusp/serve.log is the primary diagnostic every scenario failure line
+# points at ("see [swarm] diagnostics + /home/pcusp/serve.log on each frame").
+# Destroying it unbanked is how a FAIL verdict routinely outlived its own
+# explanation — and why four separate agents hand-rolled the same ad-hoc
+# scp-on-a-timer rescue script (/tmp/bank-serve-logs-*.sh, one of them "-v3").
+#
+# WHY THIS EXISTS ALONGSIDE rig_bank_logs() (lib/deb-hetzner-rig.sh), which
+# already banks per-scenario-FAIL and at the matrix's own EXIT — it does NOT
+# cover the two cases this one is for, and both are the cases where evidence is
+# scarcest:
+#   • MATRIX-SCOPED. Every failure BEFORE the matrix starts — provision, the
+#     wait-sshd window, DHT bootstrap, the ufw preflight — and every kill of
+#     THIS wrapper (a gate leg budget, `timeout`, ^C) reaches teardown without
+#     the matrix banker ever having run. That is the EI's "a run that never
+#     reaches a clean EXIT banks NOTHING at all".
+#   • SSH-SCOPED. rig_bank_logs reads each frame over ssh (`drv_exec … cat`), so
+#     a frame that is wedged, OOM-killed or never finished booting answers
+#     nothing and banks the string "(bank fetch failed …)" in place of the log
+#     that would have explained it. `docker cp` reads the container filesystem
+#     off the daemon: no key, no IP parsing, no ConnectTimeout — and it works on
+#     a STOPPED container, which is exactly the frame you most need to read.
+#
+# GAP-FILL, NOT A SECOND BANKER (PCUSP_LOCAL_RIG_BANK=auto, the default): if the
+# matrix already banked a serve-*.log for THIS run, this returns without writing.
+# Re-banking the same cumulative log would inflate the file/starved counts the
+# gate's own _frame_lag_scan() reports, and would add another nested snapshot to
+# the pile the lib's bank header explicitly warns readers about
+# (EI-18687774064705397). `=always` banks regardless (useful when a run got far
+# enough to bank early but the frames wedged later); `=never` disables it.
+#
+# Files land in the SAME dir and the SAME serve-*.log naming the gate's
+# _frame_lag_scan()/check_local_matrix_frame_starvation() already read, so a
+# killed run's frames now feed the starvation detector too instead of reading as
+# "no frame serve.log banked for this run". Retention is the lib's existing FIFO
+# over serve-*.log; the DHT bundle carries its own (its name is outside that
+# glob on purpose — it is not a frame, and must not be counted as one).
+#
+# Best-effort throughout: never fatal, never masks the run's verdict.
+RIG_BANK_DIR="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
+RIG_BANK_KEEP="${RIG_BANK_KEEP:-200}"
+RIG_LOCAL_T0="$(date +%s 2>/dev/null || echo 0)"
+
+# True iff a frame serve.log was already banked since this run started — the
+# same mtime-marker idiom live-federation-gate.sh's _frame_lag_scan uses to scope
+# banked files to a run.
+_rig_local_run_already_banked() {
+  local marker rc=1
+  [ -d "$RIG_BANK_DIR" ] || return 1
+  marker="$(mktemp -u 2>/dev/null || echo "/tmp/.local-matrix-bank-marker.$$")"
+  touch -d "@$RIG_LOCAL_T0" "$marker" 2>/dev/null || return 1
+  [ -n "$(find "$RIG_BANK_DIR" -maxdepth 1 -name 'serve-*.log' -newer "$marker" -print -quit 2>/dev/null)" ] && rc=0
+  rm -f "$marker" 2>/dev/null
+  return "$rc"
+}
+
+rig_local_bank_logs() {
+  local mode="${PCUSP_LOCAL_RIG_BANK:-auto}" stamp inst cn f state first last banked=0
+  case "$mode" in
+    never) log "bank: skipped (PCUSP_LOCAL_RIG_BANK=never)"; return 0 ;;
+    auto)  if _rig_local_run_already_banked; then
+             log "bank: frame serve.logs for this run are already banked in $RIG_BANK_DIR (matrix banker) — not re-banking (PCUSP_LOCAL_RIG_BANK=always to force)"
+             return 0
+           fi ;;
+  esac
+  command -v docker >/dev/null 2>&1 || { log "bank: docker unavailable — nothing banked"; return 0; }
+  mkdir -p "$RIG_BANK_DIR" 2>/dev/null || { log "bank: cannot mkdir $RIG_BANK_DIR — skipping (best-effort)"; return 0; }
+  stamp="$(date +%H%M%S 2>/dev/null || echo now)-teardown"
+
+  for inst in a b c; do
+    case "$inst" in a) cn="${CN_A:-}" ;; b) cn="${CN_B:-}" ;; c) cn="${CN_C:-}" ;; esac
+    [ -n "$cn" ] || continue
+    # Never provisioned (the usual case for c on a 2-frame run), or already gone.
+    state="$(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} started={{.State.StartedAt}}' "$cn" 2>/dev/null)" || state=""
+    [ -n "$state" ] || continue
+    f="$RIG_BANK_DIR/serve-$inst-$stamp.log"
+    docker cp "$cn:/home/pcusp/serve.log" "$f" 2>/dev/null \
+      || printf '(no /home/pcusp/serve.log could be copied out of container %s — the frame may never have started the sidecar)\n' "$cn" >"$f" 2>/dev/null
+    [ -f "$f" ] || continue
+    banked=$((banked + 1))
+    # Same coverage-window + absent-subject-id caveats the ssh banker stamps
+    # (EI-18687774064705397 / EI-18744109084137549) — a reader hits the identical
+    # traps here, and a bank file that omits them is the one they read first.
+    first="$(grep -m1 -oE '^\[[0-9TZ:.+-]+\]' "$f" 2>/dev/null || true)"
+    last="$(grep -oE '^\[[0-9TZ:.+-]+\]' "$f" 2>/dev/null | tail -1 || true)"
+    { printf '=== bank %s: frame %s (container %s) — banked by local-matrix.sh via `docker cp` AT TEARDOWN, i.e. this run reached destroy without the matrix banker running (pre-matrix failure, or the run was killed). Container state at bank time: %s. serve.log is CUMULATIVE for the whole rig session, NOT scoped to one scenario/run; this snapshot spans %s .. %s — check whether another bank file'"'"'s first timestamp matches before treating the two as independent runs. ⚠ This log format records NO scenario/subject ids for ANY scenario, so an id being ABSENT here is not evidence its operation never happened — confirm with a known-PASSING leg'"'"'s id from the same run before concluding anything from a miss. ===\n' \
+        "$stamp" "$inst" "$cn" "$state" "${first:-?}" "${last:-?}"
+      cat "$f"
+    } >"$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" || rm -f "$f.tmp" 2>/dev/null
+  done
+
+  # The gateway DHT's container log. A DHT bootstrap failure is one of the
+  # pre-matrix failures above, and it is diagnosable ONLY from here — the frames'
+  # serve.log shows a bootstrap timeout, never why. Deliberately NOT named
+  # serve-*.log: it is not a frame, and the gate's frame scan must not count it.
+  if docker inspect "$NET-dht" >/dev/null 2>&1; then
+    docker logs "$NET-dht" >"$RIG_BANK_DIR/dht-$stamp.log" 2>&1 || true
+    ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t dht-*.log 2>/dev/null \
+        | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
+  fi
+
+  if [ "$banked" -gt 0 ]; then
+    log "bank: $banked frame serve.log(s) + DHT log → $RIG_BANK_DIR (stamp=$stamp) before destroy"
+  else
+    log "bank: no rig containers existed at teardown — nothing to bank (expected for a run that failed before provisioning)"
+  fi
+  # Same bounded FIFO the lib applies, so a killed-run bank can never grow this
+  # dir without limit. fail/<stamp>/ bundles are non-recursive-globbed away.
+  ( cd "$RIG_BANK_DIR" 2>/dev/null && ls -t serve-*.log 2>/dev/null \
+      | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
+}
+
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
+  rig_local_bank_logs   # EI-18660101091813036 — evidence out BEFORE the destroy
   log "teardown: frames + DHT"
   docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht" >/dev/null 2>&1 || true
   rig_disable_exclusive   # release the system.slice exclusive-core grant (scopes now gone)
