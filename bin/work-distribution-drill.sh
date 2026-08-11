@@ -348,17 +348,19 @@ fi
 # p2p-work-intake routine seeds, and the seeder logs its own reason when it cannot.
 if ! bundle_has 'executeClaimedOffer'; then
   skipp "SPAWN — DETECTED: executeClaimedOffer absent from the shipped bundle (no production path reaches the executor)"
+elif routine_active 'p2p-work-intake'; then
+  ok "SPAWN wired: executor ships AND the p2p-work-intake routine is active in this instance"
 elif routine_seeded 'p2p-work-intake'; then
-  ok "SPAWN wired: executor ships AND the p2p-work-intake routine is seeded in this instance"
+  skipp "SPAWN — DETECTED: p2p-work-intake is seeded but inactive: $(routine_inactive_reason 'p2p-work-intake')"
 else
   skipp "SPAWN — DETECTED, sidecar's own words: $(log_reason '[p2p-host-routines]')"
 fi
 
 # RESULTS — rides SPAWN by construction (nothing spawns ⇒ nothing to sync back).
-if routine_seeded 'p2p-work-intake' && bundle_has 'runForeignGitSyncTick'; then
+if routine_active 'p2p-work-intake' && bundle_has 'runForeignGitSyncTick'; then
   ok "RESULTS wired: foreign-git-sync ships and an intake path exists to produce work for it"
 else
-  skipp "RESULTS — DETECTED: rides SPAWN (intake seeded=$(routine_seeded 'p2p-work-intake' && echo yes || echo no), foreign-git-sync in bundle=$(bundle_has 'runForeignGitSyncTick' && echo yes || echo no))"
+  skipp "RESULTS — DETECTED: rides SPAWN (intake seeded=$(routine_seeded 'p2p-work-intake' && echo yes || echo no), active=$(routine_active 'p2p-work-intake' && echo yes || echo no), inactive-reason=$(routine_inactive_reason 'p2p-work-intake'), foreign-git-sync in bundle=$(bundle_has 'runForeignGitSyncTick' && echo yes || echo no))"
 fi
 
 # METERING — P-205's own lane. Substrate and writer are SEPARATE facts; the old reason
