@@ -1015,7 +1015,9 @@ if [[ "$WITH_ANDROID" == "1" ]]; then
     set -euo pipefail
     cd "$MOBILE_ROOT"
     make tokens bindings-kotlin
-    bash tools/build-scripts/build-android.sh
+    # A desktop cut must request store-ready mobile artifacts explicitly.
+    # The script's default stays debug-only for developer installs.
+    bash tools/build-scripts/build-android.sh release
   ) >"$ANDROID_LEG_LOG" 2>&1 &
   ANDROID_PID=$!
 else
