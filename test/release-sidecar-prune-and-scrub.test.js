@@ -125,15 +125,21 @@ test('scrub-text breaks hardlinks — the live monorepo doc tree is never rewrit
   // reach back THROUGH the link into apps/operator-docs and mutate the real repo.
   const lit = identityLiteral();
   const dir = tmp('scrubtext-link');
-  const shipped = path.join(dir, 'shipped.md');
-  const source = path.join(dir, 'source-of-truth.md');
-  fs.writeFileSync(shipped, `path ${lit} end`);
-  fs.linkSync(shipped, source);
+  try {
+    const shipped = path.join(dir, 'internal-docs', 'shipped.md');
+    fs.mkdirSync(path.dirname(shipped), { recursive: true });
+    fs.writeFileSync(shipped, `path ${lit} end`);
+    const source = path.join(dir, 'source-of-truth.md'); // OUTSIDE the scrubbed root
+    fs.linkSync(shipped, source);
+    assert.equal(fs.statSync(shipped).nlink, 2, 'fixture must actually be hardlinked');
 
-  assert.equal(audit('--scrub-text', dir).status, 0);
-  assert.ok(!fs.readFileSync(shipped, 'utf8').includes(lit), 'the shipped copy must be scrubbed');
-  assert.ok(fs.readFileSync(source, 'utf8').includes(lit),
-    'the hardlinked sibling must be UNTOUCHED — scrub must write a new inode');
+    assert.equal(audit('--scrub-text', path.join(dir, 'internal-docs')).status, 0);
+    assert.ok(!fs.readFileSync(shipped, 'utf8').includes(lit), 'the shipped copy must be scrubbed');
+    assert.ok(fs.readFileSync(source, 'utf8').includes(lit),
+      'the sibling hardlink must be UNTOUCHED — an in-place write would have rewritten it');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('scrub-text leaves a CLEAN doc byte-identical', () => {
