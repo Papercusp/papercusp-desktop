@@ -397,18 +397,32 @@ jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-pot" -H 'content-type: 
 # quantity that decides the incr-B→A matrix — see the report section for why.
 JOIN_MS="$(( $(date +%s) * 1000 ))"
 sleep 5
-# WS_B RE-DERIVE (2026-07-03, WI-971 differential): the pre-join `LIMIT 1` read can
-# return a meta-only workspace row (e.g. the seeded 'papercusp-workspace' carrying
-# only hiveDirectoryMeta, projects:[]) while the JOIN registers the member under
-# activeWorkspaceId() (= 'default' on a fresh packaged instance). B-side writes
-# stamped with the wrong workspace_id land in a scope with NO booted substrate →
-# captured but NEVER drained → false "incr-B→A NEVER crossed" reds for every
-# workspace_id-bearing table (7/11 types on the 2026-07-03 run; features passed only
-# because its INSERT omits workspace_id → column default 'default'). Re-derive from
-# the registry row that actually CONTAINS the joined member.
-WS_B_JOINED="$(q b "SELECT workspace_id FROM harness_shared.harness_registry WHERE payload->'projects' @> '[{\"slug\":\"$SLUG\"}]'::jsonb LIMIT 1;")"
+# WS_B RE-DERIVE (2026-07-03, WI-971 differential; WI-38136 hardening): the
+# pre-join `LIMIT 1` registry read can return a meta-only workspace row (e.g. the
+# seeded 'papercusp-workspace' carrying only hiveDirectoryMeta). A project with the
+# same member slug can ALSO be projected into more than one registry row after join,
+# so filtering harness_registry by project slug is still ambiguous: the 2026-08-12
+# clean D-030 run chose papercusp-workspace even though the joined Pot + membership
+# existed only under `default`. B-side writes stamped into that wrong workspace
+# either violate pot_members_pot_fkey or drain into a scope A never receives, forging
+# a prefix of "incr-B→A NEVER crossed" reds. Resolve through the authoritative
+# relational pair instead: the joined Pot row plus THIS B account's membership.
+WS_B_JOINED="$(q b "
+  SELECT m.workspace_id
+  FROM harness_shared.pot_members m
+  JOIN harness_shared.pots p
+    ON p.workspace_id = m.workspace_id
+   AND p.canonical_pot_home_slug = m.pot_home_slug
+  WHERE m.pot_home_slug = '$HIVE_SLUG'
+    AND lower(m.github_username) = lower('$P_B_USER')
+  ORDER BY m.workspace_id
+  LIMIT 1;")"
+if [ -z "$WS_B_JOINED" ]; then
+  echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER'"
+  exit 6
+fi
 if [ -n "$WS_B_JOINED" ] && [ "$WS_B_JOINED" != "$WS_B" ]; then
-  echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (member '$SLUG' registered there)"
+  echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (Pot '$HIVE_SLUG' + B member '$P_B_USER' persisted there)"
   WS_B="$WS_B_JOINED"
 fi
 AT="$(grep -aoE '\[swarm\] joined topic [0-9a-f]{8,}' "${FED_LOG[a]}"|grep -oE '[0-9a-f]{8,}'|sort -u)"

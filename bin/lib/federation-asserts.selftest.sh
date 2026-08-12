@@ -339,6 +339,21 @@ else
   bad "content-matrix no longer refuses a same-account A/B configuration (D-030)"
 fi
 
+# WI-38136: a member project can be projected into BOTH the active workspace's
+# registry and the joined Pot's real persistence workspace. An unordered
+# harness_registry lookup by member slug selected the wrong row during a clean
+# D-030 run, causing pot_members_pot_fkey SETUP-FAIL plus false B→A misses. Bind
+# the post-join selector to the actual persisted Pot AND B-account membership.
+ws_b_joined_block="$(sed -n '/^WS_B_JOINED=/,/^if \[ -n "\$WS_B_JOINED" \]/p' "$matrix_file" 2>/dev/null || true)"
+if printf '%s\n' "$ws_b_joined_block" | grep -q 'FROM harness_shared.pot_members m' \
+  && printf '%s\n' "$ws_b_joined_block" | grep -q 'JOIN harness_shared.pots p' \
+  && printf '%s\n' "$ws_b_joined_block" | grep -q "p.canonical_pot_home_slug = m.pot_home_slug" \
+  && printf '%s\n' "$ws_b_joined_block" | grep -q "lower(m.github_username) = lower('\$P_B_USER')"; then
+  ok "content-matrix resolves B's post-join workspace from the persisted Pot + actual B membership (WI-38136)"
+else
+  bad "content-matrix post-join workspace selector is no longer bound to the persisted Pot + B account; duplicate registry projections can false-RED B→A (WI-38136)"
+fi
+
 # 8b) RED-EI dedup guard (2026-07-09, EI-8385-class fix): a prior version filed a BRAND
 # NEW work_items:create bug on EVERY hourly RED run — no dedup key, and the title embeds a
 # run timestamp so no similarity guard ever caught the duplicates — piling up 30+ open
