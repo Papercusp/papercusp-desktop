@@ -239,23 +239,103 @@ SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
 exec 9>"$SIDECAR_FINAL_DIR.lock"
 SIDECAR_LOCKDIR=""
+SIDECAR_LOCK_WAIT="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60}"
+SIDECAR_READER_YIELD_AFTER="${PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC:-5}"
+if ! [[ "$SIDECAR_LOCK_WAIT" =~ ^[0-9]+$ ]] || ! [[ "$SIDECAR_READER_YIELD_AFTER" =~ ^[0-9]+$ ]]; then
+  echo "FATAL: PAPERCUSP_SIDECAR_LOCK_WAIT_SEC and PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC must be non-negative integer seconds" >&2
+  exit 2
+fi
+
+__pc_sidecar_lock_pids() {
+  local lock_path="$1"
+  local lockdir="${2:-}"
+  if [[ -n "$lockdir" && -f "$lockdir/pid" ]]; then
+    cat "$lockdir/pid"
+    return 0
+  fi
+  command -v fuser >/dev/null 2>&1 || return 0
+  # fuser prints `/path/to/lock: PID [PID...]`; discard the path so digits in
+  # a checkout path can never be mistaken for a holder pid.
+  fuser "$lock_path" 2>/dev/null | awk -F: 'NF > 1 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }'
+}
+
+__pc_sidecar_lock_holder_lines() {
+  local lock_path="$1"
+  local lockdir="${2:-}"
+  local pid elapsed argv found=0
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    [[ -n "$argv" ]] || continue
+    elapsed="$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
+    printf '       pid %s (running %ss): %s\n' "$pid" "${elapsed:-?}" "$argv" >&2
+    found=1
+  done < <(__pc_sidecar_lock_pids "$lock_path" "$lockdir")
+  if ((found == 0)); then
+    echo "       holder details unavailable (install fuser/procps or inspect /proc/locks)" >&2
+  fi
+}
+
+__pc_request_cooperative_reader_yield() {
+  local lock_path="$1"
+  local lockdir="${2:-}"
+  local pid argv
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    # Only tauri-guarded installs the SIGUSR1 cooperative-yield handler. Never
+    # send SIGUSR1 to cargo, sccache, or an unrelated process merely because it
+    # has the lock file open: their default SIGUSR1 action is termination.
+    if [[ "$argv" == *tauri-guarded* ]]; then
+      if kill -USR1 "$pid" 2>/dev/null; then
+        echo "→ requested tauri-guarded pid $pid to yield its startup sidecar reader lock" >&2
+      fi
+    fi
+  done < <(__pc_sidecar_lock_pids "$lock_path" "$lockdir")
+}
+
+__pc_report_sidecar_lock_timeout() {
+  local lock_path="$1"
+  local lockdir="${2:-}"
+  echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar lock ($lock_path)." >&2
+  echo "       A live reader or build still owns it; holder context follows." >&2
+  __pc_sidecar_lock_holder_lines "$lock_path" "$lockdir"
+  echo "       If the holder is tauri-guarded, it should yield on SIGUSR1; otherwise stop the holder or choose an isolated sidecar output." >&2
+}
+
 if command -v flock >/dev/null 2>&1; then
   if ! flock -n 9; then
-    echo "→ another build-desktop-sidecar.sh holds $SIDECAR_FINAL_DIR.lock — waiting for it"
-    flock 9
+    echo "→ sidecar lock is busy; allowing readers ${SIDECAR_READER_YIELD_AFTER}s to finish startup before requesting a cooperative yield"
+    ((SIDECAR_READER_YIELD_AFTER == 0)) || sleep "$SIDECAR_READER_YIELD_AFTER"
+    __pc_request_cooperative_reader_yield "$SIDECAR_FINAL_DIR.lock"
+    if ! flock -w "$SIDECAR_LOCK_WAIT" 9; then
+      __pc_report_sidecar_lock_timeout "$SIDECAR_FINAL_DIR.lock"
+      exit 5
+    fi
   fi
 else
   # macOS ships no flock(1) — same EI-160 serialization via a mkdir
   # spinlock with stale-PID reclaim.
   SIDECAR_LOCKDIR="$SIDECAR_FINAL_DIR.lockdir"
+  if [[ -d "$SIDECAR_LOCKDIR" ]]; then
+    echo "→ sidecar lock is busy; allowing the current writer ${SIDECAR_READER_YIELD_AFTER}s before requesting a cooperative yield"
+    ((SIDECAR_READER_YIELD_AFTER == 0)) || sleep "$SIDECAR_READER_YIELD_AFTER"
+    __pc_request_cooperative_reader_yield "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_LOCKDIR"
+  fi
+  __pc_lock_deadline=$(( $(date +%s) + SIDECAR_LOCK_WAIT ))
   while ! mkdir "$SIDECAR_LOCKDIR" 2>/dev/null; do
     holder="$(cat "$SIDECAR_LOCKDIR/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
       rm -rf "$SIDECAR_LOCKDIR"
       continue
     fi
-    echo "→ another build-desktop-sidecar.sh holds $SIDECAR_LOCKDIR — waiting for it"
-    sleep 5
+    if (( $(date +%s) >= __pc_lock_deadline )); then
+      __pc_report_sidecar_lock_timeout "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_LOCKDIR"
+      exit 5
+    fi
+    sleep 1
   done
   echo "$$" > "$SIDECAR_LOCKDIR/pid"
 fi

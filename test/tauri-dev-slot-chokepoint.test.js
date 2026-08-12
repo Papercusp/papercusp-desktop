@@ -68,7 +68,7 @@ test('the chokepoint claims a target-dir slot for `dev`', () => {
   );
 });
 
-test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo reads resources', async (t) => {
+test('the Tauri chokepoint waits for an in-flight sidecar publish before startup reads resources', async (t) => {
   const haveFlock = spawnSync('bash', ['-c', 'command -v flock'], { encoding: 'utf8' }).status === 0;
   if (!haveFlock) {
     t.skip('needs flock(1) for the shared reader/writer lock proof');
@@ -126,6 +126,75 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo r
     rmSync(shimDir, { recursive: true, force: true });
     rmSync(lockDir, { recursive: true, force: true });
   }
+});
+
+test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIGUSR1', async (t) => {
+  const haveFlock = spawnSync('bash', ['-c', 'command -v flock'], { encoding: 'utf8' }).status === 0;
+  if (!haveFlock) {
+    t.skip('needs flock(1) for the cooperative reader/writer lock proof');
+    return;
+  }
+
+  const home = mkdtempSync(join(tmpdir(), 'ei20270512-home-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'ei20270512-bin-'));
+  const lockDir = mkdtempSync(join(tmpdir(), 'ei20270512-lock-'));
+  const lock = join(lockDir, 'sidecar.lock');
+  const shim = join(shimDir, 'tauri');
+  const env = {
+    ...process.env,
+    HOME: home,
+    CARGO_TARGET_DIR: '',
+    PATH: `${shimDir}:${process.env.PATH}`,
+    PAPERCUSP_SIDECAR_LOCK: lock,
+  };
+  let guard;
+  let writer;
+  try {
+    writeFileSync(shim, '#!/usr/bin/env bash\necho READY\nsleep 30\n');
+    chmodSync(shim, 0o755);
+
+    let stdout = '';
+    guard = spawn('bash', [GUARD, 'dev'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    guard.stdout.on('data', (chunk) => { stdout += chunk; });
+    await new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error(`tauri shim never reached startup: ${stdout}`)), 3000);
+      guard.stdout.on('data', () => {
+        if (stdout.includes('READY')) {
+          clearTimeout(deadline);
+          resolve();
+        }
+      });
+      guard.once('error', reject);
+    });
+
+    writer = spawn('flock', ['-w', '2', '-x', lock, '-c', 'true'], { stdio: 'ignore' });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(writer.exitCode, null, 'the writer must wait while the startup reader is still held');
+
+    process.kill(guard.pid, 'SIGUSR1');
+    const writerExit = await new Promise((resolve) => writer.once('close', resolve));
+    assert.equal(writerExit, 0, 'the writer must acquire the lock after the cooperative yield');
+    assert.equal(guard.exitCode, null, 'yielding the lock must not terminate the long-lived dev child');
+  } finally {
+    if (writer && writer.exitCode === null) writer.kill('SIGTERM');
+    if (guard && guard.exitCode === null) {
+      guard.kill('SIGTERM');
+      await new Promise((resolve) => guard.once('close', resolve));
+    }
+    rmSync(home, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test('the sidecar writer bounds its wait and identifies cooperative readers', () => {
+  const builder = readFileSync(join(DESKTOP_DIR, 'bin', 'build-desktop-sidecar.sh'), 'utf8');
+  assert.match(builder, /SIDECAR_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60\}"/);
+  assert.match(builder, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
+  assert.match(builder, /PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC/);
+  assert.match(builder, /kill -USR1/);
+  assert.match(builder, /tauri-guarded/);
+  assert.match(builder, /holder context follows/);
 });
 
 test('`build` is deliberately left alone — release cuts own their isolation', () => {
