@@ -309,7 +309,7 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 # re-verifying against a VM whose npm cache is cold for the packages in
 # question.
 (cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
-  --workspace=@papercusp/operator --workspace=@papercusp/operator-vite)
+  --workspace=@papercusp/web --workspace=@papercusp/operator-vite)
 
 echo "→ verifying workspace deps resolved"
 echo "  apps/operator/node_modules/@restart/ contents:"
