@@ -93,7 +93,10 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo r
     writeFileSync(shim, '#!/usr/bin/env bash\nprintf "%s" "${CARGO_TARGET_DIR:-}"\n');
     chmodSync(shim, 0o755);
 
-    holder = spawn('flock', ['-x', lock, 'sleep', '30'], { stdio: 'ignore' });
+    // Run the holder in its own process group so teardown releases the lock
+    // immediately; killing only `flock` can leave its `sleep` child holding it
+    // until the 30-second timeout and make a passing test look hung.
+    holder = spawn('flock', ['-x', lock, 'sleep', '30'], { stdio: 'ignore', detached: true });
     const holderDeadline = Date.now() + 3000;
     while (spawnSync('flock', ['-n', lock, '-c', 'true']).status === 0) {
       assert(Date.now() < holderDeadline, 'the test writer never acquired the sidecar lock');
@@ -108,7 +111,7 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo r
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(guard.exitCode, null, 'Tauri must remain blocked while the sidecar writer holds the lock');
 
-    holder.kill('SIGTERM');
+    try { process.kill(-holder.pid, 'SIGTERM'); } catch {}
     await new Promise((resolve) => holder.once('close', resolve));
     const exitCode = await new Promise((resolve) => guard.once('close', resolve));
     assert.equal(exitCode, 0);
@@ -116,7 +119,9 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo r
     assert.match(stdout, /cargo-target/);
   } finally {
     if (guard && guard.exitCode === null) guard.kill('SIGTERM');
-    if (holder && holder.exitCode === null) holder.kill('SIGTERM');
+    if (holder && holder.exitCode === null) {
+      try { process.kill(-holder.pid, 'SIGTERM'); } catch {}
+    }
     rmSync(home, { recursive: true, force: true });
     rmSync(shimDir, { recursive: true, force: true });
     rmSync(lockDir, { recursive: true, force: true });
