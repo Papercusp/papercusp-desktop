@@ -1312,19 +1312,21 @@ if [[ -d "$WEB_DIR/prompts" ]]; then
 fi
 
 # Desktop-install integration (Phase 1 of
-# desktop-app-install-integration-2026-05-23) reads two files at runtime
-# and copies them into ~/.papercusp/: the engineer-collaborator playbook
-# and the omp coord extension. The playbook lives under prompts/ (above),
-# but the coord extension is under apps/operator/scripts/hooks/omp/.
-# esbuild doesn't trace it (read via fs.readFile path), so copy
-# explicitly, preserving the apps/operator/scripts/hooks/omp/ layout
-# that lib/desktop-install/papercusp-files.ts expects.
-COORD_HOOK_SRC="$WEB_DIR/scripts/hooks/omp/coord-hook.ts"
-if [[ -f "$COORD_HOOK_SRC" ]]; then
-  COORD_HOOK_DST="$SIDECAR_DIR/apps/operator/scripts/hooks/omp/coord-hook.ts"
-  echo "→ copying omp coord-hook → sidecar/apps/operator/scripts/hooks/omp/"
-  mkdir -p "$(dirname "$COORD_HOOK_DST")"
-  cp -a "$COORD_HOOK_SRC" "$COORD_HOOK_DST"
+# desktop-app-install-integration-2026-05-23) reads the OMP hook files at
+# runtime and copies them into ~/.papercusp/. The playbook lives under prompts/
+# (above), while the OMP files are under apps/operator/scripts/hooks/omp/.
+# esbuild doesn't trace these fs.readFile paths, so copy every direct TypeScript
+# sibling explicitly. This keeps the installed bundle loadable when an entrypoint
+# gains a relative companion such as non-preempting-delivery.ts.
+OMP_HOOK_SRC_DIR="$WEB_DIR/scripts/hooks/omp"
+OMP_HOOK_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/omp"
+if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
+  echo "→ copying omp hook TypeScript bundle → sidecar/apps/operator/scripts/hooks/omp/"
+  mkdir -p "$OMP_HOOK_DST_DIR"
+  for omp_hook_src in "$OMP_HOOK_SRC_DIR"/*.ts; do
+    [[ -f "$omp_hook_src" ]] || continue
+    cp -a "$omp_hook_src" "$OMP_HOOK_DST_DIR/"
+  done
 fi
 
 # Same reason again, for the CONTEXT-INJECTION pair
@@ -1341,14 +1343,12 @@ fi
 # EI-8191 shape exactly: fail-open looks like success, so it stays invisible.
 # The `.mjs` set is the dispatcher; adapters/ is a required subdirectory.
 INJECT_SRC_DIR="$WEB_DIR/scripts/hooks/inject"
-OMP_INJECT_HOOK_SRC="$WEB_DIR/scripts/hooks/omp/inject-hook.ts"
-if [[ -d "$INJECT_SRC_DIR" && -f "$OMP_INJECT_HOOK_SRC" ]]; then
+if [[ -d "$INJECT_SRC_DIR" && -f "$OMP_HOOK_SRC_DIR/inject-hook.ts" ]]; then
   INJECT_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/inject"
   echo "→ copying context-injection dispatcher → sidecar/apps/operator/scripts/hooks/inject/"
   mkdir -p "$INJECT_DST_DIR/adapters" "$SIDECAR_DIR/apps/operator/scripts/hooks/omp"
   cp -a "$INJECT_SRC_DIR"/*.mjs "$INJECT_DST_DIR"/
   cp -a "$INJECT_SRC_DIR"/adapters/*.mjs "$INJECT_DST_DIR"/adapters/
-  cp -a "$OMP_INJECT_HOOK_SRC" "$SIDECAR_DIR/apps/operator/scripts/hooks/omp/inject-hook.ts"
 fi
 
 # Same reason: the Claude/Codex CC hooks (statusline-fleet + lock/coord/activity/
