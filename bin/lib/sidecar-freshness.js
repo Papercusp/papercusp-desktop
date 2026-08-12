@@ -37,21 +37,19 @@
 // bypass. A guard that cries wolf is worse than no guard, because it trains the
 // bypass.
 //
-// So this module contributes two things, and blocks on only one of them:
+// So this module contributes two things, and blocks only on explicit assertions:
 //
 //   1. THE BANNER (always, never blocks). The sidecar's recorded gitHead, buildSha and
 //      age, printed at the top of every consuming build. Silence was the actual defect;
 //      "built 9h ago from ebb8505" would have stopped the WI-3307 build in its tracks
 //      before ~73 minutes of cargo zigbuild. Information has no false-positive rate.
 //
-//   2. THE ASSERTION (blocks, zero false positives). PAPERCUSP_REQUIRE_SIDECAR_CONTAINS
-//      = <sha> states "this cut must carry commit X", and the check refuses the build
-//      when the sidecar's provenance does not contain it. It can only fire when a
-//      caller asserted something, so it cannot cry wolf. This is the ad-hoc "grep the
-//      built serve.mjs for a symbol only my fix introduces" FIX GATE — the thing that
-//      actually caught the WI-3307 staleness — promoted from a shell snippet each
-//      caller had to remember into a declarable precondition every caller inherits.
-//      (Remembering was exactly the property that failed.)
+//   2. THE ASSERTIONS (blocks, zero false positives). A caller can require a commit
+//      (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS), the exact serve.mjs bytes expected for a
+//      release cut (PAPERCUSP_EXPECTED_SERVE_SHA), and a sidecar build stamp at or
+//      after the cut start (PAPERCUSP_SIDECAR_MIN_EPOCH_SEC). Each can only fire when
+//      its caller explicitly asserted something, so none is a HEAD-vs-sidecar clock
+//      comparison that cries wolf on the shared checkout.
 //
 // An absent provenance file is NOT treated as a pass: it is reported as undecidable,
 // in the same spirit as spa-freshness.js's 'no-dist' — declining to guess rather than
@@ -100,6 +98,10 @@ function formatAge(ms) {
  * @param {?boolean} args.containsVerdict true = provenance contains it, false = it does not,
  *                                        null = could not be resolved (unknown object).
  *                                        Resolved by the CALLER (git), so this stays pure.
+ * @param {?string} args.expectedServeSha the exact serve.mjs hash asserted by a release cut
+ * @param {?string} args.serveSha the hash of the sidecar's actual serve.mjs bytes
+ * @param {?number} args.minEpochSec the release cut start epoch asserted by the caller
+ * @param {?number} args.stampEpochSec the sidecar build stamp's epoch
  * @param {number}  args.nowMs           clock injection for deterministic tests
  *
  * Verdicts:
@@ -107,6 +109,10 @@ function formatAge(ms) {
  *   'skew'                  an assertion was made and the sidecar does NOT carry it. BLOCKS.
  *   'contains-unverifiable' an assertion was made and could not be checked at all. BLOCKS —
  *                           an unverifiable assertion is not a pass.
+ *   'serve-skew'            the packed serve.mjs hash differs from the cut's expected bytes.
+ *   'serve-unverifiable'    the expected serve.mjs hash could not be checked.
+ *   'stamp-stale'           the sidecar build stamp predates the asserted cut start.
+ *   'stamp-unverifiable'    the asserted sidecar build stamp could not be checked.
  *   'no-sidecar'            no sidecar at all; the build fails on its own, more clearly.
  *   'no-provenance'         sidecar predates provenance emission; cannot judge, does not block.
  *   'unreadable'            provenance present but unparseable / missing gitHead.
@@ -117,11 +123,26 @@ function inspectSidecarFreshness({
   headSha = null,
   requireContains = null,
   containsVerdict = null,
+  expectedServeSha = null,
+  serveSha = null,
+  minEpochSec = null,
+  stampEpochSec = null,
   nowMs = Date.now(),
 } = {}) {
   const require_ = typeof requireContains === 'string' && requireContains.trim() !== ''
     ? requireContains.trim()
     : null;
+  const expectedServe_ = typeof expectedServeSha === 'string' && expectedServeSha.trim() !== ''
+    ? expectedServeSha.trim().toLowerCase()
+    : null;
+  const serveSha_ = typeof serveSha === 'string' && serveSha.trim() !== ''
+    ? serveSha.trim().toLowerCase()
+    : null;
+  const minEpochRequested = minEpochSec !== null && minEpochSec !== undefined;
+  const minEpoch_ = minEpochRequested ? Number(minEpochSec) : null;
+  const stampEpoch_ = stampEpochSec === null || stampEpochSec === undefined
+    ? null
+    : Number(stampEpochSec);
 
   const base = {
     gitHead: null,
@@ -131,6 +152,10 @@ function inspectSidecarFreshness({
     headSha: headSha ?? null,
     requireContains: require_,
     containsVerdict: require_ ? containsVerdict : null,
+    expectedServeSha: expectedServe_,
+    serveSha: serveSha_,
+    minEpochSec: minEpoch_,
+    stampEpochSec: stampEpoch_,
   };
 
   if (!sidecarPresent) return { ...base, verdict: 'no-sidecar' };
@@ -156,7 +181,24 @@ function inspectSidecarFreshness({
     ageMs: Number.isFinite(parsedAt) ? Math.max(0, nowMs - parsedAt) : null,
   };
 
-  // A provenance doc with no gitHead cannot answer the only question that blocks.
+  // These assertions are independent of git provenance. In particular, an
+  // explicit release cut must fail closed even if an older sidecar predates
+  // build-provenance.json entirely.
+  if (expectedServe_) {
+    if (!/^[0-9a-f]{64}$/.test(expectedServe_) || !/^[0-9a-f]{64}$/.test(serveSha_ || '')) {
+      return { ...facts, verdict: 'serve-unverifiable' };
+    }
+    if (serveSha_ !== expectedServe_) return { ...facts, verdict: 'serve-skew' };
+  }
+
+  if (minEpochRequested) {
+    if (!Number.isFinite(minEpoch_) || minEpoch_ < 0 || !Number.isFinite(stampEpoch_) || stampEpoch_ < 0) {
+      return { ...facts, verdict: 'stamp-unverifiable' };
+    }
+    if (stampEpoch_ < minEpoch_) return { ...facts, verdict: 'stamp-stale' };
+  }
+
+  // A provenance doc with no gitHead cannot answer the commit assertion.
   if (!gitHead) return { ...facts, verdict: 'unreadable' };
 
   if (require_) {
@@ -168,22 +210,33 @@ function inspectSidecarFreshness({
 }
 
 /**
- * Whether a verdict must stop the build. Only a PROVEN skew, or an assertion the
- * caller explicitly made and we could not verify, does. Never mere staleness.
+ * Whether a verdict must stop the build. Only an explicit assertion that fails or
+ * cannot be verified does. Never mere staleness without a release-cut assertion.
  */
 function blocksBuild(verdict) {
-  return verdict === 'skew' || verdict === 'contains-unverifiable';
+  return [
+    'skew',
+    'contains-unverifiable',
+    'serve-skew',
+    'serve-unverifiable',
+    'stamp-stale',
+    'stamp-unverifiable',
+  ].includes(verdict);
 }
 
 /** The sidecar's identity line — printed on EVERY verdict, including the passing ones. */
 function provenanceLine(result) {
-  if (!result.gitHead && !result.builtAtUtc) return 'provenance: none recorded';
+  if (!result.gitHead && !result.builtAtUtc && !result.serveSha && !Number.isFinite(result.stampEpochSec)) {
+    return 'provenance: none recorded';
+  }
   const age = formatAge(result.ageMs);
   const parts = [
     `built ${result.builtAtUtc ?? 'at an unrecorded time'}${age ? ` (${age} ago)` : ''}`,
     `gitHead ${result.gitHead ?? 'unknown'}`,
   ];
   if (result.buildSha) parts.push(`buildSha ${result.buildSha}`);
+  if (result.serveSha) parts.push(`serve.mjs sha ${result.serveSha}`);
+  if (Number.isFinite(result.stampEpochSec)) parts.push(`stamp epoch ${result.stampEpochSec}`);
   if (result.headSha && result.gitHead && result.headSha !== result.gitHead) {
     parts.push(`repo HEAD is now ${result.headSha}`);
   }
@@ -221,6 +274,45 @@ function describe(result) {
         '  result it has not earned.\n\n' +
         '  Override: PAPERCUSP_ALLOW_STALE_SIDECAR=1'
       );
+    case 'serve-skew':
+      return (
+        'FATAL: STALE SIDECAR — serve.mjs does not match the bytes this release cut built.\n' +
+        `  expected sha256 ${result.expectedServeSha}\n` +
+        `  actual   sha256 ${result.serveSha ?? 'unavailable'}\n` +
+        `  sidecar ${line}\n\n` +
+        '  The cross-build leg would package a different sidecar than the one released\n' +
+        '  by release-local.sh. Rebuild the sidecar and re-run the cut.\n\n' +
+        '  Override (deliberate stale bytes only): PAPERCUSP_ALLOW_STALE_SIDECAR=1'
+      );
+    case 'serve-unverifiable':
+      return (
+        'FATAL: could not verify the sidecar bytes required by this release cut.\n' +
+        `  expected sha256 ${result.expectedServeSha ?? 'invalid'}\n` +
+        `  actual   sha256 ${result.serveSha ?? 'unavailable'}\n` +
+        `  sidecar ${line}\n\n` +
+        '  The cut assertion is fail-closed: rebuild the sidecar and verify serve.mjs\n' +
+        '  before packaging it. Override only for deliberate stale bytes:\n' +
+        '  PAPERCUSP_ALLOW_STALE_SIDECAR=1'
+      );
+    case 'stamp-stale':
+      return (
+        'FATAL: STALE SIDECAR — its build stamp predates this release cut.\n' +
+        `  sidecar stamp epoch ${result.stampEpochSec}\n` +
+        `  required cut epoch ${result.minEpochSec}\n` +
+        `  sidecar ${line}\n\n` +
+        '  The cross-build leg would package a sidecar built before release-local.sh\n' +
+        '  started this cut. Rebuild the sidecar and re-run the cut.\n\n' +
+        '  Override (deliberate stale bytes only): PAPERCUSP_ALLOW_STALE_SIDECAR=1'
+      );
+    case 'stamp-unverifiable':
+      return (
+        'FATAL: could not verify that the sidecar was built during this release cut.\n' +
+        `  required cut epoch ${Number.isFinite(result.minEpochSec) ? result.minEpochSec : 'invalid'}\n` +
+        `  sidecar ${line}\n\n` +
+        '  The cut assertion is fail-closed: rebuild the sidecar to regenerate\n' +
+        '  .sidecar-build-stamp, then re-run the cut. Override only for deliberate\n' +
+        '  stale bytes: PAPERCUSP_ALLOW_STALE_SIDECAR=1'
+      );
     case 'no-sidecar':
       return (
         'WARNING: no prebuilt sidecar found. Run papercusp-desktop/bin/build-desktop-sidecar.sh.\n' +
@@ -241,9 +333,10 @@ function describe(result) {
         '  investigating — rebuild the sidecar to regenerate it.'
       );
     default:
-      return result.requireContains
-        ? `sidecar OK — carries ${result.requireContains}.  ${line}`
-        : `sidecar ${line}`;
+      if (result.requireContains) return `sidecar OK — carries ${result.requireContains}.  ${line}`;
+      if (result.expectedServeSha) return `sidecar OK — serve.mjs matches the release cut.  ${line}`;
+      if (result.minEpochSec !== null) return `sidecar OK — build stamp satisfies the release cut.  ${line}`;
+      return `sidecar ${line}`;
   }
 }
 
