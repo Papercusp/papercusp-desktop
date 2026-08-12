@@ -46,6 +46,15 @@ CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-154}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
+# The two packaged sidecars intentionally share MACHINE_IDENTITY_DIR so each
+# GitHub account reuses its already-attested DEVICE key. The shared Hyperswarm
+# transport seed is different: its default keychain id is machine-scoped, so two
+# processes on this host would otherwise load the SAME Noise identity and refuse
+# to peer with what each sees as itself (WI-38088). Pin a distinct, stable
+# transport identity per matrix peer through swarm-keypair.ts's supported
+# multi-process escape hatch. Keep these overridable for forensic reruns.
+MATRIX_SWARM_ID_A="${PAPERCUSP_MATRIX_SWARM_ID_A:-d030-$P_A_USER-a}"
+MATRIX_SWARM_ID_B="${PAPERCUSP_MATRIX_SWARM_ID_B:-d030-$P_B_USER-b}"
 # D-030: the matrix intentionally wipes each fake HOME, but device identity is
 # machine-scoped, not run-scoped. Point both sidecars at the host's durable
 # identity store; the canonical keychain id includes GitHub user id, so A and B
@@ -204,8 +213,8 @@ log "launch A($P_A_USER, owner) + B($P_B_USER, joiner) [REAL BINARY, :$DISPLAY_N
 # (found 2026-07-03 P-002 rerun r2 — all four smokes EADDRINUSE'd at boot).
 SMK_A_HONO="$(fed_pick_free_port 18071)"; SMK_A_PG="$(fed_pick_free_port 18532)"
 SMK_B_HONO="$(fed_pick_free_port $((SMK_A_HONO + 1)))"; SMK_B_PG="$(fed_pick_free_port $((SMK_A_PG + 100)))"
-fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$MATRIX_SWARM_ID_A" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$MATRIX_SWARM_ID_B" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 for inst in a b; do fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }; done
 log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]}"
 # WI-5641 (same category as WI-5509's "insufficient boot-timeout headroom" fix):

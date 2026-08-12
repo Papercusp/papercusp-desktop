@@ -320,6 +320,19 @@ if grep -q 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file" \
 else
   bad "content-matrix fake HOMEs can mint run-scoped device keys instead of reusing machine identity (D-030)"
 fi
+# WI-38088: device identity sharing above must NOT collapse the two local
+# processes onto one persisted Hyperswarm transport identity. Hyperswarm rejects
+# a remote with its own Noise key, yielding zero peer_connected and an all-red
+# matrix even though publish reports announced=true. The product-supported
+# multi-process escape hatch must be distinct on the two launch lines.
+if grep -q 'PAPERCUSP_SWARM_IDENTITY_ID="\$MATRIX_SWARM_ID_A"' "$matrix_file" \
+  && grep -q 'PAPERCUSP_SWARM_IDENTITY_ID="\$MATRIX_SWARM_ID_B"' "$matrix_file" \
+  && grep -q 'MATRIX_SWARM_ID_A="\${PAPERCUSP_MATRIX_SWARM_ID_A:-d030-\$P_A_USER-a}"' "$matrix_file" \
+  && grep -q 'MATRIX_SWARM_ID_B="\${PAPERCUSP_MATRIX_SWARM_ID_B:-d030-\$P_B_USER-b}"' "$matrix_file"; then
+  ok "content-matrix gives A/B distinct persisted Hyperswarm transport identities (WI-38088)"
+else
+  bad "content-matrix can give A/B the same machine-scoped Hyperswarm identity and prevent self-peering (WI-38088)"
+fi
 if grep -q 'D-030 requires two distinct GitHub accounts' "$matrix_file"; then
   ok "content-matrix refuses same-account A/B fallback instead of weakening admission coverage (D-030)"
 else
