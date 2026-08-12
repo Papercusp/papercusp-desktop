@@ -398,6 +398,74 @@ KNOWN_SENSITIVE_IDENTITIES = {
 }
 
 
+# Product strings that LEGITIMATELY embed a denylisted identity literal and must
+# ship (WI-38233, 2026-08-12). Both were MEASURED as the only non-incidental uses
+# in the 0.0.16 bundle, not assumed — the two incidental ones found in the same
+# sweep (a UI placeholder "aviynw10", a test workspace name in a prose string)
+# were fixed at SOURCE instead of being listed here, which is the default and
+# should stay the default.
+#
+#   • papercusp-cupboard.aviynw.workers.dev — the Cupboard worker host. The handle
+#     is the Cloudflare ACCOUNT SUBDOMAIN, so it is in a hostname the shipped app
+#     must resolve and connect to: it is on the wire for every user no matter what
+#     these bytes say. Scrubbing it does not hide the handle, it only breaks the
+#     client. Removing it for real means moving the worker to a custom domain —
+#     infrastructure, not a release fix.
+#   • ["aviynw","papercupai"] — CANONICAL_HIVE_TEAM_ALLOWLIST, the real hive-invite
+#     team allowlist. Scrubbing it breaks hive invites outright.
+#
+# This is an ACCEPTANCE, not an exclude, and it is COUNTED rather than matched: a
+# file is accepted only when EVERY occurrence of the literal sits inside one of
+# these strings. One unexplained occurrence and the file still FAILS — so a new
+# leak of the bare handle still reds the gate, including inside these very files.
+# Both quoting styles are listed because only the minified bundle is measured
+# above; an unminified build emits the source form.
+AUTHORISED_PRODUCT_STRINGS = (
+    "papercusp-cupboard.aviynw.workers.dev",
+    '["aviynw","papercupai"]',
+    "['aviynw', 'papercupai']",
+)
+
+
+def _count_occurrences(path, needle):
+    """Exact byte-count of `needle` in `path`.
+
+    Used only for the AUTHORISED strings, which are long exact literals.
+    Fails CLOSED: an unreadable path returns -1, which can never satisfy the
+    "every occurrence is authorised" equality, so the file keeps FAILING rather
+    than being quietly accepted on bytes nobody read.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read().count(needle.encode("utf-8", "surrogateescape"))
+    except Exception:
+        return -1
+
+
+def _count_literal(path, lit):
+    """Occurrences of an IDENTITY LITERAL, counted exactly as the scan MATCHES it.
+
+    This must mirror grep_l()'s asymmetry or the arithmetic below compares two
+    different things. Measured on the 0.0.16 serve.mjs: the low-entropy literal
+    (the owner's 3-letter git user.name) occurs 15x as a plain substring — inside
+    ordinary English words such as "Available" — and ZERO times as the
+    word-boundary match the scan actually uses. Counting it as a substring left 15
+    phantom "unaccounted" occurrences and wrongly kept a clean file failing, which
+    made the acceptance unreachable for any real bundle.
+
+    Fails CLOSED: any error returns -1.
+    """
+    flag = "-oIE" if is_low_entropy(lit) else "-aoE"
+    try:
+        r = subprocess.run(["grep", flag, lit_ere(lit), path],
+                           capture_output=True, text=True)
+        if r.returncode not in (0, 1):
+            return -1
+        return sum(1 for ln in r.stdout.splitlines() if ln)
+    except Exception:
+        return -1
+
+
 # ── STAGING SCRUB (WI-4419 durable; desktop-v0-0-12-release-tri-platform#D-004).
 # Dev-infra and agent-authored SOURCE keep re-introducing this box's identity into
 # must-ship files — [owner:Avi] provenance comments in prod .ts/.sql, dev systemd
@@ -1376,6 +1444,49 @@ def scan_dir(dirs):
               "content-addressing;\n      the *.sst copies are RocksDB host.identity "
               "table properties (strippable only at source).\n"
               "      Any OTHER identity literal here would still have failed.")
+
+    # ── Authorised product strings (WI-38233) ─────────────────────────────────
+    # See AUTHORISED_PRODUCT_STRINGS for WHY each entry ships. The rule here is
+    # arithmetic, not pattern-matching: count every occurrence of each identity
+    # literal in the file, count how many of those occurrences are inside an
+    # authorised string, and accept ONLY on equality. Anything unaccounted for
+    # keeps the file failing. Never applied inside an archive member ("!"), whose
+    # bytes we cannot re-read to prove the negative.
+    authorised = []
+    if files:
+        kept = set()
+        for f in sorted(files):
+            if "!" in f:
+                kept.add(f)
+                continue
+            unexplained = []
+            for lit in (high + low):
+                n = _count_literal(f, lit)
+                if n == 0:
+                    continue
+                if n < 0:
+                    unexplained.append(f"{lit} (unreadable)")
+                    continue
+                covered = 0
+                for ok_str in AUTHORISED_PRODUCT_STRINGS:
+                    if lit in ok_str:
+                        c = _count_occurrences(f, ok_str)
+                        if c > 0:
+                            covered += c * ok_str.count(lit)
+                if covered != n:
+                    unexplained.append(f"{lit} x{n - covered} unaccounted")
+            if unexplained:
+                kept.add(f)
+            else:
+                authorised.append(f)
+        files = kept
+    if authorised:
+        print(f"\n    ⚠ ACCEPTED {len(authorised)} file(s) whose ONLY identity hits are "
+              f"authorised product strings (WI-38233):")
+        for f in authorised[:10]:
+            print(f"        {os.path.basename(f)}")
+        print("      Every occurrence was counted and matched to an authorised string;\n"
+              "      one unaccounted occurrence would still have FAILED the file.")
 
     if not files:
         print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
