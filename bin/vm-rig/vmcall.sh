@@ -47,4 +47,39 @@ if [ -z "$PORT" ]; then
 fi
 if [ -z "$PORT" ]; then echo "NO_OPERATOR_PORT"; exit 3; fi
 echo "[vmcall port=$PORT]" >&2
-PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@"
+
+# Keep the result visible to the caller, but do not trust the child's exit code
+# alone.  The VM-rig deploy self-test historically saw rc=0 even when the
+# operator returned no MCP result at all: a silent child stdout is not proof of
+# reachability, and a non-JSON result is not proof that the call completed.
+# Capture stdout so we can validate the actual result before returning success.
+OUT="$(mktemp "${TMPDIR:-/tmp}/vmcall.XXXXXX")" || {
+  echo "MCP_RESULT_CAPTURE_FAILED" >&2
+  exit 5
+}
+cleanup() { rm -f "$OUT"; }
+trap cleanup EXIT HUP INT TERM
+
+PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT"
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+  cat "$OUT"
+  exit "$rc"
+fi
+
+# mcp-call.mjs unwraps the JSON-RPC response to the tool result before writing
+# stdout.  Require that unwrapped result to be non-empty JSON; this catches both
+# an empty body and a stale/incorrect driver that exits 0 without a result.
+if ! "$NODE" -e '
+  const fs = require("node:fs");
+  const body = fs.readFileSync(process.argv[1], "utf8").trim();
+  if (!body) process.exit(1);
+  try { JSON.parse(body); } catch { process.exit(1); }
+' "$OUT"; then
+  cat "$OUT"
+  echo "MCP_RESULT_INVALID: expected a non-empty JSON result" >&2
+  exit 5
+fi
+
+cat "$OUT"
