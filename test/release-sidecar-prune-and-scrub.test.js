@@ -78,6 +78,90 @@ test('prune-docs removes pagefind search-index shards, not just internal-infra d
   }
 });
 
+// ── WI-38233 / the 0.0.16 cut: the PRUNE↔SCAN predicate gap.
+//
+// prune_docs deletes by PATH; scan_dir fails by CONTENT. A doc whose path matches no
+// FORBIDDEN_PATH rule but whose TEXT quotes this box's identity falls between them —
+// 65 assembled files did exactly that and red the 0.0.16 cut after every path rule
+// passed clean. --scrub-text closes it. These assertions are behavioural: they drive
+// the real gate, so a rewrite that reopens the gap by another route still fails.
+
+test('scrub-text clears a doc the gate would REJECT — and the gate agrees afterwards', () => {
+  const lit = identityLiteral();
+  const dir = tmp('scrubtext');
+  const doc = path.join(dir, 'agent-insights', 'some-insight.mdx');
+  fs.mkdirSync(path.dirname(doc), { recursive: true });
+  fs.writeFileSync(doc, `# Insight\n\nRun it from ${lit}/papercusp and re-check.\n`);
+
+  // FALSIFIER: prove the gate REJECTS this fixture first. Without this, a scrub that
+  // did nothing would still let the post-scan assertion below pass vacuously.
+  assert.notEqual(audit('--scan-dir', dir).status, 0,
+    'fixture must be rejected BEFORE the scrub, or this test proves nothing');
+
+  assert.equal(audit('--scrub-text', dir).status, 0);
+  const after = fs.readFileSync(doc, 'utf8');
+  assert.ok(!after.includes(lit), 'the identity literal must be gone');
+  assert.ok(after.includes('# Insight'), 'surrounding prose must survive the scrub');
+  assert.equal(audit('--scan-dir', dir).status, 0, 'the gate must pass after the scrub');
+});
+
+test('scrub-text reaches the doc classes the sidecar actually ships (.md/.mdx/.html)', () => {
+  const lit = identityLiteral();
+  const dir = tmp('scrubtext-ext');
+  // .html matters specifically: internal-docs ships RENDERED twins of each .mdx, so
+  // scrubbing only the source would leave the identity live in the served bytes.
+  for (const ext of ['md', 'mdx', 'html', 'txt', 'json']) {
+    fs.writeFileSync(path.join(dir, `f.${ext}`), `see ${lit} here`);
+  }
+  assert.equal(audit('--scrub-text', dir).status, 0);
+  for (const ext of ['md', 'mdx', 'html', 'txt', 'json']) {
+    assert.ok(!fs.readFileSync(path.join(dir, `f.${ext}`), 'utf8').includes(lit),
+      `.${ext} must be scrubbed — it ships`);
+  }
+});
+
+test('scrub-text breaks hardlinks — the live monorepo doc tree is never rewritten', () => {
+  // The sidecar copier hardlinks where the FS supports it. An in-place write would
+  // reach back THROUGH the link into apps/operator-docs and mutate the real repo.
+  const lit = identityLiteral();
+  const dir = tmp('scrubtext-link');
+  const shipped = path.join(dir, 'shipped.md');
+  const source = path.join(dir, 'source-of-truth.md');
+  fs.writeFileSync(shipped, `path ${lit} end`);
+  fs.linkSync(shipped, source);
+
+  assert.equal(audit('--scrub-text', dir).status, 0);
+  assert.ok(!fs.readFileSync(shipped, 'utf8').includes(lit), 'the shipped copy must be scrubbed');
+  assert.ok(fs.readFileSync(source, 'utf8').includes(lit),
+    'the hardlinked sibling must be UNTOUCHED — scrub must write a new inode');
+});
+
+test('scrub-text leaves a CLEAN doc byte-identical', () => {
+  const dir = tmp('scrubtext-clean');
+  const doc = path.join(dir, 'clean.md');
+  const body = '# Clean\n\nNothing sensitive here.\n';
+  fs.writeFileSync(doc, body);
+  const before = fs.statSync(doc).mtimeMs;
+  assert.equal(audit('--scrub-text', dir).status, 0);
+  assert.equal(fs.readFileSync(doc, 'utf8'), body);
+  assert.equal(fs.statSync(doc).mtimeMs, before, 'a clean file must not be rewritten at all');
+});
+
+test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judges it', () => {
+  // Ordering is the whole contract: scrubbing after the scan would gate on unscrubbed
+  // bytes and red every cut, which is the bug this wiring exists to prevent.
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const scrub = sh.indexOf('--scrub-text');
+  const scan = sh.indexOf('--scan-dir');
+  assert.ok(scrub > 0, 'build-desktop-sidecar.sh must invoke --scrub-text');
+  assert.ok(scan > 0, 'build-desktop-sidecar.sh must invoke --scan-dir');
+  assert.ok(scrub < scan, '--scrub-text must run BEFORE --scan-dir');
+  // Both doc trees, or the untouched one reds the cut.
+  assert.ok(/--scrub-text[\s\S]{0,200}internal-docs/.test(sh), 'must scrub internal-docs');
+  assert.ok(/--scrub-text[\s\S]{0,200}operator-docs\/src\/content\/docs/.test(sh),
+    'must scrub the .mdx source tree');
+});
+
 test('scrub-binaries removes a build-box literal from a compiled addon, preserving byte length', () => {
   const lit = identityLiteral();
   const dir = tmp('scrub');

@@ -974,6 +974,91 @@ def _scrub_one(p, pairs):
     return hits
 
 
+#: Text file suffixes the sidecar doc scrub rewrites. Deliberately a SUFFIX
+#: allowlist and not "anything grep calls text": the sidecar tree also holds
+#: compiled addons and seed bundles, and those belong to --scrub-binaries, whose
+#: byte-length invariant this function does NOT honor.
+SCRUBBABLE_TEXT_SUFFIXES = (".md", ".mdx", ".html", ".htm", ".txt", ".json")
+
+
+def scrub_text(dirs):
+    """Redact build-box identity from SHIPPING TEXT (the sidecar's doc trees).
+
+    WHY THIS EXISTS — the gap between --prune-docs and --scan-dir:
+    prune_docs() deletes by PATH (FORBIDDEN_PATH rules), while scan_dir() fails by
+    CONTENT (identity needles). Those are different predicates, so a doc whose path
+    is not internal-build-infra but whose TEXT quotes this box's home path passes the
+    prune and then reds the gate. Measured on the 0.0.16 cut: 65 assembled files —
+    28 source .mdx plus their rendered .md/.html twins — carried the build-home-path
+    and the mac VM logins while every path rule passed clean.
+
+    WHY SCRUB RATHER THAN PRUNE OR EDIT THE SOURCE: these docs SHIP on purpose (the
+    app serves internal-docs via bin/host-docs.ts, and the .mdx source grounds
+    docs-qa), so pruning removes a real feature. And per the STAGING SCRUB doctrine
+    above, a per-file source edit is a treadmill — agents author new insight docs
+    continuously and each new absolute path reds the next cut. Redacting a COPY at
+    build time is the same remedy bin/stage-source-tree.sh already applies to
+    source.tar.zst; this closes the sidecar half of that blind spot, which is
+    precisely the route WI-4419 documents as bypassing the staged-source audit.
+
+    Unlike _scrub_one() this does NOT preserve byte length: nothing here is linked
+    or offset-addressed, and padding a placeholder out to the literal's width with
+    underscores would corrupt readable prose for no benefit.
+
+    Only HIGH-entropy literals are rewritten — _high_entropy_pairs() is the single
+    source of truth, shared with --scrub-binaries, so this can never drift from what
+    the gate hunts. That is sufficient rather than merely convenient: the low-entropy
+    needle is restricted by scan_dir() to word-boundary matches in TEXT, and measured
+    across the doc trees it matches ZERO files, so no gap is left behind. If that ever
+    stops holding, the gate still FAILS — this scrub removes leaks, it never hides
+    one.
+    """
+    pairs = _high_entropy_pairs()
+    if not pairs:
+        print("    scrub-text: no high-entropy identity resolved — nothing to scrub")
+        return 0
+    total_files = 0
+    for root in dirs:
+        if not os.path.isdir(root):
+            print(f"    scrub-text: {root} absent — skipping")
+            continue
+        scrubbed = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if not fn.endswith(SCRUBBABLE_TEXT_SUFFIXES):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    data = open(p, "rb").read()
+                except OSError:
+                    continue
+                orig = data
+                hits = []
+                for lit, placeholder in pairs:
+                    b = lit.encode()
+                    if b not in data:
+                        continue
+                    hits.append(f"{lit} x{data.count(b)}")
+                    data = data.replace(b, placeholder.encode())
+                if not hits or data == orig:
+                    continue
+                # New inode + rename, never an in-place write: the sidecar copier
+                # hardlinks where the FS supports it, and writing through a link
+                # would reach back into the live monorepo doc tree.
+                tmp_p = p + ".scrub.tmp"
+                with open(tmp_p, "wb") as fh:
+                    fh.write(data)
+                shutil.copymode(p, tmp_p)
+                os.replace(tmp_p, p)
+                scrubbed.append((os.path.relpath(p, root), hits))
+        total_files += len(scrubbed)
+        print(f"    scrub-text: {root} — scrubbed {len(scrubbed)} file(s)")
+        for rel, hits in sorted(scrubbed):
+            print(f"        ✂ {rel}: {', '.join(hits)}")
+    print(f"    scrub-text: {total_files} file(s) rewritten")
+    return 0
+
+
 def scrub_app_binary(paths):
     """Scrub build-box identity out of explicitly named packaged executables.
 
@@ -1413,6 +1498,8 @@ def main():
         return prune_docs(sys.argv[2:])
     if sys.argv[1] == "--scrub-binaries":
         return scrub_binaries(sys.argv[2:])
+    if sys.argv[1] == "--scrub-text":
+        return scrub_text(sys.argv[2:])
     if sys.argv[1] == "--scrub-app-binary":
         return scrub_app_binary(sys.argv[2:])
     if sys.argv[1] == "--scan-dir":
