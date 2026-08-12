@@ -51,6 +51,37 @@ for fn in _rv_key_bearing_device _rv_classify_leak; do
     || { echo "FAIL — $fn missing from $SCN (EI-18712383368117845 probe removed or inlined again?)"; exit 1; }
 done
 
+# The helper cases above prove the two decisions in isolation. These source-level
+# checks prove that scn_revocation_kcut still wires those decisions to the real
+# probes. A unit-only test would stay green if a future edit quietly switched the
+# leak detail back to rig_read_content (metadata) or stopped filtering the device
+# resolver by a pre-ban key (the two integration failures this item covers).
+if awk '!/^[[:space:]]*#/ && /EXISTS/ && /k\.epoch < \$maxep/ { found=1 }
+        END { if (found) exit 0; exit 1 }' "$SCN"; then
+  ok "K-CUT integration: resolver filters attested devices by a pre-ban epoch key"
+else
+  bad "K-CUT integration: resolver no longer selects a key-bearing pre-ban device"
+fi
+
+if grep -vE '^[[:space:]]*#' "$SCN" | grep -Fq 'rig_read_content b "$FPOST"'; then
+  bad "leak integration: detail path still re-reads metadata through rig_read_content"
+else
+  ok "leak integration: detail path does not re-read the arrival predicate"
+fi
+
+if grep -vE '^[[:space:]]*#' "$SCN" | grep -Fq 'SELECT title FROM harness_shared.harness_features_consolidated'; then
+  ok "leak integration: detail path reads the replicated content column"
+else
+  bad "leak integration: detail path no longer reads replicated content"
+fi
+
+if awk '!/^[[:space:]]*#/ && /_rv_classify_leak[[:space:]]+"\$leaked_title"[[:space:]]+"\$post_title"/ { found=1 }
+        END { if (found) exit 0; exit 1 }' "$SCN"; then
+  ok "leak integration: classifier compares observed bytes with the exact written title"
+else
+  bad "leak integration: classifier is not wired to the observed and written content"
+fi
+
 declare -A FRAME_USER=([a]=owner-user [b]=member-user)
 
 # ── The stub. It answers _rv_key_bearing_device's query the way PG would, from a table of
