@@ -17,6 +17,32 @@
 #   2. owner BANS B (Hive-wide revoke → revoked_pubkeys blocklist + epoch 0→1 K-cut);
 #   3. owner writes post-ban content (triggers the C-001 re-key) → it must NOT reach B.
 
+# ── EI-18712383368117845 helpers ──────────────────────────────────────────────────────
+# Extracted from the monolithic core function for ONE reason: both encode a judgement
+# that was previously WRONG in a way no live run could reveal (an unfalsifiable assert
+# and a mislabelled diagnostic), so both must be drivable under a stub.
+# Guarded by lib/b3-revocation-kcut.selftest.sh — hermetic, no docker/ssh/PG.
+
+# _rv_key_bearing_device <maxep> — echo the pubkey of the B-attested device that ACTUALLY
+# held an epoch key below <maxep>; empty when none does. Filtering on "held a key" is the
+# whole point: B's attestation array also carries the SYNTHETIC att2dev-<rid>-<rand> device
+# that scenario order 60 merges in, and asserting the absence of a value that can never
+# appear in pot_epoch_keys is a probe that cannot fail.
+_rv_key_bearing_device() {
+  local maxep="$1"
+  drv_psql a "SELECT e.v->>'device_pubkey' FROM harness_shared.pot_members m, LATERAL jsonb_array_elements(m.device_attestations::jsonb) e(v) WHERE m.github_username='${FRAME_USER[b]}' AND EXISTS (SELECT 1 FROM harness_shared.pot_epoch_keys k WHERE k.member_device_pubkey = e.v->>'device_pubkey' AND k.epoch < $maxep) LIMIT 1;" 2>/dev/null | head -1 | tr -d '[:space:]'
+}
+
+# _rv_classify_leak <observed_title> <written_title> — echo DISCLOSURE | UNREADABLE | SEALED.
+# DISCLOSURE only when B's replicated row carries the owner's exact plaintext bytes; row
+# presence alone is delivery, and delivery is not disclosure (revocation is a DECRYPT cut).
+_rv_classify_leak() {
+  local observed="$1" written="$2"
+  if [ "$observed" = "$written" ]; then echo DISCLOSURE
+  elif [ -z "$observed" ]; then echo UNREADABLE
+  else echo SEALED; fi
+}
+
 scn_revocation_kcut() {
   local rid="$MATRIX_RUN_ID" oslug="${FRAME_MEMBER_SLUG[a]:-}" bslug="${FRAME_MEMBER_SLUG[b]:-}"
   local FPRE="F-RV-PRE-$rid" FPOST="F-RV-POST-$rid"
@@ -88,7 +114,8 @@ scn_revocation_kcut() {
 
   # 3. post-ban owner write (triggers the re-key; revoke.live is false until it lands) must
   #    NOT reach B. rig_assert_absent waits the full window and passes only if it never appears.
-  rig_write_content a "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned B)" todo >/dev/null
+  local post_title="revocation post-ban (must be ABSENT on banned B)"
+  rig_write_content a "$oslug" "$FPOST" "$post_title" todo >/dev/null
   local absent; absent="$(rig_assert_absent b "$FPOST" 30)"
 
   # WI-560 K-CUT CRYPTO WITNESS (diagnostic — the assertion above is deliberately UNCHANGED).
@@ -152,19 +179,46 @@ scn_revocation_kcut() {
   # "a probe that cannot fail is not a probe" trap this file's rig_assert_* helpers were rewritten
   # for (WI-5768). We therefore require maxep>=1 and FAIL loudly if it did not advance. Likewise a
   # blank pubkey means the identity lookup failed, not that the cut held — also a FAIL, never a pass.
-  local bpub maxep
-  bpub="$(drv_psql b "SELECT jsonb_array_elements(device_attestations::jsonb)->>'device_pubkey' FROM harness_shared.pot_members WHERE github_username='${FRAME_USER[b]}' LIMIT 1;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  # EI-18712383368117845: the device-pubkey lookup used to be
+  #   SELECT jsonb_array_elements(device_attestations)->>'device_pubkey' ... LIMIT 1
+  # which picks an ARBITRARY element of a MULTI-DEVICE array — and by the time this
+  # scenario (order 90) runs, scenario order 60 (attestation_membership LEG2) has
+  # deliberately merged a SYNTHETIC second device into B's attestations:
+  #   d2="att2dev-${rid}-$RANDOM"        (b9-attestation.sh)
+  # That string is a device LABEL, not a key: it can never equal a base64
+  # member_device_pubkey, so `rig_assert_row_absent ... member_device_pubkey='att2dev-…'`
+  # returned "absent" unconditionally and this assert printed K-CUT VERIFIED on EVERY
+  # run — including run 223522 (2026-08-06), whose content leg FAILED with a real leak.
+  # Measured in all four banked runs: "B device=att2dev-m1786068697-27155" while every
+  # pot_epoch_keys row in the same dump carries a base64 pubkey. A probe that cannot
+  # fail is not a probe (WI-5768) — the blank-pubkey and vacuous-epoch guards below
+  # already encode that principle; this closes the third hole in the same family.
+  #
+  # The fix resolves B's device by the only property that makes the assert meaningful:
+  # it must be a device that ACTUALLY HELD a pre-ban epoch key. That is self-calibrating
+  # — the very predicate required to come back ABSENT at epoch N is first proven PRESENT
+  # at some epoch < N, on B's own frame and against the same table.
+  local bpub maxep preep
   maxep="$(drv_psql a "SELECT COALESCE(MAX(epoch),0) FROM harness_shared.pot_epoch_keys;" 2>/dev/null | head -1 | tr -d '[:space:]')"
-  echo "  · WI-560 K-CUT assert — B device=${bpub:-<UNRESOLVED>} post-ban maxEpoch=${maxep:-<UNRESOLVED>}"
-  if [ -z "$bpub" ]; then
-    echo "revocation: K-CUT UNMEASURED — could not resolve B's device pubkey (identity lookup failed); an unmeasurable probe is not a pass"; return 1
-  fi
   case "${maxep:-}" in
     ''|*[!0-9]*) echo "revocation: K-CUT UNMEASURED — could not read max epoch on the owner ('${maxep:-}'); not a pass"; return 1 ;;
   esac
   if [ "$maxep" -lt 1 ]; then
     echo "revocation: K-CUT VACUOUS — epoch never advanced past 0, so there was no re-key to cut (papercusp-hive-rekey not armed? see rig_arm_hive_rekey); refusing to pass a probe that cannot fail"; return 1
   fi
+  bpub="$(_rv_key_bearing_device "$maxep")"
+  echo "  · WI-560 K-CUT assert — B key-bearing device=${bpub:-<UNRESOLVED>} post-ban maxEpoch=${maxep}"
+  if [ -z "$bpub" ]; then
+    echo "revocation: K-CUT UNMEASURED — none of B's attested devices ever held an epoch key below $maxep, so a device-scoped absence at $maxep would pass vacuously (a synthetic attestation such as attestation_membership's att2dev-… device can never match member_device_pubkey); an unmeasurable probe is not a pass"; return 1
+  fi
+  # CALIBRATION (the half that makes the assert falsifiable): the same table, the same
+  # frame, the same device — proven PRESENT before the ban. If this reads nothing, the
+  # absence below would prove nothing.
+  preep="$(drv_psql b "SELECT COALESCE(MAX(epoch),-1) FROM harness_shared.pot_epoch_keys WHERE member_device_pubkey='$bpub' AND epoch < $maxep;" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  case "${preep:-}" in
+    ''|*[!0-9-]*|-1) echo "revocation: K-CUT UNCALIBRATED — B's own frame shows NO pre-ban epoch key for device $bpub (read '${preep:-<empty>}'), so asserting its absence at epoch $maxep cannot fail; not a pass"; return 1 ;;
+  esac
+  echo "  · WI-560 K-CUT calibration — B's frame holds device $bpub at epoch $preep (< $maxep), so the absence assert below is falsifiable"
   local kcut; kcut="$(rig_assert_row_absent b "harness_shared.pot_epoch_keys WHERE epoch=$maxep AND member_device_pubkey='$bpub'" 12)"
   if [ "$kcut" != 1 ]; then
     echo "revocation: K-CUT FAILED — banned member B still holds an epoch-$maxep key wrapped to its OWN device ($bpub); the re-key did not cut it off"; return 1
@@ -172,20 +226,50 @@ scn_revocation_kcut() {
   echo "  · WI-560 K-CUT VERIFIED — B holds NO epoch-$maxep key for its own device (pre-ban epochs retained; the epoch-$maxep row B did receive is sealed to the owner's device, unreadable by B)"
 
   if [ "$absent" != 1 ]; then
-    # EI-18712383368117845: on a LEAK, also record whether B can actually READ the leaked content.
-    # rig_assert_absent only proves the row reached B's consolidated table; this distinguishes a
-    # plaintext disclosure from replicated-but-undecryptable bytes, which is what sets the real
+    # EI-18712383368117845: on a LEAK, record whether B can actually READ the leaked content —
+    # rig_assert_absent only proves the row REACHED B's consolidated table, and delivery is not
+    # disclosure (revocation is designed as a DECRYPT cut, not a replication cut).
+    #
+    # ⚠ This block previously called rig_read_content and labelled a '*|remote' result
+    # "READABLE plaintext disclosure". That was FALSE and is retracted: rig_read_content returns
+    # `harness_slug||'|'||origin` — table METADATA, read from the SAME table and the SAME
+    # predicate rig_assert_absent had already probed. It could not distinguish disclosure from
+    # sealed bytes; it merely restated the arrival fact in different words, under a label that
+    # escalated it. Run 223522 (2026-08-06)'s "READABLE plaintext disclosure" line rests on that
+    # bad inference and does not establish disclosure.
+    #
+    # The discriminator is the CONTENT column against the exact bytes the owner wrote: `title`
+    # is written plaintext by rig_write_content on frame a, so if B's replicated row carries the
+    # identical string, the plaintext genuinely crossed to a banned member. Anything else
+    # (sealed/placeholder/empty) is a delivery leak WITHOUT disclosure — a materially lower
     # severity. Diagnostic only — the FAIL verdict is unchanged either way.
-    local leaked; leaked="$(rig_read_content b "$FPOST" 2>/dev/null)"
-    echo "  · revocation: LEAK detail — revoke.live=${rvlive:-ABSENT}; B read of $FPOST => '${leaked:-<unreadable>}' (a '*|remote' value = READABLE plaintext disclosure)"
+    local leaked_title; leaked_title="$(drv_psql b "SELECT title FROM harness_shared.harness_features_consolidated WHERE feature_id='$FPOST' LIMIT 1;" 2>/dev/null | head -1)"
+    leaked_title="$(printf '%s' "$leaked_title" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$(_rv_classify_leak "$leaked_title" "$post_title")" in
+      DISCLOSURE) echo "  · revocation: LEAK detail — revoke.live=${rvlive:-ABSENT}; DISCLOSURE — B's row carries the owner's exact plaintext title ('$leaked_title')" ;;
+      UNREADABLE) echo "  · revocation: LEAK detail — revoke.live=${rvlive:-ABSENT}; row reached B but its title read EMPTY (probe error or sealed) — delivery leak, disclosure NOT established" ;;
+      *)          echo "  · revocation: LEAK detail — revoke.live=${rvlive:-ABSENT}; row reached B with a NON-matching title ('$leaked_title') — delivery leak, plaintext NOT disclosed" ;;
+    esac
     echo "revocation: LEAK — $FPOST reached banned member B after the ban (cut-off failed)"
     return 1
   fi
 
-  # pre-ban content stays readable on B (revocation is not retroactive — matches the repro's
+  # pre-ban content survives on B (revocation is not retroactive — matches the repro's
   # readable epoch-0). A WARN (not FAIL): the cut-off assertion above is the gate.
+  #
+  # EI-18712383368117845: rig_read_content returns `harness_slug||'|'||origin`, so this leg
+  # measures ROW PRESENCE + federation origin — it has never measured readability, and the
+  # old wording ("not readable on B post-ban") over-claimed exactly the way the retracted
+  # LEAK-detail label above did. Every banked passing run (233537, 003418, 232013) tripped
+  # this WARN with 'hello-world|local', i.e. the row IS on B but carries origin=local; that
+  # is a probe/origin-attribution question, not evidence about decryptability. Report what
+  # was measured, and name the two readings separately.
   local fpre_post; fpre_post="$(rig_read_content b "$FPRE" 2>/dev/null)"
-  case "$fpre_post" in *"|remote") : ;; *) echo "revocation: WARN — pre-ban $FPRE not readable on B post-ban (got '$fpre_post')";; esac
+  case "$fpre_post" in
+    *"|remote") : ;;
+    "") echo "revocation: WARN — pre-ban $FPRE row is ABSENT on B post-ban (retroactive cut?)" ;;
+    *) echo "revocation: WARN — pre-ban $FPRE row IS present on B post-ban but not marked federated (got '$fpre_post'; expected '*|remote') — origin attribution, NOT a readability finding" ;;
+  esac
 
   echo "revocation + K-cut OK — B federated pre-ban, then after the ban B stopped receiving post-ban content (pre-ban stayed readable)"
   return 0

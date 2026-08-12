@@ -35,6 +35,7 @@ TESTS=(
   vm-run-env.selftest.sh
   seat-offer-diag.selftest.sh
   b9-attestation-precondition.selftest.sh
+  b3-revocation-kcut.selftest.sh
   restart-settle-barrier.selftest.sh
   rig-wait-converged.selftest.sh
   roster-scope.selftest.sh
