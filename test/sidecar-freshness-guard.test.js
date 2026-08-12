@@ -125,6 +125,28 @@ test('an assertion that cannot be resolved BLOCKS — an unverifiable claim is n
   assert.equal(blocksBuild(r.verdict), true);
 });
 
+test('an explicit serve assertion still fails closed when provenance is absent', () => {
+  const r = inspectSidecarFreshness({
+    sidecarPresent: true,
+    provenanceText: null,
+    expectedServeSha: 'a'.repeat(64),
+    serveSha: null,
+  });
+  assert.equal(r.verdict, 'serve-unverifiable');
+  assert.equal(blocksBuild(r.verdict), true);
+});
+
+test('an explicit cut-time assertion still fails closed when provenance is absent', () => {
+  const r = inspectSidecarFreshness({
+    sidecarPresent: true,
+    provenanceText: null,
+    minEpochSec: 200,
+    stampEpochSec: null,
+  });
+  assert.equal(r.verdict, 'stamp-unverifiable');
+  assert.equal(blocksBuild(r.verdict), true);
+});
+
 test('mere staleness NEVER blocks — no gitHead-vs-HEAD failure (the cry-wolf design)', () => {
   // The guard people learn to bypass is the one that fires on every build. On this
   // shared checkout HEAD moves every few minutes, so a differing HEAD must be

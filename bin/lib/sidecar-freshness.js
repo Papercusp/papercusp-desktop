@@ -87,6 +87,30 @@ function formatAge(ms) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function explicitAssertionVerdict({
+  expectedServeSha,
+  serveSha,
+  minEpochRequested,
+  minEpochSec,
+  stampEpochSec,
+}) {
+  if (expectedServeSha) {
+    if (!/^[0-9a-f]{64}$/.test(expectedServeSha) || !/^[0-9a-f]{64}$/.test(serveSha || '')) {
+      return 'serve-unverifiable';
+    }
+    if (serveSha !== expectedServeSha) return 'serve-skew';
+  }
+
+  if (minEpochRequested) {
+    if (!Number.isFinite(minEpochSec) || minEpochSec < 0 || !Number.isFinite(stampEpochSec) || stampEpochSec < 0) {
+      return 'stamp-unverifiable';
+    }
+    if (stampEpochSec < minEpochSec) return 'stamp-stale';
+  }
+
+  return null;
+}
+
 /**
  * Judge a prebuilt sidecar's freshness.
  *
@@ -162,6 +186,18 @@ function inspectSidecarFreshness({
 
   const prov = parseProvenance(provenanceText);
   if (prov == null) {
+    // Explicit release-cut assertions are independent of the optional legacy
+    // provenance record. They must still fail closed when that record is absent
+    // or corrupt; otherwise an old sidecar can evade the cut's real assertions by
+    // deleting the metadata that would have made it visible.
+    const assertionVerdict = explicitAssertionVerdict({
+      expectedServeSha: expectedServe_,
+      serveSha: serveSha_,
+      minEpochRequested,
+      minEpochSec: minEpoch_,
+      stampEpochSec: stampEpoch_,
+    });
+    if (assertionVerdict) return { ...base, verdict: assertionVerdict };
     // Distinguish "no file at all" from "a file we could not read" — they call for
     // different operator actions (rebuild vs investigate a corrupt emit).
     const hadText = typeof provenanceText === 'string' && provenanceText.trim() !== '';
@@ -184,19 +220,14 @@ function inspectSidecarFreshness({
   // These assertions are independent of git provenance. In particular, an
   // explicit release cut must fail closed even if an older sidecar predates
   // build-provenance.json entirely.
-  if (expectedServe_) {
-    if (!/^[0-9a-f]{64}$/.test(expectedServe_) || !/^[0-9a-f]{64}$/.test(serveSha_ || '')) {
-      return { ...facts, verdict: 'serve-unverifiable' };
-    }
-    if (serveSha_ !== expectedServe_) return { ...facts, verdict: 'serve-skew' };
-  }
-
-  if (minEpochRequested) {
-    if (!Number.isFinite(minEpoch_) || minEpoch_ < 0 || !Number.isFinite(stampEpoch_) || stampEpoch_ < 0) {
-      return { ...facts, verdict: 'stamp-unverifiable' };
-    }
-    if (stampEpoch_ < minEpoch_) return { ...facts, verdict: 'stamp-stale' };
-  }
+  const assertionVerdict = explicitAssertionVerdict({
+    expectedServeSha: expectedServe_,
+    serveSha: serveSha_,
+    minEpochRequested,
+    minEpochSec: minEpoch_,
+    stampEpochSec: stampEpoch_,
+  });
+  if (assertionVerdict) return { ...facts, verdict: assertionVerdict };
 
   // A provenance doc with no gitHead cannot answer the commit assertion.
   if (!gitHead) return { ...facts, verdict: 'unreadable' };
