@@ -300,6 +300,32 @@ else
   bad "content-matrix smoke no longer emits OVERALL: PASS (live-federation-gate will mark it FAIL)"
 fi
 
+# D-030 / EI-20192345878553998: a matrix run uses two throwaway HOME dirs, but
+# device identity must remain machine-scoped so an already-attested key is
+# reused. The REAL ensureAttestationGist path must run before package extraction,
+# otherwise an account unable to attest stays local-only and burns the full
+# matrix timeout before emitting a misleading replication RED.
+attest_line="$(grep -n 'preflight_attestation "\$P_A_USER"' "$matrix_file" | head -1 | cut -d: -f1)"
+extract_line="$(grep -n 'log "extract \$DEB"' "$matrix_file" | head -1 | cut -d: -f1)"
+if [ -n "$attest_line" ] && [ -n "$extract_line" ] && [ "$attest_line" -lt "$extract_line" ] \
+  && grep -q 'ensureAttestationGist' "$matrix_file" \
+  && grep -q 'verifyAttestation' "$matrix_file"; then
+  ok "content-matrix proves the real device attestation before expensive package extraction (D-030)"
+else
+  bad "content-matrix no longer fail-fast proves real device attestation before package extraction (D-030)"
+fi
+if grep -q 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file" \
+  && [ "$(grep -c 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file")" -ge 3 ]; then
+  ok "content-matrix preflight and both sidecars share the durable machine identity directory (D-030)"
+else
+  bad "content-matrix fake HOMEs can mint run-scoped device keys instead of reusing machine identity (D-030)"
+fi
+if grep -q 'D-030 requires two distinct GitHub accounts' "$matrix_file"; then
+  ok "content-matrix refuses same-account A/B fallback instead of weakening admission coverage (D-030)"
+else
+  bad "content-matrix no longer refuses a same-account A/B configuration (D-030)"
+fi
+
 # 8b) RED-EI dedup guard (2026-07-09, EI-8385-class fix): a prior version filed a BRAND
 # NEW work_items:create bug on EVERY hourly RED run — no dedup key, and the title embeds a
 # run timestamp so no similarity guard ever caught the duplicates — piling up 30+ open

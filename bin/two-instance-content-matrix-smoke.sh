@@ -46,6 +46,11 @@ CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
 DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-154}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
+# D-030: the matrix intentionally wipes each fake HOME, but device identity is
+# machine-scoped, not run-scoped. Point both sidecars at the host's durable
+# identity store; the canonical keychain id includes GitHub user id, so A and B
+# still use distinct keys while repeated runs reuse their already-attested device.
+MACHINE_IDENTITY_DIR="${PAPERCUSP_MATRIX_IDENTITY_DIR:-$HOME/.papercusp/identity}"
 
 WORK="${PAPERCUSP_MATRIX_WORK:-$HOME/.papercusp-lane-a-fed}"
 # WI-2115: this smoke reuses the SAME fixed $WORK (and therefore the same fixed
@@ -109,6 +114,77 @@ except Exception: pass
 A_TOKEN="$(gh auth token --user "$P_A_USER" 2>/dev/null)" || true
 B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 [ -n "$A_TOKEN" ] && [ -n "$B_TOKEN" ] || { echo "FATAL: need gh tokens for $P_A_USER + $P_B_USER"; exit 1; }
+[[ "${P_A_USER,,}" != "${P_B_USER,,}" ]] || {
+  echo "FATAL: D-030 requires two distinct GitHub accounts; A and B both resolve to '$P_A_USER'"
+  exit 1
+}
+
+# Prove the exact production attestation path BEFORE extracting/repacking the
+# multi-GB package. Previously a fresh fake HOME minted a fresh key, papercupai's
+# gist create returned 422 (unverified email), and the gate then spent ~80m
+# reporting every replication leg red even though A had stayed local-only. The
+# durable machine identity makes ensureAttestationGist idempotently find the
+# existing valid gist; a missing/bad identity now fails here in seconds.
+preflight_attestation() {
+  local expected_user="$1" token="$2" user_json user_id login gist_id
+  user_json="$(GH_TOKEN="$token" gh api user 2>/dev/null)" || {
+    echo "FATAL: GitHub identity preflight failed for '$expected_user' (GET /user)"
+    return 1
+  }
+  user_id="$(jget "$user_json" 'd["id"]')"
+  login="$(jget "$user_json" 'd["login"]')"
+  [[ "$user_id" =~ ^[1-9][0-9]*$ ]] && [ -n "$login" ] || {
+    echo "FATAL: GitHub identity preflight returned an invalid user for '$expected_user'"
+    return 1
+  }
+  [[ "${login,,}" = "${expected_user,,}" ]] || {
+    echo "FATAL: token requested for '$expected_user' authenticates as '$login'"
+    return 1
+  }
+
+  gist_id="$(
+    cd "$REPO_DIR" &&
+      PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" \
+      PAPERCUSP_ATTEST_TOKEN="$token" \
+      PAPERCUSP_ATTEST_USER_ID="$user_id" \
+      PAPERCUSP_ATTEST_LOGIN="$login" \
+      npx tsx -e '
+        import { ensureAttestationGist, loadOrGenerateDeviceKeypair, verifyAttestation } from "./packages/operator-core/lib/identity/attest.ts";
+        import { resolveDeviceKeychainId } from "./packages/operator-core/lib/identity/device-keychain-id.ts";
+        async function main() {
+          const githubUserId = Number(process.env.PAPERCUSP_ATTEST_USER_ID);
+          const githubLogin = process.env.PAPERCUSP_ATTEST_LOGIN!;
+          const token = process.env.PAPERCUSP_ATTEST_TOKEN!;
+          const keychainId = resolveDeviceKeychainId(githubUserId);
+          const keypair = await loadOrGenerateDeviceKeypair(keychainId);
+          const gistId = await ensureAttestationGist({
+            keychainId,
+            pubkeyBase64: keypair.pubkeyBase64,
+            deviceLabel: `papercusp-${githubLogin}`,
+            githubUserId,
+            githubLogin,
+            token,
+          });
+          const verified = await verifyAttestation(gistId, keypair.pubkeyBase64, githubUserId, { skipCache: true });
+          if (!verified.valid) throw new Error(`attestation ${gistId} failed verification: ${verified.reason}`);
+          console.log(gistId);
+        }
+        main().catch((err) => { console.error(String(err)); process.exit(1); });
+      ' 2>&1
+  )" || {
+    echo "FATAL: real device-attestation preflight failed for '$login': $gist_id"
+    return 1
+  }
+  gist_id="$(printf '%s\n' "$gist_id" | tail -1 | tr -d '[:space:]')"
+  [[ "$gist_id" =~ ^[0-9a-fA-F]{32}$ ]] || {
+    echo "FATAL: attestation preflight for '$login' returned no valid gist id"
+    return 1
+  }
+  echo "ATTESTATION: $login#$user_id ready (gist=$gist_id, identity_dir=$MACHINE_IDENTITY_DIR)"
+}
+
+preflight_attestation "$P_A_USER" "$A_TOKEN" || exit 1
+preflight_attestation "$P_B_USER" "$B_TOKEN" || exit 1
 
 log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" || exit 1
@@ -128,8 +204,8 @@ log "launch A($P_A_USER, owner) + B($P_B_USER, joiner) [REAL BINARY, :$DISPLAY_N
 # (found 2026-07-03 P-002 rerun r2 — all four smokes EADDRINUSE'd at boot).
 SMK_A_HONO="$(fed_pick_free_port 18071)"; SMK_A_PG="$(fed_pick_free_port 18532)"
 SMK_B_HONO="$(fed_pick_free_port $((SMK_A_HONO + 1)))"; SMK_B_PG="$(fed_pick_free_port $((SMK_A_PG + 100)))"
-fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
-fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+fed_local_launch_sidecar "${AHOME[b]}" "${FED_LOG[b]}" "$SIDE" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 for inst in a b; do fed_wait_boot "$inst" 80 || { echo "$inst boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[$inst]}"; exit 4; }; done
 log "A: sc=${FED_SC[a]} pg=${FED_PG[a]} | B: sc=${FED_SC[b]} pg=${FED_PG[b]}"
 # WI-5641 (same category as WI-5509's "insufficient boot-timeout headroom" fix):
