@@ -7,9 +7,10 @@
 # pty.rs, custom_protocol.rs, endpoint_ipc.rs, dev_bridge.rs,
 # native_terminal.rs — is INVISIBLE to a default `cargo check` on this Linux
 # box (that target compiles the `cfg(not(windows))` half). So a type / import /
-# borrow / name error inside a Windows-only block compiles clean here and only
-# blows up 15-25 min later inside `bin/build-windows-on-vm.sh` on the QEMU VM.
-# This gate compiles those exact blocks on THIS box in ~40 s.
+# borrow / name error inside a Windows-only block can compile clean here and
+# remain hidden until a Windows-targeted build. This gate compiles those exact
+# blocks on THIS box in ~40 s. It is a
+# manual-only check: the retired QEMU VM producer no longer invokes it.
 #
 # HOW
 # `cargo check --target x86_64-pc-windows-msvc` alone does NOT work: the graph
@@ -20,9 +21,9 @@
 # CRT + Windows SDK (one-time, cached under ~/.cache/cargo-xwin). `check` emits
 # metadata only (no link), so no real MSVC linker is needed.
 #
-# This is a metadata check, NOT a build — it will NOT produce a runnable .exe
-# (that is still the VM's job). It catches the compile-error class, which is
-# the class that was costing a whole VM round-trip.
+# This is a metadata check, NOT a build — it will NOT produce a runnable .exe.
+# It catches the compile-error class before a Windows cross-build or release
+# build, without requiring a VM round-trip.
 #
 # ONE-TIME SETUP (this script checks for each and prints the exact command):
 #   rustup target add x86_64-pc-windows-msvc
@@ -34,10 +35,10 @@
 #   bin/check-windows-cfg.sh --message-format short # extra args pass through to cargo
 #
 # Exit code is cargo's: 0 = the Windows-cfg surface compiles, non-zero = it does
-# not (with the errors printed). Intended as a pre-flight before the VM build
-# and as a quick check after editing any cfg(windows) code. It is deliberately
-# NOT wired into the green-checkpoint suite: it needs cargo-xwin + the SDK,
-# which not every dev/CI box has.
+# not (with the errors printed). Run it manually before a Windows cross-build
+# or after editing any cfg(windows) code. It is deliberately NOT wired into the
+# green-checkpoint suite: it needs cargo-xwin + the SDK, which not every dev/CI
+# box has.
 
 set -euo pipefail
 
@@ -81,6 +82,6 @@ if XWIN_ACCEPT_LICENSE=1 CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}" \
   echo "[check-windows-cfg] PASS — Windows-cfg surface compiles ($(( $(date +%s) - start ))s)"
 else
   rc=$?
-  echo "[check-windows-cfg] FAIL — Windows-cfg compile error(s) above ($(( $(date +%s) - start ))s). Fix before the VM build." >&2
+  echo "[check-windows-cfg] FAIL — Windows-cfg compile error(s) above ($(( $(date +%s) - start ))s). Fix before the Windows cross-build." >&2
   exit "$rc"
 fi
