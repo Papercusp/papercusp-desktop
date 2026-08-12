@@ -55,6 +55,7 @@ function commandBlock(allLines, lineNo) {
 const scriptLines = script.split('\n');
 const CARGO_WIN_BUILD = /cargo\s+xwin\s+build\b/;
 const SCRUB_CALL = /--scrub-app-binary\b/;
+const ASSEMBLED_SCAN_CALL = /--scan-dir\s+"\$\{_WIN_SCAN_DIRS\[@\]\}"/;
 // The CALL, not the definition (`run_iscc() {`).
 const ISCC_CALL = /^\s*run_iscc\s+["'$]/;
 
@@ -107,6 +108,29 @@ test('the produced .exe is identity-scrubbed BEFORE ISCC packs it', () => {
   );
 });
 
+test('each Windows role scans the assembled payload before ISCC packs it', () => {
+  const scanAt = script.indexOf('python3 "$HERE/audit-release-bundle.py" --scan-dir "${_WIN_SCAN_DIRS[@]}"');
+  const copyAt = script.indexOf('cp -f "$EXE" "$STAGE/target/release/papercusp-desktop.exe"');
+  const packAt = script.indexOf('run_iscc "$app_id" "$app_name"');
+
+  assert.ok(scanAt > -1, 'Windows must run the assembled-payload identity gate');
+  assert.ok(copyAt > -1, 'the assembled payload must contain the role exe before the scan');
+  assert.ok(scanAt > copyAt, 'the scan must inspect the staged role exe, not only the pre-stage binary');
+  assert.ok(packAt > scanAt, 'the installer must not be packed before the assembled-payload scan passes');
+
+  // The BuildRoot is symlinked for speed; passing it to grep -r would skip the
+  // directories Inno follows. These real roots are the shipped inputs, and the
+  // server-only roots protect the conditional [Files] entries in papercusp.iss.
+  for (const root of ['$STAGE/target/release', '$SRC_TAURI/sidecar', '$SRC_TAURI/resources']) {
+    assert.match(script, new RegExp(`"\\${root}"`), `assembled scan must include ${root}`);
+  }
+  assert.match(
+    script,
+    /_WIN_SCAN_DIRS\+=\("\$SRC_TAURI\/seed"\s+"\$SRC_TAURI\/env-sidecars\/staging"\)/,
+    'server payload roots (seed and env-sidecars) must be scanned too',
+  );
+});
+
 // FALSIFIABILITY — the guard-for-the-guard.
 //
 // A guard that has never failed is a guard nobody has tested. These prove the
@@ -126,6 +150,7 @@ test('the matchers catch a regressed script and ignore prose', () => {
       remapped: builds.every(({ lineNo }) => /RUSTFLAGS=/.test(commandBlock(all, lineNo))),
       buildCount: builds.length,
       scrubCount: codeOnly.filter(({ line }) => SCRUB_CALL.test(line)).length,
+      assembledScanCount: codeOnly.filter(({ line }) => ASSEMBLED_SCAN_CALL.test(line)).length,
       packLine: Math.min(
         ...codeOnly.filter(({ line }) => ISCC_CALL.test(line)).map((p) => p.lineNo),
         Infinity,
@@ -158,7 +183,11 @@ test('the matchers catch a regressed script and ignore prose', () => {
   assert.equal(prose.scrubCount, 0, 'a commented/echoed --scrub-app-binary must not count as a real call');
   assert.equal(prose.packLine, Infinity, 'a commented/echoed run_iscc must not count as a real call');
 
-  // 4. Scrub AFTER packing is caught — the mac failure mode, restated.
+  // 4. The assembled-payload gate is a real call, not prose.
+  const realScan = analyse('python3 "$HERE/audit-release-bundle.py" --scan-dir "${_WIN_SCAN_DIRS[@]}"');
+  assert.equal(realScan.assembledScanCount, 1, 'a real assembled-payload scan must be counted');
+
+  // 5. Scrub AFTER packing is caught — the mac failure mode, restated.
   const late = analyse(['run_iscc "$APP_ID" "$APP_NAME"', 'python3 audit.py --scrub-app-binary "$EXE"'].join('\n'));
   assert.ok(
     !(late.scrubLine < late.packLine),
