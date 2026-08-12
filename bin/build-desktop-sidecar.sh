@@ -54,7 +54,21 @@ WEB_DIR="$REPO_ROOT/apps/operator"
 # NVM/Homebrew/mise install and prepend ITS bin directory to PATH so `npm` uses
 # the same runtime. If none exists, fail fast with the actual vs required major.
 PAPERCUSP_REQUIRED_NODE_MAJOR="$(sed -nE 's/^[[:space:]]*v?([0-9]+).*$/\1/p' "$REPO_ROOT/.nvmrc" 2>/dev/null | head -1)"
-PAPERCUSP_REQUIRED_NODE_MAJOR="${PAPERCUSP_REQUIRED_NODE_MAJOR:-25}"
+# P-411 R1 (check-assert-integrity): this used to coerce an empty read to 25.
+# An empty read means EITHER "the pin is unreadable/missing" OR "the parse
+# failed" — it never means "the pin is 25". Coercing made an UNMEASURED probe
+# score as the permissive case, and the consequence is not hypothetical: the
+# moment the repo pins 26, an unreadable .nvmrc would still admit a Node 25
+# build, and the `-ge` assert below would report a requirement it never read.
+# That is precisely the failure this whole block was added to prevent
+# (EI-20228051309163209), so fail closed — the pin is one cheap file read.
+if ! [[ "$PAPERCUSP_REQUIRED_NODE_MAJOR" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: could not read the repo-pinned Node major from $REPO_ROOT/.nvmrc" >&2
+  echo "       (parsed: '${PAPERCUSP_REQUIRED_NODE_MAJOR:-<empty>}')." >&2
+  echo "       The runtime pin is load-bearing for this release build, so this" >&2
+  echo "       script refuses to guess it. Restore/repair .nvmrc and re-run." >&2
+  exit 1
+fi
 papercusp_node_major() {
   local candidate="$1"
   [ -x "$candidate" ] || return 1
@@ -429,29 +443,41 @@ for (const rel of pkgs) {
   }
 }
 
-// WI-38149: Vite follows @papercusp/dock-workbench through its workspace
-// symlink and resolves imports from the library realpath, not from the
-// consuming apps/operator directory. npm may therefore report the two app
-// workspaces complete while nesting dockview under apps/operator/node_modules,
-// where the linked library cannot see it. Check the runtime peers that are
-// actually imported by this alias-reachable workspace from the same realpath
-// Vite uses. Keep this list narrow: checking every peer of every linked
-// package would reintroduce the known @papercusp/test-config false positive
-// documented above.
-const aliasReachableRuntimePeers = [
-  {
-    workspace: "libs/generic/dock-workbench",
-    peers: ["dockview", "dockview-react"],
-  },
-];
-for (const { workspace, peers } of aliasReachableRuntimePeers) {
-  const workspaceRoot = path.join(repoRoot, workspace);
-  const requireFromWorkspace = createRequire(path.join(workspaceRoot, "package.json"));
-  for (const peer of peers) {
-    try {
-      requireFromWorkspace.resolve(peer);
-    } catch {
-      missing.push(`${peer} (runtime peer required from ${workspace}/ realpath)`);
+// WI-38149: Vite follows file: workspace dependencies through their symlinks
+// and resolves imports from each library realpath, not from the consuming app
+// directory. A scoped npm install can therefore report both app workspaces
+// complete while putting a runtime peer only beneath apps/operator/node_modules,
+// where the linked library cannot see it. Validate the complete peer contract
+// of DIRECT file: dependencies from the union installed above: each required
+// peer must be declared by at least one installed app workspace and must
+// resolve from the library realpath Vite uses. This stays narrower than the
+// old npm-ls --all false-positive class because it never walks transitive peers.
+const installDeclarations = new Set();
+for (const rel of pkgs) {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+  for (const dep of Object.keys(pkg.dependencies || {})) installDeclarations.add(dep);
+  for (const dep of Object.keys(pkg.devDependencies || {})) installDeclarations.add(dep);
+}
+for (const rel of pkgs) {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, rel), "utf8"));
+  for (const [dep, spec] of Object.entries(pkg.dependencies || {})) {
+    if (typeof spec !== "string" || !spec.startsWith("file:")) continue;
+    const workspaceRoot = path.resolve(repoRoot, path.dirname(rel), spec.slice("file:".length));
+    const workspacePackagePath = path.join(workspaceRoot, "package.json");
+    if (!fs.existsSync(workspacePackagePath)) continue;
+    const workspacePackage = JSON.parse(fs.readFileSync(workspacePackagePath, "utf8"));
+    const requireFromWorkspace = createRequire(workspacePackagePath);
+    for (const peer of Object.keys(workspacePackage.peerDependencies || {})) {
+      if (workspacePackage.peerDependenciesMeta?.[peer]?.optional) continue;
+      if (!installDeclarations.has(peer)) {
+        missing.push(`${peer} (required peer of ${dep}, but undeclared by the installed app workspaces)`);
+        continue;
+      }
+      try {
+        requireFromWorkspace.resolve(peer);
+      } catch {
+        missing.push(`${peer} (required peer of ${dep}, unresolved from ${path.relative(repoRoot, workspaceRoot)}/ realpath)`);
+      }
     }
   }
 }
