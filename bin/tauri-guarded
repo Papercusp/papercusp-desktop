@@ -33,6 +33,42 @@ set -euo pipefail
 
 __here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# A sidecar rebuild publishes with an exclusive flock on this same lock. Keep a
+# shared read lock for every Tauri command that asks Cargo/build.rs to inspect
+# bundle resources, and inherit the descriptor through the `exec tauri` below.
+# Without this second half of the reader/writer protocol, a Tauri rig can walk
+# `src-tauri/sidecar/db-sql` in the narrow rename gap and turn a concurrent
+# publish into a false "resource ... does not exist" panic (EI-20227496970063146).
+__pc_sidecar_lock="${PAPERCUSP_SIDECAR_LOCK:-$__here/../src-tauri/sidecar.lock}"
+__pc_sidecar_lockdir="${PAPERCUSP_SIDECAR_LOCKDIR:-$__here/../src-tauri/sidecar.lockdir}"
+
+__pc_hold_sidecar_read_lock() {
+  mkdir -p "$(dirname "$__pc_sidecar_lock")"
+  if command -v flock >/dev/null 2>&1; then
+    # fd 9 matches the sidecar builder's lock convention. The descriptor is
+    # intentionally inherited by the Tauri CLI and its Cargo child.
+    exec 9>>"$__pc_sidecar_lock"
+    if ! flock -sn 9; then
+      echo "→ build-desktop-sidecar.sh holds $__pc_sidecar_lock exclusively — waiting before reading sidecar/" >&2
+      flock -s 9
+    fi
+    return 0
+  fi
+
+  # macOS has no flock(1); mirror cargo-build-safe.sh's best-effort fallback.
+  # A mkdir mutex cannot provide shared-reader semantics, but it does keep a
+  # Tauri read out of an active writer's publish window.
+  while [[ -d "$__pc_sidecar_lockdir" ]]; do
+    local holder
+    holder="$(cat "$__pc_sidecar_lockdir/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      break
+    fi
+    echo "→ build-desktop-sidecar.sh holds $__pc_sidecar_lockdir — waiting before reading sidecar/" >&2
+    sleep 2
+  done
+}
+
 # Find the subcommand: the first argument that is not a flag (and not the value
 # of one we care about). `tauri` takes its subcommand first in every documented
 # form used in this repo, so a plain scan is enough — and being wrong here is
@@ -58,6 +94,12 @@ if [[ "$__subcommand" == "dev" ]]; then
   # is idempotent by design, so belt-and-braces callers cost nothing.
   . "$__here/lib/claim-target-dir.sh"
 fi
+
+# `dev` is the documented rig path; `build`/`bundle` also have Cargo/build.rs
+# resource reads and must observe the same publish lock when invoked directly.
+case "$__subcommand" in
+  dev|build|bundle) __pc_hold_sidecar_read_lock ;;
+esac
 
 # `tauri` here is node_modules/.bin/tauri (@tauri-apps/cli), NOT this script:
 # npm puts .bin on PATH for run-scripts, and this file is only ever reached via

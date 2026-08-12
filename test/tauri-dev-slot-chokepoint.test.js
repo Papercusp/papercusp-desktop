@@ -9,9 +9,11 @@
  * unprotected concurrent build against the shared ~/.cargo-target.
  *
  * The fix moved the claim to the `tauri` npm script (bin/tauri-guarded), which
- * every launcher already goes through. These tests are the recurrence guard for
- * that: one proves the chokepoint actually claims, the other proves nobody has
- * routed around it again.
+ * every launcher already goes through. The same chokepoint now holds the shared
+ * sidecar read lock, so Cargo/build.rs cannot walk a directory during the
+ * sidecar's atomic publish. These tests are the recurrence guard for both: one
+ * proves the chokepoint actually claims, one proves the sidecar lock blocks a
+ * concurrent writer, and one proves nobody has routed around it again.
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -64,6 +66,61 @@ test('the chokepoint claims a target-dir slot for `dev`', () => {
     'the `tauri` npm script must claim a slot before exec-ing the CLI for `dev` — ' +
       'without it a concurrent build corrupts the shared app-manifest (WI-7101)',
   );
+});
+
+test('the Tauri chokepoint waits for an in-flight sidecar publish before Cargo reads resources', async (t) => {
+  const haveFlock = spawnSync('bash', ['-c', 'command -v flock'], { encoding: 'utf8' }).status === 0;
+  if (!haveFlock) {
+    t.skip('needs flock(1) for the shared reader/writer lock proof');
+    return;
+  }
+
+  const home = mkdtempSync(join(tmpdir(), 'ei20227496-home-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'ei20227496-bin-'));
+  const lockDir = mkdtempSync(join(tmpdir(), 'ei20227496-lock-'));
+  const lock = join(lockDir, 'sidecar.lock');
+  const shim = join(shimDir, 'tauri');
+  const env = {
+    ...process.env,
+    HOME: home,
+    CARGO_TARGET_DIR: '',
+    PATH: `${shimDir}:${process.env.PATH}`,
+    PAPERCUSP_SIDECAR_LOCK: lock,
+  };
+  let holder;
+  let guard;
+  try {
+    writeFileSync(shim, '#!/usr/bin/env bash\nprintf "%s" "${CARGO_TARGET_DIR:-}"\n');
+    chmodSync(shim, 0o755);
+
+    holder = spawn('flock', ['-x', lock, 'sleep', '30'], { stdio: 'ignore' });
+    const holderDeadline = Date.now() + 3000;
+    while (spawnSync('flock', ['-n', lock, '-c', 'true']).status === 0) {
+      assert(Date.now() < holderDeadline, 'the test writer never acquired the sidecar lock');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    let stdout = '';
+    let stderr = '';
+    guard = spawn('bash', [GUARD, 'dev'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    guard.stdout.on('data', (chunk) => { stdout += chunk; });
+    guard.stderr.on('data', (chunk) => { stderr += chunk; });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(guard.exitCode, null, 'Tauri must remain blocked while the sidecar writer holds the lock');
+
+    holder.kill('SIGTERM');
+    await new Promise((resolve) => holder.once('close', resolve));
+    const exitCode = await new Promise((resolve) => guard.once('close', resolve));
+    assert.equal(exitCode, 0);
+    assert.match(stderr, /waiting before reading sidecar/);
+    assert.match(stdout, /cargo-target/);
+  } finally {
+    if (guard && guard.exitCode === null) guard.kill('SIGTERM');
+    if (holder && holder.exitCode === null) holder.kill('SIGTERM');
+    rmSync(home, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 });
 
 test('`build` is deliberately left alone — release cuts own their isolation', () => {
