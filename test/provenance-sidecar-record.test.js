@@ -165,6 +165,8 @@ test('gitDirty fails closed when a submodule path has no checked-out HEAD', () =
   git(parent, ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', source, 'papercusp-desktop']);
   git(parent, ['commit', '-qm', 'pin submodule']);
 
+  assert.equal(emit({ gitRoot: parent }).gitDirty, false, 'a fully checked-out pinned submodule is clean');
+
   const submodulePath = path.join(parent, 'papercusp-desktop');
   fs.rmSync(submodulePath, { recursive: true, force: true });
   fs.mkdirSync(submodulePath, { recursive: true });
