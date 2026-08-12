@@ -334,6 +334,24 @@ for role in $ROLES; do
   cp -f "$EXE" "$STAGE/target/release/papercusp-desktop.exe"
   authenticode_sign "$STAGE/target/release/papercusp-desktop.exe"
 
+  # ── Identity: scan the assembled Windows payload BEFORE Inno packs it ───────
+  # The BuildRoot is intentionally made from symlinks above; grep -r (which the
+  # audit uses) does not descend into symlinked directories, so scanning "$STAGE"
+  # would inspect the exe but silently skip the sidecar/resources/seed bytes that
+  # Inno follows and ships. Point at the real assembled inputs instead. The GUI's
+  # source.tar.zst is independently audited by stage-source-tree.sh and is not
+  # included by papercusp.iss; the Server root includes it here via sidecar/.
+  _WIN_SCAN_DIRS=(
+    "$STAGE/target/release"
+    "$SRC_TAURI/sidecar"
+    "$SRC_TAURI/resources"
+  )
+  if [[ "$role" == "server" ]]; then
+    _WIN_SCAN_DIRS+=("$SRC_TAURI/seed" "$SRC_TAURI/env-sidecars/staging")
+  fi
+  python3 "$HERE/audit-release-bundle.py" --scan-dir "${_WIN_SCAN_DIRS[@]}" \
+    || fail "[$role] assembled Windows payload carries sensitive identity (see scan above) — refusing to package a leaky installer"
+
   echo "==> [$role] packing installer with Inno Setup under wine"
   run_iscc "$app_id" "$app_name"
 done
