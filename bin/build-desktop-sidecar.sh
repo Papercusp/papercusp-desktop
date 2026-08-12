@@ -282,16 +282,27 @@ __pc_sidecar_lock_pids() {
   # /proc/locks can be a process that already exited while a child that inherited
   # the fd keeps the lock alive — scanning /proc/*/fd finds the LIVE holder,
   # which is the one worth signalling.
-  # ONE bounded `find`, never a shell glob over /proc/*/fd/*: this box has 128
-  # cores and thousands of open fds, and the glob form forks `readlink` per fd —
-  # measured, it did not finish in 120s. `-lname` matches the symlink TARGET
-  # inside find itself, and the `timeout` is a hard ceiling so a diagnostic path
-  # can never outlive the lock wait it is diagnosing.
+  # ONE `ls` over every fd directory, parsed in a single awk. MEASURED on this
+  # 128-core box (thousands of open fds), because the obvious forms are far too
+  # slow to sit in a build's lock wait: a shell glob over /proc/*/fd/* forking
+  # `readlink` per fd did not finish in 120s, `find -lname` did not finish inside
+  # a 5s timeout (returning EMPTY, i.e. a false "no holder" — worse than no
+  # fallback at all), and a per-pid `ls | grep` loop took 80s. This form takes
+  # ~1.4s. The `timeout` is a hard ceiling so a diagnostic can never outlive the
+  # wait it is diagnosing.
   local lock_real
   lock_real="$(readlink -f "$lock_path" 2>/dev/null)" || return 0
   [[ -n "$lock_real" ]] || return 0
-  timeout 5 find /proc -maxdepth 3 -path '/proc/[0-9]*/fd/*' -lname "$lock_real" \
-    -printf '%h\n' 2>/dev/null | sed 's|^/proc/||; s|/fd$||' | sort -u
+  # `ls -l /proc/<pid>/fd` emits a "/proc/<pid>/fd:" header per group, then one
+  # "… N -> /target" line per fd. Track the pid from the header and match the
+  # target EXACTLY — a prefix match would also claim "<lock>.tmp".
+  timeout 20 ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v t="$lock_real" '
+    /^\/proc\/[0-9]+\/fd:/ { split($0, a, "/"); pid = a[3]; next }
+    {
+      p = index($0, "-> " t)
+      if (p > 0 && substr($0, p + 3 + length(t)) == "") print pid
+    }
+  ' | sort -u
 }
 
 __pc_sidecar_lock_holder_lines() {
