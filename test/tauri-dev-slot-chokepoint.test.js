@@ -150,7 +150,7 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
   let guard;
   let writer;
   try {
-    writeFileSync(shim, '#!/usr/bin/env bash\necho READY\nsleep 30\n');
+    writeFileSync(shim, '#!/usr/bin/env bash\necho READY\nexec sleep 30\n');
     chmodSync(shim, 0o755);
 
     let stdout = '';
