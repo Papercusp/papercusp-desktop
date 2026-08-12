@@ -571,6 +571,24 @@ for _worker_src in \
   fi
 done
 
+# Blocked-event-loop sentinel worker (EI-20013016005187186). Unlike the workers
+# above this one is TypeScript and imports the shared decider, so a plain copy
+# cannot work: the packaged desktop sidecar runs `node serve.mjs` with NO tsx
+# loader. Bundle it to a self-contained .mjs beside the entry, matching the
+# host bundle's runtime artifact. The sentinel's runtime resolver prefers this
+# .mjs and falls back to the .ts only for tsx runtimes.
+SENTINEL_WORKER_SRC="$REPO_ROOT/packages/operator-core/lib/event-loop-sentinel.worker.ts"
+if [[ -f "$SENTINEL_WORKER_SRC" ]]; then
+  npx --yes esbuild@0.25.0 "$SENTINEL_WORKER_SRC" \
+    --bundle --platform=node --format=esm --target=node22 \
+    --outfile="$SIDECAR_DIR/event-loop-sentinel.worker.mjs" \
+    --log-limit=5 \
+    && echo "    ✓ bundled event-loop sentinel worker beside serve.mjs" \
+    || echo "WARNING: sentinel worker bundle FAILED — the desktop will run with NO blocked-loop detection"
+else
+  echo "WARNING: sentinel worker not found at $SENTINEL_WORKER_SRC — the desktop will run with NO blocked-loop detection"
+fi
+
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
 # opusscript's JS shim (voice-node/codec.ts's lazy `import('opusscript')`) into
