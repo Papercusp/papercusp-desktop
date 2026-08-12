@@ -188,6 +188,84 @@ log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
 # last-green/last-run live in a tiny ops state dir. Deliberately a FILE, not PG: the gate
 # must keep working when the operator/PG is down (EI filing is already best-effort curl).
 STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_DIR"
+
+# ── verdict banking (WI-38285) ────────────────────────────────────────────────
+# EVERY terminal path emits through verdict(), never a bare `echo "GATE: …"`. That echo used
+# to BE the entire record of what a run decided, and it survives nowhere:
+#   • a bare ./live-federation-gate.sh never touches journald — NO journal entry at all;
+#     a manual `systemctl --user start` of the SERVICE leaves service entries and no timer
+#     ones, so the journal answers about the TIMER and lies by omission about the GATE;
+#   • $WORK=/tmp/live-fed-gate-$STAMP is pruned to GATE_KEEP_RUNS and reaped from /tmp;
+#   • the markers here (last-run/last-green/last-red/last-downgrade) are bare epoch
+#     INTEGERS — they record THAT a window happened, never WHAT it decided.
+# Not hypothetical: the 2026-08-12T11:12:50Z GREEN on this release-BLOCKING gate exists only
+# as the integer in last-green. Its leg breakdown is gone, so it cannot answer the question a
+# green is actually asked — did the containerized local-matrix restart class run this window,
+# or did the cheap content-matrix leg carry the green alone (the exact failure check_matrix_
+# staleness exists for)? And since the timer was owner-stopped on 2026-08-07 (wall fact
+# wall:live-federation-gate-timer-owner-stopped) EVERY run is a hand-run, so this bank is now
+# the ONLY durable record of a verdict that exists.
+#
+# A FILE in $STATE_DIR for the same reason the markers are: the gate must keep recording when
+# the operator/PG is down. Append-only JSONL, tail-bounded, and it can never fail the gate —
+# a write error is logged and swallowed, and the verdict still goes to stdout regardless.
+GATE_VERDICT_LOG="${GATE_VERDICT_LOG:-$STATE_DIR/verdicts.jsonl}"
+GATE_VERDICT_KEEP="${GATE_VERDICT_KEEP:-500}"
+__json_str() {  # stdin → a JSON string BODY (caller supplies the quotes)
+  # Order matters: double the backslashes FIRST, so the ones introduced below stay escapes.
+  # Every control character must then be accounted for or the line is not parseable JSON —
+  # \011 (TAB) is the one that bites, because it is the only one that survives a naive
+  # "strip the control chars" range and a leg SUMMARY can legitimately contain it. Caught by
+  # the escaping test below: an un-escaped tab in SUMMARY invalidated EVERY banked line, not
+  # just the one carrying it, since SUMMARY persists across the run.
+  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' \
+    | tr -d '\000-\010\013\014\016-\037' | tr '\n' ' '
+}
+bank_verdict() {  # <the full "GATE: …" line>
+  [ "${GATE_NO_VERDICT_LOG:-0}" = 1 ] && return 0
+  local line="$1" token esc head invoker
+  # The verdict TOKEN (GREEN / RED / FRESH-RED / SKIPPED-STARVATION / TERMINATED / …) is what a
+  # reader greps on; the full line is kept beside it so nothing is lost to the extraction.
+  token="$(printf '%s' "$line" | sed -n 's/^GATE: \([A-Za-z-]*\).*/\1/p')"
+  [ -n "$token" ] || token=UNKNOWN
+  esc="$(printf '%s' "$line" | __json_str)"
+  # Resolved HERE rather than on the hot fresh-exit path: bank_verdict runs exactly once per
+  # run, at the terminal exit, so this costs one rev-parse per run and never touches the
+  # ~0-cost hourly FRESH window. GIT_HEAD (§2) is NOT usable — every fresh/skip path exits
+  # long before the rebuild that sets it.
+  head="$(cd "$DESKTOP_DIR/.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  # systemd exports INVOCATION_ID to a unit's processes and nothing else does — so this
+  # records whether the run was journald-observable, which is the distinction that made the
+  # 08-12 green unrecoverable in the first place.
+  if [ -n "${INVOCATION_ID:-}" ]; then invoker=systemd; else invoker=hand; fi
+  if ! printf '{"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(now_s)" "$token" \
+      "${MATRIX_RES:-?}" "${FROMREPO_RES:-?}" "${WITNESS_RES:-?}" "${MATRIXFULL_RES:-?}" \
+      "$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)" \
+      "$(printf '%s' "${SUMMARY:-}" | __json_str)" \
+      "$(printf '%s' "${MATRIX_SKIP_REASON:-}" | __json_str)" \
+      "$head" "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
+    log "bank_verdict: could not append to $GATE_VERDICT_LOG — verdict still emitted on stdout"
+    return 0
+  fi
+  # Tail-bound so an append-only file cannot grow without limit. Trimmed to a temp file in the
+  # SAME dir and moved into place, so a reader never observes a half-written bank.
+  local n; n="$(wc -l <"$GATE_VERDICT_LOG" 2>/dev/null || echo 0)"
+  if [ "${n:-0}" -gt "$GATE_VERDICT_KEEP" ] 2>/dev/null; then
+    local tmp="$GATE_VERDICT_LOG.trim.$$"
+    if tail -n "$GATE_VERDICT_KEEP" "$GATE_VERDICT_LOG" >"$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$GATE_VERDICT_LOG" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+  return 0
+}
+# Bank FIRST, then emit: a caller that pipes/drops stdout, or a TERM arriving mid-emit, must
+# not be able to cost us the durable record. The echoed string is byte-identical to what the
+# bare echo produced, so every existing verdict-greping caller is unaffected.
+verdict() { bank_verdict "$1"; echo "$1"; }
+
 GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 # A WI-5329 frame-starvation downgrade is NOT a genuine green (D-005: a starvation SKIP never
 # satisfies first-green). Such a window must NOT refresh last-green — that is exactly how the
@@ -422,7 +500,7 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     # Cheap (a file mtime read) and deliberately kept on the hot FRESH path: this is the window
     # the hourly timer takes almost every fire, so it is the one that must not stay silent.
     check_matrix_staleness
-    echo "GATE: FRESH (green ${GREEN_AGE_H}h ago)$(matrix_stale_suffix)"; exit 0
+    verdict "GATE: FRESH (green ${GREEN_AGE_H}h ago)$(matrix_stale_suffix)"; exit 0
   fi
   # A starvation-downgraded window is NOT a green (it never refreshes last-green, so it does not
   # satisfy the TTL above), but back off for a SHORTER window so a chronically starved box does
@@ -432,7 +510,7 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     log "fresh: last window STARVATION-DOWNGRADED ${DOWNGRADE_AGE_H}h ago (< ${GATE_DOWNGRADE_TTL_H}h retry TTL) — NOT a green; retrying after the TTL, nothing to do this window."
     skip_cleanup
     check_matrix_staleness
-    echo "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)$(matrix_stale_suffix)"; exit 0
+    verdict "GATE: FRESH-DOWNGRADE (downgraded ${DOWNGRADE_AGE_H}h ago — not a green)$(matrix_stale_suffix)"; exit 0
   fi
   # WI-37464: a TRACKED red backs off too. Checked LAST of the three so it can never mask a
   # fresher green or downgrade. `last-red` is stamped ONLY where the red was confirmed tracked
@@ -444,7 +522,7 @@ if [ "${GATE_FORCE:-0}" != 1 ]; then
     log "fresh: last window was a TRACKED RED ${RED_AGE_H}h ago (< ${GATE_RED_TTL_H}h retry TTL) — the red is already reported and re-running unchanged code reproduces it at full cost; nothing to do this window. GATE_FORCE=1 to run anyway."
     skip_cleanup
     check_matrix_staleness
-    echo "GATE: FRESH-RED (red ${RED_AGE_H}h ago — still red, already tracked; NOT a green)$(matrix_stale_suffix)"; exit 0
+    verdict "GATE: FRESH-RED (red ${RED_AGE_H}h ago — still red, already tracked; NOT a green)$(matrix_stale_suffix)"; exit 0
   fi
 fi
 
@@ -485,7 +563,7 @@ if [ "${GATE_SINGLETON:-1}" = 1 ]; then
       log "another gate run is already in flight (held by: $GATE_HOLDER) — skipping this window rather than starting a second run that would duplicate the verdict and clobber the shared content-matrix lane dir. GATE_SINGLETON=0 overrides (wedged holder only)."
       skip_cleanup
       check_staleness   # same reasoning as the other SKIPPED* exits: a recurring skip must not go unnoticed
-      echo "GATE: SKIPPED-GATE-IN-FLIGHT (held by: $GATE_HOLDER)"; exit 0
+      verdict "GATE: SKIPPED-GATE-IN-FLIGHT (held by: $GATE_HOLDER)"; exit 0
     fi
     # Held for the rest of this process. Record who, for the next run's message.
     printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${USER:-?}:live-federation-gate${GATE_FORCE:+ (GATE_FORCE)}" >"$GATE_LOCK.holder" 2>/dev/null || true
@@ -539,7 +617,7 @@ if [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] && [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ]
         log "rig busy (held by: $RIG_HOLDER) and this window would reach the local-matrix leg — skipping now, before the rebuild, rather than wasting one (non-blocking probe only; local-matrix.sh's own flock still serializes correctly regardless of this check). Set RIG_WAIT=1 to queue instead of skipping."
         skip_cleanup
         check_staleness   # by this point freshness was already ruled out above — same as the other SKIPPED* exits (load/github-api), unlike the FRESH* exits, this skip must not go unnoticed if it recurs
-        echo "GATE: SKIPPED-RIG-BUSY (held by: $RIG_HOLDER)"; exit 0
+        verdict "GATE: SKIPPED-RIG-BUSY (held by: $RIG_HOLDER)"; exit 0
       fi
     else
       exec 8<&- 2>/dev/null || true   # release the probe immediately — we only peeked
@@ -662,7 +740,7 @@ trap 'guard_prod_ports exit-trap; reap_gate_sidecars; kill "$GUARD_SWEEP_PID" 2>
 # ran. Emit a distinct TERMINATED verdict (not RED — an external kill is not federation
 # signal) with whatever leg statuses exist; the EXIT trap still reaps the port guard.
 on_external_term() {
-  echo "GATE: TERMINATED (external signal — unit timeout or manual stop; legs at kill: content-matrix=${MATRIX_RES:-?} from-repo=${FROMREPO_RES:-?} local-matrix=${MATRIXFULL_RES:-?} build=$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)) ; logs in ${WORK:-?}"
+  verdict "GATE: TERMINATED (external signal — unit timeout or manual stop; legs at kill: content-matrix=${MATRIX_RES:-?} from-repo=${FROMREPO_RES:-?} local-matrix=${MATRIXFULL_RES:-?} build=$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)) ; logs in ${WORK:-?}"
   exit 143
 }
 trap on_external_term TERM INT
@@ -680,7 +758,7 @@ if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
   else
     log "assert-core self-test FAILED — federation-asserts.sh port discovery is broken; see $WORK/selftest.log"
     sed 's/^/  /' "$WORK/selftest.log" >&2
-    echo "GATE: RED (assert-core self-test failed — fix federation-asserts.sh before trusting the smokes)"
+    verdict "GATE: RED (assert-core self-test failed — fix federation-asserts.sh before trusting the smokes)"
     exit 1
   fi
 fi
@@ -784,7 +862,7 @@ if awk "BEGIN{exit !($ADMIT_VALUE > $ADMIT_GATE)}"; then
     log "SKIP: $ADMIT_SIGNAL $ADMIT_VALUE > gate $ADMIT_GATE — the box is genuinely CPU-contended, so the smokes would be starved; retry next window (not a failure). $ADMIT_CONTEXT."
     check_staleness
     skip_cleanup
-    echo "GATE: SKIPPED ($ADMIT_SIGNAL $ADMIT_VALUE > $ADMIT_GATE; $ADMIT_CONTEXT)"; exit 0
+    verdict "GATE: SKIPPED ($ADMIT_SIGNAL $ADMIT_VALUE > $ADMIT_GATE; $ADMIT_CONTEXT)"; exit 0
   fi
 else
   log "admission OK: $ADMIT_SIGNAL $ADMIT_VALUE <= gate $ADMIT_GATE; proceeding. $ADMIT_CONTEXT."
@@ -833,7 +911,7 @@ if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
         log "SKIP: credentialed GitHub REST unhealthy (HTTP $GH_CODE for $GH_PREFLIGHT_USER after 3 tries) — smokes would false-RED (announced=False/memberLinks=0); retry next window (not a failure)."
         check_staleness
         skip_cleanup
-        echo "GATE: SKIPPED (github-api-unhealthy HTTP $GH_CODE)"; exit 0
+        verdict "GATE: SKIPPED (github-api-unhealthy HTTP $GH_CODE)"; exit 0
       fi
     else
       log "credentialed GitHub REST OK (200 for $GH_PREFLIGHT_USER); proceeding."
@@ -1323,7 +1401,7 @@ echo "$(now_s)" >"$STATE_DIR/last-run"
 if is_skip_result "$MATRIX_RES" && is_skip_result "$FROMREPO_RES" && is_skip_result "$MATRIXFULL_RES" && [ "$FAIL_BUILD" != 1 ]; then
   log "all smoke legs SKIPPED — nothing proven; NOT recording a green."
   check_staleness
-  echo "GATE: SKIPPED (no legs ran — $SUMMARY)$(matrix_skip_suffix)"; exit 0
+  verdict "GATE: SKIPPED (no legs ran — $SUMMARY)$(matrix_skip_suffix)"; exit 0
 fi
 
 if [ ${#REDS[@]} -eq 0 ]; then
@@ -1338,7 +1416,7 @@ if [ ${#REDS[@]} -eq 0 ]; then
     # downgrade retry this branch deliberately asks for.
     rm -f "$STATE_DIR/last-red"
     check_staleness
-    echo "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)$(matrix_skip_suffix)"; exit 0
+    verdict "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)$(matrix_skip_suffix)"; exit 0
   fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs" "$STATE_DIR/last-red"
   # EI-18657324526667507 — THE load-bearing call. check_staleness() is (correctly) not invoked on
@@ -1347,7 +1425,7 @@ if [ ${#REDS[@]} -eq 0 ]; then
   # days. Note matrix-stale-ei-filed is deliberately NOT cleared here (unlike stale-ei-filed) —
   # only a real local-matrix verdict clears the leg's clock; a green gate is not evidence it ran.
   check_matrix_staleness
-  echo "GATE: GREEN — $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix)"; exit 0
+  verdict "GATE: GREEN — $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix)"; exit 0
 fi
 
 # Storm downgrade: if the box got SATURATED mid-run, a FAIL is likelier starvation than a
@@ -1367,10 +1445,10 @@ if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
   # own), so it takes the same marker and the same SHORT retry TTL rather than the red one.
   echo "$(now_s)" >"$STATE_DIR/last-downgrade"
   check_staleness
-  echo "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]}; $FRAME_NOTE)$(matrix_skip_suffix)"; exit 0
+  verdict "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]}; $FRAME_NOTE)$(matrix_skip_suffix)"; exit 0
 fi
 
-echo "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; $FRAME_NOTE ; logs in $WORK"
+verdict "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; $FRAME_NOTE ; logs in $WORK"
 
 # ── 5. file an EI on RED (best-effort curl-MCP; the loud echo + $WORK logs are the fallback) ─
 # Dedup (RED_REFILE_H, see header): only file once per window per still-red condition —
