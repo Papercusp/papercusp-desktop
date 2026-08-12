@@ -24,11 +24,37 @@ test('sidecar dependency install names both source workspaces exactly', () => {
   assert.doesNotMatch(builder, /--workspace=@papercusp\/operator(?:\s|$)/);
 });
 
-test('sidecar build keeps linked dock-workbench runtime peers resolvable from its realpath', () => {
+test('sidecar build closes direct linked-workspace peer contracts and hoists dockview v6', () => {
   const rootPackage = require(path.join(repoRoot, 'package.json'));
   const operatorPackage = require(path.join(repoRoot, 'apps/operator/package.json'));
+  const vitePackage = require(path.join(repoRoot, 'apps/operator-vite/package.json'));
   const lock = require(path.join(repoRoot, 'package-lock.json'));
   const workspaceRoot = path.join(repoRoot, 'libs/generic/dock-workbench');
+  const installedDeclarations = {
+    ...operatorPackage.dependencies,
+    ...operatorPackage.devDependencies,
+    ...vitePackage.dependencies,
+    ...vitePackage.devDependencies,
+  };
+  const missingPeerDeclarations = [];
+
+  for (const [consumerRel, consumer] of [
+    ['apps/operator', operatorPackage],
+    ['apps/operator-vite', vitePackage],
+  ]) {
+    for (const [dep, spec] of Object.entries(consumer.dependencies || {})) {
+      if (!spec.startsWith('file:')) continue;
+      const dependencyRoot = path.resolve(repoRoot, consumerRel, spec.slice('file:'.length));
+      const dependencyPackagePath = path.join(dependencyRoot, 'package.json');
+      if (!fs.existsSync(dependencyPackagePath)) continue;
+      const dependencyPackage = JSON.parse(fs.readFileSync(dependencyPackagePath, 'utf8'));
+      for (const peer of Object.keys(dependencyPackage.peerDependencies || {})) {
+        if (dependencyPackage.peerDependenciesMeta?.[peer]?.optional) continue;
+        if (!(peer in installedDeclarations)) missingPeerDeclarations.push(`${dep} -> ${peer}`);
+      }
+    }
+  }
+  assert.deepEqual(missingPeerDeclarations, []);
 
   for (const peer of ['dockview', 'dockview-react']) {
     assert.equal(
@@ -52,9 +78,9 @@ test('sidecar build keeps linked dock-workbench runtime peers resolvable from it
     );
   }
 
-  assert.match(builder, /workspace: "libs\/generic\/dock-workbench"/);
-  assert.match(builder, /peers: \["dockview", "dockview-react"\]/);
-  assert.match(builder, /createRequire\(path\.join\(workspaceRoot, "package\.json"\)\)/);
+  assert.match(builder, /spec\.startsWith\("file:"\)/);
+  assert.match(builder, /workspacePackage\.peerDependenciesMeta\?\.\[peer\]\?\.optional/);
+  assert.match(builder, /createRequire\(workspacePackagePath\)/);
 });
 
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
