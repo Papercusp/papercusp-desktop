@@ -4,8 +4,10 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { builtinModules } = require('node:module');
 const path = require('node:path');
 const test = require('node:test');
+const ts = require('typescript');
 
 const desktopRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(desktopRoot, '..');
@@ -81,6 +83,79 @@ test('sidecar build closes direct linked-workspace peer contracts and hoists doc
   assert.match(builder, /spec\.startsWith\("file:"\)/);
   assert.match(builder, /workspacePackage\.peerDependenciesMeta\?\.\[peer\]\?\.optional/);
   assert.match(builder, /createRequire\(workspacePackagePath\)/);
+});
+
+test('sidecar source union declares every bare runtime import in operator-core', () => {
+  const manifests = [
+    require(path.join(repoRoot, 'packages/operator-core/package.json')),
+    require(path.join(repoRoot, 'apps/operator/package.json')),
+    require(path.join(repoRoot, 'apps/operator-vite/package.json')),
+  ];
+  const declared = new Set(
+    manifests.flatMap((manifest) => [
+      ...Object.keys(manifest.dependencies || {}),
+      ...Object.keys(manifest.devDependencies || {}),
+      ...Object.keys(manifest.optionalDependencies || {}),
+      ...Object.keys(manifest.peerDependencies || {}),
+    ]),
+  );
+  const builtins = new Set(builtinModules.map((name) => name.replace(/^node:/, '')));
+  const missing = new Map();
+  const packageName = (specifier) =>
+    specifier.startsWith('@')
+      ? specifier.split('/').slice(0, 2).join('/')
+      : specifier.split('/')[0];
+  const inspectSpecifier = (specifier, file) => {
+    if (
+      specifier.startsWith('.') ||
+      specifier.startsWith('/') ||
+      specifier.startsWith('node:') ||
+      builtins.has(specifier.split('/')[0])
+    ) return;
+    const dependency = packageName(specifier);
+    if (declared.has(dependency)) return;
+    if (!missing.has(dependency)) missing.set(dependency, new Set());
+    missing.get(dependency).add(path.relative(repoRoot, file));
+  };
+  const visitDirectory = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!['dist', 'node_modules'].includes(entry.name)) visitDirectory(file);
+        continue;
+      }
+      if (!/\.[cm]?[jt]sx?$/.test(entry.name) || /\.(test|spec)\.[^.]+$/.test(entry.name)) continue;
+      const source = ts.createSourceFile(
+        file,
+        fs.readFileSync(file, 'utf8'),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const visitNode = (node) => {
+        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+          if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+            inspectSpecifier(node.moduleSpecifier.text, file);
+          }
+        } else if (
+          ts.isCallExpression(node) &&
+          node.arguments.length === 1 &&
+          ts.isStringLiteral(node.arguments[0]) &&
+          (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+            (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+        ) {
+          inspectSpecifier(node.arguments[0].text, file);
+        }
+        ts.forEachChild(node, visitNode);
+      };
+      visitNode(source);
+    }
+  };
+
+  visitDirectory(path.join(repoRoot, 'packages/operator-core/lib'));
+  assert.deepEqual(
+    [...missing].map(([dependency, files]) => [dependency, [...files].sort()]).sort(),
+    [],
+  );
 });
 
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
