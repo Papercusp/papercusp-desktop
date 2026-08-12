@@ -409,6 +409,7 @@ for dep_check_attempt in $(seq 1 "$dep_check_attempts"); do
   if node -e '
 const fs = require("fs");
 const path = require("path");
+const { createRequire } = require("module");
 const repoRoot = process.argv[1];
 const attempt = process.argv[2];
 const pkgs = ["apps/operator/package.json", "apps/operator-vite/package.json"];
@@ -424,6 +425,33 @@ for (const rel of pkgs) {
     ];
     if (!candidates.some((c) => fs.existsSync(c))) {
       missing.push(`${dep} (declared in ${rel})`);
+    }
+  }
+}
+
+// WI-38149: Vite follows @papercusp/dock-workbench through its workspace
+// symlink and resolves imports from the library realpath, not from the
+// consuming apps/operator directory. npm may therefore report the two app
+// workspaces complete while nesting dockview under apps/operator/node_modules,
+// where the linked library cannot see it. Check the runtime peers that are
+// actually imported by this alias-reachable workspace from the same realpath
+// Vite uses. Keep this list narrow: checking every peer of every linked
+// package would reintroduce the known @papercusp/test-config false positive
+// documented above.
+const aliasReachableRuntimePeers = [
+  {
+    workspace: "libs/generic/dock-workbench",
+    peers: ["dockview", "dockview-react"],
+  },
+];
+for (const { workspace, peers } of aliasReachableRuntimePeers) {
+  const workspaceRoot = path.join(repoRoot, workspace);
+  const requireFromWorkspace = createRequire(path.join(workspaceRoot, "package.json"));
+  for (const peer of peers) {
+    try {
+      requireFromWorkspace.resolve(peer);
+    } catch {
+      missing.push(`${peer} (runtime peer required from ${workspace}/ realpath)`);
     }
   }
 }

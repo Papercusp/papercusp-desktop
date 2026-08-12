@@ -24,6 +24,39 @@ test('sidecar dependency install names both source workspaces exactly', () => {
   assert.doesNotMatch(builder, /--workspace=@papercusp\/operator(?:\s|$)/);
 });
 
+test('sidecar build keeps linked dock-workbench runtime peers resolvable from its realpath', () => {
+  const rootPackage = require(path.join(repoRoot, 'package.json'));
+  const operatorPackage = require(path.join(repoRoot, 'apps/operator/package.json'));
+  const lock = require(path.join(repoRoot, 'package-lock.json'));
+  const workspaceRoot = path.join(repoRoot, 'libs/generic/dock-workbench');
+
+  for (const peer of ['dockview', 'dockview-react']) {
+    assert.equal(
+      rootPackage.dependencies[peer],
+      operatorPackage.dependencies[peer],
+      `${peer} root constraint must stay aligned so the scoped install can hoist it`,
+    );
+    assert.match(
+      lock.packages[`node_modules/${peer}`].version,
+      /^6\./,
+      `${peer} must be hoisted at the root on the operator v6 line`,
+    );
+    assert.equal(
+      lock.packages[`apps/operator/node_modules/${peer}`],
+      undefined,
+      `${peer} must not be locked only beneath the consuming app`,
+    );
+    assert.doesNotThrow(
+      () => require.resolve(peer, { paths: [workspaceRoot] }),
+      `${peer} must resolve from the workspace realpath Vite uses`,
+    );
+  }
+
+  assert.match(builder, /workspace: "libs\/generic\/dock-workbench"/);
+  assert.match(builder, /peers: \["dockview", "dockview-react"\]/);
+  assert.match(builder, /createRequire\(path\.join\(workspaceRoot, "package\.json"\)\)/);
+});
+
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
   const runtimeStart = builder.indexOf('PAPERCUSP_REQUIRED_NODE_MAJOR=');
   const installStart = builder.indexOf('npm install --legacy-peer-deps');
