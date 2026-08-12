@@ -1285,6 +1285,16 @@ if [[ -f "$_audit_py" ]]; then
   python3 "$_audit_py" --prune-docs \
     "$SIDECAR_DIR/internal-docs" \
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+  # The prune above deletes by PATH; the gate below fails by CONTENT. A doc whose
+  # path is not internal-build-infra but whose TEXT quotes this box's identity slips
+  # between the two — 65 assembled files did exactly that on the 0.0.16 cut. Redact
+  # the shipping doc TEXT from the same identity map --scrub-binaries uses, which is
+  # the sidecar half of the redaction bin/stage-source-tree.sh already applies to
+  # source.tar.zst. Must run BEFORE the scan below.
+  echo "→ scrubbing build-box identity from sidecar doc text (release-privacy, WI-4419)"
+  python3 "$_audit_py" --scrub-text \
+    "$SIDECAR_DIR/internal-docs" \
+    "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
   # WI-37620: a build-box path baked into a COMPILED addon (.rodata assert string)
   # is reachable by neither of the gate's other remedies — `strip` leaves it and the
   # file is needed at runtime — so scrub it. Must run BEFORE the scan below.
