@@ -31,7 +31,125 @@ LOG="/tmp/serve-current.log"
 PIDFILE="/tmp/serve-current.pid"
 HONO_PORT="${PAPERCUSP_HONO_PORT:-3070}"
 
-for f in "$NODE" "$SERVE" "$CUR/db-sql" "$CUR/node_modules" "$CUR/sql"; do
+# A deploy uploads a complete payload to a sibling staging directory and
+# invokes this script with --stage. With no --stage this remains a restart-only
+# command for an already composed payload.
+STAGE=""
+CLEANUP_CONTROL=""
+SELF_TEST=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stage)
+      [ "$#" -ge 2 ] || { echo "FATAL: --stage requires a directory" >&2; exit 2; }
+      STAGE="$2"
+      shift 2
+      ;;
+    --cleanup-control)
+      [ "$#" -ge 2 ] || { echo "FATAL: --cleanup-control requires a file" >&2; exit 2; }
+      CLEANUP_CONTROL="$2"
+      shift 2
+      ;;
+    --self-test)
+      SELF_TEST=1
+      shift
+      ;;
+    *)
+      echo "FATAL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+cleanup_control() {
+  [ -n "$CLEANUP_CONTROL" ] && rm -f "$CLEANUP_CONTROL" 2>/dev/null || true
+}
+trap cleanup_control EXIT
+
+validate_payload() {
+  local root="$1" require_stamp="${2:-0}" f
+  for f in "$root/serve.mjs" "$root/db-sql" "$root/node_modules" "$root/sql" "$root/prompts"; do
+    [ -e "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
+  done
+  if [ "$require_stamp" = "1" ] && [ ! -s "$root/BUILD-STAMP.txt" ]; then
+    echo "FATAL: staged payload is missing BUILD-STAMP.txt" >&2
+    return 1
+  fi
+  if [ -e "$root/sql/000-baseline.sql" ] || [ ! -e "$root/sql/001-bootstrap.sql" ]; then
+    echo "FATAL: staged payload sql/ is not the locks migration set" >&2
+    return 1
+  fi
+}
+
+overlay_payload() {
+  local candidate="$1" stage="$2" subtree
+  cp -a "$stage/serve.mjs" "$candidate/serve.mjs.new"
+  mv -f "$candidate/serve.mjs.new" "$candidate/serve.mjs"
+  for subtree in db-sql sql prompts; do
+    rm -rf "$candidate/$subtree"
+    cp -a "$stage/$subtree" "$candidate/$subtree"
+  done
+  cp -a "$stage/BUILD-STAMP.txt" "$candidate/BUILD-STAMP.txt"
+}
+
+prepare_candidate() {
+  local current="$1" stage="$2" candidate="$3"
+  rm -rf "$candidate"
+  cp -a "$current" "$candidate"
+  overlay_payload "$candidate" "$stage"
+  validate_payload "$candidate" 1
+}
+
+swap_payload() {
+  local current="$1" candidate="$2" backup="$3"
+  mv "$current" "$backup" || return 1
+  if ! mv "$candidate" "$current"; then
+    mv "$backup" "$current" || true
+    return 1
+  fi
+}
+
+rollback_payload() {
+  local current="$1" backup="$2" failed="$3"
+  if [ -d "$current" ]; then
+    mv "$current" "$failed" || return 1
+  fi
+  mv "$backup" "$current"
+}
+
+run_filesystem_self_test() {
+  local root current stage candidate backup failed
+  root="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-sidecar-selftest.XXXXXX")" || return 1
+  current="$root/current"
+  stage="$root/stage"
+  candidate="$root/candidate"
+  backup="$root/backup"
+  failed="$root/failed"
+  mkdir -p "$current/db-sql" "$current/sql" "$current/prompts" "$current/node_modules"
+  mkdir -p "$stage/db-sql" "$stage/sql" "$stage/prompts" "$stage/node_modules"
+  printf '%s\n' old > "$current/serve.mjs"
+  printf '%s\n' new > "$stage/serve.mjs"
+  printf '%s\n' stamp > "$stage/BUILD-STAMP.txt"
+  : > "$current/sql/001-bootstrap.sql"
+  : > "$stage/sql/001-bootstrap.sql"
+  : > "$stage/db-sql/000-baseline.sql"
+  validate_payload "$stage" 1 || { rm -rf "$root"; return 1; }
+  prepare_candidate "$current" "$stage" "$candidate" || { rm -rf "$root"; return 1; }
+  [ "$(cat "$candidate/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  swap_payload "$current" "$candidate" "$backup" || { rm -rf "$root"; return 1; }
+  [ "$(cat "$current/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  rollback_payload "$current" "$backup" "$failed" || { rm -rf "$root"; return 1; }
+  [ "$(cat "$current/serve.mjs")" = old ] || { rm -rf "$root"; return 1; }
+  [ "$(cat "$failed/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  rm -rf "$root"
+  echo "SELF-TEST PASS: staged swap and rollback preserve the previous payload"
+}
+
+if [ "$SELF_TEST" = "1" ]; then
+  run_filesystem_self_test
+  exit $?
+fi
+
+for f in "$NODE" "$SERVE" "$CUR/db-sql" "$CUR/node_modules" "$CUR/sql" "$CUR/prompts"; do
   [ -e "$f" ] || { echo "FATAL: missing $f" >&2; exit 1; }
 done
 
@@ -69,9 +187,29 @@ fi
 # split-brain is invisible in every status surface — it showed up only as a
 # workflow being recovered out from under the live process.
 #
-# So: after the pid-file pass, sweep by IDENTITY (any live serve.mjs), then
-# REFUSE to launch if the port is still held. Nothing we could match here can be
-# ours — we have not launched yet — so this cannot self-terminate.
+# Resolve one authoritative owner before stopping and refuse to launch if the
+# port remains held by an untracked process.
+# --- exact-owner stop and optional staged payload preparation
+DEPLOY_ID=""
+CANDIDATE=""
+BACKUP=""
+FAILED=""
+SWAPPED=0
+
+if [ -n "$STAGE" ]; then
+  case "$STAGE" in
+    "$CUR".incoming.*) ;;
+    *) echo "FATAL: --stage must be a sibling incoming directory under $CUR" >&2; exit 2 ;;
+  esac
+  validate_payload "$STAGE" 1 || exit 1
+  DEPLOY_ID="$(date -u +%Y%m%dT%H%M%SZ).$$"
+  CANDIDATE="${CUR}.candidate.${DEPLOY_ID}"
+  BACKUP="${CUR}.backup.${DEPLOY_ID}"
+  FAILED="${CUR}.failed.${DEPLOY_ID}"
+  echo "preparing staged payload: $STAGE"
+  prepare_candidate "$CUR" "$STAGE" "$CANDIDATE" || exit 1
+fi
+
 stop_pid() { # pid, label — TERM, wait, then KILL (observed twice: TERM ignored)
   local op="$1" label="$2" i
   kill -0 "$op" 2>/dev/null || return 0
@@ -83,13 +221,7 @@ stop_pid() { # pid, label — TERM, wait, then KILL (observed twice: TERM ignore
   fi
 }
 
-for pf in /tmp/serve-headless.pid /tmp/serve-devsource.pid "$PIDFILE"; do
-  [ -f "$pf" ] || continue
-  op=$(cat "$pf" 2>/dev/null)
-  [ -n "${op:-}" ] && stop_pid "$op" "$pf"
-done
-
-# Identity sweep — catches every incumbent the pid files missed.
+# Exact-owner resolution — catches a stale discovery PID without a broad sweep.
 #
 # LABELLING (WI-6271, 2026-07-27): the main operator DELIBERATELY spawns a
 # staging operator on :3170 — "[env-operators] spawned staging on :3170
@@ -105,34 +237,92 @@ done
 #
 # Identity must be resolved BEFORE the first kill: once the parent is stopped
 # its child reparents to init and the lineage evidence is gone for good.
-sweep_pids="$(pgrep -f 'serve\.mjs' 2>/dev/null | grep -vx "$$" || true)"
-staging_pid="$(lsof -nP -iTCP:"${PAPERCUSP_STAGING_PORT:-3170}" -sTCP:LISTEN -t 2>/dev/null | head -1)"
-sweep_lineage="$(for op in $sweep_pids; do
-  echo "$op $(ps -o ppid= -p "$op" 2>/dev/null | tr -d ' ')"
-done)"
+# Identity is resolved from operator.json or the exact current PID file below;
+# never sweep the process table for a matching command line.
 
-for op in $sweep_pids; do
-  pp="$(printf '%s\n' "$sweep_lineage" | awk -v p="$op" '$1==p{print $2}')"
-  if [ -n "${staging_pid:-}" ] && [ "$op" = "$staging_pid" ]; then
-    stop_pid "$op" "staging operator on :${PAPERCUSP_STAGING_PORT:-3170} — EXPECTED child of pid ${pp:-?}, not an orphan"
-  elif [ -n "${pp:-}" ] && printf '%s\n' $sweep_pids | grep -qx "$pp"; then
-    stop_pid "$op" "EXPECTED child of live serve.mjs pid $pp, not an orphan"
-  else
-    stop_pid "$op" "genuine orphan serve.mjs (no/stale pid file, ppid=${pp:-?})"
+process_cmdline() {
+  ps -o command= -p "$1" 2>/dev/null | sed 's/^[[:space:]]*//'
+}
+
+is_current_operator_pid() {
+  local op="$1" cmd
+  case "$op" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$op" 2>/dev/null || return 1
+  cmd="$(process_cmdline "$op")"
+  case "$cmd" in *serve.mjs*--ensure*|*serve.mjs*) return 0 ;; esac
+  return 1
+}
+
+pid_from_file() {
+  local file="$1" op
+  [ -f "$file" ] || return 1
+  op="$(sed -nE 's/^[[:space:]]*([0-9]+).*/\1/p' "$file" | head -1)"
+  is_current_operator_pid "$op" || return 1
+  printf '%s\n' "$op"
+}
+
+resolve_current_operator_pid() {
+  local op parent parent_cmd discovery="$REAL_HOME/.papercusp/operator.json"
+  if [ -f "$discovery" ]; then
+    op="$(sed -nE 's/.*"pid"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$discovery" | head -1)"
+    if is_current_operator_pid "$op"; then
+      parent="$(ps -o ppid= -p "$op" 2>/dev/null | tr -d ' ')"
+      parent_cmd="$(process_cmdline "$parent")"
+      case "$parent_cmd" in
+        *"Papercusp Server.app/Contents/MacOS"*) printf '%s\n' "$parent" ;;
+        *) printf '%s\n' "$op" ;;
+      esac
+      return 0
+    fi
   fi
-done
+  pid_from_file "$PIDFILE"
+}
 
-for i in $(seq 1 10); do
-  curl -fsS -m 2 "http://127.0.0.1:${HONO_PORT}/api/health" >/dev/null 2>&1 || break
-  sleep 1
-done
+stop_owned_operator() {
+  local owner live i
+  owner="$(resolve_current_operator_pid || true)"
+  if [ -n "$owner" ]; then
+    stop_pid "$owner" "exact operator owner from discovery/PID file"
+  else
+    echo "no tracked current operator PID; refusing broad process-table matching"
+  fi
+  for i in $(seq 1 30); do
+    live="$(resolve_current_operator_pid || true)"
+    [ -n "$live" ] || return 0
+    if [ "$live" != "$owner" ]; then
+      stop_pid "$live" "exact operator child after parent teardown"
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_port_free() {
+  local tries="${1:-30}" i
+  for i in $(seq 1 "$tries"); do
+    lsof -nP -iTCP:"$HONO_PORT" -sTCP:LISTEN >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  return 1
+}
+
+stop_owned_operator || { echo "FATAL: exact current operator did not stop" >&2; exit 1; }
 
 # Hard gate: a still-held port means something we could not identify owns the
 # operator. Launching anyway is what produced the split-brain — fail loudly.
-if lsof -nP -iTCP:"${HONO_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+if ! wait_for_port_free 30; then
   echo "FATAL: port ${HONO_PORT} is still held after the stop sweep — refusing to start a second operator." >&2
   lsof -nP -iTCP:"${HONO_PORT}" -sTCP:LISTEN >&2
   exit 1
+fi
+
+if [ -n "$STAGE" ]; then
+  if ! swap_payload "$CUR" "$CANDIDATE" "$BACKUP"; then
+    echo "FATAL: atomic payload swap failed; previous payload was restored" >&2
+    exit 1
+  fi
+  SWAPPED=1
+  echo "active payload swapped atomically: $CUR (backup $BACKUP)"
 fi
 
 # --- env: bundle-variant parity; current db-sql/prompts; bundle resources else
@@ -148,6 +338,12 @@ export PAPERCUSP_HARNESS_DIR="$SIDECAR/harness"
 export PAPERCUSP_TEMPLATES_DIR="$SIDECAR/templates"
 export PAPERCUSP_RUBRICS_DIR="$SIDECAR/rubrics"
 export PAPERCUSP_DESKTOP="1"
+# SSH/headless launches intentionally outlive the shell that invoked them.
+# The packaged Tauri launcher sets this to 1; this supported headless boundary
+# opts out explicitly so the detached process does not self-terminate when SSH
+# closes.
+export PAPERCUSP_PARENT_DEATH_WATCH="0"
+export PAPERCUSP_HOME="$REAL_HOME/.papercusp"
 export PAPERCUSP_DBOS_ENABLE="1"
 export PAPERCUSP_DBOS_ROUTINES="1"
 export PAPERCUSP_DBOS_ORCHESTRATOR="1"
@@ -234,15 +430,94 @@ for f in "$CUR"/Heap.*.heapsnapshot; do
     && echo "boot-current: swept prior heap snapshot to $HEAP_SNAPSHOT_DIR/$(basename "$f")"
 done
 shopt -u nullglob
-perl -e '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); exec @ARGV or die "exec: $!"' -- \
-  "$NODE" --heapsnapshot-near-heap-limit=1 "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
-sleep 2
-pid="$(pgrep -f 'serve.mjs --ensure' | head -1)"
-echo "${pid:-}" > "$PIDFILE"
-echo "LAUNCHED (detached, current) serve.mjs --ensure pid=${pid:-?} log=$LOG"
-sleep 3
-if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-  echo "STILL-ALIVE after ~5s. Poll $LOG + :${HONO_PORT}/api/health."
+
+# Write the detached child PID before exec. Process-table matching is inherently
+# ambiguous when the operator deliberately has a staging sibling; this PID file
+# is owned by the launcher and is checked against the command line before it is
+# ever used for a stop.
+LAUNCHED_PID=""
+launch_operator() {
+  local i pid=""
+  rm -f "$PIDFILE"
+  PAPERCUSP_LAUNCH_PIDFILE="$PIDFILE" perl -e \
+    '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); open(my $fh, ">", $ENV{PAPERCUSP_LAUNCH_PIDFILE}) or die "pidfile: $!"; print $fh "$$\n"; close $fh; exec @ARGV or die "exec: $!"' -- \
+    "$NODE" --heapsnapshot-near-heap-limit=1 "$SERVE" --ensure >>"$LOG" 2>&1 </dev/null &
+  for i in $(seq 1 20); do
+    pid="$(sed -nE 's/^[[:space:]]*([0-9]+).*/\1/p' "$PIDFILE" 2>/dev/null | head -1)"
+    [ -n "$pid" ] && break
+    sleep 1
+  done
+  if ! is_current_operator_pid "$pid"; then
+    echo "DIED before exact PID capture — see $LOG:" >&2
+    tail -40 "$LOG" >&2
+    return 1
+  fi
+  LAUNCHED_PID="$pid"
+  echo "LAUNCHED (detached, current) serve.mjs --ensure pid=$pid log=$LOG"
+}
+
+wait_for_health() {
+  local timeout="${PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-180}" i
+  case "$timeout" in ''|*[!0-9]*) timeout=180 ;; esac
+  [ "$timeout" -gt 0 ] || return 1
+  for i in $(seq 1 "$timeout"); do
+    if curl -fsS -m 2 "http://127.0.0.1:${HONO_PORT}/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+rollback_deployment() {
+  local tracked="${1:-}" pid
+  pid="$tracked"
+  [ -n "$pid" ] || pid="$(pid_from_file "$PIDFILE" || true)"
+  if [ -n "$pid" ] && is_current_operator_pid "$pid"; then
+    stop_pid "$pid" "failed staged operator"
+  fi
+  wait_for_port_free 30 || {
+    echo "FATAL: failed staged operator still owns port $HONO_PORT" >&2
+    return 1
+  }
+  rollback_payload "$CUR" "$BACKUP" "$FAILED" || {
+    echo "FATAL: could not restore backup payload $BACKUP" >&2
+    return 1
+  }
+  SWAPPED=0
+  cd "$CUR" || return 1
+  echo "staged health check failed; restored previous payload (failed copy: $FAILED)"
+  launch_operator || return 1
+  if wait_for_health; then
+    echo "ROLLBACK HEALTHY: previous payload is serving on :$HONO_PORT"
+    return 0
+  fi
+  echo "FATAL: rollback payload also failed health check; see $LOG" >&2
+  tail -60 "$LOG" >&2
+  return 1
+}
+
+if ! launch_operator; then
+  if [ "$SWAPPED" = "1" ]; then
+    rollback_deployment || exit 2
+    exit 1
+  fi
+  exit 1
+fi
+
+if ! wait_for_health; then
+  echo "HEALTH CHECK FAILED for pid=$LAUNCHED_PID — see $LOG" >&2
+  tail -60 "$LOG" >&2
+  if [ "$SWAPPED" = "1" ]; then
+    rollback_deployment || exit 2
+    exit 1
+  fi
+  exit 1
+fi
+
+if [ "$SWAPPED" = "1" ]; then
+  rm -rf "$BACKUP" "$STAGE"
+  echo "DEPLOY HEALTHY: staged payload is active; backup and incoming payload removed"
 else
-  echo "DIED early — see $LOG:" >&2; tail -40 "$LOG" >&2; exit 1
+  echo "HEALTHY: current payload is serving on :$HONO_PORT"
 fi

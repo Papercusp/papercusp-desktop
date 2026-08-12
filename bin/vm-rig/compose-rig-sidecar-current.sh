@@ -41,7 +41,7 @@
 # throws, and every lock call fails rig-wide behind ONE log line.
 #
 # USAGE
-#   bin/vm-rig/compose-rig-sidecar-current.sh            # build + push
+#   bin/vm-rig/compose-rig-sidecar-current.sh            # build + staged deploy
 #   bin/vm-rig/compose-rig-sidecar-current.sh --no-push  # build locally only
 #   PCUSP_VM_SSH=user@host bin/vm-rig/compose-rig-sidecar-current.sh
 #
@@ -175,15 +175,24 @@ echo "  ✓ sql/ = locks set;  db-sql/ fresh at migration $out_max"
 
 # ── 5. push ─────────────────────────────────────────────────────────────────
 if [ "$PUSH" = "1" ]; then
-  echo "→ pushing to $VM:$REMOTE_DIR (node_modules/ untouched)"
-  # NOTE: no --delete at the top level — node_modules/ and any local state on
-  # the far side must survive. Each subtree below IS mirrored exactly.
-  rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_DIR/serve.mjs"
-  rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_DIR/BUILD-STAMP.txt"
-  rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_DIR/db-sql/"
-  rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_DIR/sql/"
-  rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_DIR/prompts/"
-  echo "→ pushed. Restart the far side:  ssh $VM 'bash ~/boot-headless-current.sh'"
+  DEPLOY_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  REMOTE_STAGE="${REMOTE_DIR}.incoming.${DEPLOY_ID}"
+  REMOTE_CONTROL="/tmp/papercusp-boot-headless-current.${DEPLOY_ID}.sh"
+  REMOTE_STAGE_Q="$(printf '%q' "$REMOTE_STAGE")"
+  REMOTE_CONTROL_Q="$(printf '%q' "$REMOTE_CONTROL")"
+  echo "→ staging payload on $VM:$REMOTE_STAGE (node_modules/ untouched)"
+  # The active directory is not written in place. boot-headless-current.sh
+  # validates the complete stage, stops the exact recorded owner PID, swaps the
+  # sibling directories atomically, and restores the backup if health fails.
+  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts"
+  rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
+  rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_STAGE/BUILD-STAMP.txt"
+  rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
+  rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
+  rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
+  rsync -a "$HERE/boot-headless-current.sh" "$VM:$REMOTE_CONTROL"
+  ssh "$VM" "bash $REMOTE_CONTROL_Q --stage $REMOTE_STAGE_Q --cleanup-control $REMOTE_CONTROL_Q"
+  echo "→ staged deploy completed through exact-PID restart/rollback boundary"
   echo "→ verify what the far side is RUNNING (not what you think it is):"
   echo "     ssh $VM 'cat $REMOTE_DIR/BUILD-STAMP.txt; shasum -a 256 $REMOTE_DIR/serve.mjs'"
   echo "     ssh $VM 'grep -ao \"\\[sidecar\\] build [^\"\\\`]*\" $REMOTE_DIR/serve.mjs | head -1'"

@@ -6004,6 +6004,11 @@ fn spawn_serve(
         //
         // Same-kernel platforms only (Linux/macOS, and any future non-WSL Windows
         // route) — see the WI-37736 note in the `if` branch for why WSL2 is excluded.
+        // Packaged native launches are owned by the Tauri process. Keep the
+        // parent-death watch explicit so a caller's inherited headless opt-out
+        // cannot silently disable supervision in the GUI; the supported SSH
+        // launcher sets this to 0 for its detached child instead.
+        cmd.env("PAPERCUSP_PARENT_DEATH_WATCH", "1");
         cmd.env("PAPERCUSP_DESKTOP_PARENT_PID", std::process::id().to_string());
     }
     cmd.env("PATH", &new_path)
