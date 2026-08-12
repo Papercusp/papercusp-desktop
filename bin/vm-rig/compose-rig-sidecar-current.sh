@@ -184,7 +184,7 @@ if [ "$PUSH" = "1" ]; then
   # The active directory is not written in place. boot-headless-current.sh
   # validates the complete stage, stops the exact recorded owner PID, swaps the
   # sibling directories atomically, and restores the backup if health fails.
-  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts"
+  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/node_modules"
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
   rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_STAGE/BUILD-STAMP.txt"
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"

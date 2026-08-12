@@ -175,20 +175,13 @@ if [ -e "$CUR/sql/000-baseline.sql" ] || [ ! -e "$CUR/sql/001-bootstrap.sql" ]; 
   exit 1
 fi
 
-# --- stop any prior rig operator variant (bundle / dev-source / current)
+# --- stop the exact current operator and optionally stage a new payload
 #
-# EI-18757045027579334, hardened 2026-07-27 (WI-6243 wake): the pid-file pass
-# below is NECESSARY BUT NOT SUFFICIENT, and the gap bit three times. A pid file
-# records ONE pid; an incumbent that CRASHED (the sidecar OOMs at the 4GB heap
-# limit) leaves that pid dead while a sibling/child serve.mjs keeps running,
-# reparented to init. The loop then finds a dead pid, does nothing, and we
-# launch a SECOND operator against the same embedded PG. Both then present as
-# the same DBOS executor (executor_id is the constant 'local'), so the
-# split-brain is invisible in every status surface — it showed up only as a
-# workflow being recovered out from under the live process.
-#
-# Resolve one authoritative owner before stopping and refuse to launch if the
-# port remains held by an untracked process.
+# The old restart path swept every process whose command line contained
+# serve.mjs. That was unsafe on the rig because the operator intentionally
+# creates a staging sibling, and it offered no atomic rollback boundary. This
+# path resolves the one recorded operator PID, validates its command line, and
+# refuses to launch if the port is still held by an untracked process.
 # --- exact-owner stop and optional staged payload preparation
 DEPLOY_ID=""
 CANDIDATE=""
@@ -222,21 +215,6 @@ stop_pid() { # pid, label — TERM, wait, then KILL (observed twice: TERM ignore
 }
 
 # Exact-owner resolution — catches a stale discovery PID without a broad sweep.
-#
-# LABELLING (WI-6271, 2026-07-27): the main operator DELIBERATELY spawns a
-# staging operator on :3170 — "[env-operators] spawned staging on :3170
-# (bundled, request-only, pid=N)" — so TWO live serve.mjs processes is the
-# DESIGNED steady state, not a fault. The operator's own connection budgeter
-# says as much: "~78 direct across 2 proc(s) vs live max_connections=100 — ok".
-#
-# Calling that child "orphan serve.mjs (no/stale pid file)" reads as the
-# split-brain hazard the header comment above describes, and has now sent at
-# least two separate OOM investigations down a false path (see WI-6271). The
-# BEHAVIOUR here is correct — stopping the child before relaunch is right, and
-# the parent respawns it — so only the wording changes.
-#
-# Identity must be resolved BEFORE the first kill: once the parent is stopped
-# its child reparents to init and the lineage evidence is gone for good.
 # Identity is resolved from operator.json or the exact current PID file below;
 # never sweep the process table for a matching command line.
 
@@ -249,7 +227,7 @@ is_current_operator_pid() {
   case "$op" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$op" 2>/dev/null || return 1
   cmd="$(process_cmdline "$op")"
-  case "$cmd" in *serve.mjs*--ensure*|*serve.mjs*) return 0 ;; esac
+  case "$cmd" in *serve.mjs*--ensure*) return 0 ;; esac
   return 1
 }
 
@@ -311,7 +289,7 @@ stop_owned_operator || { echo "FATAL: exact current operator did not stop" >&2; 
 # Hard gate: a still-held port means something we could not identify owns the
 # operator. Launching anyway is what produced the split-brain — fail loudly.
 if ! wait_for_port_free 30; then
-  echo "FATAL: port ${HONO_PORT} is still held after the stop sweep — refusing to start a second operator." >&2
+  echo "FATAL: port ${HONO_PORT} is still held after exact-owner stop — refusing to start a second operator." >&2
   lsof -nP -iTCP:"${HONO_PORT}" -sTCP:LISTEN >&2
   exit 1
 fi
