@@ -41,6 +41,57 @@ ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
+
+# EI-20228051309163209: release builders are invoked from several environments
+# (interactive shells, systemd user units, cron/routines). The systemd user
+# manager can retain an OLD PATH for days: on 2026-08-12 it resolved NVM Node 22
+# even though the repo's .nvmrc/engines require Node 25 and the host's current
+# Linuxbrew runtime was Node 25. npm 10 under Node 22 then reported a successful
+# scoped install while leaving 100+ direct operator dependencies un-extracted,
+# producing a misleading dependency-resolution red after the build had started.
+# Resolve the repo-pinned major here, before the first node/npm call. Prefer the
+# caller's node when it satisfies the pin; otherwise use a matching common
+# NVM/Homebrew/mise install and prepend ITS bin directory to PATH so `npm` uses
+# the same runtime. If none exists, fail fast with the actual vs required major.
+PAPERCUSP_REQUIRED_NODE_MAJOR="$(sed -nE 's/^[[:space:]]*v?([0-9]+).*$/\1/p' "$REPO_ROOT/.nvmrc" 2>/dev/null | head -1)"
+PAPERCUSP_REQUIRED_NODE_MAJOR="${PAPERCUSP_REQUIRED_NODE_MAJOR:-25}"
+papercusp_node_major() {
+  local candidate="$1"
+  [ -x "$candidate" ] || return 1
+  "$candidate" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || return 1
+}
+_current_node="$(command -v node 2>/dev/null || true)"
+_brew_node=""
+if command -v brew >/dev/null 2>&1; then
+  _brew_node="$(brew --prefix node 2>/dev/null || true)/bin/node"
+fi
+_selected_node=""
+for _node_candidate in \
+  "$_current_node" \
+  "$_brew_node" \
+  /home/linuxbrew/.linuxbrew/bin/node \
+  /opt/homebrew/bin/node \
+  /usr/local/bin/node \
+  "$HOME"/.nvm/versions/node/v"$PAPERCUSP_REQUIRED_NODE_MAJOR"*/bin/node \
+  "$HOME"/.local/share/mise/installs/node/"$PAPERCUSP_REQUIRED_NODE_MAJOR"*/bin/node; do
+  [ -n "$_node_candidate" ] && [ -x "$_node_candidate" ] || continue
+  _node_major="$(papercusp_node_major "$_node_candidate" || true)"
+  if [[ "$_node_major" =~ ^[0-9]+$ ]] && [ "$_node_major" -ge "$PAPERCUSP_REQUIRED_NODE_MAJOR" ]; then
+    _selected_node="$_node_candidate"
+    break
+  fi
+done
+if [ -z "$_selected_node" ]; then
+  _current_version="$($_current_node -v 2>/dev/null || echo unavailable)"
+  echo "ERROR: sidecar release build requires Node >=$PAPERCUSP_REQUIRED_NODE_MAJOR (.nvmrc), but PATH resolves ${_current_node:-no node} (${_current_version})." >&2
+  echo "       Install/expose the pinned runtime (for example: nvm use $PAPERCUSP_REQUIRED_NODE_MAJOR) before building." >&2
+  exit 1
+fi
+export PATH="$(dirname "$_selected_node"):$PATH"
+hash -r
+echo "→ using pinned Node runtime: $(command -v node) ($(node -v), required >=$PAPERCUSP_REQUIRED_NODE_MAJOR)"
+unset _current_node _current_version _brew_node _selected_node _node_candidate _node_major
+
 # WI-5651: normally the sidecar is assembled + published at src-tauri/sidecar
 # (where tauri build's bundle.resources glob reads it — a real release cut MUST
 # use that). PAPERCUSP_SIDECAR_OUT redirects the WHOLE build (temp stage, lock,
