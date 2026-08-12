@@ -253,10 +253,45 @@ __pc_sidecar_lock_pids() {
     cat "$lockdir/pid"
     return 0
   fi
-  command -v fuser >/dev/null 2>&1 || return 0
-  # fuser prints `/path/to/lock: PID [PID...]`; discard the path so digits in
-  # a checkout path can never be mistaken for a holder pid.
-  fuser "$lock_path" 2>/dev/null | awk -F: 'NF > 1 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }'
+  # fuser SPLITS ITS OUTPUT ACROSS TWO STREAMS: the bare PID list goes to
+  # STDOUT (" 3950042"), while the annotated "/path/to/lock: PID [PID...]" line
+  # goes to STDERR. An earlier version discarded stderr and then filtered stdout
+  # with `awk -F: 'NF > 1'`, expecting the annotated form — but stdout carries no
+  # colon, so that guard dropped EVERY holder and this function always returned
+  # empty. Both callers are fed from here, so the one bad parse silently disabled
+  # BOTH of them: the diagnostics printed "holder details unavailable (install
+  # fuser/procps)" on a box where fuser was installed and working, and
+  # __pc_request_cooperative_reader_yield never signalled anyone — so the SIGUSR1
+  # yield handshake that `bin/tauri-guarded` implements had never once fired, and
+  # a live `tauri dev` reader deadlocked every sidecar build for the full 60s
+  # timeout instead of yielding (the recurring EI-20270512880607021 stall, which
+  # only ever "cleared on its own" because the holder eventually exited).
+  # Reading stdout also removes the reason the colon-split existed: a checkout
+  # path never reaches this stream, so no path digit can be mistaken for a pid.
+  if command -v fuser >/dev/null 2>&1; then
+    local pids
+    pids="$(fuser "$lock_path" 2>/dev/null | grep -oE '[0-9]+' || true)"
+    if [[ -n "$pids" ]]; then
+      printf '%s\n' "$pids"
+      return 0
+    fi
+  fi
+  # Fallback for a host without fuser (the old message told people to install it,
+  # which means this path has to actually work): resolve holders from procfs. An
+  # flock is held by the OPEN FILE DESCRIPTION, so the pid recorded in
+  # /proc/locks can be a process that already exited while a child that inherited
+  # the fd keeps the lock alive — scanning /proc/*/fd finds the LIVE holder,
+  # which is the one worth signalling.
+  # ONE bounded `find`, never a shell glob over /proc/*/fd/*: this box has 128
+  # cores and thousands of open fds, and the glob form forks `readlink` per fd —
+  # measured, it did not finish in 120s. `-lname` matches the symlink TARGET
+  # inside find itself, and the `timeout` is a hard ceiling so a diagnostic path
+  # can never outlive the lock wait it is diagnosing.
+  local lock_real
+  lock_real="$(readlink -f "$lock_path" 2>/dev/null)" || return 0
+  [[ -n "$lock_real" ]] || return 0
+  timeout 5 find /proc -maxdepth 3 -path '/proc/[0-9]*/fd/*' -lname "$lock_real" \
+    -printf '%h\n' 2>/dev/null | sed 's|^/proc/||; s|/fd$||' | sort -u
 }
 
 __pc_sidecar_lock_holder_lines() {
