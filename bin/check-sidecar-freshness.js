@@ -18,6 +18,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const {
   inspectSidecarFreshness,
@@ -41,6 +42,27 @@ const label = arg('--label', 'sidecar-freshness');
 function readOrNull(file) {
   try {
     return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function sha256FileOrNull(file) {
+  try {
+    return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function readStampEpochOrNull(file) {
+  const text = readOrNull(file);
+  if (text == null) return null;
+  try {
+    const stamp = JSON.parse(text);
+    return stamp && typeof stamp === 'object' && Object.prototype.hasOwnProperty.call(stamp, 'epochSec')
+      ? stamp.epochSec
+      : null;
   } catch {
     return null;
   }
@@ -77,6 +99,11 @@ function containsCommit(needle, head) {
 
 const provenanceText = readOrNull(path.join(sidecarDir, 'build-provenance.json'));
 const requireContains = (process.env.PAPERCUSP_REQUIRE_SIDECAR_CONTAINS || '').trim() || null;
+const expectedServeSha = (process.env.PAPERCUSP_EXPECTED_SERVE_SHA || '').trim() || null;
+const minEpochRaw = (process.env.PAPERCUSP_SIDECAR_MIN_EPOCH_SEC || '').trim();
+const minEpochSec = minEpochRaw || null;
+const serveSha = sha256FileOrNull(path.join(sidecarDir, 'serve.mjs'));
+const stampEpochSec = readStampEpochOrNull(path.join(sidecarDir, '.sidecar-build-stamp'));
 
 // Resolve the sidecar's own gitHead first so ancestry can be asked against it.
 let recordedHead = null;
@@ -93,6 +120,10 @@ const result = inspectSidecarFreshness({
   headSha: gitOrNull(['rev-parse', 'HEAD']),
   requireContains,
   containsVerdict: requireContains ? containsCommit(requireContains, recordedHead) : null,
+  expectedServeSha,
+  serveSha,
+  minEpochSec,
+  stampEpochSec,
 });
 
 const message = describe(result);

@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const {
@@ -151,11 +152,28 @@ test('formatAge / parseProvenance edges are total (never throw, never NaN-print)
 // ── the CLI ──────────────────────────────────────────────────────────────────
 
 function runCli(sidecarDir, env = {}) {
+  const childEnv = { ...process.env };
+  delete childEnv.PAPERCUSP_EXPECTED_SERVE_SHA;
+  delete childEnv.PAPERCUSP_SIDECAR_MIN_EPOCH_SEC;
   return spawnSync(
     process.execPath,
     [path.join(BIN, 'check-sidecar-freshness.js'), '--sidecar', sidecarDir],
-    { encoding: 'utf8', env: { ...process.env, ...env } },
+    { encoding: 'utf8', env: { ...childEnv, ...env } },
   );
+}
+
+function sha256(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function writeStampedSidecar(dir, { serveText = 'sidecar bytes\n', epochSec = 200 } = {}) {
+  fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
+  fs.writeFileSync(path.join(dir, 'serve.mjs'), serveText);
+  fs.writeFileSync(
+    path.join(dir, '.sidecar-build-stamp'),
+    JSON.stringify({ serveSha256: sha256(serveText), epochSec }),
+  );
+  return sha256(serveText);
 }
 
 test('CLI: exits 0 and prints the banner when nothing is asserted', () => {
@@ -188,6 +206,51 @@ test('CLI: a sidecar dir that does not exist is reported, not crashed on', () =>
   const r = runCli(path.join(os.tmpdir(), 'definitely-not-a-sidecar-' + Date.now()));
   assert.equal(r.status, 0);
   assert.match(r.stdout, /no prebuilt sidecar/);
+});
+
+test('CLI: release-cut hash and minimum-epoch assertions pass for matching sidecar bytes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const expectedSha = writeStampedSidecar(dir, { serveText: 'release sidecar bytes\n', epochSec: 250 });
+  const r = runCli(dir, {
+    PAPERCUSP_EXPECTED_SERVE_SHA: expectedSha,
+    PAPERCUSP_SIDECAR_MIN_EPOCH_SEC: '200',
+  });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, new RegExp(`serve\\.mjs sha ${expectedSha}`));
+  assert.match(r.stdout, /stamp epoch 250/);
+});
+
+test('CLI: release-cut hash assertion rejects different packed serve.mjs bytes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const actualSha = writeStampedSidecar(dir, { serveText: 'stale sidecar bytes\n', epochSec: 250 });
+  const expectedSha = sha256('fresh sidecar bytes\n');
+  assert.notEqual(expectedSha, actualSha);
+  const r = runCli(dir, { PAPERCUSP_EXPECTED_SERVE_SHA: expectedSha });
+  assert.equal(r.status, 4);
+  assert.match(r.stderr, /serve\.mjs does not match/);
+  assert.match(r.stderr, new RegExp(`expected sha256 ${expectedSha}`));
+  assert.match(r.stderr, new RegExp(`actual   sha256 ${actualSha}`));
+});
+
+test('CLI: minimum-epoch assertion rejects a sidecar stamped before the release cut', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const serveText = 'sidecar from an earlier cut\n';
+  writeStampedSidecar(dir, { serveText, epochSec: 100 });
+  const r = runCli(dir, { PAPERCUSP_SIDECAR_MIN_EPOCH_SEC: '200' });
+  assert.equal(r.status, 4);
+  assert.match(r.stderr, /build stamp predates this release cut/);
+  assert.match(r.stderr, /sidecar stamp epoch 100/);
+  assert.match(r.stderr, /required cut epoch 200/);
+});
+
+test('CLI: an asserted cut with missing or malformed stamp fails closed', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
+  fs.writeFileSync(path.join(dir, 'serve.mjs'), 'sidecar bytes\n');
+  fs.writeFileSync(path.join(dir, '.sidecar-build-stamp'), '{not json');
+  const r = runCli(dir, { PAPERCUSP_SIDECAR_MIN_EPOCH_SEC: '200' });
+  assert.equal(r.status, 4);
+  assert.match(r.stderr, /could not verify that the sidecar was built during this release cut/);
 });
 
 // ── the wiring (the half that actually prevents the recurrence) ───────────────
