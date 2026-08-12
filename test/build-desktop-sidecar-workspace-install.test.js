@@ -4,7 +4,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const { builtinModules } = require('node:module');
+const { builtinModules, createRequire } = require('node:module');
 const path = require('node:path');
 const test = require('node:test');
 const ts = require('typescript');
@@ -156,6 +156,36 @@ test('sidecar source union declares every bare runtime import in operator-core',
     [...missing].map(([dependency, files]) => [dependency, [...files].sort()]).sort(),
     [],
   );
+});
+
+test('sidecar server bundle declares DBOS telemetry runtime requirements', () => {
+  const rootPackage = require(path.join(repoRoot, 'package.json'));
+  const operatorPackagePath = path.join(repoRoot, 'apps/operator/package.json');
+  const operatorPackage = require(operatorPackagePath);
+  const lock = require(path.join(repoRoot, 'package-lock.json'));
+  const requireFromOperator = createRequire(operatorPackagePath);
+
+  // @dbos-inc/dbos-sdk's telemetry module requires these packages at runtime,
+  // but its published manifest does not declare them. The root only carried
+  // them as devDependencies, so the release builder's scoped workspace install
+  // pruned them before esbuild followed the server graph. Keep the bundle's
+  // actual runtime contract on the installed app workspace.
+  for (const dependency of ['winston', 'winston-transport']) {
+    assert.equal(
+      operatorPackage.dependencies[dependency],
+      rootPackage.devDependencies[dependency],
+      `${dependency} must remain a production dependency of the installed operator workspace`,
+    );
+    assert.equal(
+      lock.packages[`node_modules/${dependency}`].dev,
+      undefined,
+      `${dependency} must not be locked as dev-only`,
+    );
+    assert.doesNotThrow(
+      () => requireFromOperator.resolve(dependency),
+      `${dependency} must resolve from the operator workspace used by the sidecar server bundle`,
+    );
+  }
 });
 
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
