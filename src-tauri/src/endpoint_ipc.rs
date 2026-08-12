@@ -124,8 +124,19 @@ const PER_CALL_EVENT_CAP: u64 = 10_000;
 /// needs manual relaunch" symptom this fixes.
 const IPC_CALL_IDLE_TIMEOUT_MS: u64 = 20_000;
 /// How often the per-call watchdog re-checks staleness. Small relative to
-/// the timeout so the observed hang is bounded to ~timeout + one interval.
+/// either timeout so the observed hang is bounded to ~timeout + one interval.
 const IPC_WATCHDOG_CHECK_INTERVAL_MS: u64 = 2_000;
+
+/// Heartbeat cadence for the long-lived session SSE streams. This mirrors
+/// `SESSION_STREAM_HEARTBEAT_MS` in
+/// `packages/operator-core/lib/endpoint-route/routes/harness/streams.ts`.
+const IPC_STREAM_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+/// A stream gets two complete heartbeat intervals plus one watchdog tick of
+/// scheduling margin. The margin prevents a watchdog check racing a heartbeat
+/// delivered exactly at the two-beat boundary from tearing down a healthy
+/// stream. Request/response calls retain their shorter 20s budget above.
+const IPC_STREAM_IDLE_TIMEOUT_MS: u64 =
+    IPC_STREAM_HEARTBEAT_INTERVAL_MS * 2 + IPC_WATCHDOG_CHECK_INTERVAL_MS;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -140,6 +151,23 @@ fn is_idle_timed_out(last_activity_ms: u64, now_ms: u64, timeout_ms: u64) -> boo
     now_ms.saturating_sub(last_activity_ms) >= timeout_ms
 }
 
+/// Whether a `sys:http` response head identifies a long-lived SSE stream.
+/// Header names and MIME types are case-insensitive; parameters such as
+/// `charset=utf-8` do not change the media type.
+fn is_sse_response_head(data: &serde_json::Value) -> bool {
+    let Some(headers) = data.get("headers").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .as_str()
+                .and_then(|content_type| content_type.split(';').next())
+                .map(str::trim)
+                .is_some_and(|media_type| media_type.eq_ignore_ascii_case("text/event-stream"))
+    })
+}
+
 struct CallSink {
     channel: Channel<EndpointEvent>,
     events_sent: AtomicU64,
@@ -148,6 +176,9 @@ struct CallSink {
     /// terminal frame) seen for this call — the idle-timeout watchdog's
     /// staleness clock.
     last_activity_ms: AtomicU64,
+    /// Request/response calls use `IPC_CALL_IDLE_TIMEOUT_MS`; once their head
+    /// proves they are SSE subscriptions this switches to the stream budget.
+    idle_timeout_ms: AtomicU64,
 }
 
 /// Decision returned by `decide_backpressure` — testable in isolation.
@@ -188,12 +219,28 @@ fn decide_backpressure(
 }
 
 impl CallSink {
+    /// Record inbound activity and classify a response head before forwarding
+    /// it to the webview. Classification is intentionally based on the
+    /// response MIME type, not the request path or Accept header: a route can
+    /// legitimately negotiate a stream under more than one URL, while the
+    /// head is the first authoritative proof that this call is a subscription.
+    fn record_activity(&self, event: &EndpointEvent) {
+        if let EndpointEvent::Event { name, data } = event {
+            if name == "head" && is_sse_response_head(data) {
+                self.idle_timeout_ms
+                    .store(IPC_STREAM_IDLE_TIMEOUT_MS, Ordering::Relaxed);
+            }
+        }
+        self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+    }
+
     /// Send a non-terminal event with the per-call cap enforced. Returns
     /// true if the event was forwarded; false if it was dropped (cap or
     /// channel error).
     fn try_send_event(&self, event: EndpointEvent) -> bool {
         // WI-2817: ANY inbound frame is activity — resets the idle-timeout clock.
-        self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+        // The response head may also promote this call to the stream budget.
+        self.record_activity(&event);
         match decide_backpressure(&self.events_sent, &self.overflowed, PER_CALL_EVENT_CAP) {
             BackpressureDecision::Forward => self.channel.send(event).is_ok(),
             BackpressureDecision::EmitOverflowAndStop => {
@@ -426,6 +473,7 @@ impl IpcClient {
                 events_sent: AtomicU64::new(0),
                 overflowed: std::sync::atomic::AtomicBool::new(false),
                 last_activity_ms: AtomicU64::new(now_ms()),
+                idle_timeout_ms: AtomicU64::new(IPC_CALL_IDLE_TIMEOUT_MS),
             },
         );
         if let Err(e) = w.write_all(&frame).await {
@@ -461,12 +509,15 @@ impl IpcClient {
                         IPC_WATCHDOG_CHECK_INTERVAL_MS,
                     ))
                     .await;
-                    let last_activity = match in_flight.get(&id) {
-                        Some(sink) => sink.last_activity_ms.load(Ordering::Relaxed),
+                    let (last_activity, timeout_ms) = match in_flight.get(&id) {
+                        Some(sink) => (
+                            sink.last_activity_ms.load(Ordering::Relaxed),
+                            sink.idle_timeout_ms.load(Ordering::Relaxed),
+                        ),
                         // Already resolved (Done/Error removed it) — nothing to watch.
                         None => return,
                     };
-                    if !is_idle_timed_out(last_activity, now_ms(), IPC_CALL_IDLE_TIMEOUT_MS) {
+                    if !is_idle_timed_out(last_activity, now_ms(), timeout_ms) {
                         continue;
                     }
                     // Still present AND stale — force-fail it. A concurrent
@@ -478,8 +529,8 @@ impl IpcClient {
                         sink.send_terminal(EndpointEvent::Error {
                             code: "connection_lost".to_string(),
                             message: format!(
-                                "endpoint-ipc call {id} got no response for over {}s — treating the connection as wedged",
-                                IPC_CALL_IDLE_TIMEOUT_MS / 1000
+                                "endpoint-ipc call {id} got no response or activity for over {}s — treating the connection as wedged",
+                                timeout_ms / 1000
                             ),
                         });
                     }
@@ -1200,6 +1251,38 @@ mod tests {
     }
 
     #[test]
+    fn sse_head_detection_ignores_header_case_and_mime_parameters() {
+        assert!(is_sse_response_head(&serde_json::json!({
+            "status": 200,
+            "headers": { "Content-Type": "TEXT/EVENT-STREAM; charset=utf-8" }
+        })));
+        assert!(!is_sse_response_head(&serde_json::json!({
+            "status": 200,
+            "headers": { "content-type": "application/json" }
+        })));
+        assert!(!is_sse_response_head(&serde_json::json!({
+            "status": 200,
+            "headers": {}
+        })));
+    }
+
+    #[test]
+    fn stream_idle_timeout_allows_two_heartbeat_intervals() {
+        assert!(IPC_STREAM_IDLE_TIMEOUT_MS >= IPC_STREAM_HEARTBEAT_INTERVAL_MS * 2);
+        assert!(IPC_STREAM_IDLE_TIMEOUT_MS > IPC_CALL_IDLE_TIMEOUT_MS);
+        assert!(!is_idle_timed_out(
+            0,
+            IPC_STREAM_IDLE_TIMEOUT_MS - 1,
+            IPC_STREAM_IDLE_TIMEOUT_MS
+        ));
+        assert!(is_idle_timed_out(
+            0,
+            IPC_STREAM_IDLE_TIMEOUT_MS,
+            IPC_STREAM_IDLE_TIMEOUT_MS
+        ));
+    }
+
+    #[test]
     fn drain_in_flight_empties_map_and_returns_ids() {
         let map: DashMap<u64, CallSink> = DashMap::new();
         for id in [3u64, 7, 11] {
@@ -1210,6 +1293,7 @@ mod tests {
                     events_sent: AtomicU64::new(0),
                     overflowed: AtomicBool::new(false),
                     last_activity_ms: AtomicU64::new(now_ms()),
+                    idle_timeout_ms: AtomicU64::new(IPC_CALL_IDLE_TIMEOUT_MS),
                 },
             );
         }
@@ -1393,6 +1477,7 @@ mod tests {
                 events_sent: AtomicU64::new(0),
                 overflowed: AtomicBool::new(false),
                 last_activity_ms: AtomicU64::new(now_ms()),
+                idle_timeout_ms: AtomicU64::new(IPC_CALL_IDLE_TIMEOUT_MS),
             },
             captured,
         )
@@ -1411,6 +1496,40 @@ mod tests {
         assert_eq!(bodies.len(), 3);
         assert!(bodies[0].contains("\"e0\""));
         assert!(bodies[2].contains("\"e2\""));
+    }
+
+    #[test]
+    fn call_sink_promotes_only_sse_responses_to_stream_timeout() {
+        let (sink, _captured) = capturing_sink();
+        assert_eq!(
+            sink.idle_timeout_ms.load(Ordering::Relaxed),
+            IPC_CALL_IDLE_TIMEOUT_MS
+        );
+
+        sink.record_activity(&EndpointEvent::Event {
+            name: "head".into(),
+            data: serde_json::json!({
+                "status": 200,
+                "headers": { "content-type": "text/event-stream" }
+            }),
+        });
+        assert_eq!(
+            sink.idle_timeout_ms.load(Ordering::Relaxed),
+            IPC_STREAM_IDLE_TIMEOUT_MS
+        );
+
+        let (request_sink, _captured) = capturing_sink();
+        request_sink.record_activity(&EndpointEvent::Event {
+            name: "head".into(),
+            data: serde_json::json!({
+                "status": 200,
+                "headers": { "content-type": "application/json" }
+            }),
+        });
+        assert_eq!(
+            request_sink.idle_timeout_ms.load(Ordering::Relaxed),
+            IPC_CALL_IDLE_TIMEOUT_MS
+        );
     }
 
     #[test]
