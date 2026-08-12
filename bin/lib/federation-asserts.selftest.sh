@@ -1049,6 +1049,55 @@ rm -f "$WI6217_COUNTER"
 unset -f drv_psql
 unset WI6217_COUNTER WI6217_DRAINED SLUG_ECHO
 
+# ── fed_coord_merge_probe is `set -u`-safe with RIG_HIVE_ID unset (WI-5472) ──
+# WI-5472 reported fed_hive_merge_probe/fed_coord_merge_probe crashing
+# "ws: unbound variable" under `set -u` whenever RIG_HIVE_ID is unset — a FALSE
+# FAIL on every two-instance-*-smoke.sh federation-merge assertion, since the
+# non-rig smokes (content-matrix, merge-smoke) never set RIG_HIVE_ID. The
+# D-050/WI-5399 iteration-2 sweep fixed it by initialising `ws=""` in the local
+# decl and guarding the read as "${RIG_HIVE_ID:-}", and the WI-6217 block above
+# happens to re-cover fed_hive_merge_probe — but NOTHING exercised
+# fed_coord_merge_probe, so half the fix had no recurrence guard and a
+# regression would have reappeared only as a live-rig false FAIL.
+#
+# Why the assertion is shaped around stdout rather than a caught signal: these
+# probes run inside `$(...)`, so a `set -u` abort kills only the substitution
+# subshell — the parent sees an EMPTY capture, never a crash. Empty stdout (not
+# "1"/"0") is therefore the regression signature; the stderr check names it.
+WI5472_ERR="$(mktemp /tmp/wi5472-selftest-stderr.XXXXXX)"
+drv_psql() {
+  local inst="$1" sql="$2"
+  case "$sql" in
+    # BOTH ws-resolution rungs answer, so neither branch can pass by falling
+    # through to the other — a regression in either one is caught.
+    *"SELECT workspace_id FROM harness_shared.pot_members"*) echo "wi5472-fake-ws" ;;
+    *"INSERT INTO harness_shared.coord_event_log"*)          : ;;
+    *"SELECT msg_id FROM harness_shared.coord_event_log"*)   echo "wi5472-arrived" ;;
+  esac
+}
+
+# Case 1: THE WI-5472 CONDITION — RIG_HIVE_ID unset, `set -u` in force.
+unset RIG_HIVE_ID
+res="$(fed_coord_merge_probe src dst srcslug WI5472 1 2>"$WI5472_ERR")"
+if [ "$res" = 1 ] && ! grep -q 'unbound variable' "$WI5472_ERR"; then
+  ok "fed_coord_merge_probe: set -u safe with RIG_HIVE_ID unset (WI-5472)"
+else
+  bad "fed_coord_merge_probe regressed on WI-5472: got '$res' (want '1')$(grep -q 'unbound variable' "$WI5472_ERR" && echo " — 'unbound variable' is BACK: $(grep 'unbound variable' "$WI5472_ERR" | head -1)")"
+fi
+
+# Case 2 (CONTROL, so Case 1 cannot pass vacuously): the rig frame — RIG_HIVE_ID
+# SET takes the pot_home_slug rung instead. Both branches must stay set -u safe.
+res="$(RIG_HIVE_ID=some-pot fed_coord_merge_probe src dst srcslug WI5472R 1 2>"$WI5472_ERR")"
+if [ "$res" = 1 ] && ! grep -q 'unbound variable' "$WI5472_ERR"; then
+  ok "CONTROL: fed_coord_merge_probe: set -u safe on the RIG_HIVE_ID rung too (WI-5472)"
+else
+  bad "fed_coord_merge_probe regressed on the RIG_HIVE_ID rung: got '$res' (want '1')"
+fi
+
+rm -f "$WI5472_ERR"
+unset -f drv_psql
+unset WI5472_ERR res
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1
