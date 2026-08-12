@@ -44,7 +44,8 @@ exit 0
 #   2026-06-02) — now ENFORCED up front by a static grep of the packaged
 #   host.mjs (fail-fast instead of a silent public-DHT no-discovery run). ***
 #
-# Identities: A=papercupai, B=aviynw (distinct, via per-instance GH_TOKEN), the
+# Identities: A=papercupai, B=aviynw (distinct, via a non-secret per-instance
+# PAPERCUSP_GITHUB_LOGIN selector), the
 #   same real pair the p079 live test uses. Override with P_A_USER / P_B_USER.
 #
 # PROVEN GREEN 2026-06-03 (see agent-insight packaged-two-instance-federation-merge):
@@ -97,8 +98,8 @@ log "launch A ($P_A_USER) + B ($P_B_USER)"
 # (found 2026-07-03 P-002 rerun r2 — all four smokes EADDRINUSE'd at boot).
 SMK_A_HONO="$(fed_pick_free_port 18071)"; SMK_A_PG="$(fed_pick_free_port 18532)"
 SMK_B_HONO="$(fed_pick_free_port $((SMK_A_HONO + 1)))"; SMK_B_PG="$(fed_pick_free_port $((SMK_A_PG + 100)))"
-fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
-fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$SMK_A_HONO" "$SMK_A_PG" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$SMK_B_HONO" "$SMK_B_PG" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
 
 # ── wait for boot; capture PG + sidecar ports + admin DSN ──────────────────────
 fed_wait_boot a 50 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 4; }

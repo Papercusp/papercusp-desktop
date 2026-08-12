@@ -140,6 +140,15 @@ else
   ok "fed_local_launch_sidecar rejects empty ports"
 fi
 
+# EI-20241165263819645: a token passed as a trailing env assignment survives in
+# the sidecar's /proc environment (and in transient-systemd unit metadata).
+# Reject it before spawn; callers select a gh account by non-secret login.
+if fed_local_launch_sidecar "$WORK/g-home" /dev/null "$WORK" 18001 18002 GH_TOKEN=sentinel 2>/dev/null; then
+  bad "fed_local_launch_sidecar accepted a persistent GH_TOKEN assignment"
+else
+  ok "fed_local_launch_sidecar rejects persistent GitHub-token assignments"
+fi
+
 # 7) ambient-env neutralization (the 2026-07-03 P-002 layer-4 class): fleet
 #    shells carry PAPERCUSP_DHT_HOST=<bridge-ip> and PAPERCUSP_DHT_BOOTSTRAP=
 #    <bridge-ip:port>; a launcher that INHERITS either swarm-binds/bootstraps
@@ -172,6 +181,29 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
     ok "$fn scrubs ambient PAPERCUSP_HOME (isolation-leak guard)"
   else
     bad "$fn no longer scrubs ambient PAPERCUSP_HOME (EI-15308 shared-home isolation-leak regression)"
+  fi
+  if [ "$fn" = fed_local_launch_sidecar ] \
+    && printf '%s\n' "$body" | grep -q -- '-u GH_TOKEN' \
+    && printf '%s\n' "$body" | grep -q -- '-u GITHUB_TOKEN'; then
+    ok "$fn scrubs ambient GitHub credential variables"
+  elif [ "$fn" = fed_local_launch_sidecar ]; then
+    bad "$fn no longer scrubs ambient GH_TOKEN/GITHUB_TOKEN (EI-20241165263819645)"
+  fi
+done
+
+
+# Every committed caller that needs a distinct identity must pass only the
+# account selector. The launch helper rejects legacy token assignments, and
+# this static guard makes that migration failure obvious before a live drill.
+for account_launcher in \
+  "$DIR/../two-instance-content-matrix-smoke.sh" \
+  "$DIR/../two-instance-hive-directory-smoke.sh" \
+  "$DIR/../two-instance-merge-smoke.sh" \
+  "$DIR/../work-distribution-drill.sh"; do
+  if grep -q 'PAPERCUSP_GITHUB_LOGIN=' "$account_launcher"; then
+    ok "$(basename "$account_launcher") selects sidecar identity without a credential env var"
+  else
+    bad "$(basename "$account_launcher") lacks PAPERCUSP_GITHUB_LOGIN account selection"
   fi
 done
 

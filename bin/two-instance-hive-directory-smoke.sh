@@ -96,8 +96,8 @@ log "launch A ($P_A_USER) + B ($P_B_USER)"
 # (found 2026-07-03 P-002 rerun r2 — all four smokes EADDRINUSE'd at boot).
 SMK_A_HONO="$(fed_pick_free_port 18071)"; SMK_A_PG="$(fed_pick_free_port 18532)"
 SMK_B_HONO="$(fed_pick_free_port $((SMK_A_HONO + 1)))"; SMK_B_PG="$(fed_pick_free_port $((SMK_A_PG + 100)))"
-fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$SMK_A_HONO" "$SMK_A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
-fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$SMK_B_HONO" "$SMK_B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+fed_local_launch_sidecar "$A_HOME" "${FED_LOG[a]}" "$(fed_sidecar_dir "$PKG")" "$SMK_A_HONO" "$SMK_A_PG" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
+fed_local_launch_sidecar "$B_HOME" "${FED_LOG[b]}" "$(fed_sidecar_dir "$PKG")" "$SMK_B_HONO" "$SMK_B_PG" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP"
 
 fed_wait_boot a 50 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 4; }
 fed_wait_boot b 50 || { echo "B boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[b]}"; exit 4; }

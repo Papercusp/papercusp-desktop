@@ -110,7 +110,7 @@ echo "PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP"
 log "launch sidecar A ($P_A_USER)"
 SMK_HONO="$(fed_pick_free_port 18271)"; SMK_PG="$(fed_pick_free_port 18932)"
 fed_local_launch_sidecar "${AHOME[a]}" "${FED_LOG[a]}" "$SIDE" "$SMK_HONO" "$SMK_PG" \
-  GH_TOKEN="$A_TOKEN" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
+  PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL"
 fed_wait_boot a 80 || { echo "boot failed: ${FED_BOOT_ERR:-?}"; tail -25 "${FED_LOG[a]}"; exit 4; }
 # WI-5641: don't override fed_wait_api's own default (60 tries*2s=120s, EI-521) —
 # a hardcoded 30 re-introduces the boot-readiness flake EI-521 already fixed.

@@ -310,6 +310,21 @@ fed_local_launch_sidecar() {
     echo "fed_local_launch_sidecar: hono_port/pg_port must be DISTINCT non-empty (got hono='$hono_port' pg='$pg_port') — use staggered fed_pick_free_port starts (e.g. 18071/18532, B offset from A)" >&2
     return 1
   fi
+  # EI-20241165263819645: never make a long-lived packaged service inherit a
+  # GitHub credential. Besides /proc/<pid>/environ, a transient systemd launch
+  # preserves Environment=/ExecStart metadata for the unit lifetime. Select a
+  # distinct already-authenticated gh account with the NON-SECRET
+  # PAPERCUSP_GITHUB_LOGIN instead; gh-token.ts resolves it via
+  # `gh auth token --user <login>` inside the process and caches it in memory.
+  local launch_arg
+  for launch_arg in "$@"; do
+    case "$launch_arg" in
+      GH_TOKEN=*|GITHUB_TOKEN=*)
+        echo "fed_local_launch_sidecar: refusing secret ${launch_arg%%=*} in a persistent sidecar environment; pass PAPERCUSP_GITHUB_LOGIN=<login>" >&2
+        return 1
+        ;;
+    esac
+  done
   # EI-18687938054040755: record the bundle this instance is about to RUN, keyed
   # by its log path (the one identifier every local caller already threads
   # through FED_LOG). drv_appbundle_local reverse-maps inst → log → bundle, so
@@ -352,7 +367,7 @@ fed_local_launch_sidecar() {
   ( cd "$side"
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
         -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
-        -u PAPERCUSP_HOME \
+        -u PAPERCUSP_HOME -u GH_TOKEN -u GITHUB_TOKEN \
         HOME="$home" \
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
