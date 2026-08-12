@@ -20,6 +20,7 @@
     "test:local-matrix-bank": "bash bin/lib/local-matrix-bank.selftest.sh",
     "test:seat-offer-diag": "bash bin/lib/seat-offer-diag.selftest.sh",
     "test:b9-attestation-precondition": "bash bin/lib/b9-attestation-precondition.selftest.sh",
+    "test:b3-revocation-kcut": "bash bin/lib/b3-revocation-kcut.selftest.sh",
     "test:vm-run-env": "bash bin/lib/vm-run-env.selftest.sh",
     "test:restart-settle-barrier": "bash bin/lib/restart-settle-barrier.selftest.sh",
     "test:rig-wait-converged": "bash bin/lib/rig-wait-converged.selftest.sh",
