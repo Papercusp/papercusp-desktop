@@ -154,13 +154,11 @@ test('scrub-binaries leaves a CLEAN addon byte-identical', () => {
   }
 });
 
-// ── WI-37553: --scrub-app-binary (the mac .app executable) ───────────────────
+// ── WI-37553: --scrub-app-binary (explicit packaged executable) ──────────────
 // A THIRD scrub case, separate from --scrub-binaries: that one walks a tree by
-// SCRUBBABLE_BINARY_SUFFIXES and would never match an extension-less executable
-// like Contents/MacOS/papercusp-desktop. The mac binary carries the crate's
-// absolute CARGO_MANIFEST_DIR from tauri's permission codegen (the linux binary
-// is clean from the same codegen — a Mach-O vs ELF dead-strip difference), and
-// --remap-path-prefix provably cannot reach it.
+// SCRUBBABLE_BINARY_SUFFIXES and would never match an extension-less packaged
+// executable. This explicit-file form remains for the Windows release caller
+// and other artifacts that need the same length-preserving identity scrub.
 //
 // The byte-length assertion is the load-bearing one: the scrub rewrites bytes
 // inside an already-linked binary, so every Mach-O offset, section size and
@@ -228,66 +226,30 @@ test('--scrub-app-binary takes EXPLICIT files and never sweeps a directory', () 
 // shared working tree (a sweep would commit the mutant).
 const MAC_CROSS = process.env.PROBE_SCRIPT || path.join(root, 'bin/build-mac-cross.sh');
 
-test('build-mac-cross scrubs BEFORE the assembled-bytes scan, and before signing', () => {
-  // ⚠ THE INVARIANT THAT ACTUALLY MATTERS, and the one whose absence shipped.
-  // The previous version of this test sliced from 'sign_app() {' and asserted
-  // scrub-before-rcodesign INSIDE that slice. That was true and useless: the
-  // producer runs assemble_app → scan → sign_app, so the scan hard-fails the cut
-  // BEFORE sign_app is ever entered. The scrub sat in sign_app, never executed,
-  // and the 0.0.14 cut died at the scan with the leak intact while this test was
-  // green. Assert the ORDER OF THE THREE CONSUMERS in the real call flow.
+test('build-mac-cross enables Tauri production codegen and has no mac scrub mitigation', () => {
   const src = fs.readFileSync(MAC_CROSS, 'utf8');
-
-  // 1. The scrub is a postcondition of assemble_app, not of a call site.
-  const asmStart = src.indexOf('assemble_app() {');
-  assert.ok(asmStart > -1, 'assemble_app must exist');
-  const asmBody = src.slice(asmStart, src.indexOf('\n}\n', asmStart));
-  assert.ok(asmBody.includes('scrub_app_identity'),
-    'assemble_app must scrub before returning — "assembled" has to MEAN "scrubbed" (WI-37553)');
-
-  // 2. sign_app must NOT scrub: that placement is the exact bug being guarded.
-  const signStart = src.indexOf('sign_app() {');
-  const signBody = src.slice(signStart, src.indexOf('\n}\n', signStart));
-  assert.ok(!signBody.includes('--scrub-app-binary'),
-    'the scrub must NOT live in sign_app — it is called AFTER the scan, so it never runs');
-
-  // 3. Main flow order: assemble (which scrubs) → scan → sign.
-  const assembleAt = src.indexOf('assemble_app "$app_id"');
-  // ⚠ Anchor on the SPECIFIC scan, not a bare '--scan-dir'. There are now TWO scans —
-  // the cheap post-lipo one on the isolated binary, and this authoritative one on the
-  // assembled bundle — and a bare substring silently matched the EARLY one first,
-  // turning this assertion into a claim about the wrong object.
-  const scanAt = src.indexOf('--scan-dir "$app"');
-  const signAt = src.indexOf('sign_app "$app"');
-  for (const [n, v] of [['assemble', assembleAt], ['scan', scanAt], ['sign', signAt]]) {
-    assert.ok(v > -1, `main flow must still call ${n}`);
-  }
-  assert.ok(assembleAt < scanAt,
-    'scrub (inside assemble_app) must precede the assembled-bytes identity scan');
-  assert.ok(scanAt < signAt,
-    'the scan must precede signing — signing seals already-scrubbed, already-scanned bytes');
+  assert.ok(src.includes('cargo zigbuild --release --target "$arch" -p papercusp-desktop --features custom-protocol'),
+    'release mac builds must enable Tauri custom-protocol so tauri_build uses production codegen (EI-200443)');
+  assert.equal(src.includes('scrub_app_identity'), false,
+    'the mac build must not carry the pre-sign scrub mitigation after the production-codegen fix');
 });
 
-test('build-mac-cross fails fast: the binary is scrubbed + scanned right after lipo', () => {
+test('build-mac-cross fails fast: the binary is scanned right after lipo', () => {
   // WHY THIS EXISTS: the authoritative assembled-bytes gate runs AFTER assemble_app
   // copies a ~2.4GB sidecar per role. Measured on the 0.0.14 cut that is ~58min into a
   // ~75min mac leg, and the mac leg is ~96% of the whole release's wall clock. Two
   // attempts died there, each burning a full mac build to learn something the binary
-  // already knew. So the binary gets scrubbed + scanned IN ISOLATION straight after
-  // lipo. This test pins that the early gate exists AND still precedes assembly —
+  // already knew. So the binary gets scanned IN ISOLATION straight after lipo. This
+  // test pins that the early gate exists AND still precedes assembly —
   // an early gate that drifted after assemble_app would be pure cost and no benefit.
   const src = fs.readFileSync(MAC_CROSS, 'utf8');
 
   const lipoAt = src.indexOf('-create');                      // llvm-lipo fuses the arches
-  const earlyScrubAt = src.indexOf('scrub_app_identity_file "$uni_bin"');
   const earlyScanAt = src.indexOf('--scan-dir "$_early_scan"');
   const assembleAt = src.indexOf('assemble_app "$app_id"');
   const fullScanAt = src.indexOf('--scan-dir "$app"');
 
-  assert.ok(earlyScrubAt > -1, 'the universal binary must be scrubbed right after lipo');
   assert.ok(earlyScanAt > -1, 'the universal binary must be identity-scanned right after lipo');
-  assert.ok(lipoAt < earlyScrubAt, 'the early scrub must come after lipo produces the binary');
-  assert.ok(earlyScrubAt < earlyScanAt, 'scrub before the early scan, else the scan just reports the leak we already fix');
   assert.ok(earlyScanAt < assembleAt,
     'THE POINT: the early scan must precede assemble_app — after it, the 2.4GB/role sidecar copies are already paid');
   // The authoritative gate is NOT replaced by the cheap one.

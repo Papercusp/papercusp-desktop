@@ -298,44 +298,6 @@ stage_env_sidecars() { # $1=sidecar dir (inside the .app)
 }
 
 # ── Hand-assemble the .app to Tauri's macOS layout. ───────────────────────────
-# ── WI-37553: strip the build box's absolute CARGO_MANIFEST_DIR out of the app's
-# executables. The mac binary retains it (one occurrence per lipo'd arch slice)
-# from tauri's permission/ACL codegen; the LINUX binary is clean from the same
-# codegen, so the difference is the LINK (Mach-O ld vs ELF --gc-sections
-# dead-strip), not the source — and --remap-path-prefix provably cannot reach it
-# (the remap works here: 86 /build-home strings survive, yet the remapped form of
-# this path is in neither binary). Byte length is preserved exactly, so every
-# Mach-O offset stays valid.
-#
-# ⚠ ORDERING INVARIANT — scrub must run BEFORE the assembled-bytes identity scan
-# AND before rcodesign. It is called from the END of assemble_app so that
-# "assembled" *means* "scrubbed": any future caller inherits it, and the two
-# consumers downstream (the scan, then the signature) both see scrubbed bytes.
-# Scrubbing after rcodesign would invalidate the signature; scrubbing after the
-# scan is useless, because the scan hard-fails the cut first.
-#   This previously sat inside sign_app(), which is called AFTER the scan — so it
-#   never executed and the 0.0.14 cut died at the scan with the leak intact. The
-#   comment there asserted the scan ran "later still"; it does not. Guarded now by
-#   a test that asserts scrub-before-SCAN, not merely scrub-before-sign.
-# ⚠ MITIGATION, not a fix — the dead-strip root cause is EI-20044309663936316.
-# Scrub EXPLICIT executable files. The single implementation — both the early
-# post-lipo call and the assemble_app postcondition go through here, so the two
-# call sites cannot drift apart in what they consider "scrubbed".
-scrub_app_identity_file() { # $@=executables
-  (( $# > 0 )) || return 0
-  python3 "$HERE/audit-release-bundle.py" --scrub-app-binary "$@" \
-    || fail "scrub-app-binary failed for $*"
-}
-
-scrub_app_identity() { # $1=app
-  local app="$1" _macos_dir="$1/Contents/MacOS" _exes=()
-  [[ -d "$_macos_dir" ]] || return 0
-  while IFS= read -r -d '' _f; do _exes+=("$_f"); done \
-    < <(find "$_macos_dir" -maxdepth 1 -type f -perm -u+x -print0)
-  (( ${#_exes[@]} > 0 )) || return 0
-  scrub_app_identity_file "${_exes[@]}"
-}
-
 assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
   local ident="$1" name="$2" bin="$3" app="$4"
   rm -rf "$app"
@@ -388,10 +350,6 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
     echo "    (no libPapercuspTermShim.dylib — embedded terminal degrades to NewWindow; see KNOWN GAPS)"
   fi
 
-  # Postcondition of assemble_app: the .app's executables carry no build-box
-  # identity. MUST stay last, and MUST stay inside this function — the caller
-  # scans the assembled bytes immediately after this returns.
-  scrub_app_identity "$app"
 }
 
 # ── rcodesign deep-sign the bundle (ad-hoc, or the supplied cert). The nested
@@ -399,12 +357,6 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
 # sign seals them into CodeResources. ─────────────────────────────────────────
 sign_app() { # $1=app
   local app="$1" args=(--entitlements-xml-path "$ENTITLEMENTS")
-
-  # WI-37553: the build-box identity scrub does NOT live here. It runs at the end
-  # of assemble_app(), because the assembled-bytes identity scan sits BETWEEN
-  # assemble_app and sign_app and hard-fails the cut before this function is ever
-  # reached. Signing therefore seals already-scrubbed bytes. Do not reintroduce a
-  # scrub here: post-signature mutation would invalidate the signature.
 
   [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
@@ -582,7 +534,7 @@ for role in $ROLES; do
         "PAPERCUSP_BUILD_VERSION=${PAPERCUSP_BUILD_VERSION:-}" \
         "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
         "${cfg_env[@]}" \
-        cargo zigbuild --release --target "$arch" -p papercusp-desktop )
+        cargo zigbuild --release --target "$arch" -p papercusp-desktop --features custom-protocol )
     local_bin="$CARGO_TARGET_ROOT/$arch/release/papercusp-desktop"
     [[ -f "$local_bin" ]] || fail "[$role] cross-compile produced no binary for $arch at $local_bin"
     thin_bins+=("$local_bin")
@@ -614,12 +566,10 @@ for role in $ROLES; do
   # the binary already knew: every identity leak we have actually hit lives in THIS
   # file, which is complete right here.
   #
-  # So: scrub at the source (once, before the per-role copies — assemble_app's scrub
-  # then finds nothing left to do, which is fine: it is idempotent and length-preserving),
-  # then scan the binary in isolation so a NEW leak fails in seconds instead of an hour.
+  # So: scan the binary in isolation before the per-role copies, so a NEW leak fails
+  # in seconds instead of an hour.
   # Isolation is what makes this cheap AND meaningful — scan-dir on a directory holding
   # only this binary attributes any hit to the binary itself, with no bundle noise.
-  scrub_app_identity_file "$uni_bin"
   _early_scan="$(mktemp -d)"
   cp "$uni_bin" "$_early_scan/" || fail "[$role] could not stage the binary for the early identity scan"
   if ! python3 "$HERE/audit-release-bundle.py" --scan-dir "$_early_scan"; then

@@ -975,36 +975,16 @@ def _scrub_one(p, pairs):
 
 
 def scrub_app_binary(paths):
-    """Scrub build-box identity out of APP EXECUTABLES named EXPLICITLY.
+    """Scrub build-box identity out of explicitly named packaged executables.
 
-    A THIRD case, deliberately kept separate from --scrub-binaries: that one walks
-    a TREE selecting compiled addons by SCRUBBABLE_BINARY_SUFFIXES, and would never
-    match an extension-less executable like Contents/MacOS/papercusp-desktop. This
-    one takes explicit FILE paths and can never sweep a directory.
+    This is deliberately separate from --scrub-binaries: that flag walks a TREE
+    selecting compiled addons by SCRUBBABLE_BINARY_SUFFIXES, while this flag takes
+    explicit FILE paths and can never sweep a directory. Callers that must sanitize
+    an extension-less executable (for example, a packaged Windows .exe or another
+    release artifact) use this narrow form.
 
-    ⚠ THIS IS A MITIGATION, NOT A FIX — the root cause is tracked separately.
-    WI-37553: the macOS .app executable carries the crate's absolute
-    CARGO_MANIFEST_DIR (…/src-tauri), one occurrence per lipo'd arch slice. It
-    comes from tauri's permission/ACL codegen, whose build-script output bakes the
-    manifest dir — and that output contains the path on BOTH targets, yet only the
-    darwin binary retains it. So the difference is the LINK (Mach-O ld vs ELF
-    --gc-sections dead-stripping), not the source, and the linux binary is clean.
-
-    Two fixes were ruled OUT with evidence rather than by assumption:
-      • --remap-path-prefix cannot reach it. The remap IS applied and IS working on
-        the mac build (86 `/build-home` + 1262 `/build-cargo` strings present), yet
-        the REMAPPED form of this path appears in NEITHER binary — so it is not a
-        rustc source-path embedding at all.
-      • Changing darwin link flags (-Wl,-dead_strip) is untestable here: the box is
-        linux and the artifact is a universal, signed Mach-O. An unverifiable link
-        change on a shipping app is a worse risk than the string.
-
-    The scrubbed bytes are an unused permission-manifest path — never read for
-    control flow in a packaged app — and byte length is preserved exactly.
-
-    ⚠ ORDERING IS LOAD-BEARING: run this BEFORE code signing. build-mac-cross.sh
-    signs with rcodesign and only then scans, so scrubbing after signing would
-    invalidate the signature.
+    Byte length is preserved exactly because the executable may already be linked;
+    changing its size would invalidate offsets, sections, and relocations.
     """
     pairs = _high_entropy_pairs()
     if not pairs:
