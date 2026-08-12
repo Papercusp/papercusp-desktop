@@ -62,8 +62,60 @@ OUT_DIR="$1"; VERSION="$2"; BUILD_SHA="$3"; REUSED="$4"; shift 4
 [[ -d "$OUT_DIR" ]] || { echo "OUT_DIR '$OUT_DIR' is not a directory" >&2; exit 2; }
 
 GIT_ROOT="${PROVENANCE_GIT_ROOT:-$PWD}"
+GIT_ROOT="$(git -C "$GIT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$GIT_ROOT")"
 GIT_HEAD="$(git -C "$GIT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-GIT_DIRTY="$(git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && echo false || echo true)"
+
+# A superproject's `git diff HEAD` is not a complete clean-snapshot proof. Git
+# can report an uninitialized/empty submodule as clean for that path (the
+# gitlink is still the committed value), while `git -C <path>` may resolve up
+# into the superproject and return a plausible HEAD. That is exactly the shape
+# that produced a dirty-looking tree with papercusp-desktop lacking its own
+# checked-out commit, then let provenance consumers treat the snapshot as
+# usable. Before recording `gitDirty=false`, verify every recursive submodule's
+# worktree root and HEAD against the gitlink printed by `submodule status`.
+submodule_worktree_dirty() {
+  local status_output line expected path sub_root actual top
+  if ! status_output="$(git -C "$GIT_ROOT" submodule status --recursive 2>/dev/null)"; then
+    # An unreadable status is not evidence of a clean snapshot.
+    return 0
+  fi
+
+  if [[ -z "$status_output" ]]; then
+    # `submodule status` can be empty when the config/worktree is damaged. If
+    # HEAD still contains a gitlink, fail closed rather than accepting it.
+    if git -C "$GIT_ROOT" ls-tree -r HEAD 2>/dev/null | grep -q '^160000 '; then
+      return 0
+    fi
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    expected="${line#?}"
+    expected="${expected%% *}"
+    path="${line#?}"
+    path="${path#"$expected"}"
+    path="${path# }"
+    path="${path%% *}"
+    [[ -n "$expected" && -n "$path" ]] || return 0
+
+    sub_root="$GIT_ROOT/$path"
+    [[ -d "$sub_root" ]] || return 0
+    # A missing/empty submodule `.git` must not fall through to the parent
+    # repository's HEAD. The top-level check makes that distinction explicit.
+    top="$(git -C "$sub_root" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ "$top" = "$sub_root" ]] || return 0
+    actual="$(git -C "$sub_root" rev-parse HEAD 2>/dev/null || true)"
+    [[ -n "$actual" && ( "$actual" = "$expected" || "$actual" = "$expected"* ) ]] || return 0
+  done <<< "$status_output"
+
+  return 1
+}
+
+GIT_DIRTY=true
+if git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && ! submodule_worktree_dirty; then
+  GIT_DIRTY=false
+fi
 
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
 _bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }

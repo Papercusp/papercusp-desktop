@@ -39,13 +39,13 @@ function tmp() {
 }
 
 /** Run the real emitter; return the parsed build-provenance.json it wrote. */
-function emit({ sidecarDir } = {}) {
+function emit({ sidecarDir, gitRoot } = {}) {
   const out = path.join(tmp(), 'out');
   fs.mkdirSync(out, { recursive: true });
   const artifact = path.join(out, 'App_0.0.0_amd64.deb');
   fs.writeFileSync(artifact, 'fixture');
 
-  const env = { ...process.env, PROVENANCE_GIT_ROOT: path.join(BIN, '..') };
+  const env = { ...process.env, PROVENANCE_GIT_ROOT: gitRoot || path.join(BIN, '..') };
   if (sidecarDir) env.PROVENANCE_SIDECAR_DIR = sidecarDir;
 
   const r = spawnSync('bash', [EMITTER, out, '0.0.0', 'testsha', 'false', artifact], {
@@ -130,6 +130,47 @@ test('the emitted document is valid JSON in every sidecar state', () => {
   for (const state of [undefined, tmp(), sidecarWithProvenance()]) {
     assert.doesNotThrow(() => emit({ sidecarDir: state }));
   }
+});
+
+test('gitDirty fails closed when a submodule path has no checked-out HEAD', () => {
+  // Reproduce the clean-snapshot failure against a disposable superproject:
+  // Git's root diff ignores an absent submodule path, but that path is not a
+  // usable checkout and must not produce dirty=false provenance.
+  const source = tmp();
+  fs.mkdirSync(source, { recursive: true });
+  const parent = tmp();
+  fs.mkdirSync(parent, { recursive: true });
+
+  const git = (cwd, args) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const init = (dir) => {
+    git(dir, ['init', '-q', '-b', 'main']);
+    git(dir, ['config', 'user.email', 'provenance@test']);
+    git(dir, ['config', 'user.name', 'Provenance Test']);
+    git(dir, ['config', 'commit.gpgsign', 'false']);
+  };
+
+  init(source);
+  fs.writeFileSync(path.join(source, 'desktop.txt'), 'desktop\n');
+  git(source, ['add', '.']);
+  git(source, ['commit', '-qm', 'submodule']);
+
+  init(parent);
+  fs.writeFileSync(path.join(parent, 'root.txt'), 'root\n');
+  git(parent, ['add', '.']);
+  git(parent, ['commit', '-qm', 'root']);
+  git(parent, ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', source, 'papercusp-desktop']);
+  git(parent, ['commit', '-qm', 'pin submodule']);
+
+  const submodulePath = path.join(parent, 'papercusp-desktop');
+  fs.rmSync(submodulePath, { recursive: true, force: true });
+  fs.mkdirSync(submodulePath, { recursive: true });
+
+  const doc = emit({ gitRoot: parent });
+  assert.equal(doc.gitDirty, true, 'an absent submodule checkout is not a clean snapshot');
 });
 
 // ── STRUCTURAL: the record is only worth anything if the legs actually pass a dir ──
