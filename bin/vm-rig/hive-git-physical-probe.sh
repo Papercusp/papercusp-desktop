@@ -44,6 +44,13 @@ fail() { echo "hive-git-physical-probe: $*" >&2; exit 1; }
 [ ! -e "$evidence_out" ] && [ ! -e "$trust_out" ] \
   || fail 'refusing to overwrite a pre-banked output'
 [ -x "$TSX" ] && [ -f "$PRODUCER" ] || fail 'local TypeScript producer is unavailable'
+[ -x "$SCENARIO" ] \
+  || fail "canonical E/G scenario driver is not executable: $SCENARIO"
+
+# Readiness is an OFFLINE gate and must precede the first VM ssh. An incomplete
+# checked-in scenario must not touch the physical rig merely to discover that
+# it cannot emit an admissible manifest yet.
+"$SCENARIO" --require-ready >/dev/null
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
 cleanup() { rm -rf "$run_dir"; }
@@ -62,12 +69,6 @@ remote_unsigned="/tmp/hive-git-physical-unsigned-$$.json"
 ssh "${SSH_OPTS[@]}" "$VM" \
   "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
 "$TSX" "$PRODUCER" preflight "$tower_identity" "$vm_identity" >/dev/null
-
-# No synthetic/local command may substitute for the checked-in physical
-# scenario. It owns its execution-readiness gate and fails before mutation while
-# any fixed A-G executor is missing.
-[ -x "$SCENARIO" ] \
-  || fail "canonical E/G scenario driver is not executable: $SCENARIO"
 
 # The scenario receives the preflighted identities so its topology is pinned
 # before it mutates anything. It must emit fresh, UNATTESTED same-run A-G

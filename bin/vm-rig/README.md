@@ -67,7 +67,9 @@ topology, output, and ordered A-G phase contract has landed. It validates the
 two producer-issued host identities, requires all three files to share the
 producer's private run directory, and then exits **before the first SSH or
 mutation** while any fixed phase executor is missing. `--contract-check` is the
-only successful mode in this revision and emits no evidence.
+only successful mode in this revision and emits no evidence. The canonical
+wrapper calls `--require-ready` before its VM identity SSH, so an incomplete
+scenario cannot even contact the rig.
 
 The adapter therefore still exits non-zero without evidence, and the canonical
 drill continues reporting E and G as SKIP. It becomes execution-ready only when

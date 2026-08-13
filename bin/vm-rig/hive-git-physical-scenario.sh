@@ -21,12 +21,12 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
+# Wrapper readiness gate (non-zero until every fixed phase has landed):
+#   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
 IMPLEMENTATION_STATE='offline-contract-v1'
-PHASE_SEQUENCE=(A B C D E F G)
-NODE_BIN="${PAPERCUSP_NODE_BIN:-node}"
 
 fail() {
   echo "hive-git-physical-scenario: $*" >&2
@@ -36,6 +36,11 @@ fail() {
 if [ "${1:-}" = '--contract-check' ]; then
   printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"]}\n' \
     "$IMPLEMENTATION_STATE"
+  exit 0
+fi
+if [ "${1:-}" = '--require-ready' ]; then
+  [ "$IMPLEMENTATION_STATE" = 'ready-v1' ] \
+    || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-G phase executors have not all landed"
   exit 0
 fi
 
@@ -76,7 +81,7 @@ run_dir="$(dirname "$unsigned_out")"
   || fail 'producer run files have unexpected canonical names'
 
 identity_fields() {
-  "$NODE_BIN" - "$1" "$2" <<'NODE'
+  node - "$1" "$2" <<'NODE'
 const fs = require('node:fs');
 const [path, expectedHost] = process.argv.slice(2);
 const value = JSON.parse(fs.readFileSync(path, 'utf8'));
