@@ -4,15 +4,15 @@
 #
 # The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
 # topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-# plus Phase B ref-announcement, Phase C trust, and Phase D production-spine
-# materialization executors, then stop before the first ssh,
+# plus Phase B ref-announcement, Phase C trust, Phase D production-spine
+# materialization, and Phase E GitHub-bridge executors, then stop before the first ssh,
 # service, database, git-ref, or
 # Corestore operation because the global A-G readiness gate remains red.
 # Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
-# Future increments replace the remaining three fail-closed phase stubs below
+# Future increments replace the remaining two fail-closed phase stubs below
 # with fixed, checked-in operations satisfying their offline contracts. Do not add an
 # environment-supplied command seam or an input-manifest escape hatch; either
 # would re-introduce pre-banked evidence.
@@ -25,13 +25,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B|C|D
+#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-b-c-d-executors-v1'
+IMPLEMENTATION_STATE='offline-phase-a-b-c-d-e-executors-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,18 +77,25 @@ phase_d_contract() {
 JSON
 }
 
+phase_e_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"E","planItem":"P-306","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"two-host-commit-only-members-to-single-github-bridge-writer"},"causalOrder":["legacyModeObservedOnBothHosts","bridgedModePersistedThroughSetPotGitMode","bothPhysicalMemberGitSyncTicksTriggered","bothMembersObservedCommitOnlyWithNoDirectPushes","freshFixedUpstreamIngressCreated","bridgeIngressAdmissionAndIntegrationTicksTriggered","lastAdmittedReachedExactIngressHead","canonicalAndForkStagingConverged","twoProductionWatchdogSweepsStayedQuiet","freshForkAheadControlCreated","bridgeReportedStructuredEgressNonFastForward","canonicalStayedFixedDuringDivergence","forkRestoredWithForceWithLease","legacyModeRestoredAndObservedOnBothHosts"],"requiredObservations":["federatedModeRowOnBothPhysicalHosts","commitOnlyRoutineMetadataAndEmptyLastPushed","freshUpstreamHead","githubBridgeLastAdmitted","canonicalStagingOid","forkRemoteStagingOid","productionGitSyncTriggers","twoDistinctCheckGitSyncStallResults","structuredEgressNonFfEscalation","unchangedCanonicalAcrossForkAheadControl","forceWithLeaseRecoveryRecord","legacyRollbackOnBothHosts"],"forbiddenEvidence":["memberDirectPush","summaryOnlyLegPass","singleHostObservation","callerSelectedRepoRefOrRemote","directCanonicalRefMutation","preAuthoredManifest","environmentSuppliedCommand"],"productionSurfaces":["setPotGitMode","git-sync:run","runGithubBridgeLeg","checkGitSyncStall","github-bridge-divergence"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
     C) phase_c_contract ;;
     D) phase_d_contract ;;
+    E) phase_e_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
@@ -134,6 +141,10 @@ run_dir="$(dirname "$unsigned_out")"
   && [ "$(basename "$tower_identity")" = 'tower-identity.json' ] \
   && [ "$(basename "$vm_identity")" = 'vm-identity.json' ] \
   || fail 'producer run files have unexpected canonical names'
+
+# One run identifier binds every strict causal leg to the enclosing manifest.
+# Phase-local ids cannot satisfy the final D/E/G evidence validator.
+physical_run_id="p505-physical-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 identity_fields() {
   node - "$1" "$2" <<'NODE'
@@ -456,7 +467,7 @@ phase_d_worktree_materialization() {
   local phase_dir="$run_dir/phase-d"
   local first_dir="$phase_dir/first-advance"
   local dirty_dir="$phase_dir/dirty-advance"
-  local run_id="p505-d-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  local run_id="$physical_run_id"
   local started_at finished_at first_head second_head
   local publish_started publish_finished queue_started queue_finished
   local integrate_started integrate_finished first_bridge_started first_bridge_finished
