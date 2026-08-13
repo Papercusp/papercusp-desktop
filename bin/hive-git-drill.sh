@@ -11,6 +11,11 @@
 # assert IN THIS SAME FILE — the harness below (sidecar boot, workspace,
 # throwaway hive) is built to stay put; only the leg BODIES change.
 #
+# Default invocation remains a scaffold verdict: it may exit 0 while naming
+# explicit unproven legs in the SKIP census. Release acceptance is stricter:
+# REQUIRE_ZERO_SKIPS=1 makes any remaining skip a non-zero verdict, which is
+# the machine-checkable form of plan decision D-002's all-legs/zero-skip gate.
+#
 # TODAY'S STATUS (2026-07-10, p2p-live-federation-crack-2026-07-10 P-006
 # re-verify — re-check against the runbook doc + `git log -- packages/
 # operator-core/lib/sync/pot-git/` before trusting this further): the module
@@ -582,9 +587,19 @@ fi
 echo
 echo "════════════════════════════════════════════════════════"
 echo "P-301 hive-git drill (single-box scaffold): PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED"
-if [ "$FAIL" -eq 0 ]; then
-  echo "OVERALL: PASS — scaffold + mode round-trip green; $SKIPPED Phase-3 legs unproven (unwired or rig-gated, see census)"
-  exit 0
+# ZERO-SKIP-RELEASE-GATE-BEGIN — extracted verbatim by the focused regression test.
+if [ "$FAIL" -ne 0 ]; then
+  echo "OVERALL: FAIL"
+  exit 1
 fi
-echo "OVERALL: FAIL"
-exit 1
+if [ "${REQUIRE_ZERO_SKIPS:-0}" = "1" ] && [ "$SKIPPED" -ne 0 ]; then
+  echo "OVERALL: FAIL — release acceptance requires zero skips; $SKIPPED Phase-3 legs remain unproven (see census)"
+  exit 1
+fi
+if [ "${REQUIRE_ZERO_SKIPS:-0}" = "1" ]; then
+  echo "OVERALL: PASS — release acceptance green; all Phase-3 legs ran with zero skips"
+else
+  echo "OVERALL: PASS — scaffold + mode round-trip green; $SKIPPED Phase-3 legs unproven (unwired or rig-gated, see census)"
+fi
+exit 0
+# ZERO-SKIP-RELEASE-GATE-END
