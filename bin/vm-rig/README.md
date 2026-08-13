@@ -62,14 +62,24 @@ the trust-root half of the producer:
   pairs are refused.
 
 The mutation/observation entrypoint is now checked in as
-`bin/vm-rig/hive-git-physical-scenario.sh`, but only its offline invocation,
-topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-adapter contract have landed. `--phase-contract A` pins the test hive/repo plus
-the causal before/after observations that must falsify a warm-store false green:
-the VM store is observed absent, canonical git-sync recreates it, both physical
-device namespaces and their referenced objects then agree on both hosts, and
-each device remains confined to its own namespace. The contract is explicitly
-`ready:false`; it is not an observation and cannot emit evidence.
+`bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
+output, ordered A-G phase contract, and fixed Phase A cold-join executor have
+landed. `--phase-contract A` pins the test hive/repo and the causal operations:
+observe the tower store, atomically quarantine (not delete) the VM store,
+observe absence, invoke only the VM's canonical `git-sync:run`, then capture
+both bare repos. The shared producer rejects the result unless both identity-
+derived namespaces and every referenced object exist on both hosts, ref OIDs
+match exactly, the stores have independent fingerprints and local ODBs with no
+alternates, and the timestamps prove absence preceded bootstrap. Hermetic tests
+exercise real temporary bare repos plus warm-store, divergent-ref, missing-
+object, alternate-ODB, same-store, and causal-order negative controls.
+
+Phase A is still explicitly `ready:false`: the executor is unreachable until
+the remaining fixed B-G executors land and the scenario's global
+`--require-ready` gate changes. The wrapper checks that gate before its first VM
+SSH, so this increment cannot touch the rig or emit evidence merely because the
+Phase A code exists. There is no environment-supplied command or pre-authored
+manifest input.
 
 The scenario validates the two producer-issued host identities, requires all
 three files to share the producer's private run directory, and then exits
