@@ -81,7 +81,7 @@ log "boot $NAME — ssh:$SSH_PORT spice:127.0.0.1:$SPICE_PORT op:${OP_PORT}${op_
 # args (this exact block, when placed mid-command, dropped -vga/-spice/
 # -monitor/-serial/-display/-pidfile/-daemonize — no SPICE, no pidfile, qemu
 # in the foreground; found 2026-07-10).
-qemu-system-x86_64 \
+run_testvm_scoped "$NAME" "$VM_RAM_MB" qemu-system-x86_64 \
   -name "papercusp-testvm-$NAME" \
   -enable-kvm -machine q35,accel=kvm -cpu host \
   -m "$VM_RAM_MB" -smp "$VM_CPUS" \

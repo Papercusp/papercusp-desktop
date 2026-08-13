@@ -26,6 +26,49 @@ VM_RAM_MB="${PAPERCUSP_TESTVM_RAM_MB:-16384}"
 VM_CPUS="${PAPERCUSP_TESTVM_CPUS:-8}"
 VM_USER="${PAPERCUSP_TESTVM_USER:-tester}"
 
+# A test VM is disposable infrastructure, not an entitlement to unbounded host
+# memory. QEMU's guest RAM is only the baseline charge: device state, page
+# cache, and dirty qcow2 buffers add several GiB during a desktop run. Keep a
+# reclaim-first cushion above guest RAM and a second hard-stop cushion above
+# that. Swap is bounded separately so one abandoned test VM cannot recreate a
+# host-wide swap storm during the reaper's deliberate safety window.
+testvm_memory_envelope() {  # <guest-ram-mib> -> "high max swap-max" (all MiB)
+  local ram_mb="${1:-}"
+  [[ "$ram_mb" =~ ^[1-9][0-9]*$ ]] \
+    || die "PAPERCUSP_TESTVM_RAM_MB must be a positive integer (got '$ram_mb')"
+
+  local cushion_mb=4096
+  local high_mb=$((ram_mb + cushion_mb))
+  local max_mb=$((ram_mb + 2 * cushion_mb))
+  local swap_max_mb=$((ram_mb / 2))
+  [ "$swap_max_mb" -lt 4096 ] && swap_max_mb=4096
+  [ "$swap_max_mb" -gt 16384 ] && swap_max_mb=16384
+  printf '%s %s %s\n' "$high_mb" "$max_mb" "$swap_max_mb"
+}
+
+run_testvm_scoped() {  # <name> <guest-ram-mib> <qemu> [args...]
+  local name="$1" ram_mb="$2"; shift 2
+  local systemd_run="${PAPERCUSP_TESTVM_SYSTEMD_RUN:-systemd-run}"
+  local systemd_escape="${PAPERCUSP_TESTVM_SYSTEMD_ESCAPE:-systemd-escape}"
+  command -v "$systemd_run" >/dev/null 2>&1 \
+    || die "systemd-run is required to start a resource-bounded test VM"
+  command -v "$systemd_escape" >/dev/null 2>&1 \
+    || die "systemd-escape is required to name the test VM resource scope"
+
+  local high_mb max_mb swap_max_mb unit
+  read -r high_mb max_mb swap_max_mb <<<"$(testvm_memory_envelope "$ram_mb")"
+  unit="$("$systemd_escape" --template=papercup-testvm@.scope "$name")" \
+    || die "could not derive a systemd scope name for test VM '$name'"
+
+  log "resource envelope $unit — memory high:${high_mb}MiB max:${max_mb}MiB swap-max:${swap_max_mb}MiB"
+  "$systemd_run" --user --scope --quiet --collect --unit "$unit" \
+    -p MemoryAccounting=yes \
+    -p "MemoryHigh=${high_mb}M" \
+    -p "MemoryMax=${max_mb}M" \
+    -p "MemorySwapMax=${swap_max_mb}M" \
+    -- "$@"
+}
+
 # ── Per-instance port map ──────────────────────────────────────────────────
 # Existing box VMs use SSH 2222/2223, SPICE 5930/5931 — we start past them.
 # Returns "<ssh_port> <spice_port> <operator_fwd_port>" for an instance name.
