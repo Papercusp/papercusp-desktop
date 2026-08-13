@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# upload-mobile-release.sh — push a cut's MOBILE artifacts (Android APK/AAB,
-# iOS IPA) to the release host, under the synthesized versioned names the
+# upload-mobile-release.sh — push a cut's PROVENANCED mobile artifacts (currently
+# Android APK/AAB; iOS stays dormant until its builder emits equivalent provenance)
+# to the release host, under the synthesized versioned names the
 # release registry records them as.
 #
 # Sibling of upload-release.sh (desktop artifacts + latest.json) — separate on
