@@ -7,10 +7,10 @@
 # to the separately checked-in canonical scenario driver. Only that driver's
 # fresh unsigned manifest is signed on BOTH physical hosts and finalized.
 #
-# The scenario driver is intentionally not present yet. Until it lands with the
-# real E/P-306 + G/P-308 causal observations, this adapter exits non-zero and
-# produces neither output — so merely installing the receipt producer cannot
-# turn either release SKIP green.
+# The scenario entrypoint is checked in, but remains execution-incomplete until
+# its fixed A-G phase executors land. It exits before the first mutation and
+# produces no manifest, so installing the invocation contract cannot turn
+# either release SKIP green.
 #
 # Usage (only through hive-git-drill.sh):
 #   hive-git-physical-probe.sh /abs/evidence.json /abs/trust.json
@@ -63,10 +63,11 @@ ssh "${SSH_OPTS[@]}" "$VM" \
   "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
 "$TSX" "$PRODUCER" preflight "$tower_identity" "$vm_identity" >/dev/null
 
-# The receipt plane is ready, but no synthetic/local command may substitute for
-# the checked-in physical scenario. Its absence is the deliberate current gate.
+# No synthetic/local command may substitute for the checked-in physical
+# scenario. It owns its execution-readiness gate and fails before mutation while
+# any fixed A-G executor is missing.
 [ -x "$SCENARIO" ] \
-  || fail "canonical E/G scenario driver is not installed: $SCENARIO"
+  || fail "canonical E/G scenario driver is not executable: $SCENARIO"
 
 # The scenario receives the preflighted identities so its topology is pinned
 # before it mutates anything. It must emit fresh, UNATTESTED same-run A-G

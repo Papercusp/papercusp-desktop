@@ -61,13 +61,20 @@ the trust-root half of the producer:
   after the final validator passes. Pre-banked attestations and local-only host
   pairs are refused.
 
-The real mutation/observation half remains deliberately absent as
-`bin/vm-rig/hive-git-physical-scenario.sh`. Until that checked-in scenario
-driver records fresh same-run A-G observations—including the E/P-306 bridge and
-G/P-308 crash/fence/retry/restart causality—the adapter exits non-zero without
-emitting evidence, and the canonical drill continues reporting E and G as
-SKIP. Do not replace it with an environment-supplied command or a pre-authored
-JSON file; those are the false-green paths this producer is designed to remove.
+The mutation/observation entrypoint is now checked in as
+`bin/vm-rig/hive-git-physical-scenario.sh`, but only its offline invocation,
+topology, output, and ordered A-G phase contract has landed. It validates the
+two producer-issued host identities, requires all three files to share the
+producer's private run directory, and then exits **before the first SSH or
+mutation** while any fixed phase executor is missing. `--contract-check` is the
+only successful mode in this revision and emits no evidence.
+
+The adapter therefore still exits non-zero without evidence, and the canonical
+drill continues reporting E and G as SKIP. It becomes execution-ready only when
+the checked-in fixed phases record fresh same-run A-G observations—including
+the E/P-306 bridge and G/P-308 crash/fence/retry/restart causality. Do not add an
+environment-supplied command or pre-authored JSON seam; those are the false-green
+paths this producer is designed to remove.
 
 ## `parity.sh` — the LIVE-1 parity runner (WI-7000)
 
