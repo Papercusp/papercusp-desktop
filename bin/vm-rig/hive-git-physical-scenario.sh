@@ -29,7 +29,7 @@
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-executor-v1'
+IMPLEMENTATION_STATE='offline-phase-a-executor-core-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,12 +52,12 @@ fail() {
 
 phase_a_contract() {
   cat <<'JSON'
-{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"A","planItem":"P-302","state":"executor-installed","ready":false,"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"tower-to-vm-cold-join"},"causalOrder":["towerStoreObserved","vmStoreQuarantinedByScenario","vmStoreAbsenceObserved","canonicalGitSyncBootstrapTriggered","vmStoreRecreatedAfterBootstrap","twoHostNamespaceAndObjectParityObserved"],"requiredObservations":["towerBareRepo","vmBareRepo","bothPhysicalDeviceNamespacesOnBothHosts","namespaceRefOidsMatch","referencedObjectsExistOnBothHosts","oneObjectDatabasePerRepo","eachDeviceWritesOnlyItsOwnNamespace","bootstrapCompletedAfterObservedAbsence"],"forbiddenEvidence":["preExistingVmStoreAsColdJoinProof","singleHostObservation","preAuthoredManifest","environmentSuppliedCommand"],"externalCommandOverrides":false}
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"A","planItem":"P-302","state":"executor-core-installed","ready":false,"missingAssertions":["eachDeviceWritesOnlyItsOwnNamespace"],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"tower-to-vm-cold-join"},"causalOrder":["towerStoreObserved","vmStoreQuarantinedByScenario","vmStoreAbsenceObserved","canonicalGitSyncBootstrapTriggered","vmStoreRecreatedAfterBootstrap","twoHostNamespaceAndObjectParityObserved"],"requiredObservations":["towerBareRepo","vmBareRepo","bothPhysicalDeviceNamespacesOnBothHosts","namespaceRefOidsMatch","referencedObjectsExistOnBothHosts","oneObjectDatabasePerRepo","eachDeviceWritesOnlyItsOwnNamespace","bootstrapCompletedAfterObservedAbsence"],"forbiddenEvidence":["preExistingVmStoreAsColdJoinProof","singleHostObservation","preAuthoredManifest","environmentSuppliedCommand"],"externalCommandOverrides":false}
 JSON
 }
 
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-core-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
