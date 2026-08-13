@@ -81,7 +81,7 @@
 declare -gA FRAME_ID FRAME_IP FRAME_USER FRAME_TOKEN FRAME_MEMBER_SLUG
 declare -ga RIG_FRAMES
 declare -g RIG_TOKEN RIG_SSH_KEY_ID RIG_SSH_IDENTITY
-declare -g RIG_STYPE RIG_IMAGE RIG_HONO_PORT RIG_PG_PORT
+declare -g RIG_STYPE RIG_IMAGE RIG_HONO_PORT RIG_PG_PORT RIG_ANNOUNCE_REFLUSH_MS
 declare -g RIG_WORK RIG_PKG RIG_SLUG RIG_SERVERS_FILE RIG_KEEP_UP
 declare -g RIG_HIVE_ID RIG_HIVE_PUBKEY RIG_HIVE_LINK RIG_REPO_URL
 declare -g RIG_QUOTA_LOCK_ID
@@ -195,6 +195,15 @@ rig_init() {
   # short grace, and `frozen` cannot arm at 0 peers by construction.
   # Set RIG_FROZEN_GRACE_MS=0 to leave the production 180s in place.
   RIG_FROZEN_GRACE_MS="${RIG_FROZEN_GRACE_MS:-45000}"
+
+  # WI-38376 P-002: SignedAnnounce.log_length is the writer-progress heartbeat,
+  # so the replication_soak rig must re-flush it comfortably inside its 90s SLA.
+  # Keep this RIG-ONLY: swarm.ts's production default remains five minutes.
+  # Fifteen seconds leaves several independent heartbeat opportunities before
+  # the 45s frozen detector fires, while still being negligible traffic (one
+  # small signed frame per local log). Override for diagnostics; 0 preserves the
+  # runtime kill-switch semantics.
+  RIG_ANNOUNCE_REFLUSH_MS="${RIG_ANNOUNCE_REFLUSH_MS:-15000}"
 
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
@@ -827,7 +836,7 @@ INSTEOF
   printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
     | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
         umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' RIG_ANNOUNCE_REFLUSH='${RIG_ANNOUNCE_REFLUSH_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
 # WI-183 class, seen LIVE on a --reuse relaunch (2026-07-17, frame b): a reused frame
@@ -870,6 +879,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
   ${RIG_FROZEN_GRACE:+PAPERCUSP_REPLICATION_FROZEN_GRACE_MS="$RIG_FROZEN_GRACE"} \
+  ${RIG_ANNOUNCE_REFLUSH:+PAPERCUSP_ANNOUNCE_REFLUSH_MS="$RIG_ANNOUNCE_REFLUSH"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
@@ -935,7 +945,7 @@ rig_kill_sidecar() {
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' RIG_ANNOUNCE_REFLUSH='${RIG_ANNOUNCE_REFLUSH_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 # serve.mjs needs the same actually-exited discipline as postgres below (WI-183 class):
@@ -987,6 +997,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
   ${RIG_FROZEN_GRACE:+PAPERCUSP_REPLICATION_FROZEN_GRACE_MS="$RIG_FROZEN_GRACE"} \
+  ${RIG_ANNOUNCE_REFLUSH:+PAPERCUSP_ANNOUNCE_REFLUSH_MS="$RIG_ANNOUNCE_REFLUSH"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
