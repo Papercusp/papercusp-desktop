@@ -901,6 +901,54 @@ if [[ "$_IDENTITY_LINT_STATUS" != "0" ]]; then
   exit 1
 fi
 
+# ── ASSEMBLED-BUNDLE IDENTITY GATE (EI-20304355477263736) ─────────────────────
+# WHY THIS IS NOT REDUNDANT WITH THE TWO SCANS ABOVE. build-desktop-sidecar.sh
+# identity-scans the sidecar it assembles, but that scan cannot be the last word:
+# `stage-env-sidecars.sh` and `stage-source-tree.sh` both write into
+# src-tauri/sidecar AFTER it returns, so everything they add is structurally
+# invisible to it. Measured on the 0.0.16-alpha tree (2026-08-13): the in-sidecar
+# scan covered 10,635 file(s) and expanded 0 archive(s); the SAME scanner pointed
+# at the SAME directory HERE covers 17,554 file(s) and expands 2 archive(s) —
+# parity with the per-leg AppDir gate (17,560 / 3, bin/build-appimage.sh step 3d).
+#
+# That gap cost 0.0.16-alpha attempt 5 a whole cut: an owner handle in a RETIRED
+# blueprint's YAML comment reached both sidecar/harness/** and
+# sidecar/env-sidecars/staging/harness/**, and was caught by the per-leg gate
+# ~40 MINUTES in, after four parallel Rust builds had already run.
+#
+# No scrub could have neutralised it first, and NOT for the extension reason it
+# looks like: stage-source-tree.sh's scrub has no extension filter at all (it
+# redacts whatever --source-leakers names, .yaml included) but only ever rewrites
+# what goes INTO source.tar.zst, while --scrub-text's .md/.mdx/.html/.htm/.txt/
+# .json suffix list applies only to the two doc trees build-desktop-sidecar.sh
+# points it at (internal-docs, apps/operator-docs). NOTHING scrubs
+# sidecar/harness/** or sidecar/env-sidecars/**. For those paths a SCAN is the
+# only remedy — which is precisely why its position is the whole ballgame.
+#
+# ORDERING + SCOPE fix, not a new rule and not a weakening: same scanner, same
+# literal set, same fail-closed semantics as the per-leg gate. Nothing that passes
+# today starts failing — anything this catches would have been caught by the leg
+# gate anyway, just after the builds. The leg gates stay exactly where they are and
+# become a cheap idempotent re-assert.
+#
+# ⚠ INVARIANT: this must run AFTER every bin/stage-*.sh call (they write into the
+# bundle) and BEFORE the first leg launches. Pinned by
+# packages/operator-core/lib/release-identity-gate-ordering.test.ts — a new staging
+# step added below this line reds that test instead of silently re-opening the gap.
+# Both bundled resource roots, because `resources` in src-tauri/tauri.conf.json is
+# exactly ["sidecar/**/*", "resources/*"] — scanning only the sidecar would leave a
+# 5-file / 1-archive hole (papercup-runtime.tar.gz, +11.7s to close) and reproduce
+# the unequal-scope defect in miniature. Measured 2026-08-13: sidecar 17,554 file(s)
+# / 2 archive(s) in 87.5s + resources 5 / 1 in 11.7s ≈ the per-leg AppDir gate's
+# 17,560 / 3, for ~99s against the ~40min of builds it now front-runs.
+echo "==> assembled-bundle identity gate (EI-20304355477263736): scanning the FULLY-staged bundle (scope-identical to the per-leg gate, ~40min earlier)"
+if ! python3 "$ROOT/bin/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
+  echo "ERROR: the fully-assembled sidecar carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
+  echo "       This is the SAME rule the per-leg AppDir/.app gate enforces; it now fires BEFORE ~40 minutes of Rust builds instead of after them." >&2
+  echo "       Fix the leak at its SOURCE in the monorepo (not in src-tauri/sidecar — that is regenerated build output), then re-run the cut." >&2
+  exit 1
+fi
+
 # ── BOOT GATE (desktop-release-0-0-8) — the sidecar must actually START ────────
 # 0.0.9 shipped a sidecar that could not boot on ANY platform (sharp native
 # missing from the closure copy). FIVE green cuts missed it, because a dev box
