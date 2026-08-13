@@ -63,8 +63,10 @@ the trust-root half of the producer:
 
 The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
-output, ordered A-G phase contract, and fixed Phase A cold-join executor
-have landed. `--phase-contract A` pins the test hive/repo and the causal operations:
+output, ordered A-G phase contract, fixed Phase A cold-join executor, and fixed
+Phase B bidirectional ref-announcement executor have landed.
+`--phase-contract A|B` exposes their exact contracts. Phase A pins the
+test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
 observe absence, invoke only the VM's canonical `git-sync:run`, then capture
 both bare repos. The shared producer rejects the result unless both identity-
@@ -79,12 +81,21 @@ for device-owned publication. Hermetic tests exercise real temporary bare repos
 plus spoofed signatures, stale VM signatures, warm-store, divergent-ref,
 missing-object, alternate-ODB, same-store, and causal-order negative controls.
 
-Phase A's own contract is complete, but the scenario remains globally
-`ready:false`: the executor is unreachable until the remaining fixed B-G
+Phase B then creates a fresh run-bound commit in the tower device namespace,
+drives only the source and destination canonical `git-sync:run` ticks, and
+requires the destination to observe the exact signed sigrefs OID, commit OID,
+payload hash, reachable-object count, and bounded causal latency. It repeats
+the same proof from VM to tower. The scenario never calls `git fetch` or
+`git bundle` directly and has no environment-supplied command seam, so the
+production ref-announce/Protomux git-upload-pack v2 path is the only transfer
+path that can satisfy the contract.
+
+Phase A and B's own contracts are complete, but the scenario remains globally
+`ready:false`: the executors are unreachable until the remaining fixed C-G
 executors land and the scenario's global `--require-ready` gate changes. The
 wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A code exists. There is no environment-supplied command or pre-authored
+Phase A-B code exists. There is no environment-supplied command or pre-authored
 manifest input.
 
 The scenario validates the two producer-issued host identities, requires all
