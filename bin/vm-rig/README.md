@@ -63,9 +63,10 @@ the trust-root half of the producer:
 
 The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
-output, ordered A-G phase contract, fixed Phase A cold-join executor, and fixed
-Phase B bidirectional ref-announcement executor, and fixed Phase C trust
-negative-control executor have landed. `--phase-contract A|B|C` exposes their
+output, ordered A-G phase contract, fixed Phase A cold-join executor, fixed
+Phase B bidirectional ref-announcement executor, fixed Phase C trust
+negative-control executor, and fixed Phase D production-spine materialization
+executor have landed. `--phase-contract A|B|C|D` exposes their
 exact contracts. Phase A pins the
 test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
@@ -104,12 +105,27 @@ signatures, mismatches, rollback verdicts, scope refusals, and store paths all
 match the fixed P-304 contract. There is no caller-supplied key, command, or
 manifest seam; Phase B remains the production transport proof.
 
-Phase A-C's own contracts are complete, but the scenario remains globally
-`ready:false`: the executors are unreachable until the remaining fixed D-G
+Phase D is a thin physical adapter over the production integration and
+worktree-bridge spine. It creates one fresh fixed commit below the steer tier on
+the VM, drives only canonical `git-sync:run` ticks, observes the exact pending
+integration-request row on the tower, and ratifies that row through
+`ratifyIntegrationRequest`. It then requires the tower's signed
+`pot-git:staging-advance` to appear identically in both physical event logs and
+requires the VM's canonical staging ref, worktree, and persisted bridge cursor
+to reach that signed head. A second fresh overlapping tower commit runs through
+the same production path while the VM's fixed sentinel file is dirty; acceptance
+requires the mirror and cursor to advance while the VM worktree head and the
+sentinel's content hash remain unchanged. Final evidence embeds this full causal
+object and re-runs the strict Phase D validator—there is no summary-only pass,
+local second-worktree substitute, caller-selected repo/worktree, direct fetch,
+or direct ref mutation seam.
+
+Phase A-D's own contracts are complete, but the scenario remains globally
+`ready:false`: the executors are unreachable until the remaining fixed E-G
 executors land and the scenario's global `--require-ready` gate changes. The
 wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A-C code exists. There is no environment-supplied command or pre-authored
+Phase A-D code exists. There is no environment-supplied command or pre-authored
 manifest input.
 
 The scenario validates the two producer-issued host identities, requires all
