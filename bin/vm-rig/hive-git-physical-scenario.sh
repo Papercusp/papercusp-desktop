@@ -2,16 +2,18 @@
 # hive-git-physical-scenario.sh — checked-in mutation/observation driver for
 # the P-505 two-machine hive-git release drill.
 #
-# This first landed increment is deliberately OFFLINE-ONLY. It pins the
-# invocation, topology, output, and ordered A-G phase contract, then stops
-# before the first ssh, service, database, git-ref, or Corestore operation.
+# The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
+# topology, output, ordered A-G phase contract, and Phase A cold-join
+# falsifiability contract, then stop before the first ssh, service, database,
+# git-ref, or Corestore operation.
 # Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
 # Future increments replace the seven fail-closed phase stubs below with fixed,
-# checked-in operations. Do not add an environment-supplied command seam or an
-# input-manifest escape hatch; either would re-introduce pre-banked evidence.
+# checked-in operations satisfying their offline contracts. Do not add an
+# environment-supplied command seam or an input-manifest escape hatch; either
+# would re-introduce pre-banked evidence.
 #
 # Canonical invocation (from hive-git-physical-probe.sh only):
 #   hive-git-physical-scenario.sh \
@@ -21,21 +23,36 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
+#   hive-git-physical-scenario.sh --phase-contract A
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-contract-v1'
+IMPLEMENTATION_STATE='offline-phase-a-contract-v1'
+PHASE_A_POT_HOME='hello-world-3-pot'
+PHASE_A_REPO_KEY='gh-1296269'
 
 fail() {
   echo "hive-git-physical-scenario: $*" >&2
   exit 1
 }
 
+phase_a_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"A","planItem":"P-302","state":"contract-only","ready":false,"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"tower-to-vm-cold-join"},"causalOrder":["towerStoreObserved","vmStoreRemovedByScenario","vmStoreAbsenceObserved","canonicalGitSyncBootstrapTriggered","vmStoreRecreatedAfterBootstrap","twoHostNamespaceAndObjectParityObserved"],"requiredObservations":["towerBareRepo","vmBareRepo","bothPhysicalDeviceNamespacesOnBothHosts","namespaceRefOidsMatch","referencedObjectsExistOnBothHosts","oneObjectDatabasePerRepo","eachDeviceWritesOnlyItsOwnNamespace","bootstrapCompletedAfterObservedAbsence"],"forbiddenEvidence":["preExistingVmStoreAsColdJoinProof","singleHostObservation","preAuthoredManifest","environmentSuppliedCommand"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"]}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"contract-only"}}\n' \
     "$IMPLEMENTATION_STATE"
+  exit 0
+fi
+if [ "${1:-}" = '--phase-contract' ]; then
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A'
+  [ "$2" = 'A' ] || fail "phase $2 has no installed offline contract"
+  phase_a_contract
   exit 0
 fi
 if [ "${1:-}" = '--require-ready' ]; then
@@ -119,7 +136,15 @@ phase_missing() {
 
 # The order is part of D-002: G may run only after the same physical run has
 # observed A-F. These fixed functions are intentionally not replaceable via env.
-phase_a_storage_join() { phase_missing A; }
+phase_a_storage_join() {
+  # The fixed target and causal assertions are inspectable with
+  # `--phase-contract A`, but the mutation/observer executor is deliberately
+  # absent. A warm two-repo snapshot must never be promoted as cold-join proof.
+  [ "$PHASE_A_POT_HOME" = 'hello-world-3-pot' ] \
+    && [ "$PHASE_A_REPO_KEY" = 'gh-1296269' ] \
+    || fail 'phase A target drifted from its checked-in contract'
+  phase_missing 'A (cold-join executor; contract-only)'
+}
 phase_b_ref_announce() { phase_missing B; }
 phase_c_staging_advance() { phase_missing C; }
 phase_d_worktree_materialization() { phase_missing D; }

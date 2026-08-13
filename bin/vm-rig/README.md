@@ -63,13 +63,19 @@ the trust-root half of the producer:
 
 The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`, but only its offline invocation,
-topology, output, and ordered A-G phase contract has landed. It validates the
-two producer-issued host identities, requires all three files to share the
-producer's private run directory, and then exits **before the first SSH or
-mutation** while any fixed phase executor is missing. `--contract-check` is the
-only successful mode in this revision and emits no evidence. The canonical
-wrapper calls `--require-ready` before its VM identity SSH, so an incomplete
-scenario cannot even contact the rig.
+topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
+adapter contract have landed. `--phase-contract A` pins the test hive/repo plus
+the causal before/after observations that must falsify a warm-store false green:
+the VM store is observed absent, canonical git-sync recreates it, both physical
+device namespaces and their referenced objects then agree on both hosts, and
+each device remains confined to its own namespace. The contract is explicitly
+`ready:false`; it is not an observation and cannot emit evidence.
+
+The scenario validates the two producer-issued host identities, requires all
+three files to share the producer's private run directory, and then exits
+**before the first SSH or mutation** while any fixed phase executor is missing.
+The canonical wrapper calls `--require-ready` before its VM identity SSH, so an
+incomplete scenario cannot even contact the rig.
 
 The adapter therefore still exits non-zero without evidence, and the canonical
 drill continues reporting E and G as SKIP. It becomes execution-ready only when
