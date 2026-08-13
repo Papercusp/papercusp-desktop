@@ -11,6 +11,7 @@
 # Usage:
 #   fed.sh <a|b> ports                      # show the discovered operator/PG ports
 #   fed.sh <a|b> sql  "<SQL>"               # psql against the VM's embedded PG
+#   fed.sh <a|b> sqlt "<SQL>"               # tuples-only, unaligned SQL for assertions
 #        (uses the guest's psql if on PATH, else the app's bundled
 #        sidecar/bin/psql — real client binaries ship with the app since
 #        2026-07-07; installs built before that shipped a broken pg_wrapper
@@ -61,7 +62,7 @@ vm="${1:-}"; cmd="${2:-}"; shift 2 2>/dev/null || true
 case "$vm" in
   a) sshp="${FED_SSH_A:-2225}" ;;
   b) sshp="${FED_SSH_B:-2226}" ;;
-  *) echo "usage: fed.sh <a|b> <ports|sql|api|mcp|ssh|rediscover|health> ..." >&2; exit 2 ;;
+  *) echo "usage: fed.sh <a|b> <ports|sql|sqlt|api|mcp|ssh|rediscover|health> ..." >&2; exit 2 ;;
 esac
 
 _ssh() { ssh "${SSHOPT[@]}" -p "$sshp" "$SSH_USER@$SSH_HOST" "$@"; }
@@ -127,10 +128,12 @@ case "$cmd" in
     echo "vm=$vm rediscovered: operator=$op pg=$pg"
     ;;
 
-  sql)
+  sql|sqlt)
     _resolve || exit 1
     b64=$(printf '%s' "${1:-}" | base64 -w0)
-    _ssh "P=\$(command -v psql || echo '/usr/lib/Papercusp GUI/sidecar/bin/psql'); echo $b64 | base64 -d | \"\$P\" 'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$pg/papercusp' -P pager=off 2>&1"
+    psql_output_args="-P pager=off"
+    [ "$cmd" = sqlt ] && psql_output_args="-tA -P pager=off"
+    _ssh "P=\$(command -v psql || echo '/usr/lib/Papercusp GUI/sidecar/bin/psql'); echo $b64 | base64 -d | \"\$P\" 'postgresql://harness_admin:harness_admin_pwd@127.0.0.1:$pg/papercusp' $psql_output_args 2>&1"
     ;;
 
   api)
@@ -201,5 +204,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "fed.sh: unknown cmd '$cmd' (ports|sql|api|mcp|ssh|rediscover|health)" >&2; exit 2 ;;
+    echo "fed.sh: unknown cmd '$cmd' (ports|sql|sqlt|api|mcp|ssh|rediscover|health)" >&2; exit 2 ;;
 esac
