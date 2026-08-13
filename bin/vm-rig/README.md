@@ -63,24 +63,26 @@ the trust-root half of the producer:
 
 The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
-output, ordered A-G phase contract, and fixed Phase A cold-join executor core
+output, ordered A-G phase contract, and fixed Phase A cold-join executor
 have landed. `--phase-contract A` pins the test hive/repo and the causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
 observe absence, invoke only the VM's canonical `git-sync:run`, then capture
 both bare repos. The shared producer rejects the result unless both identity-
 derived namespaces and every referenced object exist on both hosts, ref OIDs
 match exactly, the stores have independent fingerprints and local ODBs with no
-alternates, and the timestamps prove absence preceded bootstrap. Hermetic tests
-exercise real temporary bare repos plus warm-store, divergent-ref, missing-
-object, alternate-ODB, same-store, and causal-order negative controls. That
-verdict is deliberately `partial`: a static two-repo snapshot cannot prove
-which physical host authored a ref change, so the remaining
-`eachDeviceWritesOnlyItsOwnNamespace` witness is named as missing instead of
-being inferred from identity-derived namespace paths.
+alternates, and the timestamps prove absence preceded bootstrap. It also
+re-verifies each existing G-4 sigrefs signature against the exact observed
+ref→OID set for that device's namespace on both hosts. The rebuilt VM's own
+signed snapshot must be timestamped inside the bootstrap window, so a static
+path name, relay-written ref, or banked pre-cold-join signature cannot stand in
+for device-owned publication. Hermetic tests exercise real temporary bare repos
+plus spoofed signatures, stale VM signatures, warm-store, divergent-ref,
+missing-object, alternate-ODB, same-store, and causal-order negative controls.
 
-Phase A is still explicitly `ready:false`: the executor is unreachable until
-the remaining fixed B-G executors land and the scenario's global
-`--require-ready` gate changes. The wrapper checks that gate before its first VM
+Phase A's own contract is complete, but the scenario remains globally
+`ready:false`: the executor is unreachable until the remaining fixed B-G
+executors land and the scenario's global `--require-ready` gate changes. The
+wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
 Phase A code exists. There is no environment-supplied command or pre-authored
 manifest input.
