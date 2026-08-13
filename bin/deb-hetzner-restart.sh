@@ -122,6 +122,114 @@ _rd_assert_single() {
 # _rd_origin <inst> <feature_id> — echo "<slug>|<origin>" for the row (empty if absent).
 _rd_origin() { rig_read_content "$1" "$2"; }
 
+# _rd_log_line_mark <inst> — exact current application-log line count, or "?"
+# with a non-zero return when the remote log cannot be measured. Line offsets are
+# used instead of timestamps because serve.log is not uniformly timestamped.
+_rd_log_line_mark() {
+  local inst="$1" n
+  n="$(printf 'wc -l < %q 2>/dev/null\n' "$(drv_applog "$inst")" \
+    | drv_exec "$inst" 2>/dev/null | tail -1 | tr -d '[:space:]')"
+  case "${n:-}" in
+    ''|*[!0-9]*) echo "?"; return 1 ;;
+    *) echo "$n" ;;
+  esac
+}
+
+# _rd_actual_rows <inst> <feature_id> — ALL rows at the destination, preserving
+# the actual harness_slug|origin rather than filtering origin='remote' and then
+# throwing the row away (the old _rd_poll_remote blind spot).
+_rd_actual_rows() {
+  local inst="$1" fid="$2" rows
+  rows="$(drv_psql "$inst" "SELECT COALESCE(string_agg(harness_slug||'|'||origin, ',' ORDER BY harness_slug, origin), '<absent>') FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid';" 2>/dev/null | tr -d '\r\n')"
+  [ -n "$rows" ] && echo "$rows" || echo "<unavailable>"
+}
+
+# _rd_writer_outbox_row <inst> <feature_id> — raw
+# "id|harness_slug|drained(Y/N)|drained_log_key" for the writer's target row.
+# The drained_log_key is the exact own-log that accepted the outbox operation,
+# which lets the announce high-water below be matched to the correct local log
+# even when the process serves both a member and its -pot home log.
+_rd_writer_outbox_row() {
+  local inst="$1" fid="$2" row
+  row="$(drv_psql "$inst" "SELECT id::text||'|'||harness_slug||'|'||CASE WHEN drained_at IS NULL THEN 'N' ELSE 'Y' END||'|'||COALESCE(drained_log_key, '<none>') FROM harness_shared.substrate_outbox WHERE table_name='harness_features_consolidated' AND key='$fid' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '\r\n')"
+  [ -n "$row" ] && echo "$row" || echo "<absent>"
+}
+
+# _rd_writer_log_high_water <inst> <start-line> <end-line> <full-log-key>
+# Echo the latest env-gated sent-announce trace for the exact drained log in the
+# failed leg's write→timeout window. swarm.ts now prints signed log_length on
+# every sent/received announce, so this distinguishes never-appended from
+# appended-but-not-delivered without a second matrix.
+_rd_writer_log_high_water() {
+  local inst="$1" start="$2" end="$3" log_key="$4" out cmd
+  case "$start:$end" in *[!0-9:]*|:*|*:) echo "<window-unavailable>"; return 1 ;; esac
+  if [ "$log_key" = "<none>" ] || [ "$log_key" = "<absent>" ] || [ -z "$log_key" ]; then
+    echo "<not-appended>"; return 0
+  fi
+  cmd="$(printf 'sed -n %q %q 2>/dev/null | grep -F %q | grep -F %q | tail -1\n' \
+    "$((start + 1)),${end}p" "$(drv_applog "$inst")" '[announce-debug] sent ' "log=${log_key:0:12}... ")"
+  out="$(printf '%s' "$cmd" | drv_exec "$inst" 2>/dev/null | tr -d '\r')"
+  [ -n "$out" ] && echo "$out" || echo "<missing-after-write>"
+}
+
+# _rd_detector_window <inst> <start-line> <end-line> <harness-a> <harness-b>
+# Return only detector/repair evidence for this failed leg's exact log window.
+_rd_detector_window() {
+  local inst="$1" start="$2" end="$3" h1="$4" h2="$5" cmd
+  case "$start:$end" in *[!0-9:]*|:*|*:) return 2 ;; esac
+  cmd="$(printf 'sed -n %q %q 2>/dev/null | grep -E %q | grep -E %q || true\n' \
+    "$((start + 1)),${end}p" "$(drv_applog "$inst")" \
+    'replication_stalled|replication_frozen|repair-on-detect' \
+    "harness=(${h1}|${h2})(-pot)?[[:space:]]")"
+  printf '%s' "$cmd" | drv_exec "$inst" 2>/dev/null | tr -d '\r'
+}
+
+# _rd_emit_failed_leg_diagnostics <cycle> <leg> <writer> <receiver> <fid>
+#   <writer-start> <owner-start> <member-start> <owner> <member> <oslug> <mslug>
+# Emits one machine-readable verdict per FAILED LEG. b8-replication-soak.sh uses
+# these verdicts instead of grepping cumulative serve.log, so an earlier cycle's
+# detector fire can never false-pass a later blind failure.
+_rd_emit_failed_leg_diagnostics() {
+  local cycle="$1" leg="$2" writer="$3" receiver="$4" fid="$5" writer_start="$6"
+  local owner_start="$7" member_start="$8" owner="$9" member="${10}" h1="${11}" h2="${12}"
+  local owner_end member_end actual outbox outbox_id outbox_slug outbox_drained outbox_log high
+  local frame start end evidence stalls repairs detector_total=0 measurable=1
+
+  owner_end="$(_rd_log_line_mark "$owner")" || owner_end="?"
+  member_end="$(_rd_log_line_mark "$member")" || member_end="?"
+  actual="$(_rd_actual_rows "$receiver" "$fid")"
+  outbox="$(_rd_writer_outbox_row "$writer" "$fid")"
+  if [ "$outbox" = "<absent>" ]; then
+    outbox_id="<absent>"; outbox_slug="<absent>"; outbox_drained="N"; outbox_log="<absent>"
+  else
+    IFS='|' read -r outbox_id outbox_slug outbox_drained outbox_log <<<"$outbox"
+  fi
+  high="$(_rd_writer_log_high_water "$writer" "$writer_start" \
+    "$([ "$writer" = "$owner" ] && echo "$owner_end" || echo "$member_end")" "$outbox_log")"
+  echo "  ⚙ failed-leg row/outbox/high-water cycle=$cycle leg=$leg fid=$fid receiver=$receiver actual_rows=$actual writer=$writer writer_outbox=id=$outbox_id,harness=$outbox_slug,drained=$outbox_drained,log=$outbox_log writer_announce=$high"
+
+  for frame in "$owner" "$member"; do
+    if [ "$frame" = "$owner" ]; then start="$owner_start"; end="$owner_end"; else start="$member_start"; end="$member_end"; fi
+    if evidence="$(_rd_detector_window "$frame" "$start" "$end" "$h1" "$h2")"; then
+      stalls="$(printf '%s\n' "$evidence" | grep -cE 'replication_stalled|replication_frozen')"
+      repairs="$(printf '%s\n' "$evidence" | grep -c 'repair-on-detect')"
+      detector_total=$((detector_total + stalls))
+      echo "  ⚙ DETECTOR-CYCLE-WINDOW cycle=$cycle leg=$leg frame=$frame lines=$start-$end detector_events=$stalls repair_events=$repairs"
+      [ -z "$evidence" ] || printf '%s\n' "$evidence" | sed 's/^/       /'
+    else
+      measurable=0
+      echo "  ⚙ DETECTOR-CYCLE-WINDOW cycle=$cycle leg=$leg frame=$frame lines=$start-$end detector_events=? repair_events=?"
+    fi
+  done
+  if [ "$measurable" != 1 ]; then
+    echo "  ⚙ DETECTOR-CYCLE-VERDICT cycle=$cycle leg=$leg detector_events=? result=inconclusive"
+  elif [ "$detector_total" = 0 ]; then
+    echo "  ⚙ DETECTOR-CYCLE-VERDICT cycle=$cycle leg=$leg detector_events=0 result=blind"
+  else
+    echo "  ⚙ DETECTOR-CYCLE-VERDICT cycle=$cycle leg=$leg detector_events=$detector_total result=observed"
+  fi
+}
+
 # ── the scenario (operates on already-provisioned+joined frames a=owner, b=member) ─
 # Reads the rig globals FRAME_MEMBER_SLUG[a|b], FRAME_IP[*], FED_PG[*] (filled by
 # rig_owner_publish_hive + rig_join_all + rig_wait_*). Returns 0 = PASS, 1 = FAIL.
@@ -314,6 +422,10 @@ scenario_replication_liveness_soak() {
 
     # Leg A: owner → member.
     local fid_am="F-RLSOAK-${ts}-${i}-AM"
+    local -A legmark=()
+    for frame in "$OWNER" "$MEMBER"; do
+      legmark[$frame]="$(_rd_log_line_mark "$frame")" || legmark[$frame]="?"
+    done
     t0="$(date +%s)"
     rig_write_content "$OWNER" "$oslug" "$fid_am" "replication soak c$i owner→member" todo >/dev/null
     if _rd_poll_remote "$MEMBER" "$fid_am" "$tries" >/dev/null; then
@@ -330,11 +442,17 @@ scenario_replication_liveness_soak() {
       load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
       psi_o="$(_rd_remote_cpu_pressure "$OWNER")"; psi_m="$(_rd_remote_cpu_pressure "$MEMBER")"
       echo "  ✗ cycle $i A→B FAIL: $fid_am did not land on member within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m — cpu.pressure (frame-scoped): '$OWNER'=$psi_o '$MEMBER'=$psi_m"
+      _rd_emit_failed_leg_diagnostics "$i" "A-to-B" "$OWNER" "$MEMBER" "$fid_am" \
+        "${legmark[$OWNER]}" "${legmark[$OWNER]}" "${legmark[$MEMBER]}" \
+        "$OWNER" "$MEMBER" "$oslug" "$mslug"
       rc=1
     fi
 
     # Leg B: member → owner (the reverse direction P-059 also lost).
     local fid_ma="F-RLSOAK-${ts}-${i}-MA"
+    for frame in "$OWNER" "$MEMBER"; do
+      legmark[$frame]="$(_rd_log_line_mark "$frame")" || legmark[$frame]="?"
+    done
     t0="$(date +%s)"
     rig_write_content "$MEMBER" "$mslug" "$fid_ma" "replication soak c$i member→owner" todo >/dev/null
     if _rd_poll_remote "$OWNER" "$fid_ma" "$tries" >/dev/null; then
@@ -344,6 +462,9 @@ scenario_replication_liveness_soak() {
       load_o="$(_rd_remote_loadavg "$OWNER")"; load_m="$(_rd_remote_loadavg "$MEMBER")"
       psi_o="$(_rd_remote_cpu_pressure "$OWNER")"; psi_m="$(_rd_remote_cpu_pressure "$MEMBER")"
       echo "  ✗ cycle $i B→A FAIL: $fid_ma did not land on owner within ${sla_s}s — replication NOT re-established (WI-183 class) — loadavg at failure: '$OWNER'=$load_o '$MEMBER'=$load_m — cpu.pressure (frame-scoped): '$OWNER'=$psi_o '$MEMBER'=$psi_m"
+      _rd_emit_failed_leg_diagnostics "$i" "B-to-A" "$MEMBER" "$OWNER" "$fid_ma" \
+        "${legmark[$MEMBER]}" "${legmark[$OWNER]}" "${legmark[$MEMBER]}" \
+        "$OWNER" "$MEMBER" "$oslug" "$mslug"
       rc=1
     fi
   done

@@ -50,62 +50,23 @@ scn_replication_soak() {
   else
     echo "replication-liveness soak FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
-    # ── detector fire-path pin (WI-1840, proven live 2026-07-04 run on kept-up
-    # m1783120511 frames): when the SLA FAILS — replication genuinely dead past
-    # the 90s window — the connected_never_replicated axis MUST have fired on at
-    # least one frame within its 3min grace + the scenario's wait. A silent
-    # detector on a red soak is a DETECTOR regression (the m1783120511 round-1
-    # incident: per-join liveConnectionCount counter blind to pre-join sockets →
-    # swarmConnections=0 → axis disarmed; fixed by reading swarm.connections
-    # .size). This assert makes that class self-announcing instead of needing a
-    # by-hand serve.log autopsy. Grace(180s) < SLA-wait accumulation across both
-    # directions, so by scenario exit the line must exist on a true stall.
-    local frame hit=0 oslug mslug
-    oslug="${FRAME_MEMBER_SLUG[a]:-}"; mslug="${FRAME_MEMBER_SLUG[b]:-}"
-    # WI-5665/WI-5639 follow-up (bug-drain-200k, 2026-07-20): this pin used to
-    # grep for ANY "replication_stalled" line anywhere in serve.log, unscoped
-    # to harness — on a shared matrix pass, earlier scenarios (content_bidir
-    # etc.) federate a DIFFERENT fixed harness (e.g. hello-world/hello-world-
-    # pot) whose own transient stalls make this assert a false PASS even when
-    # the detector never fired for the harness THIS soak's F-RLSOAK probes
-    # actually replicate through (oslug/mslug). Verified live on run
-    # stamp=140846 (WI-5665, cycles 1-2 both-direction SLA miss, cpu.pressure
-    # all-zero on both frames): frame 'a's only connected_never_replicated/
-    # no_replicator events in the ENTIRE serve.log were for
-    # harness=hello-world/hello-world-pot, all logged BEFORE
-    # replication_soak's own cycles began (leftover from
-    # restart_durability/reconnect_catchup) — i.e. this pin was passing on
-    # coincidental unrelated noise, not real evidence the detector saw the
-    # soak's own stall. Scoping to the soak's own harness slugs makes the pin
-    # mean what it claims to mean. Falls back to the old unscoped check only
-    # if oslug/mslug somehow never resolved (shouldn't happen post-join).
-    #
-    # WI-5833 follow-up (2026-07-25): the scoped match above still missed a
-    # REAL stall on a genuinely-failing soak (banked stamp=153415) because it
-    # required a literal trailing space after the slug — but one hypercore is
-    # reported under BOTH "harness=<slug>" and its "-pot" sibling label (the
-    # same aliasing deb-hetzner-restart.sh:391-401 documents and handles for
-    # its own detector-noise assert; oslug==mslug=="hello-world" in
-    # production, and the real stall line logged harness=hello-world-pot).
-    # The old space-anchored regex never matches the "-pot" spelling, so a
-    # genuine fire was scored as a false "DETECTOR REGRESSION". Allow an
-    # optional "-pot" suffix before the word boundary so both label spellings
-    # count as the detector having seen the soak's own stall. Offline-verified
-    # against serve-a-153415.log: 0 matches under the old pattern, 1 (the real
-    # stall line) under this one.
-    for frame in a b; do
-      if [ -n "$oslug$mslug" ]; then
-        if drv_exec "$frame" <<<"grep -qE 'replication_stalled.*harness=(${oslug}|${mslug})(-pot)?[[:space:]]' /home/pcusp/serve.log" 2>/dev/null; then
-          hit=1
-        fi
-      elif drv_exec "$frame" <<<'grep -q "replication-liveness.*replication_stalled" /home/pcusp/serve.log' 2>/dev/null; then
-        hit=1
-      fi
-    done
-    if [ "$hit" = 1 ]; then
-      echo "      ✓ detector fire-path pin: replication_stalled present in serve.log for this soak's own harness (WI-1840 detector saw the stall)"
+    # ── detector fire-path pin (WI-38376) ───────────────────────────────────
+    # The scenario emits one DETECTOR-CYCLE-VERDICT for every failed probe leg,
+    # using exact per-leg serve.log line marks. Never re-read cumulative logs
+    # here: m1786605814 proved that an earlier cycle's legitimate detector fire
+    # can otherwise false-pass a later cycle whose real SLA miss was invisible.
+    local failed_legs evidence_verdicts blind observed inconclusive
+    failed_legs="$(printf '%s\n' "$out" | grep -cE '^  ✗ cycle [0-9]+ (A→B|B→A) FAIL:')"
+    evidence_verdicts="$(printf '%s\n' "$out" | grep -c 'DETECTOR-CYCLE-VERDICT')"
+    blind="$(printf '%s\n' "$out" | grep -c 'DETECTOR-CYCLE-VERDICT.*result=blind')"
+    observed="$(printf '%s\n' "$out" | grep -c 'DETECTOR-CYCLE-VERDICT.*result=observed')"
+    inconclusive="$(printf '%s\n' "$out" | grep -c 'DETECTOR-CYCLE-VERDICT.*result=inconclusive')"
+    if [ "$failed_legs" = 0 ] || [ "$evidence_verdicts" != "$failed_legs" ] || [ "$inconclusive" != 0 ]; then
+      echo "      ✗ detector fire-path INCONCLUSIVE: failed_legs=$failed_legs cycle_verdicts=$evidence_verdicts inconclusive=$inconclusive — every failed replication leg must carry a measurable line-bounded detector window"
+    elif [ "$blind" != 0 ]; then
+      echo "      ✗ DETECTOR REGRESSION: $blind/$failed_legs failed replication leg(s) emitted ZERO replication_stalled/replication_frozen events inside their own write→timeout windows (earlier-cycle events do not count)"
     else
-      echo "      ✗ DETECTOR REGRESSION: soak failed its SLA but NO replication_stalled line for this soak's own harness (oslug=$oslug mslug=$mslug) on either frame — the WI-1840 detector was blind to a real stall (check lastSwarmConnections via substrate:getReplicationLiveness RPC)"
+      echo "      ✓ detector fire-path pin: all $observed failed replication leg(s) carried a detector event inside their own write→timeout windows"
     fi
     # ── EI-19940993365684927: THE LAST LINE MUST BE THE VERDICT ──────────────
     # A gate artifact's final line must BE its verdict, or be MORE alarming than
