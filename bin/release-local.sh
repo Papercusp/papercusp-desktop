@@ -906,10 +906,10 @@ fi
 # identity-scans the sidecar it assembles, but that scan cannot be the last word:
 # `stage-env-sidecars.sh` and `stage-source-tree.sh` both write into
 # src-tauri/sidecar AFTER it returns, so everything they add is structurally
-# invisible to it. Measured on the 0.0.16-alpha tree (2026-08-13): the in-sidecar
-# scan covered 10,635 file(s) and expanded 0 archive(s); the SAME scanner pointed
-# at the SAME directory HERE covers 17,554 file(s) and expands 2 archive(s) —
-# parity with the per-leg AppDir gate (17,560 / 3, bin/build-appimage.sh step 3d).
+# invisible to it. The 0.0.16-alpha attempt-5 cut log shows the size of that blind
+# spot: the in-sidecar scan reported 10,635 file(s) / 0 archive(s) while the per-leg
+# AppDir gate (bin/build-appimage.sh step 3d) reported 17,560 / 3 — the SAME scanner
+# and the SAME rule, 40 minutes apart, judging two very different populations.
 #
 # That gap cost 0.0.16-alpha attempt 5 a whole cut: an owner handle in a RETIRED
 # blueprint's YAML comment reached both sidecar/harness/** and
@@ -937,13 +937,14 @@ fi
 # step added below this line reds that test instead of silently re-opening the gap.
 # Both bundled resource roots, because `resources` in src-tauri/tauri.conf.json is
 # exactly ["sidecar/**/*", "resources/*"] — scanning only the sidecar would leave a
-# 5-file / 1-archive hole (papercup-runtime.tar.gz, +11.7s to close) and reproduce
-# the unequal-scope defect in miniature. Measured 2026-08-13: sidecar 17,554 file(s)
-# / 2 archive(s) in 87.5s + resources 5 / 1 in 11.7s ≈ the per-leg AppDir gate's
-# 17,560 / 3, for ~99s against the ~40min of builds it now front-runs.
+# 5-file / 1-archive hole (resources/papercup-runtime.tar.gz IS the third archive
+# the leg scan expands) and reproduce the unequal-scope defect in miniature.
+# Measured 2026-08-13 by running this exact command: 17,559 file(s) / 3 archive(s)
+# in 136s — ONE file off the per-leg AppDir gate's 17,560 / 3, for ~2 minutes
+# against the ~40 minutes of builds it now front-runs.
 echo "==> assembled-bundle identity gate (EI-20304355477263736): scanning the FULLY-staged bundle (scope-identical to the per-leg gate, ~40min earlier)"
 if ! python3 "$ROOT/bin/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
-  echo "ERROR: the fully-assembled sidecar carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
+  echo "ERROR: the fully-assembled bundle (sidecar + bundled resources) carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
   echo "       This is the SAME rule the per-leg AppDir/.app gate enforces; it now fires BEFORE ~40 minutes of Rust builds instead of after them." >&2
   echo "       Fix the leak at its SOURCE in the monorepo (not in src-tauri/sidecar — that is regenerated build output), then re-run the cut." >&2
   exit 1
