@@ -134,6 +134,16 @@ B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 # reporting every replication leg red even though A had stayed local-only. The
 # durable machine identity makes ensureAttestationGist idempotently find the
 # existing valid gist; a missing/bad identity now fails here in seconds.
+#
+# EI-20192345878553998: that reuse is ALSO why ensureAttestationGist alone could
+# not detect the very condition this preflight was added for. It returns the
+# existing valid gist without ever reaching POST /gists, and GitHub's
+# unverified-email block is WRITE-ONLY — so this preflight passed, printed
+# "ready", and handed the gate ~50m of red content legs on an account that could
+# not mint an attestation at all (reproduced live: GET /gists 200, POST /gists
+# 422, preflight exit 0). Probe the WRITE capability explicitly first; inferring
+# it from a successful read is the same mistake as reading `git ls-remote`
+# exiting 0 as evidence that pushes work.
 preflight_attestation() {
   local expected_user="$1" token="$2" user_json user_id login gist_id
   user_json="$(GH_TOKEN="$token" gh api user 2>/dev/null)" || {
@@ -158,12 +168,19 @@ preflight_attestation() {
       PAPERCUSP_ATTEST_USER_ID="$user_id" \
       PAPERCUSP_ATTEST_LOGIN="$login" \
       npx tsx -e '
-        import { ensureAttestationGist, loadOrGenerateDeviceKeypair, verifyAttestation } from "./packages/operator-core/lib/identity/attest.ts";
+        import { ensureAttestationGist, loadOrGenerateDeviceKeypair, verifyAttestation, probeGistWriteCapability } from "./packages/operator-core/lib/identity/attest.ts";
         import { resolveDeviceKeychainId } from "./packages/operator-core/lib/identity/device-keychain-id.ts";
         async function main() {
           const githubUserId = Number(process.env.PAPERCUSP_ATTEST_USER_ID);
           const githubLogin = process.env.PAPERCUSP_ATTEST_LOGIN!;
           const token = process.env.PAPERCUSP_ATTEST_TOKEN!;
+          const cap = await probeGistWriteCapability(token);
+          if (!cap.ok) {
+            throw new Error(
+              `${githubLogin} CANNOT create attestation gists (${cap.code}): ${cap.detail}` +
+                (cap.remediation ? ` -- remediate: ${cap.remediation}` : ""),
+            );
+          }
           const keychainId = resolveDeviceKeychainId(githubUserId);
           const keypair = await loadOrGenerateDeviceKeypair(keychainId);
           const gistId = await ensureAttestationGist({
