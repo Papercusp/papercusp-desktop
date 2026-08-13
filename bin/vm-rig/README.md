@@ -65,8 +65,9 @@ The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
 output, ordered A-G phase contract, fixed Phase A cold-join executor, fixed
 Phase B bidirectional ref-announcement executor, fixed Phase C trust
-negative-control executor, and fixed Phase D production-spine materialization
-executor have landed. `--phase-contract A|B|C|D` exposes their
+negative-control executor, fixed Phase D production-spine materialization
+executor, and fixed Phase E GitHub-bridge executor have landed.
+`--phase-contract A|B|C|D|E` exposes their
 exact contracts. Phase A pins the
 test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
@@ -120,12 +121,30 @@ object and re-runs the strict Phase D validator—there is no summary-only pass,
 local second-worktree substitute, caller-selected repo/worktree, direct fetch,
 or direct ref mutation seam.
 
-Phase A-D's own contracts are complete, but the scenario remains globally
-`ready:false`: the executors are unreachable until the remaining fixed E-G
+Phase E is a thin adapter over the production GitHub bridge rather than a
+second bridge implementation. It observes legacy mode on both physical hosts,
+persists the fixed canary's bridged mode through `setPotGitMode`, drives both
+members only through `git-sync:run`, and requires both routine rows to report
+`commit-only:bridged` with no direct pushes. A fixed fresh upstream commit must
+become the exact `last_admitted` watermark; canonical staging, the bridge's
+egress head, and fork staging must then converge. Two direct executions of the
+production stall watchdog must stay quiet for that active commit-only routine.
+
+The same executor creates one fixed fork-ahead commit, requires the production
+bridge to emit a structured `egress-non-ff` escalation without moving canonical
+staging, restores only that exact fork head with force-with-lease, and rolls
+the mode back to legacy on both hosts. A RETURN trap performs best-effort lease
+recovery and legacy rollback if any intermediate assertion fails. Final
+evidence embeds the full Phase E causal object and re-runs its strict validator;
+a summary pass cannot satisfy the gate. Phases D and E share one scenario-level
+run id so both can bind to the eventual enclosing physical manifest.
+
+Phase A-E's own contracts are complete, but the scenario remains globally
+`ready:false`: the executors are unreachable until the remaining fixed F-G
 executors land and the scenario's global `--require-ready` gate changes. The
 wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A-D code exists. There is no environment-supplied command or pre-authored
+Phase A-E code exists. There is no environment-supplied command or pre-authored
 manifest input.
 
 The scenario validates the two producer-issued host identities, requires all

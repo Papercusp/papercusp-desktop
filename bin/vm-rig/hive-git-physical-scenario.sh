@@ -632,7 +632,186 @@ NODE
   "$TSX" "$PRODUCER" phase-d-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_e_github_bridge() { phase_missing E; }
+phase_e_github_bridge() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
+    || fail 'phase E local producer or canonical ptool is unavailable'
+
+  # Phase E drives the real mode row, git-sync member ticks, GitHub bridge,
+  # watchdog, and divergence escalation. The only direct GitHub mutations are
+  # the producer's fixed fresh upstream commit and lease-guarded fork control;
+  # there is no caller-selected repo, ref, remote, command, or evidence seam.
+  local phase_dir="$run_dir/phase-e"
+  local run_id="$physical_run_id"
+  local started_at finished_at
+  local tower_member_started tower_member_finished vm_member_started vm_member_finished
+  local ingress_started ingress_finished integrate_started integrate_finished egress_started egress_finished
+  local divergence_started divergence_finished rollback_tower_started rollback_tower_finished
+  local rollback_vm_started rollback_vm_finished
+  local mode_armed=0 divergence_armed=0
+  mkdir -m 700 "$phase_dir"
+
+  _phase_e_cleanup() {
+    set +e
+    if [ "$divergence_armed" -eq 1 ] && [ -s "$phase_dir/divergence-mutation.json" ]; then
+      "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
+        >"$phase_dir/cleanup-recovery.json" 2>"$phase_dir/cleanup-recovery.err"
+    fi
+    if [ "$mode_armed" -eq 1 ]; then
+      "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
+        >"$phase_dir/cleanup-mode.json" 2>"$phase_dir/cleanup-mode.err"
+    fi
+    set -e
+  }
+  trap _phase_e_cleanup RETURN
+
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-e-observe tower legacy-before "$tower_device" "$run_id" \
+    >"$phase_dir/tower-legacy-before.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-before '$vm_device' '$run_id'" \
+    >"$phase_dir/vm-legacy-before.json"
+
+  "$TSX" "$PRODUCER" phase-e-mode bridged "$run_id" \
+    >"$phase_dir/activation-mode.json"
+  mode_armed=1
+
+  tower_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/tower-member-raw.json"
+  tower_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  vm_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+    >"$phase_dir/vm-member-raw.json"
+  vm_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" \
+    >"$phase_dir/tower-bridged-member.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm bridged-member '$vm_device' '$run_id'" \
+    >"$phase_dir/vm-bridged-member.json"
+
+  "$TSX" "$PRODUCER" phase-e-ingress "$run_id" \
+    >"$phase_dir/ingress-mutation.json"
+  ingress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/healthy-ingress-raw.json"
+  ingress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/healthy-integrate-raw.json"
+  integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  egress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/healthy-egress-raw.json"
+  egress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" \
+    >"$phase_dir/healthy-observation.json"
+
+  "$TSX" "$PRODUCER" phase-e-watchdog 1 "$run_id" \
+    >"$phase_dir/watchdog-1.json"
+  "$TSX" "$PRODUCER" phase-e-watchdog 2 "$run_id" \
+    >"$phase_dir/watchdog-2.json"
+
+  "$TSX" "$PRODUCER" phase-e-observe tower divergence-before "$tower_device" "$run_id" \
+    >"$phase_dir/divergence-before.json"
+  "$TSX" "$PRODUCER" phase-e-diverge "$run_id" \
+    >"$phase_dir/divergence-mutation.json"
+  divergence_armed=1
+  divergence_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/divergence-egress-raw.json"
+  divergence_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" \
+    >"$phase_dir/divergence-after.json"
+  "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
+    >"$phase_dir/divergence-recovery.json"
+  divergence_armed=0
+
+  "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
+    >"$phase_dir/rollback-mode.json"
+  rollback_tower_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$phase_dir/rollback-tower-raw.json"
+  rollback_tower_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  rollback_vm_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+    >"$phase_dir/rollback-vm-raw.json"
+  rollback_vm_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" \
+    >"$phase_dir/tower-legacy-after.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-after '$vm_device' '$run_id'" \
+    >"$phase_dir/vm-legacy-after.json"
+  mode_armed=0
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
+    "$tower_member_started" "$tower_member_finished" "$vm_member_started" "$vm_member_finished" \
+    "$ingress_started" "$ingress_finished" "$integrate_started" "$integrate_finished" \
+    "$egress_started" "$egress_finished" "$divergence_started" "$divergence_finished" \
+    "$rollback_tower_started" "$rollback_tower_finished" "$rollback_vm_started" "$rollback_vm_finished" <<'NODE'
+const fs = require('node:fs');
+const [
+  dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey,
+  towerMemberStarted, towerMemberFinished, vmMemberStarted, vmMemberFinished,
+  ingressStarted, ingressFinished, integrateStarted, integrateFinished,
+  egressStarted, egressFinished, divergenceStarted, divergenceFinished,
+  rollbackTowerStarted, rollbackTowerFinished, rollbackVmStarted, rollbackVmFinished,
+] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
+  tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host, role, fired: true,
+  startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
+});
+const input = {
+  schemaVersion: 'hive-git-physical-phase-e-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  before: { tower: read('tower-legacy-before'), vm: read('vm-legacy-before') },
+  activation: {
+    modeChange: read('activation-mode'),
+    towerTrigger: trigger('tower', 'tower-member', towerMemberStarted, towerMemberFinished),
+    vmTrigger: trigger('vm', 'vm-member', vmMemberStarted, vmMemberFinished),
+    tower: read('tower-bridged-member'),
+    vm: read('vm-bridged-member'),
+  },
+  healthy: {
+    ingressMutation: read('ingress-mutation'),
+    ingressTrigger: trigger('tower', 'healthy-ingress', ingressStarted, ingressFinished),
+    integrateTrigger: trigger('tower', 'healthy-integrate', integrateStarted, integrateFinished),
+    egressTrigger: trigger('tower', 'healthy-egress', egressStarted, egressFinished),
+    observation: read('healthy-observation'),
+  },
+  watchdogSweeps: [read('watchdog-1'), read('watchdog-2')],
+  divergence: {
+    before: read('divergence-before'),
+    mutation: read('divergence-mutation'),
+    trigger: trigger('tower', 'divergence-egress', divergenceStarted, divergenceFinished),
+    after: read('divergence-after'),
+    recovery: read('divergence-recovery'),
+  },
+  rollback: {
+    modeChange: read('rollback-mode'),
+    towerTrigger: trigger('tower', 'rollback-observe', rollbackTowerStarted, rollbackTowerFinished),
+    vmTrigger: trigger('vm', 'rollback-observe', rollbackVmStarted, rollbackVmFinished),
+    tower: read('tower-legacy-after'),
+    vm: read('vm-legacy-after'),
+  },
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-e-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+  trap - RETURN
+}
 phase_f_restart_rejoin() { phase_missing F; }
 phase_g_crash_epoch_chaos() { phase_missing G; }
 
