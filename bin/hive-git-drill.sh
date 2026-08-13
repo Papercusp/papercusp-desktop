@@ -68,7 +68,8 @@
 #   HIVE_GIT_PHYSICAL_PROBE_CMD=/absolute/executable
 #               optional real-rig adapter; receives one argument (the JSON
 #               output path) and must bank schema hive-git-physical-evidence/v1
-#               with hash-matching raw witnesses from both physical hosts
+#               with hash-matching raw witnesses plus canonical-manifest
+#               Ed25519 attestations from both physical device identities
 #   HIVE_GIT_PHYSICAL_EVIDENCE_FILE=/absolute/evidence.json
 #               consume an already-banked result from that same real adapter
 #               (mutually exclusive with HIVE_GIT_PHYSICAL_PROBE_CMD)
