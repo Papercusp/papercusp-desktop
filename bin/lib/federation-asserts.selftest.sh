@@ -207,6 +207,24 @@ for account_launcher in \
   fi
 done
 
+# WI-38376 P-002: the writer-progress high-water rides periodic signed announce
+# re-flushes. Pin the rig-only 15s default AND both launch paths: setup and
+# restart each need the outer SSH handoff plus the inner sidecar env assignment.
+# Extract function bodies so two duplicate tokens elsewhere cannot false-green
+# a missing restart wire.
+RIG_LIB_FILE="$DIR/deb-hetzner-rig.sh"
+rig_setup_body="$(awk '/^rig_setup_frame\(\)/{p=1} p{print} p&&/^}$/{exit}' "$RIG_LIB_FILE")"
+rig_restart_body="$(awk '/^rig_restart_sidecar\(\)/{p=1} p{print} p&&/^}$/{exit}' "$RIG_LIB_FILE")"
+if grep -q 'RIG_ANNOUNCE_REFLUSH_MS="${RIG_ANNOUNCE_REFLUSH_MS:-15000}"' "$RIG_LIB_FILE" \
+  && printf '%s\n' "$rig_setup_body" | grep -q "RIG_ANNOUNCE_REFLUSH='" \
+  && printf '%s\n' "$rig_setup_body" | grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS=' \
+  && printf '%s\n' "$rig_restart_body" | grep -q "RIG_ANNOUNCE_REFLUSH='" \
+  && printf '%s\n' "$rig_restart_body" | grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS='; then
+  ok "deb rig applies the 15s announce re-flush heartbeat on initial launch and restart (WI-38376)"
+else
+  bad "deb rig no longer carries the 15s announce re-flush through BOTH initial and restart env blocks (WI-38376)"
+fi
+
 # 7b) EI-15308 (smoke-local copy): two-instance-hive-from-repo-smoke.sh's sc_launch
 # is a script-local launcher (not in this sourced lib, so `declare -f` can't see
 # it) that likewise sets HOME="$home". Static-grep it for the same PAPERCUSP_HOME
