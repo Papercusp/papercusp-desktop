@@ -1,0 +1,1 @@
+import{n as i}from"./chunk-ChpBd9eV.js";import{i as o,r as t}from"./roles-DB_bU9kT.js";function _(e){return r.has(t(e))}var r,n=i((()=>{o(),r=new Set(["mug","kettle","cup"])}));n();export{_ as isRetiredTierRole};

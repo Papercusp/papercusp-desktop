@@ -1,0 +1,1 @@
+import{a as i,c as E,i as s,n as a,o as n,r as t,s as r,t as S}from"./machine-authored-Bi_Q3FI8.js";s();export{S as AGENT_SESSION_SENDER_PATTERN,a as MACHINE_EMITTER_STAMP_PATTERN,t as MACHINE_SENDER_PATTERN,i as isAgentSessionSender,n as isMachineAuthoredSender,r as isMachineEmitterForStamping,E as isSystemEmissionUnderAgentIdentity};

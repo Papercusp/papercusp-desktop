@@ -1,0 +1,12 @@
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/materialize-triggers-2zRDm9LS.js","assets/materialize-triggers-mYxDLiib.js","assets/chunk-ChpBd9eV.js","assets/preload-helper-CcgcQsTF.js","assets/server-CB1HiStO.js","assets/types-B6UfiA7g.js","assets/src-6Py4l2MU.js","assets/src-CL56NiZm.js","assets/src-BmBNODK0.js","assets/node-module-browser-DndEyzys.js","assets/postgres-browser-CFiHlG7w.js","assets/resource-profile-DqktAQ65.js","assets/__vite-browser-external-56mrcCg8.js","assets/drizzle-orm-BbO4Lkx2.js","assets/zod-CZhQjvAS.js","assets/core-DFQ1sEXS.js","assets/cron-CQ-fl78O.js","assets/workspace-registry-Du2UbhlH.js","assets/workspace-als-CSW21ZcE.js","assets/workspace-id-constant-AQ2MH5pQ.js"])))=>i.map(i=>d[i]);
+import{n as S}from"./chunk-ChpBd9eV.js";import{n as d,t as L}from"./preload-helper-CcgcQsTF.js";import{a as f,o}from"./operator-home-harness-MSlRvOkW.js";import{i as g,t as E}from"./scheduler-9KmHbqG0.js";import{a as A,c as v,i as w,r as I,s as e,t as T}from"./learning-loop-health-D-D7qoyB.js";async function M(a,n,i={}){const _=[...new Set([...e.map(t=>A(t.blueprintId)),...e.map(t=>t.legacyRoutine)])],l=(await a`
+    SELECT install_slug, name, active, last_fired_at, next_fire_at,
+           metadata->'pause'->>'reviewBy' AS pause_review_by
+      FROM harness_shared.routines
+     WHERE workspace_id = ${n}
+       AND install_slug IN ${a([T,o()])}
+       AND name IN ${a(_)}`).map(t=>({installSlug:t.install_slug,name:t.name,active:!!t.active,lastFiredAt:t.last_fired_at==null?null:new Date(t.last_fired_at).toISOString(),nextFireAt:t.next_fire_at==null?null:new Date(t.next_fire_at).toISOString(),pauseReviewBy:t.pause_review_by??null})),s=(await a`
+    SELECT max(tick_at) AS last_tick_at
+      FROM harness_shared.scout_ticks
+     WHERE workspace_id = ${n}
+       AND origin = 'scout'`)[0]?.last_tick_at??null,{platformImprovementLoopsEnabled:m,isPlatformImprovementLoop:p}=await L(async()=>{const{platformImprovementLoopsEnabled:t,isPlatformImprovementLoop:c}=await import("./materialize-triggers-2zRDm9LS.js");return{platformImprovementLoopsEnabled:t,isPlatformImprovementLoop:c}},__vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19])),u=await m();return I(e,l,{nowMs:i.nowMs??Date.now(),staleAfterDays:i.staleAfterDays,homeSlug:o(),expectedMaterialized:t=>u||!p(t),activityLagGraceMs:r,activityByBlueprintId:{scout:{lastActivityAt:s==null?null:new Date(s).toISOString(),source:"scout_ticks"}}})}var r,R=S((()=>{v(),f(),g(),w(),d(),r=E+10*6e4}));export{M as n,R as t};

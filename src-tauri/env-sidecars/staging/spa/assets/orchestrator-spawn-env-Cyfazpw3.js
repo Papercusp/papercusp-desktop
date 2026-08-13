@@ -1,0 +1,1 @@
+import{n as _}from"./chunk-ChpBd9eV.js";function P(e){const r={HARNESS_SLUG:e.harnessSlug,PAPERCUSP_CHUNK_LOCK_PG:"1",PAPERCUSP_TURN_TRIGGER:e.turnTrigger??"cron"};return e.idempotencyKey&&(r.IDEMPOTENCY_KEY=e.idempotencyKey),e.workspaceId&&(r.PAPERCUSP_WORKSPACE_ID=e.workspaceId),r}var o=_((()=>{}));export{o as n,P as t};

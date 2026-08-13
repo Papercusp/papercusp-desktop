@@ -1,0 +1,1 @@
+import{n as t}from"./chunk-ChpBd9eV.js";import{s as o}from"./resource-profile-DqktAQ65.js";function s(r={}){return r.PAPERCUSP_DBOS_ORCHESTRATOR!=="0"}function a(r={}){return s(r)&&r.PAPERCUSP_DBOS_BACKUP==="1"}var _=t((()=>{o()}));export{s as n,_ as r,a as t};

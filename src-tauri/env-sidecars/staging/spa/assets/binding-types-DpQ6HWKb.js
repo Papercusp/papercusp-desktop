@@ -1,0 +1,1 @@
+import{n as i}from"./chunk-ChpBd9eV.js";function s(r,n){return r+":"+String(n)}var e,t=i((()=>{e=class extends Error{error;constructor(r){super(r.code),this.error=r,this.name="BindingServiceErrorThrowable"}}}));export{s as n,t as r,e as t};

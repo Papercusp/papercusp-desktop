@@ -1,0 +1,1 @@
+import{n as o,o as i}from"./chunk-ChpBd9eV.js";import{t as _}from"./__vite-browser-external-56mrcCg8.js";function c(t){if(!t.startsWith("codex-cli:"))return null;const r=t.slice(10).trim();return r?r==="~"?e.homedir():r.startsWith("~/")?`${e.homedir()}${r.slice(1)}`:r:null}var s,e,n,m=o((()=>{s=i(_(),1),e=i(_(),1),n="codex-cli:"}));export{m as n,c as r,n as t};

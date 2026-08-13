@@ -1,0 +1,1 @@
+import{n}from"./chunk-ChpBd9eV.js";import{n as u,r as o}from"./resource-profile-DqktAQ65.js";function c(r,e){return Math.max(1,Math.min(r,e))}function a(r){return c(r,u().dbosQueueConcurrency)}var s=n((()=>{o()}));export{a as n,s as t};

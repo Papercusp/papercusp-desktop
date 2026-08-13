@@ -2,7 +2,7 @@
 --
 -- workspace-data-isolation-leaks-2026-06-17 D-009 (ISSUE plane) — the engineer_issues
 -- analog of migration 360 (harness_docs) / migration 295 (plans/features). Owner-directed
--- (aviynw, 2026-06-22): scope issues PER-WORKSPACE, not the shared 'default' bus.
+-- (ownerhandle, 2026-06-22): scope issues PER-WORKSPACE, not the shared 'default' bus.
 --
 -- LOCKSTEP with the papercusp-issues-per-workspace flip (issuesScopeWorkspace() returns
 -- activeWorkspaceId() when ON, else the legacy 'default'). The data move + the flag flip

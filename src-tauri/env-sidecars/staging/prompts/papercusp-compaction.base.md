@@ -132,9 +132,12 @@ carry-respawn, a cold-loop fire, or a `claude --resume` rung even though the
 Two traps follow for a summary carrying an in-flight background job across this
 boundary:
 - **Never write `"await background task <id>"` as the next action** — the id is
-  a dead reference to the successor; if the work must survive the boundary use
-  `capability:bash { run_in_background: true }` (operator-owned, reattachable)
-  and checkpoint its `bash_id` instead.
+  a dead reference to the successor. `capability:bash { run_in_background: true }`
+  is operator-owned and its `bash_id` is reattachable while that operator stays
+  up, but it is **not restart-durable**: the current `systemd-run --scope` monitor
+  can take the payload down when :3070/:3170 restarts. Checkpoint the `bash_id`,
+  then re-verify it on the next wake; do not use it for work that must survive an
+  operator restart.
 - **A checkpoint's own claim that a job "COMPLETED" must be re-verified, not
   trusted at face value** — a backgrounding idiom (`cmd & echo launched pid $!`)
   can deliver a "task completed" notification for the WRAPPER shell while the

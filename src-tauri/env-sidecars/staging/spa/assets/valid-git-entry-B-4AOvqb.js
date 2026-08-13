@@ -1,0 +1,1 @@
+import{n as a,o as _}from"./chunk-ChpBd9eV.js";import{t as n}from"./__vite-browser-external-56mrcCg8.js";function c(s){const i=(0,e.join)(s,".git");let t;try{t=(0,r.statSync)(i)}catch{return!1}return t.isFile()?!0:t.isDirectory()?(0,r.existsSync)((0,e.join)(i,"HEAD")):!1}var r,e,f=a((()=>{r=_(n(),1),e=_(n(),1)}));export{f as n,c as t};

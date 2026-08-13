@@ -1,0 +1,1 @@
+import{n as s}from"./chunk-ChpBd9eV.js";function o(n,t){return t===0?n:`${n}~${t+1}`}function c(n){const t=n.lastIndexOf("~");return t===-1?n:n.slice(0,t)}var r,e=s((()=>{r="~"}));export{e as n,c as r,o as t};

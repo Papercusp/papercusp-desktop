@@ -1,0 +1,1 @@
+import{n as t}from"./chunk-ChpBd9eV.js";import{_ as p,c as i,o as n,u as c}from"./workspace-registry-Du2UbhlH.js";function _(){const e=c();let s=e.workspaces.find(a=>a.id===r);return s||(s={id:r,name:r,createdAt:Date.now()},e.workspaces.push(s),e.current||(e.current=r),p(e)),n(r),s}var r,k=t((()=>{i(),r="papercusp-workspace"}));export{_ as n,k as r,r as t};

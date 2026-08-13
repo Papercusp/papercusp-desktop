@@ -199,7 +199,7 @@ dependencies:
     # frontier task↔bee by affinity, then fans spawn + warm-inject across the fleet
     # in a single call — the serial placement loop collapsed.
     - fleet:place_batch
-    - cup:spawn
+    # (cup:spawn removed by P-059 — retired with the Mug/Kettle/Cup tier.)
     - harness:create
     - harness:escalation
     - harness:get

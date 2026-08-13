@@ -1,0 +1,1 @@
+import{a,c as i,d as e,i as t,l as n,n as o,o as E,p as _,r as u,s as f,t as m,u as R}from"./src-DlwRNy_t.js";a();export{m as DEFAULT_WASM_MEMORY_BUDGET_MB,o as KvQuotaError,u as PAPERCUSP_RUNTIME_VERSION,e as TIER_TABLE,t as defineService,E as isDaemonRuntime,f as isIframeSurface,i as isTuiPaneSurface,n as isWasmRuntime,_ as lookupTier,R as validateManifestEventDeclarations};

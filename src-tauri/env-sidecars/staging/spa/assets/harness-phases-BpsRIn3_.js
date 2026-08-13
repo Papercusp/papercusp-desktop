@@ -1,0 +1,1 @@
+import{n as r}from"./chunk-ChpBd9eV.js";function e(t,n){if(n==="staging")return t.path;const i=t.phases?.[n]?.path;return typeof i=="string"&&i.length>0?i:`${t.path}--${n}`}function a(t){return t==="testing"||t==="production"||t==="staging"?t:"staging"}var g=r((()=>{}));export{e as n,a as r,g as t};

@@ -62,7 +62,7 @@ documenter → curator — and humans approve at gates. **The `pot` blueprint is
 NO spine. Don't apply coding-spine roles to a pot —
 [pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint).**
 ⚠ That blueprint's original dispatcher — a **Mug** placing ranked work onto generic
-`cup`s — is **RETIRED** (`papercusp-mug-kettle-system`, default OFF): `cup:spawn`
+`cup`s — is **RETIRED** permanently (the gate flag was DELETED): `cup:spawn`
 REFUSES, so a pot no longer places work on its own. A **FLEET** is the fan-out
 (`fleet:launch-on-plan`); the shared pot substrate itself survives ungated (D-003).
 **Hand work to fleet members through the hybrid claim-spec dispatch
@@ -119,6 +119,13 @@ transaction (`audit:list`) and fail `workspace_required` until you pass
 `papercusp:list_workspaces` → `harness:list { workspace }` → the per-harness
 verb. Don't paper over a missing workspace/slug with a default — ask one short
 question.
+
+**Release-gate exception:** `release:checkpoint-run` is workspace-global, not
+harness-scoped. Its live schema accepts only `force`, `replaceStale`, `paths`,
+`waitForEligibility`, and `reason`; do **not** pass `harness` to it. It runs the
+shared green-checkpoint pipeline, so call it with only the arguments its live
+schema declares (or no arguments), even when the surrounding diagnosis names a
+specific harness.
 
 ## The tool surface
 
@@ -368,7 +375,7 @@ wakes spinning). Arm it as the LAST thing before you end your turn. *(Behind the
 loops ONLY — it is **NOT** the autonomous Blender loop, which is a separate
 system (`pot:declare-wake`); never `loop:arm` from an
 autonomous-fleet agent. ⚠ The mug/cup/kettle half of that loop is **RETIRED**
-(`papercusp-mug-kettle-system`, default OFF): `kettle:declare-wake` REFUSES, while
+permanently (the gate flag was DELETED): `kettle:declare-wake` REFUSES, while
 `pot:declare-wake` survives ungated (D-003 keeps the shared pot substrate).
 
 **Then CLOSE YOURSELF — `session:end` (WI-6638).** Ending your loop does not end your
@@ -399,8 +406,8 @@ stamp before acting: a fleet **leader** draining ITS members
 pause. Pull live fleet state on demand with `pot:get-steering`; a fleet
 is paused only by an explicit `fleet:*` / owner action, never as a side-effect of a
 pot pause you happened to read. ⚠ The other stamp source — `pot-mug(<pot>)→pot-wide`
-— came from the **RETIRED** Mug placement loop and is not emitted while
-`papercusp-mug-kettle-system` is OFF; treat one as a flag-ON testing artifact.
+— came from the **RETIRED** Mug placement loop and is no longer emitted at
+all; treat any occurrence as stale data, never a live signal.
 
 ## Modes — official state, offers, and the new-project intake
 
@@ -782,7 +789,10 @@ mug-memory-hybrid L1b).
   fact to the next reader** — including your own next self, who inherits your
   conclusions without the derivation that produced them.
   - **Goal** → `coord:orient { intent }` at the start (it DECLARES to peers in
-    the same call), `loop:arm { goal }` for an armed loop, and `why: { goalRef }`
+    the same call) — or, when an `## Orientation` block already arrived and
+    oriented you, `coord:declare-intent { intent, planItems }` alone, which
+    declares + claims your lane without re-paying orient's full read;
+    `loop:arm { goal }` for an armed loop, and `why: { goalRef }`
     on a `coord:send` so the recipient queries the goal's LIVE state instead of
     trusting your snapshot of it. A ruling OTHER lanes must follow is a plan
     Decision (`plans:add-decision`), never only a message — a message is not
@@ -903,7 +913,7 @@ A live **subscribe→inject** substrate routes work across agents by **topic**:
   `new_topic` to learn of new ones). `topics:feed { topic }` reads everything
   tagged an area.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
   Need a decision only the owner can make? `coord:ask-owner`.

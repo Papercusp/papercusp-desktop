@@ -1,0 +1,1 @@
+import{n}from"./chunk-ChpBd9eV.js";function s(r){o.set(r.name,r)}function i(r){return o.get(r)}function a(r){const e=o.get(r);if(!e)throw new Error(`coord-op "${r}" is not registered (known: ${[...o.keys()].sort().join(", ")||"<none>"})`);return e}function p(){return new Set(o.keys())}var o,u=n((()=>{o=new Map}));export{a,s as i,i as n,u as r,p as t};

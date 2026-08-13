@@ -46,7 +46,7 @@ SELECT
   'active',
   to_char(now(), 'YYYY-MM-DD'),
   to_char(now(), 'YYYY-MM-DD'),
-  COALESCE(r.ratified_by, r.created_by, 'aviynw@gmail.com'),
+  COALESCE(r.ratified_by, r.created_by, 'ownerhandle@gmail.com'),
   '[]'::jsonb,
   '[]'::jsonb,
   'Rubric-template plan (template:rubric) migrated from the v1 rubrics table (P-007). The hive-coordination-health scorecard the Overwatch grades every turn (14 criteria — the founding 13 plus scheduler-usage, mig 371); structured fields live in template_data, queried via rubrics:list/get/search. Long-form per-criterion METHOD: the agent-insights runbook named by template_data.methodRef.',

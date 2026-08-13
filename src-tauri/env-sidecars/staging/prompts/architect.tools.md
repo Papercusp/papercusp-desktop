@@ -94,7 +94,7 @@ in sync, routed by **topic**:
   { topic }` shows every open issue/conversation/feature/plan in an area —
   essential context before you shape new work.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real defect or gap you surface while planning →

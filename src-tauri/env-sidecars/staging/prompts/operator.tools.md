@@ -39,8 +39,8 @@ improvements backlog" below.)
 For OPERATOR specifically: use the `<spawn role="..." harness="..." />`
 tag in your turn output — it is the ONLY live path. It routes through the
 durable nursery dispatcher (recorded in `spawned_agents`, visible via
-`fleet_tree`). There is no MCP tool form to fall back to: `cup:spawn`
-refuses while the Mug/Kettle/Cup tier is retired, so you cannot get a
+`fleet_tree`). There is no MCP tool form to fall back to: the cup-spawn
+tool refuses while the Mug/Kettle/Cup tier is retired, so you cannot get a
 spawn_id back in-turn — acknowledge the launch and move on.
 
 1. Name the harness: `harness="<registry slug>"` (the project the user is

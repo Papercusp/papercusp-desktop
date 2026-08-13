@@ -108,6 +108,9 @@ kickoff adds mission specifics, never this:
   An empty result is SIGNAL, not a fault: the lane is drained, DAG-blocked, or scoped
   away from you. Don't spin on it, and don't cherry-pick the raw backlog around it —
   but a nonempty queue you can see + an idle you = a SPEC bug: report it to the leader.
+  When the claim returns `freshness.lane:'validation'`, run the cheapest current-HEAD
+  reproduction or focused test BEFORE implementation. The score is a routing hint, never
+  closure evidence: an already-fixed result still closes only with the verification you ran.
 - **Claim via a `wip`-flip or the work-items pull — never hand-edit plan files** beyond
   status flips. An ad-hoc unit gets its work-item ATOMICALLY: `work_items:create { kind,
   title, assign_to: self }` (creates AND claims in one write — no create→claim race).
@@ -127,9 +130,11 @@ kickoff adds mission specifics, never this:
   TURN; the wake carries the payload. Only when no event exists for the condition,
   re-arm at a longer interval sized to the blocker and RESTORE the cadence the instant
   it clears.
-- **Report to the LEADER via `coord:send`** — terminal outcomes, blockers WITH diagnosis,
-  and anything fleet-wide (a shared-tree fault you hit — broken deps, a wedged service —
-  is the leader's to fix fleet-wide: say so, don't route around it silently).
+- **Report exceptions to the LEADER via `coord:send`.** A successful
+  `work_items:complete` already routes its structured completion to the current fleet
+  leader — do NOT send a second completion FYI. Send blockers WITH diagnosis, cross-lane
+  rulings, and anything fleet-wide (a shared-tree fault you hit — broken deps, a wedged
+  service — is the leader's to fix fleet-wide: say so, don't route around it silently).
 - **Never contest a live peer's claim** — a `claim_conflict` means coordinate with the
   holder, not take the item.
 - **A gate opens on the LEADER'S emitted event — never on a peer's announcement of
@@ -360,8 +365,8 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     real desktop terminals — `cup:spawn` / `fleet:place_batch` spawn HEADLESS nursery cups (no
     window on the owner's desktop, Mug-supervised — NOT the same as option D's headless su
     FLEET), so NEVER use them for a "desktop fleet." ⚠️ And they are not a fallback either: the
-    Mug-supervised nursery tier is **RETIRED** behind `papercusp-mug-kettle-system` (default OFF
-    = the delivered end state), so `cup:spawn` REFUSES — a FLEET is the only fan-out. ⚠️ Only OFFER options C/D when
+    Mug-supervised nursery tier is **RETIRED** permanently — the gate flag was DELETED, so
+    there is no flag to flip and `cup:spawn` REFUSES; a FLEET is the only fan-out. ⚠️ Only OFFER options C/D when
     `fleet:launch-on-plan` is actually in your toolset (some client surfaces expose only the
     nursery-cup tools); if not, say so and don't present a fleet you can't launch. When no fleet is active, label option B "(there are no active fleets)" so the
     owner sees why B was skipped.
@@ -375,7 +380,7 @@ Launch-tool routing reference: [Launching agents — which tool for which door](
     *fleet* is NOT cups: `fleet:launch-on-plan { headless: true }` launches leader-led su
     MEMBERS; `cup:spawn` / `fleet:place_batch` launch Mug-supervised nursery CUPS (count in
     beeCount, no fleet, no leader) — never conflate them, and note the cup half is RETIRED
-    (`papercusp-mug-kettle-system`, default OFF) so `cup:spawn` REFUSES. Availability is identical to D (both
+    permanently (the gate flag was DELETED) so `cup:spawn` REFUSES. Availability is identical to D (both
     are `fleet:launch-on-plan`), so offer D and E together or neither; visible-vs-headless is
     just the `headless` knob, INDEPENDENT of the carry knob below.
 - **NEVER OFFER A ROUTE YOU HAVE NOT CONFIRMED YOU CAN EXECUTE.** Before a route reaches
@@ -607,8 +612,13 @@ it is easy to never see. They answer the box; the text above it silently dies. T
   verify it actually resolves — `Artifact { action:'list' }` should show it, or `WebFetch` the
   URL directly — rather than trusting the tool call that produced it. Prefer recording the
   SOURCE FILE PATH alongside the URL, not the bare URL alone: a source path lets any later
-  reader republish (same path → same URL) even if the citation turns out stale, where a bare
-  dead URL is a dead end. (EI-19944806095285549 — a checkpoint asserted a delivered artifact
+  reader republish rather than dead-end, where a bare dead URL is a dead end. **After a
+  carry-respawn, pass the recorded `url` explicitly when updating the artifact**: native
+  Artifact identity is conversation-scoped, so republishing by the same source path alone
+  can silently fork a second artifact. If the update returns a different URL, stop and
+  re-resolve both artifacts before citing either one. (EI-20208902739802837 — a carry-respawn
+  republished the same path into a stale twin; the existing URL + source path were available,
+  but the update omitted `url`.) (EI-19944806095285549 — a checkpoint asserted a delivered artifact
   URL that did not exist; `Artifact { action:'list' }` showed nothing published that day and
   `WebFetch` 404'd it. The publish-time error for an update conflict ("hasn't viewed the
   latest version... read it first") reads exactly like "the artifact exists and was changed
@@ -738,7 +748,7 @@ AUTO you skip the ask and still register per the tiers.
   (`coord:catch-up { audience }` as a member, `coord:feed { audience }` as the firehose) — never
   a state tool. Full map: the `presence-vs-history-who-is-on-what` agent-insights doc.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
   Need a decision only the owner can make? `coord:ask-owner`.
@@ -761,6 +771,12 @@ AUTO you skip the ask and still register per the tiers.
   costs seconds; the uncaptured friction re-costs every next agent the same discovery.
   **Filing a suspected bug is
   unconditional — the only judgment call is fix-now vs leave-it-filed, never whether to file.**
+  For a suspected TOOL-CALL failure, preserve that immediacy without exciting the work queue:
+  pass `improvements:capture { toolFailure:{ toolName, errorCode?, status?, message,
+  schemaRevision?, fieldPath?, runtimeVersion? } }`. A one-off lands immediately in correlated,
+  non-claimable probation; a second independent reporter or the invocation-ledger watchdog
+  promotes the SAME row. Set `reproduced:true`, `clearServerMismatch:true`, or
+  `hardInternal:true` only when you have that direct evidence — those bypass probation.
   A "bug" includes SUB-OPTIMAL, not just a hard stopper: a false alarm / wrong reading from any
   monitor or tracker (a false alarm is a bug in the alarm), a flap that self-recovered,
   degradation under load — the system must stay responsive at ANY load, so load-correlated

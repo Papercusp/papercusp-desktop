@@ -155,3 +155,9 @@ COMMENT ON COLUMN harness_shared.bash_tool_substitutions.bash_pattern IS
 
 COMMENT ON COLUMN harness_shared.bash_tool_substitutions.tier IS
   'observe = log the match, change nothing. advise = ride out as additionalContext on the gate''s existing permissionDecision:''allow'' (the command still runs). deny = block. Default advise for substitutions; deny reserved for policy-violation rows.';
+
+COMMENT ON COLUMN harness_shared.bash_tool_substitutions.baseline_calls IS
+  'Frozen count of matching Bash atoms measured when this registry row began observing; re-seeding must not overwrite this before-measurement denominator.';
+
+COMMENT ON COLUMN harness_shared.bash_tool_substitutions.baseline_sessions IS
+  'Frozen count of distinct sessions contributing to the matching Bash atoms when this registry row began observing; re-seeding must not overwrite this before-measurement denominator.';

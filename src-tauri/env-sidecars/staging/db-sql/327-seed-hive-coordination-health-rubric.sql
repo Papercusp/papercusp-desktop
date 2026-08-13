@@ -157,7 +157,7 @@ VALUES (
   'active',
   'su-5695e3da-622d-4cd2-ae65-75c70a2e71c1',
   'su-5695e3da-622d-4cd2-ae65-75c70a2e71c1',
-  'aviynw@gmail.com'
+  'ownerhandle@gmail.com'
 )
 ON CONFLICT (workspace_id, rubric_id) DO UPDATE SET
   characteristic = EXCLUDED.characteristic,

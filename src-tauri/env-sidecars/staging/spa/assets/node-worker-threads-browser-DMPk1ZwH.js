@@ -1,0 +1,1 @@
+import{n}from"./chunk-ChpBd9eV.js";function r(){throw new Error("node:worker_threads is server-only and cannot run in the operator-vite browser bundle")}var e,s,a,_=n((()=>{e={get(t,o){return o===Symbol.toPrimitive||o==="toString"?()=>"[worker_threads-browser-shim]":r},apply:r,construct:r},s=new Proxy(function(){r()},e),a=new Proxy({},e)}));export{_ as n,s as t};

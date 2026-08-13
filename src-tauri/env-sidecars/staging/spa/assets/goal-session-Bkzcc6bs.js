@@ -1,0 +1,1 @@
+import{n as r}from"./chunk-ChpBd9eV.js";function i(n){if(!n)return null;for(const o of n){if(typeof o=="string"||o?.mode!=="goal")continue;const t=o.subject;if(typeof t=="string"&&t.trim()!=="")return t}return null}function a(n){return i(n)!==null}var s,u=r((()=>{s="goal"}));export{a as i,i as n,u as r,s as t};

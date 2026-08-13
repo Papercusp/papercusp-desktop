@@ -1,1 +1,0 @@
-var a={}.hasOwnProperty;function e(o,c){const i=c||{};function n(t,...d){let r=n.invalid;const s=n.handlers;if(t&&a.call(t,o)){const l=String(t[o]);r=a.call(s,l)?s[l]:n.unknown}if(r)return r.call(this,t,...d)}return n.handlers=i.handlers||{},n.invalid=i.invalid,n.unknown=i.unknown,n}export{e as t};

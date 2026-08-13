@@ -70,7 +70,7 @@ You share a live coordination substrate with other agents, routed by **topic**:
   updates inject into your context;
   `topics:feed { topic }` shows everything tagged an area.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real problem outside your current chunk →

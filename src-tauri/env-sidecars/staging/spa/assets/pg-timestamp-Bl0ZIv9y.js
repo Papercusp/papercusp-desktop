@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-ChpBd9eV.js";function i(t){if(t instanceof Date)return t.toISOString();if(typeof t=="number")return new Date(t).toISOString();if(t==null)return"";const n=String(t),r=new Date(n);return Number.isNaN(r.getTime())?n:r.toISOString()}function s(t){return t==null?null:i(t)}var a=e((()=>{}));export{i as n,s as r,a as t};

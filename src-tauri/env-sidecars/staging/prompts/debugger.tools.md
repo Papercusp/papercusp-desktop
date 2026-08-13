@@ -76,7 +76,7 @@ The coordination substrate keeps you in sync with other agents, routed by **topi
   high-churn); `topics:feed { topic }` shows open
   issues/conversations/features/plans in an area — often the bug is already filed.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real defect that's out of your current

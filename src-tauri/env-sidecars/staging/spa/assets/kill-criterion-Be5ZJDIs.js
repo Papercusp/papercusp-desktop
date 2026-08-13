@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-ChpBd9eV.js";function a(i){const n=i.trim();return n.length<12||t.test(n)?`killCriterion '${n}' states no abandonment condition — GOAL mode requires a concrete one, and it is the only thing that can ever stop this goal`:null}var o,t,l=e((()=>{o=12,t=/^(tbd|n\/?a|none|unknown|todo)\b/i}));export{a as n,l as t};

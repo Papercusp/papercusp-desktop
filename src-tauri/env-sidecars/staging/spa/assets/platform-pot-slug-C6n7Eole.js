@@ -1,0 +1,1 @@
+import{n as i}from"./chunk-ChpBd9eV.js";function n(r){return t.includes(r)?a:r}function e(r){return r.startsWith("harness:")?n(r.slice(8).trim())===a:!1}var a,t,p=i((()=>{a="papercusp",t=["papercup","papercup-hive"]}));export{e as a,p as i,a as n,n as r,t};

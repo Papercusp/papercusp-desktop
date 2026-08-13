@@ -79,7 +79,7 @@ The coordination substrate keeps you in sync with other agents, routed by **topi
   every open issue/conversation/feature/plan in an area — read it as part of the
   READ-heavy scoping phase.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
 - **File what you discover.** A real defect or gap you surface while scoping →

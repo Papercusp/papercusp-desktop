@@ -1,0 +1,1 @@
+import{a as s,c as e,i as o,l as r,n as i,o as l,r as p,s as n,t as u,u as C}from"./couplings-NYsUNHH8.js";s();export{u as COUPLING_REASON_MAX,i as DERIVED_COUPLING_RELATIONS,p as SELF_TOKEN,o as declareCoupling,l as listCouplingsFor,n as normalizePair,e as peerOf,r as resolveCoupledPeers,C as suppressCoupling};

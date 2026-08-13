@@ -1,0 +1,1 @@
+body:has(.h-feature-peek-drawer[data-state=open]) .dv-tab,body:has(.h-issue-detail-drawer[data-state=open]) .dv-tab{pointer-events:none}body:has(.h-feature-peek-drawer[data-state=open]) .dv-tab .dv-tab-action,body:has(.h-issue-detail-drawer[data-state=open]) .dv-tab .dv-tab-action{pointer-events:auto}

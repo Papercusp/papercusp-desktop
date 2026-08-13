@@ -1,0 +1,8 @@
+import{n as T}from"./chunk-ChpBd9eV.js";import{st as m,t as f}from"./src-BmBNODK0.js";function n(s){const e=typeof s=="string"?Number(s):s;return typeof e=="number"&&Number.isFinite(e)?e:0}function g(s,e){return s`
+    SELECT run_id, ts, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, turn_count
+      FROM harness_shared.agent_usage_samples
+     WHERE workspace_id = ${e.workspaceId}
+       AND role = 'mug'
+       ${e.harnessSlug?s`AND harness_slug = ${e.harnessSlug}`:s``}
+     ORDER BY ts DESC
+     LIMIT ${e.limit}`}function C(){return{fetchSamples:async s=>g(m().sql,s)}}async function W(s,e={}){const u=(await{...C(),...e.deps}.fetchSamples({workspaceId:s,harnessSlug:e.harnessSlug,limit:e.limit??50})).map(t=>({runId:t.run_id,tsMs:n(t.ts),inputTokens:n(t.input_tokens),outputTokens:n(t.output_tokens),cacheReadTokens:n(t.cache_read_tokens),cacheCreationTokens:n(t.cache_creation_tokens),costUsd:t.cost_usd==null?null:n(t.cost_usd),turns:t.turn_count==null?null:n(t.turn_count)}));let c=0,a=0,l=0,i=0,k=0,_=0,r=0,o=0;for(const t of u)c+=t.inputTokens,a+=t.cacheReadTokens,l+=t.cacheCreationTokens,i+=t.outputTokens,k+=t.costUsd??0,t.cacheReadTokens>0&&(_+=1),t.turns!=null&&(r+=t.turns,o+=1);const h=a+l+c,p=h>0?a/h:0,d=o>0?r/o:null;return{wakes:u.length,cachedWakes:_,totalInputTokens:c,totalCacheReadTokens:a,totalCacheCreationTokens:l,totalOutputTokens:i,totalCostUsd:k,cacheHitRatio:p,avgTurns:d,totalTurns:r,turnsReportedWakes:o,samples:u}}var R,w=T((()=>{f(),R={wakes:0,cachedWakes:0,totalInputTokens:0,totalCacheReadTokens:0,totalCacheCreationTokens:0,totalOutputTokens:0,totalCostUsd:0,cacheHitRatio:0,avgTurns:null,totalTurns:0,turnsReportedWakes:0,samples:[]}}));export{g as i,w as n,W as r,R as t};

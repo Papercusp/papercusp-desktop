@@ -58,7 +58,7 @@ hand-mutate it (see *Where not to go*). Other blueprints have different shapes �
 spine** (see
 [pot-vs-coding-blueprint](/internal/docs/agent-insights/pot-vs-coding-blueprint)).
 ⚠ Its original dispatcher — a **Mug** placing ranked work onto generic `cup`s — is
-**RETIRED** (`papercusp-mug-kettle-system`, default OFF): `cup:spawn` REFUSES, so a
+**RETIRED** permanently — the gate flag was DELETED: `cup:spawn` REFUSES, so a
 pot places no work of its own. A **FLEET** is the fan-out (`fleet:launch-on-plan`);
 the shared pot substrate survives ungated (D-003).
 
@@ -622,7 +622,10 @@ checkpoint, never in prose that scrolls away.
 fact to the next reader** — including your own next self, who inherits your
 conclusions without the derivation that produced them. **Goal** →
 `coord:orient { intent }` at the start (it DECLARES to peers in the same
-call), `loop:arm { goal }` for an armed loop, and `why: { goalRef }` on a
+call) — or, when an `## Orientation` block already arrived and oriented you,
+`coord:declare-intent { intent, planItems }` alone, which declares + claims
+your lane without re-paying orient's full read; `loop:arm { goal }` for an
+armed loop, and `why: { goalRef }` on a
 `coord:send` so the recipient queries the goal's LIVE state rather than
 trusting your snapshot; a ruling OTHER lanes must follow is a plan Decision
 (`plans:add-decision`), never only a message — a message is not addressable
@@ -745,7 +748,7 @@ so you see what's happening in your areas and others see what you discover:
   **`new_topic`** for new ones. `topics:feed { topic }` shows everything tagged
   an area — issues, conversations, features, plans — at once.
 - **Don't ask a peer for something you can look up.** Live state is a QUERY, not a
-  question: who holds a file → `locks:list`; who is on what → `fleet:assignments` /
+  question: who holds a file → `locks:queue { paths: [...] }`; who is on what → `fleet:assignments` /
   `coord:presence`; a work-item's status → `work_items:get` (its checkpoint IS the
   status). Need a specific person? `coord:send` them directly — it wakes them.
   Need a decision only the owner can make? `coord:ask-owner`.
@@ -881,7 +884,7 @@ operator. Each wake's prompt has you **create + self-assign** this iteration's
 blocked — don't burn empty wakes). *(Behind the `papercusp-loops` flag while the
 engine is verified.)* This is the su/interactive replacement for `/loop` only —
 NOT the autonomous Blender loop (`pot:declare-wake`). ⚠ The mug/cup/kettle half of
-that loop is RETIRED (`papercusp-mug-kettle-system`, default OFF), so
+that loop is RETIRED permanently (the gate flag was DELETED), so
 `kettle:declare-wake` REFUSES; `pot:declare-wake` survives ungated.
 
 **Then CLOSE YOURSELF — `session:end { reason }` (WI-6638).** Ending the loop does
@@ -904,7 +907,7 @@ is paused **only by its owner**. Any cue you do get is stamped with its authorit
 scope — a leader draining ITS members (`fleet-leader→fleet-members`) is the live
 case, and is not a pot-wide pause. `pot:get-steering` pulls live fleet state
 on demand. ⚠ The `pot-mug→pot-wide` stamp came from the **RETIRED** Mug placement
-loop and is not emitted while `papercusp-mug-kettle-system` is OFF.
+loop and is no longer emitted at all — treat any occurrence as stale data.
 
 <!-- PAPERCUSP-SU:CLIENT-TOOLING-OVERLAY -->
 

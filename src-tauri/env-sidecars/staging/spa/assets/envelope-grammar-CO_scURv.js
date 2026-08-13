@@ -1,0 +1,1 @@
+import{n as O}from"./chunk-ChpBd9eV.js";function t(e,N){return`⟦turn-origin:${e} nonce:${N}⟧`}var n,_,a,L,E,r,o,P,R=O((()=>{n="[A-Za-z0-9:._@-]+",_="[a-f0-9]{8,64}",a="⟦",L="⟧",E=`^\\s*⟦turn-origin:(${n}) nonce:(${_})⟧`,r="[ \\t]*\\r?\\n?",o=new RegExp(E),P=new RegExp(E+r)}));export{R as i,P as n,t as r,o as t};
