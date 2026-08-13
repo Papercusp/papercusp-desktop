@@ -4,13 +4,14 @@
 #
 # The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
 # topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-# executor, then stop before the first ssh, service, database, git-ref, or
+# plus Phase B ref-announcement executors, then stop before the first ssh,
+# service, database, git-ref, or
 # Corestore operation because the global A-G readiness gate remains red.
 # Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
-# Future increments replace the remaining six fail-closed phase stubs below
+# Future increments replace the remaining five fail-closed phase stubs below
 # with fixed, checked-in operations satisfying their offline contracts. Do not add an
 # environment-supplied command seam or an input-manifest escape hatch; either
 # would re-introduce pre-banked evidence.
@@ -23,13 +24,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A
+#   hive-git-physical-scenario.sh --phase-contract A|B
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-executor-v1'
+IMPLEMENTATION_STATE='offline-phase-a-b-executors-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +42,7 @@ VM_NODE='/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node'
 VM_TSX='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/node_modules/tsx/dist/cli.mjs'
 VM_PRODUCER='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts'
 VM_CALL='/tmp/vmcall.sh'
+TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
@@ -56,15 +58,24 @@ phase_a_contract() {
 JSON
 }
 
+phase_b_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"B","planItem":"P-303","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"bidirectional-tower-vm-ref-announce"},"causalOrder":["transferRefAbsentOnBothHosts","freshSourceNamespaceCommitCreated","sourceGitSyncPublishTriggered","sourceSignedSigrefsAdvanced","destinationGitSyncReceiveTriggered","exactSignedNamespaceAndObjectsObservedOnDestination","reverseDirectionRepeated"],"requiredObservations":["freshRunBoundCommitInEachDeviceNamespace","sourceAndDestinationPreMutationAbsence","deviceSignedExactNamespaceSnapshot","sameSigrefsOidOnSourceAndDestination","sameCommitAndPayloadOnSourceAndDestination","reachableObjectCounts","boundedTransferLatency","canonicalGitSyncPublishAndReceiveTicks"],"forbiddenEvidence":["preExistingTransferRef","directGitFetch","bundleTransfer","preAuthoredManifest","environmentSuppliedCommand"],"transport":"ref-announce-protomux-git-upload-pack-v2","externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A'
-  [ "$2" = 'A' ] || fail "phase $2 has no installed offline contract"
-  phase_a_contract
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B'
+  case "$2" in
+    A) phase_a_contract ;;
+    B) phase_b_contract ;;
+    *) fail "phase $2 has no installed offline contract" ;;
+  esac
   exit 0
 fi
 if [ "${1:-}" = '--require-ready' ]; then
@@ -222,7 +233,164 @@ NODE
   "$TSX" "$PRODUCER" phase-a-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_b_ref_announce() { phase_missing B; }
+phase_b_ref_announce() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
+    || fail 'phase B local producer or canonical ptool is unavailable'
+
+  # Like Phase A, this remains unreachable until every A-G executor exists.
+  # Once enabled it creates only two run-bound refs in the fixed test repo and
+  # drives only the production git-sync action. The destination action owns the
+  # signed ref-announcement receive path and its Protomux git-upload-pack v2
+  # fetch; this scenario never invokes a direct fetch or bundle command.
+  local phase_dir="$run_dir/phase-b"
+  local forward_dir="$phase_dir/tower-to-vm"
+  local reverse_dir="$phase_dir/vm-to-tower"
+  local run_id="p505-b-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  local started_at finished_at
+  local forward_started forward_publish_started forward_publish_finished
+  local forward_receive_started forward_receive_finished forward_finished
+  local reverse_started reverse_publish_started reverse_publish_finished
+  local reverse_receive_started reverse_receive_finished reverse_finished
+  local deadline attempt
+  mkdir -m 700 "$phase_dir"
+  mkdir -m 700 "$forward_dir" "$reverse_dir"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  forward_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm absent "$TOWER_REPO" \
+    "$tower_device" "$run_id" >"$forward_dir/source-before.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm absent '$VM_REPO' '$tower_device' '$run_id'" \
+    >"$forward_dir/destination-before.json"
+  "$TSX" "$PRODUCER" phase-b-commit tower tower-to-vm "$TOWER_REPO" \
+    "$tower_device" "$run_id" >"$forward_dir/mutation.json"
+  forward_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$forward_dir/source-publish-raw.json"
+  forward_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
+    "$tower_device" "$run_id" >"$forward_dir/source-after.json"
+  forward_receive_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  deadline=$((SECONDS + 1200))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+      >"$forward_dir/destination-receive-$attempt.json"
+    if ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm present '$VM_REPO' '$tower_device' '$run_id'" \
+      >"$forward_dir/destination-after.json" 2>"$forward_dir/destination-after.err"; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail 'phase B tower-to-vm ref announcement did not materialize within 20 minutes'
+    sleep 10
+  done
+  forward_receive_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  reverse_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower absent '$VM_REPO' '$vm_device' '$run_id'" \
+    >"$reverse_dir/source-before.json"
+  "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower absent "$TOWER_REPO" \
+    "$vm_device" "$run_id" >"$reverse_dir/destination-before.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-commit vm vm-to-tower '$VM_REPO' '$vm_device' '$run_id'" \
+    >"$reverse_dir/mutation.json"
+  reverse_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+    >"$reverse_dir/source-publish-raw.json"
+  reverse_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id'" \
+    >"$reverse_dir/source-after.json"
+  reverse_receive_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  deadline=$((SECONDS + 1200))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+      | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+        >"$reverse_dir/destination-receive-$attempt.json"
+    if "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower present "$TOWER_REPO" \
+      "$vm_device" "$run_id" >"$reverse_dir/destination-after.json" 2>"$reverse_dir/destination-after.err"; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail 'phase B vm-to-tower ref announcement did not materialize within 20 minutes'
+    sleep 10
+  done
+  reverse_receive_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" \
+    "$tower_device" "$vm_device" \
+    "$forward_started" "$forward_publish_started" "$forward_publish_finished" \
+    "$forward_receive_started" "$forward_receive_finished" "$forward_finished" \
+    "$reverse_started" "$reverse_publish_started" "$reverse_publish_finished" \
+    "$reverse_receive_started" "$reverse_receive_finished" "$reverse_finished" <<'NODE'
+const fs = require('node:fs');
+const [
+  dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey,
+  forwardStarted, forwardPublishStarted, forwardPublishFinished,
+  forwardReceiveStarted, forwardReceiveFinished, forwardFinished,
+  reverseStarted, reversePublishStarted, reversePublishFinished,
+  reverseReceiveStarted, reverseReceiveFinished, reverseFinished,
+] = process.argv.slice(2);
+const read = (direction, name) => JSON.parse(fs.readFileSync(`${dir}/${direction}/${name}.json`, 'utf8'));
+const direction = ({ name, sourceHost, destinationHost, sourceDeviceKey, destinationDeviceKey,
+  windowStarted, publishStarted, publishFinished, receiveStarted, receiveFinished, windowFinished }) => {
+  const observations = {
+    sourceBefore: read(name, 'source-before'),
+    destinationBefore: read(name, 'destination-before'),
+    sourceAfter: read(name, 'source-after'),
+    destinationAfter: read(name, 'destination-after'),
+  };
+  return {
+    direction: name,
+    sourceHost,
+    destinationHost,
+    sourceDeviceKey,
+    destinationDeviceKey,
+    window: { startedAt: windowStarted, finishedAt: windowFinished },
+    mutation: read(name, 'mutation'),
+    triggers: {
+      sourcePublish: { tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host: sourceHost,
+        role: 'source-publish', fired: true, startedAt: publishStarted, finishedAt: publishFinished },
+      destinationReceive: { tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host: destinationHost,
+        role: 'destination-receive', fired: true, startedAt: receiveStarted, finishedAt: receiveFinished },
+    },
+    observations,
+    latencyMs: Date.parse(observations.destinationAfter.observedAt) - Date.parse(publishStarted),
+  };
+};
+fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
+  schemaVersion: 'hive-git-physical-phase-b-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  directions: [
+    direction({ name: 'tower-to-vm', sourceHost: 'tower', destinationHost: 'vm',
+      sourceDeviceKey: towerDeviceKey, destinationDeviceKey: vmDeviceKey,
+      windowStarted: forwardStarted, publishStarted: forwardPublishStarted,
+      publishFinished: forwardPublishFinished, receiveStarted: forwardReceiveStarted,
+      receiveFinished: forwardReceiveFinished, windowFinished: forwardFinished }),
+    direction({ name: 'vm-to-tower', sourceHost: 'vm', destinationHost: 'tower',
+      sourceDeviceKey: vmDeviceKey, destinationDeviceKey: towerDeviceKey,
+      windowStarted: reverseStarted, publishStarted: reversePublishStarted,
+      publishFinished: reversePublishFinished, receiveStarted: reverseReceiveStarted,
+      receiveFinished: reverseReceiveFinished, windowFinished: reverseFinished }),
+  ],
+}, null, 2));
+NODE
+  "$TSX" "$PRODUCER" phase-b-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
 phase_c_staging_advance() { phase_missing C; }
 phase_d_worktree_materialization() { phase_missing D; }
 phase_e_github_bridge() { phase_missing E; }
