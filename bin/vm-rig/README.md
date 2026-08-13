@@ -66,8 +66,8 @@ The mutation/observation entrypoint is now checked in as
 output, ordered A-G phase contract, fixed Phase A cold-join executor, fixed
 Phase B bidirectional ref-announcement executor, fixed Phase C trust
 negative-control executor, fixed Phase D production-spine materialization
-executor, and fixed Phase E GitHub-bridge executor have landed.
-`--phase-contract A|B|C|D|E` exposes their
+executor, fixed Phase E GitHub-bridge executor, and fixed Phase F lifecycle
+executor have landed. `--phase-contract A|B|C|D|E|F` exposes their
 exact contracts. Phase A pins the
 test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
@@ -139,12 +139,28 @@ evidence embeds the full Phase E causal object and re-runs its strict validator;
 a summary pass cannot satisfy the gate. Phases D and E share one scenario-level
 run id so both can bind to the eventual enclosing physical manifest.
 
-Phase A-E's own contracts are complete, but the scenario remains globally
-`ready:false`: the executors are unreachable until the remaining fixed F-G
-executors land and the scenario's global `--require-ready` gate changes. The
+Phase F then executes the real G-9 collector and G-10 publish guard independently
+on both attested physical hosts. Each host creates private throwaway bare
+repositories, derives the live and departed namespaces only from the two
+attested device keys, and proves that GC keeps the work ref and newest two
+published refs, prunes the oldest published ref, and archives the departed
+namespace. A separate private repo must admit a clean commit, refuse a planted
+AWS-style credential with the exact `secrets` code, and refuse a fixed oversized
+blob with the exact `blob-over-cap` code. Both repositories are removed before
+the host result returns.
+
+The producer accepts no caller-selected repo path, ref, namespace, retention cap,
+publish cap, command, or evidence document for this leg. Final evidence embeds
+both full host results, re-runs the strict P-307 validator, and binds their run
+id, observation window, and identities to the enclosing two-machine attestation;
+a one-host or summary-only lifecycle pass cannot satisfy the release gate.
+
+Phase A-F's own contracts are complete, but the scenario remains globally
+`ready:false`: the executors are unreachable until the remaining fixed Phase G
+executor lands and the scenario's global `--require-ready` gate changes. The
 wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A-E code exists. There is no environment-supplied command or pre-authored
+Phase A-F code exists. There is no environment-supplied command or pre-authored
 manifest input.
 
 The scenario validates the two producer-issued host identities, requires all

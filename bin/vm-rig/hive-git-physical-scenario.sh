@@ -5,14 +5,14 @@
 # The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
 # topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
 # plus Phase B ref-announcement, Phase C trust, Phase D production-spine
-# materialization, and Phase E GitHub-bridge executors, then stop before the first ssh,
+# materialization, Phase E GitHub-bridge, and Phase F lifecycle executors, then stop before the first ssh,
 # service, database, git-ref, or
 # Corestore operation because the global A-G readiness gate remains red.
-# Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
+# Installing the entrypoint must not make G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
-# Future increments replace the remaining two fail-closed phase stubs below
+# A future increment replaces the remaining fail-closed Phase G stub below
 # with fixed, checked-in operations satisfying their offline contracts. Do not add an
 # environment-supplied command seam or an input-manifest escape hatch; either
 # would re-introduce pre-banked evidence.
@@ -25,13 +25,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E
+#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-b-c-d-e-executors-v1'
+IMPLEMENTATION_STATE='offline-phase-a-b-c-d-e-f-executors-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,19 +83,26 @@ phase_e_contract() {
 JSON
 }
 
+phase_f_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"F","planItem":"P-307","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"topology":"two-host-private-lifecycle-repositories","repositoryLifetime":"one-host-execution"},"causalOrder":["privateBareRepositoriesCreatedOnEachPhysicalHost","liveAndDepartedNamespacesPopulated","productionGcCollectorExecuted","WorkRefAndNewestTwoPublishedRefsRetained","oldestPublishedRefPruned","departedNamespaceArchived","cleanPublishAdmitted","plantedCredentialRefused","oversizedBlobRefused","temporaryRepositoriesRemoved","twoHostLifecycleEvidenceAggregated"],"requiredObservations":["towerAndVmProductionLifecycleResults","identityDerivedLiveAndDepartedNamespaces","exactBeforeAndAfterRefInventories","gcHiveGitRepoResult","checkPublishGuardCleanResult","checkPublishGuardSecretRefusal","checkPublishGuardOversizedBlobRefusal","temporaryRepositoryCleanup"],"forbiddenEvidence":["singleHostLifecycleResult","summaryOnlyLegPass","callerSelectedRepoPath","callerSelectedNamespaceOrRetentionCap","preAuthoredManifest","environmentSuppliedCommand"],"productionSurfaces":["gcHiveGitRepo","checkPublishGuard"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
     C) phase_c_contract ;;
     D) phase_d_contract ;;
     E) phase_e_contract ;;
+    F) phase_f_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
@@ -812,7 +819,43 @@ NODE
     >"$phase_dir/verdict.json"
   trap - RETURN
 }
-phase_f_restart_rejoin() { phase_missing F; }
+phase_f_lifecycle_safety() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase F local producer is unavailable'
+
+  # Each host independently creates private throwaway bare repositories and
+  # drives the real G-9/G-10 surfaces. The producer owns every repo path, ref,
+  # namespace, retention cap, planted control, and cleanup action; the caller
+  # supplies only the already-attested host identities and enclosing run id.
+  local phase_dir="$run_dir/phase-f"
+  local run_id="$physical_run_id"
+  local started_at finished_at
+  mkdir -m 700 "$phase_dir"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  "$TSX" "$PRODUCER" phase-f-run tower "$tower_device" "$vm_device" "$run_id" \
+    >"$phase_dir/tower-lifecycle.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-f-run vm '$vm_device' '$tower_device' '$run_id'" \
+    >"$phase_dir/vm-lifecycle.json"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const input = {
+  schemaVersion: 'hive-git-physical-phase-f-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  hostResults: [read('tower-lifecycle'), read('vm-lifecycle')],
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-f-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
 phase_g_crash_epoch_chaos() { phase_missing G; }
 
 run_all_phases() {
@@ -821,7 +864,7 @@ run_all_phases() {
   phase_c_trust_negative_controls
   phase_d_worktree_materialization
   phase_e_github_bridge
-  phase_f_restart_rejoin
+  phase_f_lifecycle_safety
   phase_g_crash_epoch_chaos
 }
 
