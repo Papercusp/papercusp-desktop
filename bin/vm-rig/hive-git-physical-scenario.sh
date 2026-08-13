@@ -444,7 +444,183 @@ NODE
   "$TSX" "$PRODUCER" phase-c-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_d_worktree_materialization() { phase_missing D; }
+phase_d_worktree_materialization() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
+    || fail 'phase D local producer or canonical ptool is unavailable'
+
+  # This is intentionally a thin adapter around production surfaces. The only
+  # mutations are two fixed canary commits and one fixed dirty-overlap file;
+  # all publication, queueing, ratification, integration, federation, and
+  # worktree materialization are driven through the canonical application
+  # paths and then captured as one revalidated causal object.
+  local phase_dir="$run_dir/phase-d"
+  local first_dir="$phase_dir/first-advance"
+  local dirty_dir="$phase_dir/dirty-advance"
+  local run_id="p505-d-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  local started_at finished_at first_head second_head
+  local publish_started publish_finished queue_started queue_finished
+  local integrate_started integrate_finished first_bridge_started first_bridge_finished
+  local dirty_integrate_started dirty_integrate_finished dirty_bridge_started dirty_bridge_finished
+  local deadline attempt
+  mkdir -m 700 "$phase_dir"
+  mkdir -m 700 "$first_dir" "$dirty_dir"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-commit vm below-steer '$vm_device' '$run_id'" \
+    >"$first_dir/mutation.json"
+  first_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$first_dir/mutation.json")"
+
+  publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+    >"$first_dir/publish-raw.json"
+  publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  queue_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  deadline=$((SECONDS + 1200))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+      | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+        >"$first_dir/queue-receive-$attempt.json"
+    if "$TSX" "$PRODUCER" phase-d-request pending "$vm_device" "$first_head" \
+      >"$first_dir/pending-request.json" 2>"$first_dir/pending-request.err"; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail 'phase D fresh below-steer request did not become visible on the tower within 20 minutes'
+    sleep 10
+  done
+  queue_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-d-ratify "$vm_device" "$first_head" \
+    >"$first_dir/ratification.json"
+
+  integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$first_dir/integrate-raw.json"
+  integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" \
+    >"$first_dir/source-event.json"
+  "$TSX" "$PRODUCER" phase-d-observe tower first-source "$tower_device" "$run_id" \
+    >"$first_dir/source-observation.json"
+
+  first_bridge_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  deadline=$((SECONDS + 1200))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+      >"$first_dir/destination-bridge-$attempt.json"
+    if ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-event vm 0 '$tower_device' '$first_head'" \
+      >"$first_dir/destination-event.json" 2>"$first_dir/destination-event.err"; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail 'phase D first signed staging advance did not reach the VM within 20 minutes'
+    sleep 10
+  done
+  first_bridge_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm first-destination '$tower_device' '$run_id'" \
+    >"$first_dir/destination-observation.json"
+
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-dirty '$run_id'" \
+    >"$dirty_dir/dirty-mutation.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-before '$tower_device' '$run_id'" \
+    >"$dirty_dir/before-observation.json"
+
+  "$TSX" "$PRODUCER" phase-d-commit tower dirty-overlap "$tower_device" "$run_id" \
+    >"$dirty_dir/mutation.json"
+  second_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$dirty_dir/mutation.json")"
+  dirty_integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+      >"$dirty_dir/integrate-raw.json"
+  dirty_integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" \
+    >"$dirty_dir/source-event.json"
+
+  dirty_bridge_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  deadline=$((SECONDS + 1200))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+      >"$dirty_dir/destination-bridge-$attempt.json"
+    if ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-event vm 0 '$tower_device' '$second_head'" \
+      >"$dirty_dir/destination-event.json" 2>"$dirty_dir/destination-event.err"; then
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail 'phase D second signed staging advance did not reach the VM within 20 minutes'
+    sleep 10
+  done
+  dirty_bridge_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-after '$tower_device' '$run_id'" \
+    >"$dirty_dir/after-observation.json"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
+    "$publish_started" "$publish_finished" "$queue_started" "$queue_finished" \
+    "$integrate_started" "$integrate_finished" "$first_bridge_started" "$first_bridge_finished" \
+    "$dirty_integrate_started" "$dirty_integrate_finished" "$dirty_bridge_started" "$dirty_bridge_finished" <<'NODE'
+const fs = require('node:fs');
+const [
+  dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey,
+  publishStarted, publishFinished, queueStarted, queueFinished,
+  integrateStarted, integrateFinished, firstBridgeStarted, firstBridgeFinished,
+  dirtyIntegrateStarted, dirtyIntegrateFinished, dirtyBridgeStarted, dirtyBridgeFinished,
+] = process.argv.slice(2);
+const read = (path) => JSON.parse(fs.readFileSync(`${dir}/${path}.json`, 'utf8'));
+const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
+  tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host, role, fired: true,
+  startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
+});
+const input = {
+  schemaVersion: 'hive-git-physical-phase-d-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  belowSteer: {
+    mutation: read('first-advance/mutation'),
+    publishTrigger: trigger('vm', 'below-steer-publish', publishStarted, publishFinished),
+    queueTrigger: trigger('tower', 'queue-receive', queueStarted, queueFinished),
+    pendingReceipt: read('first-advance/pending-request'),
+    ratification: read('first-advance/ratification'),
+  },
+  firstAdvance: {
+    integratorTrigger: trigger('tower', 'ratified-integrate', integrateStarted, integrateFinished),
+    sourceEvent: read('first-advance/source-event'),
+    destinationEvent: read('first-advance/destination-event'),
+    destinationTrigger: trigger('vm', 'first-bridge', firstBridgeStarted, firstBridgeFinished),
+    sourceObservation: read('first-advance/source-observation'),
+    destinationObservation: read('first-advance/destination-observation'),
+  },
+  dirtyAdvance: {
+    mutation: read('dirty-advance/mutation'),
+    integratorTrigger: trigger('tower', 'dirty-integrate', dirtyIntegrateStarted, dirtyIntegrateFinished),
+    sourceEvent: read('dirty-advance/source-event'),
+    destinationEvent: read('dirty-advance/destination-event'),
+    destinationTrigger: trigger('vm', 'dirty-bridge', dirtyBridgeStarted, dirtyBridgeFinished),
+    dirtyBefore: read('dirty-advance/before-observation'),
+    dirtyAfter: read('dirty-advance/after-observation'),
+  },
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-d-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
 phase_e_github_bridge() { phase_missing E; }
 phase_f_restart_rejoin() { phase_missing F; }
 phase_g_crash_epoch_chaos() { phase_missing G; }
