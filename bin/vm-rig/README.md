@@ -64,8 +64,9 @@ the trust-root half of the producer:
 The mutation/observation entrypoint is now checked in as
 `bin/vm-rig/hive-git-physical-scenario.sh`. Its offline invocation, topology,
 output, ordered A-G phase contract, fixed Phase A cold-join executor, and fixed
-Phase B bidirectional ref-announcement executor have landed.
-`--phase-contract A|B` exposes their exact contracts. Phase A pins the
+Phase B bidirectional ref-announcement executor, and fixed Phase C trust
+negative-control executor have landed. `--phase-contract A|B|C` exposes their
+exact contracts. Phase A pins the
 test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
 observe absence, invoke only the VM's canonical `git-sync:run`, then capture
@@ -90,12 +91,25 @@ the same proof from VM to tower. The scenario never calls `git fetch` or
 production ref-announce/Protomux git-upload-pack v2 path is the only transfer
 path that can satisfy the contract.
 
-Phase A and B's own contracts are complete, but the scenario remains globally
-`ready:false`: the executors are unreachable until the remaining fixed C-G
+Phase C then runs real Git and real Ed25519 negative controls independently on
+both physical stores. Each host generates a distinct run-bound third-device
+key and honest/rogue commits, signs the honest namespace snapshot, proves the
+signature is authentic, mutates the served head afterward, and requires
+`reconcileFetchedHeads` to report the exact signed-head mismatch. The same
+signed snapshot must fail `acceptFetchedSigrefs` at the monotonic rollback
+fence, and a run-bound real bare scope repo must refuse a fixed non-member via
+`authorizeScopeRepoServe`. The honest head is restored before the host result
+is accepted. The two host results are aggregated only when identities, refs,
+signatures, mismatches, rollback verdicts, scope refusals, and store paths all
+match the fixed P-304 contract. There is no caller-supplied key, command, or
+manifest seam; Phase B remains the production transport proof.
+
+Phase A-C's own contracts are complete, but the scenario remains globally
+`ready:false`: the executors are unreachable until the remaining fixed D-G
 executors land and the scenario's global `--require-ready` gate changes. The
 wrapper checks that gate before its first VM
 SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A-B code exists. There is no environment-supplied command or pre-authored
+Phase A-C code exists. There is no environment-supplied command or pre-authored
 manifest input.
 
 The scenario validates the two producer-issued host identities, requires all
