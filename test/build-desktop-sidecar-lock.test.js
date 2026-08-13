@@ -183,3 +183,175 @@ test('WI-6557: the real EXIT trap line removes OLD_DIR on a mid-publish failure 
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// WI-38368 / EI-18882950272344248 — the stale-staging sweep.
+//
+// The EXIT trap above cannot be the whole answer: measured on this box, a bash
+// EXIT trap DOES fire on SIGTERM and SIGINT, but NOT on SIGKILL (nor the OOM
+// killer / power loss). So SIGKILL residue is the one class no trap can close,
+// and the startup sweep is the only mechanism that can. A 1.4GB
+// `sidecar.tmp.3992781` with a long-dead owning pid sat here for over a day
+// from exactly this gap.
+//
+// Same discipline as the trap tests above: extract and run the REAL function
+// from the shipped script, never a hand-copied duplicate that could drift.
+const SWEEP_FN = (builder.match(/^__pc_sweep_stale_staging\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
+
+test('WI-38368: the stale-staging sweep function is present in the shipped script', () => {
+  assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
+  assert.match(SWEEP_FN, /kill -0/, 'the sweep must check whether the owning pid is alive');
+  assert.match(
+    SWEEP_FN,
+    /ps -p "\$pid" -o args=/,
+    'kill -0 alone is insufficient — pid wrap would protect dead residue forever, so the sweep must also confirm the pid is really a build-desktop-sidecar process',
+  );
+});
+
+// Behavioral: a static match cannot prove the globbing, the pid check, or the
+// self-exclusion actually work. Run the real function against a sandbox that
+// mimics the true directory layout, with one genuinely-live decoy process.
+test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eats its own staging dir (behavioral)', () => {
+  assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-sweep-'));
+  let live = 0;
+  try {
+    const final = path.join(tmp, 'sidecar');
+    // A real, live process whose `ps args` genuinely contains the script name —
+    // the decoy the sweep must refuse to touch.
+    const decoy = path.join(tmp, 'build-desktop-sidecar.sh');
+    fs.writeFileSync(decoy, 'sleep 30\n');
+    live = Number(
+      execFileSync('bash', ['-c', 'bash "$1" >/dev/null 2>&1 & echo $!', 'bash', decoy], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    assert(Number.isInteger(live) && live > 1, 'failed to start the live decoy build');
+
+    // A pid that is dead: allocate one, then reap it.
+    const deadPid = Number(
+      execFileSync('bash', ['-c', '( exit 0 ) & echo $!; wait'], { encoding: 'utf8' }).trim(),
+    );
+
+    const deadTmp = `${final}.tmp.${deadPid}`;
+    const deadOld = `${final}.old.${deadPid}`;
+    const liveTmp = `${final}.tmp.${live}`;
+    const ownTmp = `${final}.tmp.999999`; // stands in for THIS run's own staging tree
+    const notPidStamped = `${final}.tmp.notanumber`;
+    for (const d of [deadTmp, deadOld, liveTmp, ownTmp, notPidStamped]) fs.mkdirSync(d);
+    fs.writeFileSync(path.join(deadTmp, 'a-1.4g-build-would-have-files-like-this'), 'x');
+
+    const script = [
+      'set -euo pipefail',
+      `SIDECAR_FINAL_DIR=${JSON.stringify(final)}`,
+      `SIDECAR_TMP_DIR=${JSON.stringify(ownTmp)}`,
+      SWEEP_FN, // the ACTUAL function from the shipped script
+      '__pc_sweep_stale_staging',
+    ].join('\n');
+
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `sweep should exit 0, got ${result.status}: ${result.stderr}`);
+
+    assert.equal(fs.existsSync(deadTmp), false, 'a tmp staging dir whose owning pid is dead must be reaped');
+    assert.equal(fs.existsSync(deadOld), false, 'an old staging dir whose owning pid is dead must be reaped');
+    assert.equal(
+      fs.existsSync(liveTmp),
+      true,
+      'a CONCURRENT build’s staging dir must never be deleted out from under it',
+    );
+    assert.equal(fs.existsSync(ownTmp), true, 'the sweep must never remove this run’s own SIDECAR_TMP_DIR');
+    assert.equal(
+      fs.existsSync(notPidStamped),
+      true,
+      'a dir without a numeric pid suffix is not ours to reap — leave it alone',
+    );
+  } finally {
+    if (live > 1) {
+      try {
+        process.kill(live, 'SIGKILL');
+      } catch {}
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// The case EVERY future build hits, and the one with the widest blast radius if
+// wrong: no residue at all. The script runs under `set -euo pipefail`, so a
+// sweep whose last statement evaluated non-zero on the empty path would abort
+// every build before it started. The unmatched glob must also not be mistaken
+// for a directory named `sidecar.tmp.*`.
+test('WI-38368: the sweep is a no-op that does NOT abort the build when there is no residue (set -euo pipefail)', () => {
+  assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-sweep-empty-'));
+  try {
+    const final = path.join(tmp, 'sidecar');
+    const script = [
+      'set -euo pipefail', // the shipped script's own mode (line 20)
+      `SIDECAR_FINAL_DIR=${JSON.stringify(final)}`,
+      `SIDECAR_TMP_DIR=${JSON.stringify(`${final}.tmp.999999`)}`,
+      SWEEP_FN,
+      '__pc_sweep_stale_staging',
+      'echo REACHED_NEXT_STATEMENT',
+    ].join('\n');
+
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `the empty sweep must not abort the build: ${result.stderr}`);
+    assert.match(
+      result.stdout,
+      /REACHED_NEXT_STATEMENT/,
+      'execution must continue past the sweep when there is nothing to reap',
+    );
+    assert.equal(
+      fs.existsSync(`${final}.tmp.*`),
+      false,
+      'an unmatched glob must never be treated as a real directory',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// FALSIFIABILITY CONTROL for the test above. A guard that has never failed is a
+// guard nobody has tested, and the assertions above would pass vacuously if the
+// sandbox simply never deleted anything. So run a deliberately-WRONG sweep — the
+// blanket `rm -rf sidecar.tmp.*` this fix exists to avoid — through the same
+// sandbox and assert it destroys the live build's tree. Kept permanently in the
+// test file as a control (never a mutation of the shared tree, which git-sync
+// would happily commit mid-probe).
+test('WI-38368 control: a BLANKET sweep would eat a live build — proving the pid check is what saves it', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-sweep-ctl-'));
+  let live = 0;
+  try {
+    const final = path.join(tmp, 'sidecar');
+    const decoy = path.join(tmp, 'build-desktop-sidecar.sh');
+    fs.writeFileSync(decoy, 'sleep 30\n');
+    live = Number(
+      execFileSync('bash', ['-c', 'bash "$1" >/dev/null 2>&1 & echo $!', 'bash', decoy], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    const liveTmp = `${final}.tmp.${live}`;
+    fs.mkdirSync(liveTmp);
+
+    const blanket = [
+      'set -euo pipefail',
+      `SIDECAR_FINAL_DIR=${JSON.stringify(final)}`,
+      'rm -rf "$SIDECAR_FINAL_DIR".tmp.*', // the naive implementation
+    ].join('\n');
+    assert.equal(spawnSync('bash', ['-c', blanket]).status, 0);
+
+    assert.equal(
+      fs.existsSync(liveTmp),
+      false,
+      'control must fail as designed: a blanket sweep DOES delete a live build’s staging dir. If this assertion ever flips, the behavioral test above is passing vacuously.',
+    );
+  } finally {
+    if (live > 1) {
+      try {
+        process.kill(live, 'SIGKILL');
+      } catch {}
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

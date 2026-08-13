@@ -387,6 +387,64 @@ else
 fi
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
 
+# STALE STAGING SWEEP (WI-38368 / EI-18882950272344248) — reap residue the EXIT
+# trap structurally CANNOT catch.
+#
+# The EXIT trap above already covers far more than it looks like it does:
+# measured on this box, a bash EXIT trap DOES fire on SIGTERM and SIGINT, so
+# `trap ... EXIT INT TERM` would add nothing. What no trap can ever catch is
+# SIGKILL (also the OOM killer, a power loss, a hard reset) — the process is
+# destroyed without running userspace. That is the ONLY way residue survives
+# now, and it is how `sidecar.tmp.3992781` (1.4GB, owning pid long dead) came
+# to sit here for over a day. A sweep is therefore not redundant with the
+# trap; it is the only mechanism that can close the remaining class.
+#
+# Placed deliberately AFTER the lock is held and BEFORE the disk preflight:
+#   - holding the EXCLUSIVE flock means no concurrent build is between
+#     lock-acquire and lock-release, so anything matching here is by
+#     construction not an in-flight peer's tree;
+#   - sweeping before the preflight means reclaimed space COUNTS toward the
+#     free-GB requirement, so a build that would have died on "not enough
+#     space" now succeeds off its own garbage.
+#
+# ⚠ PID-CHECKED, NEVER BLANKET. This is a shared multi-agent tree and a
+# blanket `rm -rf sidecar.tmp.*` would turn a latent race (a concurrent build
+# finishing its atomic rename while STAGE2 tars src-tauri) into a reliable
+# failure. `kill -0` ALONE is not enough either: pid wrap happens ~daily on
+# this box under fleet load, so a recycled pid would otherwise protect dead
+# residue forever. We require the pid to be alive AND to actually be a
+# build-desktop-sidecar.sh process. Both checks failing open (skip, don't
+# delete) is the safe direction — a missed reap costs disk, a wrong reap
+# costs someone else's build.
+__pc_sweep_stale_staging() {
+  local d pid base reaped=0 freed_kb=0 sz
+  for d in "$SIDECAR_FINAL_DIR".tmp.* "$SIDECAR_FINAL_DIR".old.*; do
+    [[ -d "$d" ]] || continue                 # unmatched glob expands to itself
+    [[ "$d" == "$SIDECAR_TMP_DIR" ]] && continue   # never our own staging tree
+    base="${d##*.}"
+    pid="$base"
+    # A non-numeric suffix is not a pid-stamped staging dir we own — leave it.
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [[ "$pid" == "$$" ]] && continue
+    if kill -0 "$pid" 2>/dev/null &&
+       ps -p "$pid" -o args= 2>/dev/null | grep -q 'build-desktop-sidecar'; then
+      echo "[sweep] skip $(basename "$d") — pid $pid is a LIVE build"
+      continue
+    fi
+    sz="$(du -sk "$d" 2>/dev/null | cut -f1)"
+    [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+    if rm -rf "$d" 2>/dev/null; then
+      reaped=$((reaped + 1)); freed_kb=$((freed_kb + sz))
+      echo "[sweep] reaped $(basename "$d") — owning pid $pid is dead ($((sz / 1024))MB)"
+    else
+      echo "[sweep] WARN could not remove $d" >&2
+    fi
+  done
+  (( reaped > 0 )) && echo "[sweep] reclaimed $((freed_kb / 1024))MB from $reaped stale staging dir(s)"
+  return 0
+}
+__pc_sweep_stale_staging
+
 # DISK PREFLIGHT (EI-20090527288494606) — refuse now, not 3 minutes into the copy.
 # This script stages a multi-GB tree (node_modules + the ~2.4GB sidecar payload)
 # and, at publish time, briefly holds BOTH the old and new trees during the
