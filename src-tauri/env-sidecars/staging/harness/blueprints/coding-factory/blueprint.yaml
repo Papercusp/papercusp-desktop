@@ -13,7 +13,7 @@ id: coding-factory
 extends: base
 version: 0.1.0
 description: >-
-  RETIRED — NOT ACTIVE (2026-06-24, owner aviynw4). Preserved-but-dormant: its
+  RETIRED — NOT ACTIVE (2026-06-24, by owner decision). Preserved-but-dormant: its
   `director` autoloop last fired 2026-05-01 and nothing currently instantiates it.
   Do NOT treat this as "the active/default coding harness" and do NOT wire new work
   to it. (It is the per-feature coding spine: director → scoper → architect → worker
