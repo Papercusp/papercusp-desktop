@@ -46,18 +46,23 @@ testvm_memory_envelope() {  # <guest-ram-mib> -> "high max swap-max" (all MiB)
   printf '%s %s %s\n' "$high_mb" "$max_mb" "$swap_max_mb"
 }
 
+testvm_scope_unit() {  # <name> -> regular (non-template) escaped *.scope unit
+  local name="$1"
+  local systemd_escape="${PAPERCUSP_TESTVM_SYSTEMD_ESCAPE:-systemd-escape}"
+  command -v "$systemd_escape" >/dev/null 2>&1 \
+    || die "systemd-escape is required to name the test VM resource scope"
+  "$systemd_escape" --mangle "papercup-testvm-$name.scope"
+}
+
 run_testvm_scoped() {  # <name> <guest-ram-mib> <qemu> [args...]
   local name="$1" ram_mb="$2"; shift 2
   local systemd_run="${PAPERCUSP_TESTVM_SYSTEMD_RUN:-systemd-run}"
-  local systemd_escape="${PAPERCUSP_TESTVM_SYSTEMD_ESCAPE:-systemd-escape}"
   command -v "$systemd_run" >/dev/null 2>&1 \
     || die "systemd-run is required to start a resource-bounded test VM"
-  command -v "$systemd_escape" >/dev/null 2>&1 \
-    || die "systemd-escape is required to name the test VM resource scope"
 
   local high_mb max_mb swap_max_mb unit
   read -r high_mb max_mb swap_max_mb <<<"$(testvm_memory_envelope "$ram_mb")"
-  unit="$("$systemd_escape" --template=papercup-testvm@.scope "$name")" \
+  unit="$(testvm_scope_unit "$name")" \
     || die "could not derive a systemd scope name for test VM '$name'"
 
   log "resource envelope $unit — memory high:${high_mb}MiB max:${max_mb}MiB swap-max:${swap_max_mb}MiB"

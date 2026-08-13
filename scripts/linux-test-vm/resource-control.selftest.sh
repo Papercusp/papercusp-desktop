@@ -37,8 +37,9 @@ fi
 echo "2. systemd scope launch contract"
 CAPTURED_ARGS=()
 fake_systemd_escape() {
-  [ "$1" = "--template=papercup-testvm@.scope" ] || return 91
-  printf 'papercup-testvm@%s.scope\n' "$2"
+  [ "$1" = "--mangle" ] || return 91
+  [ "$2" = "papercup-testvm-clean.scope" ] || return 92
+  printf '%s\n' "$2"
 }
 fake_systemd_run() { CAPTURED_ARGS=("$@"); }
 PAPERCUSP_TESTVM_SYSTEMD_ESCAPE=fake_systemd_escape
@@ -48,7 +49,7 @@ run_testvm_scoped clean 16384 qemu-system-x86_64 -name papercusp-testvm-clean -d
 
 for expected in \
   --user --scope --quiet --collect \
-  papercup-testvm@clean.scope \
+  papercup-testvm-clean.scope \
   MemoryAccounting=yes MemoryHigh=20480M MemoryMax=24576M MemorySwapMax=8192M \
   qemu-system-x86_64 -name papercusp-testvm-clean -daemonize; do
   contains_arg "$expected" && ok "launch includes $expected" || bad "launch omitted $expected"
@@ -60,7 +61,7 @@ for i in "${!CAPTURED_ARGS[@]}"; do
   [ "${CAPTURED_ARGS[$i]}" = "--" ] && separator_index="$i"
   [ "${CAPTURED_ARGS[$i]}" = "qemu-system-x86_64" ] && qemu_index="$i"
 done
-if [ "$unit_index" -ge 0 ] && [ "${CAPTURED_ARGS[$((unit_index + 1))]}" = "papercup-testvm@clean.scope" ]; then
+if [ "$unit_index" -ge 0 ] && [ "${CAPTURED_ARGS[$((unit_index + 1))]}" = "papercup-testvm-clean.scope" ]; then
   ok "escaped scope name is passed as --unit's value"
 else
   bad "escaped scope name is not wired to --unit"
@@ -69,6 +70,23 @@ if [ "$separator_index" -ge 0 ] && [ "$qemu_index" -eq $((separator_index + 1)) 
   ok "QEMU argv begins immediately after systemd-run's -- separator"
 else
   bad "QEMU argv is not isolated behind systemd-run's -- separator"
+fi
+
+echo "3. real user-manager unit-name acceptance"
+unset PAPERCUSP_TESTVM_SYSTEMD_ESCAPE PAPERCUSP_TESTVM_SYSTEMD_RUN
+if command -v systemd-run >/dev/null 2>&1 \
+    && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1; then
+  real_unit="$(testvm_scope_unit "selftest-$$")"
+  if systemd-run --user --scope --quiet --collect --unit "$real_unit" \
+      -p MemoryAccounting=yes -p MemoryHigh=64M -p MemoryMax=128M \
+      -p MemorySwapMax=64M -- true; then
+    ok "real user manager accepts derived unit $real_unit and all memory properties"
+  else
+    bad "real user manager rejected derived unit $real_unit or its memory properties"
+  fi
+else
+  echo "  - SKIP: no reachable user systemd manager (hermetic argv checks still ran)"
 fi
 
 echo
