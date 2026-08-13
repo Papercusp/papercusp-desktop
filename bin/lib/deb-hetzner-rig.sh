@@ -171,6 +171,31 @@ rig_init() {
   # REPLICATION_STALL_GRACE_MS via RIG_GRACE.
   RIG_REPLICATION_GRACE_MS="${RIG_REPLICATION_GRACE_MS:-15000}"
 
+  # WI-38376: the SAME reasoning, one axis further along — and this is the axis
+  # that actually matters for replication_soak's residual failure mode.
+  #
+  # The override above deliberately reaches ONLY the zombie
+  # (connected_never_replicated) axis, which arms exactly when peersCount === 0.
+  # That leaves `frozen` — the ONLY axis covering "a replicator IS attached and
+  # the writer IS ahead, but nothing is arriving" — sharing the 180s production
+  # default, i.e. 2x this scenario's 90s SLA. Consequence, measured on full-matrix
+  # run m1786592636: the cycle-3 A→B leg missed its SLA and produced ZERO
+  # detector events on ANY of the three frames for the whole 90s window. The
+  # scenario's own fire-path pin still passed, because it is scoped to the whole
+  # soak and matched cycle 2's expected restart stall — so the run LOOKED like
+  # "the detector saw it" while the detector had in fact been silent throughout.
+  # Three prior items (WI-5448/WI-5634/WI-5639) chased host load for a mechanism
+  # signal that was never going to be emitted.
+  #
+  # 45s: comfortably inside the 90s SLA (leaving ~45s for the episode to fire,
+  # repair-on-detect to run, and the feature to land) and far above the ~3s
+  # healthy end-to-end landing time, so a normal cycle never approaches it.
+  # Shortening THIS axis does not re-open the WI-5672/WI-5686 false-positive
+  # class: that came from a cold restart legitimately holding 0 peers past a
+  # short grace, and `frozen` cannot arm at 0 peers by construction.
+  # Set RIG_FROZEN_GRACE_MS=0 to leave the production 180s in place.
+  RIG_FROZEN_GRACE_MS="${RIG_FROZEN_GRACE_MS:-45000}"
+
   RIG_TOKEN="${HCLOUD_TOKEN:-$(cat ~/.papercusp/hcloud-token 2>/dev/null)}"
   # BYO-frames mode (RIG_FRAME_IPS set) never touches the Hetzner API, so no token
   # is required. Hetzner access was gone 2026-07-03→2026-07-09 (D-001 of
@@ -802,7 +827,7 @@ INSTEOF
   printf 'GH_TOKEN=%s\n' "${FRAME_TOKEN[$inst]}" \
     | rig_ssh "$ip" 'id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash pcusp
         umask 077; cat > /home/pcusp/fed.env; chown pcusp:pcusp /home/pcusp/fed.env'
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp   # explicit — don't trust runuser's HOME handling
 # WI-183 class, seen LIVE on a --reuse relaunch (2026-07-17, frame b): a reused frame
@@ -844,6 +869,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
+  ${RIG_FROZEN_GRACE:+PAPERCUSP_REPLICATION_FROZEN_GRACE_MS="$RIG_FROZEN_GRACE"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
@@ -909,7 +935,7 @@ rig_kill_sidecar() {
 rig_restart_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] restart sidecar (preserve pgdata) → boot-all reads state → swarm rejoin"
-  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
 set -e
 H=/home/pcusp
 # serve.mjs needs the same actually-exited discipline as postgres below (WI-183 class):
@@ -960,6 +986,7 @@ env PATH="$SIDE/bin:/usr/bin:/bin" HOME="$H" USERPROFILE="$H" NODE_ENV=productio
   ${WSID:+PAPERCUSP_WORKSPACE_ID="$WSID"} \
   ${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"} \
   ${RIG_GRACE:+PAPERCUSP_REPLICATION_STALL_GRACE_MS="$RIG_GRACE"} \
+  ${RIG_FROZEN_GRACE:+PAPERCUSP_REPLICATION_FROZEN_GRACE_MS="$RIG_FROZEN_GRACE"} \
   PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
   GH_TOKEN="${GH_TOKEN:-}" \
   PAPERCUSP_PROVISION_ENV_OPERATORS=0 \
