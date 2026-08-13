@@ -9,10 +9,10 @@ original `vmcall.sh` got lost).
 
 ## Topology
 
-| End | What | Address |
-| --- | --- | --- |
-| tower | live operator (`papercup-dev-api.service`, `:3070`) | `172.31.44.1` (host side of `macbr0`) |
-| VM | packaged **Papercusp Server.app** on the macOS (Sonoma) QEMU VM | `172.31.44.2`, ssh `aviweiss@172.31.44.2` |
+| End   | What                                                            | Address                                   |
+| ----- | --------------------------------------------------------------- | ----------------------------------------- |
+| tower | live operator (`papercup-dev-api.service`, `:3070`)             | `172.31.44.1` (host side of `macbr0`)     |
+| VM    | packaged **Papercusp Server.app** on the macOS (Sonoma) QEMU VM | `172.31.44.2`, ssh `aviweiss@172.31.44.2` |
 
 - Bridge: `macbr0` (`172.31.44.1/24`), VM NIC `mactap0`.
 - VM boot (usually already up; the mac-VM dogfood lane owns it — coordinate
@@ -96,17 +96,17 @@ paths this producer is designed to remove.
 
 ## `parity.sh` — the LIVE-1 parity runner (WI-7000)
 
-The probes above prove the *transport*. `parity.sh` proves the five LIVE-1
+The probes above prove the _transport_. `parity.sh` proves the five LIVE-1
 **coordination surfaces** on top of it, by driving the `fed_assert_*` helpers in
 `bin/lib/federation-asserts.sh` against this rig:
 
-| Leg | Surface | Proves |
-| --- | --- | --- |
-| `fedevents` | P-009 federated events | key fired EXACTLY once on the VM (positive control — run it first) |
-| `wakebridge` | P-002/P-003 wake bridge | a tower `coord:send` fires the VM's inbox-wake |
-| `receipts` | P-008 + M5a delivery receipts | exactly one receipt, `delivered=true` |
-| `claimspec` | P-016 + M7 claim-spec federation | spec lands on the VM `origin=remote` with `fed_hlc`+`fed_ts` |
-| `presence` | P-004/P-005 presence gossip | **both directions**, as two verdict rows: `presence` = the tower carries fresh presence+session rows for the VM, `presence-rev` = the VM carries them for the tower (WI-7029 — asserting only one direction let the reverse stay dead under a green leg) |
+| Leg          | Surface                          | Proves                                                                                                                                                                                                                                                   |
+| ------------ | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fedevents`  | P-009 federated events           | key fired EXACTLY once on the VM (positive control — run it first)                                                                                                                                                                                       |
+| `wakebridge` | P-002/P-003 wake bridge          | a tower `coord:send` fires the VM's inbox-wake                                                                                                                                                                                                           |
+| `receipts`   | P-008 + M5a delivery receipts    | exactly one receipt, `delivered=true`                                                                                                                                                                                                                    |
+| `claimspec`  | P-016 + M7 claim-spec federation | spec lands on the VM `origin=remote` with `fed_hlc`+`fed_ts`                                                                                                                                                                                             |
+| `presence`   | P-004/P-005 presence gossip      | **both directions**, as two verdict rows: `presence` = the tower carries fresh presence+session rows for the VM, `presence-rev` = the VM carries them for the tower (WI-7029 — asserting only one direction let the reverse stay dead under a green leg) |
 
 Exit: `0` all green · `1` one or more red · `2` **preflight failed, NO verdict**.
 
@@ -116,8 +116,8 @@ Exit: `0` all green · `1` one or more red · `2` **preflight failed, NO verdict
   WRONG release reading). Never report a LIVE-1 surface proven from a run whose
   banner does not name two distinct hosts.
 - **Why it exists at all:** those five helpers shipped in July with their named
-  caller being the retired `deb-hetzner-federation.sh`, so *nothing invoked
-  them* for a month and four of five surfaces stayed "unproven cross-machine,
+  caller being the retired `deb-hetzner-federation.sh`, so _nothing invoked
+  them_ for a month and four of five surfaces stayed "unproven cross-machine,
   manual PG inspection". `npm run lint:assert-integrity` (rule R6) now fails the
   build if any assert helper becomes unreachable again — but that guard proves
   a runner **exists**, not that anyone **ran** it. This rig is manual: running
@@ -132,12 +132,12 @@ that's the last delivery hop, not a federation failure.
 
 ## Env knobs
 
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `PCUSP_VM_SSH` | `aviweiss@172.31.44.2` | ssh target for the VM end |
-| `PAPERCUSP_HONO_PORT` | `3270` | TOWER operator port (probes'/diag's tower end) — the **bg-host substrate primary**, which actually holds the in-process events/coord state; `:3070` is the request-only cluster tier and gives false-negative probe results (earlier "probe failures" were this, not a federation defect) |
-| `PCUSP_PROBE_KEY` | unique per run | event key the probes emit/await |
-| `PCUSP_VM_NODE` / `PCUSP_MCP_CALL` | auto | VM-side node binary / mcp-call.mjs path (see `vmcall.sh`) |
+| Var                                | Default                | Meaning                                                                                                                                                                                                                                                                                   |
+| ---------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PCUSP_VM_SSH`                     | `aviweiss@172.31.44.2` | ssh target for the VM end                                                                                                                                                                                                                                                                 |
+| `PAPERCUSP_HONO_PORT`              | `3270`                 | TOWER operator port (probes'/diag's tower end) — the **bg-host substrate primary**, which actually holds the in-process events/coord state; `:3070` is the request-only cluster tier and gives false-negative probe results (earlier "probe failures" were this, not a federation defect) |
+| `PCUSP_PROBE_KEY`                  | unique per run         | event key the probes emit/await                                                                                                                                                                                                                                                           |
+| `PCUSP_VM_NODE` / `PCUSP_MCP_CALL` | auto                   | VM-side node binary / mcp-call.mjs path (see `vmcall.sh`)                                                                                                                                                                                                                                 |
 
 ## Gotchas (each burned a real drill)
 
@@ -200,19 +200,19 @@ that's the last delivery hop, not a federation failure.
   release operator) — a fix in the staging tree is NOT live there until
   deployed (`dev:pipeline_position`, force-deploy if the drill needs it).
   This is separate from the `:3270` substrate-primary port the probes/diag
-  call by default above — `:3070` is where a *code change* lands; `:3270`
-  is which *port* of the running (already-deployed) operator to query.
+  call by default above — `:3070` is where a _code change_ lands; `:3270`
+  is which _port_ of the running (already-deployed) operator to query.
 
 ## Files
 
-| File | Role |
-| --- | --- |
-| `vmcall.sh` | VM-SIDE driver: port auto-discovery + mcp-call (deployed to VM `/tmp`) |
-| `deploy.sh` | push `vmcall.sh` + `scripts/mcp-call.mjs` onto the VM + self-test (auto-runs `preflight-login.sh` if the operator is unreachable) |
+| File                 | Role                                                                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `vmcall.sh`          | VM-SIDE driver: port auto-discovery + mcp-call (deployed to VM `/tmp`)                                                                                                                                 |
+| `deploy.sh`          | push `vmcall.sh` + `scripts/mcp-call.mjs` onto the VM + self-test (auto-runs `preflight-login.sh` if the operator is unreachable)                                                                      |
 | `preflight-login.sh` | assert the VM's unattended-login invariant (kcpassword ↔ account password); fails LOUD on the silent loginwindow-stuck death (WI-4070 / EI-13010) instead of letting it look like a federation failure |
-| `probe-fwd.sh` | tower→VM federated-event probe (from `/tmp/p059-e1c.sh`) |
-| `probe-rev.sh` | VM→tower federated-event probe (from `/tmp/p059-rev2.sh`) |
-| `diag.sh` | tower+VM `dev:dogfood_substrate_status` side-by-side + swarm log (from `/tmp/p059-diag.sh`) |
+| `probe-fwd.sh`       | tower→VM federated-event probe (from `/tmp/p059-e1c.sh`)                                                                                                                                               |
+| `probe-rev.sh`       | VM→tower federated-event probe (from `/tmp/p059-rev2.sh`)                                                                                                                                              |
+| `diag.sh`            | tower+VM `dev:dogfood_substrate_status` side-by-side + swarm log (from `/tmp/p059-diag.sh`)                                                                                                            |
 
 For the containerized 2-node **matrix** rig see `bin/local-matrix.sh`; for the
 fast single-box smokes see `bin/two-instance-*-smoke.sh`.
