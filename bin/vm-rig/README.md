@@ -41,6 +41,34 @@ bin/vm-rig/parity.sh                      # all legs
 bin/vm-rig/parity.sh --only fedevents     # legs: fedevents wakebridge receipts claimspec presence
 ```
 
+## Hive-git physical evidence producer (P-505)
+
+`bin/hive-git-drill.sh` accepts physical E/G release evidence from exactly one
+checked-in adapter: `bin/vm-rig/hive-git-physical-probe.sh`. The adapter now has
+the trust-root half of the producer:
+
+- It loads each host's existing `local-announce-identity.json` and verifies the
+  cached public key against that host's existing keychain entry. It never runs
+  GitHub identity discovery and never generates a new device key.
+- It derives an OS machine fingerprint (`/etc/machine-id` on Linux,
+  `IOPlatformUUID` on macOS), and refuses a pair unless host ids, device keys,
+  and machine fingerprints are all distinct.
+- After a run, each physical host signs both the canonical evidence bytes and a
+  receipt binding run id + host + device + machine + signing time. The final
+  trust anchor contains both receipts; the release validator verifies them and
+  requires the evidence attestations to match them exactly.
+- Evidence/trust outputs must be absent absolute paths and are written only
+  after the final validator passes. Pre-banked attestations and local-only host
+  pairs are refused.
+
+The real mutation/observation half remains deliberately absent as
+`bin/vm-rig/hive-git-physical-scenario.sh`. Until that checked-in scenario
+driver records fresh same-run A-G observations—including the E/P-306 bridge and
+G/P-308 crash/fence/retry/restart causality—the adapter exits non-zero without
+emitting evidence, and the canonical drill continues reporting E and G as
+SKIP. Do not replace it with an environment-supplied command or a pre-authored
+JSON file; those are the false-green paths this producer is designed to remove.
+
 ## `parity.sh` — the LIVE-1 parity runner (WI-7000)
 
 The probes above prove the *transport*. `parity.sh` proves the five LIVE-1
