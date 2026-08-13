@@ -34,13 +34,12 @@
 #      refusal receipt threaded by offer_id.
 #
 # ⚠ HONEST SCOPE — READ BEFORE QUOTING THIS SCENARIO AS RELEASE EVIDENCE:
-#   · The foreign session on b is SEEDED, not spawned. The executor spawn leg
-#     does not run on a packaged host today (the p2p-work-intake routine does not
-#     seed — see the LIVE-2 drill's detected SPAWN census line), so there is no
-#     honest way to get a REAL foreign session here yet. What is under test is
+#   · The foreign session on b is SEEDED, not spawned. This scenario isolates
 #     the REVOCATION path; the seed is scaffolding for it, exactly as the drill's
-#     own LEG FW is. When the intake routine seeds, replace step 2 with a real
-#     claimed offer and this scenario gets strictly stronger with no other edit.
+#     own LEG FW is. The real v1 delegation path is seat → signed spawn_request
+#     → projection honor and has its own acceptance coverage. Replacing step 2
+#     with a real delegated spawn would make this scenario strictly stronger,
+#     but is not required for the withdrawal invariant asserted here.
 #   · This proves an honest session WINDS DOWN on withdrawal. It does NOT prove a
 #     HOSTILE session is stopped — mechanical kill (revocation-reaper deferred #1,
 #     cgroup/dedicated OS user after the X13 wind-down) is P-105 tier and is

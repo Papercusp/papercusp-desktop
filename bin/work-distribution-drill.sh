@@ -22,8 +22,8 @@
 #                         capabilities expanded {chat,steer,work-offer,wake}, epoch stamped
 #   M11 zero-allotment    granting confers NO allotment — resource_allotments stays empty
 #                         for the grantee fleet until the host sets numbers
-#   FW  in-flight session synthetic 'active' p2p_foreign_workspaces row (drill scaffold —
-#                         the REAL spawn path is the unwired offer-executor, see SKIPs)
+#   FW  in-flight session synthetic 'active' p2p_foreign_workspaces row (a focused
+#                         revocation fixture; the real seat-spawn path is probed below)
 #   R   revoke → reap     p2p-grant-set { action:'revoke' } → row state='reaped', refusal
 #                         receipt (grant-revoked, work-offer:reap, offer_id-threaded),
 #                         grantor high-water epoch bumped, grant status flipped
@@ -184,8 +184,8 @@ curl -s -m 30 -X POST "$SC/api/agent-mcp/p2p-allotment-set" -H 'content-type: ap
 gone="$(q "SELECT count(*) FROM harness_shared.resource_allotments WHERE fleet_slug='$DRILL_FLEET';")"
 [ "$gone" = "0" ] && ok "allotment removed — table left clean" || bad "allotment remove left $gone row(s)"
 
-# ── LEG FW: synthetic in-flight foreign session (drill scaffold) ─────────────
-log "LEG FW — seed synthetic ACTIVE foreign session (real spawn path unwired, see SKIPs)"
+# ── LEG FW: synthetic in-flight foreign session (revocation fixture) ─────────
+log "LEG FW — seed synthetic ACTIVE foreign session for the revoke/reap assertion"
 q "INSERT INTO harness_shared.p2p_foreign_workspaces
      (workspace_id, offer_id, fleet_slug, origin_github_user_id, executor_device, root_path, clone_path, state)
    VALUES ('$WS','$DRILL_OFFER','$DRILL_FLEET', 1567022, 'p007-drill-device', '$WORK/foreign-root', '$WORK/foreign-root/clone', 'active');" >/dev/null
@@ -262,60 +262,25 @@ fi
 #     A LEG MAY NOT STATE A REASON. IT MAY ONLY RUN A PROBE.
 #
 # Every probe below interrogates THE ARTIFACT UNDER TEST — this packaged sidecar's own
-# bundle, its own database, its own log — never the repo and never a human's memory of
-# either. Three oracles, in order of strength:
+# bundle and database — never the repo and never a human's memory of either. Two
+# oracles, in order of strength:
 #
 #   1. THE BUNDLE IS TREE-SHAKEN, so it is an honest witness to reachability: a symbol
 #      that no production path reaches is not merely uncalled, it is ABSENT FROM THE
-#      SHIPPED FILE. (Verified 2026-08-01: executeClaimedOffer/pullAndExecuteOffer/
-#      reapForeignSessionsForRevocation present; recordSpendDurable/onOfferAvailable
-#      absent — exactly matching which legs have production callers. Identifiers are
+#      SHIPPED FILE. (Verified 2026-08-01: reapForeignSessionsForRevocation present;
+#      recordSpendDurable/onOfferAvailable absent — exactly matching which legs have
+#      production callers. Identifiers are
 #      not minified in this build, so absence is signal, not noise.)
 #   2. THE SIDECAR'S OWN PG — a relation either exists in the instance under test or
 #      does not. ("is the table there" is not a question to answer from a migration
 #      filename: mig 483 is on disk in the repo AND its tables are in this database,
 #      but those are two different facts and only the second one is the drill's.)
-#   3. THE SIDECAR'S OWN LOG — where the build EXPLAINS ITSELF (the p2p-host-routines
-#      seeder prints precisely why a routine did not seed). A reason the artifact
-#      states about itself cannot go stale relative to the artifact.
-#
 # Consequence, and the whole point: a lane that wires its leg makes this drill greener
 # on the NEXT RUN with zero edits here — and a lane that UNWIRES one turns it red
 # instead of leaving a comment that lies for three weeks.
 bundle_has()    { grep -qF -- "$1" "$SIDE/serve.mjs" 2>/dev/null; }
 table_present() { [ "$(q "SELECT to_regclass('harness_shared.$1') IS NOT NULL;")" = "t" ]; }
-routine_seeded(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' LIMIT 1;")" ]; }
-# ⚠ SEEDED IS NOT TICKING — WI-6680 introduced a THIRD state and broke that equivalence.
-# Before it, the row either existed-and-was-active or did not exist, so `routine_seeded`
-# was a sound proxy for "a production path ticks this". WI-6680 now seeds the row
-# `active=false` on a packaged install (no resolvable sourceRepoPath), so an existence
-# check reports ✓ SPAWN wired for a routine that never fires — a FALSE GREEN on exactly
-# the row release-blocker #1 is judged by. Judge on `active`; keep `routine_seeded` only
-# to tell "no row at all" apart from "row, deliberately off", which is what makes the
-# skip reason honest. Same class as D-018: a probe whose premise rotted underneath it.
-routine_active(){ [ -n "$(q "SELECT 1 FROM harness_shared.routines WHERE name='$1' AND active LIMIT 1;")" ]; }
-routine_inactive_reason(){
-  q "SELECT coalesce(trigger_config->>'inactiveReason','(no inactiveReason recorded)') FROM harness_shared.routines WHERE name='$1' LIMIT 1;"
-}
-# The artifact's own words for why it did what it did (oracle 3). Falls back to an
-# HONEST 'no reason logged' — never to an invented one.
-#
-# ⚠ MATCH THE SUBSYSTEM MARKER, NOT ONE EXPECTED SENTENCE. A first draft grepped
-# for 'p2p-work-intake:' — the reason string seen on one run — and on the very
-# next run the seeder failed EARLIER, by a different path, emitting a different
-# sentence that did not contain that substring. The probe then reported
-# 'no reason logged' while the sidecar had in fact logged a perfectly good (and
-# more serious) reason. A probe narrowed to one known answer is a probe that
-# goes blind exactly when the answer changes — which is the whole failure mode
-# this census exists to prevent. Grep the SUBSYSTEM tag and print whatever it
-# says. (The honest fallback is what made that discrepancy visible rather than
-# silently reporting the previous run's reason — keep it.)
-log_reason() {
-  local line; line="$(grep -F -- "$1" "${FED_LOG[a]}" 2>/dev/null | tail -1)"
-  [ -n "$line" ] && printf '%s' "${line#*] }" || printf 'no reason logged by the sidecar'
-}
-
-log "wiring census — reasons DETECTED from the packaged artifact (bundle / its PG / its log)"
+log "wiring census — reasons DETECTED from the packaged artifact (bundle / its PG)"
 
 # OFFER-PUBLISH — store + publish leg (WI-1935).
 # ⚠ THE PROBE SYMBOL IS PART OF THE CONTRACT — a rename silently inverts this leg.
@@ -336,31 +301,30 @@ else
   skipp "OFFER-PUBLISH — DETECTED: listOffers in bundle=$(bundle_has 'listOffers' && echo yes || echo no), putWorkOffer in bundle=$(bundle_has 'putWorkOffer' && echo yes || echo no), p2p_work_offers table=$(table_present p2p_work_offers && echo yes || echo no)"
 fi
 
-# PULL — X11 activation + the WI-3629 puller boundary.
-if bundle_has 'PULLER_ACTIVATION_LANDED' && bundle_has 'pullAndExecuteOffer'; then
-  ok "PULL wired: X11 activation constant + the WI-3629 evaluatePull→pullAndExecuteOffer seam both ship"
+# PULL — the actual v1 request path: discover a signed seat, then publish the
+# signed spawn_request that spends it. The retired kind:'work' puller is not a
+# delegation leg and must never be used as this oracle again.
+if bundle_has 'listOffers' && bundle_has 'publishSpawnRequest'; then
+  ok "PULL wired: seat discovery + signed spawn-request publish both ship"
 else
-  skipp "PULL — DETECTED: activation=$(bundle_has 'PULLER_ACTIVATION_LANDED' && echo present || echo absent), pull-seam=$(bundle_has 'pullAndExecuteOffer' && echo present || echo absent) in the shipped bundle"
+  skipp "PULL — DETECTED: listOffers in bundle=$(bundle_has 'listOffers' && echo yes || echo no), publishSpawnRequest in bundle=$(bundle_has 'publishSpawnRequest' && echo yes || echo no)"
 fi
 
-# SPAWN — the P-104 executor. Owner decision D-001 ships this LIVE with no sandbox, so
-# the ONLY question is whether a production path ticks it. It does not tick until the
-# p2p-work-intake routine seeds, and the seeder logs its own reason when it cannot.
-if ! bundle_has 'executeClaimedOffer'; then
-  skipp "SPAWN — DETECTED: executeClaimedOffer absent from the shipped bundle (no production path reaches the executor)"
-elif routine_active 'p2p-work-intake'; then
-  ok "SPAWN wired: executor ships AND the p2p-work-intake routine is active in this instance"
-elif routine_seeded 'p2p-work-intake'; then
-  skipp "SPAWN — DETECTED: p2p-work-intake is seeded but inactive: $(routine_inactive_reason 'p2p-work-intake')"
+# SPAWN — projection apply is the production trigger. It validates the signed
+# spawn_request, claims the target seat and opens bounded fleet members.
+if bundle_has 'honorSpawnRequestFromProjection'; then
+  ok "SPAWN wired: projection-triggered signed spawn-request honor ships"
 else
-  skipp "SPAWN — DETECTED, sidecar's own words: $(log_reason '[p2p-host-routines]')"
+  skipp "SPAWN — DETECTED: honorSpawnRequestFromProjection is absent from the shipped bundle"
 fi
 
-# RESULTS — rides SPAWN by construction (nothing spawns ⇒ nothing to sync back).
-if routine_active 'p2p-work-intake' && bundle_has 'runForeignGitSyncTick'; then
-  ok "RESULTS wired: foreign-git-sync ships and an intake path exists to produce work for it"
+# RESULTS — requester-side reconciliation reads the federated receipt seam and
+# classifies the delegated launch without pretending remote member absence is a
+# failure verdict.
+if bundle_has 'resolveDelegatedSpawnOutcome' && bundle_has 'listP2pReceipts'; then
+  ok "RESULTS wired: delegated-spawn outcome reconciliation + federated receipt read both ship"
 else
-  skipp "RESULTS — DETECTED: rides SPAWN (intake seeded=$(routine_seeded 'p2p-work-intake' && echo yes || echo no), active=$(routine_active 'p2p-work-intake' && echo yes || echo no), inactive-reason=$(routine_inactive_reason 'p2p-work-intake'), foreign-git-sync in bundle=$(bundle_has 'runForeignGitSyncTick' && echo yes || echo no))"
+  skipp "RESULTS — DETECTED: resolveDelegatedSpawnOutcome in bundle=$(bundle_has 'resolveDelegatedSpawnOutcome' && echo yes || echo no), listP2pReceipts in bundle=$(bundle_has 'listP2pReceipts' && echo yes || echo no)"
 fi
 
 # METERING — P-205's own lane. Substrate and writer are SEPARATE facts; the old reason
