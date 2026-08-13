@@ -1426,13 +1426,15 @@ if [[ -f "$_audit_py" ]]; then
   # file is needed at runtime — so scrub it. Must run BEFORE the scan below.
   echo "→ scrubbing build-box identity from compiled native addons (release-privacy, WI-37620)"
   python3 "$_audit_py" --scrub-binaries "$SIDECAR_DIR/node_modules"
-  if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
-    echo "→ identity-scanning assembled sidecar (release gate, honors NO path-exclude)"
-    if ! python3 "$_audit_py" --scan-dir "$SIDECAR_DIR"; then
-      echo "ERROR: assembled sidecar carries a sensitive/build-box identity — refusing to ship (WI-4419)."
-      exit 1
-    fi
-  fi
+  # NOTE (EI-20304355477263736): the release identity SCAN used to run right here,
+  # which made it a scan of a HALF-ASSEMBLED sidecar — 44 further cp/mkdir/cat
+  # writes into $SIDECAR_DIR happen below this line (harness/**, prompts/**,
+  # db-sql/**, sql/**, the vendored bin/** binaries, pui, provenance, across 112
+  # $SIDECAR_DIR references in total). The two files that killed
+  # 0.0.16-alpha attempt 5 were both written AFTER this point, so this position
+  # could not have caught them however correct the scanner was. The scan now runs
+  # at the END of this script (search: ASSEMBLED-SIDECAR IDENTITY SCAN). The
+  # prune/scrub steps above stay here: they must precede the copies they rewrite.
 elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
   echo "ERROR: release build requires $_audit_py for sidecar privacy enforcement — aborting."
   exit 1
@@ -3493,6 +3495,28 @@ if [[ -x "$HERE/emit-build-provenance.sh" ]]; then
   # has already done 20 minutes of work.
   if [[ -f "$SIDECAR_DIR/build-provenance.json" ]]; then
     echo "→ provenance recorded at $SIDECAR_DIR/build-provenance.json"
+  fi
+fi
+
+# ── ASSEMBLED-SIDECAR IDENTITY SCAN (WI-4419, repositioned by EI-20304355477263736)
+# The ultimate backstop the source.tar.zst audit structurally cannot be: it reads
+# the assembled bytes that actually ship and honors NO path-exclude. It lives HERE,
+# at the very end, because a scan is only as good as its position — every earlier
+# position leaves whatever is copied afterwards unscanned, and 0.0.16-alpha attempt
+# 5 died on exactly that (two files written after the scrub block ~2100 lines above,
+# caught ~40 minutes later by the per-leg AppDir gate instead). Anything added to
+# the sidecar in the future is therefore covered by construction, with no second
+# place to remember to update.
+#
+# Release-gated (PAPERCUSP_RELEASE_AUDIT=1) exactly as before: a dev sidecar on the
+# build box — whose own identity legitimately pervades its compiled binaries —
+# still builds. The prune/scrub steps stay where they are, upstream of the copies
+# they rewrite. Pinned by packages/operator-core/lib/release-identity-gate-ordering.test.ts.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" && -f "$HERE/audit-release-bundle.py" ]]; then
+  echo "→ identity-scanning assembled sidecar (release gate, honors NO path-exclude)"
+  if ! python3 "$HERE/audit-release-bundle.py" --scan-dir "$SIDECAR_DIR"; then
+    echo "ERROR: assembled sidecar carries a sensitive/build-box identity — refusing to ship (WI-4419)."
+    exit 1
   fi
 fi
 
