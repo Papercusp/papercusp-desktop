@@ -4,14 +4,14 @@
 #
 # The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
 # topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-# plus Phase B ref-announcement executors, then stop before the first ssh,
+# plus Phase B ref-announcement and Phase C trust executors, then stop before the first ssh,
 # service, database, git-ref, or
 # Corestore operation because the global A-G readiness gate remains red.
 # Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
-# Future increments replace the remaining five fail-closed phase stubs below
+# Future increments replace the remaining four fail-closed phase stubs below
 # with fixed, checked-in operations satisfying their offline contracts. Do not add an
 # environment-supplied command seam or an input-manifest escape hatch; either
 # would re-introduce pre-banked evidence.
@@ -24,13 +24,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B
+#   hive-git-physical-scenario.sh --phase-contract A|B|C
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-b-executors-v1'
+IMPLEMENTATION_STATE='offline-phase-a-b-c-executors-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,16 +64,23 @@ phase_b_contract() {
 JSON
 }
 
+phase_c_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"C","planItem":"P-304","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"two-host-local-trust-negative-controls"},"causalOrder":["runBoundThirdDeviceKeyGeneratedOnEachHost","honestNamespaceHeadCreatedAndSigned","relayHeadMutatedAfterSignature","authenticSignatureAccepted","servedHeadReconciledAgainstSignedSnapshot","staleSignedSnapshotRejectedByVersionFence","nonMemberScopeServeRejected","honestHeadRestored","twoHostEvidenceAggregated"],"requiredObservations":["distinctRunBoundThirdDeviceOnEachPhysicalHost","realGitHonestAndRogueCommits","validEd25519SignedSnapshot","exactRelayHeadMismatch","rollbackRefusalFromMonotonicVersionFence","nonMemberRefusalFromScopeServeGate","realBareScopeRepoOnEachHost","postControlHonestHeadRestoration"],"forbiddenEvidence":["singleHostControl","sharedThirdDeviceKey","unverifiedSignature","restoredBeforeMismatchObserved","preAuthoredManifest","environmentSuppliedCommand"],"trustPrimitives":["acceptFetchedSigrefs","reconcileFetchedHeads","authorizeScopeRepoServe"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
+    C) phase_c_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
@@ -391,7 +398,44 @@ NODE
   "$TSX" "$PRODUCER" phase-b-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_c_staging_advance() { phase_missing C; }
+phase_c_trust_negative_controls() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase C local producer is unavailable'
+
+  # Phase B already proves the cross-machine transport. This phase runs the
+  # trust layer's three production negative controls independently on both
+  # physical stores. Each producer invocation generates its own run-bound
+  # third-device Ed25519 key, real honest/rogue commits, and real scope repo;
+  # there is no caller-supplied key, command, or manifest seam.
+  local phase_dir="$run_dir/phase-c"
+  local run_id="p505-c-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  local started_at finished_at
+  mkdir -m 700 "$phase_dir"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  "$TSX" "$PRODUCER" phase-c-run tower "$TOWER_REPO" \
+    "$tower_device" "$vm_device" "$run_id" >"$phase_dir/tower.json"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-c-run vm '$VM_REPO' '$vm_device' '$tower_device' '$run_id'" \
+    >"$phase_dir/vm.json"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" \
+    "$tower_device" "$vm_device" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
+  schemaVersion: 'hive-git-physical-phase-c-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  hostResults: [read('tower'), read('vm')],
+}, null, 2));
+NODE
+  "$TSX" "$PRODUCER" phase-c-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
 phase_d_worktree_materialization() { phase_missing D; }
 phase_e_github_bridge() { phase_missing E; }
 phase_f_restart_rejoin() { phase_missing F; }
@@ -400,7 +444,7 @@ phase_g_crash_epoch_chaos() { phase_missing G; }
 run_all_phases() {
   phase_a_storage_join
   phase_b_ref_announce
-  phase_c_staging_advance
+  phase_c_trust_negative_controls
   phase_d_worktree_materialization
   phase_e_github_bridge
   phase_f_restart_rejoin
