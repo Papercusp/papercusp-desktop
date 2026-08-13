@@ -351,7 +351,7 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
     return 1
   fi
 }
-find_open_duplicate() { # <title-prefix, no timestamp> -> prints an existing open WI id, or nothing
+find_open_duplicate() { # <title-prefix, no timestamp> [open|active] -> prints a matching WI id, or nothing
   # P-005 (2026-08-02): MOVED here from below the RED block. It was defined at ~L1272, but
   # check_staleness — which now uses it — is invoked from a dozen earlier exit paths (L316,
   # 326, 367, 421, 665, 714, 1196, 1207, 1231), ALL of which run before that point. Under
@@ -361,12 +361,17 @@ find_open_duplicate() { # <title-prefix, no timestamp> -> prints an existing ope
   # exactly the dedup this closes. Pure relocation; the body is unchanged and the RED
   # caller below is unaffected. Its only deps (OPERATOR_MCP_URL L158,
   # GATE_SUPERUSER_BEARER L168) are set well above here.
-  local prefix="$1" resp
+  local prefix="$1" scope="${2:-open}" resp item_filter='"state":"open"'
+  # An account-setting wall is intentionally parked as needs-human, not left open. The
+  # attestation write preflight below must still recognize that as durable tracking, or every
+  # hourly run mints a duplicate bug for the same owner action. Existing callers retain the
+  # historical open-only query; `active` widens just this lookup to every non-terminal state.
+  [ "$scope" = active ] && item_filter='"notTerminal":true'
   local -a auth_hdr=()
   [ -n "$GATE_SUPERUSER_BEARER" ] && auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
   resp="$(curl -s -m 15 -X POST "$OPERATOR_MCP_URL" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:list\",\"arguments\":{\"kind\":\"bug\",\"harness\":\"papercusp\",\"state\":\"open\",\"limit\":500}}}" 2>/dev/null || true)"
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:list\",\"arguments\":{\"kind\":\"bug\",\"harness\":\"papercusp\",$item_filter,\"limit\":500}}}" 2>/dev/null || true)"
   GATE_DUP_PREFIX="$prefix" python3 -c '
 import sys, json, os
 prefix = os.environ.get("GATE_DUP_PREFIX", "")
@@ -918,6 +923,132 @@ if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
     fi
   fi
 fi
+
+# ── 1c. two-account attestation WRITE preflight (EI-20192345878553998) ────────
+# §1b proves authenticated REST READS work. That does not prove either smoke account can
+# CREATE the private gist that carries its device attestation: GitHub's unverified-email wall
+# returns 200 for GET /user and GET /gists while POST /gists returns 422. The inner content
+# matrix now catches that correctly, but only AFTER the wrapper has rebuilt/repacked a multi-GB
+# desktop bundle. Run the SAME production probe here for BOTH DISTINCT identities before §2.
+# Keep the inner probe as defense-in-depth: this wrapper saves the gate-wide cost; the smoke's
+# own preflight keeps a direct/ad-hoc invocation honest.
+preflight_attestation_write_account() {
+  local expected_user="$1" token actual_login probe_out probe_rc
+  token="$(gh auth token --user "$expected_user" 2>/dev/null || true)"
+  if [ -z "$token" ]; then
+    echo "ATTESTATION_WRITE: user=$expected_user code=token_missing detail=no-gh-token"
+    return 1
+  fi
+
+  actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null || true)"
+  if [ -z "$actual_login" ]; then
+    echo "ATTESTATION_WRITE: user=$expected_user code=identity_unavailable detail=GET-/user-failed"
+    return 1
+  fi
+  if [[ "${actual_login,,}" != "${expected_user,,}" ]]; then
+    echo "ATTESTATION_WRITE: user=$expected_user code=identity_mismatch actual=$actual_login"
+    return 1
+  fi
+
+  probe_out="$({
+    cd "$DESKTOP_DIR/.." &&
+      PAPERCUSP_ATTEST_TOKEN="$token" PAPERCUSP_ATTEST_LOGIN="$actual_login" \
+      npx tsx -e '
+        import { probeGistWriteCapability } from "./packages/operator-core/lib/identity/attest.ts";
+        async function main() {
+          const user = process.env.PAPERCUSP_ATTEST_LOGIN ?? "unknown";
+          const cap = await probeGistWriteCapability(process.env.PAPERCUSP_ATTEST_TOKEN ?? "");
+          if (!cap.ok) {
+            console.log(JSON.stringify({
+              user,
+              ok: false,
+              code: cap.code,
+              status: cap.status,
+              detail: cap.detail,
+              remediation: cap.remediation,
+            }));
+            process.exit(1);
+          }
+          console.log(JSON.stringify({ user, ok: true, cleanedUp: cap.cleanedUp }));
+        }
+        main().catch((err) => {
+          console.log(JSON.stringify({
+            user: process.env.PAPERCUSP_ATTEST_LOGIN ?? "unknown",
+            ok: false,
+            code: "probe_exception",
+            detail: String(err),
+          }));
+          process.exit(1);
+        });
+      '
+  } 2>&1)"
+  probe_rc=$?
+  printf '%s\n' "$probe_out"
+  return "$probe_rc"
+}
+
+preflight_attestation_write_accounts() {
+  local user out rc failed=0
+  if [[ "${P_A_USER,,}" = "${P_B_USER,,}" ]]; then
+    echo "ATTESTATION_WRITE: code=same_account user_a=$P_A_USER user_b=$P_B_USER detail=D-030-requires-distinct-accounts"
+    return 1
+  fi
+  for user in "$P_A_USER" "$P_B_USER"; do
+    out="$(preflight_attestation_write_account "$user" 2>&1)"
+    rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] || failed=1
+  done
+  return "$failed"
+}
+
+P_A_USER="${P_A_USER:-papercupai}"
+P_B_USER="${P_B_USER:-aviynw}"
+ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
+ATTESTATION_PREFLIGHT_RC=$?
+if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
+  printf '%s\n' "$ATTESTATION_PREFLIGHT_OUTPUT" >"$WORK/attestation-preflight.out"
+  ATTESTATION_PREFLIGHT_SUMMARY="$(printf '%s' "$ATTESTATION_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
+  SUMMARY="attestation-write-preflight=FAIL accounts=$P_A_USER,$P_B_USER reason=$ATTESTATION_PREFLIGHT_SUMMARY"
+  log "ATTESTATION WRITE PREFLIGHT RED before build: $ATTESTATION_PREFLIGHT_SUMMARY"
+  echo "$(now_s)" >"$STATE_DIR/last-run"
+  verdict "GATE: RED (attestation-write-preflight) — $SUMMARY ; logs in $WORK"
+
+  # email_unverified is already an explicit needs-human account wall. Recognize that
+  # non-terminal item instead of cloning it; every other preflight failure still gets the
+  # normal fail-loud filing path. In both cases last-red is stamped only when tracking is real.
+  preflight_tracked=0
+  if printf '%s' "$ATTESTATION_PREFLIGHT_OUTPUT" | grep -q '"code":"email_unverified"'; then
+    wall_prefix="Fresh-home P2P gate depends on both GitHub accounts being able to create attestation gists"
+    existing_wall="$(find_open_duplicate "$wall_prefix" active)"
+    if [ -n "$existing_wall" ]; then
+      log "attestation email wall already tracked as non-terminal $existing_wall — no duplicate filing."
+      preflight_tracked=1
+    fi
+  fi
+  if [ "$preflight_tracked" != 1 ]; then
+    early_title="live-federation-gate RED: attestation-write-preflight failed before build ($STAMP)"
+    early_prefix="live-federation-gate RED: attestation-write-preflight failed before build ("
+    existing_early="$(find_open_duplicate "$early_prefix" active)"
+    if [ -n "$existing_early" ]; then
+      log "attestation preflight red already tracked as non-terminal $existing_early — no duplicate filing."
+      preflight_tracked=1
+    elif file_ei "$early_title" "The live federation gate proved neither build nor protocol because the required two distinct GitHub identities failed their attestation gist WRITE preflight. $SUMMARY. This runs before sidecar build by design; do not bypass distinct-account coverage. Logs: $WORK/attestation-preflight.out."; then
+      preflight_tracked=1
+    fi
+  fi
+  # Deliberately do NOT stamp last-red here. The standard protocol/build RED below backs off
+  # because re-running the full gate is expensive and unchanged code adds no signal. This
+  # preflight exits before §2, costs only two write probes, and its state can change without a
+  # code change when the account email is verified. Re-check it next window so that external
+  # remediation unblocks the gate promptly; dedup above prevents the hourly check cloning work.
+  [ "$preflight_tracked" = 1 ] \
+    && log "attestation preflight red is durably tracked; next window rechecks the cheap prerequisite before any build." \
+    || log "attestation preflight red is not durably tracked; next window rechecks and retries filing before any build."
+  check_staleness
+  exit 1
+fi
+log "attestation WRITE preflight OK for both distinct accounts ($P_A_USER, $P_B_USER); proceeding to build."
 
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
