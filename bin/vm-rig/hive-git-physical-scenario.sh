@@ -4,14 +4,15 @@
 #
 # The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
 # topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-# plus Phase B ref-announcement and Phase C trust executors, then stop before the first ssh,
+# plus Phase B ref-announcement, Phase C trust, and Phase D production-spine
+# materialization executors, then stop before the first ssh,
 # service, database, git-ref, or
 # Corestore operation because the global A-G readiness gate remains red.
 # Installing the entrypoint must not make E/P-306 or G/P-308 look proven: the
 # producer signs nothing unless this driver eventually emits a complete fresh
 # manifest, and this revision cannot emit one.
 #
-# Future increments replace the remaining four fail-closed phase stubs below
+# Future increments replace the remaining three fail-closed phase stubs below
 # with fixed, checked-in operations satisfying their offline contracts. Do not add an
 # environment-supplied command seam or an input-manifest escape hatch; either
 # would re-introduce pre-banked evidence.
@@ -24,13 +25,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B|C
+#   hive-git-physical-scenario.sh --phase-contract A|B|C|D
 # Wrapper readiness gate (non-zero until every fixed phase has landed):
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-b-c-executors-v1'
+IMPLEMENTATION_STATE='offline-phase-a-b-c-d-executors-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,17 +71,24 @@ phase_c_contract() {
 JSON
 }
 
+phase_d_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"D","planItem":"P-305","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1296269","topology":"vm-below-steer-to-tower-integrator-to-vm-worktree"},"causalOrder":["freshVmBelowSteerCommitCreated","vmGitSyncPublishTriggered","towerGitSyncQueueReceiveTriggered","exactPendingRequestObserved","productionRatificationApplied","towerGitSyncIntegrationTriggered","towerSignedStagingAdvanceObserved","vmReceivedIdenticalSignedAdvance","vmCanonicalAndWorktreeFastForwarded","vmOverlapFileMadeDirty","freshTowerOverlapCommitCreated","towerSecondSignedAdvanceObserved","vmMirrorAndCursorAdvanced","vmWorktreeHeadAndDirtyFileObservedUntouched"],"requiredObservations":["freshRunBoundBelowSteerHead","exactVisibleIntegrationRequest","ratifyIntegrationRequestResult","productionGitSyncTriggers","signedStagingAdvanceOnBothPhysicalHosts","integratorNamespaceAndCanonicalStagingOids","worktreeBridgeCursorEpochSeqAndEventRow","secondFreshOverlappingAdvance","unchangedDirtyWorktreeHead","unchangedProtectedFileHash"],"forbiddenEvidence":["localSecondWorktreeAsPhysicalProof","directGitFetch","directRefMutation","preAuthoredManifest","environmentSuppliedCommand","callerSelectedRepoOrWorktree"],"productionSurfaces":["git-sync:run","listIntegrationRequests","ratifyIntegrationRequest","pot-git:staging-advance","worktree-bridge"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
     C) phase_c_contract ;;
+    D) phase_d_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
