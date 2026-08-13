@@ -26,6 +26,7 @@ set -euo pipefail
 VERSION="${1:-}"
 CHANNEL="${2:-alpha}"
 DRY_RUN="${DRY_RUN:-0}"
+SKIP_ANDROID="${PAPERCUSP_SKIP_ANDROID:-0}"
 
 if [[ -z "$VERSION" ]]; then
   echo "usage: bin/upload-mobile-release.sh <version> [channel]    (e.g. 0.0.9 alpha)" >&2
@@ -83,14 +84,38 @@ s3api_head() {
 }
 
 # ── What to upload: src TAB published-name, from the ONE tested candidate list ─
-mapfile -t PAIRS < <(cd "$ROOT" && npx tsx apps/operator/lib/release/record-release-cli.ts \
-  --scan-mobile --version "$VERSION")
+# Android is required as a complete provenanced APK+AAB pair unless explicitly
+# opted out. Capture the command status directly: process substitution would hide
+# a provenance validation failure and make it look like an empty candidate list.
+SCAN_ARGS=(--scan-mobile --version "$VERSION")
+if [[ "$SKIP_ANDROID" == "1" ]]; then
+  SCAN_ARGS+=(--skip-android)
+  echo "==> Android explicitly skipped (PAPERCUSP_SKIP_ANDROID=1)"
+fi
+if ! scan_output="$(cd "$ROOT" && npx tsx apps/operator/lib/release/record-release-cli.ts "${SCAN_ARGS[@]}")"; then
+  echo "ERROR: mobile artifact provenance validation failed" >&2
+  exit 1
+fi
+PAIRS=()
+while IFS= read -r pair; do
+  [[ -n "$pair" ]] && PAIRS+=("$pair")
+done <<<"$scan_output"
 
 if [[ ${#PAIRS[@]} -eq 0 ]]; then
   echo "ERROR: no mobile artifacts found (record-release-cli --scan-mobile --version $VERSION" >&2
   echo "       returned nothing). Build the apps first — android: gradlew assembleDebug/Release;" >&2
   echo "       ios: an .ipa under papercup-rust-mobile/ios/build/." >&2
   exit 1
+fi
+
+if [[ "$SKIP_ANDROID" != "1" ]]; then
+  android_apk_count="$(printf '%s\n' "${PAIRS[@]}" | awk -F '\t' '$2 ~ /_android\.apk$/ { n++ } END { print n+0 }')"
+  android_aab_count="$(printf '%s\n' "${PAIRS[@]}" | awk -F '\t' '$2 ~ /_android\.aab$/ { n++ } END { print n+0 }')"
+  if [[ "$android_apk_count" != "1" || "$android_aab_count" != "1" ]]; then
+    echo "ERROR: upload requires exactly one provenanced Android APK and AAB" >&2
+    echo "       found apk=$android_apk_count aab=$android_aab_count; use PAPERCUSP_SKIP_ANDROID=1 only for an explicit non-Android upload" >&2
+    exit 1
+  fi
 fi
 
 echo "==> release host : ${BASE%/*}/<secret>"

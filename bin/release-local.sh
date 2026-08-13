@@ -224,8 +224,9 @@ WITH_MAC="${WITH_MAC:-0}"
 PAPERCUSP_BUILD_ROLES_EXPLICIT="${PAPERCUSP_BUILD_ROLES:+1}"
 PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 export PAPERCUSP_BUILD_ROLES
-# Mobile (Android) leg — ADDITIVE and BEST-EFFORT: a broken or absent mobile
-# build never fails a desktop cut. The APK is BUILT here in the sibling
+# Mobile (Android) leg — optional, but STRICT when enabled. An explicitly
+# disabled/prerequisite-absent desktop-only cut stays legal; once enabled, a
+# broken or unprovenanced APK+AAB pair fails the cut. The pair is BUILT in the sibling
 # papercup-rust-mobile repo; it is RECORDED separately by record-release-cli
 # (scanMobileArtifacts) and deliberately NOT swept into ARTIFACTS[], which feeds
 # the DESKTOP-only auto-update latest.json (mobile must never leak into the
@@ -1054,23 +1055,23 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
 ) >"$LINUX_LEG_LOG" 2>&1 &
 LINUX_PID=$!
 
-# ── Mobile (Android) leg — parallel + BEST-EFFORT (see WITH_ANDROID block above).
+# ── Mobile (Android) leg — parallel + fatal when enabled (see WITH_ANDROID above).
 # Builds fresh design tokens + UniFFI Kotlin bindings, cross-compiles the 4 ABIs,
 # and assembles the APK — but NOT install-and-launch (that needs an adb device,
 # which a headless release host does not have). The APK lands in the mobile repo's
-# own output tree; record-release-cli scans it there. A failure here is joined
-# NON-fatally below, so it can never block a desktop release.
+# own output tree; record-release-cli accepts it only through the builder's
+# requested-version/current-source/path/size/hash provenance manifest.
 ANDROID_LEG_LOG="/tmp/papercusp-androidleg-${TAG}.log"
 ANDROID_PID=""
 if [[ "$WITH_ANDROID" == "1" ]]; then
-  echo "==> [parallel] launching Android APK build in $MOBILE_ROOT (best-effort; log: $ANDROID_LEG_LOG)"
+  echo "==> [parallel] launching Android APK+AAB build in $MOBILE_ROOT (required; log: $ANDROID_LEG_LOG)"
   (
     set -euo pipefail
     cd "$MOBILE_ROOT"
     make tokens bindings-kotlin
     # A desktop cut must request store-ready mobile artifacts explicitly.
     # The script's default stays debug-only for developer installs.
-    bash tools/build-scripts/build-android.sh release
+    PAPERCUP_RELEASE_VERSION="$VERSION" bash tools/build-scripts/build-android.sh release
   ) >"$ANDROID_LEG_LOG" 2>&1 &
   ANDROID_PID=$!
 else
@@ -1249,21 +1250,25 @@ join_leg() {  # $1=pid  $2=name  $3=logfile
 [[ -n "$WIN_PID"   ]] && join_leg "$WIN_PID"   win   "$WIN_LEG_LOG"
 [[ -n "$MAC_PID"   ]] && join_leg "$MAC_PID"   mac   "$MAC_LEG_LOG"
 
-# Android is ADDITIVE — a broken/absent mobile build must NEVER fail a desktop
-# release, so it is joined BEST-EFFORT (log the outcome, never exit). Ground truth
-# is the APK on disk (record-release-cli registers it later via scanMobileArtifacts);
-# the APK is intentionally NOT added to ARTIFACTS[] (that feeds the desktop-only
-# auto-update latest.json — mobile must not leak into the desktop updater).
+# Android remains OUTSIDE ARTIFACTS[] (that array feeds the desktop-only updater),
+# but an enabled leg is a release promise and therefore uses the same fatal join as
+# every desktop leg. Then exercise the recorder's manifest verifier and require the
+# complete APK+AAB pair before the cut can continue.
 if [[ -n "$ANDROID_PID" ]]; then
-  echo "==> joining android leg (pid $ANDROID_PID, best-effort)…"
-  if wait "$ANDROID_PID"; then android_rc=0; else android_rc=$?; fi
-  [[ -f "$ANDROID_LEG_LOG" ]] && sed "s/^/  [android] /" "$ANDROID_LEG_LOG"
-  android_apk="$(ls -1t "$MOBILE_ROOT"/android/app/build/outputs/apk/release/*.apk "$MOBILE_ROOT"/android/app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1 || true)"
-  if [[ "$android_rc" == "0" && -n "$android_apk" ]]; then
-    echo "==> android leg SUCCEEDED — APK: $android_apk ($(du -h "$android_apk" 2>/dev/null | cut -f1)); record-release-cli will register it"
-  else
-    echo "==> ⚠ android leg did not produce a usable APK (rc=$android_rc) — desktop release CONTINUES; mobile omitted from this cut"
+  join_leg "$ANDROID_PID" android "$ANDROID_LEG_LOG"
+  PAPERCUSP_ROOT="$(cd "$ROOT/.." && pwd)"
+  if ! android_scan="$(cd "$PAPERCUSP_ROOT" && npx tsx apps/operator/lib/release/record-release-cli.ts \
+      --scan-mobile --version "$VERSION" --mobile-root "$MOBILE_ROOT")"; then
+    echo "ERROR: enabled Android leg built bytes, but provenance validation failed" >&2
+    exit 1
   fi
+  android_apk_count="$(printf '%s\n' "$android_scan" | awk -F '\t' '$2 ~ /_android\.apk$/ { n++ } END { print n+0 }')"
+  android_aab_count="$(printf '%s\n' "$android_scan" | awk -F '\t' '$2 ~ /_android\.aab$/ { n++ } END { print n+0 }')"
+  if [[ "$android_apk_count" != "1" || "$android_aab_count" != "1" ]]; then
+    echo "ERROR: enabled Android leg must yield exactly one provenanced APK and one AAB (apk=$android_apk_count aab=$android_aab_count)" >&2
+    exit 1
+  fi
+  echo "==> android leg SUCCEEDED — complete provenanced APK+AAB pair for $VERSION"
 fi
 
 # ── Collect artifacts in the PARENT, post-join (a subshell's ARTIFACTS+= would not
