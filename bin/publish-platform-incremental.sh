@@ -91,7 +91,11 @@ CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-v
 NEW_ARTIFACTS=()
 case "$PLATFORM" in
   linux)
-    BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+    # build-linux-local.sh moves finished bundles out of Cargo's (possibly
+    # globally relocated) target into this source-tree collection directory.
+    # Prefer that canonical post-build tree; keep Cargo's tree only as a legacy
+    # fallback for direct/older builders that did not perform collection.
+    BUNDLE="$(release_artifacts_linux_bundle_root "$ROOT" "$CARGO_TARGET_ROOT" "$VERSION")"
     for f in "$BUNDLE"/deb/*_"$VERSION"_*.deb "$BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
              "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
       [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")

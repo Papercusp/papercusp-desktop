@@ -14,6 +14,8 @@
 #   4. the recurrence guard PASSES when latest.json only advertises covered artifacts.
 #   5. the recurrence guard FAILS when latest.json advertises an artifact the upload
 #      set does not carry (the LABELED != PACKED class, caught BEFORE upload).
+#   6. Linux incremental discovery prefers build-linux-local.sh's source-tree
+#      collection destination, with Cargo's target retained only as a legacy fallback.
 #
 #   bash bin/lib/release-artifacts.selftest.sh      # exit 0 = PASS, 1 = FAIL
 #
@@ -101,6 +103,32 @@ if [[ "$FOUND_APPIMAGE" == "$EXPECTED_APPIMAGE" ]]; then
   ok "symlink-safe artifact scan follows the target root"
 else
   bad "symlink-safe artifact scan missed the AppImage under the target root"
+fi
+
+# 0c) build-linux-local.sh collects successful output into the source-tree
+# target even when Cargo itself writes under a global target-dir.  The
+# incremental publisher must look at that post-collection destination first or
+# it reports a successful build as absent (EI-20320547917563727).
+DESKTOP_ROOT="$WORK/desktop"
+CARGO_ROOT="$WORK/cargo-target"
+COLLECTED_BUNDLE="$DESKTOP_ROOT/src-tauri/target/release/bundle"
+mkdir -p "$COLLECTED_BUNDLE/appimage" "$CARGO_ROOT/release/bundle"
+COLLECTED_APPIMAGE="$COLLECTED_BUNDLE/appimage/Papercusp_${VER}_amd64.AppImage"
+: > "$COLLECTED_APPIMAGE"
+SELECTED_LINUX_ROOT="$(release_artifacts_linux_bundle_root "$DESKTOP_ROOT" "$CARGO_ROOT" "$VER")"
+if [[ "$SELECTED_LINUX_ROOT" == "$COLLECTED_BUNDLE" ]]; then
+  ok "Linux publish prefers the post-build source-tree collection destination"
+else
+  bad "Linux publish selected '$SELECTED_LINUX_ROOT' instead of collected '$COLLECTED_BUNDLE'"
+fi
+rm -f "$COLLECTED_APPIMAGE"
+LEGACY_BUNDLE="$CARGO_ROOT/release/bundle"
+: > "$LEGACY_BUNDLE/Papercusp_${VER}_amd64.AppImage"
+SELECTED_LINUX_ROOT="$(release_artifacts_linux_bundle_root "$DESKTOP_ROOT" "$CARGO_ROOT" "$VER")"
+if [[ "$SELECTED_LINUX_ROOT" == "$LEGACY_BUNDLE" ]]; then
+  ok "Linux publish falls back to Cargo's target for an uncollected legacy build"
+else
+  bad "Linux publish did not retain the legacy Cargo-target fallback"
 fi
 
 # 0) every Windows entry point shares the DiskSpan normalization decision. The

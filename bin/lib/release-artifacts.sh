@@ -60,6 +60,37 @@ release_artifacts_resolve_root() {
   printf '%s\n' "$resolved"
 }
 
+# release_artifacts_linux_bundle_root <desktop-root> <cargo-target-root> <version>
+# — select the Linux artifact tree the incremental publisher must consume.
+# build-linux-local.sh COLLECTS finished bundles into the source-tree target so
+# every platform has one canonical location.  On hosts with Cargo's target-dir
+# redirected elsewhere, the pre-collection Cargo tree is empty after that move;
+# looking only there falsely reports a successful Linux build as absent.  Prefer
+# the collection destination whenever it contains this version, retaining the
+# Cargo target only as compatibility for older/direct builders that did not
+# collect their output.
+release_artifacts_linux_bundle_root() {
+  local desktop_root="${1:-}" cargo_target_root="${2:-}" version="${3:-}"
+  [[ -n "$desktop_root" && -n "$cargo_target_root" && -n "$version" ]] || {
+    echo "release-artifacts: linux bundle selection requires desktop root, cargo target root, and version." >&2
+    return 2
+  }
+
+  local collected="$desktop_root/src-tauri/target/release/bundle"
+  local f
+  for f in "$collected"/deb/*_"$version"_*.deb \
+           "$collected"/deb/*_"$version"_*.deb.sig \
+           "$collected"/appimage/*_"$version"_*.AppImage \
+           "$collected"/appimage/*_"$version"_*.AppImage.sig; do
+    if [[ -f "$f" ]]; then
+      printf '%s\n' "$collected"
+      return 0
+    fi
+  done
+
+  printf '%s\n' "$cargo_target_root/release/bundle"
+}
+
 # release_artifacts_write <tag> <artifact>... — record the cut's artifact set.
 # One ABSOLUTE path per line, sorted + de-duplicated, EXISTING files only (an
 # unmatched glob expands to a literal pattern, and a vanished file is dropped —
