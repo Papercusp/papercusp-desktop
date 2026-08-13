@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # replication-soak-diagnostics.selftest.sh — hermetic recurrence guards for
-# WI-38376's three live-rig diagnostics. No docker/SSH/PG and no matrix run.
+# WI-38376's live-rig diagnostics. No docker/SSH/PG and no matrix run.
 #
 # Guards that a failed replication-soak leg reports:
 #   1. detector/repair evidence from that leg's own line-bounded window;
 #   2. the destination's ACTUAL harness_slug|origin row (including local);
 #   3. the writer outbox row + exact drained-log announce log_length high-water.
+#   4. the receiver's exact per-log liveness + merge-queue snapshot.
 # It also proves the b8 wrapper consumes those per-leg verdicts and never falls
 # back to a cumulative serve.log grep that an earlier cycle can false-pass.
 set -uo pipefail
@@ -16,7 +17,7 @@ SCEN="$DIR/scenarios/b8-replication-soak.sh"
 [ -f "$RESTART" ] && [ -f "$SCEN" ] || { echo "SKIP: replication-soak sources not found"; exit 0; }
 
 FAILS=0
-TESTS=8
+TESTS=11
 ok()  { echo "  ✓ $*"; }
 bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 
@@ -41,9 +42,35 @@ _rd_detector_window() {
     echo '[replication-liveness] repair-on-detect: re-attached replica session log=abcdef012345... harness=hello-world'
   fi
 }
+rig_pcusp_run() {
+  cat >/dev/null
+  printf '%s\n' "$STUB_SUBSTRATE_STATUS"
+}
+STUB_SUBSTRATE_STATUS='{"replicationLiveness":[{"workspaceId":"workspace-rig","harnessSlug":"hello-world","logs":[{"keyHex":"abcdef0123456789","verdict":"live","knownLength":41,"localLength":37,"mergedPosition":35,"peersCount":1,"mergeQueueIndex":1,"mergeQueueHeadKeyHex":"feedface","msSinceMergeQueueHead":null}]}]}'
+[ "${REPLICATION_SOAK_DIAGNOSTICS_RECEIVER_ONLY:-0}" = 1 ] && TESTS=3
 
 STUB_DETECTOR_EVENT=0
 out="$(_rd_emit_failed_leg_diagnostics 5 A-to-B a b F-RLSOAK-5-AM 10 10 10 a b hello-world hello-world)"
+grep -q 'RECEIVER-LIVENESS-SNAPSHOT.*snapshot={"status":"found","harnessSlug":"hello-world","logKey":"abcdef0123456789","verdict":"live","knownLength":41,"localLength":37,"mergedPosition":35,"peersCount":1,"mergeQueueIndex":1,"mergeQueueHeadKeyHex":"feedface","msSinceMergeQueueHead":null}' <<<"$out" \
+  && ok 'failed leg reports the exact receiver log liveness and queue snapshot' \
+  || bad "receiver liveness snapshot missing or incomplete: $out"
+missing="$(_rd_receiver_liveness_snapshot b hello-world deadbeef)"
+grep -q '"status":"log-missing"' <<<"$missing" \
+  && ok 'receiver snapshot distinguishes an absent target log from a failed read' \
+  || bad "missing receiver log was not explicit: $missing"
+if grep -q 'scripts/ptool.mjs' "$RESTART" \
+  && grep -q 'dev:dogfood_substrate_status' "$RESTART" \
+  && grep -q 'http://127.0.0.1:\$HONO' "$RESTART"; then
+  ok 'shipping helper uses the receiver packaged ptool against its local operator'
+else
+  bad 'shipping helper lost the packaged-ptool receiver path'
+fi
+if [ "${REPLICATION_SOAK_DIAGNOSTICS_RECEIVER_ONLY:-0}" = 1 ]; then
+  echo "── replication-soak-diagnostics.selftest: $((TESTS - FAILS))/$TESTS passed (receiver-only) ──"
+  [ "$FAILS" = 0 ] && { echo 'OVERALL: PASS'; exit 0; }
+  echo "OVERALL: FAIL ($FAILS failing)"; exit 1
+fi
+
 grep -q 'actual_rows=hello-world|local' <<<"$out" \
   && ok 'failed leg preserves the actual wrong-origin destination row' \
   || bad "actual destination row missing: $out"

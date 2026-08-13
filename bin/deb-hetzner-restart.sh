@@ -184,6 +184,88 @@ _rd_detector_window() {
   printf '%s' "$cmd" | drv_exec "$inst" 2>/dev/null | tr -d '\r'
 }
 
+# _rd_project_receiver_liveness <harness> <log-key>
+# Read dev:dogfood_substrate_status JSON on stdin and emit ONE compact row for
+# the exact receiver harness + writer log. Keep the projection on the driver so
+# a remote ptool failure cannot execute caller-controlled data as shell source.
+_rd_project_receiver_liveness() {
+  local target_harness="$1" target_log="$2"
+  node -e '
+    const fs = require("node:fs");
+    const harnessSlug = process.argv[1];
+    const requestedLogKey = process.argv[2];
+    const emit = (value) => process.stdout.write(JSON.stringify(value));
+    try {
+      const status = JSON.parse(fs.readFileSync(0, "utf8"));
+      const groups = Array.isArray(status?.replicationLiveness)
+        ? status.replicationLiveness
+        : [];
+      const group = groups.find((row) => row?.harnessSlug === harnessSlug);
+      if (!group) {
+        emit({ status: "harness-missing", harnessSlug, logKey: requestedLogKey });
+        process.exit(0);
+      }
+      const logs = Array.isArray(group.logs) ? group.logs : [];
+      const log = logs.find((row) => row?.keyHex === requestedLogKey);
+      if (!log) {
+        emit({ status: "log-missing", harnessSlug, logKey: requestedLogKey });
+        process.exit(0);
+      }
+      emit({
+        status: "found",
+        harnessSlug,
+        logKey: log.keyHex,
+        verdict: log.verdict ?? null,
+        knownLength: log.knownLength ?? null,
+        localLength: log.localLength ?? null,
+        mergedPosition: log.mergedPosition ?? null,
+        peersCount: log.peersCount ?? null,
+        mergeQueueIndex: log.mergeQueueIndex ?? null,
+        mergeQueueHeadKeyHex: log.mergeQueueHeadKeyHex ?? null,
+        msSinceMergeQueueHead: log.msSinceMergeQueueHead ?? null,
+      });
+    } catch {
+      emit({ status: "parse-error", harnessSlug, logKey: requestedLogKey });
+    }
+  ' "$target_harness" "$target_log"
+}
+
+# _rd_receiver_liveness_snapshot <receiver-frame> <receiver-harness> <writer-log-key>
+# Invoke the RECEIVER'S packaged ptool under the same pcusp/HONO context as the
+# sidecar, then project only the exact log locally. Best-effort diagnostic: an
+# unavailable read is explicit JSON and never changes the scenario verdict.
+_rd_receiver_liveness_snapshot() {
+  local inst="$1" harness="$2" log_key="$3" sidecar_dir raw rc
+  case "$log_key" in
+    ''|'<absent>'|'<none>')
+      echo '{"status":"log-key-unavailable"}'
+      return 0
+      ;;
+  esac
+  sidecar_dir="$(dirname "$(drv_appbundle "$inst")")"
+  raw="$({
+    printf 'sidecar_dir=%q\n' "$sidecar_dir"
+    printf 'workspace=%q\n' "${RIG_WORKSPACE_ID:-unknown}"
+    printf 'harness=%q\n' "$harness"
+    cat <<'PCUSP'
+node_bin="$sidecar_dir/bin/node"
+ptool_cli="$sidecar_dir/scripts/ptool.mjs"
+[ -x "$node_bin" ] && [ -f "$ptool_cli" ] || exit 41
+printf '{}\n' | "$node_bin" "$ptool_cli" dev:dogfood_substrate_status \
+  --url="http://127.0.0.1:$HONO" \
+  --workspace="$workspace" --harness="$harness" --json - --raw
+PCUSP
+  } | rig_pcusp_run "$inst" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" != 0 ] || [ -z "$raw" ]; then
+    echo '{"status":"unavailable","reason":"packaged-ptool-call-failed"}'
+    return 0
+  fi
+  if ! printf '%s' "$raw" | _rd_project_receiver_liveness "$harness" "$log_key"; then
+    echo '{"status":"unavailable","reason":"projection-failed"}'
+  fi
+}
+
 # _rd_emit_failed_leg_diagnostics <cycle> <leg> <writer> <receiver> <fid>
 #   <writer-start> <owner-start> <member-start> <owner> <member> <oslug> <mslug>
 # Emits one machine-readable verdict per FAILED LEG. b8-replication-soak.sh uses
@@ -193,7 +275,7 @@ _rd_emit_failed_leg_diagnostics() {
   local cycle="$1" leg="$2" writer="$3" receiver="$4" fid="$5" writer_start="$6"
   local owner_start="$7" member_start="$8" owner="$9" member="${10}" h1="${11}" h2="${12}"
   local owner_end member_end actual outbox outbox_id outbox_slug outbox_drained outbox_log high
-  local frame start end evidence stalls repairs detector_total=0 measurable=1
+  local receiver_harness receiver_snapshot frame start end evidence stalls repairs detector_total=0 measurable=1
 
   owner_end="$(_rd_log_line_mark "$owner")" || owner_end="?"
   member_end="$(_rd_log_line_mark "$member")" || member_end="?"
@@ -207,6 +289,13 @@ _rd_emit_failed_leg_diagnostics() {
   high="$(_rd_writer_log_high_water "$writer" "$writer_start" \
     "$([ "$writer" = "$owner" ] && echo "$owner_end" || echo "$member_end")" "$outbox_log")"
   echo "  ⚙ failed-leg row/outbox/high-water cycle=$cycle leg=$leg fid=$fid receiver=$receiver actual_rows=$actual writer=$writer writer_outbox=id=$outbox_id,harness=$outbox_slug,drained=$outbox_drained,log=$outbox_log writer_announce=$high"
+
+  if [ "$receiver" = "$owner" ]; then receiver_harness="$h1"
+  elif [ "$receiver" = "$member" ]; then receiver_harness="$h2"
+  else receiver_harness="<unknown>"
+  fi
+  receiver_snapshot="$(_rd_receiver_liveness_snapshot "$receiver" "$receiver_harness" "$outbox_log")"
+  echo "  ⚙ RECEIVER-LIVENESS-SNAPSHOT cycle=$cycle leg=$leg receiver=$receiver harness=$receiver_harness log=$outbox_log snapshot=$receiver_snapshot"
 
   for frame in "$owner" "$member"; do
     if [ "$frame" = "$owner" ]; then start="$owner_start"; end="$owner_end"; else start="$member_start"; end="$member_end"; fi
