@@ -66,13 +66,11 @@
 # Usage: bin/hive-git-drill.sh [path/to/Papercusp*.deb]
 #   KEEP_UP=1   leave the sidecar running for inspection
 #   HIVE_GIT_PHYSICAL_PROBE_CMD=/absolute/executable
-#               optional real-rig adapter; receives one argument (the JSON
-#               output path) and must bank schema hive-git-physical-evidence/v1
-#               with hash-matching raw witnesses plus canonical-manifest
-#               Ed25519 attestations from both physical device identities
-#   HIVE_GIT_PHYSICAL_EVIDENCE_FILE=/absolute/evidence.json
-#               consume an already-banked result from that same real adapter
-#               (mutually exclusive with HIVE_GIT_PHYSICAL_PROBE_CMD)
+#               optional real-rig adapter. It MUST resolve to the checked-in
+#               bin/vm-rig/hive-git-physical-probe.sh; arbitrary commands and
+#               pre-banked evidence are deliberately refused. It receives two
+#               output paths: evidence JSON and an out-of-manifest VM-rig trust
+#               anchor binding the run to the two registered device identities.
 set -uo pipefail
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
@@ -309,24 +307,27 @@ run_vitest_leg "LEG C" lib/sync/pot-git/leg-c-trust-drill.integration.test.ts
 log "SKIP census — legs needing the real LIVE-1 rig (owners: p2p-git-live-activation-2026-07-09 lanes)"
 PHYSICAL_EVIDENCE_VALID=0
 PHYSICAL_EVIDENCE_RUN_ID=""
-physical_evidence_file="${HIVE_GIT_PHYSICAL_EVIDENCE_FILE:-}"
 physical_probe_cmd="${HIVE_GIT_PHYSICAL_PROBE_CMD:-}"
-if [ -n "$physical_evidence_file" ] && [ -n "$physical_probe_cmd" ]; then
-  bad "physical E/G adapter: set only one of HIVE_GIT_PHYSICAL_PROBE_CMD or HIVE_GIT_PHYSICAL_EVIDENCE_FILE"
-elif [ -n "$physical_probe_cmd" ]; then
+physical_evidence_file=""
+physical_trust_file=""
+canonical_physical_probe="$DESKTOP_DIR/bin/vm-rig/hive-git-physical-probe.sh"
+if [ -n "$physical_probe_cmd" ]; then
   physical_evidence_file="$WORK/hive-git-physical-evidence.json"
-  if [ "${physical_probe_cmd#/}" = "$physical_probe_cmd" ] || [ ! -x "$physical_probe_cmd" ]; then
-    bad "physical E/G adapter: HIVE_GIT_PHYSICAL_PROBE_CMD must be an absolute executable path"
+  physical_trust_file="$WORK/hive-git-physical-trust.json"
+  physical_probe_cmd="$(readlink -f "$physical_probe_cmd" 2>/dev/null || echo "$physical_probe_cmd")"
+  if [ "$physical_probe_cmd" != "$canonical_physical_probe" ] || [ ! -x "$canonical_physical_probe" ]; then
+    bad "physical E/G adapter: only the checked-in executable $canonical_physical_probe may produce release evidence"
   elif ! HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
-    "$physical_probe_cmd" "$physical_evidence_file" \
+    "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
     >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr"; then
     bad "physical E/G adapter command failed — see $WORK/physical-probe.stdout + physical-probe.stderr"
   fi
 fi
-if [ -n "$physical_evidence_file" ] && [ -f "$physical_evidence_file" ]; then
+if [ -n "$physical_evidence_file" ] && [ -f "$physical_evidence_file" ] && [ -f "$physical_trust_file" ]; then
   physical_evidence_file="$(readlink -f "$physical_evidence_file")"
+  physical_trust_file="$(readlink -f "$physical_trust_file")"
   physical_verdict="$(cd "$REPO_DIR/packages/operator-core" && env -u npm_config_local_prefix \
-    npx tsx "$HGGIT/physical-drill-evidence.ts" "$physical_evidence_file" \
+    npx tsx "$HGGIT/physical-drill-evidence.ts" "$physical_evidence_file" "$physical_trust_file" \
     2>"$WORK/physical-evidence-validator.stderr")"
   if [ "$(jget "$physical_verdict" "d['ok']")" = "True" ]; then
     PHYSICAL_EVIDENCE_VALID=1
@@ -337,13 +338,13 @@ if [ -n "$physical_evidence_file" ] && [ -f "$physical_evidence_file" ]; then
     bad "physical E/G evidence rejected: ${physical_errors:-validator returned no parseable verdict}"
   fi
 elif [ -n "$physical_evidence_file" ]; then
-  bad "physical E/G evidence file was not produced or does not exist: $physical_evidence_file"
+  bad "physical E/G evidence or trusted anchor was not produced by the canonical VM-rig probe"
 fi
 
 if [ "$PHYSICAL_EVIDENCE_VALID" = "1" ]; then
   ok "LEG E (P-306) physical GitHub bridge: same-run bridged-mode/commit-only/sole-egress/OID-chain/watchdog/divergence/rollback evidence validated (run=$PHYSICAL_EVIDENCE_RUN_ID)"
 else
-  skipp "LEG E (P-306) GitHub bridge live — needs the rig's 2nd machine to prove commit-only members don't false-alarm the watchdog under REAL multi-machine wall-clock/network timing; provide the strict physical adapter artifact via HIVE_GIT_PHYSICAL_PROBE_CMD or HIVE_GIT_PHYSICAL_EVIDENCE_FILE — no local git-object trick or structure-only JSON substitutes for hash-matching real-host witnesses"
+  skipp "LEG E (P-306) GitHub bridge live — needs the canonical VM-rig probe to prove commit-only members don't false-alarm the watchdog under REAL multi-machine wall-clock/network timing; arbitrary commands and pre-banked evidence cannot clear this gate"
 fi
 if [ "$PHYSICAL_EVIDENCE_VALID" = "1" ]; then
   ok "LEG G (P-308) physical chaos: same-run A-F→election→higher grant→successor accept→stale fence→retry hold→PG blip→restart evidence validated (run=$PHYSICAL_EVIDENCE_RUN_ID)"
