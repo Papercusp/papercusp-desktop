@@ -63,11 +63,11 @@ the trust-root half of the producer:
 - The VM's bundle-extracted `dev-source` is an installed-artifact snapshot and
   may legitimately predate the release candidate. Before reading either host
   identity, the wrapper streams immutable `git archive` snapshots of the current
-  superproject packages, generic libraries, root scripts, and Papercusp library
-  submodule into a private run-local VM directory. It builds a run-local
-  dependency overlay where staged workspace packages replace the bundle's stale
-  workspace links while third-party packages remain read-only links to the
-  installed dependency tree.
+  superproject `packages/operator-core`, generic libraries, root scripts, and
+  Papercusp library submodule into a private run-local VM directory. It builds a
+  run-local dependency overlay where staged workspace packages replace the
+  bundle's stale workspace links while third-party packages remain read-only
+  links to the installed dependency tree.
   The staged producer's SHA-256 must equal the tower producer byte-for-byte. The
   run-local source is removed on exit; the installed `dev-source` is never
   overwritten. This stages the strict evidence adapter only: production
