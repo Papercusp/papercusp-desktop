@@ -155,10 +155,21 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       '#!/usr/bin/env bash',
       'set -euo pipefail',
       'profile=release',
-      'for arg in "$@"; do [[ "$arg" == "--debug" ]] && profile=debug; done',
+      'target=',
+      'expect_target=0',
+      'for arg in "$@"; do',
+      '  [[ "$arg" == "--debug" || "$arg" == "-d" ]] && profile=debug',
+      '  if [[ "$expect_target" == 1 ]]; then target="$arg"; expect_target=0; continue; fi',
+      '  case "$arg" in',
+      '    -t|--target) expect_target=1 ;;',
+      '    -t=*|--target=*) target="${arg#*=}" ;;',
+      '  esac',
+      'done',
       'printf \'%s\\n\' "$*" > "$FAKE_ARGS_LOG"',
-      'mkdir -p "$FAKE_TARGET_DIR/$profile/bundle/deb"',
-      'cp "$FAKE_DEB_SOURCE" "$FAKE_TARGET_DIR/$profile/bundle/deb/Papercusp_1.0.0_all.deb"',
+      'bundle_root="$FAKE_TARGET_DIR"',
+      '[[ -n "$target" ]] && bundle_root="$bundle_root/$target"',
+      'mkdir -p "$bundle_root/$profile/bundle/deb"',
+      'cp "$FAKE_DEB_SOURCE" "$bundle_root/$profile/bundle/deb/Papercusp_1.0.0_all.deb"',
       '',
     ].join('\n'), { mode: 0o755 });
 
@@ -183,6 +194,16 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
         args: ['--tauri-subcommand=bundle', '--bundles', 'rpm,deb', '--debug'],
         profile: 'debug',
         expectedArgs: 'bundle --bundles rpm,deb --debug',
+      },
+      {
+        args: ['--tauri-subcommand=bundle', '--bundles=deb', '--target=aarch64-unknown-linux-gnu'],
+        profile: 'aarch64-unknown-linux-gnu/release',
+        expectedArgs: 'bundle --bundles=deb --target=aarch64-unknown-linux-gnu',
+      },
+      {
+        args: ['--tauri-subcommand=bundle', '-brpm,deb'],
+        profile: 'release',
+        expectedArgs: 'bundle -brpm,deb',
       },
     ]) {
       const result = spawnSync('bash', [path.join(root, buildWrapperRel), ...args], {

@@ -193,6 +193,15 @@ if [[ "$__subcommand" == "build" || "$__subcommand" == "bundle" ]]; then
           __pc_bundle_filter_includes_deb=1
         fi
         ;;
+      -b?*)
+        # clap also accepts the compact short-option form (`-bdeb` and
+        # `-brpm,deb`). Treating it as an unrelated flag makes an explicit
+        # non-Debian filter look unfiltered and wrongly enters the repacker.
+        __pc_bundle_filter_seen=1
+        if __pc_bundle_value_includes_deb "${__arg#-b}"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        ;;
     esac
   done
 

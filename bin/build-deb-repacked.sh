@@ -22,7 +22,7 @@ for arg in "$@"; do
     --all-bundles)
       BUNDLE_ARGS=()
       ;;
-    -b|--bundles|-b=*|--bundles=*)
+    -b|--bundles|-b=*|-b?*|--bundles=*)
       # The generic Tauri chokepoint has already proved this explicit filter
       # includes deb. Preserve the caller's exact list and do not append a
       # second, narrowing `--bundles deb` option.

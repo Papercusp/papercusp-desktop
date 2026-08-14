@@ -254,6 +254,11 @@ test('generic build and bundle commands capable of emitting deb route through th
     ['repack', '--tauri-subcommand=bundle', '-b', 'rpm', 'deb', '--ci'],
     'Tauri also accepts short, space-separated multi-value bundle filters',
   );
+  assert.deepStrictEqual(
+    runGuardRouting(['bundle', '-brpm,deb', '--ci']),
+    ['repack', '--tauri-subcommand=bundle', '-brpm,deb', '--ci'],
+    'clap accepts compact -bVALUE filters; a compact list containing deb is still a producer',
+  );
 });
 
 test('explicit non-Debian filters and --no-bundle remain direct Tauri invocations', () => {
@@ -264,6 +269,11 @@ test('explicit non-Debian filters and --no-bundle remain direct Tauri invocation
   assert.deepStrictEqual(
     runGuardRouting(['bundle', '--bundles=appimage,rpm']),
     ['direct', 'bundle', '--bundles=appimage,rpm'],
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['build', '-brpm']),
+    ['direct', 'build', '-brpm'],
+    'a compact explicit non-Debian filter must not be mistaken for an unfiltered producer',
   );
   assert.deepStrictEqual(
     runGuardRouting(['build', '--no-bundle']),
