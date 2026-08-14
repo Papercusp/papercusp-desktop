@@ -92,7 +92,7 @@ ssh "${SSH_OPTS[@]}" "$VM" \
   "[ -x '$VM_TSX' ] && [ -d '$VM_DEP_SOURCE/node_modules' ] && [ ! -e '$remote_source' ] && mkdir -m 700 '$remote_source'" \
   || fail 'could not create the canonical VM run-source directory'
 git -C "$REPO_ROOT" archive --format=tar HEAD -- \
-  packages libs/generic package.json tsconfig.base.json \
+  packages/operator-core libs/generic scripts package.json tsconfig.base.json \
   | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
   || fail 'could not stage the immutable superproject source snapshot on the VM'
 git -C "$REPO_ROOT/libs/papercusp" archive --format=tar --prefix=libs/papercusp/ HEAD \
