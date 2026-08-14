@@ -63,48 +63,243 @@ test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () 
   }
 });
 
-function section(source, start, end) {
-  const startAt = source.indexOf(start);
-  const endAt = source.indexOf(end, startAt + start.length);
-  assert.notEqual(startAt, -1, `missing section start: ${start}`);
-  assert.notEqual(endAt, -1, `missing section end: ${end}`);
-  return source.slice(startAt, endAt);
+function shellEntrypointsUnder(dir, files = []) {
+  if (!fs.existsSync(dir)) return files;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (['.git', 'node_modules', 'target'].includes(entry.name)) continue;
+    const absolute = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      shellEntrypointsUnder(absolute, files);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const source = fs.readFileSync(absolute, 'utf8');
+    if (entry.name.endsWith('.sh') || /^#![^\n]*(?:ba|z|k)?sh\b/.test(source)) {
+      files.push({ label: path.relative(path.dirname(root), absolute), source });
+    }
+  }
+  return files;
 }
 
-test('every known shell Linux deb-producing path reaches the repacker', () => {
-  const releaseSource = fs.readFileSync(path.join(root, 'bin/release-local.sh'), 'utf8');
-  const producers = [
-    ['bin/build-and-archive-deb.sh', fs.readFileSync(path.join(root, 'bin/build-and-archive-deb.sh'), 'utf8')],
-    [buildWrapperRel, fs.readFileSync(path.join(root, buildWrapperRel), 'utf8')],
-    ['bin/build-linux-local.sh', fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8')],
-    ['bin/release-local.sh x86_64', section(releaseSource, 'echo "==> building Tauri Linux x86_64 (signed)"', 'if [[ "$WITH_WINDOWS" == "1" ]]')],
-    ['bin/release-local.sh arm64', section(releaseSource, 'if [[ "$WITH_ARM64" == "1" ]]', 'if [[ "$WITH_MAC" == "1"')],
-  ];
-  for (const [label, source] of producers) {
-    assert.match(
-      source,
-      /(?:tauri build|tauri "\$TAURI_SUBCOMMAND"|npm run build)/,
-      `${label} must retain its Debian build or bundle invocation`,
-    );
-    assert.match(source, /repack-deb-xz\.sh/, `${label} must repack its Debian artifacts`);
+function logicalShellLines(source) {
+  const logical = [];
+  let text = '';
+  let startLine = 1;
+  source.split('\n').forEach((line, index) => {
+    if (!text) startLine = index + 1;
+    if (/\\\s*$/.test(line)) {
+      text += `${line.replace(/\\\s*$/, '')} `;
+      return;
+    }
+    logical.push({ line: startLine, text: text + line });
+    text = '';
+  });
+  if (text) logical.push({ line: startLine, text });
+  return logical;
+}
+
+const KNOWN_BUNDLES = new Set(['app', 'dmg', 'msi', 'nsis', 'deb', 'rpm', 'appimage', 'updater']);
+
+function unquoteShellToken(token) {
+  return token.replace(/^["']|["'\\),]+$/g, '');
+}
+
+function directTauriCommandCanEmitDeb(command, subcommand) {
+  if (subcommand === 'build' && /(?:^|\s)--no-bundle(?:\s|$)/.test(command)) return false;
+
+  const tokens = command.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map(unquoteShellToken) ?? [];
+  let sawBundleFilter = false;
+  let sawBundleValue = false;
+  let unknownBundleValue = false;
+  let includesDeb = false;
+  let target = '';
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    let inlineBundles;
+    if (token === '-b' || token === '--bundles') {
+      sawBundleFilter = true;
+      let sawKnownValueForThisFilter = false;
+      for (let j = i + 1; j < tokens.length && !tokens[j].startsWith('-'); j += 1) {
+        const values = tokens[j].split(',');
+        const allValuesKnown = values.every((value) => KNOWN_BUNDLES.has(value));
+        // Once a literal list is complete, a later shell-array expansion is
+        // the next option group (for example role/config args), not another
+        // bundle value. A wholly variable list remains conservatively unknown.
+        if (!allValuesKnown && sawKnownValueForThisFilter) break;
+        sawBundleValue = true;
+        for (const value of values) {
+          if (value === 'deb') includesDeb = true;
+          else if (!KNOWN_BUNDLES.has(value)) unknownBundleValue = true;
+        }
+        if (allValuesKnown) sawKnownValueForThisFilter = true;
+      }
+    } else if (token.startsWith('--bundles=')) {
+      sawBundleFilter = true;
+      inlineBundles = token.slice('--bundles='.length);
+    } else if (/^-b=?[^-].*/.test(token)) {
+      sawBundleFilter = true;
+      inlineBundles = token.replace(/^-b=?/, '');
+    }
+
+    if (inlineBundles !== undefined) {
+      if (inlineBundles) sawBundleValue = true;
+      for (const value of inlineBundles.split(',').filter(Boolean)) {
+        if (value === 'deb') includesDeb = true;
+        else if (!KNOWN_BUNDLES.has(value)) unknownBundleValue = true;
+      }
+    }
+
+    if (token === '-t' || token === '--target') target = tokens[i + 1] ?? '';
+    else if (token.startsWith('--target=') || token.startsWith('-t=')) target = token.split('=').slice(1).join('=');
   }
 
-  const arm64 = producers.at(-1)[1];
-  assert.ok(
-    arm64.indexOf('repack-deb-xz.sh') < arm64.indexOf('ARTIFACTS+=("$f")'),
-    'release-local.sh arm64 must repack Debian artifacts before collecting them',
+  if (sawBundleFilter) {
+    // Tauri treats a zero-value --bundles as an explicit empty package set.
+    return includesDeb || (sawBundleValue && unknownBundleValue);
+  }
+  if (/(?:apple|darwin|windows|msvc)/i.test(target)) return false;
+  return true;
+}
+
+function executableSegments(entry) {
+  const segments = [];
+  for (const logical of logicalShellLines(entry.source)) {
+    if (/^\s*#/.test(logical.text)) continue;
+    for (const raw of logical.text.split(/&&|\|\||;/)) {
+      const text = raw.trim();
+      if (!text || /^#|^["']/.test(text)) continue;
+      segments.push({ ...logical, text });
+    }
+  }
+  return segments;
+}
+
+function insideShellQuote(text, end) {
+  let single = false;
+  let double = false;
+  let escaped = false;
+  for (let i = 0; i < end; i += 1) {
+    const char = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && !single) {
+      escaped = true;
+    } else if (char === "'" && !double) {
+      single = !single;
+    } else if (char === '"' && !single) {
+      double = !double;
+    }
+  }
+  return single || double;
+}
+
+function directTauriCommands(entry) {
+  const commands = [];
+  for (const segment of executableSegments(entry)) {
+    const pattern = /\btauri\s+(build|bundle)\b/g;
+    for (let match = pattern.exec(segment.text); match; match = pattern.exec(segment.text)) {
+      const prefix = segment.text.slice(0, match.index);
+      // Diagnostic/search prose names commands but cannot produce an artifact.
+      if (/\b(?:echo|printf|pgrep|grep)\b/.test(prefix)) continue;
+      if (
+        insideShellQuote(segment.text, match.index) &&
+        !/(?:\b(?:bash|sh)\s+-c\s+|(?:^|\s)[A-Za-z_][A-Za-z0-9_]*(?:CMD|COMMAND)=)["'][^"']*$/i.test(prefix)
+      ) continue;
+      const command = segment.text.slice(match.index);
+      commands.push({
+        ...segment,
+        command,
+        subcommand: match[1],
+        canEmitDeb: directTauriCommandCanEmitDeb(command, match[1]),
+      });
+    }
+  }
+  return commands;
+}
+
+function repackLines(entry) {
+  return executableSegments(entry)
+    .filter(({ text }) => {
+      const at = text.indexOf('repack-deb-xz.sh');
+      return at !== -1 && !/\b(?:echo|printf|pgrep|grep)\b/.test(text.slice(0, at));
+    })
+    .map(({ line }) => line);
+}
+
+function unrepackedDirectDebianProducers(entries) {
+  const offenders = [];
+  for (const entry of entries) {
+    const commands = directTauriCommands(entry);
+    const repacks = repackLines(entry);
+    commands.forEach((command, index) => {
+      if (!command.canEmitDeb) return;
+      const nextProducerLine = commands[index + 1]?.line ?? Number.POSITIVE_INFINITY;
+      const repacksBeforeNextProducer = repacks.some(
+        (line) => line >= command.line && line < nextProducerLine,
+      );
+      if (!repacksBeforeNextProducer) {
+        offenders.push(`${entry.label}:${command.line}: ${command.command}`);
+      }
+    });
+  }
+  return offenders;
+}
+
+test('source-wide shell scan requires every direct Debian-producing Tauri path to repack', () => {
+  const entries = [
+    ...shellEntrypointsUnder(path.join(root, 'bin')),
+    ...shellEntrypointsUnder(path.join(root, 'scripts')),
+    ...shellEntrypointsUnder(path.join(path.dirname(root), 'scripts')),
+  ];
+  const offenders = unrepackedDirectDebianProducers(entries);
+  assert.deepEqual(
+    offenders,
+    [],
+    'direct Tauri build/bundle commands that can emit deb must invoke repack-deb-xz.sh before the next producer:\n' +
+      offenders.join('\n'),
   );
 });
 
-test('every npm script that can emit Debian routes through the repacking build wrapper', () => {
+test('the source-wide producer detector catches an unknown sixth path and ignores non-Debian output', () => {
+  assert.deepEqual(
+    unrepackedDirectDebianProducers([{
+      label: 'bin/future-sixth-producer.sh',
+      source: '#!/usr/bin/env bash\nnpx tauri build --bundles deb\n',
+    }]),
+    ['bin/future-sixth-producer.sh:2: tauri build --bundles deb'],
+  );
+  assert.deepEqual(
+    unrepackedDirectDebianProducers([{
+      label: 'bin/future-safe-producers.sh',
+      source: [
+        '#!/usr/bin/env bash',
+        'npx tauri build -brpm',
+        'npx tauri bundle --bundles deb,rpm',
+        'bash "$ROOT/bin/repack-deb-xz.sh" "$deb"',
+        '',
+      ].join('\n'),
+    }]),
+    [],
+    'an explicit rpm-only build is not a Debian producer, while a following deb bundle is guarded by its repack',
+  );
+});
+
+test('every direct Debian-producing npm script is discovered and routes through a repacking chokepoint', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  for (const name of ['build', 'build:debug', 'build:all-bundles']) {
-    assert.match(
-      pkg.scripts?.[name] ?? '',
-      /bin\/build-deb-repacked\.sh/,
-      `package.json script ${name} must route Debian artifacts through ${buildWrapperRel}`,
-    );
-  }
+  const packageEntries = Object.entries(pkg.scripts ?? {}).map(([name, source]) => ({
+    label: `papercusp-desktop/package.json scripts.${name}`,
+    source,
+  }));
+  const directOffenders = unrepackedDirectDebianProducers(packageEntries);
+  assert.deepEqual(
+    directOffenders,
+    [],
+    'a package script added later must not introduce a direct Debian-producing Tauri bypass:\n' +
+      directOffenders.join('\n'),
+  );
 
   assert.match(
     pkg.scripts?.tauri ?? '',
