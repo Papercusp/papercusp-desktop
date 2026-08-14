@@ -30,6 +30,7 @@ VM_NODE='/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node'
 VM_TSX="$VM_DEP_SOURCE/node_modules/tsx/dist/cli.mjs"
 TOWER_CACHE="${PAPERCUSP_ANNOUNCE_IDENTITY_CACHE:-$HOME/.papercusp-workspaces/.shared/.papercusp/local-announce-identity.json}"
 VM_CACHE="${PCUSP_VM_ANNOUNCE_IDENTITY_CACHE:-/Users/aviweiss/.papercusp-workspaces/.shared/.papercusp/local-announce-identity.json}"
+VM_IDENTITY_DIR="${PCUSP_VM_IDENTITY_DIR:-/Users/aviweiss/.papercusp-workspaces/.shared/.papercusp/identity}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 
 source_preflight=0
@@ -174,7 +175,7 @@ remote_producer_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
 "$TSX" "$PRODUCER" identity tower "$TOWER_CACHE" >"$tower_identity"
 [ -s "$tower_identity" ] || fail 'tower identity command produced no JSON'
 ssh "${SSH_OPTS[@]}" "$VM" \
-  "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
+  "PAPERCUSP_IDENTITY_DIR='$VM_IDENTITY_DIR' '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
 [ -s "$vm_identity" ] || fail 'VM identity command produced no JSON'
 "$TSX" "$PRODUCER" preflight "$tower_identity" "$vm_identity" >/dev/null
 if [ "$source_preflight" -eq 1 ]; then
@@ -195,7 +196,7 @@ HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
 "$TSX" "$PRODUCER" sign "$unsigned_evidence" tower "$TOWER_CACHE" >"$tower_receipt"
 scp "${SSH_OPTS[@]}" "$unsigned_evidence" "$VM:$remote_unsigned" >/dev/null
 if ! ssh "${SSH_OPTS[@]}" "$VM" \
-  "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' sign '$remote_unsigned' vm '$VM_CACHE'" \
+  "PAPERCUSP_IDENTITY_DIR='$VM_IDENTITY_DIR' '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' sign '$remote_unsigned' vm '$VM_CACHE'" \
   >"$vm_receipt"; then
   ssh "${SSH_OPTS[@]}" "$VM" "rm -f '$remote_unsigned'" >/dev/null 2>&1 || true
   fail 'VM host receipt failed'
