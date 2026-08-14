@@ -92,12 +92,73 @@ ssh "${SSH_OPTS[@]}" "$VM" \
   "[ -x '$VM_TSX' ] && [ -d '$VM_DEP_SOURCE/node_modules' ] && [ ! -e '$remote_source' ] && mkdir -m 700 '$remote_source'" \
   || fail 'could not create the canonical VM run-source directory'
 git -C "$REPO_ROOT" archive --format=tar HEAD -- \
-  packages/operator-core package.json tsconfig.base.json \
+  packages libs/generic package.json tsconfig.base.json \
   | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
-  || fail 'could not stage the immutable operator-core HEAD snapshot on the VM'
+  || fail 'could not stage the immutable superproject source snapshot on the VM'
+git -C "$REPO_ROOT/libs/papercusp" archive --format=tar --prefix=libs/papercusp/ HEAD \
+  | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
+  || fail 'could not stage the immutable papercusp-library snapshot on the VM'
+
+# Build a run-local dependency overlay. Third-party modules remain read-only
+# links into the installed bundle, while every staged workspace package wins
+# over the bundle's potentially stale workspace symlink (including packages
+# that did not exist when that bundle was cut).
 ssh "${SSH_OPTS[@]}" "$VM" \
-  "ln -s '$VM_DEP_SOURCE/node_modules' '$remote_source/node_modules'" \
-  || fail 'could not attach the VM dependency tree to the run-source snapshot'
+  "'$VM_NODE' - '$remote_source' '$VM_DEP_SOURCE'" <<'NODE' \
+  || fail 'could not build the VM run-source dependency overlay'
+const fs = require('node:fs');
+const path = require('node:path');
+const [runRoot, installedRoot] = process.argv.slice(2);
+const installedModules = path.join(installedRoot, 'node_modules');
+const runModules = path.join(runRoot, 'node_modules');
+fs.mkdirSync(runModules, { mode: 0o700 });
+
+const hasEntry = (target) => {
+  try { fs.lstatSync(target); return true; } catch { return false; }
+};
+const link = (source, target) => {
+  if (!hasEntry(target)) fs.symlinkSync(source, target, 'dir');
+};
+
+for (const entry of fs.readdirSync(installedModules, { withFileTypes: true })) {
+  const source = path.join(installedModules, entry.name);
+  const target = path.join(runModules, entry.name);
+  if (entry.name.startsWith('@') && entry.isDirectory()) {
+    fs.mkdirSync(target, { recursive: true });
+    for (const child of fs.readdirSync(source)) {
+      link(path.join(source, child), path.join(target, child));
+    }
+  } else {
+    link(source, target);
+  }
+}
+
+const packageBases = [
+  path.join(runRoot, 'packages'),
+  path.join(runRoot, 'libs', 'generic'),
+  path.join(runRoot, 'libs', 'papercusp', 'libs'),
+  path.join(runRoot, 'libs', 'papercusp', 'packages'),
+];
+for (const base of packageBases) {
+  if (!fs.existsSync(base)) continue;
+  for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const packageRoot = path.join(base, entry.name);
+    const manifestPath = path.join(packageRoot, 'package.json');
+    if (!fs.existsSync(manifestPath)) continue;
+    const name = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).name;
+    if (typeof name !== 'string' || !name) continue;
+    const target = path.join(runModules, ...name.split('/'));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (hasEntry(target)) {
+      const stat = fs.lstatSync(target);
+      if (!stat.isSymbolicLink()) throw new Error(`refusing to replace non-link dependency ${name}`);
+      fs.unlinkSync(target);
+    }
+    fs.symlinkSync(packageRoot, target, 'dir');
+  }
+}
+NODE
 local_producer_sha="$(sha256sum "$PRODUCER" | awk '{print $1}')"
 remote_producer_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
   "shasum -a 256 '$VM_PRODUCER' | awk '{print \$1}'")" \
