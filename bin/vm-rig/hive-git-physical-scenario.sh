@@ -25,6 +25,8 @@ EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
 IMPLEMENTATION_STATE='ready-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
+TOWER_GIT_SYNC_SLUG="$PHASE_A_POT_HOME"
+VM_GIT_SYNC_SLUG='hello-world'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 PRODUCER="$REPO_ROOT/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
@@ -39,6 +41,19 @@ TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
+
+# The pot home is the owner/tower's self_repo, but on a joined VM it is an
+# intentionally ineligible remote-hive view. All production ticks must target
+# the runnable member entry that owns system:git-sync on that host.
+run_tower_git_sync() {
+  printf '{"installSlug":"%s"}\n' "$TOWER_GIT_SYNC_SLUG" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME"
+}
+
+run_vm_git_sync() {
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'"
+}
 
 fail() {
   echo "hive-git-physical-scenario: $*" >&2
@@ -215,9 +230,7 @@ phase_a_storage_join() {
     >"$phase_dir/vm-absent.json"
 
   bootstrap_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    >"$phase_dir/bootstrap-raw.json"
+  run_vm_git_sync >"$phase_dir/bootstrap-raw.json"
   bootstrap_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 
   # A multi-GB cold join is allowed to take minutes. Presence is necessary but
@@ -247,7 +260,7 @@ fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   identities: { towerDeviceKey, vmDeviceKey },
   quarantine: read('quarantine'),
   bootstrap: {
-    tool: 'git-sync:run', installSlug: 'hello-world-3-pot', targetHost: 'vm', fired: true,
+    tool: 'git-sync:run', installSlug: 'hello-world', targetHost: 'vm', fired: true,
     startedAt: bootstrapStarted, finishedAt: bootstrapFinished,
   },
   observations: {
@@ -293,9 +306,7 @@ phase_b_ref_announce() {
   "$TSX" "$PRODUCER" phase-b-commit tower tower-to-vm "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/mutation.json"
   forward_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$forward_dir/source-publish-raw.json"
+  run_tower_git_sync >"$forward_dir/source-publish-raw.json"
   forward_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/source-after.json"
@@ -304,9 +315,7 @@ phase_b_ref_announce() {
   attempt=0
   while :; do
     attempt=$((attempt + 1))
-    ssh "${SSH_OPTS[@]}" "$VM" \
-      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-      >"$forward_dir/destination-receive-$attempt.json"
+    run_vm_git_sync >"$forward_dir/destination-receive-$attempt.json"
     if ssh "${SSH_OPTS[@]}" "$VM" \
       "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm present '$VM_REPO' '$tower_device' '$run_id'" \
       >"$forward_dir/destination-after.json" 2>"$forward_dir/destination-after.err"; then
@@ -329,9 +338,7 @@ phase_b_ref_announce() {
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-commit vm vm-to-tower '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/mutation.json"
   reverse_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    >"$reverse_dir/source-publish-raw.json"
+  run_vm_git_sync >"$reverse_dir/source-publish-raw.json"
   reverse_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id'" \
@@ -341,9 +348,7 @@ phase_b_ref_announce() {
   attempt=0
   while :; do
     attempt=$((attempt + 1))
-    printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-      | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-        >"$reverse_dir/destination-receive-$attempt.json"
+    run_tower_git_sync >"$reverse_dir/destination-receive-$attempt.json"
     if "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower present "$TOWER_REPO" \
       "$vm_device" "$run_id" >"$reverse_dir/destination-after.json" 2>"$reverse_dir/destination-after.err"; then
       break
@@ -371,6 +376,7 @@ const [
   reverseReceiveStarted, reverseReceiveFinished, reverseFinished,
 ] = process.argv.slice(2);
 const read = (direction, name) => JSON.parse(fs.readFileSync(`${dir}/${direction}/${name}.json`, 'utf8'));
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
 const direction = ({ name, sourceHost, destinationHost, sourceDeviceKey, destinationDeviceKey,
   windowStarted, publishStarted, publishFinished, receiveStarted, receiveFinished, windowFinished }) => {
   const observations = {
@@ -388,9 +394,9 @@ const direction = ({ name, sourceHost, destinationHost, sourceDeviceKey, destina
     window: { startedAt: windowStarted, finishedAt: windowFinished },
     mutation: read(name, 'mutation'),
     triggers: {
-      sourcePublish: { tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host: sourceHost,
+      sourcePublish: { tool: 'git-sync:run', installSlug: gitSyncSlug(sourceHost), host: sourceHost,
         role: 'source-publish', fired: true, startedAt: publishStarted, finishedAt: publishFinished },
-      destinationReceive: { tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host: destinationHost,
+      destinationReceive: { tool: 'git-sync:run', installSlug: gitSyncSlug(destinationHost), host: destinationHost,
         role: 'destination-receive', fired: true, startedAt: receiveStarted, finishedAt: receiveFinished },
     },
     observations,
@@ -485,9 +491,7 @@ phase_d_worktree_materialization() {
   first_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$first_dir/mutation.json")"
 
   publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    >"$first_dir/publish-raw.json"
+  run_vm_git_sync >"$first_dir/publish-raw.json"
   publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 
   queue_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -495,9 +499,7 @@ phase_d_worktree_materialization() {
   attempt=0
   while :; do
     attempt=$((attempt + 1))
-    printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-      | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-        >"$first_dir/queue-receive-$attempt.json"
+    run_tower_git_sync >"$first_dir/queue-receive-$attempt.json"
     if "$TSX" "$PRODUCER" phase-d-request pending "$vm_device" "$first_head" \
       >"$first_dir/pending-request.json" 2>"$first_dir/pending-request.err"; then
       break
@@ -511,9 +513,7 @@ phase_d_worktree_materialization() {
     >"$first_dir/ratification.json"
 
   integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$first_dir/integrate-raw.json"
+  run_tower_git_sync >"$first_dir/integrate-raw.json"
   integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" \
     >"$first_dir/source-event.json"
@@ -525,9 +525,7 @@ phase_d_worktree_materialization() {
   attempt=0
   while :; do
     attempt=$((attempt + 1))
-    ssh "${SSH_OPTS[@]}" "$VM" \
-      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-      >"$first_dir/destination-bridge-$attempt.json"
+    run_vm_git_sync >"$first_dir/destination-bridge-$attempt.json"
     if ssh "${SSH_OPTS[@]}" "$VM" \
       "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-event vm 0 '$tower_device' '$first_head'" \
       >"$first_dir/destination-event.json" 2>"$first_dir/destination-event.err"; then
@@ -553,9 +551,7 @@ phase_d_worktree_materialization() {
     >"$dirty_dir/mutation.json"
   second_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$dirty_dir/mutation.json")"
   dirty_integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$dirty_dir/integrate-raw.json"
+  run_tower_git_sync >"$dirty_dir/integrate-raw.json"
   dirty_integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" \
     >"$dirty_dir/source-event.json"
@@ -565,9 +561,7 @@ phase_d_worktree_materialization() {
   attempt=0
   while :; do
     attempt=$((attempt + 1))
-    ssh "${SSH_OPTS[@]}" "$VM" \
-      "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-      >"$dirty_dir/destination-bridge-$attempt.json"
+    run_vm_git_sync >"$dirty_dir/destination-bridge-$attempt.json"
     if ssh "${SSH_OPTS[@]}" "$VM" \
       "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-event vm 0 '$tower_device' '$second_head'" \
       >"$dirty_dir/destination-event.json" 2>"$dirty_dir/destination-event.err"; then
@@ -595,8 +589,9 @@ const [
   dirtyIntegrateStarted, dirtyIntegrateFinished, dirtyBridgeStarted, dirtyBridgeFinished,
 ] = process.argv.slice(2);
 const read = (path) => JSON.parse(fs.readFileSync(`${dir}/${path}.json`, 'utf8'));
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
-  tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host, role, fired: true,
+  tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
 });
 const input = {
@@ -678,14 +673,10 @@ phase_e_github_bridge() {
   mode_armed=1
 
   tower_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/tower-member-raw.json"
+  run_tower_git_sync >"$phase_dir/tower-member-raw.json"
   tower_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   vm_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    >"$phase_dir/vm-member-raw.json"
+  run_vm_git_sync >"$phase_dir/vm-member-raw.json"
   vm_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" \
     >"$phase_dir/tower-bridged-member.json"
@@ -696,19 +687,13 @@ phase_e_github_bridge() {
   "$TSX" "$PRODUCER" phase-e-ingress "$run_id" \
     >"$phase_dir/ingress-mutation.json"
   ingress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/healthy-ingress-raw.json"
+  run_tower_git_sync >"$phase_dir/healthy-ingress-raw.json"
   ingress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/healthy-integrate-raw.json"
+  run_tower_git_sync >"$phase_dir/healthy-integrate-raw.json"
   integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   egress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/healthy-egress-raw.json"
+  run_tower_git_sync >"$phase_dir/healthy-egress-raw.json"
   egress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" \
     >"$phase_dir/healthy-observation.json"
@@ -724,9 +709,7 @@ phase_e_github_bridge() {
     >"$phase_dir/divergence-mutation.json"
   divergence_armed=1
   divergence_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/divergence-egress-raw.json"
+  run_tower_git_sync >"$phase_dir/divergence-egress-raw.json"
   divergence_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" \
     >"$phase_dir/divergence-after.json"
@@ -737,14 +720,10 @@ phase_e_github_bridge() {
   "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
     >"$phase_dir/rollback-mode.json"
   rollback_tower_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  printf '{"installSlug":"%s"}\n' "$PHASE_A_POT_HOME" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
-      >"$phase_dir/rollback-tower-raw.json"
+  run_tower_git_sync >"$phase_dir/rollback-tower-raw.json"
   rollback_tower_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   rollback_vm_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$PHASE_A_POT_HOME\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    >"$phase_dir/rollback-vm-raw.json"
+  run_vm_git_sync >"$phase_dir/rollback-vm-raw.json"
   rollback_vm_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" \
     >"$phase_dir/tower-legacy-after.json"
@@ -768,8 +747,9 @@ const [
   rollbackTowerStarted, rollbackTowerFinished, rollbackVmStarted, rollbackVmFinished,
 ] = process.argv.slice(2);
 const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
-  tool: 'git-sync:run', installSlug: 'hello-world-3-pot', host, role, fired: true,
+  tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
 });
 const input = {
