@@ -29,6 +29,11 @@ test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () 
       '',
     ].join('\n'));
     fs.writeFileSync(path.join(pkg, 'usr', 'share', 'papercusp', 'payload.txt'), 'payload survives recompression\n');
+    const sidecar = path.join(pkg, 'usr', 'lib', 'Papercusp GUI', 'sidecar');
+    const staging = path.join(sidecar, 'env-sidecars', 'staging');
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(sidecar, 'serve.mjs'), 'console.log("same staged bundle");\n');
+    fs.copyFileSync(path.join(sidecar, 'serve.mjs'), path.join(staging, 'serve.mjs'));
 
     const deb = path.join(tmp, 'fixture.deb');
     run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
@@ -41,6 +46,12 @@ test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () 
     const extracted = path.join(tmp, 'extracted');
     run('dpkg-deb', ['-x', deb, extracted]);
     assert.equal(fs.readFileSync(path.join(extracted, 'usr', 'share', 'papercusp', 'payload.txt'), 'utf8'), 'payload survives recompression\n');
+    const primaryStat = fs.statSync(path.join(extracted, 'usr', 'lib', 'Papercusp GUI', 'sidecar', 'serve.mjs'));
+    const stagedStat = fs.statSync(path.join(extracted, 'usr', 'lib', 'Papercusp GUI', 'sidecar', 'env-sidecars', 'staging', 'serve.mjs'));
+    assert.equal(primaryStat.ino, stagedStat.ino, 'dpkg extraction must restore staging as a hardlink to the primary payload');
+
+    const listing = run('bash', ['-c', 'dpkg-deb --fsys-tarfile "$1" | tar -tvf -', '_', deb]);
+    assert.match(listing, /env-sidecars\/staging\/serve\.mjs link to .*sidecar\/serve\.mjs/);
 
     // A second pass is deliberately idempotent and still validates the package.
     run('bash', [helper, deb], { env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '' } });

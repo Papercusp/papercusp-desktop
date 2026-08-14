@@ -6,6 +6,7 @@
 # also rewrite control metadata, so this helper changes only the data member.
 # The replacement is assembled beside the input and atomically renamed over it.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEB_PATH="${1:?usage: repack-deb-xz.sh <package.deb>}"
 [[ -f "$DEB_PATH" ]] || { echo "FATAL: deb not found: $DEB_PATH" >&2; exit 2; }
@@ -54,7 +55,10 @@ trap cleanup EXIT
 
 ar p "$DEB_PATH" debian-binary > "$WORK/debian-binary"
 ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
-ar p "$DEB_PATH" "${MEMBERS[2]}" | "${DECOMPRESS[@]}" | xz -9 -T0 -c > "$WORK/data.tar.xz"
+ar p "$DEB_PATH" "${MEMBERS[2]}" \
+  | "${DECOMPRESS[@]}" \
+  | python3 "$SCRIPT_DIR/dedupe-env-sidecar-tar.py" \
+  | xz -9 -T0 -c > "$WORK/data.tar.xz"
 
 REPLACEMENT="$WORK/repacked.deb"
 (cd "$WORK" && ar rc "$REPLACEMENT" debian-binary "${MEMBERS[1]}" data.tar.xz)
