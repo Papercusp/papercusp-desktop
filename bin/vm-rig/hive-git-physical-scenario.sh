@@ -55,6 +55,57 @@ run_vm_git_sync() {
     "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'"
 }
 
+# Phase A's quarantine is intentionally destructive: it removes the VM's
+# existing test bare store so the production bootstrap must recreate it from
+# the tower. Refuse that mutation unless the VM operator can first reach the
+# substrate owner and the exact runnable hello-world handle is booted. Without
+# this gate a corrupt/copied Corestore can turn the cold join into a guaranteed
+# 20-minute no-topic wait after the last usable store has already been moved.
+require_vm_phase_a_substrate_ready() {
+  local raw
+  if ! raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' dev:dogfood_substrate_status '{}' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
+    fail 'phase A VM substrate readiness probe could not reach the VM operator'
+  fi
+
+  if ! printf '%s' "$raw" | node -e '
+    const fs = require("node:fs");
+    const harnessSlug = process.argv[1];
+    const workspaceId = "papercusp-workspace";
+    let status;
+    try {
+      status = JSON.parse(fs.readFileSync(0, "utf8"));
+    } catch {
+      process.stderr.write("phase A VM substrate readiness probe returned invalid JSON\n");
+      process.exit(2);
+    }
+    const harnesses = Array.isArray(status?.harnesses) ? status.harnesses : [];
+    const harness = harnesses.find((row) =>
+      row?.workspaceId === workspaceId && row?.harnessSlug === harnessSlug,
+    );
+    const ready =
+      status?.substrateActive === true &&
+      status?.reachedSubstrateOwner === true &&
+      Number.isInteger(status?.bootedCount) &&
+      status.bootedCount > 0 &&
+      Boolean(harness);
+    const evidence = {
+      schemaVersion: "hive-git-phase-a-substrate-readiness/v1",
+      ready,
+      target: { workspaceId, harnessSlug },
+      substrateActive: status?.substrateActive === true,
+      reachedSubstrateOwner: status?.reachedSubstrateOwner === true,
+      bootedCount: Number.isInteger(status?.bootedCount) ? status.bootedCount : null,
+      harnessVerdict: harness?.verdict ?? null,
+      harnessReasons: Array.isArray(harness?.reasons) ? harness.reasons : [],
+    };
+    process.stdout.write(`${JSON.stringify(evidence)}\n`);
+    if (!ready) process.exit(1);
+  ' "$VM_GIT_SYNC_SLUG"; then
+    fail 'phase A VM substrate readiness gate failed: papercusp-workspace::hello-world is not booted and reachable'
+  fi
+}
+
 # Node-produced observations carry millisecond precision. Truncating the shell
 # side of the same causal window to .000Z can make a later action sort before
 # an observation from the same second, so every scenario timestamp uses the
@@ -226,6 +277,8 @@ phase_a_storage_join() {
   local started_at bootstrap_started bootstrap_finished finished_at
   mkdir -m 700 "$phase_dir"
   started_at="$(now_iso)"
+
+  require_vm_phase_a_substrate_ready >"$phase_dir/vm-substrate-readiness.json"
 
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
