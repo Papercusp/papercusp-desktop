@@ -1043,6 +1043,12 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
     echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
+  # Repack BOTH role artifacts after Tauri finishes writing them. The helper
+  # verifies the ar structure and dpkg readability, atomically replaces each
+  # deb, and regenerates its updater signature over the final bytes.
+  for deb in "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
+    [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+  done
   # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
   # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
   if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then

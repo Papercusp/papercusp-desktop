@@ -126,6 +126,13 @@ for role in $ROLES; do
     || { echo "ERROR: role=$role — release host not baked; refusing to package a permanently-un-updatable app"; exit 1; }
 done
 
+# Tauri's Debian bundler emits gzip payloads. Repack every requested role only
+# after the loop so GUI and Server are both present, then replace their updater
+# signatures over the final bytes.
+for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
+  [[ -f "$deb" ]] && bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+done
+
 if [[ " $ROLES " == *" gui "* ]]; then
   echo "==> [5/5] building Linux AppImage (gui, build-appimage.sh)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \

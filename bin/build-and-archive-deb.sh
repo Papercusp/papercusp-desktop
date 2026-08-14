@@ -433,6 +433,11 @@ if [ -z "$DEB_PATH" ] || [ ! -f "$DEB_PATH" ]; then
   exit 3
 fi
 
+# P-003 / desktop-release-size-reduction-2026-08-14: Tauri emits a
+# data.tar.gz. Recompress it before archiving (and re-sign the changed bytes),
+# saving ~193MB on the measured GUI artifact while retaining old-dpkg support.
+bash "$DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH"
+
 GIT_SHA="$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASENAME="$(basename "$DEB_PATH" .deb)"
