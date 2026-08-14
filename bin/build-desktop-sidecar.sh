@@ -1096,6 +1096,79 @@ prune_foreign_onnx_bins() {
   [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned foreign onnx bin dir(s), kept ${_bare_node_platform}/${_bare_node_arch}"
   return 0
 }
+# The KEPT platform/arch dir from the prune above still ships ONNX Runtime's GPU
+# EXECUTION PROVIDERS — and on linux/x64 that is the single largest file in the
+# entire sidecar:
+#     libonnxruntime_providers_cuda.so      301M   ← dead weight, on every install
+#     libonnxruntime_providers_tensorrt.so  835K   ← same
+#     libonnxruntime_providers_shared.so     14K   ← KEEP: the EP-registration shim
+#
+# Dead weight because nothing in this product ever constructs a GPU session, and
+# that is a DECISION, not an oversight:
+#   • the embedder is CPU-only ON PURPOSE (EI-19363236885307403). Shipping the
+#     provider actively makes CUDA *look* available — it then fails at pipeline
+#     construction on `libcudnn.so.9: cannot open shared object file`, because
+#     cuDNN 9 is absent and Ubuntu's apt only offers cuDNN 8. See the long note in
+#     libs/generic/memory/src/local-embedder-worker.script.mjs.
+#   • the one component that CAN target a GPU — the local reranker — is opt-IN
+#     (PAPERCUSP_RERANK_DEVICE) *and* verified-load: a provider that fails to
+#     construct falls back to the CPU pair (libs/generic/rerank/src/local-engine.ts,
+#     `_gpuUnusable` → CPU_EXECUTION_TARGET).
+#
+# So removing these .so files removes no capability. It swaps one failing provider
+# load for another on the SAME already-exercised fallback path, and stops us
+# shipping 301M to every user that could never execute on their machine. (WI-38682.)
+prune_onnx_gpu_providers() {
+  local pkg_dir="$1"
+  [[ -d "$pkg_dir/bin/napi-v6" ]] || return 0
+  local f freed_kb=0 pruned=0
+  while IFS= read -r -d '' f; do
+    freed_kb=$(( freed_kb + ( $(stat -c %s "$f" 2>/dev/null || echo 0) / 1024 ) ))
+    rm -f "$f"
+    pruned=$((pruned+1))
+  done < <(find "$pkg_dir/bin/napi-v6" -type f \( \
+             -name 'libonnxruntime_providers_cuda.*' -o \
+             -name 'libonnxruntime_providers_tensorrt.*' \) -print0 2>/dev/null)
+  [[ $pruned -gt 0 ]] && echo "  ✂ $(basename "$pkg_dir"): pruned $pruned GPU execution provider(s), $((freed_kb / 1024))MB (CPU-only by design, EI-19363236885307403)"
+  return 0
+}
+# The backstop for the prune above. prune_onnx_gpu_providers runs PER PACKAGE inside
+# the closure walk, so it only ever sees what that walk brought in. Anything that puts
+# a GPU provider back into the assembled tree AFTERWARDS would ship hundreds of MB of
+# dead weight with nothing failing and no line in the log — a new dependency vendoring
+# its own onnxruntime copy, an onnxruntime-node bump adding a provider we do not know
+# about, or the prune silently not running because its call site was dropped in a
+# refactor. So this scans the ASSEMBLED tree and refuses to build.
+#
+# Deliberately an ALLOWLIST rather than a denylist of known-bad names: a provider
+# nobody has seen before is exactly the case that must stop the line instead of
+# shipping silently, and a denylist cannot catch one. libonnxruntime_providers_shared
+# (14K) is the EP-registration shim and is REQUIRED — everything else is a GPU
+# execution provider this product never constructs a session for. (WI-38682.)
+assert_no_onnx_gpu_providers() {
+  local root="$1"
+  local _gpu_eps="" _ep
+  [[ -d "$root" ]] || return 0
+  while IFS= read -r -d '' _ep; do
+    case "$(basename "$_ep")" in
+      libonnxruntime_providers_shared.*) continue ;;
+    esac
+    _gpu_eps+="         $(( $(stat -c %s "$_ep" 2>/dev/null || echo 0) / 1048576 ))MB  ${_ep#"$root"/}"$'\n'
+  done < <(find "$root" -type f -name 'libonnxruntime_providers_*' -print0 2>/dev/null)
+  [[ -z "$_gpu_eps" ]] && return 0
+  echo "ERROR: ONNX GPU execution provider(s) survived sidecar staging (WI-38682):" >&2
+  printf '%s' "$_gpu_eps" >&2
+  echo "       This product never constructs a GPU session, so these can never execute on a" >&2
+  echo "       user's machine — they are pure install-size bloat. The embedder is CPU-only BY" >&2
+  echo "       DESIGN (EI-19363236885307403) and the reranker's GPU path is opt-in AND" >&2
+  echo "       verified-load with a CPU fallback, so nothing here is a capability regression." >&2
+  echo "       • New provider from an onnxruntime-node bump? Add it to prune_onnx_gpu_providers()." >&2
+  echo "       • Vendored by a new dependency? Prune it at the source, like the closure walk does." >&2
+  echo "       • Genuinely intend to ship GPU execution? That is a real product decision — make" >&2
+  echo "         it deliberately (and it needs the cuDNN 9 story solved first, see the note in" >&2
+  echo "         libs/generic/memory/src/local-embedder-worker.script.mjs)." >&2
+  return 1
+}
 # node-gyp SCAFFOLDING carries the build box's absolute paths — and therefore the
 # owner's identity — into the shipped bundle (WI-4419). A compiled native module
 # needs only its addon binary at build/Release/*.node; everything else node-gyp
@@ -1229,6 +1302,7 @@ copy_pkg_closure() {
     fi
     prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
     prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
+    prune_onnx_gpu_providers "$SIDECAR_DIR/node_modules/$cur"
     nat_copied=$((nat_copied+1))
     local deps; deps=$(node -e "try{const p=require('$src/package.json');const r=Object.keys(p.dependencies||{});const o=Object.keys(p.optionalDependencies||{}).map(n=>'?'+n);process.stdout.write([...r,...o].join(' '))}catch(e){}" 2>/dev/null)
     for d in $deps; do queue+=("$d"); done
@@ -1462,6 +1536,9 @@ echo "→ pruning node-gyp build scaffolding from sidecar native modules (releas
 prune_gyp_build_intermediates "$SIDECAR_DIR"
 echo "→ pruning vendored test fixtures from sidecar (release-privacy, WI-37620)"
 prune_vendored_test_fixtures "$SIDECAR_DIR"
+
+echo "→ verifying no ONNX GPU execution providers survive in the sidecar (WI-38682)"
+assert_no_onnx_gpu_providers "$SIDECAR_DIR" || exit 1
 
 _audit_py="$HERE/audit-release-bundle.py"
 if [[ -f "$_audit_py" ]]; then
