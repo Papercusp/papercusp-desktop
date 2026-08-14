@@ -24,10 +24,11 @@
 # covered by construction. That is the difference between a convention and a
 # chokepoint.
 #
-# Claiming is scoped to the `dev` subcommand deliberately. `tauri build` shares
-# the same target dir, but release cuts have their own peer-detection
-# (bin/release-local.sh) and their own isolation needs; widening this to build
-# would change release behaviour, which is out of scope for the bug this fixes.
+# Target-dir claiming is scoped to the `dev` subcommand deliberately. Finite
+# `build` and `bundle` commands keep their existing isolation, but any invocation
+# capable of emitting a Debian package is routed through build-deb-repacked.sh.
+# That makes the generic `npm run tauri -- build|bundle` surface obey the same
+# xz + sidecar-deduplication invariant as the named npm build scripts.
 
 set -euo pipefail
 
@@ -127,13 +128,81 @@ __pc_run_dev_with_yieldable_reader() {
 # form used in this repo, so a plain scan is enough — and being wrong here is
 # fail-safe in one direction only: a missed `dev` claims nothing (status quo),
 # never a wrong target dir.
+__tauri_args=("$@")
 __subcommand=""
-for __arg in "$@"; do
+__subcommand_index=-1
+for __index in "${!__tauri_args[@]}"; do
+  __arg="${__tauri_args[$__index]}"
   case "$__arg" in
     -*) continue ;;
-    *) __subcommand="$__arg"; break ;;
+    *)
+      __subcommand="$__arg"
+      __subcommand_index="$__index"
+      break
+      ;;
   esac
 done
+
+__pc_bundle_value_includes_deb() {
+  local value part
+  value="$1"
+  IFS=',' read -r -a __pc_bundle_parts <<<"$value"
+  for part in "${__pc_bundle_parts[@]}"; do
+    if [[ "$part" == "deb" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Decide from argv, not from a spelling-specific grep. Tauri accepts both short
+# and long bundle flags, with space- or comma-separated values. No filter means
+# the base config can emit deb; an explicit list is producer-capable only when
+# one of its exact values is `deb`. `build --no-bundle` is the one unfiltered
+# build form that cannot emit a package and must remain a direct invocation.
+__pc_repack_deb=0
+__pc_bundle_filter_seen=0
+__pc_bundle_filter_includes_deb=0
+__pc_collect_bundle_values=0
+__pc_no_bundle=0
+if [[ "$__subcommand" == "build" || "$__subcommand" == "bundle" ]]; then
+  for ((__index = __subcommand_index + 1; __index < ${#__tauri_args[@]}; __index++)); do
+    __arg="${__tauri_args[$__index]}"
+
+    if [[ "$__pc_collect_bundle_values" == 1 ]]; then
+      if [[ "$__arg" == -* ]]; then
+        __pc_collect_bundle_values=0
+      else
+        if __pc_bundle_value_includes_deb "$__arg"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        continue
+      fi
+    fi
+
+    case "$__arg" in
+      --) break ;;
+      --no-bundle) __pc_no_bundle=1 ;;
+      -b|--bundles)
+        __pc_bundle_filter_seen=1
+        __pc_collect_bundle_values=1
+        ;;
+      -b=*|--bundles=*)
+        __pc_bundle_filter_seen=1
+        if __pc_bundle_value_includes_deb "${__arg#*=}"; then
+          __pc_bundle_filter_includes_deb=1
+        fi
+        ;;
+    esac
+  done
+
+  if [[ "$__pc_no_bundle" == 0 ]] && {
+    [[ "$__pc_bundle_filter_seen" == 0 ]] ||
+      [[ "$__pc_bundle_filter_includes_deb" == 1 ]]
+  }; then
+    __pc_repack_deb=1
+  fi
+fi
 
 if [[ "$__subcommand" == "dev" ]]; then
   # Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd on the
@@ -157,10 +226,21 @@ esac
 # `tauri` here is node_modules/.bin/tauri (@tauri-apps/cli), NOT this script:
 # npm puts .bin on PATH for run-scripts, and this file is only ever reached via
 # the `tauri` npm SCRIPT. No recursion. `dev` gets a supervisor so the parent
-# can yield its startup-only reader lock; finite build/bundle commands retain
-# the original direct exec and lock lifetime.
+# can yield its startup-only reader lock. Debian-producing finite commands exec
+# the canonical repacking wrapper; explicit non-Debian filters remain direct.
 if [[ "$__subcommand" == "dev" ]] && [[ "$__pc_sidecar_lock_held" == 1 ]]; then
   __pc_run_dev_with_yieldable_reader "$@"
+elif [[ "$__pc_repack_deb" == 1 ]]; then
+  __wrapper_args=("${__tauri_args[@]}")
+  unset '__wrapper_args[__subcommand_index]'
+  __wrapper_mode=("--tauri-subcommand=$__subcommand")
+  if [[ "$__pc_bundle_filter_seen" == 0 ]]; then
+    # Preserve the generic command's unfiltered semantics. The wrapper's own
+    # no-argument default is Debian-only for `npm run build`, so its internal
+    # escape hatch is required here to avoid silently dropping rpm/appimage.
+    __wrapper_mode+=(--all-bundles)
+  fi
+  exec "$__here/build-deb-repacked.sh" "${__wrapper_mode[@]}" "${__wrapper_args[@]}"
 else
   exec tauri "$@"
 fi

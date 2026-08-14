@@ -58,6 +58,42 @@ function runGuard(args) {
   }
 }
 
+/**
+ * Exercise finite-command routing against an unmodified copy of the real guard.
+ * The copy's sibling wrapper and PATH `tauri` are distinct recorders, so the
+ * result proves which branch exec'd and preserves every forwarded argv element.
+ */
+function runGuardRouting(args) {
+  const sandbox = mkdtempSync(join(tmpdir(), 'ei20465840-routing-'));
+  const binDir = join(sandbox, 'bin');
+  try {
+    mkdirSync(binDir, { recursive: true });
+    copyFileSync(GUARD, join(binDir, 'tauri-guarded'));
+    writeFileSync(
+      join(binDir, 'build-deb-repacked.sh'),
+      '#!/usr/bin/env bash\nprintf "repack\\n"\nprintf "%s\\n" "$@"\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(binDir, 'tauri'),
+      '#!/usr/bin/env bash\nprintf "direct\\n"\nprintf "%s\\n" "$@"\n',
+      { mode: 0o755 },
+    );
+
+    const stdout = execFileSync('bash', [join(binDir, 'tauri-guarded'), ...args], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        PAPERCUSP_SIDECAR_LOCK: join(sandbox, 'sidecar.lock'),
+      },
+      encoding: 'utf8',
+    });
+    return stdout.trimEnd().split('\n');
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
 test('the chokepoint claims a target-dir slot for `dev`', () => {
   const targetDir = runGuard(['dev', '--config', '{"build":{"devUrl":"http://127.0.0.1:3070"}}']);
   assert.match(
@@ -197,11 +233,47 @@ test('the sidecar writer bounds its wait and identifies cooperative readers', ()
   assert.match(builder, /holder context follows/);
 });
 
-test('`build` is deliberately left alone — release cuts own their isolation', () => {
+test('generic build and bundle commands capable of emitting deb route through the repacker', () => {
+  assert.deepStrictEqual(
+    runGuardRouting(['build']),
+    ['repack', '--tauri-subcommand=build', '--all-bundles'],
+    'an unfiltered generic build inherits deb from the base config and must preserve all outputs while repacking it',
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['--verbose', 'bundle']),
+    ['repack', '--tauri-subcommand=bundle', '--all-bundles', '--verbose'],
+    'bundle is a second Debian producer, and flags before the subcommand must survive routing',
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['build', '--bundles', 'rpm,deb', '--debug']),
+    ['repack', '--tauri-subcommand=build', '--bundles', 'rpm,deb', '--debug'],
+    'a comma-separated list containing deb must be preserved exactly rather than narrowed or duplicated',
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['bundle', '-b', 'rpm', 'deb', '--ci']),
+    ['repack', '--tauri-subcommand=bundle', '-b', 'rpm', 'deb', '--ci'],
+    'Tauri also accepts short, space-separated multi-value bundle filters',
+  );
+});
+
+test('explicit non-Debian filters and --no-bundle remain direct Tauri invocations', () => {
+  assert.deepStrictEqual(
+    runGuardRouting(['build', '--bundles', 'rpm', 'appimage']),
+    ['direct', 'build', '--bundles', 'rpm', 'appimage'],
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['bundle', '--bundles=appimage,rpm']),
+    ['direct', 'bundle', '--bundles=appimage,rpm'],
+  );
+  assert.deepStrictEqual(
+    runGuardRouting(['build', '--no-bundle']),
+    ['direct', 'build', '--no-bundle'],
+    'routing a no-bundle compile would make the wrapper wait for an artifact the caller explicitly disabled',
+  );
   assert.strictEqual(
-    runGuard(['build', '--bundles', 'deb']),
+    runGuard(['build', '--bundles', 'appimage']),
     '',
-    'claiming was scoped to `dev` on purpose; widening it silently changes release behaviour',
+    'finite commands must retain their existing target-dir isolation; only dev claims a slot',
   );
 });
 

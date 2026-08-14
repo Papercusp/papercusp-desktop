@@ -8,6 +8,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const helper = path.join(root, 'bin', 'repack-deb-xz.sh');
 const buildWrapperRel = 'bin/build-deb-repacked.sh';
+const tauriGuardRel = 'bin/tauri-guarded';
 
 function run(cmd, args, options = {}) {
   const res = spawnSync(cmd, args, { encoding: 'utf8', ...options });
@@ -80,7 +81,11 @@ test('every known shell Linux deb-producing path reaches the repacker', () => {
     ['bin/release-local.sh arm64', section(releaseSource, 'if [[ "$WITH_ARM64" == "1" ]]', 'if [[ "$WITH_MAC" == "1"')],
   ];
   for (const [label, source] of producers) {
-    assert.match(source, /(?:tauri build|npm run build)/, `${label} must retain its Debian build invocation`);
+    assert.match(
+      source,
+      /(?:tauri build|tauri "\$TAURI_SUBCOMMAND"|npm run build)/,
+      `${label} must retain its Debian build or bundle invocation`,
+    );
     assert.match(source, /repack-deb-xz\.sh/, `${label} must repack its Debian artifacts`);
   }
 
@@ -100,6 +105,18 @@ test('every npm script that can emit Debian routes through the repacking build w
       `package.json script ${name} must route Debian artifacts through ${buildWrapperRel}`,
     );
   }
+
+  assert.match(
+    pkg.scripts?.tauri ?? '',
+    /bin\/tauri-guarded/,
+    'the generic `npm run tauri -- build|bundle` producer surface must remain wired to its routing chokepoint',
+  );
+  const tauriGuard = fs.readFileSync(path.join(root, tauriGuardRel), 'utf8');
+  assert.match(
+    tauriGuard,
+    /build-deb-repacked\.sh/,
+    `${tauriGuardRel} must route Debian-capable build and bundle invocations through ${buildWrapperRel}`,
+  );
 
   const wrapper = fs.readFileSync(path.join(root, buildWrapperRel), 'utf8');
   assert.match(wrapper, /BUNDLE_ARGS=\(--bundles deb\)/, `${buildWrapperRel} must default to Debian-only bundles`);
@@ -157,6 +174,16 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       { args: [], profile: 'release', expectedArgs: 'build --bundles deb' },
       { args: ['--debug'], profile: 'debug', expectedArgs: 'build --bundles deb --debug' },
       { args: ['--all-bundles'], profile: 'release', expectedArgs: 'build' },
+      {
+        args: ['--tauri-subcommand=bundle', '--all-bundles'],
+        profile: 'release',
+        expectedArgs: 'bundle',
+      },
+      {
+        args: ['--tauri-subcommand=bundle', '--bundles', 'rpm,deb', '--debug'],
+        profile: 'debug',
+        expectedArgs: 'bundle --bundles rpm,deb --debug',
+      },
     ]) {
       const result = spawnSync('bash', [path.join(root, buildWrapperRel), ...args], {
         cwd: root,
