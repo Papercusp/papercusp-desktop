@@ -172,8 +172,10 @@ remote_producer_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
 # Identity preflight is load-only: the cached announce identity must still
 # match an EXISTING keychain entry on each host. No gh lookup or key mint occurs.
 "$TSX" "$PRODUCER" identity tower "$TOWER_CACHE" >"$tower_identity"
+[ -s "$tower_identity" ] || fail 'tower identity command produced no JSON'
 ssh "${SSH_OPTS[@]}" "$VM" \
   "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
+[ -s "$vm_identity" ] || fail 'VM identity command produced no JSON'
 "$TSX" "$PRODUCER" preflight "$tower_identity" "$vm_identity" >/dev/null
 if [ "$source_preflight" -eq 1 ]; then
   printf '{"schemaVersion":"hive-git-physical-source-preflight/v1","ready":true,"producerSha256":"%s","topology":"tower-vm-distinct-host-identities"}\n' \
