@@ -32,7 +32,8 @@ TSX="$REPO_ROOT/node_modules/.bin/tsx"
 VM='aviweiss@172.31.44.2'
 VM_NODE='/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node'
 VM_TSX='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/node_modules/tsx/dist/cli.mjs'
-VM_PRODUCER='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts'
+VM_SOURCE="${HIVE_GIT_PHYSICAL_VM_SOURCE:-}"
+VM_PRODUCER="$VM_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 VM_CALL='/tmp/vmcall.sh'
 TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
@@ -946,6 +947,21 @@ run_all_phases() {
   phase_g_crash_epoch_chaos
 }
 
+verify_physical_vm_source() {
+  case "$VM_SOURCE" in
+    /tmp/hive-git-physical-source.[0-9]*) ;;
+    *) fail 'physical VM source must be the canonical probe staging directory' ;;
+  esac
+
+  local local_sha remote_sha
+  local_sha="$(sha256sum "$PRODUCER" | awk '{print $1}')"
+  remote_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
+    "[ -x '$VM_TSX' ] && [ -f '$VM_PRODUCER' ] && shasum -a 256 '$VM_PRODUCER' | awk '{print \$1}'")" \
+    || fail 'physical VM source is incomplete or unreadable'
+  [ "$remote_sha" = "$local_sha" ] \
+    || fail 'physical VM producer digest does not match the tower'
+}
+
 # OFFLINE CONTRACT BOUNDARY. This must remain before the first phase call and
 # before any future ssh/mutation primitive until all seven fixed executors and
 # their focused falsifiability tests are checked in.
@@ -953,6 +969,7 @@ run_all_phases() {
   || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-G phase executors have not all landed"
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
+verify_physical_vm_source
 
 scenario_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 run_all_phases

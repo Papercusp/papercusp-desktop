@@ -14,6 +14,9 @@
 #
 # Usage (only through hive-git-drill.sh):
 #   hive-git-physical-probe.sh /abs/evidence.json /abs/trust.json
+# Safe live preflight (stages/verifies current source + identities; no mutation):
+#   HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
+#     hive-git-physical-probe.sh --source-preflight
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,28 +24,37 @@ REPO_ROOT="${PAPERCUSP_REPO_DIR:-$(cd "$HERE/../../.." && pwd)}"
 PRODUCER="$REPO_ROOT/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 SCENARIO="$HERE/hive-git-physical-scenario.sh"
 TSX="$REPO_ROOT/node_modules/.bin/tsx"
-VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
-VM_SOURCE="${PCUSP_VM_DEV_SOURCE:-/Users/aviweiss/.papercusp-workspaces/.shared/dev-source}"
-VM_NODE="${PCUSP_VM_NODE:-/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node}"
-VM_TSX="${PCUSP_VM_TSX:-$VM_SOURCE/node_modules/tsx/dist/cli.mjs}"
-VM_PRODUCER="${PCUSP_VM_PHYSICAL_PRODUCER:-$VM_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts}"
+VM='aviweiss@172.31.44.2'
+VM_DEP_SOURCE='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source'
+VM_NODE='/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node'
+VM_TSX="$VM_DEP_SOURCE/node_modules/tsx/dist/cli.mjs"
 TOWER_CACHE="${PAPERCUSP_ANNOUNCE_IDENTITY_CACHE:-$HOME/.papercusp-workspaces/.shared/.papercusp/local-announce-identity.json}"
 VM_CACHE="${PCUSP_VM_ANNOUNCE_IDENTITY_CACHE:-/Users/aviweiss/.papercusp-workspaces/.shared/.papercusp/local-announce-identity.json}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 
+source_preflight=0
+if [ "${1:-}" = '--source-preflight' ]; then
+  source_preflight=1
+  shift
+fi
 evidence_out="${1:-}"
 trust_out="${2:-}"
 fail() { echo "hive-git-physical-probe: $*" >&2; exit 1; }
 
 [ "${HIVE_GIT_PHYSICAL_PLAN:-}" = "p2p-git-live-activation-2026-07-09" ] \
   || fail 'must be launched by the canonical P-505 drill'
-[ -n "$evidence_out" ] && [ "${evidence_out#/}" != "$evidence_out" ] \
-  || fail 'evidence output must be an absolute path'
-[ -n "$trust_out" ] && [ "${trust_out#/}" != "$trust_out" ] \
-  || fail 'trust output must be an absolute path'
-[ "$evidence_out" != "$trust_out" ] || fail 'evidence and trust outputs must differ'
-[ ! -e "$evidence_out" ] && [ ! -e "$trust_out" ] \
-  || fail 'refusing to overwrite a pre-banked output'
+if [ "$source_preflight" -eq 1 ]; then
+  [ "$#" -eq 0 ] || fail 'usage: hive-git-physical-probe.sh --source-preflight'
+else
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-probe.sh /abs/evidence.json /abs/trust.json'
+  [ -n "$evidence_out" ] && [ "${evidence_out#/}" != "$evidence_out" ] \
+    || fail 'evidence output must be an absolute path'
+  [ -n "$trust_out" ] && [ "${trust_out#/}" != "$trust_out" ] \
+    || fail 'trust output must be an absolute path'
+  [ "$evidence_out" != "$trust_out" ] || fail 'evidence and trust outputs must differ'
+  [ ! -e "$evidence_out" ] && [ ! -e "$trust_out" ] \
+    || fail 'refusing to overwrite a pre-banked output'
+fi
 [ -x "$TSX" ] && [ -f "$PRODUCER" ] || fail 'local TypeScript producer is unavailable'
 [ -x "$SCENARIO" ] \
   || fail "canonical E/G scenario driver is not executable: $SCENARIO"
@@ -53,7 +65,13 @@ fail() { echo "hive-git-physical-probe: $*" >&2; exit 1; }
 "$SCENARIO" --require-ready >/dev/null
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
-cleanup() { rm -rf "$run_dir"; }
+remote_source="/tmp/hive-git-physical-source.$$"
+cleanup() {
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "case '$remote_source' in /tmp/hive-git-physical-source.[0-9]*) rm -rf -- '$remote_source' ;; esac" \
+    >/dev/null 2>&1 || true
+  rm -rf "$run_dir"
+}
 trap cleanup EXIT HUP INT TERM
 
 tower_identity="$run_dir/tower-identity.json"
@@ -62,6 +80,30 @@ unsigned_evidence="$run_dir/unsigned-evidence.json"
 tower_receipt="$run_dir/tower-receipt.json"
 vm_receipt="$run_dir/vm-receipt.json"
 remote_unsigned="/tmp/hive-git-physical-unsigned-$$.json"
+VM_PRODUCER="$remote_source/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
+
+# The bundle-extracted VM dev-source is intentionally pinned to the installed
+# app and can be older than this release candidate. Stage an immutable HEAD
+# snapshot for the observer/adapter instead of overwriting that installed tree.
+# The installed node_modules supplies the VM-native dependency closure; the
+# exact producer bytes must still match the tower working tree before either
+# host identity is read.
+ssh "${SSH_OPTS[@]}" "$VM" \
+  "[ -x '$VM_TSX' ] && [ -d '$VM_DEP_SOURCE/node_modules' ] && [ ! -e '$remote_source' ] && mkdir -m 700 '$remote_source'" \
+  || fail 'could not create the canonical VM run-source directory'
+git -C "$REPO_ROOT" archive --format=tar HEAD -- \
+  packages/operator-core package.json tsconfig.base.json \
+  | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
+  || fail 'could not stage the immutable operator-core HEAD snapshot on the VM'
+ssh "${SSH_OPTS[@]}" "$VM" \
+  "ln -s '$VM_DEP_SOURCE/node_modules' '$remote_source/node_modules'" \
+  || fail 'could not attach the VM dependency tree to the run-source snapshot'
+local_producer_sha="$(sha256sum "$PRODUCER" | awk '{print $1}')"
+remote_producer_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
+  "shasum -a 256 '$VM_PRODUCER' | awk '{print \$1}'")" \
+  || fail 'could not hash the staged VM physical-drill producer'
+[ "$remote_producer_sha" = "$local_producer_sha" ] \
+  || fail 'staged VM physical-drill producer does not match the tower working tree'
 
 # Identity preflight is load-only: the cached announce identity must still
 # match an EXISTING keychain entry on each host. No gh lookup or key mint occurs.
@@ -69,13 +111,18 @@ remote_unsigned="/tmp/hive-git-physical-unsigned-$$.json"
 ssh "${SSH_OPTS[@]}" "$VM" \
   "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' identity vm '$VM_CACHE'" >"$vm_identity"
 "$TSX" "$PRODUCER" preflight "$tower_identity" "$vm_identity" >/dev/null
+if [ "$source_preflight" -eq 1 ]; then
+  printf '{"schemaVersion":"hive-git-physical-source-preflight/v1","ready":true,"producerSha256":"%s","topology":"tower-vm-distinct-host-identities"}\n' \
+    "$local_producer_sha"
+  exit 0
+fi
 
 # The scenario receives the preflighted identities so its topology is pinned
 # before it mutates anything. It must emit fresh, UNATTESTED same-run A-G
 # observations at an absent path; the finalizer rejects pre-banked signatures.
 HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
-  PCUSP_VM_SSH="$VM" \
+  HIVE_GIT_PHYSICAL_VM_SOURCE="$remote_source" \
   "$SCENARIO" "$unsigned_evidence" "$tower_identity" "$vm_identity"
 [ -s "$unsigned_evidence" ] || fail 'canonical scenario produced no unsigned evidence'
 
