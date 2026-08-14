@@ -43,6 +43,30 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- UPDATER SIGNING KEY (EI-20398328195531333) ---
+#
+# tauri.conf.json enables createUpdaterArtifacts, so a build without a private
+# key can spend the full compile + multi-GB Debian bundle and only then fail at
+# the updater-signing step. The other local release producers already load the
+# conventional key; keep this wrapper on the same contract. An explicitly
+# supplied TAURI_SIGNING_PRIVATE_KEY still wins because Tauri accepts either
+# key contents or a path in that variable. TAURI_SIGNING_PRIVATE_KEY_PATH is
+# the repo's path-only convenience override and is otherwise ignored by Tauri.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  SIGNING_KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
+  if [[ ! -f "$SIGNING_KEY_FILE" ]]; then
+    echo "FATAL: updater signing key not found at $SIGNING_KEY_FILE." >&2
+    echo "       Run bin/setup-signing-key.sh, set TAURI_SIGNING_PRIVATE_KEY_PATH," >&2
+    echo "       or provide TAURI_SIGNING_PRIVATE_KEY directly before building." >&2
+    exit 7
+  fi
+  export TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY_FILE"
+  echo "==> updater signing key: $SIGNING_KEY_FILE"
+else
+  echo "==> updater signing key: supplied via TAURI_SIGNING_PRIVATE_KEY"
+fi
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
 # --- SEED OVERLAY (WI-6075) ---
 #
 # The multi-GB hive seed (src-tauri/seed, ~2GB) is deliberately NOT in the base
