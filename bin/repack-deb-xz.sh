@@ -63,13 +63,18 @@ chmod --reference="$DEB_PATH" "$REPLACEMENT"
 # Exercise both metadata and payload readers before replacing the known-good deb.
 dpkg-deb --info "$REPLACEMENT" >/dev/null
 dpkg-deb --contents "$REPLACEMENT" >/dev/null
-mv -f "$REPLACEMENT" "$DEB_PATH"
 
 if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-  rm -f "$DEB_PATH.sig"
   npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
-    tauri signer sign "$DEB_PATH" >/dev/null
-  [[ -s "$DEB_PATH.sig" ]] || { echo "FATAL: Tauri signer produced no signature for $DEB_PATH" >&2; exit 6; }
+    tauri signer sign "$REPLACEMENT" >/dev/null
+  [[ -s "$REPLACEMENT.sig" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
+fi
+
+# Publish only after every validation AND signing step succeeds. A signer
+# failure must leave the known-good deb and its matching signature untouched.
+mv -f "$REPLACEMENT" "$DEB_PATH"
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  mv -f "$REPLACEMENT.sig" "$DEB_PATH.sig"
 fi
 
 echo "✓ repacked data member as xz -9: $DEB_PATH"

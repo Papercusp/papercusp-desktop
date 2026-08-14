@@ -56,3 +56,36 @@ test('all Linux deb producers invoke the repacker', () => {
     assert.match(source, /repack-deb-xz\.sh/, `${rel} must repack its Debian artifacts`);
   }
 });
+
+test('refuses to invalidate an existing updater signature without a signing key', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-sig-'));
+  try {
+    const pkg = path.join(tmp, 'pkg');
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+      'Package: papercusp-repack-signature-test',
+      'Version: 1.0.0',
+      'Architecture: all',
+      'Maintainer: Papercusp <test@example.invalid>',
+      'Description: signature guard fixture',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'signed bytes\n');
+    const deb = path.join(tmp, 'signed.deb');
+    run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+    fs.writeFileSync(`${deb}.sig`, 'signature-for-original-bytes\n');
+    const original = fs.readFileSync(deb);
+
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '' },
+    });
+    assert.equal(res.status, 5);
+    assert.match(res.stderr, /refusing to create a stale signature/);
+    assert.deepEqual(fs.readFileSync(deb), original, 'refusal must preserve the original package bytes');
+    assert.equal(fs.readFileSync(`${deb}.sig`, 'utf8'), 'signature-for-original-bytes\n');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
