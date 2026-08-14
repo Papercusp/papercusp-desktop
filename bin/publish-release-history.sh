@@ -17,6 +17,7 @@
 # Layout it writes (relative to the bucket root):
 #   <secret>/index.html            ← THE LINK WE SHARE WITH BETA TESTERS
 #   <secret>/plans/<slug>.html     ← one page per plan that shipped
+#   <secret>/work-items/<id>.html  ← one page per user-facing work item
 #
 # It lands at the SAME secret path as the installers, which is what makes the
 # page's relative download links resolve: index.html links `desktop-v0.0.8-alpha/…`,
@@ -54,6 +55,28 @@ if [[ ! -f "$SITE_DIR/index.html" ]]; then
   echo "ERROR: no generated site at $SITE_DIR" >&2
   echo "       Generate it first:" >&2
   echo "         npx tsx apps/operator/lib/release/record-release-cli.ts --regenerate" >&2
+  exit 1
+fi
+if [[ ! -d "$SITE_DIR/work-items" ]]; then
+  echo "ERROR: no generated work-item pages at $SITE_DIR/work-items" >&2
+  echo "       Regenerate with the current record-release-cli before publishing." >&2
+  exit 1
+fi
+
+# Pick a detail page through the INDEX LINK itself. That proves the generated
+# navigation and the uploaded object agree; choosing an arbitrary file from the
+# directory would miss a broken href in the page testers actually open.
+DETAIL_PAGE="$(
+  node - "$SITE_DIR/index.html" <<'NODE'
+const fs = require('node:fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const match = html.match(/href="(work-items\/[A-Za-z0-9._-]+\.html)"/);
+if (match) process.stdout.write(match[1]);
+NODE
+)"
+if [[ -z "$DETAIL_PAGE" || ! -f "$SITE_DIR/$DETAIL_PAGE" ]]; then
+  echo "ERROR: index.html does not link to a generated work-item detail page." >&2
+  echo "       Regenerate; every listed user-facing item must have an explicit detail link." >&2
   exit 1
 fi
 
@@ -129,12 +152,19 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit 0
 fi
 
-# Upload the plan pages FIRST, index.html LAST. index.html is what a tester opens;
-# publishing it before the pages it links to would serve a page whose links 404.
+# Upload the plan + work-item pages FIRST, index.html LAST. index.html is what a
+# tester opens; publishing it before the pages it links to would serve 404 links.
 # (Same ordering rule as upload-release.sh: the thing that ADVERTISES goes last.)
 echo
 echo "==> uploading plan pages"
 aws s3 sync "$SITE_DIR/plans" "s3://${R2_BUCKET}/${KEY_PREFIX}/plans" \
+  --endpoint-url "$ENDPOINT" \
+  --content-type 'text/html; charset=utf-8' \
+  --cache-control 'no-cache, max-age=0' \
+  --delete --only-show-errors
+
+echo "==> uploading work-item pages"
+aws s3 sync "$SITE_DIR/work-items" "s3://${R2_BUCKET}/${KEY_PREFIX}/work-items" \
   --endpoint-url "$ENDPOINT" \
   --content-type 'text/html; charset=utf-8' \
   --cache-control 'no-cache, max-age=0' \
@@ -185,7 +215,22 @@ if ! diff -q "$SITE_DIR/index.html" "$TMP_PAGE/index.html" >/dev/null; then
 fi
 echo "  ✓ index.html served and byte-identical"
 
-# The gate again, on the SERVED bytes. Belt and braces, and it is nearly free:
+# Follow one REAL link from the served index and compare that detail page too.
+# This is the minimal public-path proof that index → work item is not a local-only
+# success caused by forgetting to sync the new directory.
+mkdir -p "$TMP_PAGE/$(dirname "$DETAIL_PAGE")"
+DETAIL_HTTP_CODE="$(curl -sS -o "$TMP_PAGE/$DETAIL_PAGE" -w '%{http_code}' --max-time 30 "${BASE}/${DETAIL_PAGE}" 2>/dev/null)" || true
+if [[ "$DETAIL_HTTP_CODE" != "200" ]]; then
+  echo "  ✗ GET $DETAIL_PAGE returned HTTP ${DETAIL_HTTP_CODE:-000}" >&2
+  exit 1
+fi
+if ! diff -q "$SITE_DIR/$DETAIL_PAGE" "$TMP_PAGE/$DETAIL_PAGE" >/dev/null; then
+  echo "  ✗ the served work-item detail page does NOT match what we uploaded" >&2
+  exit 1
+fi
+echo "  ✓ linked work-item detail page served and byte-identical"
+
+# The gate again, on BOTH served pages. Belt and braces, and it is nearly free:
 # what we uploaded and what the host serves are two different facts.
 if ! npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$TMP_PAGE"; then
   echo "  ✗ the SERVED page contains identity — it is live. Take it down NOW." >&2
