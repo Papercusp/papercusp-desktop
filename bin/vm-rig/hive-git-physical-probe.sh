@@ -123,7 +123,10 @@ const link = (source, target) => {
 for (const entry of fs.readdirSync(installedModules, { withFileTypes: true })) {
   const source = path.join(installedModules, entry.name);
   const target = path.join(runModules, entry.name);
-  if (entry.name.startsWith('@') && entry.isDirectory()) {
+  // A scope may itself be a symlink in an installed npm tree. Always make the
+  // run-local scope a real directory so replacing one of its package links can
+  // never traverse back into and mutate the installed bundle.
+  if (entry.name.startsWith('@') && (entry.isDirectory() || entry.isSymbolicLink())) {
     fs.mkdirSync(target, { recursive: true });
     for (const child of fs.readdirSync(source)) {
       link(path.join(source, child), path.join(target, child));

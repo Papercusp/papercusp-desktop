@@ -62,13 +62,16 @@ the trust-root half of the producer:
   pairs are refused.
 - The VM's bundle-extracted `dev-source` is an installed-artifact snapshot and
   may legitimately predate the release candidate. Before reading either host
-  identity, the wrapper streams an immutable `git archive` of the current
-  `packages/operator-core` HEAD into a private run-local VM directory, attaches
-  the VM's installed dependency tree, and requires the staged producer's SHA-256
-  to equal the tower producer byte-for-byte. The run-local source is removed on
-  exit; the installed `dev-source` is never overwritten. This stages the strict
-  evidence adapter only: production mutations still run through the live
-  `git-sync:run`, bridge, watchdog, and host services named by each phase.
+  identity, the wrapper streams immutable `git archive` snapshots of the current
+  superproject packages/generic libraries and Papercusp library submodule into a
+  private run-local VM directory. It builds a run-local dependency overlay where
+  staged workspace packages replace the bundle's stale workspace links while
+  third-party packages remain read-only links to the installed dependency tree.
+  The staged producer's SHA-256 must equal the tower producer byte-for-byte. The
+  run-local source is removed on exit; the installed `dev-source` is never
+  overwritten. This stages the strict evidence adapter only: production
+  mutations still run through the live `git-sync:run`, bridge, watchdog, and
+  host services named by each phase.
   `HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09
   bin/vm-rig/hive-git-physical-probe.sh --source-preflight` exercises this
   staging, byte-hash, and distinct-host identity path and exits before the
