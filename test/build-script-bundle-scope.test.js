@@ -40,25 +40,28 @@ const path = require('node:path');
 const pkg = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'),
 );
+const buildWrapperRel = 'bin/build-deb-repacked.sh';
+const buildWrapper = fs.readFileSync(path.join(__dirname, '..', buildWrapperRel), 'utf8');
 
 /** Scripts whose whole purpose is "give me a local build, now". */
 const DEFAULT_BUILD_SCRIPTS = ['build', 'build:debug'];
 
-test('default build scripts pass an explicit --bundles filter', () => {
+test('default build scripts route through the explicitly scoped Debian wrapper', () => {
   for (const name of DEFAULT_BUILD_SCRIPTS) {
     const script = pkg.scripts?.[name];
     assert.ok(script, `package.json is missing the "${name}" script`);
     assert.match(
       script,
-      /--bundles\s+\S+/,
-      `"${name}" is "${script}" — an unfiltered \`tauri build\` on Linux also packages ` +
+      /bin\/build-deb-repacked\.sh/,
+      `"${name}" is "${script}" — it must use ${buildWrapperRel}; an unscoped Tauri build also packages ` +
         `rpm and appimage, each a single-threaded in-process compression of the ~4.7GB ` +
         `sidecar. The deb finishes in ~2min and is the only artifact consumed, but the ` +
         `command does not RETURN for hours, so anything awaiting completion hangs. ` +
-        `Use "--bundles deb" (as bin/build-linux-local.sh does); run ` +
+        `Use ${buildWrapperRel}; run ` +
         `"npm run build:all-bundles" for the rare every-format case.`,
     );
   }
+  assert.match(buildWrapper, /tauri build --bundles deb/, `${buildWrapperRel} must retain the Debian-only bundle filter`);
 });
 
 test('the escape hatch for every-format builds still exists', () => {
@@ -75,9 +78,9 @@ test('the scoped default still builds the artifact the perf suite resolves', () 
   // If the default build ever stops emitting deb, that suite silently falls back to
   // an older/incomplete tree — the exact failure EI-18885442084466501 was about.
   assert.match(
-    pkg.scripts.build,
+    buildWrapper,
     /--bundles\s+(\S*,)?deb\b/,
-    `"build" must still include the deb target — it is what ` +
+    `${buildWrapperRel} must still include the deb target — it is what ` +
       `bin/lib/installed-app-tree.js inspects and what the packaged perf suite measures.`,
   );
 });
