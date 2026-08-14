@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
-# Build only Debian bundles, then route every bundle produced by this invocation
-# through the canonical xz + env-sidecar deduplication repacker.
+# Build Debian bundles (or all bundles with --all-bundles), then route every
+# Debian bundle produced by this invocation through the canonical xz +
+# env-sidecar deduplication repacker.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE="release"
+BUNDLE_ARGS=(--bundles deb)
+TAURI_ARGS=()
 for arg in "$@"; do
-  [[ "$arg" == "--debug" ]] && PROFILE="debug"
+  case "$arg" in
+    --debug)
+      PROFILE="debug"
+      TAURI_ARGS+=("$arg")
+      ;;
+    --all-bundles)
+      BUNDLE_ARGS=()
+      ;;
+    *)
+      TAURI_ARGS+=("$arg")
+      ;;
+  esac
 done
 
 BUILD_MARKER="$(mktemp "${TMPDIR:-/tmp}/papercusp-deb-build.XXXXXX")"
@@ -15,7 +29,7 @@ cleanup() { rm -f "$BUILD_MARKER"; }
 trap cleanup EXIT
 
 cd "$ROOT"
-tauri build --bundles deb "$@"
+tauri build "${BUNDLE_ARGS[@]}" "${TAURI_ARGS[@]}"
 
 CARGO_TARGET_ROOT="$(
   cd "$ROOT/src-tauri"

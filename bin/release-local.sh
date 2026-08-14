@@ -979,6 +979,12 @@ export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
 # running this script.
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
+# Resolve the claimed cargo output root before any build leg reads or writes it.
+# claim-target-dir.sh exports CARGO_TARGET_DIR, and cargo metadata is the source
+# of truth that maps that selection to the bundle tree for every target triple.
+CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+
 # Tauri CLI does the platform-native bundling + signing in one shot.
 # Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):
 # GUI (base tauri.conf.json) + Server (tauri.server.conf.json override).
@@ -1144,6 +1150,12 @@ if [[ "$WITH_ARM64" == "1" ]]; then
     echo "==> tauri build (linux arm64, role=$role)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
+  # The base Tauri config includes deb among the unfiltered arm64 targets.
+  # Repack both role artifacts before they enter ARTIFACTS, regenerating updater
+  # signatures over the final xz + hardlink-deduplicated bytes.
+  for deb in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
+    [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+  done
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
   done
@@ -1281,8 +1293,6 @@ fi
 # survive the fork). Version-scoped globs so a stale older-version bundle can't
 # sweep in (desktop-v0.0.2-alpha incident 2026-06-11). ──
 ARTIFACTS=()
-CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
 LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
 if [[ ! -d "$LINUX_BUNDLE" ]]; then
   echo "ERROR: expected Linux bundles at $LINUX_BUNDLE — Linux leg produced none?"; exit 1

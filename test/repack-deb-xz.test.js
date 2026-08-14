@@ -62,16 +62,38 @@ test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () 
   }
 });
 
-test('all shell Linux deb producers invoke the repacker', () => {
-  for (const rel of ['bin/build-and-archive-deb.sh', 'bin/build-linux-local.sh', 'bin/release-local.sh']) {
-    const source = fs.readFileSync(path.join(root, rel), 'utf8');
-    assert.match(source, /repack-deb-xz\.sh/, `${rel} must repack its Debian artifacts`);
+function section(source, start, end) {
+  const startAt = source.indexOf(start);
+  const endAt = source.indexOf(end, startAt + start.length);
+  assert.notEqual(startAt, -1, `missing section start: ${start}`);
+  assert.notEqual(endAt, -1, `missing section end: ${end}`);
+  return source.slice(startAt, endAt);
+}
+
+test('every known shell Linux deb-producing path reaches the repacker', () => {
+  const releaseSource = fs.readFileSync(path.join(root, 'bin/release-local.sh'), 'utf8');
+  const producers = [
+    ['bin/build-and-archive-deb.sh', fs.readFileSync(path.join(root, 'bin/build-and-archive-deb.sh'), 'utf8')],
+    [buildWrapperRel, fs.readFileSync(path.join(root, buildWrapperRel), 'utf8')],
+    ['bin/build-linux-local.sh', fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8')],
+    ['bin/release-local.sh x86_64', section(releaseSource, 'echo "==> building Tauri Linux x86_64 (signed)"', 'if [[ "$WITH_WINDOWS" == "1" ]]')],
+    ['bin/release-local.sh arm64', section(releaseSource, 'if [[ "$WITH_ARM64" == "1" ]]', 'if [[ "$WITH_MAC" == "1"')],
+  ];
+  for (const [label, source] of producers) {
+    assert.match(source, /(?:tauri build|npm run build)/, `${label} must retain its Debian build invocation`);
+    assert.match(source, /repack-deb-xz\.sh/, `${label} must repack its Debian artifacts`);
   }
+
+  const arm64 = producers.at(-1)[1];
+  assert.ok(
+    arm64.indexOf('repack-deb-xz.sh') < arm64.indexOf('ARTIFACTS+=("$f")'),
+    'release-local.sh arm64 must repack Debian artifacts before collecting them',
+  );
 });
 
-test('both npm Debian producers route through the repacking build wrapper', () => {
+test('every npm script that can emit Debian routes through the repacking build wrapper', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  for (const name of ['build', 'build:debug']) {
+  for (const name of ['build', 'build:debug', 'build:all-bundles']) {
     assert.match(
       pkg.scripts?.[name] ?? '',
       /bin\/build-deb-repacked\.sh/,
@@ -80,11 +102,11 @@ test('both npm Debian producers route through the repacking build wrapper', () =
   }
 
   const wrapper = fs.readFileSync(path.join(root, buildWrapperRel), 'utf8');
-  assert.match(wrapper, /tauri build --bundles deb/, `${buildWrapperRel} must build only Debian bundles`);
+  assert.match(wrapper, /BUNDLE_ARGS=\(--bundles deb\)/, `${buildWrapperRel} must default to Debian-only bundles`);
   assert.match(wrapper, /repack-deb-xz\.sh/, `${buildWrapperRel} must invoke the canonical repacker`);
 });
 
-test('the npm build wrapper repacks the fresh bundle from release and debug profiles', () => {
+test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian output', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-build-wrapper-test-'));
   try {
     const pkgDir = path.join(tmp, 'pkg');
@@ -131,9 +153,10 @@ test('the npm build wrapper repacks the fresh bundle from release and debug prof
       FAKE_TARGET_DIR: targetDir,
       TAURI_SIGNING_PRIVATE_KEY: '',
     };
-    for (const { args, profile } of [
-      { args: [], profile: 'release' },
-      { args: ['--debug'], profile: 'debug' },
+    for (const { args, profile, expectedArgs } of [
+      { args: [], profile: 'release', expectedArgs: 'build --bundles deb' },
+      { args: ['--debug'], profile: 'debug', expectedArgs: 'build --bundles deb --debug' },
+      { args: ['--all-bundles'], profile: 'release', expectedArgs: 'build' },
     ]) {
       const result = spawnSync('bash', [path.join(root, buildWrapperRel), ...args], {
         cwd: root,
@@ -141,7 +164,7 @@ test('the npm build wrapper repacks the fresh bundle from release and debug prof
         env,
       });
       assert.equal(result.status, 0, `wrapper failed (${result.status}): ${result.stderr}`);
-      assert.match(fs.readFileSync(argsLog, 'utf8'), new RegExp(`^build --bundles deb${args.length ? ' --debug' : ''}\\n$`));
+      assert.equal(fs.readFileSync(argsLog, 'utf8'), `${expectedArgs}\n`);
       const builtDeb = path.join(targetDir, profile, 'bundle', 'deb', 'Papercusp_1.0.0_all.deb');
       assert.deepEqual(run('ar', ['t', builtDeb]).trim().split('\n'), [
         'debian-binary',

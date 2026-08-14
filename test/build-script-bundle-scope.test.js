@@ -61,14 +61,14 @@ test('default build scripts route through the explicitly scoped Debian wrapper',
         `"npm run build:all-bundles" for the rare every-format case.`,
     );
   }
-  assert.match(buildWrapper, /tauri build --bundles deb/, `${buildWrapperRel} must retain the Debian-only bundle filter`);
+  assert.match(buildWrapper, /BUNDLE_ARGS=\(--bundles deb\)/, `${buildWrapperRel} must retain the Debian-only default`);
 });
 
 test('the escape hatch for every-format builds still exists', () => {
-  assert.ok(
-    pkg.scripts?.['build:all-bundles'],
-    'build:all-bundles is the documented way to get rpm/appimage from package.json; ' +
-      'the guard above tells people to use it, so it must exist.',
+  assert.match(
+    pkg.scripts?.['build:all-bundles'] ?? '',
+    /bin\/build-deb-repacked\.sh --all-bundles/,
+    'build:all-bundles must preserve every-format output while routing its Debian artifact through the repacker.',
   );
 });
 
@@ -79,7 +79,7 @@ test('the scoped default still builds the artifact the perf suite resolves', () 
   // an older/incomplete tree — the exact failure EI-18885442084466501 was about.
   assert.match(
     buildWrapper,
-    /--bundles\s+(\S*,)?deb\b/,
+    /BUNDLE_ARGS=\(--bundles deb\)/,
     `${buildWrapperRel} must still include the deb target — it is what ` +
       `bin/lib/installed-app-tree.js inspects and what the packaged perf suite measures.`,
   );
