@@ -55,6 +55,14 @@ run_vm_git_sync() {
     "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'"
 }
 
+# Node-produced observations carry millisecond precision. Truncating the shell
+# side of the same causal window to .000Z can make a later action sort before
+# an observation from the same second, so every scenario timestamp uses the
+# same precision.
+now_iso() {
+  date -u +%Y-%m-%dT%H:%M:%S.%3NZ
+}
+
 fail() {
   echo "hive-git-physical-scenario: $*" >&2
   exit 1
@@ -217,7 +225,7 @@ phase_a_storage_join() {
   local run_id="p505-a-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   local started_at bootstrap_started bootstrap_finished finished_at
   mkdir -m 700 "$phase_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
 
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
@@ -229,27 +237,26 @@ phase_a_storage_join() {
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-observe vm absent '$VM_REPO' '$vm_device' '$tower_device'" \
     >"$phase_dir/vm-absent.json"
 
-  bootstrap_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  bootstrap_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/bootstrap-raw.json"
-  bootstrap_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  bootstrap_finished="$(now_iso)"
 
   # A multi-GB cold join is allowed to take minutes. Presence is necessary but
-  # not sufficient; the verifier below still requires exact two-host namespace
-  # OID parity, local object existence, and independent ODB fingerprints.
+  # not sufficient: keep sampling until the strict verifier observes both
+  # namespaces, both signed witnesses, exact ref-OID parity, and independent
+  # object databases. Capture tower first and the final VM snapshot second so
+  # the evidence preserves the validator's causal order.
   local deadline=$((SECONDS + 1200))
-  while ! ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-observe vm present '$VM_REPO' '$vm_device' '$tower_device'" \
-    >"$phase_dir/vm-after.json" 2>"$phase_dir/vm-after.err"; do
-    [ "$SECONDS" -lt "$deadline" ] \
-      || fail 'phase A canonical bootstrap did not recreate an observable VM store within 20 minutes'
-    sleep 10
-  done
-  "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
-    "$tower_device" "$vm_device" >"$phase_dir/tower-after.json"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  while :; do
+    "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
+      "$tower_device" "$vm_device" >"$phase_dir/tower-after.json"
+    if ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-observe vm present '$VM_REPO' '$vm_device' '$tower_device'" \
+      >"$phase_dir/vm-after.json" 2>"$phase_dir/vm-after.err"; then
+      finished_at="$(now_iso)"
 
-  node - "$phase_dir" "$run_id" "$started_at" "$bootstrap_started" \
-    "$bootstrap_finished" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
+      node - "$phase_dir" "$run_id" "$started_at" "$bootstrap_started" \
+        "$bootstrap_finished" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
 const fs = require('node:fs');
 const [dir, runId, startedAt, bootstrapStarted, bootstrapFinished, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
 const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
@@ -271,8 +278,21 @@ fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   },
 }, null, 2));
 NODE
-  "$TSX" "$PRODUCER" phase-a-verify "$phase_dir/verify-input.json" \
-    >"$phase_dir/verdict.json"
+      if "$TSX" "$PRODUCER" phase-a-verify "$phase_dir/verify-input.json" \
+        >"$phase_dir/verdict.json" 2>"$phase_dir/verdict.err"; then
+        break
+      fi
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      if [ -s "$phase_dir/verdict.err" ]; then
+        cat "$phase_dir/verdict.err" >&2
+      elif [ -s "$phase_dir/vm-after.err" ]; then
+        cat "$phase_dir/vm-after.err" >&2
+      fi
+      fail 'phase A canonical bootstrap did not reach strict two-host convergence within 20 minutes'
+    fi
+    sleep 10
+  done
 }
 phase_b_ref_announce() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
@@ -295,9 +315,9 @@ phase_b_ref_announce() {
   local deadline attempt
   mkdir -m 700 "$phase_dir"
   mkdir -m 700 "$forward_dir" "$reverse_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
 
-  forward_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_started="$(now_iso)"
   "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm absent "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/source-before.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
@@ -305,12 +325,12 @@ phase_b_ref_announce() {
     >"$forward_dir/destination-before.json"
   "$TSX" "$PRODUCER" phase-b-commit tower tower-to-vm "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/mutation.json"
-  forward_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_publish_started="$(now_iso)"
   run_tower_git_sync >"$forward_dir/source-publish-raw.json"
-  forward_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_publish_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/source-after.json"
-  forward_receive_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_receive_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
   while :; do
@@ -325,10 +345,10 @@ phase_b_ref_announce() {
       || fail 'phase B tower-to-vm ref announcement did not materialize within 20 minutes'
     sleep 10
   done
-  forward_receive_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  forward_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  forward_receive_finished="$(now_iso)"
+  forward_finished="$(now_iso)"
 
-  reverse_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_started="$(now_iso)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower absent '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/source-before.json"
@@ -337,13 +357,13 @@ phase_b_ref_announce() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-commit vm vm-to-tower '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/mutation.json"
-  reverse_publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_publish_started="$(now_iso)"
   run_vm_git_sync >"$reverse_dir/source-publish-raw.json"
-  reverse_publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_publish_finished="$(now_iso)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/source-after.json"
-  reverse_receive_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_receive_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
   while :; do
@@ -357,9 +377,9 @@ phase_b_ref_announce() {
       || fail 'phase B vm-to-tower ref announcement did not materialize within 20 minutes'
     sleep 10
   done
-  reverse_receive_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  reverse_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  reverse_receive_finished="$(now_iso)"
+  reverse_finished="$(now_iso)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" \
     "$tower_device" "$vm_device" \
@@ -438,14 +458,14 @@ phase_c_trust_negative_controls() {
   local run_id="p505-c-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   local started_at finished_at
   mkdir -m 700 "$phase_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
 
   "$TSX" "$PRODUCER" phase-c-run tower "$TOWER_REPO" \
     "$tower_device" "$vm_device" "$run_id" >"$phase_dir/tower.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-c-run vm '$VM_REPO' '$vm_device' '$tower_device' '$run_id'" \
     >"$phase_dir/vm.json"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" \
     "$tower_device" "$vm_device" <<'NODE'
@@ -483,18 +503,18 @@ phase_d_worktree_materialization() {
   local deadline attempt
   mkdir -m 700 "$phase_dir"
   mkdir -m 700 "$first_dir" "$dirty_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
 
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-commit vm below-steer '$vm_device' '$run_id'" \
     >"$first_dir/mutation.json"
   first_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$first_dir/mutation.json")"
 
-  publish_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  publish_started="$(now_iso)"
   run_vm_git_sync >"$first_dir/publish-raw.json"
-  publish_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  publish_finished="$(now_iso)"
 
-  queue_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  queue_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
   while :; do
@@ -508,19 +528,19 @@ phase_d_worktree_materialization() {
       || fail 'phase D fresh below-steer request did not become visible on the tower within 20 minutes'
     sleep 10
   done
-  queue_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  queue_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-ratify "$vm_device" "$first_head" \
     >"$first_dir/ratification.json"
 
-  integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  integrate_started="$(now_iso)"
   run_tower_git_sync >"$first_dir/integrate-raw.json"
-  integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  integrate_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" \
     >"$first_dir/source-event.json"
   "$TSX" "$PRODUCER" phase-d-observe tower first-source "$tower_device" "$run_id" \
     >"$first_dir/source-observation.json"
 
-  first_bridge_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  first_bridge_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
   while :; do
@@ -535,7 +555,7 @@ phase_d_worktree_materialization() {
       || fail 'phase D first signed staging advance did not reach the VM within 20 minutes'
     sleep 10
   done
-  first_bridge_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  first_bridge_finished="$(now_iso)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm first-destination '$tower_device' '$run_id'" \
     >"$first_dir/destination-observation.json"
@@ -550,13 +570,13 @@ phase_d_worktree_materialization() {
   "$TSX" "$PRODUCER" phase-d-commit tower dirty-overlap "$tower_device" "$run_id" \
     >"$dirty_dir/mutation.json"
   second_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$dirty_dir/mutation.json")"
-  dirty_integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  dirty_integrate_started="$(now_iso)"
   run_tower_git_sync >"$dirty_dir/integrate-raw.json"
-  dirty_integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  dirty_integrate_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" \
     >"$dirty_dir/source-event.json"
 
-  dirty_bridge_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  dirty_bridge_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
   while :; do
@@ -571,11 +591,11 @@ phase_d_worktree_materialization() {
       || fail 'phase D second signed staging advance did not reach the VM within 20 minutes'
     sleep 10
   done
-  dirty_bridge_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  dirty_bridge_finished="$(now_iso)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-after '$tower_device' '$run_id'" \
     >"$dirty_dir/after-observation.json"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
     "$publish_started" "$publish_finished" "$queue_started" "$queue_finished" \
@@ -661,7 +681,7 @@ phase_e_github_bridge() {
   }
   trap _phase_e_cleanup RETURN
 
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower legacy-before "$tower_device" "$run_id" \
     >"$phase_dir/tower-legacy-before.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
@@ -672,12 +692,12 @@ phase_e_github_bridge() {
     >"$phase_dir/activation-mode.json"
   mode_armed=1
 
-  tower_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  tower_member_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/tower-member-raw.json"
-  tower_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  vm_member_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  tower_member_finished="$(now_iso)"
+  vm_member_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/vm-member-raw.json"
-  vm_member_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  vm_member_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" \
     >"$phase_dir/tower-bridged-member.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
@@ -686,15 +706,15 @@ phase_e_github_bridge() {
 
   "$TSX" "$PRODUCER" phase-e-ingress "$run_id" \
     >"$phase_dir/ingress-mutation.json"
-  ingress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ingress_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-ingress-raw.json"
-  ingress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  integrate_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  ingress_finished="$(now_iso)"
+  integrate_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-integrate-raw.json"
-  integrate_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  egress_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  integrate_finished="$(now_iso)"
+  egress_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-egress-raw.json"
-  egress_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  egress_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" \
     >"$phase_dir/healthy-observation.json"
 
@@ -708,9 +728,9 @@ phase_e_github_bridge() {
   "$TSX" "$PRODUCER" phase-e-diverge "$run_id" \
     >"$phase_dir/divergence-mutation.json"
   divergence_armed=1
-  divergence_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  divergence_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/divergence-egress-raw.json"
-  divergence_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  divergence_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" \
     >"$phase_dir/divergence-after.json"
   "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
@@ -719,19 +739,19 @@ phase_e_github_bridge() {
 
   "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
     >"$phase_dir/rollback-mode.json"
-  rollback_tower_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  rollback_tower_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/rollback-tower-raw.json"
-  rollback_tower_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  rollback_vm_started="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  rollback_tower_finished="$(now_iso)"
+  rollback_vm_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/rollback-vm-raw.json"
-  rollback_vm_finished="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  rollback_vm_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" \
     >"$phase_dir/tower-legacy-after.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-after '$vm_device' '$run_id'" \
     >"$phase_dir/vm-legacy-after.json"
   mode_armed=0
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
     "$tower_member_started" "$tower_member_finished" "$vm_member_started" "$vm_member_finished" \
@@ -806,14 +826,14 @@ phase_f_lifecycle_safety() {
   local run_id="$physical_run_id"
   local started_at finished_at
   mkdir -m 700 "$phase_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
 
   "$TSX" "$PRODUCER" phase-f-run tower "$tower_device" "$vm_device" "$run_id" \
     >"$phase_dir/tower-lifecycle.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-f-run vm '$vm_device' '$tower_device' '$run_id'" \
     >"$phase_dir/vm-lifecycle.json"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
 const fs = require('node:fs');
@@ -843,10 +863,10 @@ phase_g_crash_epoch_chaos() {
   local run_id="$physical_run_id"
   local started_at finished_at
   mkdir -m 700 "$phase_dir"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  started_at="$(now_iso)"
   "$TSX" "$PRODUCER" phase-g-run "$tower_device" "$vm_device" "$run_id" \
     >"$phase_dir/result.json"
-  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
 const fs = require('node:fs');
@@ -951,8 +971,8 @@ verify_physical_vm_source() {
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
 verify_physical_vm_source
 
-scenario_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+scenario_started_at="$(now_iso)"
 run_all_phases
-scenario_finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+scenario_finished_at="$(now_iso)"
 assemble_unsigned_evidence "$scenario_started_at" "$scenario_finished_at"
 [ -s "$unsigned_out" ] || fail 'all phases returned without emitting the required unsigned evidence manifest'
