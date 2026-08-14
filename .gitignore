@@ -83,3 +83,5 @@ squashfs-root/
 **/squashfs-root/
 appimg-arrives*/
 **/appimg-arrives*/
+__pycache__/
+*.py[cod]
