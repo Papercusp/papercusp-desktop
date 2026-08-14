@@ -184,10 +184,6 @@ vm_machine="${vm_fields#*$'\t'}"
 [ "$tower_machine" != "$vm_machine" ] \
   || fail 'tower and vm identities resolve to the same physical machine'
 
-phase_missing() {
-  fail "phase $1 is not installed; refusing to emit partial or synthetic physical evidence"
-}
-
 # The order is part of D-002: G may run only after the same physical run has
 # observed A-F. These fixed functions are intentionally not replaceable via env.
 phase_a_storage_join() {

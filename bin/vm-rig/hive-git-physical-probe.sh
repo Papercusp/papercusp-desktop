@@ -7,10 +7,10 @@
 # to the separately checked-in canonical scenario driver. Only that driver's
 # fresh unsigned manifest is signed on BOTH physical hosts and finalized.
 #
-# The scenario entrypoint is checked in, but remains execution-incomplete until
-# its fixed A-G phase executors land. It exits before the first mutation and
-# produces no manifest, so installing the invocation contract cannot turn
-# either release SKIP green.
+# The scenario entrypoint is execution-ready, but remains inert unless this
+# canonical probe is selected by the drill. The probe forwards the plan slug as
+# the scenario's separate destructive-execution grant; neither a bare readiness
+# check nor a direct scenario call without that grant can mutate the rig.
 #
 # Usage (only through hive-git-drill.sh):
 #   hive-git-physical-probe.sh /abs/evidence.json /abs/trust.json
@@ -74,6 +74,7 @@ ssh "${SSH_OPTS[@]}" "$VM" \
 # before it mutates anything. It must emit fresh, UNATTESTED same-run A-G
 # observations at an absent path; the finalizer rejects pre-banked signatures.
 HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
+  HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
   PCUSP_VM_SSH="$VM" \
   "$SCENARIO" "$unsigned_evidence" "$tower_identity" "$vm_identity"
 [ -s "$unsigned_evidence" ] || fail 'canonical scenario produced no unsigned evidence'
