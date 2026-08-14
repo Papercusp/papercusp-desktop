@@ -2,20 +2,11 @@
 # hive-git-physical-scenario.sh — checked-in mutation/observation driver for
 # the P-505 two-machine hive-git release drill.
 #
-# The landed increments are deliberately OFFLINE-ONLY. They pin the invocation,
-# topology, output, ordered A-G phase contract, and the fixed Phase A cold-join
-# plus Phase B ref-announcement, Phase C trust, Phase D production-spine
-# materialization, Phase E GitHub-bridge, and Phase F lifecycle executors, then stop before the first ssh,
-# service, database, git-ref, or
-# Corestore operation because the global A-G readiness gate remains red.
-# Installing the entrypoint must not make G/P-308 look proven: the
-# producer signs nothing unless this driver eventually emits a complete fresh
-# manifest, and this revision cannot emit one.
-#
-# A future increment replaces the remaining fail-closed Phase G stub below
-# with fixed, checked-in operations satisfying their offline contracts. Do not add an
-# environment-supplied command seam or an input-manifest escape hatch; either
-# would re-introduce pre-banked evidence.
+# This driver pins the invocation, topology, output, ordered A-G phase contract,
+# and every fixed executor. It remains fail-closed at two independent edges:
+# the caller must opt into the canonical plan and the destructive execution
+# grant, and the producer will not sign or finalize anything unless every phase
+# returns a complete same-run object accepted by its strict validator.
 #
 # Canonical invocation (from hive-git-physical-probe.sh only):
 #   hive-git-physical-scenario.sh \
@@ -25,13 +16,13 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F
-# Wrapper readiness gate (non-zero until every fixed phase has landed):
+#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G
+# Wrapper readiness gate:
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
 
 EXPECTED_PLAN='p2p-git-live-activation-2026-07-09'
-IMPLEMENTATION_STATE='offline-phase-a-b-c-d-e-f-executors-v1'
+IMPLEMENTATION_STATE='ready-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1296269'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,13 +80,19 @@ phase_f_contract() {
 JSON
 }
 
+phase_g_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"G","planItem":"P-308","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"topology":"two-host-attested-ephemeral-protocol-adapter","repositoryLifetime":"one-phase-execution"},"causalOrder":["outerPhysicalIdentitiesPreflighted","ephemeralAuthorityHandoffPublished","successorGrantDerivedFromHandoff","successorAdvanceAccepted","staleAuthorityRejectedWithoutRefMove","retryableUnknownShaHeldCursor","retryableUngrantedEpochHeldCursor","evidenceArrivalAdvancedCursor","pgReadFailureFailedOpenLegacy","nonFastForwardPushRecoveredWithoutForce","coreKeyRotatedWithStableEphemeralNamespace","exactGitRoundTripVerified","temporaryStateRemoved","outerHostReceiptsAttestSameRunManifest"],"requiredObservations":["truthfulPhysicalVsEphemeralIdentityBoundary","signedHandoffAndDerivedEpochGrant","acceptedSuccessorAndRejectedStaleAdvance","unchangedReceiverRefAfterStaleReplay","durableRetryCursorBeforeAndAfterEvidence","structuredPostgresFallback","noisyNonFastForwardAndSuccessfulRetry","noForcePush","distinctCoreKeys","stableEphemeralDeviceNamespace","exactCommitAndPayloadRoundTrip","temporaryRepositoryCleanup"],"forbiddenEvidence":["protocolSignerRepresentedAsPhysicalHost","summaryOnlyLegPass","callerSelectedRepoPath","callerSelectedProtocolKey","preAuthoredManifest","environmentSuppliedCommand"],"productionSurfaces":["publishHandoffToken","deriveIntegratorGrant","signStagingAdvance","acceptStagingAdvanceFF","runWorktreeBridgeTick","decideWorktreeBridgePersistence","deriveMaxGrantedEpoch","readPotGitMode","runGitSync","openOwnLog","deviceNamespaceKey","writeNamespaceRef","readNamespaceRef"],"externalCommandOverrides":false}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":false,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
@@ -103,6 +100,7 @@ if [ "${1:-}" = '--phase-contract' ]; then
     D) phase_d_contract ;;
     E) phase_e_contract ;;
     F) phase_f_contract ;;
+    G) phase_g_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
@@ -856,7 +854,91 @@ NODE
   "$TSX" "$PRODUCER" phase-f-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_g_crash_epoch_chaos() { phase_missing G; }
+phase_g_crash_epoch_chaos() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase G local producer is unavailable'
+
+  # The already-preflighted tower and VM keys bind this adapter to the outer
+  # two-host manifest. The protocol authority, survivor, and restart identity
+  # are deliberately fresh EPHEMERAL keypairs: neither may be relabelled as a
+  # physical host. Both real hosts attest the complete manifest afterward.
+  local phase_dir="$run_dir/phase-g"
+  local run_id="$physical_run_id"
+  local started_at finished_at
+  mkdir -m 700 "$phase_dir"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "$TSX" "$PRODUCER" phase-g-run "$tower_device" "$vm_device" "$run_id" \
+    >"$phase_dir/result.json"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
+const result = JSON.parse(fs.readFileSync(`${dir}/result.json`, 'utf8'));
+const input = {
+  schemaVersion: 'hive-git-physical-phase-g-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  result,
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-g-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
+
+assemble_unsigned_evidence() {
+  local started_at="$1" finished_at="$2"
+  node - "$run_dir" "$unsigned_out" "$physical_run_id" "$started_at" "$finished_at" \
+    "$tower_device" "$vm_device" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const [dir, output, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
+const readJson = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
+const phaseInput = (phase) => readJson(`${dir}/phase-${phase.toLowerCase()}/verify-input.json`);
+const inputs = Object.fromEntries([...'ABCDEFG'].map((phase) => [phase, phaseInput(phase)]));
+const witness = (host, path) => {
+  const bytes = fs.readFileSync(path);
+  return {
+    host,
+    contentBase64: bytes.toString('base64'),
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
+};
+const observedAt = (phase) => phase === 'G'
+  ? inputs.G.result.observedAt
+  : inputs[phase].window.finishedAt;
+const evidence = {
+  schemaVersion: 'hive-git-physical-evidence/v1',
+  plan: 'p2p-git-live-activation-2026-07-09',
+  runId,
+  window: { startedAt, finishedAt },
+  topology: {
+    kind: 'two-physical-machines',
+    hosts: [
+      { id: 'tower', deviceKey: towerDeviceKey },
+      { id: 'vm', deviceKey: vmDeviceKey },
+    ],
+  },
+  artifacts: [
+    witness('tower', `${dir}/phase-f/tower-lifecycle.json`),
+    witness('vm', `${dir}/phase-f/vm-lifecycle.json`),
+  ],
+  legVerdicts: [...'ABCDEFG'].map((leg) => ({
+    leg,
+    status: 'pass',
+    scope: 'physical',
+    observedAt: observedAt(leg),
+  })),
+  legD: inputs.D,
+  legE: inputs.E,
+  legF: inputs.F,
+  legG: inputs.G,
+};
+fs.writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+}
 
 run_all_phases() {
   phase_a_storage_join
@@ -876,5 +958,8 @@ run_all_phases() {
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
 
+scenario_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 run_all_phases
-fail 'all phases returned without emitting the required unsigned evidence manifest'
+scenario_finished_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+assemble_unsigned_evidence "$scenario_started_at" "$scenario_finished_at"
+[ -s "$unsigned_out" ] || fail 'all phases returned without emitting the required unsigned evidence manifest'

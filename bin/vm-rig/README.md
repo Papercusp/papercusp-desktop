@@ -66,9 +66,9 @@ The mutation/observation entrypoint is now checked in as
 output, ordered A-G phase contract, fixed Phase A cold-join executor, fixed
 Phase B bidirectional ref-announcement executor, fixed Phase C trust
 negative-control executor, fixed Phase D production-spine materialization
-executor, fixed Phase E GitHub-bridge executor, and fixed Phase F lifecycle
-executor have landed. `--phase-contract A|B|C|D|E|F` exposes their
-exact contracts. Phase A pins the
+executor, fixed Phase E GitHub-bridge executor, fixed Phase F lifecycle
+executor, and fixed Phase G authority/fence/retry/restart adapter have landed.
+`--phase-contract A|B|C|D|E|F|G` exposes their exact contracts. Phase A pins the
 test hive/repo and causal operations:
 observe the tower store, atomically quarantine (not delete) the VM store,
 observe absence, invoke only the VM's canonical `git-sync:run`, then capture
@@ -155,26 +155,37 @@ both full host results, re-runs the strict P-307 validator, and binds their run
 id, observation window, and identities to the enclosing two-machine attestation;
 a one-host or summary-only lifecycle pass cannot satisfy the release gate.
 
-Phase A-F's own contracts are complete, but the scenario remains globally
-`ready:false`: the executors are unreachable until the remaining fixed Phase G
-executor lands and the scenario's global `--require-ready` gate changes. The
-wrapper checks that gate before its first VM
-SSH, so this increment cannot touch the rig or emit evidence merely because the
-Phase A-F code exists. There is no environment-supplied command or pre-authored
-manifest input.
+Phase G then runs a fixed adapter over the production handoff/grant, signed
+staging-advance fence, worktree-bridge cursor persistence, Postgres mode fallback,
+git-sync non-fast-forward recovery, Hypercore restart, and namespace Git
+round-trip surfaces. The two real tower/VM device keys are only the enclosing
+manifest's physical execution binding. The adapter's authority, survivor, and
+stable restart identities are fresh ephemeral keypairs, and the strict validator
+rejects any attempt to relabel them as either physical host. Both physical hosts
+later attest the complete same-run manifest with their real keychain-backed keys.
 
-The scenario validates the two producer-issued host identities, requires all
-three files to share the producer's private run directory, and then exits
-**before the first SSH or mutation** while any fixed phase executor is missing.
-The canonical wrapper calls `--require-ready` before its VM identity SSH, so an
-incomplete scenario cannot even contact the rig.
+The result independently records a ready epoch-8 token-adoption grant, accepted
+successor advance, stale epoch/sequence refusal without a ref move, cursor holds
+for both `unknown-sha` and `ungranted-epoch`, cursor advance only after the missing
+evidence arrives, `source:error` legacy fallback on an injected settings read
+failure, a noisy non-fast-forward push followed by normal fetch/merge/retry
+without force, and a changed Hypercore key with stable ephemeral namespace plus
+exact commit/payload round-trip. All private temporary repositories are removed
+before the result returns.
 
-The adapter therefore still exits non-zero without evidence, and the canonical
-drill continues reporting E and G as SKIP. It becomes execution-ready only when
-the checked-in fixed phases record fresh same-run A-G observations—including
-the E/P-306 bridge and G/P-308 crash/fence/retry/restart causality. Do not add an
-environment-supplied command or pre-authored JSON seam; those are the false-green
-paths this producer is designed to remove.
+The scenario is now `ready-v1`, but readiness alone performs no mutation. The
+canonical wrapper invokes it only when the drill receives the checked-in physical
+probe path, and the scenario additionally requires
+`HIVE_GIT_PHYSICAL_EXECUTE=p2p-git-live-activation-2026-07-09` immediately before
+the first phase call. It assembles one unsigned A-G manifest from the seven fresh
+phase inputs, embedding one hashed raw lifecycle witness from each physical host
+so later validation does not depend on temporary files. The wrapper then obtains
+fresh receipts from both real hosts, and only the finalizer may add attestations.
+There is no environment-supplied command or pre-authored JSON seam.
+
+Without invoking that physical probe, the canonical drill still reports E and G
+as SKIP. With it, the same-run strict validator re-runs the complete D/P-305,
+E/P-306, F/P-307, and G/P-308 validators before either release leg can pass.
 
 ## `parity.sh` — the LIVE-1 parity runner (WI-7000)
 
