@@ -28,6 +28,7 @@ VERSION="${1:-}"
 CHANNEL="${2:-alpha}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_ANDROID="${PAPERCUSP_SKIP_ANDROID:-0}"
+MOBILE_PRODUCT_NAME="${PAPERCUSP_MOBILE_PRODUCT_NAME:-Papercusp}"
 
 if [[ -z "$VERSION" ]]; then
   echo "usage: bin/upload-mobile-release.sh <version> [channel]    (e.g. 0.0.9 alpha)" >&2
@@ -88,7 +89,7 @@ s3api_head() {
 # Android is required as a complete provenanced APK+AAB pair unless explicitly
 # opted out. Capture the command status directly: process substitution would hide
 # a provenance validation failure and make it look like an empty candidate list.
-SCAN_ARGS=(--scan-mobile --version "$VERSION")
+SCAN_ARGS=(--scan-mobile --version "$VERSION" --mobile-product-name "$MOBILE_PRODUCT_NAME")
 if [[ "$SKIP_ANDROID" == "1" ]]; then
   SCAN_ARGS+=(--skip-android)
   echo "==> Android explicitly skipped (PAPERCUSP_SKIP_ANDROID=1)"
@@ -130,6 +131,7 @@ echo "==> release host : ${BASE%/*}/<secret>"
 # env var).
 echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
 echo "==> tag          : $TAG"
+echo "==> mobile brand : $MOBILE_PRODUCT_NAME"
 echo "==> mobile artifacts: ${#PAIRS[@]}"
 for pair in "${PAIRS[@]}"; do
   src="${pair%%$'\t'*}"; name="${pair##*$'\t'}"
