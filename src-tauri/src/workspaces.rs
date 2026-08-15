@@ -26,9 +26,10 @@
 // price of per-workspace isolation; documented in the onboarding screen.
 
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize, Clone, Debug, specta::Type)]
@@ -395,27 +396,60 @@ fn read_registry() -> io::Result<Registry> {
 /// inside the write window, which is how this was found (a live `coord:orient`
 /// failed here 2026-08-11 while the file was valid before and after).
 ///
-/// Keep this in lockstep with `writeRegistry` in
-/// `packages/operator-core/lib/workspace-registry.ts` — same temp-name shape,
-/// same directory (a cross-filesystem rename is not atomic, so the temp file must
-/// be a sibling, never in /tmp).
+/// Keep the temp file in the same directory as the registry: a cross-filesystem
+/// rename is not atomic. Unlike the synchronous single-threaded TypeScript
+/// writer, Tauri commands can call this function concurrently inside ONE Rust
+/// process. A PID-only temp name therefore is not unique: two command threads
+/// can open the same temp inode, one can rename it live, and the other can then
+/// truncate/write through its still-open descriptor at the public path. That is
+/// the exact torn-read window this function exists to remove.
+static REGISTRY_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn registry_temp_path(path: &Path) -> PathBuf {
+    let sequence = REGISTRY_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        "registry.json.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ))
+}
+
 fn write_registry(reg: &Registry) -> io::Result<()> {
     fs::create_dir_all(workspaces_root())?;
     let raw = serde_json::to_string_pretty(reg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let path = registry_path();
-    let tmp = path.with_file_name(format!("registry.json.{}.tmp", std::process::id()));
-    fs::write(&tmp, raw)?;
-    match fs::rename(&tmp, &path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            // Never leave a stray temp sibling behind on a failed rename — the
-            // directory is scanned elsewhere, and a `registry.json.<pid>.tmp`
-            // that outlives its writer reads as debris nobody can attribute.
-            let _ = fs::remove_file(&tmp);
-            Err(e)
+    let (tmp, mut file) = loop {
+        let candidate = registry_temp_path(&path);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            // A crashed process can leave a temp file behind and the OS can
+            // later reuse its PID. Never truncate that unattributed file or
+            // let it block registry writes: advance the per-process sequence.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
+    };
+
+    let write_result = file.write_all(raw.as_bytes()).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
+
+    if let Err(e) = fs::rename(&tmp, &path) {
+        // Never leave a stray temp sibling behind on a failed rename — the
+        // directory is scanned elsewhere, and a registry temp that outlives
+        // its writer reads as debris nobody can attribute.
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Slugify a user-supplied workspace name into a filesystem-safe id.
@@ -851,7 +885,33 @@ mod tests {
         assert_eq!(unique_id(&reg, "b"), "b");
     }
 
-    // The atomicity guard for `write_registry`.
+    // The concurrency half of the atomicity guard for `write_registry`.
+    //
+    // Tauri dispatches commands on multiple threads in one process. A temp name
+    // derived from only the PID is therefore shared by concurrent writers. If
+    // one thread renames that temp file while another still has it open, the
+    // second thread keeps writing through the same inode after it becomes the
+    // live registry. These paths must be unique before filesystem timing enters
+    // the picture; testing the path allocator is deterministic and catches the
+    // exact PID-only regression without a probabilistic race test.
+    #[test]
+    fn registry_temp_paths_are_unique_within_one_process() {
+        use std::collections::HashSet;
+
+        let live = PathBuf::from("/tmp/workspace-registry-test/registry.json");
+        let paths: Vec<PathBuf> = (0..128).map(|_| registry_temp_path(&live)).collect();
+        let unique: HashSet<&PathBuf> = paths.iter().collect();
+
+        assert_eq!(unique.len(), paths.len(), "each write needs its own temp inode");
+        assert!(paths.iter().all(|path| path.parent() == live.parent()));
+        assert!(paths.iter().all(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with(&format!("registry.json.{}.", std::process::id()))
+                && name.ends_with(".tmp")
+        }));
+    }
+
+    // The replacement half of the atomicity guard for `write_registry`.
     //
     // WHY AN INODE ASSERTION AND NOT A ROUND-TRIP: the obvious test — write it,
     // read it back, assert it parses — passes just as happily against the
