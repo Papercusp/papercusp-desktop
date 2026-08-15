@@ -902,7 +902,11 @@ mod tests {
         let paths: Vec<PathBuf> = (0..128).map(|_| registry_temp_path(&live)).collect();
         let unique: HashSet<&PathBuf> = paths.iter().collect();
 
-        assert_eq!(unique.len(), paths.len(), "each write needs its own temp inode");
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "each write needs its own temp inode"
+        );
         assert!(paths.iter().all(|path| path.parent() == live.parent()));
         assert!(paths.iter().all(|path| {
             let name = path.file_name().unwrap().to_string_lossy();
