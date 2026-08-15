@@ -94,8 +94,15 @@ VERSION="$1"
 CHANNEL="$2"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-KEY_FILE="${HOME}/.papercusp/signing/papercusp.key"
-KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
+# Signing-key selection must agree with every OTHER producer in bin/ — and with this
+# same file's Windows preflight below, which already resolves
+# "${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/...}" because build-windows-cross.sh:121 does.
+# Hardcoding $HOME here made release-local.sh the ONE producer that ignored that
+# override, so a cut launched with TAURI_SIGNING_PRIVATE_KEY_PATH set signed its Windows
+# leg with the override and its Linux leg with the default — split-brain key selection
+# inside a single cut. EI-20549708598153511 (latent sibling of the signer-key bug).
+KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-${HOME}/.papercusp/signing/papercusp.key}"
+KEY_PUB="${KEY_FILE}.pub"
 
 # Load only the two pure release-ref helpers before installing the cut's EXIT
 # reaper. A repair-only call or a source-drift refusal must not claim build
@@ -665,9 +672,14 @@ if [[ "${PAPERCUSP_SKIP_BUILDSET_CHECK:-0}" != "1" ]]; then
     || { echo "ERROR: build-set check failed (above) — this release cut would drop a required product (e.g. the Server the mac/win GUI attaches to). Set PAPERCUSP_BUILD_ROLES=\"gui server\", or PAPERCUSP_ALLOW_INCOMPLETE_ROLES=1 for a deliberate partial cut."; exit 1; }
 fi
 
-if [[ ! -f "$KEY_FILE" ]]; then
+# A caller-supplied TAURI_SIGNING_PRIVATE_KEY (key CONTENT or a path) satisfies this
+# preflight on its own — it is what the sibling producers' own error text tells you to
+# reach for, and hard-failing on the conventional FILE regardless made that advice inert
+# on the one script that drives a real cut.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && ! -f "$KEY_FILE" ]]; then
   echo "ERROR: signing key not found at $KEY_FILE"
-  echo "       Run bin/setup-signing-key.sh first."
+  echo "       Run bin/setup-signing-key.sh, set TAURI_SIGNING_PRIVATE_KEY_PATH,"
+  echo "       or export TAURI_SIGNING_PRIVATE_KEY (key content or a path) first."
   exit 1
 fi
 
@@ -1160,7 +1172,14 @@ echo "==> building Tauri Linux x86_64 (signed)"
 # Tauri v2 reads TAURI_SIGNING_PRIVATE_KEY (value = key content OR a path);
 # the v1-style _PATH variant is silently ignored and the build dies at the
 # updater-artifact signing step ("public key found, but no private key").
-export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+else
+  # An unconditional export here silently CLOBBERED a caller-supplied key, which is why
+  # no launch-env workaround could rescue the dead 0.0.17 cut. Same contract as
+  # build-and-archive-deb.sh:55-67, which was already right.
+  echo "==> updater signing key: supplied via TAURI_SIGNING_PRIVATE_KEY"
+fi
 # Empty passphrase by default. If the user set one at keygen time
 # they should `export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...` before
 # running this script.
@@ -1247,7 +1266,7 @@ echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
   if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
     echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
     (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-       TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+       TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
        PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" \
        "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
   fi

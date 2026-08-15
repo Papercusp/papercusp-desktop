@@ -70,7 +70,12 @@ VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.js
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
-[[ -f "$KEY_FILE" ]] || { echo "ERROR: minisign signing key not found at $KEY_FILE"; exit 1; }
+[[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -f "$KEY_FILE" ]] || {
+  echo "ERROR: minisign signing key not found at $KEY_FILE"
+  echo "       Run bin/setup-signing-key.sh, set TAURI_SIGNING_PRIVATE_KEY_PATH,"
+  echo "       or export TAURI_SIGNING_PRIVATE_KEY (key content or a path) first."
+  exit 1
+}
 
 # Collection destination — the same tree Mac/Windows artifacts land in.
 DEST_BUNDLE="$ROOT/src-tauri/target/release/bundle"
@@ -95,7 +100,13 @@ bash "$ROOT/bin/stage-env-sidecars.sh"
 echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
 bash "$ROOT/bin/stage-source-tree.sh"
 
-export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+# Never clobber a caller-supplied key: `tauri build` takes CONTENT or a path here, and an
+# unconditional export makes every env-supplied override inert (EI-20549708598153511).
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE"
+else
+  echo "==> updater signing key: supplied via TAURI_SIGNING_PRIVATE_KEY"
+fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # cargo's REAL target dir (this box has a global override → ~/.cargo-target, so it
@@ -136,7 +147,7 @@ done
 if [[ " $ROLES " == *" gui "* ]]; then
   echo "==> [5/5] building Linux AppImage (gui, build-appimage.sh)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-     TAURI_SIGNING_PRIVATE_KEY="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+     TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
      bash "$ROOT/bin/build-appimage.sh")
 fi
 
