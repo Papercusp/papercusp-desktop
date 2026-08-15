@@ -8733,10 +8733,24 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
         // still runs identically (it's still the same signal, same target
         // process, just delivered via the group form); this only widens the
         // blast radius to siblings-in-group that a plain per-pid TERM missed.
-        let _ = Command::new("kill")
+        let status = Command::new("kill")
             .arg("-TERM")
+            // procps-ng parses a bare negative operand as another option-like
+            // signal token. `--` is required before the negative process-group
+            // id; without it `kill -TERM -5034` can target pgid 5 instead of
+            // pgid 5034, silently missing both Node and embedded Postgres.
+            .arg("--")
             .arg(format!("-{pid}"))
             .status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!(
+                "[papercusp-desktop] {label} pid={pid}: process-group SIGTERM failed with {status}"
+            ),
+            Err(error) => eprintln!(
+                "[papercusp-desktop] {label} pid={pid}: could not invoke process-group SIGTERM: {error}"
+            ),
+        }
     }
     #[cfg(windows)]
     {
@@ -8777,13 +8791,121 @@ fn graceful_kill(child: &mut Child, label: &str, grace_ms: u64) {
         // that outlived the soft signal (or joined the group after it) still
         // needs to go down here, not just the direct child `child.kill()`
         // below reaches.
-        let _ = Command::new("kill")
+        let status = Command::new("kill")
             .arg("-KILL")
+            .arg("--")
             .arg(format!("-{pid}"))
             .status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!(
+                "[papercusp-desktop] {label} pid={pid}: process-group SIGKILL failed with {status}"
+            ),
+            Err(error) => eprintln!(
+                "[papercusp-desktop] {label} pid={pid}: could not invoke process-group SIGKILL: {error}"
+            ),
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(all(test, unix))]
+mod graceful_kill_process_group_tests {
+    use super::{graceful_kill, isolate_process_group};
+    use std::fs;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_marker(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "papercusp-graceful-kill-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn wait_for_file(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "fixture did not create {}", path.display());
+    }
+
+    fn process_group_alive(pgid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", "--", &format!("-{pgid}")])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn wait_for_group_exit(pgid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !process_group_alive(pgid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn soft_term_reaches_the_isolated_process_group() {
+        let marker = temp_marker("term");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap 'printf reached > \"$1\"; exit 0' TERM; printf ready > \"$2\"; while :; do sleep 1; done")
+            .arg("sh")
+            .arg(&marker)
+            .arg(marker.with_extension("ready"));
+        isolate_process_group(&mut command);
+        let ready = marker.with_extension("ready");
+        let mut child = command.spawn().expect("spawn TERM fixture");
+        wait_for_file(&ready);
+
+        graceful_kill(&mut child, "TERM fixture", 1_000);
+
+        assert_eq!(
+            fs::read_to_string(&marker).expect("read TERM marker"),
+            "reached"
+        );
+        let _ = fs::remove_file(marker);
+        let _ = fs::remove_file(ready);
+    }
+
+    #[test]
+    fn hard_fallback_kills_a_same_group_grandchild() {
+        let grandchild_file = temp_marker("grandchild");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; sleep 30 & printf '%s' \"$!\" > \"$1\"; wait")
+            .arg("sh")
+            .arg(&grandchild_file);
+        isolate_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn KILL fixture");
+        let pgid = child.id();
+        wait_for_file(&grandchild_file);
+        assert!(process_group_alive(pgid), "fixture process group is live");
+
+        graceful_kill(&mut child, "KILL fixture", 100);
+
+        let exited = wait_for_group_exit(pgid);
+        if !exited {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pgid}")])
+                .status();
+        }
+        let _ = fs::remove_file(grandchild_file);
+        assert!(exited, "same-group grandchild survived hard fallback");
+    }
 }
 
 /// Kill the native sibling terminal (if any) on shutdown. `try_state` so it's
