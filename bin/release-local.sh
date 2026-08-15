@@ -511,6 +511,67 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
   fi
 fi
 
+# Windows TOOLCHAIN preflight (WI-39339) — the third instance of the same pattern, and the
+# same economics: build-windows-cross.sh:139-149 already checks each of these, but it checks
+# them INSIDE the leg, which is launched in parallel and joined FATALLY. So a missing wine or
+# an unprovisioned Inno prefix — host state that is knowable at second zero and cannot change
+# during the cut — is discovered only after the leg starts, and join_leg's `exit 1` then reaps
+# the healthy linux/android/mac legs with it.
+#
+# SCOPE IS DELIBERATE — these six are HOST CAPABILITIES, true or false before the cut begins.
+# Two of build-windows-cross.sh's other preconditions are deliberately NOT hoisted:
+#   - the SIDECAR ($SRC_TAURI/sidecar/apps): release-local.sh BUILDS it at build-desktop-sidecar.sh
+#     below, which runs AFTER this preflight zone but BEFORE any leg launches. Asserting it here
+#     would fail on a tree that is about to be perfectly valid — a false refusal, not a fast one.
+#   - src-tauri/icons/icon.ico: TRACKED in the papercusp-desktop submodule and not gitignored
+#     (verified), so unlike the WSL rootfs it is present in every fresh worktree by construction.
+#     The in-leg check remains the right home for it.
+# The in-leg checks all stay regardless: build-windows-cross.sh must remain safe to invoke
+# directly, outside a cut. This is defence in depth, not relocation.
+if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
+  # Mirror build-windows-cross.sh's own derivations EXACTLY (:94, :121, :128-129). If these
+  # drift apart, this preflight would happily verify a DIFFERENT path than the leg later uses
+  # — a guard that passes while the leg dies, which is worse than no guard. A test pins the
+  # two files' defaults together so the drift fails loudly instead.
+  win_target="x86_64-pc-windows-msvc"
+  win_key_file="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
+  win_wineprefix_inno="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
+  win_iscc_exe="${PAPERCUSP_ISCC_EXE:-$win_wineprefix_inno/drive_c/InnoSetup6/ISCC.exe}"
+
+  win_missing=()
+  command -v cargo >/dev/null 2>&1 || win_missing+=("cargo not on PATH")
+  cargo xwin --version >/dev/null 2>&1 \
+    || win_missing+=("cargo-xwin not installed or not working — cargo install cargo-xwin")
+  # Capture-then-match rather than `rustup ... | grep -qx`: under `set -o pipefail` an
+  # early-exiting grep can SIGPIPE the producer, so the pipeline reports failure even on a
+  # match. That would refuse a perfectly good cut — the exact false-alarm class this file
+  # exists to avoid.
+  win_targets_installed="$(rustup target list --installed 2>/dev/null || true)"
+  case "$win_targets_installed" in
+    *"$win_target"*) ;;
+    *) win_missing+=("rustup target $win_target not installed — rustup target add $win_target") ;;
+  esac
+  command -v wine >/dev/null 2>&1 \
+    || win_missing+=("wine not installed — apt install wine + dpkg --add-architecture i386")
+  command -v xvfb-run >/dev/null 2>&1 \
+    || win_missing+=("xvfb-run not installed — apt install xvfb (ISCC runs headless under it)")
+  [[ -f "$win_iscc_exe" ]] \
+    || win_missing+=("ISCC not found at $win_iscc_exe — provision Inno Setup under WINEPREFIX=$win_wineprefix_inno")
+  [[ -f "$win_key_file" ]] \
+    || win_missing+=("updater signing key not found at $win_key_file — bin/setup-signing-key.sh")
+
+  # Report EVERY missing prerequisite at once. Failing on the first would make provisioning a
+  # fresh host an N-cut discovery loop; this is one cut, one list.
+  if (( ${#win_missing[@]} > 0 )); then
+    echo "ERROR: WITH_WINDOWS=1 but ${#win_missing[@]} Windows prerequisite(s) are missing — refusing to start the cut." >&2
+    for m in "${win_missing[@]}"; do echo "       - $m" >&2; done
+    echo "       Fix these, or cut with WITH_WINDOWS=0. (Failing here costs seconds; failing" >&2
+    echo "        inside the win leg aborts the whole cut and reaps the other legs.)" >&2
+    exit 1
+  fi
+  echo "==> Windows toolchain verified (cargo-xwin, $win_target, wine, xvfb-run, ISCC, signing key)"
+fi
+
 # Android versionName preflight — same shape, same reason as the WSL-rootfs block above:
 # a defect that is knowable by reading ONE line at second zero must not be discovered
 # ~10 minutes into a parallel leg, where join_leg's fatal `exit 1` reaps the healthy legs.
