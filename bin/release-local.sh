@@ -1513,7 +1513,7 @@ leg_heartbeat_line() {  # per-leg verdict: liveness + whether the leg's log is s
 }
 
 supervise_legs() {
-  local alive=() kept=() i p rc finished idx name first_failed='' grace_expired=0
+  local alive=() kept=() i p rc finished collected idx name first_failed='' grace_expired=0
   for i in "${!LEG_PIDS[@]}"; do alive+=("${LEG_PIDS[$i]}"); done
   (( ${#alive[@]} > 0 )) || return 0
   echo "==> supervising ${#alive[@]} parallel leg(s) CONCURRENTLY: ${LEG_NAMES[*]} — the FIRST death fails the cut immediately; healthy siblings are left to finish (salvage)"
@@ -1529,34 +1529,40 @@ supervise_legs() {
 
     finished=''
     if wait -n -p finished "${wait_set[@]}"; then rc=0; else rc=$?; fi
+    # ⚠ `wait -n -p VAR` UNSETS VAR when it collected no child — it does not leave the
+    # pre-set empty value in place — so under this script's `set -u` the very next read
+    # of $finished is an "unbound variable" abort. Measured, not theorised: a SIGUSR1
+    # storm against the supervising shell killed this loop on its first interrupted
+    # wait. Read it through a default ONCE, here, and use $collected below.
+    collected="${finished:-}"
 
     # WI-4230 (0.0.8 false-FAIL): a signal-interrupted `wait` returns >128 — or a
     # spurious 127 — IMMEDIATELY while every leg is still running. The 0.0.8 cut
     # declared the linux leg FAILED mid-appimagetool on exactly that. `wait -n -p`
     # REPORTS the pid it collected, so "no pid reported" IS the no-verdict case and is
     # the whole guard: never grade a leg on a wakeup that named no child.
-    if [[ -z "$finished" ]]; then
+    if [[ -z "$collected" ]]; then
       (( rc == 127 )) && sleep 5   # non-child rc: poll instead of hot-spinning
       continue
     fi
 
-    if [[ -n "$LEG_TICK_PID" && "$finished" == "$LEG_TICK_PID" ]]; then
+    if [[ -n "$LEG_TICK_PID" && "$collected" == "$LEG_TICK_PID" ]]; then
       LEG_TICK_PID=''
       leg_heartbeat_line
       continue
     fi
-    if [[ -n "$LEG_GRACE_PID" && "$finished" == "$LEG_GRACE_PID" ]]; then
+    if [[ -n "$LEG_GRACE_PID" && "$collected" == "$LEG_GRACE_PID" ]]; then
       LEG_GRACE_PID=''; grace_expired=1
       echo "==> SALVAGE GRACE (${RELEASE_SALVAGE_GRACE_S}s) EXPIRED — no longer waiting on the remaining leg(s). The cut has already failed; the survivors keep running and their artifacts are whatever landed."
       break
     fi
 
     idx=''
-    for i in "${!LEG_PIDS[@]}"; do [[ "${LEG_PIDS[$i]}" == "$finished" ]] && { idx="$i"; break; }; done
+    for i in "${!LEG_PIDS[@]}"; do [[ "${LEG_PIDS[$i]}" == "$collected" ]] && { idx="$i"; break; }; done
     [[ -n "$idx" ]] || continue   # not a leg we track
 
     name="${LEG_NAMES[$idx]}"
-    kept=(); for p in "${alive[@]}"; do [[ "$p" == "$finished" ]] || kept+=("$p"); done
+    kept=(); for p in "${alive[@]}"; do [[ "$p" == "$collected" ]] || kept+=("$p"); done
     alive=("${kept[@]}")
 
     if (( rc == 0 )); then
