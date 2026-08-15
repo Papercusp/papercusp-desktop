@@ -4,7 +4,7 @@
 #
 # WHY: release-local.sh launches its Linux leg (`tauri build` → cargo → rustc, and
 # bin/build-appimage.sh's appimagetool/linuxdeploy) as a background subshell of
-# itself. If release-local.sh's own process dies before `join_leg` reaps that
+# itself. If release-local.sh's own process dies before `supervise_legs` reaps that
 # subshell (an interrupted/killed terminal or tmux pane, an OOM, a `kill -9` on a
 # wedged cut) the leg was silently ORPHANED and kept running forever, pinning a
 # full CPU core — observed live: a `tauri build` ran 10h at 99% CPU after its
