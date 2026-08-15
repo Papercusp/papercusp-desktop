@@ -26,6 +26,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTS=(
   federation-asserts.selftest.sh
   release-artifacts.selftest.sh
+  release-tag-pin.selftest.sh
   gen-latest-manifest.selftest.sh
   live-federation-gate-reaper.selftest.sh
   release-local-leg-reaper.selftest.sh
