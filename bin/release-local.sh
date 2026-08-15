@@ -97,6 +97,62 @@ ROOT="$(cd "$HERE/.." && pwd)"
 KEY_FILE="${HOME}/.papercusp/signing/papercusp.key"
 KEY_PUB="${HOME}/.papercusp/signing/papercusp.key.pub"
 
+# Load only the two pure release-ref helpers before installing the cut's EXIT
+# reaper. A repair-only call or a source-drift refusal must not claim build
+# resources or run cleanup intended for a cut that actually launched children.
+# shellcheck source=lib/gen-latest-manifest.sh
+source "$HERE/lib/gen-latest-manifest.sh"
+# shellcheck source=lib/release-tag-pin.sh
+source "$HERE/lib/release-tag-pin.sh"
+
+# P-009 containment escape hatch. This is intentionally an explicit confirmed
+# RELEASE-owned operation, not advice to run a manual `git push`. It only moves
+# an existing desktop release tag to an exact commit object and verifies both
+# local + origin refs before returning.
+if [[ -n "${PAPERCUSP_RELEASE_REPAIR_TAG_SHA:-}" ]]; then
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
+    echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo" >&2
+    exit 2
+  fi
+  case "$CHANNEL" in
+    alpha|beta|stable|nightly) ;;
+    *) echo "ERROR: channel must be alpha|beta|stable|nightly" >&2; exit 2 ;;
+  esac
+  TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
+  MONOREPO="$(cd "$ROOT/.." && pwd)"
+  if [[ "${PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM:-0}" != "1" ]]; then
+    echo "DRY RUN: would repair local+origin refs/tags/$TAG to $PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
+    echo "Set PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM=1 to execute the force-with-lease repair." >&2
+    exit 2
+  fi
+  release_tag_repair_exact "$MONOREPO" "$TAG" "$PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
+  exit $?
+fi
+
+# EI-20505417131773854: every cut is explicitly bound to one full superproject
+# commit before any release-tree write. The agent-facing release:cut wrapper
+# supplies this value; direct/manual callers must do the same. A moving staging
+# HEAD therefore fails at second zero instead of silently re-pinning a release.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
+  echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
+  exit 1
+fi
+case "$CHANNEL" in
+  alpha|beta|stable|nightly) ;;
+  *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
+esac
+MONOREPO="$(cd "$ROOT/.." && pwd)"
+EXPECTED_SOURCE_SHA="${PAPERCUSP_EXPECTED_SOURCE_SHA:-}"
+release_tag_validate_exact_commit "$MONOREPO" "$EXPECTED_SOURCE_SHA" || exit $?
+CURRENT_SOURCE_SHA="$(git -C "$MONOREPO" rev-parse HEAD 2>/dev/null || true)"
+if [[ "$CURRENT_SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
+  echo "ERROR: release source drift — current superproject HEAD is ${CURRENT_SOURCE_SHA:-<unreadable>}" >&2
+  echo "       expected exact PAPERCUSP_EXPECTED_SOURCE_SHA=$EXPECTED_SOURCE_SHA" >&2
+  echo "       Refusing before any manifest, tag, seed, or build mutation." >&2
+  exit 1
+fi
+export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
+
 # ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
 # The Linux leg (below) launches `tauri build` → cargo → rustc, and
 # bin/build-appimage.sh (appimagetool/linuxdeploy), as a background subshell of
@@ -176,40 +232,6 @@ source "$HERE/lib/release-artifacts.sh"
 # direct cross-builder and incremental publisher as well as this full cut.
 # shellcheck source=lib/inno-spanned-server.sh
 source "$HERE/lib/inno-spanned-server.sh"
-# EI-18101626616739029: the ONE source of truth for turning an artifact set into
-# latest.json/latest-server.json — shared with bin/gen-latest-manifest.sh so a
-# single-leg (per-platform) cut can produce the same manifest this multi-leg
-# script does, instead of nobody generating one.
-source "$HERE/lib/gen-latest-manifest.sh"
-# EI-20505417131773854: exact-SHA, force-with-lease tag repair shared with the
-# normal cut path. The repair-only mode below exits before release-host checks,
-# target-dir claims, tree dirtiness checks, manifest writes, or any build.
-# shellcheck source=lib/release-tag-pin.sh
-source "$HERE/lib/release-tag-pin.sh"
-
-# P-009 containment escape hatch. This is intentionally an explicit confirmed
-# RELEASE-owned operation, not advice to run a manual `git push`. It only moves
-# an existing desktop release tag to an exact commit object and verifies both
-# local + origin refs before returning.
-if [[ -n "${PAPERCUSP_RELEASE_REPAIR_TAG_SHA:-}" ]]; then
-  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
-    echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo" >&2
-    exit 2
-  fi
-  case "$CHANNEL" in
-    alpha|beta|stable|nightly) ;;
-    *) echo "ERROR: channel must be alpha|beta|stable|nightly" >&2; exit 2 ;;
-  esac
-  TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
-  MONOREPO="$(cd "$ROOT/.." && pwd)"
-  if [[ "${PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM:-0}" != "1" ]]; then
-    echo "DRY RUN: would repair local+origin refs/tags/$TAG to $PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
-    echo "Set PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM=1 to execute the force-with-lease repair." >&2
-    exit 2
-  fi
-  release_tag_repair_exact "$MONOREPO" "$TAG" "$PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
-  exit $?
-fi
 # WI-36794 / WI-7101: claim a Rust target-dir SLOT before any cargo runs. This
 # script drives `tauri build` directly (npx, not the guarded `tauri` npm
 # script), so it was routing around the only chokepoint that claims one — and a
@@ -297,30 +319,6 @@ TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}"
 # WI-5651: the mac VM ssh/scp/rsync frames that used to live here are GONE — the
 # mac leg builds natively (bin/build-mac-cross.sh), no VM. mac-vm-build.sh keeps
 # its own VM connection setup for the on-device TESTING the VM is retained for.
-# EI-20505417131773854: every cut is explicitly bound to one full superproject
-# commit before any release-tree write. The agent-facing release:cut wrapper
-# supplies this value; direct/manual callers must do the same. A moving staging
-# HEAD therefore fails at second zero instead of silently re-pinning a release.
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
-  echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
-  exit 1
-fi
-case "$CHANNEL" in
-  alpha|beta|stable|nightly) ;;
-  *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
-esac
-MONOREPO="$(cd "$ROOT/.." && pwd)"
-EXPECTED_SOURCE_SHA="${PAPERCUSP_EXPECTED_SOURCE_SHA:-}"
-release_tag_validate_exact_commit "$MONOREPO" "$EXPECTED_SOURCE_SHA" || exit $?
-CURRENT_SOURCE_SHA="$(git -C "$MONOREPO" rev-parse HEAD 2>/dev/null || true)"
-if [[ "$CURRENT_SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
-  echo "ERROR: release source drift — current superproject HEAD is ${CURRENT_SOURCE_SHA:-<unreadable>}" >&2
-  echo "       expected exact PAPERCUSP_EXPECTED_SOURCE_SHA=$EXPECTED_SOURCE_SHA" >&2
-  echo "       Refusing before any manifest, tag, seed, or build mutation." >&2
-  exit 1
-fi
-export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
-
 # Build provenance: the short git sha of the tree we're packaging, made HONEST
 # per EI-8914 / P-003 (desktop-build-hardening-tri-platform-2026-07-11). This is
 # the SINGLE SOURCE OF TRUTH for PAPERCUSP_BUILD_SHA across all three legs — it
