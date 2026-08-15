@@ -180,6 +180,35 @@ source "$HERE/lib/inno-spanned-server.sh"
 # single-leg (per-platform) cut can produce the same manifest this multi-leg
 # script does, instead of nobody generating one.
 source "$HERE/lib/gen-latest-manifest.sh"
+# EI-20505417131773854: exact-SHA, force-with-lease tag repair shared with the
+# normal cut path. The repair-only mode below exits before release-host checks,
+# target-dir claims, tree dirtiness checks, manifest writes, or any build.
+# shellcheck source=lib/release-tag-pin.sh
+source "$HERE/lib/release-tag-pin.sh"
+
+# P-009 containment escape hatch. This is intentionally an explicit confirmed
+# RELEASE-owned operation, not advice to run a manual `git push`. It only moves
+# an existing desktop release tag to an exact commit object and verifies both
+# local + origin refs before returning.
+if [[ -n "${PAPERCUSP_RELEASE_REPAIR_TAG_SHA:-}" ]]; then
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
+    echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo" >&2
+    exit 2
+  fi
+  case "$CHANNEL" in
+    alpha|beta|stable|nightly) ;;
+    *) echo "ERROR: channel must be alpha|beta|stable|nightly" >&2; exit 2 ;;
+  esac
+  TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
+  MONOREPO="$(cd "$ROOT/.." && pwd)"
+  if [[ "${PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM:-0}" != "1" ]]; then
+    echo "DRY RUN: would repair local+origin refs/tags/$TAG to $PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
+    echo "Set PAPERCUSP_RELEASE_REPAIR_TAG_CONFIRM=1 to execute the force-with-lease repair." >&2
+    exit 2
+  fi
+  release_tag_repair_exact "$MONOREPO" "$TAG" "$PAPERCUSP_RELEASE_REPAIR_TAG_SHA"
+  exit $?
+fi
 # WI-36794 / WI-7101: claim a Rust target-dir SLOT before any cargo runs. This
 # script drives `tauri build` directly (npx, not the guarded `tauri` npm
 # script), so it was routing around the only chokepoint that claims one — and a
