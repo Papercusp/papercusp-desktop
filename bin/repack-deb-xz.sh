@@ -69,8 +69,24 @@ dpkg-deb --info "$REPLACEMENT" >/dev/null
 dpkg-deb --contents "$REPLACEMENT" >/dev/null
 
 if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-  npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
-    tauri signer sign "$REPLACEMENT" >/dev/null
+  # WI-3823 (again, here): `tauri signer sign` accepts ONLY the key CONTENT (base64)
+  # in TAURI_SIGNING_PRIVATE_KEY, while `tauri build` accepts contents OR a path — so
+  # the conventional callers legitimately export a PATH (build-linux-local.sh:98 and
+  # build-and-archive-deb.sh:63 both do, unconditionally) and only THIS call site
+  # breaks. Symptom when unresolved, after a full compile + multi-GB bundle:
+  #   failed to decode base64 secret key: ... Invalid symbol 45, offset 11
+  # (symbol 45 is '-', and the offset lands on the first '-' of the key's own
+  # pathname — i.e. the decoder was handed the path itself, not a key). The offset
+  # therefore varies by machine; the "Invalid symbol 45" is the stable signature.
+  # Resolve a path to its contents and hand the
+  # secret over via the CLI's own env fallback, never on argv: `npm run`/npx echo the
+  # resolved command line, which would print the private key into the build log and
+  # expose it in `ps` for the life of the process.
+  _key="$TAURI_SIGNING_PRIVATE_KEY"; [[ -f "$_key" ]] && _key="$(cat "$_key")"
+  TAURI_SIGNING_PRIVATE_KEY="$_key" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+    npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
+      tauri signer sign "$REPLACEMENT" >/dev/null
   [[ -s "$REPLACEMENT.sig" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
 fi
 
