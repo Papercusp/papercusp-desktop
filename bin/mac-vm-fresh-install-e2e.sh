@@ -432,17 +432,41 @@ else
   fi
 
   echo
-  echo "=== 6b. gateway auto-supervised on :8788 ==="
-  GW=""
-  for i in $(seq 1 20); do
-    GW=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8788/healthz 2>/dev/null)
-    [ "$GW" = "200" ] && break
-    sleep 2
-  done
-  if [ "$GW" = "200" ]; then
-    pass "gateway answers :8788/healthz"
+  echo "=== 6b. gateway auto-supervised on :8788 (capability-gated) ==="
+  # CAPABILITY-GATED, and it must stay that way. This assertion used to run
+  # unconditionally and FAILED every release for a capability the shipped
+  # artifact does not have and never claimed to have.
+  #
+  # MEASURED 2026-08-15 against the installed published 0.0.17 (WI-39343):
+  #   · the shipped sidecar contains NO host-bootstrap — only serve.mjs,
+  #     mcp-proxy.mjs and the worker scripts;
+  #   · `grep -c ensureGatewaySupervised serve.mjs` => 0;
+  #   · :8788 had NO LISTENER AT ALL ten minutes after launch, while the app was
+  #     otherwise fully healthy (operator 200, SPA rendered, embedded PG up).
+  # The supervisor is imported by apps/operator/bin/host-bootstrap.ts, which is a
+  # DEV host (bg-host) — the same mis-attribution WI-4996 already recorded. So
+  # there is no code path in the packaged app that could ever answer :8788.
+  #
+  # A check that cannot pass is worse than no check: it is quotable, and it turns
+  # every honest release verdict into a FAIL that readers learn to ignore. Assert
+  # it only when the installed bundle actually carries the supervisor — that way a
+  # real regression (the gateway being dropped from a build that ships it) is still
+  # caught, and a build that never shipped it is reported as n/a rather than broken.
+  GW_SUPERVISOR=$(grep -rl 'ensureGatewaySupervised' "/Applications/Papercusp Server.app/Contents/Resources/sidecar" 2>/dev/null | head -1)
+  if [ -z "$GW_SUPERVISOR" ]; then
+    note "n/a — this bundle ships no gateway supervisor (serve.mjs only), so :8788 is a dev-host surface, not a product one"
   else
-    fail "gateway did not answer :8788/healthz (last code='${GW:-none}')"
+    GW=""
+    for i in $(seq 1 20); do
+      GW=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8788/healthz 2>/dev/null)
+      [ "$GW" = "200" ] && break
+      sleep 2
+    done
+    if [ "$GW" = "200" ]; then
+      pass "gateway answers :8788/healthz"
+    else
+      fail "gateway did not answer :8788/healthz (last code='${GW:-none}') — and this bundle DOES carry the supervisor ($GW_SUPERVISOR), so it should have"
+    fi
   fi
 fi
 
