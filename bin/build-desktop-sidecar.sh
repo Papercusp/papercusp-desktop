@@ -560,6 +560,32 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 (cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
   --workspace=@papercusp/web --workspace=@papercusp/operator-vite)
 
+# POST-INSTALL RUNTIME BUILDS (EI-20505823617947029) -------------------------
+# setup-release-checkout.sh builds these gitignored runtime entry points from
+# the pinned release source before a cut starts. The scoped install above is a
+# second dependency-reification boundary, though: npm can leave the workspace
+# symlink and package.json intact while removing the generated dist/ behind it.
+# That exact shape made `createRequire(...).resolve("@papercusp/sse")` fail in
+# the D-026 stable cut even though the package was correctly installed.
+#
+# Rebuild from THIS REPO_ROOT after the install, never by copying an integration
+# tree's dist/. The registry is intentionally explicit and is checked against
+# every workspace with a gitignored main/require/default target by
+# setup-release-checkout-workspace-builds.test.ts.
+RUNTIME_BUILD_WORKSPACES=(
+  "@papercusp/sse"
+)
+
+build_runtime_workspace_outputs_after_install() {
+  local workspace
+  for workspace in "${RUNTIME_BUILD_WORKSPACES[@]}"; do
+    echo "→ rebuilding post-install runtime output for $workspace"
+    (cd "$REPO_ROOT" && npm --workspace "$workspace" run build)
+  done
+}
+build_runtime_workspace_outputs_after_install
+# END POST-INSTALL RUNTIME BUILDS ---------------------------------------------
+
 echo "→ verifying workspace deps resolved"
 echo "  apps/operator/node_modules/@restart/ contents:"
 ls -la "$WEB_DIR/node_modules/@restart" 2>&1 | head -10 || echo "(no @restart subdir)"
