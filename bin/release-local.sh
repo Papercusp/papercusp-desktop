@@ -163,7 +163,7 @@ export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 # ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
 # The Linux leg (below) launches `tauri build` → cargo → rustc, and
 # bin/build-appimage.sh (appimagetool/linuxdeploy), as a background subshell of
-# THIS script. If this script's own process dies before `join_leg` reaps that
+# THIS script. If this script's own process dies before `supervise_legs` reaps that
 # subshell (an interrupted/killed terminal or tmux pane, an OOM, a `kill -9` on
 # a wedged cut) the leg is silently ORPHANED and keeps running forever, pinning
 # a full CPU core — observed live: a `tauri build` ran 10h at 99% CPU after its
@@ -173,7 +173,7 @@ export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 # trap that pgrep-matches known build-tool cmdlines AND verifies ownership via
 # cwd rooted under THIS script's own tree ($ROOT) before killing — so a
 # concurrent PEER release cut's tauri/cargo build elsewhere on this shared dev
-# box is NEVER touched. A normal, successful join_leg already reaps every leg
+# box is NEVER touched. A normal, successful supervise_legs already reaps every leg
 # itself, so by the time this trap fires on a clean exit, pgrep finds nothing —
 # a no-op. Bash still runs the EXIT trap when the script dies from an unhandled
 # signal (SIGINT/SIGTERM/etc, though not SIGKILL of THIS process), so this
@@ -463,9 +463,11 @@ fi
 # EVERY release cut runs from a fresh `git worktree`, which by construction receives no
 # copy — so the Windows leg reaches build-windows-cross.sh:161 and dies on "WSL rootfs
 # missing". That failure is far more expensive than it looks: the win leg is launched in
-# PARALLEL with linux/mac, and join_leg's `exit 1` on it aborts the WHOLE cut and reaps
-# the still-running linux and mac legs. The 0.0.17 cut (2026-08-15) lost three healthy
-# legs this way, ~10 minutes in, to a missing file that was knowable at second zero.
+# PARALLEL with linux/mac, and its failure aborts the WHOLE cut. The 0.0.17 cut
+# (2026-08-15) lost three healthy legs this way, ~10 minutes in, to a missing file that
+# was knowable at second zero. (EI-20549139616021387 has since made supervise_legs
+# SALVAGE the healthy siblings rather than reap them — but the cut still fails, and it
+# still costs the ~10 minutes of compute this preflight exists to refuse in seconds.)
 #
 # Hydration is VERIFIABLE, not a guess: .rootfs-build-stamp is TRACKED, so the pinned
 # commit itself names the exact rootfsSha256 it expects. We accept a donor copy only if
@@ -522,8 +524,9 @@ fi
 # same economics: build-windows-cross.sh:139-149 already checks each of these, but it checks
 # them INSIDE the leg, which is launched in parallel and joined FATALLY. So a missing wine or
 # an unprovisioned Inno prefix — host state that is knowable at second zero and cannot change
-# during the cut — is discovered only after the leg starts, and join_leg's `exit 1` then reaps
-# the healthy linux/android/mac legs with it.
+# during the cut — is discovered only after the leg starts, ~10 minutes of compute later,
+# and fails the whole cut. (Since EI-20549139616021387 the healthy linux/android/mac legs
+# are SALVAGED rather than reaped, but the cut is still lost.)
 #
 # SCOPE IS DELIBERATE — these six are HOST CAPABILITIES, true or false before the cut begins.
 # Two of build-windows-cross.sh's other preconditions are deliberately NOT hoisted:
@@ -581,13 +584,13 @@ fi
 
 # Android versionName preflight — same shape, same reason as the WSL-rootfs block above:
 # a defect that is knowable by reading ONE line at second zero must not be discovered
-# ~10 minutes into a parallel leg, where join_leg's fatal `exit 1` reaps the healthy legs.
+# ~10 minutes into a parallel leg, where a leg's fatal `exit 1` loses the whole cut.
 #
 # The failure this prevents (0.0.17 cut, 2026-08-15): android/app/build.gradle.kts hardcoded
 # `versionName = "0.1.0"` while tools/build-scripts/android-release-provenance.sh:66-67
 # asserts the packaged APK's versionName EQUALS the requested release version. That
 # assertion is correct and stays — but it is POST-BUILD: it can only fire after a full
-# Gradle release build, and the android leg is joined FATALLY (join_leg, below), so it
+# Gradle release build, and the android leg is supervised FATALLY (supervise_legs, below), so it
 # aborted the entire cut rather than just the mobile artifacts.
 #
 # This is therefore a STATIC read of the assignment, never a build. If versionName does not
@@ -1441,45 +1444,179 @@ elif [[ "$WITH_MAC" == "1" ]]; then
   MAC_PID=$!
 fi
 
-# ── JOIN all parallel legs; replay each leg's log; FAIL the release if any failed ──
-join_leg() {  # $1=pid  $2=name  $3=logfile
-  local pid="$1" name="$2" logf="$3" rc=0
-  echo "==> joining $name leg (pid $pid)…"
-  # WI-4230 (0.0.8 false-FAIL): a signal-interrupted `wait` returns >128 (or a
-  # spurious 127) IMMEDIATELY while the leg is still running — the 0.0.8 cut
-  # declared the linux leg FAILED mid-appimagetool, dumped a truncated log, and
-  # exited without provenance/latest.json while the leg finished fine 4min
-  # later. Only accept a verdict once the pid is actually GONE; an interrupted
-  # wait on a live pid re-waits (bash keeps the un-reaped child's status, so the
-  # re-wait returns the leg's true exit code).
-  while :; do
-    if wait "$pid"; then rc=0; else rc=$?; fi
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "    (wait returned rc=$rc but $name leg pid $pid is still alive — interrupted wait; re-waiting)"
-      [[ "$rc" == "127" ]] && sleep 5   # non-child rc: poll instead of hot-spinning
+# ── SUPERVISE all parallel legs CONCURRENTLY; fail fast, salvage the survivors ──
+# EI-20549139616021387. The legs are launched in PARALLEL but used to be JOINED in a
+# FIXED ORDER (linux → win → mac → android), each join blocking until that ONE leg
+# finished. Two defects fell out of that ordering, and the second one is the expensive
+# one:
+#
+#   1. INVISIBILITY. A leg that died at minute 1 was not observed at minute 1 — the
+#      parent sat blocked on `joining linux leg` and surfaced NOTHING until the join
+#      pointer reached the corpse. Observed on the 0.0.17 cut: ~10 minutes. For that
+#      whole window every cheap health signal an observer has produced a confident
+#      FALSE HEALTHY — the parent log read healthy, `release:cut status` said running
+#      (it was), and a cgroup CPU probe read healthy too, because "three healthy legs"
+#      and "three healthy legs plus one corpse" are the same 20-cores-busy reading.
+#   2. REAPING. Reaching the corpse then did `exit 1`, and the EXIT trap that fires on
+#      it (reap_release_legs, :189) SIGTERMs every still-running build descendant of
+#      this cut. On the 0.0.17 cut that was about to destroy a SIGNED 3.34 GB linux
+#      .deb minutes from completion, killed by a win leg that had already been dead
+#      for ~10 minutes.
+#
+# So: supervise every leg CONCURRENTLY (`wait -n`), and separate two things the old
+# code conflated into one `exit 1`.
+#   • The VERDICT is IMMEDIATE. The first death is announced within one wait wakeup,
+#     not at its join-order position. From that moment the cut is doomed and WILL exit
+#     non-zero; nothing downstream runs. That alone removes the blind spot.
+#   • The TEARDOWN is NOT immediate. Healthy siblings are left to FINISH so their
+#     artifacts land on disk, because the retry path for exactly that is already in
+#     this script: PAPERCUSP_REUSE_WIN / PAPERCUSP_REUSE_MAC (:1302, :1369) ship
+#     artifacts salvaged from a previous attempt. The old behaviour was destroying its
+#     own salvage input. RELEASE_ABORT_ON_LEG_FAILURE=1 restores tear-it-down-now, and
+#     RELEASE_SALVAGE_GRACE_S=<seconds> bounds the wait for an automated caller.
+#
+# The same loop emits a per-leg heartbeat, so the parent log stops implying a health it
+# has not verified. It grades a leg by PID LIVENESS + LOG MTIME ADVANCING, never by
+# grepping the leg log for the word "error": that regex produced 7 false hits in the win
+# leg and 5 in mac on the 0.0.17 cut — win's were the identity gate's own prose ("…would
+# still have FAILED the file"), mac's were `error: &NSError,`, a Rust struct field quoted
+# inside a compiler warning.
+LEG_NAMES=(); LEG_PIDS=(); LEG_LOGS=(); LEG_STATE=(); LEG_RC=()
+register_leg() {  # $1=name  $2=pid  $3=logfile
+  LEG_NAMES+=("$1"); LEG_PIDS+=("$2"); LEG_LOGS+=("$3"); LEG_STATE+=("alive"); LEG_RC+=("")
+}
+[[ -n "$LINUX_PID"   ]] && register_leg linux   "$LINUX_PID"   "$LINUX_LEG_LOG"
+[[ -n "$WIN_PID"     ]] && register_leg win     "$WIN_PID"     "$WIN_LEG_LOG"
+[[ -n "$MAC_PID"     ]] && register_leg mac     "$MAC_PID"     "$MAC_LEG_LOG"
+[[ -n "$ANDROID_PID" ]] && register_leg android "$ANDROID_PID" "$ANDROID_LEG_LOG"
+
+LEG_HEARTBEAT_S="${RELEASE_LEG_HEARTBEAT_S:-60}"
+LEG_TICK_PID=""; LEG_GRACE_PID=""
+
+leg_heartbeat_line() {  # per-leg verdict: liveness + whether the leg's log is still moving
+  local i out='' now mt age
+  now="$(date +%s)"
+  for i in "${!LEG_NAMES[@]}"; do
+    case "${LEG_STATE[$i]}" in
+      done)   out+=" ${LEG_NAMES[$i]}=done" ;;
+      failed) out+=" ${LEG_NAMES[$i]}=FAILED(rc=${LEG_RC[$i]})" ;;
+      *)      mt="$(stat -c %Y "${LEG_LOGS[$i]}" 2>/dev/null || true)"
+              if [[ -n "$mt" ]]; then
+                age=$(( now - mt ))
+                out+=" ${LEG_NAMES[$i]}=alive(log+${age}s)"
+              else
+                out+=" ${LEG_NAMES[$i]}=alive(no-log-yet)"
+              fi ;;
+    esac
+  done
+  echo "==> [legs]${out}"
+}
+
+supervise_legs() {
+  local alive=() kept=() i p rc finished idx name first_failed='' grace_expired=0
+  for i in "${!LEG_PIDS[@]}"; do alive+=("${LEG_PIDS[$i]}"); done
+  (( ${#alive[@]} > 0 )) || return 0
+  echo "==> supervising ${#alive[@]} parallel leg(s) CONCURRENTLY: ${LEG_NAMES[*]} — the FIRST death fails the cut immediately; healthy siblings are left to finish (salvage)"
+  leg_heartbeat_line
+
+  while (( ${#alive[@]} > 0 )); do
+    local wait_set=("${alive[@]}")
+    if (( LEG_HEARTBEAT_S > 0 )) && [[ -z "$LEG_TICK_PID" ]]; then
+      sleep "$LEG_HEARTBEAT_S" & LEG_TICK_PID=$!
+    fi
+    [[ -n "$LEG_TICK_PID"  ]] && wait_set+=("$LEG_TICK_PID")
+    [[ -n "$LEG_GRACE_PID" ]] && wait_set+=("$LEG_GRACE_PID")
+
+    finished=''
+    if wait -n -p finished "${wait_set[@]}"; then rc=0; else rc=$?; fi
+
+    # WI-4230 (0.0.8 false-FAIL): a signal-interrupted `wait` returns >128 — or a
+    # spurious 127 — IMMEDIATELY while every leg is still running. The 0.0.8 cut
+    # declared the linux leg FAILED mid-appimagetool on exactly that. `wait -n -p`
+    # REPORTS the pid it collected, so "no pid reported" IS the no-verdict case and is
+    # the whole guard: never grade a leg on a wakeup that named no child.
+    if [[ -z "$finished" ]]; then
+      (( rc == 127 )) && sleep 5   # non-child rc: poll instead of hot-spinning
       continue
     fi
-    break
+
+    if [[ -n "$LEG_TICK_PID" && "$finished" == "$LEG_TICK_PID" ]]; then
+      LEG_TICK_PID=''
+      leg_heartbeat_line
+      continue
+    fi
+    if [[ -n "$LEG_GRACE_PID" && "$finished" == "$LEG_GRACE_PID" ]]; then
+      LEG_GRACE_PID=''; grace_expired=1
+      echo "==> SALVAGE GRACE (${RELEASE_SALVAGE_GRACE_S}s) EXPIRED — no longer waiting on the remaining leg(s). The cut has already failed; the survivors keep running and their artifacts are whatever landed."
+      break
+    fi
+
+    idx=''
+    for i in "${!LEG_PIDS[@]}"; do [[ "${LEG_PIDS[$i]}" == "$finished" ]] && { idx="$i"; break; }; done
+    [[ -n "$idx" ]] || continue   # not a leg we track
+
+    name="${LEG_NAMES[$idx]}"
+    kept=(); for p in "${alive[@]}"; do [[ "$p" == "$finished" ]] || kept+=("$p"); done
+    alive=("${kept[@]}")
+
+    if (( rc == 0 )); then
+      LEG_STATE[$idx]='done'
+      [[ -f "${LEG_LOGS[$idx]}" ]] && sed "s/^/  [$name] /" "${LEG_LOGS[$idx]}"
+      echo "==> $name leg SUCCEEDED"
+    else
+      LEG_STATE[$idx]='failed'; LEG_RC[$idx]="$rc"
+      echo "ERROR: $name leg FAILED (rc=$rc) — full leg log:"
+      [[ -f "${LEG_LOGS[$idx]}" ]] && sed "s/^/  [$name] /" "${LEG_LOGS[$idx]}"
+      if [[ -z "$first_failed" ]]; then
+        first_failed="$name"
+        echo "⛔ FIRST LEG DEATH: $name (rc=$rc) at $(date -u +%Y-%m-%dT%H:%M:%SZ) — THIS CUT IS DOOMED and will exit non-zero."
+        if (( ${#alive[@]} > 0 )); then
+          if [[ "${RELEASE_ABORT_ON_LEG_FAILURE:-0}" == "1" ]]; then
+            echo "   RELEASE_ABORT_ON_LEG_FAILURE=1 — tearing down ${#alive[@]} still-running leg(s) NOW (their partial artifacts are forfeit)."
+            break
+          fi
+          echo "   SALVAGE: ${#alive[@]} sibling leg(s) still building. Letting them FINISH so their artifacts"
+          echo "   land on disk and a retry can reuse them (PAPERCUSP_REUSE_WIN / PAPERCUSP_REUSE_MAC), instead"
+          echo "   of reaping work that may be minutes from done — the 0.0.17 cut nearly lost a signed 3.34GB"
+          echo "   .deb this way. Abort now instead: RELEASE_ABORT_ON_LEG_FAILURE=1. Bound the wait:"
+          echo "   RELEASE_SALVAGE_GRACE_S=<seconds>."
+          if [[ -n "${RELEASE_SALVAGE_GRACE_S:-}" ]] && (( RELEASE_SALVAGE_GRACE_S > 0 )); then
+            sleep "$RELEASE_SALVAGE_GRACE_S" & LEG_GRACE_PID=$!
+          fi
+        fi
+      fi
+    fi
+    leg_heartbeat_line
   done
-  if [[ "$rc" == "0" ]]; then
-    [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
-    echo "==> $name leg SUCCEEDED"
-  else
-    echo "ERROR: $name leg FAILED (rc=$rc) — full leg log:"
-    [[ -f "$logf" ]] && sed "s/^/  [$name] /" "$logf"
+
+  [[ -n "$LEG_TICK_PID"  ]] && { kill "$LEG_TICK_PID"  2>/dev/null || true; LEG_TICK_PID=''; }
+  [[ -n "$LEG_GRACE_PID" ]] && { kill "$LEG_GRACE_PID" 2>/dev/null || true; LEG_GRACE_PID=''; }
+
+  local failed=() survived=()
+  for i in "${!LEG_NAMES[@]}"; do
+    case "${LEG_STATE[$i]}" in
+      failed) failed+=("${LEG_NAMES[$i]}(rc=${LEG_RC[$i]})") ;;
+      done)   survived+=("${LEG_NAMES[$i]}") ;;
+    esac
+  done
+  if (( ${#failed[@]} > 0 )); then
+    echo "ERROR: release cut FAILED — leg(s): ${failed[*]}"
+    if (( ${#survived[@]} > 0 )); then
+      echo "==> SALVAGED (completed before the cut ended, artifacts are on disk): ${survived[*]}"
+      echo "    Re-run with PAPERCUSP_REUSE_WIN=1 / PAPERCUSP_REUSE_MAC=1 to ship those bytes instead of rebuilding them."
+    fi
+    (( grace_expired == 1 )) && echo "    (salvage grace expired; leg(s) still running were NOT waited for)"
     exit 1
   fi
+  return 0
 }
-[[ -n "$LINUX_PID" ]] && join_leg "$LINUX_PID" linux "$LINUX_LEG_LOG"
-[[ -n "$WIN_PID"   ]] && join_leg "$WIN_PID"   win   "$WIN_LEG_LOG"
-[[ -n "$MAC_PID"   ]] && join_leg "$MAC_PID"   mac   "$MAC_LEG_LOG"
+supervise_legs
 
-# Android remains OUTSIDE ARTIFACTS[] (that array feeds the desktop-only updater),
-# but an enabled leg is a release promise and therefore uses the same fatal join as
-# every desktop leg. Then exercise the recorder's manifest verifier and require the
-# complete APK+AAB pair before the cut can continue.
+# Android remains OUTSIDE ARTIFACTS[] (that array feeds the desktop-only updater), but an
+# enabled leg is a release promise and is therefore supervised exactly like every desktop
+# leg above — its death fails the cut. Then exercise the recorder's manifest verifier and
+# require the complete APK+AAB pair before the cut can continue.
 if [[ -n "$ANDROID_PID" ]]; then
-  join_leg "$ANDROID_PID" android "$ANDROID_LEG_LOG"
   PAPERCUSP_ROOT="$(cd "$ROOT/.." && pwd)"
   if ! android_scan="$(cd "$PAPERCUSP_ROOT" && npx tsx apps/operator/lib/release/record-release-cli.ts \
       --scan-mobile --version "$VERSION" --mobile-root "$MOBILE_ROOT")"; then
