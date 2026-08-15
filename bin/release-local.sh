@@ -511,6 +511,58 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
   fi
 fi
 
+# Android versionName preflight — same shape, same reason as the WSL-rootfs block above:
+# a defect that is knowable by reading ONE line at second zero must not be discovered
+# ~10 minutes into a parallel leg, where join_leg's fatal `exit 1` reaps the healthy legs.
+#
+# The failure this prevents (0.0.17 cut, 2026-08-15): android/app/build.gradle.kts hardcoded
+# `versionName = "0.1.0"` while tools/build-scripts/android-release-provenance.sh:66-67
+# asserts the packaged APK's versionName EQUALS the requested release version. That
+# assertion is correct and stays — but it is POST-BUILD: it can only fire after a full
+# Gradle release build, and the android leg is joined FATALLY (join_leg, below), so it
+# aborted the entire cut rather than just the mobile artifacts.
+#
+# This is therefore a STATIC read of the assignment, never a build. If versionName does not
+# derive from PAPERCUP_RELEASE_VERSION — the variable this very script supplies to the leg —
+# then the post-build assertion CANNOT hold, and the cut is already doomed. Refuse in
+# seconds instead. Ordinary dev/debug builds leave the env unset and keep the repo default.
+if [[ "$WITH_ANDROID" == "1" ]]; then
+  android_gradle="$MOBILE_ROOT/android/app/build.gradle.kts"
+  if [[ ! -f "$android_gradle" ]]; then
+    echo "ERROR: WITH_ANDROID=1 but the sibling mobile app's build.gradle.kts is missing." >&2
+    echo "       Expected: $android_gradle" >&2
+    echo "       Cut with WITH_ANDROID=0 (or PAPERCUSP_SKIP_MOBILE=1) for a desktop-only cut." >&2
+    exit 1
+  fi
+  # EVERY versionName assignment must derive from the env, not just the first one found:
+  # a hardcoded assignment in a product flavor or a build type overrides defaultConfig in
+  # the packaged APK, so "one good assignment exists" is not the property worth pinning.
+  # Line comments are stripped BEFORE matching, and the match is NOT anchored to start-of-line:
+  # anchoring misses the single-line flavor form `create("store") { versionName = "1.0.0" }`
+  # (verified — that exact shape slips past a `^[[:space:]]*versionName` pattern), while
+  # stripping `//` keeps a commented-out historical hardcode from false-refusing a good cut.
+  android_vn_lines="$(sed 's;//.*;;' "$android_gradle" | grep -E 'versionName[[:space:]]*=' || true)"
+  if [[ -z "$android_vn_lines" ]]; then
+    echo "ERROR: WITH_ANDROID=1 but $android_gradle declares no versionName assignment." >&2
+    echo "       The packaged APK would carry no release version for provenance to assert." >&2
+    exit 1
+  fi
+  android_vn_total="$(printf '%s\n' "$android_vn_lines" | wc -l)"
+  android_vn_env="$(printf '%s\n' "$android_vn_lines" | grep -cE 'PAPERCUP_RELEASE_VERSION' || true)"
+  if [[ "$android_vn_total" != "$android_vn_env" ]]; then
+    echo "ERROR: Android versionName does not track PAPERCUP_RELEASE_VERSION — refusing to start the cut." >&2
+    echo "       $android_gradle" >&2
+    echo "       $android_vn_env of $android_vn_total versionName assignment(s) read the env; all must." >&2
+    sed 's;//.*;;' "$android_gradle" | grep -nE 'versionName[[:space:]]*=' >&2 || true
+    echo "       Expected form: versionName = System.getenv(\"PAPERCUP_RELEASE_VERSION\")?.takeIf { it.isNotBlank() } ?: \"0.1.0\"" >&2
+    echo "       (android-release-provenance.sh asserts the packaged versionName == the requested" >&2
+    echo "        version AFTER a ~10-minute build, and the android leg is joined fatally — so" >&2
+    echo "        failing here costs seconds, while failing there aborts the whole cut.)" >&2
+    exit 1
+  fi
+  echo "==> Android versionName verified to derive from PAPERCUP_RELEASE_VERSION ($android_vn_env/$android_vn_total assignment(s))"
+fi
+
 # Migration-safety gate — fail FAST (before the ~35-min build) if a migration would
 # crash the packaged operator on FIRST BOOT. Catches the migration-631 class (an
 # unguarded work_items harness_slug re-slug UPDATE → duplicate work_items_pkey →
