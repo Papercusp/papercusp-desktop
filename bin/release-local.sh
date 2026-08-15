@@ -37,9 +37,10 @@
 #
 # runs every gate and exits 0 before the first write, having modified nothing.
 #
-# NOTE: it DOES `git commit` the version bump and `git tag -f` locally (neither
-# is pushed to origin). It also pushes a dogfood *monorepo* tag — see the
-# PAPERCUP_DOGFOOD_REPO_REF block below; that is a source-pin, not a release.
+# NOTE: it DOES `git commit` the version bump and may `git tag -f` locally
+# (neither is pushed to origin). The dogfood *monorepo* tag must already exist
+# on origin at the explicit expected source SHA; a LOCAL-only cut verifies it
+# and never creates, moves, or force-pushes that remote ref.
 #
 # Optional platform legs (both mac + windows now build NATIVELY on this Linux box
 # via cross-compilation — the QEMU build VMs were retired as build legs, WI-5651;
@@ -296,6 +297,30 @@ TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}"
 # WI-5651: the mac VM ssh/scp/rsync frames that used to live here are GONE — the
 # mac leg builds natively (bin/build-mac-cross.sh), no VM. mac-vm-build.sh keeps
 # its own VM connection setup for the on-device TESTING the VM is retained for.
+# EI-20505417131773854: every cut is explicitly bound to one full superproject
+# commit before any release-tree write. The agent-facing release:cut wrapper
+# supplies this value; direct/manual callers must do the same. A moving staging
+# HEAD therefore fails at second zero instead of silently re-pinning a release.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
+  echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
+  exit 1
+fi
+case "$CHANNEL" in
+  alpha|beta|stable|nightly) ;;
+  *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
+esac
+MONOREPO="$(cd "$ROOT/.." && pwd)"
+EXPECTED_SOURCE_SHA="${PAPERCUSP_EXPECTED_SOURCE_SHA:-}"
+release_tag_validate_exact_commit "$MONOREPO" "$EXPECTED_SOURCE_SHA" || exit $?
+CURRENT_SOURCE_SHA="$(git -C "$MONOREPO" rev-parse HEAD 2>/dev/null || true)"
+if [[ "$CURRENT_SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
+  echo "ERROR: release source drift — current superproject HEAD is ${CURRENT_SOURCE_SHA:-<unreadable>}" >&2
+  echo "       expected exact PAPERCUSP_EXPECTED_SOURCE_SHA=$EXPECTED_SOURCE_SHA" >&2
+  echo "       Refusing before any manifest, tag, seed, or build mutation." >&2
+  exit 1
+fi
+export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
+
 # Build provenance: the short git sha of the tree we're packaging, made HONEST
 # per EI-8914 / P-003 (desktop-build-hardening-tri-platform-2026-07-11). This is
 # the SINGLE SOURCE OF TRUTH for PAPERCUSP_BUILD_SHA across all three legs — it
@@ -350,16 +375,6 @@ fi
 # $VERSION (this script's own CLI arg, semver-validated below) — the exact
 # value this run writes into tauri.conf.json, so they can never drift.
 echo "==> build provenance: PAPERCUSP_BUILD_VERSION=${VERSION}"
-
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
-  echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo"
-  exit 1
-fi
-
-case "$CHANNEL" in
-  alpha|beta|stable|nightly) ;;
-  *) echo "ERROR: channel must be alpha|beta|stable|nightly"; exit 1 ;;
-esac
 
 # ── CHANNEL IDENTITY (WI-36794) ───────────────────────────────────────────────
 # THE ONE derivation for this cut, from the shared chokepoint. It sets
@@ -656,50 +671,20 @@ PY
 # (github.com/Papercusp/papercup) on first boot. Pin that clone to THIS build's
 # commit so the dogfooded source matches the binary exactly (without it, a fresh
 # install clones whatever `main` is NOW — drift). We:
-#   1. tag the monorepo superproject ($ROOT/.. — papercusp-desktop is a submodule
-#      of it) with the SAME release tag + push it, so the ref exists to clone, and
+#   1. verify the monorepo superproject ($ROOT/.. — papercusp-desktop is a
+#      submodule of it) already has the SAME release tag on origin at the exact
+#      expected source SHA, aligning only the LOCAL ref when needed, and
 #   2. export PAPERCUP_DOGFOOD_REPO_REF=$TAG so build-desktop-sidecar.sh bakes it
 #      into the sidecar (esbuild --define). bootstrap-papercusp-hive reads it.
-# Best-effort: a push failure just means the dogfood clone falls back to `main`.
-MONOREPO="$(cd "$ROOT/.." && pwd)"
+# Fail-closed: LOCAL-only cuts never mutate origin. A missing/mismatched remote
+# pin is a precondition failure, not an invitation for the cutter to force-push.
 if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
-  MONO_SHA="$(git -C "$MONOREPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  echo "==> dogfood pin: tagging monorepo ($MONOREPO @ $MONO_SHA) as $TAG"
-  # The pin MUST resolve to the commit this build is made from. Re-cutting a
-  # version is routine (a failed attempt, a retry — 0.0.11 was cut 3x on
-  # 2026-07-15 alone), and the pin used to be REUSED-never-moved on a re-cut:
-  # it froze at attempt #1's commit while the build moved on, so the shipped app
-  # cloned source that did not match its binary. Silent, exit 0, prints green.
-  # 0.0.9 shipped that way — pinned 60 desktop commits / 27h behind its binary
-  # (WI-5022, measured). A stale pin is the exact drift this block exists to
-  # prevent, so a mismatch RE-PINS and says so.
-  MONO_HEAD="$(git -C "$MONOREPO" rev-parse HEAD 2>/dev/null || echo '?')"
-  PIN_FORCE=""
-  if EXISTING_PIN="$(git -C "$MONOREPO" rev-parse -q --verify "refs/tags/$TAG" 2>/dev/null)"; then
-    if [[ "$EXISTING_PIN" == "$MONO_HEAD" ]]; then
-      echo "    tag $TAG already at this build's commit (${MONO_HEAD:0:10}) — reusing"
-    else
-      # Re-pinning a version whose installs are already in the wild changes what
-      # they dogfood-clone. That is intended here: re-cutting a published version
-      # is itself the deliberate act, and leaving the pin stale is never right.
-      echo "    ⚠ RE-PINNING $TAG: ${EXISTING_PIN:0:10} (stale) -> ${MONO_HEAD:0:10} (this build)"
-      git -C "$MONOREPO" tag -f "$TAG" || echo "    WARN: could not move monorepo tag $TAG"
-      PIN_FORCE="--force"
-    fi
-  else
-    git -C "$MONOREPO" tag "$TAG" || echo "    WARN: could not create monorepo tag $TAG"
-  fi
-  git -C "$MONOREPO" push $PIN_FORCE origin "refs/tags/$TAG" 2>/dev/null \
-    || echo "    WARN: could not push monorepo tag $TAG — dogfood clone will fall back to the default branch (main)"
-  # Fail loud rather than ship a pin that silently disagrees with the build.
-  PUSHED_PIN="$(git -C "$MONOREPO" ls-remote --tags origin "refs/tags/$TAG" 2>/dev/null | awk '{print $1}')"
-  if [[ -n "$PUSHED_PIN" && "$PUSHED_PIN" != "$MONO_HEAD" ]]; then
-    echo "    ⚠ WARN: remote $TAG is $PUSHED_PIN but this build is $MONO_HEAD —"
-    echo "      the dogfood clone will NOT match this binary (WI-5022)."
-  fi
+  echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
+  release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA"
 else
-echo "==> dogfood pin: $ROOT/.. is not a git repo — skipping (sidecar bakes no ref → dogfood clone uses main)"
+  echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
+  exit 1
 fi
 
 cut_release_seed() {

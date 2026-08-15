@@ -9,25 +9,62 @@ release_tag_remote_sha() { # <repo> <tag>
     | awk 'NR == 1 { print $1 }'
 }
 
-release_tag_repair_exact() { # <repo> <tag> <expected-40-char-commit-sha>
-  local repo="$1" tag="$2" expected_sha="$3"
-  local resolved_sha remote_before remote_after local_after
-
+release_tag_validate_exact_commit() { # <repo> <expected-40-char-commit-sha>
+  local repo="$1" expected_sha="$2" resolved_sha
   if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "ERROR: release tag repair requires an exact 40-character lowercase commit SHA" >&2
+    echo "ERROR: release source must be an exact 40-character lowercase commit SHA" >&2
     return 2
   fi
-  if [[ ! "$tag" =~ ^desktop-v[0-9A-Za-z.-]+$ ]]; then
-    echo "ERROR: refusing to repair non-desktop release tag '$tag'" >&2
-    return 2
-  fi
-
   resolved_sha="$(git -C "$repo" rev-parse --verify "${expected_sha}^{commit}" 2>/dev/null)" || {
     echo "ERROR: expected release source $expected_sha is not a commit in $repo" >&2
     return 2
   }
   if [[ "$resolved_sha" != "$expected_sha" ]]; then
     echo "ERROR: expected release source resolved to $resolved_sha, not exact $expected_sha" >&2
+    return 2
+  fi
+}
+
+release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha>
+  local repo="$1" tag="$2" expected_sha="$3"
+  local remote_sha local_sha
+
+  release_tag_validate_exact_commit "$repo" "$expected_sha" || return $?
+  if [[ ! "$tag" =~ ^desktop-v[0-9A-Za-z.-]+$ ]]; then
+    echo "ERROR: refusing non-desktop release tag '$tag'" >&2
+    return 2
+  fi
+
+  remote_sha="$(release_tag_remote_sha "$repo" "$tag")"
+  if [[ "$remote_sha" != "$expected_sha" ]]; then
+    echo "ERROR: origin refs/tags/$tag is ${remote_sha:-<missing>}, expected $expected_sha" >&2
+    echo "       A LOCAL-only cut never creates, moves, or force-pushes a remote tag." >&2
+    echo "       Repair/prepare the exact tag through the explicit release-owned tag operation first." >&2
+    return 1
+  fi
+
+  local_sha="$(git -C "$repo" rev-parse -q --verify "refs/tags/$tag" 2>/dev/null || true)"
+  if [[ "$local_sha" != "$expected_sha" ]]; then
+    echo "    aligning LOCAL $tag: ${local_sha:-<missing>} -> $expected_sha (origin already exact)"
+    git -C "$repo" tag -f "$tag" "$expected_sha" >/dev/null
+  fi
+
+  local_sha="$(git -C "$repo" rev-parse --verify "refs/tags/$tag" 2>/dev/null)"
+  remote_sha="$(release_tag_remote_sha "$repo" "$tag")"
+  if [[ "$local_sha" != "$expected_sha" || "$remote_sha" != "$expected_sha" ]]; then
+    echo "ERROR: release tag verification drifted (local=$local_sha origin=$remote_sha expected=$expected_sha)" >&2
+    return 1
+  fi
+  echo "    ✓ local+origin refs/tags/$tag already pinned to expected source $expected_sha"
+}
+
+release_tag_repair_exact() { # <repo> <tag> <expected-40-char-commit-sha>
+  local repo="$1" tag="$2" expected_sha="$3"
+  local remote_before remote_after local_after
+
+  release_tag_validate_exact_commit "$repo" "$expected_sha" || return $?
+  if [[ ! "$tag" =~ ^desktop-v[0-9A-Za-z.-]+$ ]]; then
+    echo "ERROR: refusing to repair non-desktop release tag '$tag'" >&2
     return 2
   fi
 
