@@ -43,7 +43,8 @@ done
 # ── (1b) `papercusp` dispatcher + the Papercusp Tutorial & Setup desktop icon ─
 # (agent-first-onboarding-2026-07-03 P-014.) `papercusp setup` (alias `onboard`)
 # runs the terminal concierge; `papercusp tutorial` re-opens the guided tutorial on
-# an already-onboarded machine. The third .desktop entry sits beside the two
+# an already-onboarded machine; `papercusp project-history` generates the portable
+# project read model. The third .desktop entry sits beside the two
 # Tauri-bundled icons (Papercusp Server + Papercusp GUI) and opens the same
 # command in the user's terminal. Guarded like everything else — never fails
 # the install.
@@ -56,7 +57,8 @@ case "\$cmd" in
   setup)    shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tab=setup "\$@" ;;
   tutorial) shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" --tutorial "\$@" ;;
   onboard)  shift; exec "$SC/bin/node" "$SC/scripts/onboard.mjs" "\$@" ;;
-  *) echo "usage: papercusp <setup|tutorial>"; echo "  setup     open the Tutorial & Setup shell on the Setup tab"; echo "  tutorial  open the Tutorial & Setup shell on the Tutorial tab"; exit 2 ;;
+  project-history) shift; exec "$SC/bin/node" "$SC/scripts/project-history.mjs" "\$@" ;;
+  *) echo "usage: papercusp <setup|tutorial|project-history>"; echo "  setup     open the Tutorial & Setup shell on the Setup tab"; echo "  tutorial  open the Tutorial & Setup shell on the Tutorial tab"; echo "  project-history  generate a versioned project History artifact"; exit 2 ;;
 esac
 WRAP
   chmod 755 /usr/bin/papercusp

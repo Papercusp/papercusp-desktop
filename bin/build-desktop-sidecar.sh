@@ -937,7 +937,7 @@ fi
 #   * Only --external:@lydell/* (psu/ptool don't pull the holepunch native stack).
 # The ~/.papercusp/bin/{psu,ptool} shims that `exec node` these are written on
 # boot by installPapercuspFiles() (papercup CLAUDE.md desktop-install path; A2).
-echo "→ esbuild-bundling psu + ptool + onboard + tutorial-runner → $SIDECAR_DIR/scripts/"
+echo "→ esbuild-bundling psu + ptool + onboard + tutorial-runner + project-history → $SIDECAR_DIR/scripts/"
 mkdir -p "$SIDECAR_DIR/scripts"
 # pairs of <output-name>:<source-stem> (source lives at $WEB_DIR/scripts/<stem>.mjs)
 # onboard = the onboarding/tutorial concierge (agent-first-onboarding P-014):
@@ -966,7 +966,27 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
     exit 1
   fi
 done
-echo "  bundled psu.mjs + ptool.mjs + onboard.mjs + tutorial-runner.mjs"
+
+# Project History is a Papercusp platform CLI, not an operator-host concern.
+# Bundle its narrow entry directly from @papercusp/cli so installed projects can
+# generate the versioned read model without a monorepo checkout or tsx. The
+# shared ESM banner is load-bearing: plan-parser reaches yaml's CJS path, whose
+# dynamic require otherwise fails only in the packaged bundle.
+_project_history_src="$REPO_ROOT/libs/papercusp/packages/cli/src/project-history-entry.ts"
+if [[ ! -f "$_project_history_src" ]]; then
+  echo "ERROR: $_project_history_src not found — project-history cannot ship"
+  exit 1
+fi
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$_project_history_src" \
+  --bundle --platform=node --format=esm --target=node22 \
+  "${MINIFY_ARGS[@]}" \
+  --outfile="$SIDECAR_DIR/scripts/project-history.mjs" \
+  --banner:js="$HOST_BANNER")
+if [[ ! -f "$SIDECAR_DIR/scripts/project-history.mjs" ]]; then
+  echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/project-history.mjs"
+  exit 1
+fi
+echo "  bundled psu.mjs + ptool.mjs + onboard.mjs + tutorial-runner.mjs + project-history.mjs"
 
 # Copy the externalized native deps. esbuild inlined everything else, so
 # this is a tiny tree — node-pty + its platform-binary sub-package(s).

@@ -26,6 +26,21 @@ test('sidecar dependency install names both source workspaces exactly', () => {
   assert.doesNotMatch(builder, /--workspace=@papercusp\/operator(?:\s|$)/);
 });
 
+test('sidecar ships the standalone project-history generator with the shared ESM banner', () => {
+  const postinstall = fs.readFileSync(
+    path.join(desktopRoot, 'src-tauri/deb/postinstall.sh'),
+    'utf8',
+  );
+
+  assert.match(builder, /libs\/papercusp\/packages\/cli\/src\/project-history-entry\.ts/);
+  assert.match(builder, /scripts\/project-history\.mjs/);
+  assert.match(builder, /--banner:js="\$HOST_BANNER"/);
+  assert.match(
+    postinstall,
+    /project-history\) shift; exec "\$SC\/bin\/node" "\$SC\/scripts\/project-history\.mjs"/, 
+  );
+});
+
 test('sidecar build closes direct linked-workspace peer contracts and hoists dockview v6', () => {
   const rootPackage = require(path.join(repoRoot, 'package.json'));
   const operatorPackage = require(path.join(repoRoot, 'apps/operator/package.json'));
