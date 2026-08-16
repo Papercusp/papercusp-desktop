@@ -380,7 +380,21 @@ echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_
 #
 # Fatal by design. If this fires, fix the allowlist above — do not add an
 # exception to make the build pass.
-if ! python3 "$HERE/audit-release-bundle.py" "$OUT"; then
+# Exit 2 (COULD NOT CHECK) is reported separately from exit 1 (FOUND LEAKS). Both are
+# fatal — the difference is what you go and fix (EI-20583328178472869).
+set +e
+python3 "$HERE/audit-release-bundle.py" "$OUT"
+_audit_rc=$?
+set -e
+if [[ $_audit_rc -eq 2 ]]; then
+  echo "" >&2
+  echo "ERROR: release bundle audit COULD NOT CHECK — it did NOT find a leak (WI-4419)." >&2
+  echo "  Almost always: no owner-name literal resolved, because git user.name is unset" >&2
+  echo "  or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and" >&2
+  echo "  PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run." >&2
+  echo "  Read at run time — never write either into a file." >&2
+  exit 2
+elif [[ $_audit_rc -ne 0 ]]; then
   echo "" >&2
   echo "ERROR: release bundle audit FAILED — refusing to package (WI-4419)." >&2
   exit 1

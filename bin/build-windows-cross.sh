@@ -404,8 +404,19 @@ exclusive — see the _WIN_CRT_STATIC comment above)."
   if [[ "$role" == "server" ]]; then
     _WIN_SCAN_DIRS+=("$SRC_TAURI/seed" "$SRC_TAURI/env-sidecars/staging")
   fi
-  python3 "$HERE/audit-release-bundle.py" --scan-dir "${_WIN_SCAN_DIRS[@]}" \
-    || fail "[$role] assembled Windows payload carries sensitive identity (see scan above) — refusing to package a leaky installer"
+  # Exit 2 (COULD NOT CHECK) and exit 1 (FOUND LEAKS) must not share a message. Both
+  # stop the build — this is a diagnosability fix, not a safety one — but reporting a
+  # blind gate as "carries sensitive identity" sends you hunting a leak that is not
+  # there while the real fault is that nothing was hunted (EI-20583328178472869).
+  set +e
+  python3 "$HERE/audit-release-bundle.py" --scan-dir "${_WIN_SCAN_DIRS[@]}"
+  _audit_rc=$?
+  set -e
+  if [[ $_audit_rc -eq 2 ]]; then
+    fail "[$role] identity audit COULD NOT CHECK — it did NOT find a leak. Almost always: no owner-name literal resolved, because git user.name is unset or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run. Read at run time — never write either into a file."
+  elif [[ $_audit_rc -ne 0 ]]; then
+    fail "[$role] assembled Windows payload carries sensitive identity (see scan above) — refusing to package a leaky installer"
+  fi
 
   echo "==> [$role] packing installer with Inno Setup under wine"
   run_iscc "$app_id" "$app_name"
