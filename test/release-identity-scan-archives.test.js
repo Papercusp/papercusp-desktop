@@ -104,7 +104,11 @@ test('a literal INSIDE a .tar.gz fails the scan and names the member', () => {
     const stage = path.join(dir, 'stage');
     fs.mkdirSync(stage);
     fs.writeFileSync(path.join(stage, 'secret.txt'), `leaked ${lit}\n`);
-    execFileSync('tar', ['-czf', path.join(dir, 'bundle/db-seed.tar.gz'), '-C', stage, 'secret.txt']);
+    // --owner/--group/--numeric-owner: scrub tar OWNER METADATA (uname/gname) so this
+    // test proves CONTENT detection specifically — the scanner also (deliberately)
+    // flags the local username embedded in member headers, which would fail this
+    // fixture for the wrong reason on any box whose username is in the identity corpus.
+    execFileSync('tar', ['--owner=0', '--group=0', '--numeric-owner', '-czf', path.join(dir, 'bundle/db-seed.tar.gz'), '-C', stage, 'secret.txt']);
     const r = scanDir(path.join(dir, 'bundle'));
     assert.equal(r.status, 1, `expected FAIL on an archive carrying an identity literal:\n${r.stdout}`);
     // The member must be named — "some archive is dirty" is not actionable.
@@ -124,7 +128,13 @@ test('a clean bundle — including a clean archive and a clean binary — passes
     const stage = path.join(dir, 'stage');
     fs.mkdirSync(stage);
     fs.writeFileSync(path.join(stage, 'ok.txt'), 'harmless\n');
-    execFileSync('tar', ['-czf', path.join(dir, 'bundle/src.tar.gz'), '-C', stage, 'ok.txt']);
+    // A genuinely clean tar must scrub owner metadata: plain `tar -czf` embeds the
+    // BUILDER's uname/gname in every member header, and the scanner's
+    // __member_names__.txt collection correctly flags that as shipping identity
+    // (the same metadata channel as the real postmaster.opts leak this gate exists
+    // to catch). Without these flags this control fixture is dirty-by-construction
+    // on the builder's own box.
+    execFileSync('tar', ['--owner=0', '--group=0', '--numeric-owner', '-czf', path.join(dir, 'bundle/src.tar.gz'), '-C', stage, 'ok.txt']);
     const r = scanDir(path.join(dir, 'bundle'));
     assert.equal(r.status, 0, `expected PASS on a clean bundle:\n${r.stdout}`);
   } finally {

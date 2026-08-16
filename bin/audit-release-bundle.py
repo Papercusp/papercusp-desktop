@@ -1890,6 +1890,14 @@ def _expand_installer(path, dest):
             r = sh(f"7z x -y -bd -o{q(dest)} -tnsis {q(path)}")
             if r.returncode == 0 and _tree_bytes(dest) > 0:
                 return True, "7z -tnsis"
+            # Generic last rung: a self-extracting `.exe` is commonly a zip/7z/cab
+            # with a PE stub glued in front, and 7z identifies those by content.
+            # It is safe to try LAST precisely because the caller's expansion-ratio
+            # floor catches 7z's known failure mode here — misdetecting an Inno PE
+            # as gzip and "succeeding" with a ~49KB fragment of a 4.5MB installer.
+            r = sh(f"7z x -y -bd -o{q(dest)} {q(path)}")
+            if r.returncode == 0 and _tree_bytes(dest) > 0:
+                return True, "7z"
         return False, "none"
 
     if low.endswith((".dmg", ".appimage", ".msi", ".bin")):
