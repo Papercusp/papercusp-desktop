@@ -33,8 +33,25 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 
+/**
+ * A SYNTHETIC owner name, asserted for every AUDIT invocation.
+ *
+ * The certify path REFUSES TO CERTIFY (exit 2) unless an owner-name literal is
+ * ASSERTED via this env var — `has_owner_name_literal` deliberately ignores git,
+ * because git names the COMMITTER and on an automated build box that is not the
+ * owner. That refusal is correct, and it is a PRECONDITION of certifying rather
+ * than anything to do with the prune/scrub behaviour measured here: without the
+ * env, `--scan-dir` exits 2 before it reads a byte, so the post-scrub assertion
+ * "the gate must pass after the scrub" sees 2 instead of 0.
+ *
+ * Must stay SYNTHETIC: a real identity in tracked source is the exact leak this
+ * gate exists to prevent.
+ */
+const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
+const AUDIT_ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: SYNTHETIC_OWNER };
+
 function audit(...args) {
-  return spawnSync('python3', [AUDIT, ...args], { encoding: 'utf8' });
+  return spawnSync('python3', [AUDIT, ...args], { encoding: 'utf8', env: AUDIT_ENV });
 }
 
 /** A high-entropy identity literal, from the gate's OWN source of truth. */
@@ -95,8 +112,16 @@ test('scrub-text clears a doc the gate would REJECT — and the gate agrees afte
 
   // FALSIFIER: prove the gate REJECTS this fixture first. Without this, a scrub that
   // did nothing would still let the post-scan assertion below pass vacuously.
-  assert.notEqual(audit('--scan-dir', dir).status, 0,
-    'fixture must be rejected BEFORE the scrub, or this test proves nothing');
+  //
+  // Asserted as EXACTLY 1, not merely non-zero: the gate separates "found leaks" (1)
+  // from "could not check" (2) precisely so a caller can tell a blind gate from a
+  // real verdict. A `notEqual(…, 0)` falsifier accepts BOTH, so a gate that refused
+  // to certify — and therefore never read the fixture at all — would satisfy this
+  // step and make the scrub look proven. That is not hypothetical: it is exactly how
+  // this test failed when the box's asserted owner identity went missing.
+  assert.equal(audit('--scan-dir', dir).status, 1,
+    'fixture must be REJECTED-on-a-leak (exit 1) before the scrub; exit 2 means the ' +
+    'gate could not check and this test would prove nothing');
 
   assert.equal(audit('--scrub-text', dir).status, 0);
   const after = fs.readFileSync(doc, 'utf8');
