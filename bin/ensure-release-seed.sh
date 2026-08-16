@@ -87,8 +87,13 @@ seed_present() { [[ -f "$MANIFEST" ]]; }
 #
 # Delegated to the installer's OWN check (verify-seed-payload-cli → the same
 # defaultSeedRegistry providers boot uses) rather than a size/hash comparison written
-# here, so the cut side and the install side cannot drift apart silently. ~1.1s on the
-# real ~475MB seed, so it runs unconditionally.
+# here, so the cut side and the install side cannot drift apart silently.
+#
+# That CLI now carries all THREE guards that used to run only when a cut ran — payload
+# integrity, sparse-label honesty (assertSeedNotDegraded), and build-box identity
+# (judgeSeedIdentity: does the seed carry the builder's username / home / hostname / git
+# email into every installer?). Measured ~1.1s + ~1.8s on the real ~475MB seed, so the
+# whole set runs unconditionally.
 #
 # THREE-WAY on purpose: 0 intact · 1 MISMATCH · 2 COULD NOT DETERMINE. A 2 must never
 # read as "fine" (that false-absence is the bug) nor as "broken" (that would fail every
@@ -120,7 +125,7 @@ seed_usable() {
   seed_payload_verdict
   case "$SEED_PAYLOAD_VERDICT" in
     0) return 0 ;;
-    1) log "committed seed FAILS the installer's own payload check — treating it as BROKEN, not usable"
+    1) log "committed seed FAILS one of the installer's own checks (payload integrity, sparse-label honesty, or build-box identity) — treating it as BROKEN, not usable"
        return 1 ;;
     *) log "WARN: could not verify the committed seed's payload integrity — falling back to the presence-only check. This seed is UNVERIFIED, not verified-good."
        return 0 ;;
