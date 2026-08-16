@@ -334,6 +334,28 @@ if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
 else
   bad "live-federation-gate no longer guards missing GATE_DEB overrides (WI-3344 regression)"
 fi
+# EI-20580419609576585: the .deb REPACK produces $GATE_DEB, and $GATE_DEB is what the gate
+# passes to local-matrix.sh as `--deb=`. Gating that repack on SKIP_MATRIX ALONE couples two
+# unrelated things: the attestation wall sets SKIP_MATRIX=1 to force-skip the two GITHUB legs,
+# and thereby also starves the attestation-INDEPENDENT local-matrix leg of its artifact. With
+# no --deb that leg falls back to its implicit newest-bundle pick and hard-fails common.sh's
+# staleness guard — AFTER provisioning frames and evicting 24 exclusive host cores, executing
+# ZERO scenarios. Measured 2026-08-16 on three consecutive forced runs. The wall's own design
+# comment says it runs local-matrix precisely BECAUSE that leg is attestation-independent, so
+# this coupling silently defeats the wall's stated intent.
+# Anchored to the PROPERTY — the guard enclosing the repack must consult the local-matrix
+# admission predicate — not to the exact condition text, so a reworded but correct guard passes.
+repack_ln="$(grep -n 'dpkg-deb -b pkg "\$GATE_DEB"' "$gate_file" | head -1 | cut -d: -f1)"
+if [ -z "$repack_ln" ]; then
+  bad "live-federation-gate no longer contains the .deb repack (dpkg-deb -b pkg \"\$GATE_DEB\") — the EI-20580419609576585 guard cannot verify anything"
+else
+  repack_guard="$(head -n "$repack_ln" "$gate_file" | grep -n '^  if \[ ' | tail -1 | cut -d: -f2-)"
+  if printf '%s' "$repack_guard" | grep -q 'local_matrix_due'; then
+    ok "live-federation-gate repacks the .deb whenever a consumer leg is due, not on SKIP_MATRIX alone (EI-20580419609576585)"
+  else
+    bad "live-federation-gate's .deb repack no longer consults local_matrix_due — the attestation wall will starve the local-matrix leg of --deb, and it will die on the staleness guard after provisioning frames + evicting 24 cores (EI-20580419609576585)"
+  fi
+fi
 if grep -q 'Papercusp\\ GUI_' "$gate_file" && grep -q 'Papercusp\\ GUI_' "$matrix_file"; then
   ok "live federation deb discovery includes the current 'Papercusp GUI' artifact name"
 else
