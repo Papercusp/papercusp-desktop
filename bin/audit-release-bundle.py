@@ -1813,6 +1813,188 @@ def scan_dir(dirs):
     return 1
 
 
+#: The FINISHED artifacts we publish — installer CONTAINERS, not tree members.
+#:
+#: ⚠ DELIBERATELY NOT MERGED INTO ARCHIVE_SUFFIXES, and that separation is the
+#: whole design (WI-39458). `_iter_archives` walks the WHOLE scanned tree, so
+#: teaching it `.exe` would hand it every vendored Windows helper binary in
+#: node_modules and every .NET assembly — none of which any expander can open —
+#: and each would then become "uninspectable", i.e. a RED on every cut. That
+#: converts a false PASS into a permanent false FAILURE, which is not a fix.
+#:
+#: A container is instead named EXPLICITLY by the caller, one artifact at a
+#: time, so the fail-closed rule below applies to the handful of files we are
+#: about to publish and to nothing else.
+ARTIFACT_SUFFIXES = (".exe", ".msi", ".dmg", ".appimage", ".zip", ".bin",
+                     ".deb", ".tar.gz", ".tar.zst", ".app.tar.gz")
+
+#: An expansion that "succeeded" while recovering almost nothing is the SAME
+#: false-clean this entrypoint exists to remove, one level deeper — and it is
+#: not hypothetical. Pointed at an Inno Setup PE, `7z` misdetects the stub as
+#: gzip, exits 0, and recovers ~49KB of a 4.5MB installer. Scanning that 1%
+#: and reporting CLEAN would be strictly worse than not scanning at all,
+#: because the verdict reads as evidence. So coverage is ASSERTED, not assumed:
+#: a container must yield a plausible fraction of its own size or it is
+#: uninspectable. Installers are compressed, so a real expansion is normally
+#: LARGER than the container and this floor has generous headroom.
+ARTIFACT_MIN_EXPANSION_RATIO = 0.10
+
+
+def _tree_bytes(root):
+    """Total bytes of regular files under `root` (symlinks not followed)."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if os.path.islink(p):
+                continue
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+    return total
+
+
+def _expand_installer(path, dest):
+    """Expand ONE finished installer container. Returns (ok, method).
+
+    The tool LADDER is ordered by specificity, because a generic extractor that
+    merely exits 0 is the failure mode here, not a missing extractor:
+
+      • `.exe` → innoextract FIRST. This project's Windows installer is Inno
+        Setup 6 (build-windows-cross.sh packs it with ISCC under wine and emits
+        `bundle/inno/`), and the Server role DISK-SPANS into a `setup.exe` stub
+        plus `-setup-N.bin` slices. innoextract given the stub follows those
+        sibling slices itself, which is the only way the ~2.2GB payload is ever
+        actually read. 7z is tried after it, for a genuine NSIS installer.
+      • `.dmg` / `.AppImage` / `.msi` → 7z, whose Dmg/HFS/SquashFS/Udf handlers
+        cover them.
+      • anything `_expand_archive` already knows (.zip/.tar.*/.deb) → that, so
+        the two entrypoints cannot drift in how they read a format they share.
+
+    Returns ok=False when nothing could open it. The CALLER fails closed on that
+    — an installer this gate cannot open is a hole in the identity scan, not a
+    pass, exactly as for a tree archive.
+    """
+    os.makedirs(dest, exist_ok=True)
+    low = path.lower()
+
+    if low.endswith(".exe"):
+        if shutil.which("innoextract"):
+            # --extract-unknown keeps files innoextract cannot classify rather
+            # than dropping them: an unclassified blob still has to be scanned.
+            r = sh(f"innoextract -e -s --output-dir {q(dest)} {q(path)}")
+            if r.returncode == 0 and _tree_bytes(dest) > 0:
+                return True, "innoextract"
+        if shutil.which("7z"):
+            r = sh(f"7z x -y -bd -o{q(dest)} -tnsis {q(path)}")
+            if r.returncode == 0 and _tree_bytes(dest) > 0:
+                return True, "7z -tnsis"
+        return False, "none"
+
+    if low.endswith((".dmg", ".appimage", ".msi", ".bin")):
+        if not shutil.which("7z"):
+            print(f"    scan-artifact: cannot expand {path}: 7z not on PATH "
+                  f"(a container this gate cannot open is a hole, not a pass)")
+            return False, "none"
+        r = sh(f"7z x -y -bd -o{q(dest)} {q(path)}")
+        if r.returncode == 0 and _tree_bytes(dest) > 0:
+            return True, "7z"
+        return False, "7z"
+
+    # Shared formats go through the ONE expander both entrypoints use.
+    return (True, "archive-pass") if _expand_archive(path, dest) else (False, "archive-pass")
+
+
+def scan_artifact(paths):
+    """Identity-scan FINISHED installer artifacts — the bytes we actually publish.
+
+    WHY THIS EXISTS SEPARATELY FROM --scan-dir (WI-39458, measured):
+    `--scan-dir` scans an assembled TREE and expands the archives it finds inside
+    it. Handed a finished installer it therefore does the one thing this gate is
+    written to prevent — it greps the container as opaque bytes, expands ZERO
+    archives, and reports a POSITIVE clean. Measured 2026-08-16 on the published
+    0.0.17 `Papercusp Server_..._x64-setup.zip` (2,240,463,722 B): the gate printed
+    "✓ CLEAN … 3 file(s), 0 archive(s) expanded and scanned" and exited 0, while the
+    installer's own payload carried the build-box username. ~100% of the shipped
+    bytes were never read. The paired control — the same artifact EXTRACTED, then
+    `--scan-dir`'d — exits 1 DIRTY. The same bytes cannot be both, so the CLEAN
+    verdicts were false.
+
+    Note the AppImage behaved CORRECTLY in that same measurement (7z failed on it,
+    coverage was 0, and the gate REFUSED with exit 2). The machinery was never the
+    problem; nothing was routing installers INTO it.
+
+    The contract here is fail-closed on three separate ways of learning nothing:
+    a container that cannot be opened, one that opens but yields no files, and one
+    that opens but recovers an implausible fraction of itself. Once expanded, the
+    tree is handed to `scan_dir` — the same literal set, coverage assertion, nested
+    archive pass and acceptances — so there is no second scanner to drift.
+    """
+    if not paths:
+        print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
+        return 2
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        print(f"\n    ✗ ARTIFACT MISSING — refusing to report CLEAN on a file that "
+              f"does not exist ({len(missing)} of {len(paths)})\n", file=sys.stderr)
+        for p in missing:
+            print(f"        {p}", file=sys.stderr)
+        print("\n  A gate pointed at a path that isn't there scans nothing and would "
+              "'pass' forever.\n  Fix the caller's path (an unset shell variable "
+              "expands to an empty argument).", file=sys.stderr)
+        return 2
+
+    unknown = [p for p in paths if not p.lower().endswith(ARTIFACT_SUFFIXES)]
+    if unknown:
+        # Not a silent skip: an artifact shape this entrypoint has never been
+        # taught is precisely the thing that must not sail through as clean.
+        print(f"\n    ✗ UNRECOGNISED ARTIFACT TYPE — refusing to certify "
+              f"({len(unknown)} of {len(paths)})\n", file=sys.stderr)
+        for p in unknown:
+            print(f"        {p}", file=sys.stderr)
+        print("\n  Teach ARTIFACT_SUFFIXES + _expand_installer this container, or "
+              "stop publishing it.", file=sys.stderr)
+        return 2
+
+    print("==> identity-scan of FINISHED artifacts (the published bytes — WI-39458)")
+    with tempfile.TemporaryDirectory(prefix="papercusp-audit-artifact-") as tmp:
+        dests = []
+        uninspectable = []
+        for idx, art in enumerate(paths):
+            dest = os.path.join(tmp, f"art{idx}")
+            size = os.path.getsize(art)
+            ok, method = _expand_installer(art, dest)
+            got = _tree_bytes(dest) if ok else 0
+            ratio = (got / size) if size else 0.0
+            if not ok or got == 0:
+                uninspectable.append((art, f"could not expand (tried: {method})"))
+                continue
+            if ratio < ARTIFACT_MIN_EXPANSION_RATIO:
+                uninspectable.append((
+                    art,
+                    f"expanded via {method} but recovered only {got:,} of {size:,} B "
+                    f"({ratio:.1%}) — below the {ARTIFACT_MIN_EXPANSION_RATIO:.0%} floor",
+                ))
+                continue
+            print(f"    {os.path.basename(art)}: expanded via {method} — "
+                  f"{got:,} B from a {size:,} B container ({ratio:.0%})")
+            dests.append(dest)
+
+        if uninspectable:
+            print(f"\n    ✗ {len(uninspectable)} ARTIFACT(S) COULD NOT BE INSPECTED — "
+                  f"refusing to report CLEAN on bytes nobody read\n", file=sys.stderr)
+            for f, why in uninspectable[:40]:
+                print(f"        {f}\n            {why}", file=sys.stderr)
+            print("\n  An archive this gate cannot open is a hole in the identity scan, "
+                  "not a pass.", file=sys.stderr)
+            print("  Either teach _expand_installer its format, or stop shipping it.",
+                  file=sys.stderr)
+            return 2
+
+        return scan_dir(dests)
+
+
 def print_identity_literals():
     """Emit `value<TAB>redaction<TAB>wordboundary(0/1)<TAB>sed_ere` for every identity
     literal the gate hunts — build-box identity + the known cross-box sensitive set — so
