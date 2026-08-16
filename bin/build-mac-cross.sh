@@ -607,6 +607,25 @@ for role in $ROLES; do
   PROV_ARTIFACTS+=("$OUT_BUNDLE/dmg/${product}_${VERSION}_${DMG_ARCH}.dmg" "$OUT_BUNDLE/macos/$product.app.tar.gz")
 done
 
+# ── Identity-scan the FINISHED artifacts (WI-39458) ──────────────────────────
+# Gate (a) above scans the assembled .app TREE, which is the right object for
+# what is IN the app — but the .dmg and the updater .app.tar.gz do not exist yet
+# when it runs, and handed a finished container --scan-dir greps it as opaque
+# bytes and expands zero archives (measured on 0.0.17: "✓ CLEAN … 0 archive(s)
+# expanded" on installers that were in fact dirty). --scan-artifact expands the
+# container and FAILS CLOSED when it cannot, so "not inspected" stops reading as
+# "clean".
+echo "==> identity-scan of the finished mac artifacts"
+set +e
+python3 "$HERE/audit-release-bundle.py" --scan-artifact "${PROV_ARTIFACTS[@]}"
+_artifact_rc=$?
+set -e
+if [[ $_artifact_rc -eq 2 ]]; then
+  fail "finished-artifact identity audit COULD NOT CHECK — it did NOT find a leak. Either no owner-name literal resolved (export PAPERCUSP_RELEASE_OWNER_NAME), or a container could not be expanded (7z missing / unreadable dmg). Refusing to publish bytes nobody read."
+elif [[ $_artifact_rc -ne 0 ]]; then
+  fail "finished mac artifact carries sensitive identity (see scan above) — refusing to publish it"
+fi
+
 # ── Provenance (shared emitter, one schema across all legs). ──────────────────
 if [[ -x "$HERE/emit-build-provenance.sh" && ${#PROV_ARTIFACTS[@]} -gt 0 ]]; then
   PROVENANCE_GIT_ROOT="$ROOT" \
