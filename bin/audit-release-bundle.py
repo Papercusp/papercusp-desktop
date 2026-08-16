@@ -564,6 +564,38 @@ def has_owner_name_literal(lits):
     return bool(str(lits.get("build-git-name", "")).strip())
 
 
+def identity_coverage_gaps(lits):
+    """Identity classes a CLEAN verdict from this run does NOT cover.
+
+    A pass must never claim more than it checked. The NAME class is fail-closed at both
+    entry points, so reaching CLEAN proves the name was hunted. The EMAIL class is not:
+    this audit has no shape-based email rule (unlike the TS scrub's IDENTITY_PATTERNS),
+    so if no email literal resolves, email coverage is simply ZERO and every downstream
+    reader still sees an unqualified "✓ CLEAN".
+
+    That silence is the exact mechanism of EI-20583328178472869 — the verdict outliving
+    the evidence it was based on. This file already argues the case for coverage of FILES
+    ("a scan that inspects nothing is indistinguishable from a scan that found nothing");
+    it had simply never applied it to the CLASSES. Call it out IN the verdict.
+
+    Returns a list of human-readable gaps; empty means the verdict is unqualified.
+    """
+    gaps = []
+    if not str(lits.get("build-git-email", "")).strip():
+        gaps.append(
+            f"EMAIL not covered — no owner-email literal resolved "
+            f"(git user.email is unset or an automation address). "
+            f"Set {OWNER_EMAIL_ENV} to hunt it."
+        )
+    return gaps
+
+
+def print_coverage_gaps(gaps, indent="    "):
+    """Print coverage caveats beside a CLEAN verdict, or nothing when there are none."""
+    for g in gaps:
+        print(f"{indent}⚠ PARTIAL COVERAGE: {g}")
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
@@ -1791,6 +1823,7 @@ def main():
 
     if not path_hits and not content_hits:
         print("    ✓ CLEAN — no forbidden paths, no build-box identity, no credentials")
+        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
 
     print(f"\n    ✗ THIS BUNDLE MUST NOT SHIP\n")
