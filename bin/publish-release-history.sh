@@ -104,7 +104,25 @@ fi
 # implementation, one behaviour — a gate that re-implements the rule it is
 # checking eventually disagrees with it, and then it is guarding nothing).
 echo "==> identity gate: scanning the finished bytes in $SITE_DIR"
-if ! npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$SITE_DIR"; then
+# The gate distinguishes 1 (FOUND LEAKS) from 2 (COULD NOT CHECK), and this caller must
+# too. Collapsing them re-creates, one layer up, the exact defect the split was made to
+# kill (EI-20583328178472869): a blind gate reported as a leak sends you hunting the
+# pages for a name that is not there, while the real fault is that nothing was hunted.
+set +e
+npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$SITE_DIR"
+_gate_rc=$?
+set -e
+if [[ $_gate_rc -eq 2 ]]; then
+  echo >&2
+  echo "⛔ REFUSING TO UPLOAD — the gate COULD NOT CHECK (it did not find a leak)." >&2
+  echo "   Almost always: no owner-name literal resolved, because git user.name is" >&2
+  echo "   unset or belongs to an automation. A CLEAN verdict would have been" >&2
+  echo "   meaningless, so it refused instead of certifying." >&2
+  echo "   Fix: export PAPERCUSP_RELEASE_OWNER_NAME='<the owner's name>' and re-run" >&2
+  echo "   (PAPERCUSP_RELEASE_OWNER_EMAIL too, for email coverage; both accept a" >&2
+  echo "   comma-separated list). Read at run time — never write either into a file." >&2
+  exit 2
+elif [[ $_gate_rc -ne 0 ]]; then
   echo >&2
   echo "⛔ REFUSING TO UPLOAD — this box's identity is present in the pages above." >&2
   echo "   Fix the SOURCE of the leak (the scrub / the renderer), regenerate, re-run." >&2

@@ -199,7 +199,10 @@ test('an identity literal in an archive member PATH is caught, not just in conte
 // a real feature to fix nothing. These two tests pin BOTH directions, because
 // "stop crying wolf" and "stop catching real leaks" are one edit apart.
 function lowEntropyLiteral() {
-  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
   assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
   for (const line of r.stdout.split('\n')) {
     const [value, , low] = line.split('\t');
@@ -274,7 +277,10 @@ test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
 // the first two while silently no longer catching the build hostname anywhere
 // else in the bundle — a far bigger hole than the one deliberately allowed.
 function gateLiterals() {
-  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
   assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
   return r.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
 }
