@@ -143,7 +143,7 @@ if [[ "${PAPERCUSP_SEED_FORCE:-0}" != "1" ]] && seed_usable; then
   exit 0
 fi
 
-OPERATOR_DIR="$MONOREPO/apps/operator"
+# OPERATOR_DIR is resolved at the top — seed_payload_verdict() needs it before this point.
 if [[ ! -d "$OPERATOR_DIR" ]]; then
   log "seed cutter not found at $OPERATOR_DIR — not a full checkout"
   seed_present && { log "keeping the committed seed"; exit 0; }
