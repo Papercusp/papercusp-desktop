@@ -552,6 +552,19 @@ def looks_like_automation_email(value):
     return bool(AUTOMATION_EMAIL_RE.search(value.strip()))
 
 
+def explicit_owner_values(env_var):
+    """The owner literals ASSERTED for this run, parsed from one env var. ONE rule.
+
+    SEPARATOR IS COMMA/SEMICOLON ONLY — deliberately NOT whitespace. A first draft split on
+    \\s too and tore "Jane Doe" into "Jane" + "Doe", which is wrong twice: it never hunts
+    the full name, and it injects a bare surname as its own low-entropy literal that then
+    matches innocent words across the bundle. Names contain spaces; addresses do not, so
+    nothing is lost by dropping whitespace as a separator.
+    """
+    raw = os.environ.get(env_var, "")
+    return list(dict.fromkeys(v.strip() for v in re.split(r"[,;]", raw) if v.strip()))
+
+
 def has_owner_name_literal(lits):
     """Can this literal set actually detect the owner's NAME?
 
@@ -560,8 +573,23 @@ def has_owner_name_literal(lits):
     name is only ever a literal. So when this is false the scan cannot see the name at
     all, and a CLEAN verdict degrades to "I looked for nothing" while still reading as
     proof. Callers that SHIP must fail closed on false.
+
+    ⚠ REQUIRES THE **EXPLICIT** VALUE, and deliberately ignores anything git supplied.
+    An earlier version of this fix accepted a git-derived name so long as it did not match
+    looks_like_automation_identity(). That is a DENYLIST, and a denylist fails OPEN for
+    every identity nobody thought of — which stopped being hypothetical within the hour:
+    this box's user.name changed from one automation identity to a differently-spelled one
+    ("…-agent" → "…-buildbox"), the pattern list did not carry the new token, the bot read
+    as a person, and this function returned True again while the scan hunted a machine's
+    name. The same defect, one level up, with the fix already in place.
+
+    git config names the COMMITTER. On an automated box that is by construction not the
+    owner, and no pattern list can reliably separate the two. So the gate stops guessing:
+    the owner identity must be ASSERTED by whoever runs the release. The heuristic is still
+    worth keeping — it stops a bot's name being hunted uselessly and keeps redaction honest
+    — but it is a convenience, never the thing a CLEAN verdict is allowed to rest on.
     """
-    return bool(_owner_values(lits, "build-git-name"))
+    return bool(explicit_owner_values(OWNER_NAME_ENV))
 
 
 def _owner_values(lits, base):
@@ -682,11 +710,12 @@ def identity_literals():
             pass
     # Explicit answers outrank whatever the box guesses (CI, a container, or a box whose
     # git identity an automation has taken over). Read at run time, never stored.
-    # BOTH accept a LIST (comma / semicolon / whitespace separated). A person has more
-    # than one address, and often more than one spelling of their name; a single-value
-    # argument silently covers the first and certifies the class anyway.
+    # BOTH accept a LIST. A person has more than one address, and often more than one
+    # spelling of their name; a single-value argument silently covers the first and
+    # certifies the class anyway.
+    #
     for env_var, base in ((OWNER_NAME_ENV, "build-git-name"), (OWNER_EMAIL_ENV, "build-git-email")):
-        values = [v for v in re.split(r"[,;\s]+", os.environ.get(env_var, "")) if v.strip()]
+        values = explicit_owner_values(env_var)
         if not values:
             continue
         # Explicit answers REPLACE the box's guess for that class rather than adding to it
