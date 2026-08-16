@@ -214,15 +214,61 @@ else
 fi
 
 # 5) recurrence guard FAILS when latest.json advertises an artifact NOT in the set.
+# Strict mode (no reachability leg) so this stays hermetic and offline-safe.
 LATEST_BAD="$WORK/latest-bad.json"
 cat > "$LATEST_BAD" <<JSON
 { "version": "$VER", "platforms": {
     "windows-x86_64": { "signature": "x", "url": "https://h/secret/tag/Papercusp%20GUI_${VER}_x64-setup.exe" } } }
 JSON
-if release_artifacts_assert_urls_covered "$TAG" "$LATEST_BAD" 2>/dev/null; then
+if RELEASE_ARTIFACTS_NO_REACHABILITY=1 \
+   release_artifacts_assert_urls_covered "$TAG" "$LATEST_BAD" 2>/dev/null; then
   bad "guard passed a manifest advertising a NON-present artifact (LABELED!=PACKED not caught)"
 else
   ok "guard catches an advertised-but-missing artifact before upload"
+fi
+
+# ── reachability leg (incremental publish) ───────────────────────────────────
+# An artifact absent from THIS upload set but already live on the release host is
+# covered: that is exactly what publish-platform-incremental.sh produces when it
+# merges the live latest.json to add one platform. Judging those by local
+# presence alone made the guard structurally unpassable on that path.
+# The prober is injected so these cases are hermetic — no network, no live host.
+PROBE_UP="$WORK/probe-up.sh";   printf '#!/bin/sh\nexit 0\n' > "$PROBE_UP";   chmod +x "$PROBE_UP"
+PROBE_DOWN="$WORK/probe-down.sh"; printf '#!/bin/sh\nexit 1\n' > "$PROBE_DOWN"; chmod +x "$PROBE_DOWN"
+
+# 6) an advertised-but-unpacked artifact that IS live on the host passes.
+if RELEASE_ARTIFACTS_REACHABILITY_CMD="$PROBE_UP" \
+   release_artifacts_assert_urls_covered "$TAG" "$LATEST_BAD" 2>/dev/null; then
+  ok "guard passes an out-of-set artifact that is already live (incremental publish)"
+else
+  bad "guard blocked an already-live artifact — incremental publish is unpassable"
+fi
+
+# 7) CONTROL — the reachability leg must not blanket-pass. Same manifest, same
+# code path, prober reporting NOT reachable: the guard must still catch it.
+if RELEASE_ARTIFACTS_REACHABILITY_CMD="$PROBE_DOWN" \
+   release_artifacts_assert_urls_covered "$TAG" "$LATEST_BAD" 2>/dev/null; then
+  bad "guard passed an UNREACHABLE out-of-set artifact — the 404 class is no longer caught"
+else
+  ok "guard still catches an out-of-set artifact that is NOT reachable (fails closed)"
+fi
+
+# 8) CONTROL — a probe that ERRORS (non-executable / missing) must fail closed,
+# not be mistaken for success.
+if RELEASE_ARTIFACTS_REACHABILITY_CMD="$WORK/no-such-probe" \
+   release_artifacts_assert_urls_covered "$TAG" "$LATEST_BAD" 2>/dev/null; then
+  bad "a broken reachability probe was treated as reachable (fails OPEN)"
+else
+  ok "a broken reachability probe fails closed"
+fi
+
+# 9) CONTROL — a fully-covered manifest still passes with the leg enabled, and
+# must not depend on the probe at all (nothing to probe).
+if RELEASE_ARTIFACTS_REACHABILITY_CMD="$PROBE_DOWN" \
+   release_artifacts_assert_urls_covered "$TAG" "$LATEST" 2>/dev/null; then
+  ok "a fully-covered manifest passes without consulting the prober"
+else
+  bad "a fully-covered manifest was rejected when the prober reports down"
 fi
 
 echo

@@ -136,20 +136,49 @@ release_artifacts_read() {
 }
 
 # release_artifacts_assert_urls_covered <tag> <latest_json>... — RECURRENCE GUARD.
-# Every artifact URL a manifest ADVERTISES must have its (url-decoded) basename
-# present in the cut's artifact set. This catches the whole drift class BEFORE
-# upload: a latest.json that names a file the upload set does not carry would 404
-# for every updater client — the exact LABELED != PACKED failure the post-upload
-# fetch-check catches only AFTER the lie is already live. Returns 0 if every
-# advertised url is covered, 1 (and prints the offenders on stderr) otherwise.
-# Missing / empty latest_json arguments are skipped (latest-server.json is
-# optional — only Server-role cuts produce it).
+# The property being defended: a manifest must never advertise a URL that would
+# 404 for an updater client — the LABELED != PACKED failure the post-upload
+# fetch-check catches only AFTER the lie is already live.
+#
+# An advertised URL is COVERED if EITHER
+#   (a) its (url-decoded) basename is in this cut's artifact set — it is about to
+#       be uploaded; or
+#   (b) it is ALREADY LIVE on the release host — it was uploaded by an earlier
+#       publish and is reachable right now.
+#
+# (b) exists because "present in the local upload set" is only a PROXY for the
+# real property, and that proxy is correct for a WHOLE cut but wrong for an
+# INCREMENTAL platform publish. bin/publish-platform-incremental.sh deliberately
+# merges the LIVE latest.json so it can add one platform without disturbing the
+# others; those other platforms are already uploaded and are legitimately absent
+# from this upload set. Judging them by (a) alone made the guard structurally
+# unpassable on the incremental path whenever any other platform was already
+# published — it rejected manifests that were, in fact, entirely serviceable.
+#
+# Fails CLOSED: a non-2xx, a timeout, a missing curl, or any probe error leaves
+# the artifact uncovered, so an unreachable URL is still caught. Reachability is
+# probed ONLY for artifacts that already failed (a), so a whole cut makes no
+# network calls at all.
+#
+# Probing uses curl, not urllib: Cloudflare r2.dev hard-403s the default
+# Python-urllib User-Agent as a bot while serving curl/* normally, so a urllib
+# probe would report every live artifact as missing.
+#
+# Env:
+#   RELEASE_ARTIFACTS_NO_REACHABILITY=1   skip (b) entirely — strict local-set
+#                                         checking, for offline/hermetic runs.
+#   RELEASE_ARTIFACTS_REACHABILITY_CMD=P  use P <url> instead of curl; exit 0
+#                                         means reachable (test seam).
+#
+# Returns 0 if every advertised url is covered, 1 (and prints the offenders on
+# stderr) otherwise. Missing / empty latest_json arguments are skipped
+# (latest-server.json is optional — only Server-role cuts produce it).
 release_artifacts_assert_urls_covered() {
   local tag="$1"; shift
   local manifest; manifest="$(release_artifacts_manifest_path "$tag")"
   [[ -f "$manifest" ]] || { echo "release-artifacts: no manifest at $manifest to check against." >&2; return 1; }
   python3 - "$manifest" "$@" <<'PY'
-import json, os, sys
+import json, os, shutil, subprocess, sys
 from urllib.parse import unquote, urlsplit
 manifest = sys.argv[1]
 have = set()
@@ -158,7 +187,31 @@ with open(manifest) as fh:
         line = line.strip()
         if line:
             have.add(os.path.basename(line))
-missing = []
+
+
+def reachable(url):
+    """True only on a positive 2xx read. Every failure path returns False."""
+    if not url or os.environ.get("RELEASE_ARTIFACTS_NO_REACHABILITY"):
+        return False
+    probe = os.environ.get("RELEASE_ARTIFACTS_REACHABILITY_CMD")
+    try:
+        if probe:
+            return subprocess.run([probe, url], capture_output=True,
+                                  timeout=30).returncode == 0
+        if not shutil.which("curl"):
+            return False
+        # Range-GET a single byte: cheaper than a full GET and, unlike HEAD,
+        # not answered by an interstitial on large objects.
+        out = subprocess.run(
+            ["curl", "-s", "-o", os.devnull, "-w", "%{http_code}",
+             "-r", "0-0", "-L", "--max-time", "15", url],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        return out in ("200", "206")
+    except Exception:
+        return False
+
+
+advertised = []
 for mpath in sys.argv[2:]:
     if not mpath or not os.path.isfile(mpath):
         continue
@@ -169,9 +222,21 @@ for mpath in sys.argv[2:]:
         if not name:
             continue
         if name not in have:
-            missing.append((os.path.basename(mpath), plat, name))
+            advertised.append((os.path.basename(mpath), plat, name, url))
+
+missing, already_live = [], []
+for mf, plat, name, url in advertised:
+    (already_live if reachable(url) else missing).append((mf, plat, name))
+
+if already_live:
+    print("release-artifacts: advertised artifact(s) absent from this upload set "
+          "but ALREADY LIVE on the release host (incremental publish — allowed):",
+          file=sys.stderr)
+    for mf, plat, name in already_live:
+        print(f"  {mf} [{plat}] -> {name}", file=sys.stderr)
 if missing:
-    print("release-artifacts: manifest advertises artifact(s) NOT in the upload set:", file=sys.stderr)
+    print("release-artifacts: manifest advertises artifact(s) NOT in the upload set "
+          "and NOT reachable on the release host:", file=sys.stderr)
     for mf, plat, name in missing:
         print(f"  {mf} [{plat}] -> {name}", file=sys.stderr)
     sys.exit(1)
