@@ -107,6 +107,68 @@ s3api_head() {
     --query 'ContentLength' --output text 2>/dev/null || true
 }
 
+# ETag of an object in the bucket (quotes stripped), or empty if it is not there.
+#
+# For a NON-multipart upload the ETag IS the MD5 of the object's content, so it
+# settles byte-identity outright. A MULTIPART upload instead yields
+# "<md5-of-the-part-md5s>-<partcount>" — the `-N` suffix is how you tell them
+# apart, and such a value is NOT comparable to any local hash. `aws s3 cp` goes
+# multipart above 8 MiB, so in practice: every small companion file (.sig,
+# .json, .txt) gets a real content check, and only the multi-GB artifacts fall
+# back to size.
+s3api_head_etag() {
+  aws s3api head-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" \
+    --query 'ETag' --output text 2>/dev/null | tr -d '"' || true
+}
+
+# Anything at or below this is never worth a size-only guess: re-pushing it
+# costs nothing, and the skip exists solely to avoid re-pushing GIGABYTES.
+# Matches the aws multipart threshold, i.e. exactly the boundary at which an
+# ETag stops being a usable content hash.
+SMALL_ARTIFACT_BYTES=$((8 * 1024 * 1024))
+
+# Compare a local file against the published object and say what is ACTUALLY
+# known about them. Echoes exactly one of:
+#
+#   absent          — nothing published at that key
+#   identical       — content PROVEN equal (ETag was a real MD5 and matched)
+#   differs         — content PROVEN different (size differs, or MD5 differs)
+#   size-only-match — sizes agree and that is ALL that could be established
+#
+# The last verdict is the whole point of this function. `upload-release.sh` used
+# to treat "same size" as "same file" for every artifact, and its own comment
+# justified that with "a re-cut with the same version but different bytes is a
+# size change in practice". That is FALSE for exactly the files whose entire job
+# is byte-identity: a minisign signature is FIXED-LENGTH (428 B here), so a
+# re-cut produces a genuinely different .sig at an identical size, the skip
+# fires, and the NEW artifact ends up published beside the OLD artifact's
+# signature. Anyone who then does the right thing — download the artifact,
+# verify it against the published signature — gets a MISMATCH on a clean
+# release, which is indistinguishable from tampering. Measured live on the
+# 0.0.17 Windows GUI re-publish (EI-20592319474283246).
+remote_state() {
+  local key="$1" file="$2" local_size remote_size etag
+  local_size="$(stat -c%s "$file")"
+  remote_size="$(s3api_head "$key")"
+  if [[ -z "$remote_size" || "$remote_size" == "None" ]]; then
+    echo absent; return
+  fi
+  if [[ "$remote_size" != "$local_size" ]]; then
+    echo differs; return
+  fi
+  etag="$(s3api_head_etag "$key")"
+  if [[ "$etag" =~ ^[0-9a-f]{32}$ ]]; then
+    if [[ "$etag" == "$(md5sum "$file" | cut -d' ' -f1)" ]]; then
+      echo identical
+    else
+      echo differs
+    fi
+    return
+  fi
+  echo size-only-match
+}
+
 # ── What to upload ───────────────────────────────────────────────────────────
 # NOTE: there is deliberately no $BUNDLE here. Since EI-12913 this script consumes
 # the ONE artifact list the builder wrote (release_artifacts_read, below) and hard-
@@ -349,19 +411,35 @@ fi
 # Order matters: latest.json is what makes an update VISIBLE to every installed
 # app. Publishing it before the bytes it points at exist would advertise an
 # update that 404s for anyone who checks in the meantime.
-# Skip anything already in the bucket at exactly the local size. These artifacts
-# are ~4 GB each, and the common reason to re-run this script is to complete the
-# HTTPS verification after the custom domain was bound — re-pushing 11 GB to
-# re-learn what we already know is pure waste. (Size, not mtime: a re-cut with the
-# same version but different bytes is a size change in practice, and the manifest's
-# minisign signature is the real integrity gate.)
+# Skip anything already published that is PROVABLY the same bytes. These
+# artifacts are ~4 GB each, and the common reason to re-run this script is to
+# complete the HTTPS verification after the custom domain was bound — re-pushing
+# 11 GB to re-learn what we already know is pure waste.
+#
+# The skip is decided by `remote_state`, which compares CONTENT wherever content
+# can be compared and only falls back to size for genuinely multipart (i.e.
+# multi-GB) objects. It deliberately does NOT trust size for small files: see the
+# fixed-length-signature failure documented on `remote_state` above.
 for f in "${ARTIFACTS[@]}"; do
   name="$(basename "$f")"
   local_size="$(stat -c%s "$f")"
-  if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]; then
-    echo "==> already uploaded, skipping $name"
-    continue
-  fi
+  case "$(remote_state "${KEY_PREFIX}/${TAG}/${name}" "$f")" in
+    identical)
+      echo "==> already uploaded, content verified identical — skipping $name"
+      continue
+      ;;
+    size-only-match)
+      # Sizes agree but nothing proved the bytes do. For a big multipart artifact
+      # that is the fast path we want. For a small file it is a guess we have no
+      # reason to make — re-uploading a few hundred bytes is free, and this is
+      # precisely where a stale companion file hides.
+      if (( local_size > SMALL_ARTIFACT_BYTES )); then
+        echo "==> already uploaded, size matches (multipart — content not verifiable), skipping $name"
+        continue
+      fi
+      echo "==> re-uploading $name (same size, but content could not be verified and it is small)"
+      ;;
+  esac
   echo "==> uploading $name"
   s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
 done
