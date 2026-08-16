@@ -51,6 +51,7 @@ Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-artifact <finished-installer>...
 """
 import fnmatch
+import functools
 import os
 import pwd
 import re
@@ -840,7 +841,12 @@ def is_vendor(name):
     return n.startswith("node_modules/") or "/node_modules/" in n
 
 
+@functools.lru_cache(maxsize=512)
 def lit_rx(lit):
+    """Memoised: phase A now calls this per MEMBER (~248k on source.tar.zst) for
+    every literal and every header field, so recompiling the pattern each time is
+    the difference between a header pass that costs seconds and one that costs
+    minutes. `lit_ere` is a pure function of `lit`, so caching cannot go stale."""
     return re.compile(lit_ere(lit))
 
 
