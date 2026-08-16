@@ -1648,6 +1648,7 @@ def scan_dir(dirs):
     if not files:
         print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
               f"({covered:,} file(s), {len(archives)} archive(s) expanded and scanned)")
+        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
     print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
           f"({len(files)} file(s))\n")
