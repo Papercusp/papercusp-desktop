@@ -1958,20 +1958,40 @@ def scan_dir(dirs):
         print("      Every occurrence was counted and matched to an authorised string;\n"
               "      one unaccounted occurrence would still have FAILED the file.")
 
-    if not files:
+    # Symlink-target findings are reported SEPARATELY and are deliberately NOT run
+    # through the seed / authorised-product-string acceptance passes above: both
+    # re-READ the offending file to prove the negative by counting occurrences, and
+    # a symlink has no content to re-read. Accepting one on a content argument would
+    # be accepting it on evidence that does not exist.
+    if link_hits:
+        print(f"\n    ✗ SYMLINK TARGET(S) CARRY SENSITIVE IDENTITY — MUST NOT SHIP "
+              f"({len(link_hits)} link(s))\n")
+        for rule, p, target in link_hits[:40]:
+            print(f"        [{rule}]  {p} -> {target}")
+        if len(link_hits) > 40:
+            print(f"        … and {len(link_hits) - 40:,} more")
+        print("\n  A symlink's TARGET is committed content: the git blob of a mode-120000")
+        print("  entry IS the target string, so an absolute path here ships the build")
+        print("  box's layout. `grep -r` never reads a symlink, which is why this could")
+        print("  sit in the tree unnoticed — do not 'fix' it by re-hiding it from the scan.")
+        print("  Fix the SOURCE: make the link repo-relative, or stop tracking it.")
+
+    if not files and not link_hits:
         print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
-              f"({covered:,} file(s), {len(archives)} archive(s) expanded and scanned)")
+              f"({covered:,} file(s), {len(links):,} link target(s), "
+              f"{len(archives)} archive(s) expanded and scanned)")
         print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
-    print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
-          f"({len(files)} file(s))\n")
-    for f in sorted(files)[:40]:
-        print(f"        {f}")
-    if len(files) > 40:
-        print(f"        … and {len(files) - 40:,} more")
-    print("\n  This scan IGNORES the path-exclude list BY DESIGN (scan the bytes that ship).")
-    print("  Fix the SOURCE: prune the leaking file from the sidecar copy in")
-    print("  build-desktop-sidecar.sh, or scrub the value — never add an exclude here.")
+    if files:
+        print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
+              f"({len(files)} file(s))\n")
+        for f in sorted(files)[:40]:
+            print(f"        {f}")
+        if len(files) > 40:
+            print(f"        … and {len(files) - 40:,} more")
+        print("\n  This scan IGNORES the path-exclude list BY DESIGN (scan the bytes that ship).")
+        print("  Fix the SOURCE: prune the leaking file from the sidecar copy in")
+        print("  build-desktop-sidecar.sh, or scrub the value — never add an exclude here.")
     return 1
 
 
