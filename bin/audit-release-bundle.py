@@ -1314,6 +1314,32 @@ def scan_dir(dirs):
         return 2
 
     lits = identity_literals()
+
+    # ── THE QUERY SET MUST BE PROVEN TOO, NOT JUST THE CORPUS ──────────────────
+    # This function already refuses to call CLEAN on a missing directory, on 0 files,
+    # and on bytes nobody read — three hard-won guards, all asserting that the scan
+    # READ everything. None of them asserts that it KNEW WHAT TO LOOK FOR.
+    #
+    # That is the gap EI-20583328178472869 fell through: git `user.name` became the
+    # git-sync bot, so the owner's bare first name silently left `low` below, and this
+    # backstop then read every byte, matched nothing, and reported CLEAN — passing all
+    # three coverage guards on the way. Full corpus coverage, empty query.
+    #
+    # The name is the ONLY literal with no shape to fall back on (a home path or an
+    # address is still caught structurally), so its absence cannot be recovered
+    # downstream. Same principle as grep_l's "a scan that inspects nothing is
+    # indistinguishable from a scan that found nothing" — applied to the NEEDLES.
+    #
+    # NOTE this runs BEFORE the KNOWN_SENSITIVE_IDENTITIES merge on purpose: that
+    # denylist carries a github handle and VM logins but NO name entry, so merging
+    # first would make a blind scan look equipped.
+    if not has_owner_name_literal(lits):
+        print("\n    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this\n"
+              "      backstop cannot hunt the owner's name and CLEAN would be meaningless.\n"
+              f"      Fix: export {OWNER_NAME_ENV}='<the owner's name>' for this build.\n",
+              file=sys.stderr)
+        return 2
+
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     high = sorted({v for v in lits.values() if not is_low_entropy(v)})
     low = sorted({v for v in lits.values() if is_low_entropy(v)})
