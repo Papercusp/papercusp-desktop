@@ -71,19 +71,60 @@ MONOREPO="$(cd "$ROOT/.." && pwd)"             # papercup superproject
 SEED_OUT="$ROOT/src-tauri/seed"
 MANIFEST="$SEED_OUT/manifest.json"
 EPOCH_KEYS="$SEED_OUT/epoch-keys.json"
+OPERATOR_DIR="$MONOREPO/apps/operator"
 
 log() { echo "[ensure-seed] $*"; }
 
 seed_present() { [[ -f "$MANIFEST" ]]; }
 
+# ── payload integrity (WI-39447) ────────────────────────────────────────────
+# Does the manifest actually DESCRIBE the bytes next to it? Presence of a file says
+# nothing about that: the seed shipped on 2026-08-15 had both files present and a
+# corestore 50,165,685 bytes SHORT of its declared sizeBytes, because the default
+# --reuse-corestore path GRAFTS the prior manifest's store entry without re-measuring
+# it. On a fresh install that store fails restoreSeed's verify, gets skipped, and the
+# install reports SUCCESS with an EMPTY hive.
+#
+# Delegated to the installer's OWN check (verify-seed-payload-cli → the same
+# defaultSeedRegistry providers boot uses) rather than a size/hash comparison written
+# here, so the cut side and the install side cannot drift apart silently. ~1.1s on the
+# real ~475MB seed, so it runs unconditionally.
+#
+# THREE-WAY on purpose: 0 intact · 1 MISMATCH · 2 COULD NOT DETERMINE. A 2 must never
+# read as "fine" (that false-absence is the bug) nor as "broken" (that would fail every
+# VM leg and partial checkout, where the verifier simply cannot run) — it falls back to
+# the presence-only predicate and SAYS SO.
+SEED_PAYLOAD_VERDICT=""   # memoized: '' unset · 0 intact · 1 mismatch · 2 undetermined
+seed_payload_verdict() {
+  if [[ -z "$SEED_PAYLOAD_VERDICT" ]]; then
+    if [[ ! -d "$OPERATOR_DIR" ]]; then
+      SEED_PAYLOAD_VERDICT=2
+    else
+      local out
+      out="$( cd "$OPERATOR_DIR" && npx tsx lib/release/verify-seed-payload-cli.ts \
+                --seed "$SEED_OUT" 2>&1 )"
+      SEED_PAYLOAD_VERDICT=$?
+      [[ -n "$out" ]] && log "$out"
+    fi
+  fi
+  return "$SEED_PAYLOAD_VERDICT"
+}
+
 # A committed seed is USABLE as-is when it has a manifest AND (if epoch emit is
-# on) an epoch-keys.json — the file whose absence is the whole 57-item bug.
+# on) an epoch-keys.json AND its manifest describes the bytes actually on disk.
 seed_usable() {
   seed_present || return 1
   if [[ "${PAPERCUSP_SEED_EMIT_EPOCH_KEY:-1}" == "1" ]]; then
     [[ -f "$EPOCH_KEYS" ]] || return 1
   fi
-  return 0
+  seed_payload_verdict
+  case "$SEED_PAYLOAD_VERDICT" in
+    0) return 0 ;;
+    1) log "committed seed FAILS the installer's own payload check — treating it as BROKEN, not usable"
+       return 1 ;;
+    *) log "WARN: could not verify the committed seed's payload integrity — falling back to the presence-only check. This seed is UNVERIFIED, not verified-good."
+       return 0 ;;
+  esac
 }
 
 # ── skip paths ──────────────────────────────────────────────────────────────
