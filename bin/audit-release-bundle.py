@@ -1924,6 +1924,7 @@ def _expand_installer(path, dest):
     # cut — re-creating, inside this entrypoint, precisely the regression that
     # keeps `.exe` out of ARCHIVE_SUFFIXES. So only a file that names itself a
     # setup stub is treated as a container.
+    #
     # SNAPSHOT FIRST: the loop writes new directories INTO `dest`, and walking a
     # tree while extending it can descend into what the loop just produced — an
     # inner installer that itself contains a stub would then recurse without
@@ -1937,14 +1938,13 @@ def _expand_installer(path, dest):
         stub = os.path.join(dirpath, fn)
         inner = os.path.join(dest, f"__inner__{fn}")
         ok, how = _expand_installer(stub, inner)
-        if True:
-            if not ok:
-                print(f"    scan-artifact: {os.path.basename(path)} wraps installer "
-                      f"{fn!r}, which could NOT be expanded (tried: {how}) — "
-                      f"its payload is a hole, not a pass")
-                return False, f"archive-pass+{how}"
-            print(f"    scan-artifact: {os.path.basename(path)} wraps {fn!r} — "
-                  f"expanded its payload via {how}")
+        if not ok:
+            print(f"    scan-artifact: {os.path.basename(path)} wraps installer "
+                  f"{fn!r}, which could NOT be expanded (tried: {how}) — "
+                  f"its payload is a hole, not a pass")
+            return False, f"archive-pass+{how}"
+        print(f"    scan-artifact: {os.path.basename(path)} wraps {fn!r} — "
+              f"expanded its payload via {how}")
     return True, "archive-pass"
 
 
