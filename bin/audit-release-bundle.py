@@ -1602,20 +1602,51 @@ def _scan_coverage(dirs):
     followlinks=False)` matches that exactly. So this is the scan's real coverage
     — the number that makes a CLEAN falsifiable — not an upper bound on it.
 
-    Returns (regular_file_count, [symlinked directories that will be skipped]).
+    A SYMLINK'S TARGET IS ITSELF IDENTITY-BEARING CONTENT (WI-39462). A symlink has
+    no payload — the target string lives in the directory entry — so `grep -r`
+    never reads it and no working-tree scan we own could ever see it. That is not
+    hypothetical: the owner's absolute home path sat COMMITTED in this repo as two
+    tracked symlink blobs (mode 120000) and shipped inside every release's
+    source.tar.zst, while every scan reported CLEAN. Naming the symlink in a ⚠
+    coverage line (which this function already did) is NOT enough — the leaking
+    path was printed in that very warning and the gate still exited 0.
+
+    So targets are returned for SCANNING, not just for reporting, and files are
+    included alongside directories: a symlinked FILE is skipped by grep for exactly
+    the same reason and carries a target string just the same.
+
+    Returns (regular_file_count, [symlinked dirs skipped], [(path, target) links]).
     """
     n_files = 0
     symlinked_dirs = []
+    links = []
+
+    def _record(p):
+        try:
+            links.append((p, os.readlink(p)))
+        except OSError:
+            # A link we cannot read is a hole, not a pass — surface it as such
+            # rather than dropping it silently.
+            links.append((p, "<unreadable link target>"))
+
     for root in dirs:
+        # The scan roots THEMSELVES can be symlinks (a build stages its BuildRoot
+        # out of links), and os.walk reports nothing about the root's own nature.
+        if os.path.islink(root):
+            _record(root)
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             for d in dirnames:
                 p = os.path.join(dirpath, d)
                 if os.path.islink(p):
                     symlinked_dirs.append(p)
+                    _record(p)
             for f in filenames:
-                if not os.path.islink(os.path.join(dirpath, f)):
+                p = os.path.join(dirpath, f)
+                if os.path.islink(p):
+                    _record(p)
+                else:
                     n_files += 1
-    return n_files, symlinked_dirs
+    return n_files, symlinked_dirs, links
 
 
 def scan_dir(dirs):
@@ -1693,8 +1724,29 @@ def scan_dir(dirs):
     print(f"    high-entropy (all files):  {', '.join(high) or '(none)'}")
     print(f"    low-entropy (non-vendor):  {', '.join(low) or '(none)'}")
 
-    covered, symlinked_dirs = _scan_coverage(dirs)
+    covered, symlinked_dirs, links = _scan_coverage(dirs)
     print(f"    coverage: {covered:,} file(s) reachable by the scan")
+
+    # Symlink TARGETS, scanned as content (WI-39462). Collected before the ⚠ below
+    # so that a link which is both untraversable AND leaking is reported as a
+    # FINDING, not merely as a coverage caveat.
+    link_hits = []
+    if links:
+        print(f"    symlinks: reading {len(links):,} link target(s) "
+              f"(a target string is content no grep can reach)")
+        for p, target in links:
+            for rule, lit in lits.items():
+                # Low-entropy literals (a bare first name) are NOT hunted here: a
+                # path component legitimately matching a common first name would
+                # red the gate on nothing, the same anti-false-positive scoping the
+                # content passes use. A home path / user / host in a target is
+                # high-entropy and unambiguous.
+                if is_low_entropy(lit):
+                    continue
+                if lit_rx(lit).search(target):
+                    link_hits.append((rule, p, target))
+                    break
+
     if symlinked_dirs:
         # `grep -r` does not descend into a symlinked directory, so these ship but
         # are NOT scanned. Naming them keeps the blind spot visible instead of
