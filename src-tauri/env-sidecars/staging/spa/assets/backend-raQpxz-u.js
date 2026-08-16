@@ -1,0 +1,1 @@
+import{B as a,Et as t,H as i,Ot as o,U as n}from"./src-BeqmmfWq.js";import{t as e}from"./backend-BPjEGdcD.js";e();export{t as MemoryUnavailableError,a as getMemoryBackend,i as registerMemoryBackend,n as registeredMemoryBackends,o as scopesOf};

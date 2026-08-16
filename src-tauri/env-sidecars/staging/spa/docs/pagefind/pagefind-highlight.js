@@ -460,10 +460,10 @@ var require_mark = __commonJS({
           key: "setupWildcardsRegExp",
           value: function setupWildcardsRegExp(str) {
             str = str.replace(/(?:\\)*\?/g, function(val) {
-              return val.charAt(0) === "\\" ? "?" : "\x01";
+              return val.charAt(0) === "\\" ? "?" : "";
             });
             return str.replace(/(?:\\)*\*/g, function(val) {
-              return val.charAt(0) === "\\" ? "*" : "\x02";
+              return val.charAt(0) === "\\" ? "*" : "";
             });
           }
         }, {

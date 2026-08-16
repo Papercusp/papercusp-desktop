@@ -1,0 +1,1 @@
+import{n as s}from"./chunk-ChpBd9eV.js";import{st as t,t as i}from"./src-8fWtxfEz.js";import{c as a,r as n}from"./workspace-registry-Du2UbhlH.js";function _(r={}){return{sql:r.sql??t().sql,ws:r.workspaceId??n()}}var p=s((()=>{i(),a()}));export{_ as n,p as t};

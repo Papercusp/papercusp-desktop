@@ -769,9 +769,13 @@ AUTO you skip the ask and still register per the tiers.
   agents each hit real tool frictions — a ToolSearch dead-end, a surprising arg default,
   undocumented claim semantics — worked around every one, and filed ZERO). The capture
   costs seconds; the uncaptured friction re-costs every next agent the same discovery.
-  **Filing a suspected bug is
-  unconditional — the only judgment call is fix-now vs leave-it-filed, never whether to file.**
-  For a suspected TOOL-CALL failure, preserve that immediacy without exciting the work queue:
+  **Outside DRAIN, filing a suspected bug is unconditional — the only judgment call is fix-now
+  vs leave-it-filed, never whether to file. DRAIN is the explicit exception:** while DRAIN is
+  active, do not mint a new improvement, issue, work-item, or observation for an incidental
+  suspected defect; keep useful evidence on the current drain item's checkpoint/completion.
+  Only a defect that directly blocks the scoped drain may be filed, exactly once and linked to
+  the active drain item/plan. Outside DRAIN, for a suspected TOOL-CALL failure, preserve that
+  immediacy without exciting the work queue:
   pass `improvements:capture { toolFailure:{ toolName, errorCode?, status?, message,
   schemaRevision?, fieldPath?, runtimeVersion? } }`. A one-off lands immediately in correlated,
   non-claimable probation; a second independent reporter or the invocation-ledger watchdog

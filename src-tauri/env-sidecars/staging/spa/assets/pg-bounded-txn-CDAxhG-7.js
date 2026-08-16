@@ -1,0 +1,12 @@
+import{n as b}from"./chunk-ChpBd9eV.js";import{gt as O,nt as M,st as p,t as h,tt as S,yt as y}from"./src-8fWtxfEz.js";async function w(n){try{const e=await n.begin(async a=>(await a.unsafe(`SET LOCAL statement_timeout = ${E}`),a.unsafe(`SELECT a.pid,
+                EXTRACT(EPOCH FROM (now() - a.xact_start))::int AS age_s,
+                left(regexp_replace(a.query, '\\s+', ' ', 'g'), 160) AS q,
+                cardinality(pg_blocking_pids(a.pid)) = 0 AS unblocked
+           FROM pg_stat_activity a
+          WHERE a.state <> 'idle' AND a.pid <> pg_backend_pid()
+            AND (a.wait_event_type = 'Lock' OR EXISTS (
+                  SELECT 1 FROM pg_stat_activity b
+                   WHERE b.pid <> a.pid AND a.pid = ANY (pg_blocking_pids(b.pid))
+                ))
+          ORDER BY a.xact_start NULLS LAST
+          LIMIT 25`))),t=e.find(a=>a.unblocked);if(!t)return;const i=t.age_s==null?"unknown age":`${t.age_s}s`,c=(t.q??"").trim()||"(query text unavailable)",r=e.filter(a=>!a.unblocked).length;return`likely blocked by pid ${t.pid} (running ${i}; current/last statement — lock may have been taken by an earlier statement in this transaction): ${c}`+(r>0?` — ${r} other backend(s) also waiting`:"")}catch{return}}async function k(n,e={}){const t=e.client??p().sql,i=Math.max(100,Math.trunc(e.statementTimeoutMs??m)),c=Math.max(100,Math.trunc(e.lockTimeoutMs??g)),r="boundedOrgTxn:acquire(admin)",a=e.client?void 0:"org-admin",_=e.acquireTimeoutMs??S;let l;try{l=await O(()=>y(({disarm:s,expired:o})=>t.begin(async u=>{if(await u`SELECT set_config('lock_timeout', ${`${c}ms`}, true)`,await u`SELECT set_config('statement_timeout', ${`${i}ms`}, true)`,o())throw new M(r,_,_,a);return s(),n(u)}),{ms:_,label:r,pool:a}))}catch(s){const o=s?.code;throw typeof o=="string"&&T.has(o)?new d(o,s,await w(t).catch(()=>{})):s}return l}var d,T,E,m,g,L=b((()=>{h(),d=class extends Error{pgCode;blockerHint;constructor(n,e,t){const i=n==="55P03"?"operator write timed out waiting for a row/advisory lock (pg 55P03 lock_timeout) — retry shortly":"operator write exceeded its time budget (pg 57014 statement_timeout) — the database stalled; retry shortly";super(t?`${i} — ${t}`:i),this.name="OrgTxnTimeoutError",this.pgCode=n,this.cause=e,this.blockerHint=t}},T=new Set(["57014","55P03"]),E=2e3,m=Math.max(500,Number({}.PAPERCUSP_COORD_WRITE_STATEMENT_TIMEOUT_MS)||15e3),g=Math.max(100,Number({}.PAPERCUSP_COORD_WRITE_LOCK_TIMEOUT_MS)||8e3)}));export{k as n,L as r,d as t};

@@ -1,1 +1,0 @@
-import{n as r}from"./chunk-ChpBd9eV.js";import{s as a}from"./types-B6UfiA7g.js";import{t as n}from"./src-CL56NiZm.js";import{l as o,o as i}from"./server-CB1HiStO.js";async function f(t){try{return await i(a.MUG_FULL_AUTONOMY,`autonomy:${t}`)}catch{return!1}}var l=r((()=>{n(),o()}));export{f as n,l as t};

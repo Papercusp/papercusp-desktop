@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-ChpBd9eV.js";import{r as a}from"./presence-payload-BplumyXZ.js";function i(E){return Math.ceil(Math.max(0,E)/4)}var r,_,t,N=e((()=>{a(),r=4,_=6e3,t=_*4}));export{i as n,N as r,_ as t};

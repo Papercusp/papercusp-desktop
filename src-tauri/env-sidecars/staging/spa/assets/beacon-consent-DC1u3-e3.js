@@ -1,0 +1,1 @@
+import{n as i}from"./chunk-ChpBd9eV.js";import{S as o,d as r,m as c}from"./hive-settings-store-CI7HrDJH.js";async function v(t,e,n){return(await r(t,e,s,n))?.value===!0}async function g(t,e,n,a){await o({workspaceId:t,potHomeSlug:e,settingKey:s,value:n===!0},a)}var s,m=i((()=>{c(),s="beacon-publish-consent"}));export{g as i,v as n,m as r,s as t};

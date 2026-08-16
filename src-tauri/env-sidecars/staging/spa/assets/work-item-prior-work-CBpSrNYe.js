@@ -1,0 +1,1 @@
+import{a,c as o,i as t,n as s,o as i,r as n,s as e,t as m}from"./work-item-prior-work-DFSwL2Oa.js";i();export{m as AUTHORSHIP_REVALIDATION_MIN_AGE_MS,s as authorshipRevalidationHintFromRow,n as authorshipRevalidationWarning,t as getClaimTimeAuthorshipRevalidationHint,a as getClaimTimePriorWorkHint,e as parseWorkedByHistory,o as priorWorkWarning};

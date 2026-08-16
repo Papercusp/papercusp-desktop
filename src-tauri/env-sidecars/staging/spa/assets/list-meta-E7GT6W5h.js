@@ -1,1 +1,0 @@
-import{n as i}from"./chunk-ChpBd9eV.js";function f(t,n){return t.length===0?t:t.map((e,a)=>a===0?{...e,_meta:{...e._meta,...n}}:e)}function u(t){return t&&t.length>0?t[0]._meta:void 0}function m(t){return t?u(t)?.total??t.length:0}function l(t,n){return n!=null&&n>t?`${t} of ${n}`:`${n??t}`}var _=i((()=>{}));export{m as a,u as i,_ as n,l as r,f as t};
