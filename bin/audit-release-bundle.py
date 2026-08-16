@@ -2118,6 +2118,8 @@ def main():
         return scrub_app_binary(sys.argv[2:])
     if sys.argv[1] == "--scan-dir":
         return scan_dir(sys.argv[2:])
+    if sys.argv[1] == "--scan-artifact":
+        return scan_artifact(sys.argv[2:])
     bundle = sys.argv[1]
     if not os.path.isfile(bundle):
         print(f"AUDIT ERROR: no such bundle: {bundle}", file=sys.stderr)
