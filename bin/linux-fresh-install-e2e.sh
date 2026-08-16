@@ -317,6 +317,11 @@ while [ "$WAITED" -lt "$PC_L_BOOT_TIMEOUT" ]; do
   sleep 5; WAITED=$((WAITED+5))
 done
 
+# assert-integrity-ok: this empty branch does NOT continue — `fail` increments FAILURES and
+# `emit_verdict` (defined above) unconditionally exits (2 on VOID, 1 on FAILURES>0, 0 otherwise),
+# so an empty $FOUND can never reach the success path below. The checker flags it because it
+# does not follow the exit through the helper; the identical fail+emit_verdict shape guards the
+# two process-death checks above. Verified by reading emit_verdict, not assumed (WI-39362).
 if [ -z "$FOUND" ]; then
   fail "no artifact-attributable /api/health 200 within ${PC_L_BOOT_TIMEOUT}s"
   echo "  ---- launch log tail ----"; tail -25 "$APP_LOG" 2>/dev/null | sed 's/^/  | /'
