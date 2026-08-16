@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the Papercusp desktop shell. NOTE: core:window:default carries only the READ half of the fullscreen pair (allow-is-fullscreen); allow-set-fullscreen is listed explicitly below because the chat popup's full-screen control drives the WINDOW rather than the document — the DOM Fullscreen API needs transient activation, and every way it can fail degrades that control into full-window (owner-reported 2026-08-02). Removing this permission does not error; it silently restores that bug.",
-  "windows": ["main", "papercusp-perf-recorder-*", "ws-*", "docs-search-palette"],
+  "windows": ["main", "pc-perf-recorder-*", "ws-*", "docs-search-palette"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
