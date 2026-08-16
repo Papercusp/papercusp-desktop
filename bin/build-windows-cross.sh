@@ -100,6 +100,34 @@ TARGET="x86_64-pc-windows-msvc"
 # scan to say so (EI-20094260886633250 / EI-12889). Same flag that took pui 544 -> 0 in
 # build-desktop-sidecar.sh (_PUI_REMAP). $HOME alone covers .cargo, .rustup and the repo.
 _WIN_REMAP="--remap-path-prefix=$HOME=/build"
+# ── crt-static (WI-39375, fixes WI-39372) ────────────────────────────────────
+# STATICALLY LINK THE MSVC CRT. Without it the msvc target links the DYNAMIC CRT
+# (toolchain default), so the shipped .exe hard-depends on VCRUNTIME140.dll /
+# VCRUNTIME140_1.dll / MSVCP140.dll — and nothing in this repo ships or installs
+# the VC++ redistributable. 0.0.17 reached users this way: it installs fine on a
+# clean Windows, then dies at first launch with "The code execution cannot
+# proceed because VCRUNTIME140.dll was not found" (reproduced on a clean Win11
+# Ent LTSC 26100 guest). Invisible from the build side BY CONSTRUCTION — every
+# build machine has Visual Studio, so the DLL is present exactly where the
+# artifact is produced and missing only where it is consumed.
+#
+# WHY IT LIVES HERE AND NOT ONLY IN .cargo/config.toml — THIS IS THE TRAP:
+# cargo's rustflag sources are MUTUALLY EXCLUSIVE, not additive. If the RUSTFLAGS
+# ENV VAR is set, `target.*.rustflags` from .cargo/config.toml is IGNORED
+# ENTIRELY. Line ~297 below sets RUSTFLAGS (for _WIN_REMAP), so a crt-static that
+# lived only in config.toml would be SILENTLY DROPPED on this — the real release
+# — path, producing a build that looks fixed and ships broken. Verified
+# empirically, not assumed: a probe crate with `target.<host>.rustflags =
+# ["--cfg","from_config_toml"]` emits `--cfg from_config_toml` with no env
+# RUSTFLAGS, and emits ONLY `--cfg from_env` when RUSTFLAGS is set.
+# config.toml keeps a copy for plain `cargo xwin build` invocations that set no
+# env RUSTFLAGS; THIS is the copy that governs the shipped artifact.
+#
+# Same class the sibling rust-path-remap.sh header names: "release-critical build
+# hygiene lives in the CALLER, so whether an artifact is shippable depends on
+# which entry point produced it." Accordingly the guard below does not trust
+# either copy — it asserts the property on the produced binary.
+_WIN_CRT_STATIC="-C target-feature=+crt-static"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 # Resolve the cargo target dir ONCE, deterministically — this box relocates it
 # via ~/.cargo/config.toml (target-dir = ~/.cargo-target) AND src-tauri/target is
@@ -294,10 +322,37 @@ for role in $ROLES; do
       "PAPERCUSP_BUILD_VERSION=${PAPERCUSP_BUILD_VERSION:-}" \
       "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
       "${cfg_env[@]}" \
-      "RUSTFLAGS=${RUSTFLAGS:-} $_WIN_REMAP" \
+      "RUSTFLAGS=${RUSTFLAGS:-} $_WIN_REMAP $_WIN_CRT_STATIC" \
       cargo xwin build --release --target "$TARGET" -p papercusp-desktop )
   EXE="$CROSS_EXE"
   [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role' at $EXE"
+
+  # ── Guard: the shipped binary must not import the VC++ runtime (WI-39375) ────
+  # THE RECURRENCE GUARD for WI-39372. A green build is NOT evidence here: builds
+  # already succeeded for every release that shipped this bug, because the build
+  # host always has the DLL. The only honest check is a property of the ARTIFACT,
+  # so read the PE import table of the binary we just produced.
+  #
+  # Placed in the build script rather than a unit test on purpose: no test that
+  # runs in the build environment can observe this class — the dependency is
+  # created at link time and satisfied by nothing at install time, and the build
+  # box satisfies it by accident. This is also why it asserts on $EXE (the thing
+  # we ship) instead of re-reading the config that was supposed to cause it.
+  _imports="$( { llvm-readobj --coff-imports "$EXE" 2>/dev/null \
+                 || x86_64-w64-mingw32-objdump -p "$EXE" 2>/dev/null \
+                 || strings -a "$EXE" 2>/dev/null; } | tr 'A-Z' 'a-z' )"
+  if [[ -z "$_imports" ]]; then
+    fail "crt-static guard: could not read imports of $EXE (need llvm-readobj, objdump or strings) — refusing to ship an unverified Windows binary"
+  fi
+  if printf '%s' "$_imports" | grep -qE 'vcruntime140|msvcp140|api-ms-win-crt'; then
+    fail "crt-static guard FAILED: $EXE still imports the VC++ runtime (vcruntime140/msvcp140/api-ms-win-crt).
+This binary will install fine and then FAIL AT FIRST LAUNCH on any clean Windows
+that lacks the redistributable — the exact WI-39372 defect. Most likely cause: a
+caller exported RUSTFLAGS and suppressed \$_WIN_CRT_STATIC, or .cargo/config.toml
+was relied on while an env RUSTFLAGS was set (those sources are mutually
+exclusive — see the _WIN_CRT_STATIC comment above)."
+  fi
+  echo "  [crt-static] OK — $role: no VC++ runtime imports in $(basename "$EXE")"
 
   # ── Identity: scrub the ONE path --remap-path-prefix cannot reach ────────────
   # _WIN_REMAP takes this binary from 359 leaked $HOME occurrences to exactly 1.
