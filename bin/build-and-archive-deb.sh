@@ -108,6 +108,73 @@ else
   echo "NOTE: src-tauri/sidecar/serve.mjs not found — skipping env-sidecars/staging (run bin/build-desktop-sidecar.sh first for a packaged staging button)"
 fi
 
+# --- PLACEHOLDER-SIDECAR GUARD (EI-20576367847192101) -----------------------
+#
+# `src-tauri/build.rs` (ensure_sidecar_placeholder / ensure_seed_placeholder)
+# writes PLACEHOLDER-README.txt stand-ins for sidecar/serve.mjs and
+# sidecar/db-sql/*.sql whenever the real sidecar hasn't been built — purely so
+# a fresh/cleaned checkout's `cargo build`/`tauri dev` can compile (dev never
+# spawns the sidecar, see build.rs's own comment). `tauri build` (this
+# script's BUILD_CMD) does not know the difference: it happily bundles
+# whatever sits in sidecar/, placeholders included, and exits 0. The result is
+# a .deb that is byte-plausible — right filename, multi-hundred-MB, archived
+# like a good build — but ships zero migrations and no server: indistinguishable
+# from a real artifact by exit code, filename, or the archive step, only
+# detectable by actually installing and running it.
+#
+# check-spa-freshness.js's 'no-sidecar' verdict deliberately does NOT block on
+# this ("the build will fail on its own, and more clearly, than a freshness
+# check can" — bin/lib/spa-freshness.js's `describe()`). That assumption is
+# false: build.rs's placeholder is exactly what lets the build succeed instead
+# of failing. So the check belongs here too, as a hard pre-flight — the one
+# place guaranteed to run before every real packaging build, independent of
+# whether the npm `prebuild` hook fires (a caller could invoke `tauri build`
+# directly, or a future refactor could change the npm script wiring).
+#
+# Positive checks only — never "is PLACEHOLDER-README.txt absent". A file-name
+# check is fragile against the placeholder mechanism's own shape changing;
+# checking for the REAL artifacts the shipped app actually needs is not.
+if [[ ! -f "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" ]]; then
+  echo "" >&2
+  echo "FATAL: PLACEHOLDER SIDECAR — src-tauri/sidecar/serve.mjs does not exist." >&2
+  echo "" >&2
+  echo "  build.rs writes a placeholder there on a fresh/cleaned checkout so plain" >&2
+  echo "  cargo/tauri-dev builds can compile — but this script packages a REAL .deb," >&2
+  echo "  and 'tauri build' cannot tell a placeholder from a real bundle. Left" >&2
+  echo "  unguarded this produces a .deb that exits 0, looks complete, and ships" >&2
+  echo "  nothing runnable." >&2
+  echo "" >&2
+  echo "  FIX:  bash bin/build-desktop-sidecar.sh   # then re-run this script" >&2
+  echo "" >&2
+  exit 8
+fi
+SIDECAR_SQL_COUNT="$(find "$DESKTOP_DIR/src-tauri/sidecar/db-sql" -maxdepth 1 -iname '*.sql' 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "${SIDECAR_SQL_COUNT:-0}" -eq 0 ]]; then
+  echo "" >&2
+  echo "FATAL: PLACEHOLDER SIDECAR — src-tauri/sidecar/db-sql/ has no *.sql files." >&2
+  echo "" >&2
+  echo "  Same root cause as the serve.mjs check above: build.rs placeholders this" >&2
+  echo "  directory on a fresh checkout so cargo/tauri-dev can compile. A real bundle" >&2
+  echo "  must ship every migration — bin/build-desktop-sidecar.sh is what actually" >&2
+  echo "  populates it from libs/db/sql/." >&2
+  echo "" >&2
+  echo "  FIX:  bash bin/build-desktop-sidecar.sh   # then re-run this script" >&2
+  echo "" >&2
+  exit 8
+fi
+if [[ ! -f "$DESKTOP_DIR/src-tauri/sidecar/spa/index.html" ]]; then
+  echo "" >&2
+  echo "FATAL: PLACEHOLDER SIDECAR — src-tauri/sidecar/spa/index.html does not exist." >&2
+  echo "" >&2
+  echo "  No staged SPA means the sidecar build never ran, or was interrupted before" >&2
+  echo "  it staged the frontend. Packaging now would ship an app with no UI." >&2
+  echo "" >&2
+  echo "  FIX:  bash bin/build-desktop-sidecar.sh   # then re-run this script" >&2
+  echo "" >&2
+  exit 8
+fi
+echo "==> sidecar looks real (serve.mjs, $SIDECAR_SQL_COUNT migration file(s), spa/index.html present)"
+
 # --- STALE-SIDECAR GUARD (EI-18683847182779973, third occurrence 2026-07-26) ---
 #
 # `tauri build` does NOT rebuild the sidecar (tauri.conf.json beforeBuildCommand
