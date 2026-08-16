@@ -1134,7 +1134,20 @@ if [ -z "${GATE_DEB:-}" ]; then
     FAIL_BUILD=1
     log "BUILD FAILED — src-tauri/sidecar has no serve.mjs (nested sidecar.tmp.* publish?) — refusing to repack a corrupt sidecar tree"
   fi
-  if [ "$SKIP_MATRIX" != 1 ] && [ "$FAIL_BUILD" != 1 ]; then
+  # EI-20580419609576585 — the REPACK must not be gated on SKIP_MATRIX alone. SKIP_MATRIX=1
+  # is set by the attestation wall (:1086) to force-skip the two GITHUB-dependent legs, but
+  # the repack it also suppressed is what produces $GATE_DEB — and $GATE_DEB is what :1520
+  # passes to local-matrix.sh as `--deb=`. With no --deb, local-matrix falls back to its
+  # implicit newest-bundle pick and hard-fails the staleness guard (common.sh
+  # _warn_if_deb_stale, which dies when ANY commit touching apps/operator is newer than the
+  # .deb by even one second and renders that as a misleading "~0d OLDER"). Net effect: the
+  # owner-gated GITHUB wall silently disabled the attestation-INDEPENDENT leg too, which is
+  # the exact outcome the wall's own design comment at :1042 says it is avoiding.
+  # So: repack whenever the build succeeded AND some leg will actually consume the artifact —
+  # content-matrix (SKIP_MATRIX != 1) or the local-matrix leg (local_matrix_due, the same
+  # predicate the wall itself consults at :1009). Keeps the repack cost off windows where
+  # nothing would use it, instead of tying it to an unrelated flag.
+  if [ "$FAIL_BUILD" != 1 ] && { [ "$SKIP_MATRIX" != 1 ] || local_matrix_due; }; then
     CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
     BASE_DEB="$(ls -t \
       "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
