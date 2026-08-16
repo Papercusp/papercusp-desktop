@@ -564,6 +564,36 @@ def has_owner_name_literal(lits):
     return bool(str(lits.get("build-git-name", "")).strip())
 
 
+def _owner_values(lits, base):
+    """Every non-empty literal for one owner class — `base`, `base-2`, `base-3`, ...
+
+    The owner side is PLURAL because a person is: measured on this repo's own history,
+    three distinct non-automation addresses match the owner's name pattern. A single-value
+    argument would let one invocation hunt one of them and still print an unqualified
+    CLEAN — certifying the class while leaving the rest unhunted, which is the very shape
+    of defect this file is being hardened against. The alternative (re-run the audit once
+    per address) is an unenforceable process convention, and the next person will not know
+    to follow it. Put it in the data model instead.
+    """
+    out = []
+    for k, v in lits.items():
+        if k == base or k.startswith(base + "-"):
+            v = str(v).strip()
+            if v:
+                out.append(v)
+    return out
+
+
+def redaction_key(key):
+    """REDACTION_BY_KEY lookup key, with the plural `-2`, `-3` suffix normalised off.
+
+    All of one owner's addresses share a single placeholder ON PURPOSE — they are one
+    identity, and the fallback's warning about distinct identities collapsing to the same
+    token does not apply within a class.
+    """
+    return re.sub(r"-\d+$", "", key)
+
+
 def identity_coverage_gaps(lits):
     """Identity classes a CLEAN verdict from this run does NOT cover.
 
@@ -581,11 +611,19 @@ def identity_coverage_gaps(lits):
     Returns a list of human-readable gaps; empty means the verdict is unqualified.
     """
     gaps = []
-    if not str(lits.get("build-git-email", "")).strip():
+    emails = _owner_values(lits, "build-git-email")
+    if not emails:
         gaps.append(
             f"EMAIL not covered — no owner-email literal resolved "
             f"(git user.email is unset or an automation address). "
-            f"Set {OWNER_EMAIL_ENV} to hunt it."
+            f"Set {OWNER_EMAIL_ENV} to hunt it (accepts a comma-separated list)."
+        )
+    else:
+        # State the COUNT, not just "covered". A person can have several addresses, and
+        # "email: covered" over one of three reads as a full pass to anyone downstream.
+        gaps.append(
+            f"EMAIL covered for {len(emails)} address(es) — a CLEAN result says nothing "
+            f"about any owner address NOT supplied via {OWNER_EMAIL_ENV}."
         )
     return gaps
 
@@ -644,12 +682,19 @@ def identity_literals():
             pass
     # Explicit answers outrank whatever the box guesses (CI, a container, or a box whose
     # git identity an automation has taken over). Read at run time, never stored.
-    explicit_owner = os.environ.get(OWNER_NAME_ENV, "").strip()
-    if explicit_owner:
-        lits["build-git-name"] = explicit_owner
-    explicit_email = os.environ.get(OWNER_EMAIL_ENV, "").strip()
-    if explicit_email:
-        lits["build-git-email"] = explicit_email
+    # BOTH accept a LIST (comma / semicolon / whitespace separated). A person has more
+    # than one address, and often more than one spelling of their name; a single-value
+    # argument silently covers the first and certifies the class anyway.
+    for env_var, base in ((OWNER_NAME_ENV, "build-git-name"), (OWNER_EMAIL_ENV, "build-git-email")):
+        values = [v for v in re.split(r"[,;\s]+", os.environ.get(env_var, "")) if v.strip()]
+        if not values:
+            continue
+        # Explicit answers REPLACE the box's guess for that class rather than adding to it
+        # — otherwise a stale git identity would linger beside the supplied truth.
+        for k in [k for k in lits if k == base or k.startswith(base + "-")]:
+            del lits[k]
+        for i, v in enumerate(dict.fromkeys(values)):  # de-dup, order preserved
+            lits[base if i == 0 else f"{base}-{i + 1}"] = v.strip()
     return lits
 
 
