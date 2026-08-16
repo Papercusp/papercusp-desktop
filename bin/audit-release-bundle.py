@@ -738,15 +738,55 @@ def needs_word_boundary(lit):
     cut of this gate skipped any literal under 4 chars, which silently made the
     owner's own example the ONE identity it could not catch. Substring-matching
     "Avi" instead would fire on every .avi/AVI/Avicenna in vendored code and get
-    the gate switched off, so short literals match case-sensitively on a word
-    boundary: \\bAvi\\b hits "Avi Weiss", not "video.avi".
+    the gate switched off, so short literals match on a word boundary:
+    \\bAvi\\b hits "Avi Weiss", not "video.avi".
     """
     return len(lit) < 6 and lit.isalnum()
 
 
+def case_fold_ere(pat):
+    """Make an ERE case-insensitive by folding each letter into a class: a → [aA].
+
+    WHY A CHARACTER CLASS AND NOT A FLAG. This one pattern is consumed by four
+    engines that do NOT share a case-insensitivity switch: GNU grep (-E), Python
+    re.compile (str AND bytes), and — through --identity-literals — the `sed -E`
+    scrub in bin/stage-source-tree.sh, which also has to run under BSD sed on the
+    mac release VM, where `s///I` is not portable. A folded class is the one form
+    every ERE dialect agrees on, so the scrub and the gate cannot disagree about
+    case the way they previously disagreed about it silently.
+
+    Apply to an ALREADY re.escape()d pattern: escape() leaves alphanumerics alone
+    and only introduces non-alpha metacharacters, so folding letters afterwards
+    cannot corrupt an escape sequence.
+    """
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in pat)
+
+
 def lit_ere(lit):
-    """The ERE this identity literal is searched with (GNU grep supports \\b)."""
-    return rf"\b{re.escape(lit)}\b" if needs_word_boundary(lit) else re.escape(lit)
+    """The ERE this identity literal is searched with (GNU grep supports \\b).
+
+    CASE-INSENSITIVE — and it must be, which cost us a shipped leak to learn
+    (EI-20589264759185712). The owner's name reached the PUBLISHED 0.0.17 Linux
+    deb in lowercase, inside a SQL comment ("Surfaced for avi:"), while this gate
+    read the bundle CLEAN: it was hunting \\bAvi\\b, and `avi` is not `Avi`.
+
+    Because this ONE rule feeds all three legs — the gate's own scan, the
+    --source-leakers set (WHICH files the stager scrubs) and the --identity-literals
+    sed map (WHAT it replaces) — case-sensitivity failed all three at once and in
+    the same direction: the file was never nominated for scrubbing, so nothing
+    redacted it, so the gate found nothing to fail on. Three independent-looking
+    proofs, one blind spot.
+
+    The 'it would cry wolf on vendored .avi/AVI' worry that justified case-sensitivity
+    is handled by a DIFFERENT mechanism that already exists: is_low_entropy() scopes
+    a bare first name to OUR source via is_vendor(), so node_modules is out of scope
+    before case ever matters. Measured over the real non-vendor corpus at the time of
+    the fix: 69 files gained, 54 of them carrying genuine identity (test fixtures with
+    `username: 'avi'`, `--account avi-storewolf`, the box hostname `avi-dev`), and the
+    only non-identity hits were prose ABOUT this tradeoff and this gate's own tests.
+    """
+    body = case_fold_ere(re.escape(lit))
+    return rf"\b{body}\b" if needs_word_boundary(lit) else body
 
 
 def _literal_in_file(path, lit):
@@ -1740,12 +1780,21 @@ def scan_dir(dirs):
 
 
 def print_identity_literals():
-    """Emit `value<TAB>redaction<TAB>wordboundary(0/1)` for every identity literal
-    the gate hunts — build-box identity + the known cross-box sensitive set — so
+    """Emit `value<TAB>redaction<TAB>wordboundary(0/1)<TAB>sed_ere` for every identity
+    literal the gate hunts — build-box identity + the known cross-box sensitive set — so
     bin/stage-source-tree.sh scrubs EXACTLY what this gate would later fail on, from
     the one source of truth (no second list to drift). LONGEST value first so an
     overlapping pair is applied safely (/home/<user> before the bare <user> inside
-    it). A value with no explicit REDACTION_BY_KEY token falls back to 'redacted'."""
+    it). A value with no explicit REDACTION_BY_KEY token falls back to 'redacted'.
+
+    COLUMN 4 (sed_ere) is the ready-to-use `sed -E` pattern — lit_ere() with the
+    delimiter escaped — and it exists so the scrub inherits this gate's CASE rule
+    instead of re-deriving it. The stager used to rebuild the pattern itself from
+    column 1, which is how the scrub stayed case-SENSITIVE after the gate stopped
+    being (EI-20589264759185712): two hand-kept derivations of "the same" rule, and
+    the quiet one wins. Columns 1-3 stay for compatibility; a stager that reads only
+    them still works, it is just the older, case-sensitive behaviour.
+    """
     lits = identity_literals()
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     seen = set()
@@ -1755,7 +1804,10 @@ def print_identity_literals():
         seen.add(val)
         red = REDACTION_BY_KEY.get(redaction_key(key), "redacted")
         wb = "1" if needs_word_boundary(val) else "0"
-        print(f"{val}\t{red}\t{wb}")
+        # `/` is the stager's s/// delimiter; escape it so a home path cannot end
+        # the substitution early. Every other metacharacter is already re.escape()d.
+        sed_ere = lit_ere(val).replace("/", r"\/")
+        print(f"{val}\t{red}\t{wb}\t{sed_ere}")
     return 0
 
 

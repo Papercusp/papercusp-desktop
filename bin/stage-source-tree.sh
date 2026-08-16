@@ -307,11 +307,21 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
     # literal→placeholder sed program, longest-literal-first (so /home/<user> is
     # redacted before the bare <user> inside it) — straight from the gate's rule.
     declare -a _sed=()
-    while IFS=$'\t' read -r _val _red _wb; do
+    # Column 4 (_pat) is the gate's OWN `sed -E` pattern — case rule, word boundary
+    # and escaping already applied by lit_ere(). Prefer it, and do NOT re-escape it:
+    # rebuilding the pattern here from column 1 is exactly how this scrub stayed
+    # case-SENSITIVE after the gate stopped being, and shipped the owner's lowercase
+    # name in the 0.0.17 deb (EI-20589264759185712). The columns 1-3 branch is the
+    # fallback for an older audit script that emits no column 4.
+    while IFS=$'\t' read -r _val _red _wb _pat; do
       [[ -z "$_val" ]] && continue
-      _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
       _r="$(printf '%s' "$_red" | sed 's/[&/\]/\\&/g')"
-      if [[ "$_wb" == "1" ]]; then _sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _sed+=(-e "s/${_p}/${_r}/g"); fi
+      if [[ -n "$_pat" ]]; then
+        _sed+=(-e "s/${_pat}/${_r}/g")
+      else
+        _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
+        if [[ "$_wb" == "1" ]]; then _sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _sed+=(-e "s/${_p}/${_r}/g"); fi
+      fi
     done < <(python3 "$HERE/audit-release-bundle.py" --identity-literals)
     SCRUB_DIR="$(mktemp -d "$SIDECAR/.stage-scrub-XXXXXX")"
     for _rel in "${_leakers[@]}"; do
