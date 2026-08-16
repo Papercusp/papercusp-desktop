@@ -96,9 +96,52 @@ git -C "$REPO_ROOT" archive --format=tar HEAD -- \
   packages/operator-core libs/generic scripts package.json tsconfig.base.json \
   | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
   || fail 'could not stage the immutable superproject source snapshot on the VM'
-git -C "$REPO_ROOT/libs/papercusp" archive --format=tar --prefix=libs/papercusp/ HEAD \
-  | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
-  || fail 'could not stage the immutable papercusp-library snapshot on the VM'
+# Stage submodule CONTENTS, one archive per submodule repo.
+#
+# ⚠ `git archive` NEVER includes a submodule's files — it emits the bare
+# mount-point directory and nothing else, silently. Verified directly:
+#   $ git archive --format=tar HEAD -- libs/papercusp-shared | tar -tf -
+#   libs/
+#   libs/papercusp-shared/        ← two empty dirs, zero files
+# So listing `libs/generic` in the superproject archive above does NOT stage the
+# six submodules under it, and the previous hand-rolled single archive here
+# staged libs/papercusp ONLY. That left libs/papercusp-shared — a declared npm
+# workspace and a direct operator-core dependency — resolving on the rig to the
+# installed bundle's STALE copy. Fresh operator-core against a stale sibling
+# fails as an unresolvable import naming a SYMBOL, which reads like "someone
+# broke an export" rather than "the harness never shipped the file" (WI-39361:
+# `'@papercusp/papercusp-shared/agent' does not provide an export named
+# 'parseUsageReset'`, committed to that submodule 1.7h before the drill ran).
+#
+# Derived from .gitmodules, not a hand-list, so adding a submodule cannot
+# silently re-arm the trap.
+staged_submodules=()
+while IFS= read -r sm_path; do
+  [ -n "$sm_path" ] || continue
+  case "$sm_path" in libs/*) ;; *) continue ;; esac
+  [ -e "$REPO_ROOT/$sm_path/.git" ] \
+    || fail "required submodule is not initialised on the tower: $sm_path"
+  git -C "$REPO_ROOT/$sm_path" archive --format=tar --prefix="$sm_path/" HEAD \
+    | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
+    || fail "could not stage the immutable submodule snapshot on the VM: $sm_path"
+  staged_submodules+=("$sm_path")
+done < <(git -C "$REPO_ROOT" config --file "$REPO_ROOT/.gitmodules" \
+  --get-regexp '^submodule\..*\.path$' | awk '{ print $2 }')
+
+[ "${#staged_submodules[@]}" -gt 0 ] \
+  || fail 'no libs/ submodules were staged — .gitmodules is unreadable or empty'
+
+# RECURRENCE GUARD (WI-39361): prove the staged tree actually contains FILES for
+# every submodule before any identity is read. A staging regression must fail
+# HERE, naming the path, instead of surfacing minutes later on the rig as an
+# import error that points at the consuming file rather than the missing one.
+empty_staged="$(ssh "${SSH_OPTS[@]}" "$VM" \
+  "for d in ${staged_submodules[*]}; do \
+     [ -n \"\$(find '$remote_source'/\$d -type f -print -quit 2>/dev/null)\" ] || echo \$d; \
+   done")" \
+  || fail 'could not verify the staged submodule contents on the VM'
+[ -z "$empty_staged" ] \
+  || fail "staged submodule tree contains NO FILES on the VM: $(echo $empty_staged)"
 
 # Build a run-local dependency overlay. Third-party modules remain read-only
 # links into the installed bundle, while every staged workspace package wins
@@ -139,6 +182,15 @@ for (const entry of fs.readdirSync(installedModules, { withFileTypes: true })) {
 
 const packageBases = [
   path.join(runRoot, 'packages'),
+  // WI-39361: `libs` ITSELF, not just `libs/generic`. The top level holds real
+  // workspace packages that operator-core depends on directly —
+  // libs/papercusp-shared, libs/papercusp-db, libs/agent-chat, libs/testing-shell,
+  // libs/test-config. Omitting this base meant those could never win over the
+  // installed bundle's symlink no matter how fresh the staged copy was, so a
+  // symbol added to papercusp-shared surfaced on the rig as an unresolvable
+  // import naming that symbol. Entries without a package.json (libs/generic) are
+  // skipped by the loop below, so listing the parent is safe.
+  path.join(runRoot, 'libs'),
   path.join(runRoot, 'libs', 'generic'),
   path.join(runRoot, 'libs', 'papercusp', 'libs'),
   path.join(runRoot, 'libs', 'papercusp', 'packages'),

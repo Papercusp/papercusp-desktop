@@ -1002,17 +1002,47 @@ preflight_attestation_write_accounts() {
   return "$failed"
 }
 
+# WI-39359 (p2p-release lane) — mirrors the local-matrix leg's OWN admission conditions
+# (RUN_LOCAL_MATRIX / wrapper present / cadence window) so the attestation wall below can ask
+# "would the attestation-INDEPENDENT leg actually run this window?" before it decides whether
+# blinding the entire gate is justified. Keep in sync with the leg's branches near the bottom.
+local_matrix_due() {
+  [ "${RUN_LOCAL_MATRIX:-1}" = 1 ] || return 1
+  [ -e "$DESKTOP_DIR/bin/local-matrix.sh" ] || return 1
+  [ "$(age_h "$STATE_DIR/last-matrix-green")" -ge "${MATRIX_TTL_H:-144}" ] || return 1
+  return 0
+}
+
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
 ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
 ATTESTATION_PREFLIGHT_RC=$?
+ATTESTATION_BLOCKED=0
 if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
   printf '%s\n' "$ATTESTATION_PREFLIGHT_OUTPUT" >"$WORK/attestation-preflight.out"
   ATTESTATION_PREFLIGHT_SUMMARY="$(printf '%s' "$ATTESTATION_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
   SUMMARY="attestation-write-preflight=FAIL accounts=$P_A_USER,$P_B_USER reason=$ATTESTATION_PREFLIGHT_SUMMARY"
   log "ATTESTATION WRITE PREFLIGHT RED before build: $ATTESTATION_PREFLIGHT_SUMMARY"
   echo "$(now_s)" >"$STATE_DIR/last-run"
-  verdict "GATE: RED (attestation-write-preflight) — $SUMMARY ; logs in $WORK"
+
+  # WI-39359 — DO NOT BLIND THE WHOLE GATE ON A CREDENTIAL WALL.
+  # Measured 2026-08-16: local-matrix.sh has ZERO functional attestation dependency (its only
+  # three gist/attest matches are comments), while two-instance-content-matrix-smoke.sh has 37
+  # (incl. its own preflight_attestation) and two-instance-hive-from-repo-smoke.sh has 45. So
+  # when both GitHub identities cannot mint an attestation gist, the two GitHub-dependent legs
+  # genuinely cannot run — but the 18-scenario local matrix (membership_churn, content_bidir,
+  # replication_soak, restart_durability) still can, and it is the leg that carries the core
+  # federation behaviour. Between 2026-08-14 and 2026-08-16 this early exit voided ~50 runs of
+  # p2p coverage over a credential fault none of those scenarios touch.
+  # COST CONTROL: only continue when the local-matrix leg is genuinely DUE, so the cheap early
+  # exit (the reason this preflight exists — it saves a multi-GB build) still governs every
+  # other window. Never GREEN in this state; see the ATTESTATION_BLOCKED guard at the verdict.
+  if local_matrix_due; then
+    ATTESTATION_BLOCKED=1
+    log "ATTESTATION WALL: neither identity can mint an attestation gist, but local-matrix is DUE and has no attestation dependency — running it instead of voiding the window. GitHub-dependent legs will report SKIPPED-ATTESTATION-WALL."
+  else
+    verdict "GATE: RED (attestation-write-preflight) — $SUMMARY ; logs in $WORK"
+  fi
 
   # email_unverified is already an explicit needs-human account wall. Recognize that
   # non-terminal item instead of cloning it; every other preflight failure still gets the
@@ -1046,9 +1076,19 @@ if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
     && log "attestation preflight red is durably tracked; next window rechecks the cheap prerequisite before any build." \
     || log "attestation preflight red is not durably tracked; next window rechecks and retries filing before any build."
   check_staleness
-  exit 1
+  # WI-39359: exit only when the attestation-independent leg would NOT have run anyway.
+  # When ATTESTATION_BLOCKED=1 we fall through to §2 and run local-matrix; the two
+  # GitHub-dependent legs are force-skipped with a token that names WHY, so a reader can
+  # never mistake "we could not test this" for "we tested this and it passed".
+  if [ "$ATTESTATION_BLOCKED" != 1 ]; then
+    exit 1
+  fi
+  SKIP_MATRIX=1
+  SKIP_FROMREPO=1
+  ATTESTATION_WALL_TOKEN="SKIPPED-ATTESTATION-WALL"
+else
+  log "attestation WRITE preflight OK for both distinct accounts ($P_A_USER, $P_B_USER); proceeding to build."
 fi
-log "attestation WRITE preflight OK for both distinct accounts ($P_A_USER, $P_B_USER); proceeding to build."
 
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
@@ -1328,7 +1368,7 @@ frame_pressure_note() { # [start-epoch-s] -> one-line frame-scoped reading
   fi
 }
 
-MATRIX_RES="SKIPPED"
+MATRIX_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
 if [ "$SKIP_MATRIX" != 1 ]; then
   MATRIX_RES="$(run_smoke content-matrix two-instance-content-matrix-smoke.sh "${GATE_DEB:-}" \
     PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100)"
@@ -1399,8 +1439,8 @@ fi
 # closed there is no longer ANY leg whose red is expected, so a from-repo-witness FAIL must be
 # investigated like any other — never waved through as "the known witness red". Two such REDs
 # fired 2026-07-31 (23:00Z, 00:02Z) while this file still described the leg as expected.
-FROMREPO_RES="SKIPPED"
-WITNESS_RES="SKIPPED"
+FROMREPO_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
+WITNESS_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
 if [ "$SKIP_FROMREPO" != 1 ]; then
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
     HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
@@ -1441,7 +1481,16 @@ if [ "${RUN_LOCAL_MATRIX:-1}" != 1 ]; then
   MATRIX_SKIP_REASON="leg disabled for this run (RUN_LOCAL_MATRIX=${RUN_LOCAL_MATRIX:-1})"
 elif [ ! -e "$DESKTOP_DIR/bin/local-matrix.sh" ]; then
   MATRIX_SKIP_REASON="wrapper bin/local-matrix.sh not present"
-elif ! { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_RES" = PASS-971 ]; }; then
+# WI-39359: the content-matrix gate below exists because running the heavy matrix on a window
+# whose CHEAP SMOKE ALREADY FAILED just burns the box. Under the attestation wall the cheap
+# smoke did not fail — it never ran, for a credential reason no local-matrix scenario touches —
+# so that rationale does not apply and the coupling would only propagate the blindness. This is
+# the scenario-level decoupling EI-18715623477356990 deferred to the p2p-release lane, scoped
+# DELIBERATELY to the credential-wall case only: a genuine content-matrix RED still declines the
+# leg exactly as before. NOTE this must stay a GUARD on the existing condition rather than its
+# own elif branch — a branch that merely logs would match and fall out of the chain WITHOUT
+# running the matrix, which is the silent no-coverage outcome this whole change exists to end.
+elif [ "${ATTESTATION_BLOCKED:-0}" != 1 ] && ! { [ "$MATRIX_RES" = PASS ] || [ "$MATRIX_RES" = PASS-971 ]; }; then
   # A DISTINCT token (still SKIPPED* so is_skip_result keeps treating it as "nothing proven"),
   # because this is the decline that blocks a whole second verification plane indefinitely: a
   # persistently-red content-matrix means revocation_kcut (order 90) and

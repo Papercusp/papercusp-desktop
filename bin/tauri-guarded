@@ -34,6 +34,39 @@ set -euo pipefail
 
 __here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# FAIL FAST AND SAY WHY (WI-39358)
+#
+# Every path below ends in a bare `tauri` — the two `exec tauri` sites here, and
+# bin/build-deb-repacked.sh:65 for the Debian-producing commands. When @tauri-apps/cli is
+# not installed, bash reports that as
+#
+#     bin/tauri-guarded: line 100: exec: tauri: not found
+#
+# which names neither the cause nor the fix, and reads like a broken toolchain. It is not:
+# papercusp-desktop is a git submodule with its OWN package-lock.json and is NOT an npm
+# workspace of the monorepo root, so a root `npm install` does not install it. A fresh
+# clone or a restored tree therefore leaves this empty, and the repair is one command.
+#
+# Measured 2026-08-15: exactly this cost the owner a debugging session after the tree was
+# re-cloned following WI-39347 and only the ROOT install was re-run. The check runs BEFORE
+# the target-dir claim and the sidecar read lock, so a missing CLI cannot leave a claimed
+# slot or a held lock behind on the way out.
+if ! command -v tauri >/dev/null 2>&1; then
+  cat >&2 <<EOF
+✗ tauri CLI not found — @tauri-apps/cli is not installed for papercusp-desktop.
+
+  This is NOT a broken toolchain. papercusp-desktop is a git submodule with its own
+  package-lock.json, and it is not an npm workspace of the monorepo root — so a root
+  \`npm install\` does not install it. A fresh clone or a restored tree leaves it empty.
+
+  Fix (from the monorepo root):
+      npm run install:safe -- --repo-root papercusp-desktop
+
+  \`npm run doctor\` asserts this too ("submodule installs complete").
+EOF
+  exit 127
+fi
+
 # A sidecar rebuild publishes with an exclusive flock on this same lock. Keep a
 # shared read lock for every Tauri command that asks Cargo/build.rs to inspect
 # bundle resources, and inherit the descriptor through the `exec tauri` below.
