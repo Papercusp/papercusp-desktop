@@ -849,24 +849,72 @@ def sh(cmd, **kw):
 
 
 def phase_a_paths(bundle, lits):
-    """Member names. ~25s for 444k members."""
-    r = sh(f"zstd -dc {q(bundle)} | tar -tf -")
-    if r.returncode != 0:
-        print(f"AUDIT ERROR: cannot list bundle: {r.stderr.strip()[:300]}", file=sys.stderr)
-        sys.exit(2)
-    names = r.stdout.splitlines()
+    """Member HEADERS — names, link targets, and ownership names.
+
+    Not just names (WI-39462). This used to be `tar -tf -`, which prints member
+    paths and nothing else, and phase B greps member CONTENT. A SYMLINK member
+    falls between the two: its target string lives in the header's `linkname`
+    field, it has zero payload bytes, and its own path is innocuous. So the owner's
+    home path, committed as a tracked symlink target, was invisible to BOTH phases
+    and this audit printed `✓ CLEAN` exit 0 on a bundle carrying it.
+
+    Measured with a paired control: the SAME literal moved into a member's content
+    failed correctly (exit 1, attributed), which is what makes this a header blind
+    spot rather than a weak literal set. `stage-source-tree.sh` runs this mode as
+    source.tar.zst's independent audit, so this was the gap that let 0.0.17 ship.
+
+    Streaming `tarfile` over a `zstd -dc` pipe reads every header field in ONE pass
+    — no second decompression — and covers ownership/pax names here too, matching
+    what `_expand_tar_stream` records for the --scan-dir path.
+    """
+    proc = subprocess.Popen(["zstd", "-dc", bundle],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    n = 0
     hits = []
-    for name in names:
-        for rule, rx, _globs in FORBIDDEN_PATH:
-            if rx.search(name):
-                hits.append((rule, name))
-                break
-        else:
-            for rule, lit in lits.items():
-                if lit_rx(lit).search(name):
-                    hits.append((rule + " (in path)", name))
-                    break
-    return len(names), hits
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+            for member in tf:
+                n += 1
+                name = member.name
+                for rule, rx, _globs in FORBIDDEN_PATH:
+                    if rx.search(name):
+                        hits.append((rule, name))
+                        break
+                else:
+                    # Every header string that can carry an identity, with the
+                    # field named in the finding so it is actionable: "in path"
+                    # sends you looking at a filename, which is the wrong fix when
+                    # the value is really a link target or a uid name.
+                    fields = [("path", name)]
+                    if member.linkname:
+                        fields.append(("link target", f"{name} -> {member.linkname}"))
+                    if member.uname:
+                        fields.append(("uid name", f"{name} [uname={member.uname}]"))
+                    if member.gname:
+                        fields.append(("gid name", f"{name} [gname={member.gname}]"))
+                    for k, v in (member.pax_headers or {}).items():
+                        fields.append(("pax header", f"{name} [{k}={v}]"))
+                    for rule, lit in lits.items():
+                        matched = next(
+                            (d for where, d in fields if lit_rx(lit).search(d)), None)
+                        if matched is not None:
+                            where = next(w for w, d in fields if d == matched)
+                            hits.append((f"{rule} (in {where})", matched))
+                            break
+    except tarfile.TarError as exc:
+        proc.kill(); proc.wait()
+        print(f"AUDIT ERROR: cannot list bundle: {exc}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    rc = proc.wait()
+    if rc != 0:
+        err = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
+        print(f"AUDIT ERROR: cannot list bundle: zstd exited {rc}: {err[:300]}",
+              file=sys.stderr)
+        sys.exit(2)
+    return n, hits
 
 
 def phase_b_content(bundle, lits):
@@ -1144,43 +1192,66 @@ def _expand_tar_memberwise(path, dest):
     both halves are kept deliberately, because a source fix protects the archives
     we build and this one protects every archive we merely SHIP.
 
+    ⚠ EVERY tar-like format MUST reach this function, or its metadata coverage is
+    a fiction for whatever format skipped it. `.tar.zst` did skip it until
+    WI-39462: `_expand_archive` matched a `.tar.zst` suffix branch BEFORE the
+    `tarfile.is_tarfile()` branch that routes here, and expanded it with a shell
+    `tar -xf`, which writes NO manifest at all. That silently exempted the single
+    largest artifact we ship — `source.tar.zst`, the whole source tree — from
+    linkname, member-name AND uname/gname scanning, so the ownership fix above
+    never actually covered it. Measured on identical tar bytes: `.tar` produced a
+    manifest carrying the leak, `.tar.zst` produced none. Route by CONTENT
+    (is it a tar?), never by how it happens to be compressed.
+
     Returns False when a payload genuinely cannot be read — unknown is not absent.
+    """
+    with tarfile.open(path) as tf:
+        return _expand_tar_stream(tf, dest, label=path)
+
+
+def _expand_tar_stream(tf, dest, label="<tar>"):
+    """The memberwise core of `_expand_tar_memberwise`, over an OPEN tarfile.
+
+    Split out so a compression `tarfile` cannot open natively (zstd) can be piped
+    in as a stream and get BYTE-IDENTICAL treatment — one scanner, no drift. It is
+    written to work under `mode='r|'` (non-seekable) as well as random access:
+    members are visited once, in order, and `extractfile` is called only on the
+    member currently being iterated, which is the one case streaming mode supports.
     """
     os.makedirs(dest, exist_ok=True)
     names = []
-    with tarfile.open(path) as tf:
-        for idx, member in enumerate(tf):
-            names.append(member.name)
-            if member.linkname:
-                names.append(member.linkname)
-            # Ownership NAMES (see the docstring). Numeric uid/gid are deliberately
-            # NOT recorded: an integer cannot carry an identity literal, and
-            # emitting them would only add noise to a manifest that is grepped.
-            if member.uname:
-                names.append(member.uname)
-            if member.gname:
-                names.append(member.gname)
-            # PAX headers are free-form key/value metadata (`tar --xattrs`, ACLs,
-            # SCHILY.* records). Same argument as uname/gname: metadata, greppable
-            # by nothing else, and a natural landing spot for a build path.
-            for k, v in (member.pax_headers or {}).items():
-                names.append(f"{k}={v}")
-            if not member.isfile():
-                continue
-            src = tf.extractfile(member)
-            if src is None:
-                # A regular file whose payload will not open IS a hole in the scan.
-                print(f"    scan-dir: {path}: member {member.name!r} payload unreadable")
-                return False
-            parts = [p for p in member.name.replace("\\", "/").split("/")
-                     if p not in ("", ".", "..")]
-            out = os.path.join(dest, *parts) if parts else os.path.join(dest, f"member{idx}")
-            # Two members can sanitise to one path ('a/../b' and 'b'); never clobber.
-            while os.path.exists(out):
-                out = f"{out}.{idx}"
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "wb") as fh:
-                shutil.copyfileobj(src, fh)
+    for idx, member in enumerate(tf):
+        names.append(member.name)
+        if member.linkname:
+            names.append(member.linkname)
+        # Ownership NAMES (see the docstring). Numeric uid/gid are deliberately
+        # NOT recorded: an integer cannot carry an identity literal, and
+        # emitting them would only add noise to a manifest that is grepped.
+        if member.uname:
+            names.append(member.uname)
+        if member.gname:
+            names.append(member.gname)
+        # PAX headers are free-form key/value metadata (`tar --xattrs`, ACLs,
+        # SCHILY.* records). Same argument as uname/gname: metadata, greppable
+        # by nothing else, and a natural landing spot for a build path.
+        for k, v in (member.pax_headers or {}).items():
+            names.append(f"{k}={v}")
+        if not member.isfile():
+            continue
+        src = tf.extractfile(member)
+        if src is None:
+            # A regular file whose payload will not open IS a hole in the scan.
+            print(f"    scan-dir: {label}: member {member.name!r} payload unreadable")
+            return False
+        parts = [p for p in member.name.replace("\\", "/").split("/")
+                 if p not in ("", ".", "..")]
+        out = os.path.join(dest, *parts) if parts else os.path.join(dest, f"member{idx}")
+        # Two members can sanitise to one path ('a/../b' and 'b'); never clobber.
+        while os.path.exists(out):
+            out = f"{out}.{idx}"
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "wb") as fh:
+            shutil.copyfileobj(src, fh)
     with open(os.path.join(dest, "__member_names__.txt"), "w",
               encoding="utf-8", errors="replace") as fh:
         fh.write("\n".join(names))
@@ -1203,8 +1274,47 @@ def _expand_archive(path, dest):
                 zf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed
             return True
         if low.endswith(".tar.zst"):
-            r = sh(f"zstd -dc {q(path)} | tar -xf - -C {q(dest)}")
-            return r.returncode == 0
+            # `tarfile` has no zstd codec, which is why this used to be a shell
+            # `zstd -dc | tar -xf -`. That shelled-out form had TWO defects, both
+            # measured (WI-39462), and both produced a false CLEAN rather than an
+            # error — so neither was ever visible in a build log:
+            #
+            #  1. It bypassed _expand_tar_memberwise entirely, so NO
+            #     __member_names__.txt was written. Linknames, member names and
+            #     uname/gname all went unscanned for `source.tar.zst` — the whole
+            #     shipped source tree, and the largest artifact we produce. A
+            #     symlink whose TARGET is the owner's home path has no content
+            #     bytes and an innocuous name, so it was invisible to every phase.
+            #  2. sh() runs shell=True against /bin/sh (dash — no pipefail), so the
+            #     pipeline reported only `tar`'s status. A failing `zstd` feeding an
+            #     empty stream to a `tar` that exits 0 returned True having
+            #     extracted NOTHING. Identical to the hole the .deb branch below
+            #     documents and guards; this branch never got the same treatment.
+            #
+            # Streaming the pipe into tarfile(mode='r|') fixes both at once: the
+            # SAME memberwise reader handles it (no drift, no format exemption),
+            # and zstd's own exit status is checked explicitly instead of being
+            # swallowed by a pipeline. Route by CONTENT, not by compression.
+            proc = subprocess.Popen(
+                ["zstd", "-dc", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+                    ok = _expand_tar_stream(tf, dest, label=path)
+            except tarfile.TarError as exc:
+                proc.kill()
+                proc.wait()
+                print(f"    scan-dir: cannot expand {path}: {exc}")
+                return False
+            finally:
+                if proc.stdout:
+                    proc.stdout.close()
+            rc = proc.wait()
+            if rc != 0:
+                err = (proc.stderr.read().decode("utf-8", "replace").strip()
+                       if proc.stderr else "")
+                print(f"    scan-dir: cannot expand {path}: zstd exited {rc}: {err[:200]}")
+                return False
+            return ok
         if low.endswith(".deb"):
             # A .deb is an `ar` archive whose payload is a NESTED data.tar.{zst,xz,gz}.
             # Extracting the ar members would leave that nested tarball unexpanded, and
