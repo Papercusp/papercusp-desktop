@@ -1598,6 +1598,18 @@ if [ ${#REDS[@]} -eq 0 ]; then
     check_staleness
     verdict "GATE: SKIPPED-STARVATION (would-be-green but restart-class unproven — not a fresh green; $SUMMARY)$(matrix_skip_suffix)"; exit 0
   fi
+  # WI-39359 — AN ATTESTATION-BLOCKED WINDOW CAN NEVER BE GREEN, however clean its legs were.
+  # content-matrix, from-repo and from-repo-witness were NOT exercised (no credential could mint
+  # an attestation gist), so a green here would assert coverage nobody produced — precisely the
+  # false-green class D-018 exists to stop, and the same shape as the "green that survives only
+  # as an epoch integer" discrepancy §8 #1 already records. Emit an explicit PARTIAL that names
+  # what did and did not run, and deliberately do NOT stamp last-green (which would suppress
+  # re-runs and let the wall sit undetected behind a cadence gate).
+  if [ "${ATTESTATION_BLOCKED:-0}" = 1 ]; then
+    check_matrix_staleness
+    verdict "GATE: PARTIAL (attestation-blocked) — local-matrix=$MATRIXFULL_RES ran WITHOUT attestation; content-matrix/from-repo/from-repo-witness NOT exercised (both GitHub identities cannot mint an attestation gist). NOT a green: $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix)"
+    exit 1
+  fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs" "$STATE_DIR/last-red"
   # EI-18657324526667507 — THE load-bearing call. check_staleness() is (correctly) not invoked on
   # the green path, so without this the leg check would never run in exactly the state that hides
