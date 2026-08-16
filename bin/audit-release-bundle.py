@@ -1903,7 +1903,62 @@ def _expand_installer(path, dest):
         return False, "7z"
 
     # Shared formats go through the ONE expander both entrypoints use.
-    return (True, "archive-pass") if _expand_archive(path, dest) else (False, "archive-pass")
+    if not _expand_archive(path, dest):
+        return False, "archive-pass"
+
+    # ── A WRAPPER IS NOT THE PAYLOAD (WI-39458) ──────────────────────────────
+    # The published Windows Server artifact is a `.zip` whose three members are
+    # an Inno Setup STUB (`…-setup.exe`, ~4.5MB) plus its DiskSpan slices
+    # (`…-setup-1.bin` ~2.0GB, `…-setup-2.bin` ~140MB). Expanding the zip alone
+    # therefore "succeeds", passes the size-ratio check comfortably (~2.2GB out
+    # of a 2.2GB container), and leaves ~100% of the real payload sitting in two
+    # blobs that the scan can only grep as opaque bytes. That is the SAME false
+    # clean this entrypoint exists to remove, one level down — and it is the
+    # exact artifact this item was filed on, so failing to recurse here would
+    # ship a fix that does not fix the reported case.
+    #
+    # ⚠ RECURSION IS DELIBERATELY NARROW — an installer STUB, not every `.exe`.
+    # The expanded payload legitimately contains program executables we bundle
+    # (node.exe, gh.exe). Blanket-recursing on `.exe` would hand those to an
+    # expander that cannot open them, mark them uninspectable, and red every
+    # cut — re-creating, inside this entrypoint, precisely the regression that
+    # keeps `.exe` out of ARCHIVE_SUFFIXES. So only a file that names itself a
+    # setup stub is treated as a container.
+    # SNAPSHOT FIRST: the loop writes new directories INTO `dest`, and walking a
+    # tree while extending it can descend into what the loop just produced — an
+    # inner installer that itself contains a stub would then recurse without
+    # bound. Collect, then expand.
+    stubs = []
+    for dirpath, _dirnames, filenames in os.walk(dest, followlinks=False):
+        for fn in filenames:
+            if _looks_like_installer_stub(fn):
+                stubs.append((dirpath, fn))
+    for dirpath, fn in stubs:
+        stub = os.path.join(dirpath, fn)
+        inner = os.path.join(dest, f"__inner__{fn}")
+        ok, how = _expand_installer(stub, inner)
+        if True:
+            if not ok:
+                print(f"    scan-artifact: {os.path.basename(path)} wraps installer "
+                      f"{fn!r}, which could NOT be expanded (tried: {how}) — "
+                      f"its payload is a hole, not a pass")
+                return False, f"archive-pass+{how}"
+            print(f"    scan-artifact: {os.path.basename(path)} wraps {fn!r} — "
+                  f"expanded its payload via {how}")
+    return True, "archive-pass"
+
+
+#: A file that NAMES ITSELF an installer stub. Kept as its own predicate so the
+#: narrowness above is testable and cannot quietly widen into "every .exe".
+def _looks_like_installer_stub(name):
+    low = name.lower()
+    if low.endswith((".msi", ".dmg", ".appimage")):
+        return True
+    # Tauri/Inno emit `<Product>_<version>_<arch>-setup.exe`; the DiskSpan
+    # slices beside it are `-setup-N.bin` and are pulled in BY the stub, so they
+    # must NOT be expanded independently (innoextract needs the stub to find
+    # them, and 7z on a raw slice recovers a misdetected fragment).
+    return low.endswith("-setup.exe") or low.endswith("setup.exe")
 
 
 def scan_artifact(paths):
