@@ -489,23 +489,47 @@ fi
 #      upload. An unbound domain is an expected pre-launch state, not corruption.
 echo
 echo "==> verifying storage (S3, authenticated)"
+# This leg used to read ONLY ContentLength — the same measurement the skip above
+# used to make its decision. That is why it could never catch a stale companion
+# file: the skip and its verifier shared one derivation, so they agreed because
+# they were the same check run twice, not because the bytes matched. It now
+# asserts CONTENT wherever content is knowable, which makes it a real detector of
+# the failure that produced EI-20592319474283246.
 STORAGE_BAD=0
 for f in "${ARTIFACTS[@]}"; do
   name="$(basename "$f")"
   local_size="$(stat -c%s "$f")"
-  remote_size="$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")"
-  if [[ "$remote_size" == "$local_size" ]]; then
-    printf '  ✓ %s (%.2f GB)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
-  else
-    echo "  ✗ $name — local ${local_size}B but remote '${remote_size}'" >&2
-    STORAGE_BAD=1
-  fi
+  case "$(remote_state "${KEY_PREFIX}/${TAG}/${name}" "$f")" in
+    identical)
+      printf '  ✓ %s (%.2f GB, content verified)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
+      ;;
+    size-only-match)
+      if (( local_size > SMALL_ARTIFACT_BYTES )); then
+        printf '  ✓ %s (%.2f GB, size only — multipart object)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
+      else
+        echo "  ✗ $name — published at the right size but its content could NOT be verified," >&2
+        echo "    and it is small enough that there is no excuse for not knowing. Treating as bad." >&2
+        STORAGE_BAD=1
+      fi
+      ;;
+    absent)
+      echo "  ✗ $name — nothing published at ${KEY_PREFIX}/${TAG}/${name}" >&2
+      STORAGE_BAD=1
+      ;;
+    *)
+      echo "  ✗ $name — PUBLISHED BYTES DIFFER FROM LOCAL (local ${local_size}B)." >&2
+      echo "    A same-size mismatch here is the stale-companion bug: the published file was" >&2
+      echo "    left behind by a skip. Anyone verifying this artifact against its published" >&2
+      echo "    signature would see what looks exactly like tampering. (EI-20592319474283246)" >&2
+      STORAGE_BAD=1
+      ;;
+  esac
 done
 if [[ "$STORAGE_BAD" != "0" ]]; then
   echo "ERROR: artifacts did not land intact — NOT a domain problem, the upload is broken." >&2
   exit 1
 fi
-echo "  ✓ all artifacts present in the bucket at full size"
+echo "  ✓ all artifacts published and verified against local bytes"
 
 echo
 echo "==> verifying the public read path (${BASE%/*}/<secret>/latest.json)"
