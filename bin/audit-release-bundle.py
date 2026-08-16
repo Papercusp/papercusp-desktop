@@ -561,7 +561,7 @@ def has_owner_name_literal(lits):
     all, and a CLEAN verdict degrades to "I looked for nothing" while still reading as
     proof. Callers that SHIP must fail closed on false.
     """
-    return bool(str(lits.get("build-git-name", "")).strip())
+    return bool(_owner_values(lits, "build-git-name"))
 
 
 def _owner_values(lits, base):
@@ -1176,7 +1176,7 @@ def _high_entropy_pairs():
     lits = identity_literals()
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     return sorted(
-        ((v, REDACTION_BY_KEY.get(k, "redacted")) for k, v in lits.items()
+        ((v, REDACTION_BY_KEY.get(redaction_key(k), "redacted")) for k, v in lits.items()
          if v and not is_low_entropy(v)),
         key=lambda p: -len(p[0]),
     )
@@ -1721,7 +1721,7 @@ def print_identity_literals():
         if val in seen:
             continue
         seen.add(val)
-        red = REDACTION_BY_KEY.get(key, "redacted")
+        red = REDACTION_BY_KEY.get(redaction_key(key), "redacted")
         wb = "1" if needs_word_boundary(val) else "0"
         print(f"{val}\t{red}\t{wb}")
     return 0
