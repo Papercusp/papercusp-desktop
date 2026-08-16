@@ -438,6 +438,37 @@ if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" && "${PAPERCUSP_SINGLE_FILE:-0}" != 
 fi
 shopt -u nullglob
 
+# ── Identity-scan the FINISHED installers (WI-39458) ─────────────────────────
+# The --scan-dir pass above runs BEFORE Inno packs, so it can only ever see the
+# pre-package tree. Two things then escape it, and both shipped in 0.0.17:
+#   • bytes that do not exist yet at scan time — ISCC writes the installer after
+#     the gate has already reported clean;
+#   • the container itself — handed a finished installer, --scan-dir greps it as
+#     opaque bytes and expands ZERO archives, so it reported "✓ CLEAN … 0
+#     archive(s) expanded" on a 2.2GB installer whose payload was in fact dirty.
+# --scan-artifact expands the container (innoextract follows the -setup-N.bin
+# DiskSpan slices from the stub) and FAILS CLOSED if it cannot, so "not
+# inspected" can no longer read as "clean".
+#
+# Deliberately placed BEFORE signing: a leaky installer must never acquire a
+# signature that makes it look endorsed.
+echo "==> identity-scan of the finished installer(s)"
+shopt -s nullglob
+_FINISHED_INSTALLERS=("$OUT_DIR"/*-setup.exe)
+shopt -u nullglob
+if (( ${#_FINISHED_INSTALLERS[@]} == 0 )); then
+  fail "no *-setup.exe in $OUT_DIR to scan — packing produced nothing, or OUT_DIR is wrong"
+fi
+set +e
+python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_FINISHED_INSTALLERS[@]}"
+_artifact_rc=$?
+set -e
+if [[ $_artifact_rc -eq 2 ]]; then
+  fail "finished-installer identity audit COULD NOT CHECK — it did NOT find a leak. Either no owner-name literal resolved (export PAPERCUSP_RELEASE_OWNER_NAME), or the installer could not be expanded (innoextract missing, or Inno emitted a format it cannot read). Refusing to publish bytes nobody read."
+elif [[ $_artifact_rc -ne 0 ]]; then
+  fail "finished Windows installer carries sensitive identity (see scan above) — refusing to sign or publish it"
+fi
+
 # ── Sign the setup.exe(s): Authenticode (cert-conditional) THEN the host-side
 # updater .sig (ed25519/minisign) that the shipped auto-updater verifies.
 echo "==> signing installers"

@@ -371,7 +371,17 @@ make_updater() { # $1=app $2=productName
   local app="$1" name="$2"
   local tgz="$OUT_BUNDLE/macos/$name.app.tar.gz"
   echo "    updater: $name.app.tar.gz (+ .sig)"
-  ( cd "$(dirname "$app")" && tar czf "$tgz" "$name.app" ) || fail "tar of $name.app failed"
+  # --owner=0 --group=0 --numeric-owner is LOAD-BEARING (WI-39458): without it tar
+  # stamps the BUILDING USER's account name into every member's uid/gid NAME
+  # fields, and this tarball ships. Those fields are metadata — not a member's
+  # payload, not a member's path — so the identity gate's content grep could not
+  # see them; it now reads uname/gname too, which would red this build rather than
+  # let the leak through. Fix it here, at the producer. Same change as
+  # embedded-postgres-server/bin/build-seed.mjs and the same convention
+  # stage-source-tree.sh has always used for source.tar.zst.
+  ( cd "$(dirname "$app")" \
+      && tar --owner=0 --group=0 --numeric-owner -czf "$tgz" "$name.app" ) \
+    || fail "tar of $name.app failed"
   # Strip the two env vars a newer tauri CLI rejects alongside --private-key-path.
   ( cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
       npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$tgz" >/dev/null ) \
