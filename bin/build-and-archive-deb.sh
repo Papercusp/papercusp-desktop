@@ -148,7 +148,14 @@ if [[ ! -f "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" ]]; then
   echo "" >&2
   exit 8
 fi
-SIDECAR_SQL_COUNT="$(find "$DESKTOP_DIR/src-tauri/sidecar/db-sql" -maxdepth 1 -iname '*.sql' 2>/dev/null | wc -l | tr -d ' ')"
+SIDECAR_SQL_COUNT=0
+if [[ -d "$DESKTOP_DIR/src-tauri/sidecar/db-sql" ]]; then
+  # Guarded behind the -d check above: under `set -euo pipefail`, `find` on a
+  # NONEXISTENT dir exits 1, and pipefail propagates that through `| wc -l | tr`
+  # into this assignment — which set -e then treats as a script-ending failure,
+  # silently, with none of this guard's own FATAL messaging ever printed.
+  SIDECAR_SQL_COUNT="$(find "$DESKTOP_DIR/src-tauri/sidecar/db-sql" -maxdepth 1 -iname '*.sql' 2>/dev/null | wc -l | tr -d ' ')"
+fi
 if [[ "${SIDECAR_SQL_COUNT:-0}" -eq 0 ]]; then
   echo "" >&2
   echo "FATAL: PLACEHOLDER SIDECAR — src-tauri/sidecar/db-sql/ has no *.sql files." >&2
