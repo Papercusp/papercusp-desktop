@@ -1122,6 +1122,26 @@ def _expand_tar_memberwise(path, dest):
     extractall never had, because the scan greps file CONTENTS and a materialised
     directory name is not content.
 
+    THE MANIFEST MUST CARRY OWNERSHIP, NOT JUST PATHS (WI-39458, MEASURED).
+    `tar` stamps the BUILDING USER's name into every member's uid/gid NAME fields
+    (`uname`/`gname`) unless told otherwise, and those fields are metadata: they
+    are not any member's payload and not any member's path, so neither the
+    content grep nor the name manifest could ever see them. Measured 2026-08-16
+    on a PGDATA-shaped fixture whose contents were clean: this gate expanded the
+    archive (`1 archive(s) expanded and scanned` — NOT a suffix-list miss) and
+    printed `✓ CLEAN` exit 0, while `tar -tv` showed the build-box username on
+    every member. The paired control — the SAME archive shape with the SAME
+    literal moved into a member's CONTENT — failed correctly, which is what makes
+    this a blind spot in the manifest rather than a weak literal set.
+
+    It bites COMPRESSED tars specifically. In a plain `.tar` the header bytes are
+    on disk in the clear, so the raw `grep -a` pass already reads them; gzip/zstd
+    /xz hide them, and those are exactly the tars that ship (`db-seed.tar.gz`,
+    `papercup-runtime.tar.gz`). The real leak this caught was `db-seed.tar.gz`,
+    now also fixed at source in embedded-postgres-server/bin/build-seed.mjs —
+    both halves are kept deliberately, because a source fix protects the archives
+    we build and this one protects every archive we merely SHIP.
+
     Returns False when a payload genuinely cannot be read — unknown is not absent.
     """
     os.makedirs(dest, exist_ok=True)
@@ -1131,6 +1151,18 @@ def _expand_tar_memberwise(path, dest):
             names.append(member.name)
             if member.linkname:
                 names.append(member.linkname)
+            # Ownership NAMES (see the docstring). Numeric uid/gid are deliberately
+            # NOT recorded: an integer cannot carry an identity literal, and
+            # emitting them would only add noise to a manifest that is grepped.
+            if member.uname:
+                names.append(member.uname)
+            if member.gname:
+                names.append(member.gname)
+            # PAX headers are free-form key/value metadata (`tar --xattrs`, ACLs,
+            # SCHILY.* records). Same argument as uname/gname: metadata, greppable
+            # by nothing else, and a natural landing spot for a build path.
+            for k, v in (member.pax_headers or {}).items():
+                names.append(f"{k}={v}")
             if not member.isfile():
                 continue
             src = tf.extractfile(member)
