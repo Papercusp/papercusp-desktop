@@ -356,6 +356,54 @@ else
     bad "live-federation-gate's .deb repack no longer consults local_matrix_due — the attestation wall will starve the local-matrix leg of --deb, and it will die on the staleness guard after provisioning frames + evicting 24 cores (EI-20580419609576585)"
   fi
 fi
+# EI-20578660332729593: local-matrix.sh must validate every cheap host-side precondition
+# BEFORE the first state-creating step. Three inputs — the sidecar node binary, the .deb, and
+# a frame's gh token — were each in turn discovered missing only AT THEIR POINT OF USE, every
+# time after the frame image was built, containers provisioned and 24 exclusive host cores
+# evicted, having executed ZERO scenarios. The first two were patched with their own bespoke
+# earlier checks; this guard defends the CLASS fix (one preflight covering all of them) so the
+# next such input does not become a fourth point-fix.
+# Anchored to the ORDERING PROPERTY — the preflight call must precede every state-creating step
+# by line number — not to the preflight's wording, so a rewritten but correctly-placed preflight
+# passes and one relocated below provisioning fails.
+lm_file="$DIR/../local-matrix.sh"
+pf_call_ln="$(grep -n 'preflight_host_preconditions || exit 1' "$lm_file" | head -1 | cut -d: -f1)"
+first_state_ln=""
+for _pat in 'docker network create' 'docker build -q -t "\$IMAGE_TAG"' 'docker run -d --name "\$CN_A"'; do
+  _ln="$(grep -n "$_pat" "$lm_file" | head -1 | cut -d: -f1)"
+  [ -n "$_ln" ] || continue
+  if [ -z "$first_state_ln" ] || [ "$_ln" -lt "$first_state_ln" ]; then first_state_ln="$_ln"; fi
+done
+if [ -z "$pf_call_ln" ] || [ -z "$first_state_ln" ]; then
+  bad "local-matrix.sh: cannot locate the host preflight (line='$pf_call_ln') or the first state-creating step (line='$first_state_ln') — the EI-20578660332729593 ordering guard can verify nothing"
+elif [ "$pf_call_ln" -ge "$first_state_ln" ]; then
+  bad "local-matrix.sh runs its host preflight at line $pf_call_ln, AT OR BELOW the first state-creating step at line $first_state_ln — a missing sidecar/.deb/gh-token will again surface only after provisioning + 24-core eviction (EI-20578660332729593)"
+else
+  ok "local-matrix.sh validates host preconditions (line $pf_call_ln) before any state-creating step (line $first_state_ln) (EI-20578660332729593)"
+fi
+# Class coverage: the preflight must still check all three members, or it has decayed back
+# toward point-fixes. `case` rather than a `grep -q` pipe on purpose — an early-exiting pipe
+# consumer can report a false absence under pipefail (repo convention).
+pf_body="$(sed -n '/^preflight_host_preconditions() {/,/^}/p' "$lm_file")"
+missing_cover=""
+case "$pf_body" in *'sidecar/bin/node'*) : ;; *) missing_cover="$missing_cover sidecar-node" ;; esac
+case "$pf_body" in *'default_deb'*)      : ;; *) missing_cover="$missing_cover deb" ;; esac
+case "$pf_body" in *'gh auth token'*)    : ;; *) missing_cover="$missing_cover gh-token" ;; esac
+if [ -z "$missing_cover" ]; then
+  ok "local-matrix.sh's host preflight covers the whole precondition class (sidecar node, .deb, gh identities)"
+else
+  bad "local-matrix.sh's host preflight no longer checks:$missing_cover — the class fix has decayed back toward point-fixes (EI-20578660332729593)"
+fi
+# The preflight probes a gh identity by name, so its default must track the one the run will
+# actually register; a silent drift would validate a user nobody uses and skip the one that fails.
+lm_b_default="$(grep -o 'P_B_USER:-[A-Za-z0-9_-]*' "$lm_file" | head -1)"
+gate_b_default="$(grep -o 'P_B_USER:-[A-Za-z0-9_-]*' "$gate_file" | head -1)"
+if [ -n "$lm_b_default" ] && [ "$lm_b_default" = "$gate_b_default" ]; then
+  ok "local-matrix.sh's preflight frame-b identity default tracks live-federation-gate.sh (\${$lm_b_default})"
+else
+  bad "local-matrix.sh's preflight frame-b identity default ('$lm_b_default') has drifted from live-federation-gate.sh ('$gate_b_default') — the preflight would clear a gh user the run never registers while missing the one that aborts it (EI-20578660332729593)"
+fi
+
 if grep -q 'Papercusp\\ GUI_' "$gate_file" && grep -q 'Papercusp\\ GUI_' "$matrix_file"; then
   ok "live federation deb discovery includes the current 'Papercusp GUI' artifact name"
 else

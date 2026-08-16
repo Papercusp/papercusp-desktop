@@ -234,14 +234,29 @@ _warn_if_deb_stale() {
     [ -n "$t" ] && [ "$t" -gt "$newest_ts" ] 2>/dev/null && newest_ts="$t"
   done
   if [ -n "$newest_ts" ] && [ "$newest_ts" -gt "$deb_ts" ] 2>/dev/null; then
-    local age_days=$(( (newest_ts - deb_ts) / 86400 ))
+    # Render the delta in a unit that can never round to zero. This used to be a
+    # bare `/ 86400`, which printed the self-refuting "~0d OLDER than the newest
+    # source commit" for every sub-day staleness — i.e. exactly the common case
+    # (a .deb built this morning against an afternoon commit), and precisely when
+    # the reader most needs to know HOW stale. `newest_ts -gt deb_ts` already
+    # holds here, so age_secs >= 1 and the cascade always yields a non-zero unit.
+    local age_secs=$(( newest_ts - deb_ts )) age_human
+    if [ "$age_secs" -ge 86400 ]; then
+      age_human="$(( age_secs / 86400 ))d$(( (age_secs % 86400) / 3600 ))h"
+    elif [ "$age_secs" -ge 3600 ]; then
+      age_human="$(( age_secs / 3600 ))h$(( (age_secs % 3600) / 60 ))m"
+    elif [ "$age_secs" -ge 60 ]; then
+      age_human="$(( age_secs / 60 ))m"
+    else
+      age_human="${age_secs}s"
+    fi
     if [ "${PCUSP_ALLOW_STALE_DEB:-0}" = "1" ]; then
-      warn "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
+      warn "default_deb() picked '$deb' — its mtime is ~${age_human} OLDER than the newest" \
            "source commit touching the bundle inputs, so it may be missing a landed fix." \
            "Continuing anyway (PCUSP_ALLOW_STALE_DEB=1 — deliberate regression-test override)." \
            "(WI-1334/Brief-8, 2026-07-02; EI-18160721229588594.)"
     else
-      die "default_deb() picked '$deb' — its mtime is ~${age_days}d OLDER than the newest" \
+      die "default_deb() picked '$deb' — its mtime is ~${age_human} OLDER than the newest" \
           "source commit touching the bundle inputs, so it may be missing a landed fix." \
           "REFUSING to silently continue on a possibly-stale artifact (EI-18160721229588594 —" \
           "a WARN alone was reliably missed in a long boot log, burning full soak runs on the" \
