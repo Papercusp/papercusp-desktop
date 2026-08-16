@@ -31,9 +31,33 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 
+/**
+ * A SYNTHETIC owner name, asserted for every AUDIT invocation below.
+ *
+ * `--scan-dir` REFUSES TO CERTIFY (exit 2) unless an owner-name literal is
+ * ASSERTED via this env var: `has_owner_name_literal` deliberately ignores git,
+ * because git names the COMMITTER and on an automated build box that is not the
+ * owner. The refusal is correct and is a PRECONDITION of the certify path — it
+ * has nothing to do with the archive-traversal behaviour measured here, so the
+ * value is supplied rather than inherited from whatever identity the box carries.
+ *
+ * Applied to `--identity-literals` TOO, not only `--scan-dir`: an explicit value
+ * REPLACES the whole `build-git-name` class rather than adding to it, so a bare
+ * enumeration and an asserted scan would disagree about which literals exist —
+ * and `identityLiteral()` below picks the very value the scan is expected to hunt.
+ *
+ * Must stay SYNTHETIC: a real identity in tracked source is the exact leak this
+ * gate exists to prevent.
+ */
+const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
+const AUDIT_ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: SYNTHETIC_OWNER };
+
 /** A real high-entropy identity literal, from the gate's OWN source of truth. */
 function identityLiteral() {
-  const r = spawnSync('python3', [AUDIT, '--identity-literals'], { encoding: 'utf8' });
+  const r = spawnSync('python3', [AUDIT, '--identity-literals'], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
   assert.equal(r.status, 0, `--identity-literals failed: ${r.stderr}`);
   for (const line of r.stdout.split('\n')) {
     const value = line.split('\t')[0];
@@ -44,7 +68,10 @@ function identityLiteral() {
 }
 
 function scanDir(dir) {
-  return spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8' });
+  return spawnSync('python3', [AUDIT, '--scan-dir', dir], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
 }
 
 function fixture(name) {
