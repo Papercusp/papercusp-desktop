@@ -47,6 +47,8 @@ Exit 0 clean · 1 findings (build MUST fail) · 2 unscannable (also fatal — an
 unscannable bundle is not a clean one). Never prints a secret VALUE.
 
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
+        audit-release-bundle.py --scan-dir <assembled-tree>...
+        audit-release-bundle.py --scan-artifact <finished-installer>...
 """
 import fnmatch
 import os
