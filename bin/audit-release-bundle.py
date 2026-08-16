@@ -504,6 +504,12 @@ REDACTION_BY_KEY = {
 # so we can search for it would BE the leak, committed to git forever.
 OWNER_NAME_ENV = "PAPERCUSP_RELEASE_OWNER_NAME"
 
+# The owner's EMAIL, same contract as the name. Needed because — unlike the TS scrub,
+# which catches any address by SHAPE via IDENTITY_PATTERNS — this audit has no shape rule
+# for email: `build-git-email` is its ONLY email detection. So dropping an automation
+# address below without offering this would silently zero out the email class entirely.
+OWNER_EMAIL_ENV = "PAPERCUSP_RELEASE_OWNER_EMAIL"
+
 # Git identities belonging to AUTOMATION rather than to a person. Mirrors
 # AUTOMATION_NAME_RE in release-content-scrub.ts — keep the two in step.
 AUTOMATION_NAME_RE = re.compile(
@@ -557,14 +563,32 @@ def identity_literals():
             # invisible. Dropping it makes the gap loud, and main() fails closed on it.
             if key == "build-git-name" and looks_like_automation_identity(v):
                 continue
+            # The EMAIL class, same rule, and it fails the OPPOSITE way — which is how it
+            # was found. This box's user.email is the git-sync bot's noreply address, and
+            # that exact string is ALSO a hardcoded public constant in the project's own
+            # source (run-git-sync.ts's committer identity), which vite bundles into
+            # apps/operator-vite/dist. So the "private box identity" oracle collided with a
+            # deliberate public constant and the gate could never pass: a permanent FALSE
+            # POSITIVE, where the name class was a permanent FALSE NEGATIVE. One cause —
+            # the box's git identity repointed at shared automation — two opposite failures.
+            #
+            # Redacting a bot's public noreply address protects nobody: it is in every
+            # commit on the public repo by construction. Do NOT "fix" this by allowlisting
+            # the address or by excluding the dist directory it happened to surface in —
+            # the constant lives in SOURCE and will reappear in any other build output.
+            if key == "build-git-email" and looks_like_automation_identity(v):
+                continue
             lits[key] = v
         except Exception:
             pass
-    # An explicit owner name outranks whatever the box guesses (CI, a container, or a
-    # box whose git identity an automation has taken over).
+    # Explicit answers outrank whatever the box guesses (CI, a container, or a box whose
+    # git identity an automation has taken over). Read at run time, never stored.
     explicit_owner = os.environ.get(OWNER_NAME_ENV, "").strip()
     if explicit_owner:
         lits["build-git-name"] = explicit_owner
+    explicit_email = os.environ.get(OWNER_EMAIL_ENV, "").strip()
+    if explicit_email:
+        lits["build-git-email"] = explicit_email
     return lits
 
 
