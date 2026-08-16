@@ -523,6 +523,35 @@ def looks_like_automation_identity(value):
     return bool(AUTOMATION_NAME_RE.search(value.strip()))
 
 
+# An ADDRESS needs its own test, and finding that out cost a wrong fix: AUTOMATION_NAME_RE
+# anchors on [-_ ] boundaries, but in a `<user>@users.noreply.github.com` form the
+# separators are DOTS, so `noreply` never matched and the address sailed through unchanged.
+# (The first attempt at this fix shipped that regex, and the scan still exited 1.)
+#
+# Deliberately NOT solved by adding `.`/`@` to that name regex: widening it would start
+# eating real people (`alice.service@…` would match `service` between a dot and an at-sign)
+# and a false DROP on the email class is a silent loss of coverage — the failure direction
+# this whole item is about. So: a targeted test for the actual conventions automation
+# addresses use, leaving human-name matching untouched.
+AUTOMATION_EMAIL_RE = re.compile(
+    r"(^|[-_.+])(no-?reply|bot|ci|build|actions|automation|daemon|jenkins|dependabot|renovate)([-_.+]|@)"
+    r"|\bnoreply\b"
+    r"|users\.noreply\.github\.com$"
+    r"|\[bot\]",
+    re.I,
+)
+
+
+def looks_like_automation_email(value):
+    """True when an address belongs to automation rather than to the human owner.
+
+    A bot's public noreply address is not a private identity: it is in every commit on the
+    public repo by construction, so redacting it protects nobody while guaranteeing a
+    permanent false positive wherever the project legitimately hardcodes it.
+    """
+    return bool(AUTOMATION_EMAIL_RE.search(value.strip()))
+
+
 def has_owner_name_literal(lits):
     """Can this literal set actually detect the owner's NAME?
 
@@ -576,7 +605,7 @@ def identity_literals():
             # commit on the public repo by construction. Do NOT "fix" this by allowlisting
             # the address or by excluding the dist directory it happened to surface in —
             # the constant lives in SOURCE and will reappear in any other build output.
-            if key == "build-git-email" and looks_like_automation_identity(v):
+            if key == "build-git-email" and looks_like_automation_email(v):
                 continue
             lits[key] = v
         except Exception:
