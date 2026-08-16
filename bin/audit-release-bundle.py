@@ -496,6 +496,39 @@ REDACTION_BY_KEY = {
 }
 
 
+# ── The owner's NAME when git can no longer supply it ────────────────────────
+# DELIBERATELY the same variable the TS site gate reads
+# (apps/operator/lib/release/release-content-scrub.ts, OWNER_NAME_ENV): two gates
+# guarding one release must not need two different answers to the same question.
+# Read at run time and never stored — writing the owner's name into a source file
+# so we can search for it would BE the leak, committed to git forever.
+OWNER_NAME_ENV = "PAPERCUSP_RELEASE_OWNER_NAME"
+
+# Git identities belonging to AUTOMATION rather than to a person. Mirrors
+# AUTOMATION_NAME_RE in release-content-scrub.ts — keep the two in step.
+AUTOMATION_NAME_RE = re.compile(
+    r"(^|[-_ ])(agent|bot|ci|runner|automation|service|actions|daemon|noreply)([-_ ]|$)|\[bot\]",
+    re.I,
+)
+
+
+def looks_like_automation_identity(value):
+    """True when a git identity is a machine's, not a person's."""
+    return bool(AUTOMATION_NAME_RE.search(value.strip()))
+
+
+def has_owner_name_literal(lits):
+    """Can this literal set actually detect the owner's NAME?
+
+    The name is the one identity class with NO SHAPE to fall back on. A home path or
+    an email is still caught structurally even when no literal knows it; a bare first
+    name is only ever a literal. So when this is false the scan cannot see the name at
+    all, and a CLEAN verdict degrades to "I looked for nothing" while still reading as
+    proof. Callers that SHIP must fail closed on false.
+    """
+    return bool(str(lits.get("build-git-name", "")).strip())
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
@@ -515,10 +548,23 @@ def identity_literals():
         try:
             v = subprocess.run(["git", "config", "--get", cfg], capture_output=True,
                                text=True, timeout=5).stdout.strip()
-            if v:
-                lits[key] = v
+            if not v:
+                continue
+            # EI-20583328178472869: `user.name` became the git-sync bot, so this gate
+            # spent every build hunting a bot's name — useless — while the owner's real
+            # name went unhunted and the bundle still printed CLEAN. Recording the bot
+            # would ALSO leave has_owner_name_literal() true, so the blindness would stay
+            # invisible. Dropping it makes the gap loud, and main() fails closed on it.
+            if key == "build-git-name" and looks_like_automation_identity(v):
+                continue
+            lits[key] = v
         except Exception:
             pass
+    # An explicit owner name outranks whatever the box guesses (CI, a container, or a
+    # box whose git identity an automation has taken over).
+    explicit_owner = os.environ.get(OWNER_NAME_ENV, "").strip()
+    if explicit_owner:
+        lits["build-git-name"] = explicit_owner
     return lits
 
 
@@ -1627,6 +1673,31 @@ def main():
     lits = identity_literals()
     print(f"==> auditing {os.path.basename(bundle)}")
     print(f"    identity of this build box: {', '.join(sorted(lits)) or '(none resolved)'}")
+
+    # FAIL CLOSED when the owner's NAME cannot be resolved (EI-20583328178472869).
+    #
+    # This audit's whole value is that a CLEAN verdict is EVIDENCE. Without a name
+    # literal it cannot hunt the one identity class with no shape to fall back on, so
+    # "✓ CLEAN" degrades to "I looked for nothing" while still reading as proof to the
+    # human and to the publish script's `|| exit`. That is strictly worse than no gate:
+    # it turns an unverified bundle into an apparently-verified one.
+    #
+    # The KNOWN_SENSITIVE_IDENTITIES denylist below does NOT cover this: it carries the
+    # owner's github handle and some VM logins, but no name entry — so with git blind,
+    # nothing whatsoever hunts the bare first name that `needs_word_boundary` exists for.
+    #
+    # Exit 2 (cannot check), never 1 (found leaks): a caller must be able to tell a blind
+    # gate from a clean one.
+    if not has_owner_name_literal(lits):
+        print(
+            "    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this scan\n"
+            "      cannot detect the owner's name in the bundle and a CLEAN verdict would\n"
+            "      be meaningless.\n"
+            f"      Cause: `git config user.name` is unset or belongs to an automation.\n"
+            f"      Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
+            file=sys.stderr,
+        )
+        return 2
     # Cross-box blind-spot backstop (WI-4419): hunt the KNOWN leaked identities on
     # EVERY build, not just the ones belonging to the box running this scan.
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
