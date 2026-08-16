@@ -1,5 +1,13 @@
 # Rust build outputs
-src-tauri/target/
+#
+# NO TRAILING SLASH, deliberately (WI-39462). `src-tauri/target/` matches a
+# DIRECTORY only — it does NOT match a SYMLINK standing in for that directory,
+# which is how this box relocates the 193GB cargo target dir onto /mnt/data. So
+# the link itself was never ignored, and git-sync swept it into the index on
+# 2026-07-08 (5fd810f8). A symlink's git blob IS its target string, so that
+# committed an absolute build-machine path — the same leak class as the two
+# docs-viewer project links. Dropping the slash covers both shapes.
+src-tauri/target
 
 # Seed corestore reuse caches (PAPERCUSP_SEED_REUSE_CORESTORE=1 build workaround
 # writes ~100MB+ blobs that git-sync must never sweep — >100MB rejects the push)
