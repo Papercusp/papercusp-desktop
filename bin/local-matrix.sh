@@ -501,6 +501,113 @@ if command -v ufw >/dev/null; then
   fi
 fi
 
+# ── host preconditions: validate the whole CLASS before anything expensive ────
+# EI-20578660332729593. Three separate host-side inputs have each, in turn, been
+# discovered missing only AT THEIR POINT OF USE — every time after this script had
+# already built the frame image, provisioned containers, and promoted a cgroup-v2
+# exclusive partition (24 cores evicted off the host fleet):
+#   • the sidecar node binary — checked at the DHT start, ~130 lines below
+#   • the .deb                — resolved inside deb-hetzner-matrix.sh, post-exec
+#   • a frame's gh token      — rig_set_identity (lib/deb-hetzner-rig.sh:683),
+#                               which runs only once the matrix is already going
+# Each of the first two was previously patched with its own bespoke earlier check.
+# This is deliberately NOT a fourth point-fix: the recurring defect is not any one
+# missing input, it is the CLASS — "a cheap, side-effect-free host-side
+# precondition is discovered late, after the expensive and destructive steps".
+# Anything the run will need that can be checked with no side effects belongs
+# HERE, not at its point of use.
+#
+# ORDERING CONTRACT: this must stay ABOVE the first state-creating step — the ssh
+# keypair, docker network, frame image build, provisioning and core eviction all
+# follow it. Modes that provision nothing never reach it (--list execs above,
+# --teardown exits above). federation-asserts.selftest.sh asserts that ordering
+# by line number, so moving this below provisioning fails the selftest rather
+# than silently restoring the bug.
+preflight_host_preconditions() {
+  local missing=0 u seen="" tok dht_reused=0 common_sh deb_out deb_rc
+  local sidecar_node="$DESKTOP_DIR/src-tauri/sidecar/bin/node"
+
+  # (1) sidecar node binary — needed to start the containerized testnet DHT. A
+  #     --reuse run that finds its DHT container already up never starts one, so
+  #     mirror exactly that condition rather than over-requiring the binary.
+  if [ "$REUSE" = 1 ] && [ -f "$STATE_FILE" ] \
+     && [ -n "$(docker ps -q -f "name=^${NET}-dht\$" 2>/dev/null)" ]; then
+    dht_reused=1
+  fi
+  if [ "$dht_reused" = 0 ] && [ ! -x "$sidecar_node" ]; then
+    echo "FATAL(preflight): sidecar node binary missing at $sidecar_node" >&2
+    echo "  build it once: bin/build-desktop-sidecar.sh" >&2
+    missing=$((missing + 1))
+  fi
+
+  # (2) the .deb the frames install. An explicit --deb= is the caller's own
+  #     choice and only has to EXIST (default_deb's staleness guard deliberately
+  #     does not apply to it). An implicit pick is resolved by default_deb(),
+  #     which also enforces that staleness guard — run it HERE so its verdict
+  #     lands before provisioning instead of after. The subshell is load-bearing:
+  #     common.sh sets `set -euo pipefail` at top level and would otherwise leak
+  #     those flags into this script.
+  common_sh="$DESKTOP_DIR/scripts/linux-test-vm/lib/common.sh"
+  if [ -n "$DEB" ]; then
+    if [ ! -r "$DEB" ]; then
+      echo "FATAL(preflight): --deb=$DEB is not a readable file" >&2
+      missing=$((missing + 1))
+    fi
+  elif [ ! -r "$common_sh" ]; then
+    echo "FATAL(preflight): cannot resolve the default .deb — $common_sh is unreadable" >&2
+    missing=$((missing + 1))
+  else
+    deb_out="$(bash -c 'source "$1" >/dev/null 2>&1 || exit 97; default_deb' _ "$common_sh" 2>&1)" && deb_rc=0 || deb_rc=$?
+    if [ "$deb_rc" = 97 ]; then
+      echo "FATAL(preflight): could not source $common_sh to resolve the default .deb" >&2
+      missing=$((missing + 1))
+    elif [ "$deb_rc" != 0 ]; then
+      echo "FATAL(preflight): no usable .deb — default_deb() refused (exit $deb_rc):" >&2
+      printf '%s\n' "$deb_out" | sed 's/^/  | /' >&2
+      missing=$((missing + 1))
+    fi
+  fi
+
+  # (3) a gh token for EVERY identity this run will register. Each scenario calls
+  #     rig_set_identity a "$P_A_USER" / b "$P_B_USER" (and c "$P_C_USER" on a
+  #     3-frame run), and that helper aborts the run when a token is missing. The
+  #     defaults below MUST match the ones those scripts use — the selftest
+  #     asserts exactly that, so renaming a default there fails the guard instead
+  #     of silently un-checking an identity here. Frames may legitimately share
+  #     one gh user (a real multi-device topology), so dedupe before probing.
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "FATAL(preflight): gh is not installed — no frame identity can be resolved" >&2
+    missing=$((missing + 1))
+  else
+    local frame_users=("${P_A_USER:-papercupai}" "${P_B_USER:-aviynw}")
+    if [ "$FRAMES" = 3 ]; then frame_users+=("${P_C_USER:-aviynw}"); fi
+    for u in "${frame_users[@]}"; do
+      case " $seen " in *" $u "*) continue ;; esac
+      seen="$seen $u"
+      tok="$(gh auth token --user "$u" 2>/dev/null || true)"
+      if [ -z "$tok" ]; then
+        echo "FATAL(preflight): no gh token for '$u' — rig_set_identity would abort this run mid-flight (lib/deb-hetzner-rig.sh:683)" >&2
+        echo "  fix: gh auth login -h github.com   (verify with: gh auth token --user $u)" >&2
+        missing=$((missing + 1))
+      fi
+    done
+  fi
+
+  if [ "$missing" != 0 ]; then
+    echo "FATAL(preflight): $missing host precondition(s) unmet — refusing to build the frame image, provision containers or evict cores for a run that cannot reach a scenario (EI-20578660332729593)." >&2
+    echo "  PCUSP_RIG_SKIP_PREFLIGHT=1 proceeds anyway — i.e. chooses to discover the miss after the cores are gone." >&2
+    return 1
+  fi
+  log "preflight: host preconditions OK (sidecar node, .deb, gh identities)"
+  return 0
+}
+
+if [ "${PCUSP_RIG_SKIP_PREFLIGHT:-0}" = 1 ]; then
+  log "WARN: PCUSP_RIG_SKIP_PREFLIGHT=1 — host preconditions NOT checked; a missing one will now surface AFTER provisioning and core eviction"
+else
+  preflight_host_preconditions || exit 1
+fi
+
 # ── ssh keypair (the frames' root login — rig contract: ssh -i KEY root@ip) ──
 if [ ! -f "$SSH_KEY" ]; then
   log "generate rig ssh key $SSH_KEY"
