@@ -63,6 +63,99 @@ test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () 
   }
 });
 
+test('WI-39357: repacked deb with paths >100 chars installs via `dpkg --unpack` (not just `dpkg-deb -x`)', () => {
+  // Regression guard for WI-39357. Prior to the fix, dedupe-env-sidecar-tar.py
+  // opened its output stream in tarfile.PAX_FORMAT, which emits type-'x' extended
+  // headers for any entry whose path exceeds the USTAR 100-char limit — the
+  // packaged Papercusp deb hits that on every deep sidecar path. libdpkg's
+  // install/--unpack walker rejects PAX 'x' ("unsupported PAX tar header type
+  // 'x'"), refusing every end-user install of the 0.0.17 debs. But `dpkg-deb -x`,
+  // `dpkg -x`, and `dpkg-deb --fsys-tarfile | tar tv` TOLERATE PAX 'x' — so a
+  // fixture-only extraction test misses the regression. This test exercises the
+  // exact strict path with a path long enough to force the header format matter,
+  // AND greps the produced tar for PAX-x metadata as a belt-and-braces check.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-pax-regression-'));
+  try {
+    const pkg = path.join(tmp, 'pkg');
+    // Sidecar path deliberately >100 chars to force USTAR overflow → PAX/GNU headers.
+    const longDeepDir = path.join(
+      'usr', 'lib', 'Papercusp GUI', 'sidecar',
+      'deeply', 'nested', 'path', 'that', 'exceeds', 'one', 'hundred',
+      'characters', 'for', 'sure', 'testing', 'paxrejection',
+    );
+    const longStagingDir = path.join(
+      'usr', 'lib', 'Papercusp GUI', 'sidecar', 'env-sidecars', 'staging',
+      'deeply', 'nested', 'path', 'that', 'exceeds', 'one', 'hundred',
+      'characters', 'for', 'sure', 'testing', 'paxrejection',
+    );
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, longDeepDir), { recursive: true });
+    fs.mkdirSync(path.join(pkg, longStagingDir), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+      'Package: papercusp-pax-fix-test',
+      'Version: 1.0.0',
+      'Architecture: all',
+      'Maintainer: WI-39357 <test@example.invalid>',
+      'Description: PAX header regression fixture',
+      '',
+    ].join('\n'));
+    const payload = 'identical bytes\n';
+    fs.writeFileSync(path.join(pkg, longDeepDir, 'file.txt'), payload);
+    fs.writeFileSync(path.join(pkg, longStagingDir, 'file.txt'), payload);
+
+    const deb = path.join(tmp, 'fixture.deb');
+    run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+    run('bash', [helper, deb], { env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '' } });
+
+    // Belt: the produced tar must not contain PAX-x header markers.
+    const tarBytes = spawnSync(
+      'bash',
+      ['-c', `ar p "${deb}" data.tar.xz | xz -dc | head -c $((256 * 1024))`],
+      { encoding: 'buffer' },
+    ).stdout ?? Buffer.alloc(0);
+    const tarPreview = tarBytes.toString('latin1');
+    assert.equal(
+      /(PaxHeader|SCHILY\.xattr|paxheader)/.test(tarPreview),
+      false,
+      'repacked tar must not contain PAX extended-header markers (WI-39357 regression: PAX_FORMAT emitted type-x headers that dpkg install-refuses)',
+    );
+
+    // Braces: the strict libdpkg install walker (the exact code path that
+    // refuses the shipped 0.0.17 debs) must accept the repacked deb. Rootless
+    // via --root/--admindir/--force-not-root so this runs in-CI as any user.
+    const dpkgRoot = path.join(tmp, 'dpkgroot');
+    fs.mkdirSync(path.join(dpkgRoot, 'var', 'lib', 'dpkg', 'updates'), { recursive: true });
+    fs.mkdirSync(path.join(dpkgRoot, 'var', 'lib', 'dpkg', 'info'), { recursive: true });
+    fs.mkdirSync(path.join(dpkgRoot, 'var', 'lib', 'dpkg', 'triggers'), { recursive: true });
+    fs.writeFileSync(path.join(dpkgRoot, 'var', 'lib', 'dpkg', 'status'), '');
+    const unpack = spawnSync('dpkg', [
+      `--root=${dpkgRoot}`,
+      `--instdir=${dpkgRoot}`,
+      `--admindir=${path.join(dpkgRoot, 'var', 'lib', 'dpkg')}`,
+      '--force-not-root',
+      '--no-triggers',
+      '--unpack',
+      deb,
+    ], { encoding: 'utf8' });
+    assert.equal(
+      unpack.status,
+      0,
+      `dpkg --unpack must succeed on the repacked deb (WI-39357): ${unpack.stderr || unpack.stdout}`,
+    );
+    // And the extracted tree must include both the long-path files.
+    assert.ok(
+      fs.existsSync(path.join(dpkgRoot, longDeepDir, 'file.txt')),
+      'long-path primary file must be unpacked',
+    );
+    assert.ok(
+      fs.existsSync(path.join(dpkgRoot, longStagingDir, 'file.txt')),
+      'long-path staging hardlink must be unpacked',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 function shellEntrypointsUnder(dir, files = []) {
   if (!fs.existsSync(dir)) return files;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
