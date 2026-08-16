@@ -1318,6 +1318,54 @@ mod macos_ats_tests {
     }
 }
 
+// P-302 (EI-20584279536840151): macOS 15+ gates LOCAL-SUBNET traffic behind the
+// TCC "Local Network" permission, which an app only gets if it declares
+// NSLocalNetworkUsageDescription. Papercusp's whole p2p federation dials peers on
+// the local subnet, so without the key the OS drops every datagram with
+// EHOSTUNREACH — and because dht-rpc sends via udx's fire-and-forget `trySend`,
+// nothing above the socket ever learns. Measured on the two-machine rig: the app's
+// DHT was correctly bootstrapped and retrying (918 requests / 917 timeouts / 0
+// responses) while a standalone process on the SAME host reached the same peer
+// fine, and the app could still reach loopback, itself, and the public internet.
+//
+// The trap this guards is specifically the LOOK-ALIKE key: Info.plist already had
+// `NSAllowsLocalNetworking`, an App Transport Security (HTTP/TLS) setting with no
+// bearing on TCC. Asserting BOTH keys here is deliberate — it is what stops a
+// future editor from "deduplicating" the two as one concern.
+#[cfg(test)]
+mod macos_local_network_tests {
+    const INFO_PLIST: &str = include_str!("../Info.plist");
+
+    #[test]
+    fn info_plist_declares_local_network_usage() {
+        assert!(
+            INFO_PLIST.contains("NSLocalNetworkUsageDescription"),
+            "Info.plist must declare NSLocalNetworkUsageDescription or macOS 15+ \
+             denies ALL local-subnet traffic to the app (EHOSTUNREACH on every \
+             send), silently breaking p2p federation while loopback and public \
+             internet keep working (P-302)"
+        );
+        // The ATS key is NOT a substitute — both must be present, for different reasons.
+        assert!(
+            INFO_PLIST.contains("NSAllowsLocalNetworking"),
+            "NSAllowsLocalNetworking (ATS) must remain alongside \
+             NSLocalNetworkUsageDescription (TCC) — they are different mechanisms"
+        );
+        // A non-empty purpose string is required; macOS shows it in the permission
+        // prompt, and an empty one gets the app rejected at review.
+        let idx = INFO_PLIST
+            .find("NSLocalNetworkUsageDescription")
+            .expect("key presence asserted above");
+        let after = &INFO_PLIST[idx..];
+        let open = after.find("<string>").expect("usage description needs a <string> value");
+        let close = after.find("</string>").expect("usage description <string> must be closed");
+        assert!(
+            close > open + "<string>".len(),
+            "NSLocalNetworkUsageDescription must have a non-empty purpose string"
+        );
+    }
+}
+
 #[cfg(test)]
 mod discovery_tests {
     use std::time::Duration;

@@ -5,6 +5,31 @@
   <key>NSMicrophoneUsageDescription</key>
   <string>Papercusp needs microphone access for voice mode, push-to-talk, and wake-word capture.</string>
 
+  <!-- P-302 / EI-20584279536840151 — macOS LOCAL NETWORK PRIVACY (TCC).
+
+       Papercusp's p2p federation (hyperswarm/hyperdht over UDP) dials PEERS ON
+       THE LOCAL SUBNET. Since macOS 15, an app that initiates local-network
+       traffic must declare this key; without it the system denies that traffic
+       and every send fails with EHOSTUNREACH.
+
+       ⚠ DO NOT confuse this with `NSAllowsLocalNetworking` in the ATS dict
+       below. That key is App Transport Security — an HTTP/TLS policy for the
+       WEBVIEW's plaintext loopback requests. It has NOTHING to do with the TCC
+       local-network permission, despite the near-identical name. Having the ATS
+       key and missing THIS one is exactly the state that cost ~7h of packet
+       archaeology: the DHT was perfectly configured and retrying (918 requests,
+       917 timeouts, 0 responses) while the OS dropped every datagram, and
+       udx's fire-and-forget `trySend` reported no error to any layer above it.
+
+       The denial is precisely scoped, which is what makes it so deceptive:
+       loopback, the host's own address, and the entire PUBLIC internet all
+       still work — only local-subnet peers are unreachable. Inbound-initiated
+       flows are exempt too, so the node still ANSWERS pings while being unable
+       to dial anyone. Guarded by
+       macos_local_network_tests::info_plist_declares_local_network_usage. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Papercusp connects directly to your other devices on this network to sync your workspaces peer-to-peer.</string>
+
   <!-- App Transport Security (WI-1802 — packaged-macOS blank page).
 
        The desktop webview reaches the local operator over PLAINTEXT http on the
