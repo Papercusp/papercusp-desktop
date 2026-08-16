@@ -639,7 +639,10 @@ def identity_coverage_gaps(lits):
     Returns a list of human-readable gaps; empty means the verdict is unqualified.
     """
     gaps = []
-    emails = _owner_values(lits, "build-git-email")
+    # Counts ASSERTED addresses only, for the same reason has_owner_name_literal does: a
+    # git-derived address identifies the committer, and on this box that has twice been an
+    # automation. Counting it would inflate the coverage claim with a value nobody vouched.
+    emails = explicit_owner_values(OWNER_EMAIL_ENV)
     if not emails:
         gaps.append(
             f"EMAIL not covered — no owner-email literal resolved "
