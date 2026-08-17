@@ -256,8 +256,14 @@ end;
 
 { ── Uninstall cleanup (WI-39403) ──────────────────────────────────────────
   Measured on a real 0.0.17 Windows guest: the uninstaller reports exit 0 and
-  removes {app} entirely, but leaves live login-autostart state behind and
-  never touches the multi-GB WSL runtime. Both are fixed below. }
+  removes the install directory entirely, but leaves live login-autostart state
+  behind and never touches the multi-GB WSL runtime. Both are fixed below.
+
+  NOTE FOR EDITORS: a Pascal comment ends at the FIRST closing brace, so an Inno
+  constant written inline here (the app dir, the AppName define) would terminate
+  the comment early and turn the prose into code. Name them in words instead —
+  this exact mistake is what the compile leg of
+  bin/lib/inno-uninstall-cleanup.selftest.sh caught on the first run. }
 
 { THE APP registers login auto-start at RUNTIME — tauri-plugin-autostart 2.5.1
   -> auto-launch 0.5.0, whose windows.rs writes an HKCU **Run VALUE** (not a
@@ -269,7 +275,7 @@ end;
   The value NAME is auto-launch's app_name = PackageInfo.name, which
   tauri-codegen fills from tauri.conf.json productName (context.rs:268-269) and
   which nothing overrides at the init site (main.rs passes None). That is
-  exactly {#AppName}. So this is ROLE-SCOPED by construction: uninstalling
+  exactly the AppName define. So this is ROLE-SCOPED by construction: uninstalling
   "Papercusp GUI" can never disable "Papercusp Server"'s auto-start. Do not
   "simplify" this to the shared binary name papercusp-desktop — that WOULD
   cross the roles. }
@@ -283,8 +289,8 @@ end;
 
 { BELT AND BRACES, NOT AN ADMISSION. A Startup-folder shortcut named after the
   product was OBSERVED surviving an uninstall on a 0.0.17 guest. No Papercusp
-  code creates one — not this script's [Icons] (both entries are
-  {autoprograms}), not windows/hooks.nsh, not the app — so its origin is
+  code creates one — not this script's [Icons] (both entries are Start Menu
+  entries), not windows/hooks.nsh, not the app — so its origin is
   genuinely undetermined and is NOT the autostart mechanism above. Deleting a
   shortcut that bears our product name costs nothing when it is absent, and
   leaving a dangling one is a bad enough end-state to sweep for anyway. }

@@ -130,9 +130,30 @@ PROBE_KEY='HKCU\Software\PapercuspSelftest'
 
 wreg()  { WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg "$@" >/dev/null 2>&1; }
 # Prints the value's data, or nothing when the value is absent.
+# Two things make the naive `awk '$1 == name { print $3 }'` wrong here, and both
+# fail in the direction that reads as "value absent" — i.e. as a PASS for a
+# cleanup that did nothing:
+#   - `wine reg query` emits CRLF, so the last field carries a trailing \r and
+#     every string comparison against it fails;
+#   - the value names under test are the product names, which CONTAIN SPACES
+#     ("Papercusp GUI"), so they span $1..$2 and never equal $1.
+# Match on the name as a prefix of the trimmed line and take everything after
+# the REG_* type column instead.
 rvalue() {
   WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg query "$1" /v "$2" 2>/dev/null \
-    | awk -v v="$2" '$1 == v { for (i = 3; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "") }'
+    | tr -d '\r' \
+    | awk -v name="$2" '
+        {
+          line = $0
+          sub(/^[ \t]+/, "", line)
+          if (index(line, name) == 1) {
+            rest = substr(line, length(name) + 1)
+            if (match(rest, /REG_[A-Z_]+[ \t]+/)) {
+              print substr(rest, RSTART + RLENGTH)
+              exit
+            }
+          }
+        }'
 }
 
 RC=0
@@ -178,10 +199,26 @@ printf 'stub' > "$STARTUP_DIR/$ROLE_NAME.lnk"
 [[ -f "$STARTUP_DIR/$ROLE_NAME.lnk" ]]       || fail "seeding failed: startup shortcut absent before the uninstall"
 
 # ── Run the real uninstaller ─────────────────────────────────────────────────
-UNINST="$(printf '%s' "$TESTPREFIX"/drive_c/users/*/AppData/Local/PapercuspUninstallSelftest/unins000.exe)"
+APPDIR="$(printf '%s' "$TESTPREFIX"/drive_c/users/*/AppData/Local/PapercuspUninstallSelftest)"
+UNINST="$APPDIR/unins000.exe"
 [[ -f "$UNINST" ]] || fail "the harness produced no unins000.exe at $UNINST (install did not complete)"
 WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
   /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/uninstall.log" 2>&1
+
+# AN INNO UNINSTALLER RETURNS BEFORE IT HAS FINISHED. unins000.exe copies itself
+# to %TEMP% and relaunches from there (so it can delete its own directory), and
+# the process we launched exits immediately. Asserting here without waiting reads
+# every not-yet-run cleanup as "the cleanup did not happen" — which is a FALSE
+# FAILURE, and, worse, the same shape would be a false PASS for any assertion
+# phrased as "the value is still present". Wait for the real completion signal:
+# the install directory being gone.
+for _ in $(seq 1 60); do
+  [[ -d "$APPDIR" ]] || break
+  sleep 1
+done
+[[ ! -d "$APPDIR" ]] || fail "the uninstaller did not complete within 60s (install dir still at $APPDIR)"
+# The registry writes happen in usPostUninstall, i.e. after the directory goes.
+sleep 2
 
 # ── Cases 1-4 ────────────────────────────────────────────────────────────────
 [[ -z "$(rvalue "$RUN_KEY" "$ROLE_NAME")" ]] \
