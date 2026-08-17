@@ -10,7 +10,75 @@
 
 PAPERCUSP_SPANNED_SERVER_STUB=""
 PAPERCUSP_SPANNED_SERVER_ZIP=""
+PAPERCUSP_SPANNED_SERVER_ZIP_SIG=""
 PAPERCUSP_SPANNED_SERVER_SLICES=()
+# Every file this normalization PRODUCES, in the order a caller should append them
+# to its artifact array.  Callers use THIS instead of naming the zip directly, so a
+# future additional output cannot be silently dropped by two of three call sites —
+# which is exactly how the zip shipped unsigned (EI-20595279927716716).
+PAPERCUSP_SPANNED_SERVER_OUTPUTS=()
+
+# papercusp_sign_spanned_server_zip <zip> — produce <zip>.sig (Tauri/minisign).
+#
+# WHY THIS EXISTS: signing used to follow the UPDATER pipeline only.  `tauri build`
+# signs what it bundles, so every updater input (.deb/.AppImage/-setup.exe/.app.tar.gz)
+# got a sibling .sig for free — but this zip is assembled by US, after the bundler has
+# run, so nothing ever signed it.  The Server zip is the single largest download the
+# release page offers and it shipped with NO signature in 0.0.16 AND 0.0.17.
+# Signing lives HERE, beside the zip's creation, not in the three callers: a
+# caller-side signing step is the same drift class the normalization helper was
+# extracted to end.
+#
+# BEST-EFFORT BY DESIGN: a keyless dev/CI cut still produces a valid zip — signing is
+# skipped with a warning rather than failing the build.  The POLICY is enforced at
+# publish time by release_artifacts_assert_signatures_present, which is where an
+# unsigned download actually becomes a user-visible defect.
+#
+# Sets PAPERCUSP_SPANNED_SERVER_ZIP_SIG on success; leaves it empty otherwise.
+papercusp_sign_spanned_server_zip() {
+  local zip="$1"
+  PAPERCUSP_SPANNED_SERVER_ZIP_SIG=""
+  [[ -s "$zip" ]] || return 1
+
+  # Resolve the key the same way every other signing call site does.
+  local key="${TAURI_SIGNING_PRIVATE_KEY:-}"
+  if [[ -z "$key" ]]; then
+    local key_path="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
+    [[ -f "$key_path" ]] || {
+      echo "WARNING: [win] no updater signing key (TAURI_SIGNING_PRIVATE_KEY / _PATH / ~/.papercusp/signing/papercusp.key) — leaving $(basename "$zip") UNSIGNED (EI-20595279927716716)" >&2
+      return 1
+    }
+    key="$key_path"
+  fi
+  # WI-3823: `tauri signer sign` accepts ONLY the key CONTENT (base64) in
+  # TAURI_SIGNING_PRIVATE_KEY, while `tauri build` accepts contents OR a path — so a
+  # caller that legitimately exported a PATH breaks only at this call site, after the
+  # multi-GB bundle is already built ("failed to decode base64 secret key: Invalid
+  # symbol 45" — symbol 45 is the '-' in the key's own pathname).  Resolve it here.
+  [[ -f "$key" ]] && key="$(cat "$key")"
+
+  command -v npx >/dev/null 2>&1 || {
+    echo "WARNING: [win] npx unavailable — leaving $(basename "$zip") UNSIGNED (EI-20595279927716716)" >&2
+    return 1
+  }
+
+  rm -f "$zip.sig"
+  # The secret goes via the CLI's own env fallback, NEVER on argv: npx echoes the
+  # resolved command line, which would print the private key into the build log and
+  # expose it in `ps` for the life of the process.
+  if ! TAURI_SIGNING_PRIVATE_KEY="$key" \
+       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+       npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
+         tauri signer sign "$zip" >/dev/null 2>&1 \
+     || [[ ! -s "$zip.sig" ]]; then
+    rm -f "$zip.sig"
+    echo "WARNING: [win] tauri signer sign failed for $(basename "$zip") — leaving it UNSIGNED (EI-20595279927716716)" >&2
+    return 1
+  fi
+
+  PAPERCUSP_SPANNED_SERVER_ZIP_SIG="$zip.sig"
+  return 0
+}
 
 # papercusp_normalize_spanned_server <inno_dir> <version>
 #
@@ -27,7 +95,9 @@ papercusp_normalize_spanned_server() {
   local inno_dir="$1" version="$2" f
   PAPERCUSP_SPANNED_SERVER_STUB=""
   PAPERCUSP_SPANNED_SERVER_ZIP=""
+  PAPERCUSP_SPANNED_SERVER_ZIP_SIG=""
   PAPERCUSP_SPANNED_SERVER_SLICES=()
+  PAPERCUSP_SPANNED_SERVER_OUTPUTS=()
 
   [[ -d "$inno_dir" ]] || return 1
 
