@@ -311,9 +311,16 @@ now_s() { date +%s 2>/dev/null || echo 0; }
 GATE_RUN_START_TS="$(now_s)"
 age_h() { local f="$1"; [ -f "$f" ] || { echo 999999; return; }; echo $(( ( $(now_s) - $(cat "$f" 2>/dev/null || echo 0) ) / 3600 )); }
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$1"; }
-file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK logs are the fallback
+file_ei() { # <title> <body> [conditionKey] — best-effort curl-MCP; the loud echo + $WORK logs are the fallback
+  # $3 (WI-39604): optional work_items:create conditionKey. The server then routes the
+  # filing through the WI-39594 condition upsert: an OPEN item already holding the key is
+  # REFRESHED (newest legs+stamp win) and its id returned, instead of a sibling row being
+  # minted — so dupes can no longer leak across marker-expiry days or leg-set changes while
+  # ONE regression stands. The response carries the incumbent's "id":"WI-…" either way, so
+  # the confirm-grep below is key-agnostic.
   [ "$GATE_NO_FILE" = 1 ] && return 0
-  local resp
+  local resp cond_arg=""
+  [ -n "${3:-}" ] && cond_arg=",\"conditionKey\":$(jstr "$3")"
   local -a auth_hdr=()
   if [ -n "$GATE_SUPERUSER_BEARER" ]; then
     auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
@@ -322,7 +329,7 @@ file_ei() { # <title> <body> — best-effort curl-MCP; the loud echo + $WORK log
   fi
   resp="$(curl -s -m 30 -X POST "$OPERATOR_MCP_URL" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercusp\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]}}}" 2>/dev/null || true)"
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercusp\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]$cond_arg}}}" 2>/dev/null || true)"
   # Verify the filing actually landed (P-013: the 2026-07-03 red filed against harness
   # "papercup" + got an SSE ':stream-open' preamble back and NO work item was created —
   # a silent-miss on the gate's core contract). An SSE body carries the JSON in data: lines,
