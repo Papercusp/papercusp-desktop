@@ -161,6 +161,11 @@ Filename: "{app}\papercusp-desktop.exe"; Flags: nowait; Check: IsUpdaterLaunch
 const
   LegacyUninstallRoot =
     'Software\Microsoft\Windows\CurrentVersion\Uninstall\';
+  { auto-launch (via tauri-plugin-autostart) writes login auto-start HERE. }
+  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  StartupApprovedRunKey =
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
+  SharedWslDistro = 'papercup-runtime';
 
 function UninstallTargetExists(const UninstallString: String): Boolean;
 var
