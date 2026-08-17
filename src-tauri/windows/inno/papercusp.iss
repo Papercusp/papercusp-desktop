@@ -362,12 +362,37 @@ end;
   .papercusp survive. They are user configuration, and preserving them across
   uninstall/reinstall is the conventional and recoverable choice — unlike a
   dangling autostart entry, which is pure breakage. }
+var
+  UninstallCleanupDone: Boolean;
+
+procedure PerformUninstallCleanup;
+begin
+  { Idempotent: the handler below deliberately calls this from two steps. }
+  if UninstallCleanupDone then
+    Exit;
+  UninstallCleanupDone := True;
+  RemoveLoginAutostart;
+  RemoveStartupShortcut;
+  MaybeUnregisterSharedRuntime;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    RemoveLoginAutostart;
-    RemoveStartupShortcut;
-    MaybeUnregisterSharedRuntime;
-  end;
+  { WHY usUninstall AND NOT ONLY usPostUninstall — this is measured, not
+    stylistic. usPostUninstall is the semantically obvious hook and it is the
+    one this originally used, but on the Inno/wine toolchain the build and the
+    selftest run on it NEVER FIRES: a probe whose handler called Inno's own
+    Log() on every step recorded step=0 (usAppMutexCheck) and step=1
+    (usUninstall) and nothing else, and the uninstall log ends mid-teardown
+    right after "Need to restart Windows?". Cleanup hung off usPostUninstall
+    alone therefore silently never ran — the uninstaller still exits 0, which
+    is exactly how the original defect stayed invisible.
+
+    So: do the work at usUninstall, where it is proven to happen, and call
+    again at usPostUninstall for hosts where that step does run. The second
+    call is a no-op via UninstallCleanupDone, which also keeps the WSL prompt
+    from being shown twice. Everything here is an idempotent delete, so the
+    doubled entry point costs nothing. }
+  if (CurUninstallStep = usUninstall) or (CurUninstallStep = usPostUninstall) then
+    PerformUninstallCleanup;
 end;

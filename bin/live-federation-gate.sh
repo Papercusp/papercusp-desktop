@@ -349,6 +349,18 @@ file_ei() { # <title> <body> [conditionKey] — best-effort curl-MCP; the loud e
   # this matches both the SSE-escaped and a plain-JSON transport.
   local id_match
   id_match="$(printf '%s' "$resp" | grep -oaE '\\?"id\\?":\\?"WI-[0-9]+' | head -1)"
+  # WI-39604 deploy-ordering fallback: this script runs from the STAGING tree while
+  # :3070 serves the RELEASE build, so until the conditionKey-aware work_items:create
+  # deploys, the tool's .strict() args REJECT the unknown key. One retry without the
+  # key keeps the filing leg alive across that window (the local markers still dedup);
+  # post-deploy the first attempt confirms and this branch never fires.
+  if [ -z "$id_match" ] && [ -n "$cond_arg" ]; then
+    log "EI filing with conditionKey did not confirm (server may predate WI-39604) — retrying once WITHOUT the key. resp head: ${resp:0:160}"
+    resp="$(curl -s -m 30 -X POST "$OPERATOR_MCP_URL" \
+      -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"work_items:create\",\"arguments\":{\"kind\":\"bug\",\"title\":$(jstr "$1"),\"summary\":$(jstr "$2"),\"harness\":\"papercusp\",\"severity\":\"major\",\"topics\":[\"shared-hive\",\"federation\"]}}}" 2>/dev/null || true)"
+    id_match="$(printf '%s' "$resp" | grep -oaE '\\?"id\\?":\\?"WI-[0-9]+' | head -1)"
+  fi
   if [ -n "$id_match" ]; then
     log "EI filed OK → $(printf '%s' "$id_match" | grep -oaE 'WI-[0-9]+')"
     return 0

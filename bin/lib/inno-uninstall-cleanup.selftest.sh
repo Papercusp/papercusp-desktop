@@ -202,8 +202,9 @@ printf 'stub' > "$STARTUP_DIR/$ROLE_NAME.lnk"
 APPDIR="$(printf '%s' "$TESTPREFIX"/drive_c/users/*/AppData/Local/PapercuspUninstallSelftest)"
 UNINST="$APPDIR/unins000.exe"
 [[ -f "$UNINST" ]] || fail "the harness produced no unins000.exe at $UNINST (install did not complete)"
+UNINST_LOG_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK" 2>/dev/null)\\inno-uninstall.log"
 WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
-  /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/uninstall.log" 2>&1
+  /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "/LOG=$UNINST_LOG_WIN" >"$WORK/uninstall.log" 2>&1
 
 # AN INNO UNINSTALLER RETURNS BEFORE IT HAS FINISHED. unins000.exe copies itself
 # to %TEMP% and relaunches from there (so it can delete its own directory), and
@@ -236,6 +237,12 @@ sleep 2
 [[ ! -f "$STARTUP_DIR/$ROLE_NAME.lnk" ]] \
   && ok "dangling Startup shortcut swept" \
   || bad "Startup shortcut survived the uninstall"
+
+if [[ $RC -ne 0 && -f "$WORK/inno-uninstall.log" ]]; then
+  echo "--- Inno uninstall log (tail) ---"
+  tr -d '\r' < "$WORK/inno-uninstall.log" | tail -25
+  echo "---------------------------------"
+fi
 
 echo
 if [[ $RC -eq 0 ]]; then
