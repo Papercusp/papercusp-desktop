@@ -253,3 +253,115 @@ function IsUpdaterLaunch(): Boolean;
 begin
   Result := Pos('/UPDATE', UpperCase(GetCmdTail())) > 0;
 end;
+
+{ ── Uninstall cleanup (WI-39403) ──────────────────────────────────────────
+  Measured on a real 0.0.17 Windows guest: the uninstaller reports exit 0 and
+  removes {app} entirely, but leaves live login-autostart state behind and
+  never touches the multi-GB WSL runtime. Both are fixed below. }
+
+{ THE APP registers login auto-start at RUNTIME — tauri-plugin-autostart 2.5.1
+  -> auto-launch 0.5.0, whose windows.rs writes an HKCU **Run VALUE** (not a
+  Startup-folder shortcut). Inno has no record of a value it never created, so
+  it cannot clean it up implicitly: after an otherwise-clean uninstall that Run
+  value survives pointing at the executable we just deleted, and EVERY
+  SUBSEQUENT LOGIN tries to launch a missing exe.
+
+  The value NAME is auto-launch's app_name = PackageInfo.name, which
+  tauri-codegen fills from tauri.conf.json productName (context.rs:268-269) and
+  which nothing overrides at the init site (main.rs passes None). That is
+  exactly {#AppName}. So this is ROLE-SCOPED by construction: uninstalling
+  "Papercusp GUI" can never disable "Papercusp Server"'s auto-start. Do not
+  "simplify" this to the shared binary name papercusp-desktop — that WOULD
+  cross the roles. }
+procedure RemoveLoginAutostart;
+begin
+  RegDeleteValue(HKCU, RunKey, '{#AppName}');
+  { auto-launch also writes the enabled/disabled marker Task Manager reads;
+    leaving it orphans a Startup-apps row for a program that is gone. }
+  RegDeleteValue(HKCU, StartupApprovedRunKey, '{#AppName}');
+end;
+
+{ BELT AND BRACES, NOT AN ADMISSION. A Startup-folder shortcut named after the
+  product was OBSERVED surviving an uninstall on a 0.0.17 guest. No Papercusp
+  code creates one — not this script's [Icons] (both entries are
+  {autoprograms}), not windows/hooks.nsh, not the app — so its origin is
+  genuinely undetermined and is NOT the autostart mechanism above. Deleting a
+  shortcut that bears our product name costs nothing when it is absent, and
+  leaving a dangling one is a bad enough end-state to sweep for anyway. }
+procedure RemoveStartupShortcut;
+begin
+  DeleteFile(ExpandConstant('{userstartup}\{#AppName}.lnk'));
+end;
+
+{ The OTHER product's Inno uninstall key ('' when AppId is neither role, e.g. a
+  nightly — in which case the caller fails safe and keeps the distro). }
+function OtherRoleAppId: String;
+begin
+  if CompareText('{#AppId}', 'com.papercusp.gui') = 0 then
+    Result := 'com.papercusp.server'
+  else if CompareText('{#AppId}', 'com.papercusp.server') = 0 then
+    Result := 'com.papercusp.gui'
+  else
+    Result := '';
+end;
+
+{ The papercup-runtime distro is SHARED by the GUI and the Server. Removing it
+  while the other product is still installed would break that install, so the
+  offer is only ever made when this is the last Papercusp product on the box.
+  Unknown AppId => assume still needed. }
+function SharedRuntimeStillNeeded: Boolean;
+var
+  Other: String;
+begin
+  Other := OtherRoleAppId;
+  if Other = '' then
+  begin
+    Result := True;
+    Exit;
+  end;
+  Result := RegKeyExists(HKCU, LegacyUninstallRoot + Other + '_is1');
+end;
+
+{ DEFECT 2: after uninstall, `wsl --list` still shows papercup-runtime — the
+  imported runtime tarball plus its embedded-PostgreSQL data directory. Multiple
+  GB, invisible in Add/Remove Programs, and a normal user has no reason to know
+  it exists or that `wsl --unregister` is what removes it.
+
+  OPT-IN, NEVER SILENT, AND NEVER DEFAULT-YES. That distro holds the user's own
+  workspace and database: destroying it is irreversible and is not something an
+  uninstall may decide on their behalf. A /VERYSILENT run (which is also what
+  the auto-updater drives) therefore skips this entirely and keeps the data —
+  the strictly safe direction. }
+procedure MaybeUnregisterSharedRuntime;
+var
+  ResultCode: Integer;
+begin
+  if UninstallSilent then
+    Exit;
+  if SharedRuntimeStillNeeded then
+    Exit;
+  if MsgBox('Papercusp also installed a Windows Subsystem for Linux runtime'
+            + ' called "' + SharedWslDistro + '".' #13#10#13#10
+            + 'It holds your Papercusp workspace and database — often several'
+            + ' gigabytes — and it is NOT removed by this uninstall.' #13#10#13#10
+            + 'Remove it now and permanently delete that data?' #13#10#13#10
+            + 'Choose No to keep it. You can remove it later by running:'
+            + #13#10 + '    wsl --unregister ' + SharedWslDistro,
+            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    Exec(ExpandConstant('{sys}\wsl.exe'), '--unregister ' + SharedWslDistro, '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ NOT cleaned up, deliberately: %LOCALAPPDATA%\Papercusp and %USERPROFILE%\
+  .papercusp survive. They are user configuration, and preserving them across
+  uninstall/reinstall is the conventional and recoverable choice — unlike a
+  dangling autostart entry, which is pure breakage. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    RemoveLoginAutostart;
+    RemoveStartupShortcut;
+    MaybeUnregisterSharedRuntime;
+  end;
+end;
