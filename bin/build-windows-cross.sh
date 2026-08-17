@@ -286,7 +286,14 @@ run_iscc() {
   local out_win; out_win="$(winpath "$STAGE/out")"
   rm -rf "$STAGE/out"; mkdir -p "$STAGE/out"
   echo "  ISCC (wine, headless): $app_name"
-  WINEPREFIX="$WINEPREFIX_INNO" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree=d;mshtml=d" \
+  # winemenubuilder.exe=d: wine's menubuilder otherwise registers .desktop entries
+  # into the HOST's GNOME app grid (~/.local/share/applications/wine/Programs/).
+  # On the dev box that lands "Papercusp GUI"/"Papercusp Server" right beside the
+  # real "Papercusp Dev" launcher, and agents/owner then verify a PACKAGED build
+  # instead of `npm run dev` — which says nothing about their working-tree edit.
+  # An explicit WINEDLLOVERRIDES here would override the global default set in
+  # ~/.config/environment.d/90-wine-no-menubuilder.conf, so it must repeat it.
+  WINEPREFIX="$WINEPREFIX_INNO" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree=d;mshtml=d;winemenubuilder.exe=d" \
     xvfb-run -a wine "$ISCC_EXE" \
       "/DAppId=$app_id" "/DAppName=$app_name" "/DAppVersion=$VERSION" \
       "/DBuildRoot=$BUILDROOT_WIN" "/O$out_win" \

@@ -58,7 +58,9 @@ cleanup() {
 trap cleanup EXIT
 
 export WINEDEBUG=-all
-export WINEDLLOVERRIDES="mscoree,mshtml="
+# winemenubuilder: keep this throwaway TESTPREFIX from registering .desktop
+# entries into the host's GNOME app grid (see build-windows-cross.sh run_iscc).
+export WINEDLLOVERRIDES="mscoree,mshtml,winemenubuilder.exe="
 
 # ── Build a standalone harness from the REAL [Code] section ──────────────────
 # Extracted verbatim from papercusp.iss so this can never drift from shipping
