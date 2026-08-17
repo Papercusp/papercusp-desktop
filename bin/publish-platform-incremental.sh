@@ -197,6 +197,17 @@ else
   exit 1
 fi
 
+# Recurrence guard (EI-20595279927716716): a published download with no .sig cannot
+# be verified by anyone. This path NORMALIZES and SIGNS the Windows Server zip in the
+# same run, so a well-formed incremental publish passes without special handling.
+if release_artifacts_assert_signatures_present "$TAG"; then
+  echo "==> signature guard: every signable artifact in $TAG carries its .sig"
+else
+  echo "ERROR: $TAG would publish an unsigned download — see above. Re-cut with a signing key," >&2
+  echo "       or set RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 to ship it knowingly (EI-20595279927716716)." >&2
+  exit 1
+fi
+
 echo
 echo "==> done — merged $PLATFORM into $TAG's manifest without touching other platforms."
 echo "    manifest:  $LATEST_JSON"

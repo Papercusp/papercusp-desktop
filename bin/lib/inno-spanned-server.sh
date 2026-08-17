@@ -57,10 +57,19 @@ papercusp_sign_spanned_server_zip() {
   # symbol 45" — symbol 45 is the '-' in the key's own pathname).  Resolve it here.
   [[ -f "$key" ]] && key="$(cat "$key")"
 
-  command -v npx >/dev/null 2>&1 || {
-    echo "WARNING: [win] npx unavailable — leaving $(basename "$zip") UNSIGNED (EI-20595279927716716)" >&2
-    return 1
-  }
+  # PAPERCUSP_SIGNER_CMD=P — run `P <file>` instead of npx (test seam; also lets a
+  # host with a preinstalled tauri CLI skip the npx fetch). Same contract either
+  # way: exit 0 AND a non-empty <file>.sig on disk.
+  local -a signer=()
+  if [[ -n "${PAPERCUSP_SIGNER_CMD:-}" ]]; then
+    signer=( "${PAPERCUSP_SIGNER_CMD}" )
+  else
+    command -v npx >/dev/null 2>&1 || {
+      echo "WARNING: [win] npx unavailable — leaving $(basename "$zip") UNSIGNED (EI-20595279927716716)" >&2
+      return 1
+    }
+    signer=( npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" tauri signer sign )
+  fi
 
   rm -f "$zip.sig"
   # The secret goes via the CLI's own env fallback, NEVER on argv: npx echoes the
@@ -68,8 +77,7 @@ papercusp_sign_spanned_server_zip() {
   # expose it in `ps` for the life of the process.
   if ! TAURI_SIGNING_PRIVATE_KEY="$key" \
        TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-       npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
-         tauri signer sign "$zip" >/dev/null 2>&1 \
+       "${signer[@]}" "$zip" >/dev/null 2>&1 \
      || [[ ! -s "$zip.sig" ]]; then
     rm -f "$zip.sig"
     echo "WARNING: [win] tauri signer sign failed for $(basename "$zip") — leaving it UNSIGNED (EI-20595279927716716)" >&2

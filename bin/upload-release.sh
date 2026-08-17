@@ -235,6 +235,19 @@ if ! release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER
   exit 1
 fi
 
+# Recurrence guard (EI-20595279927716716): every user-facing artifact we are about
+# to publish must carry its sibling .sig, so a download can be VERIFIED. Signing
+# used to follow the updater pipeline, so anything assembled after the bundler —
+# the Windows Server zip — shipped unsigned in 0.0.16 AND 0.0.17 with nothing
+# noticing. Fails closed; the .dmg deferral (WI-39600) prints rather than hides.
+if ! release_artifacts_assert_signatures_present "$TAG"; then
+  echo "ERROR: this cut would publish a download with no signature — nobody could verify it (EI-20595279927716716)." >&2
+  echo "       Re-cut so the artifact is signed (a keyless build cannot sign; see bin/setup-signing-key.sh)," >&2
+  echo "       or, for a deliberate legacy re-publish of an already-shipped unsigned set, re-run with" >&2
+  echo "       RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 — which records that you shipped it knowingly." >&2
+  exit 1
+fi
+
 echo "==> release host : ${BASE%/*}/<secret>"
 # NEVER print the raw KEY_PREFIX — it is the unguessable path segment that keeps
 # the bucket unlisted (D-002/D-003), so it is a masked secret (must never reach a

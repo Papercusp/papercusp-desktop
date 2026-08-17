@@ -131,6 +131,22 @@ else
   bad "Linux publish did not retain the legacy Cargo-target fallback"
 fi
 
+# SIGNING SEAM (EI-20595279927716716). Normalization now SIGNS the zip it builds,
+# so every case below that calls papercusp_normalize_spanned_server would otherwise
+# reach for the host's real key and npx — network, seconds, and a different answer
+# on a keyless box. Point it at a stub instead: this file stays hermetic and ~1s,
+# and the cases that care about the unsigned path opt out explicitly.
+STUB_SIGNER="$WORK/stub-signer"
+cat > "$STUB_SIGNER" <<'STUB'
+#!/usr/bin/env bash
+# Stand-in for `tauri signer sign <file>`: same contract, no crypto.
+[[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] || exit 3   # refuse without a key, like the real one
+printf 'stub-signature\n' > "$1.sig"
+STUB
+chmod +x "$STUB_SIGNER"
+export PAPERCUSP_SIGNER_CMD="$STUB_SIGNER"
+export TAURI_SIGNING_PRIVATE_KEY="dGVzdC1rZXktY29udGVudA=="
+
 # 0) every Windows entry point shares the DiskSpan normalization decision. The
 # raw stub + slices are replaced by one zip for artifact selection, while the
 # original files remain available for provenance/debugging.
@@ -270,6 +286,107 @@ if RELEASE_ARTIFACTS_REACHABILITY_CMD="$PROBE_DOWN" \
 else
   bad "a fully-covered manifest was rejected when the prober reports down"
 fi
+
+# ── EI-20595279927716716: every published download must carry its .sig ───────
+# The bug: signing followed the UPDATER pipeline, not the PUBLISHED set. `tauri
+# build` signs what it bundles, so the Server zip — which WE assemble after the
+# bundler — shipped with no signature in 0.0.16 AND 0.0.17 while every updater
+# input beside it was signed. Nothing failed; a download simply could not be
+# verified. Both halves are covered here: sign at creation, refuse at publish.
+
+# 10) normalization SIGNS the zip it creates and publishes it through OUTPUTS —
+# the array callers append. Naming the zip directly is how two of three call
+# sites would silently drop a newly-added output.
+if papercusp_normalize_spanned_server "$INNO" "$VER"; then
+  [[ -n "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" && -s "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" ]] \
+    && ok "normalization signs the zip it builds" \
+    || bad "normalization produced no signature for the zip"
+  if [[ ${#PAPERCUSP_SPANNED_SERVER_OUTPUTS[@]} -eq 2 \
+        && "${PAPERCUSP_SPANNED_SERVER_OUTPUTS[0]}" == "$PAPERCUSP_SPANNED_SERVER_ZIP" \
+        && "${PAPERCUSP_SPANNED_SERVER_OUTPUTS[1]}" == "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" ]]; then
+    ok "OUTPUTS carries zip + signature in caller-append order"
+  else
+    bad "OUTPUTS did not carry zip+sig (${#PAPERCUSP_SPANNED_SERVER_OUTPUTS[@]} entries)"
+  fi
+  papercusp_spanned_server_artifact "$PAPERCUSP_SPANNED_SERVER_ZIP.sig" \
+    && ok "shared matcher recognizes the zip signature (a re-scan cannot duplicate it)" \
+    || bad "shared matcher missed the zip signature — a re-scan would double-add it"
+else
+  bad "spanned Server normalization failed unexpectedly under the signing seam"
+fi
+
+# 11) A KEYLESS build still yields a usable zip. Signing is best-effort at BUILD
+# time; refusing to SHIP an unsigned download is the publish guard's job. Getting
+# this backwards would break every local/dev cut on a box with no signing key.
+if ( unset PAPERCUSP_SIGNER_CMD TAURI_SIGNING_PRIVATE_KEY
+     export TAURI_SIGNING_PRIVATE_KEY_PATH="$WORK/no-such-key"
+     papercusp_normalize_spanned_server "$INNO" "$VER" 2>/dev/null \
+       && [[ -s "$PAPERCUSP_SPANNED_SERVER_ZIP" \
+             && -z "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" \
+             && ${#PAPERCUSP_SPANNED_SERVER_OUTPUTS[@]} -eq 1 ]] ); then
+  ok "a keyless build still yields a valid zip, unsigned, OUTPUTS holding only it"
+else
+  bad "keyless normalization did not degrade gracefully to an unsigned zip"
+fi
+
+TAG_SIG="$TAG-signatures"
+SIGDIR="$WORK/sigcut"; mkdir -p "$SIGDIR"
+mk_sig_artifact() { : > "$SIGDIR/$1"; printf '%s\n' "$SIGDIR/$1"; }
+S_DEB="$(mk_sig_artifact "Papercusp GUI_${VER}_amd64.deb")"
+S_DEB_SIG="$(mk_sig_artifact "Papercusp GUI_${VER}_amd64.deb.sig")"
+S_EXE="$(mk_sig_artifact "Papercusp GUI_${VER}_x64-setup.exe")"
+S_EXE_SIG="$(mk_sig_artifact "Papercusp GUI_${VER}_x64-setup.exe.sig")"
+S_ZIP="$(mk_sig_artifact "Papercusp Server_${VER}_x64-setup.zip")"
+S_ZIP_SIG="$(mk_sig_artifact "Papercusp Server_${VER}_x64-setup.zip.sig")"
+S_TGZ="$(mk_sig_artifact "Papercusp GUI.app.tar.gz")"
+S_TGZ_SIG="$(mk_sig_artifact "Papercusp GUI.app.tar.gz.sig")"
+S_DMG="$(mk_sig_artifact "Papercusp GUI_${VER}_universal-apple-darwin.dmg")"
+
+# 12) CONTROL — a fully-signed cut passes. Without this, case 13 cannot tell a
+# working guard from one that rejects everything.
+release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
+  "$S_ZIP" "$S_ZIP_SIG" "$S_TGZ" "$S_TGZ_SIG" >/dev/null
+if release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
+  ok "signature guard passes a fully-signed cut"
+else
+  bad "signature guard rejected a fully-signed cut (false positive)"
+fi
+
+# 13) FALSIFIABILITY — the guard must FAIL the exact shape that actually shipped:
+# Server zip present, its .sig absent, everything else signed. A guard that
+# cannot fail here would have waved 0.0.16 and 0.0.17 through unchanged.
+release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
+  "$S_ZIP" "$S_TGZ" "$S_TGZ_SIG" >/dev/null
+if release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
+  bad "signature guard PASSED an unsigned Server zip — the shape 0.0.16/0.0.17 shipped"
+else
+  ok "signature guard fails the unsigned-Server-zip shape that actually shipped"
+fi
+
+# 14) The .dmg deferral (WI-39600) is an EXEMPTION, not a hole: it must pass AND
+# say so on stderr. A silent allowlist is precisely how the mac half of a
+# two-symptom bug gets buried.
+release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
+  "$S_ZIP" "$S_ZIP_SIG" "$S_DMG" >/dev/null
+DMG_ERR="$(release_artifacts_assert_signatures_present "$TAG_SIG" 2>&1 >/dev/null)"
+DMG_RC=$?
+[[ "$DMG_RC" -eq 0 ]] \
+  && ok "an unsigned .dmg passes under its tracked exemption" \
+  || bad "the .dmg exemption is not being applied (rc=$DMG_RC)"
+case "$DMG_ERR" in
+  *WI-39600*) ok "the .dmg exemption names its tracking item on stderr (not silent)" ;;
+  *)          bad "the .dmg exemption printed nothing traceable — a silent allowlist" ;;
+esac
+
+# 15) The documented escape is honoured, so a keyless cut is never hard-blocked.
+release_artifacts_write "$TAG_SIG" "$S_ZIP" >/dev/null
+if RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 \
+   release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
+  ok "RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 skips the check for keyless cuts"
+else
+  bad "the documented signature-check escape did not skip"
+fi
+rm -f "$(release_artifacts_manifest_path "$TAG_SIG")"
 
 echo
 if [[ "$FAILS" -eq 0 ]]; then
