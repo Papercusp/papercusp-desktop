@@ -43,6 +43,7 @@ TESTS=(
   roster-scope.selftest.sh
   deployed-state-guards.selftest.sh
   inno-legacy-reaper.selftest.sh
+  inno-uninstall-cleanup.selftest.sh
   rust-path-remap.selftest.sh
   disk-preflight.selftest.sh
 )

@@ -98,6 +98,14 @@
 #                                     stale-ei-filed marker: file once, then suppress re-filing
 #                                     for this window (cleared immediately on the next GREEN, so
 #                                     a genuine fix is never hidden behind a stale suppression).
+#                                     WI-39604 (2026-08-17): this window is now the CHEAP
+#                                     CLIENT-SIDE suppression only — the durable dedup moved
+#                                     server-side: the RED filing passes conditionKey
+#                                     'live-federation-gate-red:papercusp', so work_items:create
+#                                     REFRESHES the one open row per gate (newest legs+stamp
+#                                     win) instead of minting a sibling, even across marker
+#                                     expiry days and leg-set changes while one regression
+#                                     stands. Dupes can no longer leak past an expired marker.
 # ── self-snapshot re-exec (EI-16828 root-cause fix) ─────────────────────────────
 # This gate runs via a `Type=oneshot` systemd unit for up to 4h (TimeoutStartSec=14400)
 # executing THIS file directly out of the shared tree, which many agents edit
@@ -1721,7 +1729,11 @@ else
     # stamping them after an unconfirmed filing converts a transient operator/curl failure
     # into a permanently-lost red. On failure we leave them untouched so the NEXT window
     # re-attempts — a duplicate item is cheap, a silently-dropped release-gate red is not.
-    if file_ei "$TITLE" "$BODY"; then
+    # WI-39604: the conditionKey makes the SERVER the durable dedup — one open row per
+    # gate, refreshed with the newest legs+stamp, regardless of marker expiry or leg-set
+    # changes. The local markers + find_open_duplicate above remain as the cheap
+    # client-side suppression (they save the curl round-trip on a still-fresh red).
+    if file_ei "$TITLE" "$BODY" "live-federation-gate-red:papercusp"; then
       echo "$(now_s)" >"$RED_MARKER"
       printf '%s' "${REDS[*]}" >"$RED_LEGS_MARKER"
     else
