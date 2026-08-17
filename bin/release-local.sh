@@ -1701,7 +1701,10 @@ if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
       papercusp_spanned_server_artifact "$_a" && continue
       _win_kept+=("$_a")
     done
-    ARTIFACTS=( "${_win_kept[@]}" "$PAPERCUSP_SPANNED_SERVER_ZIP" )
+    # OUTPUTS, not the bare zip: the normalization also emits the zip's updater
+    # signature, and naming the zip directly is how it shipped unsigned in 0.0.16
+    # and 0.0.17 (EI-20595279927716716).
+    ARTIFACTS=( "${_win_kept[@]}" "${PAPERCUSP_SPANNED_SERVER_OUTPUTS[@]}" )
     echo "==> [win] spanned Server normalized → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") ($(du -h "$PAPERCUSP_SPANNED_SERVER_ZIP" | cut -f1); stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s)) — the single download the release page offers"
   elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
     echo "WARNING: [win] could not zip the spanned Server set (zip missing or failed) — leaving the raw stub+slices; record-release-cli will SKIP the stub, so publish the Windows Server manually (WI-5600)" >&2

@@ -117,7 +117,9 @@ case "$PLATFORM" in
         papercusp_spanned_server_artifact "$_a" && continue
         _win_kept+=("$_a")
       done
-      NEW_ARTIFACTS=( "${_win_kept[@]}" "$PAPERCUSP_SPANNED_SERVER_ZIP" )
+      # OUTPUTS, not the bare zip — it also carries the zip's updater signature
+      # (EI-20595279927716716).
+      NEW_ARTIFACTS=( "${_win_kept[@]}" "${PAPERCUSP_SPANNED_SERVER_OUTPUTS[@]}" )
       echo "==> normalized spanned Server → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") (stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s))"
     elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
       echo "ERROR: spanned Server installer detected but normalization failed — refusing to publish the raw stub+slices" >&2

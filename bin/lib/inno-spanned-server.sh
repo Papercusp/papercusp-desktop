@@ -129,19 +129,32 @@ papercusp_normalize_spanned_server() {
           "$PAPERCUSP_SPANNED_SERVER_STUB" \
           "${PAPERCUSP_SPANNED_SERVER_SLICES[@]}" >/dev/null 2>&1 \
      || [[ ! -s "$PAPERCUSP_SPANNED_SERVER_ZIP" ]]; then
+    PAPERCUSP_SPANNED_SERVER_ZIP=""
     return 2
   fi
+
+  # Sign the zip we just built. Best-effort: an unsigned zip is still a usable
+  # download, and the publish-time guard is what refuses to ship one.
+  papercusp_sign_spanned_server_zip "$PAPERCUSP_SPANNED_SERVER_ZIP" || true
+
+  PAPERCUSP_SPANNED_SERVER_OUTPUTS=( "$PAPERCUSP_SPANNED_SERVER_ZIP" )
+  [[ -n "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" ]] \
+    && PAPERCUSP_SPANNED_SERVER_OUTPUTS+=( "$PAPERCUSP_SPANNED_SERVER_ZIP_SIG" )
   return 0
 }
 
 # papercusp_spanned_server_artifact <path> — true when PATH is one of the raw
-# span inputs (including its orphanable signature) or the normalized zip.
+# span inputs (including its orphanable signature) or a normalization OUTPUT
+# (the zip, or the zip's signature).  Callers use this to strip the span from
+# their artifact array before re-appending PAPERCUSP_SPANNED_SERVER_OUTPUTS, so
+# every produced file must match here or a re-scan would duplicate it.
 papercusp_spanned_server_artifact() {
   local artifact="$1" slice
   [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" ]] || return 1
   [[ "$artifact" == "$PAPERCUSP_SPANNED_SERVER_STUB" \
      || "$artifact" == "$PAPERCUSP_SPANNED_SERVER_STUB.sig" \
-     || "$artifact" == "$PAPERCUSP_SPANNED_SERVER_ZIP" ]] && return 0
+     || ( -n "$PAPERCUSP_SPANNED_SERVER_ZIP" && "$artifact" == "$PAPERCUSP_SPANNED_SERVER_ZIP" ) \
+     || ( -n "$PAPERCUSP_SPANNED_SERVER_ZIP" && "$artifact" == "$PAPERCUSP_SPANNED_SERVER_ZIP.sig" ) ]] && return 0
   for slice in "${PAPERCUSP_SPANNED_SERVER_SLICES[@]}"; do
     [[ "$artifact" == "$slice" ]] && return 0
   done
