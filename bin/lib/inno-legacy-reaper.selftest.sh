@@ -69,6 +69,14 @@ export WINEDLLOVERRIDES="mscoree,mshtml,winemenubuilder.exe="
 CODE_LINE="$(grep -n '^\[Code\]' "$ISS" | head -1 | cut -d: -f1)"
 [[ -n "$CODE_LINE" ]] || fail "no [Code] section in papercusp.iss"
 {
+  # The shipping [Code] reads the AppName/AppId PREPROCESSOR defines (its own
+  # #ifndef/#error block at the top of papercusp.iss proves ISCC is never
+  # invoked without them), so the harness must define them too — a [Setup]
+  # AppName= directive is a different thing entirely and does not satisfy
+  # {#AppName}. Without these the harness fails to compile the moment any
+  # [Code] routine references a define, which is exactly what happened when the
+  # uninstall-cleanup routines landed (WI-39403).
+  printf '#define AppName "Papercusp GUI"\n#define AppId "com.papercusp.gui"\n'
   printf '[Setup]\nAppName=Inno Reaper Selftest\nAppVersion=0.0.0\n'
   printf 'DefaultDirName={autopf}\\InnoReaperSelftest\nOutputDir=out\n'
   printf 'OutputBaseFilename=reaper-harness\nUninstallable=no\nCreateAppDir=no\n'
