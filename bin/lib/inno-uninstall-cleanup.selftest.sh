@@ -40,7 +40,12 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISS="$DIR/../../src-tauri/windows/inno/papercusp.iss"
+# Overridable so scripts/mutation-probe.sh can point this at a MUTATED COPY
+# outside the tree (its tier-2 copy-out mode) and prove the assertions below can
+# actually fail. Mutating the real file in place is unsafe here: git-sync commits
+# the whole working tree on a timer, so a probe that holds a mutation for the
+# ~70s this suite runs can have that mutation swept into a commit.
+ISS="${PAPERCUSP_ISS:-$DIR/../../src-tauri/windows/inno/papercusp.iss}"
 WINEPREFIX_INNO="${PAPERCUSP_WINEPREFIX_INNO:-$HOME/.papercusp/wine-inno}"
 ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$WINEPREFIX_INNO/drive_c/InnoSetup6/ISCC.exe}"
 
@@ -97,6 +102,11 @@ CODE_LINE="$(grep -n '^\[Code\]' "$ISS" | head -1 | cut -d: -f1)"
 
 function InitializeSetup(): Boolean;
 begin
+  { Publish the Startup folder as INNO resolves it. Guessing this path in bash
+    means the test can seed a shortcut somewhere the uninstaller was never going
+    to look and then report a false failure — or, if the guess drifted the other
+    way, a false pass. Ask the thing under test. }
+  RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'UserStartup', ExpandConstant('{userstartup}'));
   RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'OtherRoleAppId', OtherRoleAppId);
   if SharedRuntimeStillNeeded then
     RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'SharedRuntimeStillNeeded', 'yes')
@@ -191,7 +201,10 @@ wreg add "$RUN_KEY"      /v "$ROLE_NAME"  /d 'C:\gone\papercusp-desktop.exe' /f
 wreg add "$RUN_KEY"      /v "$OTHER_NAME" /d 'C:\still-here\papercusp-desktop.exe' /f
 wreg add "$APPROVED_KEY" /v "$ROLE_NAME"  /d 'marker' /f
 
-STARTUP_DIR="$(printf '%s' "$TESTPREFIX"/drive_c/users/*/AppData/Roaming/Microsoft/Windows/'Start Menu'/Programs/Startup)"
+STARTUP_WIN="$(rvalue "$PROBE_KEY" UserStartup)"
+[[ -n "$STARTUP_WIN" ]] || fail "the harness did not publish {userstartup} — cannot locate the Startup folder Inno uses"
+STARTUP_DIR="$(WINEPREFIX="$TESTPREFIX" winepath -u "$STARTUP_WIN" 2>/dev/null)"
+[[ -n "$STARTUP_DIR" ]] || fail "winepath could not map $STARTUP_WIN to a unix path"
 mkdir -p "$STARTUP_DIR" 2>/dev/null
 printf 'stub' > "$STARTUP_DIR/$ROLE_NAME.lnk"
 
