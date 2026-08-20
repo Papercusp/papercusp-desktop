@@ -139,6 +139,14 @@ signal). An inner-healthy / outer-failing split is reported as non-fatal
 **`forward-degraded`** (repair the Windows→WSL forward, never kill the operator).
 Direct: `bash bin/vm-preflight.sh --json`.
 
+If the SSH leg cannot complete, the preflight also requests a host-side QEMU HMP
+`screendump` through `~/windows-vm/qemu-monitor.sock` and records the PNG path in
+the JSON verdict (`guestScreenPng`). This is diagnostic evidence for distinguishing
+a bluescreen, boot/login screen, and hung guest; it does not turn the screenshot
+into a health pass. Override the socket or artifact directory with
+`--monitor-socket PATH` and `--screendump-dir DIR` when the VM uses a different
+layout. A QEMU-owned hostfwd LISTEN socket is never treated as guest liveness.
+
 ---
 
 ## 4. Live update proof: `release:install-and-relaunch-verify` (P-012)
