@@ -386,6 +386,32 @@ op_port() {  # op_port <name>  → prints the operator port (empty if unknown)
   vm_ssh "$name" "grep -oE 'listening on http://127\.0\.0\.1:[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null
 }
 
+# Read an xwininfo -root -tree body from stdin and accept only the real main
+# window: title exactly "Papercusp" and at least the app's configured 800x600
+# minimum. The tray/server placeholder is a 10x10 window named
+# "papercusp-desktop"; accepting a process or any X11 child let vmctl verify
+# false-green while the framebuffer contained only an unrelated xmessage.
+papercusp_window_tree_has_main() {
+  awk '
+    /"Papercusp":/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9]+x[0-9]+[+-]/) {
+          split($i, dimensions, /[x+-]/)
+          if (dimensions[1] >= 800 && dimensions[2] >= 600) found = 1
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+guest_papercusp_window_visible() {  # guest_papercusp_window_visible <name>
+  local name="$1"
+  vm_ssh "$name" \
+    'export DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority"; xwininfo -root -tree 2>/dev/null' \
+    2>/dev/null | papercusp_window_tree_has_main
+}
+
 cmd_verify() {
   local name="${1:-clean}"
   vm_running "$name" || die "$name is not running. vmctl up $name"
@@ -425,6 +451,22 @@ cmd_verify() {
     echo "  ✓ operator responds (port $op)"; pass=$((pass+1))
   else
     echo "  ✗ operator responds${op:+ (port $op)}"; fail=$((fail+1))
+  fi
+
+  # Operator health is not visible-window health. The Linux GUI's cold start can
+  # take a little longer to map its 1280x800 webview after the sidecar becomes
+  # reachable, so give the actual window a bounded settle budget and validate its
+  # title + geometry. This rejects the tray/server 10x10 placeholder and unrelated
+  # dialogs even when the process, PG, and HTTP checks are all green.
+  local window_visible=0
+  for _i in $(seq 1 24); do
+    if guest_papercusp_window_visible "$name"; then window_visible=1; break; fi
+    sleep 5
+  done
+  if [ "$window_visible" -eq 1 ]; then
+    echo "  ✓ Papercusp main window visible (>=800x600)"; pass=$((pass+1))
+  else
+    echo "  ✗ Papercusp main window visible (>=800x600)"; fail=$((fail+1))
   fi
 
   if screenshot "$name" "$out/screen.ppm"; then
@@ -485,6 +527,11 @@ cmd_status() {
 cmd_help() { sed -n '2,30p' "$SELF_DIR/vmctl" | sed 's/^# \{0,1\}//'; }
 
 # ── dispatch ───────────────────────────────────────────────────────────────
+# Hermetic regression tests source the real predicates without touching a VM.
+if [ "${PAPERCUSP_VMCTL_SOURCE_ONLY:-0}" = 1 ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   provision) cmd_provision "$@" ;;
