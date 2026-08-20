@@ -65,6 +65,7 @@ const WRITTEN_MANIFESTS = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/ta
 /** The line of the actual `if` branch — NOT the header comment that names it. */
 const PRECHECK_BRANCH = /if \[\[ "\$\{PAPERCUSP_RELEASE_PRECHECK_ONLY:-0\}" == "1" \]\]/;
 const PREPARE_TAG_BRANCH = /if \[\[ -n "\$\{PAPERCUSP_RELEASE_PREPARE_TAG_SHA:-\}" \]\]/;
+const OWNER_IDENTITY_BRANCH = /if \[\[ -z "\$\{PAPERCUSP_RELEASE_OWNER_NAME:-\}" \]\]/;
 
 test('the precheck-only exit exists and is reachable', () => {
   const text = src();
@@ -122,6 +123,21 @@ test('the version bump really is the first write, and it writes what we think', 
         `the precheck exit is still above ALL of them`,
     );
   }
+});
+
+test('missing runtime owner identity refuses before every seed or manifest write', () => {
+  const text = src();
+  const guard = firstLine(text, OWNER_IDENTITY_BRANCH);
+  const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
+  const seed = firstLine(text, /^cut_release_seed$/);
+
+  assert(guard > 0, 'the PAPERCUSP_RELEASE_OWNER_NAME fail-fast guard was removed or reworded');
+  assert(guard < bump, `owner identity guard (line ${guard}) drifted below the version bump (line ${bump})`);
+  assert(guard < seed, `owner identity guard (line ${guard}) drifted below the seed cut (line ${seed})`);
+  assert(
+    /exit 2/.test(text.split('\n').slice(guard - 1, guard + 8).join('\n')),
+    'the missing-owner guard no longer refuses the cut',
+  );
 });
 
 test('the header warns that this script is not read-only', () => {

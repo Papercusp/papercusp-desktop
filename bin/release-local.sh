@@ -197,6 +197,19 @@ if [[ "$CURRENT_SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
 fi
 export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 
+# EI-21007848170102877: the finished-byte identity audit is mandatory on every
+# release cut, and it cannot certify anything without the human owner's name as
+# a runtime search literal. Fail HERE — after exact-source validation but before
+# the first manifest/seed/build write — instead of paying the full seed cut and
+# discovering the missing env only when build-desktop-sidecar.sh starts.
+# Runtime-only is load-bearing: persisting the owner's identity in the release
+# tree would manufacture the very identity leak this audit exists to catch.
+if [[ -z "${PAPERCUSP_RELEASE_OWNER_NAME:-}" ]]; then
+  echo "ERROR: release cut requires PAPERCUSP_RELEASE_OWNER_NAME at run time before any seed/build work." >&2
+  echo "       Pass the human owner name through release:cut; never write it into a tracked file." >&2
+  exit 2
+fi
+
 # ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
 # The Linux leg (below) launches `tauri build` → cargo → rustc, and
 # bin/build-appimage.sh (appimagetool/linuxdeploy), as a background subshell of
