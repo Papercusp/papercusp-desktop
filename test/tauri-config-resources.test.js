@@ -9,6 +9,10 @@ function readConfig(name) {
   return JSON.parse(fs.readFileSync(path.join(root, 'src-tauri', name), 'utf8'));
 }
 
+function readText(...segments) {
+  return fs.readFileSync(path.join(root, ...segments), 'utf8');
+}
+
 test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () => {
   const base = readConfig('tauri.conf.json');
   const server = readConfig('tauri.server.conf.json');
@@ -71,4 +75,162 @@ test('gate overlay carries the seed explicitly, so the base config never has to'
     configured.includes('src-tauri/tauri.gate.conf.json'),
     `build-and-archive-deb.sh must pass the gate overlay via --config, or the gate deb loses its seed (resolved --config values: ${JSON.stringify(configured)})`,
   );
+});
+
+// release-build-vm-dev-parity-audit-2026-08-13 D-020 / P-007:
+// Release variants are allowed to change identity, packaging and lifecycle,
+// but not silently fork the GUI's user-facing plugin/capability contract. A
+// newly-added overlay override therefore fails here until its difference is
+// reviewed and classified in the parity ledger.
+test('release overlays preserve the shared GUI feature contract', () => {
+  const base = readConfig('tauri.conf.json');
+  const overlays = [
+    ['server', readConfig('tauri.server.conf.json')],
+    ['windows', readConfig('tauri.windows.conf.json')],
+    ['nightly', readConfig('tauri.nightly.conf.json')],
+    ['gate', readConfig('tauri.gate.conf.json')],
+  ];
+
+  assert.equal(base.build.beforeDevCommand, 'bash bin/dev-operator-ifneeded.sh');
+  assert.equal(base.build.devUrl, 'http://127.0.0.1:3270');
+  assert.equal(base.build.frontendDist, 'http://127.0.0.1:3070');
+  assert.equal(base.plugins.updater.active, true, 'the shared GUI config must retain updater support');
+
+  for (const [name, overlay] of overlays) {
+    assert.equal(
+      overlay.build,
+      undefined,
+      `${name} overlay must not fork the shared frontend/dev command contract`,
+    );
+    assert.equal(
+      overlay.plugins,
+      undefined,
+      `${name} overlay must not replace the shared plugin contract`,
+    );
+    assert.equal(
+      overlay.capabilities,
+      undefined,
+      `${name} overlay must not select a platform/role-specific capability set`,
+    );
+    assert.equal(
+      overlay.app?.security,
+      undefined,
+      `${name} overlay must not weaken or fork the shared webview security contract`,
+    );
+  }
+
+  const capabilitiesDir = path.join(root, 'src-tauri', 'capabilities');
+  const capabilityFiles = fs.readdirSync(capabilitiesDir).filter((name) => name.endsWith('.json'));
+  assert.deepEqual(
+    capabilityFiles,
+    ['default.json'],
+    'every shipped role/platform must consume one reviewed capability contract; classify any split before adding it',
+  );
+
+  const capability = JSON.parse(readText('src-tauri', 'capabilities', 'default.json'));
+  const requiredPermissions = [
+    'shell:allow-open',
+    'dialog:default',
+    'fs:default',
+    'os:default',
+    'updater:default',
+    'process:default',
+    'notification:default',
+    'allow-check-for-update',
+    'allow-install-update',
+    'allow-pty-spawn',
+    'allow-endpoint-invoke',
+    'allow-open-docs-search-palette',
+  ];
+  for (const permission of requiredPermissions) {
+    assert(
+      capability.permissions.includes(permission),
+      `shared release/dev capability contract lost ${permission}`,
+    );
+  }
+});
+
+test('all public platform writers consume the shared sidecar, source and command registry', () => {
+  const releaseLocal = readText('bin', 'release-local.sh');
+  const windows = readText('bin', 'build-windows-cross.sh');
+  const mac = readText('bin', 'build-mac-cross.sh');
+  const main = readText('src-tauri', 'src', 'main.rs');
+
+  assert.match(
+    releaseLocal,
+    /PAPERCUSP_RELEASE_AUDIT=1[\s\S]*build-desktop-sidecar\.sh[\s\S]*stage-source-tree\.sh/,
+    'the release chokepoint must build one audited sidecar and stage the same runnable source before platform fan-out',
+  );
+  assert.match(
+    releaseLocal,
+    /role_cfg=\(\); \[\[ "\$role" == "server" \]\] && role_cfg=\(--config src-tauri\/tauri\.server\.conf\.json\)/,
+    'Linux release roles must differ only through the reviewed server overlay',
+  );
+
+  for (const [name, source] of [
+    ['windows', windows],
+    ['mac', mac],
+  ]) {
+    assert.match(
+      source,
+      /server\).*tauri_cfg="\$SRC_TAURI\/tauri\.server\.conf\.json"/,
+      `${name} release roles must select the same reviewed server overlay`,
+    );
+    assert.match(
+      source,
+      /PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1/,
+      `${name} release build must refuse a sidecar that missed the final release audit`,
+    );
+    assert.match(
+      source,
+      /PAPERCUSP_BUILD_SHA=/,
+      `${name} release build must receive the shared source identity`,
+    );
+    assert.match(
+      source,
+      /PAPERCUSP_BUILD_VERSION=/,
+      `${name} release build must receive the shared version identity`,
+    );
+  }
+
+  assert.equal(
+    (main.match(/\.invoke_handler\(specta_builder\.invoke_handler\(\)\)/g) ?? []).length,
+    1,
+    'dev and every release role must register one shared Tauri command surface',
+  );
+});
+
+test('every debug-versus-release compile fork is explicitly classified', () => {
+  const main = readText('src-tauri', 'src', 'main.rs');
+  const lines = main.split('\n');
+  const gates = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\s*#\[cfg\([^\]]*debug_assertions[^\]]*\)\]/.test(lines[index])) {
+      gates.push(lines.slice(index, index + 12).join('\n'));
+    }
+  }
+
+  const intendedForks = [
+    'const BINDINGS_HEADER', // generated bindings exist only in a developer build
+    'specta_builder', // generation side effect, not a product command
+    'PAPERCUSP_DISABLE_SINGLE_INSTANCE', // release-only lifecycle protection
+    'tauri_plugin_mcp_bridge', // localhost developer inspection bridge
+    'redirect_own_stdio', // packaged apps have no inherited terminal
+    'PAPERCUSP_AUTO_DEVTOOLS', // opt-in developer inspector
+    'std::env::var_os("HOME")', // dev IPC discovers the externally-run operator
+  ];
+
+  assert.equal(
+    gates.length,
+    intendedForks.length,
+    `main.rs added or removed a debug/release compile fork; classify it here before shipping (${gates.length} found)`,
+  );
+  intendedForks.forEach((fingerprint, index) => {
+    assert.match(
+      gates[index],
+      new RegExp(fingerprint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      `debug/release fork ${index + 1} is no longer the reviewed ${fingerprint} case`,
+    );
+  });
 });
