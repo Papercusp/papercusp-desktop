@@ -317,6 +317,8 @@ if [ -n "$physical_probe_cmd" ]; then
   physical_probe_cmd="$(readlink -f "$physical_probe_cmd" 2>/dev/null || echo "$physical_probe_cmd")"
   if [ "$physical_probe_cmd" != "$canonical_physical_probe" ] || [ ! -x "$canonical_physical_probe" ]; then
     bad "physical E/G adapter: only the checked-in executable $canonical_physical_probe may produce release evidence"
+  elif [ -z "${PAPERCUSP_CAPABILITY_BASH_BACKGROUND_TASK_ID:-}" ]; then
+    bad "physical E/G adapter requires a durable capability:bash background task enrollment"
   elif ! HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
     "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
     >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr"; then

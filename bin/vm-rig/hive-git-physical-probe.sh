@@ -44,6 +44,9 @@ fail() { echo "hive-git-physical-probe: $*" >&2; exit 1; }
 
 [ "${HIVE_GIT_PHYSICAL_PLAN:-}" = "p2p-git-live-activation-2026-07-09" ] \
   || fail 'must be launched by the canonical P-505 drill'
+if [ "$source_preflight" -eq 0 ] && [ -z "${PAPERCUSP_CAPABILITY_BASH_BACKGROUND_TASK_ID:-}" ]; then
+  fail 'physical run requires a durable capability:bash background task enrollment'
+fi
 if [ "$source_preflight" -eq 1 ]; then
   [ "$#" -eq 0 ] || fail 'usage: hive-git-physical-probe.sh --source-preflight'
 else
