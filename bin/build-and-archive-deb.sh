@@ -21,8 +21,9 @@
 # purely ADDITIVE, so nothing that already calls `npm run build` directly
 # changes behavior) that, on a successful build, HARDLINKS (not copies — the
 # .deb is ~1GB and hardlinks cost ~0 extra disk on the same filesystem) the
-# fresh artifact into a git-sha + timestamp-stamped archive path, then prunes
-# to the last N (default 10) archived builds so this can run unattended
+# fresh artifact into a byte-independent git-sha + timestamp-stamped archive
+# path (a reflink where supported, a real copy otherwise), then prunes to the
+# last N (default 10) archived builds so this can run unattended
 # (e.g. from a CI/gate script) without unbounded disk growth.
 #
 # Usage: bin/build-and-archive-deb.sh [--debug] [--keep N]
@@ -391,6 +392,7 @@ cleanup_build_cgroup() {
 }
 
 BUILD_PGID=""
+ARCHIVE_TMP=""
 stop_build_group() {
   if [ -n "$BUILD_PGID" ] && kill -0 "-$BUILD_PGID" 2>/dev/null; then
     echo "==> stopping build process group $BUILD_PGID (so it cannot orphan into the shared staging dir)" >&2
@@ -403,6 +405,9 @@ stop_build_group() {
   fi
   kill_build_cgroup
   cleanup_build_cgroup
+  if [ -n "$ARCHIVE_TMP" ]; then
+    rm -f -- "$ARCHIVE_TMP"
+  fi
 }
 trap stop_build_group EXIT INT TERM
 
@@ -518,14 +523,23 @@ BASENAME="$(basename "$DEB_PATH" .deb)"
 ARCHIVED_PATH="$ARCHIVE_DIR/${STAMP}-${GIT_SHA}-${BASENAME}.deb"
 
 mkdir -p "$ARCHIVE_DIR"
-if ln "$DEB_PATH" "$ARCHIVED_PATH" 2>/dev/null; then
-  echo "✓ archived (hardlink, 0 extra disk): $ARCHIVED_PATH"
-else
-  # Cross-device or hardlink-unsupported fallback — a real copy, still correct,
-  # just costs disk (the .deb is large; this path should be rare on one box).
-  cp "$DEB_PATH" "$ARCHIVED_PATH"
-  echo "✓ archived (copy — hardlink failed, cross-device or unsupported): $ARCHIVED_PATH"
+# Never hardlink the fixed live bundle path into the archive. Tauri/dpkg may
+# rewrite that path in place on the next build; a hardlink then rewrites the
+# supposedly immutable OLD archive too (observed live 2026-08-20: the archive
+# named 04:47:18Z acquired the 06:07 build's inode, mtime, and bytes). A reflink
+# retains the near-zero incremental storage benefit where the filesystem
+# supports CoW while giving the archive its own inode; --reflink=auto falls
+# back to an ordinary byte copy everywhere else.
+ARCHIVE_TMP="${ARCHIVED_PATH}.partial.$$"
+rm -f -- "$ARCHIVE_TMP"
+cp --reflink=auto --preserve=mode,timestamps -- "$DEB_PATH" "$ARCHIVE_TMP"
+if [[ "$(stat -c '%d:%i' "$DEB_PATH")" == "$(stat -c '%d:%i' "$ARCHIVE_TMP")" ]]; then
+  echo "FATAL: archive copy shares the live deb inode; refusing a mutable archive ($ARCHIVE_TMP)." >&2
+  exit 9
 fi
+mv -- "$ARCHIVE_TMP" "$ARCHIVED_PATH"
+ARCHIVE_TMP=""
+echo "✓ archived (immutable reflink/copy): $ARCHIVED_PATH"
 
 # Prune to the last $KEEP archived builds (oldest-first deletion), so an
 # unattended repeated build (e.g. a periodic gate) never grows this unbounded.
