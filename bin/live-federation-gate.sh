@@ -185,7 +185,11 @@ WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
 # GATE_KEEP_RUNS run dirs (this one included; logs+deb of recent runs stay for EI
 # debugging); pkg/ is additionally removed right after a successful repack below.
 GATE_KEEP_RUNS="${GATE_KEEP_RUNS:-5}"
-ls -dt /tmp/live-fed-gate-* 2>/dev/null | tail -n +$(( GATE_KEEP_RUNS + 1 )) | xargs -r rm -rf --
+# Match stamped RUN directories only. The gate's immutable self-copies are named
+# /tmp/live-fed-gate-snapshot.*; the old broad `live-fed-gate-*` glob counted those
+# short-lived snapshots as retained runs and pruned the real RED evidence before the
+# fresh-red retry window expired (EI-20943443385083338).
+ls -dt /tmp/live-fed-gate-[0-9]* 2>/dev/null | tail -n +$(( GATE_KEEP_RUNS + 1 )) | xargs -r rm -rf --
 # log → STDERR. Load-bearing (P-013 validation run 2026-07-03): run_smoke's result is read
 # via $(command substitution); with log on stdout the captured value became
 # "log-line\nPASS|FAIL", so `[ "$RES" = FAIL ]` could NEVER match and a genuine
