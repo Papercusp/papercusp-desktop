@@ -159,6 +159,7 @@ empty_staged="$(ssh "${SSH_OPTS[@]}" "$VM" \
 ssh "${SSH_OPTS[@]}" "$VM" \
   "'$VM_NODE' - '$remote_source' '$VM_DEP_SOURCE'" <<'NODE' \
   || fail 'could not build the VM run-source dependency overlay'
+// VM-RUN-SOURCE-OVERLAY-BEGIN
 const fs = require('node:fs');
 const path = require('node:path');
 const [runRoot, installedRoot] = process.argv.slice(2);
@@ -189,20 +190,44 @@ for (const entry of fs.readdirSync(installedModules, { withFileTypes: true })) {
   }
 }
 
-// Reuse the monorepo's canonical workspace registry rather than maintaining a
-// second hand-written directory list here. This covers nested workspaces such
-// as papergrid/grid-core as well as top-level libs, and adding a workspace to
-// package.json automatically makes it eligible for the run-source overlay.
-const rootManifest = JSON.parse(fs.readFileSync(path.join(runRoot, 'package.json'), 'utf8'));
-const workspacePatterns = Array.isArray(rootManifest.workspaces)
-  ? rootManifest.workspaces
-  : rootManifest.workspaces?.packages;
-if (!Array.isArray(workspacePatterns) || workspacePatterns.length === 0) {
+// Reuse every canonical workspace registry staged into the immutable run tree
+// rather than maintaining a second hand-written directory list here. The root
+// registry covers the main monorepo; nested repositories such as
+// libs/papercusp carry their own registry and may declare packages (for example
+// @papercusp/file-claim) that intentionally are not repeated at the root.
+const rootRegistryPath = path.join(runRoot, 'package.json');
+const workspaceRegistryPaths = [...new Set([
+  rootRegistryPath,
+  ...fs.globSync('**/package.json', {
+    cwd: runRoot,
+    exclude: ['**/node_modules/**'],
+  }).map((relative) => path.join(runRoot, relative)),
+])];
+const workspaceRoots = new Set();
+let rootRegistryFound = false;
+for (const registryPath of workspaceRegistryPaths) {
+  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  const workspacePatterns = Array.isArray(registry.workspaces)
+    ? registry.workspaces
+    : registry.workspaces?.packages;
+  if (registryPath === rootRegistryPath) {
+    rootRegistryFound = Array.isArray(workspacePatterns) && workspacePatterns.length > 0;
+  }
+  if (!Array.isArray(workspacePatterns)) continue;
+  const registryRoot = path.dirname(registryPath);
+  for (const pattern of workspacePatterns) {
+    for (const relative of fs.globSync(pattern, {
+      cwd: registryRoot,
+      exclude: ['**/node_modules/**'],
+    })) {
+      const packageRoot = path.join(registryRoot, relative);
+      if (fs.existsSync(path.join(packageRoot, 'package.json'))) workspaceRoots.add(packageRoot);
+    }
+  }
+}
+if (!rootRegistryFound) {
   throw new Error('root package.json has no workspace registry for the VM run-source overlay');
 }
-const workspaceRoots = [...new Set(workspacePatterns.flatMap((pattern) =>
-  fs.globSync(pattern, { cwd: runRoot, exclude: ['**/node_modules/**'] }),
-))].map((relative) => path.join(runRoot, relative));
 for (const packageRoot of workspaceRoots) {
   const manifestPath = path.join(packageRoot, 'package.json');
   if (!fs.existsSync(manifestPath)) continue;
@@ -239,6 +264,7 @@ if (staleWorkspaceDependencies.length > 0) {
     `operator-core workspace dependencies were not staged into the VM run-source overlay: ${staleWorkspaceDependencies.join(', ')}`,
   );
 }
+// VM-RUN-SOURCE-OVERLAY-END
 NODE
 local_producer_sha="$(sha256sum "$PRODUCER" | awk '{print $1}')"
 remote_producer_sha="$(ssh "${SSH_OPTS[@]}" "$VM" \
