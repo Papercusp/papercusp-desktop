@@ -31,7 +31,7 @@
 #            host-side ed25519/minisign step the mac leg always ran.
 #   DMG      libdmg-hfsplus (`hfsplus addall` + the `dmg` UDIF converter) over an
 #            mkfs.hfsplus image builds a real compressed .dmg with NO hdiutil and
-#            NO root.
+#            NO root, then the pinned Tauri signer emits its .dmg.sig sibling.
 #
 # ROLE CORRECTNESS (the subtlety a naive wiring gets wrong — identical to
 # build-windows-cross.sh): the app resolves its role at RUNTIME from the BAKED
@@ -533,13 +533,24 @@ make_dmg() { # $1=app $2=productName
   grep -qF "$name.app/Contents/MacOS/papercusp-desktop" <<<"$listing" \
     || fail "dmg $(basename "$dmg") does not contain $name.app/Contents/MacOS/papercusp-desktop — pack failed"
 
-  # Sign the dmg ONLY with a real cert. The current prod dmgs ship UNSIGNED, and
-  # the .app inside is already signed; rcodesign's ad-hoc dmg signature adds
-  # nothing for gatekeeper and is non-standard, so the ad-hoc path skips it.
+  # Apple-code-sign the dmg only when a real certificate is supplied. The .app
+  # inside is already signed; rcodesign's ad-hoc dmg signature adds nothing for
+  # gatekeeper and is non-standard, so the ad-hoc path skips it.
   if [[ -n "$MAC_CERT_P12" ]]; then
     rcodesign sign --p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}" "$dmg" >/dev/null 2>&1 \
       || echo "    WARN: rcodesign could not sign the dmg (non-fatal)"
   fi
+  # Published DMGs also need the Tauri updater/minisign sibling. `tauri signer
+  # sign` accepts key CONTENT, not a path; resolve the conventional key path
+  # before handing it to the CLI, and never put the secret on argv.
+  local _key="$KEY_FILE"
+  [[ -f "$_key" ]] && _key="$(cat "$_key")"
+  [[ -n "$_key" ]] || fail "no updater signing key content for $dmg"
+  ( cd "$ROOT" && TAURI_SIGNING_PRIVATE_KEY="$_key" \
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD" \
+      npx --yes -p "@tauri-apps/cli@$TAURI_CLI_VERSION" tauri signer sign "$dmg" >/dev/null ) \
+    || fail "tauri signer failed for $dmg"
+  [[ -s "$dmg.sig" ]] || fail "tauri signer produced no .sig for $dmg"
   echo "    ✓ $(basename "$dmg") ($(du -h "$dmg" | cut -f1))"
 }
 
