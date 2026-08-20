@@ -68,6 +68,7 @@ chmod --reference="$DEB_PATH" "$REPLACEMENT"
 dpkg-deb --info "$REPLACEMENT" >/dev/null
 dpkg-deb --contents "$REPLACEMENT" >/dev/null
 
+SIGNATURE_STATUS="UNSIGNED"
 if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   # WI-3823 (again, here): `tauri signer sign` accepts ONLY the key CONTENT (base64)
   # in TAURI_SIGNING_PRIVATE_KEY, while `tauri build` accepts contents OR a path — so
@@ -88,13 +89,17 @@ if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
       tauri signer sign "$REPLACEMENT" >/dev/null
   [[ -s "$REPLACEMENT.sig" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
+  SIGNATURE_STATUS="signed"
 fi
 
 # Publish only after every validation AND signing step succeeds. A signer
 # failure must leave the known-good deb and its matching signature untouched.
 mv -f "$REPLACEMENT" "$DEB_PATH"
-if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+if [[ "$SIGNATURE_STATUS" == "signed" ]]; then
   mv -f "$REPLACEMENT.sig" "$DEB_PATH.sig"
 fi
 
-echo "✓ repacked data member as xz -9: $DEB_PATH"
+echo "✓ repacked data member as xz -9: $DEB_PATH ($SIGNATURE_STATUS)"
+if [[ "$SIGNATURE_STATUS" == "UNSIGNED" ]]; then
+  echo "⚠ UNSIGNED: no TAURI_SIGNING_PRIVATE_KEY supplied; $DEB_PATH has no .sig" >&2
+fi

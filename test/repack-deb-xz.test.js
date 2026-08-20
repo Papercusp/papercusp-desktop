@@ -545,3 +545,39 @@ test('refuses to invalidate an existing updater signature without a signing key'
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('announces an unsigned output when repacking without a signing key', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-unsigned-'));
+  try {
+    const pkg = path.join(tmp, 'pkg');
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+      'Package: papercusp-repack-unsigned-test',
+      'Version: 1.0.0',
+      'Architecture: all',
+      'Maintainer: Papercusp <test@example.invalid>',
+      'Description: unsigned status fixture',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'unsigned bytes\n');
+    const deb = path.join(tmp, 'unsigned.deb');
+    run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /repacked data member as xz -9: .* \(UNSIGNED\)/);
+    assert.match(res.stderr, /UNSIGNED: no TAURI_SIGNING_PRIVATE_KEY supplied/);
+    assert.equal(fs.existsSync(`${deb}.sig`), false, 'unsigned output must not claim a signature');
+    assert.deepEqual(run('ar', ['t', deb]).trim().split('\n'), [
+      'debian-binary',
+      'control.tar.gz',
+      'data.tar.xz',
+    ]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

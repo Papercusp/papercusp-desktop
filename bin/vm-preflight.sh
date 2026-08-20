@@ -33,6 +33,11 @@
 #   --app-image NAME      Windows image name for tasklist (default papercusp-desktop.exe)
 #   --host-vm-pattern PAT pgrep -f pattern for the VM process on the host
 #                         (default 'qemu.*(windows|win-|papercup-vm-win)')
+#   --monitor-socket PATH host-side QEMU HMP monitor socket used for a
+#                         screendump when SSH is unavailable
+#                         (default $HOME/windows-vm/qemu-monitor.sock)
+#   --screendump-dir DIR  directory for diagnostic PPM/PNG artifacts
+#                         (default ${TMPDIR:-/tmp})
 #   --skip-host-pgrep     skip check 1 (e.g. VM launched outside this host's pgrep view)
 #   --json                emit a machine-readable verdict to stdout
 # Exit: 0 = operator genuinely healthy (forward-degraded still exits 0) ·
@@ -49,6 +54,8 @@ APP_IMAGE="papercusp-desktop.exe"
 # recipe form (which can't pass --host-vm-pattern) failed WI-3270 preflight
 # (live-diagnosed on the 0.0.8 windows verify, 2026-07-11).
 HOST_VM_PATTERN='qemu.*(windows|win-|papercup-vm-win|hv_synic)'
+MONITOR_SOCKET="${VM_MONITOR_SOCKET:-$HOME/windows-vm/qemu-monitor.sock}"
+SCREEN_DUMP_DIR="${VM_SCREENDUMP_DIR:-${TMPDIR:-/tmp}}"
 SKIP_HOST_PGREP=0
 JSON=0
 
@@ -60,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --distro) DISTRO="${2:-}"; shift 2 ;;
     --app-image) APP_IMAGE="${2:-}"; shift 2 ;;
     --host-vm-pattern) HOST_VM_PATTERN="${2:-}"; shift 2 ;;
+    --monitor-socket) MONITOR_SOCKET="${2:-}"; shift 2 ;;
+    --screendump-dir) SCREEN_DUMP_DIR="${2:-}"; shift 2 ;;
     --skip-host-pgrep) SKIP_HOST_PGREP=1; shift ;;
     --json) JSON=1; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -71,12 +80,93 @@ done
 # a live VM — the D-007 acceptance path while the Windows VM is untouchable.
 SSH_BIN="${PC_SSH:-ssh}"
 SSH=("$SSH_BIN" -i "$SSH_KEY" -p "$SSH_PORT" -o IdentitiesOnly=yes -o ConnectTimeout=10 -o BatchMode=yes "$SSH_HOST")
+SOCAT_BIN="${PC_SOCAT:-socat}"
+CONVERT_BIN="${PC_CONVERT:-convert}"
+PNMTOPNG_BIN="${PC_PNMTOPNG:-pnmtopng}"
 wsl_exec() { timeout 60 "${SSH[@]}" "wsl -d $DISTRO --user papercup --exec $*" 2>/dev/null | tr -d '\r\0'; }
 
 FAILURES=()
 NOTES=()
 fail_check() { FAILURES+=("$1"); }
 note() { NOTES+=("$1"); }
+
+# A hostfwd LISTEN socket is deliberately not a VM-health signal here. QEMU's
+# user-mode network stack owns that bind and can accept TCP while the guest is
+# bluescreened; SSH/banner or the inner /api/health probe must provide guest
+# evidence instead.
+
+guest_screen_status="not-attempted"
+guest_screen_ppm=""
+guest_screen_png=""
+guest_screen_error=""
+
+capture_guest_screen() {
+  guest_screen_status="unavailable"
+
+  if [[ ! -S "$MONITOR_SOCKET" ]]; then
+    guest_screen_error="monitor socket not found at $MONITOR_SOCKET"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    guest_screen_error="timeout command is unavailable"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  fi
+  if ! command -v "$SOCAT_BIN" >/dev/null 2>&1; then
+    guest_screen_error="socat command is unavailable (needed for HMP monitor $MONITOR_SOCKET)"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  fi
+  if [[ ! -d "$SCREEN_DUMP_DIR" || ! -w "$SCREEN_DUMP_DIR" ]]; then
+    guest_screen_error="screendump directory is not writable: $SCREEN_DUMP_DIR"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  fi
+
+  local ppm png monitor_rc
+  ppm="$(mktemp "$SCREEN_DUMP_DIR/vm-preflight-screen-XXXXXX.ppm" 2>/dev/null)" || {
+    guest_screen_error="could not allocate a screendump artifact in $SCREEN_DUMP_DIR"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  }
+  png="${ppm%.ppm}.png"
+  monitor_rc=0
+
+  # The HMP monitor keeps its UNIX connection open on some QEMU builds. The
+  # artifact, not socat's eventual EOF/timeout status, is therefore authoritative.
+  printf 'screendump %s\n' "$ppm" |
+    timeout 15 "$SOCAT_BIN" - "UNIX-CONNECT:$MONITOR_SOCKET" >/dev/null 2>&1 || monitor_rc=$?
+
+  if [[ ! -s "$ppm" ]]; then
+    rm -f "$ppm"
+    guest_screen_error="monitor screendump failed (rc=$monitor_rc) via $MONITOR_SOCKET"
+    note "guest-state diagnosis unavailable: $guest_screen_error"
+    return 0
+  fi
+
+  if command -v "$CONVERT_BIN" >/dev/null 2>&1 &&
+    "$CONVERT_BIN" "$ppm" "$png" >/dev/null 2>&1 && [[ -s "$png" ]]; then
+    guest_screen_status="captured"
+    guest_screen_ppm="$ppm"
+    guest_screen_png="$png"
+    note "guest-state screen captured at $png; inspect it for BSOD, boot, login, or a hung display"
+    return 0
+  fi
+  if command -v "$PNMTOPNG_BIN" >/dev/null 2>&1 &&
+    "$PNMTOPNG_BIN" "$ppm" >"$png" 2>/dev/null && [[ -s "$png" ]]; then
+    guest_screen_status="captured"
+    guest_screen_ppm="$ppm"
+    guest_screen_png="$png"
+    note "guest-state screen captured at $png; inspect it for BSOD, boot, login, or a hung display"
+    return 0
+  fi
+
+  guest_screen_status="captured-ppm"
+  guest_screen_ppm="$ppm"
+  guest_screen_error="captured $ppm but no usable PNG converter is available"
+  note "guest-state screen captured at $ppm, but PNG conversion failed; install ImageMagick convert or pnmtopng"
+}
 
 host_pgrep_ok=null
 ssh_ok=null
@@ -123,7 +213,14 @@ else
     fi
   else
     ssh_ok=false
-    fail_check "vm: ssh unreachable on :$SSH_PORT ($SSH_HOST)"
+    capture_guest_screen
+    if [[ "$guest_screen_status" == "captured" ]]; then
+      fail_check "vm: ssh unreachable on :$SSH_PORT ($SSH_HOST); guest screen captured at $guest_screen_png (inspect for BSOD/boot/hang)"
+    elif [[ "$guest_screen_status" == "captured-ppm" ]]; then
+      fail_check "vm: ssh unreachable on :$SSH_PORT ($SSH_HOST); guest screen captured at $guest_screen_ppm but PNG conversion failed"
+    else
+      fail_check "vm: ssh unreachable on :$SSH_PORT ($SSH_HOST); guest-state monitor diagnosis unavailable: $guest_screen_error"
+    fi
   fi
 fi
 
@@ -166,6 +263,10 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "innerHealthCode": "%s",\n' "$inner_code"
   printf '  "innerHealthy": "%s",\n' "$inner_ok"
   printf '  "outerHealthCode": "%s",\n' "$outer_code"
+  printf '  "monitorSocket": %s,\n' "$(printf '%s' "$MONITOR_SOCKET" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "${MONITOR_SOCKET//\"/\\\"}")"
+  printf '  "guestScreenStatus": "%s",\n' "$guest_screen_status"
+  printf '  "guestScreenPpm": %s,\n' "$(printf '%s' "$guest_screen_ppm" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "${guest_screen_ppm//\"/\\\"}")"
+  printf '  "guestScreenPng": %s,\n' "$(printf '%s' "$guest_screen_png" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "${guest_screen_png//\"/\\\"}")"
   printf '  "forwardDegraded": %s,\n' "$forward_degraded"
   printf '  "failures": ['
   for i in "${!FAILURES[@]}"; do [[ $i -gt 0 ]] && printf ', '; printf '%s' "$(printf '%s' "${FAILURES[$i]}" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "${FAILURES[$i]}")"; done
