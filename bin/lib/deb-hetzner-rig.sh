@@ -1321,12 +1321,25 @@ rig_resolve_ws() {
 
 # rig_write_content <inst> <harness_slug> <feature_id> [title] [status]
 # INSERT a feature row origin='local' on <inst> (the capture trigger federates it).
-# Echoes the feature_id written. The analog the fed_*_merge probes also use.
+# Echoes the feature_id only after a confirmed write. The analog the fed_*_merge
+# probes also use.
+#
+# WI-6043 detector-integrity fix: migrations 651/652 reject local feature writes
+# under a joined member-repo slug; a federated rig write must be homed to the real
+# Pot. RIG_HIVE_ID is that already-resolved identity, shared by every frame, so use
+# it whenever it is in scope (the explicit slug remains the fallback for callers
+# outside the Pot rig). Also propagate a rejected INSERT: a negative assertion run
+# after an unauthored write is vacuous and used to score revocation_kcut PASS.
 rig_write_content() {
-  local inst="$1" slug="$2" fid="$3" title="${4:-rig write}" status="${5:-todo}" ts ws
+  local inst="$1" slug="$2" fid="$3" title="${4:-rig write}" status="${5:-todo}" ts ws write_slug
+  write_slug="$slug"
+  [ -n "${RIG_HIVE_ID:-}" ] && write_slug="$RIG_HIVE_ID"
   ts="$(date +%s)000"
   ws="$(rig_resolve_ws "$inst")" || return 1
-  drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null
+  if ! drv_psql "$inst" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$write_slug','$fid','$title','rig write','$status',0,'local',$ts,$ts,$ts);" >/dev/null; then
+    echo "FATAL rig_write_content($inst,$fid): source write was rejected (requested slug='$slug', resolved Pot home='$write_slug') — refusing to let a downstream absence assert pass vacuously" >&2
+    return 1
+  fi
   echo "$fid"
 }
 

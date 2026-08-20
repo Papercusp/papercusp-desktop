@@ -113,9 +113,14 @@ scn_revocation_kcut() {
   fi
 
   # 3. post-ban owner write (triggers the re-key; revoke.live is false until it lands) must
-  #    NOT reach B. rig_assert_absent waits the full window and passes only if it never appears.
+  #    NOT reach B. Fail BEFORE the negative assert if the source write was rejected:
+  #    "absent" is otherwise vacuously true for a row the owner never authored (WI-6043).
+  #    rig_assert_absent waits the full window and passes only if a confirmed write never appears.
   local post_title="revocation post-ban (must be ABSENT on banned B)"
-  rig_write_content a "$oslug" "$FPOST" "$post_title" todo >/dev/null
+  if ! rig_write_content a "$oslug" "$FPOST" "$post_title" todo >/dev/null; then
+    echo "revocation: POST-BAN WRITE FAILED — $FPOST was never authored; refusing to score its absence as a cut-off (WI-6043)"
+    return 1
+  fi
   local absent; absent="$(rig_assert_absent b "$FPOST" 30)"
 
   # WI-560 K-CUT CRYPTO WITNESS (diagnostic — the assertion above is deliberately UNCHANGED).

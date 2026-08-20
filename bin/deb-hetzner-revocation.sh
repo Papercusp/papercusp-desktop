@@ -195,7 +195,10 @@ scenario_revocation_kcut() {
   # advances the epoch EXCLUDING B → B can never decrypt/apply it. rig_assert_absent waits
   # the full window and passes ONLY if the row never appears on B.
   fed_log "[3] owner writes $FPOST (POST-ban → triggers the re-key) → banned member must NOT receive it"
-  rig_write_content "$OWNER" "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned member)" todo >/dev/null
+  if ! rig_write_content "$OWNER" "$oslug" "$FPOST" "revocation post-ban (must be ABSENT on banned member)" todo >/dev/null; then
+    echo "  ✗ POST-BAN WRITE FAILED: $FPOST was never authored — refusing to score its absence as a cut-off (WI-6043)"
+    echo "OVERALL: INCOMPLETE"; return 2
+  fi
   local absent; absent="$(rig_assert_absent "$BANNED" "$FPOST" 30)"
   if [ "$absent" = 1 ]; then
     echo "  ✓ CUT-OFF: $FPOST never reached the banned member in ~90s (revocation holds)"

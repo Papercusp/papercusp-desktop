@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# b3-revocation-kcut.selftest.sh — guards the two EI-18712383368117845 probes in
-# scenarios/b3-revocation.sh: the K-CUT device resolver and the leak classifier.
+# b3-revocation-kcut.selftest.sh — guards the revocation K-CUT detector's
+# falsifiability: the K-CUT device resolver, leak classifier, and WI-6043's
+# source-write precondition for the post-ban negative assertion.
 #
 # WHY THIS EXISTS. Both probes were previously wrong in the one way a live run can
 # never reveal — they produced a CONFIDENT verdict that was structurally incapable of
@@ -35,16 +36,22 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tree (scripts/mutation-probe.sh tier 2) instead of mutating the shared checkout, where
 # git-sync would commit the mutant mid-probe. Defaults to the real file.
 SCN="${B3_SCENARIO_SRC:-$DIR/scenarios/b3-revocation.sh}"
+RIG_LIB="${RIG_LIB_SRC:-$DIR/deb-hetzner-rig.sh}"
+STANDALONE="$DIR/../deb-hetzner-revocation.sh"
 
 fails=0
 ok()  { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1"; fails=$((fails + 1)); }
 
 [ -f "$SCN" ] || { echo "FAIL — cannot find $SCN"; exit 1; }
+[ -f "$RIG_LIB" ] || { echo "FAIL — cannot find $RIG_LIB"; exit 1; }
+[ -f "$STANDALONE" ] || { echo "FAIL — cannot find $STANDALONE"; exit 1; }
 
 matrix_register() { :; }
 # shellcheck disable=SC1090
 source "$SCN"
+# shellcheck disable=SC1090
+source "$RIG_LIB"
 
 for fn in _rv_key_bearing_device _rv_classify_leak; do
   declare -f "$fn" >/dev/null \
@@ -91,10 +98,23 @@ declare -A FRAME_USER=([a]=owner-user [b]=member-user)
 #    discriminating clause is what decides each case — not the stub's mood.
 STUB_DEVICES=""
 STUB_CALLS=0
+STUB_WS="workspace-rigtest"
+STUB_INSERT_RC=0
+SQL_LOG="$(mktemp)"
+ERR_LOG="$(mktemp)"
+trap 'rm -f "$SQL_LOG" "$ERR_LOG"' EXIT
 drv_psql() {
   local sql="${2:-}"   # drv_psql <inst> <sql>
 
   STUB_CALLS=$((STUB_CALLS + 1))
+  printf '%s\n' "$sql" >>"$SQL_LOG"
+  if [[ "$sql" == *"SELECT workspace_id FROM harness_shared.pot_members"* ]]; then
+    printf '%s\n' "$STUB_WS"
+    return 0
+  fi
+  if [[ "$sql" == *"INSERT INTO harness_shared.harness_features_consolidated"* ]]; then
+    return "$STUB_INSERT_RC"
+  fi
   local maxep row pk ep
   maxep="$(printf '%s' "$sql" | sed -n 's/.*k\.epoch < \([0-9]\+\).*/\1/p')"
   [ -n "$maxep" ] || return 0
@@ -158,6 +178,50 @@ got="$(_rv_classify_leak "" "$WRITTEN")"
 [ "$got" = UNREADABLE ] \
   && ok "empty read ⇒ UNREADABLE (probe error or sealed), never DISCLOSURE" \
   || bad "classified '$got' — an unread probe must never be reported as a disclosure finding"
+
+echo "source-write precondition"
+
+# CALIBRATION: the helper must author under the Pot home, not the member-repo
+# slug its historical API still receives. Migrations 651/652 reject the latter.
+: >"$SQL_LOG"; : >"$ERR_LOG"
+RIG_HIVE_ID="pot-home-rigtest"; STUB_INSERT_RC=0
+got="$(rig_write_content a member-repo-slug F-RV-WRITE "post-ban bytes" todo 2>"$ERR_LOG")"; rc=$?
+insert_sql="$(grep 'INSERT INTO harness_shared.harness_features_consolidated' "$SQL_LOG" || true)"
+if [ "$rc" = 0 ] && [ "$got" = F-RV-WRITE ] \
+  && grep -q "'workspace-rigtest','pot-home-rigtest','F-RV-WRITE'" <<<"$insert_sql" \
+  && ! grep -q "'member-repo-slug'" <<<"$insert_sql"; then
+  ok "rig_write_content authors under the resolved Pot home and emits the fid only after success"
+else
+  bad "rig_write_content Pot-home write: rc=$rc got='$got' sql='$insert_sql' err='$(cat "$ERR_LOG")'"
+fi
+
+# THE REGRESSION: a rejected post-ban INSERT must be observable as failure and
+# must not emit the fid (which callers historically treated as authored).
+: >"$SQL_LOG"; : >"$ERR_LOG"
+STUB_INSERT_RC=42
+got="$(rig_write_content a member-repo-slug F-RV-REJECT "post-ban bytes" todo 2>"$ERR_LOG")"; rc=$?
+if [ "$rc" -ne 0 ] && [ -z "$got" ] \
+  && grep -q 'source write was rejected' "$ERR_LOG"; then
+  ok "rig_write_content propagates a rejected INSERT instead of reporting a phantom write"
+else
+  bad "rejected INSERT did not fail closed: rc=$rc got='$got' err='$(cat "$ERR_LOG")'"
+fi
+
+# Wiring guard: the helper's nonzero is only protective if both revocation
+# drivers check it BEFORE entering rig_assert_absent. Ignore comments so a prose
+# mention cannot keep the test green after the executable guard is removed.
+if grep -vE '^[[:space:]]*#' "$SCN" \
+  | grep -Fq 'if ! rig_write_content a "$oslug" "$FPOST" "$post_title" todo'; then
+  ok "matrix revocation leg checks post-ban authoring before its negative assert"
+else
+  bad "matrix revocation leg can still run a vacuous negative assert after a rejected post-ban write"
+fi
+if grep -vE '^[[:space:]]*#' "$STANDALONE" \
+  | grep -Fq 'if ! rig_write_content "$OWNER" "$oslug" "$FPOST"'; then
+  ok "standalone revocation leg checks post-ban authoring before its negative assert"
+else
+  bad "standalone revocation leg can still run a vacuous negative assert after a rejected post-ban write"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "b3-revocation-kcut.selftest: PASS"; exit 0; fi
