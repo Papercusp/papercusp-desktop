@@ -64,6 +64,7 @@ const WRITTEN_MANIFESTS = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/ta
 
 /** The line of the actual `if` branch — NOT the header comment that names it. */
 const PRECHECK_BRANCH = /if \[\[ "\$\{PAPERCUSP_RELEASE_PRECHECK_ONLY:-0\}" == "1" \]\]/;
+const PREPARE_TAG_BRANCH = /if \[\[ -n "\$\{PAPERCUSP_RELEASE_PREPARE_TAG_SHA:-\}" \]\]/;
 
 test('the precheck-only exit exists and is reachable', () => {
   const text = src();
@@ -93,6 +94,21 @@ test('the precheck exit is ABOVE the version bump — the first tree write', () 
   );
 });
 
+test('the release-owned prepare-tag operation exits before the first build write', () => {
+  const text = src();
+  const prepare = firstLine(text, PREPARE_TAG_BRANCH);
+  const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
+  const branch = text.split('\n').slice(prepare - 1, prepare + 30).join('\n');
+
+  assert(prepare > 0, 'the PAPERCUSP_RELEASE_PREPARE_TAG_SHA branch was removed or reworded');
+  assert(prepare < bump, 'prepare-tag drifted below the version bump and can mutate build manifests');
+  assert(
+    /release_tag_create_exact/.test(branch),
+    'prepare-tag no longer routes through the create-only force-with-lease helper',
+  );
+  assert(/exit \$\?/.test(branch), 'prepare-tag no longer exits immediately after the exact ref operation');
+});
+
 test('the version bump really is the first write, and it writes what we think', () => {
   const text = src();
   const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
@@ -120,5 +136,9 @@ test('the header warns that this script is not read-only', () => {
   assert(
     /PAPERCUSP_RELEASE_PRECHECK_ONLY/.test(head),
     "release-local.sh's header no longer names the precheck-only escape hatch",
+  );
+  assert(
+    /PAPERCUSP_RELEASE_PREPARE_TAG_SHA/.test(head),
+    "release-local.sh's header no longer discloses the separate remote-tag creation path",
   );
 });

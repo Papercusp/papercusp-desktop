@@ -58,6 +58,51 @@ release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha>
   echo "    ✓ local+origin refs/tags/$tag already pinned to expected source $expected_sha"
 }
 
+release_tag_create_exact() { # <repo> <tag> <expected-40-char-commit-sha>
+  local repo="$1" tag="$2" expected_sha="$3"
+  local remote_before remote_after local_after
+
+  release_tag_validate_exact_commit "$repo" "$expected_sha" || return $?
+  if [[ ! "$tag" =~ ^desktop-v[0-9A-Za-z.-]+$ ]]; then
+    echo "ERROR: refusing to create non-desktop release tag '$tag'" >&2
+    return 2
+  fi
+
+  remote_before="$(release_tag_remote_sha "$repo" "$tag")"
+  if [[ -n "$remote_before" ]]; then
+    if [[ "$remote_before" != "$expected_sha" ]]; then
+      echo "ERROR: origin refs/tags/$tag already exists at $remote_before, expected $expected_sha" >&2
+      echo "       Create is intentionally non-overwriting; use the separately-confirmed repair operation." >&2
+      return 1
+    fi
+    git -C "$repo" tag -f "$tag" "$expected_sha" >/dev/null
+    echo "    ✓ local+origin refs/tags/$tag already pinned to expected source $expected_sha"
+    return 0
+  fi
+
+  echo "==> creating release tag $tag at ${expected_sha:0:12}"
+  # Empty <expect> means the remote ref MUST NOT exist. A concurrent release
+  # writer therefore wins by making this push fail; create never overwrites.
+  git -C "$repo" push \
+    "--force-with-lease=refs/tags/$tag:" \
+    origin "$expected_sha:refs/tags/$tag"
+
+  remote_after="$(release_tag_remote_sha "$repo" "$tag")"
+  if [[ "$remote_after" != "$expected_sha" ]]; then
+    echo "ERROR: origin refs/tags/$tag is ${remote_after:-<missing>} after create, expected $expected_sha" >&2
+    return 1
+  fi
+
+  git -C "$repo" tag -f "$tag" "$expected_sha" >/dev/null
+  local_after="$(git -C "$repo" rev-parse --verify "refs/tags/$tag" 2>/dev/null)"
+  if [[ "$local_after" != "$expected_sha" ]]; then
+    echo "ERROR: local refs/tags/$tag is $local_after after create, expected $expected_sha" >&2
+    return 1
+  fi
+
+  echo "    ✓ created local+origin refs/tags/$tag = $expected_sha"
+}
+
 release_tag_repair_exact() { # <repo> <tag> <expected-40-char-commit-sha>
   local repo="$1" tag="$2" expected_sha="$3"
   local remote_before remote_after local_after

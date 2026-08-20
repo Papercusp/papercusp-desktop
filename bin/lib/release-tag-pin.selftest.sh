@@ -56,4 +56,26 @@ if release_tag_repair_exact "$WORK" "$TAG" deadbeef >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "release-tag-pin selftest: PASS (repaired ${WRONG:0:12} -> ${CANONICAL:0:12})"
+# A new release gets an explicit create-only path. The empty force-with-lease
+# expectation must make concurrent pre-existence a refusal, never an overwrite.
+CREATE_TAG="desktop-v9.9.10-alpha"
+release_tag_create_exact "$WORK" "$CREATE_TAG" "$CANONICAL"
+[[ "$(git -C "$WORK" rev-parse "refs/tags/$CREATE_TAG")" == "$CANONICAL" ]]
+[[ "$(release_tag_remote_sha "$WORK" "$CREATE_TAG")" == "$CANONICAL" ]]
+
+# Exact re-entry is idempotent and re-aligns a stale local ref.
+git -C "$WORK" tag -f "$CREATE_TAG" "$WRONG" >/dev/null
+release_tag_create_exact "$WORK" "$CREATE_TAG" "$CANONICAL"
+[[ "$(git -C "$WORK" rev-parse "refs/tags/$CREATE_TAG")" == "$CANONICAL" ]]
+[[ "$(release_tag_remote_sha "$WORK" "$CREATE_TAG")" == "$CANONICAL" ]]
+
+# A mismatched remote ref is not silently repaired by the create operation.
+git -C "$WORK" tag -f "$CREATE_TAG" "$WRONG" >/dev/null
+git -C "$WORK" push -q --force origin "refs/tags/$CREATE_TAG"
+if release_tag_create_exact "$WORK" "$CREATE_TAG" "$CANONICAL" >/dev/null 2>&1; then
+  echo "FAIL: create overwrote an existing mismatched release tag" >&2
+  exit 1
+fi
+[[ "$(release_tag_remote_sha "$WORK" "$CREATE_TAG")" == "$WRONG" ]]
+
+echo "release-tag-pin selftest: PASS (repair + create-only lease guards)"

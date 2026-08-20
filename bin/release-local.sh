@@ -14,6 +14,18 @@
 # off — see the note at the tail. Recover it from git history if that ever
 # reverses.
 #
+# One separate, explicit remote-ref operation exists because a brand-new cut's
+# dogfood clone pin needs an exact tag before artifact work starts:
+#
+#   PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<40-char superproject sha> \
+#   PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 \
+#     bin/release-local.sh <version> <channel>
+#
+# It creates only a MISSING tag under a force-with-lease expecting absence,
+# verifies local+origin equality, and exits before any build or manifest write.
+# It never creates a GitHub Release or uploads an artifact. Prefer the audited,
+# dry-run-by-default `release:cut { op:'prepare-tag', ... }` wrapper.
+#
 # Usage:
 #   bin/release-local.sh 0.0.8 stable     # tag + channel
 #   bin/release-local.sh 0.0.8 beta
@@ -37,10 +49,11 @@
 #
 # runs every gate and exits 0 before the first write, having modified nothing.
 #
-# NOTE: it DOES `git commit` the version bump and may `git tag -f` locally
-# (neither is pushed to origin). The dogfood *monorepo* tag must already exist
-# on origin at the explicit expected source SHA; a LOCAL-only cut verifies it
-# and never creates, moves, or force-pushes that remote ref.
+# NOTE: a NORMAL CUT does `git commit` the version bump and may `git tag -f`
+# locally (neither is pushed to origin). The dogfood *monorepo* tag must already
+# exist on origin at the explicit expected source SHA; the normal cut verifies
+# it and never creates, moves, or force-pushes that remote ref. The separate
+# prepare-tag operation above is the only create path and never overwrites.
 #
 # Optional platform legs (both mac + windows now build NATIVELY on this Linux box
 # via cross-compilation — the QEMU build VMs were retired as build legs, WI-5651;
@@ -111,6 +124,30 @@ KEY_PUB="${KEY_FILE}.pub"
 source "$HERE/lib/gen-latest-manifest.sh"
 # shellcheck source=lib/release-tag-pin.sh
 source "$HERE/lib/release-tag-pin.sh"
+
+# A brand-new version needs an exact remote ref before the LOCAL-only cutter can
+# bake its dogfood clone pin. Keep that outward write separate from the cut:
+# create is explicit + confirmed, idempotent when already exact, and uses an
+# empty force-with-lease expectation so it can never overwrite a concurrent ref.
+if [[ -n "${PAPERCUSP_RELEASE_PREPARE_TAG_SHA:-}" ]]; then
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]; then
+    echo "ERROR: version must look like X.Y.Z or X.Y.Z-foo" >&2
+    exit 2
+  fi
+  case "$CHANNEL" in
+    alpha|beta|stable|nightly) ;;
+    *) echo "ERROR: channel must be alpha|beta|stable|nightly" >&2; exit 2 ;;
+  esac
+  TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
+  MONOREPO="$(cd "$ROOT/.." && pwd)"
+  if [[ "${PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM:-0}" != "1" ]]; then
+    echo "DRY RUN: would create missing local+origin refs/tags/$TAG at $PAPERCUSP_RELEASE_PREPARE_TAG_SHA"
+    echo "Set PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 to execute the create-only force-with-lease operation." >&2
+    exit 2
+  fi
+  release_tag_create_exact "$MONOREPO" "$TAG" "$PAPERCUSP_RELEASE_PREPARE_TAG_SHA"
+  exit $?
+fi
 
 # P-009 containment escape hatch. This is intentionally an explicit confirmed
 # RELEASE-owned operation, not advice to run a manual `git push`. It only moves
