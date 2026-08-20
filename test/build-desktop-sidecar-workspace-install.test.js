@@ -17,14 +17,26 @@ const builder = fs.readFileSync(
   'utf8',
 );
 
-test('sidecar dependency install names both source workspaces exactly', () => {
+test('sidecar dependency install includes both source workspaces with exact names', () => {
   const operatorName = require(path.join(repoRoot, 'apps/operator/package.json')).name;
   const viteName = require(path.join(repoRoot, 'apps/operator-vite/package.json')).name;
 
   assert.equal(operatorName, '@papercusp/web');
   assert.equal(viteName, '@papercusp/operator-vite');
-  assert.match(builder, /--workspace=@papercusp\/web\s+--workspace=@papercusp\/operator-vite\)/);
-  assert.doesNotMatch(builder, /--workspace=@papercusp\/operator(?:\s|$)/);
+  const installStart = builder.indexOf(
+    '(cd "$REPO_ROOT" && npm install --legacy-peer-deps',
+  );
+  const installEnd = builder.indexOf(
+    ')\n\n# POST-INSTALL RUNTIME BUILDS',
+    installStart,
+  );
+  assert(installStart >= 0, 'missing scoped sidecar dependency install');
+  assert(installEnd > installStart, 'could not isolate scoped sidecar dependency install');
+  const install = builder.slice(installStart, installEnd).replace(/\\\r?\n/g, ' ');
+
+  assert.match(install, /--workspace=@papercusp\/web(?:\s|$)/);
+  assert.match(install, /--workspace=@papercusp\/operator-vite(?:\s|$)/);
+  assert.doesNotMatch(install, /--workspace=@papercusp\/operator(?:\s|$)/);
 });
 
 test('Debian removal tears down only verified Papercusp process ownership', () => {
