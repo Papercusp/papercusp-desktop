@@ -192,6 +192,14 @@ assert_serve_supports_from_repo() {
       return 1
     fi
     echo "✓ $label serve.mjs carries the WI-37195 tri-state owner gate (witness static check)"
+    # WI-6266: K4b is a CONTENT-UNDECRYPTABILITY witness only when B proves the
+    # encrypted F-RKCUT op reached its decrypt gate. A bundle without this trace
+    # can prove only content non-arrival, which is a different property.
+    if ! grep -qaF 'epoch_gate_seen' "$serve" 2>/dev/null; then
+      echo "✗ $label serve.mjs lacks the WI-6266 epoch-gate arrival trace (string 'epoch_gate_seen') — K4b cannot distinguish ciphertext deferral from non-arrival; rebuild it (cd papercusp-desktop && bin/build-desktop-sidecar.sh) for the re-key witness"
+      return 1
+    fi
+    echo "✓ $label serve.mjs carries the WI-6266 epoch-gate arrival trace (witness static check)"
   fi
   # Moderation-witness staleness gate (MODERATION_PROBE only). The EN-3 report backend must be
   # present or LEG 2 false-FAILs on an OLD build (report route absent → no-op). Marker survives
@@ -401,6 +409,19 @@ mcp_call() {
     -H 'accept: application/json, text/event-stream' \
     ${tok:+-H "Authorization: Bearer $tok"} \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$args}}"
+}
+
+# boot_history_get <inst> <comma-separated-kinds> — authenticated read
+# of the instance-local epoch trace. Under SUBSTRATE_SIDECAR the admin route
+# proxies to that sidecar's in-memory ring, which is where the decrypt gate runs.
+boot_history_get() {
+  local inst="$1" kinds="$2" home tok
+  [ "$inst" = a ] && home="$A_HOME" || home="$B_HOME"
+  tok="$(cat "$home/.papercusp/superuser-token" 2>/dev/null || true)"
+  [ -n "$tok" ] || return 1
+  curl -sS -m 30 \
+    "http://127.0.0.1:${FED_SC[$inst]}/api/admin/dogfood-substrate-boot-history?kinds=$kinds&limit=500" \
+    -H "Authorization: Bearer $tok"
 }
 
 # ── 0. pre-create A↔B swarm peering gate (EI-13590 r6 fix, 2026-07-17) ──────────
@@ -1048,11 +1069,54 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   rkcut="$(fed_hive_merge_probe a b "$MEMBER_SLUG" F-RKCUT ${RKCUT_PROBE_TRIES:-20} || true)"
   rkcut_on_b="${rkcut%% *}"   # 1 ⇒ B READ post-revoke content (a C-001 BREACH if K4a passed); else 0
   rkcut_on_a="$(drv_psql a "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='F-RKCUT';" 2>/dev/null | tr -d '[:space:]')"
+  # WI-6266: non-materialization alone proves only CONTENT NON-ARRIVAL. Ask B's
+  # own decrypt-gate ring whether the exact ciphertext op reached the gate and
+  # was deferred for its missing epoch key. The parser emits a leading validity
+  # bit so an auth/route/JSON failure can never collapse to four trustworthy 0s.
+  rkcut_trace_json="$(boot_history_get b 'epoch_gate_seen,epoch_defer,epoch_decrypt_fail,epoch_applied' 2>/dev/null || true)"
+  rkcut_trace_counts="$(printf '%s' "$rkcut_trace_json" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    entries=d["entries"]
+    assert isinstance(entries,list)
+except Exception:
+    sys.exit(0)
+kinds=("epoch_gate_seen","epoch_defer","epoch_decrypt_fail","epoch_applied")
+matched=[e for e in entries if isinstance(e,dict) and "/F-RKCUT" in str(e.get("message",""))]
+counts=[sum(1 for e in matched if e.get("kind")==kind) for kind in kinds]
+print("1 "+" ".join(map(str,counts)))
+' 2>/dev/null)"
+  rkcut_trace_ok=0; rkcut_seen=""; rkcut_defer=""; rkcut_decrypt_fail=""; rkcut_applied=""
+  read -r rkcut_trace_ok rkcut_seen rkcut_defer rkcut_decrypt_fail rkcut_applied <<< "$rkcut_trace_counts" || true
+  rkcut_trace_diag="seen=${rkcut_seen:-<unread>} defer=${rkcut_defer:-<unread>} decrypt-fail=${rkcut_decrypt_fail:-<unread>} applied=${rkcut_applied:-<unread>}"
   if [ "$rk_content_ctrl_ok" = 1 ]; then
     rk_content_applicable=1
-    # The content cut holds iff B did NOT read F-RKCUT AND the remaining member (A) DOES hold it.
-    [ "$rkcut_on_b" != 1 ] && [ -n "$rkcut_on_a" ] && [ "$rkcut_on_a" -ge 1 ] && rk_content_cut_ok=1
-    echo "  K4b CONTENT CUT (B can NO LONGER read post-revoke content F-RKCUT; remaining member A reads it): $([ "$rk_content_cut_ok" = 1 ] && echo "PASS (B-read=no, A-has=$rkcut_on_a)" || { [ "$rkcut_on_b" = 1 ] && echo "FAIL — C-001 BREACH: B READ post-revoke content F-RKCUT" || echo "FAIL (remaining member A lacks F-RKCUT, A-has=${rkcut_on_a:-0})"; })"
+    # PASS requires the complete connected-but-cut chain: K3 proved B remains
+    # connected while lacking its own new-epoch key; A materialized F-RKCUT; B
+    # did not; and B's exact trace says the ciphertext ARRIVED then DEFERRED —
+    # never applied and never failed under a wrongly-present key.
+    if [ "$rkcut_on_b" = 1 ]; then
+      rk_content_cut_why="FAIL — C-001 BREACH: B READ post-revoke content F-RKCUT ($rkcut_trace_diag)"
+    elif [ -z "$rkcut_on_a" ] || [ "$rkcut_on_a" -lt 1 ] 2>/dev/null; then
+      rk_content_cut_why="FAIL (remaining member A lacks F-RKCUT, A-has=${rkcut_on_a:-<unread>}; $rkcut_trace_diag)"
+    elif [ "$rk_cut_ok" != 1 ]; then
+      rk_content_cut_why="INCONCLUSIVE (K3 connected-but-cut key witness did not pass; $rkcut_trace_diag)"
+    elif [ "${rkcut_trace_ok:-0}" != 1 ]; then
+      rk_content_cut_why="INCONCLUSIVE (B boot-history trace unreadable — ciphertext arrival/defer was not measured)"
+    elif [ "${rkcut_seen:-0}" -lt 1 ] 2>/dev/null; then
+      rk_content_cut_why="INCONCLUSIVE (B never recorded epoch_gate_seen for /F-RKCUT — non-materialization may be non-arrival; $rkcut_trace_diag)"
+    elif [ "${rkcut_defer:-0}" -lt 1 ] 2>/dev/null; then
+      rk_content_cut_why="INCONCLUSIVE (B saw /F-RKCUT but never recorded epoch_defer for its missing key; $rkcut_trace_diag)"
+    elif [ "${rkcut_decrypt_fail:-0}" -gt 0 ] 2>/dev/null; then
+      rk_content_cut_why="FAIL (B reached decrypt with a key but failed /F-RKCUT; expected permanent no-key defer; $rkcut_trace_diag)"
+    elif [ "${rkcut_applied:-0}" -gt 0 ] 2>/dev/null; then
+      rk_content_cut_why="FAIL — C-001 BREACH: B applied post-revoke /F-RKCUT ($rkcut_trace_diag)"
+    else
+      rk_content_cut_ok=1
+      rk_content_cut_why="PASS (B-read=no, A-has=$rkcut_on_a; B ciphertext arrived+deferred; $rkcut_trace_diag)"
+    fi
+    echo "  K4b CONTENT CUT (B receives but can NO LONGER decrypt post-revoke content F-RKCUT; remaining member A reads it): $rk_content_cut_why"
   else
     echo "  K4b CONTENT CUT: INCONCLUSIVE (K4a did not establish healthy content federation A→B this run — WI-259; device-filtered key-level K3-CUT is the governing release proof)"
   fi
