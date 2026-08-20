@@ -1,1 +1,0 @@
-import{a as p,i as r,n as s,o as e,r as a,s as c,t as _}from"./spec-triad-policy-4pvWSP_G.js";a();export{_ as SPEC_TRIAD_EPOCH_DEFAULT,s as SPEC_TRIAD_EPOCH_ENV,r as planInSpecTriadScope,p as readSpecTriadDeclaration,e as specTriadEpoch,c as specTriadGate};

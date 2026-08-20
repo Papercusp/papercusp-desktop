@@ -1,1 +1,0 @@
-import{n}from"./chunk-ChpBd9eV.js";import{n as s,t as _}from"./pid-keyed-socket-B4KtK0DQ.js";function o(){const r={}[t];return r&&r.trim()?r.trim():s(e,process.pid)}var t,e,p=n((()=>{_(),t="PAPERCUSP_SPAWNER_IPC_SOCKET",e="spawner"}));export{p as n,o as r,t};

@@ -1,1 +1,0 @@
-import{n as a}from"./chunk-ChpBd9eV.js";var r,s,e=a((()=>{r=["analogical","first-principles","reframing","constraint-removal"],s=[...r,"risk-first","user-value","cost-leverage"]}));export{s as n,e as r,r as t};

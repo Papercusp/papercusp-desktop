@@ -58,7 +58,7 @@ params:
     affects: every role's agent invocation (the default backend)
     description: >-
       Default model id for this harness's agents (a role can override). e.g.
-      claude-opus-4-8.
+      claude-opus-5.
   "aiBackend.default.agentCmd":
     label: Agent command
     type: string

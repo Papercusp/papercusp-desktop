@@ -1,1 +1,0 @@
-import{n as r}from"./chunk-ChpBd9eV.js";function u(t,n){const e=new Date(t).getTime();if(!Number.isFinite(e))return"stale";const i=n-e;return i<6e4?"live":i<6e5?"idle":"stale"}var s,a,v=r((()=>{s=6e4,a=6e5}));export{v as i,a as n,u as r,s as t};

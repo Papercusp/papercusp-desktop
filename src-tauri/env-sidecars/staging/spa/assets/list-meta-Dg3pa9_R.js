@@ -1,0 +1,1 @@
+function e(t){if(t){for(const n of t)if(n._meta!==void 0)return n._meta}}function r(t){return t?e(t)?.total??t.length:0}function i(t,n){return n!=null&&n>t?`${t} of ${n}`:`${n??t}`}export{e as n,r,i as t};

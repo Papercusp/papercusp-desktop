@@ -1,1 +1,0 @@
-import{a as i,c as a,i as r,l as t,n as m,o,r as _,s as e,t as E}from"./premises-claim-port-BG5Fc6Dg.js";e();export{E as INVALIDATED_PREMISE_COMPLETION_RE,m as MAX_PREMISE_CITATION_REFS,_ as buildPremisesBrief,r as detectAbsencePremises,i as evidenceNamesScope,o as getClaimTimePremises,a as invalidatedPremiseCitationChecks,t as stripNonProse};

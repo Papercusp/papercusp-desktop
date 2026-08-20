@@ -1,1 +1,0 @@
-import{n as a}from"./chunk-ChpBd9eV.js";function e(n){if(n.json!=null)return n.json;const t=n.text??"",r=t.match(/```(?:json)?\s*([\s\S]*?)```/i),s=(r?r[1]:t).trim();try{return JSON.parse(s)}catch{const o=s.match(/\{[\s\S]*\}/);if(o)try{return JSON.parse(o[0])}catch{}return null}}var i=a((()=>{}));export{e as n,i as t};

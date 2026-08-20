@@ -1,1 +1,0 @@
-import{n as o}from"./chunk-ChpBd9eV.js";function a(i){const r=()=>{throw new Error("[node:module shim] require() is unavailable in the browser bundle")},e=(n=>r());return e.cache=Object.create(null),e.resolve=n=>r(),e.main=void 0,e.extensions=Object.create(null),e}var s=o((()=>{}));export{s as n,a as t};

@@ -1,1 +1,0 @@
-import{n as a}from"./chunk-ChpBd9eV.js";function n(e){r=e}async function s(e){if(!r)return{wired:!1};try{return{wired:!0,result:await r.requestWake(e)}}catch(t){return{wired:!0,error:t instanceof Error?t.message:String(t)}}}var r,u=a((()=>{r=null}));export{n,s as r,u as t};

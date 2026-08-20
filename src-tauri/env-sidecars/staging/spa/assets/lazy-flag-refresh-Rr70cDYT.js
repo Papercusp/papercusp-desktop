@@ -1,1 +1,0 @@
-import{n as f}from"./chunk-ChpBd9eV.js";import{f as i,l}from"./server-BXcXKvn3.js";function h(t,e){const n=e.keys??[];let r=!1;const a=()=>{try{Promise.resolve(t()).catch(()=>{})}catch{}};return function(){if(!r){if(r=!0,e.seed)try{e.seed()}catch{}i(s=>{(s===null||n.includes(s))&&a()}),a()}}}var u=f((()=>{l()}));export{h as n,u as t};

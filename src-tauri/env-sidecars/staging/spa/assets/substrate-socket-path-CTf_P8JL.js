@@ -1,1 +1,0 @@
-import{n as e}from"./chunk-ChpBd9eV.js";import{n as a,t as i}from"./pid-keyed-socket-B4KtK0DQ.js";function S(){const t={}[r];return t&&t.trim()?t.trim():a(s,process.pid)}var r,s,n=e((()=>{i(),r="PAPERCUSP_SUBSTRATE_IPC_SOCKET",s="substrate"}));export{S as i,s as n,n as r,r as t};

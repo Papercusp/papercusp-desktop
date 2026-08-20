@@ -1,1 +1,0 @@
-import{n as r}from"./chunk-ChpBd9eV.js";function c(a,t){return!Number.isFinite(a)||t<=0?i:(t*Math.max(0,Math.min(1,1-a/.25))+6*i)/(t+6)}function m(a,t){const n=Math.max(0,Math.min(1,t));return a==="flake-recurrence"?n:1-n}var i,e,s=r((()=>{i=.5,e=6}));export{s as i,m as n,c as r,i as t};

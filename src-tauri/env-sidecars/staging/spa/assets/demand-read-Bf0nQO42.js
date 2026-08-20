@@ -1,5 +1,0 @@
-import{n as o}from"./chunk-ChpBd9eV.js";function _(e,i=50){const a=[...e].sort((t,n)=>n.miss_count-t.miss_count||n.distinct_agents-t.distinct_agents);let s=null;for(const t of e){const n=d(t.updated_at);(s===null||n>s)&&(s=n)}return{entries:a.slice(0,i).map(t=>({surface:t.surface,queryNorm:t.query_norm,exampleQuery:t.example_query,missCount:t.miss_count,distinctAgents:t.distinct_agents,lastMissedAt:d(t.last_missed_at),candidateImprovementId:t.candidate_improvement_id})),totalEntries:e.length,totalMisses:e.reduce((t,n)=>t+n.miss_count,0),filedCount:e.filter(t=>t.candidate_improvement_id!=null).length,minedAt:s}}async function c(e,i,a=50){return _(await e`
-    SELECT surface, query_norm, example_query, miss_count, distinct_agents,
-           last_missed_at, candidate_improvement_id, updated_at
-      FROM harness_shared.negative_space_demand
-     WHERE workspace_id = ${i}`,a)}var d,m,r=o((()=>{d=e=>e instanceof Date?e.toISOString():String(e),m={entries:[],totalEntries:0,totalMisses:0,filedCount:0,minedAt:null}}));r();export{m as EMPTY_DEMAND_SNAPSHOT,c as readDemandSnapshot};

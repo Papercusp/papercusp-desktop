@@ -1,1 +1,0 @@
-import{n as i}from"./chunk-ChpBd9eV.js";function p(c,f){const o=(f??"").trim(),r=o==="";let n=o;const s=[];for(const e of c){const t=e.cellVersion;typeof t!="string"||t===""||(t>n&&(n=t),!r&&t>o&&s.push(e))}return{changed:s,nextCursor:n,bootstrap:r}}var a,l=i((()=>{a="facts"}));l();export{a as FACTS_CELL_SURFACE,p as factsCellDelta};

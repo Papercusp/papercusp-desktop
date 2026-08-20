@@ -1,1 +1,0 @@
-import{n as i}from"./chunk-ChpBd9eV.js";import{s as n,t as s}from"./src-BZE1GDpz.js";import{n as o,t as a}from"./embedder-mode-registry-DUe3LtwU.js";function f(e){if(e==="gemma")return{embeddings:t}}var t,m=i((()=>{t=.45}));function d(e){if(e.mode!=="fulltext")return f(a(e.embedder))}function u(){r||(r=!0,n({minScore:d}))}var r,M=i((()=>{s(),o(),m(),r=!1,u()}));export{M as t};

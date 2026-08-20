@@ -1,1 +1,0 @@
-import{n as s}from"./chunk-ChpBd9eV.js";function a(r,e){return{reader:{ownerId:r.ownerId,roles:e.role?[e.role]:[],...e.harnessSlug?{harnessSlug:e.harnessSlug}:{}},env:{workspaceId:r.workspaceId??e.workspaceId??"default",harnessSlug:e.harnessSlug??null,role:e.role??""}}}var n=s((()=>{}));export{n,a as t};

@@ -1,1 +1,0 @@
-import{n as a}from"./chunk-ChpBd9eV.js";function c(t){const r=t?.knowledge?.pack?.trim()||void 0,e=t?.learning?.pack?.trim()||void 0;return r&&e&&r!==e?{packId:e,deprecatedKey:!0,conflict:{knowledge:r,learning:e}}:r?{packId:r,deprecatedKey:!1}:e?{packId:e,deprecatedKey:!0}:{deprecatedKey:!1}}var d=a((()=>{}));d();export{c as resolveSeedPackKey};

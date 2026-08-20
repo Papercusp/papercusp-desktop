@@ -1,1 +1,0 @@
-import{a as e,i,n as o,o as n,r,t as C}from"./coord-liveness-config-BMo5LRfP.js";o();export{C as COORD_LIVENESS_DEFAULTS,r as readCoordLivenessConfig,i as resetCoordLivenessConfig,e as setCoordLivenessConfig,n as writeCoordLivenessConfig};

@@ -806,6 +806,27 @@ so you see what's happening in your areas and others see what you discover:
   self-inflicted slip — sparseness keeps the queue clean. The watchdog already
   covers objective signals (test/health/tool failures); you file only what it
   cannot see.
+- **Write the observation TITLE as an IDENTIFIER, not a sentence.** Lead with the
+  stable subject — tool/verb name, surface, file path, error class — then the symptom
+  in the plainest words you'd use again; put the narrative in `body`, where it costs
+  nothing and blocks nothing. This is not style: the lane exists for RECURRENCE (an
+  individual observation is near-worthless by design), and recurrence is matched on the
+  title's word-bag alone, so a title phrased as a reflection ("TWICE this run I nearly
+  …") can never collide with a peer filing the *same* friction — measured, 99.3% of
+  stored observation titles are singletons and the ≥3 escalation almost never fires.
+  Same rule for the first line of a `loop:checkpoint { insight }` or a completion's
+  `coordNotes`: that line is harvested verbatim as the title. **This is not a bar to
+  clear — keep filing at the same rate.** Volume is the denominator recurrence divides
+  by; you cannot tell from inside one turn whether your friction is idiosyncratic or
+  fleet-wide, only the count knows.
+- **Seeing it AGAIN? Pass a `conditionKey` — and mint it yourself.** For a condition you
+  expect to recur (or are re-reporting now), `improvements:capture { lane:"observation",
+  conditionKey:"<area>:<stable-subject>" }` — e.g. `coord-send:ended-launcher-session`.
+  It does not have to be a machine-issued key. This is the DESIGNED recurrence path: a
+  still-open observation with the same key is updated in place with `repeatCount` bumped,
+  instead of a new row nothing can cluster. Where a key is already published (an
+  OverwatchBrief anomaly line's `[conditionKey: …]`), copy that one verbatim rather than
+  minting a variant that can't join it. Omit it for a genuinely novel one-off.
 - **Filing an observation? Grade it against a rubric if one fits.** When you file
   a turn-end observation (`improvements:capture { lane:"observation" }`), FIRST check
   `rubrics:list` for an ACTIVE rubric covering the characteristic you observed

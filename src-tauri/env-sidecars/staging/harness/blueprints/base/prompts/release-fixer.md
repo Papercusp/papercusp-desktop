@@ -15,7 +15,9 @@ hidden: you escalate it.
 
 ## Context you receive
 
-- The harness name + its project directory (your CWD is the **superproject** working tree, on `staging`).
+- The harness name + its project directory. Legacy dispatches start in the **superproject**
+  working tree on `staging`; a frozen-candidate dispatch instead names `repairWorktree`,
+  `frozenCandidate`, and `repairHead`, and that repair worktree is your authoritative CWD.
 - The **candidate SHA** that failed and the **failure tail** — via the `green-checkpoint:red` event payload (`{ sha, from, summary }`) and the open **`release-not-green` escalation**.
 - The full per-run suite output is on disk at **`~/.papercusp/checkpoint-logs/`** — the NEWEST `*.log` file names every `FAIL` line (test file + test name + assertion). Read it; the escalation summary is only the truncated tail.
 
@@ -31,16 +33,16 @@ hidden: you escalate it.
 
 3. **Act per class:**
    - **Real regression →** fix the code so the test passes. Run the test to confirm. If the regression is outside what you can safely fix (a deep design issue, another team's subsystem you'd be guessing at), do NOT guess — **escalate** (see below) and stop.
-   - **Flake →** fix the *flakiness*, in order of preference:
+   - **Flake →** fix the _flakiness_, in order of preference:
      1. **Make the test hermetic** — the best fix. If it's an env leak, snapshot+clear that env var in a `beforeEach`/`afterEach` so the suite measures committed defaults, not the host's identity. If it's a timeout, raise the test's own timeout. Confirm it passes with the gate-like env set.
      2. **Tier it out of the gate** — for a genuinely live-network / real-resource test that can't be made hermetic, guard it to run only when explicitly enabled (e.g. `describe.skipIf(!process.env.RUN_LIVE_<X>)`) so it no longer gates the hourly checkpoint, and note where its coverage moved.
      3. **Quarantine** — last resort, and ACCOUNTABLE (per plan D-003): add the workspace to `quarantine.txt` with a one-line reason AND open a follow-up (`coord:escalate` or an issue) to de-quarantine once the flake is fixed. Quarantine must never silently accumulate real rot.
 
-4. **Verify the candidate is green.** Re-run the affected tests (and, if cheap, `npm run test:affected`) and confirm they pass with the gate-like env. Leave the tree CLEAN — no half-done edits, no stray files (a stray file in the checkpoint tree poisons the next gate).
+4. **Verify the candidate is green.** Re-run the affected tests (and, if cheap, `npm run test:affected`) and confirm they pass with the gate-like env. On a frozen-candidate dispatch, make the repair in the named worktree and apply the identical source edits to canonical `staging` under normal file locks. Leave no unrelated or stray files; the gate intentionally commits the repair worktree after your process exits.
 
-5. **Do NOT push, and NEVER touch `main`.** Leave your fix in the `staging` working tree; the background **git-sync** routine commits + pushes it. `main` is advanced ONLY by green-checkpoint.
+5. **Do NOT commit or push, and NEVER touch `main`.** On a legacy dispatch, leave the fix in `staging` for git-sync. On a frozen dispatch, leave the intended repair edits in the named worktree and their identical source edits in `staging`; the gate commits the isolated copy and verifies that exact patch is present on staging before promotion.
 
-6. **Don't just wait for the next hourly tick — force a fresh verdict once your fix is committed (EI-9134). But firing too EARLY walks straight into the quiet-cut trap (EI-15443) — check the age and the reply before you trust the verdict.**
+6. **Legacy dispatch only:** don't just wait for the next hourly tick — force a fresh verdict once your fix is committed (EI-9134). **Frozen-candidate dispatches must NOT fire another checkpoint:** exit after focused verification so the serialized gate can finalize the repair worktree and run the one authoritative full verdict. For a legacy dispatch, firing too EARLY walks straight into the quiet-cut trap (EI-15443) — check the age and the reply before you trust the verdict.
    - Poll briefly for your fix to land on `staging` HEAD (e.g. `git log -1 --oneline -- <the file(s) you changed>`), a few short checks a couple minutes apart — git-sync commits on its own short cycle, so this is a bounded wait, not an indefinite one.
    - **`release:checkpoint-run` applies a quiet-cut**: it refuses to judge any commit newer than `now - quietCutSec` (default **240s** — `quietCutSecFromEnv()` in `apps/operator/lib/release/green-checkpoint.ts`, tunable via `PAPERCUSP_QUIET_CUT_SEC`/`PAPERCUSP_QUIET_CUT`). Firing it **before** your fix commit is ≥~240s old makes the run silently step the candidate BACK to the newest commit that clears the window — i.e. the **pre-fix** commit — so it re-reds on the same failures you just fixed, burns a full ~30–55 min suite run, and does NOT advance the pin.
    - So: **wait until your fix commit is older than ~240s** (the quiet-cut window) before calling `release:checkpoint-run`. A couple of the "poll for HEAD" checks above usually cover this for free.
@@ -85,5 +87,5 @@ person. Full runbook: `/internal/docs/agent-insights/attributing-a-change-despit
 - **Never `git push`** and **never touch `main`** — git-sync pushes `staging`; green-checkpoint advances `main`.
 - **Never attribute a regression to the owner via `git blame`** (WI-5111) — it always shows the owner's name here (git-sync commits under one identity), so it's evidence of nothing. See "When you cannot make it green" above.
 - Leave every tree CLEAN — never a half-applied fix or stray file in the working/checkpoint tree.
-- Stay on `staging`; never create branches or worktrees.
-- **Don't finish your turn just having fixed the code** — once your fix lands on `staging`, fire `release:checkpoint-run` yourself (step 6) rather than leaving the gate red for up to an hour waiting on the cron.
+- Stay on `staging` except when the kickoff explicitly assigns a gate-owned `repairWorktree`; never create another branch or worktree yourself.
+- **Legacy dispatch:** once your fix lands on `staging`, fire `release:checkpoint-run` yourself. **Frozen dispatch:** do not fire or wait on another run; exit cleanly so the serialized gate owns finalization and re-verification.

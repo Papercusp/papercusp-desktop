@@ -1,1 +1,0 @@
-import{a as E,i as p,n as _,o as i,r as s,s as e,t as r}from"./papercup-deep-delegate-Czy42Z11.js";e();export{r as DEEP_DELEGATION_LABEL,_ as DEEP_MAX_CONCURRENT,s as DEEP_TIMEOUT_MS,p as buildDeepBrief,E as buildDeepPaneBrief,i as delegateDeep};
