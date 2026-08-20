@@ -1602,6 +1602,36 @@ fi
 # windows whose verdict line a reader never sees.
 [ -n "$MATRIX_SKIP_REASON" ] && log "local-matrix DID NOT DECIDE this window: $MATRIX_SKIP_REASON"
 
+# A shared-host load sample can only downgrade a failure that reached workload execution.
+# It is not evidence for failures that happened before work began, and it has no causal
+# connection to a sidecar build failure. The old verdict branch applied STORM_GATE to every
+# RED indiscriminately: a local-matrix `FATAL(preflight): no gh token` with zero frames and
+# zero scenarios was rewritten to SKIPPED-STORM solely because /proc/loadavg was high, even
+# while frame_pressure_note() correctly said UNKNOWN (EI-20944957866525531).
+storm_downgrade_eligible() {
+  STORM_DOWNGRADE_BLOCKER=""
+  if [ "${FAIL_BUILD:-0}" = 1 ]; then
+    STORM_DOWNGRADE_BLOCKER="sidecar-build failed before smoke execution"
+    return 1
+  fi
+
+  local label result output
+  for label in content-matrix from-repo from-repo-witness local-matrix; do
+    case "$label" in
+      content-matrix)      result="${MATRIX_RES:-SKIPPED}"; output="$WORK/content-matrix.out" ;;
+      from-repo)           result="${FROMREPO_RES:-SKIPPED}"; output="$WORK/from-repo.out" ;;
+      from-repo-witness)   result="${WITNESS_RES:-SKIPPED}"; output="$WORK/from-repo.out" ;;
+      local-matrix)        result="${MATRIXFULL_RES:-SKIPPED}"; output="$WORK/local-matrix.out" ;;
+    esac
+    [ "$result" = FAIL ] || continue
+    if grep -qaE '^FATAL\(preflight\):|^(FATAL|ERROR):.*preflight' "$output" 2>/dev/null; then
+      STORM_DOWNGRADE_BLOCKER="$label failed preflight before workload execution"
+      return 1
+    fi
+  done
+  return 0
+}
+
 # ── 4. verdict ────────────────────────────────────────────────────────────────
 REDS=()
 [ "$FAIL_BUILD" = 1 ] && REDS+=("sidecar-build")
@@ -1673,7 +1703,9 @@ LOAD1_END="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
 # itself instead of a manual docker-stats correlation. Computed once — the scan walks the bank
 # dir, and the STORM branch exits before the RED line, so at most one of these two is emitted.
 FRAME_NOTE="$(frame_pressure_note)"
-if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
+STORM_ACTIVE=0
+awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}" && STORM_ACTIVE=1
+if [ "$STORM_ACTIVE" = 1 ] && storm_downgrade_eligible; then
   log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal). $FRAME_NOTE"
   # WI-37464: a storm downgrade is the SECOND unsuppressed expensive outcome — it costs a FULL
   # heavy run and, before this, stamped nothing at all, so it too re-fired every hour. It is the
@@ -1682,6 +1714,9 @@ if awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}"; then
   echo "$(now_s)" >"$STATE_DIR/last-downgrade"
   check_staleness
   verdict "GATE: SKIPPED-STORM (load $LOAD1_END; would-be-red: ${REDS[*]}; $FRAME_NOTE)$(matrix_skip_suffix)"; exit 0
+fi
+if [ "$STORM_ACTIVE" = 1 ] && [ -n "${STORM_DOWNGRADE_BLOCKER:-}" ]; then
+  log "STORM DOWNGRADE REFUSED: $STORM_DOWNGRADE_BLOCKER; host load $LOAD1_END is not causal evidence for this RED."
 fi
 
 verdict "GATE: RED (${REDS[*]}) — $SUMMARY$(matrix_skip_suffix) ; $FRAME_NOTE ; logs in $WORK"
