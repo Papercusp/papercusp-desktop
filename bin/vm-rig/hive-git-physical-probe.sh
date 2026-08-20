@@ -95,8 +95,14 @@ VM_PRODUCER="$remote_source/packages/operator-core/lib/sync/pot-git/physical-dri
 ssh "${SSH_OPTS[@]}" "$VM" \
   "[ -x '$VM_TSX' ] && [ -d '$VM_DEP_SOURCE/node_modules' ] && [ ! -e '$remote_source' ] && mkdir -m 700 '$remote_source'" \
   || fail 'could not create the canonical VM run-source directory'
+# Stage every first-party package, not only operator-core. The producer loads
+# operator-core's real module graph during identity/preflight; leaving one of
+# its workspace dependencies (for example packages/coordination) behind in the
+# installed bundle creates a mixed-version graph and surfaces as a misleading
+# missing named export. `git archive` excludes node_modules, so widening this
+# tracked-source slice does not copy the dependency payload.
 git -C "$REPO_ROOT" archive --format=tar HEAD -- \
-  packages/operator-core libs/generic scripts package.json tsconfig.base.json \
+  packages libs/generic scripts package.json tsconfig.base.json \
   | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
   || fail 'could not stage the immutable superproject source snapshot on the VM'
 # Stage submodule CONTENTS, one archive per submodule repo.
@@ -216,6 +222,28 @@ for (const base of packageBases) {
     }
     fs.symlinkSync(packageRoot, target, 'dir');
   }
+}
+
+// Fail before identity lookup or rig mutation if ANY direct Papercusp
+// dependency of operator-core still resolves into the installed bundle. This
+// guards the dependency CLOSURE, rather than pinning today's one missing
+// package name and re-arming the same mixed-version failure for the next one.
+const operatorManifest = JSON.parse(
+  fs.readFileSync(path.join(runRoot, 'packages', 'operator-core', 'package.json'), 'utf8'),
+);
+const canonicalRunRoot = fs.realpathSync(runRoot);
+const staleWorkspaceDependencies = Object.keys(operatorManifest.dependencies ?? {})
+  .filter((name) => name.startsWith('@papercusp/'))
+  .filter((name) => {
+    const target = path.join(runModules, ...name.split('/'));
+    if (!hasEntry(target)) return true;
+    const resolved = fs.realpathSync(target);
+    return resolved !== canonicalRunRoot && !resolved.startsWith(`${canonicalRunRoot}${path.sep}`);
+  });
+if (staleWorkspaceDependencies.length > 0) {
+  throw new Error(
+    `operator-core workspace dependencies were not staged into the VM run-source overlay: ${staleWorkspaceDependencies.join(', ')}`,
+  );
 }
 NODE
 local_producer_sha="$(sha256sum "$PRODUCER" | awk '{print $1}')"
