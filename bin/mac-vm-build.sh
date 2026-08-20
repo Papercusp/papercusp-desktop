@@ -16,6 +16,33 @@ set -eo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+MAC_SIGNING_XATTR_HELPER="$HERE/lib/strip-mac-signing-xattrs.py"
+
+[[ -f "$MAC_SIGNING_XATTR_HELPER" ]] \
+  || { echo "ERROR: mac signing xattr helper missing at $MAC_SIGNING_XATTR_HELPER" >&2; exit 1; }
+
+# Apple rejects FinderInfo/resource-fork metadata under `codesign --strict`.
+# Remove only those attributes; the seed's required `user.*` attributes must
+# survive packaging. The cross-build path defines the same pair of helpers so
+# both mac producers share one policy and one regression guard.
+strip_mac_signing_xattrs() { # $1=bundle/resource tree
+  python3 "$MAC_SIGNING_XATTR_HELPER" "$1" \
+    || { echo "ERROR: could not strip Apple signing-invalid xattrs from $1" >&2; exit 1; }
+}
+
+verify_mac_signing_xattrs() { # $1=bundle/resource tree
+  python3 "$MAC_SIGNING_XATTR_HELPER" --check "$1" \
+    || { echo "ERROR: Apple signing-invalid xattrs remain under $1" >&2; exit 1; }
+}
+
+verify_mac_app_signature() { # $1=app
+  local app="$1"
+  verify_mac_signing_xattrs "$app"
+  # Capture codesign's status directly. Do not pipe it through head/sed/grep:
+  # a pipeline can report the filter's zero while codesign itself failed.
+  codesign --verify --deep --strict "$app" \
+    || { echo "ERROR: strict codesign verification failed for $app" >&2; exit 1; }
+}
 
 # WI-4419 follow-up: mac-vm-build.sh is a RELEASE build entrypoint, so arm
 # build-desktop-sidecar.sh's unconditional identity-scan of the assembled sidecar
@@ -415,6 +442,14 @@ if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
 fi
 
 echo "--- tauri build ($MAC_BUILD_TARGET) ---"
+# Clean source resource metadata before Tauri creates a fresh persistent staging
+# tree. The per-role staging cleanup below also handles stale attributes already
+# present in an incremental target directory.
+for _res in sidecar seed resources; do
+  _res_src="$ROOT/src-tauri/$_res"
+  [[ -d "$_res_src" ]] || continue
+  strip_mac_signing_xattrs "$_res_src"
+done
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
 # legacy _PATH spelling forward so older callers keep working.
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
@@ -549,10 +584,14 @@ for role in $PAPERCUSP_BUILD_ROLES; do
       [[ -d "$_res_src" && -d "$_res_dst" ]] || continue
       echo "    (WI-4723 resource-hygiene: rsync --delete $_res → ${_stage_rel#$PWD/})"
       rsync -a --delete "$_res_src"/ "$_res_dst"/
+      strip_mac_signing_xattrs "$_res_dst"
     done
   done
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }
+  # This is the native recurrence guard: it verifies the exact app Tauri built
+  # before the release flow copies its updater artifacts or repacks the DMG.
+  verify_mac_app_signature "$role_bundle_dir/macos/$role_label.app"
   # ── WI-4723: fail-closed identity scan of the ASSEMBLED .app (mac creds-leak gate) ──
   # The fail-closed backstop for the resource-hygiene rsync above: scan the bytes
   # that actually ship. audit-release-bundle.py --scan-dir hunts the build-box

@@ -340,13 +340,82 @@ test('--scrub-app-binary takes EXPLICIT files and never sweeps a directory', () 
 // outside the tree, so falsifiability can be proven without ever mutating the
 // shared working tree (a sweep would commit the mutant).
 const MAC_CROSS = process.env.PROBE_SCRIPT || path.join(root, 'bin/build-mac-cross.sh');
+const MAC_VM = path.join(root, 'bin/mac-vm-build.sh');
+const MAC_XATTR_HELPER = path.join(root, 'bin/lib/strip-mac-signing-xattrs.py');
 
-test('build-mac-cross enables Tauri production codegen and has no mac scrub mitigation', () => {
+test('mac producers strip only signing-invalid xattrs and preserve required user.* metadata', () => {
+  const dir = tmp('mac-xattrs');
+  const file = path.join(dir, 'seed.bin');
+  fs.writeFileSync(file, 'seed');
+  const setup = spawnSync('python3', ['-c', `
+import os, sys
+p = sys.argv[1]
+set_names = []
+for name in ('com.apple.FinderInfo', 'user.com.apple.FinderInfo'):
+    try:
+        os.setxattr(p, name, b'finder')
+        set_names.append(name)
+        break
+    except OSError:
+        pass
+if not set_names:
+    raise SystemExit('could not set a platform xattr fixture')
+os.setxattr(p, 'user.device-file', b'keep')
+`, file], { encoding: 'utf8' });
+  try {
+    assert.equal(setup.status, 0, `could not create xattr fixture: ${setup.stderr}`);
+    const dirty = spawnSync('python3', [MAC_XATTR_HELPER, '--check', dir], { encoding: 'utf8' });
+    assert.equal(dirty.status, 1, `fixture must fail the strict metadata check: ${dirty.stderr}`);
+
+    const scrub = spawnSync('python3', [MAC_XATTR_HELPER, dir], { encoding: 'utf8' });
+    assert.equal(scrub.status, 0, `xattr scrub failed: ${scrub.stdout}${scrub.stderr}`);
+    const clean = spawnSync('python3', [MAC_XATTR_HELPER, '--check', dir], { encoding: 'utf8' });
+    assert.equal(clean.status, 0, `strict metadata check must pass after scrub: ${clean.stderr}`);
+
+    const attrs = spawnSync('python3', ['-c', `
+import os, sys
+print('\\n'.join(sorted(os.listxattr(sys.argv[1]))))
+`, file], { encoding: 'utf8' });
+    assert.equal(attrs.status, 0, attrs.stderr);
+    assert.match(attrs.stdout, /(?:^|\n)user\.device-file(?:\n|$)/,
+      'required user.device-file xattr must survive');
+    assert.doesNotMatch(attrs.stdout, /(?:^|\n)(?:com\.apple\.|user\.com\.apple\.)(?:FinderInfo|ResourceFork)(?:\n|$)/,
+      'only signing-invalid Apple xattrs should be removed');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('build-mac-cross enables production codegen and scrubs metadata before signing', () => {
   const src = fs.readFileSync(MAC_CROSS, 'utf8');
   assert.ok(src.includes('cargo zigbuild --release --target "$arch" -p papercusp-desktop --features custom-protocol'),
     'release mac builds must enable Tauri custom-protocol so tauri_build uses production codegen (EI-200443)');
-  assert.equal(src.includes('scrub_app_identity'), false,
-    'the mac build must not carry the pre-sign scrub mitigation after the production-codegen fix');
+  const scrubAt = src.lastIndexOf('strip_mac_signing_xattrs "$app"');
+  const checkAt = src.lastIndexOf('verify_mac_signing_xattrs "$app"');
+  const signAt = src.indexOf('sign_app "$app"');
+  assert.ok(scrubAt > 0 && scrubAt < signAt,
+    'the assembled app must be scrubbed before rcodesign');
+  assert.ok(checkAt > scrubAt && checkAt < signAt,
+    'the cross-build must fail closed if signing-invalid xattrs remain');
+  assert.doesNotMatch(src, /^\s*xattr\s+-cr\b/m,
+    'the producer must not delete required user.* xattrs with blanket xattr -cr');
+});
+
+test('mac-vm-build cleans resource staging and runs strict codesign before publication', () => {
+  const src = fs.readFileSync(MAC_VM, 'utf8');
+  const buildAt = src.indexOf('npx tauri build');
+  const verifyAt = src.indexOf('verify_mac_app_signature "$role_bundle_dir/macos/$role_label.app"');
+  const identityScanAt = src.indexOf('--scan-dir "$role_bundle_dir/macos/$role_label.app"');
+  assert.ok(src.includes('strip_mac_signing_xattrs "$_res_src"'),
+    'mac VM builds must clean source resources before Tauri creates fresh staging');
+  assert.ok(src.includes('strip_mac_signing_xattrs "$_res_dst"'),
+    'mac VM builds must clean persistent per-role staging resources');
+  assert.ok(buildAt > 0 && verifyAt > buildAt && verifyAt < identityScanAt,
+    'strict codesign verification must run after Tauri builds the app and before later publication gates');
+  assert.ok(src.includes('codesign --verify --deep --strict "$app"'),
+    'the native mac leg must use the strict codesign verifier');
+  assert.doesNotMatch(src, /^\s*xattr\s+-cr\b/m,
+    'the producer must not delete required user.* xattrs with blanket xattr -cr');
 });
 
 test('build-mac-cross fails fast: the binary is scanned right after lipo', () => {
