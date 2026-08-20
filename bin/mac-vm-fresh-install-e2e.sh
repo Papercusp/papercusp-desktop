@@ -42,10 +42,12 @@
 #                                    download and let Gatekeeper answer. `strip`
 #                                    is the legacy behaviour and DOWNGRADES the
 #                                    verdict scope (Gatekeeper NOT tested).
-#   MAC_E2E_FRESH_STATE=1            move ~/.papercusp aside (restored on exit) so
-#                                    first-run provisioning is genuinely exercised.
-#                                    OFF by default: this runs on the owner's real
-#                                    machine and we do not mutate their state dir.
+#   MAC_E2E_FRESH_STATE=1            move ~/.papercusp and
+#                                    ~/.papercusp-workspaces aside (restored on
+#                                    exit) so first-run provisioning is genuinely
+#                                    exercised. OFF by default: this runs on the
+#                                    owner's real machine and we do not mutate
+#                                    their state dirs.
 #   MAC_E2E_BUNDLE_BASE=<dir>        explicit bundle dir (implies MAC_E2E_SOURCE=build).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -57,6 +59,10 @@ MAC_E2E_SOURCE="${MAC_E2E_SOURCE:-published}"
 MAC_E2E_VERSION="${MAC_E2E_VERSION:-0.0.15}"
 MAC_E2E_QUARANTINE="${MAC_E2E_QUARANTINE:-honest}"
 ARTIFACT_BASE="${MAC_E2E_ARTIFACT_BASE:-https://pub-cb5359a346e94c0c88562bd41db9295a.r2.dev/HK70BNWvxXWRRRkMgl3PXqgdZyWYLsCG/desktop-v${MAC_E2E_VERSION}-alpha}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/mac-vm-fresh-state.sh
+source "$SCRIPT_DIR/lib/mac-vm-fresh-state.sh"
 [ -n "$MAC_E2E_BUNDLE_BASE" ] && MAC_E2E_SOURCE=build
 
 FAILURES=0
@@ -141,9 +147,13 @@ if [ -d "$HOME/papercup-build-mac" ]; then
   note "host carries a build tree ($(du -sh "$HOME/papercup-build-mac" 2>/dev/null | cut -f1)) — not a never-had-a-dev-install box"
   CONFIDENCE="host-contaminated"
 fi
-if [ -d "$HOME/.papercusp" ] && [ -z "$MAC_E2E_FRESH_STATE" ]; then
-  note "~/.papercusp state dir PRESENT and preserved — first-run provisioning is NOT verified by this run"
-  CONFIDENCE="host-contaminated"
+if [ -z "$MAC_E2E_FRESH_STATE" ]; then
+  for STATE_ROOT in "$HOME/.papercusp" "$HOME/.papercusp-workspaces"; do
+    if [ -e "$STATE_ROOT" ] || [ -L "$STATE_ROOT" ]; then
+      note "$STATE_ROOT PRESENT and preserved — first-run provisioning is NOT verified by this run"
+      CONFIDENCE="host-contaminated"
+    fi
+  done
 fi
 for T in cargo rustc; do
   command -v "$T" >/dev/null 2>&1 && note "host has $T (build-time only; not on a packaged app's launch path)"
@@ -167,6 +177,24 @@ if [ -n "$MAC_E2E_CONTROLS_ONLY" ]; then
     pass "C2 nothing answers /api/health — a real run could attribute a 200 to the artifact"
   fi
   emit_verdict
+fi
+
+# ── 0b. optional fresh-state isolation ──────────────────────────────────────
+# This is deliberately after CONTROLS_ONLY: the preflight promises to be
+# read-only, while a real fresh-state run must move both state roots before any
+# app launch. The EXIT/signal traps are installed before preparation so a
+# partial move is restored too.
+if [ "$MAC_E2E_FRESH_STATE" = "1" ]; then
+  echo
+  echo "=== 0b. fresh-state isolation (both Papercusp state roots) ==="
+  mac_e2e_fresh_state_configure "$HOME"
+  mac_e2e_fresh_state_install_traps
+  if mac_e2e_fresh_state_prepare; then
+    note "isolated ~/.papercusp and ~/.papercusp-workspaces; originals are trap-restored on exit"
+  else
+    void "could not establish an unambiguous fresh-state isolation boundary"
+    emit_verdict
+  fi
 fi
 
 # ── 1. quit any running instance ────────────────────────────────────────────
