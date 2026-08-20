@@ -192,6 +192,188 @@ print(f"release-artifacts: freshness check passed ({len(sys.argv) - 2} artifact(
 PY
 }
 
+# release_artifacts_assert_baked_host_from_bytes <base> <artifact...> — derive
+# the baked update prefix from the bytes being published. This is the proof leg
+# that keeps a repack/re-publish honest: it does not need a fresh build and it
+# never accepts a hand-written build-provenance record as evidence.
+release_artifacts_assert_baked_host_from_bytes() {
+  local base="\${1:-}"; shift || true
+  [[ -n "$base" && $# -gt 0 ]] || {
+    echo "release-artifacts: byte host proof requires a publish base and artifacts." >&2
+    return 2
+  }
+
+  local expected_fp expected_authority
+  expected_fp="$(printf '%s' "\${base%/}" | sha256sum | cut -d' ' -f1)"
+  expected_authority="$(printf '%s' "\${base%/}" | sed -E 's#^https?://([^/]+).*#\1#')"
+  [[ -n "$expected_authority" && "$expected_authority" != "\${base%/}" ]] || {
+    echo "release-artifacts: byte host proof requires an https/http publish base." >&2
+    return 2
+  }
+
+  RELEASE_HOST_PROOF_EXPECTED_FP="$expected_fp" \
+  RELEASE_HOST_PROOF_EXPECTED_AUTHORITY="$expected_authority" \
+    python3 - "$@" <<'PY'
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import zipfile
+from urllib.parse import urlsplit
+
+EXPECTED_FP = os.environ["RELEASE_HOST_PROOF_EXPECTED_FP"]
+EXPECTED_AUTHORITY = os.environ["RELEASE_HOST_PROOF_EXPECTED_AUTHORITY"].lower()
+EXPECTED_HOST = EXPECTED_AUTHORITY.split(":", 1)[0]
+
+URL_RE = re.compile(
+    rb"https?://[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]{1,5})?"
+    rb"(?:/[A-Za-z0-9._~!$&'()*+,;=:@%\-]+)+"
+)
+CHUNK = 1024 * 1024
+CARRY = 4096
+
+
+def release_host_prefix(raw):
+    try:
+        value = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    value = value.rstrip(".,;:)]}\"'")
+    if value.endswith("/latest.json"):
+        value = value[: -len("/latest.json")]
+    return value.rstrip("/")
+
+
+def is_release_like(prefix):
+    parsed = urlsplit(prefix)
+    authority = parsed.netloc.lower()
+    host = authority.split(":", 1)[0]
+    return authority == EXPECTED_AUTHORITY or host == EXPECTED_HOST or host.endswith(".r2.dev")
+
+
+def scan_stream(stream, found):
+    carry = b""
+    while True:
+        chunk = stream.read(CHUNK)
+        if not chunk:
+            return
+        data = carry + chunk
+        for match in URL_RE.finditer(data):
+            prefix = release_host_prefix(match.group(0))
+            if prefix and is_release_like(prefix):
+                found.add(prefix)
+        carry = data[-CARRY:]
+
+
+def scan_process(command, found):
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    try:
+        scan_stream(proc.stdout, found)
+    finally:
+        proc.stdout.close()
+    return proc.wait() == 0
+
+
+def scan_artifact(path):
+    found = set()
+    errors = []
+    try:
+        with open(path, "rb") as stream:
+            scan_stream(stream, found)
+    except OSError as exc:
+        return found, [str(exc)]
+
+    lower = path.lower()
+    if lower.endswith(".deb") and shutil.which("dpkg-deb") and shutil.which("tar"):
+        try:
+            deb = subprocess.Popen(
+                ["dpkg-deb", "--fsys-tarfile", path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            tar = subprocess.Popen(
+                ["tar", "-xOf", "-", "--wildcards", "*"],
+                stdin=deb.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            deb.stdout.close()
+            scan_stream(tar.stdout, found)
+            tar.stdout.close()
+            tar_rc = tar.wait()
+            deb_rc = deb.wait()
+            if deb_rc != 0 or tar_rc != 0:
+                errors.append("deb payload stream failed")
+        except OSError as exc:
+            errors.append(str(exc))
+    elif lower.endswith((
+        ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tbz", ".tbz2", ".tar.zst",
+    )) and shutil.which("tar"):
+        if not scan_process(["tar", "-xOf", path, "--wildcards", "*"], found):
+            errors.append("tar payload stream failed")
+    elif lower.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for entry in archive.infolist():
+                    if entry.is_dir():
+                        continue
+                    with archive.open(entry) as stream:
+                        scan_stream(stream, found)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            errors.append(str(exc))
+    elif lower.endswith(".appimage") and shutil.which("unsquashfs"):
+        if not scan_process(["unsquashfs", "-cat", path, ".*"], found):
+            errors.append("AppImage payload stream failed")
+
+    return found, errors
+
+
+payloads = []
+skipped_signatures = 0
+for path in sys.argv[1:]:
+    if path.lower().endswith(".sig"):
+        skipped_signatures += 1
+    else:
+        payloads.append(path)
+
+verified = []
+mismatched = []
+unverified = []
+for path in payloads:
+    found, errors = scan_artifact(path)
+    fingerprints = {
+        hashlib.sha256(prefix.encode("ascii")).hexdigest(): prefix
+        for prefix in found
+    }
+    expected = EXPECTED_FP in fingerprints
+    foreign = [fp for fp in fingerprints if fp != EXPECTED_FP]
+    name = os.path.basename(path)
+    if expected and not foreign and not errors:
+        verified.append(path)
+        print(f"release-host-bytes: ✓ {name} agrees (fp {EXPECTED_FP[:12]}…)")
+    elif foreign or (expected and errors):
+        mismatched.append(path)
+        print(f"release-host-bytes: ✗ {name} has {len(foreign)} foreign/mixed host fingerprint(s)")
+    else:
+        unverified.append(path)
+        reason = "container scan unavailable" if errors else "no release-host bytes found"
+        print(f"release-host-bytes: ? {name} unverified ({reason})")
+
+print(
+    "release-host-bytes: "
+    f"checked={len(verified)} mismatched={len(mismatched)} "
+    f"unverified={len(unverified)} skipped-signatures={skipped_signatures}"
+)
+
+raise SystemExit(1 if mismatched or unverified or not payloads else 2)
+PY
+}
+
 # release_artifacts_resolve_root <path> — print the existing directory's
 # physical path.  The dev box relocates cargo output and keeps
 # src-tauri/target as a symlink; `find` does not descend a symlink supplied as
