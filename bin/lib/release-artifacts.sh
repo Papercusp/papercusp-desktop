@@ -32,6 +32,166 @@ release_artifacts_manifest_path() {
   printf '/tmp/papercusp-artifacts-%s.txt\n' "$1"
 }
 
+# release_artifacts_cut_start_path <tag> — the cut-start freshness stamp shared
+# by release-local.sh, direct platform producers, incremental publishing, and
+# upload.  Keep it beside the artifact manifest in /tmp: both are tag-scoped
+# hand-off state, and a missing stamp must fail closed rather than silently
+# accepting a same-version artifact left by a failed earlier cut.
+release_artifacts_cut_start_path() {
+  printf '/tmp/papercusp-cut-start-%s.txt\n' "$1"
+}
+
+release_artifacts_cut_start_now_ns() {
+  local now
+  now="$(date -u +%s%N 2>/dev/null || true)"
+  if [[ "$now" =~ ^[0-9]{19}$ ]]; then
+    printf '%s\n' "$now"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(time.time_ns())'
+    return $?
+  fi
+  # Last-resort portability fallback for a host with neither GNU date nor
+  # Python.  It intentionally has second precision and therefore fails closed
+  # for artifacts whose mtime lands in the same second as the cut start.
+  now="$(date -u +%s 2>/dev/null || true)"
+  [[ "$now" =~ ^[0-9]+$ ]] || {
+    echo "release-artifacts: cannot obtain a UTC cut-start timestamp." >&2
+    return 1
+  }
+  printf '%s000000000\n' "$now"
+}
+
+# release_artifacts_cut_start_write <tag> [epoch-ns] — atomically replace the
+# tag's start stamp and print the value exported to child producers.
+release_artifacts_cut_start_write() {
+  local tag="${1:-}" stamp="${2:-}" path tmp
+  [[ -n "$tag" ]] || { echo "release-artifacts: cut-start stamp requires a tag." >&2; return 2; }
+  [[ -n "$stamp" ]] || stamp="$(release_artifacts_cut_start_now_ns)" || return 1
+  [[ "$stamp" =~ ^[0-9]+$ ]] || {
+    echo "release-artifacts: malformed cut-start timestamp '$stamp'." >&2
+    return 2
+  }
+  path="$(release_artifacts_cut_start_path "$tag")"
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || {
+    echo "release-artifacts: could not create temporary cut-start stamp for $tag." >&2
+    return 1
+  }
+  if ! printf '%s\n' "$stamp" > "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    echo "release-artifacts: could not persist cut-start stamp at $path." >&2
+    return 1
+  fi
+  printf '%s\n' "$stamp"
+}
+
+# release_artifacts_cut_start_read <tag> — read one valid epoch-ns stamp. A
+# missing, multi-line, or malformed stamp is an error; callers must not mint a
+# replacement while deciding whether an existing artifact is safe to publish.
+release_artifacts_cut_start_read() {
+  local tag="${1:-}" path stamp
+  local -a lines=()
+  [[ -n "$tag" ]] || { echo "release-artifacts: cut-start stamp requires a tag." >&2; return 2; }
+  path="$(release_artifacts_cut_start_path "$tag")"
+  [[ -f "$path" ]] || {
+    echo "release-artifacts: no cut-start stamp at $path — refusing to trust same-version artifacts." >&2
+    return 1
+  }
+  mapfile -t lines < "$path" || {
+    echo "release-artifacts: could not read cut-start stamp at $path." >&2
+    return 1
+  }
+  [[ ${#lines[@]} -eq 1 ]] || {
+    echo "release-artifacts: malformed cut-start stamp at $path — expected one epoch-ns value." >&2
+    return 1
+  }
+  stamp="${lines[0]}"
+  [[ "$stamp" =~ ^[0-9]+$ ]] || {
+    echo "release-artifacts: malformed cut-start stamp at $path — expected epoch nanoseconds." >&2
+    return 1
+  }
+  printf '%s\n' "$stamp"
+}
+
+# release_artifacts_cut_start_ensure <tag> — preserve an existing valid cut
+# start for incremental platform additions; create one only for a first-class
+# direct producer/publish path that has no prior stamp. Never overwrite a
+# malformed existing stamp: that would turn a fail-closed hand-off into a pass.
+release_artifacts_cut_start_ensure() {
+  local tag="${1:-}" path
+  [[ -n "$tag" ]] || { echo "release-artifacts: cut-start stamp requires a tag." >&2; return 2; }
+  path="$(release_artifacts_cut_start_path "$tag")"
+  if [[ -e "$path" ]]; then
+    release_artifacts_cut_start_read "$tag"
+  else
+    release_artifacts_cut_start_write "$tag"
+  fi
+}
+
+# release_artifacts_assert_fresh <tag> [artifact...] — fail closed unless each
+# supplied artifact was written STRICTLY AFTER this cut's start. With no
+# explicit artifact list, inspect every path recorded in the tag manifest,
+# including missing paths (release_artifacts_read intentionally filters those
+# for its legacy caller contract). Incremental publishing passes only its NEW
+# artifacts so already-live platforms remain valid against their original cut.
+release_artifacts_assert_fresh() {
+  local tag="${1:-}" stamp manifest line
+  shift || true
+  [[ -n "$tag" ]] || { echo "release-artifacts: freshness check requires a tag." >&2; return 2; }
+  stamp="$(release_artifacts_cut_start_read "$tag")" || return 1
+
+  local -a artifacts=("$@")
+  if [[ ${#artifacts[@]} -eq 0 ]]; then
+    manifest="$(release_artifacts_manifest_path "$tag")"
+    [[ -f "$manifest" ]] || {
+      echo "release-artifacts: no artifact manifest at $manifest to freshness-check." >&2
+      return 1
+    }
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && artifacts+=("$line")
+    done < "$manifest"
+  fi
+  [[ ${#artifacts[@]} -gt 0 ]] || {
+    echo "release-artifacts: no artifacts to freshness-check for $tag." >&2
+    return 1
+  }
+
+  python3 - "$stamp" "${artifacts[@]}" <<'PY'
+import datetime
+import os
+import sys
+
+start = int(sys.argv[1])
+missing = []
+stale = []
+for path in sys.argv[2:]:
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except FileNotFoundError:
+        missing.append(path)
+        continue
+    except OSError as exc:
+        missing.append(f"{path} ({exc})")
+        continue
+    if mtime <= start:
+        stale.append((path, mtime))
+
+def utc(ns):
+    return datetime.datetime.fromtimestamp(ns / 1_000_000_000, datetime.timezone.utc).isoformat()
+
+if missing or stale:
+    print(f"release-artifacts: freshness check FAILED for cut start {utc(start)}", file=sys.stderr)
+    for path in missing:
+        print(f"  missing/unreadable: {path}", file=sys.stderr)
+    for path, mtime in stale:
+        print(f"  stale (mtime {utc(mtime)} is not after cut start): {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"release-artifacts: freshness check passed ({len(sys.argv) - 2} artifact(s) after {utc(start)})")
+PY
+}
+
 # release_artifacts_resolve_root <path> — print the existing directory's
 # physical path.  The dev box relocates cargo output and keeps
 # src-tauri/target as a symlink; `find` does not descend a symlink supplied as

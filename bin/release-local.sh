@@ -829,6 +829,15 @@ if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+# EI-20551860898590077: bind every artifact to THIS cut before the first tree
+# write. A failed cut may leave correctly named/signed same-version bytes behind;
+# publishers compare each artifact mtime to this tag-scoped stamp and refuse any
+# byte that predates it. Keep the stamp for upload and incremental hand-offs.
+PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_write "$TAG")"
+export PAPERCUSP_RELEASE_CUT_START_NS
+export PAPERCUSP_RELEASE_TAG="$TAG"
+echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$TAG)"
+
 echo "==> bumping version in manifests"
 python3 - "$VERSION" "$ROOT" <<'PY'
 import json, sys, re, pathlib

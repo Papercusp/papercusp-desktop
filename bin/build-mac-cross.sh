@@ -22,9 +22,11 @@
 #            is Tauri's computed CFBundle* keys merged with src-tauri/Info.plist
 #            (the ATS/mic keys — WI-1802: without NSAppTransportSecurity the
 #            packaged mac app renders a BLANK page, so this merge is load-bearing).
-#   Sign     rcodesign (Rust; no `codesign`) deep-signs the bundle with
-#            entitlements.plist — ad-hoc by default (parity with the current
-#            unsigned prod dmgs), real cert when MAC_SIGN_P12_BASE64 is supplied.
+#   Sign     strips only Apple signing-invalid xattrs (preserving required
+#            user.* attributes), then rcodesign (Rust; no `codesign`) deep-signs
+#            the bundle with entitlements.plist — ad-hoc by default (parity with
+#            the current unsigned prod dmgs), real cert when MAC_SIGN_P12_BASE64
+#            is supplied.
 #   Updater  `tauri signer sign` over <productName>.app.tar.gz is the SAME
 #            host-side ed25519/minisign step the mac leg always ran.
 #   DMG      libdmg-hfsplus (`hfsplus addall` + the `dmg` UDIF converter) over an
@@ -113,6 +115,10 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
 load_release_host
+# EI-20551860898590077: inherit/verify the tag-scoped cut-start stamp when this
+# producer is run directly or as a release-local child.
+# shellcheck source=lib/release-artifacts.sh
+source "$HERE/lib/release-artifacts.sh"
 
 # WI-4419: a release build arms the sidecar identity-scan by default.
 export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
@@ -162,12 +168,18 @@ KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 # updater-.sig signer step below). Same idiom as release-local.sh / build-appimage.sh.
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 ENTITLEMENTS="$SRC_TAURI/entitlements.plist"
+MAC_SIGNING_XATTR_HELPER="$HERE/lib/strip-mac-signing-xattrs.py"
 DARWIN_SIDECAR="${PAPERCUSP_DARWIN_SIDECAR_DIR:-/var/tmp/darwin-sidecar-test}"
 # stage-source-tree is OFF for cross by default (wrong-arch node_modules; see the
 # KNOWN GAPS header). Opt in with PAPERCUSP_STAGE_SOURCE=1.
 PAPERCUSP_STAGE_SOURCE="${PAPERCUSP_STAGE_SOURCE:-0}"
 
 VERSION="${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$SRC_TAURI/tauri.conf.json').version" 2>/dev/null || echo unknown)}"
+if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$PAPERCUSP_RELEASE_TAG")"
+  export PAPERCUSP_RELEASE_CUT_START_NS
+  echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$PAPERCUSP_RELEASE_TAG)"
+fi
 
 # Cargo target root: THIS box relocates it via ~/.cargo/config.toml
 # (target-dir = ~/.cargo-target) AND src-tauri/target is a symlink, so a naive
@@ -214,6 +226,7 @@ command -v mkfs.hfsplus >/dev/null 2>&1 || fail "mkfs.hfsplus not found (apt ins
 [[ -f "$KEY_FILE" ]] || fail "updater signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 [[ -f "$SRC_TAURI/icons/icon.icns" ]] || fail "src-tauri/icons/icon.icns missing"
 [[ -f "$ENTITLEMENTS" ]] || fail "src-tauri/entitlements.plist missing"
+[[ -f "$MAC_SIGNING_XATTR_HELPER" ]] || fail "mac signing xattr helper missing at $MAC_SIGNING_XATTR_HELPER"
 [[ -f "$SRC_TAURI/Info.plist" ]] || fail "src-tauri/Info.plist missing (the ATS/mic keys merged into every bundle)"
 [[ "$VERSION" != "unknown" && -n "$VERSION" ]] || fail "could not resolve the build version (PAPERCUSP_BUILD_VERSION or tauri.conf.json)"
 for a in "${ARCHES[@]}"; do
@@ -270,6 +283,19 @@ d = {
     "CFBundleIconFile": "icon.icns",
     "LSRequiresCarbon": True,
     "NSHighResolutionCapable": True,
+}
+
+# Apple rejects FinderInfo/resource-fork metadata under `codesign --strict`.
+# Remove only those attributes from the assembled copy; `user.*` attributes in
+# the seed are part of the runtime contract and must survive packaging.
+strip_mac_signing_xattrs() { # $1=bundle/resource tree
+  python3 "$MAC_SIGNING_XATTR_HELPER" "$1" \
+    || fail "could not strip Apple signing-invalid xattrs from $1"
+}
+
+verify_mac_signing_xattrs() { # $1=bundle/resource tree
+  python3 "$MAC_SIGNING_XATTR_HELPER" --check "$1" \
+    || fail "Apple signing-invalid xattrs remain under $1"
 }
 with open(userplist, "rb") as f:
     d.update(plistlib.load(f))   # user keys (mic, ATS) win — same order as Tauri
@@ -591,6 +617,12 @@ for role in $ROLES; do
   app="$OUT_BUNDLE/macos/$product.app"
   echo "    [$role] assembling $product.app"
   assemble_app "$app_id" "$product" "$uni_bin" "$app"
+
+  # `cp -a` preserves extended attributes when the source filesystem supports
+  # them. Remove only FinderInfo/resource-fork metadata before any signature or
+  # updater tarball is produced; never use blanket `xattr -cr` here.
+  strip_mac_signing_xattrs "$app"
+  verify_mac_signing_xattrs "$app"
 
   # ── MANDATORY gates (mac-vm-build.sh L524-547 parity) ──
   # (a) creds-leak scan of the ASSEMBLED bytes (WI-4723). Honors no path-exclude.

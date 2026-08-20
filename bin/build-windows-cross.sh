@@ -90,6 +90,10 @@ load_release_host
 # span normalization and with the incremental publisher.
 # shellcheck source=lib/inno-spanned-server.sh
 source "$HERE/lib/inno-spanned-server.sh"
+# EI-20551860898590077: inherit/verify the tag-scoped cut-start stamp when this
+# producer is run directly or as a release-local child.
+# shellcheck source=lib/release-artifacts.sh
+source "$HERE/lib/release-artifacts.sh"
 # EI-20962889392870069: use the same bounded cooperative writer acquisition as
 # build-desktop-sidecar.sh. A long-lived tauri-guarded dev reader otherwise
 # pins this release staging block forever at a bare `flock 9`.
@@ -195,6 +199,11 @@ node "$ROOT/bin/check-sidecar-freshness.js" \
 [[ -f "$SRC_TAURI/icons/icon.ico" ]] || fail "src-tauri/icons/icon.ico missing (papercusp.iss SetupIconFile)"
 
 VERSION="${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$SRC_TAURI/tauri.conf.json').version" 2>/dev/null || echo unknown)}"
+if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$PAPERCUSP_RELEASE_TAG")"
+  export PAPERCUSP_RELEASE_CUT_START_NS
+  echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$PAPERCUSP_RELEASE_TAG)"
+fi
 [[ "$VERSION" != "unknown" && -n "$VERSION" ]] || fail "could not resolve the build version (PAPERCUSP_BUILD_VERSION or tauri.conf.json)"
 
 # Authenticode is opt-in on an owner-supplied cert (currently unset in prod, so

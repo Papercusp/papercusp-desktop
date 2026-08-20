@@ -226,6 +226,15 @@ if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# EI-20551860898590077: the artifact manifest is tag-scoped, but a failed cut
+# can leave a correctly named/signed artifact from an earlier attempt in that
+# same directory. Check every raw manifest entry (including missing files) before
+# any publish hop; a missing or malformed stamp also fails closed.
+if ! release_artifacts_assert_fresh "$TAG"; then
+  echo "ERROR: this cut contains a missing or stale artifact — refusing to publish same-version bytes from before the cut start (EI-20551860898590077)." >&2
+  exit 1
+fi
+
 # Recurrence guard (EI-12913): every artifact URL the manifest(s) ADVERTISE must
 # be in the set we are about to upload. Fail BEFORE uploading — the post-upload
 # fetch-check below catches an advertised-but-missing artifact only once the

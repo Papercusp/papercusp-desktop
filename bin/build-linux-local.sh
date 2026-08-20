@@ -49,6 +49,11 @@ cd "$ROOT"
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
 load_release_host
+# EI-20551860898590077: release-local.sh exports PAPERCUSP_RELEASE_TAG for its
+# child legs. A direct release-leg caller can provide the same tag explicitly;
+# without it, the later incremental/upload path fails closed on a missing stamp.
+# shellcheck source=lib/release-artifacts.sh
+source "$HERE/lib/release-artifacts.sh"
 
 # WI-5083: RUSTC_WRAPPER=sccache backed by a persistent ~/.cache/sccache, so
 # even this "local" build reuses crates compiled by a prior run/checkout
@@ -68,6 +73,11 @@ setup_lld_path
 
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
+if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$PAPERCUSP_RELEASE_TAG")"
+  export PAPERCUSP_RELEASE_CUT_START_NS
+  echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$PAPERCUSP_RELEASE_TAG)"
+fi
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -f "$KEY_FILE" ]] || {

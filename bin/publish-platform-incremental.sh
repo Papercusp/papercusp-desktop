@@ -75,6 +75,14 @@ esac
 TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
 echo "==> version=$VERSION channel=$CHANNEL platform=$PLATFORM tag=$TAG"
 
+# EI-20551860898590077: retain the original full-cut start when this is an
+# incremental addition; otherwise already-live platforms in the union would be
+# incorrectly judged stale against a newly-created stamp. A first incremental
+# publish with no prior cut creates the stamp and then checks only NEW_ARTIFACTS.
+PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$TAG")"
+export PAPERCUSP_RELEASE_CUT_START_NS PAPERCUSP_RELEASE_TAG="$TAG"
+echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
+
 load_release_host
 if [[ -z "${PAPERCUSP_UPDATE_BASE_URL:-}" ]]; then
   echo "ERROR: no release host configured (~/.papercusp/release-host.env) — cannot fetch the" >&2
@@ -140,6 +148,11 @@ if [[ ${#NEW_ARTIFACTS[@]} -eq 0 ]]; then
 fi
 echo "==> found ${#NEW_ARTIFACTS[@]} $PLATFORM artifact(s):"
 for f in "${NEW_ARTIFACTS[@]}"; do echo "      $(basename "$f")"; done
+
+if ! release_artifacts_assert_fresh "$TAG" "${NEW_ARTIFACTS[@]}"; then
+  echo "ERROR: one or more $PLATFORM artifacts predate this cut's freshness stamp — refusing to merge/publish stale same-version bytes (EI-20551860898590077)." >&2
+  exit 1
+fi
 
 # ── [2] fetch the LIVE manifest(s) as the merge base ─────────────────────────
 MERGE_GUI="$(mktemp /tmp/papercusp-merge-base-gui-XXXXXX.json)"

@@ -16,6 +16,8 @@
 #      set does not carry (the LABELED != PACKED class, caught BEFORE upload).
 #   6. Linux incremental discovery prefers build-linux-local.sh's source-tree
 #      collection destination, with Cargo's target retained only as a legacy fallback.
+#   7. a missing/malformed cut-start stamp fails closed, and every artifact must
+#      be strictly newer than the stamp (stale + fresh controls).
 #
 #   bash bin/lib/release-artifacts.selftest.sh      # exit 0 = PASS, 1 = FAIL
 #
@@ -41,9 +43,10 @@ WORK="$(mktemp -d /tmp/relart-selftest.XXXXXX)"
 # Unique tags so the /tmp manifests can't collide with a real cut or a parallel run.
 TAG="desktop-v0.0.0-selftest-$$"
 TAG_EMPTY="desktop-v0.0.0-selftest-empty-$$"
+TAG_FRESH="desktop-v0.0.0-selftest-fresh-$$"
 cleanup() {
   rm -rf "$WORK"
-  rm -f "$(release_artifacts_manifest_path "$TAG")" "$(release_artifacts_manifest_path "$TAG_EMPTY")"
+  rm -f "$(release_artifacts_manifest_path "$TAG")" "$(release_artifacts_manifest_path "$TAG_EMPTY")" "$(release_artifacts_manifest_path "$TAG_FRESH")" "$(release_artifacts_cut_start_path "$TAG_FRESH")"
 }
 trap cleanup EXIT
 
@@ -241,6 +244,33 @@ if RELEASE_ARTIFACTS_NO_REACHABILITY=1 \
   bad "guard passed a manifest advertising a NON-present artifact (LABELED!=PACKED not caught)"
 else
   ok "guard catches an advertised-but-missing artifact before upload"
+fi
+
+# 5b) EI-20551860898590077 — same-version stale bytes are rejected per artifact,
+# while a fresh control passes. The helper uses nanosecond mtimes, so a future
+# cut cannot accidentally share a timestamp second with its predecessor.
+FRESH="$WORK/fresh-artifact"
+STALE="$WORK/stale-artifact"
+: > "$STALE"
+STAMP_NOW="$(release_artifacts_cut_start_now_ns)"
+release_artifacts_cut_start_write "$TAG_FRESH" "$STAMP_NOW" >/dev/null
+if release_artifacts_assert_fresh "$TAG_FRESH" "$STALE" 2>/dev/null; then
+  bad "freshness guard accepted an artifact whose mtime predates the cut start"
+else
+  ok "freshness guard rejects a stale same-version artifact"
+fi
+sleep 0.01
+: > "$FRESH"
+if release_artifacts_assert_fresh "$TAG_FRESH" "$FRESH" 2>/dev/null; then
+  ok "freshness guard accepts an artifact written after the cut start"
+else
+  bad "freshness guard rejected a fresh artifact"
+fi
+rm -f "$(release_artifacts_cut_start_path "$TAG_FRESH")"
+if release_artifacts_assert_fresh "$TAG_FRESH" "$FRESH" >/dev/null 2>&1; then
+  bad "freshness guard passed with a missing cut-start stamp"
+else
+  ok "freshness guard fails closed when the cut-start stamp is missing"
 fi
 
 # ── reachability leg (incremental publish) ───────────────────────────────────
