@@ -37,6 +37,11 @@ VM_TSX='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/node_modules/ts
 VM_SOURCE="${HIVE_GIT_PHYSICAL_VM_SOURCE:-}"
 VM_PRODUCER="$VM_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 VM_CALL='/tmp/vmcall.sh'
+# The unprojected diagnostic includes detailed rows for every booted harness and
+# can cross the transport result door.  Pin the dispatch-level projection at
+# the call site so this destructive gate always receives the direct readiness
+# shape rather than a {summary,_projection} spill wrapper.
+PHASE_A_STATUS_ARGS='{"projection":{"pick":["substrateActive","reachedSubstrateOwner","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons"]}}'
 TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
@@ -64,7 +69,7 @@ run_vm_git_sync() {
 require_vm_phase_a_substrate_ready() {
   local raw
   if ! raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' dev:dogfood_substrate_status '{}' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
+    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
     fail 'phase A VM substrate readiness probe could not reach the VM operator'
   fi
 
