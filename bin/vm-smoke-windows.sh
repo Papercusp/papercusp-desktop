@@ -73,12 +73,12 @@ PORT="$(echo "$OPJSON" | grep -o '"port": *[0-9]*' | grep -o '[0-9]*' | head -1)
 pass "operator.json names port $PORT"
 
 echo "==> 5. operator health"
-CODE="$("${SSH[@]}" "powershell -NoProfile -Command \"try { (Invoke-WebRequest -Uri http://127.0.0.1:$PORT/api/health -UseBasicParsing -TimeoutSec 15).StatusCode } catch { 0 }\"" 2>/dev/null | tr -d '\r[:space:]')"
+CODE="$("${SSH[@]}" "powershell -NoProfile -Command \"\$ProgressPreference = 'SilentlyContinue'; try { (Invoke-WebRequest -Uri http://127.0.0.1:$PORT/api/health -UseBasicParsing -TimeoutSec 15).StatusCode } catch { 0 }\"" 2>/dev/null | tr -d '\r[:space:]')"
 [[ "$CODE" == "200" ]] || fail "/api/health returned '$CODE'"
 pass "health 200"
 
 echo "==> 6. backups + kopia detection"
-BK="$("${SSH[@]}" "powershell -NoProfile -Command \"(Invoke-WebRequest -Uri http://127.0.0.1:$PORT/api/backups -UseBasicParsing -TimeoutSec 20).Content\"" 2>/dev/null | tr -d '\r')"
+BK="$("${SSH[@]}" "powershell -NoProfile -Command \"\$ProgressPreference = 'SilentlyContinue'; (Invoke-WebRequest -Uri http://127.0.0.1:$PORT/api/backups -UseBasicParsing -TimeoutSec 20).Content\"" 2>/dev/null | tr -d '\r')"
 echo "$BK" | grep -q '"settings"' || fail "/api/backups gave no settings"
 echo "$BK" | grep -q '"kopia":{"ok":true' || fail "kopia detection not ok: $(echo "$BK" | grep -o '"kopia":{[^}]*}')"
 pass "backups 200, kopia ok"

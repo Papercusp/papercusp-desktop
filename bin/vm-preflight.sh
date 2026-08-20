@@ -146,7 +146,7 @@ if [[ -n "$port" ]]; then
 
   # Outer Windows→WSL forward probe — DIAGNOSTIC ONLY. A failure here with a
   # healthy inner probe is `forward-degraded`, never operator death (WI-3270).
-  outer_code="$("${SSH[@]}" "powershell -NoProfile -Command \"try { (Invoke-WebRequest -Uri http://127.0.0.1:$port/api/health -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 }\"" 2>/dev/null | tr -d '\r[:space:]')"
+  outer_code="$("${SSH[@]}" "powershell -NoProfile -Command \"\$ProgressPreference = 'SilentlyContinue'; try { (Invoke-WebRequest -Uri http://127.0.0.1:$port/api/health -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 }\"" 2>/dev/null | tr -d '\r[:space:]')"
   if [[ "$inner_ok" == "true" && "$outer_code" != "200" ]]; then
     forward_degraded=true
     note "forward-degraded: inner /api/health is 200 but the outer Windows→WSL probe returned '$outer_code' — REPAIR THE FORWARD, do NOT kill the operator (WI-3270)"
