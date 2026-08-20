@@ -7,6 +7,8 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+const windowsBuilder = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+const sidecarLockHelper = fs.readFileSync(path.join(root, 'bin/lib/sidecar-lock-yield.sh'), 'utf8');
 
 const SIDECAR_LOCK_SECTION = (
   builder.match(/^exec 9>"\$SIDECAR_FINAL_DIR\.lock"\n[\s\S]*?^SIDECAR_DIR="\$SIDECAR_TMP_DIR"$/m) || []
@@ -19,6 +21,32 @@ async function waitForFile(file, timeoutMs = 3000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+test('every release writer uses the shared bounded cooperative sidecar-lock helper', () => {
+  for (const [name, source] of [
+    ['build-desktop-sidecar.sh', builder],
+    ['build-windows-cross.sh', windowsBuilder],
+  ]) {
+    assert.match(
+      source,
+      /source "\$HERE\/lib\/sidecar-lock-yield\.sh"/,
+      `${name} must source the shared writer-lock protocol`,
+    );
+    assert.match(
+      source,
+      /__pc_acquire_sidecar_flock /,
+      `${name} must use the bounded cooperative acquisition, not a bare flock`,
+    );
+  }
+  assert.doesNotMatch(
+    windowsBuilder,
+    /^\s*flock 9\s*$/m,
+    'the Windows release staging path must never return to an unbounded bare flock',
+  );
+  assert.match(sidecarLockHelper, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
+  assert.match(sidecarLockHelper, /kill -USR1/);
+  assert.match(sidecarLockHelper, /holder context follows/);
+});
 
 test('the real builder lock path survives vanished fuser PIDs and yields a live tauri reader', async () => {
   assert(SIDECAR_LOCK_SECTION, 'could not extract the shipped sidecar lock section');
@@ -69,6 +97,7 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
       `SIDECAR_TMP_DIR=${JSON.stringify(`${lockBase}.tmp`)}`,
       'PAPERCUSP_SIDECAR_LOCK_WAIT_SEC=2',
       'PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC=0',
+      sidecarLockHelper,
       SIDECAR_LOCK_SECTION,
       'echo LOCK_ACQUIRED',
     ].join('\n');
