@@ -90,6 +90,11 @@ load_release_host
 # span normalization and with the incremental publisher.
 # shellcheck source=lib/inno-spanned-server.sh
 source "$HERE/lib/inno-spanned-server.sh"
+# EI-20962889392870069: use the same bounded cooperative writer acquisition as
+# build-desktop-sidecar.sh. A long-lived tauri-guarded dev reader otherwise
+# pins this release staging block forever at a bare `flock 9`.
+# shellcheck source=lib/sidecar-lock-yield.sh
+source "$HERE/lib/sidecar-lock-yield.sh"
 
 TARGET="x86_64-pc-windows-msvc"
 # Identity: keep build-box paths OUT of the shipped .exe. rustc embeds source paths
@@ -239,9 +244,11 @@ winpath() { printf 'Z:%s' "$(printf '%s' "$1" | sed 's:/:\\:g')"; }
 # stage-source-tree.sh writes src-tauri/sidecar/source.tar.zst (the Server span
 # trigger); env-sidecars/staging is the packaged env switcher's staging bundle.
 # Both re-staged fresh, serialized against a concurrent sidecar publish via the
-# same flock on src-tauri/sidecar.lock.
+# same flock on src-tauri/sidecar.lock. The shared helper first grants a short
+# startup grace, then asks only tauri-guarded readers to yield, and finally
+# bounds the remaining wait with holder diagnostics.
 (
-  flock 9
+  __pc_acquire_sidecar_flock "$SRC_TAURI/sidecar.lock" || exit $?
   PAPERCUSP_SIDECAR_LOCK_HELD=1 bash "$ROOT/bin/stage-source-tree.sh"
   if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
     [[ -f "$SRC_TAURI/sidecar/source.tar.zst" ]] \
