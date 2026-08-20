@@ -841,6 +841,34 @@ def is_vendor(name):
     return n.startswith("node_modules/") or "/node_modules/" in n
 
 
+_FINGERPRINTED_DIST_ASSET_RE = re.compile(
+    r"^(?P<stem>.+)-(?P<fingerprint>[A-Za-z0-9_-]{8})(?P<ext>\.[^/]+)$"
+)
+
+
+def semantic_path_for_low_entropy(name):
+    """Remove only an opaque Vite/Rollup fingerprint before matching a short name.
+
+    A three-letter owner name has too little entropy to convict inside an opaque
+    content hash.  The real 2026-08-20 collision was
+    ``dist/assets/factor-aVI-w_hC.js``: ``aVI`` is a whole ERE word because the
+    hash contains punctuation, but it is not a semantic filename component.
+
+    Scope this narrowly to generated ``dist/assets`` names with the measured
+    eight-character fingerprint shape.  The semantic stem remains searchable, so
+    ``dist/assets/Avi-abcdefgh.js`` still fails while the hash-only collision does
+    not.  Paths outside that generated-asset shape remain byte-for-byte unchanged.
+    """
+    normalized = name.replace("\\", "/")
+    if "/dist/assets/" not in "/" + normalized or "/" not in normalized:
+        return name
+    parent, base = normalized.rsplit("/", 1)
+    match = _FINGERPRINTED_DIST_ASSET_RE.fullmatch(base)
+    if not match:
+        return name
+    return f"{parent}/{match.group('stem')}{match.group('ext')}"
+
+
 @functools.lru_cache(maxsize=512)
 def lit_rx(lit):
     """Memoised: phase A now calls this per MEMBER (~248k on source.tar.zst) for
@@ -891,22 +919,34 @@ def phase_a_paths(bundle, lits):
                     # field named in the finding so it is actionable: "in path"
                     # sends you looking at a filename, which is the wrong fix when
                     # the value is really a link target or a uid name.
-                    fields = [("path", name)]
+                    # Search each header FIELD by its own value.  Prefixing the
+                    # path onto uname/gname/link values made a path collision look
+                    # like four independent header findings and defeated the
+                    # low-entropy path rule below.
+                    fields = [("path", name, name)]
                     if member.linkname:
-                        fields.append(("link target", f"{name} -> {member.linkname}"))
+                        fields.append(("link target", member.linkname,
+                                       f"{name} -> {member.linkname}"))
                     if member.uname:
-                        fields.append(("uid name", f"{name} [uname={member.uname}]"))
+                        fields.append(("uid name", member.uname,
+                                       f"{name} [uname={member.uname}]"))
                     if member.gname:
-                        fields.append(("gid name", f"{name} [gname={member.gname}]"))
+                        fields.append(("gid name", member.gname,
+                                       f"{name} [gname={member.gname}]"))
                     for k, v in (member.pax_headers or {}).items():
-                        fields.append(("pax header", f"{name} [{k}={v}]"))
+                        fields.append(("pax header", f"{k}={v}",
+                                       f"{name} [{k}={v}]"))
                     for rule, lit in lits.items():
-                        matched = next(
-                            (d for where, d in fields if lit_rx(lit).search(d)), None)
-                        if matched is not None:
-                            where = next(w for w, d in fields if d == matched)
-                            hits.append((f"{rule} (in {where})", matched))
-                            break
+                        for where, searchable, display in fields:
+                            candidate = searchable
+                            if where == "path" and is_low_entropy(lit):
+                                candidate = semantic_path_for_low_entropy(searchable)
+                            if lit_rx(lit).search(candidate):
+                                hits.append((f"{rule} (in {where})", display))
+                                break
+                        else:
+                            continue
+                        break
     except tarfile.TarError as exc:
         proc.kill(); proc.wait()
         print(f"AUDIT ERROR: cannot list bundle: {exc}", file=sys.stderr)
@@ -930,9 +970,9 @@ def phase_b_content(bundle, lits):
       • BROAD  — credentials + high-entropy identity, over the WHOLE bundle.
                  A hit in node_modules is real: only a build on this box could
                  have put it there.
-      • NARROW — low-entropy identity (a bare first name), over OUR SOURCE ONLY.
-                 Vendored dictionaries and third-party READMEs are full of common
-                 first names that are not our owner.
+      • NARROW — low-entropy identity (a bare first name), over OUR TEXT SOURCE
+                 ONLY. Vendored dictionaries and binary/compressed bytes are full
+                 of chance three-letter matches that are not our owner.
     """
     rev = {v: k for k, v in lits.items()}
     benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)
@@ -947,13 +987,8 @@ def phase_b_content(bundle, lits):
 
     broad = [p for _, p in CREDENTIAL_ERE]
     broad += [lit_ere(v) for v in lits.values() if not is_low_entropy(v)]
-    narrow = [lit_ere(v) for v in lits.values() if is_low_entropy(v)]
-
-    # GNU tar --exclude applies to extraction too; * spans '/' by default.
-    vendor_excl = "--exclude='./node_modules/*' --exclude='*/node_modules/*'"
-
     found = []
-    for line in scan(broad) + scan(narrow, vendor_excl):
+    for line in scan(broad):
         n, _, val = line.partition(" ")
         val = val.strip()
         rule = rev.get(val)
@@ -963,7 +998,77 @@ def phase_b_content(bundle, lits):
                     rule = name
                     break
         found.append((rule or "credential-or-identity", int(n), val))
-    return found
+    found.extend(phase_b_low_entropy_text(bundle, lits))
+    return sorted(found, key=lambda row: (-row[1], row[0], row[2]))
+
+
+def phase_b_low_entropy_text(bundle, lits):
+    """Count short identity literals member-by-member, excluding binary files.
+
+    The former narrow pass concatenated every non-vendor tar member and forced
+    ``grep -a``.  That contradicted ``scan_dir`` and ``source_leakers``, which both
+    deliberately use grep's binary-skip behavior for a three-letter name.  On the
+    real source archive, random binary bytes produced four case variants of the
+    owner name and made a clean build permanently red.
+
+    Stream each member once, preserving cross-chunk matches.  Counts are committed
+    only after the whole member proves NUL-free; if a later chunk reveals binary
+    content, every provisional chance match from that member is discarded.  This
+    keeps the fail-closed text coverage without treating compressed bytes as prose.
+    """
+    needles = [
+        (rule, lit, re.compile(lit_ere(lit).encode()))
+        for rule, lit in lits.items()
+        if is_low_entropy(lit)
+    ]
+    if not needles:
+        return []
+
+    overlap = max(len(lit.encode("utf-8", "surrogateescape")) for _, lit, _ in needles) + 2
+    counts = {}
+    proc = subprocess.Popen(["zstd", "-dc", bundle],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+            for member in tf:
+                if not member.isfile() or is_vendor(member.name):
+                    continue
+                fh = tf.extractfile(member)
+                if fh is None:
+                    continue
+                local = {}
+                tail = b""
+                binary = False
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    if b"\0" in chunk:
+                        binary = True
+                    if binary:
+                        continue
+                    data = tail + chunk
+                    old = len(tail)
+                    for rule, lit, rx in needles:
+                        n = sum(1 for match in rx.finditer(data) if match.end() > old)
+                        if n:
+                            local[(rule, lit)] = local.get((rule, lit), 0) + n
+                    tail = data[-overlap:]
+                if not binary:
+                    for key, n in local.items():
+                        counts[key] = counts.get(key, 0) + n
+    except tarfile.TarError as exc:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(f"cannot scan low-entropy tar members: {exc}") from exc
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    rc = proc.wait()
+    if rc != 0:
+        err = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
+        raise RuntimeError(f"cannot scan low-entropy tar members: zstd exited {rc}: {err[:300]}")
+    return [(rule, n, lit) for (rule, lit), n in counts.items()]
 
 
 def phase_c_attribute(bundle, lits, wanted, per_rule=8):

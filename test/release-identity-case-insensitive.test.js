@@ -60,6 +60,27 @@ function mkfixture(files) {
   return dir;
 }
 
+function auditArchive(files) {
+  const source = mkfixture(files);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-identity-archive-'));
+  const tar = path.join(work, 'fixture.tar');
+  const bundle = path.join(work, 'fixture.tar.zst');
+  // Mirror stage-source-tree.sh: member ownership is normalized, otherwise this
+  // fixture correctly fails on the build host's uname before reaching the case
+  // it was created to isolate.
+  execFileSync('tar', [
+    '--numeric-owner', '--owner=0', '--group=0', '-C', source, '-cf', tar, '.',
+  ]);
+  execFileSync('zstd', ['-q', '-f', '-o', bundle, tar]);
+  const result = spawnSync('python3', [AUDIT, bundle], {
+    encoding: 'utf8',
+    env,
+  });
+  fs.rmSync(source, { recursive: true, force: true });
+  fs.rmSync(work, { recursive: true, force: true });
+  return result;
+}
+
 test('--identity-literals emits a case-folded pattern for the owner name', () => {
   const row = identityLiteralRow(OWNER);
   assert.ok(row, `no --identity-literals row for ${OWNER}`);
@@ -127,4 +148,35 @@ test('--source-leakers nominates a file whose ONLY hit is lowercase', () => {
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('opaque asset fingerprints and binary bytes do not convict a short owner name', () => {
+  const result = auditArchive({
+    // zED-w_hC is an eight-character Vite fingerprint. It happens to contain the
+    // whole-word case-folded owner token, but carries no semantic identity.
+    'apps/operator-vite/dist/assets/factor-zED-w_hC.js': 'export const factor = 1;\n',
+    // The old tar-stream pass forced binary-as-text and convicted this chance hit.
+    'apps/operator-vite/dist/assets/random.bin': Buffer.from([0, 122, 69, 100, 0]),
+  });
+  assert.equal(
+    result.status,
+    0,
+    `hash/binary noise must not block a release:\n${result.stdout}\n${result.stderr}`,
+  );
+});
+
+test('semantic owner paths and textual owner mentions remain release-blocking controls', () => {
+  const pathLeak = auditArchive({
+    // Only the opaque suffix is removed. The semantic stem remains searchable.
+    'apps/operator-vite/dist/assets/Zed-abcdefgh.js': 'export const clean = true;\n',
+  });
+  assert.equal(pathLeak.status, 1, `semantic owner path escaped:\n${pathLeak.stdout}`);
+  assert.match(pathLeak.stdout, /Zed-abcdefgh\.js/);
+
+  const textLeak = auditArchive({
+    'apps/operator-vite/dist/assets/factor-abcdefgh.js':
+      '-- Surfaced for zed: this is genuine authored text, not random bytes\n',
+  });
+  assert.equal(textLeak.status, 1, `text owner mention escaped:\n${textLeak.stdout}`);
+  assert.match(textLeak.stdout, /IN FILE CONTENT/);
 });
