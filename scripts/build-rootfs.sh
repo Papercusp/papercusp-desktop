@@ -25,6 +25,20 @@ OUT_TARBALL="${OUT_DIR}/papercup-runtime.tar.gz"
 CONTAINER="papercup-runtime-build-$$"
 
 mkdir -p "$OUT_DIR"
+# A failed export must leave no final-path artifact for a later build guard to
+# mistake for a complete rootfs. Publish the successful export with rename(2)
+# below so readers see either no file or the complete tarball.
+rm -f "$OUT_TARBALL"
+OUT_TMP="$(mktemp "${OUT_TARBALL}.tmp.XXXXXX")"
+
+cleanup() {
+  local status="$?"
+  trap - EXIT
+  [[ -z "$OUT_TMP" ]] || rm -f "$OUT_TMP"
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  exit "$status"
+}
+trap cleanup EXIT
 
 # ── Bootstrap script that runs inside the container ──────────────────
 # This script ALSO ships inside the rootfs at /opt/papercup/bootstrap so
@@ -193,12 +207,13 @@ $BOOTSTRAP_SH
 BS
 chmod +x /opt/papercup/bootstrap"
 
-trap "docker rm -f $CONTAINER >/dev/null 2>&1 || true" EXIT
 docker start -a "$CONTAINER"
 
 # ── Export rootfs as a tarball ───────────────────────────────────────
 echo "exporting rootfs to $OUT_TARBALL"
-docker export "$CONTAINER" | gzip -9 > "$OUT_TARBALL"
+docker export "$CONTAINER" | gzip -9 > "$OUT_TMP"
+mv -f "$OUT_TMP" "$OUT_TARBALL"
+OUT_TMP=""
 
 ls -lh "$OUT_TARBALL"
 

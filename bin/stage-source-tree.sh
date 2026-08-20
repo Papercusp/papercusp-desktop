@@ -123,7 +123,8 @@ else
   echo "$$" > "$STAGE_LOCKDIR/pid"
 fi
 SCRUB_DIR=""
-trap 'rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"} ${SCRUB_DIR:+"$SCRUB_DIR"}' EXIT
+OUT_TMP=""
+trap 'rm -f ${OUT_TMP:+"$OUT_TMP"}; rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"} ${SCRUB_DIR:+"$SCRUB_DIR"}' EXIT
 
 # Re-check AFTER taking the lock: a rebuild we just waited on may have replaced
 # the sidecar (the serve.mjs check above ran unlocked, so its answer is stale).
@@ -132,7 +133,10 @@ if [[ ! -f "$SIDECAR/serve.mjs" ]]; then
   exit 1
 fi
 
+# Never leave a stale or interrupted archive at the final path. The replacement
+# is published only after tar, zstd, and the release-bundle audit all succeed.
 rm -f "$OUT"
+OUT_TMP="$(mktemp "${OUT}.tmp.XXXXXX")"
 echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 
 # EXCLUDES. Two classes, and only ONE of them is maintained here:
@@ -370,13 +374,13 @@ declare -a _scrub_tail=()
   "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${SCRUB_TRANSFORM[@]}" \
   -C "$MONO" -cf - "${INCLUDES[@]}" \
   "${_scrub_tail[@]}" \
-  | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT"
+  | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT_TMP"
 rcs=("${PIPESTATUS[@]}")
 set -e -o pipefail
 (( rcs[0] <= 1 )) || { echo "ERROR: tar failed (exit ${rcs[0]})" >&2; exit 1; }
 (( rcs[1] == 0 )) || { echo "ERROR: zstd failed (exit ${rcs[1]})" >&2; exit 1; }
 
-sz="$(du -h "$OUT" | cut -f1)"
+sz="$(du -h "$OUT_TMP" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"
 echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_ROOT points at it (WI-3308)"
 
@@ -393,7 +397,7 @@ echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_
 # Exit 2 (COULD NOT CHECK) is reported separately from exit 1 (FOUND LEAKS). Both are
 # fatal — the difference is what you go and fix (EI-20583328178472869).
 set +e
-python3 "$HERE/audit-release-bundle.py" "$OUT"
+python3 "$HERE/audit-release-bundle.py" "$OUT_TMP"
 _audit_rc=$?
 set -e
 if [[ $_audit_rc -eq 2 ]]; then
@@ -409,6 +413,8 @@ elif [[ $_audit_rc -ne 0 ]]; then
   echo "ERROR: release bundle audit FAILED — refusing to package (WI-4419)." >&2
   exit 1
 fi
+mv -f "$OUT_TMP" "$OUT"
+OUT_TMP=""
 exit 0
 
 }  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──
