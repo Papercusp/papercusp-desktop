@@ -49,7 +49,15 @@ function runGuard(args) {
     writeFileSync(shim, '#!/usr/bin/env bash\nprintf "%s" "${CARGO_TARGET_DIR:-}"\n');
     chmodSync(shim, 0o755);
     return execFileSync('bash', [GUARD, ...args], {
-      env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', PATH: `${shimDir}:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        HOME: home,
+        CARGO_TARGET_DIR: '',
+        PATH: `${shimDir}:${process.env.PATH}`,
+        // Routing/claim probes must never wait on a real concurrent release
+        // writer. The dedicated contention tests below exercise that behavior.
+        PAPERCUSP_SIDECAR_LOCK: join(home, 'sidecar.lock'),
+      },
       encoding: 'utf8',
     });
   } finally {
@@ -225,12 +233,17 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
 
 test('the sidecar writer bounds its wait and identifies cooperative readers', () => {
   const builder = readFileSync(join(DESKTOP_DIR, 'bin', 'build-desktop-sidecar.sh'), 'utf8');
-  assert.match(builder, /SIDECAR_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60\}"/);
-  assert.match(builder, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
-  assert.match(builder, /PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC/);
-  assert.match(builder, /kill -USR1/);
-  assert.match(builder, /tauri-guarded/);
-  assert.match(builder, /holder context follows/);
+  const windowsBuilder = readFileSync(join(DESKTOP_DIR, 'bin', 'build-windows-cross.sh'), 'utf8');
+  const helper = readFileSync(join(DESKTOP_DIR, 'bin', 'lib', 'sidecar-lock-yield.sh'), 'utf8');
+  assert.match(helper, /SIDECAR_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60\}"/);
+  assert.match(helper, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
+  assert.match(helper, /PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC/);
+  assert.match(helper, /kill -USR1/);
+  assert.match(helper, /tauri-guarded/);
+  assert.match(helper, /holder context follows/);
+  assert.match(builder, /source "\$HERE\/lib\/sidecar-lock-yield\.sh"/);
+  assert.match(windowsBuilder, /source "\$HERE\/lib\/sidecar-lock-yield\.sh"/);
+  assert.match(windowsBuilder, /__pc_acquire_sidecar_flock "\$SRC_TAURI\/sidecar\.lock"/);
 });
 
 test('generic build and bundle commands capable of emitting deb route through the repacker', () => {
