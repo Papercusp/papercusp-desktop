@@ -69,6 +69,55 @@ function tmp(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `wi37620-${name}-`));
 }
 
+function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
+  const dir = tmp('owner-preflight');
+  const env = {
+    ...process.env,
+    PAPERCUSP_RELEASE_AUDIT: audit,
+    // The rejecting cases use a missing repo to prove they stop before the first
+    // runtime-pin read. Allowed cases use the real pin, then stop safely at the
+    // deliberately absent Papercusp dependency before any build operation.
+    REPO_ROOT: advance ? path.resolve(root, '..') : path.join(dir, 'missing-repo'),
+    PAPERCUSP_ROOT: path.join(dir, 'missing-papercusp'),
+  };
+  delete env.PAPERCUSP_RELEASE_OWNER_NAME;
+  if (owner !== undefined) env.PAPERCUSP_RELEASE_OWNER_NAME = owner;
+  try {
+    return spawnSync('bash', [path.join(root, 'bin/build-desktop-sidecar.sh')], {
+      encoding: 'utf8',
+      env,
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('release-audited sidecar build rejects a missing owner name before toolchain work', () => {
+  for (const owner of [undefined, '', ' , ; \t ']) {
+    const r = runBuilderOwnerPreflight({ audit: '1', owner });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 2, `owner=${JSON.stringify(owner)}\n${output}`);
+    assert.match(output, /PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME/);
+    assert.match(output, /final identity audit cannot certify/);
+    assert.doesNotMatch(output, /could not read the repo-pinned Node major/,
+      'the owner-name rejection must precede the first toolchain/runtime preflight');
+  }
+});
+
+test('sidecar owner-name preflight leaves dev builds and asserted release builds unchanged', () => {
+  for (const input of [
+    { audit: '0', owner: undefined, advance: true, label: 'dev build' },
+    { audit: '1', owner: SYNTHETIC_OWNER, advance: true, label: 'asserted release build' },
+  ]) {
+    const r = runBuilderOwnerPreflight(input);
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 1, `${input.label}\n${output}`);
+    assert.match(output, /papercusp not found at/,
+      `${input.label} must advance past the owner-name guard`);
+    assert.doesNotMatch(output, /requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME/);
+  }
+});
+
 test('prune-docs removes pagefind search-index shards, not just internal-infra docs', () => {
   const dir = tmp('prune');
   try {
