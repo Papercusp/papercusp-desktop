@@ -1113,11 +1113,16 @@ unset -f drv_psql diag_out
 # plain shell variable can't count calls across invocations — use a tempfile
 # counter (same technique two-instance smoke's run_smoke fixture above uses).
 WI6217_COUNTER="$(mktemp /tmp/wi6217-selftest-counter.XXXXXX)"; echo 0 > "$WI6217_COUNTER"
+WI6217_INSERT="$(mktemp /tmp/wi6217-selftest-insert.XXXXXX)"
 WI6217_DRAINED="N"
+WI6217_INSERT_FAIL=0
 drv_psql() {
   local inst="$1" sql="$2" n
   case "$sql" in
-    *"INSERT INTO harness_shared.harness_features_consolidated"*) : ;;
+    *"INSERT INTO harness_shared.harness_features_consolidated"*)
+      printf '%s\n' "$sql" > "$WI6217_INSERT"
+      [ "$WI6217_INSERT_FAIL" = 0 ]
+      ;;
     "SELECT origin FROM harness_shared.harness_features_consolidated"*)
       n=$(( $(cat "$WI6217_COUNTER") + 1 )); echo "$n" > "$WI6217_COUNTER"
       [ "$n" -ge 2 ] && echo remote
@@ -1155,9 +1160,30 @@ res="$(fed_hive_merge_probe src dst srcslug F-WI6217-HIVE-SLOW 1 2>/dev/null)"
 [ "$res" = "1 dst-slug" ] && ok "fed_hive_merge_probe: drained-but-slow delivery succeeds in the extended window (WI-6217)" \
                           || bad "fed_hive_merge_probe did not extend the window for a drained-but-slow delivery (got '$res')"
 
-rm -f "$WI6217_COUNTER"
+# Case 4: when the caller supplies the real Pot home through RIG_HIVE_ID, the
+# feature write must use that Pot identity rather than the legacy member-repo
+# slug passed as sslug. Migration 651/652 rejects the latter, which made every
+# live from-repo merge + K4 probe fail before it reached the federation wire.
+echo 0 > "$WI6217_COUNTER"; WI6217_DRAINED="Y"; SLUG_ECHO="dst-slug"
+res="$(RIG_HIVE_ID=real-pot fed_hive_merge_probe src dst legacy-member F-WI6217-POT-HOME 1 2>/dev/null)"
+if [ "$res" = "1 dst-slug" ] \
+  && grep -q "VALUES ('wi6217-fake-ws','real-pot','F-WI6217-POT-HOME'" "$WI6217_INSERT"; then
+  ok "fed_hive_merge_probe: RIG_HIVE_ID Pot home governs the source write (member slug cannot trip pot-membership enforcement)"
+else
+  bad "fed_hive_merge_probe did not author under the resolved Pot home (result='$res')"
+fi
+
+# A rejected source INSERT can never arrive. Fail immediately rather than
+# spending the full poll window and then misreporting a transport timeout.
+echo 0 > "$WI6217_COUNTER"; WI6217_INSERT_FAIL=1
+res="$(RIG_HIVE_ID=real-pot fed_hive_merge_probe src dst legacy-member F-WI6217-REJECTED 1 2>/dev/null)"
+[ "$res" = 0 ] && [ "$(cat "$WI6217_COUNTER")" = 0 ] \
+  && ok "fed_hive_merge_probe: rejected source write fails before polling" \
+  || bad "fed_hive_merge_probe polled after a rejected source write (result='$res', polls=$(cat "$WI6217_COUNTER"))"
+
+rm -f "$WI6217_COUNTER" "$WI6217_INSERT"
 unset -f drv_psql
-unset WI6217_COUNTER WI6217_DRAINED SLUG_ECHO
+unset WI6217_COUNTER WI6217_INSERT WI6217_DRAINED WI6217_INSERT_FAIL SLUG_ECHO
 
 # ── fed_coord_merge_probe is `set -u`-safe with RIG_HIVE_ID unset (WI-5472) ──
 # WI-5472 reported fed_hive_merge_probe/fed_coord_merge_probe crashing

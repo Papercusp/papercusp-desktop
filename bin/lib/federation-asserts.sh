@@ -1131,7 +1131,8 @@ fed_plan_part_merge_assert() {
 # for that feature_id arriving origin='remote' under ANY harness_slug. Answers the open
 # question "does a write federate AFTER a hive join?" Echoes "1 <landed_slug>" or "0".
 fed_hive_merge_probe() {
-  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts ws=""
+  local src="$1" dst="$2" sslug="$3" fid="$4" tries="${5:-30}" i row ts ws="" write_slug=""
+  write_slug="$sslug"
   ts="$(date +%s)000"
   # D-050 / WI-5399 iteration 2: workspace_id = the operator's REAL workspace (the
   # harness drains WHERE workspace_id=its boot workspace). Prefer pot_home_slug
@@ -1144,13 +1145,22 @@ fed_hive_merge_probe() {
   # silently writing under a workspace_id the harness never drains.
   if [ -n "${RIG_HIVE_ID:-}" ]; then
     ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+    # Pot membership enforcement (migrations 651/652) rejects local work-item
+    # writes under a member-repo slug: harness_features_consolidated rows must
+    # be homed to a real Pot. RIG_HIVE_ID is the already-resolved Pot identity
+    # shared by both frames, so use it for the write as well as for the
+    # workspace lookup above. The destination read remains slug-agnostic.
+    write_slug="$RIG_HIVE_ID"
   fi
   [ -n "$ws" ] || ws="$(drv_psql "$src" "SELECT workspace_id FROM harness_shared.pot_members WHERE coalesce(origin,'local')='local' ORDER BY joined_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   if [ -z "$ws" ]; then
     echo "FATAL fed_hive_merge_probe($src,$sslug,$fid): could not resolve a real workspace_id — refusing to silently write under 'default' (D-050/WI-5399 class)" >&2
     echo "0"; return 1
   fi
-  drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$sslug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null
+  if ! drv_psql "$src" "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$write_slug','$fid','hive merge probe','P-001','todo',0,'local',$ts,$ts,$ts);" >/dev/null; then
+    echo "FATAL fed_hive_merge_probe($src,$sslug,$fid): source write was rejected (resolved Pot home='$write_slug') — refusing to poll for a row that was never authored" >&2
+    echo "0"; return 1
+  fi
   for i in $(seq 1 "$tries"); do
     row="$(drv_psql "$dst" "SELECT harness_slug FROM harness_shared.harness_features_consolidated WHERE feature_id='$fid' AND origin='remote' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$row" ] && { echo "1 $row"; return 0; }
