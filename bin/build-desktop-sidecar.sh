@@ -2783,11 +2783,19 @@ cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 # PAPERCUSP_STAGE_SCRUB=0 (mirrors stage-source-tree.sh).
 if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" && -f "$HERE/audit-release-bundle.py" ]]; then
   declare -a _dbsql_sed=()
-  while IFS=$'\t' read -r _val _red _wb; do
+  # Column 4 is audit-release-bundle.py's ready-to-use portable case-folded ERE.
+  # Consume it directly so this shipped-copy scrub cannot drift from the final
+  # scan's case rule. Columns 1-3 remain a compatibility fallback for an older
+  # audit script that does not emit the pattern yet.
+  while IFS=$'\t' read -r _val _red _wb _pat; do
     [[ -z "$_val" ]] && continue
-    _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
     _r="$(printf '%s' "$_red" | sed 's/[&/\]/\\&/g')"
-    if [[ "$_wb" == "1" ]]; then _dbsql_sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _dbsql_sed+=(-e "s/${_p}/${_r}/g"); fi
+    if [[ -n "$_pat" ]]; then
+      _dbsql_sed+=(-e "s/${_pat}/${_r}/g")
+    else
+      _p="$(printf '%s' "$_val" | sed 's/[][\.^$*+?(){}|/]/\\&/g')"
+      if [[ "$_wb" == "1" ]]; then _dbsql_sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _dbsql_sed+=(-e "s/${_p}/${_r}/g"); fi
+    fi
   done < <(python3 "$HERE/audit-release-bundle.py" --identity-literals)
   _scrub_sidecar_db_sql() {
     local _scope="$1"

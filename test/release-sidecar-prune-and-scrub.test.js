@@ -266,6 +266,31 @@ test('build-desktop-sidecar scrubs every preserved env-sidecar db-sql tree at it
   );
 });
 
+test('sidecar db-sql scrub consumes the audit gate case-folded pattern instead of rebuilding it', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const programStart = sh.indexOf('declare -a _dbsql_sed=()');
+  const helperStart = sh.indexOf('_scrub_sidecar_db_sql()', programStart);
+  assert.ok(programStart > 0 && helperStart > programStart,
+    'the db-sql scrub program and helper must exist in order');
+
+  const program = sh.slice(programStart, helperStart);
+  assert.match(
+    program,
+    /read -r _val _red _wb _pat/,
+    'the sidecar scrub must read --identity-literals column 4, which carries the audit case rule',
+  );
+  assert.match(
+    program,
+    /_dbsql_sed\+=\(-e "s\/\$\{_pat\}\/\$\{_r\}\/g"\)/,
+    'the sidecar scrub must pass the audit-owned folded ERE directly to sed',
+  );
+  assert.match(
+    program,
+    /if \[\[ -n "\$_pat" \]\]/,
+    'an older three-column audit script may use the compatibility fallback, but must not be the normal path',
+  );
+});
+
 test('scrub-binaries removes a build-box literal from a compiled addon, preserving byte length', () => {
   const lit = identityLiteral();
   const dir = tmp('scrub');
