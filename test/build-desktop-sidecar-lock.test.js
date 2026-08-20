@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync, spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -7,6 +7,93 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+
+const SIDECAR_LOCK_SECTION = (
+  builder.match(/^exec 9>"\$SIDECAR_FINAL_DIR\.lock"\n[\s\S]*?^SIDECAR_DIR="\$SIDECAR_TMP_DIR"$/m) || []
+)[0];
+
+async function waitForFile(file, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(file)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${file}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+test('the real builder lock path survives vanished fuser PIDs and yields a live tauri reader', async () => {
+  assert(SIDECAR_LOCK_SECTION, 'could not extract the shipped sidecar lock section');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-builder-yield-'));
+  const lockBase = path.join(tmp, 'sidecar');
+  const holderScript = path.join(tmp, 'tauri-guarded');
+  const ready = path.join(tmp, 'ready');
+  const yielded = path.join(tmp, 'yielded');
+  const fuserFdState = path.join(tmp, 'fuser-fd9-state');
+  const shimDir = path.join(tmp, 'bin');
+  fs.mkdirSync(shimDir);
+  fs.writeFileSync(
+    holderScript,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'exec 8>"$1"',
+      'flock -s 8',
+      'printf ready >"$2"',
+      'trap \'exec 8>&-; printf yielded >"$3"\' USR1',
+      'while :; do sleep 0.05; done',
+    ].join('\n'),
+  );
+  fs.chmodSync(holderScript, 0o755);
+
+  const holder = spawn('bash', [holderScript, `${lockBase}.lock`, ready, yielded], {
+    stdio: 'ignore',
+    detached: true,
+  });
+  try {
+    await waitForFile(ready);
+    const fuserShim = path.join(shimDir, 'fuser');
+    fs.writeFileSync(
+      fuserShim,
+      [
+        '#!/usr/bin/env bash',
+        'if [[ -e /proc/$$/fd/9 ]]; then printf open >"$FUSER_FD_STATE"; else printf closed >"$FUSER_FD_STATE"; fi',
+        // A PID outside Linux's possible range deterministically models the real
+        // fuser-helper race; the second PID is the cooperative reader we must signal.
+        'printf \'99999999 %s\\n\' "$HOLDER_PID"',
+      ].join('\n'),
+    );
+    fs.chmodSync(fuserShim, 0o755);
+
+    const harness = [
+      'set -euo pipefail',
+      `SIDECAR_FINAL_DIR=${JSON.stringify(lockBase)}`,
+      `SIDECAR_TMP_DIR=${JSON.stringify(`${lockBase}.tmp`)}`,
+      'PAPERCUSP_SIDECAR_LOCK_WAIT_SEC=2',
+      'PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC=0',
+      SIDECAR_LOCK_SECTION,
+      'echo LOCK_ACQUIRED',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${shimDir}:${process.env.PATH}`,
+        FUSER_FD_STATE: fuserFdState,
+        HOLDER_PID: String(holder.pid),
+      },
+    });
+
+    assert.equal(result.status, 0, `builder lock path exited ${result.status}:\n${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /LOCK_ACQUIRED/, 'the writer must cross the cooperative-yield boundary');
+    assert.equal(fs.readFileSync(fuserFdState, 'utf8'), 'closed', 'fuser helpers must not inherit writer fd 9');
+    assert.equal(fs.existsSync(yielded), true, 'the real tauri-guarded holder must receive SIGUSR1');
+  } finally {
+    if (holder.exitCode === null) {
+      try { process.kill(-holder.pid, 'SIGTERM'); } catch {}
+      await new Promise((resolve) => holder.once('close', resolve));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 // The guard is PROPERTY-based, not SHAPE-based, and that is a deliberate
 // rewrite (2026-08-10). It used to match a literal `( exec 9>&-; cd <x>&& cargo

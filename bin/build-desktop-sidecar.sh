@@ -312,12 +312,21 @@ __pc_sidecar_lock_holder_lines() {
   while read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     [[ "$pid" == "$$" ]] && continue
-    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    # PID discovery and inspection are separate snapshots. A holder (or one of the
+    # short-lived helper processes fuser observed) can disappear between them; under
+    # this script's `set -euo pipefail`, an unguarded `ps` assignment would abort the
+    # entire build with no lock-timeout diagnostic. A vanished PID is simply no longer
+    # a holder, so skip it.
+    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')" || continue
     [[ -n "$argv" ]] || continue
     elapsed="$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
     printf '       pid %s (running %ss): %s\n' "$pid" "${elapsed:-?}" "$argv" >&2
     found=1
-  done < <(__pc_sidecar_lock_pids "$lock_path" "$lockdir")
+  # The builder owns fd 9. Process substitutions inherit it unless explicitly
+  # closed, which made fuser report its own short-lived shell/grep helpers as lock
+  # holders; those helpers were gone by the `ps` above and triggered the silent
+  # set-e exit this diagnostic is supposed to explain (EI-20463638533169241).
+  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
   if ((found == 0)); then
     echo "       holder details unavailable (install fuser/procps or inspect /proc/locks)" >&2
   fi
@@ -330,7 +339,9 @@ __pc_request_cooperative_reader_yield() {
   while read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     [[ "$pid" == "$$" ]] && continue
-    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    # A fuser result is stale the moment it is returned. Do not let a process that
+    # exits in the discovery→inspection gap trip `set -e` and kill the build.
+    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')" || continue
     # Only tauri-guarded installs the SIGUSR1 cooperative-yield handler. Never
     # send SIGUSR1 to cargo, sccache, or an unrelated process merely because it
     # has the lock file open: their default SIGUSR1 action is termination.
@@ -339,7 +350,10 @@ __pc_request_cooperative_reader_yield() {
         echo "→ requested tauri-guarded pid $pid to yield its startup sidecar reader lock" >&2
       fi
     fi
-  done < <(__pc_sidecar_lock_pids "$lock_path" "$lockdir")
+  # Do not let this process-substitution helper inherit the writer's fd 9. If it
+  # does, fuser reports the helper itself as a holder and the helper vanishes before
+  # the caller can inspect it — the root cause of the intermittent silent exit.
+  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
 }
 
 __pc_report_sidecar_lock_timeout() {
