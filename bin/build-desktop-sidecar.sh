@@ -42,6 +42,25 @@ REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
+# EI-20971912793028056: the final assembled-sidecar identity audit deliberately
+# refuses to certify unless the owner's NAME is asserted at run time. Git cannot
+# supply it: release builders use automation identities, and accepting those would
+# turn a clean verdict into false evidence. This used to fail only after the entire
+# sidecar had been assembled. Mirror audit-release-bundle.py's exact non-empty rule
+# here (comma/semicolon-separated values, surrounding whitespace ignored) so a
+# release-audited build fails before the first toolchain or dependency operation.
+# Keep the value runtime-only — writing it into tracked source would create the
+# identity leak this gate exists to prevent.
+_release_owner_name="${PAPERCUSP_RELEASE_OWNER_NAME:-}"
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
+   && -z "${_release_owner_name//[[:space:],;]/}" ]]; then
+  echo "ERROR: PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME before building." >&2
+  echo "       Export it at run time (never write it into a tracked file), then re-run." >&2
+  echo "       Refusing now because the final identity audit cannot certify without it." >&2
+  exit 2
+fi
+unset _release_owner_name
+
 # EI-20228051309163209: release builders are invoked from several environments
 # (interactive shells, systemd user units, cron/routines). The systemd user
 # manager can retain an OLD PATH for days: on 2026-08-12 it resolved NVM Node 22
