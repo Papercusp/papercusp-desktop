@@ -67,6 +67,10 @@ fi
 # checked-in scenario must not touch the physical rig merely to discover that
 # it cannot emit an admissible manifest yet.
 "$SCENARIO" --require-ready >/dev/null
+# Phase E is the only phase that touches GitHub remotes. Prove the fixed canary
+# has both configured remotes, authenticated push permission, and the exact
+# starting refs before the first SSH or any phase mutation.
+"$TSX" "$PRODUCER" phase-e-preflight >/dev/null
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
 remote_source="/tmp/hive-git-physical-source.$$"
