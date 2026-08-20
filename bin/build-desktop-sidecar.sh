@@ -237,144 +237,13 @@ fi
 SIDECAR_FINAL_DIR="$SIDECAR_DIR"
 SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
+# shellcheck source=lib/sidecar-lock-yield.sh
+source "$HERE/lib/sidecar-lock-yield.sh"
 exec 9>"$SIDECAR_FINAL_DIR.lock"
 SIDECAR_LOCKDIR=""
-SIDECAR_LOCK_WAIT="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60}"
-SIDECAR_READER_YIELD_AFTER="${PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC:-5}"
-if ! [[ "$SIDECAR_LOCK_WAIT" =~ ^[0-9]+$ ]] || ! [[ "$SIDECAR_READER_YIELD_AFTER" =~ ^[0-9]+$ ]]; then
-  echo "FATAL: PAPERCUSP_SIDECAR_LOCK_WAIT_SEC and PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC must be non-negative integer seconds" >&2
-  exit 2
-fi
-
-__pc_sidecar_lock_pids() {
-  local lock_path="$1"
-  local lockdir="${2:-}"
-  if [[ -n "$lockdir" && -f "$lockdir/pid" ]]; then
-    cat "$lockdir/pid"
-    return 0
-  fi
-  # fuser SPLITS ITS OUTPUT ACROSS TWO STREAMS: the bare PID list goes to
-  # STDOUT (" 3950042"), while the annotated "/path/to/lock: PID [PID...]" line
-  # goes to STDERR. An earlier version discarded stderr and then filtered stdout
-  # with `awk -F: 'NF > 1'`, expecting the annotated form — but stdout carries no
-  # colon, so that guard dropped EVERY holder and this function always returned
-  # empty. Both callers are fed from here, so the one bad parse silently disabled
-  # BOTH of them: the diagnostics printed "holder details unavailable (install
-  # fuser/procps)" on a box where fuser was installed and working, and
-  # __pc_request_cooperative_reader_yield never signalled anyone — so the SIGUSR1
-  # yield handshake that `bin/tauri-guarded` implements had never once fired, and
-  # a live `tauri dev` reader deadlocked every sidecar build for the full 60s
-  # timeout instead of yielding (the recurring EI-20270512880607021 stall, which
-  # only ever "cleared on its own" because the holder eventually exited).
-  # Reading stdout also removes the reason the colon-split existed: a checkout
-  # path never reaches this stream, so no path digit can be mistaken for a pid.
-  if command -v fuser >/dev/null 2>&1; then
-    local pids
-    pids="$(fuser "$lock_path" 2>/dev/null | grep -oE '[0-9]+' || true)"
-    if [[ -n "$pids" ]]; then
-      printf '%s\n' "$pids"
-      return 0
-    fi
-  fi
-  # Fallback for a host without fuser (the old message told people to install it,
-  # which means this path has to actually work): resolve holders from procfs. An
-  # flock is held by the OPEN FILE DESCRIPTION, so the pid recorded in
-  # /proc/locks can be a process that already exited while a child that inherited
-  # the fd keeps the lock alive — scanning /proc/*/fd finds the LIVE holder,
-  # which is the one worth signalling.
-  # ONE `ls` over every fd directory, parsed in a single awk. MEASURED on this
-  # 128-core box (thousands of open fds), because the obvious forms are far too
-  # slow to sit in a build's lock wait: a shell glob over /proc/*/fd/* forking
-  # `readlink` per fd did not finish in 120s, `find -lname` did not finish inside
-  # a 5s timeout (returning EMPTY, i.e. a false "no holder" — worse than no
-  # fallback at all), and a per-pid `ls | grep` loop took 80s. This form takes
-  # ~1.4s. The `timeout` is a hard ceiling so a diagnostic can never outlive the
-  # wait it is diagnosing.
-  local lock_real
-  lock_real="$(readlink -f "$lock_path" 2>/dev/null)" || return 0
-  [[ -n "$lock_real" ]] || return 0
-  # `ls -l /proc/<pid>/fd` emits a "/proc/<pid>/fd:" header per group, then one
-  # "… N -> /target" line per fd. Track the pid from the header and match the
-  # target EXACTLY — a prefix match would also claim "<lock>.tmp".
-  timeout 20 ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v t="$lock_real" '
-    /^\/proc\/[0-9]+\/fd:/ { split($0, a, "/"); pid = a[3]; next }
-    {
-      p = index($0, "-> " t)
-      if (p > 0 && substr($0, p + 3 + length(t)) == "") print pid
-    }
-  ' | sort -u
-}
-
-__pc_sidecar_lock_holder_lines() {
-  local lock_path="$1"
-  local lockdir="${2:-}"
-  local pid elapsed argv found=0
-  while read -r pid; do
-    [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    [[ "$pid" == "$$" ]] && continue
-    # PID discovery and inspection are separate snapshots. A holder (or one of the
-    # short-lived helper processes fuser observed) can disappear between them; under
-    # this script's `set -euo pipefail`, an unguarded `ps` assignment would abort the
-    # entire build with no lock-timeout diagnostic. A vanished PID is simply no longer
-    # a holder, so skip it.
-    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')" || continue
-    [[ -n "$argv" ]] || continue
-    elapsed="$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
-    printf '       pid %s (running %ss): %s\n' "$pid" "${elapsed:-?}" "$argv" >&2
-    found=1
-  # The builder owns fd 9. Process substitutions inherit it unless explicitly
-  # closed, which made fuser report its own short-lived shell/grep helpers as lock
-  # holders; those helpers were gone by the `ps` above and triggered the silent
-  # set-e exit this diagnostic is supposed to explain (EI-20463638533169241).
-  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
-  if ((found == 0)); then
-    echo "       holder details unavailable (install fuser/procps or inspect /proc/locks)" >&2
-  fi
-}
-
-__pc_request_cooperative_reader_yield() {
-  local lock_path="$1"
-  local lockdir="${2:-}"
-  local pid argv
-  while read -r pid; do
-    [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    [[ "$pid" == "$$" ]] && continue
-    # A fuser result is stale the moment it is returned. Do not let a process that
-    # exits in the discovery→inspection gap trip `set -e` and kill the build.
-    argv="$(ps -o args= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//')" || continue
-    # Only tauri-guarded installs the SIGUSR1 cooperative-yield handler. Never
-    # send SIGUSR1 to cargo, sccache, or an unrelated process merely because it
-    # has the lock file open: their default SIGUSR1 action is termination.
-    if [[ "$argv" == *tauri-guarded* ]]; then
-      if kill -USR1 "$pid" 2>/dev/null; then
-        echo "→ requested tauri-guarded pid $pid to yield its startup sidecar reader lock" >&2
-      fi
-    fi
-  # Do not let this process-substitution helper inherit the writer's fd 9. If it
-  # does, fuser reports the helper itself as a holder and the helper vanishes before
-  # the caller can inspect it — the root cause of the intermittent silent exit.
-  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
-}
-
-__pc_report_sidecar_lock_timeout() {
-  local lock_path="$1"
-  local lockdir="${2:-}"
-  echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar lock ($lock_path)." >&2
-  echo "       A live reader or build still owns it; holder context follows." >&2
-  __pc_sidecar_lock_holder_lines "$lock_path" "$lockdir"
-  echo "       If the holder is tauri-guarded, it should yield on SIGUSR1; otherwise stop the holder or choose an isolated sidecar output." >&2
-}
 
 if command -v flock >/dev/null 2>&1; then
-  if ! flock -n 9; then
-    echo "→ sidecar lock is busy; allowing readers ${SIDECAR_READER_YIELD_AFTER}s to finish startup before requesting a cooperative yield"
-    ((SIDECAR_READER_YIELD_AFTER == 0)) || sleep "$SIDECAR_READER_YIELD_AFTER"
-    __pc_request_cooperative_reader_yield "$SIDECAR_FINAL_DIR.lock"
-    if ! flock -w "$SIDECAR_LOCK_WAIT" 9; then
-      __pc_report_sidecar_lock_timeout "$SIDECAR_FINAL_DIR.lock"
-      exit 5
-    fi
-  fi
+  __pc_acquire_sidecar_flock "$SIDECAR_FINAL_DIR.lock" || exit $?
 else
   # macOS ships no flock(1) — same EI-160 serialization via a mkdir
   # spinlock with stale-PID reclaim.
@@ -710,6 +579,60 @@ const repoRoot = process.argv[1];
 const attempt = process.argv[2];
 const pkgs = ["apps/operator/package.json", "apps/operator-vite/package.json"];
 const missing = [];
+const runtimeDetails = [];
+
+for (const workspace of process.argv.slice(3)) {
+  const packageRoot = path.join(repoRoot, "node_modules", workspace);
+  const manifestPath = path.join(packageRoot, "package.json");
+  if (!fs.existsSync(manifestPath)) {
+    runtimeDetails.push(`${workspace}: package.json MISSING; TypeScript <unresolved>`);
+    continue;
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    runtimeDetails.push(
+      `${workspace}: package.json unreadable (${error instanceof Error ? error.message : String(error)}); TypeScript <unresolved>`,
+    );
+    continue;
+  }
+
+  let tscVersion = "<unresolved>";
+  try {
+    tscVersion = createRequire(manifestPath).resolve("typescript/package.json");
+    tscVersion = JSON.parse(fs.readFileSync(tscVersion, "utf8")).version;
+  } catch {
+    // Keep the diagnostic explicit when the workspace-local/root compiler is absent.
+  }
+
+  const runtimeTargets = [];
+  if (typeof manifest.main === "string") runtimeTargets.push(manifest.main);
+  if (manifest.exports && typeof manifest.exports === "object") {
+    for (const entry of Object.values(manifest.exports)) {
+      if (typeof entry === "string") {
+        runtimeTargets.push(entry);
+      } else if (entry && typeof entry === "object") {
+        for (const condition of ["require", "default"]) {
+          if (typeof entry[condition] === "string") runtimeTargets.push(entry[condition]);
+        }
+      }
+    }
+  }
+  const outputStatus = [...new Set(runtimeTargets)]
+    .map((target) => {
+      const outputPath = target.startsWith("./")
+        ? path.resolve(packageRoot, target)
+        : path.join(packageRoot, target);
+      return `${target}=${fs.existsSync(outputPath) ? "present" : "MISSING"}`;
+    })
+    .join(", ") || "none declared";
+  runtimeDetails.push(
+    `${workspace}: TypeScript ${tscVersion} (pin ${manifest.devDependencies?.typescript ?? "<missing>"}); runtime outputs ${outputStatus}`,
+  );
+}
+
 for (const rel of pkgs) {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, rel), "utf8"));
   for (const dep of Object.keys(pkg.dependencies || {})) {
@@ -764,11 +687,13 @@ for (const rel of pkgs) {
   }
 }
 if (missing.length > 0) {
-  console.error(`dep-check attempt ${attempt}: npm install reported "up to date" but left the following DIRECTLY-DECLARED dependencies un-extracted on disk (see build-desktop-sidecar.sh comment above — a known --prefer-offline-class npm quirk; if this persists across all retries it is a real miss, not a filesystem-sync race):`);
+  console.error(`dep-check attempt ${attempt}: post-install dependency resolution found missing DIRECTLY-DECLARED dependencies on disk. This is a real dependency-tree miss, not an npm "up to date" or extraction-class diagnosis; if it persists across all retries it is not a filesystem-sync race.`);
   for (const m of missing) console.error(`  - ${m}`);
+  console.error("  runtime-build diagnostics (output targets + resolved TypeScript):");
+  for (const detail of runtimeDetails) console.error(`  - ${detail}`);
   process.exit(1);
 }
-' "$REPO_ROOT" "$dep_check_attempt"; then
+' "$REPO_ROOT" "$dep_check_attempt" "${RUNTIME_BUILD_WORKSPACES[@]}"; then
     dep_check_ok=1
     break
   fi
