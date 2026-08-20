@@ -633,10 +633,9 @@ PY
 # minisigned) leaves the largest download we ship unverifiable. So this guard's
 # subject is the PUBLISHED set, not the updater set.
 #
-# THE .dmg EXEMPTION IS DELIBERATE, LINKED, AND LOUD. The mac leg has the same gap
-# and its fix needs a real mac cut to verify, so it is tracked as WI-39600 rather
-# than red-pinning every release in the meantime. The exemption PRINTS on every run
-# — a silent allowlist is how the second half of a two-symptom bug gets buried.
+# DMGs are part of the published set and must carry the same minisign sibling as
+# every other user-facing download. WI-39600 closes the producer-side gap, so no
+# artifact extension is exempted here.
 #
 # Env:
 #   RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1  skip entirely — for keyless local cuts,
@@ -666,28 +665,17 @@ with open(manifest) as fh:
 # read as a bare archive. DiskSpanning ".bin" slices are absent on purpose: they are
 # normalized into the zip and never published on their own.
 SIGNABLE = (".app.tar.gz", ".AppImage", ".deb", ".dmg", ".msi", ".exe", ".zip")
-# Exempt, with the item that will remove the exemption. Never add a row here without
-# a tracking id — the id is the whole difference between an exemption and a lie.
-EXEMPT = {".dmg": "WI-39600 (mac half of the same gap — needs a real mac cut to verify; delete this row when it lands)"}
 
-missing, exempted = [], []
+missing = []
 for name in sorted(names):
     if name.endswith(".sig"):
         continue
     ext = next((s for s in SIGNABLE if name.endswith(s)), None)
     if not ext:
         continue
-    if ext in EXEMPT:
-        exempted.append((name, EXEMPT[ext]))
-        continue
     if name + ".sig" not in names:
         missing.append(name)
 
-if exempted:
-    print("release-artifacts: artifact(s) publishing UNSIGNED under an explicit, tracked "
-          "exemption (not a pass — a deferral):", file=sys.stderr)
-    for name, why in exempted:
-        print(f"  {name} -> {why}", file=sys.stderr)
 if missing:
     print("release-artifacts: artifact(s) in this cut have NO sibling .sig — a download "
           "nobody can verify (EI-20595279927716716):", file=sys.stderr)

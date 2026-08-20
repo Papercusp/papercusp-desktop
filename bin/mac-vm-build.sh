@@ -17,6 +17,7 @@ set -eo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 MAC_SIGNING_XATTR_HELPER="$HERE/lib/strip-mac-signing-xattrs.py"
+TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 
 [[ -f "$MAC_SIGNING_XATTR_HELPER" ]] \
   || { echo "ERROR: mac signing xattr helper missing at $MAC_SIGNING_XATTR_HELPER" >&2; exit 1; }
@@ -451,9 +452,13 @@ for _res in sidecar seed resources; do
   strip_mac_signing_xattrs "$_res_src"
 done
 # Tauri v2 only reads TAURI_SIGNING_PRIVATE_KEY (content or path) — map the
-# legacy _PATH spelling forward so older callers keep working.
+# legacy _PATH spelling forward so older callers keep working. The build accepts
+# either form, but the standalone signer below requires key CONTENT.
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
   export TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY_PATH"
+fi
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" && -f "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY")"
 fi
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   echo "WARN: no TAURI_SIGNING_PRIVATE_KEY in env — updater artifacts will be unsigned/fail"
@@ -727,6 +732,15 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   rm -f "$dmg"
   "${iopolicy_cmd[@]}" hdiutil create -volname "$vol" -srcfolder "$STAGE" -ov "${dmg_compress[@]}" "$dmg"
   rm -rf "$STAGE"
+  [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] \
+    || { echo "ERROR: no TAURI_SIGNING_PRIVATE_KEY — refusing to publish unsigned $(basename "$dmg")" >&2; exit 1; }
+  rm -f "$dmg.sig"
+  ( cd "$ROOT" && TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" \
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+      npx --yes -p "@tauri-apps/cli@$TAURI_CLI_VERSION" tauri signer sign "$dmg" >/dev/null ) \
+    || { echo "ERROR: tauri signer failed for $dmg" >&2; exit 1; }
+  [[ -s "$dmg.sig" ]] \
+    || { echo "ERROR: tauri signer produced no .sig for $dmg" >&2; exit 1; }
   echo "    ✓ $(basename "$dmg")"
 done
 

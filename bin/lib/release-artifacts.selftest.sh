@@ -371,11 +371,12 @@ S_ZIP_SIG="$(mk_sig_artifact "Papercusp Server_${VER}_x64-setup.zip.sig")"
 S_TGZ="$(mk_sig_artifact "Papercusp GUI.app.tar.gz")"
 S_TGZ_SIG="$(mk_sig_artifact "Papercusp GUI.app.tar.gz.sig")"
 S_DMG="$(mk_sig_artifact "Papercusp GUI_${VER}_universal-apple-darwin.dmg")"
+S_DMG_SIG="$(mk_sig_artifact "Papercusp GUI_${VER}_universal-apple-darwin.dmg.sig")"
 
 # 12) CONTROL — a fully-signed cut passes. Without this, case 13 cannot tell a
 # working guard from one that rejects everything.
 release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
-  "$S_ZIP" "$S_ZIP_SIG" "$S_TGZ" "$S_TGZ_SIG" >/dev/null
+  "$S_ZIP" "$S_ZIP_SIG" "$S_TGZ" "$S_TGZ_SIG" "$S_DMG" "$S_DMG_SIG" >/dev/null
 if release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
   ok "signature guard passes a fully-signed cut"
 else
@@ -386,30 +387,30 @@ fi
 # Server zip present, its .sig absent, everything else signed. A guard that
 # cannot fail here would have waved 0.0.16 and 0.0.17 through unchanged.
 release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
-  "$S_ZIP" "$S_TGZ" "$S_TGZ_SIG" >/dev/null
+  "$S_ZIP" "$S_TGZ" "$S_TGZ_SIG" "$S_DMG" "$S_DMG_SIG" >/dev/null
 if release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
   bad "signature guard PASSED an unsigned Server zip — the shape 0.0.16/0.0.17 shipped"
 else
   ok "signature guard fails the unsigned-Server-zip shape that actually shipped"
 fi
 
-# 14) The .dmg deferral (WI-39600) is an EXEMPTION, not a hole: it must pass AND
-# say so on stderr. A silent allowlist is precisely how the mac half of a
-# two-symptom bug gets buried.
+# 14) DMGs are published downloads, so an unsigned .dmg must fail exactly like
+# every other signable artifact. This prevents the old exemption from returning.
 release_artifacts_write "$TAG_SIG" "$S_DEB" "$S_DEB_SIG" "$S_EXE" "$S_EXE_SIG" \
   "$S_ZIP" "$S_ZIP_SIG" "$S_DMG" >/dev/null
 DMG_ERR="$(release_artifacts_assert_signatures_present "$TAG_SIG" 2>&1 >/dev/null)"
 DMG_RC=$?
-[[ "$DMG_RC" -eq 0 ]] \
-  && ok "an unsigned .dmg passes under its tracked exemption" \
-  || bad "the .dmg exemption is not being applied (rc=$DMG_RC)"
+[[ "$DMG_RC" -ne 0 ]] \
+  && ok "signature guard fails an unsigned .dmg" \
+  || bad "signature guard passed an unsigned .dmg (exemption returned)"
 case "$DMG_ERR" in
-  *WI-39600*) ok "the .dmg exemption names its tracking item on stderr (not silent)" ;;
-  *)          bad "the .dmg exemption printed nothing traceable — a silent allowlist" ;;
+  *"Papercusp GUI_${VER}_universal-apple-darwin.dmg"*) ok "the unsigned .dmg is named on stderr" ;;
+  *)                                                   bad "the unsigned .dmg was not named on stderr" ;;
 esac
 
-# 15) The documented escape is honoured, so a keyless cut is never hard-blocked.
-release_artifacts_write "$TAG_SIG" "$S_ZIP" >/dev/null
+# 15) The documented escape is honoured, so a deliberate keyless cut is never
+# hard-blocked even when it contains an unsigned DMG.
+release_artifacts_write "$TAG_SIG" "$S_ZIP" "$S_DMG" >/dev/null
 if RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 \
    release_artifacts_assert_signatures_present "$TAG_SIG" 2>/dev/null; then
   ok "RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 skips the check for keyless cuts"
