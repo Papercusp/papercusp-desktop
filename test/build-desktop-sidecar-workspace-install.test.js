@@ -17,6 +17,21 @@ const builder = fs.readFileSync(
   'utf8',
 );
 
+test('sidecar build fails closed unless all five official mobile templates are packaged', () => {
+  for (const ref of [
+    'papercusp-mobile-base',
+    'papercusp-android-shell',
+    'papercusp-android-app',
+    'papercusp-iphone-shell',
+    'papercusp-iphone-app',
+  ]) {
+    assert.match(builder, new RegExp(`\\b${ref}\\b`), `${ref} is absent from the packaged-template guard`);
+  }
+  assert.match(builder, /REQUIRED_MOBILE_TEMPLATES/);
+  assert.match(builder, /listing\.json template\.yaml GUIDE\.md/);
+  assert.match(builder, /required official mobile template entry missing from sidecar/);
+});
+
 test('sidecar dependency install includes both source workspaces with exact names', () => {
   const operatorName = require(path.join(repoRoot, 'apps/operator/package.json')).name;
   const viteName = require(path.join(repoRoot, 'apps/operator-vite/package.json')).name;

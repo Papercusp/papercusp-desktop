@@ -1847,6 +1847,25 @@ while IFS= read -r f; do
   cp "$TEMPLATES_SRC/$rel" "$TEMPLATES_DST/$rel"
 done < /tmp/template-files.txt
 rm -f /tmp/template-files.txt
+# official-mobile-app-templates-2026-08-20 P-016: the generic copier above is
+# deliberately future-proof, but a successful copy count cannot prove the five
+# launch-critical mobile directories landed. Fail the release build on the exact
+# self-describing entry files each templates:* path requires.
+REQUIRED_MOBILE_TEMPLATES=(
+  papercusp-mobile-base
+  papercusp-android-shell
+  papercusp-android-app
+  papercusp-iphone-shell
+  papercusp-iphone-app
+)
+for required in "${REQUIRED_MOBILE_TEMPLATES[@]}"; do
+  for entry in listing.json template.yaml GUIDE.md; do
+    if [[ ! -f "$TEMPLATES_DST/$required/$entry" ]]; then
+      echo "ERROR: required official mobile template entry missing from sidecar: $required/$entry"
+      exit 1
+    fi
+  done
+done
 # Sanity: the first-party set + their self-describing listing.json actually landed.
 tmpl_count=$(find "$TEMPLATES_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
 if [[ "$tmpl_count" -lt 1 ]]; then
