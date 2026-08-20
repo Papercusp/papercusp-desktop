@@ -101,7 +101,7 @@ const perFileLimitBytes = 256 * 1024;
 const totalLimitBytes = 1024 * 1024;
 const allowed = [
   'failure.err',
-  'phase-a/vm-substrate-readiness.json',
+  'phase-a/two-host-substrate-readiness.json',
   'phase-a/tower-before.json',
   'phase-a/quarantine.json',
   'phase-a/vm-absent.json',

@@ -41,7 +41,8 @@ VM_CALL='/tmp/vmcall.sh'
 # can cross the transport result door.  Pin the dispatch-level projection at
 # the call site so this destructive gate always receives the direct readiness
 # shape rather than a {summary,_projection} spill wrapper.
-PHASE_A_STATUS_ARGS='{"projection":{"pick":["substrateActive","reachedSubstrateOwner","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons"]}}'
+PHASE_A_TOWER_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world-3-pot"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
+PHASE_A_VM_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
 TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
@@ -62,53 +63,108 @@ run_vm_git_sync() {
 
 # Phase A's quarantine is intentionally destructive: it removes the VM's
 # existing test bare store so the production bootstrap must recreate it from
-# the tower. Refuse that mutation unless the VM operator can first reach the
-# substrate owner and the exact runnable hello-world handle is booted. Without
-# this gate a corrupt/copied Corestore can turn the cold join into a guaranteed
-# 20-minute no-topic wait after the last usable store has already been moved.
-require_vm_phase_a_substrate_ready() {
-  local raw
-  if ! raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
-    fail 'phase A VM substrate readiness probe could not reach the VM operator'
-  fi
-
-  if ! printf '%s' "$raw" | node -e '
-    const fs = require("node:fs");
-    const harnessSlug = process.argv[1];
+# the tower. A booted local handle is not enough. Refuse that mutation unless
+# BOTH fixed harnesses report a live remote content peer, a recent inbound
+# announce, and the same exact content topic. This is the smallest witness that
+# the two-host dial path exists before the last usable VM store is moved.
+phase_a_host_substrate_readiness() {
+  local host="$1" harness_slug="$2" raw="$3"
+  node -e '
+    const [host, harnessSlug, raw] = process.argv.slice(1);
     const workspaceId = "papercusp-workspace";
+    const maxAnnounceAgeMs = 10 * 60 * 1000;
     let status;
     try {
-      status = JSON.parse(fs.readFileSync(0, "utf8"));
+      status = JSON.parse(raw);
     } catch {
-      process.stderr.write("phase A VM substrate readiness probe returned invalid JSON\n");
+      process.stderr.write(`phase A ${host} substrate readiness probe returned invalid JSON\n`);
       process.exit(2);
     }
     const harnesses = Array.isArray(status?.harnesses) ? status.harnesses : [];
+    const connectivity = Array.isArray(status?.contentConnectivity)
+      ? status.contentConnectivity
+      : [];
     const harness = harnesses.find((row) =>
       row?.workspaceId === workspaceId && row?.harnessSlug === harnessSlug,
     );
+    const content = connectivity.find((row) =>
+      row?.workspaceId === workspaceId && row?.harnessSlug === harnessSlug,
+    );
+    const topicHex = typeof content?.topicHex === "string" ? content.topicHex : null;
+    const lastAnnounce = Number.isInteger(content?.lastContentAnnounceRecvMs)
+      ? content.lastContentAnnounceRecvMs
+      : null;
+    const announceAgeMs = lastAnnounce === null ? null : Math.abs(Date.now() - lastAnnounce);
     const ready =
       status?.substrateActive === true &&
       status?.reachedSubstrateOwner === true &&
+      status?.healthInputsObserved === true &&
       Number.isInteger(status?.bootedCount) &&
       status.bootedCount > 0 &&
-      Boolean(harness);
+      Boolean(harness) &&
+      /^[0-9a-f]{64}$/.test(topicHex ?? "") &&
+      Number.isInteger(content?.contentPeers) &&
+      content.contentPeers > 0 &&
+      announceAgeMs !== null &&
+      announceAgeMs <= maxAnnounceAgeMs;
     const evidence = {
-      schemaVersion: "hive-git-phase-a-substrate-readiness/v1",
+      host,
       ready,
       target: { workspaceId, harnessSlug },
       substrateActive: status?.substrateActive === true,
       reachedSubstrateOwner: status?.reachedSubstrateOwner === true,
+      healthInputsObserved: status?.healthInputsObserved === true,
       bootedCount: Number.isInteger(status?.bootedCount) ? status.bootedCount : null,
       harnessVerdict: harness?.verdict ?? null,
       harnessReasons: Array.isArray(harness?.reasons) ? harness.reasons : [],
+      contentTopicHex: topicHex,
+      contentPeers: Number.isInteger(content?.contentPeers) ? content.contentPeers : null,
+      lastContentAnnounceRecvMs: lastAnnounce,
+      announceAgeMs,
+      maxAnnounceAgeMs,
     };
     process.stdout.write(`${JSON.stringify(evidence)}\n`);
     if (!ready) process.exit(1);
-  ' "$VM_GIT_SYNC_SLUG"; then
-    fail 'phase A VM substrate readiness gate failed: papercusp-workspace::hello-world is not booted and reachable'
+  ' "$host" "$harness_slug" "$raw"
+}
+
+require_phase_a_two_host_substrate_ready() {
+  local vm_raw tower_raw vm_evidence tower_evidence
+  if ! vm_raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_VM_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
+    fail 'phase A VM substrate readiness probe could not reach the VM operator'
   fi
+  if ! vm_evidence="$(phase_a_host_substrate_readiness vm "$VM_GIT_SYNC_SLUG" "$vm_raw")"; then
+    printf '%s\n' "$vm_evidence"
+    fail 'phase A VM substrate readiness gate failed: exact topic has no live, recent remote content peer'
+  fi
+
+  if ! tower_raw="$(printf '%s\n' "$PHASE_A_TOWER_STATUS_ARGS" \
+    | "$TOWER_CALL" dev:dogfood_substrate_status --json - --client hive-git-phase-a-readiness \
+      --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")"; then
+    fail 'phase A tower substrate readiness probe could not reach the tower operator'
+  fi
+  if ! tower_evidence="$(phase_a_host_substrate_readiness tower "$TOWER_GIT_SYNC_SLUG" "$tower_raw")"; then
+    printf '%s\n' "$tower_evidence"
+    fail 'phase A tower substrate readiness gate failed: exact topic has no live, recent remote content peer'
+  fi
+
+  node -e '
+    const [towerRaw, vmRaw] = process.argv.slice(1);
+    const tower = JSON.parse(towerRaw);
+    const vm = JSON.parse(vmRaw);
+    const sameTopic = tower.contentTopicHex === vm.contentTopicHex;
+    const ready = tower.ready === true && vm.ready === true && sameTopic;
+    process.stdout.write(`${JSON.stringify({
+      schemaVersion: "hive-git-phase-a-substrate-readiness/v2",
+      ready,
+      sameTopic,
+      tower,
+      vm,
+    })}\n`);
+    if (!ready) process.exit(1);
+  ' "$tower_evidence" "$vm_evidence" \
+    || fail 'phase A two-host substrate readiness gate failed: tower and VM do not share one live content topic'
 }
 
 # Node-produced observations carry millisecond precision. Truncating the shell
@@ -283,7 +339,7 @@ phase_a_storage_join() {
   mkdir -m 700 "$phase_dir"
   started_at="$(now_iso)"
 
-  require_vm_phase_a_substrate_ready >"$phase_dir/vm-substrate-readiness.json"
+  require_phase_a_two_host_substrate_ready >"$phase_dir/two-host-substrate-readiness.json"
 
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
