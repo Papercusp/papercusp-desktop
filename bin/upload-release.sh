@@ -53,6 +53,7 @@ TAG="desktop-v${VERSION}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 # ── Config: where it goes ────────────────────────────────────────────────────
 RELEASE_HOST_ENV="${HOME}/.papercusp/release-host.env"
@@ -636,6 +637,19 @@ for key, entry in (m.get("platforms") or {}).items():
 if bad:
     sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable — the manifest lies. Fix before shipping.")
 PY
+
+# Only after the independent public manifest + artifact probes pass may the
+# registry call this release LIVE. The finalizer re-reads the row and repeats
+# the public HEAD proof, then uses the workspace-scoped monotonic writer. Keep
+# the base URL in the child environment rather than argv: its path is the
+# permanent release secret and must not appear in process listings or logs.
+echo
+echo "==> finalizing release registry publication"
+PAPERCUSP_UPDATE_BASE_URL="$BASE" \
+  npx tsx "${REPO_ROOT}/apps/operator/lib/release/finalize-release-publication.ts" \
+    --version "$VERSION" \
+    --channel "$CHANNEL" \
+    --workspace "${PAPERCUSP_WORKSPACE_ID:-papercusp-workspace}"
 
 echo
 echo "==> done — $TAG is LIVE at the release host."
