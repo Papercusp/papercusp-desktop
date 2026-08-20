@@ -115,7 +115,25 @@ A_HOME="$WORK/inst-a"; B_HOME="$WORK/inst-b"
 FED_LOG[a]="$WORK/a.log"; FED_LOG[b]="$WORK/b.log"
 log() { fed_log "$@"; }
 
-cleanup() { log "cleanup (scoped to $WORK)"; fed_cleanup_scoped "$WORK"; }
+bank_instance_logs() {
+  local dst="${PAPERCUSP_SMOKE_LOG_BANK_DIR:-}" f n=0
+  [ -n "$dst" ] || return 0
+  mkdir -p "$dst" 2>/dev/null || return 0
+  for f in "${FED_LOG[a]}" "${FED_LOG[b]}"; do
+    [ -f "$f" ] || continue
+    cp -p "$f" "$dst/" 2>/dev/null && n=$((n + 1))
+  done
+  log "banked $n from-repo instance log(s) -> $dst"
+}
+cleanup() {
+  # WI-40008: several load-bearing failures exit before the final verdict block
+  # (boot/readiness/create are examples). The old preservation helper lived only
+  # in that final block, so the EXIT cleanup deleted both serve logs precisely
+  # when they were needed. Bank at the one exit path every branch shares.
+  bank_instance_logs
+  log "cleanup (scoped to $WORK)"
+  fed_cleanup_scoped "$WORK"
+}
 trap cleanup EXIT
 
 # ── tokens (distinct identities — same pair as every two-instance smoke) ───────

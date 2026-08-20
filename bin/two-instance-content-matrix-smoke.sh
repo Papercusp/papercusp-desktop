@@ -553,7 +553,17 @@ if [ -n "$ADMIT_MS" ] && [ -n "${JOIN_MS:-}" ]; then
 else
   echo "owner-admits-joiner-delay=UNMEASURED (no announce_admitted/owner_admit_joiner row on A at/after the join stamp — WI-5673 probe)"
 fi
-UNPAIRED_A="$(grep -ac 'swarm:unpaired' "${FED_LOG[a]}" 2>/dev/null || true)"
+UNPAIRED_A=0
+if [ -n "${ST:-}" ]; then
+  # WI-40008: the process-global swarm log contains every locally joined topic.
+  # A raw file-wide count folded private Spoon-Knife/Git-Consortium side topics
+  # into the Hello-World matrix and reported 8 "tested channel" failures when
+  # only 2 raw participant firings belonged to ST. Scope the discriminator to
+  # the exact topic equality witness above; keep "raw-participant-firings" in
+  # the label because two same-topic harness participants can log one physical
+  # episode twice.
+  UNPAIRED_A="$(grep -acF "[swarm:unpaired] ⚠ topic ${ST:0:16}" "${FED_LOG[a]}" 2>/dev/null || true)"
+fi
 # THE DISCRIMINATOR between the only two mechanisms that can produce that delay (boot.ts
 # resolveSameHiveMember / swarm.ts:2569). They are mutually exclusive and this splits them:
 #  (a) DELIVERY  — the announce never reached A because the announce channel held live
@@ -568,9 +578,9 @@ UNPAIRED_A="$(grep -ac 'swarm:unpaired' "${FED_LOG[a]}" 2>/dev/null || true)"
 # owner_device_pubkey bound by the signed hive-announce, precisely because the joiner's
 # member roster is still empty). There is no mirror of that anchor for the owner admitting
 # a joiner, which is why the delay is member→owner-only.
-PENDING_A="$(q a "SELECT count(*)::text FROM harness_shared.boot_history_events WHERE kind='announce_pending' AND ts >= ${JOIN_MS:-0};" || true)"
+PENDING_A="$(q a "SELECT count(*)::text FROM harness_shared.boot_history_events WHERE kind='announce_pending' AND harness_slug IN ('$SLUG','$HIVE_SLUG') AND ts >= ${JOIN_MS:-0};" || true)"
 PENDING_A="$(printf '%s' "$PENDING_A" | tr -dc '0-9')"
-echo "A-announce-channel-unpaired-escalations=${UNPAIRED_A:-0}  A-announce-pending-buffered=${PENDING_A:-0}  (WI-5673 discriminator: pending>0 ⇒ ADMISSION-side (announce arrived, A's own state was not ready); pending=0 AND unpaired>0 ⇒ DELIVERY-side (announce never paired through))"
+echo "A-tested-topic-unpaired-raw-participant-firings=${UNPAIRED_A:-0}  A-tested-harness-announce-pending-buffered=${PENDING_A:-0}  (WI-5673 discriminator scoped to topic ${ST:0:16}… + harnesses $SLUG/$HIVE_SLUG: pending>0 ⇒ ADMISSION-side; pending=0 AND unpaired>0 ⇒ DELIVERY-side)"
 
 CONTENT_OVERALL=PASS
 [ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE

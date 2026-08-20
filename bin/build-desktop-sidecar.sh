@@ -3381,7 +3381,20 @@ mkdir -p "$SIDECAR_DIR/bin"
 # `[build] target-dir` — this box redirects ALL builds to ~/.cargo-target, so the
 # built binaries are NOT under <crate>/target/. Same resolution release-local.sh
 # uses; empty string on failure → the standard in-crate paths below still match).
-CARGO_TGT="$(cd "$REPO/apps/tui" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
+if ! CARGO_TGT="$(
+  cd "$REPO/apps/tui" \
+    && cargo metadata --no-deps --format-version 1 \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))'
+)"; then
+  # WI-40008: this probe was documented as fail-soft (the standard in-crate /
+  # workspace target candidates below are valid fallbacks), but `set -e` plus
+  # `pipefail` made a transient cargo-metadata error abort the ENTIRE sidecar
+  # build here, with both stderr streams suppressed. Two live federation builds
+  # ended exactly at the chat-dock banner as a result. Keep the failure loud,
+  # then take the fallback the surrounding code has always promised.
+  echo "    WARN: cargo metadata could not resolve the pui target directory — falling back to standard crate/workspace target paths" >&2
+  CARGO_TGT=""
+fi
 # EI-20094260886633250 / WI-4736 / EI-11730 — REMAP BUILD PATHS OUT OF THE BINARIES.
 # rustc bakes ABSOLUTE build paths into .rodata (panic locations, file!(), and the
 # std/registry paths behind them). On 2026-08-10 that made the shipped chat-dock

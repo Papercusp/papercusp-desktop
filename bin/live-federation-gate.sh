@@ -1197,6 +1197,19 @@ if [ -z "${GATE_DEB:-}" ]; then
   fi
 fi
 
+# WI-40008: a failed fresh build invalidates every consumer leg. Before this
+# guard, GATE_DEB stayed empty and the content smoke silently selected its own
+# newest on-disk .deb (the failing run used a 6h-stale artifact); the from-repo
+# leg likewise ran the last atomically-published sidecar rather than the source
+# tree this window claimed to test. Those secondary reds are real observations
+# about OLD code but are not current-tree verdicts. Fail closed on the one
+# attributable build red and preserve the leg results as explicit SKIPs.
+if [ "$FAIL_BUILD" = 1 ]; then
+  SKIP_MATRIX=1
+  SKIP_FROMREPO=1
+  log "fresh sidecar build failed — refusing to run content-matrix/from-repo against fallback stale artifacts"
+fi
+
 # ── 3. run the smokes ─────────────────────────────────────────────────────────
 # PASS iff an `OVERALL: PASS` line exists in the smoke output.
 # DISCOVERY-RETRY: the from-repo flow discovers via cupboard-off DHT gossip, which lands
@@ -1488,7 +1501,8 @@ WITNESS_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
 if [ "$SKIP_FROMREPO" != 1 ]; then
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
     HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
-    PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 WITNESS_PROBE=1)"
+    PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 WITNESS_PROBE=1 \
+    PAPERCUSP_SMOKE_LOG_BANK_DIR="$WORK/pair-logs-from-repo")"
   log "from-repo+witness → $FROMREPO_RES"
   # WI-5783: fold the WITNESS sub-probe's own verdict into a REAL red — the top-level
   # OVERALL line above does not cover it. Only meaningful when the smoke actually ran the

@@ -287,6 +287,15 @@ else
   ok "live-federation-gate core-leg verdict pattern is anchored so subset lines cannot satisfy it (WI-37222)"
 fi
 
+# WI-40008 detector integrity: early from-repo failures must bank their serve
+# logs from the EXIT path, and the gate must provide a per-run destination.
+if grep -q 'bank_instance_logs' "$FROMREPO_SMOKE_FILE" \
+  && grep -q 'PAPERCUSP_SMOKE_LOG_BANK_DIR=' "$GATE_FILE"; then
+  ok "from-repo smoke banks instance logs on the shared EXIT path, including pre-verdict failures (WI-40008)"
+else
+  bad "from-repo smoke/gate no longer wires PAPERCUSP_SMOKE_LOG_BANK_DIR through the EXIT cleanup — early boot/create failures will delete their only frame logs (WI-40008)"
+fi
+
 # 8) Route-cutover guard (WI-2929): the live federation driver runs against the
 # current pot route. A stale /hives/from-repo call hard-404s on current packaged
 # binaries before the matrix can exercise federation at all.
@@ -333,6 +342,13 @@ if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
   ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"
 else
   bad "live-federation-gate no longer guards missing GATE_DEB overrides (WI-3344 regression)"
+fi
+if grep -q 'fresh sidecar build failed — refusing to run content-matrix/from-repo against fallback stale artifacts' "$gate_file" \
+  && grep -q '^  SKIP_MATRIX=1$' "$gate_file" \
+  && grep -q '^  SKIP_FROMREPO=1$' "$gate_file"; then
+  ok "live-federation-gate fails closed on a sidecar build error instead of testing fallback stale artifacts (WI-40008)"
+else
+  bad "live-federation-gate can still run consumer legs after FAIL_BUILD=1 — an empty GATE_DEB will silently select a stale .deb/sidecar and forge secondary reds (WI-40008)"
 fi
 # EI-20580419609576585: the .deb REPACK produces $GATE_DEB, and $GATE_DEB is what the gate
 # passes to local-matrix.sh as `--deb=`. Gating that repack on SKIP_MATRIX ALONE couples two
@@ -418,6 +434,12 @@ if grep -q 'OVERALL: PASS' "$matrix_file"; then
   ok "content-matrix smoke emits the OVERALL verdict live-federation-gate parses"
 else
   bad "content-matrix smoke no longer emits OVERALL: PASS (live-federation-gate will mark it FAIL)"
+fi
+if grep -qF 'grep -acF "[swarm:unpaired] ⚠ topic ${ST:0:16}"' "$matrix_file" \
+  && grep -q "harness_slug IN ('\$SLUG','\$HIVE_SLUG')" "$matrix_file"; then
+  ok "content-matrix announce discriminator is scoped to the tested topic + harnesses (WI-40008)"
+else
+  bad "content-matrix announce discriminator is gate-wide — unrelated private topics can be misreported as the tested hive's pairing failure (WI-40008)"
 fi
 
 # D-030 / EI-20192345878553998: a matrix run uses two throwaway HOME dirs, but

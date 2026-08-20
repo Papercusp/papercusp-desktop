@@ -17,6 +17,17 @@ const builder = fs.readFileSync(
   'utf8',
 );
 
+test('chat-dock cargo target discovery is fail-soft and leaves diagnostics visible', () => {
+  assert.match(builder, /if ! CARGO_TGT="\$\(/);
+  assert.match(builder, /cargo metadata could not resolve the pui target directory/);
+  assert.match(builder, /CARGO_TGT=""/);
+  assert.doesNotMatch(
+    builder,
+    /CARGO_TGT="\$\(cd "\$REPO\/apps\/tui" && cargo metadata[^\n]*2>\/dev\/null/,
+    'a cargo metadata failure must not silently abort the build under set -e/pipefail',
+  );
+});
+
 test('sidecar build fails closed unless all five official mobile templates are packaged', () => {
   for (const ref of [
     'papercusp-mobile-base',
