@@ -572,7 +572,8 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 # re-verifying against a VM whose npm cache is cold for the packages in
 # question.
 (cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
-  --workspace=@papercusp/web --workspace=@papercusp/operator-vite)
+  --workspace=@papercusp/web --workspace=@papercusp/operator-vite \
+  --workspace=@papercusp/sse)
 
 # POST-INSTALL RUNTIME BUILDS (EI-20505823617947029) -------------------------
 # setup-release-checkout.sh builds these gitignored runtime entry points from
@@ -593,6 +594,63 @@ RUNTIME_BUILD_WORKSPACES=(
 build_runtime_workspace_outputs_after_install() {
   local workspace
   for workspace in "${RUNTIME_BUILD_WORKSPACES[@]}"; do
+    echo "→ reifying build-time devDependencies for $workspace"
+    if ! (cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund \
+      --ignore-scripts --include=dev --workspace="$workspace"); then
+      echo "ERROR: could not reify build-time devDependencies for $workspace" >&2
+      exit 1
+    fi
+    echo "→ verifying the resolved TypeScript toolchain for $workspace"
+    if ! (cd "$REPO_ROOT" && npm --workspace="$workspace" exec -- node -e '
+const expected = require("./package.json").devDependencies?.typescript ?? "";
+let actual = "<unresolved>";
+try {
+  actual = require("typescript/package.json").version;
+} catch {
+  // The diagnostic below names the unresolved toolchain.
+}
+const expectedMatch = /^(~|\^)?(\d+)\.(\d+)\.(\d+)$/.exec(expected);
+const actualMatch = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(actual);
+let compatible = false;
+if (expectedMatch && actualMatch) {
+  const [, operator = "", expectedMajor, expectedMinor, expectedPatch] = expectedMatch;
+  const [, actualMajor, actualMinor, actualPatch] = actualMatch;
+  const eMajor = Number(expectedMajor);
+  const eMinor = Number(expectedMinor);
+  const ePatch = Number(expectedPatch);
+  const aMajor = Number(actualMajor);
+  const aMinor = Number(actualMinor);
+  const aPatch = Number(actualPatch);
+  if (operator === "~") {
+    compatible = aMajor === eMajor && aMinor === eMinor && aPatch >= ePatch;
+  } else if (operator === "^") {
+    compatible =
+      aMajor === eMajor &&
+      (eMajor > 0
+        ? aMinor > eMinor || (aMinor === eMinor && aPatch >= ePatch)
+        : eMinor > 0
+          ? aMinor === eMinor && aPatch >= ePatch
+          : aMinor === 0 && aPatch === ePatch);
+  } else {
+    compatible = aMajor === eMajor && aMinor === eMinor && aPatch === ePatch;
+  }
+}
+if (!compatible) {
+  console.error(
+    "FATAL: " + (process.env.npm_package_name ?? "runtime workspace") +
+      " build toolchain mismatch: package pins typescript " +
+      (expected || "<missing>") + " but resolves " + actual + ".",
+  );
+  process.exit(1);
+}
+console.log(
+  "  ✓ " + (process.env.npm_package_name ?? "runtime workspace") +
+    ": TypeScript " + actual + " satisfies " + expected,
+);
+'); then
+      echo "ERROR: resolved TypeScript does not satisfy the workspace pin for $workspace" >&2
+      exit 1
+    fi
     echo "→ rebuilding post-install runtime output for $workspace"
     (cd "$REPO_ROOT" && npm --workspace "$workspace" run build)
   done
