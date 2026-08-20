@@ -326,9 +326,49 @@ elif [[ "$host_checked" -gt 0 ]]; then
   echo "    ✓ ${host_checked} artifact(s) carry the prefix being published to"
 fi
 # NOTE: the host_checked==0 case is NOT decided here any more — it is decided by
-# the combined verdict below, after the provenance leg has had its say.
+# the combined verdict below, after the byte and provenance legs have had their say.
 
-# ── GUARD leg 2 (WI-37746): the DECISIVE, non-heuristic host check ────────────
+# ── GUARD leg 2 (WI-37746): derive proof from the bytes themselves ───────────
+# A repack/re-publish can carry a stale or hand-written build-provenance file.
+# Read the payload bytes independently, including compressed package contents,
+# so the host agreement check is about what will actually ship. Signature
+# companions are intentionally skipped: they sign the payload and do not carry
+# the updater URL. The helper prints only basenames and truncated fingerprints;
+# the release path is never copied into the upload transcript.
+byte_checked=0; byte_bad=0; byte_unverified=0; byte_skipped_signatures=0; byte_proof_rc=0
+if byte_proof_output="$(release_artifacts_assert_baked_host_from_bytes "$BASE" "${ARTIFACTS[@]}" 2>&1)"; then
+  byte_proof_rc=0
+else
+  byte_proof_rc=$?
+fi
+printf '%s\n' "$byte_proof_output"
+byte_summary="$(printf '%s\n' "$byte_proof_output" | grep -E '^release-host-bytes: checked=' | tail -n 1)" || true
+if [[ "$byte_summary" =~ checked=([0-9]+)[[:space:]]mismatched=([0-9]+)[[:space:]]unverified=([0-9]+)[[:space:]]skipped-signatures=([0-9]+) ]]; then
+  byte_checked="${BASH_REMATCH[1]}"
+  byte_bad="${BASH_REMATCH[2]}"
+  byte_unverified="${BASH_REMATCH[3]}"
+  byte_skipped_signatures="${BASH_REMATCH[4]}"
+else
+  byte_unverified=1
+  echo "    ⚠ byte-derived host proof produced no complete verdict (exit ${byte_proof_rc})" >&2
+fi
+
+if [[ "$byte_bad" -gt 0 ]]; then
+  if [[ "${ALLOW_HOST_MISMATCH:-0}" == "1" ]]; then
+    echo "    ⚠ byte-derived host mismatch OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — ${byte_bad} artifact(s) contain a foreign/mixed host fingerprint; byte-proof gaps=${byte_unverified}, signatures-skipped=${byte_skipped_signatures}." >&2
+  else
+    echo >&2
+    echo "ERROR: the published artifact bytes contain a DIFFERENT release host." >&2
+    echo "       The byte-derived proof found ${byte_bad} mismatched artifact(s); this is a decisive host/target disagreement." >&2
+    echo "       Rebuild or repack from the current release host, or re-run only after deliberately setting ALLOW_HOST_MISMATCH=1." >&2
+    echo "       (WI-37746; byte-proof gaps=${byte_unverified}, signatures-skipped=${byte_skipped_signatures}.)" >&2
+    exit 1
+  fi
+elif [[ "$byte_unverified" -gt 0 ]]; then
+  echo "    ⚠ byte-derived host proof has ${byte_unverified} unverified artifact(s); compressed/uninspectable payloads remain a proof gap." >&2
+fi
+
+# ── GUARD leg 3 (WI-37746): the DECISIVE, non-heuristic host check ────────────
 # The strings scan above is necessary but NOT sufficient, and its blind spot is
 # the WORSE half of the failure class. It greps for the CURRENT host
 # (${BASE_HOST}), so an artifact baked to a DIFFERENT HOST matches nothing, is
@@ -391,7 +431,7 @@ elif [[ "$prov_checked" -gt 0 ]]; then
   echo "    ✓ ${prov_checked} build-provenance record(s) confirm these bytes were built for this exact host"
 fi
 
-# Combined verdict: NEITHER leg could establish agreement ⇒ REFUSE.
+# Combined verdict: NONE of the three independent legs could establish agreement ⇒ REFUSE.
 #
 # This used to be a warning that shipped, and measurement is what changed it.
 # Running this script against the REAL, already-published 0.0.15 cut on
@@ -407,13 +447,14 @@ fi
 # means something genuinely unusual: artifacts assembled outside the build, or a
 # provenance file that never made it next to them. Fail closed and make the
 # operator say so out loud, rather than letting the routine case stay silent.
-if [[ "$host_checked" -eq 0 && "$prov_checked" -eq 0 ]]; then
+if [[ "$host_checked" -eq 0 && "$prov_checked" -eq 0 && "$byte_checked" -eq 0 ]]; then
   if [[ "${ALLOW_HOST_MISMATCH:-0}" == "1" ]]; then
-    echo "    ⚠ UNVERIFIED host/target agreement OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — nothing proves these binaries point at this prefix." >&2
+    echo "    ⚠ UNVERIFIED host/target agreement OVERRIDDEN by ALLOW_HOST_MISMATCH=1 — no leg proves these binaries point at this prefix (byte-proof: checked=${byte_checked}, mismatched=${byte_bad}, gaps=${byte_unverified}, signatures-skipped=${byte_skipped_signatures})." >&2
   else
     echo >&2
     echo "ERROR: host/target agreement is UNVERIFIED for this cut, so this upload is REFUSED." >&2
     echo "       The artifacts expose no baked host to \`strings\` (all compressed is normal), AND no" >&2
+    echo "       byte-derived proof agrees (checked=${byte_checked}, mismatched=${byte_bad}, gaps=${byte_unverified}, signatures-skipped=${byte_skipped_signatures}), AND no" >&2
     echo "       build-provenance record carries releaseHostSha256 (${prov_legacy} legacy/absent record(s))." >&2
     echo "       Nothing here proves these binaries poll the prefix being published to — and shipping a" >&2
     echo "       build that polls the WRONG one strands every install from it permanently (WI-37738)." >&2

@@ -197,22 +197,26 @@ PY
 # that keeps a repack/re-publish honest: it does not need a fresh build and it
 # never accepts a hand-written build-provenance record as evidence.
 release_artifacts_assert_baked_host_from_bytes() {
-  local base="\${1:-}"; shift || true
+  local base="${1:-}"; shift || true
   [[ -n "$base" && $# -gt 0 ]] || {
     echo "release-artifacts: byte host proof requires a publish base and artifacts." >&2
     return 2
   }
 
+  base="${base%/}"
   local expected_fp expected_authority
-  expected_fp="$(printf '%s' "\${base%/}" | sha256sum | cut -d' ' -f1)"
-  expected_authority="$(printf '%s' "\${base%/}" | sed -E 's#^https?://([^/]+).*#\1#')"
-  [[ -n "$expected_authority" && "$expected_authority" != "\${base%/}" ]] || {
+  expected_fp="$(printf '%s' "$base" | sha256sum | cut -d' ' -f1)"
+  expected_authority="$(printf '%s' "$base" | sed -En 's#^https?://([^/]+).*$#\1#p')"
+  local expected_path
+  expected_path="$(printf '%s' "$base" | sed -E 's#^https?://[^/]+##; s#/$##')"
+  [[ "$base" =~ ^https?://[^/]+/.+ && -n "$expected_authority" && -n "$expected_path" ]] || {
     echo "release-artifacts: byte host proof requires an https/http publish base." >&2
     return 2
   }
 
   RELEASE_HOST_PROOF_EXPECTED_FP="$expected_fp" \
   RELEASE_HOST_PROOF_EXPECTED_AUTHORITY="$expected_authority" \
+  RELEASE_HOST_PROOF_EXPECTED_PATH="$expected_path" \
     python3 - "$@" <<'PY'
 import hashlib
 import os
@@ -225,7 +229,8 @@ from urllib.parse import urlsplit
 
 EXPECTED_FP = os.environ["RELEASE_HOST_PROOF_EXPECTED_FP"]
 EXPECTED_AUTHORITY = os.environ["RELEASE_HOST_PROOF_EXPECTED_AUTHORITY"].lower()
-EXPECTED_HOST = EXPECTED_AUTHORITY.split(":", 1)[0]
+EXPECTED_PATH = os.environ["RELEASE_HOST_PROOF_EXPECTED_PATH"].rstrip("/")
+EXPECTED_HOST = (urlsplit(f"https://{EXPECTED_AUTHORITY}").hostname or "").lower()
 
 URL_RE = re.compile(
     rb"https?://[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]{1,5})?"
@@ -241,16 +246,30 @@ def release_host_prefix(raw):
     except UnicodeDecodeError:
         return None
     value = value.rstrip(".,;:)]}\"'")
-    if value.endswith("/latest.json"):
-        value = value[: -len("/latest.json")]
-    return value.rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/")
+    if path.endswith("/latest.json"):
+        path = path[: -len("/latest.json")].rstrip("/")
+    if not path:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc}{path}"
 
 
 def is_release_like(prefix):
     parsed = urlsplit(prefix)
     authority = parsed.netloc.lower()
-    host = authority.split(":", 1)[0]
-    return authority == EXPECTED_AUTHORITY or host == EXPECTED_HOST or host.endswith(".r2.dev")
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/")
+    return (
+        authority == EXPECTED_AUTHORITY
+        or host == EXPECTED_HOST
+        or host.endswith(".r2.dev")
+        or host.endswith(".r2.cloudflarestorage.com")
+        or path == EXPECTED_PATH
+        or path.startswith(f"{EXPECTED_PATH}/")
+    )
 
 
 def scan_stream(stream, found):
@@ -289,32 +308,37 @@ def scan_artifact(path):
         return found, [str(exc)]
 
     lower = path.lower()
-    if lower.endswith(".deb") and shutil.which("dpkg-deb") and shutil.which("tar"):
-        try:
-            deb = subprocess.Popen(
-                ["dpkg-deb", "--fsys-tarfile", path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            tar = subprocess.Popen(
-                ["tar", "-xOf", "-", "--wildcards", "*"],
-                stdin=deb.stdout,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            deb.stdout.close()
-            scan_stream(tar.stdout, found)
-            tar.stdout.close()
-            tar_rc = tar.wait()
-            deb_rc = deb.wait()
-            if deb_rc != 0 or tar_rc != 0:
-                errors.append("deb payload stream failed")
-        except OSError as exc:
-            errors.append(str(exc))
+    if lower.endswith(".deb"):
+        if not shutil.which("dpkg-deb") or not shutil.which("tar"):
+            errors.append("deb payload scanner unavailable")
+        else:
+            try:
+                deb = subprocess.Popen(
+                    ["dpkg-deb", "--fsys-tarfile", path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                tar = subprocess.Popen(
+                    ["tar", "-xOf", "-", "--wildcards", "*"],
+                    stdin=deb.stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                deb.stdout.close()
+                scan_stream(tar.stdout, found)
+                tar.stdout.close()
+                tar_rc = tar.wait()
+                deb_rc = deb.wait()
+                if deb_rc != 0 or tar_rc != 0:
+                    errors.append("deb payload stream failed")
+            except OSError as exc:
+                errors.append(str(exc))
     elif lower.endswith((
         ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tbz", ".tbz2", ".tar.zst",
-    )) and shutil.which("tar"):
-        if not scan_process(["tar", "-xOf", path, "--wildcards", "*"], found):
+    )):
+        if not shutil.which("tar"):
+            errors.append("tar payload scanner unavailable")
+        elif not scan_process(["tar", "-xOf", path, "--wildcards", "*"], found):
             errors.append("tar payload stream failed")
     elif lower.endswith(".zip"):
         try:
@@ -324,11 +348,17 @@ def scan_artifact(path):
                         continue
                     with archive.open(entry) as stream:
                         scan_stream(stream, found)
-        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        except OSError as exc:
             errors.append(str(exc))
-    elif lower.endswith(".appimage") and shutil.which("unsquashfs"):
-        if not scan_process(["unsquashfs", "-cat", path, ".*"], found):
+        except (RuntimeError, zipfile.BadZipFile) as exc:
+            errors.append(str(exc))
+    elif lower.endswith(".appimage"):
+        if not shutil.which("unsquashfs"):
+            errors.append("AppImage payload scanner unavailable")
+        elif not scan_process(["unsquashfs", "-cat", path, ".*"], found):
             errors.append("AppImage payload stream failed")
+    elif lower.endswith(".dmg"):
+        errors.append("dmg payload scanner unavailable")
 
     return found, errors
 
@@ -356,7 +386,7 @@ for path in payloads:
     if expected and not foreign and not errors:
         verified.append(path)
         print(f"release-host-bytes: ✓ {name} agrees (fp {EXPECTED_FP[:12]}…)")
-    elif foreign or (expected and errors):
+    elif foreign:
         mismatched.append(path)
         print(f"release-host-bytes: ✗ {name} has {len(foreign)} foreign/mixed host fingerprint(s)")
     else:
@@ -370,7 +400,7 @@ print(
     f"unverified={len(unverified)} skipped-signatures={skipped_signatures}"
 )
 
-raise SystemExit(1 if mismatched or unverified or not payloads else 2)
+raise SystemExit(1 if mismatched or unverified else (2 if not payloads else 0))
 PY
 }
 
