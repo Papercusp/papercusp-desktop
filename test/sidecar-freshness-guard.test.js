@@ -147,6 +147,31 @@ test('an explicit cut-time assertion still fails closed when provenance is absen
   assert.equal(blocksBuild(r.verdict), true);
 });
 
+test('a required release audit fails closed without a successful sidecar attestation', () => {
+  const r = inspectSidecarFreshness({
+    sidecarPresent: true,
+    provenanceText: prov(),
+    requireReleaseAudit: true,
+    releaseAuditPassed: false,
+  });
+  assert.equal(r.verdict, 'release-audit-unattested');
+  assert.equal(blocksBuild(r.verdict), true);
+  assert.match(describe(r), /UNAUDITED SIDECAR/);
+  assert.match(describe(r), /PAPERCUSP_RELEASE_AUDIT=1/);
+});
+
+test('a required release audit passes only with the final-scan attestation', () => {
+  const r = inspectSidecarFreshness({
+    sidecarPresent: true,
+    provenanceText: prov(),
+    requireReleaseAudit: true,
+    releaseAuditPassed: true,
+  });
+  assert.equal(r.verdict, 'match');
+  assert.equal(blocksBuild(r.verdict), false);
+  assert.match(describe(r), /release identity audit attested/);
+});
+
 test('mere staleness NEVER blocks — no gitHead-vs-HEAD failure (the cry-wolf design)', () => {
   // The guard people learn to bypass is the one that fires on every build. On this
   // shared checkout HEAD moves every few minutes, so a differing HEAD must be
@@ -177,6 +202,7 @@ function runCli(sidecarDir, env = {}) {
   const childEnv = { ...process.env };
   delete childEnv.PAPERCUSP_EXPECTED_SERVE_SHA;
   delete childEnv.PAPERCUSP_SIDECAR_MIN_EPOCH_SEC;
+  delete childEnv.PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT;
   return spawnSync(
     process.execPath,
     [path.join(BIN, 'check-sidecar-freshness.js'), '--sidecar', sidecarDir],
@@ -188,12 +214,23 @@ function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
 }
 
-function writeStampedSidecar(dir, { serveText = 'sidecar bytes\n', epochSec = 200 } = {}) {
+function writeStampedSidecar(
+  dir,
+  { serveText = 'sidecar bytes\n', epochSec = 200, releaseAuditPassed = false } = {},
+) {
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
   fs.writeFileSync(path.join(dir, 'serve.mjs'), serveText);
+  const stamp = { serveSha256: sha256(serveText), epochSec };
+  if (releaseAuditPassed) {
+    stamp.releaseIdentityAudit = {
+      schemaVersion: 1,
+      passed: true,
+      scanner: 'audit-release-bundle.py --scan-dir',
+    };
+  }
   fs.writeFileSync(
     path.join(dir, '.sidecar-build-stamp'),
-    JSON.stringify({ serveSha256: sha256(serveText), epochSec }),
+    JSON.stringify(stamp),
   );
   return sha256(serveText);
 }
@@ -275,6 +312,26 @@ test('CLI: an asserted cut with missing or malformed stamp fails closed', () => 
   assert.match(r.stderr, /could not verify that the sidecar was built during this release cut/);
 });
 
+test('CLI: release cross-build assertion rejects an ordinary dev sidecar before compilation', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  writeStampedSidecar(dir);
+  const r = runCli(dir, {
+    PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT: '1',
+    PAPERCUSP_ALLOW_STALE_SIDECAR: '1',
+  });
+  assert.equal(r.status, 4, 'ALLOW_STALE must not bypass a missing privacy attestation');
+  assert.match(r.stderr, /UNAUDITED SIDECAR/);
+  assert.match(r.stderr, /does not\s+bypass a missing privacy attestation/);
+});
+
+test('CLI: release cross-build assertion accepts a successfully audited sidecar', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  writeStampedSidecar(dir, { releaseAuditPassed: true });
+  const r = runCli(dir, { PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT: '1' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /release identity audit attested/);
+});
+
 // ── the wiring (the half that actually prevents the recurrence) ───────────────
 
 test('build-desktop-sidecar.sh RECORDS provenance into the published sidecar', () => {
@@ -284,6 +341,11 @@ test('build-desktop-sidecar.sh RECORDS provenance into the published sidecar', (
     /emit-build-provenance\.sh/,
     'the sidecar builder must emit build-provenance.json — without it, staleness downstream is not merely unguarded, it is unknowable',
   );
+  const scan = src.lastIndexOf('audit-release-bundle.py" --scan-dir "$SIDECAR_DIR"');
+  const attestation = src.indexOf('stamp.releaseIdentityAudit = {');
+  assert.ok(scan > 0, 'the final assembled-sidecar identity scan must exist');
+  assert.ok(attestation > scan,
+    'the release audit attestation must be recorded only AFTER the final scan succeeds');
 });
 
 for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh']) {
@@ -293,6 +355,11 @@ for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh']) {
       src,
       /check-sidecar-freshness\.js/,
       `${script} consumes a sidecar it did not build; its existence/arch asserts are silent on staleness, which is how a 9-hour-old operator shipped in WI-3307`,
+    );
+    assert.match(
+      src,
+      /PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1/,
+      `${script} must reject a dev/unaudited sidecar before its expensive compiler leg`,
     );
   });
 }

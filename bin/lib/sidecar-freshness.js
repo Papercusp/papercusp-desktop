@@ -46,10 +46,12 @@
 //
 //   2. THE ASSERTIONS (blocks, zero false positives). A caller can require a commit
 //      (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS), the exact serve.mjs bytes expected for a
-//      release cut (PAPERCUSP_EXPECTED_SERVE_SHA), and a sidecar build stamp at or
-//      after the cut start (PAPERCUSP_SIDECAR_MIN_EPOCH_SEC). Each can only fire when
-//      its caller explicitly asserted something, so none is a HEAD-vs-sidecar clock
-//      comparison that cries wolf on the shared checkout.
+//      release cut (PAPERCUSP_EXPECTED_SERVE_SHA), a sidecar build stamp at or
+//      after the cut start (PAPERCUSP_SIDECAR_MIN_EPOCH_SEC), and proof that the
+//      assembled sidecar passed its release identity audit
+//      (PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT). Each can only fire when its caller
+//      explicitly asserted something, so none is a HEAD-vs-sidecar clock comparison
+//      that cries wolf on the shared checkout.
 //
 // An absent provenance file is NOT treated as a pass: it is reported as undecidable,
 // in the same spirit as spa-freshness.js's 'no-dist' — declining to guess rather than
@@ -93,6 +95,8 @@ function explicitAssertionVerdict({
   minEpochRequested,
   minEpochSec,
   stampEpochSec,
+  requireReleaseAudit,
+  releaseAuditPassed,
 }) {
   if (expectedServeSha) {
     if (!/^[0-9a-f]{64}$/.test(expectedServeSha) || !/^[0-9a-f]{64}$/.test(serveSha || '')) {
@@ -106,6 +110,10 @@ function explicitAssertionVerdict({
       return 'stamp-unverifiable';
     }
     if (stampEpochSec < minEpochSec) return 'stamp-stale';
+  }
+
+  if (requireReleaseAudit && releaseAuditPassed !== true) {
+    return 'release-audit-unattested';
   }
 
   return null;
@@ -126,6 +134,9 @@ function explicitAssertionVerdict({
  * @param {?string} args.serveSha the hash of the sidecar's actual serve.mjs bytes
  * @param {?number} args.minEpochSec the release cut start epoch asserted by the caller
  * @param {?number} args.stampEpochSec the sidecar build stamp's epoch
+ * @param {boolean} args.requireReleaseAudit whether the caller requires proof that the
+ *                                          final assembled identity scan passed
+ * @param {boolean} args.releaseAuditPassed whether the sidecar stamp carries that proof
  * @param {number}  args.nowMs           clock injection for deterministic tests
  *
  * Verdicts:
@@ -137,6 +148,8 @@ function explicitAssertionVerdict({
  *   'serve-unverifiable'    the expected serve.mjs hash could not be checked.
  *   'stamp-stale'           the sidecar build stamp predates the asserted cut start.
  *   'stamp-unverifiable'    the asserted sidecar build stamp could not be checked.
+ *   'release-audit-unattested' the caller required the final assembled identity audit,
+ *                              but the sidecar carries no successful attestation.
  *   'no-sidecar'            no sidecar at all; the build fails on its own, more clearly.
  *   'no-provenance'         sidecar predates provenance emission; cannot judge, does not block.
  *   'unreadable'            provenance present but unparseable / missing gitHead.
@@ -151,6 +164,8 @@ function inspectSidecarFreshness({
   serveSha = null,
   minEpochSec = null,
   stampEpochSec = null,
+  requireReleaseAudit = false,
+  releaseAuditPassed = false,
   nowMs = Date.now(),
 } = {}) {
   const require_ = typeof requireContains === 'string' && requireContains.trim() !== ''
@@ -167,6 +182,8 @@ function inspectSidecarFreshness({
   const stampEpoch_ = stampEpochSec === null || stampEpochSec === undefined
     ? null
     : Number(stampEpochSec);
+  const requireReleaseAudit_ = requireReleaseAudit === true;
+  const releaseAuditPassed_ = releaseAuditPassed === true;
 
   const base = {
     gitHead: null,
@@ -180,6 +197,8 @@ function inspectSidecarFreshness({
     serveSha: serveSha_,
     minEpochSec: minEpoch_,
     stampEpochSec: stampEpoch_,
+    requireReleaseAudit: requireReleaseAudit_,
+    releaseAuditPassed: releaseAuditPassed_,
   };
 
   if (!sidecarPresent) return { ...base, verdict: 'no-sidecar' };
@@ -196,6 +215,8 @@ function inspectSidecarFreshness({
       minEpochRequested,
       minEpochSec: minEpoch_,
       stampEpochSec: stampEpoch_,
+      requireReleaseAudit: requireReleaseAudit_,
+      releaseAuditPassed: releaseAuditPassed_,
     });
     if (assertionVerdict) return { ...base, verdict: assertionVerdict };
     // Distinguish "no file at all" from "a file we could not read" — they call for
@@ -226,6 +247,8 @@ function inspectSidecarFreshness({
     minEpochRequested,
     minEpochSec: minEpoch_,
     stampEpochSec: stampEpoch_,
+    requireReleaseAudit: requireReleaseAudit_,
+    releaseAuditPassed: releaseAuditPassed_,
   });
   if (assertionVerdict) return { ...facts, verdict: assertionVerdict };
 
@@ -252,6 +275,7 @@ function blocksBuild(verdict) {
     'serve-unverifiable',
     'stamp-stale',
     'stamp-unverifiable',
+    'release-audit-unattested',
   ].includes(verdict);
 }
 
@@ -268,6 +292,7 @@ function provenanceLine(result) {
   if (result.buildSha) parts.push(`buildSha ${result.buildSha}`);
   if (result.serveSha) parts.push(`serve.mjs sha ${result.serveSha}`);
   if (Number.isFinite(result.stampEpochSec)) parts.push(`stamp epoch ${result.stampEpochSec}`);
+  if (result.releaseAuditPassed) parts.push('release identity audit attested');
   if (result.headSha && result.gitHead && result.headSha !== result.gitHead) {
     parts.push(`repo HEAD is now ${result.headSha}`);
   }
@@ -344,6 +369,17 @@ function describe(result) {
         '  .sidecar-build-stamp, then re-run the cut. Override only for deliberate\n' +
         '  stale bytes: PAPERCUSP_ALLOW_STALE_SIDECAR=1'
       );
+    case 'release-audit-unattested':
+      return (
+        'FATAL: UNAUDITED SIDECAR — this cross-build requires proof that the final\n' +
+        '  assembled sidecar passed the release identity scan, but its\n' +
+        '  .sidecar-build-stamp carries no successful releaseIdentityAudit attestation.\n' +
+        `  sidecar ${line}\n\n` +
+        '  A normal/dev sidecar is not a release input: rebuild it with\n' +
+        '  PAPERCUSP_RELEASE_AUDIT=1 and the release owner identity environment set,\n' +
+        '  then re-run this cross-build. PAPERCUSP_ALLOW_STALE_SIDECAR does not\n' +
+        '  bypass a missing privacy attestation.'
+      );
     case 'no-sidecar':
       return (
         'WARNING: no prebuilt sidecar found. Run papercusp-desktop/bin/build-desktop-sidecar.sh.\n' +
@@ -367,6 +403,7 @@ function describe(result) {
       if (result.requireContains) return `sidecar OK — carries ${result.requireContains}.  ${line}`;
       if (result.expectedServeSha) return `sidecar OK — serve.mjs matches the release cut.  ${line}`;
       if (result.minEpochSec !== null) return `sidecar OK — build stamp satisfies the release cut.  ${line}`;
+      if (result.requireReleaseAudit) return `sidecar OK — release identity audit attested.  ${line}`;
       return `sidecar ${line}`;
   }
 }

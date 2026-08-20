@@ -193,6 +193,30 @@ test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judg
     'must scrub the .mdx source tree');
 });
 
+test('build-desktop-sidecar scrubs every preserved env-sidecar db-sql tree at its copy point', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const overlayCopy = sh.indexOf('cp -a "$OLD_DIR/$_overlay" "$SIDECAR_TMP_DIR/$_overlay"');
+  const envScrub = sh.indexOf('"preserved env sidecars"');
+  const stamp = sh.indexOf('_stamp_serve_sha=');
+  const finalScan = sh.lastIndexOf('audit-release-bundle.py" --scan-dir "$SIDECAR_DIR"');
+
+  assert.ok(overlayCopy > 0, 'the release-overlay preservation copy must exist');
+  assert.ok(envScrub > overlayCopy,
+    'env-sidecar db-sql must be scrubbed AFTER preserved overlays are restored');
+  assert.ok(stamp > envScrub, 'the scrub must finish before the sidecar is stamped');
+  assert.ok(finalScan > envScrub, 'the final assembled scan must judge the scrubbed bytes');
+  assert.match(
+    sh.slice(envScrub - 120, envScrub + 240),
+    /\$SIDECAR_TMP_DIR"\/env-sidecars\/\*\/db-sql/,
+    'the copy-point scrub must cover every env-sidecars/<environment>/db-sql tree',
+  );
+  assert.match(
+    sh,
+    /find "\$\{_roots\[@\]\}" -type f -name '\*\.sql' -print0/,
+    'the shared db-sql scrub helper must recurse through every SQL file in each selected tree',
+  );
+});
+
 test('scrub-binaries removes a build-box literal from a compiled addon, preserving byte length', () => {
   const lit = identityLiteral();
   const dir = tmp('scrub');

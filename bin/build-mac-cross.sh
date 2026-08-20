@@ -243,10 +243,11 @@ file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -q 'Mach-O' \
 # completely silent when it is merely OLD — which is the common case, because this
 # script never rebuilds the sidecar and rebuilding it is a separate manual step. This
 # prints the sidecar's recorded age/gitHead unconditionally (the silence WAS the bug),
-# and refuses the build only when the caller asserted a commit it does not carry
-# (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS=<sha>). It deliberately does NOT fail on
+# honors caller-supplied content assertions, and always requires proof that the FINAL
+# assembled sidecar passed its release identity scan. It deliberately does NOT fail on
 # "gitHead != HEAD" — see bin/lib/sidecar-freshness.js for why that would be a
 # false-positive machine on this shared checkout.
+PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
 node "$HERE/check-sidecar-freshness.js" \
   --sidecar "$DARWIN_SIDECAR" --repo-root "$ROOT/.." --label "sidecar-freshness:darwin" \
   || fail "darwin sidecar freshness check refused this build (see above)"

@@ -55,14 +55,12 @@ function sha256FileOrNull(file) {
   }
 }
 
-function readStampEpochOrNull(file) {
+function readStampOrNull(file) {
   const text = readOrNull(file);
   if (text == null) return null;
   try {
     const stamp = JSON.parse(text);
-    return stamp && typeof stamp === 'object' && Object.prototype.hasOwnProperty.call(stamp, 'epochSec')
-      ? stamp.epochSec
-      : null;
+    return stamp && typeof stamp === 'object' ? stamp : null;
   } catch {
     return null;
   }
@@ -103,7 +101,12 @@ const expectedServeSha = (process.env.PAPERCUSP_EXPECTED_SERVE_SHA || '').trim()
 const minEpochRaw = (process.env.PAPERCUSP_SIDECAR_MIN_EPOCH_SEC || '').trim();
 const minEpochSec = minEpochRaw || null;
 const serveSha = sha256FileOrNull(path.join(sidecarDir, 'serve.mjs'));
-const stampEpochSec = readStampEpochOrNull(path.join(sidecarDir, '.sidecar-build-stamp'));
+const stamp = readStampOrNull(path.join(sidecarDir, '.sidecar-build-stamp'));
+const stampEpochSec = stamp && Object.prototype.hasOwnProperty.call(stamp, 'epochSec')
+  ? stamp.epochSec
+  : null;
+const requireReleaseAudit = process.env.PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT === '1';
+const releaseAuditPassed = stamp?.releaseIdentityAudit?.passed === true;
 
 // Resolve the sidecar's own gitHead first so ancestry can be asked against it.
 let recordedHead = null;
@@ -124,11 +127,17 @@ const result = inspectSidecarFreshness({
   serveSha,
   minEpochSec,
   stampEpochSec,
+  requireReleaseAudit,
+  releaseAuditPassed,
 });
 
 const message = describe(result);
 
-if (blocksBuild(result.verdict) && process.env.PAPERCUSP_ALLOW_STALE_SIDECAR === '1') {
+if (
+  blocksBuild(result.verdict)
+  && result.verdict !== 'release-audit-unattested'
+  && process.env.PAPERCUSP_ALLOW_STALE_SIDECAR === '1'
+) {
   console.warn(`[${label}] OVERRIDDEN by PAPERCUSP_ALLOW_STALE_SIDECAR=1:\n${message}`);
   process.exit(0);
 }
