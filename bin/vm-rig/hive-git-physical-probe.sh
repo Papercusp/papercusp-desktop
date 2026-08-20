@@ -40,7 +40,16 @@ if [ "${1:-}" = '--source-preflight' ]; then
 fi
 evidence_out="${1:-}"
 trust_out="${2:-}"
-fail() { echo "hive-git-physical-probe: $*" >&2; exit 1; }
+failure_diagnostics_out=''
+fail() {
+  local message="$*"
+  printf 'hive-git-physical-probe: %s\n' "$message" >&2
+  if [ -n "${run_dir:-}" ] && [ -d "$run_dir" ]; then
+    printf '%s\n' "$message" >"$run_dir/failure.err" || true
+    chmod 600 "$run_dir/failure.err" 2>/dev/null || true
+  fi
+  exit 1
+}
 
 [ "${HIVE_GIT_PHYSICAL_PLAN:-}" = "p2p-git-live-activation-2026-07-09" ] \
   || fail 'must be launched by the canonical P-505 drill'
@@ -58,6 +67,9 @@ else
   [ "$evidence_out" != "$trust_out" ] || fail 'evidence and trust outputs must differ'
   [ ! -e "$evidence_out" ] && [ ! -e "$trust_out" ] \
     || fail 'refusing to overwrite a pre-banked output'
+  failure_diagnostics_out="${evidence_out}.failure-diagnostics"
+  [ ! -e "$failure_diagnostics_out" ] \
+    || fail 'refusing to overwrite pre-banked failure diagnostics'
 fi
 [ -x "$TSX" ] && [ -f "$PRODUCER" ] || fail 'local TypeScript producer is unavailable'
 [ -x "$SCENARIO" ] \
@@ -74,13 +86,142 @@ fi
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
 remote_source="/tmp/hive-git-physical-source.$$"
+
+# FAILED-RUN-DIAGNOSTIC-CLEANUP-BEGIN
+preserve_failed_run_diagnostics() {
+  local exit_status="$1"
+  [ -n "$failure_diagnostics_out" ] || return 0
+
+  node - "$run_dir" "$failure_diagnostics_out" "$exit_status" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+
+const [sourceRoot, destinationRoot, rawExitStatus] = process.argv.slice(2);
+const perFileLimitBytes = 256 * 1024;
+const totalLimitBytes = 1024 * 1024;
+const allowed = [
+  'failure.err',
+  'phase-a/vm-substrate-readiness.json',
+  'phase-a/tower-before.json',
+  'phase-a/quarantine.json',
+  'phase-a/vm-absent.json',
+  'phase-a/bootstrap-raw.json',
+  'phase-a/tower-after.json',
+  'phase-a/vm-after.json',
+  'phase-a/vm-after.err',
+  'phase-a/verify-input.json',
+  'phase-a/verdict.json',
+  'phase-a/verdict.err',
+];
+const sensitiveKey = /(authorization|cookie|credential|password|secret|token|private.?key)/i;
+const sanitizeText = (value) => value
+  .replace(
+    /-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/g,
+    '[REDACTED PRIVATE KEY]',
+  )
+  .replace(/\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b/g, '[REDACTED TOKEN]')
+  .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
+  .replace(/([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi, '$1[REDACTED]@');
+const sanitize = (value, key = '') => {
+  if (key && sensitiveKey.test(key)) return '[REDACTED]';
+  if (typeof value === 'string') return sanitizeText(value);
+  if (Array.isArray(value)) return value.map((entry) => sanitize(entry));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, sanitize(child, childKey)]));
+  }
+  return value;
+};
+
+const temporaryRoot = fs.mkdtempSync(`${destinationRoot}.tmp.`);
+fs.chmodSync(temporaryRoot, 0o700);
+const included = [];
+const skipped = [];
+let totalBytes = 0;
+try {
+  for (const relative of allowed) {
+    const source = path.join(sourceRoot, relative);
+    let stat;
+    try {
+      stat = fs.lstatSync(source);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      skipped.push({ path: relative, reason: 'not-regular-file' });
+      continue;
+    }
+    if (stat.size > perFileLimitBytes || totalBytes + stat.size > totalLimitBytes) {
+      skipped.push({ path: relative, reason: 'source-size-cap', bytes: stat.size });
+      continue;
+    }
+
+    const raw = fs.readFileSync(source, 'utf8');
+    let sanitized;
+    try {
+      sanitized = `${JSON.stringify(sanitize(JSON.parse(raw)), null, 2)}\n`;
+    } catch {
+      sanitized = sanitizeText(raw);
+    }
+    const sanitizedBytes = Buffer.byteLength(sanitized);
+    if (sanitizedBytes > perFileLimitBytes || totalBytes + sanitizedBytes > totalLimitBytes) {
+      skipped.push({ path: relative, reason: 'sanitized-size-cap', bytes: sanitizedBytes });
+      continue;
+    }
+
+    const destination = path.join(temporaryRoot, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(destination, sanitized, { mode: 0o600, flag: 'wx' });
+    included.push({ path: relative, bytes: sanitizedBytes });
+    totalBytes += sanitizedBytes;
+  }
+
+  const manifest = {
+    schemaVersion: 'hive-git-physical-failure-diagnostics/v1',
+    exitStatus: Number(rawExitStatus),
+    sanitized: true,
+    caps: { perFileBytes: perFileLimitBytes, totalBytes: totalLimitBytes },
+    included,
+    skipped,
+    includedBytes: totalBytes,
+  };
+  fs.writeFileSync(path.join(temporaryRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, {
+    mode: 0o600,
+    flag: 'wx',
+  });
+  fs.renameSync(temporaryRoot, destinationRoot);
+} catch (error) {
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  throw error;
+}
+NODE
+}
+
 cleanup() {
+  local exit_status=$?
+  trap - EXIT HUP INT TERM
   ssh "${SSH_OPTS[@]}" "$VM" \
     "case '$remote_source' in /tmp/hive-git-physical-source.[0-9]*) rm -rf -- '$remote_source' ;; esac" \
     >/dev/null 2>&1 || true
-  rm -rf "$run_dir"
+  if [ "$exit_status" -ne 0 ] && [ "$source_preflight" -eq 0 ]; then
+    if preserve_failed_run_diagnostics "$exit_status"; then
+      printf 'hive-git-physical-probe: preserved failed-run diagnostics at %s\n' \
+        "$failure_diagnostics_out" >&2
+      rm -rf "$run_dir"
+    else
+      printf 'hive-git-physical-probe: diagnostic sanitization failed; private raw workspace retained at %s\n' \
+        "$run_dir" >&2
+    fi
+  else
+    rm -rf "$run_dir"
+  fi
+  exit "$exit_status"
 }
-trap cleanup EXIT HUP INT TERM
+# FAILED-RUN-DIAGNOSTIC-CLEANUP-END
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 tower_identity="$run_dir/tower-identity.json"
 vm_identity="$run_dir/vm-identity.json"
