@@ -2770,16 +2770,27 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" && -f "$HERE/audit-release-bundle.py"
     _r="$(printf '%s' "$_red" | sed 's/[&/\]/\\&/g')"
     if [[ "$_wb" == "1" ]]; then _dbsql_sed+=(-e "s/\\b${_p}\\b/${_r}/g"); else _dbsql_sed+=(-e "s/${_p}/${_r}/g"); fi
   done < <(python3 "$HERE/audit-release-bundle.py" --identity-literals)
-  if (( ${#_dbsql_sed[@]} > 0 )); then
-    _dbsql_scrubbed=0
-    for _f in "$SIDECAR_DIR/db-sql/"*.sql; do
-      [[ -f "$_f" ]] || continue
+  _scrub_sidecar_db_sql() {
+    local _scope="$1"
+    shift
+    (( ${#_dbsql_sed[@]} > 0 )) || return 0
+    local -a _roots=()
+    local _root _f
+    for _root in "$@"; do
+      [[ -d "$_root" ]] && _roots+=("$_root")
+    done
+    (( ${#_roots[@]} > 0 )) || return 0
+    local _dbsql_scrubbed=0
+    while IFS= read -r -d '' _f; do
       sed -E "${_dbsql_sed[@]}" "$_f" | cmp -s - "$_f" && continue
+      # sed -i replaces the inode rather than mutating a preserved hardlink in
+      # place, so cleaning an env overlay cannot rewrite its primary sibling.
       sed -E -i "${_dbsql_sed[@]}" "$_f"
       _dbsql_scrubbed=$((_dbsql_scrubbed+1))
-    done
-    echo "    identity scrub: redacted $_dbsql_scrubbed shipped db-sql file(s) in place (WI-4419 D-004)"
-  fi
+    done < <(find "${_roots[@]}" -type f -name '*.sql' -print0)
+    echo "    identity scrub: redacted $_dbsql_scrubbed shipped db-sql file(s) in $_scope (WI-4419 D-004)"
+  }
+  _scrub_sidecar_db_sql "primary sidecar" "$SIDECAR_DIR/db-sql"
 fi
 
 # WI-3047 guard: assert what we just copied EXACTLY matches the source tree at
@@ -3520,6 +3531,16 @@ if [[ -d "$OLD_DIR" ]]; then
     fi
   done
 fi
+# The preserved env overlays are copied AFTER the primary db-sql scrub above.
+# They carry their own db-sql trees (and may preserve hardlinks), so scrub every
+# restored environment copy at this actual copy point before stamping/publishing.
+# This closes EI-20588742052141621's second path instead of relying on the late
+# assembled scan to rediscover it after the expensive build has finished.
+if declare -F _scrub_sidecar_db_sql >/dev/null 2>&1; then
+  _scrub_sidecar_db_sql \
+    "preserved env sidecars" \
+    "$SIDECAR_TMP_DIR"/env-sidecars/*/db-sql
+fi
 # ── P-004 (desktop-build-hardening-tri-platform-2026-07-11): sidecar freshness
 # stamp ─────────────────────────────────────────────────────────────────────
 # build-windows-on-vm.sh PACKS sidecar/serve.mjs AS-IS (it never rebuilds the
@@ -3696,6 +3717,27 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" && -f "$HERE/audit-release-bundle.p
     echo "ERROR: assembled sidecar carries a sensitive/build-box identity — refusing to ship (WI-4419)."
     exit 1
   fi
+  # EI-20588742052141621: the direct cross-builders consume an already-built
+  # sidecar and used to have no proof that THIS final scan ever ran. Record the
+  # attestation only after success. This is the sole post-scan sidecar write: it
+  # rewrites one fixed-schema metadata document with no copied/input-derived text,
+  # so it cannot introduce the identity-bearing payload class the scan polices.
+  _release_audit_stamp="$SIDECAR_DIR/.sidecar-build-stamp"
+  node - "$_release_audit_stamp" <<'NODE'
+const fs = require('node:fs');
+const stampPath = process.argv[2];
+const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'));
+stamp.releaseIdentityAudit = {
+  schemaVersion: 1,
+  passed: true,
+  scanner: 'audit-release-bundle.py --scan-dir',
+  passedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+};
+const tmpPath = `${stampPath}.audit-attestation.tmp`;
+fs.writeFileSync(tmpPath, `${JSON.stringify(stamp, null, 2)}\n`);
+fs.renameSync(tmpPath, stampPath);
+NODE
+  echo "→ recorded release identity-audit attestation in .sidecar-build-stamp"
 fi
 
 # Compute size

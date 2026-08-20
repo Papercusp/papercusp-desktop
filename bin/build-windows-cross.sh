@@ -190,8 +190,11 @@ command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not installed (apt install
 [[ -d "$SRC_TAURI/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
 # "we ship them as-is" is exactly why staleness here is invisible (EI-19446480107603858):
 # the assert above is loud when the sidecar is MISSING and silent when it is merely OLD.
-# Announce its recorded age/gitHead, and refuse only when the caller asserted a commit it
-# does not carry (PAPERCUSP_REQUIRE_SIDECAR_CONTAINS=<sha>). Never fails on mere staleness.
+# Announce its recorded age/gitHead, honor any caller-supplied content assertions,
+# and always require proof that the FINAL assembled sidecar passed its release
+# identity scan. Without the attestation, this direct cross-builder could spend
+# minutes compiling before its later payload scan rediscovers an unaudited dev tree.
+PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
 node "$ROOT/bin/check-sidecar-freshness.js" \
   --sidecar "$SRC_TAURI/sidecar" --repo-root "$ROOT/.." --label "sidecar-freshness:windows" \
   || fail "sidecar freshness check refused this build (see above)"
