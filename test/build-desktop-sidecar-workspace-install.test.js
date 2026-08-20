@@ -3,6 +3,7 @@
 // matched only operator-vite and omitted every apps/operator dependency.
 
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const { builtinModules, createRequire } = require('node:module');
 const path = require('node:path');
@@ -24,6 +25,34 @@ test('sidecar dependency install names both source workspaces exactly', () => {
   assert.equal(viteName, '@papercusp/operator-vite');
   assert.match(builder, /--workspace=@papercusp\/web\s+--workspace=@papercusp\/operator-vite\)/);
   assert.doesNotMatch(builder, /--workspace=@papercusp\/operator(?:\s|$)/);
+});
+
+test('Debian removal tears down only verified Papercusp process ownership', () => {
+  const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
+  const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
+  const preRemovePath = path.join(desktopRoot, 'src-tauri/deb/preremove.sh');
+  const preRemove = fs.readFileSync(preRemovePath, 'utf8');
+
+  assert.equal(baseConfig.bundle.linux.deb.preRemoveScript, 'deb/preremove.sh');
+  // The Server overlay intentionally inherits the base Debian maintainer
+  // scripts; adding a second script here would let the two bundles drift.
+  assert.equal(serverConfig.bundle.linux.deb.preRemoveScript, undefined);
+  assert.equal(childProcess.spawnSync('sh', ['-n', preRemovePath]).status, 0);
+  assert.match(preRemove, /PAPERCUSP_PREREMOVE_PROC_ROOT/);
+  assert.match(preRemove, /PAPERCUSP_PREREMOVE_HOME_ROOT/);
+  assert.match(preRemove, /operator\.json/);
+  assert.match(preRemove, /processIdentity/);
+  assert.match(preRemove, /linux:%s:%s/);
+  assert.match(preRemove, /serve\.mjs\*\|\*serve\.ts\*/);
+  assert.match(preRemove, /hono-host\.mjs\*\|\*hono-host\.ts\*/);
+  assert.match(preRemove, /proc_pgid/);
+  assert.match(preRemove, /\[ "\$\(proc_pgid "\$pid"\)" = "\$pid" \]/);
+  assert.match(preRemove, /kill -TERM -- "-\$operator_pid"/);
+  assert.match(preRemove, /kill -KILL -- "-\$operator_pid"/);
+  assert.match(preRemove, /is_operator_authority_valid "\$operator_pid" "\$operator_identity"/);
+  assert.match(preRemove, /is_packaged_desktop/);
+  assert.match(preRemove, /kill -TERM "\$pid"/);
+  assert.match(preRemove, /kill -KILL "\$pid"/);
 });
 
 test('sidecar ships the standalone project-history generator with the shared ESM banner', () => {

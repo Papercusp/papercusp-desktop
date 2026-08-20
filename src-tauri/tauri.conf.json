@@ -72,6 +72,7 @@
         "replaces": [
           "papercusp-server"
         ],
+        "preRemoveScript": "deb/preremove.sh",
         "postInstallScript": "deb/postinstall.sh",
         "postRemoveScript": "deb/postremove.sh"
       },
