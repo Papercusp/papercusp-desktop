@@ -150,6 +150,47 @@ test('--source-leakers nominates a file whose ONLY hit is lowercase', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('occurrence-aware scrub removes identity but preserves AVI media and opaque hashes', () => {
+  const dir = mkfixture({
+    'mixed.js': [
+      'const owner = "zed";',
+      'const formats = ["mp4", "webm", "avi", "wmv"];',
+      'const chunk = "factor-zED-w_hC.js";',
+    ].join('\n'),
+  });
+  const file = path.join(dir, 'mixed.js');
+
+  const before = spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8', env });
+  assert.equal(before.status, 1, `real identity must fail before scrub:\n${before.stdout}`);
+  const scrub = spawnSync('python3', [AUDIT, '--scrub-text', file], { encoding: 'utf8', env });
+  assert.equal(scrub.status, 0, `${scrub.stdout}${scrub.stderr}`);
+
+  const body = fs.readFileSync(file, 'utf8');
+  assert.doesNotMatch(body, /owner = "zed"/i, 'authored identity must be redacted');
+  assert.match(body, /"avi"/, 'AVI media support must survive');
+  assert.match(body, /factor-zED-w_hC\.js/, 'opaque Vite reference must survive byte-for-byte');
+  const after = spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8', env });
+  assert.equal(after.status, 0, `shared classifier must agree after scrub:\n${after.stdout}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('--source-leakers ignores benign-only short-name collisions but keeps a mixed leaker', () => {
+  const dir = mkfixture({
+    'packages/media.js': 'const formats = ["mp4", "webm", "zed", "wmv"];\n',
+    'packages/hash.js': 'import("./factor-zED-w_hC.js");\n',
+    'packages/mixed.js': 'const formats = ["mp4", "webm", "avi", "wmv"]; // owner zed\n',
+  });
+  // The media fixture uses the synthetic name and is therefore intentionally NOT
+  // an AVI exception; only the opaque hash is generic. The mixed file must remain.
+  const out = execFileSync('python3', [AUDIT, '--source-leakers', dir, 'packages'], {
+    encoding: 'utf8', env,
+  });
+  assert.doesNotMatch(out, /hash\.js/, `opaque hash was wrongly nominated:\n${out}`);
+  assert.match(out, /media\.js/, 'a non-AVI quoted owner token is still identity');
+  assert.match(out, /mixed\.js/, 'a genuine prose occurrence must keep a mixed file nominated');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('opaque asset fingerprints and binary bytes do not convict a short owner name', () => {
   const result = auditArchive({
     // zED-w_hC is an eight-character Vite fingerprint. It happens to contain the

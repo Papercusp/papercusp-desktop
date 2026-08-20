@@ -837,8 +837,16 @@ def is_vendor(name):
     present at their real path (libs/, packages/, apps/), where they ARE scanned —
     so nothing we authored escapes the name check by hiding here.
     """
-    n = name.lstrip("./")
-    return n.startswith("node_modules/") or "/node_modules/" in n
+    n = name.lstrip("./").replace("\\", "/")
+    return (
+        n.startswith("node_modules/")
+        or "/node_modules/" in n
+        # Vditor is copied into the built SPA outside node_modules. Its checked-in
+        # distribution contains the AVI media-extension token, which is upstream
+        # vocabulary rather than this box owner's name. Keep high-entropy hunting
+        # enabled there; only the bare-name pass inherits vendor scoping.
+        or "/spa/vditor/" in "/" + n
+    )
 
 
 _FINGERPRINTED_DIST_ASSET_RE = re.compile(
@@ -876,6 +884,85 @@ def lit_rx(lit):
     the difference between a header pass that costs seconds and one that costs
     minutes. `lit_ere` is a pure function of `lit`, so caching cannot go stale."""
     return re.compile(lit_ere(lit))
+
+
+_OPAQUE_ASSET_REFERENCE_RE = re.compile(
+    rb"[A-Za-z0-9_.-]+-(?P<fingerprint>[A-Za-z0-9_-]{8})\.js"
+)
+_MEDIA_EXTENSION_NEIGHBOURS = (b'"mp4"', b'"webm"', b'"mov"', b'"wmv"')
+
+
+def low_entropy_match_is_benign(name, data, match):
+    """True only for a proven non-identity use of a short owner-name token.
+
+    A case-folded ``Avi`` correctly catches authored ``avi`` identity, but also
+    collides with the AVI media format and with an opaque eight-character Vite
+    fingerprint. Classify OCCURRENCES, never whole generated files: the same JS
+    file can carry a harmless codec token and a real authored identity.
+
+    ``data`` is bytes so this helper is shared by tar streaming, assembled-tree
+    scans, and the copy-point scrubber. Every exception below is structural and
+    narrow; ordinary ``@avi`` / prose / identifiers remain release-blocking.
+    """
+    if is_vendor(name):
+        return True
+
+    start, end = match.span()
+    token = data[start:end].lower()
+
+    # A Vite import/reference such as factor-aVI-w_hC.js: ignore the owner token
+    # only when it lies wholly inside the opaque eight-character fingerprint.
+    window_start = max(0, start - 160)
+    window_end = min(len(data), end + 160)
+    window = data[window_start:window_end]
+    for asset in _OPAQUE_ASSET_REFERENCE_RE.finditer(window):
+        fp_start = window_start + asset.start("fingerprint")
+        fp_end = window_start + asset.end("fingerprint")
+        if fp_start <= start and end <= fp_end:
+            return True
+
+    if token != b"avi":
+        return False
+
+    # FFmpeg/AviSynth source-name regex embedded in the Markdown editor bundle.
+    prefix = data[max(0, start - 1):min(len(data), end + 18)].lower()
+    if prefix.startswith(b"/avi(?:file)?source"):
+        return True
+
+    # Quoted AVI in an actual media-extension table. Requiring two neighbouring
+    # video formats avoids treating an arbitrary identity string "avi" as safe.
+    quoted = (
+        start > 0 and end < len(data)
+        and data[start - 1:start] in (b'"', b"'")
+        and data[end:end + 1] == data[start - 1:start]
+    )
+    if quoted:
+        local = data[max(0, start - 120):min(len(data), end + 120)].lower()
+        if sum(neighbour in local for neighbour in _MEDIA_EXTENSION_NEIGHBOURS) >= 2:
+            return True
+    return False
+
+
+def unexplained_low_entropy_matches(name, data, literals):
+    """Return (literal, match) rows not covered by the narrow benign classifier."""
+    out = []
+    for lit in literals:
+        rx = re.compile(lit_ere(lit).encode())
+        for match in rx.finditer(data):
+            if not low_entropy_match_is_benign(name, data, match):
+                out.append((lit, match))
+    return out
+
+
+def file_has_unexplained_low_entropy(path, display_name, literals):
+    """Mirror grep's low-entropy text-only rule for one candidate file."""
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return True  # fail closed: unreadable cannot be certified benign
+    if b"\0" in data:
+        return False  # the low-entropy pass deliberately skips binary bytes
+    return bool(unexplained_low_entropy_matches(display_name, data, literals))
 
 
 def sh(cmd, **kw):
@@ -1024,7 +1111,10 @@ def phase_b_low_entropy_text(bundle, lits):
     if not needles:
         return []
 
-    overlap = max(len(lit.encode("utf-8", "surrogateescape")) for _, lit, _ in needles) + 2
+    # Keep enough history/future bytes for low_entropy_match_is_benign() to
+    # classify a match that straddles a 1 MiB chunk boundary. ``processed_start``
+    # de-duplicates the overlapping windows by absolute match start.
+    context = 192
     counts = {}
     proc = subprocess.Popen(["zstd", "-dc", bundle],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1038,6 +1128,8 @@ def phase_b_low_entropy_text(bundle, lits):
                     continue
                 local = {}
                 tail = b""
+                total_read = 0
+                processed_start = 0
                 binary = False
                 while True:
                     chunk = fh.read(1024 * 1024)
@@ -1048,12 +1140,34 @@ def phase_b_low_entropy_text(bundle, lits):
                     if binary:
                         continue
                     data = tail + chunk
-                    old = len(tail)
+                    data_start = total_read - len(tail)
+                    total_read += len(chunk)
+                    safe_start = data_start + max(0, len(data) - context)
                     for rule, lit, rx in needles:
-                        n = sum(1 for match in rx.finditer(data) if match.end() > old)
+                        n = 0
+                        for match in rx.finditer(data):
+                            absolute_start = data_start + match.start()
+                            if absolute_start < processed_start or absolute_start >= safe_start:
+                                continue
+                            if low_entropy_match_is_benign(member.name, data, match):
+                                continue
+                            n += 1
                         if n:
                             local[(rule, lit)] = local.get((rule, lit), 0) + n
-                    tail = data[-overlap:]
+                    processed_start = max(processed_start, safe_start)
+                    tail = data[-(context * 2):]
+                if not binary and tail:
+                    data_start = total_read - len(tail)
+                    for rule, lit, rx in needles:
+                        n = 0
+                        for match in rx.finditer(tail):
+                            if data_start + match.start() < processed_start:
+                                continue
+                            if low_entropy_match_is_benign(member.name, tail, match):
+                                continue
+                            n += 1
+                        if n:
+                            local[(rule, lit)] = local.get((rule, lit), 0) + n
                 if not binary:
                     for key, n in local.items():
                         counts[key] = counts.get(key, 0) + n
@@ -1108,7 +1222,12 @@ def phase_c_attribute(bundle, lits, wanted, per_rule=8):
                 for rule, rx, scoped in needles:
                     if scoped and vendor:
                         continue
-                    if rx.search(blob):
+                    matches = list(rx.finditer(blob))
+                    if scoped:
+                        matches = [match for match in matches
+                                   if not low_entropy_match_is_benign(
+                                       m.name, blob, match)]
+                    if matches:
                         g = found.setdefault(rule, {"n": 0, "files": []})
                         g["n"] += 1
                         if len(g["files"]) < per_rule:
@@ -1509,6 +1628,20 @@ def _high_entropy_pairs():
     )
 
 
+def _identity_pairs():
+    """All identity/redaction pairs, longest first and de-duplicated by literal."""
+    lits = identity_literals()
+    lits.update(KNOWN_SENSITIVE_IDENTITIES)
+    seen = set()
+    pairs = []
+    for key, value in sorted(lits.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        pairs.append((value, REDACTION_BY_KEY.get(redaction_key(key), "redacted")))
+    return pairs
+
+
 def _scrub_one(p, pairs):
     """Length-preserving identity scrub of ONE file, in place. Returns the hit
     list ([] when nothing matched, so the caller can stay quiet).
@@ -1549,11 +1682,15 @@ def _scrub_one(p, pairs):
 #: allowlist and not "anything grep calls text": the sidecar tree also holds
 #: compiled addons and seed bundles, and those belong to --scrub-binaries, whose
 #: byte-length invariant this function does NOT honor.
-SCRUBBABLE_TEXT_SUFFIXES = (".md", ".mdx", ".html", ".htm", ".txt", ".json")
+SCRUBBABLE_TEXT_SUFFIXES = (
+    ".md", ".mdx", ".html", ".htm", ".txt", ".json",
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".sql", ".sh", ".py",
+    ".yml", ".yaml", ".toml", ".xml", ".css", ".scss", ".rs",
+)
 
 
-def scrub_text(dirs):
-    """Redact build-box identity from SHIPPING TEXT (the sidecar's doc trees).
+def scrub_text(paths):
+    """Redact build-box identity from explicitly selected SHIPPING TEXT.
 
     WHY THIS EXISTS — the gap between --prune-docs and --scan-dir:
     prune_docs() deletes by PATH (FORBIDDEN_PATH rules), while scan_dir() fails by
@@ -1576,52 +1713,74 @@ def scrub_text(dirs):
     or offset-addressed, and padding a placeholder out to the literal's width with
     underscores would corrupt readable prose for no benefit.
 
-    Only HIGH-entropy literals are rewritten — _high_entropy_pairs() is the single
-    source of truth, shared with --scrub-binaries, so this can never drift from what
-    the gate hunts. That is sufficient rather than merely convenient: the low-entropy
-    needle is restricted by scan_dir() to word-boundary matches in TEXT, and measured
-    across the doc trees it matches ZERO files, so no gap is left behind. If that ever
-    stops holding, the gate still FAILS — this scrub removes leaks, it never hides
-    one.
+    High- and low-entropy literals are rewritten with the SAME case-folded regex the
+    gate hunts. Low-entropy occurrences first pass through
+    low_entropy_match_is_benign(), shared with every scan path, so AVI media tokens
+    and opaque Vite fingerprints survive while authored ``avi`` identity does not.
+    Explicit file arguments are accepted for stage-source-tree's already-proven text
+    leakers; directory walks remain suffix-scoped and prune node_modules.
     """
-    pairs = _high_entropy_pairs()
+    pairs = _identity_pairs()
     if not pairs:
-        print("    scrub-text: no high-entropy identity resolved — nothing to scrub")
+        print("    scrub-text: no identity resolved — nothing to scrub")
         return 0
+
+    def scrub_one(p, display_name):
+        try:
+            data = open(p, "rb").read()
+        except OSError:
+            return []
+        if b"\0" in data:
+            return []
+        orig = data
+        hits = []
+        for lit, placeholder in pairs:
+            rx = re.compile(lit_ere(lit).encode())
+            low = is_low_entropy(lit)
+            replaced = 0
+
+            def replacement(match):
+                nonlocal replaced
+                if low and low_entropy_match_is_benign(display_name, data, match):
+                    return match.group(0)
+                replaced += 1
+                return placeholder.encode()
+
+            data = rx.sub(replacement, data)
+            if replaced:
+                hits.append(f"{lit} x{replaced}")
+        if not hits or data == orig:
+            return []
+        # New inode + rename, never an in-place write: callers may hand us a
+        # hardlinked sidecar/staging copy whose source of truth must stay untouched.
+        tmp_p = p + ".scrub.tmp"
+        with open(tmp_p, "wb") as fh:
+            fh.write(data)
+        shutil.copymode(p, tmp_p)
+        os.replace(tmp_p, p)
+        return hits
+
     total_files = 0
-    for root in dirs:
-        if not os.path.isdir(root):
+    for root in paths:
+        if not os.path.exists(root):
             print(f"    scrub-text: {root} absent — skipping")
             continue
         scrubbed = []
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for fn in filenames:
-                if not fn.endswith(SCRUBBABLE_TEXT_SUFFIXES):
-                    continue
-                p = os.path.join(dirpath, fn)
-                try:
-                    data = open(p, "rb").read()
-                except OSError:
-                    continue
-                orig = data
-                hits = []
-                for lit, placeholder in pairs:
-                    b = lit.encode()
-                    if b not in data:
+        if os.path.isfile(root):
+            hits = scrub_one(root, os.path.basename(root))
+            if hits:
+                scrubbed.append((os.path.basename(root), hits))
+        else:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d != "node_modules"]
+                for fn in filenames:
+                    if not fn.endswith(SCRUBBABLE_TEXT_SUFFIXES):
                         continue
-                    hits.append(f"{lit} x{data.count(b)}")
-                    data = data.replace(b, placeholder.encode())
-                if not hits or data == orig:
-                    continue
-                # New inode + rename, never an in-place write: the sidecar copier
-                # hardlinks where the FS supports it, and writing through a link
-                # would reach back into the live monorepo doc tree.
-                tmp_p = p + ".scrub.tmp"
-                with open(tmp_p, "wb") as fh:
-                    fh.write(data)
-                shutil.copymode(p, tmp_p)
-                os.replace(tmp_p, p)
-                scrubbed.append((os.path.relpath(p, root), hits))
+                    p = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(p, root)
+                    hits = scrub_one(p, rel)
+                    if hits:
+                        scrubbed.append((rel, hits))
         total_files += len(scrubbed)
         print(f"    scrub-text: {root} — scrubbed {len(scrubbed)} file(s)")
         for rel, hits in sorted(scrubbed):
@@ -1923,6 +2082,11 @@ def scan_dir(dirs):
             for line in r.stdout.splitlines():
                 if line.strip():
                     hit = line.strip()
+                    if not binary:
+                        display_name = os.path.relpath(hit, root)
+                        if not file_has_unexplained_low_entropy(
+                                hit, display_name, pats):
+                            continue
                     files.add(f"{label}!{os.path.relpath(hit, root)}" if label else hit)
 
     grep_l(high, False, dirs)
@@ -2419,7 +2583,7 @@ def source_leakers(argv):
     ]
     leakers = set()
 
-    def hunt(pats):
+    def hunt(pats, low_entropy=False):
         if not pats:
             return
         for root in roots:
@@ -2445,10 +2609,13 @@ def source_leakers(argv):
                     continue
                 if any(fnmatch.fnmatch(rel, g) for g in size_skip):
                     continue
+                if low_entropy and not file_has_unexplained_low_entropy(
+                        line, rel, pats):
+                    continue
                 leakers.add(rel)
 
     hunt(high)
-    hunt(low)
+    hunt(low, low_entropy=True)
     for rel in sorted(leakers):
         print(rel)
     return 0

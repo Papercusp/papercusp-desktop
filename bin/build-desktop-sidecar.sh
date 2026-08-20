@@ -1614,10 +1614,12 @@ if [[ -f "$_audit_py" ]]; then
   # the shipping doc TEXT from the same identity map --scrub-binaries uses, which is
   # the sidecar half of the redaction bin/stage-source-tree.sh already applies to
   # source.tar.zst. Must run BEFORE the scan below.
-  echo "→ scrubbing build-box identity from sidecar doc text (release-privacy, WI-4419)"
+  echo "→ scrubbing build-box identity from sidecar text (release-privacy, WI-4419)"
   python3 "$_audit_py" --scrub-text \
     "$SIDECAR_DIR/internal-docs" \
-    "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+    "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
+    "$SIDECAR_DIR/serve.mjs" \
+    "$SIDECAR_DIR/spa"
   # WI-37620: a build-box path baked into a COMPILED addon (.rodata assert string)
   # is reachable by neither of the gate's other remedies — `strip` leaves it and the
   # file is needed at runtime — so scrub it. Must run BEFORE the scan below.
@@ -3567,6 +3569,14 @@ if declare -F _scrub_sidecar_db_sql >/dev/null 2>&1; then
   _scrub_sidecar_db_sql \
     "preserved env sidecars" \
     "$SIDECAR_TMP_DIR"/env-sidecars/*/db-sql
+fi
+# Preserved env overlays also carry serve.mjs + compiled SPA text. Scrub them at
+# the actual restore point; the earlier primary-sidecar scrub cannot see bytes
+# copied later from OLD_DIR.
+if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" && -f "$HERE/audit-release-bundle.py" \
+      && -d "$SIDECAR_TMP_DIR/env-sidecars" ]]; then
+  python3 "$HERE/audit-release-bundle.py" --scrub-text \
+    "$SIDECAR_TMP_DIR/env-sidecars"
 fi
 # ── P-004 (desktop-build-hardening-tri-platform-2026-07-11): sidecar freshness
 # stamp ─────────────────────────────────────────────────────────────────────

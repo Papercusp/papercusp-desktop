@@ -179,16 +179,16 @@ test('scrub-text clears a doc the gate would REJECT — and the gate agrees afte
   assert.equal(audit('--scan-dir', dir).status, 0, 'the gate must pass after the scrub');
 });
 
-test('scrub-text reaches the doc classes the sidecar actually ships (.md/.mdx/.html)', () => {
+test('scrub-text reaches the source and generated-text classes the sidecar actually ships', () => {
   const lit = identityLiteral();
   const dir = tmp('scrubtext-ext');
   // .html matters specifically: internal-docs ships RENDERED twins of each .mdx, so
   // scrubbing only the source would leave the identity live in the served bytes.
-  for (const ext of ['md', 'mdx', 'html', 'txt', 'json']) {
+  for (const ext of ['md', 'mdx', 'html', 'txt', 'json', 'js', 'mjs', 'ts', 'sql']) {
     fs.writeFileSync(path.join(dir, `f.${ext}`), `see ${lit} here`);
   }
   assert.equal(audit('--scrub-text', dir).status, 0);
-  for (const ext of ['md', 'mdx', 'html', 'txt', 'json']) {
+  for (const ext of ['md', 'mdx', 'html', 'txt', 'json', 'js', 'mjs', 'ts', 'sql']) {
     assert.ok(!fs.readFileSync(path.join(dir, `f.${ext}`), 'utf8').includes(lit),
       `.${ext} must be scrubbed — it ships`);
   }
@@ -240,6 +240,14 @@ test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judg
   assert.ok(/--scrub-text[\s\S]{0,200}internal-docs/.test(sh), 'must scrub internal-docs');
   assert.ok(/--scrub-text[\s\S]{0,200}operator-docs\/src\/content\/docs/.test(sh),
     'must scrub the .mdx source tree');
+  assert.ok(/--scrub-text[\s\S]{0,260}serve\.mjs/.test(sh),
+    'must scrub the generated operator entrypoint');
+  assert.ok(/--scrub-text[\s\S]{0,300}\$SIDECAR_DIR\/spa/.test(sh),
+    'must scrub generated SPA text');
+  const overlayCopy = sh.indexOf('cp -a "$OLD_DIR/$_overlay" "$SIDECAR_TMP_DIR/$_overlay"');
+  const envTextScrub = sh.indexOf('--scrub-text', overlayCopy);
+  assert.ok(envTextScrub > overlayCopy,
+    'preserved env-sidecar text must be scrubbed after the overlay restore');
 });
 
 test('build-desktop-sidecar scrubs every preserved env-sidecar db-sql tree at its copy point', () => {
