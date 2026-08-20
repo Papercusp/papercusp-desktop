@@ -102,7 +102,7 @@ ssh "${SSH_OPTS[@]}" "$VM" \
 # missing named export. `git archive` excludes node_modules, so widening this
 # tracked-source slice does not copy the dependency payload.
 git -C "$REPO_ROOT" archive --format=tar HEAD -- \
-  packages libs/generic scripts package.json tsconfig.base.json \
+  packages libs scripts package.json tsconfig.base.json \
   | ssh "${SSH_OPTS[@]}" "$VM" "tar -xf - -C '$remote_source'" \
   || fail 'could not stage the immutable superproject source snapshot on the VM'
 # Stage submodule CONTENTS, one archive per submodule repo.
@@ -189,39 +189,33 @@ for (const entry of fs.readdirSync(installedModules, { withFileTypes: true })) {
   }
 }
 
-const packageBases = [
-  path.join(runRoot, 'packages'),
-  // WI-39361: `libs` ITSELF, not just `libs/generic`. The top level holds real
-  // workspace packages that operator-core depends on directly —
-  // libs/papercusp-shared, libs/papercusp-db, libs/agent-chat, libs/testing-shell,
-  // libs/test-config. Omitting this base meant those could never win over the
-  // installed bundle's symlink no matter how fresh the staged copy was, so a
-  // symbol added to papercusp-shared surfaced on the rig as an unresolvable
-  // import naming that symbol. Entries without a package.json (libs/generic) are
-  // skipped by the loop below, so listing the parent is safe.
-  path.join(runRoot, 'libs'),
-  path.join(runRoot, 'libs', 'generic'),
-  path.join(runRoot, 'libs', 'papercusp', 'libs'),
-  path.join(runRoot, 'libs', 'papercusp', 'packages'),
-];
-for (const base of packageBases) {
-  if (!fs.existsSync(base)) continue;
-  for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const packageRoot = path.join(base, entry.name);
-    const manifestPath = path.join(packageRoot, 'package.json');
-    if (!fs.existsSync(manifestPath)) continue;
-    const name = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).name;
-    if (typeof name !== 'string' || !name) continue;
-    const target = path.join(runModules, ...name.split('/'));
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (hasEntry(target)) {
-      const stat = fs.lstatSync(target);
-      if (!stat.isSymbolicLink()) throw new Error(`refusing to replace non-link dependency ${name}`);
-      fs.unlinkSync(target);
-    }
-    fs.symlinkSync(packageRoot, target, 'dir');
+// Reuse the monorepo's canonical workspace registry rather than maintaining a
+// second hand-written directory list here. This covers nested workspaces such
+// as papergrid/grid-core as well as top-level libs, and adding a workspace to
+// package.json automatically makes it eligible for the run-source overlay.
+const rootManifest = JSON.parse(fs.readFileSync(path.join(runRoot, 'package.json'), 'utf8'));
+const workspacePatterns = Array.isArray(rootManifest.workspaces)
+  ? rootManifest.workspaces
+  : rootManifest.workspaces?.packages;
+if (!Array.isArray(workspacePatterns) || workspacePatterns.length === 0) {
+  throw new Error('root package.json has no workspace registry for the VM run-source overlay');
+}
+const workspaceRoots = [...new Set(workspacePatterns.flatMap((pattern) =>
+  fs.globSync(pattern, { cwd: runRoot, exclude: ['**/node_modules/**'] }),
+))].map((relative) => path.join(runRoot, relative));
+for (const packageRoot of workspaceRoots) {
+  const manifestPath = path.join(packageRoot, 'package.json');
+  if (!fs.existsSync(manifestPath)) continue;
+  const name = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).name;
+  if (typeof name !== 'string' || !name) continue;
+  const target = path.join(runModules, ...name.split('/'));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (hasEntry(target)) {
+    const stat = fs.lstatSync(target);
+    if (!stat.isSymbolicLink()) throw new Error(`refusing to replace non-link dependency ${name}`);
+    fs.unlinkSync(target);
   }
+  fs.symlinkSync(packageRoot, target, 'dir');
 }
 
 // Fail before identity lookup or rig mutation if ANY direct Papercusp
