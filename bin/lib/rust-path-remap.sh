@@ -66,22 +66,41 @@ papercusp_export_rust_path_remap() {
 # Cargo's target.*.rustflags and the RUSTFLAGS environment variable are
 # mutually exclusive. Release producers set RUSTFLAGS for the path remap, so a
 # linker flag left only in .cargo/config.toml disappears on the real release
-# path. Carry the LLD flag in the same environment that carries the remap.
+# path. Single-target producers may export the combined flags. A multi-target
+# parent (release-local builds native + wasm + Windows + Darwin children) must
+# instead compute the native value and pass it only to that native cargo call;
+# a cc-driver flag is invalid input to rust-lld's wasm flavor.
 #
 # The platform is explicit because build-mac-cross.sh runs on Linux while
 # producing a Darwin target. Windows has its own native linker/CRT flag path and
 # deliberately does not call this helper.
-papercusp_export_rust_lld() { # $1=linux|macos|darwin
+papercusp_rustflags_with_lld() { # $1=linux|macos|darwin  $2=flags (default RUSTFLAGS)
   local platform="${1:-}"
+  local flags="${2-${RUSTFLAGS:-}}"
   case "$platform" in
     linux|macos|darwin) ;;
-    *) return 0 ;;
+    *) printf '%s' "$flags"; return 0 ;;
   esac
 
-  case " ${RUSTFLAGS:-} " in
-    *" -C link-arg=-fuse-ld=lld "*) return 0 ;;
-    *"-C link-arg=-fuse-ld=lld"*) return 0 ;;
+  case " $flags " in
+    *" -C link-arg=-fuse-ld=lld "*) printf '%s' "$flags"; return 0 ;;
+    *"-C link-arg=-fuse-ld=lld"*) printf '%s' "$flags"; return 0 ;;
   esac
 
-  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld"
+  printf '%s' "$flags -C link-arg=-fuse-ld=lld"
+}
+
+# A native producer may already have exported the LLD cc-driver flag before it
+# invokes the shared sidecar builder. The sidecar also builds wasm32-wasip1;
+# remove only this native-only flag for that cargo call while preserving every
+# path remap and unrelated caller flag.
+papercusp_rustflags_without_native_lld() { # $1=flags (default RUSTFLAGS)
+  local flags="${1-${RUSTFLAGS:-}}"
+  flags="${flags//-C link-arg=-fuse-ld=lld/}"
+  printf '%s' "$flags"
+}
+
+papercusp_export_rust_lld() { # $1=linux|macos|darwin — single-target producers only
+  RUSTFLAGS="$(papercusp_rustflags_with_lld "$1" "${RUSTFLAGS:-}")"
+  export RUSTFLAGS
 }

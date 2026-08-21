@@ -122,6 +122,36 @@ else
   bad "duplicated an inherited LLD flag (got: $OUT_LLD_IDEM)"
 fi
 
+# Multi-target release parents compute a native-only value without contaminating
+# their ambient remap flags, and the shared sidecar removes that native flag for
+# wasm32-wasip1 while retaining the remaps.
+SCOPED_PAIR="$({
+  export RUSTFLAGS="$PRESET"
+  . "$LIB" || exit 9
+  printf '%s\n' "$RUSTFLAGS"
+  papercusp_rustflags_with_lld linux "$RUSTFLAGS"
+})"
+SCOPED_AMBIENT="${SCOPED_PAIR%%$'\n'*}"
+SCOPED_NATIVE="${SCOPED_PAIR#*$'\n'}"
+if [ "$SCOPED_AMBIENT" = "$PRESET" ] && [[ "$SCOPED_NATIVE" == *"-C link-arg=-fuse-ld=lld"* ]]; then
+  ok "multi-target parent computes native LLD flags without mutating ambient RUSTFLAGS"
+else
+  bad "native LLD scoping mutated ambient flags or omitted LLD (ambient=$SCOPED_AMBIENT native=$SCOPED_NATIVE)"
+fi
+WASM_FLAGS="$({ . "$LIB" || exit 9; papercusp_rustflags_without_native_lld "$SCOPED_NATIVE"; })"
+if [[ "$WASM_FLAGS" == *"--remap-path-prefix=/home/other=/build-home"* ]] && [[ "$WASM_FLAGS" != *"-fuse-ld=lld"* ]]; then
+  ok "wasm flags retain path remapping while removing the native-only LLD selector"
+else
+  bad "wasm flag sanitizer lost remapping or retained native LLD (got: $WASM_FLAGS)"
+fi
+
+SIDECAR_SCRIPT="$DIR/../build-desktop-sidecar.sh"
+if grep -q 'papercusp_rustflags_without_native_lld' "$SIDECAR_SCRIPT" && grep -q 'RUSTFLAGS="\$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1' "$SIDECAR_SCRIPT"; then
+  ok "sidecar wasm build uses the native-LLD sanitizer"
+else
+  bad "sidecar wasm build bypasses the native-LLD sanitizer"
+fi
+
 CONFIG="$DIR/../../.cargo/config.toml"
 if [ -f "$CONFIG" ] && grep -q -- 'link-arg=-fuse-ld=lld' "$CONFIG"; then
   ok ".cargo/config.toml keeps the bare-cargo LLD fallback"
@@ -175,8 +205,8 @@ for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross
   else
     bad "$SCRIPT compiles a shipped binary but sets NO path remap — it would inherit one only by luck (see lib/rust-path-remap.sh)"
   fi
-  if grep -Eq 'papercusp_export_rust_lld[[:space:]]+(linux|macos|darwin)' "$P"; then
-    ok "$SCRIPT carries its platform LLD flag with RUSTFLAGS"
+  if grep -Eq 'papercusp_(export_rust_lld|rustflags_with_lld)[[:space:]]+(linux|macos|darwin)' "$P"; then
+    ok "$SCRIPT carries or scopes its platform LLD flag with RUSTFLAGS"
   else
     bad "$SCRIPT has no platform LLD export — its RUSTFLAGS would suppress .cargo/config.toml"
   fi

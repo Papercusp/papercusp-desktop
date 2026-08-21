@@ -3468,6 +3468,15 @@ fi
 # Safe to set RUSTFLAGS here — no cargo config on this box sets rustflags (only
 # [build] target-dir), so this overrides nothing.
 _PUI_REMAP="--remap-path-prefix=$REPO=/papercusp --remap-path-prefix=$HOME=/build"
+# A native release producer may carry the cc-driver-only LLD selector in its
+# ambient RUSTFLAGS. Keep it for the native pui build, but never pass it to
+# rust-lld's wasm flavor (EI-21079215899748395).
+# shellcheck source=lib/rust-path-remap.sh
+source "$HERE/lib/rust-path-remap.sh"
+_PUI_WASM_RUSTFLAGS="$(papercusp_rustflags_without_native_lld "${RUSTFLAGS:-} $_PUI_REMAP")"
+case "$_PUI_WASM_RUSTFLAGS" in
+  *-fuse-ld=lld*) echo "ERROR: native LLD cc-driver flag leaked into wasm32-wasip1 RUSTFLAGS" >&2; exit 1 ;;
+esac
 
 # 1. pui (apps/tui) — release build for the TARGET triple.
 # Close the sidecar lock fd in the cargo subtree. RUSTC_WRAPPER may start the
@@ -3516,7 +3525,7 @@ cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 # 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release --target wasm32-wasip1 )
+( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1 )
 WASM=""
 for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
   [[ -f "$_c" ]] && WASM="$_c" && break

@@ -1093,13 +1093,14 @@ export PC_HEAVY_BYPASS=1
 # stripping. Exported before the sidecar build + every local `tauri build`
 # call below; a plain `export` also reaches build-appimage.sh, which this
 # script invokes as a child process later. A RUSTFLAGS change busts the cargo
-# incremental cache once — expected, not a regression. The shared helper also
-# carries the LLD flag because Cargo suppresses the config.toml copy whenever
-# this environment is present.
+# incremental cache once — expected, not a regression. Cargo suppresses the
+# config.toml LLD flag whenever this environment is present, so compute a
+# Linux-native value below and apply it only to Linux cargo calls. Exporting it
+# globally would also feed `-fuse-ld=lld` to the wasm32 sidecar linker.
 # The matching helper was sourced from ORCHESTRATOR_HERE during startup; do not
 # re-resolve it through target-tree HERE here.
 papercusp_export_rust_path_remap
-papercusp_export_rust_lld linux
+PAPERCUSP_LINUX_RUSTFLAGS="$(papercusp_rustflags_with_lld linux "${RUSTFLAGS:-}")"
 # WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
 # by a persistent ~/.cache/sccache, exported HERE (before the Linux leg forks
 # below + the optional arm64 cross-compile section) so both inherit it via
@@ -1372,7 +1373,7 @@ else
       # see the collection globs) AND its multi-GB payload compression wedged the
       # 0.0.3-alpha linux leg for 33min+. deb only.
       echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-      (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+      (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
     done
     # Repack BOTH role artifacts after Tauri finishes writing them. The helper
     # verifies the ar structure and dpkg readability, atomically replaces each
@@ -1474,7 +1475,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+    (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
   # The base Tauri config includes deb among the unfiltered arm64 targets.
   # Repack both role artifacts before they enter ARTIFACTS, regenerating updater
