@@ -78,6 +78,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
+SOURCE_ROOT="$ROOT"
+OUTPUT_SRC_TAURI="$SRC_TAURI"
+BUILD_ROOT=""
+BUILD_WORKTREE=0
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -238,6 +242,12 @@ cleanup() {
   local status="$?"
   trap - EXIT
   [[ -n "$AUTHENTICODE_PFX" && -f "$AUTHENTICODE_PFX" ]] && rm -f "$AUTHENTICODE_PFX"
+  if [[ "$BUILD_WORKTREE" == "1" && -n "$BUILD_ROOT" ]]; then
+    git -C "$SOURCE_ROOT" worktree remove --force "$BUILD_ROOT" >/dev/null 2>&1 \
+      || rm -rf -- "$BUILD_ROOT"
+  elif [[ -n "$BUILD_ROOT" && -d "$BUILD_ROOT" ]]; then
+    rm -rf -- "$BUILD_ROOT"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -295,13 +305,67 @@ winpath() { printf 'Z:%s' "$(printf '%s' "$1" | sed 's:/:\\:g')"; }
   echo "    env-sidecars/staging staged (hardlinked)"
 ) 9>>"$SRC_TAURI/sidecar.lock"
 
+# ── Immutable build-source snapshot ─────────────────────────────────────────
+# The shared checkout can change while this ~12-minute build is running: git-sync
+# commits it, peers edit it, and the sidecar writer refreshes generated inputs.
+# Compiling the live tree while stamping PAPERCUSP_BUILD_SHA therefore produces
+# an artifact whose provenance is false. Pin the commit before any cargo work and
+# compile from a private worktree so later edits cannot change the Rust source.
+BUILD_COMMIT_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+BUILD_COMMIT_SHORT="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+[[ -n "$BUILD_COMMIT_SHA" && -n "$BUILD_COMMIT_SHORT" ]] \
+  || fail "could not resolve the Windows build source commit from $SOURCE_ROOT"
+
+if [[ -n "${PAPERCUSP_BUILD_SHA:-}" ]]; then
+  _build_sha_label="${PAPERCUSP_BUILD_SHA%-dirty}"
+  case "$BUILD_COMMIT_SHA" in
+    "$_build_sha_label"*) ;;
+    *) fail "PAPERCUSP_BUILD_SHA='${PAPERCUSP_BUILD_SHA}' does not identify source HEAD ${BUILD_COMMIT_SHORT} — refusing a mislabeled Windows build" ;;
+  esac
+else
+  export PAPERCUSP_BUILD_SHA="$BUILD_COMMIT_SHORT"
+fi
+
+BUILD_ROOT="$(mktemp -d /tmp/papercusp-win-cross-source-XXXXXX)"
+if ! git -C "$SOURCE_ROOT" worktree add --detach "$BUILD_ROOT" "$BUILD_COMMIT_SHA" >/dev/null 2>&1; then
+  fail "could not create the isolated Windows build source at $BUILD_ROOT"
+fi
+BUILD_WORKTREE=1
+
+# A release cut intentionally edits its version manifests before the build and
+# generates the seed/sidecar outside Git. Copy those inputs once into the pinned
+# worktree; do not copy arbitrary source edits, which would reopen the race this
+# snapshot closes. The generated trees are staged under their own writer lock and
+# are copied only after staging completes.
+copy_snapshot_input() {
+  local rel="$1" source="$SOURCE_ROOT/$1" dest="$BUILD_ROOT/$1"
+  [[ -e "$source" || -L "$source" ]] || fail "required Windows build input is missing: $source"
+  rm -rf -- "$dest"
+  mkdir -p -- "$(dirname "$dest")"
+  cp -a --reflink=auto -- "$source" "$dest"
+}
+
+for _release_input in package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json; do
+  copy_snapshot_input "$_release_input"
+done
+for _generated_input in src-tauri/sidecar src-tauri/env-sidecars src-tauri/seed src-tauri/resources; do
+  copy_snapshot_input "$_generated_input"
+done
+
+# ROOT/SRC_TAURI now name the immutable source. OUTPUT_SRC_TAURI remains the
+# canonical shared output tree consumed by release-local.sh after this process
+# exits; artifacts must not disappear with the temporary worktree.
+ROOT="$BUILD_ROOT"
+SRC_TAURI="$ROOT/src-tauri"
+echo "==> isolated Windows build source: commit=${BUILD_COMMIT_SHORT} root=$BUILD_ROOT"
+
 # ── Stage dir the .iss reads via {#BuildRoot}. papercusp.iss wants the exe at
 # {BuildRoot}\target\release\papercusp-desktop.exe and sibling dirs sidecar,
 # resources, seed, env-sidecars, icons, windows. We symlink the src-tauri dirs
 # (wine follows them) and drop the freshly-compiled per-role exe into
 # target/release/ just before each pack.
 STAGE="$(mktemp -d /tmp/win-cross-stage-XXXX)"
-OUT_DIR="$SRC_TAURI/target/windows-vm/bundle/inno"   # the dir release-local.sh collects from
+OUT_DIR="$OUTPUT_SRC_TAURI/target/windows-vm/bundle/inno"   # the dir release-local.sh collects from
 mkdir -p "$STAGE/target/release" "$OUT_DIR"
 for d in sidecar resources seed env-sidecars icons windows; do
   [[ -e "$SRC_TAURI/$d" ]] && ln -sfn "$SRC_TAURI/$d" "$STAGE/$d"
