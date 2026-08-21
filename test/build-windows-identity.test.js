@@ -87,6 +87,39 @@ test('every cargo-xwin build passes RUSTFLAGS carrying the remap', () => {
   );
 });
 
+test('the Windows cross-build compiles an immutable source snapshot and pins its stamp', () => {
+  assert.match(
+    script,
+    /BUILD_COMMIT_SHA="\$\(git -C "\$SOURCE_ROOT" rev-parse HEAD/, 
+    'the producer must resolve the source commit before cargo starts',
+  );
+  assert.match(
+    script,
+    /git -C "\$SOURCE_ROOT" worktree add --detach "\$BUILD_ROOT" "\$BUILD_COMMIT_SHA"/,
+    'the producer must build from a private worktree, not the shared checkout',
+  );
+  assert.match(
+    script,
+    /PAPERCUSP_BUILD_SHA=.*does not identify source HEAD/,
+    'a caller-supplied build stamp must be rejected when it names a different commit',
+  );
+  assert.match(
+    script,
+    /ROOT="\$BUILD_ROOT"\nSRC_TAURI="\$ROOT\/src-tauri"/,
+    'cargo and packaging inputs must switch to the isolated source after snapshotting',
+  );
+  assert.match(
+    script,
+    /OUT_DIR="\$OUTPUT_SRC_TAURI\/target\/windows-vm\/bundle\/inno"/,
+    'artifacts must remain in the canonical collector tree after the source snapshot is removed',
+  );
+  assert.match(
+    script,
+    /git -C "\$SOURCE_ROOT" worktree remove --force "\$BUILD_ROOT"/,
+    'the temporary source worktree must be cleaned up on exit',
+  );
+});
+
 test('the produced .exe is identity-scrubbed BEFORE ISCC packs it', () => {
   const scrubs = find(SCRUB_CALL);
   assert.ok(

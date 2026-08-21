@@ -58,18 +58,6 @@ function claimsAVerdict(name) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pre-existing D-009 debt. SHRINK-ONLY: converting a script removes its entry.
-// Nothing may be ADDED here without the owning plan/work-item saying why — a new
-// verdict-claiming script that cannot fail is the exact regression this prevents.
-// Tracked for conversion; each still exits 0 unconditionally today.
-// ─────────────────────────────────────────────────────────────────────────────
-const KNOWN_VERDICTLESS = new Map([
-  ['mac-vm-relaunch-verify.sh', 'pre-existing D-009 debt: prints relaunch state, never exits nonzero'],
-  ['mac-vm-lifecycle-gw-e2e.sh', 'pre-existing D-009 debt: gateway lifecycle e2e with no verdict'],
-  ['mac-vm-seed-runtime-test.sh', 'pre-existing D-009 debt: seed runtime probe with no verdict'],
-  ['mac-vm-reqb-fileprec.sh', 'pre-existing D-009 debt: REQ-B file-precedence check with no verdict'],
-]);
-
 function verdictClaimingScripts() {
   return fs
     .readdirSync(BIN)
@@ -82,7 +70,7 @@ test('every verdict-claiming script in bin/ can emit a failing verdict (D-009)',
   const offenders = [];
   for (const name of verdictClaimingScripts()) {
     const src = fs.readFileSync(path.join(BIN, name), 'utf8');
-    if (!canEmitFailingVerdict(src) && !KNOWN_VERDICTLESS.has(name)) offenders.push(name);
+    if (!canEmitFailingVerdict(src)) offenders.push(name);
   }
 
   assert.deepEqual(
@@ -118,19 +106,6 @@ test('the specific script that motivated D-009 emits a real verdict', () => {
   // "this could not have failed", and it is the first thing an optimising edit drops.
   assert.ok(/exit 2/.test(code), 'the VOID verdict (exit 2) must remain');
   assert.ok(/exit 1/.test(code), 'the FAIL verdict (exit 1) must remain');
-});
-
-test('the allowlist is honest: every KNOWN_VERDICTLESS entry exists and still lacks a verdict', () => {
-  for (const [name, reason] of KNOWN_VERDICTLESS) {
-    const p = path.join(BIN, name);
-    assert.ok(fs.existsSync(p), `KNOWN_VERDICTLESS names ${name}, which no longer exists — remove the entry`);
-    assert.ok(reason && reason.length > 20, `${name} needs a real reason, not a placeholder`);
-    assert.ok(
-      !canEmitFailingVerdict(fs.readFileSync(p, 'utf8')),
-      `${name} CAN now emit a failing verdict — delete its KNOWN_VERDICTLESS entry so the ` +
-        `allowlist keeps shrinking. An allowlist that outlives its debt stops meaning anything.`,
-    );
-  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

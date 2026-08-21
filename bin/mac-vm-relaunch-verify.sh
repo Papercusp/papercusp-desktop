@@ -10,10 +10,27 @@
 #      so operator /api/health alone is NOT sufficient).
 #   - byte-offset diff on ~/.papercusp/logs/gui.log → count only NEWLY appended
 #     'panicked at' lines this iteration.
-set +e
+# This script emits a machine-readable verdict.  The checks intentionally keep
+# running after a failure so the operator gets the complete relaunch picture;
+# `emit_verdict` at the end is the only exit path.
 GUILOG="$HOME/.papercusp/logs/gui.log"
 N=3
 PASS=0
+FAILURES=0
+
+emit_verdict() {
+  echo
+  echo "================ VERDICT ================"
+  if [ "$FAILURES" -gt 0 ]; then
+    echo "VERDICT: FAIL ($FAILURES failed relaunch(es))"
+    echo "=========================================="
+    exit 1
+  fi
+  echo "VERDICT: PASS ($N/$N relaunches survived)"
+  echo "=========================================="
+  exit 0
+}
+
 guipid() { pgrep -f 'Papercusp GUI.app/Contents/MacOS' 2>/dev/null | head -1; }
 ophealth() {
   for P in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i node | grep -oE '127.0.0.1:[0-9]+' | grep -oE '[0-9]+$' | sort -u); do
@@ -72,5 +89,11 @@ done
 echo
 echo "================ VERDICT ================"
 echo "RELAUNCHES SURVIVED: $PASS / $N"
-[ "$PASS" = "$N" ] && echo "✅✅✅ WI-3139 FIX CONFIRMED — GUI survives all relaunches (was 0/$N before fix)" || echo "⚠ FIX INCOMPLETE — $((N-PASS))/$N relaunch(es) still failed"
+if [ "$PASS" = "$N" ]; then
+  echo "✅✅✅ WI-3139 FIX CONFIRMED — GUI survives all relaunches (was 0/$N before fix)"
+else
+  FAILURES=$((N-PASS))
+  echo "⚠ FIX INCOMPLETE — $FAILURES/$N relaunch(es) still failed"
+fi
 echo "=== final gui.log tail ==="; tail -6 "$GUILOG" 2>/dev/null
+emit_verdict
