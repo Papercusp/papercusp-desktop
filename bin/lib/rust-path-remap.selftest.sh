@@ -129,7 +129,32 @@ else
   bad ".cargo/config.toml lost its bare-cargo LLD fallback"
 fi
 
-# 6. THE STRUCTURAL GUARD — every script that compiles a shipped Rust binary
+# 6. A salvage cut sources the current release-local.sh while $0 deliberately
+#    names the frozen release-worktree entrypoint. The target tree may carry an
+#    older helper revision, so release-local must resolve its OWN sourced libs
+#    through BASH_SOURCE[0], while it continues to build/collect through $0.
+#
+#    Reproduce that exact shape with a foreign target tree whose helper files
+#    are fatal sentinels. An invalid version makes the real script exit at its
+#    normal early validation gate, before any release mutation. Exit 1 proves
+#    canonical helpers loaded; exit 97 proves a stale target helper leaked in.
+RELEASE_SCRIPT="$DIR/../release-local.sh"
+FOREIGN_ROOT="$(mktemp -d)"
+mkdir -p "$FOREIGN_ROOT/bin/lib"
+for STALE_LIB in gen-latest-manifest.sh release-tag-pin.sh rust-path-remap.sh; do
+  printf '%s\n' 'echo "STALE TARGET HELPER SOURCED" >&2' 'exit 97' > "$FOREIGN_ROOT/bin/lib/$STALE_LIB"
+done
+OUT_FOREIGN="$(bash -c 'canonical=$1; shift; source "$canonical"' \
+  "$FOREIGN_ROOT/bin/release-local.sh" "$RELEASE_SCRIPT" invalid alpha 2>&1)"
+STATUS_FOREIGN=$?
+rm -rf "$FOREIGN_ROOT"
+if [ "$STATUS_FOREIGN" -eq 1 ] && [[ "$OUT_FOREIGN" == *"version must look like"* ]] && [[ "$OUT_FOREIGN" != *"STALE TARGET HELPER"* ]]; then
+  ok "foreign-\$0 salvage loads orchestration helpers from BASH_SOURCE, not the stale target tree"
+else
+  bad "foreign-\$0 salvage mixed target-tree helpers into canonical orchestration (status=$STATUS_FOREIGN output=$OUT_FOREIGN)"
+fi
+
+# 7. THE STRUCTURAL GUARD — every script that compiles a shipped Rust binary
 #    must set the remap itself rather than trust an ambient export. A new build
 #    script that forgets it fails HERE, in <1s, instead of at the identity gate
 #    ~10 min into a real build (or, worse, shipping a leaky artifact).

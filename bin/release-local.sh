@@ -105,6 +105,12 @@ fi
 
 VERSION="$1"
 CHANNEL="$2"
+# An exact-source salvage cut deliberately combines the current orchestration
+# script with a frozen target tree: callers source this file while setting $0
+# to the frozen worktree entrypoint. Keep those roots separate. Libraries that
+# THIS script revision calls must follow BASH_SOURCE[0]; build scripts and
+# artifact paths continue to follow the target-tree $0 (EI-21078401508503033).
+ORCHESTRATOR_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # Signing-key selection must agree with every OTHER producer in bin/ — and with this
@@ -121,9 +127,13 @@ KEY_PUB="${KEY_FILE}.pub"
 # reaper. A repair-only call or a source-drift refusal must not claim build
 # resources or run cleanup intended for a cut that actually launched children.
 # shellcheck source=lib/gen-latest-manifest.sh
-source "$HERE/lib/gen-latest-manifest.sh"
+source "$ORCHESTRATOR_HERE/lib/gen-latest-manifest.sh"
 # shellcheck source=lib/release-tag-pin.sh
-source "$HERE/lib/release-tag-pin.sh"
+source "$ORCHESTRATOR_HERE/lib/release-tag-pin.sh"
+# Release-local's own function calls must resolve against the same revision as
+# release-local.sh, even when $0 names a frozen target worktree.
+# shellcheck source=lib/rust-path-remap.sh
+source "$ORCHESTRATOR_HERE/lib/rust-path-remap.sh"
 
 # A brand-new version needs an exact remote ref before the LOCAL-only cutter can
 # bake its dogfood clone pin. Keep that outward write separate from the cut:
@@ -281,14 +291,14 @@ trap reap_release_legs EXIT
 # warned, and shipped anyway. Escape hatch, if you truly want a throwaway:
 # PAPERCUSP_ALLOW_HOSTLESS_RELEASE=1.
 # shellcheck source=lib/release-host.sh
-source "$HERE/lib/release-host.sh"
+source "$ORCHESTRATOR_HERE/lib/release-host.sh"
 # EI-12913: the ONE source of truth for this cut's artifact set — release-local.sh
 # writes it (below), upload-release.sh reads it, so the two halves can never drift.
-source "$HERE/lib/release-artifacts.sh"
+source "$ORCHESTRATOR_HERE/lib/release-artifacts.sh"
 # WI-20118266632432430: shared Inno Server DiskSpan normalization used by the
 # direct cross-builder and incremental publisher as well as this full cut.
 # shellcheck source=lib/inno-spanned-server.sh
-source "$HERE/lib/inno-spanned-server.sh"
+source "$ORCHESTRATOR_HERE/lib/inno-spanned-server.sh"
 # WI-36794 / WI-7101: claim a Rust target-dir SLOT before any cargo runs. This
 # script drives `tauri build` directly (npx, not the guarded `tauri` npm
 # script), so it was routing around the only chokepoint that claims one — and a
@@ -304,7 +314,7 @@ source "$HERE/lib/inno-spanned-server.sh"
 # CARGO_TARGET_ROOT below is derived from `cargo metadata`, so artifact
 # collection follows the claimed dir automatically.
 # shellcheck source=lib/claim-target-dir.sh
-source "$HERE/lib/claim-target-dir.sh"
+source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
 require_release_host
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
@@ -1086,8 +1096,8 @@ export PC_HEAVY_BYPASS=1
 # incremental cache once — expected, not a regression. The shared helper also
 # carries the LLD flag because Cargo suppresses the config.toml copy whenever
 # this environment is present.
-# shellcheck source=lib/rust-path-remap.sh
-source "$HERE/lib/rust-path-remap.sh"
+# The matching helper was sourced from ORCHESTRATOR_HERE during startup; do not
+# re-resolve it through target-tree HERE here.
 papercusp_export_rust_path_remap
 papercusp_export_rust_lld linux
 # WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
@@ -1101,7 +1111,7 @@ papercusp_export_rust_lld linux
 # (Ensure-Sccache) in its generated build script. Best-effort throughout —
 # see lib/sccache.sh.
 # shellcheck source=lib/sccache.sh
-source "$HERE/lib/sccache.sh"
+source "$ORCHESTRATOR_HERE/lib/sccache.sh"
 setup_sccache_env "30G"
 PC_NICE=()
 if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
