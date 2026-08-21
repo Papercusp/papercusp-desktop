@@ -297,9 +297,19 @@ d = {
     "NSHighResolutionCapable": True,
 }
 
+with open(userplist, "rb") as f:
+    d.update(plistlib.load(f))   # user keys (mic, ATS) win — same order as Tauri
+with open(out, "wb") as f:
+    plistlib.dump(d, f)
+PY
+}
+
 # Apple rejects FinderInfo/resource-fork metadata under `codesign --strict`.
 # Remove only those attributes from the assembled copy; `user.*` attributes in
 # the seed are part of the runtime contract and must survive packaging.
+# EI-21021948571055943: these shell functions MUST stay after gen_info_plist's
+# PY terminator. Placing them between <<'PY' and PY is valid Bash syntax but
+# feeds the shell function text to Python only after the expensive mac compile.
 strip_mac_signing_xattrs() { # $1=bundle/resource tree
   python3 "$MAC_SIGNING_XATTR_HELPER" "$1" \
     || fail "could not strip Apple signing-invalid xattrs from $1"
@@ -308,12 +318,6 @@ strip_mac_signing_xattrs() { # $1=bundle/resource tree
 verify_mac_signing_xattrs() { # $1=bundle/resource tree
   python3 "$MAC_SIGNING_XATTR_HELPER" --check "$1" \
     || fail "Apple signing-invalid xattrs remain under $1"
-}
-with open(userplist, "rb") as f:
-    d.update(plistlib.load(f))   # user keys (mic, ATS) win — same order as Tauri
-with open(out, "wb") as f:
-    plistlib.dump(d, f)
-PY
 }
 
 # ── env-sidecars/staging (packaged env switcher, WI-3285 P-004): clone the
