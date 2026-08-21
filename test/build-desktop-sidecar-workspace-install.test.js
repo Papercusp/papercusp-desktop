@@ -79,6 +79,22 @@ test('sidecar dependency install includes both source workspaces with exact name
   assert.doesNotMatch(install, /--workspace=@papercusp\/operator(?:\s|$)/);
 });
 
+test('sidecar runtime workspace builds require native TypeScript 7 plus the TypeScript 6 API alias', () => {
+  const ssePackage = require(path.join(repoRoot, 'libs/generic/sse/package.json'));
+
+  assert.equal(ssePackage.devDependencies['@typescript/native'], 'npm:typescript@7.0.2');
+  assert.equal(
+    ssePackage.devDependencies.typescript,
+    'npm:@typescript/typescript6@6.0.2',
+  );
+  assert.match(builder, /require\("@typescript\/native\/package\.json"\)/);
+  assert.match(builder, /require\("typescript\/package\.json"\)/);
+  assert.match(builder, /actualNative\.name === "typescript"/);
+  assert.match(builder, /actualApi\.name === "@typescript\/typescript6"/);
+  assert.match(builder, /native TypeScript/);
+  assert.match(builder, /API compatibility/);
+});
+
 test('Debian removal tears down only verified Papercusp process ownership', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
