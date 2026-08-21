@@ -15,6 +15,22 @@ for tool in ar xz gzip dpkg-deb; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: required tool not found: $tool" >&2; exit 3; }
 done
 
+# `-T0` scales compression workers to every host core. On the release host that
+# let one repack grow past 27 GiB private RSS and amplify system-wide reclaim
+# pressure. Keep the release path parallel, but make its default resource cost
+# independent of host size. Operators may tune either budget explicitly; xz
+# automatically lowers its effective worker count if the memory cap requires it.
+XZ_THREADS="${PAPERCUSP_XZ_THREADS:-4}"
+XZ_MEMORY_LIMIT="${PAPERCUSP_XZ_MEMORY_LIMIT:-4GiB}"
+[[ "$XZ_THREADS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "FATAL: PAPERCUSP_XZ_THREADS must be a positive integer, got: $XZ_THREADS" >&2
+  exit 7
+}
+[[ "$XZ_MEMORY_LIMIT" =~ ^[1-9][0-9]*(KiB|MiB|GiB)$ ]] || {
+  echo "FATAL: PAPERCUSP_XZ_MEMORY_LIMIT must be a non-zero KiB/MiB/GiB value, got: $XZ_MEMORY_LIMIT" >&2
+  exit 7
+}
+
 mapfile -t MEMBERS < <(ar t "$DEB_PATH")
 [[ "${#MEMBERS[@]}" -eq 3 ]] || {
   echo "FATAL: expected exactly 3 deb members in $DEB_PATH, found ${#MEMBERS[@]}" >&2
@@ -58,7 +74,7 @@ ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
 ar p "$DEB_PATH" "${MEMBERS[2]}" \
   | "${DECOMPRESS[@]}" \
   | python3 "$SCRIPT_DIR/dedupe-env-sidecar-tar.py" \
-  | xz -9 -T0 -c > "$WORK/data.tar.xz"
+  | xz -9 "-T${XZ_THREADS}" "--memlimit-compress=${XZ_MEMORY_LIMIT}" -c > "$WORK/data.tar.xz"
 
 REPLACEMENT="$WORK/repacked.deb"
 (cd "$WORK" && ar rc "$REPLACEMENT" debian-binary "${MEMBERS[1]}" data.tar.xz)

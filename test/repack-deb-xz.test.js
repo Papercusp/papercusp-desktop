@@ -16,6 +16,20 @@ function run(cmd, args, options = {}) {
   return res.stdout;
 }
 
+test('bounds xz workers and compression memory independently of host core count', () => {
+  const source = fs.readFileSync(helper, 'utf8');
+  assert.doesNotMatch(source, /\bxz\s+-9\s+-T0\b/, 'the release repacker must never scale workers to every host core');
+  assert.match(source, /PAPERCUSP_XZ_THREADS:-4/, 'the default worker budget must remain explicit and bounded');
+  assert.match(source, /PAPERCUSP_XZ_MEMORY_LIMIT:-4GiB/, 'the default compression-memory budget must remain explicit');
+  assert.match(
+    source,
+    /xz -9 "-T\$\{XZ_THREADS\}" "--memlimit-compress=\$\{XZ_MEMORY_LIMIT\}" -c/,
+    'the canonical xz invocation must apply both budgets',
+  );
+  assert.match(source, /PAPERCUSP_XZ_THREADS must be a positive integer/);
+  assert.match(source, /PAPERCUSP_XZ_MEMORY_LIMIT must be a non-zero KiB\/MiB\/GiB value/);
+});
+
 test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-test-'));
   try {
