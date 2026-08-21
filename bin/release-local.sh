@@ -411,13 +411,23 @@ TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}"
 # (Fed this already-honest value, the Windows leg's own derivation reproduces the
 # same label — no divergence.)
 _short_head="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+_source_git_head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+_source_git_dirty=false
 if [[ -n "$_short_head" ]] \
    && { [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]] \
         || [[ -n "$(git -C "$ROOT/.." status --porcelain 2>/dev/null)" ]]; }; then
+  _source_git_dirty=true
   BUILD_SHA="${_short_head}-dirty"
 else
   BUILD_SHA="$_short_head"
 fi
+# Preserve the input state NOW, before the cutter bumps versions or regenerates
+# tracked env-sidecars. Every provenance emitter inherits these values; its own
+# later checkout observation rides separately as git*AtEmit. Without this phase
+# boundary, the documented ship gate fails every normal cut even when this
+# preflight proved the source clean (EI-20555742146560765).
+export PROVENANCE_SOURCE_GIT_HEAD="$_source_git_head"
+export PROVENANCE_SOURCE_GIT_DIRTY="$_source_git_dirty"
 echo "==> build provenance: PAPERCUSP_BUILD_SHA=${BUILD_SHA:-<unknown>}"
 # Fail-fast on a -dirty cut (0.0.8 drive, 2026-07-11): the release-verify-provenance
 # ship-gate asserts gitDirty==false on EVERY channel — alpha included, since alpha
@@ -1307,11 +1317,26 @@ CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-v
 _prov_version() {  # $1 = build-provenance.json path → prints the version string
   grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/'
 }
+_prov_string() {  # $1 = json path, $2 = top-level string field
+  grep -oE '"'"$2"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true
+}
+_prov_bool() {  # $1 = json path, $2 = top-level boolean field
+  grep -oE '"'"$2"'"[[:space:]]*:[[:space:]]*(true|false)' "$1" 2>/dev/null | head -1 | grep -oE '(true|false)$' || true
+}
 assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
   local dir="$1" leg="$2"
   local prov="$dir/build-provenance.json"
   if [[ "${PAPERCUSP_ALLOW_REUSE_UNVERIFIED:-0}" == "1" ]]; then
     echo "==> ⚠ PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1 — skipping the $leg reuse-provenance verification (P-005)"
+    case "$leg" in
+      linux)
+        LINUX_REUSE_BUILD_SHA="$BUILD_SHA"; LINUX_REUSE_GIT_HEAD="$PROVENANCE_SOURCE_GIT_HEAD"; LINUX_REUSE_GIT_DIRTY="$PROVENANCE_SOURCE_GIT_DIRTY" ;;
+      windows)
+        WINDOWS_REUSE_BUILD_SHA="$BUILD_SHA"; WINDOWS_REUSE_GIT_HEAD="$PROVENANCE_SOURCE_GIT_HEAD"; WINDOWS_REUSE_GIT_DIRTY="$PROVENANCE_SOURCE_GIT_DIRTY" ;;
+      mac)
+        MAC_REUSE_BUILD_SHA="$BUILD_SHA"; MAC_REUSE_GIT_HEAD="$PROVENANCE_SOURCE_GIT_HEAD"; MAC_REUSE_GIT_DIRTY="$PROVENANCE_SOURCE_GIT_DIRTY" ;;
+      *) echo "ERROR: unknown reuse provenance leg '$leg'" >&2; exit 2 ;;
+    esac
     return 0
   fi
   [[ -f "$prov" ]] || { echo "ERROR: REUSE_$leg but no prior build-provenance.json at $prov — the salvaged bytes' true version is unknown, so re-labelling them $VERSION would be a LABELED!=PACKED lie (P-005). Restore a cut that includes build-provenance.json, or override: PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1."; exit 1; }
@@ -1327,6 +1352,29 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
   else
     echo "==> ✓ REUSE_$leg provenance verified: salvaged version $prior_ver == cut $VERSION (P-005)"
   fi
+
+  # A reused artifact keeps the identity baked into ITS bytes. Relabelling it
+  # with this collector run's BUILD_SHA is LABELED!=PACKED even when the version
+  # happens to match — and a post-cut collector often sees the cutter-authored
+  # dirty tree. Preserve the prior source identity before the late emitter
+  # replaces build-provenance.json.
+  local prior_sha prior_head prior_dirty
+  prior_sha="$(_prov_string "$prov" buildSha)"
+  prior_head="$(_prov_string "$prov" gitHead)"
+  prior_dirty="$(_prov_bool "$prov" gitDirty)"
+  [[ -n "$prior_sha" && -n "$prior_head" && -n "$prior_dirty" ]] || {
+    echo "ERROR: REUSE_$leg prior provenance lacks buildSha/gitHead/gitDirty — refusing to relabel unverifiable bytes (P-005). Rebuild the leg, or use PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1 for a deliberate local-only bypass." >&2
+    exit 1
+  }
+  case "$leg" in
+    linux)
+      LINUX_REUSE_BUILD_SHA="$prior_sha"; LINUX_REUSE_GIT_HEAD="$prior_head"; LINUX_REUSE_GIT_DIRTY="$prior_dirty" ;;
+    windows)
+      WINDOWS_REUSE_BUILD_SHA="$prior_sha"; WINDOWS_REUSE_GIT_HEAD="$prior_head"; WINDOWS_REUSE_GIT_DIRTY="$prior_dirty" ;;
+    mac)
+      MAC_REUSE_BUILD_SHA="$prior_sha"; MAC_REUSE_GIT_HEAD="$prior_head"; MAC_REUSE_GIT_DIRTY="$prior_dirty" ;;
+    *) echo "ERROR: unknown reuse provenance leg '$leg'" >&2; exit 2 ;;
+  esac
 }
 
 assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
@@ -1791,10 +1839,20 @@ assert_linux_artifact_cardinality "$LINUX_BUNDLE"
 # a toolchain drift that changes the bytes is visible in the provenance record.
 _tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
 _tc_node="$(node --version 2>/dev/null)"
+_linux_prov_sha="$BUILD_SHA"
+_linux_prov_head="$PROVENANCE_SOURCE_GIT_HEAD"
+_linux_prov_dirty="$PROVENANCE_SOURCE_GIT_DIRTY"
+if [[ "$LINUX_REUSE" == "1" ]]; then
+  _linux_prov_sha="$LINUX_REUSE_BUILD_SHA"
+  _linux_prov_head="$LINUX_REUSE_GIT_HEAD"
+  _linux_prov_dirty="$LINUX_REUSE_GIT_DIRTY"
+fi
 PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${_tc_rustc:-unknown}" "${_tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
 PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
+PROVENANCE_SOURCE_GIT_HEAD="$_linux_prov_head" \
+PROVENANCE_SOURCE_GIT_DIRTY="$_linux_prov_dirty" \
 PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
-  "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" "$([[ "$LINUX_REUSE" == "1" ]] && echo true || echo false)" \
+  "$LINUX_BUNDLE" "$VERSION" "$_linux_prov_sha" "$([[ "$LINUX_REUSE" == "1" ]] && echo true || echo false)" \
   "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
   || echo "WARNING: linux build-provenance.json emit failed (non-fatal) — linux artifacts shipped WITHOUT a provenance record"
 if [[ "$WITH_ARM64" == "1" ]]; then
@@ -1871,8 +1929,18 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # record for bytes it never packed — manufacturing exactly the LABELED != PACKED
   # claim this file exists to prevent. An honest null beats a confident wrong value.
   # The darwin sidecar IS recorded, at the leg that actually packs it: build-mac-cross.sh.
+  _mac_prov_sha="$BUILD_SHA"
+  _mac_prov_head="$PROVENANCE_SOURCE_GIT_HEAD"
+  _mac_prov_dirty="$PROVENANCE_SOURCE_GIT_DIRTY"
+  if [[ "$MAC_REUSE" == "1" ]]; then
+    _mac_prov_sha="$MAC_REUSE_BUILD_SHA"
+    _mac_prov_head="$MAC_REUSE_GIT_HEAD"
+    _mac_prov_dirty="$MAC_REUSE_GIT_DIRTY"
+  fi
+  PROVENANCE_SOURCE_GIT_HEAD="$_mac_prov_head" \
+  PROVENANCE_SOURCE_GIT_DIRTY="$_mac_prov_dirty" \
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
-    "$MAC_OUT" "$VERSION" "$BUILD_SHA" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
+    "$MAC_OUT" "$VERSION" "$_mac_prov_sha" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
     || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
 fi

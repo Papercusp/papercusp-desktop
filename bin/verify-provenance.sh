@@ -5,7 +5,9 @@
 # dimension that must hold for the bytes to be safe to ship — encoding EI-8914
 # (LABELED != PACKED) as a gate a bad build physically cannot pass:
 #
-#   1. gitDirty == false             — a release was not cut from a dirty tree.
+#   1. gitDirty == false             — the source accepted at cut START was
+#      clean. gitDirtyAtEmit is diagnostic only: the cutter legitimately dirties
+#      tracked version/env-sidecar staging before provenance is emitted.
 #   2. buildSha == live /api/health  — the running operator IS this artifact
 #      sha (when a --health-sha/--health-url is supplied; the post-install proof).
 #   3. each artifact's sha256 == the value recorded in build-provenance.json
@@ -32,7 +34,7 @@
 #   --pubkey VALUE|PATH  minisign pubkey for the sig check (default: plugins.updater.pubkey
 #                        from src-tauri/tauri.conf.json)
 #   --require-signed     fail if ANY artifact lacks a .sig (default: verify sigs that exist)
-#   --allow-dirty        don't fail on gitDirty==true (default: gitDirty must be false)
+#   --allow-dirty        don't fail when build-start gitDirty==true
 #   --json               emit a machine-readable verdict to stdout
 # Exit: 0 = all checks pass · 1 = a check failed · 2 = usage/setup error.
 set -euo pipefail
@@ -115,12 +117,15 @@ except Exception as e:
 version = prov.get("version")
 build_sha = prov.get("buildSha")
 git_dirty = prov.get("gitDirty")
+git_dirty_at_emit = prov.get("gitDirtyAtEmit")
 reused = prov.get("reused", False)  # absent on pre-P-002 provenance ⇒ treat as fresh
 
-# ── 1. gitDirty ────────────────────────────────────────────────────────────
+# ── 1. build-start source cleanliness ──────────────────────────────────────
 if git_dirty is True and not ALLOW_DIRTY:
-    failures.append("gitDirty is true — release cut from a dirty tree (pass --allow-dirty to override)")
+    failures.append("gitDirty is true — release INPUT was dirty at cut start (pass --allow-dirty to override)")
 git_dirty_ok = not (git_dirty is True and not ALLOW_DIRTY)
+if git_dirty_at_emit is True and git_dirty is False:
+    notes.append("gitDirtyAtEmit is true — cutter-authored post-preflight mutations were present; build-start source remained clean")
 
 # ── 2. buildSha == live health sha ──────────────────────────────────────────
 if HEALTH_SHA:
@@ -232,6 +237,7 @@ verdict = {
     "buildSha": build_sha,
     "gitDirty": git_dirty,
     "gitDirtyOk": git_dirty_ok,
+    "gitDirtyAtEmit": git_dirty_at_emit,
     "reused": reused,
     "healthMatch": health_ok,
     "artifacts": artifacts_report,

@@ -48,9 +48,14 @@
 # answer WI-4243 found missing (the top-level windows `signed` field means
 # Authenticode, NOT minisign, and was being misread).
 #
-# The git head/dirty are read from PROVENANCE_GIT_ROOT (default: $PWD) — the
-# orchestrator's checkout, which (unlike a VM's rsync'd, .git-less tree) can
-# resolve them.
+# The source git head/dirty normally come from PROVENANCE_GIT_ROOT (default:
+# $PWD). A release orchestrator whose build mutates tracked staging files MUST
+# capture the clean input state before those mutations and pass it through
+# PROVENANCE_SOURCE_GIT_HEAD / PROVENANCE_SOURCE_GIT_DIRTY. The record keeps
+# both moments: gitHead/gitDirty describe the source accepted at cut start,
+# while gitHeadAtEmit/gitDirtyAtEmit describe the checkout when this file was
+# emitted. Conflating those moments made every normal release look dirty after
+# the cutter regenerated tracked env-sidecars (EI-20555742146560765).
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
@@ -63,7 +68,7 @@ OUT_DIR="$1"; VERSION="$2"; BUILD_SHA="$3"; REUSED="$4"; shift 4
 
 GIT_ROOT="${PROVENANCE_GIT_ROOT:-$PWD}"
 GIT_ROOT="$(git -C "$GIT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$GIT_ROOT")"
-GIT_HEAD="$(git -C "$GIT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+GIT_HEAD_AT_EMIT="$(git -C "$GIT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # A superproject's `git diff HEAD` is not a complete clean-snapshot proof. Git
 # can report an uninitialized/empty submodule as clean for that path (the
@@ -112,10 +117,22 @@ submodule_worktree_dirty() {
   return 1
 }
 
-GIT_DIRTY=true
+GIT_DIRTY_AT_EMIT=true
 if git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && ! submodule_worktree_dirty; then
-  GIT_DIRTY=false
+  GIT_DIRTY_AT_EMIT=false
 fi
+
+# The orchestrator is the only layer that can observe the release INPUT before
+# it performs its own version/staging mutations. Direct emitter callers omit
+# these seams and retain the conservative emit-time behavior. Values are
+# validated rather than truthy-coerced so a typo cannot manufacture clean
+# provenance.
+GIT_HEAD="${PROVENANCE_SOURCE_GIT_HEAD:-$GIT_HEAD_AT_EMIT}"
+GIT_DIRTY="${PROVENANCE_SOURCE_GIT_DIRTY:-$GIT_DIRTY_AT_EMIT}"
+[[ "$GIT_HEAD" == "unknown" || "$GIT_HEAD" =~ ^[0-9a-fA-F]{7,64}$ ]] \
+  || { echo "PROVENANCE_SOURCE_GIT_HEAD must be a git object id or 'unknown', got '$GIT_HEAD'" >&2; exit 2; }
+[[ "$GIT_DIRTY" == "true" || "$GIT_DIRTY" == "false" ]] \
+  || { echo "PROVENANCE_SOURCE_GIT_DIRTY must be true|false, got '$GIT_DIRTY'" >&2; exit 2; }
 
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
 _bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
@@ -211,6 +228,8 @@ PROV="$OUT_DIR/build-provenance.json"
   printf '  "reused": %s,\n'      "$REUSED"
   printf '  "gitHead": "%s",\n'   "$GIT_HEAD"
   printf '  "gitDirty": %s,\n'    "$GIT_DIRTY"
+  printf '  "gitHeadAtEmit": "%s",\n' "$GIT_HEAD_AT_EMIT"
+  printf '  "gitDirtyAtEmit": %s,\n' "$GIT_DIRTY_AT_EMIT"
   # Optional leg-specific fields (P-002 consolidation) — emitted only when the
   # caller sets the env seam, so mac/linux output is byte-unchanged. The Windows
   # leg passes both: packedSrcFingerprint (a hash of the exact tree it packed to

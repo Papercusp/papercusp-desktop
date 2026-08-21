@@ -44,7 +44,15 @@ function runCutStart({ linux = 0, windows = 0, mac = 0 } = {}) {
   return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
 }
 
-function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProvenance = true, extraArtifact = false } = {}) {
+function runReuse({
+  priorVersion = '0.0.18',
+  priorBuildSha = 'built-source-sha',
+  priorGitHead = 'a'.repeat(40),
+  priorGitDirty = false,
+  includeArtifact = true,
+  includeProvenance = true,
+  extraArtifact = false,
+} = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-'));
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const appimageDir = path.join(bundle, 'appimage');
@@ -60,7 +68,9 @@ function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProv
     fs.writeFileSync(`${stale}.sig`, 'failed-pre-repair-signature');
   }
   if (includeProvenance) {
-    fs.writeFileSync(path.join(bundle, 'build-provenance.json'), JSON.stringify({ version: priorVersion }));
+    const provenance = { version: priorVersion, gitHead: priorGitHead, gitDirty: priorGitDirty };
+    if (priorBuildSha !== null) provenance.buildSha = priorBuildSha;
+    fs.writeFileSync(path.join(bundle, 'build-provenance.json'), JSON.stringify(provenance));
   }
 
   const command = [
@@ -73,7 +83,7 @@ function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProv
     "PAPERCUSP_BUILD_ROLES='gui server'",
     'PAPERCUSP_REUSE_LINUX=1',
     linuxReuseHarness,
-    "printf 'HARNESS LINUX_REUSE=%s LINUX_PID=%s\\n' \"$LINUX_REUSE\" \"$LINUX_PID\"",
+    "printf 'HARNESS LINUX_REUSE=%s LINUX_PID=%s PRIOR_SHA=%s PRIOR_HEAD=%s PRIOR_DIRTY=%s\\n' \"$LINUX_REUSE\" \"$LINUX_PID\" \"$LINUX_REUSE_BUILD_SHA\" \"$LINUX_REUSE_GIT_HEAD\" \"$LINUX_REUSE_GIT_DIRTY\"",
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
   fs.rmSync(temp, { recursive: true, force: true });
@@ -85,8 +95,14 @@ test('same-version Linux salvage skips the build and enters the canonical collec
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /PAPERCUSP_REUSE_LINUX=1 — skipping linux build/);
   assert.match(result.stdout, /REUSE_linux provenance verified: salvaged version 0\.0\.18 == cut 0\.0\.18/);
-  assert.match(result.stdout, /HARNESS LINUX_REUSE=1 LINUX_PID=$/m);
+  assert.match(result.stdout, /HARNESS LINUX_REUSE=1 LINUX_PID= PRIOR_SHA=built-source-sha PRIOR_HEAD=a{40} PRIOR_DIRTY=false$/m);
   assert.doesNotMatch(result.stdout, /launching Linux x86_64 build/);
+});
+
+test('Linux salvage refuses provenance that cannot identify the bytes it reuses', () => {
+  const result = runReuse({ priorBuildSha: null });
+  assert.notEqual(result.status, 0, 'reuse without prior build identity unexpectedly passed');
+  assert.match(result.stdout + result.stderr, /lacks buildSha\/gitHead\/gitDirty/);
 });
 
 test('Linux salvage refuses to relabel a different version', () => {

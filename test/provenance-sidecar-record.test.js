@@ -29,23 +29,25 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const BIN = path.join(__dirname, '..', 'bin');
 const EMITTER = path.join(BIN, 'emit-build-provenance.sh');
+const VERIFIER = path.join(BIN, 'verify-provenance.sh');
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'prov-sidecar-'));
 }
 
 /** Run the real emitter; return the parsed build-provenance.json it wrote. */
-function emit({ sidecarDir, gitRoot } = {}) {
+function emit({ sidecarDir, gitRoot, extraEnv = {} } = {}) {
   const out = path.join(tmp(), 'out');
   fs.mkdirSync(out, { recursive: true });
   const artifact = path.join(out, 'App_0.0.0_amd64.deb');
   fs.writeFileSync(artifact, 'fixture');
 
-  const env = { ...process.env, PROVENANCE_GIT_ROOT: gitRoot || path.join(BIN, '..') };
+  const env = { ...process.env, PROVENANCE_GIT_ROOT: gitRoot || path.join(BIN, '..'), ...extraEnv };
   if (sidecarDir) env.PROVENANCE_SIDECAR_DIR = sidecarDir;
 
   const r = spawnSync('bash', [EMITTER, out, '0.0.0', 'testsha', 'false', artifact], {
@@ -173,6 +175,70 @@ test('gitDirty fails closed when a submodule path has no checked-out HEAD', () =
 
   const doc = emit({ gitRoot: parent });
   assert.equal(doc.gitDirty, true, 'an absent submodule checkout is not a clean snapshot');
+});
+
+test('clean build-start provenance survives cutter-authored dirt at emit time', () => {
+  const repo = tmp();
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  git(['init', '-q', '-b', 'main']);
+  git(['config', 'user.email', 'provenance@test']);
+  git(['config', 'user.name', 'Provenance Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  fs.writeFileSync(path.join(repo, 'staging.txt'), 'clean input\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'clean source']);
+  const sourceHead = git(['rev-parse', 'HEAD']);
+
+  // Model the real cutter: its preflight accepted the clean commit, then its
+  // own version/env-sidecar staging changed a tracked file before emit.
+  fs.writeFileSync(path.join(repo, 'staging.txt'), 'cutter-generated output\n');
+  const doc = emit({
+    gitRoot: repo,
+    extraEnv: {
+      PROVENANCE_SOURCE_GIT_HEAD: sourceHead,
+      PROVENANCE_SOURCE_GIT_DIRTY: 'false',
+    },
+  });
+
+  assert.equal(doc.gitHead, sourceHead);
+  assert.equal(doc.gitDirty, false, 'the ship gate must describe the source accepted at cut start');
+  assert.equal(doc.gitHeadAtEmit, sourceHead);
+  assert.equal(doc.gitDirtyAtEmit, true, 'post-preflight cutter mutations stay visible as diagnostics');
+});
+
+test('verify-provenance gates build-start dirt, not later cutter mutations', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const base = {
+    version: '0.0.0',
+    buildSha: 'abc1234',
+    reused: false,
+    gitHead: 'a'.repeat(40),
+    gitDirty: false,
+    gitHeadAtEmit: 'a'.repeat(40),
+    gitDirtyAtEmit: true,
+    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+  };
+  const provPath = path.join(dir, 'build-provenance.json');
+  fs.writeFileSync(provPath, JSON.stringify(base));
+
+  const clean = spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
+  assert.equal(clean.status, 0, clean.stderr || clean.stdout);
+  const cleanVerdict = JSON.parse(clean.stdout);
+  assert.equal(cleanVerdict.gitDirtyOk, true);
+  assert.equal(cleanVerdict.gitDirtyAtEmit, true);
+  assert.match(cleanVerdict.notes.join('\n'), /cutter-authored post-preflight mutations/);
+
+  fs.writeFileSync(provPath, JSON.stringify({ ...base, gitDirty: true }));
+  const dirty = spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
+  assert.equal(dirty.status, 1, 'a genuinely dirty build-start source must still fail');
+  assert.match(JSON.parse(dirty.stdout).failures.join('\n'), /release INPUT was dirty at cut start/);
 });
 
 // ── STRUCTURAL: the record is only worth anything if the legs actually pass a dir ──
