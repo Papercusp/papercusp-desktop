@@ -711,7 +711,7 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
         "trap 'rm -f {sentinel_glob}.$$' EXIT; \
          (eval {greet}); \
          exec \"${{SHELL:-/bin/bash}}\" -l",
-        sentinel_glob = SENTINEL_GLOB,
+        sentinel_glob = SENTINEL_PREFIX,
         greet = greeting,
     );
     let interactive_script_quoted = shell_escape_single(&interactive_script);
@@ -1416,15 +1416,36 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn interactive_rc_script(oneliner: &str) -> String {
+        let marker = "--rcfile <(printf '%s\\n' ";
+        let (_, encoded) = oneliner
+            .split_once(marker)
+            .expect("interactive rcfile marker missing");
+        let encoded = encoded
+            .strip_suffix(") -i")
+            .expect("interactive rcfile suffix missing");
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("printf '%s' {encoded}")])
+            .output()
+            .expect("decode interactive rcfile");
+        assert!(output.status.success(), "rcfile literal did not decode");
+        String::from_utf8(output.stdout).expect("rcfile is UTF-8")
+    }
+
     #[test]
     fn oneliner_includes_cwd_env_greeting_and_exec() {
         let e = envelope("/some/harness/dir");
         let out = build_launcher_oneliner(&e);
+        #[cfg(unix)]
+        let script = interactive_rc_script(&out);
         assert!(out.contains("cd '/some/harness/dir'"));
         assert!(out.contains("export PAPERCUSP_HARNESS_SLUG='sheets'"));
         assert!(out.contains("export PAPERCUSP_WORKSPACE='default'"));
-        assert!(out.contains("(eval 'papercup status')"));
-        assert!(out.contains("exec \"${SHELL:-/bin/bash}\" -l"));
+        #[cfg(unix)]
+        assert!(script.contains("(eval 'papercup status')"));
+        #[cfg(unix)]
+        assert!(script.contains("exec \"${SHELL:-/bin/bash}\" -l"));
     }
 
     /// A greeting containing single quotes (e.g. fleet:launch-on-plan's
@@ -1436,8 +1457,11 @@ mod tests {
         let mut e = envelope("/x");
         e.greeting_cmd = "psu --context='it'\\''s quoted' --plan=p1".to_string();
         let out = build_launcher_oneliner(&e);
+        #[cfg(unix)]
+        let script = interactive_rc_script(&out);
+        #[cfg(unix)]
         assert!(
-            out.contains(&format!("(eval {})", shell_escape_single(&e.greeting_cmd))),
+            script.contains(&format!("(eval {})", shell_escape_single(&e.greeting_cmd))),
             "greeting not carried as a shell-escaped eval literal: {out}"
         );
         // The real proof: bash itself must parse the one-liner (`bash -n`
@@ -1474,6 +1498,8 @@ mod tests {
     fn oneliner_drops_sentinel_with_trap() {
         let e = envelope("/x");
         let out = build_launcher_oneliner(&e);
+        #[cfg(unix)]
+        let script = interactive_rc_script(&out);
         // Writes the kernel-backed process identity to a sentinel whose shell
         // pid suffix is expanded ($$ → <pid>, not a literal $).
         assert!(
@@ -1483,8 +1509,9 @@ mod tests {
             "sentinel identity stamp missing or has a literal (unexpanded) $ suffix: {out}"
         );
         // trap fires on EXIT to clean up
+        #[cfg(unix)]
         assert!(
-            out.contains("trap 'rm -f .papercup-console-active.$$' EXIT"),
+            script.contains("trap 'rm -f .papercup-console-active.$$' EXIT"),
             "EXIT trap missing or has a literal (unexpanded) $ suffix: {out}"
         );
     }
