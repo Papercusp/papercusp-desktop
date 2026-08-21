@@ -2328,7 +2328,11 @@ def _expand_installer(path, dest):
         AppImages this project emits use zstd-compressed SquashFS, which the
         host's 7z can identify but cannot extract. The runtime is the producer's
         own format reader and this mode extracts without launching AppRun.
-      • `.dmg` / `.msi` / `.bin` → 7z, whose Dmg/HFS/Udf handlers cover them.
+      • `.dmg` → 7z first; libdmg-hfsplus fallback for DMGs produced by this
+        repo's mac cross-builder. 7z can decode their outer UDIF but reports
+        Data Error on some valid HFS+ members; the producer's hfsplus reader
+        can extract those same members from the raw partition.
+      • `.msi` / `.bin` → 7z, whose MSI/Udf handlers cover them.
       • anything `_expand_archive` already knows (.zip/.tar.*/.deb) → that, so
         the two entrypoints cannot drift in how they read a format they share.
 
@@ -2393,7 +2397,73 @@ def _expand_installer(path, dest):
                 return True, "7z"
         return False, "AppImage runtime+7z"
 
-    if low.endswith((".dmg", ".msi", ".bin")):
+    if low.endswith(".dmg"):
+        if not shutil.which("7z"):
+            print(f"    scan-artifact: cannot expand {path}: 7z not on PATH "
+                  f"(a container this gate cannot open is a hole, not a pass)")
+            return False, "none"
+        r = sh(f"7z x -y -bd -o{q(dest)} {q(path)}")
+        if r.returncode == 0 and _tree_bytes(dest) > 0:
+            return True, "7z"
+
+        # EI-21026285649061558 — libdmg-hfsplus parity with the PRODUCER.
+        # build-mac-cross.sh creates these DMGs as:
+        #   raw HFS+ image → hfsplus addall → `dmg` UDIF compression.
+        # The host 7z can list the final DMG and inflate its outer partition,
+        # but its nested HFS reader reports Data Error on valid large/sparse
+        # members (measured on the 0.0.18 GUI+Server DMGs). Accepting its partial
+        # tree would certify bytes nobody read. Instead, force 7z to decode ONLY
+        # the outer DMG layer (`-tDmg`), then hand the raw HFS+ partition to the
+        # exact tool family that wrote it. The same PAPERCUSP_MAC_CROSS_TOOLS
+        # seam/default as build-mac-cross.sh prevents a parallel tool locator.
+        mac_tools = os.environ.get(
+            "PAPERCUSP_MAC_CROSS_TOOLS",
+            os.path.join(os.path.expanduser("~"), ".papercusp", "mac-cross-tools"),
+        )
+        hfsplus = os.path.join(mac_tools, "hfsplus")
+        outer = dest + ".dmg-outer"
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.rmtree(outer, ignore_errors=True)
+        os.makedirs(dest, exist_ok=True)
+        os.makedirs(outer, exist_ok=True)
+        try:
+            if not os.access(hfsplus, os.X_OK):
+                print(f"    scan-artifact: 7z could not fully extract {path}, and "
+                      f"libdmg-hfsplus reader is missing/not executable at {hfsplus}")
+                return False, "7z+libdmg-hfsplus"
+            r = sh(f"7z x -y -bd -tDmg -o{q(outer)} {q(path)}")
+            raw_parts = []
+            if r.returncode == 0:
+                for dirpath, _dirnames, filenames in os.walk(outer):
+                    for filename in filenames:
+                        candidate = os.path.join(dirpath, filename)
+                        if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                            raw_parts.append(candidate)
+            if len(raw_parts) != 1:
+                print(f"    scan-artifact: outer DMG decode yielded {len(raw_parts)} "
+                      f"nonempty raw partitions for {path}; expected exactly one")
+                return False, "7z -tDmg+libdmg-hfsplus"
+            r = subprocess.run(
+                [hfsplus, raw_parts[0], "extractall"],
+                cwd=dest,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if r.returncode == 0 and _tree_bytes(dest) > 0:
+                return True, "7z -tDmg + libdmg-hfsplus"
+            detail = (r.stderr or "").strip().replace("\n", " ")[:200]
+            print(f"    scan-artifact: libdmg-hfsplus extraction failed for {path}: "
+                  f"exit {r.returncode}{f': {detail}' if detail else ''}")
+            return False, "7z -tDmg+libdmg-hfsplus"
+        finally:
+            # The raw partition is larger than both the DMG and extracted tree;
+            # it is only an intermediate reader seam and must not double the
+            # audit's disk footprint while scan_dir walks the real payload.
+            shutil.rmtree(outer, ignore_errors=True)
+
+    if low.endswith((".msi", ".bin")):
         if not shutil.which("7z"):
             print(f"    scan-artifact: cannot expand {path}: 7z not on PATH "
                   f"(a container this gate cannot open is a hole, not a pass)")
