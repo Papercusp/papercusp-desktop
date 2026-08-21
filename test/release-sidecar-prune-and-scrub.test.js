@@ -250,6 +250,32 @@ test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judg
     'preserved env-sidecar text must be scrubbed after the overlay restore');
 });
 
+test('cross-darwin git vendor prunes git-instaweb before scanning and signing the shipping tree', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const vendorCopy = sh.indexOf(
+    'cp -a "$_cross_darwin_git_keg/libexec/git-core" "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core"',
+  );
+  const prune = sh.indexOf(
+    'rm -f "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core/git-instaweb"',
+    vendorCopy,
+  );
+  const rewriteWalk = sh.indexOf(
+    'find "$SIDECAR_DIR/bin/.git-vendor" -type f -print0',
+    vendorCopy,
+  );
+
+  assert.ok(vendorCopy > 0, 'the cross-darwin Git libexec copy must exist');
+  assert.ok(prune > vendorCopy,
+    'git-instaweb must be pruned from the copied tree, never from the source keg');
+  assert.ok(rewriteWalk > prune,
+    'the prune must happen before the shipping vendor tree is rewritten and signed');
+  assert.match(
+    sh.slice(prune, rewriteWalk),
+    /\[\[ ! -e "\$SIDECAR_DIR\/bin\/\.git-vendor\/libexec\/git-core\/git-instaweb" \]\]/,
+    'the builder must fail closed if git-instaweb survives the prune',
+  );
+});
+
 test('build-desktop-sidecar scrubs every preserved env-sidecar db-sql tree at its copy point', () => {
   const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
   const overlayCopy = sh.indexOf('cp -a "$OLD_DIR/$_overlay" "$SIDECAR_TMP_DIR/$_overlay"');
