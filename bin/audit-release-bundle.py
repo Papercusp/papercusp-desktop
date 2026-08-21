@@ -1269,6 +1269,19 @@ def q(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+def _innoextract_command():
+    """Resolve the same Inno extractor selected by the build preflight.
+
+    The producer/consumer contract is runtime-configurable because the host may
+    carry an innoextract build newer than the distro package.  If an override is
+    present, do not silently substitute the PATH copy: the preflight proved (or
+    rejected) the exact override, and the artifact audit must inspect bytes with
+    that same consumer.
+    """
+    configured = os.environ.get("PAPERCUSP_INNOEXTRACT", "").strip()
+    return shutil.which(configured if configured else "innoextract")
+
+
 def redact(v):
     return f"{v[:8]}…{v[-4:]} (len {len(v)})" if len(v) > 16 else f"{v[:3]}… (len {len(v)})"
 
@@ -2371,12 +2384,13 @@ def _expand_installer(path, dest):
     low = path.lower()
 
     if low.endswith(".exe"):
-        if shutil.which("innoextract"):
+        innoextract = _innoextract_command()
+        if innoextract:
             # --extract-unknown keeps files innoextract cannot classify rather
             # than dropping them: an unclassified blob still has to be scanned.
-            r = sh(f"innoextract -e -s --output-dir {q(dest)} {q(path)}")
+            r = sh(f"{q(innoextract)} -e -s --output-dir {q(dest)} {q(path)}")
             if r.returncode == 0 and _tree_bytes(dest) > 0:
-                return True, "innoextract"
+                return True, f"innoextract ({innoextract})"
         if shutil.which("7z"):
             r = sh(f"7z x -y -bd -o{q(dest)} -tnsis {q(path)}")
             if r.returncode == 0 and _tree_bytes(dest) > 0:
