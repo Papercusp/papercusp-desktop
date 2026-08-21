@@ -475,6 +475,49 @@ const MAC_CROSS = process.env.PROBE_SCRIPT || path.join(root, 'bin/build-mac-cro
 const MAC_VM = path.join(root, 'bin/mac-vm-build.sh');
 const MAC_XATTR_HELPER = path.join(root, 'bin/lib/strip-mac-signing-xattrs.py');
 
+test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a minimal manager PATH', () => {
+  const dir = tmp('mac-cargo-home');
+  const cargoHome = path.join(dir, 'cargo-home');
+  const cargoBin = path.join(cargoHome, 'bin');
+  const zigDir = path.join(dir, 'zig');
+  const missingSdk = path.join(dir, 'missing-sdk');
+  fs.mkdirSync(cargoBin, { recursive: true });
+  fs.mkdirSync(zigDir, { recursive: true });
+
+  const executable = (file, body) => {
+    fs.writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`);
+    fs.chmodSync(file, 0o755);
+  };
+  executable(path.join(cargoBin, 'cargo'), 'printf \'%s\\n\' \'{"target_directory":"/tmp/papercusp-test-target"}\'');
+  executable(path.join(cargoBin, 'cargo-zigbuild'), 'exit 0');
+  executable(path.join(zigDir, 'zig'), 'exit 0');
+
+  try {
+    const r = spawnSync('bash', [MAC_CROSS], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: '/usr/bin:/bin',
+        HOME: dir,
+        CARGO_HOME: cargoHome,
+        PAPERCUSP_ZIG_DIR: zigDir,
+        SDKROOT: missingSdk,
+        PAPERCUSP_RELEASE_HOST: 'updates.invalid.test',
+        PAPERCUSP_BUILD_SHA: 'deadbeef',
+        PAPERCUSP_BUILD_VERSION: '0.0.0-test',
+      },
+    });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 1, output);
+    assert.match(output, /macOS SDK not found/,
+      'the preflight must advance past cargo-zigbuild and stop at the deliberately missing SDK');
+    assert.doesNotMatch(output, /cargo-zigbuild not installed/,
+      'CARGO_HOME\/bin must be visible even when the manager PATH omits it');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('mac producers strip only signing-invalid xattrs and preserve required user.* metadata', () => {
   const dir = tmp('mac-xattrs');
   const file = path.join(dir, 'seed.bin');

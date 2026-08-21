@@ -127,6 +127,17 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 # strings in the shipped binary (--remap-path-prefix). Must be exported BEFORE
 # cargo. A RUSTFLAGS change busts the incremental cache once — expected.
 CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
+# EI-21020929941632443: systemd user managers commonly retain a launch-time
+# PATH that omits Cargo's install directory. `cargo-zigbuild` and `rcodesign`
+# are Cargo-installed release tools, so a detached mac leg used to report them
+# as uninstalled even while both executables were healthy under CARGO_HOME/bin.
+# Append (rather than prepend) the directory: an explicitly selected caller
+# toolchain still wins, while missing Cargo-installed commands become visible
+# before cargo metadata and the fail-closed toolchain preflight below.
+case ":$PATH:" in
+  *":$CARGO_HOME_EFFECTIVE/bin:"*) ;;
+  *) export PATH="$PATH:$CARGO_HOME_EFFECTIVE/bin" ;;
+esac
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
 
 # Build sha baked via option_env! (parity with the VM/windows legs' own loaders).
