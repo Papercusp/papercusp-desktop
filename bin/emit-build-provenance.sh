@@ -26,6 +26,12 @@
 #   PROVENANCE_TOOLCHAIN (json)       — the build toolchain as a JSON object
 #     (rustc/node/tauriCli), recorded by the leg whose emitter runs ON the builder
 #     (the Linux leg: host == builder). P-014 reproducibility hygiene.
+#   PROVENANCE_REPLACE_BUILD_SHA_FROM — compare-and-swap repair seam. When the
+#     output already attests the exact same artifact bytes, changing buildSha is
+#     refused unless this value exactly matches the existing buildSha. This keeps
+#     metadata-only recovery from replacing the identity baked into /api/health.
+#   PROVENANCE_REPLACE_VERSION_FROM   — the equivalent compare-and-swap seam for
+#     the baked app version. Same-byte version rewrites are otherwise refused.
 #
 # Usage:
 #   emit-build-provenance.sh OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT...
@@ -221,6 +227,55 @@ _name() {
 }
 
 PROV="$OUT_DIR/build-provenance.json"
+
+# A metadata-only recovery must not silently relabel bytes that already have an
+# attestation. That is how the 0.0.18 Windows recovery replaced the cutter's
+# baked short SHA (2363b77a) with the full source commit: both values named the
+# same commit, but only one was compiled into /api/health. Detect the strong
+# case we can prove locally — the existing record names the exact same complete
+# artifact set by path, byte count, and sha256 — and make identity changes an
+# explicit compare-and-swap operation. A genuinely fresh build has different
+# artifact bytes and remains free to replace an older record without a flag.
+_existing_artifacts_match() {
+  [[ -f "$PROV" ]] || return 1
+  local current_count=0 existing_count f name bytes sha
+  for f in "$@"; do
+    [[ -e "$f" ]] || continue
+    current_count=$((current_count + 1))
+    name="$(_name "$f")"
+    bytes="$(_bytes "$f")"
+    sha="$(sha256sum "$f" | cut -d' ' -f1)"
+    grep -Fq "\"name\": \"$name\", \"bytes\": $bytes, \"sha256\": \"$sha\"" "$PROV" \
+      || return 1
+  done
+  existing_count="$(grep -c '^    { "name": ' "$PROV" || true)"
+  [[ "$current_count" -gt 0 && "$existing_count" -eq "$current_count" ]]
+}
+
+if _existing_artifacts_match "$@"; then
+  _existing_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
+  _existing_build_sha="$(sed -n 's/.*"buildSha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
+  [[ -n "$_existing_version" && -n "$_existing_build_sha" ]] || {
+    echo "ERROR: existing $PROV matches the current artifact bytes but lacks version/buildSha; refusing to replace an unreadable baked identity" >&2
+    exit 1
+  }
+  if [[ "$_existing_version" != "$VERSION" ]]; then
+    [[ "${PROVENANCE_REPLACE_VERSION_FROM:-}" == "$_existing_version" ]] || {
+      echo "ERROR: existing $PROV attests these exact artifact bytes as version $_existing_version; refusing to rewrite their baked version as $VERSION" >&2
+      echo "       For a verified metadata repair, set PROVENANCE_REPLACE_VERSION_FROM=$_existing_version (compare-and-swap)." >&2
+      exit 1
+    }
+  fi
+  if [[ "$_existing_build_sha" != "$BUILD_SHA" ]]; then
+    [[ "${PROVENANCE_REPLACE_BUILD_SHA_FROM:-}" == "$_existing_build_sha" ]] || {
+      echo "ERROR: existing $PROV attests these exact artifact bytes as buildSha $_existing_build_sha; refusing to rewrite their baked identity as $BUILD_SHA" >&2
+      echo "       Source-commit equivalence is insufficient: /api/health reports the exact compiled string." >&2
+      echo "       For a verified metadata repair, set PROVENANCE_REPLACE_BUILD_SHA_FROM=$_existing_build_sha (compare-and-swap)." >&2
+      exit 1
+    }
+  fi
+fi
+
 {
   printf '{\n'
   printf '  "version": "%s",\n'   "$VERSION"

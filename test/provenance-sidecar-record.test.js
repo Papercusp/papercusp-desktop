@@ -241,6 +241,45 @@ test('verify-provenance gates build-start dirt, not later cutter mutations', () 
   assert.match(JSON.parse(dirty.stdout).failures.join('\n'), /release INPUT was dirty at cut start/);
 });
 
+test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
+  const out = tmp();
+  const artifact = path.join(out, 'Papercusp_GUI_0.0.18_x64-setup.exe');
+  fs.writeFileSync(artifact, 'finished Windows installer bytes');
+  const run = (buildSha, extraEnv = {}) =>
+    spawnSync('bash', [EMITTER, out, '0.0.18', buildSha, 'false', artifact], {
+      encoding: 'utf8',
+      env: { ...process.env, PROVENANCE_GIT_ROOT: path.join(BIN, '..'), ...extraEnv },
+    });
+
+  const original = run('2363b77a');
+  assert.equal(original.status, 0, original.stderr || original.stdout);
+  const provPath = path.join(out, 'build-provenance.json');
+  const originalRecord = fs.readFileSync(provPath, 'utf8');
+
+  const silentRewrite = run('2363b77a68dee8d79528a4a6a94321cc324ed2f7');
+  assert.notEqual(silentRewrite.status, 0, 'same-byte identity rewrite unexpectedly passed');
+  assert.match(silentRewrite.stderr, /refusing to rewrite their baked identity/);
+  assert.match(silentRewrite.stderr, /api\/health reports the exact compiled string/);
+  assert.equal(
+    fs.readFileSync(provPath, 'utf8'),
+    originalRecord,
+    'a refused rewrite must leave the existing attestation byte-identical',
+  );
+
+  const staleCas = run('corrected-sha', { PROVENANCE_REPLACE_BUILD_SHA_FROM: 'not-the-current-sha' });
+  assert.notEqual(staleCas.status, 0, 'a stale compare-and-swap identity repair unexpectedly passed');
+  assert.equal(fs.readFileSync(provPath, 'utf8'), originalRecord);
+
+  const repaired = run('corrected-sha', { PROVENANCE_REPLACE_BUILD_SHA_FROM: '2363b77a' });
+  assert.equal(repaired.status, 0, repaired.stderr || repaired.stdout);
+  assert.equal(JSON.parse(fs.readFileSync(provPath, 'utf8')).buildSha, 'corrected-sha');
+
+  fs.writeFileSync(artifact, 'a genuinely new Windows installer build');
+  const freshBuild = run('fresh-build-sha');
+  assert.equal(freshBuild.status, 0, freshBuild.stderr || freshBuild.stdout);
+  assert.equal(JSON.parse(fs.readFileSync(provPath, 'utf8')).buildSha, 'fresh-build-sha');
+});
+
 // ── STRUCTURAL: the record is only worth anything if the legs actually pass a dir ──
 
 test('every leg that PACKS a sidecar names it; the salvage path deliberately does not', () => {
