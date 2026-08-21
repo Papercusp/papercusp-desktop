@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const { builtinModules, createRequire } = require('node:module');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const ts = require('typescript');
@@ -16,6 +17,76 @@ const builder = fs.readFileSync(
   path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
   'utf8',
 );
+
+/** Extract a top-level shell helper from the real builder for behavioral tests. */
+function extractFunction(name) {
+  const lines = builder.split('\n');
+  const start = lines.findIndex((line) => line === `${name}() {`);
+  assert(start >= 0, `${name}() is missing from build-desktop-sidecar.sh`);
+  const end = lines.findIndex((line, index) => index > start && line === '}');
+  assert(end > start, `${name}() has no top-level closing brace`);
+  return lines.slice(start, end + 1).join('\n');
+}
+
+const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
+
+function runLdconfigResolver(pathValue) {
+  const bash = ['/usr/bin/bash', '/bin/bash'].find((candidate) => fs.existsSync(candidate));
+  assert.ok(bash, 'a bash interpreter is required to exercise the builder helper');
+  return childProcess.spawnSync(
+    bash,
+    ['-c', `set -euo pipefail\n${LDCONFIG_RESOLVER}\nresolve_ldconfig`],
+    { encoding: 'utf8', env: { ...process.env, PATH: pathValue } },
+  );
+}
+
+const HOST_LDCONFIG = ['/usr/sbin/ldconfig', '/sbin/ldconfig'].find((candidate) => {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+test('ldconfig resolver finds admin-directory ldconfig under a minimal PATH', { skip: !HOST_LDCONFIG }, () => {
+  const missingPath = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-no-ldconfig-'));
+  try {
+    const result = runLdconfigResolver(missingPath);
+    assert.equal(
+      result.status,
+      0,
+      `resolver failed with minimal PATH (status ${result.status}):\n${result.stdout}${result.stderr}`,
+    );
+    assert.equal(result.stdout.trim(), HOST_LDCONFIG);
+  } finally {
+    fs.rmSync(missingPath, { recursive: true, force: true });
+  }
+});
+
+test('ldconfig resolver prefers the executable selected by PATH', () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-ldconfig-path-'));
+  try {
+    const pathLdconfig = path.join(bin, 'ldconfig');
+    fs.writeFileSync(pathLdconfig, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(pathLdconfig, 0o755);
+    const result = runLdconfigResolver(bin);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.trim(), pathLdconfig);
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('Linux PostgreSQL library copy loop invokes the resolved ldconfig path', () => {
+  assert.match(builder, /_ldconfig="\$\(resolve_ldconfig\)"/);
+  assert.match(builder, /\$\("\$_ldconfig" -p 2>\/dev\/null/);
+  assert.doesNotMatch(
+    builder,
+    /_libpath="\$\(ldconfig -p/,
+    'the library-copy loop must not invoke ldconfig through PATH directly',
+  );
+});
 
 test('chat-dock cargo target discovery is fail-soft and leaves diagnostics visible', () => {
   assert.match(builder, /if ! CARGO_TGT="\$\(/);

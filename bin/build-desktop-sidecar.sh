@@ -2596,11 +2596,37 @@ WRAP
   echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
 done
 
+# Resolve an executable that may live in an admin-only system directory. Service
+# managers commonly omit /usr/sbin and /sbin from PATH, but ldconfig is still the
+# canonical way to locate the host's SONAMEs. Keep this as a helper rather than
+# spelling a bare ldconfig invocation at each call site: under set -euo pipefail,
+# a missing PATH entry otherwise exits the entire sidecar build before the
+# missing-library diagnostic can run.
+resolve_ldconfig() {
+  local _ldconfig_candidate
+  if _ldconfig_candidate="$(command -v ldconfig 2>/dev/null)" \
+      && [[ -x "$_ldconfig_candidate" ]]; then
+    printf '%s\n' "$_ldconfig_candidate"
+    return 0
+  fi
+  for _ldconfig_candidate in /usr/sbin/ldconfig /sbin/ldconfig; do
+    if [[ -x "$_ldconfig_candidate" ]]; then
+      printf '%s\n' "$_ldconfig_candidate"
+      return 0
+    fi
+  done
+  echo "ERROR: ldconfig not found on PATH, /usr/sbin/ldconfig, or /sbin/ldconfig." >&2
+  echo "       It is required to resolve PostgreSQL client libraries for bundled psql." >&2
+  return 1
+}
+
 # Linux: psql needs readline+tinfo, which minimal images may lack — bundle them
 # into .pg-real/lib (tiny; resolved via the wrapper's LD_LIBRARY_PATH).
 if [[ "$_pg_build_os" == "Linux" && -d "$SIDECAR_DIR/bin/.pg-real" ]]; then
+  _ldconfig="$(resolve_ldconfig)" || exit 1
+  echo "  using ldconfig: $_ldconfig"
   for _lib in libreadline.so.8 libtinfo.so.6; do
-    _libpath="$(ldconfig -p 2>/dev/null | awk -v l="$_lib" '$1==l {print $NF; exit}')"
+    _libpath="$("$_ldconfig" -p 2>/dev/null | awk -v l="$_lib" '$1==l {print $NF; exit}')"
     if [[ -n "$_libpath" && -e "$_libpath" ]]; then
       cp -L "$_libpath" "$SIDECAR_DIR/bin/.pg-real/lib/$_lib"
     else
