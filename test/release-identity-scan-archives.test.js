@@ -67,10 +67,10 @@ function identityLiteral() {
   throw new Error('no high-entropy identity literal available on this host');
 }
 
-function scanDir(dir) {
+function scanDir(dir, env = {}) {
   return spawnSync('python3', [AUDIT, '--scan-dir', dir], {
     encoding: 'utf8',
-    env: AUDIT_ENV,
+    env: { ...AUDIT_ENV, ...env },
   });
 }
 
@@ -277,6 +277,51 @@ test('THE FALSIFIER: a literal extracted only by the DMG fallback fails the fini
     assert.equal(r.status, 1, `a DMG payload identity must fail:\n${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /payload\.txt/);
     assert.doesNotMatch(r.stdout, /COULD NOT BE INSPECTED/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CodeResources treats a short-name collision inside fixed-width signature digests as opaque', () => {
+  const dir = fixture('code-resources-digest');
+  try {
+    const signatureDir = path.join(dir, 'bundle/Papercusp.app/Contents/_CodeSignature');
+    fs.mkdirSync(signatureDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(signatureDir, 'CodeResources'),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<plist><dict>',
+        '<key>Resources/sidecar/spa/assets/factor-aVI-w_hC.js</key>',
+        '<dict><key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpRt/AVI=</data></dict>',
+        '</dict></plist>',
+      ].join('\n'),
+    );
+    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Avi' });
+    assert.equal(r.status, 0, `opaque CodeResources digests must not impersonate owner identity:\n${r.stdout}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('THE FALSIFIER: authored owner identity in CodeResources still fails', () => {
+  const dir = fixture('code-resources-authored');
+  try {
+    const signatureDir = path.join(dir, 'bundle/Papercusp.app/Contents/_CodeSignature');
+    fs.mkdirSync(signatureDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(signatureDir, 'CodeResources'),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<plist><dict>',
+        '<key>build-owner</key><string>Avi</string>',
+        '<key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpRt/AVI=</data>',
+        '</dict></plist>',
+      ].join('\n'),
+    );
+    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Avi' });
+    assert.equal(r.status, 1, `authored CodeResources identity must remain blocking:\n${r.stdout}`);
+    assert.match(r.stdout, /CodeResources/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
