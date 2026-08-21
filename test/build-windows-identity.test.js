@@ -90,7 +90,7 @@ test('every cargo-xwin build passes RUSTFLAGS carrying the remap', () => {
 test('the Windows cross-build compiles an immutable source snapshot and pins its stamp', () => {
   assert.match(
     script,
-    /BUILD_COMMIT_SHA="\$\(git -C "\$SOURCE_ROOT" rev-parse HEAD/, 
+    /BUILD_COMMIT_SHA="\$\(git -C "\$SOURCE_ROOT" rev-parse HEAD/,
     'the producer must resolve the source commit before cargo starts',
   );
   assert.match(
