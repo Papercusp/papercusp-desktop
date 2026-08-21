@@ -25,13 +25,20 @@ function sliceBetween(start, end) {
 // changes with it.
 const linuxReuseHarness = sliceBetween('_prov_version()', '# ── Mobile');
 
-function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProvenance = true } = {}) {
+function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProvenance = true, extraArtifact = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-'));
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const appimageDir = path.join(bundle, 'appimage');
   fs.mkdirSync(appimageDir, { recursive: true });
   if (includeArtifact) {
-    fs.writeFileSync(path.join(appimageDir, 'Papercusp_GUI_0.0.18_amd64.AppImage'), 'finished-linux-bytes');
+    const artifact = path.join(appimageDir, 'Papercusp_GUI_0.0.18_amd64.AppImage');
+    fs.writeFileSync(artifact, 'finished-linux-bytes');
+    fs.writeFileSync(`${artifact}.sig`, 'finished-linux-signature');
+  }
+  if (extraArtifact) {
+    const stale = path.join(appimageDir, 'Papercusp GUI_0.0.18_amd64.AppImage');
+    fs.writeFileSync(stale, 'failed-pre-repair-bytes');
+    fs.writeFileSync(`${stale}.sig`, 'failed-pre-repair-signature');
   }
   if (includeProvenance) {
     fs.writeFileSync(path.join(bundle, 'build-provenance.json'), JSON.stringify({ version: priorVersion }));
@@ -44,6 +51,7 @@ function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProv
     'VERSION=0.0.18',
     'BUILD_SHA=exact-source-sha',
     'TAG=desktop-v0.0.18-alpha',
+    "PAPERCUSP_BUILD_ROLES='gui server'",
     'PAPERCUSP_REUSE_LINUX=1',
     linuxReuseHarness,
     "printf 'HARNESS LINUX_REUSE=%s LINUX_PID=%s\\n' \"$LINUX_REUSE\" \"$LINUX_PID\"",
@@ -74,14 +82,23 @@ test('Linux salvage refuses an empty bundle before claiming reuse', () => {
   assert.match(result.stdout + result.stderr, /no 0\.0\.18 linux artifacts/);
 });
 
+test('Linux salvage refuses two same-version AppImages instead of picking by iteration order', () => {
+  const result = runReuse({ extraArtifact: true });
+  assert.notEqual(result.status, 0, 'ambiguous Linux AppImage set unexpectedly passed');
+  assert.match(result.stdout + result.stderr, /bundle is ambiguous\/incomplete/);
+  assert.match(result.stdout + result.stderr, /found appimages=2 signatures=2/);
+});
+
 test('Linux reuse stays on the shared provenance and collection surfaces', () => {
   const branch = sliceBetween('LINUX_LEG_LOG=', '# ── Mobile');
   const collection = sliceBetween('ARTIFACTS=()', 'if [[ "$WITH_ARM64" == "1" ]]');
 
   assert.match(branch, /PAPERCUSP_REUSE_LINUX/);
   assert.match(branch, /assert_reused_provenance "\$LINUX_BUNDLE" linux/);
+  assert.match(branch, /assert_linux_artifact_cardinality "\$LINUX_BUNDLE"/);
   assert.match(branch, /LINUX_REUSE=1/);
   assert.match(collection, /linux_found=1/);
+  assert.match(collection, /assert_linux_artifact_cardinality "\$LINUX_BUNDLE"/);
   assert.match(collection, /"\$LINUX_REUSE" == "1"/);
   assert.match(collection, /emit-build-provenance\.sh/);
 });
