@@ -251,6 +251,55 @@ PY_NORMALIZE_APPIMAGE_HOOKS
 fi
 rm -rf "$DEPLOY_STAGE"
 
+# 2c-gst. BUNDLE THE GSTREAMER PLUGIN CLOSURE (EI-20082216700215037).
+#     linuxdeploy deploys WebKitGTK's libgstreamer dependencies but does not copy
+#     the element plugins that GStreamer discovers at runtime. On a pristine host
+#     that leaves WebKit media with "element appsink not found": the library
+#     libgstapp-1.0.so.0 is present, but the appsink element lives in the separate
+#     libgstapp.so plugin under gstreamer-1.0/. Copy the build host's plugin set
+#     beside the bundled libraries and fail closed if the appsink provider or the
+#     scanner is absent. The source override makes the seam testable and supports
+#     builders whose multiarch prefix differs from this x86_64 default.
+GST_PLUGIN_SOURCE="${PAPERCUSP_GSTREAMER_PLUGIN_DIR:-/usr/lib/x86_64-linux-gnu/gstreamer-1.0}"
+GST_PLUGIN_DEST="$APPDIR/usr/lib/gstreamer-1.0"
+if [ ! -d "$GST_PLUGIN_SOURCE" ] || [ ! -f "$GST_PLUGIN_SOURCE/libgstapp.so" ]; then
+  echo "FATAL: GStreamer plugin source is missing libgstapp.so: $GST_PLUGIN_SOURCE" >&2
+  exit 1
+fi
+mkdir -p "$GST_PLUGIN_DEST"
+cp -a "$GST_PLUGIN_SOURCE"/. "$GST_PLUGIN_DEST"/ || {
+  echo "FATAL: failed to copy GStreamer plugins into the AppDir" >&2
+  exit 1
+}
+
+GST_SCANNER_SOURCE="${PAPERCUSP_GSTREAMER_SCANNER:-}"
+if [ -z "$GST_SCANNER_SOURCE" ]; then
+  for _scanner in \
+    /usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner \
+    /usr/libexec/gstreamer-1.0/gst-plugin-scanner; do
+    if [ -x "$_scanner" ]; then GST_SCANNER_SOURCE="$_scanner"; break; fi
+  done
+fi
+GST_SCANNER_DEST="$APPDIR/usr/lib/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner"
+if [ -z "$GST_SCANNER_SOURCE" ] || [ ! -x "$GST_SCANNER_SOURCE" ]; then
+  echo "FATAL: GStreamer plugin scanner is missing" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$GST_SCANNER_DEST")"
+cp -a "$GST_SCANNER_SOURCE" "$GST_SCANNER_DEST" || {
+  echo "FATAL: failed to copy the GStreamer plugin scanner into the AppDir" >&2
+  exit 1
+}
+[ -f "$GST_PLUGIN_DEST/libgstapp.so" ] || {
+  echo "FATAL: AppDir is missing the GStreamer appsink provider (libgstapp.so)" >&2
+  exit 1
+}
+[ -x "$GST_SCANNER_DEST" ] || {
+  echo "FATAL: AppDir is missing an executable GStreamer plugin scanner" >&2
+  exit 1
+}
+echo "   bundled GStreamer plugins: $(find "$GST_PLUGIN_DEST" -maxdepth 1 -type f -name 'libgst*.so*' | wc -l) + plugin scanner"
+
 # 2c-i. GL/EGL FALLBACK (last on LD_LIBRARY_PATH, never overriding the host).
 #     linuxdeploy's excludelist deliberately drops the libglvnd dispatch libs
 #     because they are driver-coupled — correct on a box that HAS them, fatal on
@@ -424,6 +473,11 @@ for _gio in "$HERE/usr/lib/x86_64-linux-gnu/gio/modules" "$HERE/usr/lib/gio/modu
 done
 # gstreamer (webkit media)
 [ -d "$HERE/usr/lib/gstreamer-1.0" ] && export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+for _gst_scanner in \
+  "$HERE/usr/lib/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner" \
+  "$HERE/usr/libexec/gstreamer-1.0/gst-plugin-scanner"; do
+  [ -x "$_gst_scanner" ] && export GST_PLUGIN_SCANNER="$_gst_scanner" && break
+done
 # WebKitGTK helper-process exec path (network/web process live beside the lib)
 for _wk in "$HERE/usr/libexec/webkit2gtk-4.1" "$HERE/usr/lib/webkit2gtk-4.1" "$HERE/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"; do
   [ -d "$_wk" ] && export WEBKIT_EXEC_PATH="$_wk" && break
