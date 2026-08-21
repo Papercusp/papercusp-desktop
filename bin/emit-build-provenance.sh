@@ -236,20 +236,45 @@ PROV="$OUT_DIR/build-provenance.json"
 # artifact set by path, byte count, and sha256 — and make identity changes an
 # explicit compare-and-swap operation. A genuinely fresh build has different
 # artifact bytes and remains free to replace an older record without a flag.
+_existing_artifact_rows() {
+  # Parse both this emitter's compact artifact lines and a jq-pretty-printed
+  # record. The latter is the exact 0.0.18 recovery shape that exposed this
+  # bug. Keep this POSIX-awk-only: the emitter also runs on the mac builder.
+  awk '
+    function string_field(line, key, value) {
+      value = line
+      sub("^.*\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\"", "", value)
+      sub("\\\".*$", "", value)
+      return value
+    }
+    function number_field(line, key, value) {
+      value = line
+      sub("^.*\\\"" key "\\\"[[:space:]]*:[[:space:]]*", "", value)
+      sub("[^0-9].*$", "", value)
+      return value
+    }
+    /"name"[[:space:]]*:/ { name = string_field($0, "name") }
+    /"bytes"[[:space:]]*:/ { bytes = number_field($0, "bytes") }
+    /"sha256"[[:space:]]*:/ { sha = string_field($0, "sha256") }
+    /"sig"[[:space:]]*:/ {
+      if (name != "" && bytes != "" && sha != "") print name "\t" bytes "\t" sha
+      name = bytes = sha = ""
+    }
+  ' "$1"
+}
+
 _existing_artifacts_match() {
   [[ -f "$PROV" ]] || return 1
-  local current_count=0 existing_count f name bytes sha
-  for f in "$@"; do
-    [[ -e "$f" ]] || continue
-    current_count=$((current_count + 1))
-    name="$(_name "$f")"
-    bytes="$(_bytes "$f")"
-    sha="$(sha256sum "$f" | cut -d' ' -f1)"
-    grep -Fq "\"name\": \"$name\", \"bytes\": $bytes, \"sha256\": \"$sha\"" "$PROV" \
-      || return 1
-  done
-  existing_count="$(grep -c '^    { "name": ' "$PROV" || true)"
-  [[ "$current_count" -gt 0 && "$existing_count" -eq "$current_count" ]]
+  local current_rows existing_rows f
+  current_rows="$({
+    for f in "$@"; do
+      [[ -e "$f" ]] || continue
+      printf '%s\t%s\t%s\n' \
+        "$(_name "$f")" "$(_bytes "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+    done
+  } | LC_ALL=C sort)"
+  existing_rows="$(_existing_artifact_rows "$PROV" | LC_ALL=C sort)"
+  [[ -n "$current_rows" && "$existing_rows" == "$current_rows" ]]
 }
 
 if _existing_artifacts_match "$@"; then

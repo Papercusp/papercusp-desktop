@@ -254,6 +254,11 @@ test('same artifact bytes cannot silently acquire a different baked buildSha', (
   const original = run('2363b77a');
   assert.equal(original.status, 0, original.stderr || original.stdout);
   const provPath = path.join(out, 'build-provenance.json');
+  // Recovery tooling may reserialize the record through jq before invoking the
+  // emitter. The production 0.0.18 record was formatted this way, so matching
+  // only the emitter's compact one-artifact-per-line layout misses the incident.
+  const originalDoc = JSON.parse(fs.readFileSync(provPath, 'utf8'));
+  fs.writeFileSync(provPath, `${JSON.stringify(originalDoc, null, 2)}\n`);
   const originalRecord = fs.readFileSync(provPath, 'utf8');
 
   const silentRewrite = run('2363b77a68dee8d79528a4a6a94321cc324ed2f7');
