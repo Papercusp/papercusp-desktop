@@ -50,6 +50,7 @@ Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
 """
+import base64
 import fnmatch
 import functools
 import os
@@ -889,6 +890,9 @@ def lit_rx(lit):
 _OPAQUE_ASSET_REFERENCE_RE = re.compile(
     rb"[A-Za-z0-9_.-]+-(?P<fingerprint>[A-Za-z0-9_-]{8})\.js"
 )
+_CODE_RESOURCES_DATA_RE = re.compile(
+    rb"<data>[\t\r\n ]*(?P<digest>[A-Za-z0-9+/=\t\r\n ]+?)[\t\r\n ]*</data>"
+)
 _MEDIA_EXTENSION_NEIGHBOURS = (b'"mp4"', b'"webm"', b'"mov"', b'"wmv"')
 
 
@@ -920,6 +924,29 @@ def low_entropy_match_is_benign(name, data, match):
         fp_end = window_start + asset.end("fingerprint")
         if fp_start <= start and end <= fp_end:
             return True
+
+    # EI-21026798895920806: Apple's generated CodeResources is XML text, but its
+    # <data> bodies are opaque SHA-1/SHA-256 digests. A random digest ending
+    # `/AVI=` tripped the three-letter owner-name gate on all four 0.0.18 mac
+    # artifacts. Accept the OCCURRENCE only when all of these structural facts
+    # hold: the file is exactly a code-signature resource manifest, the match is
+    # wholly inside a syntactically valid base64 <data> element, and decoding
+    # yields one of the two digest widths CodeResources records. An authored
+    # <string>Avi</string>, key/path, or malformed/variable-width blob remains a
+    # release-blocking hit.
+    normalized_name = name.replace("\\", "/")
+    if normalized_name.endswith("/_CodeSignature/CodeResources"):
+        for element in _CODE_RESOURCES_DATA_RE.finditer(data):
+            digest_start, digest_end = element.span("digest")
+            if not (digest_start <= start and end <= digest_end):
+                continue
+            compact = re.sub(rb"[\t\r\n ]+", b"", element.group("digest"))
+            try:
+                decoded = base64.b64decode(compact, validate=True)
+            except (ValueError, base64.binascii.Error):
+                continue
+            if len(decoded) in (20, 32):
+                return True
 
     if token != b"avi":
         return False
