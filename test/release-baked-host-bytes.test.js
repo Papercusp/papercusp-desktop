@@ -98,6 +98,24 @@ test('raw artifact bytes carrying the expected release host pass', () => {
   }
 });
 
+test('expected host followed by adjacent Rust string-table bytes passes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-byte-proof-adjacent-'));
+  try {
+    const artifact = writeRawFixture(dir, 'raw.bin', `${base}USERPROFILEcould\0`);
+    const result = runProof([artifact]);
+
+    assert.equal(result.status, 0, result.output);
+    assert.deepEqual(summary(result.output), {
+      checked: 1,
+      mismatched: 0,
+      unverified: 0,
+      skippedSignatures: 0,
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('raw artifact bytes carrying a foreign release host fail closed', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-byte-proof-foreign-'));
   try {
@@ -116,6 +134,28 @@ test('raw artifact bytes carrying a foreign release host fail closed', () => {
       skippedSignatures: 0,
     });
     assert.match(result.output, /foreign\/mixed host fingerprint/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('foreign path on the expected release authority still fails closed', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-byte-proof-foreign-path-'));
+  try {
+    const artifact = writeRawFixture(
+      dir,
+      'foreign-path.bin',
+      'https://download-test.example.invalid/different-secret/latest.json\n',
+    );
+    const result = runProof([artifact]);
+
+    assert.equal(result.status, 1, result.output);
+    assert.deepEqual(summary(result.output), {
+      checked: 0,
+      mismatched: 1,
+      unverified: 0,
+      skippedSignatures: 0,
+    });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

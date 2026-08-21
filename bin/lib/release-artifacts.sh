@@ -215,6 +215,7 @@ release_artifacts_assert_baked_host_from_bytes() {
   }
 
   RELEASE_HOST_PROOF_EXPECTED_FP="$expected_fp" \
+  RELEASE_HOST_PROOF_EXPECTED_BASE="$base" \
   RELEASE_HOST_PROOF_EXPECTED_AUTHORITY="$expected_authority" \
   RELEASE_HOST_PROOF_EXPECTED_PATH="$expected_path" \
     python3 - "$@" <<'PY'
@@ -228,6 +229,7 @@ import zipfile
 from urllib.parse import urlsplit
 
 EXPECTED_FP = os.environ["RELEASE_HOST_PROOF_EXPECTED_FP"]
+EXPECTED_BASE = os.environ["RELEASE_HOST_PROOF_EXPECTED_BASE"]
 EXPECTED_AUTHORITY = os.environ["RELEASE_HOST_PROOF_EXPECTED_AUTHORITY"].lower()
 EXPECTED_PATH = os.environ["RELEASE_HOST_PROOF_EXPECTED_PATH"].rstrip("/")
 EXPECTED_HOST = (urlsplit(f"https://{EXPECTED_AUTHORITY}").hostname or "").lower()
@@ -246,6 +248,16 @@ def release_host_prefix(raw):
     except UnicodeDecodeError:
         return None
     value = value.rstrip(".,;:)]}\"'")
+
+    # Rust may place unrelated printable string constants immediately after an
+    # option_env! value in .rodata without a NUL delimiter. URL_RE necessarily
+    # consumes that suffix (for example, RELEASE_HOST + "USERPROFILEcould") and
+    # would otherwise hash a synthetic URL that never existed at compile time.
+    # The exact expected base is still byte-proven in that sequence, so
+    # canonicalize it before parsing the remainder as a possible foreign host.
+    if value.startswith(EXPECTED_BASE):
+        return EXPECTED_BASE
+
     parsed = urlsplit(value)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
