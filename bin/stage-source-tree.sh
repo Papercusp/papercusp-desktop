@@ -308,7 +308,12 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
     [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
   done < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
   if (( ${#_leakers[@]} > 0 )); then
-    SCRUB_DIR="$(mktemp -d "$SIDECAR/.stage-scrub-XXXXXX")"
+    # Keep the quarantine outside the packaged sidecar. Tauri/deb packaging can
+    # read the sidecar after source.tar.zst appears but before this script's EXIT
+    # trap runs; an in-sidecar quarantine then becomes public duplicate payload.
+    # The trap still removes this external workspace, but cleanup timing can no
+    # longer change the contents of any sidecar artifact (EI-20559353000427453).
+    SCRUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-stage-scrub-XXXXXX")"
     for _rel in "${_leakers[@]}"; do
       [[ -f "$MONO/$_rel" ]] || continue
       mkdir -p "$SCRUB_DIR/SCRUBBED/$(dirname "$_rel")"

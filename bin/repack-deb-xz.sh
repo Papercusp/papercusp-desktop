@@ -31,6 +31,29 @@ XZ_MEMORY_LIMIT="${PAPERCUSP_XZ_MEMORY_LIMIT:-4GiB}"
   exit 7
 }
 
+# EI-20559353000427453: stage-source-tree.sh's identity scrub uses an external
+# quarantine, so a Debian payload must never contain the old in-sidecar
+# `.stage-scrub-*/` tree. Check the package before recompression (and also when
+# it is already xz-packed) so a future regression fails at the Debian chokepoint
+# instead of shipping duplicate redacted source files.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-deb-xz-guard.XXXXXX")"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+set +e
+dpkg-deb --contents "$DEB_PATH" | grep -E '(^|/)\.stage-scrub-[^/]*/' > "$WORK/stage-scrub-members.txt"
+_stage_scrub_status=("${PIPESTATUS[@]}")
+set -e
+if [[ "${_stage_scrub_status[0]}" != "0" ]]; then
+  echo "FATAL: could not inspect Debian payload for stale .stage-scrub members: $DEB_PATH" >&2
+  exit 8
+fi
+if [[ -s "$WORK/stage-scrub-members.txt" ]]; then
+  echo "FATAL: Debian payload contains stale .stage-scrub members; refusing to ship duplicate scrub files: $DEB_PATH" >&2
+  sed -n '1,20p' "$WORK/stage-scrub-members.txt" >&2
+  exit 8
+fi
+
 mapfile -t MEMBERS < <(ar t "$DEB_PATH")
 [[ "${#MEMBERS[@]}" -eq 3 ]] || {
   echo "FATAL: expected exactly 3 deb members in $DEB_PATH, found ${#MEMBERS[@]}" >&2
@@ -64,10 +87,6 @@ if [[ -f "$DEB_PATH.sig" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   echo "FATAL: $DEB_PATH.sig exists but TAURI_SIGNING_PRIVATE_KEY is unset; refusing to create a stale signature" >&2
   exit 5
 fi
-
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-deb-xz.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
-trap cleanup EXIT
 
 ar p "$DEB_PATH" debian-binary > "$WORK/debian-binary"
 ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
