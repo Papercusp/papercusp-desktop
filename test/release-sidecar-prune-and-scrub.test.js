@@ -518,6 +518,46 @@ test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a min
   }
 });
 
+test('build-mac-cross Info.plist generator closes its Python heredoc before shell helpers', () => {
+  const src = fs.readFileSync(MAC_CROSS, 'utf8');
+  const fnStart = src.indexOf('gen_info_plist() {');
+  const nextSection = src.indexOf('# ── env-sidecars/staging', fnStart);
+  assert.ok(fnStart > 0 && nextSection > fnStart, 'gen_info_plist function boundaries must exist');
+  const fn = src.slice(fnStart, nextSection);
+  const pyStart = fn.indexOf("<<'PY'");
+  const pyEnd = fn.indexOf('\nPY\n', pyStart);
+  const shellHelper = src.indexOf('strip_mac_signing_xattrs() {');
+  const absolutePyEnd = fnStart + pyEnd;
+
+  assert.ok(pyStart > 0 && pyEnd > pyStart, 'gen_info_plist must have a closed Python heredoc');
+  assert.ok(shellHelper > absolutePyEnd,
+    'shell helper definitions must never be embedded inside gen_info_plist Python input');
+
+  const dir = tmp('mac-plist-heredoc');
+  const input = path.join(dir, 'Info.plist');
+  const output = path.join(dir, 'Generated.plist');
+  fs.writeFileSync(input, [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0"><dict><key>NSMicrophoneUsageDescription</key><string>Synthetic fixture</string></dict></plist>',
+  ].join('\n'));
+  try {
+    const r = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'VERSION=0.0.0-test',
+      `SRC_TAURI=${JSON.stringify(dir)}`,
+      fn,
+      `gen_info_plist com.papercusp.synthetic 'Synthetic App' ${JSON.stringify(output)}`,
+    ].join('\n')], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    const generated = fs.readFileSync(output, 'utf8');
+    assert.match(generated, /com\.papercusp\.synthetic/);
+    assert.match(generated, /Synthetic fixture/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('mac producers strip only signing-invalid xattrs and preserve required user.* metadata', () => {
   const dir = tmp('mac-xattrs');
   const file = path.join(dir, 'seed.bin');
