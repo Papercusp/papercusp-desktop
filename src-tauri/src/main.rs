@@ -4718,6 +4718,68 @@ fn wait_for_operator(
     ))
 }
 
+/// Keep a timed-out first boot recoverable on every desktop target.
+///
+/// install_load_failure_recovery is a WebKitGTK signal hook and therefore
+/// only exists on Linux. macOS/WKWebView and Windows/WebView2 can strand the
+/// initial document when the operator misses the short GUI boot budget: their
+/// native error pages do not run the bundled retry HTML, and the normal
+/// cross-platform operator watcher is only started after a successful boot.
+/// Continue watching the workspace discovery file from Rust instead. Once a
+/// live HTTP operator appears, the existing navigation/injection path can
+/// recover even when the webview's first navigation failed completely.
+///
+/// This is deliberately a separate watcher from spawn_operator_watcher:
+/// the latter owns an already-attached operator and follows later dynamic-port
+/// moves, while this one owns only the pre-attach gap. It exits as soon as the
+/// window closes or the first live operator is attached.
+fn spawn_boot_recovery_watcher(
+    app_handle: tauri::AppHandle,
+    workspace_home: std::path::PathBuf,
+    via_wsl: bool,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let Some(window) = app_handle.get_webview_window("main") else {
+            println!(
+                "[papercusp-desktop] initial-load recovery watcher stopping — main window closed"
+            );
+            return;
+        };
+
+        let Some(discovery) = find_operator_discovery(&workspace_home, via_wsl) else {
+            continue;
+        };
+        if !discovery_pid_alive(discovery.pid, via_wsl) || !operator_http_ready(discovery.port) {
+            continue;
+        }
+
+        let port = discovery.port;
+        println!(
+            "[papercusp-desktop] initial-load recovery found operator :{} — re-navigating the webview",
+            port
+        );
+        point_window_at_operator(&window, port, 30);
+        restore_window_visibility(&window, "initial-load-recovery");
+        {
+            let state: tauri::State<SidecarState> = app_handle.state();
+            *state.port.lock().unwrap() = Some(port);
+        }
+
+        // The normal watcher owns the post-attach dynamic-port lifecycle.
+        spawn_operator_watcher(
+            app_handle.clone(),
+            workspace_home.clone(),
+            via_wsl,
+            port,
+        );
+        let window_sc = window.clone();
+        std::thread::spawn(move || run_update_self_check(&window_sc, port));
+        return;
+    });
+}
+
 /// Everything that used to run synchronously in setup() after spawning serve
 /// (P-053): wait for discovery, record the port, wire endpoint-IPC, and feed
 /// the bootstrap page its base — or a visible failure state. Runs on a worker
@@ -4857,6 +4919,12 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
                 }
                 return;
             }
+            // The initial navigation may already have failed by the time this
+            // timeout is reached. Linux has a WebKitGTK load-failed callback,
+            // but WKWebView/WebView2 do not expose the same hook through the
+            // Tauri surface. Keep the Rust-side recovery alive so a slow but
+            // ultimately healthy operator can still attach on all platforms.
+            spawn_boot_recovery_watcher(app_handle.clone(), workspace_home.clone(), via_wsl);
             eprintln!("[papercusp-desktop] FATAL: {}", reason);
             // Surface the failure ON the bootstrap page — web/index.html
             // renders window.__papercuspBootError as a terminal error
