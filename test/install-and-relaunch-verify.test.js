@@ -1,0 +1,166 @@
+'use strict';
+
+// EI-21098317150752345 — Windows is a split GUI + Server product. The GUI never
+// owns the operator, so an update proof that installs only the GUI can relaunch
+// the old Server and falsely attribute the resulting no-flip to EI-9002. Drive
+// the real Bash verifier through hermetic ssh/scp shims and require the complete,
+// provenance-matched Server Inno span to install before either app relaunches.
+
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} = require('node:fs');
+const { tmpdir } = require('node:os');
+const { basename, join } = require('node:path');
+const { test } = require('node:test');
+
+const SCRIPT = join(__dirname, '..', 'bin', 'install-and-relaunch-verify.sh');
+const TARGET_SHA = '2363b77a68dee8d79528a4a6a94321cc324ed2f7';
+const VERSION = '0.0.18';
+
+function executable(dir, name, source) {
+  const file = join(dir, name);
+  writeFileSync(file, source);
+  chmodSync(file, 0o755);
+  return file;
+}
+
+function writeProvenance(dir, sha = TARGET_SHA) {
+  const names = [
+    `Papercusp GUI_${VERSION}_x64-setup.exe`,
+    `Papercusp Server_${VERSION}_x64-setup.exe`,
+    `Papercusp Server_${VERSION}_x64-setup-1.bin`,
+    `Papercusp Server_${VERSION}_x64-setup-2.bin`,
+  ];
+  writeFileSync(join(dir, 'build-provenance.json'), JSON.stringify({
+    version: VERSION,
+    buildSha: sha,
+    artifacts: names.map((name) => ({ name })),
+  }));
+}
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'install-relaunch-server-'));
+  const artifacts = join(root, 'artifacts');
+  const shims = join(root, 'shims');
+  mkdirSync(artifacts);
+  mkdirSync(shims);
+
+  const gui = join(artifacts, `Papercusp GUI_${VERSION}_x64-setup.exe`);
+  const server = join(artifacts, `Papercusp Server_${VERSION}_x64-setup.exe`);
+  const slices = [1, 2].map((index) => join(artifacts, `Papercusp Server_${VERSION}_x64-setup-${index}.bin`));
+  for (const file of [gui, server, ...slices]) writeFileSync(file, basename(file));
+  writeProvenance(artifacts);
+
+  const log = join(root, 'transport.log');
+  const flipped = join(root, 'flipped');
+  const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
+printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+case "$*" in
+  *"cmd /c echo VM-OK"*) printf 'VM-OK\\n' ;;
+  *"--exec cat /home/papercup/.papercusp/operator.json"*) printf '{"port":15747}\\n' ;;
+  *"--exec curl -sS -m 5 http://127.0.0.1:15747/api/health"*)
+    if [[ -f "$MOCK_FLIPPED" ]]; then
+      printf '{"sha":"${TARGET_SHA}","version":"${VERSION}"}\\n'
+    else
+      printf '{"sha":"old-sha","version":"0.0.17"}\\n'
+    fi
+    ;;
+  *"schtasks /run /tn papercusp-e2e"*) : > "$MOCK_FLIPPED" ;;
+esac
+`);
+  const scp = executable(shims, 'scp', `#!/usr/bin/env bash
+printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
+`);
+
+  return { root, gui, server, slices, log, flipped, ssh, scp };
+}
+
+function runVerify(f, extraArgs = []) {
+  return spawnSync('bash', [
+    SCRIPT,
+    '--platform', 'windows',
+    '--artifact', f.gui,
+    '--expected-sha', TARGET_SHA,
+    '--expected-version', VERSION,
+    '--install-timeout', '2',
+    '--flip-timeout', '2',
+    '--poll-interval', '0',
+    '--json',
+    ...extraArgs,
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: f.root,
+      PC_SSH: f.ssh,
+      PC_SCP: f.scp,
+      MOCK_LOG: f.log,
+      MOCK_FLIPPED: f.flipped,
+    },
+  });
+}
+
+test('Windows auto-resolves, pushes, and installs the complete Server span before relaunch', () => {
+  const f = fixture();
+  try {
+    const result = runVerify(f);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.flipped, true);
+    assert.equal(verdict.portHeld, true);
+    assert.equal(verdict.serverArtifact, f.server);
+    assert.equal(verdict.serverCompanionCount, 2);
+
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    for (const file of [f.gui, f.server, ...f.slices]) {
+      assert.ok(lines.some((line) => line.startsWith('SCP ') && line.includes(file)), `missing push for ${file}`);
+    }
+    const guiInstall = lines.findIndex((line) => line.startsWith('SSH ') && line.includes(`Papercusp GUI_${VERSION}_x64-setup.exe`) && line.includes('/VERYSILENT'));
+    const serverInstall = lines.findIndex((line) => line.startsWith('SSH ') && line.includes(`Papercusp Server_${VERSION}_x64-setup.exe`) && line.includes('/VERYSILENT'));
+    const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('schtasks /run /tn papercusp-e2e'));
+    assert.ok(guiInstall >= 0, 'GUI installer was not invoked');
+    assert.ok(serverInstall > guiInstall, 'Server must install after GUI');
+    assert.ok(relaunch > serverInstall, 'neither app may relaunch before matching Server install finishes');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Windows refuses a provenance-listed Server span when any disk is absent', () => {
+  const f = fixture();
+  try {
+    unlinkSync(f.slices[1]);
+    const result = runVerify(f);
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /provenance-listed Server artifact missing/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('an explicit Server installer must attest the same build sha as the GUI', () => {
+  const f = fixture();
+  try {
+    const other = join(f.root, 'other-build');
+    mkdirSync(other);
+    const otherServer = join(other, basename(f.server));
+    writeFileSync(otherServer, 'server');
+    for (const slice of f.slices) writeFileSync(join(other, basename(slice)), 'slice');
+    writeProvenance(other, 'different-build-sha');
+
+    const result = runVerify(f, ['--server-artifact', otherServer]);
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /server artifact buildSha mismatch/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});

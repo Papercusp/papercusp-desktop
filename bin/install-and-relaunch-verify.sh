@@ -8,9 +8,12 @@
 # What it proves (the sequence, per platform):
 #   1. BEFORE: snapshot the RUNNING operator — /api/health {sha,version} + its
 #      sticky port (from operator.json). This is the pre-update operator.
-#   2. PUSH: scp the new installer artifact to the VM.
-#   3. INSTALL: run the installer. It replaces the app bytes on disk but the OLD
-#      operator keeps serving (that is exactly the EI-9002 scenario).
+#   2. PUSH: scp the new installer artifact to the VM. On Windows, also push the
+#      matching Papercusp Server installer and every provenance-listed Inno
+#      span companion; the GUI does not own the operator.
+#   3. INSTALL: run the GUI + Server installers. They replace the app bytes on
+#      disk but the OLD operator keeps serving (that is exactly the EI-9002
+#      scenario).
 #   4. RELAUNCH — WITHOUT TERMINATING. We DELIBERATELY never kill the app or the
 #      operator. We only re-launch the (now newly-installed) app and let its
 #      `serve --ensure` do the work: it must detect the build-identity mismatch,
@@ -37,12 +40,17 @@
 # Options:
 #   --platform windows|mac|linux   (default windows — the EI-9002/WI-3783 platform)
 #   --artifact PATH                the NEW installer to push+install (required)
+#   --server-artifact PATH         Windows Server installer stub. Optional when
+#                                  the exact-version stub is beside --artifact;
+#                                  its Inno spans are read from provenance.
 #   --expected-sha SHA             the new build's sha; default: buildSha from a
 #                                  build-provenance.json next to the artifact
 #   --expected-version VER         optional; default: version from that provenance
 #   --ssh-key / --ssh-port / --ssh-host / --distro / --app-image
 #   --remote-dir DIR               where to scp the artifact (default per platform)
 #   --install-cmd CMD              installer command; `__ARTIFACT__` -> remote path
+#   --server-install-cmd CMD       Server installer command;
+#                                  `__SERVER_ARTIFACT__` -> remote stub path
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
 #   --flip-timeout SEC             how long to wait for the flip (default 180)
 #   --install-timeout SEC          budget for the installer step (default 900);
@@ -57,6 +65,7 @@ set -uo pipefail
 
 PLATFORM="windows"
 ARTIFACT=""
+SERVER_ARTIFACT=""
 EXPECTED_SHA=""
 EXPECTED_VERSION=""
 SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
@@ -66,6 +75,7 @@ DISTRO="${DISTRO:-papercup-runtime}"
 APP_IMAGE="papercusp-desktop.exe"
 REMOTE_DIR=""
 INSTALL_CMD=""
+SERVER_INSTALL_CMD=""
 RELAUNCH_CMD=""
 OPJSON_PATH=""
 FLIP_TIMEOUT="${FLIP_TIMEOUT:-180}"
@@ -80,6 +90,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --artifact) ARTIFACT="${2:-}"; shift 2 ;;
+    --server-artifact) SERVER_ARTIFACT="${2:-}"; shift 2 ;;
     --expected-sha) EXPECTED_SHA="${2:-}"; shift 2 ;;
     --expected-version) EXPECTED_VERSION="${2:-}"; shift 2 ;;
     --ssh-key) SSH_KEY="${2:-}"; shift 2 ;;
@@ -89,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --app-image) APP_IMAGE="${2:-}"; shift 2 ;;
     --remote-dir) REMOTE_DIR="${2:-}"; shift 2 ;;
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
+    --server-install-cmd) SERVER_INSTALL_CMD="${2:-}"; shift 2 ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
@@ -123,6 +135,7 @@ case "$PLATFORM" in
     # terminate the WSL-side operator: the stale operator surviving app exit is
     # exactly the EI-9002 scenario the flip assertion exists to test.
     INSTALL_CMD="${INSTALL_CMD:-taskkill /f /im $APP_IMAGE >nul 2>&1 & __ARTIFACT__ /VERYSILENT /SUPPRESSMSGBOXES /NORESTART}"
+    SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-__SERVER_ARTIFACT__ /VERYSILENT /SUPPRESSMSGBOXES /NORESTART}"
     # BOTH apps: papercusp-e2e launches the GUI (shell only); papercusp-server-e2e
     # launches the Server app — whose startup is the ONLY thing that runs
     # `serve --ensure` in WSL, i.e. the flip cannot happen without it (0.0.8
@@ -188,6 +201,104 @@ if [[ -z "$EXPECTED_SHA" || -z "$EXPECTED_VERSION" ]]; then
   fi
 fi
 [[ -n "$EXPECTED_SHA" ]] || { echo "need --expected-sha (or a build-provenance.json next to the artifact naming buildSha)" >&2; exit 2; }
+
+# Windows is a split product: the GUI is only a shell, while the separately
+# installed Server owns `serve.mjs --ensure`. A GUI-only install can therefore
+# never prove that the target release replaced the operator. Resolve the exact
+# Server stub from the same cut (or accept an explicit one), then use its own
+# provenance as the authoritative list of disk-spanned Inno companions. This is
+# deliberately fail-closed: globbing whatever *.bin happens to be nearby can
+# omit a disk while still letting the tiny setup.exe launch.
+SERVER_ARTIFACTS=()
+if [[ "$PLATFORM" == "windows" ]]; then
+  if [[ -z "$SERVER_ARTIFACT" ]]; then
+    [[ -n "$EXPECTED_VERSION" ]] || {
+      echo "need --server-artifact: cannot auto-resolve the Windows Server installer without an expected version" >&2
+      exit 2
+    }
+    shopt -s nullglob
+    server_candidates=( "$(dirname "$ARTIFACT")"/*Server*_"$EXPECTED_VERSION"_x64-setup.exe )
+    shopt -u nullglob
+    if (( ${#server_candidates[@]} != 1 )); then
+      echo "need --server-artifact: expected exactly one Papercusp Server ${EXPECTED_VERSION} installer beside $(basename "$ARTIFACT"), found ${#server_candidates[@]}" >&2
+      exit 2
+    fi
+    SERVER_ARTIFACT="${server_candidates[0]}"
+  fi
+  [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
+
+  SERVER_PROV="$(dirname "$SERVER_ARTIFACT")/build-provenance.json"
+  [[ -f "$SERVER_PROV" ]] || {
+    echo "server provenance not found beside $(basename "$SERVER_ARTIFACT"): $SERVER_PROV" >&2
+    exit 2
+  }
+  SERVER_SHA="$(json_str buildSha < "$SERVER_PROV")"
+  SERVER_VERSION="$(json_str version < "$SERVER_PROV")"
+  [[ "$SERVER_SHA" == "$EXPECTED_SHA" ]] || {
+    echo "server artifact buildSha mismatch: got '$SERVER_SHA', expected '$EXPECTED_SHA' from the GUI artifact" >&2
+    exit 2
+  }
+  if [[ -n "$EXPECTED_VERSION" && "$SERVER_VERSION" != "$EXPECTED_VERSION" ]]; then
+    echo "server artifact version mismatch: got '$SERVER_VERSION', expected '$EXPECTED_VERSION' from the GUI artifact" >&2
+    exit 2
+  fi
+
+  SERVER_BASENAME="$(basename "$SERVER_ARTIFACT")"
+  SERVER_LIST_OUT="$(python3 - "$SERVER_PROV" "$SERVER_BASENAME" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+provenance_path, stub = sys.argv[1:]
+with open(provenance_path, encoding="utf-8") as handle:
+    provenance = json.load(handle)
+names = [str(item.get("name", "")) for item in provenance.get("artifacts", [])]
+if stub not in names:
+    raise SystemExit(f"provenance does not name Server stub {stub!r}")
+if pathlib.PurePath(stub).name != stub or not stub.lower().endswith(".exe"):
+    raise SystemExit(f"unsafe or non-executable Server artifact name: {stub!r}")
+stem = stub[:-4]
+slices = []
+for name in names:
+    match = re.fullmatch(re.escape(stem) + r"-(\d+)\.bin", name)
+    if match:
+        if pathlib.PurePath(name).name != name:
+            raise SystemExit(f"unsafe Server span name: {name!r}")
+        slices.append((int(match.group(1)), name))
+slices.sort()
+indexes = [index for index, _ in slices]
+if indexes and indexes != list(range(1, indexes[-1] + 1)):
+    raise SystemExit(f"non-contiguous Server spans in provenance: {indexes}")
+print(stub)
+for _, name in slices:
+    print(name)
+PY
+)" || {
+    echo "could not resolve the provenance-listed Windows Server artifact set" >&2
+    exit 2
+  }
+  while IFS= read -r server_name; do
+    [[ -n "$server_name" ]] || continue
+    server_path="$(dirname "$SERVER_ARTIFACT")/$server_name"
+    [[ -f "$server_path" ]] || {
+      echo "provenance-listed Server artifact missing: $server_path" >&2
+      exit 2
+    }
+    SERVER_ARTIFACTS+=( "$server_path" )
+  done <<< "$SERVER_LIST_OUT"
+  (( ${#SERVER_ARTIFACTS[@]} > 0 )) || {
+    echo "provenance resolved no Windows Server artifacts" >&2
+    exit 2
+  }
+elif [[ -n "$SERVER_ARTIFACT" ]]; then
+  echo "--server-artifact is currently supported only for --platform windows" >&2
+  exit 2
+fi
+SERVER_REMOTE_Q=""
+if (( ${#SERVER_ARTIFACTS[@]} > 0 )); then
+  SERVER_REMOTE_Q="\"$REMOTE_DIR/$(basename "${SERVER_ARTIFACTS[0]}")\""
+fi
 
 # ── ssh/scp transport (PC_SSH / PC_SCP overridable for the D-007 mock path) ─
 SSH_BIN="${PC_SSH:-ssh}"
@@ -268,23 +379,36 @@ fi
 if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT"; then
   fail_check "push: scp of $REMOTE_BASENAME to $REMOTE_ARTIFACT failed"
 fi
+for server_path in "${SERVER_ARTIFACTS[@]}"; do
+  server_basename="$(basename "$server_path")"
+  if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$server_path" "$SSH_HOST:$REMOTE_DIR/$server_basename"; then
+    fail_check "push: scp of $server_basename to $REMOTE_DIR/$server_basename failed"
+  fi
+done
 
 # ── 3. INSTALL (does NOT terminate the operator) ────────────────────────────
+run_installer() {
+  local label="$1" command="$2" install_rc=0 install_out=""
+  install_out="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "$command" 2>&1 | tr -d '\r\0')" || install_rc=$?
+  if [[ "$install_rc" -eq 124 ]]; then
+    # timeout(1) killed the SSH SESSION, not the VM-side installer — it is very
+    # likely STILL RUNNING detached. Relaunching now re-locks the app files under
+    # it, so fail loudly and leave the stale operator serving.
+    fail_check "$label install: timed out after ${INSTALL_TIMEOUT}s (ssh killed; the VM-side installer may still be running detached) — NOT relaunching; re-probe VM process/disk state before any retry, or raise --install-timeout"
+  elif [[ "$install_rc" -ne 0 ]]; then
+    note "$label installer exit was non-zero ($install_rc; the flip assertion is authoritative)${install_out:+ — output: ${install_out:0:400}}"
+  fi
+}
+
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
   INSTALL_RUN="${INSTALL_CMD//__ARTIFACT__/$REMOTE_Q}"
   # Capture (don't discard) installer output — a swallowed exit code cost a full
   # diagnose cycle on 0.0.8 (locked-file Abort looked like a silent no-op).
-  INSTALL_RC=0
-  INSTALL_OUT="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "$INSTALL_RUN" 2>&1 | tr -d '\r\0')" || INSTALL_RC=$?
-  if [[ "$INSTALL_RC" -eq 124 ]]; then
-    # timeout(1) killed the SSH SESSION, not the VM-side installer — it is very
-    # likely STILL RUNNING detached. Relaunching now re-locks the app files under
-    # it (live-hit on 0.0.8 attempt-4: relaunch mid-install recreated the exact
-    # file-in-use race the taskkill exists to prevent). Fail loudly instead.
-    fail_check "install: timed out after ${INSTALL_TIMEOUT}s (ssh killed; the VM-side installer may still be running detached) — NOT relaunching; re-probe VM process/disk state before any retry, or raise --install-timeout"
-  elif [[ "$INSTALL_RC" -ne 0 ]]; then
-    note "installer exit was non-zero ($INSTALL_RC; some silent installers do this; the flip assertion is authoritative)${INSTALL_OUT:+ — output: ${INSTALL_OUT:0:400}}"
-  fi
+  run_installer "GUI" "$INSTALL_RUN"
+fi
+if [[ ${#FAILURES[@]} -eq 0 && ${#SERVER_ARTIFACTS[@]} -gt 0 ]]; then
+  SERVER_INSTALL_RUN="${SERVER_INSTALL_CMD//__SERVER_ARTIFACT__/$SERVER_REMOTE_Q}"
+  run_installer "Server" "$SERVER_INSTALL_RUN"
 fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─
@@ -334,6 +458,8 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "platform": %s,\n' "$(jstr "$PLATFORM")"
   printf '  "expectedSha": %s,\n' "$(jstr "$EXPECTED_SHA")"
   printf '  "expectedVersion": %s,\n' "$(jstr "$EXPECTED_VERSION")"
+  printf '  "serverArtifact": %s,\n' "$(jstr "${SERVER_ARTIFACTS[0]:-}")"
+  printf '  "serverCompanionCount": %s,\n' "$(( ${#SERVER_ARTIFACTS[@]} > 0 ? ${#SERVER_ARTIFACTS[@]} - 1 : 0 ))"
   printf '  "shaBefore": %s,\n' "$(jstr "$SHA_BEFORE")"
   printf '  "versionBefore": %s,\n' "$(jstr "$VERSION_BEFORE")"
   printf '  "portBefore": %s,\n' "$(jstr "$PORT_BEFORE")"

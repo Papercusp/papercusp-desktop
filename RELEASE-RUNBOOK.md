@@ -159,7 +159,8 @@ recipes:run { id: "release-install-and-relaunch-verify" }        # defaults to t
 ```
 
 Sequence: snapshot the running operator (`/api/health` sha+version + sticky port)
-→ scp + install the new cut → **relaunch WITHOUT terminating** (the app's
+→ scp + install the matching GUI **and Server** cut (including every
+provenance-listed Windows Inno span) → **relaunch WITHOUT terminating** (the app's
 `serve --ensure` must replace the stale operator itself) → assert (a) the sha +
 version **flip** old→new [EI-9002: not a silent no-op update] and (b) the operator
 **sticky port holds** [WI-3783]. The target sha is the artifact's *own*
@@ -170,6 +171,9 @@ version **flip** old→new [EI-9002: not a silent no-op update] and (b) the oper
 > contact via `recipes:run { id: "release-install-and-relaunch-verify", dryRun: true }`.
 > For a specific artifact / mac|linux / a different VM, call
 > `bash bin/install-and-relaunch-verify.sh --platform <p> --artifact <path> [flags]`.
+> On Windows the script auto-resolves the exact-version Server stub beside the
+> GUI artifact and fails closed unless its provenance matches and every listed
+> span is present; use `--server-artifact PATH` only to override that location.
 
 **In-app backstop (P-013):** every user's first launch after an update runs a
 built-in self-check (`run_update_self_check` in `src-tauri/src/main.rs`): if the
