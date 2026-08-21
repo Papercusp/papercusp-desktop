@@ -7,6 +7,7 @@
 // through same-directory temporary files, and published only after success.
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -53,6 +54,19 @@ test('Windows rootfs export is published only after gzip succeeds', () => {
     executable,
     /docker export "\$CONTAINER" \| gzip -9 > "\$OUT_TARBALL"/,
     'docker export must never stream into the final tarball path',
+  );
+});
+
+test('Windows rootfs atomic temporary archive is gitignored while it streams', () => {
+  const temporaryArchive = 'src-tauri/resources/papercup-runtime.tar.gz.tmp.guard';
+  const ignored = spawnSync('git', ['-C', root, 'check-ignore', '-q', '--', temporaryArchive], {
+    encoding: 'utf8',
+  });
+
+  assert.equal(
+    ignored.status,
+    0,
+    `git-sync must never discover the 250-400 MB atomic rootfs temp as dirty: ${ignored.stderr}`,
   );
 });
 
