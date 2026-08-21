@@ -223,6 +223,32 @@ cp "$_ldicon" "$DEPLOY_STAGE/usr/share/icons/hicolor/256x256/apps/papercusp-libd
 cp -an "$DEPLOY_STAGE/usr/lib/." "$APPDIR/usr/lib/" 2>/dev/null || true
 [ -d "$DEPLOY_STAGE/usr/share/glib-2.0" ] && mkdir -p "$APPDIR/usr/share" && cp -an "$DEPLOY_STAGE/usr/share/glib-2.0" "$APPDIR/usr/share/" 2>/dev/null
 [ -d "$DEPLOY_STAGE/apprun-hooks" ] && cp -an "$DEPLOY_STAGE/apprun-hooks" "$APPDIR/" 2>/dev/null
+
+# linuxdeploy-plugin-gtk derives GIO_EXTRA_MODULES from every module directory it
+# sees. We deliberately give linuxdeploy the REAL AppDir executable while asking
+# it to assemble libraries in DEPLOY_STAGE, so its generated hook can contain a
+# mixture of portable `$APPDIR/...` entries and the real build-host path to the
+# final AppDir. Copying that hook verbatim leaked `/home/<builder>/.cargo-target…`
+# into the finished AppImage and the release identity gate correctly stopped the
+# 0.0.18 cut. Normalize only the exact AppDir prefix: unrelated absolute system
+# paths remain visible to the later fail-closed identity scan instead of being
+# papered over. Use Python's literal replacement so spaces and sed metacharacters
+# in the product/AppDir name cannot corrupt the rewrite.
+if [ -d "$APPDIR/apprun-hooks" ]; then
+  python3 - "$APPDIR" <<'PY_NORMALIZE_APPIMAGE_HOOKS'
+from pathlib import Path
+import sys
+
+appdir = Path(sys.argv[1]).resolve()
+appdir_literal = str(appdir)
+for hook in sorted((appdir / "apprun-hooks").glob("*.sh")):
+    before = hook.read_text(encoding="utf-8")
+    after = before.replace(appdir_literal, "$APPDIR")
+    if after != before:
+        hook.write_text(after, encoding="utf-8")
+        print(f"   normalized build-root path in {hook.relative_to(appdir)}")
+PY_NORMALIZE_APPIMAGE_HOOKS
+fi
 rm -rf "$DEPLOY_STAGE"
 
 # 2c-i. GL/EGL FALLBACK (last on LD_LIBRARY_PATH, never overriding the host).
