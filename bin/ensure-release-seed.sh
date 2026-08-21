@@ -255,7 +255,8 @@ run_cut() {
         "$@"
   ) 2>&1 | tee -a "$CUT_LOG"
   local rc=$?
-  set -e 2>/dev/null || true
+  # Keep errexit disabled: callers intentionally inspect a failed sparse attempt and
+  # may recover it with the full-cut fallback below.
   return "$rc"
 }
 
@@ -279,7 +280,19 @@ if [[ "$cut_rc" -ne 0 && ${#sparse_args[@]} -gt 0 ]] \
   log "WARN: retrying as a FULL cut: the bundle will carry the ENTIRE own-log history (~2GB)."
   log "WARN: to ship a genuinely sparse seed, quiesce the operator on this box and re-run."
   sparse_args=()
-  run_cut
+  # The first attempt may already have completed the expensive refresh/drain before
+  # the sparse-only head-snapshot step refused. Re-enqueueing the whole corpus for the
+  # full fallback would recreate the concurrent-cut incident this recovery handles.
+  # Resume without force-backfill ONLY when that first attempt proves refresh completed;
+  # if it failed earlier, retain the safe force-backfill default.
+  fallback_args=()
+  if grep -Eq '\[cut-seed\] refreshed (corestore source|via the live operator)' "$CUT_LOG"; then
+    fallback_args+=(--no-force-backfill)
+    log "WARN: first sparse attempt completed refresh; full fallback will use --no-force-backfill and drain the existing backlog."
+  else
+    log "WARN: first sparse attempt did not log refresh completion; full fallback will force-backfill for a complete refresh."
+  fi
+  run_cut "${fallback_args[@]}"
   cut_rc=$?
 fi
 
