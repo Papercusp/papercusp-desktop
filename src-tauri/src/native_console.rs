@@ -700,6 +700,21 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     // Harmless on macOS/Linux (every terminal there honors OSC 0 too).
     let win_title = window_title_for(&envelope.session_id);
     let title_quoted = shell_escape_single(&win_title);
+    // WI-40182: run the greeting from the rcfile of a genuinely interactive
+    // bash. The terminal emulator initially invokes a non-interactive
+    // `bash -lc`; if that shell runs the greeting directly, Ctrl+C targets the
+    // wrapper and greeting in the same foreground process group and can close
+    // the whole window. Interactive bash gives the greeting its own foreground
+    // job while the shell survives to present a prompt. Keep this in lockstep
+    // with console-spawn.ts keepWindowOpenOnFailure.
+    let interactive_script = format!(
+        "trap 'rm -f {sentinel_glob}.$$' EXIT; \
+         (eval {greet}); \
+         exec \"${{SHELL:-/bin/bash}}\" -l",
+        sentinel_glob = SENTINEL_GLOB,
+        greet = greeting,
+    );
+    let interactive_script_quoted = shell_escape_single(&interactive_script);
     format!(
         "printf '\\033]0;%s\\007' {title} \
          ; cd {cwd} && {exports} \
@@ -714,14 +729,12 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
               fi; true)\" \
          && export PAPERCUSP_CONSOLE_IDENTITY \
          && printf '%s\n' \"$PAPERCUSP_CONSOLE_IDENTITY\" > {sentinel_glob}.$$ \
-         && trap 'rm -f {sentinel_glob}.$$' EXIT \
-         && (eval {greet}) ; \
-         exec \"${{SHELL:-/bin/bash}}\" -l",
+         ; exec bash --noprofile --rcfile <(printf '%s\\n' {interactive_script}) -i",
         title = title_quoted,
         cwd = cwd_escaped,
         exports = env_exports,
         sentinel_glob = SENTINEL_PREFIX,
-        greet = greeting,
+        interactive_script = interactive_script_quoted,
     )
 }
 
