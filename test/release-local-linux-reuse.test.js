@@ -24,6 +24,25 @@ function sliceBetween(start, end) {
 // the shell logic: if the production branch changes, the behavior under test
 // changes with it.
 const linuxReuseHarness = sliceBetween('_prov_version()', '# ── Mobile');
+const cutStartHarness = sliceBetween(
+  '# EI-20551860898590077: bind every artifact',
+  'echo "==> bumping version in manifests"',
+);
+
+function runCutStart({ linux = 0, windows = 0, mac = 0 } = {}) {
+  const command = [
+    'set -euo pipefail',
+    'TAG=desktop-v0.0.18-alpha',
+    `PAPERCUSP_REUSE_LINUX=${linux}`,
+    `PAPERCUSP_REUSE_WIN=${windows}`,
+    `PAPERCUSP_REUSE_MAC=${mac}`,
+    "release_artifacts_cut_start_write() { printf 'WRITE\\n' >&2; printf '222\\n'; }",
+    "release_artifacts_cut_start_ensure() { printf 'ENSURE\\n' >&2; printf '111\\n'; }",
+    cutStartHarness,
+    "printf 'CUT_START=%s\\n' \"$PAPERCUSP_RELEASE_CUT_START_NS\"",
+  ].join('\n');
+  return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+}
 
 function runReuse({ priorVersion = '0.0.18', includeArtifact = true, includeProvenance = true, extraArtifact = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-'));
@@ -102,3 +121,26 @@ test('Linux reuse stays on the shared provenance and collection surfaces', () =>
   assert.match(collection, /"\$LINUX_REUSE" == "1"/);
   assert.match(collection, /emit-build-provenance\.sh/);
 });
+
+test('an all-fresh cut writes a new freshness boundary', () => {
+  const result = runCutStart();
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stderr, /^WRITE$/m);
+  assert.doesNotMatch(result.stderr, /^ENSURE$/m);
+  assert.match(result.stdout, /CUT_START=222/);
+});
+
+for (const [leg, reuse] of [
+  ['linux', { linux: 1 }],
+  ['windows', { windows: 1 }],
+  ['mac', { mac: 1 }],
+]) {
+  test(`${leg} reuse preserves and validates the original freshness boundary`, () => {
+    const result = runCutStart(reuse);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stderr, /^ENSURE$/m);
+    assert.doesNotMatch(result.stderr, /^WRITE$/m);
+    assert.match(result.stdout, /CUT_START=111/);
+    assert.match(result.stdout, /preserving original cut-start/);
+  });
+}
