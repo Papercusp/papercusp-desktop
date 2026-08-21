@@ -14,6 +14,11 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
 const buildRootfs = fs.readFileSync(path.join(root, 'scripts/build-rootfs.sh'), 'utf8');
+const sidecarBuilder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+const bootstrapResource = fs.readFileSync(
+  path.join(root, 'src-tauri/resources/papercup-bootstrap.sh'),
+  'utf8',
+);
 
 function executableLines(source) {
   return source
@@ -49,4 +54,27 @@ test('Windows rootfs export is published only after gzip succeeds', () => {
     /docker export "\$CONTAINER" \| gzip -9 > "\$OUT_TARBALL"/,
     'docker export must never stream into the final tarball path',
   );
+});
+
+test('Windows WSL bootstrap pins the sidecar Node runtime and ABI', () => {
+  const sidecarMatch = sidecarBuilder.match(
+    /^NODE_VERSION="\$\{NODE_VERSION:-v([0-9]+\.[0-9]+\.[0-9]+)\}"$/m,
+  );
+  assert.ok(sidecarMatch, 'the sidecar builder must declare an exact default Node release');
+
+  const sidecarVersion = sidecarMatch[1];
+  const expectedDefault = `NODE_VERSION="\${NODE_VERSION:-${sidecarVersion}}"`;
+  for (const [name, source] of [
+    ['build-rootfs.sh', buildRootfs],
+    ['papercup-bootstrap.sh', bootstrapResource],
+  ]) {
+    assert.ok(source.includes(expectedDefault), `${name} must default to sidecar Node ${sidecarVersion}`);
+    assert.match(
+      source,
+      /https:\/\/nodejs\.org\/dist\/v\$\{NODE_VERSION\}\/\$\{NODE_TARBALL\}/,
+      `${name} must fetch the exact Node release, not a moving major alias`,
+    );
+    assert.doesNotMatch(source, /latest-v[0-9$]/, `${name} must not use latest-v*`);
+    assert.doesNotMatch(source, /NODE_MAJOR/, `${name} must not reduce the runtime to a major only`);
+  }
 });

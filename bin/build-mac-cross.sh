@@ -125,8 +125,13 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 
 # WI-4781: strip the build box's $HOME / cargo registry paths from panic/debug
 # strings in the shipped binary (--remap-path-prefix). Must be exported BEFORE
-# cargo. A RUSTFLAGS change busts the incremental cache once — expected.
-CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
+# cargo. A RUSTFLAGS change busts the incremental cache once — expected. The
+# shared helper also carries the macOS LLD flag because Cargo suppresses the
+# config.toml copy whenever this environment is present.
+# shellcheck source=lib/rust-path-remap.sh
+source "$HERE/lib/rust-path-remap.sh"
+papercusp_export_rust_path_remap
+papercusp_export_rust_lld macos
 # EI-21020929941632443: systemd user managers commonly retain a launch-time
 # PATH that omits Cargo's install directory. `cargo-zigbuild` and `rcodesign`
 # are Cargo-installed release tools, so a detached mac leg used to report them
@@ -138,7 +143,6 @@ case ":$PATH:" in
   *":$CARGO_HOME_EFFECTIVE/bin:"*) ;;
   *) export PATH="$PATH:$CARGO_HOME_EFFECTIVE/bin" ;;
 esac
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
 
 # Build sha baked via option_env! (parity with the VM/windows legs' own loaders).
 if [[ -z "${PAPERCUSP_BUILD_SHA:-}" ]]; then

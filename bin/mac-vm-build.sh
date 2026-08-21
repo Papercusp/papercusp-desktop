@@ -63,10 +63,14 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 # exported BEFORE every cargo/tauri invocation below (pui, the companion wasm
 # plugin, and both tauri build roles). A RUSTFLAGS change busts the cargo
 # incremental cache once (a one-time full rebuild), same as any other RUSTFLAGS
-# edit — expected, not a regression. Verify post-build with:
+# edit — expected, not a regression. The shared helper also carries the macOS
+# LLD flag because Cargo suppresses the config.toml copy whenever this
+# environment is present. Verify post-build with:
 #   strings <binary> | grep -c /Users/   (and /home/) — should be 0.
-CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
+# shellcheck source=lib/rust-path-remap.sh
+source "$HERE/lib/rust-path-remap.sh"
+papercusp_export_rust_path_remap
+papercusp_export_rust_lld macos
 
 # EI-14660: main.rs bakes the update source + build sha via option_env! at
 # COMPILE time (WI-4389/WI-3875), and the compile happens HERE, on the VM.

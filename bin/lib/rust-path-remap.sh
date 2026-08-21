@@ -47,6 +47,7 @@
 # Usage (before ANY cargo/tauri build of a shipped binary):
 #   . "$DESK/bin/lib/rust-path-remap.sh"
 #   papercusp_export_rust_path_remap
+#   papercusp_export_rust_lld linux   # or macos for a Darwin target
 #
 # Guarded by lib/rust-path-remap.selftest.sh (in the run-selftests.sh aggregate).
 # Bash 3.2 compatible — the mac VM legs run macOS's /bin/bash 3.2.57.
@@ -60,4 +61,27 @@ papercusp_export_rust_path_remap() {
   # $HOME is what the scan flags; CARGO_HOME defaults under it but can be moved.
   local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$cargo_home=/build-cargo"
+}
+
+# Cargo's target.*.rustflags and the RUSTFLAGS environment variable are
+# mutually exclusive. Release producers set RUSTFLAGS for the path remap, so a
+# linker flag left only in .cargo/config.toml disappears on the real release
+# path. Carry the LLD flag in the same environment that carries the remap.
+#
+# The platform is explicit because build-mac-cross.sh runs on Linux while
+# producing a Darwin target. Windows has its own native linker/CRT flag path and
+# deliberately does not call this helper.
+papercusp_export_rust_lld() { # $1=linux|macos|darwin
+  local platform="${1:-}"
+  case "$platform" in
+    linux|macos|darwin) ;;
+    *) return 0 ;;
+  esac
+
+  case " ${RUSTFLAGS:-} " in
+    *" -C link-arg=-fuse-ld=lld "*) return 0 ;;
+    *"-C link-arg=-fuse-ld=lld"*) return 0 ;;
+  esac
+
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld"
 }

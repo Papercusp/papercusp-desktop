@@ -80,11 +80,17 @@ kopia --version
 # Node into /usr/local — it must be on the DEFAULT non-login PATH: the
 # desktop spawns `wsl.exe --exec node` (no shell, no profile read), and
 # appendWindowsPath=false above leaves PATH = /usr/local/bin:/usr/bin:…
-# Shim/profile installs (fnm, nvm) are invisible there.
-NODE_MAJOR="${NODE_VERSION:-22}"
-NODE_TARBALL="$(curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" \
-  | awk '/node-v[0-9.]+-linux-x64\.tar\.xz$/{print $2; exit}')"
-curl -fsSL "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/${NODE_TARBALL}" \
+# Shim/profile installs (fnm, nvm) are invisible there. Keep this exact
+# version in lockstep with the bundled sidecar so native addons load under the
+# same ABI. The URL is pinned to a release, never a moving latest-v* alias.
+NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION#v}"
+if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.15.0); got '$NODE_VERSION'" >&2
+  exit 2
+fi
+NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
+curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
   | tar -xJ -C /usr/local --strip-components=1
 node --version
 

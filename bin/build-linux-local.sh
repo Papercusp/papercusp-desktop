@@ -70,6 +70,12 @@ setup_sccache_env "30G"
 # shellcheck source=lib/lld-path.sh
 source "$HERE/lib/lld-path.sh"
 setup_lld_path
+# Keep the direct Linux release entrypoint independent of an ambient caller:
+# Cargo suppresses target.*.rustflags as soon as RUSTFLAGS exists.
+# shellcheck source=lib/rust-path-remap.sh
+source "$HERE/lib/rust-path-remap.sh"
+papercusp_export_rust_path_remap
+papercusp_export_rust_lld linux
 
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"

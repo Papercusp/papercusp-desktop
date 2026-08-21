@@ -108,6 +108,9 @@ rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/n
 . "$DESK/bin/lib/rust-path-remap.sh" || {
   echo "FATAL: cannot source bin/lib/rust-path-remap.sh — refusing to build a bundle that would embed build-box paths" >&2; exit 1; }
 papercusp_export_rust_path_remap
+# Cargo drops target.*.rustflags when RUSTFLAGS is present; carry the release
+# Linux linker choice in the same environment as the path remap.
+papercusp_export_rust_lld linux
 
 # 1. Let tauri build the AppDir + deploy the gtk/webkit libs. linuxdeploy crashes
 #    at the sidecar ELF-scan (see header) — we IGNORE that and finish below.

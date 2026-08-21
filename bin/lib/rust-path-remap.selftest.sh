@@ -39,7 +39,7 @@ ok()  { echo "  ✓ $*"; }
 bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 
 # Run the helper in a subshell under a controlled env, echo resulting RUSTFLAGS.
-remap_under() { # $1=HOME  $2=preset RUSTFLAGS  $3=CARGO_HOME (optional)
+remap_under() { # $1=HOME  $2=preset RUSTFLAGS  $3=CARGO_HOME  $4=platform (optional)
   (
     export HOME="$1"
     if [ -n "${2:-}" ]; then export RUSTFLAGS="$2"; else unset RUSTFLAGS; fi
@@ -47,6 +47,9 @@ remap_under() { # $1=HOME  $2=preset RUSTFLAGS  $3=CARGO_HOME (optional)
     # shellcheck disable=SC1090
     . "$LIB" || exit 9
     papercusp_export_rust_path_remap || exit 9
+    if [ -n "${4:-}" ]; then
+      papercusp_export_rust_lld "$4" || exit 9
+    fi
     printf '%s' "${RUSTFLAGS:-}"
   )
 }
@@ -92,7 +95,41 @@ case "$OUT_KEEP" in
   *) bad "clobbered pre-existing RUSTFLAGS (got: $OUT_KEEP)" ;;
 esac
 
-# 5. THE STRUCTURAL GUARD — every script that compiles a shipped Rust binary
+# 5. Release linker flags must travel with RUSTFLAGS, not only config.toml.
+#    This is the regression that originally prompted the item: once a release
+#    producer exports RUSTFLAGS for path remapping, Cargo drops target.*.rustflags
+#    from .cargo/config.toml entirely.
+OUT_LINUX="$(remap_under /home/buildbot '' '' linux)"
+case "$OUT_LINUX" in
+  *"-C link-arg=-fuse-ld=lld"*) ok "Linux release flags carry the LLD linker flag" ;;
+  *) bad "Linux release flags omitted the LLD linker flag (got: $OUT_LINUX)" ;;
+esac
+OUT_MAC="$(remap_under /home/buildbot '' '' macos)"
+case "$OUT_MAC" in
+  *"-C link-arg=-fuse-ld=lld"*) ok "macOS release flags carry the LLD linker flag" ;;
+  *) bad "macOS release flags omitted the LLD linker flag (got: $OUT_MAC)" ;;
+esac
+OUT_REMAP_ONLY="$(remap_under /home/buildbot "$PRESET" '' linux)"
+case "$OUT_REMAP_ONLY" in
+  *"--remap-path-prefix=/home/other=/build-home"*"-C link-arg=-fuse-ld=lld"*) ok "adds LLD even when remap was inherited" ;;
+  *) bad "inherited remap suppressed the LLD linker flag (got: $OUT_REMAP_ONLY)" ;;
+esac
+PRESET_LLD="$PRESET -C link-arg=-fuse-ld=lld"
+OUT_LLD_IDEM="$(remap_under /home/buildbot "$PRESET_LLD" '' linux)"
+if [ "$OUT_LLD_IDEM" = "$PRESET_LLD" ]; then
+  ok "idempotent: inherited LLD flag is not duplicated"
+else
+  bad "duplicated an inherited LLD flag (got: $OUT_LLD_IDEM)"
+fi
+
+CONFIG="$DIR/../../.cargo/config.toml"
+if [ -f "$CONFIG" ] && grep -q -- 'link-arg=-fuse-ld=lld' "$CONFIG"; then
+  ok ".cargo/config.toml keeps the bare-cargo LLD fallback"
+else
+  bad ".cargo/config.toml lost its bare-cargo LLD fallback"
+fi
+
+# 6. THE STRUCTURAL GUARD — every script that compiles a shipped Rust binary
 #    must set the remap itself rather than trust an ambient export. A new build
 #    script that forgets it fails HERE, in <1s, instead of at the identity gate
 #    ~10 min into a real build (or, worse, shipping a leaky artifact).
@@ -100,7 +137,7 @@ esac
 #    Accepts EITHER wiring: sourcing this lib (preferred), or a self-contained
 #    inline `--remap-path-prefix` export (what the mac legs still carry). The
 #    point is that the script does not depend on a caller.
-for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross.sh; do
+for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross.sh build-linux-local.sh; do
   P="$DIR/../$SCRIPT"
   if [ ! -f "$P" ]; then
     bad "$SCRIPT missing — update this list if it was renamed/removed"
@@ -112,6 +149,11 @@ for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross
     ok "$SCRIPT carries its own inline remap export"
   else
     bad "$SCRIPT compiles a shipped binary but sets NO path remap — it would inherit one only by luck (see lib/rust-path-remap.sh)"
+  fi
+  if grep -Eq 'papercusp_export_rust_lld[[:space:]]+(linux|macos|darwin)' "$P"; then
+    ok "$SCRIPT carries its platform LLD flag with RUSTFLAGS"
+  else
+    bad "$SCRIPT has no platform LLD export — its RUSTFLAGS would suppress .cargo/config.toml"
   fi
 done
 

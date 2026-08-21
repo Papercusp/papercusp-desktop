@@ -1083,9 +1083,13 @@ export PC_HEAVY_BYPASS=1
 # stripping. Exported before the sidecar build + every local `tauri build`
 # call below; a plain `export` also reaches build-appimage.sh, which this
 # script invokes as a child process later. A RUSTFLAGS change busts the cargo
-# incremental cache once — expected, not a regression.
-CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$CARGO_HOME_EFFECTIVE=/build-cargo"
+# incremental cache once — expected, not a regression. The shared helper also
+# carries the LLD flag because Cargo suppresses the config.toml copy whenever
+# this environment is present.
+# shellcheck source=lib/rust-path-remap.sh
+source "$HERE/lib/rust-path-remap.sh"
+papercusp_export_rust_path_remap
+papercusp_export_rust_lld linux
 # WI-5083 (desktop-build-speed-2026-07-16#P-004): RUSTC_WRAPPER=sccache backed
 # by a persistent ~/.cache/sccache, exported HERE (before the Linux leg forks
 # below + the optional arm64 cross-compile section) so both inherit it via

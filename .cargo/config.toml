@@ -58,9 +58,13 @@
 # benchmark run.
 
 [target.'cfg(target_os = "linux")']
+# Bare `cargo build` fallback only. Release scripts set RUSTFLAGS for path
+# remapping, which suppresses target.*.rustflags; they source
+# bin/lib/rust-path-remap.sh and carry this same flag in the build environment.
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [target.'cfg(target_os = "macos")']
+# Bare `cargo build` fallback; release producers carry the flag in RUSTFLAGS.
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 # MSVC doesn't route through a cc-style driver, so `-fuse-ld=` doesn't apply —
