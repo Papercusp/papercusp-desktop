@@ -277,6 +277,7 @@ _existing_artifacts_match() {
   [[ -n "$current_rows" && "$existing_rows" == "$current_rows" ]]
 }
 
+_identity_only_repair=0
 if _existing_artifacts_match "$@"; then
   _existing_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
   _existing_build_sha="$(sed -n 's/.*"buildSha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
@@ -290,6 +291,7 @@ if _existing_artifacts_match "$@"; then
       echo "       For a verified metadata repair, set PROVENANCE_REPLACE_VERSION_FROM=$_existing_version (compare-and-swap)." >&2
       exit 1
     }
+    _identity_only_repair=1
   fi
   if [[ "$_existing_build_sha" != "$BUILD_SHA" ]]; then
     [[ "${PROVENANCE_REPLACE_BUILD_SHA_FROM:-}" == "$_existing_build_sha" ]] || {
@@ -298,7 +300,46 @@ if _existing_artifacts_match "$@"; then
       echo "       For a verified metadata repair, set PROVENANCE_REPLACE_BUILD_SHA_FROM=$_existing_build_sha (compare-and-swap)." >&2
       exit 1
     }
+    _identity_only_repair=1
   fi
+fi
+
+# A compare-and-swap repair is intentionally NOT a re-emit. The existing record
+# describes when/where the bytes were built; recomputing gitHeadAtEmit,
+# gitDirtyAtEmit, builtAtUtc, host, or sidecar state now would replace history
+# with the repair machine's state. Change only the explicitly authorized baked
+# identity fields and preserve every other byte of the attestation.
+if [[ "$_identity_only_repair" == "1" ]]; then
+  [[ "$VERSION" =~ ^[A-Za-z0-9._+-]+$ && "$BUILD_SHA" =~ ^[A-Za-z0-9._+-]+$ ]] || {
+    echo "ERROR: compare-and-swap identity repairs accept only safe version/buildSha characters" >&2
+    exit 2
+  }
+  _repair_tmp="$PROV.repair.$$"
+  trap 'rm -f "$_repair_tmp"' EXIT
+  awk \
+    -v replace_version="$([[ "$_existing_version" != "$VERSION" ]] && echo 1 || echo 0)" \
+    -v replace_sha="$([[ "$_existing_build_sha" != "$BUILD_SHA" ]] && echo 1 || echo 0)" \
+    -v new_version="$VERSION" \
+    -v new_sha="$BUILD_SHA" '
+      replace_version && /^[[:space:]]*"version"[[:space:]]*:/ {
+        sub(/:[[:space:]]*"[^"]*"/, ": \"" new_version "\"")
+        version_changes++
+      }
+      replace_sha && /^[[:space:]]*"buildSha"[[:space:]]*:/ {
+        sub(/:[[:space:]]*"[^"]*"/, ": \"" new_sha "\"")
+        sha_changes++
+      }
+      { print }
+      END {
+        if ((replace_version && version_changes != 1) || (replace_sha && sha_changes != 1)) exit 3
+      }
+    ' "$PROV" >"$_repair_tmp" \
+    || { echo "ERROR: could not apply the identity compare-and-swap to $PROV" >&2; exit 1; }
+  mv "$_repair_tmp" "$PROV"
+  trap - EXIT
+  echo "==> build provenance identity repaired in place: $PROV"
+  cat "$PROV"
+  exit 0
 fi
 
 {

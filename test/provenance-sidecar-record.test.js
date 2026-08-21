@@ -277,7 +277,13 @@ test('same artifact bytes cannot silently acquire a different baked buildSha', (
 
   const repaired = run('corrected-sha', { PROVENANCE_REPLACE_BUILD_SHA_FROM: '2363b77a' });
   assert.equal(repaired.status, 0, repaired.stderr || repaired.stdout);
-  assert.equal(JSON.parse(fs.readFileSync(provPath, 'utf8')).buildSha, 'corrected-sha');
+  const repairedDoc = JSON.parse(fs.readFileSync(provPath, 'utf8'));
+  assert.equal(repairedDoc.buildSha, 'corrected-sha');
+  assert.deepEqual(
+    { ...repairedDoc, buildSha: originalDoc.buildSha },
+    originalDoc,
+    'an identity repair must not re-attest git state, build time, artifacts, or any other history',
+  );
 
   fs.writeFileSync(artifact, 'a genuinely new Windows installer build');
   const freshBuild = run('fresh-build-sha');
