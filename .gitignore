@@ -37,6 +37,7 @@ src-tauri/resources/libPapercuspTermShim.dylib
 # WSL rootfs tarball (~250-400 MB, produced by scripts/build-rootfs.sh per
 # release; bundled as a Tauri resource — never committed)
 src-tauri/resources/papercup-runtime.tar.gz
+src-tauri/resources/papercup-runtime.tar.gz.tmp.*
 
 # Seed corestore (~1.9GB of machine-generated corestore DB blobs, 50–195MB
 # each; bundled into the .deb at build time from disk — NEVER committed.
