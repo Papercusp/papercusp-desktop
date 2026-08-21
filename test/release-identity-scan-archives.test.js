@@ -98,6 +98,49 @@ function fakeAppImage(dir) {
   return artifact;
 }
 
+function fakeLibdmgTools(dir) {
+  const tools = path.join(dir, 'mac-cross-tools');
+  fs.mkdirSync(tools, { recursive: true });
+  const sevenZip = path.join(tools, '7z');
+  fs.writeFileSync(
+    sevenZip,
+    [
+      '#!/bin/sh',
+      'out=',
+      'outer=0',
+      'for arg in "$@"; do',
+      '  case "$arg" in -o*) out="${arg#-o}" ;; -tDmg) outer=1 ;; esac',
+      'done',
+      '[ -n "$out" ] || exit 65',
+      'mkdir -p "$out"',
+      'if [ "$outer" = 1 ]; then',
+      '  head -c 2048 /dev/zero > "$out/0.unknown partition"',
+      '  exit 0',
+      'fi',
+      '# Model the real 7z failure: it leaves a partial nested-HFS tree and exits',
+      '# nonzero. The production fallback must discard this before certification.',
+      'printf partial > "$out/partial-from-7z.txt"',
+      'exit 2',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const hfsplus = path.join(tools, 'hfsplus');
+  fs.writeFileSync(
+    hfsplus,
+    [
+      '#!/bin/sh',
+      '[ "$2" = extractall ] || exit 66',
+      'printf "%s\\n" "$PAPERCUSP_DMG_FIXTURE_PAYLOAD" > payload.txt',
+      'head -c 2048 /dev/zero > coverage.bin',
+      'exit 0',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  return tools;
+}
+
 function fixture(name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `p012-${name}-`));
   fs.mkdirSync(path.join(dir, 'bundle'));
@@ -197,6 +240,43 @@ test('THE FALSIFIER: a literal extracted by the AppImage runtime fails the finis
     const r = scanArtifact(artifact, { PAPERCUSP_APPIMAGE_FIXTURE_PAYLOAD: identityLiteral() });
     assert.equal(r.status, 1, `an AppImage payload identity must fail:\n${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /payload\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a libdmg-hfsplus DMG is read through the producer-parity raw-HFS fallback', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libdmg-hfsplus-clean-'));
+  try {
+    const artifact = path.join(dir, 'fixture.dmg');
+    fs.writeFileSync(artifact, Buffer.alloc(1024));
+    const tools = fakeLibdmgTools(dir);
+    const r = scanArtifact(artifact, {
+      PATH: `${tools}:${process.env.PATH}`,
+      PAPERCUSP_MAC_CROSS_TOOLS: tools,
+      PAPERCUSP_DMG_FIXTURE_PAYLOAD: 'harmless fixture',
+    });
+    assert.equal(r.status, 0, `expected libdmg-hfsplus fallback to pass:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /expanded via 7z -tDmg \+ libdmg-hfsplus/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('THE FALSIFIER: a literal extracted only by the DMG fallback fails the finished-byte scan', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libdmg-hfsplus-dirty-'));
+  try {
+    const artifact = path.join(dir, 'fixture.dmg');
+    fs.writeFileSync(artifact, Buffer.alloc(1024));
+    const tools = fakeLibdmgTools(dir);
+    const r = scanArtifact(artifact, {
+      PATH: `${tools}:${process.env.PATH}`,
+      PAPERCUSP_MAC_CROSS_TOOLS: tools,
+      PAPERCUSP_DMG_FIXTURE_PAYLOAD: identityLiteral(),
+    });
+    assert.equal(r.status, 1, `a DMG payload identity must fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /payload\.txt/);
+    assert.doesNotMatch(r.stdout, /COULD NOT BE INSPECTED/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
