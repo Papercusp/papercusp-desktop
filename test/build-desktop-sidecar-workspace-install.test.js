@@ -28,6 +28,20 @@ test('chat-dock cargo target discovery is fail-soft and leaves diagnostics visib
   );
 });
 
+test('sidecar build restores Cargo from CARGO_HOME before the expensive build', () => {
+  const cargoGuard = builder.indexOf('_cargo_home="${CARGO_HOME:-$HOME/.cargo}"');
+  const firstCargoUse = builder.indexOf('cargo metadata --no-deps --format-version 1');
+
+  assert(cargoGuard >= 0, 'missing systemd-safe Cargo PATH normalization');
+  assert(firstCargoUse > cargoGuard, 'Cargo must be resolved before its first build-time use');
+  const guard = builder.slice(cargoGuard, firstCargoUse);
+  assert.match(guard, /! command -v cargo[^\n]+&& \[\[ -x "\$_cargo_home\/bin\/cargo" \]\]/);
+  assert.match(guard, /export PATH="\$_cargo_home\/bin:\$PATH"/);
+  assert.match(guard, /hash -r/);
+  assert.match(guard, /sidecar release build requires Cargo/);
+  assert.match(guard, /exit 1/);
+});
+
 test('sidecar build fails closed unless all five official mobile templates are packaged', () => {
   for (const ref of [
     'papercusp-mobile-base',
