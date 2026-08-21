@@ -3236,6 +3236,17 @@ if [[ "$_cross_darwin" == "1" ]]; then
     cp -a "$_cross_darwin_git_keg/share/git-core/templates" "$SIDECAR_DIR/bin/.git-vendor/share/git-core/templates"
   fi
 
+  # EI-21020567880673280: Homebrew's git bottle includes the optional
+  # `git instaweb` web-UI helper. Papercusp never invokes it, but the helper is
+  # a 22 KiB shell script containing MIME-table text that trips the mandatory
+  # assembled-bundle identity scan (the 0.0.18-alpha macOS leg failed on its
+  # `.avi` entries). Do not weaken or exclude the scan: prune this non-runtime
+  # helper from the shipping copy immediately after the verbatim keg copy and
+  # before Mach-O rewrite/signing walks the vendor tree.
+  rm -f "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core/git-instaweb"
+  [[ ! -e "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core/git-instaweb" ]] \
+    || { echo "ERROR: optional git-instaweb helper survived the sidecar prune"; exit 1; }
+
   _git_vendor_count=0
   while IFS= read -r -d '' _gv_file; do
     if file -b "$_gv_file" 2>/dev/null | grep -q '^Mach-O'; then
