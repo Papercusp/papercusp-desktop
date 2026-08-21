@@ -243,6 +243,74 @@ begin
   ReapLegacyUninstallEntry('Papercusp Server');
 end;
 
+{ Close the role being replaced before Inno starts copying files. Restart
+  Manager (the normal CloseApplications=yes path) cannot close a GUI that is
+  running in the interactive console session when the installer was launched
+  from another session, such as the updater or an SSH-driven silent install.
+  With /SUPPRESSMSGBOXES that cross-session failure is auto-answered Abort,
+  which rolls back the whole install with exit code 5 after minutes of work.
+
+  Both Papercusp roles intentionally use the same executable basename, so an
+  image-name taskkill is unsafe: it would terminate the sibling role too. Use
+  the absolute executable path reported by Win32_Process instead, and fail
+  before file copy with a stable actionable message if process inspection or
+  termination does not succeed. Windows PowerShell 5.1 is part of the target
+  Windows image; Get-CimInstance is used because wmic is absent on current
+  Windows 11 guests. }
+function CloseRoleScopedRunningApplication: String;
+var
+  TargetPath: String;
+  EscapedTargetPath: String;
+  PowerShell: String;
+  CommandLine: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  TargetPath := ExpandConstant('{app}\papercusp-desktop.exe');
+  { Fresh installs and the wine/ISCC harness have no prior role binary, so
+    there is nothing to close and no process inspection is needed. }
+  if not FileExists(TargetPath) then
+    Exit;
+  EscapedTargetPath := TargetPath;
+  StringChangeEx(EscapedTargetPath, '''', '''''', True);
+  PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  CommandLine :=
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$target = ''' + EscapedTargetPath + '''; ' +
+    '$procs = @(Get-CimInstance Win32_Process -ErrorAction Stop | ' +
+      'Where-Object { $_.Name -eq ''papercusp-desktop.exe'' -and ' +
+      '$_.ExecutablePath -eq $target }); ' +
+    'foreach ($p in $procs) { Stop-Process -Id ([int]$p.ProcessId) ' +
+      '-Force -ErrorAction Stop }; ' +
+    '$deadline = (Get-Date).AddSeconds(15); ' +
+    'do { $remaining = @(Get-CimInstance Win32_Process -ErrorAction Stop | ' +
+      'Where-Object { $_.Name -eq ''papercusp-desktop.exe'' -and ' +
+      '$_.ExecutablePath -eq $target }); ' +
+      'if ($remaining.Count -eq 0) { exit 0 }; ' +
+      'Start-Sleep -Milliseconds 200 ' +
+    '} while ((Get-Date) -lt $deadline); ' +
+    'Write-Error (''role process did not exit: '' + $target); exit 73"';
+
+  Log(Format('windows-role-close: checking %s', [TargetPath]));
+  if not Exec(PowerShell, CommandLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := Format('windows-role-close-failed: could not start PowerShell to close %s before replacement (Win32 error). Close the app in its interactive session and retry.', ['{#AppName}']);
+    Log(Result);
+    Exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    Result := Format('windows-role-close-failed: could not close the running %s at %s (PowerShell exit code %d). Close that role in its interactive session and retry.', ['{#AppName}', TargetPath, ResultCode]);
+    Log(Result);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := CloseRoleScopedRunningApplication;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
