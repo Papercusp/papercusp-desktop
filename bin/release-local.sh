@@ -1266,7 +1266,7 @@ CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-v
 # artifacts in the PARENT (a subshell's `ARTIFACTS+=` would not survive the fork).
 # ── P-005 (desktop-build-hardening-tri-platform-2026-07-11): verify the REUSE
 # salvage path, don't just flag it ──────────────────────────────────────────
-# PAPERCUSP_REUSE_MAC/REUSE_WIN skip a rebuild and ship artifacts SALVAGED from a
+# PAPERCUSP_REUSE_LINUX/REUSE_MAC/REUSE_WIN skip a rebuild and ship artifacts SALVAGED from a
 # prior cut — but they get re-labelled with THIS cut's version/sha (baked into
 # the binary at its ORIGINAL build; the provenance emit only stamps reused:true).
 # Salvaging a DIFFERENT version's bytes and shipping them as $VERSION is the
@@ -1304,36 +1304,56 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
 }
 
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
-LINUX_PID=""
-echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
-(
-  set -euo pipefail
-  PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
-  for role in $PAPERCUSP_BUILD_ROLES; do
-    role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
-    # rpm DROPPED (2026-07-08): it is never collected (Linux ships deb+AppImage only —
-    # see the collection globs) AND its multi-GB payload compression wedged the
-    # 0.0.3-alpha linux leg for 33min+. deb only.
-    echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+LINUX_PID=""; LINUX_REUSE=0
+if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
+  # EI-21024313639787521: Linux is just as salvageable as Windows/macOS. A late
+  # post-package gate must not force a multi-hour rebuild (or clobber repaired,
+  # already-audited bytes) when this SAME version's artifacts and provenance are
+  # present in the canonical bundle tree.
+  LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+  echo "==> [reuse] PAPERCUSP_REUSE_LINUX=1 — skipping linux build; reusing artifacts in $LINUX_BUNDLE"
+  linux_reuse_found=0
+  for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
+           "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
+    [[ -f "$f" ]] && { echo "    reuse: $(basename "$f")"; linux_reuse_found=1; }
   done
-  # Repack BOTH role artifacts after Tauri finishes writing them. The helper
-  # verifies the ar structure and dpkg readability, atomically replaces each
-  # deb, and regenerates its updater signature over the final bytes.
-  for deb in "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
-    [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
-  done
-  # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
-  # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
-  if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
-    echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
-    (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
-       TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-       PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" \
-       "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
+  if [[ "$linux_reuse_found" != "1" ]]; then
+    echo "ERROR: PAPERCUSP_REUSE_LINUX=1 but no $VERSION linux artifacts in $LINUX_BUNDLE — restore them there first"; exit 1
   fi
-) >"$LINUX_LEG_LOG" 2>&1 &
-LINUX_PID=$!
+  # P-005: refuse to re-label a different version's salvaged linux bytes as $VERSION.
+  assert_reused_provenance "$LINUX_BUNDLE" linux
+  LINUX_REUSE=1
+else
+  echo "==> [parallel] launching Linux x86_64 build (local, log: $LINUX_LEG_LOG)"
+  (
+    set -euo pipefail
+    PAPERCUSP_BUILD_ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+    for role in $PAPERCUSP_BUILD_ROLES; do
+      role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
+      # rpm DROPPED (2026-07-08): it is never collected (Linux ships deb+AppImage only —
+      # see the collection globs) AND its multi-GB payload compression wedged the
+      # 0.0.3-alpha linux leg for 33min+. deb only.
+      echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
+      (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+    done
+    # Repack BOTH role artifacts after Tauri finishes writing them. The helper
+    # verifies the ar structure and dpkg readability, atomically replaces each
+    # deb, and regenerates its updater signature over the final bytes.
+    for deb in "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
+      [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+    done
+    # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
+    # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
+    if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
+      echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
+      (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+         TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+         PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" \
+         "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
+    fi
+  ) >"$LINUX_LEG_LOG" 2>&1 &
+  LINUX_PID=$!
+fi
 
 # ── Mobile (Android) leg — parallel + fatal when enabled (see WITH_ANDROID above).
 # Builds fresh design tokens + UniFFI Kotlin bindings, cross-compiles the 4 ABIs,
@@ -1529,7 +1549,8 @@ fi
 #     non-zero; nothing downstream runs. That alone removes the blind spot.
 #   • The TEARDOWN is NOT immediate. Healthy siblings are left to FINISH so their
 #     artifacts land on disk, because the retry path for exactly that is already in
-#     this script: PAPERCUSP_REUSE_WIN / PAPERCUSP_REUSE_MAC (:1302, :1369) ship
+#     this script: PAPERCUSP_REUSE_LINUX / PAPERCUSP_REUSE_WIN /
+#     PAPERCUSP_REUSE_MAC ship
 #     artifacts salvaged from a previous attempt. The old behaviour was destroying its
 #     own salvage input. RELEASE_ABORT_ON_LEG_FAILURE=1 restores tear-it-down-now, and
 #     RELEASE_SALVAGE_GRACE_S=<seconds> bounds the wait for an automated caller.
@@ -1641,7 +1662,7 @@ supervise_legs() {
             break
           fi
           echo "   SALVAGE: ${#alive[@]} sibling leg(s) still building. Letting them FINISH so their artifacts"
-          echo "   land on disk and a retry can reuse them (PAPERCUSP_REUSE_WIN / PAPERCUSP_REUSE_MAC), instead"
+          echo "   land on disk and a retry can reuse them (PAPERCUSP_REUSE_LINUX / PAPERCUSP_REUSE_WIN / PAPERCUSP_REUSE_MAC), instead"
           echo "   of reaping work that may be minutes from done — the 0.0.17 cut nearly lost a signed 3.34GB"
           echo "   .deb this way. Abort now instead: RELEASE_ABORT_ON_LEG_FAILURE=1. Bound the wait:"
           echo "   RELEASE_SALVAGE_GRACE_S=<seconds>."
@@ -1668,7 +1689,7 @@ supervise_legs() {
     echo "ERROR: release cut FAILED — leg(s): ${failed[*]}"
     if (( ${#survived[@]} > 0 )); then
       echo "==> SALVAGED (completed before the cut ended, artifacts are on disk): ${survived[*]}"
-      echo "    Re-run with PAPERCUSP_REUSE_WIN=1 / PAPERCUSP_REUSE_MAC=1 to ship those bytes instead of rebuilding them."
+      echo "    Re-run with PAPERCUSP_REUSE_LINUX=1 / PAPERCUSP_REUSE_WIN=1 / PAPERCUSP_REUSE_MAC=1 to ship those bytes instead of rebuilding them."
     fi
     (( grace_expired == 1 )) && echo "    (salvage grace expired; leg(s) still running were NOT waited for)"
     exit 1
@@ -1705,17 +1726,21 @@ LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
 if [[ ! -d "$LINUX_BUNDLE" ]]; then
   echo "ERROR: expected Linux bundles at $LINUX_BUNDLE — Linux leg produced none?"; exit 1
 fi
+linux_found=0
 for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
          "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
-  [[ -f "$f" ]] && ARTIFACTS+=("$f")
+  [[ -f "$f" ]] && ARTIFACTS+=("$f") && linux_found=1
 done
+[[ "$linux_found" == "1" ]] || { echo "ERROR: no $VERSION linux artifacts in $LINUX_BUNDLE $([[ "$LINUX_REUSE" == "1" ]] && echo '(reuse)' || echo '(fresh build)')"; exit 1; }
 # EI-8914 parity (P-001, desktop-build-hardening-tri-platform-2026-07-11): the
 # Windows leg records build-provenance.json (inline in build-windows-on-vm.sh)
 # and the Mac leg does (below, WI-3850), but the Linux leg emitted NOTHING — so a
 # shipped .deb/.AppImage was untraceable to the source it was built from (the
 # LABELED!=PACKED class the whole plan eradicates). Emit the same provenance
 # (each installer's sha256 + gitHead/dirty + buildSha) next to the Linux bundle.
-# Linux always builds FRESH locally (no REUSE_LINUX salvage path) → reused:false.
+# On PAPERCUSP_REUSE_LINUX, assert_reused_provenance already proved the prior
+# record was for this version; the replacement record marks the new cut's reuse
+# honestly instead of claiming these bytes were rebuilt from the current tree.
 # Fingerprint the primary installers (deb + AppImage, both gui+server roles via
 # the version-scoped globs), matching the mac call's primary-artifact scope — the
 # .sig files are signatures over these, covered by the signature dimension (P-010
@@ -1729,7 +1754,7 @@ _tc_node="$(node --version 2>/dev/null)"
 PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${_tc_rustc:-unknown}" "${_tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
 PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
 PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
-  "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" false \
+  "$LINUX_BUNDLE" "$VERSION" "$BUILD_SHA" "$([[ "$LINUX_REUSE" == "1" ]] && echo true || echo false)" \
   "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
   || echo "WARNING: linux build-provenance.json emit failed (non-fatal) — linux artifacts shipped WITHOUT a provenance record"
 if [[ "$WITH_ARM64" == "1" ]]; then
