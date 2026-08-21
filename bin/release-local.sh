@@ -883,7 +883,18 @@ fi
 # write. A failed cut may leave correctly named/signed same-version bytes behind;
 # publishers compare each artifact mtime to this tag-scoped stamp and refuse any
 # byte that predates it. Keep the stamp for upload and incremental hand-offs.
-PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_write "$TAG")"
+#
+# EI-21027458250695727: a SAME-VERSION salvage must preserve the original cut
+# boundary. Replacing it here would make every deliberately reused artifact
+# predate the new stamp, so upload-release would correctly reject the whole set
+# as stale. `ensure` validates/preserves an existing stamp and creates one only
+# when a direct producer had none; an all-fresh cut still writes a new boundary.
+if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" || "${PAPERCUSP_REUSE_WIN:-0}" == "1" || "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
+  PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$TAG")"
+  echo "==> release artifact freshness: preserving original cut-start for same-version reuse"
+else
+  PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_write "$TAG")"
+fi
 export PAPERCUSP_RELEASE_CUT_START_NS
 export PAPERCUSP_RELEASE_TAG="$TAG"
 echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$TAG)"
