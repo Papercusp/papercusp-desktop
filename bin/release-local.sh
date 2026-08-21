@@ -1303,6 +1303,18 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
   fi
 }
 
+assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
+  local dir="$1"
+  local expected_appimages=0 appimages appimage_sigs
+  [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
+  appimages="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  appimage_sigs="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  if [[ "$appimages" != "$expected_appimages" || "$appimage_sigs" != "$expected_appimages" ]]; then
+    echo "ERROR: Linux $VERSION bundle is ambiguous/incomplete: expected $expected_appimages AppImage + signature for roles '$PAPERCUSP_BUILD_ROLES', found appimages=$appimages signatures=$appimage_sigs in $dir/appimage. Quarantine stale/failed same-version bytes before collection (EI-21025181491857558)." >&2
+    exit 1
+  fi
+}
+
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""; LINUX_REUSE=0
 if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
@@ -1320,6 +1332,7 @@ if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
   if [[ "$linux_reuse_found" != "1" ]]; then
     echo "ERROR: PAPERCUSP_REUSE_LINUX=1 but no $VERSION linux artifacts in $LINUX_BUNDLE — restore them there first"; exit 1
   fi
+  assert_linux_artifact_cardinality "$LINUX_BUNDLE"
   # P-005: refuse to re-label a different version's salvaged linux bytes as $VERSION.
   assert_reused_provenance "$LINUX_BUNDLE" linux
   LINUX_REUSE=1
@@ -1732,6 +1745,7 @@ for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VER
   [[ -f "$f" ]] && ARTIFACTS+=("$f") && linux_found=1
 done
 [[ "$linux_found" == "1" ]] || { echo "ERROR: no $VERSION linux artifacts in $LINUX_BUNDLE $([[ "$LINUX_REUSE" == "1" ]] && echo '(reuse)' || echo '(fresh build)')"; exit 1; }
+assert_linux_artifact_cardinality "$LINUX_BUNDLE"
 # EI-8914 parity (P-001, desktop-build-hardening-tri-platform-2026-07-11): the
 # Windows leg records build-provenance.json (inline in build-windows-on-vm.sh)
 # and the Mac leg does (below, WI-3850), but the Linux leg emitted NOTHING — so a
