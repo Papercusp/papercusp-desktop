@@ -21,6 +21,14 @@ emit_verdict() {
   exit 0
 }
 
+# Test-only escape hatch used by verification-script-verdict-guard.test.js.  It
+# proves this script can emit FAIL without touching a real Mac or gateway.
+if [ "${MAC_VM_VERDICT_TEST_FAIL:-0}" = "1" ]; then
+  FAILURES=1
+  echo "  FAIL  synthetic failure requested by the verdict guard"
+  emit_verdict
+fi
+
 PSQL="/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/psql"
 sysid() { "$PSQL" "$1" -tAc "select system_identifier from pg_control_system();" 2>/dev/null | tr -d ' '; }
 migct() { "$PSQL" "$1" -tAc "select count(*) from harness_shared.schema_migrations;" 2>/dev/null | tr -d ' '; }

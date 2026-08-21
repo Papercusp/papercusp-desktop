@@ -27,11 +27,18 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const BIN = path.join(__dirname, '..', 'bin');
+const CONVERTED_VERDICT_SCRIPTS = [
+  'mac-vm-relaunch-verify.sh',
+  'mac-vm-lifecycle-gw-e2e.sh',
+  'mac-vm-seed-runtime-test.sh',
+  'mac-vm-reqb-fileprec.sh',
+];
 
 /**
  * A script CAN emit a failing verdict when it either aborts on error (`set -e`)
@@ -62,7 +69,7 @@ function verdictClaimingScripts() {
   return fs
     .readdirSync(BIN)
     .filter((f) => f.endsWith('.sh'))
-    .filter((f) => claimsAVerdict(f))
+    .filter((f) => claimsAVerdict(f) || CONVERTED_VERDICT_SCRIPTS.includes(f))
     .sort();
 }
 
@@ -79,8 +86,7 @@ test('every verdict-claiming script in bin/ can emit a failing verdict (D-009)',
     `These scripts claim a verdict in their name but cannot emit a failing one, so a green run ` +
       `and a red run are the same exit code:\n  ${offenders.join('\n  ')}\n\n` +
       `Give each an explicit nonzero exit (see bin/mac-vm-fresh-install-e2e.sh for the ` +
-      `PASS/FAIL/VOID shape), or — only with a stated reason on the owning work-item — add it ` +
-      `to KNOWN_VERDICTLESS.`,
+      `PASS/FAIL/VOID shape) so the guard can distinguish a real pass from a false green.`,
   );
 });
 
@@ -154,5 +160,18 @@ test('the detector is falsifiable: it flags a verdictless script and clears a re
     assert.equal(claimsAVerdict('mac-vm-gw-prep.sh'), false, 'a setup script must stay exempt');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('each converted mac-vm verdict script fails on a synthetic failure', () => {
+  for (const name of CONVERTED_VERDICT_SCRIPTS) {
+    const result = spawnSync('bash', [path.join(BIN, name)], {
+      env: { ...process.env, MAC_VM_VERDICT_TEST_FAIL: '1' },
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 1, `${name} must exit 1 on synthetic failure; output:\n${output}`);
+    assert.match(output, /VERDICT: FAIL/, `${name} must print a failing verdict`);
   }
 });

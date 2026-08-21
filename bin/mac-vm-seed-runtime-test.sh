@@ -8,6 +8,14 @@
 # Keep collecting diagnostics after a failed assertion, then return a real
 # verdict so a transcript cannot masquerade as a passing release gate.
 FAILURES=0
+# Test-only escape hatch used by verification-script-verdict-guard.test.js.  It
+# proves this script can emit FAIL without touching a real Mac or DMG.
+if [ "${MAC_VM_VERDICT_TEST_FAIL:-0}" = "1" ]; then
+  FAILURES=1
+  echo "  FAIL  synthetic failure requested by the verdict guard"
+  echo "VERDICT: FAIL (1 failed assertion(s))"
+  exit 1
+fi
 pass() { echo "  PASS  $*"; }
 fail() { echo "  FAIL  $*"; FAILURES=$((FAILURES+1)); }
 emit_verdict() {
@@ -86,9 +94,9 @@ echo "--- pg.log tail ---"; tail -5 "$WORK/pg.log"
 echo "--- try queries (whichever superuser the seed uses) ---"
 MIGRATIONS_OK=0
 for U in postgres harness_admin; do
-  R=$("$PSQL" -h "$SOCK" -p 5599 -U "$U" -d postgres -tAc "select current_user, (select count(*) from harness_shared.schema_migrations)" 2>&1)
+  R=$("$PSQL" -h "$SOCK" -p 5599 -U "$U" -d postgres -tAc "select count(*) from harness_shared.schema_migrations" 2>&1)
   echo "user=$U -> $R"
-  printf '%s\n' "$R" | grep -Eq '[[:space:]][1-9][0-9]*[[:space:]]*$' && MIGRATIONS_OK=1
+  printf '%s\n' "$R" | grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]*$' && MIGRATIONS_OK=1
 done
 if [ "$MIGRATIONS_OK" = "1" ]; then pass "seed exposes a non-empty migrated schema"; else fail "seed schema_migrations query did not return a positive count"; fi
 echo "--- databases present ---"

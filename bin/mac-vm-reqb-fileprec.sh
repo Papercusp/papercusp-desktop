@@ -8,6 +8,14 @@
 # Keep both controls observable, then return a real verdict.  Printing a result
 # while exiting 0 made this verification unusable as release evidence.
 FAILURES=0
+# Test-only escape hatch used by verification-script-verdict-guard.test.js.  It
+# proves this script can emit FAIL without touching a real Mac or Claude binary.
+if [ "${MAC_VM_VERDICT_TEST_FAIL:-0}" = "1" ]; then
+  FAILURES=1
+  echo "  FAIL  synthetic failure requested by the verdict guard"
+  echo "VERDICT: FAIL (1 failed assertion(s))"
+  exit 1
+fi
 pass() { echo "  PASS  $*"; }
 fail() { echo "  FAIL  $*"; FAILURES=$((FAILURES+1)); }
 emit_verdict() {

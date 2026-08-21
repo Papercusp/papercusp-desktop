@@ -31,6 +31,14 @@ emit_verdict() {
   exit 0
 }
 
+# Test-only escape hatch used by verification-script-verdict-guard.test.js.  It
+# proves this script can emit FAIL without touching a real Mac or GUI instance.
+if [ "${MAC_VM_VERDICT_TEST_FAIL:-0}" = "1" ]; then
+  FAILURES=1
+  echo "  FAIL  synthetic failure requested by the verdict guard"
+  emit_verdict
+fi
+
 guipid() { pgrep -f 'Papercusp GUI.app/Contents/MacOS' 2>/dev/null | head -1; }
 ophealth() {
   for P in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i node | grep -oE '127.0.0.1:[0-9]+' | grep -oE '[0-9]+$' | sort -u); do
