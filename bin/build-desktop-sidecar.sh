@@ -125,6 +125,29 @@ hash -r
 echo "→ using pinned Node runtime: $(command -v node) ($(node -v), required >=$PAPERCUSP_REQUIRED_NODE_MAJOR)"
 unset _current_node _current_version _brew_node _selected_node _node_candidate _node_major
 
+# WI-40008 / WI-6043: systemd user managers keep their own launch-time PATH and
+# commonly omit Cargo's default install directory even when the owner has a
+# healthy Rust toolchain at ~/.cargo/bin. The live federation gate exposed that
+# exact split: this script resolved the pinned Node runtime above, spent the
+# whole sidecar build, then died at the chat-dock `cargo metadata` / `cargo
+# build` calls with `cargo: command not found`. Resolve the Rust entry point at
+# the same early boundary as Node so every caller (interactive, systemd, cron)
+# gets one deterministic toolchain view and a missing install fails before the
+# expensive build. Honour relocated CARGO_HOME; only amend PATH when the caller
+# did not already select a cargo binary.
+_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+if ! command -v cargo >/dev/null 2>&1 && [[ -x "$_cargo_home/bin/cargo" ]]; then
+  export PATH="$_cargo_home/bin:$PATH"
+  hash -r
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR: sidecar release build requires Cargo, but PATH has no cargo and $_cargo_home/bin/cargo is not executable." >&2
+  echo "       Install/expose the Rust toolchain (systemd callers usually need CARGO_HOME/bin on PATH), then re-run." >&2
+  exit 1
+fi
+echo "→ using Cargo toolchain: $(command -v cargo) ($(cargo --version))"
+unset _cargo_home
+
 # WI-5651: normally the sidecar is assembled + published at src-tauri/sidecar
 # (where tauri build's bundle.resources glob reads it — a real release cut MUST
 # use that). PAPERCUSP_SIDECAR_OUT redirects the WHOLE build (temp stage, lock,
