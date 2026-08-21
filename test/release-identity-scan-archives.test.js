@@ -74,6 +74,30 @@ function scanDir(dir) {
   });
 }
 
+function scanArtifact(artifact, env = {}) {
+  return spawnSync('python3', [AUDIT, '--scan-artifact', artifact], {
+    encoding: 'utf8',
+    env: { ...AUDIT_ENV, ...env },
+  });
+}
+
+function fakeAppImage(dir) {
+  const artifact = path.join(dir, 'fixture.AppImage');
+  fs.writeFileSync(
+    artifact,
+    [
+      '#!/bin/sh',
+      '[ "$1" = "--appimage-extract" ] || exit 64',
+      'mkdir -p squashfs-root/usr/share',
+      'printf "%s\\n" "$PAPERCUSP_APPIMAGE_FIXTURE_PAYLOAD" > squashfs-root/usr/share/payload.txt',
+      'head -c 1024 /dev/zero > squashfs-root/usr/share/coverage.bin',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  return artifact;
+}
+
 function fixture(name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `p012-${name}-`));
   fs.mkdirSync(path.join(dir, 'bundle'));
@@ -149,6 +173,30 @@ test('an archive the gate cannot open FAILS rather than being skipped', () => {
     const r = scanDir(path.join(dir, 'bundle'));
     assert.equal(r.status, 1, `an uninspectable archive must not report CLEAN:\n${r.stdout}`);
     assert.match(r.stdout, /COULD NOT BE INSPECTED/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a zstd-SquashFS-shaped AppImage is read through its embedded extraction runtime', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appimage-runtime-clean-'));
+  try {
+    const artifact = fakeAppImage(dir);
+    const r = scanArtifact(artifact, { PAPERCUSP_APPIMAGE_FIXTURE_PAYLOAD: 'harmless fixture' });
+    assert.equal(r.status, 0, `expected clean AppImage extraction to pass:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /expanded via AppImage runtime/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('THE FALSIFIER: a literal extracted by the AppImage runtime fails the finished-byte scan', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appimage-runtime-dirty-'));
+  try {
+    const artifact = fakeAppImage(dir);
+    const r = scanArtifact(artifact, { PAPERCUSP_APPIMAGE_FIXTURE_PAYLOAD: identityLiteral() });
+    assert.equal(r.status, 1, `an AppImage payload identity must fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /payload\.txt/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

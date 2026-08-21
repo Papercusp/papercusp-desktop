@@ -2324,8 +2324,11 @@ def _expand_installer(path, dest):
         plus `-setup-N.bin` slices. innoextract given the stub follows those
         sibling slices itself, which is the only way the ~2.2GB payload is ever
         actually read. 7z is tried after it, for a genuine NSIS installer.
-      • `.dmg` / `.AppImage` / `.msi` → 7z, whose Dmg/HFS/SquashFS/Udf handlers
-        cover them.
+      • `.AppImage` → its embedded runtime's `--appimage-extract` first. The
+        AppImages this project emits use zstd-compressed SquashFS, which the
+        host's 7z can identify but cannot extract. The runtime is the producer's
+        own format reader and this mode extracts without launching AppRun.
+      • `.dmg` / `.msi` / `.bin` → 7z, whose Dmg/HFS/Udf handlers cover them.
       • anything `_expand_archive` already knows (.zip/.tar.*/.deb) → that, so
         the two entrypoints cannot drift in how they read a format they share.
 
@@ -2357,7 +2360,40 @@ def _expand_installer(path, dest):
                 return True, "7z"
         return False, "none"
 
-    if low.endswith((".dmg", ".appimage", ".msi", ".bin")):
+    if low.endswith(".appimage"):
+        if os.access(path, os.X_OK):
+            # `--appimage-extract` is handled by the embedded AppImage runtime;
+            # it does NOT execute the packaged AppRun. Run inside `dest` because
+            # the runtime always writes a fixed `squashfs-root/` sibling. Silence
+            # its one-line-per-member stdout — scan_dir below is the auditable
+            # coverage report, and a 15k-file member list only obscures failures.
+            r = subprocess.run(
+                [path, "--appimage-extract"],
+                cwd=dest,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            extracted = os.path.join(dest, "squashfs-root")
+            if r.returncode == 0 and _tree_bytes(extracted) > 0:
+                return True, "AppImage runtime"
+            detail = (r.stderr or "").strip().replace("\n", " ")[:200]
+            print(f"    scan-artifact: AppImage runtime extraction failed for {path}: "
+                  f"exit {r.returncode}{f': {detail}' if detail else ''}")
+        else:
+            print(f"    scan-artifact: {path} is not executable; "
+                  "cannot invoke its AppImage extraction runtime")
+        # Keep 7z as a compatibility fallback for older gzip/xz AppImages it can
+        # genuinely expand. The caller's ratio floor rejects its known partial
+        # extraction shapes, so a false zero cannot become a clean verdict.
+        if shutil.which("7z"):
+            r = sh(f"7z x -y -bd -o{q(dest)} {q(path)}")
+            if r.returncode == 0 and _tree_bytes(dest) > 0:
+                return True, "7z"
+        return False, "AppImage runtime+7z"
+
+    if low.endswith((".dmg", ".msi", ".bin")):
         if not shutil.which("7z"):
             print(f"    scan-artifact: cannot expand {path}: 7z not on PATH "
                   f"(a container this gate cannot open is a hole, not a pass)")
