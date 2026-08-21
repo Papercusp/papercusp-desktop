@@ -58,7 +58,7 @@
     "prebuild:all-bundles": "node bin/check-spa-freshness.js",
     "build:all-bundles": "bash bin/build-deb-repacked.sh --all-bundles",
     "build:archived": "bash bin/build-and-archive-deb.sh",
-    "test:config": "node --test test/tauri-config-resources.test.js",
+    "test:config": "node --test test/tauri-config-resources.test.js test/inno-silent-upgrade.test.js",
     "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '\u2713 tauri-bindings.ts regenerated'"
   },
   "devDependencies": {
