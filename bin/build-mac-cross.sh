@@ -139,6 +139,7 @@ papercusp_export_rust_lld macos
 # Append (rather than prepend) the directory: an explicitly selected caller
 # toolchain still wins, while missing Cargo-installed commands become visible
 # before cargo metadata and the fail-closed toolchain preflight below.
+CARGO_HOME_EFFECTIVE="${CARGO_HOME:-$HOME/.cargo}"
 case ":$PATH:" in
   *":$CARGO_HOME_EFFECTIVE/bin:"*) ;;
   *) export PATH="$PATH:$CARGO_HOME_EFFECTIVE/bin" ;;
