@@ -513,50 +513,43 @@ build_runtime_workspace_outputs_after_install() {
     fi
     echo "→ verifying the resolved TypeScript toolchain for $workspace"
     if ! (cd "$REPO_ROOT" && npm --workspace="$workspace" exec -- node -e '
-const expected = require("./package.json").devDependencies?.typescript ?? "";
-let actual = "<unresolved>";
+const manifest = require("./package.json");
+const expectedApi = manifest.devDependencies?.typescript ?? "";
+const expectedNative = manifest.devDependencies?.["@typescript/native"] ?? "";
+let actualApi = { name: "<unresolved>", version: "<unresolved>" };
+let actualNative = { name: "<unresolved>", version: "<unresolved>" };
 try {
-  actual = require("typescript/package.json").version;
+  actualApi = require("typescript/package.json");
 } catch {
   // The diagnostic below names the unresolved toolchain.
 }
-const expectedMatch = /^(~|\^)?(\d+)\.(\d+)\.(\d+)$/.exec(expected);
-const actualMatch = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(actual);
-let compatible = false;
-if (expectedMatch && actualMatch) {
-  const [, operator = "", expectedMajor, expectedMinor, expectedPatch] = expectedMatch;
-  const [, actualMajor, actualMinor, actualPatch] = actualMatch;
-  const eMajor = Number(expectedMajor);
-  const eMinor = Number(expectedMinor);
-  const ePatch = Number(expectedPatch);
-  const aMajor = Number(actualMajor);
-  const aMinor = Number(actualMinor);
-  const aPatch = Number(actualPatch);
-  if (operator === "~") {
-    compatible = aMajor === eMajor && aMinor === eMinor && aPatch >= ePatch;
-  } else if (operator === "^") {
-    compatible =
-      aMajor === eMajor &&
-      (eMajor > 0
-        ? aMinor > eMinor || (aMinor === eMinor && aPatch >= ePatch)
-        : eMinor > 0
-          ? aMinor === eMinor && aPatch >= ePatch
-          : aMinor === 0 && aPatch === ePatch);
-  } else {
-    compatible = aMajor === eMajor && aMinor === eMinor && aPatch === ePatch;
-  }
+try {
+  actualNative = require("@typescript/native/package.json");
+} catch {
+  // The diagnostic below names the unresolved toolchain.
 }
+const expectedApiMatch = /^npm:@typescript\/typescript6@(\d+\.\d+\.\d+)$/.exec(expectedApi);
+const expectedNativeMatch = /^npm:typescript@(\d+\.\d+\.\d+)$/.exec(expectedNative);
+const compatible =
+  expectedApiMatch?.[1] === actualApi.version &&
+  actualApi.name === "@typescript/typescript6" &&
+  expectedNativeMatch?.[1] === actualNative.version &&
+  actualNative.name === "typescript";
 if (!compatible) {
   console.error(
     "FATAL: " + (process.env.npm_package_name ?? "runtime workspace") +
-      " build toolchain mismatch: package pins typescript " +
-      (expected || "<missing>") + " but resolves " + actual + ".",
+      " build toolchain mismatch: expected native CLI " +
+      (expectedNative || "<missing>") + " + API compatibility " +
+      (expectedApi || "<missing>") + "; resolved " +
+      actualNative.name + "@" + actualNative.version + " + " +
+      actualApi.name + "@" + actualApi.version + ".",
   );
   process.exit(1);
 }
 console.log(
   "  ✓ " + (process.env.npm_package_name ?? "runtime workspace") +
-    ": TypeScript " + actual + " satisfies " + expected,
+    ": native TypeScript " + actualNative.version +
+    " + API compatibility " + actualApi.version + " satisfy their aliases",
 );
 '); then
       echo "ERROR: resolved TypeScript does not satisfy the workspace pin for $workspace" >&2
@@ -641,10 +634,13 @@ for (const workspace of process.argv.slice(3)) {
     continue;
   }
 
-  let tscVersion = "<unresolved>";
+  let tscApiVersion = "<unresolved>";
+  let tscNativeVersion = "<unresolved>";
   try {
-    tscVersion = createRequire(manifestPath).resolve("typescript/package.json");
-    tscVersion = JSON.parse(fs.readFileSync(tscVersion, "utf8")).version;
+    tscApiVersion = createRequire(manifestPath).resolve("typescript/package.json");
+    tscApiVersion = JSON.parse(fs.readFileSync(tscApiVersion, "utf8")).version;
+    tscNativeVersion = createRequire(manifestPath).resolve("@typescript/native/package.json");
+    tscNativeVersion = JSON.parse(fs.readFileSync(tscNativeVersion, "utf8")).version;
   } catch {
     // Keep the diagnostic explicit when the workspace-local/root compiler is absent.
   }
@@ -671,7 +667,7 @@ for (const workspace of process.argv.slice(3)) {
     })
     .join(", ") || "none declared";
   runtimeDetails.push(
-    `${workspace}: TypeScript ${tscVersion} (pin ${manifest.devDependencies?.typescript ?? "<missing>"}); runtime outputs ${outputStatus}`,
+    `${workspace}: native TypeScript ${tscNativeVersion} (pin ${manifest.devDependencies?.["@typescript/native"] ?? "<missing>"}); API compatibility ${tscApiVersion} (pin ${manifest.devDependencies?.typescript ?? "<missing>"}); runtime outputs ${outputStatus}`,
   );
 }
 
