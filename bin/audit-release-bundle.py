@@ -1282,6 +1282,36 @@ def _innoextract_command():
     return shutil.which(configured if configured else "innoextract")
 
 
+_INNOEXTRACT_INTEGRITY_WARNING = re.compile(
+    r"(?:"
+    r"\bchecksum\b[^\r\n]*(?:mismatch|error|fail(?:ed|ure)?)"
+    r"|\b(?:mismatch|error|fail(?:ed|ure)?)\b[^\r\n]*\bchecksum\b"
+    r"|\b(?:expected|actual|got)\b[^\r\n]*\bchecksum\b"
+    r"|\bchecksum\b[^\r\n]*\b(?:expected|actual|got)\b"
+    r"|\b(?:could not|cannot|failed to)\s+read back\b[^\r\n]*"
+    r"\b(?:multi[- ]?part|slice|part)\b"
+    r"|\bintegrity\b[^\r\n]*(?:warn|fail|mismatch|error)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _innoextract_integrity_warning(result):
+    """Return a concise integrity warning emitted by innoextract, if any.
+
+    Innoextract can report a disk-spanned read/checksum failure while still
+    exiting zero and leaving a non-empty partial file behind.  Treat those
+    diagnostics as a failed extraction rather than trusting the process code
+    or output size.  Search both streams because the extractor has used each
+    for diagnostics across releases.
+    """
+    output = "\n".join(
+        value for value in (result.stdout, result.stderr) if value
+    )
+    match = _INNOEXTRACT_INTEGRITY_WARNING.search(output)
+    return " ".join(match.group(0).split())[:200] if match else None
+
+
 def redact(v):
     return f"{v[:8]}…{v[-4:]} (len {len(v)})" if len(v) > 16 else f"{v[:3]}… (len {len(v)})"
 
@@ -2389,6 +2419,17 @@ def _expand_installer(path, dest):
             # --extract-unknown keeps files innoextract cannot classify rather
             # than dropping them: an unclassified blob still has to be scanned.
             r = sh(f"{q(innoextract)} -e -s --output-dir {q(dest)} {q(path)}")
+            integrity_warning = _innoextract_integrity_warning(r)
+            if integrity_warning:
+                print(
+                    "    scan-artifact: innoextract reported an integrity "
+                    f"warning: {integrity_warning}"
+                )
+                # Do not fall through to a generic extractor after a selected
+                # Inno reader reports damaged disk-span bytes.  A second tool
+                # can misread the same stub/slices and turn this warning into a
+                # false certification.
+                return False, f"innoextract ({innoextract}) integrity warning"
             if r.returncode == 0 and _tree_bytes(dest) > 0:
                 return True, f"innoextract ({innoextract})"
         if shutil.which("7z"):

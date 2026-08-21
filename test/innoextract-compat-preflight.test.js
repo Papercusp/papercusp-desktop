@@ -98,3 +98,57 @@ test('audit-release-bundle.py uses PAPERCUSP_INNOEXTRACT for executable expansio
 
   fs.rmSync(selected, { recursive: true, force: true });
 });
+
+test('a zero-exit Inno integrity warning fails closed before generic fallback', () => {
+  const selected = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-innoextract-warning-'));
+  const extractor = path.join(selected, 'warning extractor.sh');
+  const artifact = path.join(selected, 'fixture-setup.exe');
+  const dest = path.join(selected, 'expanded');
+
+  fs.writeFileSync(
+    extractor,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'out=""',
+      'while (($#)); do',
+      '  if [[ "$1" == "--output-dir" ]]; then out="$2"; shift 2; else shift; fi',
+      'done',
+      'mkdir -p "$out"',
+      'printf "Could not read back disk-spanned data for multi-part file\\n" >&2',
+      'printf "checksum mismatch: expected abc actual def\\n" >&2',
+      'printf "corrupt payload\\n" > "$out/source.tar.zst"',
+      'exit 0',
+    ].join('\n') + '\n',
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(artifact, 'not-an-installer-for-the-fake-consumer\n');
+
+  const python = [
+    'import importlib.util, sys',
+    `spec = importlib.util.spec_from_file_location("audit", ${JSON.stringify(path.join(root, 'bin/audit-release-bundle.py'))})`,
+    'mod = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(mod)',
+    'ok, method = mod._expand_installer(sys.argv[1], sys.argv[2])',
+    'print(ok)',
+    'print(method)',
+  ].join('; ');
+  const output = execFileSync('python3', ['-c', python, artifact, dest], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, PAPERCUSP_INNOEXTRACT: extractor },
+  });
+
+  assert.match(
+    output,
+    /^False\n/m,
+    'a checksum/read-back warning must reject a non-empty partial extraction',
+  );
+  assert.match(
+    output,
+    /innoextract .*integrity warning/,
+    'the failed method must preserve the fail-closed reason',
+  );
+
+  fs.rmSync(selected, { recursive: true, force: true });
+});
