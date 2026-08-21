@@ -83,11 +83,83 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, gui, server, slices, log, flipped, ssh, scp };
 }
 
-function runVerify(f, extraArgs = []) {
+function linuxFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'install-relaunch-linux-'));
+  const artifacts = join(root, 'artifacts');
+  const shims = join(root, 'shims');
+  mkdirSync(artifacts);
+  mkdirSync(shims);
+
+  const deb = join(artifacts, `papercusp-gui_${VERSION}_amd64.deb`);
+  writeFileSync(deb, 'pristine ubuntu deb fixture');
+  writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
+    version: VERSION,
+    buildSha: TARGET_SHA,
+  }));
+
+  const log = join(root, 'transport.log');
+  const flipped = join(root, 'flipped');
+  const configured = join(root, 'configured');
+  const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
+printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+case "$*" in
+  *"echo VM-OK"*) printf 'VM-OK\\n' ;;
+  *"operator.json"*) printf '{"port":15747}\\n' ;;
+  *"api/health"*)
+    if [[ -f "$MOCK_FLIPPED" ]]; then
+      printf '{"sha":"${TARGET_SHA}","version":"${VERSION}"}\\n'
+    else
+      printf '{"sha":"old-sha","version":"0.0.17"}\\n'
+    fi
+    ;;
+  *"dpkg-query -W"*)
+    if [[ -f "$MOCK_CONFIGURED" ]]; then
+      printf 'install ok installed\\n'
+    else
+      printf 'install ok unpacked\\n'
+    fi
+    ;;
+  *"dpkg-deb -f"*) printf 'papercusp-gui\\n' ;;
+  *"apt-get install --yes"*) : > "$MOCK_CONFIGURED" ;;
+  *"dpkg -i"*)
+    printf 'dpkg: dependency problems: libwebkit2gtk-4.1-0 is not installed\\n' >&2
+    exit 1
+    ;;
+  *"relaunch-fails"*)
+    printf 'error while loading shared libraries: libwebkit2gtk-4.1.so.0\\n' >&2
+    exit 1
+    ;;
+  *"setsid bash -c"*)
+    if [[ -f "$MOCK_CONFIGURED" ]]; then
+      : > "$MOCK_FLIPPED"
+    else
+      printf 'error while loading shared libraries: libwebkit2gtk-4.1.so.0\\n' >&2
+      exit 1
+    fi
+    ;;
+esac
+`);
+  const scp = executable(shims, 'scp', `#!/usr/bin/env bash
+printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
+`);
+
+  return { root, deb, log, flipped, configured, ssh, scp };
+}
+
+function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
+  const env = {
+    ...process.env,
+    HOME: f.root,
+    PC_SSH: f.ssh,
+    PC_SCP: f.scp,
+    MOCK_LOG: f.log,
+    MOCK_FLIPPED: f.flipped,
+  };
+  if (f.configured) env.MOCK_CONFIGURED = f.configured;
   return spawnSync('bash', [
     SCRIPT,
-    '--platform', 'windows',
-    '--artifact', f.gui,
+    '--platform', platform,
+    '--artifact', artifact,
     '--expected-sha', TARGET_SHA,
     '--expected-version', VERSION,
     '--install-timeout', '2',
@@ -97,14 +169,7 @@ function runVerify(f, extraArgs = []) {
     ...extraArgs,
   ], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      HOME: f.root,
-      PC_SSH: f.ssh,
-      PC_SCP: f.scp,
-      MOCK_LOG: f.log,
-      MOCK_FLIPPED: f.flipped,
-    },
+    env,
   });
 }
 
@@ -160,6 +225,59 @@ test('an explicit Server installer must attest the same build sha as the GUI', (
     const result = runVerify(f, ['--server-artifact', otherServer]);
     assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stderr, /server artifact buildSha mismatch/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Linux resolves missing WebKit dependencies before relaunching the installed deb', () => {
+  const f = linuxFixture();
+  try {
+    const result = runVerify(f, [], 'linux', f.deb);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.flipped, true);
+    assert.equal(verdict.portHeld, true);
+
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes'));
+    const packageCheck = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('dpkg-query -W'));
+    const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('setsid bash -c'));
+    assert.ok(install >= 0, 'Linux must use apt-get local-file installation, not dpkg -i');
+    assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
+    assert.ok(packageCheck > install, 'package configuration must be checked after installation');
+    assert.ok(relaunch > packageCheck, 'Linux must not relaunch before package configuration is confirmed');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Linux blocks relaunch when dpkg reports the WebKit dependency is missing', () => {
+  const f = linuxFixture();
+  try {
+    const result = runVerify(f, ['--install-cmd', 'sudo dpkg -i __ARTIFACT__'], 'linux', f.deb);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.failures.join('\n'), /GUI install failed/);
+    assert.match(verdict.failures.join('\n'), /libwebkit2gtk-4\.1-0/);
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    assert.equal(lines.some((line) => line.includes('setsid bash -c')), false, 'a failed install must block relaunch');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Linux includes relaunch stderr in a failed verdict', () => {
+  const f = linuxFixture();
+  try {
+    const result = runVerify(f, ['--relaunch-cmd', 'relaunch-fails'], 'linux', f.deb);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.failures.join('\n'), /relaunch command failed/);
+    assert.match(verdict.failures.join('\n'), /libwebkit2gtk-4\.1\.so\.0/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

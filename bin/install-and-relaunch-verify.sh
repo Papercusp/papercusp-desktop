@@ -153,7 +153,12 @@ case "$PLATFORM" in
   linux)
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
     OPJSON_PATH="\$HOME/.papercusp/operator.json"
-    INSTALL_CMD="${INSTALL_CMD:-sudo dpkg -i __ARTIFACT__}"
+    # `dpkg -i` unpacks a .deb but deliberately does not resolve its declared
+    # dependencies. On a pristine Ubuntu VM that leaves the GUI in iU state
+    # when WebKit is absent, so the relaunch fails before the bundled operator
+    # can report the target build. apt-get's local-file install resolves and
+    # configures the dependency closure before we attempt the relaunch.
+    INSTALL_CMD="${INSTALL_CMD:-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __ARTIFACT__}"
     # LINUX relaunch (LIVE-VALIDATED 2026-07-19 on the linux-test VM, WI-5484):
     # the app is a plain Tauri GUI in the user X session, NOT a systemd service
     # (the old `systemctl --user restart papercusp-desktop.service` default was
@@ -396,7 +401,26 @@ run_installer() {
     # it, so fail loudly and leave the stale operator serving.
     fail_check "$label install: timed out after ${INSTALL_TIMEOUT}s (ssh killed; the VM-side installer may still be running detached) — NOT relaunching; re-probe VM process/disk state before any retry, or raise --install-timeout"
   elif [[ "$install_rc" -ne 0 ]]; then
-    note "$label installer exit was non-zero ($install_rc; the flip assertion is authoritative)${install_out:+ — output: ${install_out:0:400}}"
+    # A non-zero installer result means the bytes/configuration are not a
+    # trustworthy release candidate. Continuing to relaunch made a missing
+    # WebKit dependency look like a silent no-op update and discarded the
+    # causal installer error behind a later polling failure.
+    fail_check "$label install failed with exit $install_rc${install_out:+ — output: ${install_out:0:400}}"
+  fi
+}
+
+verify_linux_package_configured() {
+  local status_out="" status_rc=0
+  # Validate the package named by the artifact, rather than hard-coding the
+  # product package name. `install ok installed` is the dpkg state required
+  # before a GUI relaunch can load its declared shared libraries.
+  status_out="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "package=\$(dpkg-deb -f $REMOTE_Q Package) && dpkg-query -W -f='\${Status}' \"\$package\"" 2>&1 | tr -d '\r\0')" || status_rc=$?
+  if [[ "$status_rc" -eq 124 ]]; then
+    fail_check "Linux package status check timed out after ${INSTALL_TIMEOUT}s — NOT relaunching"
+  elif [[ "$status_rc" -ne 0 ]]; then
+    fail_check "Linux package status check failed with exit $status_rc${status_out:+ — output: ${status_out:0:400}} — NOT relaunching"
+  elif [[ "$status_out" != "install ok installed" ]]; then
+    fail_check "Linux package is not configured (dpkg status '$status_out') — declared dependencies may still be missing; NOT relaunching"
   fi
 }
 
@@ -410,10 +434,22 @@ if [[ ${#FAILURES[@]} -eq 0 && ${#SERVER_ARTIFACTS[@]} -gt 0 ]]; then
   SERVER_INSTALL_RUN="${SERVER_INSTALL_CMD//__SERVER_ARTIFACT__/$SERVER_REMOTE_Q}"
   run_installer "Server" "$SERVER_INSTALL_RUN"
 fi
+if [[ ${#FAILURES[@]} -eq 0 && "$PLATFORM" == "linux" ]]; then
+  verify_linux_package_configured
+fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
-  timeout 60 "${SSH[@]}" "$RELAUNCH_CMD" >/dev/null 2>&1 || note "relaunch command exit was non-zero"
+  RELAUNCH_OUT=""
+  RELAUNCH_RC=0
+  RELAUNCH_OUT="$(timeout 60 "${SSH[@]}" "$RELAUNCH_CMD" 2>&1 | tr -d '\r\0')" || RELAUNCH_RC=$?
+  if [[ "$RELAUNCH_RC" -eq 124 ]]; then
+    fail_check "relaunch command timed out after 60s${RELAUNCH_OUT:+ — output: ${RELAUNCH_OUT:0:400}}"
+  elif [[ "$RELAUNCH_RC" -ne 0 ]]; then
+    fail_check "relaunch command failed with exit $RELAUNCH_RC${RELAUNCH_OUT:+ — output: ${RELAUNCH_OUT:0:400}}"
+  elif [[ -n "$RELAUNCH_OUT" ]]; then
+    note "relaunch output: ${RELAUNCH_OUT:0:400}"
+  fi
 fi
 
 # ── 5+6. Poll for the FLIP, then assert sticky-port-hold ────────────────────
