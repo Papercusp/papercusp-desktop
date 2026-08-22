@@ -96,21 +96,20 @@ override) and the build toolchain (rustc/node/tauri-cli) is recorded in
 
 ---
 
-## 2. Ship-gate: `release:verify-provenance` (P-010)
+## 2. Ship-gate: `bin/verify-provenance.sh` (P-010)
 
-The executable form of "a bad build physically cannot ship." Run it against the
-cut before handing anything over:
+The executable form of "a bad build physically cannot ship." Run the canonical
+script once per cut artifact directory before handing anything over:
 
 ```
-recipes:run { id: "release-verify-provenance" }
+bash bin/verify-provenance.sh <artifact-dir> --health-sha <sha> --require-signed
 ```
 
-It resolves the cut's `build-provenance.json` dirs under `src-tauri/target` and
-the running operator's live `/api/health` sha, then for each dir asserts (via
-`bin/verify-provenance.sh` + `bin/verify-tauri-signature.mjs`):
+Given one cut artifact directory and its `build-provenance.json`, it asserts
+(via `bin/verify-provenance.sh` + `bin/verify-tauri-signature.mjs`):
 
 - `gitDirty == false`;
-- `buildSha == the live /api/health sha` (skipped, not failed, if no operator);
+- `buildSha == the supplied live `/api/health` sha`;
 - **each artifact's sha256** matches what provenance recorded;
 - **D-004 signature dimension** — each artifact's minisign `.sig` verifies against
   the embedded updater pubkey (Node Blake2b-512 + Ed25519, no external `minisign`),
@@ -124,13 +123,13 @@ A targeted single-dir check with explicit args:
 
 ---
 
-## 3. VM operator health: `release:vm-preflight` (P-011)
+## 3. VM operator health: `bin/vm-preflight.sh` (P-011)
 
 Before (and after) exercising an install on a VM, confirm the packaged operator
 is genuinely alive — without misreading a healthy operator as dead (WI-3270):
 
 ```
-recipes:run { id: "release-vm-preflight" }
+bash bin/vm-preflight.sh --json
 ```
 
 The WI-3270 triad: host VM process (`pgrep`) + app process in the VM (`tasklist`)
@@ -149,13 +148,16 @@ layout. A QEMU-owned hostfwd LISTEN socket is never treated as guest liveness.
 
 ---
 
-## 4. Live update proof: `release:install-and-relaunch-verify` (P-012)
+## 4. Live update proof: `bin/install-and-relaunch-verify.sh` (P-012)
 
 The EI-9002 / WI-3783 live proof that installing the new cut **actually replaces
 the running operator, in place, keeping its address**:
 
 ```
-recipes:run { id: "release-install-and-relaunch-verify" }        # defaults to the newest Windows cut + the Windows VM
+bash bin/install-and-relaunch-verify.sh \
+  --platform windows \
+  --artifact <new-gui-installer> \
+  --server-artifact <matching-server-installer>
 ```
 
 Sequence: snapshot the running operator (`/api/health` sha+version + sticky port)
@@ -167,8 +169,9 @@ version **flip** old→new [EI-9002: not a silent no-op update] and (b) the oper
 `build-provenance.json` sha (D-002 — rollback-safe).
 
 > ⚠ This **touches the VM** (scp + install + relaunch). Only run it when a build
-> VM is genuinely free to be mutated. Validate the composed recipe without VM
-> contact via `recipes:run { id: "release-install-and-relaunch-verify", dryRun: true }`.
+> VM is genuinely free to be mutated. Validate the argument surface without VM
+> contact with `bash bin/install-and-relaunch-verify.sh --help`; the script's
+> mock `PC_SSH`/`PC_SCP` harness is the no-VM verification path.
 > For a specific artifact / mac|linux / a different VM, call
 > `bash bin/install-and-relaunch-verify.sh --platform <p> --artifact <path> [flags]`.
 > On Windows the script auto-resolves the exact-version Server stub beside the

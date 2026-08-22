@@ -68,7 +68,7 @@ else
 fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
-# --- SERVER OVERLAY (WI-6075 / linux GUI-Server split P-007) ---
+# --- SEED OVERLAY / SERVER PRODUCT (WI-6075 / GUI-Server split P-007) ---
 #
 # The multi-GB hive seed (src-tauri/seed, ~2GB) is deliberately NOT in the base
 # tauri.conf.json: it must never ship inside the GUI product. The debs this script

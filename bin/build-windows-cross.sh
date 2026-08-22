@@ -518,12 +518,8 @@ exclusive — see the _WIN_CRT_STATIC comment above)."
   if [[ "$role" == "gui" ]]; then
     _WIN_SCAN_DIRS+=("$SRC_TAURI/sidecar/spa")
   else
-    _WIN_SCAN_DIRS+=(
-      "$SRC_TAURI/sidecar"
-      "$SRC_TAURI/resources"
-      "$SRC_TAURI/seed"
-      "$SRC_TAURI/env-sidecars/staging"
-    )
+    _WIN_SCAN_DIRS+=("$SRC_TAURI/sidecar" "$SRC_TAURI/resources")
+    _WIN_SCAN_DIRS+=("$SRC_TAURI/seed" "$SRC_TAURI/env-sidecars/staging")
   fi
   # Exit 2 (COULD NOT CHECK) and exit 1 (FOUND LEAKS) must not share a message. Both
   # stop the build — this is a diagnosability fix, not a safety one — but reporting a

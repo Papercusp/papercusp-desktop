@@ -345,8 +345,8 @@ stage_env_sidecars() { # $1=sidecar dir (inside the .app)
 }
 
 # ── Hand-assemble the .app to Tauri's macOS layout. ───────────────────────────
-assemble_app() { # $1=role $2=identifier $3=productName $4=universal_binary $5=app_out
-  local role="$1" ident="$2" name="$3" bin="$4" app="$5"
+assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $5=role
+  local ident="$1" name="$2" bin="$3" app="$4" role="$5"
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   gen_info_plist "$ident" "$name" "$app/Contents/Info.plist"
@@ -658,7 +658,7 @@ for role in $ROLES; do
 
   app="$OUT_BUNDLE/macos/$product.app"
   echo "    [$role] assembling $product.app"
-  assemble_app "$role" "$app_id" "$product" "$uni_bin" "$app"
+  assemble_app "$app_id" "$product" "$uni_bin" "$app" "$role"
 
   # `cp -a` preserves extended attributes when the source filesystem supports
   # them. Remove only FinderInfo/resource-fork metadata before any signature or
