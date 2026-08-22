@@ -380,8 +380,15 @@ EOF
 # perfectly healthy install (WI-2902, 2026-07-06). Read operator.json first; keep the
 # log-grep as a fallback for any pre-operator.json build.
 op_port() {  # op_port <name>  → prints the operator port (empty if unknown)
-  local name="$1" p
-  p="$(vm_ssh "$name" "python3 -c \"import json,os;print(json.load(open(os.path.expanduser('~/.papercusp/operator.json')))['port'])\" 2>/dev/null" 2>/dev/null | tr -dc '0-9')"
+  local name="$1" p operator_json='~/.papercusp/operator.json'
+  # updater-e2e deliberately launches the AppImage with an isolated HOME, so
+  # its discovery record lives below ~/updater-e2e/home rather than the normal
+  # guest home. Keep the lane choice here so status and verify share one source
+  # of truth without changing the app's isolation boundary.
+  case "$name" in
+    updater|updater-*) operator_json='~/updater-e2e/home/.papercusp/operator.json' ;;
+  esac
+  p="$(vm_ssh "$name" "python3 -c \"import json,os;print(json.load(open(os.path.expanduser('$operator_json')))['port'])\" 2>/dev/null" 2>/dev/null | tr -dc '0-9')"
   [ -n "$p" ] && { printf '%s\n' "$p"; return 0; }
   vm_ssh "$name" "grep -oE 'listening on http://127\.0\.0\.1:[0-9]+' papercusp-app.log 2>/dev/null | grep -oE '[0-9]+\$' | tail -1" 2>/dev/null
 }

@@ -67,6 +67,34 @@ function runGuard(args) {
 }
 
 /**
+ * Run the guard with a controllable Tauri exit status and retain stderr. This
+ * proves the release message describes the signal path, rather than merely
+ * proving that the wrapper reaches a stub CLI.
+ */
+function runGuardResult(args, tauriScript) {
+  const home = mkdtempSync(join(tmpdir(), 'ei20270512-result-home-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'ei20270512-result-bin-'));
+  try {
+    const shim = join(shimDir, 'tauri');
+    writeFileSync(shim, tauriScript);
+    chmodSync(shim, 0o755);
+    return spawnSync('bash', [GUARD, ...args], {
+      env: {
+        ...process.env,
+        HOME: home,
+        CARGO_TARGET_DIR: '',
+        PATH: `${shimDir}:${process.env.PATH}`,
+        PAPERCUSP_SIDECAR_LOCK: join(home, 'sidecar.lock'),
+      },
+      encoding: 'utf8',
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Exercise finite-command routing against an unmodified copy of the real guard.
  * The copy's sibling wrapper and PATH `tauri` are distinct recorders, so the
  * result proves which branch exec'd and preserves every forwarded argv element.
@@ -110,6 +138,21 @@ test('the chokepoint claims a target-dir slot for `dev`', () => {
     'the `tauri` npm script must claim a slot before exec-ing the CLI for `dev` — ' +
       'without it a concurrent build corrupts the shared app-manifest (WI-7101)',
   );
+});
+
+test('ordinary Tauri success and failure do not claim a SIGUSR1 yield', () => {
+  for (const [label, exitCode] of [['success', 0], ['failure', 23]]) {
+    const result = runGuardResult(
+      ['dev'],
+      `#!/usr/bin/env bash\nexit ${exitCode}\n`,
+    );
+    assert.strictEqual(result.status, exitCode, `${label} exit status must be preserved`);
+    assert.doesNotMatch(
+      result.stderr,
+      /yielded .*waiting sidecar publish \(SIGUSR1\)/,
+      `${label} must not report a publish yield when no SIGUSR1 arrived; stderr: ${result.stderr}`,
+    );
+  }
 });
 
 test('the Tauri chokepoint waits for an in-flight sidecar publish before startup reads resources', async (t) => {
@@ -198,8 +241,10 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
     chmodSync(shim, 0o755);
 
     let stdout = '';
+    let stderr = '';
     guard = spawn('bash', [GUARD, 'dev'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     guard.stdout.on('data', (chunk) => { stdout += chunk; });
+    guard.stderr.on('data', (chunk) => { stderr += chunk; });
     await new Promise((resolve, reject) => {
       const deadline = setTimeout(() => reject(new Error(`tauri shim never reached startup: ${stdout}`)), 3000);
       guard.stdout.on('data', () => {
@@ -218,6 +263,7 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
     process.kill(guard.pid, 'SIGUSR1');
     const writerExit = await new Promise((resolve) => writer.once('close', resolve));
     assert.equal(writerExit, 0, 'the writer must acquire the lock after the cooperative yield');
+    assert.match(stderr, /yielded .*waiting sidecar publish \(SIGUSR1\)/);
     assert.equal(guard.exitCode, null, 'yielding the lock must not terminate the long-lived dev child');
   } finally {
     if (writer && writer.exitCode === null) writer.kill('SIGTERM');

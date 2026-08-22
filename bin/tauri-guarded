@@ -78,6 +78,8 @@ __pc_sidecar_lockdir="${PAPERCUSP_SIDECAR_LOCKDIR:-$__here/../src-tauri/sidecar.
 __pc_sidecar_lock_held=0
 
 __pc_release_sidecar_read_lock() {
+  local reason="${1:-}"
+
   if [[ "$__pc_sidecar_lock_held" != 1 ]]; then
     return 0
   fi
@@ -88,7 +90,9 @@ __pc_release_sidecar_read_lock() {
   # startup grace period, once the resource-read window should be complete.
   exec 9>&-
   __pc_sidecar_lock_held=0
-  echo "→ yielded $__pc_sidecar_lock to a waiting sidecar publish (SIGUSR1)" >&2
+  if [[ "$reason" == "sigusr1" ]]; then
+    echo "→ yielded $__pc_sidecar_lock to a waiting sidecar publish (SIGUSR1)" >&2
+  fi
 }
 
 __pc_hold_sidecar_read_lock() {
@@ -125,7 +129,7 @@ __pc_run_dev_with_yieldable_reader() {
   # Keep the reader lock in THIS short-lived supervisor. The child must not
   # inherit fd 9: an inherited flock would survive this shell closing its own
   # descriptor and recreate the daemon-lifetime deadlock.
-  trap '__pc_release_sidecar_read_lock' USR1
+  trap '__pc_release_sidecar_read_lock sigusr1' USR1
   trap 'if [[ -n "${child_pid:-}" ]]; then kill -TERM "$child_pid" 2>/dev/null || true; fi; __pc_release_sidecar_read_lock; exit 143' INT TERM HUP
 
   (

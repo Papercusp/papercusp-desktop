@@ -30,6 +30,26 @@ function mainWindowVisible(tree) {
   return result.status === 0;
 }
 
+function operatorPortProbe(name) {
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      [
+        'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+        'vm_ssh() { printf \'%s\\n\' "$2" >&2; printf \'3093\\n\'; }',
+        'op_port "$2"',
+      ].join('\\n'),
+      'bash',
+      vmctlPath,
+      name,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return { port: result.stdout.trim(), command: result.stderr };
+}
+
 test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   const fn = updaterFunction();
   assert.match(common, /updater\) idx=3/);
@@ -64,6 +84,21 @@ test('guest startup validates operator birth identity against guest procfs', () 
     fn.indexOf('operatorIdentityVerified":false') < fn.indexOf('record.get("processIdentity")'),
     'kernel-isolation evidence must survive rejection of a stale artifact',
   );
+});
+
+test('VM status resolves updater-e2e operator discovery from its isolated HOME', () => {
+  const updater = operatorPortProbe('updater');
+  assert.equal(updater.port, '3093');
+  assert.match(updater.command, /updater-e2e\/home\/\.papercusp\/operator\.json/);
+  assert.doesNotMatch(updater.command, /expanduser\('\/~?\.papercusp\/operator\.json/);
+
+  const updaterLane = operatorPortProbe('updater-2');
+  assert.match(updaterLane.command, /updater-e2e\/home\/\.papercusp\/operator\.json/);
+
+  const normal = operatorPortProbe('clean');
+  assert.equal(normal.port, '3093');
+  assert.match(normal.command, /~\/\.papercusp\/operator\.json/);
+  assert.doesNotMatch(normal.command, /updater-e2e\/home/);
 });
 
 test('VM verification accepts only a full-size Papercusp main window', () => {
