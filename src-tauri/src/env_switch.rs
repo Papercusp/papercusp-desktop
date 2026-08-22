@@ -144,7 +144,11 @@ fn parse_api_target(raw: Option<String>) -> Option<u16> {
         .parse::<u16>()
         .ok()
         .or_else(|| url::Url::parse(trimmed).ok().and_then(|u| u.port()))
-        .or_else(|| trimmed.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()));
+        .or_else(|| {
+            trimmed
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+        });
     match port.filter(|p| *p >= 1024) {
         Some(p) => Some(p),
         None => {
@@ -507,7 +511,10 @@ mod tests {
     #[test]
     fn ranked_candidates_put_self_first_then_prod_then_staging() {
         // The loaded env (self/release) ranks first, then prod, then staging.
-        assert_eq!(ranked_default_candidates(Some(3270)), vec![3270, 3070, 3170]);
+        assert_eq!(
+            ranked_default_candidates(Some(3270)),
+            vec![3270, 3070, 3170]
+        );
         // A self that IS prod/staging isn't duplicated — order still preserved.
         assert_eq!(ranked_default_candidates(Some(3070)), vec![3070, 3170]);
         assert_eq!(ranked_default_candidates(Some(3170)), vec![3170, 3070]);

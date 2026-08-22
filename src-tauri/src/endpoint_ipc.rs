@@ -408,12 +408,16 @@ async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
     }
     #[cfg(unix)]
     {
-        Ok(IpcStream::Unix(tokio::net::UnixStream::connect(path).await?))
+        Ok(IpcStream::Unix(
+            tokio::net::UnixStream::connect(path).await?,
+        ))
     }
     #[cfg(windows)]
     {
         use tokio::net::windows::named_pipe::ClientOptions;
-        Ok(IpcStream::Pipe(ClientOptions::new().open(path.as_os_str())?))
+        Ok(IpcStream::Pipe(
+            ClientOptions::new().open(path.as_os_str())?,
+        ))
     }
 }
 
@@ -752,11 +756,19 @@ pub struct SocketResolution {
 
 impl SocketResolution {
     pub fn found(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
-        Self { path: Some(path.into()), detail: detail.into(), owner_is_content_origin: false }
+        Self {
+            path: Some(path.into()),
+            detail: detail.into(),
+            owner_is_content_origin: false,
+        }
     }
 
     pub fn missing(detail: impl Into<String>) -> Self {
-        Self { path: None, detail: detail.into(), owner_is_content_origin: false }
+        Self {
+            path: None,
+            detail: detail.into(),
+            owner_is_content_origin: false,
+        }
     }
 
     /// Mark this resolution as belonging to the webview's own content origin.
@@ -869,9 +881,7 @@ pub struct IpcClientHandle {
 }
 
 impl IpcClientHandle {
-    pub fn new(
-        socket_source: impl Fn() -> SocketResolution + Send + Sync + 'static,
-    ) -> Arc<Self> {
+    pub fn new(socket_source: impl Fn() -> SocketResolution + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             client: Mutex::new(None),
             socket_source: Box::new(socket_source),
@@ -955,7 +965,13 @@ impl IpcClientHandle {
             }
         };
         let now = now_ms();
-        let since = |v: u64| if v == 0 { None } else { Some(now.saturating_sub(v)) };
+        let since = |v: u64| {
+            if v == 0 {
+                None
+            } else {
+                Some(now.saturating_sub(v))
+            }
+        };
         IpcStatus {
             resolved_path: resolution.path.as_ref().map(|p| p.display().to_string()),
             resolution_detail: resolution.detail,
@@ -987,7 +1003,9 @@ impl IpcClientHandle {
             }
         }
         self.stats.attempts.fetch_add(1, Ordering::Relaxed);
-        self.stats.last_attempt_ms.store(now_ms(), Ordering::Relaxed);
+        self.stats
+            .last_attempt_ms
+            .store(now_ms(), Ordering::Relaxed);
 
         let resolution = (self.socket_source)();
         let Some(path) = resolution.path else {
@@ -1004,7 +1022,9 @@ impl IpcClientHandle {
         match IpcClient::connect(&path).await {
             Ok(c) => {
                 self.stats.connects.fetch_add(1, Ordering::Relaxed);
-                self.stats.last_connect_ms.store(now_ms(), Ordering::Relaxed);
+                self.stats
+                    .last_connect_ms
+                    .store(now_ms(), Ordering::Relaxed);
                 self.set_last_error(None);
                 if let Ok(mut g) = self.connected_path.lock() {
                     *g = Some(path.display().to_string());
@@ -1768,8 +1788,7 @@ mod tests {
                 dec.push(&buf[..n]).unwrap();
                 for frame in dec.drain() {
                     if frame.frame_type == FrameType::Request {
-                        let v: serde_json::Value =
-                            serde_json::from_slice(&frame.payload).unwrap();
+                        let v: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
                         let id = v["id"].as_u64().unwrap();
                         let mut ids = server_ids.lock().unwrap();
                         ids.push(id);
@@ -1791,9 +1810,13 @@ mod tests {
         for _ in 0..N {
             let c = client.clone();
             handles.push(tokio::spawn(async move {
-                c.invoke("synth".to_string(), serde_json::json!({}), Channel::new(|_| Ok(())))
-                    .await
-                    .unwrap()
+                c.invoke(
+                    "synth".to_string(),
+                    serde_json::json!({}),
+                    Channel::new(|_| Ok(())),
+                )
+                .await
+                .unwrap()
             }));
         }
         for h in handles {
@@ -1901,8 +1924,7 @@ mod tests {
                     .into_iter()
                     .find(|f| f.frame_type == FrameType::Request)
                 {
-                    let v: serde_json::Value =
-                        serde_json::from_slice(&req.payload).unwrap();
+                    let v: serde_json::Value = serde_json::from_slice(&req.payload).unwrap();
                     break v["id"].as_u64().unwrap();
                 }
             };
@@ -1946,7 +1968,12 @@ mod tests {
         // Wait for the terminal Done to land (bounded).
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if captured.lock().unwrap().iter().any(|s| s.contains("\"done\"")) {
+            if captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.contains("\"done\""))
+            {
                 break;
             }
             assert!(

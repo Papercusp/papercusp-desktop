@@ -102,7 +102,11 @@ fn checkpoint_truncate(db: &Path) -> rusqlite::Result<(i64, i64, i64)> {
     // A short busy timeout so a transient writer doesn't hard-fail the checkpoint.
     let _ = conn.busy_timeout(std::time::Duration::from_millis(2000));
     let row = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     Ok(row)
 }
@@ -229,12 +233,12 @@ mod tests {
         // Normal operation: a WAL a few times the DB, well under the abs floor.
         assert!(!wal_is_runaway(1_000_000, 4_000_000)); // 4x, ~4 MiB
         assert!(!wal_is_runaway(1_000_000, 2_000_000)); // 2x
-        // A big multiple but still under the 128 MiB absolute floor — no alarm
-        // (a small store churning is normal; we only care about disk runaways).
+                                                        // A big multiple but still under the 128 MiB absolute floor — no alarm
+                                                        // (a small store churning is normal; we only care about disk runaways).
         assert!(!wal_is_runaway(1_000, 100_000_000)); // 100k x but < 128 MiB
-        // Over the floor but only a modest multiple — not runaway.
+                                                      // Over the floor but only a modest multiple — not runaway.
         assert!(!wal_is_runaway(200_000_000, 200_000_000)); // 1x, 200 MiB main
-        // The exact EI-14135 shape: ~127 GiB WAL over a ~1.1 MiB main DB.
+                                                            // The exact EI-14135 shape: ~127 GiB WAL over a ~1.1 MiB main DB.
         assert!(wal_is_runaway(1_126_400, 136_862_255_312));
         // Over the floor AND a large multiple.
         assert!(wal_is_runaway(5_000_000, 30_000_000_000));
@@ -293,7 +297,10 @@ mod tests {
         // reopens the store.
         let report = reclaim_localstorage_wals(&dir);
         assert_eq!(report.attempted, 1, "should have found the one DB");
-        assert_eq!(report.checkpointed, 1, "TRUNCATE should have completed (busy=0)");
+        assert_eq!(
+            report.checkpointed, 1,
+            "TRUNCATE should have completed (busy=0)"
+        );
         assert_eq!(
             report.failed_reclaim, 0,
             "a fully-completed checkpoint (busy=0) must never count as a failed reclaim"
@@ -355,7 +362,10 @@ mod tests {
 
         let wal = wal_path(&db);
         let before = file_len(&wal);
-        assert!(before > 4_000_000, "precondition: -wal should have grown, got {before}");
+        assert!(
+            before > 4_000_000,
+            "precondition: -wal should have grown, got {before}"
+        );
 
         // A third, merely-idle connection held open for the WHOLE test so that
         // dropping `reader` (and later `writer`) is never the LAST connection to
@@ -369,11 +379,16 @@ mod tests {
         // WAL contents — this is what a lingering orphaned webview process (or
         // any other still-alive reader) looks like from the checkpointer's side.
         let reader = rusqlite::Connection::open(&db).unwrap();
-        reader.execute_batch("BEGIN; SELECT count(*) FROM kv;").unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM kv;")
+            .unwrap();
 
         let report = reclaim_localstorage_wals(&dir);
         assert_eq!(report.attempted, 1);
-        assert_eq!(report.checkpointed, 0, "the open reader must block a full (busy=0) checkpoint");
+        assert_eq!(
+            report.checkpointed, 0,
+            "the open reader must block a full (busy=0) checkpoint"
+        );
         assert_eq!(
             report.failed_reclaim, 1,
             "busy + zero bytes reclaimed must be counted as a FAILED reclaim, not silently ignored"
@@ -403,8 +418,15 @@ mod tests {
             report2.attempted == 0 || report2.checkpointed == 1,
             "once the reader is gone, the WAL must end up fully reclaimed (report2={report2:?})"
         );
-        assert_eq!(report2.failed_reclaim, 0, "no failure should be reported once the blocking reader is gone");
-        assert_eq!(file_len(&wal), 0, "the -wal must actually be gone once the blocking reader is gone");
+        assert_eq!(
+            report2.failed_reclaim, 0,
+            "no failure should be reported once the blocking reader is gone"
+        );
+        assert_eq!(
+            file_len(&wal),
+            0,
+            "the -wal must actually be gone once the blocking reader is gone"
+        );
         drop(_keepalive);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -414,7 +436,10 @@ mod tests {
     fn reclaim_is_a_safe_noop_on_a_missing_or_walless_dir() {
         // Missing dir → empty report, no panic.
         let missing = std::env::temp_dir().join("papercusp-lswal-does-not-exist-xyz");
-        assert_eq!(reclaim_localstorage_wals(&missing), WalReclaimReport::default());
+        assert_eq!(
+            reclaim_localstorage_wals(&missing),
+            WalReclaimReport::default()
+        );
 
         // Dir with a non-WAL main DB (no -wal sibling) → nothing attempted.
         let dir = unique_tmp_dir("noop");

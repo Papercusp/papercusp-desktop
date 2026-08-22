@@ -201,8 +201,10 @@ pub fn init(app: &tauri::App) {
                     continue;
                 };
 
-                let Some((_, mut desired)) =
-                    DESIRED_FEATURES.iter().copied().find(|(name, _)| *name == ident)
+                let Some((_, mut desired)) = DESIRED_FEATURES
+                    .iter()
+                    .copied()
+                    .find(|(name, _)| *name == ident)
                 else {
                     continue;
                 };
@@ -210,13 +212,15 @@ pub fn init(app: &tauri::App) {
                     desired = want_damage;
                 }
 
-                let before = ffi_features::webkit_settings_get_feature_enabled(settings_ptr, feature);
+                let before =
+                    ffi_features::webkit_settings_get_feature_enabled(settings_ptr, feature);
                 ffi_features::webkit_settings_set_feature_enabled(
                     settings_ptr,
                     feature,
                     if desired { 1 } else { 0 },
                 );
-                let after = ffi_features::webkit_settings_get_feature_enabled(settings_ptr, feature);
+                let after =
+                    ffi_features::webkit_settings_get_feature_enabled(settings_ptr, feature);
 
                 // Read back rather than trusting the setter: an unknown or
                 // locked feature silently keeps its old value, and a silent

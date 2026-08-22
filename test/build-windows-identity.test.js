@@ -6,6 +6,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
 const audit = path.join(root, 'bin/audit-release-bundle.py');
 
@@ -179,6 +180,25 @@ test('source staging runs the owner-name preflight before creating or compressin
   assert.ok(tarAt >= 0, 'stage-source-tree.sh must still invoke the archive producer');
   assert.ok(preflightAt < outputAt, 'owner preflight must run before OUT_TMP is created');
   assert.ok(preflightAt < tarAt, 'owner preflight must run before tar/zstd archive work');
+});
+
+test('the Linux local release entrypoint runs owner-name preflight before sidecar assembly', () => {
+  const preflightAt = linuxScript.indexOf(
+    'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
+  );
+  const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+
+  assert.ok(preflightAt >= 0, 'build-linux-local.sh must invoke --owner-preflight');
+  assert.ok(sidecarAt >= 0, 'build-linux-local.sh must retain sidecar assembly');
+  assert.ok(
+    preflightAt < sidecarAt,
+    'Linux must reject a missing owner assertion before sidecar assembly starts; the shared stage guard is too late',
+  );
+  assert.match(
+    linuxScript.slice(0, preflightAt),
+    /PAPERCUSP_RELEASE_OWNER_NAME/,
+    'the Linux entrypoint header must document the required runtime-only owner-name contract',
+  );
 });
 
 test('owner preflight fails closed for an automation Git identity without an asserted owner name', () => {

@@ -771,10 +771,11 @@ pub fn start_bridge(
                                 parsed.join("/api/health").ok().map(|j| j.to_string())
                             })
                         });
-                        let operator_reachable = health_url.as_deref().and_then(|u| {
-                            origin_reachable(&health_check_client, u)
-                        });
-                        let sidecars_alive = pid_sidecars_alive && operator_reachable.unwrap_or(true);
+                        let operator_reachable = health_url
+                            .as_deref()
+                            .and_then(|u| origin_reachable(&health_check_client, u));
+                        let sidecars_alive =
+                            pid_sidecars_alive && operator_reachable.unwrap_or(true);
                         let resp = HealthResponse {
                             uptime_ms: start_instant.elapsed().as_millis() as u64,
                             webview_ready,

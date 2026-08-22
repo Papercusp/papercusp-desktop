@@ -52,8 +52,8 @@ mod fd_limit;
 mod localstorage_wal;
 mod native_console;
 mod native_terminal;
-mod webkit_render;
 mod pty;
+mod webkit_render;
 mod workspaces;
 mod wsl_setup;
 
@@ -279,10 +279,19 @@ enum AdvertisementState {
     /// File exists but carries no usable `socketPath`.
     Unparseable,
     /// Names a pid that is no longer running (the classic restart orphan).
-    DeadPid { socket: String, pid: u32 },
+    DeadPid {
+        socket: String,
+        pid: u32,
+    },
     /// Names a socket file that has since been removed.
-    SocketGone { socket: String, pid: u32 },
-    Live { socket: String, pid: u32 },
+    SocketGone {
+        socket: String,
+        pid: u32,
+    },
+    Live {
+        socket: String,
+        pid: u32,
+    },
 }
 
 impl AdvertisementState {
@@ -405,7 +414,6 @@ fn resolve_dev_ipc_socket(
         )),
     }
 }
-
 
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
 /// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
@@ -1104,9 +1112,18 @@ mod tests {
     fn sanitize_app_route_accepts_only_same_origin_paths() {
         use super::sanitize_app_route;
         // Accepted: ordinary app routes (with query / hash), trimmed.
-        assert_eq!(sanitize_app_route("/settings/voice").as_deref(), Some("/settings/voice"));
-        assert_eq!(sanitize_app_route("/adv?tab=harnesses").as_deref(), Some("/adv?tab=harnesses"));
-        assert_eq!(sanitize_app_route("  /settings/user#a  ").as_deref(), Some("/settings/user#a"));
+        assert_eq!(
+            sanitize_app_route("/settings/voice").as_deref(),
+            Some("/settings/voice")
+        );
+        assert_eq!(
+            sanitize_app_route("/adv?tab=harnesses").as_deref(),
+            Some("/adv?tab=harnesses")
+        );
+        assert_eq!(
+            sanitize_app_route("  /settings/user#a  ").as_deref(),
+            Some("/settings/user#a")
+        );
         // Rejected: not rooted, protocol-relative, absolute URLs, schemes, control chars.
         assert_eq!(sanitize_app_route("settings/voice"), None);
         assert_eq!(sanitize_app_route("//evil.example.com"), None);
@@ -1130,7 +1147,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Isolate HOME so the test writes to a temp dir, not the real ~/.papercusp.
-        let tmp = std::env::temp_dir().join(format!("pc-pending-route-test-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("pc-pending-route-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1138,10 +1156,21 @@ mod tests {
             std::env::set_var("HOME", &tmp);
         }
 
-        assert_eq!(super::take_pending_route(), None, "empty when nothing written");
+        assert_eq!(
+            super::take_pending_route(),
+            None,
+            "empty when nothing written"
+        );
         super::write_pending_route("/settings/voice");
-        assert_eq!(super::take_pending_route().as_deref(), Some("/settings/voice"));
-        assert_eq!(super::take_pending_route(), None, "one-shot: cleared after read");
+        assert_eq!(
+            super::take_pending_route().as_deref(),
+            Some("/settings/voice")
+        );
+        assert_eq!(
+            super::take_pending_route(),
+            None,
+            "one-shot: cleared after read"
+        );
 
         // A tampered off-origin route is rejected on read (still cleared).
         super::write_pending_route("https://evil.example.com");
@@ -1350,8 +1379,12 @@ mod macos_local_network_tests {
             .find("NSLocalNetworkUsageDescription")
             .expect("key presence asserted above");
         let after = &INFO_PLIST[idx..];
-        let open = after.find("<string>").expect("usage description needs a <string> value");
-        let close = after.find("</string>").expect("usage description <string> must be closed");
+        let open = after
+            .find("<string>")
+            .expect("usage description needs a <string> value");
+        let close = after
+            .find("</string>")
+            .expect("usage description <string> must be closed");
         assert!(
             close > open + "<string>".len(),
             "NSLocalNetworkUsageDescription must have a non-empty purpose string"
@@ -1723,9 +1756,7 @@ mod discovery_tests {
 
     #[test]
     fn tolerates_extra_fields() {
-        let d =
-            parse_operator_discovery(r#"{"port":1,"pid":2,"startedAt":"2026-06-10"}"#)
-                .unwrap();
+        let d = parse_operator_discovery(r#"{"port":1,"pid":2,"startedAt":"2026-06-10"}"#).unwrap();
         // Legacy records remain readable for healthy reuse, but destructive
         // cleanup later refuses them because they have no birth identity.
         assert!(d.process_identity.is_none());
@@ -1756,7 +1787,9 @@ mod discovery_tests {
 
     #[test]
     fn cmdline_check_matches_serve_mjs_and_ts() {
-        assert!(cmdline_looks_like_operator("node /opt/papercusp/sidecar/serve.mjs --ensure"));
+        assert!(cmdline_looks_like_operator(
+            "node /opt/papercusp/sidecar/serve.mjs --ensure"
+        ));
         assert!(cmdline_looks_like_operator(
             "/usr/bin/tsx apps/operator/bin/serve.ts --ensure"
         ));
@@ -1771,7 +1804,9 @@ mod discovery_tests {
         // pid to an unrelated process (a shell, `cat`, another app) — bare
         // pid-aliveness would wrongly call this "our operator".
         assert!(!cmdline_looks_like_operator("/bin/bash -c sleep 100"));
-        assert!(!cmdline_looks_like_operator("cat /home/user/.papercusp/operator.json"));
+        assert!(!cmdline_looks_like_operator(
+            "cat /home/user/.papercusp/operator.json"
+        ));
         assert!(!cmdline_looks_like_operator(""));
     }
 
@@ -1817,13 +1852,18 @@ mod discovery_tests {
     /// the host must not turn it into "anything with node in it".
     #[test]
     fn cmdline_check_still_rejects_an_unrelated_node_process() {
-        assert!(!cmdline_looks_like_operator("node /home/u/some-other-app/index.mjs"));
-        assert!(!cmdline_looks_like_operator("node dist-host/other-host.mjs"));
+        assert!(!cmdline_looks_like_operator(
+            "node /home/u/some-other-app/index.mjs"
+        ));
+        assert!(!cmdline_looks_like_operator(
+            "node dist-host/other-host.mjs"
+        ));
     }
 
     #[test]
     fn linux_identity_uses_boot_id_and_starttime_field_22() {
-        let stat = "42 (odd process) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
+        let stat =
+            "42 (odd process) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
         assert_eq!(
             linux_process_identity_from_stat("boot-abc\n", stat).as_deref(),
             Some("linux:boot-abc:987654")
@@ -2233,8 +2273,14 @@ mod discovery_tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         let text = err.to_string();
-        assert!(text.contains("serve.mjs"), "error names the missing file: {text}");
-        assert!(text.to_lowercase().contains("reinstall"), "error is actionable: {text}");
+        assert!(
+            text.contains("serve.mjs"),
+            "error names the missing file: {text}"
+        );
+        assert!(
+            text.to_lowercase().contains("reinstall"),
+            "error is actionable: {text}"
+        );
 
         // And it latched the defect for the updater to report.
         assert!(install_defect.current().is_some());
@@ -2387,10 +2433,9 @@ mod http_ready_tests {
 mod helper_tests {
     use super::{
         bundled_path_env, classify_advertisement, cmdline_looks_like_operator,
-        endpoint_ipc_socket_path_supported_for_target,
-        inspect_advertisement, local_process_cmdline, AdvertisementState,
-        find_endpoint_ipc_socket, is_tcp_endpoint, read_dev_ipc_socket, read_dev_ipc_socket_for_port,
-        resolve_dev_ipc_socket, url_encode,
+        endpoint_ipc_socket_path_supported_for_target, find_endpoint_ipc_socket,
+        inspect_advertisement, is_tcp_endpoint, local_process_cmdline, read_dev_ipc_socket,
+        read_dev_ipc_socket_for_port, resolve_dev_ipc_socket, url_encode, AdvertisementState,
     };
 
     /// Well above any realistic pid_max (and positive as i32) → ESRCH / no
@@ -2676,11 +2721,7 @@ mod helper_tests {
     fn discovery_socket_still_live_true_for_tcp_endpoint_regardless_of_filesystem() {
         // A `tcp://` endpoint has nothing on the local filesystem to check —
         // only the pid is validated (here: unknown pid → fail open).
-        assert!(still_live(
-            "tcp://127.0.0.1:35745",
-            0,
-            false
-        ));
+        assert!(still_live("tcp://127.0.0.1:35745", 0, false));
         // Dead pid still fails a tcp:// endpoint — pid liveness is checked
         // regardless of transport.
         assert!(!still_live(
@@ -2695,7 +2736,7 @@ mod helper_tests {
         let dir = temp_dir("ipc-live-dead-pid");
         let sock = dir.join("real.sock");
         std::fs::write(&sock, b"").unwrap(); // the socket FILE exists…
-        // …but the advertised pid is dead → the whole advertisement is stale.
+                                             // …but the advertised pid is dead → the whole advertisement is stale.
         assert!(!still_live(
             &sock.to_string_lossy(),
             DEFINITELY_DEAD_PID,
@@ -2708,9 +2749,9 @@ mod helper_tests {
     fn discovery_socket_still_live_false_when_socket_file_missing() {
         let dir = temp_dir("ipc-live-missing-sock");
         let sock = dir.join("gone.sock"); // never created
-        // Pid is alive (this test process) but the socket file itself is
-        // gone — still stale (e.g. the operator died between writing the
-        // discovery file and this read).
+                                          // Pid is alive (this test process) but the socket file itself is
+                                          // gone — still stale (e.g. the operator died between writing the
+                                          // discovery file and this read).
         assert!(!still_live(
             &sock.to_string_lossy(),
             std::process::id(),
@@ -2866,7 +2907,9 @@ mod helper_tests {
         let fixed = resolve_dev_ipc_socket(&dir, 3170, false);
         assert_eq!(
             fixed.path,
-            Some(std::path::PathBuf::from(legacy_sock.to_string_lossy().as_ref())),
+            Some(std::path::PathBuf::from(
+                legacy_sock.to_string_lossy().as_ref()
+            )),
             "a stale per-port file on a fixed dev port must fall back to a live singleton"
         );
         // A CUSTOM port (EI-296) must NOT fall back even when its own
@@ -3011,7 +3054,9 @@ mod helper_tests {
         let fell_back = resolve_dev_ipc_socket(&dir, 3170, false);
         assert_eq!(
             fell_back.path,
-            Some(std::path::PathBuf::from(singleton_sock.to_string_lossy().as_ref())),
+            Some(std::path::PathBuf::from(
+                singleton_sock.to_string_lossy().as_ref()
+            )),
             "precondition: this case must actually take the singleton fallback"
         );
         assert!(
@@ -4568,7 +4613,11 @@ fn baked_release_host() -> String {
     std::env::var("PAPERCUSP_RELEASE_HOST")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| option_env!("PAPERCUSP_RELEASE_HOST").unwrap_or("").to_string())
+        .unwrap_or_else(|| {
+            option_env!("PAPERCUSP_RELEASE_HOST")
+                .unwrap_or("")
+                .to_string()
+        })
 }
 
 /// P-013: run the post-update self-check and, on a genuine mismatch, surface it
@@ -4639,13 +4688,19 @@ mod post_update_self_check_tests {
     fn dev_build_with_no_baked_sha_skips() {
         // option_env!("PAPERCUSP_BUILD_SHA") is unset in a dev build → empty →
         // never a false mismatch alarm.
-        assert_eq!(evaluate_update_self_check("", "3cfe4e2"), UpdateSelfCheck::Skipped);
+        assert_eq!(
+            evaluate_update_self_check("", "3cfe4e2"),
+            UpdateSelfCheck::Skipped
+        );
     }
 
     #[test]
     fn unreadable_health_sha_skips() {
         // /api/health gave no sha (e.g. a Windows→WSL forward flake, WI-3270).
-        assert_eq!(evaluate_update_self_check("3cfe4e2", ""), UpdateSelfCheck::Skipped);
+        assert_eq!(
+            evaluate_update_self_check("3cfe4e2", ""),
+            UpdateSelfCheck::Skipped
+        );
     }
 
     #[test]
@@ -4662,7 +4717,10 @@ mod post_update_self_check_tests {
         // OLDER build, whose baked sha == the operator it (re)launches → the
         // self-check must PASS, not false-alarm on "not the latest".
         let older = "0.0.6-rollbacksha";
-        assert_eq!(evaluate_update_self_check(older, older), UpdateSelfCheck::Match);
+        assert_eq!(
+            evaluate_update_self_check(older, older),
+            UpdateSelfCheck::Match
+        );
     }
 }
 
@@ -4795,12 +4853,7 @@ fn spawn_boot_recovery_watcher(
         }
 
         // The normal watcher owns the post-attach dynamic-port lifecycle.
-        spawn_operator_watcher(
-            app_handle.clone(),
-            workspace_home.clone(),
-            via_wsl,
-            port,
-        );
+        spawn_operator_watcher(app_handle.clone(), workspace_home.clone(), via_wsl, port);
         let window_sc = window.clone();
         std::thread::spawn(move || run_update_self_check(&window_sc, port));
         return;
@@ -5609,9 +5662,7 @@ fn enable_login_autostart(app: &tauri::App) {
 
 #[cfg(target_os = "linux")]
 fn enable_login_autostart(_app: &tauri::App) {
-    println!(
-        "[papercusp-server] login auto-start is managed by papercusp-server.service"
-    );
+    println!("[papercusp-server] login auto-start is managed by papercusp-server.service");
 }
 
 /// Prepare rotated stdout+stderr sinks for the sidecar under
@@ -6075,7 +6126,10 @@ fn spawn_serve(
         // cannot silently disable supervision in the GUI; the supported SSH
         // launcher sets this to 0 for its detached child instead.
         cmd.env("PAPERCUSP_PARENT_DEATH_WATCH", "1");
-        cmd.env("PAPERCUSP_DESKTOP_PARENT_PID", std::process::id().to_string());
+        cmd.env(
+            "PAPERCUSP_DESKTOP_PARENT_PID",
+            std::process::id().to_string(),
+        );
     }
     cmd.env("PATH", &new_path)
         // The bundled bin dir, as its own var: on the WSL route it crosses
@@ -6508,7 +6562,9 @@ fn spawn_serve_supervisor(
                     let message = install_defect_message(&sup_sidecar, &missing_entrypoints);
                     set_install_defect(Some(message.clone()));
                     if !install_broken_notified {
-                        eprintln!("[papercusp-desktop] FATAL: {message} — NOT respawning (WI-5390)");
+                        eprintln!(
+                            "[papercusp-desktop] FATAL: {message} — NOT respawning (WI-5390)"
+                        );
                         notify_install_broken(&sup_handle, &message);
                         install_broken_notified = true;
                     }
@@ -6666,7 +6722,12 @@ async fn probe_update_check_status(endpoint: String) -> Option<(String, Option<S
             .build()
             .ok()?;
         let res = client.get(&endpoint).send().ok()?;
-        let check = res.headers().get("x-update-check")?.to_str().ok()?.to_string();
+        let check = res
+            .headers()
+            .get("x-update-check")?
+            .to_str()
+            .ok()?
+            .to_string();
         let reason = res
             .headers()
             .get("x-update-reason")
@@ -6808,7 +6869,11 @@ struct UpdateDownloadProgressPayload {
 /// since the last emit or the download has completed — bounding event volume
 /// to a handful per second regardless of chunk granularity, while still
 /// guaranteeing the final 100% emit is never swallowed by the throttle.
-fn should_emit_download_progress(downloaded: u64, total: Option<u64>, ms_since_last_emit: u128) -> bool {
+fn should_emit_download_progress(
+    downloaded: u64,
+    total: Option<u64>,
+    ms_since_last_emit: u128,
+) -> bool {
     let complete = total.map(|t| downloaded >= t).unwrap_or(false);
     complete || ms_since_last_emit >= 150
 }
@@ -6823,7 +6888,11 @@ fn make_download_progress_reporter(app: AppHandle) -> impl FnMut(usize, Option<u
     move |chunk_length: usize, total: Option<u64>| {
         downloaded += chunk_length as u64;
         let now = std::time::Instant::now();
-        if should_emit_download_progress(downloaded, total, now.duration_since(last_emit).as_millis()) {
+        if should_emit_download_progress(
+            downloaded,
+            total,
+            now.duration_since(last_emit).as_millis(),
+        ) {
             last_emit = now;
             let _ = app.emit(
                 "update-download-progress",
@@ -6908,18 +6977,15 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     let teardown_app = app.clone();
     let progress_reporter = make_download_progress_reporter(app.clone());
     update
-        .download_and_install(
-            progress_reporter,
-            move || {
-                {
-                    let state: tauri::State<SidecarState> = teardown_app.state();
-                    state
-                        .shutdown_done
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                kill_sidecar(&teardown_app);
-            },
-        )
+        .download_and_install(progress_reporter, move || {
+            {
+                let state: tauri::State<SidecarState> = teardown_app.state();
+                state
+                    .shutdown_done
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            kill_sidecar(&teardown_app);
+        })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -7186,18 +7252,15 @@ async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
     let teardown_app = app.clone();
     let progress_reporter = make_download_progress_reporter(app.clone());
     update
-        .download_and_install(
-            progress_reporter,
-            move || {
-                {
-                    let state: tauri::State<SidecarState> = teardown_app.state();
-                    state
-                        .shutdown_done
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                kill_sidecar(&teardown_app);
-            },
-        )
+        .download_and_install(progress_reporter, move || {
+            {
+                let state: tauri::State<SidecarState> = teardown_app.state();
+                state
+                    .shutdown_done
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            kill_sidecar(&teardown_app);
+        })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -7470,7 +7533,9 @@ fn apply_terminal_layout_live(app: &AppHandle, layout: native_terminal::Terminal
             });
         }
         #[cfg(target_os = "macos")]
-        native_terminal::TerminalStrategy::EmbeddedView(native_terminal::EmbedBackend::SwiftTerm) => {
+        native_terminal::TerminalStrategy::EmbeddedView(
+            native_terminal::EmbedBackend::SwiftTerm,
+        ) => {
             let Some((ns_window, term)) = nt.swiftterm_handle() else {
                 return;
             };
@@ -7802,7 +7867,11 @@ fn start_native_terminal(app: &AppHandle) {
                             handles.pid
                         );
                         let nt = handle.state::<native_terminal::NativeTerminal>();
-                        nt.set_win_handles(hwnd_addr as isize, handles.term_hwnd, handles.webview_hwnd);
+                        nt.set_win_handles(
+                            hwnd_addr as isize,
+                            handles.term_hwnd,
+                            handles.webview_hwnd,
+                        );
                         if layout.collapsed {
                             let _ = native_terminal::win_embed::set_layout(
                                 hwnd_addr as *mut std::ffi::c_void,
@@ -7875,8 +7944,11 @@ fn init_native_terminal(app: &tauri::App) {
 fn linux_has_dri_render_node() -> bool {
     std::fs::read_dir("/dev/dri")
         .map(|rd| {
-            rd.flatten()
-                .any(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("renderD")))
+            rd.flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("renderD"))
+            })
         })
         .unwrap_or(false)
 }
@@ -7942,9 +8014,7 @@ pub fn run() {
             // is present — disabling compositing there would be a perf regression),
             // and LIBGL_ALWAYS_SOFTWARE is deliberately NOT forced (a no-op under
             // llvmpipe, and it would cripple a real GPU).
-            if software_render
-                && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
-            {
+            if software_render && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
                 std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
             }
         }
@@ -9055,7 +9125,9 @@ fn sweep_stale_operator_orphan(workspace_home: &std::path::Path, via_wsl: bool) 
     let pid_alive = discovery
         .as_ref()
         .is_some_and(|d| discovery_pid_alive(d.pid, via_wsl));
-    let http_ready = discovery.as_ref().is_some_and(|d| operator_http_ready(d.port));
+    let http_ready = discovery
+        .as_ref()
+        .is_some_and(|d| operator_http_ready(d.port));
     let kill_authority_verified = discovery
         .as_ref()
         .is_some_and(|d| recorded_operator_kill_authority(d, via_wsl));

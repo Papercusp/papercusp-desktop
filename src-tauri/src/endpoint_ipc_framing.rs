@@ -123,7 +123,6 @@ pub fn decode_event_bin_payload(payload: &[u8]) -> Result<DecodedEventBin, Frame
     })
 }
 
-
 /// Streaming decoder. Push bytes via `push`; drain ready frames via `drain`.
 /// On `FrameError`, caller should close the underlying socket.
 #[derive(Debug, Default)]

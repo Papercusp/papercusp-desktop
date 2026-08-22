@@ -32,12 +32,27 @@
 #                              fast-iteration gui-only opt-in. A real Linux Server
 #                              deploy, e.g. a Hetzner box, does not go through this
 #                              knob — see bin/build-and-archive-deb.sh)
+#   PAPERCUSP_RELEASE_OWNER_NAME  human owner name asserted at run time for the
+#                                 release identity audit (required; never write it
+#                                 into the tree)
+#   PAPERCUSP_RELEASE_OWNER_EMAIL optional comma/semicolon-separated owner
+#                                 address list for email audit coverage
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  minisign key passphrase (default empty)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT"
+
+# ── OWNER-NAME PREFLIGHT (EI-21129566831677520). This entrypoint always
+# produces release artifacts, and its final identity audit cannot certify the
+# bundle without an explicitly asserted human owner name. The stager also runs
+# this shared check, but waiting until [3/5] means sidecar assembly and
+# env-sidecar staging have already spent time before a doomed build is refused.
+# Keep the policy in audit-release-bundle.py so every producer uses the same
+# non-secret, runtime-only contract.
+python3 "$HERE/audit-release-bundle.py" --owner-preflight \
+  || { echo "ERROR: owner-name preflight failed — refusing to start Linux release build" >&2; exit 2; }
 
 # ── Update source. LOAD IT HERE, in the producer (WI-4389) ───────────────────
 # This script used to have no idea PAPERCUSP_RELEASE_HOST existed: it worked only

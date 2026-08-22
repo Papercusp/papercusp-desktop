@@ -51,12 +51,7 @@ pub enum FdLimitPlan {
 
 /// Decide what to ask for, given the current limits and the kernel's per-process
 /// cap. Pure so the clamping rules are testable without touching real syscalls.
-pub fn plan_fd_limit(
-    soft: u64,
-    hard: u64,
-    kernel_cap: Option<u64>,
-    desired: u64,
-) -> FdLimitPlan {
+pub fn plan_fd_limit(soft: u64, hard: u64, kernel_cap: Option<u64>, desired: u64) -> FdLimitPlan {
     let mut ceiling = desired;
     if hard != NO_FINITE_CAP {
         ceiling = ceiling.min(hard);
@@ -345,10 +340,7 @@ mod tests {
             rlim_max: 0,
         };
         // SAFETY: caller-owned struct, read-only syscall.
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) },
-            0
-        );
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) }, 0);
         (lim.rlim_cur as u64, lim.rlim_max as u64)
     }
 }

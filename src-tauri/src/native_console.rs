@@ -637,9 +637,8 @@ fn cfs_write(path: &str, contents: &str) -> Result<(), String> {
                 if cfs_exists(path) {
                     return Ok(());
                 }
-                last =
-                    "write exited 0 but the file was not visible afterward (wsl interop race)"
-                        .to_string();
+                last = "write exited 0 but the file was not visible afterward (wsl interop race)"
+                    .to_string();
             }
             Ok(out) => last = wsl_relay_error(&out),
             Err(e) => last = e,
@@ -1581,8 +1580,12 @@ mod tests {
         assert!(is_missing_path_err(
             "wsl.exe exit 1; stderr: mv: cannot stat '/home/papercup/.papercusp/.mcp.json': No such file or directory"
         ));
-        assert!(is_missing_path_err("No such file or directory (os error 2)"));
-        assert!(is_missing_path_err("The system cannot find the file specified. (os error 2)"));
+        assert!(is_missing_path_err(
+            "No such file or directory (os error 2)"
+        ));
+        assert!(is_missing_path_err(
+            "The system cannot find the file specified. (os error 2)"
+        ));
         // A genuine permission / disk error must STILL abort the launch.
         assert!(!is_missing_path_err("Permission denied (os error 13)"));
         assert!(!is_missing_path_err("No space left on device"));

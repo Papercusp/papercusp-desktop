@@ -735,7 +735,9 @@ struct Live {
 /// surface, leaving only the webview's rail control. Persisted as "a
 /// setting" (native window chrome — the owner explicitly ruled out a nuqs
 /// URL param, which the webview's location bar has no reach into anyway).
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
 pub struct TerminalLayout {
     pub fraction: f32,
     pub collapsed: bool,
@@ -777,7 +779,9 @@ fn load_layout(path: &std::path::Path, default: TerminalLayout) -> TerminalLayou
 fn save_layout(path: &std::path::Path, layout: TerminalLayout) {
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("[papercusp-desktop] native-terminal: layout persist dir {dir:?} failed: {e}");
+            eprintln!(
+                "[papercusp-desktop] native-terminal: layout persist dir {dir:?} failed: {e}"
+            );
             return;
         }
     }
@@ -1152,7 +1156,13 @@ mod x11_glue {
             // data.l[0]: low byte = gravity (0); bits 8..=11 flag x,y,w,h present;
             // bits 12..13 = source indication (2 = pager/app per EWMH).
             let flags: u32 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (2 << 12);
-            let data = [flags, x as u32, y as u32, cw.max(1) as u32, ch.max(1) as u32];
+            let data = [
+                flags,
+                x as u32,
+                y as u32,
+                cw.max(1) as u32,
+                ch.max(1) as u32,
+            ];
             let event = ClientMessageEvent::new(32, win, self.net_moveresize, data);
             let mask = EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT;
             let _ = self.conn.send_event(false, self.root, mask, event);
@@ -1359,7 +1369,11 @@ mod x11_glue {
         /// `layout` is the current WI-3388 user layout (webview divider/rail);
         /// a change there is applied FIRST and short-circuits the rest of the
         /// tick. Returns `(target, changed, drifted)` when it moved.
-        pub fn tick(&mut self, force: bool, layout: super::TerminalLayout) -> Option<(Rect, bool, bool)> {
+        pub fn tick(
+            &mut self,
+            force: bool,
+            layout: super::TerminalLayout,
+        ) -> Option<(Rect, bool, bool)> {
             if self.apply_user_layout(layout) {
                 return self.last_target.map(|t| (t, true, false));
             }
@@ -1730,8 +1744,8 @@ pub mod vte_embed {
         fraction: f32,
         background: &str,
     ) -> Result<usize, String> {
-        use gtk::prelude::*;
         use glib::translate::ToGlibPtr;
+        use gtk::prelude::*;
 
         let vte = lib().ok_or("libvte-2.91 (gtk3) is not loadable")?;
         // SAFETY: vte_terminal_new returns a floating GtkWidget*.
@@ -2763,7 +2777,10 @@ mod tests {
     #[test]
     fn dock_gate_defaults_closed_no_spawn() {
         let nt = NativeTerminal::new(TerminalStrategy::Disabled);
-        assert!(!nt.gate_enabled(), "gate must default CLOSED (flag-off ⇒ no dock spawn)");
+        assert!(
+            !nt.gate_enabled(),
+            "gate must default CLOSED (flag-off ⇒ no dock spawn)"
+        );
         assert!(!nt.is_running());
     }
 

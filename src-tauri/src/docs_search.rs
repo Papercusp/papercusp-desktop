@@ -157,7 +157,6 @@ pub fn current_shortcut() -> Option<String> {
     read_persisted_shortcut()
 }
 
-
 // ---------------------------------------------------------------------------
 // Palette window
 // ---------------------------------------------------------------------------
@@ -691,7 +690,10 @@ mod tests {
     #[test]
     fn unavailable_page_escapes_html_in_the_reason() {
         let html = unavailable_page_html("<script>alert('x')</script> a & b");
-        assert!(!html.contains("<script>alert"), "reason must not inject markup");
+        assert!(
+            !html.contains("<script>alert"),
+            "reason must not inject markup"
+        );
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("a &amp; b"));
     }
@@ -703,10 +705,15 @@ mod tests {
     fn unavailable_data_url_is_parseable_base64_html() {
         let u = unavailable_data_url("boom");
         assert!(u.starts_with("data:text/html;charset=utf-8;base64,"));
-        assert!(u.parse::<url::Url>().is_ok(), "must parse — open_palette depends on it");
+        assert!(
+            u.parse::<url::Url>().is_ok(),
+            "must parse — open_palette depends on it"
+        );
         use base64::Engine as _;
         let payload = u.trim_start_matches("data:text/html;charset=utf-8;base64,");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
         let html = String::from_utf8(decoded).unwrap();
         assert!(html.contains("Quick Panel can’t open right now"));
         assert!(html.contains("boom"));

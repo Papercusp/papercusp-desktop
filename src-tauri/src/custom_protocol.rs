@@ -662,7 +662,10 @@ mod tests {
         let root = TempSpaRoot::new("render-root");
         let resp = render_bundled_spa(&root.dir, "/");
         assert_eq!(resp.status().as_u16(), 200);
-        assert_eq!(String::from_utf8_lossy(resp.body()), "<html>real index</html>");
+        assert_eq!(
+            String::from_utf8_lossy(resp.body()),
+            "<html>real index</html>"
+        );
     }
 
     #[test]
@@ -670,7 +673,10 @@ mod tests {
         let root = TempSpaRoot::new("render-spa-route");
         let resp = render_bundled_spa(&root.dir, "/harness/some-slug");
         assert_eq!(resp.status().as_u16(), 200);
-        assert_eq!(String::from_utf8_lossy(resp.body()), "<html>real index</html>");
+        assert_eq!(
+            String::from_utf8_lossy(resp.body()),
+            "<html>real index</html>"
+        );
     }
 
     #[test]

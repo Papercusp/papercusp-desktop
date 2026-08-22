@@ -128,7 +128,10 @@ fn validate_data_home_segment(name: &str) -> Result<(), String> {
 /// An `update-lane` channel (alpha/beta/stable) is the SAME application reached
 /// by a different feed, so it legitimately stamps the BASE home and shares state
 /// — that is why `stamped == BASE` is an accept, not a reject.
-pub fn resolve_data_home_dir_name<'a>(channel: &'a str, stamped: &'a str) -> Result<&'a str, String> {
+pub fn resolve_data_home_dir_name<'a>(
+    channel: &'a str,
+    stamped: &'a str,
+) -> Result<&'a str, String> {
     let channel = channel.trim();
     let stamped = stamped.trim();
 
@@ -547,7 +550,10 @@ pub fn ensure_initialized() -> io::Result<Registry> {
     // pre-fix install whose registry still says "default" keeps refusing,
     // which is correct — it must be migrated, not silently reinterpreted).
     // Display name stays "Default" for UX continuity; only the `id` changes.
-    let initial_id = format!("workspace-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let initial_id = format!(
+        "workspace-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
     let initial_dir = workspace_dir(&initial_id);
     fs::create_dir_all(&initial_dir)?;
 
@@ -835,8 +841,12 @@ mod tests {
             night.join(WORKSPACES_DIR_NAME),
             base.join(WORKSPACES_DIR_NAME)
         );
-        assert!(!night.join(BASE_DATA_HOME_DIR_NAME).starts_with(base.join(BASE_DATA_HOME_DIR_NAME)));
-        assert!(!night.join(WORKSPACES_DIR_NAME).starts_with(base.join(WORKSPACES_DIR_NAME)));
+        assert!(!night
+            .join(BASE_DATA_HOME_DIR_NAME)
+            .starts_with(base.join(BASE_DATA_HOME_DIR_NAME)));
+        assert!(!night
+            .join(WORKSPACES_DIR_NAME)
+            .starts_with(base.join(WORKSPACES_DIR_NAME)));
     }
 
     #[test]
@@ -984,7 +994,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(strays.is_empty(), "stray temp files left behind: {strays:?}");
+        assert!(
+            strays.is_empty(),
+            "stray temp files left behind: {strays:?}"
+        );
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -1018,7 +1031,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         // Isolate HOME so the test writes to a temp dir, never the real
         // workspaces root.
-        let tmp = std::env::temp_dir().join(format!("pcusp-ws-fresh-install-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("pcusp-ws-fresh-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1039,7 +1053,10 @@ mod tests {
             "expected a minted workspace-<hex> id, got {}",
             ws.id
         );
-        assert_eq!(ws.name, "Default", "display name stays 'Default' for UX continuity");
+        assert_eq!(
+            ws.name, "Default",
+            "display name stays 'Default' for UX continuity"
+        );
         assert_eq!(reg.current, ws.id);
         assert!(workspace_dir(&ws.id).exists());
 
@@ -1059,7 +1076,8 @@ mod tests {
 
         // --- Legacy-migration scenario: a SEPARATE fresh HOME, still isolated
         // from the first scenario above (which already restored/cleaned up). ---
-        let tmp2 = std::env::temp_dir().join(format!("pcusp-ws-legacy-migrate-{}", std::process::id()));
+        let tmp2 =
+            std::env::temp_dir().join(format!("pcusp-ws-legacy-migrate-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp2);
         fs::create_dir_all(&tmp2).unwrap();
         // Pre-seed a legacy ~/.papercusp with a marker file, as a real upgrading
@@ -1081,7 +1099,10 @@ mod tests {
             "legacy ~/.papercusp should migrate into the minted (non-'default') workspace dir"
         );
         assert_eq!(fs::read(&migrated_marker).unwrap(), b"legacy-state");
-        assert!(!legacy.exists(), "legacy dir should be moved (renamed), not copied");
+        assert!(
+            !legacy.exists(),
+            "legacy dir should be moved (renamed), not copied"
+        );
 
         unsafe {
             match prev_home2 {

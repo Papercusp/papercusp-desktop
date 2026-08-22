@@ -467,7 +467,14 @@ mod imp {
     /// disk …ext4.vhdx… ERROR_PATH_NOT_FOUND".)
     fn distro_start_failure() -> Option<String> {
         let out = wsl_command()
-            .args(["--distribution", DISTRO_NAME, "--user", "root", "--", "true"])
+            .args([
+                "--distribution",
+                DISTRO_NAME,
+                "--user",
+                "root",
+                "--",
+                "true",
+            ])
             .output();
         match out {
             Ok(o) if o.status.success() => None,
@@ -1178,7 +1185,10 @@ pub fn ensure_windows_cli_shims() {
     // papercusp.cmd — same bin dir + PATH so `papercusp tutorial` (and the rest of
     // the papercusp CLI) work from cmd/PowerShell just like `psu`. Non-fatal: a
     // failure here must not abort psu.cmd's PATH setup below.
-    if let Err(e) = std::fs::write(bin_dir.join("papercusp.cmd"), windows_papercusp_cmd_contents()) {
+    if let Err(e) = std::fs::write(
+        bin_dir.join("papercusp.cmd"),
+        windows_papercusp_cmd_contents(),
+    ) {
         eprintln!("[papercusp-desktop] cli-shims: write papercusp.cmd: {e}");
     }
 
@@ -1226,10 +1236,14 @@ pub fn ensure_windows_cli_shims() {
             frag_dir.join("papercusp.json"),
             windows_terminal_fragment_contents(),
         ) {
-            Ok(()) => println!("[papercusp-desktop] cli-shims: Windows Terminal psu profile registered"),
+            Ok(()) => {
+                println!("[papercusp-desktop] cli-shims: Windows Terminal psu profile registered")
+            }
             Err(e) => eprintln!("[papercusp-desktop] cli-shims: write WT fragment: {e}"),
         },
-        Err(e) => eprintln!("[papercusp-desktop] cli-shims: create WT fragment dir {frag_dir:?}: {e}"),
+        Err(e) => {
+            eprintln!("[papercusp-desktop] cli-shims: create WT fragment dir {frag_dir:?}: {e}")
+        }
     }
 }
 
@@ -1335,7 +1349,9 @@ fn wslconfig_with_mirrored(existing: Option<&str>) -> Option<String> {
 #[cfg(target_os = "windows")]
 pub fn ensure_wsl_networking_config() {
     let Some(profile) = std::env::var_os("USERPROFILE") else {
-        eprintln!("[papercusp-desktop] wslconfig: USERPROFILE unset — skipping mirrored-networking setup");
+        eprintln!(
+            "[papercusp-desktop] wslconfig: USERPROFILE unset — skipping mirrored-networking setup"
+        );
         return;
     };
     let path = std::path::Path::new(&profile).join(".wslconfig");
@@ -1471,7 +1487,10 @@ mod tests {
             .expect("must add the key");
         assert!(out.contains("memory=4GB"), "kept existing keys: {out}");
         assert!(out.contains("processors=2"), "kept existing keys: {out}");
-        assert!(out.contains("networkingMode=mirrored"), "added the key: {out}");
+        assert!(
+            out.contains("networkingMode=mirrored"),
+            "added the key: {out}"
+        );
         // The added key sits inside the [wsl2] section.
         assert!(
             out.find("[wsl2]").unwrap() < out.find("networkingMode=mirrored").unwrap(),
@@ -1604,7 +1623,10 @@ mod tests {
         assert!(cmd.contains("--distribution papercup-runtime"));
         assert!(cmd.contains("--cd ~"));
         assert!(cmd.contains("--exec /usr/bin/env TERM=xterm-256color"));
-        assert!(!cmd.contains(" -d "), "short -d form is the WI-2955 trap: {cmd}");
+        assert!(
+            !cmd.contains(" -d "),
+            "short -d form is the WI-2955 trap: {cmd}"
+        );
         // Targets the `papercusp` CLI (so `papercusp tutorial` works), not psu.
         assert!(
             cmd.contains("$HOME/.papercusp/bin/papercusp"),
@@ -1618,8 +1640,14 @@ mod tests {
             wsl_line.trim_end().ends_with("papercusp %*"),
             "missing papercusp %* tail: {cmd}"
         );
-        assert!(cmd.contains(r#"\"$@\""#), "missing \"$@\" forwarding: {cmd}");
-        assert!(!cmd.contains("exec psu "), "must target papercusp, not psu: {cmd}");
+        assert!(
+            cmd.contains(r#"\"$@\""#),
+            "missing \"$@\" forwarding: {cmd}"
+        );
+        assert!(
+            !cmd.contains("exec psu "),
+            "must target papercusp, not psu: {cmd}"
+        );
         // exit-code capture uses a papercusp-scoped var and survives the reset tail.
         assert!(cmd.contains("set PAPERCUSP_EXIT=%ERRORLEVEL%"));
         assert!(cmd.trim_end().ends_with("exit /b %PAPERCUSP_EXIT%"));
