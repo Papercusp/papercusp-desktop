@@ -1397,8 +1397,9 @@ mod discovery_tests {
     use std::time::Duration;
 
     use super::{
-        next_operator_port, operator_boot_timeout, parse_operator_discovery, resolve_route_upgrade,
-        self_heal_probe_due, OperatorDiscovery, SELF_HEAL_WSL_PROBE_MIN_INTERVAL,
+        launcher_status_result, next_operator_port, operator_boot_timeout,
+        parse_operator_discovery, resolve_route_upgrade, self_heal_probe_due, OperatorDiscovery,
+        SELF_HEAL_WSL_PROBE_MIN_INTERVAL,
     };
 
     #[test]
@@ -1707,6 +1708,42 @@ mod discovery_tests {
             !src.contains(&removed_self_host),
             "a GUI-side serve.mjs spawn seam reappeared: {removed_self_host}"
         );
+
+        let launch_start = src
+            .find("fn launch_bundle(")
+            .expect("launch_bundle() must remain the cross-platform sibling-launch seam");
+        let linux_start = src[launch_start..]
+            .find("#[cfg(target_os = \"linux\")]")
+            .map(|offset| launch_start + offset)
+            .expect("launch_bundle() must retain a Linux implementation");
+        let windows_start = src[linux_start..]
+            .find("#[cfg(target_os = \"windows\")]")
+            .map(|offset| linux_start + offset)
+            .expect("the Windows launch branch must follow Linux");
+        let linux = &src[linux_start..windows_start];
+        assert!(
+            linux.contains(".status()"),
+            "Linux must observe gtk-launch's exit status; spawn() only proves the launcher binary exists"
+        );
+        assert!(
+            linux.contains("launcher_status_result(status.success()"),
+            "a non-zero gtk-launch exit must reach the explicit install-Server UI"
+        );
+    }
+
+    #[test]
+    fn sibling_launcher_status_rejects_a_missing_product() {
+        assert!(launcher_status_result(true, "Papercusp Server", "gtk-launch ok").is_ok());
+
+        let error = launcher_status_result(
+            false,
+            "Papercusp Server",
+            "gtk-launch com.papercusp.server.desktop exited with status 2",
+        )
+        .expect_err("a failed sibling launcher must not be reported as success");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("Papercusp Server"));
+        assert!(error.to_string().contains("not installed"));
     }
 
     /// A guard that has never failed is a guard nobody has tested. This feeds
@@ -5341,6 +5378,27 @@ fn surface_server_connection_required(app_handle: &tauri::AppHandle, reason: &st
     }
 }
 
+/// Turn a platform launcher verdict into the lifecycle signal the thin GUI
+/// needs. Starting `gtk-launch` only proves the helper binary exists; when the
+/// sibling desktop entry is absent it exits non-zero immediately. Treating that
+/// as success strands the bundled SPA on generic reconnect UI for the full boot
+/// timeout instead of showing the explicit install-Server gate.
+fn launcher_status_result(
+    succeeded: bool,
+    product_name: &str,
+    launcher_diagnostic: &str,
+) -> std::io::Result<()> {
+    if succeeded {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "{product_name} is not installed or could not be started ({launcher_diagnostic})"
+        ),
+    ))
+}
+
 /// Cross-platform "launch the sibling app bundle by identity".
 ///   * macOS  — `open -b <bundle-id>`: LaunchServices resolves the installed
 ///     .app regardless of where it lives. Solid + used as the primary path.
@@ -5360,12 +5418,19 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = product_name;
         // The deb/appimage desktop-entry id follows the bundle identifier.
-        Command::new("gtk-launch")
-            .arg(format!("{bundle_id}.desktop"))
-            .spawn()?;
-        Ok(())
+        // `spawn()` alone is a false success when the sibling is not installed:
+        // gtk-launch itself starts, exits 2 in ~30ms, and the GUI waits 120s on
+        // an operator that cannot appear. `status()` returns just as promptly
+        // for a valid desktop entry (gtk-launch delegates the app and exits),
+        // while letting us surface the explicit install-Server gate immediately.
+        let desktop_id = format!("{bundle_id}.desktop");
+        let status = Command::new("gtk-launch").arg(&desktop_id).status()?;
+        launcher_status_result(
+            status.success(),
+            product_name,
+            &format!("gtk-launch {desktop_id} exited with {status}"),
+        )
     }
     #[cfg(target_os = "windows")]
     {
