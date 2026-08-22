@@ -104,13 +104,31 @@ test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   assert.match(common, /grep -v '\/Papercusp Server_'/);
 });
 
-test('vmctl install waits boundedly for an active guest dpkg frontend lock', () => {
+test('vmctl install waits boundedly for every guest apt lock before update and install', () => {
   const start = vmctl.indexOf('cmd_install()');
   const end = vmctl.indexOf('\ncmd_launch()', start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const install = vmctl.slice(start, end);
 
+  for (const lock of [
+    '/var/lib/apt/lists/lock',
+    '/var/cache/apt/archives/lock',
+    '/var/lib/dpkg/lock-frontend',
+    '/var/lib/dpkg/lock',
+  ]) {
+    assert.ok(install.includes(lock), `missing bounded wait for ${lock}`);
+  }
+  assert.match(install, /deadline=.*date \+%s.*\+ 300/);
+  assert.match(install, /clear_streak.*-ge 2/);
+  assert.match(install, /pgrep -x apt-get/);
+
+  const definition = install.indexOf('wait_for_guest_apt_idle()');
+  const update = install.indexOf('apt-get update -qq');
+  const packageInstall = install.indexOf('apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall');
+  const waitCalls = [...install.matchAll(/wait_for_guest_apt_idle/g)].map((match) => match.index);
+  assert.ok(waitCalls.some((index) => index > definition && index < update));
+  assert.ok(waitCalls.some((index) => index > update && index < packageInstall));
   assert.match(install, /apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall/);
 });
 

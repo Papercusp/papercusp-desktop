@@ -137,13 +137,52 @@ cmd_install() {
   # re-laid-down on a --no-reset overlay; without it apt skips "already newest"
   # and a code-only rebuild silently wouldn't land. On a pristine overlay it's a
   # plain install (nothing to reinstall).
-  # A Server install can leave a short-lived guest apt transaction behind just
-  # as the caller begins the companion GUI install. apt-get otherwise fails
-  # immediately on /var/lib/dpkg/lock-frontend, turning the supported sequential
-  # co-install flow into a timing race. Use apt's native bounded lock waiter so
-  # every vmctl install shares the same policy and still fails loudly if a guest
-  # package manager is genuinely wedged.
-  vm_ssh "$name" 'sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall /tmp/Papercusp.deb'
+  # A Server install leaves a detached, best-effort ghostty apt worker behind.
+  # The supported immediately-following GUI install used to wait only on
+  # /var/lib/dpkg/lock-frontend, but its FIRST command is `apt-get update`, which
+  # instead failed on /var/lib/apt/lists/lock while that worker was active. Wait
+  # for the complete apt/dpkg lock set plus the owning processes to stay idle for
+  # two consecutive probes before BOTH apt phases. Keep apt's native dpkg waiter
+  # as the final race backstop; the bounded outer wait still fails loudly when a
+  # guest package manager is genuinely wedged.
+  vm_run "$name" <<'EOF'
+set -euo pipefail
+
+wait_for_guest_apt_idle() {
+  local deadline now clear_streak=0
+  deadline=$(( $(date +%s) + 300 ))
+  while true; do
+    if sudo fuser \
+      /var/lib/apt/lists/lock \
+      /var/cache/apt/archives/lock \
+      /var/lib/dpkg/lock-frontend \
+      /var/lib/dpkg/lock >/dev/null 2>&1 \
+      || pgrep -x apt >/dev/null 2>&1 \
+      || pgrep -x apt-get >/dev/null 2>&1 \
+      || pgrep -x dpkg >/dev/null 2>&1; then
+      clear_streak=0
+    else
+      clear_streak=$((clear_streak + 1))
+      [ "$clear_streak" -ge 2 ] && return 0
+    fi
+
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline" ]; then
+      echo "timed out after 300s waiting for guest apt/dpkg locks" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+command -v fuser >/dev/null 2>&1 \
+  || { echo "fuser is required for bounded guest apt-lock coordination" >&2; exit 1; }
+wait_for_guest_apt_idle
+sudo apt-get update -qq
+wait_for_guest_apt_idle
+sudo DEBIAN_FRONTEND=noninteractive \
+  apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall /tmp/Papercusp.deb
+EOF
   log "installed:"; vm_ssh "$name" "dpkg -l | grep -i papercusp || true"
 }
 
