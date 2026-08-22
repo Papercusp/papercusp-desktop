@@ -257,6 +257,21 @@ release_artifacts_retention_lease_acquire() {
   printf '%s\n' "$lease"
 }
 
+# papercusp_retain_release_paths <path...> — extend the current cut's durable
+# lease with target/artifact roots after its final outputs exist. Direct dev
+# builds without a release tag remain unleased by design.
+papercusp_retain_release_paths() {
+  [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]] || return 0
+  [[ $# -gt 0 ]] || {
+    echo "release-artifacts: release retention requires at least one target/artifact path." >&2
+    return 2
+  }
+  release_artifacts_retention_lease_acquire "$PAPERCUSP_RELEASE_TAG" "$@" >/dev/null || {
+    echo "release-artifacts: could not retain release paths for ${PAPERCUSP_RELEASE_TAG}." >&2
+    return 1
+  }
+}
+
 # Print the paths in one lease. Return 1 for an expired lease and 2 for a
 # malformed lease; callers that make a destructive decision must fail closed on
 # the latter rather than treating an unreadable marker as no marker.
