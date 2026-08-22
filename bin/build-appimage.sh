@@ -43,6 +43,7 @@ CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
 APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 AUDIT_PY="$DESK/bin/audit-release-bundle.py"
+OUT="$APPIMG_DIR/Papercusp_GUI_${VERSION}_amd64.AppImage"
 
 # ── CHANNEL IDENTITY (WI-36794) ───────────────────────────────────────────────
 # This is a SEPARATE bash process from release-local.sh, and arrays do not cross
@@ -133,6 +134,18 @@ PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-}" PAPERCUSP_BUILD_VERSION="${PAPERC
   npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage \
   "${DESKTOP_CHANNEL_BUILD_CFG[@]}" \
   || echo "   (tauri appimage step exited non-zero as expected — finishing with appimagetool)"
+
+# Tauri may now finish successfully instead of crashing after creating the AppDir.
+# Its space-named AppImage is still only an INTERMEDIATE: it bypasses the AppDir
+# normalization and fail-closed identity scan below. Leaving it beside OUT makes
+# the broad release collectors see two same-version candidates and, worse, makes
+# the leaky intermediate publishable by iteration order. Purge every same-version
+# AppImage before the audited appimagetool packaging step; OUT does not exist yet.
+echo "==> purging Tauri-produced same-version AppImage intermediates before audited packaging"
+release_artifacts_guarded_delete \
+  "$APPIMG_DIR"/*_"$VERSION"_*.AppImage \
+  "$APPIMG_DIR"/*_"$VERSION"_*.AppImage.sig \
+  || exit 1
 
 # 2. Locate the AppDir tauri produced (GUI bundle).
 APPDIR="$(ls -d "$APPIMG_DIR"/*.AppDir 2>/dev/null | grep -vi server | head -1)"
@@ -587,7 +600,6 @@ fi
 #    embeds it) and package the AppDir. No ELF scan → no crash.
 PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | head -1)"
 [ -n "$PLUGIN" ] || { echo "FATAL: linuxdeploy-plugin-appimage not found in ~/.cache/tauri (did the tauri step run?)" >&2; exit 1; }
-OUT="$APPIMG_DIR/Papercusp_GUI_${VERSION}_amd64.AppImage"
 echo "==> packaging with appimagetool → $OUT"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$OUT" "$PLUGIN" --appdir "$APPDIR"
 [ -f "$OUT" ] || { echo "FATAL: appimagetool did not produce $OUT" >&2; exit 1; }
