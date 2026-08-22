@@ -93,7 +93,7 @@ fi
   return { root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions };
 }
 
-function linuxFixture() {
+function linuxFixture({ emitDpkgWarning = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-linux-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -123,7 +123,7 @@ if [[ "$*" == *"apt-get install --yes"* ]]; then
   fi
   : > "$MOCK_CONFIGURED"
 fi
-case "$*" in
+  case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"operator.json"*) printf '{"port":15747}\\n' ;;
   *"api/health"*)
@@ -134,6 +134,9 @@ case "$*" in
     fi
     ;;
   *"dpkg-query -W"*)
+    if [[ "$MOCK_EMIT_DPKG_WARNING" == "1" ]]; then
+      printf 'Warning: Permanently added 127.0.0.1 (ED25519) to the list of known hosts.\\n' >&2
+    fi
     if [[ -f "$MOCK_CONFIGURED" ]]; then
       printf 'install ok installed\\n'
     else
@@ -163,7 +166,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, deb, log, flipped, configured, updated, ssh, scp };
+  return { root, deb, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -177,6 +180,7 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   };
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
   if (f.updated) env.MOCK_UPDATED = f.updated;
+  if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   return spawnSync('bash', [
     SCRIPT,
@@ -309,6 +313,19 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
     assert.ok(packageCheck > install, 'package configuration must be checked after installation');
     assert.ok(relaunch > packageCheck, 'Linux must not relaunch before package configuration is confirmed');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Linux ignores SSH diagnostics when checking exact dpkg status', () => {
+  const f = linuxFixture({ emitDpkgWarning: true });
+  try {
+    const result = runVerify(f, [], 'linux', f.deb);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.flipped, true);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

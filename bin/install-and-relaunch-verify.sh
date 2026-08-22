@@ -452,17 +452,31 @@ run_installer() {
 }
 
 verify_linux_package_configured() {
-  local status_out="" status_rc=0
+  local status_out="" status_err="" status_detail="" status_rc=0
+  local status_stdout_file status_stderr_file
   # Validate the package named by the artifact, rather than hard-coding the
   # product package name. `install ok installed` is the dpkg state required
   # before a GUI relaunch can load its declared shared libraries.
-  status_out="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "package=\$(dpkg-deb -f $REMOTE_Q Package) && dpkg-query -W -f='\${Status}' \"\$package\"" 2>&1 | tr -d '\r\0')" || status_rc=$?
+  # Keep SSH diagnostics on stderr. Reset VMs commonly emit a host-key warning
+  # when StrictHostKeyChecking=no is used; merging that stream into stdout made
+  # a healthy dpkg status fail the exact verdict below.
+  status_stdout_file="$(mktemp)"
+  status_stderr_file="$(mktemp)"
+  if timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "package=\$(dpkg-deb -f $REMOTE_Q Package) && dpkg-query -W -f='\${Status}' \"\$package\"" >"$status_stdout_file" 2>"$status_stderr_file"; then
+    status_rc=0
+  else
+    status_rc=$?
+  fi
+  status_out="$(tr -d '\r\0' <"$status_stdout_file")"
+  status_err="$(tr -d '\r\0' <"$status_stderr_file")"
+  rm -f -- "$status_stdout_file" "$status_stderr_file"
+  status_detail="${status_out}${status_out:+; }${status_err}"
   if [[ "$status_rc" -eq 124 ]]; then
     fail_check "Linux package status check timed out after ${INSTALL_TIMEOUT}s — NOT relaunching"
   elif [[ "$status_rc" -ne 0 ]]; then
-    fail_check "Linux package status check failed with exit $status_rc${status_out:+ — output: ${status_out:0:400}} — NOT relaunching"
+    fail_check "Linux package status check failed with exit $status_rc${status_detail:+ — output: ${status_detail:0:400}} — NOT relaunching"
   elif [[ "$status_out" != "install ok installed" ]]; then
-    fail_check "Linux package is not configured (dpkg status '$status_out') — declared dependencies may still be missing; NOT relaunching"
+    fail_check "Linux package is not configured (dpkg status '$status_out')${status_err:+ — SSH diagnostics: ${status_err:0:400}} — declared dependencies may still be missing; NOT relaunching"
   fi
 }
 
