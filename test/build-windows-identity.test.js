@@ -7,6 +7,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
 const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8');
+const appimageScript = fs.readFileSync(path.join(root, 'bin/build-appimage.sh'), 'utf8');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
 const audit = path.join(root, 'bin/audit-release-bundle.py');
 const repoRoot = path.resolve(root, '..');
@@ -274,6 +275,37 @@ test('support publishing examples never embed the owner identity in shipped SPA 
     );
     assert.match(content, /@yourname\/my-template/);
   }
+});
+
+test('the Linux AppImage producer removes Tauri intermediates before audited packaging', () => {
+  const tauriAt = appimageScript.indexOf(
+    'npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage',
+  );
+  const purgeAt = appimageScript.indexOf(
+    'purging Tauri-produced same-version AppImage intermediates before audited packaging',
+  );
+  const packageAt = appimageScript.indexOf('LDAI_OUTPUT="$OUT"');
+
+  assert.ok(tauriAt >= 0, 'build-appimage.sh must retain the Tauri AppDir producer');
+  assert.ok(purgeAt > tauriAt, 'Tauri outputs can only be purged after Tauri finishes producing the AppDir');
+  assert.ok(packageAt > purgeAt, 'the audited custom AppImage must be packaged only after intermediates are purged');
+
+  const purgeBlock = appimageScript.slice(purgeAt, packageAt);
+  assert.match(
+    purgeBlock,
+    /release_artifacts_guarded_delete/,
+    'intermediate cleanup must use the retention-aware deletion guard',
+  );
+  assert.match(
+    purgeBlock,
+    /"\$APPIMG_DIR"\/\*_"\$VERSION"_\*\.AppImage/,
+    'every same-version Tauri AppImage must be removed instead of relying on one product-name spelling',
+  );
+  assert.match(
+    purgeBlock,
+    /"\$APPIMG_DIR"\/\*_"\$VERSION"_\*\.AppImage\.sig/,
+    'the matching updater signature must not survive as an orphaned publish candidate',
+  );
 });
 
 test('the Linux local release entrypoint claims one Cargo target slot before either role builds', () => {
