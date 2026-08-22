@@ -313,7 +313,12 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^KillMode=mixed$/m);
-  assert.match(unit, /^WantedBy=graphical-session\.target$/m);
+  assert.match(unit, /^WantedBy=default\.target$/m);
+  assert.doesNotMatch(
+    unit,
+    /graphical-session\.target/,
+    'lightweight Linux sessions do not reliably activate graphical-session.target',
+  );
 
   const systemdAnalyze = ['/usr/bin/systemd-analyze', '/bin/systemd-analyze'].find((candidate) => fs.existsSync(candidate));
   if (systemdAnalyze) {

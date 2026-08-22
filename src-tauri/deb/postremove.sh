@@ -12,7 +12,7 @@ set -e
 # Match dh_installsystemduser's purge semantics for the Server-only user unit.
 # `remove` intentionally preserves the administrator's enable/disable choice so
 # a later reinstall restores it; `purge` removes the helper state and global
-# graphical-session.target.wants link. The package-name gate matters because
+# default.target.wants link. The package-name gate matters because
 # this postrm is shared with the independently installed GUI product.
 if [ "$1" = "purge" ] \
   && [ -z "${DPKG_ROOT:-}" ] \

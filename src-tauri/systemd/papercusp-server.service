@@ -1,8 +1,6 @@
 [Unit]
 Description=Papercusp Server
 Documentation=https://papercuspai.com
-After=graphical-session.target
-PartOf=graphical-session.target
 ConditionFileIsExecutable=/usr/bin/papercusp-server
 
 [Service]
@@ -14,4 +12,4 @@ KillMode=mixed
 TimeoutStopSec=30s
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target

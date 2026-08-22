@@ -5723,8 +5723,11 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
 /// Register the Server bundle to launch at login (idempotent).
 ///
 /// Linux is package-owned instead: the Server `.deb` installs and globally
-/// enables `papercusp-server.service` for `graphical-session.target`. Calling
-/// the Tauri plugin here as well would create an XDG autostart entry only after
+/// enables `papercusp-server.service` for the user manager's `default.target`.
+/// Lightweight Linux desktops do not necessarily activate
+/// `graphical-session.target`, so using it would leave the Server inactive after
+/// a real login. Calling the Tauri plugin here as well would create an XDG
+/// autostart entry only after
 /// the first manual launch and then double-launch the systemd-managed Server on
 /// later logins. Keep the runtime plugin for the macOS/Windows installers,
 /// whose login-item registration is intentionally performed by the app.

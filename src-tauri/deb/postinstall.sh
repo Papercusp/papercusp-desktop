@@ -25,9 +25,10 @@ set -e
 # The Linux Server is a real, package-owned systemd user service. Use Debian's
 # standard package-wide user-unit helper rather than reaching into one logged-in
 # user's HOME from this root maintainer script. `enable` creates the global
-# graphical-session.target.wants link on first install, so every user manager
-# starts the Server at its next graphical login; `update-state` preserves an
-# administrator's explicit disable across upgrades.
+# default.target.wants link on first install, so every user manager starts the
+# Server at its next login even when a lightweight desktop does not activate
+# graphical-session.target; `update-state` preserves an administrator's
+# explicit disable across upgrades.
 #
 # This maintainer script is shared by the GUI and Server overlays. Gate on the
 # binary package name so installing/upgrading the GUI cannot claim ownership of
