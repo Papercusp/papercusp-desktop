@@ -85,6 +85,14 @@ function statusNoProcessProbe() {
   return result.stdout;
 }
 
+function ppmVisible(file) {
+  return spawnSync(
+    'bash',
+    ['-c', 'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"; ppm_has_visible_pixels "$2"', 'bash', vmctlPath, file],
+    { encoding: 'utf8' },
+  );
+}
+
 test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   const fn = updaterFunction();
   assert.match(common, /updater\) idx=3/);
@@ -161,6 +169,32 @@ test('VM verification accepts only a full-size Papercusp main window', () => {
     false,
     'a titled placeholder below the configured minimum geometry must not pass',
   );
+});
+
+test('VM screenshot rejects a nonempty all-black PPM and keeps the guest fallback reachable', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-screenshot-'));
+  const black = path.join(temp, 'black.ppm');
+  const visible = path.join(temp, 'visible.ppm');
+  const header = Buffer.from('P6\n2 1\n255\n');
+  fs.writeFileSync(black, Buffer.concat([header, Buffer.alloc(6)]));
+  fs.writeFileSync(visible, Buffer.concat([header, Buffer.from([0, 0, 0, 0, 0, 1])]));
+
+  try {
+    assert.notEqual(ppmVisible(black).status, 0, 'an all-black but nonempty screendump must not pass');
+    assert.equal(ppmVisible(visible).status, 0, 'a PPM with a visible pixel must pass');
+
+    const start = vmctl.indexOf('screenshot()');
+    const end = vmctl.indexOf('\nvm_scp_back()', start);
+    const screenshot = vmctl.slice(start, end);
+    assert(start >= 0 && end > start, 'screenshot() must remain source-visible to the guard');
+    assert(
+      screenshot.indexOf('ppm_has_visible_pixels "$out"') < screenshot.indexOf('scrot -o /tmp/shot.ppm'),
+      'the qemu PPM must be validated before falling back to the guest framebuffer',
+    );
+    assert.match(screenshot, /vm_scp_back "\$name" \/tmp\/shot\.ppm "\$out"/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test('VM status reports one scalar zero for absent process counts', () => {

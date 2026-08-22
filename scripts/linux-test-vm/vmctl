@@ -342,21 +342,58 @@ cmd_gui() {
   exec remote-viewer "spice://127.0.0.1:$spice"
 }
 
-# ── screenshot via the qemu monitor (host-side; no guest tools needed) ──────
+# A QEMU screendump can be a syntactically valid, full-size PPM whose payload is
+# entirely black while the guest X framebuffer is healthy (observed on the QXL
+# clean VM during WI-40443). Nonempty is therefore not evidence. Parse only the
+# tiny Netpbm header, then require at least one visible pixel byte.
+ppm_has_visible_pixels() {  # ppm_has_visible_pixels <image.ppm>
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+
+data = Path(sys.argv[1]).read_bytes()
+offset = 0
+tokens = []
+while len(tokens) < 4:
+    while offset < len(data) and data[offset] in b" \t\r\n":
+        offset += 1
+    if offset < len(data) and data[offset] == ord("#"):
+        end = data.find(b"\n", offset)
+        offset = len(data) if end < 0 else end + 1
+        continue
+    end = offset
+    while end < len(data) and data[end] not in b" \t\r\n":
+        end += 1
+    tokens.append(data[offset:end])
+    offset = end
+
+if tokens[0] != b"P6":
+    raise SystemExit(1)
+while offset < len(data) and data[offset] in b" \t\r\n":
+    offset += 1
+raise SystemExit(0 if any(data[offset:]) else 1)
+PY
+}
+
+# ── screenshot via qemu, with a real-framebuffer guest fallback ────────────
 screenshot() {  # screenshot <name> <out.ppm>
   local name="$1" out="$2" mon; mon="$(vm_monitor "$name")"
   [ -S "$mon" ] || { warn "no monitor socket for $name"; return 1; }
   if command -v socat >/dev/null; then
     printf 'screendump %s\n' "$out" | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1
-    [ -s "$out" ]
-  else
-    # scrot inside the guest, scp'd out (fallback).
-    vm_run "$name" >/dev/null 2>&1 <<'EOF' || return 1
-export DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority"
-scrot -o /tmp/shot.png
-EOF
-    vm_scp_back "$name" /tmp/shot.png "${out%.ppm}.png"
+    if [ -s "$out" ] && ppm_has_visible_pixels "$out"; then
+      return 0
+    fi
+    warn "qemu screendump was empty/all-black — falling back to guest X framebuffer"
   fi
+  # scrot inside the guest sees the real X framebuffer even when QXL's monitor
+  # surface is black. Keep PPM output so callers receive the path they requested.
+  vm_run "$name" >/dev/null 2>&1 <<'EOF' || return 1
+export DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority"
+scrot -o /tmp/shot.ppm
+EOF
+  vm_scp_back "$name" /tmp/shot.ppm "$out" || return 1
+  ppm_has_visible_pixels "$out"
 }
 vm_scp_back() { local name="$1" src="$2" dst="$3" p; p="$(ports_for "$name"|awk '{print $1}')"; scp $(_ssh_opts) -P "$p" "$VM_USER@127.0.0.1:$src" "$dst"; }
 
