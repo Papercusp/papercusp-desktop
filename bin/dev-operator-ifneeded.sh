@@ -142,7 +142,18 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # Degrades safely: git-via-sidecar falls back to a local spawn on ANY sidecar
 # problem (unreachable, stale build, a real git error), so this can only change
 # performance, never correctness.
-DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+# Preserve an explicit caller bind across the inner `.env.local` source. The
+# isolated Tauri verifier pins loopback here; without this re-application the
+# shared dev file's 0.0.0.0 value wins later and remote-auth-policy correctly
+# crash-loops the private verifier before its desktop can start
+# (EI-21140610191173818). No caller value means no override, so ordinary dev
+# launches retain the existing `.env.local` contract.
+DEV_BIND_OVERRIDE=""
+if [ -n "${PAPERCUSP_BIND_HOST:-}" ]; then
+  printf -v DEV_BIND_HOST_Q '%q' "$PAPERCUSP_BIND_HOST"
+  DEV_BIND_OVERRIDE="PAPERCUSP_BIND_HOST=$DEV_BIND_HOST_Q "
+fi
+DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
