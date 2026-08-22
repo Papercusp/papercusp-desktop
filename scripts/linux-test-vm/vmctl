@@ -534,7 +534,17 @@ cmd_status() {
   fi
 }
 
-cmd_help() { sed -n '2,30p' "$SELF_DIR/vmctl" | sed 's/^# \{0,1\}//'; }
+cmd_help() {
+  awk '
+    NR == 1 { next }
+    /^#/ {
+      sub(/^# ?/, "")
+      print
+      next
+    }
+    { exit }
+  ' "$SELF_DIR/vmctl"
+}
 
 # ── dispatch ───────────────────────────────────────────────────────────────
 # Hermetic regression tests source the real predicates without touching a VM.

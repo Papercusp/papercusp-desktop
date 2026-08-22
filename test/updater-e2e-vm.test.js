@@ -168,3 +168,12 @@ test('VM status reports one scalar zero for absent process counts', () => {
   assert.match(output, /^procs:\s+desktop=0 serve\.mjs=0$/m);
   assert.doesNotMatch(output, /^0$/m, 'an absent process must not add a second fallback zero line');
 });
+
+test('vmctl help emits only the leading comment block', () => {
+  const result = spawnSync(vmctlPath, ['help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^vmctl — Papercusp Linux clean-room test VM control\./);
+  assert.doesNotMatch(result.stdout, /\bsource\s+.*common\.sh/);
+  assert.doesNotMatch(result.stdout, /\bcmd_provision\s*\(/);
+  assert.doesNotMatch(result.stdout, /\bSELF_DIR\s*=/);
+});
