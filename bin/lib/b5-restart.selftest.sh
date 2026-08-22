@@ -72,7 +72,50 @@ else
   bad "successful run changed unexpectedly: rc=$rc out='$out'"
 fi
 
-echo "── b5-restart.selftest: $((3 - FAILS))/3 passed ──"
+# ── 3. WI-40553 static guards: PostgreSQL must finish its own shutdown ────────
+# These checks are intentionally source-level and hermetic.  A live smoke can
+# miss the exact regression this item fixes: a fixed-shortcut teardown that
+# sends a hard kill or removes postmaster.pid while PostgreSQL is checkpointing.
+RIG_LIB="$DIR/deb-hetzner-rig.sh"
+static_guard() {
+  local label="$1" needle="$2"
+  if [ -f "$RIG_LIB" ] && grep -Fq "$needle" "$RIG_LIB"; then
+    ok "$label"
+  else
+    bad "$label (missing '$needle')"
+  fi
+}
+
+static_guard "postgres stop requests SIGINT on the postmaster PID" \
+  'kill -INT "$pg_pid" 2>/dev/null || true'
+static_guard "postgres stop waits for the actual postmaster exit" \
+  'while kill -0 "$pg_pid" 2>/dev/null; do'
+static_guard "postgres stop fails closed without SIGKILL on timeout" \
+  'refusing SIGKILL and preserving pgdata'
+
+stop_calls=0
+if [ -f "$RIG_LIB" ]; then
+  stop_calls="$(grep -Fc 'rig_stop_postgres_gracefully "$ip" || return 1' "$RIG_LIB" || true)"
+fi
+if [ "$stop_calls" -ge 2 ]; then
+  ok "both sidecar stop paths use graceful PostgreSQL shutdown"
+else
+  bad "both sidecar stop paths use graceful PostgreSQL shutdown (calls=$stop_calls)"
+fi
+
+stop_line=""
+launch_line=""
+if [ -f "$RIG_LIB" ]; then
+  stop_line="$(grep -nF 'rig_stop_postgres_gracefully "$ip" || return 1' "$RIG_LIB" | tail -n1 | cut -d: -f1 || true)"
+  launch_line="$(grep -nF 'relaunched as pcusp (no wipe)' "$RIG_LIB" | head -n1 | cut -d: -f1 || true)"
+fi
+if [ -n "$stop_line" ] && [ -n "$launch_line" ] && [ "$stop_line" -lt "$launch_line" ]; then
+  ok "restart sidecar stops PostgreSQL before relaunch"
+else
+  bad "restart sidecar stops PostgreSQL before relaunch (stop=$stop_line launch=$launch_line)"
+fi
+
+echo "── b5-restart.selftest: $((8 - FAILS))/8 passed ──"
 if [ "$FAILS" = 0 ]; then
   echo "OVERALL: PASS"
   exit 0

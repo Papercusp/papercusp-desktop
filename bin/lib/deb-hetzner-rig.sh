@@ -1061,7 +1061,11 @@ if pgrep -u pcusp -f 'serve.mjs' >/dev/null; then
   pkill -9 -u pcusp -f 'serve.mjs' 2>/dev/null || true
   for i in $(seq 1 10); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
 fi
-rig_stop_postgres_gracefully "$ip" || exit 1
+EOF
+  rig_stop_postgres_gracefully "$ip" || return 1
+  rig_ssh "$ip" "HONO=$RIG_HONO_PORT PG=$RIG_PG_PORT DHTB='${RIG_DHT_BOOTSTRAP:-}' PGB='${RIG_PGBOUNCER:-0}' SIDE_DIR='$(fed_sidecar_dir)' WSID='$RIG_WORKSPACE_ID' HHSLUG='$RIG_HOME_HARNESS_SLUG' RIG_GRACE='${RIG_REPLICATION_GRACE_MS:-}' RIG_FROZEN_GRACE='${RIG_FROZEN_GRACE_MS:-}' RIG_ANNOUNCE_REFLUSH='${RIG_ANNOUNCE_REFLUSH_MS:-}' runuser -u pcusp -- bash -s" <<'EOF'
+set -e
+H=/home/pcusp
 # shm-race hygiene (WI-183 rig hardening; seen LIVE 2026-07-03 19:46Z frame b):
 # the old pkill + sleep 2 + pid-file-clear UNDER-COVERS the class — PG backends
 # can outlive the 2s grace still ATTACHED to the old SysV segment, and the
