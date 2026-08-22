@@ -1251,9 +1251,10 @@ assert_no_onnx_gpu_providers() {
   return 1
 }
 # The two owner-confirmed transformers models are intentionally preserved above,
-# but Hugging Face's downloader can leave large `*.tmp.*` fragments beside the
-# finished ONNX data files after an interrupted download.  Those fragments are
-# not model bytes and must never cross the assembled-sidecar boundary (EI-21121880496840788).
+# but model downloaders can leave large `*.tmp.*`, `*.partial`, or `*.part`
+# fragments beside the finished ONNX data files after an interrupted download.
+# Those fragments are not model bytes and must never cross the assembled-sidecar
+# boundary (EI-21121880496840788 / P-008).
 prune_transformers_model_fragments() {
   local cache_dir="$1"
   local model_dir
@@ -1262,7 +1263,9 @@ prune_transformers_model_fragments() {
     "$cache_dir/onnx-community/harrier-oss-v1-0.6b-ONNX" \
     "$cache_dir/onnx-community/embeddinggemma-300m-ONNX"; do
     [[ -d "$model_dir" ]] || continue
-    find "$model_dir" -type f -name '*.tmp.*' -delete
+    find "$model_dir" -type f \( \
+      -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
+    \) -delete
   done
   return 0
 }
@@ -1273,7 +1276,9 @@ assert_no_transformers_model_fragments() {
   local cache_dir="$1"
   local fragments
   [[ -d "$cache_dir" ]] || return 0
-  if ! fragments="$(find "$cache_dir" -type f -name '*.tmp.*' 2>/dev/null)"; then
+  if ! fragments="$(find "$cache_dir" -type f \( \
+    -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
+  \) 2>/dev/null)"; then
     echo "FATAL: unable to inspect the preserved transformers cache for download fragments (EI-21121880496840788)" >&2
     return 1
   fi

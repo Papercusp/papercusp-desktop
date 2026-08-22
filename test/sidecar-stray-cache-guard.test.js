@@ -165,7 +165,11 @@ function makeTransformersCache({ withFragments = true } = {}) {
     const onnx = path.join(modelRoot, model, 'onnx');
     fs.mkdirSync(onnx, { recursive: true });
     fs.writeFileSync(path.join(onnx, 'model.onnx_data'), 'real model bytes');
-    if (withFragments) fs.writeFileSync(path.join(onnx, 'model.onnx_data.tmp.123.fragment'), 'partial');
+    if (withFragments) {
+      fs.writeFileSync(path.join(onnx, 'model.onnx_data.tmp.123.fragment'), 'temporary');
+      fs.writeFileSync(path.join(onnx, 'model.onnx_data.partial'), 'partial');
+      fs.writeFileSync(path.join(onnx, 'model.onnx_data.part'), 'partial');
+    }
   }
   return { tmp, cache };
 }
@@ -177,7 +181,7 @@ function runTransformerShell(script) {
   return { ...res, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
-test('prune removes temp fragments from both preserved models and keeps model data', () => {
+test('prune removes every download-fragment suffix from both preserved models and keeps model data', () => {
   const { tmp, cache } = makeTransformersCache();
   try {
     const res = runTransformerShell(
@@ -189,6 +193,8 @@ test('prune removes temp fragments from both preserved models and keeps model da
       const onnx = path.join(cache, 'onnx-community', model, 'onnx');
       assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data')), true, `${model} data must survive`);
       assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data.tmp.123.fragment')), false, `${model} fragment must be pruned`);
+      assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data.partial')), false, `${model} .partial must be pruned`);
+      assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data.part')), false, `${model} .part must be pruned`);
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -204,6 +210,8 @@ test('assembled-tree guard rejects fragments and passes after the source prune',
     assert.equal(before.status, 1, 'guard must reject a surviving download fragment');
     assert.match(before.stderr, /download fragment/);
     assert.match(before.stderr, /model\.onnx_data\.tmp\.123\.fragment/);
+    assert.match(before.stderr, /model\.onnx_data\.partial/);
+    assert.match(before.stderr, /model\.onnx_data\.part/);
 
     const after = runTransformerShell(
       `${PRUNE_TRANSFORMER_FRAGMENTS}\n${ASSERT_NO_TRANSFORMER_FRAGMENTS}\n` +
