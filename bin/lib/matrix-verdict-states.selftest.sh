@@ -165,7 +165,8 @@ if [ -f "$SCN" ]; then
     || bad "the unholdable verdict lost its OVERALL: prefix — the matrix row will fall back to 'log has no OVERALL:/✗ line' and carry no reason"
   # A line that says both "PRECONDITION UNHOLDABLE" and "FAIL" is the original
   # self-contradiction: the prose says not-a-product-defect while the label says FAIL.
-  if grep -vE '^[[:space:]]*#' "$SCN" | grep -E 'PRECONDITION UNHOLDABLE' | grep -q 'FAIL'; then
+  unholdable_lines="$(grep -vE '^[[:space:]]*#' "$SCN" | grep -E 'PRECONDITION UNHOLDABLE' || true)"
+  if grep -q 'FAIL' <<<"$unholdable_lines"; then
     bad "a live unholdable verdict line still self-labels FAIL — that is the WI-6046 contradiction returning"
   else
     ok "no live unholdable verdict line self-labels FAIL"

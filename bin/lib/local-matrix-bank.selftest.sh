@@ -198,9 +198,10 @@ fi
 reset_env
 rig_local_bank_logs
 a_file="$(ls "$RIG_BANK_DIR"/serve-a-*.log 2>/dev/null | head -1)"
-if head -1 "$a_file" | grep -q 'CUMULATIVE' \
-  && head -1 "$a_file" | grep -q 'NO scenario/subject ids' \
-  && head -1 "$a_file" | grep -q '2026-08-11T18:00:01'; then
+bank_header="$(head -1 "$a_file" 2>/dev/null || true)"
+if grep -q 'CUMULATIVE' <<<"$bank_header" \
+  && grep -q 'NO scenario/subject ids' <<<"$bank_header" \
+  && grep -q '2026-08-11T18:00:01' <<<"$bank_header"; then
   ok "each bank file is stamped with its coverage window + both evidence caveats"
 else
   bad "bank file header is missing the cumulative/subject-id caveats or its time span"

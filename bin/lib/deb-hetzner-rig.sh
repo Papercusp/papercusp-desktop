@@ -104,6 +104,26 @@ fi
 declare -g __RIG_LIB_SOURCED=1
 RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
 
+# EI-21150371868241728: the shared Cargo admission reaper may inspect a rig
+# workdir after its shell is gone. Pair the marker with PID start ticks so a
+# reused PID cannot make an abandoned run look live; an unreadable marker is
+# treated as unowned by the reaper, while the servers ledger remains the hard
+# cost-safety fence for any run that provisioned real frames.
+rig_write_run_marker() {
+  local pid="${1:-$$}" start_ticks marker_tmp
+  start_ticks="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  marker_tmp="$RIG_WORK/.papercusp-run.tmp.$$"
+  umask 077
+  {
+    printf 'pid=%s\n' "$pid"
+    [ -n "$start_ticks" ] && printf 'start_ticks=%s\n' "$start_ticks"
+  } >"$marker_tmp" 2>/dev/null || return 1
+  mv -f "$marker_tmp" "$RIG_WORK/.papercusp-run" 2>/dev/null || {
+    rm -f "$marker_tmp" 2>/dev/null || true
+    return 1
+  }
+}
+
 # ── rig_init [STYPE] [IMAGE] ──────────────────────────────────────────────────
 # Resolve creds + ports, make the run work dir, create the (empty) servers file.
 # Idempotent fields default to the historical rig values. Must run before anything
@@ -230,6 +250,10 @@ rig_init() {
   RIG_SLUG="hzdeb${RIG_WORK##*.}"
   RIG_SERVERS_FILE="$RIG_WORK/servers"; : > "$RIG_SERVERS_FILE"
   RIG_KEEP_UP="${RIG_KEEP_UP:-0}"
+  rig_write_run_marker "$$" || { echo "FATAL: could not write rig ownership marker under $RIG_WORK" >&2; return 1; }
+  if [ "$RIG_KEEP_UP" = 1 ]; then
+    : > "$RIG_WORK/.papercusp-keep"
+  fi
   # WI-1442 fix (c) / WI-1628: stamp every server this run creates with the
   # CREATING AGENT's owner id (a Hetzner label — see rig_create_server below) so
   # the orphan-frame reaper can resolve whose coord:presence to check before ever

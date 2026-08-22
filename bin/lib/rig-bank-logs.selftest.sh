@@ -171,10 +171,11 @@ drv_exec() {  # override: emit two bracketed timestamps so first != last
 }
 rig_bank_logs
 ts_file="$(ls "$RIG_BANK_DIR"/serve-a-*.log 2>/dev/null | head -1)"
+bank_header="$(head -1 "$ts_file" 2>/dev/null || true)"
 if [ -f "$ts_file" ] \
-  && head -1 "$ts_file" | grep -q "CUMULATIVE for the whole rig session" \
-  && head -1 "$ts_file" | grep -qF '05:59:08.366Z' \
-  && head -1 "$ts_file" | grep -qF '06:02:16.650Z' \
+  && grep -q "CUMULATIVE for the whole rig session" <<<"$bank_header" \
+  && grep -qF '05:59:08.366Z' <<<"$bank_header" \
+  && grep -qF '06:02:16.650Z' <<<"$bank_header" \
   && grep -q "\[serve\] boot a" "$ts_file"; then
   ok "banked serve.log is stamped with its own first/last content timestamp + a cumulative-log warning, ahead of the real content"
 else

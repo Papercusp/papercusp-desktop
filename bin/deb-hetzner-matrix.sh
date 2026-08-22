@@ -349,7 +349,31 @@ for id in "${RUN_IDS[@]}"; do
     # a PASSING run is what you need to confirm a fix. $RIG_WORK/scn.$id.log holds it
     # but is torn down without --keep-up, so it was genuinely lost. Surface the marked
     # lines on PASS too. Additive: no assertion or exit-code semantics change.
-    grep -a '^[[:space:]]*·' "$out" 2>/dev/null | sed 's/^[[:space:]]*/    /' || true
+    #
+    # WI-40593: `·` alone was still a FILTER, and it silently defeated a deliberately
+    # fail-CLOSED instrument one layer down. `·` is an OPT-IN marker a scenario puts on
+    # DIAGNOSTIC rows; a scenario's own VERDICT lines (`✓`, `⚠`, `✗`, `OVERALL:`) do not
+    # carry it, so on PASS they were discarded and survived only in $RIG_WORK/scn.$id.log,
+    # which is torn down without --keep-up.
+    #
+    # The concrete victim was restart-settle-barrier.sh's _rsb_owner_self_classification
+    # (D-044/WI-40534), whose block comment states the property this broke verbatim:
+    # "the query failed" and "the owner classified itself correctly" must never render the
+    # same way. Its ZERO-pot_members NOT-MEASURED branch `return 0`s BEFORE printing any
+    # `·` row, so under the old filter a passing barrier rendered it as NOTHING AT ALL —
+    # indistinguishable from "the instrument never ran". Fail-closed in source, fail-open
+    # in the artifact anyone actually reads. Measured on run 20260822-054244: the file
+    # carried the instrument's two `·` data rows and not its `✓ 0 rows origin=remote`
+    # verdict, and `grep '^  ✓ ' | grep -v PASS` over the whole run returned EMPTY — no
+    # scenario-internal ✓ survived anywhere, so this was the filter, not a one-off.
+    #
+    # This is the PASS-side half of the repair the FAIL path already did for itself at
+    # EI-19940993365684927 (draw the row from OVERALL:/✗ rather than whatever line landed
+    # last). Fixed HERE, at the driver, rather than by re-prefixing that one instrument's
+    # lines with `·`: the narrower fix repairs a single caller and leaves the class armed
+    # for every scenario written next. ONE grep, so the scenario's own line ORDER is
+    # preserved. Guarded by bin/lib/matrix-pass-transcript.selftest.sh.
+    grep -aE '^[[:space:]]*(·|✓|⚠|✗|OVERALL:)' "$out" 2>/dev/null | sed 's/^[[:space:]]*/    /' || true
   else
     # EI-19940993365684927 (gate-artifact honesty). A FAIL row's message used to be
     # the log's LAST non-blank line, whatever that happened to be. Scenarios emit

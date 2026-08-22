@@ -40,6 +40,7 @@ TESTS=(
   b5-restart.selftest.sh
   matrix-scenario-adapters.selftest.sh
   matrix-verdict-states.selftest.sh
+  matrix-pass-transcript.selftest.sh
   replication-soak-diagnostics.selftest.sh
   restart-settle-barrier.selftest.sh
   rig-wait-converged.selftest.sh
@@ -98,6 +99,56 @@ fi
 if [ "${#MISSING[@]}" -gt 0 ]; then
   echo "FAIL — ${#MISSING[@]} TESTS entr(ies) have no file on disk (stale after a rename/delete?): ${MISSING[*]}" >&2
   DRIFT=1
+fi
+if [ "$DRIFT" -ne 0 ]; then
+  exit 1
+fi
+
+# PIPEFAIL PREDICATE GATE (EI-21150574805906545) — under `set -o pipefail`, an
+# early-exiting consumer such as `grep -q` can SIGPIPE a still-writing producer
+# and turn a real match into a false miss. This is a source-shape guard, not a
+# runtime race test: capture the producer first, then match the completed text.
+#
+# The baseline is shrink-only: an entry may disappear as the class is repaired,
+# but a newly introduced identity fails this aggregate before any gate leg runs.
+# Escaped `\\| grep` examples in comments/static fixtures and boolean `|| grep`
+# are excluded; only a real pipe whose consumer has a `-q` option is in scope.
+PIPEFAIL_BASELINE="$DIR/pipefail-predicate.baseline.txt"
+PIPEFAIL_CURRENT="$(
+  for f in "$DIR"/*.selftest.sh; do
+    [ -f "$f" ] || continue
+    awk -v file="$(basename "$f")" '
+      function scan(text, n) {
+        if (text ~ /^[[:space:]]*#/) return
+        if (text ~ /\\[|][[:space:]]*grep[[:space:]]+-[^[:space:]]*q/) return
+        if (text ~ /[^|][|][[:space:]]*grep[[:space:]]+-[^[:space:]]*q/)
+          print file "::" n
+      }
+      {
+        joined = joined $0 "\n"
+        if ($0 !~ /\\[[:space:]]*$/) {
+          scan(joined, NR)
+          joined = ""
+        }
+      }
+      END { if (joined != "") scan(joined, NR) }
+    ' "$f"
+  done | sort -u
+)"
+if [ ! -f "$PIPEFAIL_BASELINE" ]; then
+  echo "FAIL — missing pipefail predicate baseline: $PIPEFAIL_BASELINE" >&2
+  DRIFT=1
+else
+  PIPEFAIL_KNOWN="$(grep -vE '^[[:space:]]*(#|$)' "$PIPEFAIL_BASELINE" 2>/dev/null || true)"
+  PIPEFAIL_NEW="$(comm -13 \
+    <(printf '%s\n' "$PIPEFAIL_KNOWN" | sort -u) \
+    <(printf '%s\n' "$PIPEFAIL_CURRENT" | sort -u))"
+  if [ -n "$PIPEFAIL_NEW" ]; then
+    echo "FAIL — new pipefail early-consumer predicate(s) are not in the shrink-only baseline:" >&2
+    printf '       %s\n' "$PIPEFAIL_NEW" >&2
+    echo "       Capture the producer to completion before matching; do not baseline a new site." >&2
+    DRIFT=1
+  fi
 fi
 if [ "$DRIFT" -ne 0 ]; then
   exit 1

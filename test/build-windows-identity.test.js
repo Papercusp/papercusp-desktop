@@ -9,6 +9,11 @@ const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'u
 const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
 const audit = path.join(root, 'bin/audit-release-bundle.py');
+const repoRoot = path.resolve(root, '..');
+const supportSources = [
+  path.join(repoRoot, 'apps/operator-vite/src/routes/support.tsx'),
+  path.join(repoRoot, 'apps/operator/app/support/page.tsx'),
+];
 
 // WHY THIS GUARD EXISTS (2026-08-10, WI-37553 / EI-20094260886633250)
 //
@@ -246,6 +251,29 @@ test('the Linux local release entrypoint can resume from a fully staged sidecar'
     /verify-sidecar-bundle\.sh/,
     'resume mode must rerun the canonical sidecar verifier before packaging reused bytes',
   );
+  const verifyAt = linuxScript.indexOf('verify-sidecar-bundle.sh', resumeAt);
+  const privacyAt = linuxScript.indexOf('audit-release-bundle.py', verifyAt);
+  assert.ok(
+    privacyAt > verifyAt && privacyAt < packageAt,
+    'resume mode must identity-scan reused sidecar bytes before spending time packaging them',
+  );
+  assert.match(
+    linuxScript.slice(privacyAt, packageAt),
+    /--scan-dir "\$ROOT\/src-tauri\/sidecar"/,
+    'the reuse privacy gate must scan the complete staged sidecar, not only selected paths',
+  );
+});
+
+test('support publishing examples never embed the owner identity in shipped SPA source', () => {
+  for (const source of supportSources) {
+    const content = fs.readFileSync(source, 'utf8');
+    assert.doesNotMatch(
+      content,
+      /@avi\//i,
+      `${path.relative(repoRoot, source)} must use a generic namespace example`,
+    );
+    assert.match(content, /@yourname\/my-template/);
+  }
 });
 
 test('the Linux local release entrypoint claims one Cargo target slot before either role builds', () => {

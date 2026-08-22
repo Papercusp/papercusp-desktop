@@ -196,6 +196,13 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
       }
     done
     bash "$ROOT/bin/verify-sidecar-bundle.sh" "$ROOT/src-tauri/sidecar"
+    # Reuse is a byte-for-byte packaging shortcut, not a release-policy bypass.
+    # A sidecar assembled by a dev/background producer can be structurally valid
+    # while still carrying that producer's local identity in SPA/docs content.
+    # Catch that before the Rust build instead of several minutes later in the
+    # AppImage's final assembled-tree scan (WI-40598).
+    python3 "$ROOT/bin/audit-release-bundle.py" \
+      --scan-dir "$ROOT/src-tauri/sidecar"
     ;;
   *)
     echo "ERROR: PAPERCUSP_REUSE_SIDECAR must be 0 or 1 (got '${PAPERCUSP_REUSE_SIDECAR}')" >&2

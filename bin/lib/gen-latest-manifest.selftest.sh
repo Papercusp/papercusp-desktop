@@ -266,7 +266,8 @@ if [[ "$got" == "nightly/latest.json " ]]; then
 else
   bad "nightly feed paths: expected 'nightly/latest.json ', got '$got'"
 fi
-if desktop_channel_feed_paths nightly | grep -qx 'latest.json'; then
+nightly_paths="$(desktop_channel_feed_paths nightly || true)"
+if grep -qx 'latest.json' <<<"$nightly_paths"; then
   bad "nightly would publish to the root manifest — every installed app polls it"
 else
   ok "nightly emits no bare 'latest.json' key"

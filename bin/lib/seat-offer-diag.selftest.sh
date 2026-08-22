@@ -64,7 +64,7 @@ drv_psql() {
 expect_verdict() {
   local name="$1" want="$2" got
   got="$(_soffer_diag_b_to_a mx-seatoffer-selftest)"
-  if printf '%s' "$got" | grep -q "$want"; then ok "$name → $want"; else bad "$name — wanted '$want', got: $got"; fi
+  if grep -q "$want" <<<"$got"; then ok "$name → $want"; else bad "$name — wanted '$want', got: $got"; fi
 }
 
 echo "── seat-offer-diag.selftest: WI-6179 b→a discriminator ──"
@@ -201,7 +201,7 @@ grep -q 'EXCEPTION WHEN OTHERS THEN NULL' "$SCN" \
 CASE_TOTAL=3 CASE_PENDING=0 CASE_QUAR=0 CASE_ANY=1 CASE_BREAK='local/open=1' \
   CASE_AUDIT='2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'
 _audit_out="$(_soffer_diag_b_to_a mx-seatoffer-selftest)"
-if printf '%s' "$_audit_out" | grep -q 'WRITER AUDIT a=2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'; then
+if grep -q 'WRITER AUDIT a=2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>' <<<"$_audit_out"; then
   ok "the audit field carries the captured writes (not the origin/status breakdown)"
 else
   bad "the audit field must be fed by the rig_offer_write_audit read — got: $_audit_out"
@@ -225,7 +225,7 @@ CASE_TOTAL=3 CASE_PENDING=0 CASE_QUAR=0 CASE_ANY=1 CASE_BREAK='local/open=1' \
   CASE_ECHO='mx-selftest-pot:63|1-<A-NODE>' \
   CASE_AUDIT='2) UPDATE off-1@7 origin=remote>local q<SOME-SECOND-WRITER>'
 _echo_out="$(_soffer_diag_b_to_a mx-seatoffer-selftest)"
-if printf '%s' "$_echo_out" | grep -q 'ECHO PROBE a.outbox(p2p_work_offers)=mx-selftest-pot:63|1-<A-NODE>'; then
+if grep -q 'ECHO PROBE a.outbox(p2p_work_offers)=mx-selftest-pot:63|1-<A-NODE>' <<<"$_echo_out"; then
   ok "the echo field carries a's outbox read (not the origin/status breakdown)"
 else
   bad "the echo field must be fed by a's substrate_outbox read — got: $_echo_out"

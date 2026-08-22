@@ -100,7 +100,8 @@ fi
 # 4) fed_pick_free_port skips a held port and returns a higher, free one
 held="$SIDE_PORT"   # the sidecar synthetic listener is bound here
 got="$(fed_pick_free_port "$held")"
-if [ "${got:-0}" -gt "$held" ] 2>/dev/null && ! ss -tlnH "sport = :$got" 2>/dev/null | grep -q .; then
+port_probe="$(ss -tlnH "sport = :$got" 2>/dev/null || true)"
+if [ "${got:-0}" -gt "$held" ] 2>/dev/null && ! grep -q . <<<"$port_probe"; then
   ok "fed_pick_free_port skipped held :$held → free :$got"
 else
   bad "fed_pick_free_port returned '$got' for held :$held (expected a higher, free port)"
@@ -159,13 +160,13 @@ fi
 for fn in fed_local_launch fed_local_launch_sidecar; do
   body="$(declare -f "$fn")"
   for var in PAPERCUSP_DHT_HOST PAPERCUSP_DHT_BOOTSTRAP; do
-    if printf '%s\n' "$body" | grep -q "${var}= "; then
+    if grep -q "${var}= " <<<"$body"; then
       ok "$fn force-empties ambient $var"
     else
       bad "$fn no longer force-empties ambient $var (P-002 layer-4 regression)"
     fi
   done
-  if printf '%s\n' "$body" | grep -q 'PAPERCUSP_BACKGROUND_WORKERS=1'; then
+  if grep -q 'PAPERCUSP_BACKGROUND_WORKERS=1' <<<"$body"; then
     ok "$fn forces packaged federation background workers on"
   else
     bad "$fn no longer forces PAPERCUSP_BACKGROUND_WORKERS=1 (WI-3350 regression)"
@@ -177,14 +178,14 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   # instance onto the caller's real shared operator home (cold-start lock/port
   # collision — "another `serve` holds the cold-start lock; aborting"), defeating
   # isolation. Same env-inheritance class as the DATABASE_URL family above.
-  if printf '%s\n' "$body" | grep -q -- '-u PAPERCUSP_HOME'; then
+  if grep -q -- '-u PAPERCUSP_HOME' <<<"$body"; then
     ok "$fn scrubs ambient PAPERCUSP_HOME (isolation-leak guard)"
   else
     bad "$fn no longer scrubs ambient PAPERCUSP_HOME (EI-15308 shared-home isolation-leak regression)"
   fi
   if [ "$fn" = fed_local_launch_sidecar ] \
-    && printf '%s\n' "$body" | grep -q -- '-u GH_TOKEN' \
-    && printf '%s\n' "$body" | grep -q -- '-u GITHUB_TOKEN'; then
+    && grep -q -- '-u GH_TOKEN' <<<"$body" \
+    && grep -q -- '-u GITHUB_TOKEN' <<<"$body"; then
     ok "$fn scrubs ambient GitHub credential variables"
   elif [ "$fn" = fed_local_launch_sidecar ]; then
     bad "$fn no longer scrubs ambient GH_TOKEN/GITHUB_TOKEN (EI-20241165263819645)"
@@ -216,10 +217,10 @@ RIG_LIB_FILE="$DIR/deb-hetzner-rig.sh"
 rig_setup_body="$(awk '/^rig_setup_frame\(\)/{p=1} p{print} p&&/^}$/{exit}' "$RIG_LIB_FILE")"
 rig_restart_body="$(awk '/^rig_restart_sidecar\(\)/{p=1} p{print} p&&/^}$/{exit}' "$RIG_LIB_FILE")"
 if grep -q 'RIG_ANNOUNCE_REFLUSH_MS="${RIG_ANNOUNCE_REFLUSH_MS:-15000}"' "$RIG_LIB_FILE" \
-  && printf '%s\n' "$rig_setup_body" | grep -q "RIG_ANNOUNCE_REFLUSH='" \
-  && printf '%s\n' "$rig_setup_body" | grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS=' \
-  && printf '%s\n' "$rig_restart_body" | grep -q "RIG_ANNOUNCE_REFLUSH='" \
-  && printf '%s\n' "$rig_restart_body" | grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS='; then
+  && grep -q "RIG_ANNOUNCE_REFLUSH='" <<<"$rig_setup_body" \
+  && grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS=' <<<"$rig_setup_body" \
+  && grep -q "RIG_ANNOUNCE_REFLUSH='" <<<"$rig_restart_body" \
+  && grep -q 'PAPERCUSP_ANNOUNCE_REFLUSH_MS=' <<<"$rig_restart_body"; then
   ok "deb rig applies the 15s announce re-flush heartbeat on initial launch and restart (WI-38376)"
 else
   bad "deb rig no longer carries the 15s announce re-flush through BOTH initial and restart env blocks (WI-38376)"
@@ -270,8 +271,8 @@ fi
 # PROPERTY that the PASS path consults the accumulator. Bind guards to the property, not the token.
 # Fails CLOSED: if the region can't be sliced (the verdict block was restructured), it reports bad.
 pass_branch="$(sed -n '/\$create_ok" = 1/,/^  exit 0$/p' "$FROMREPO_SMOKE_FILE" 2>/dev/null || true)"
-if printf '%s\n' "$pass_branch" | grep -q 'preserve_instance_logs' \
-  && printf '%s\n' "$pass_branch" | grep -qE '\[ -n "\$\{FAILED_SUBSETS'; then
+if grep -q 'preserve_instance_logs' <<<"$pass_branch" \
+  && grep -qE '\[ -n "\$\{FAILED_SUBSETS' <<<"$pass_branch"; then
   ok "from-repo smoke's core-PASS branch itself tests FAILED_SUBSETS and preserves instance logs (WI-37222)"
 else
   bad "from-repo smoke's core-PASS branch no longer tests FAILED_SUBSETS / preserves instance logs — a subset failure exits 0 and the rekey_boundary_* boot events that diagnose a K2 epoch 0→0 are DESTROYED on exit (WI-37222)"
@@ -366,7 +367,7 @@ if [ -z "$repack_ln" ]; then
   bad "live-federation-gate no longer contains the .deb repack (dpkg-deb -b pkg \"\$GATE_DEB\") — the EI-20580419609576585 guard cannot verify anything"
 else
   repack_guard="$(head -n "$repack_ln" "$gate_file" | grep -n '^  if \[ ' | tail -1 | cut -d: -f2-)"
-  if printf '%s' "$repack_guard" | grep -q 'local_matrix_due'; then
+  if grep -q 'local_matrix_due' <<<"$repack_guard"; then
     ok "live-federation-gate repacks the .deb whenever a consumer leg is due, not on SKIP_MATRIX alone (EI-20580419609576585)"
   else
     bad "live-federation-gate's .deb repack no longer consults local_matrix_due — the attestation wall will starve the local-matrix leg of --deb, and it will die on the staleness guard after provisioning frames + evicting 24 cores (EI-20580419609576585)"
@@ -487,10 +488,10 @@ fi
 # D-030 run, causing pot_members_pot_fkey SETUP-FAIL plus false B→A misses. Bind
 # the post-join selector to the actual persisted Pot AND B-account membership.
 ws_b_joined_block="$(sed -n '/^WS_B_JOINED=/,/^if \[ -n "\$WS_B_JOINED" \]/p' "$matrix_file" 2>/dev/null || true)"
-if printf '%s\n' "$ws_b_joined_block" | grep -q 'FROM harness_shared.pot_members m' \
-  && printf '%s\n' "$ws_b_joined_block" | grep -q 'JOIN harness_shared.pots p' \
-  && printf '%s\n' "$ws_b_joined_block" | grep -q "p.canonical_pot_home_slug = m.pot_home_slug" \
-  && printf '%s\n' "$ws_b_joined_block" | grep -q "lower(m.github_username) = lower('\$P_B_USER')"; then
+if grep -q 'FROM harness_shared.pot_members m' <<<"$ws_b_joined_block" \
+  && grep -q 'JOIN harness_shared.pots p' <<<"$ws_b_joined_block" \
+  && grep -q "p.canonical_pot_home_slug = m.pot_home_slug" <<<"$ws_b_joined_block" \
+  && grep -q "lower(m.github_username) = lower('\$P_B_USER')" <<<"$ws_b_joined_block"; then
   ok "content-matrix resolves B's post-join workspace from the persisted Pot + actual B membership (WI-38136)"
 else
   bad "content-matrix post-join workspace selector is no longer bound to the persisted Pot + B account; duplicate registry projections can false-RED B→A (WI-38136)"
@@ -834,7 +835,7 @@ SIGNALLING_ONLY='2026-07-26T07:00:00Z [swarm] peer_connected(signalling-only) ha
 DATA_PATH_UP='2026-07-26T07:00:01Z [swarm] peer_data_path_up topic=8f2a1c9b4e6d0537… peer=1ea65f92c8a4… bytesReceived=4096 packetsReceived=7 relayed=false remoteHost=203.0.113.9'
 
 # --- the control that documents the bug: the OLD pattern matched the honest line
-if printf '%s\n' "$SIGNALLING_ONLY" | grep -qE '\[swarm\] peer_connected'; then
+if grep -qE '\[swarm\] peer_connected' <<<"$SIGNALLING_ONLY"; then
   ok "CONTROL: the OLD bare-peer_connected pattern DOES match the signalling-only line (this was the false-PASS)"
 else
   bad "CONTROL FAILED: the old pattern no longer matches the signalling-only line — this selftest's premise is wrong, re-derive the bug before trusting anything below"
@@ -1061,31 +1062,36 @@ DIAG_FIXTURE=""
 drv_psql() { printf '%s\n' "$DIAG_FIXTURE"; }
 diag_out() { DIAG_FIXTURE="$1"; fed_diagnose_unmerged frameA F-TEST-1 2>&1 >/dev/null; }
 
-if diag_out "" | grep -qF "never reached substrate_outbox"; then
+diag_result="$(diag_out "" || true)"
+if grep -qF "never reached substrate_outbox" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: no outbox row → the write was never federated at all"
 else
   bad "fed_diagnose_unmerged did NOT flag a missing outbox row"
 fi
 
-if diag_out "workspace-319be5e5|spoon-knife|N|N" | grep -qF "NEVER DRAINED"; then
+diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N" || true)"
+if grep -qF "NEVER DRAINED" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: enqueued-but-undrained → TEST-TARGETING bug (the WI-6209 trap)"
 else
   bad "fed_diagnose_unmerged did NOT flag an undrained outbox row — the WI-6209 silent false-negative is back"
 fi
 
-if diag_out "workspace-319be5e5|spoon-knife|N|N" | grep -qF "pots.public_key"; then
+diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N" || true)"
+if grep -qF "pots.public_key" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: the undrained diagnosis names the actual fix (pair frames by pots.public_key)"
 else
   bad "fed_diagnose_unmerged's undrained diagnosis no longer tells the reader how to fix it"
 fi
 
-if diag_out "workspace-b31a7a01|octocat-spoon-knife|Y|N" | grep -qF "genuine replication/transport failure"; then
+diag_result="$(diag_out "workspace-b31a7a01|octocat-spoon-knife|Y|N" || true)"
+if grep -qF "genuine replication/transport failure" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: drained-but-never-arrived → genuine replication failure"
 else
   bad "fed_diagnose_unmerged did NOT report a drained-but-unarrived row as a real replication failure"
 fi
 
-if diag_out "workspace-b31a7a01|spoon-knife|N|Y" | grep -qF "QUARANTINED"; then
+diag_result="$(diag_out "workspace-b31a7a01|spoon-knife|N|Y" || true)"
+if grep -qF "QUARANTINED" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: quarantined row is reported as refused-to-publish"
 else
   bad "fed_diagnose_unmerged did NOT surface a quarantined outbox row"

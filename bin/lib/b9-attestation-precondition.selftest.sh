@@ -79,7 +79,7 @@ _att_restore_b_devices >"$TMPOUT" 2>&1; out="$(cat "$TMPOUT")"
 [ "${WROTE[a]:-0}" -ge 1 ] && [ "${WROTE[b]:-0}" -ge 1 ] \
   && ok "both frames saved → UPDATE issued on a AND b" \
   || bad "both frames saved → expected an UPDATE on a and b, got a=${WROTE[a]:-0} b=${WROTE[b]:-0}"
-printf '%s' "$out" | grep -q 'restored .*on frame a' && printf '%s' "$out" | grep -q 'restored .*on frame b' \
+grep -q 'restored .*on frame a' <<<"$out" && grep -q 'restored .*on frame b' <<<"$out" \
   && ok "both restores reported" \
   || bad "both restores should be reported, got: $out"
 

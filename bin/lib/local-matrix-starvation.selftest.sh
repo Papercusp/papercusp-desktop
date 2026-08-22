@@ -186,7 +186,8 @@ fi
 # The real call site line-continues the `&&` onto the next line (`\` + newline), so a
 # single-line grep for the two calls joined by `&&` would never match — check the two
 # calls appear within a couple of lines of each other instead.
-if grep -A2 'local_matrix_only_starvation_prone_fails "\$WORK' "$GATE" 2>/dev/null | grep -q 'check_local_matrix_frame_starvation' \
+wiring_block="$(grep -A2 'local_matrix_only_starvation_prone_fails "\$WORK' "$GATE" 2>/dev/null || true)"
+if grep -q 'check_local_matrix_frame_starvation' <<<"$wiring_block" \
   && grep -q 'SKIPPED-STARVATION' "$GATE"; then
   ok "gate wires both predicates + the SKIPPED-STARVATION downgrade result"
 else
