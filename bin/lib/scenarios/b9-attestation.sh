@@ -248,6 +248,45 @@ matrix_register attestation_membership 60 "attestation membership seeding + 2nd-
 #
 # Both readings are actionable and they demand OPPOSITE fixes, which is exactly why the leg
 # must measure instead of guess. DIAGNOSTIC ONLY — never a verdict input.
+# _att_count_verdict <restored-count> — render the DEVICE-COUNT fingerprint together with
+# the CONCLUSION it licenses, so the count is never emitted as a bare unlabelled number.
+#
+# WI-40551. The block above documents that restored-1-of-saved-N IS the admission
+# signature, and the first-drift message derives it inline — but the TERMINAL FAIL
+# message printed the same number as an unlabelled parenthetical ("$pre_probe
+# attestation(s) at the second check") and then left the reader with two origin branches
+# demanding OPPOSITE fixes. The number was therefore present and useless at exactly the
+# moment it decided the fix.
+#
+# That is not hypothetical: the comment above records the same number sitting in the log
+# across three earlier runs with nobody reading it as a measurement, and a fourth reader
+# repeated the mistake while filing this very item. A bare count demonstrably does not
+# survive being read. Derive the verdict ONCE and emit it everywhere the count appears —
+# the same positional discipline as R7/rig_reading, applied to an interpretation rather
+# than a reading.
+#
+# DIAGNOSTIC ONLY — never a verdict input (same contract as _att_row_fingerprint).
+_att_count_verdict() {
+  local restored="${1-}" saved
+  saved="$(printf '%s' "${_ATT_SAVED_ROW}" | grep -o 'device_pubkey' | wc -l | tr -d '[:space:]')"
+  # An unreadable count and a zero count are NOT the same claim; never collapse them.
+  if [ -z "$restored" ]; then
+    printf 'count=<unreadable> — the count tiebreak is unavailable, so read the origin fingerprint and do NOT infer a writer from this line'
+    return 0
+  fi
+  if ! [ "${saved:-0}" -gt 0 ] 2>/dev/null; then
+    printf 'restored %s of <saved-unknown> — the saved set was not captured, so the count tiebreak is unavailable here' "$restored"
+    return 0
+  fi
+  if [ "$restored" = "$saved" ] 2>/dev/null; then
+    printf 'restored %s of %s saved ⇒ WHOLESALE REPLACE (the projection wrote the remote row back) ⇒ ordering CAN help: move this leg ahead of the churn legs that trigger reconnect-announces' "$restored" "$saved"
+  elif [ "$restored" -lt "$saved" ] 2>/dev/null; then
+    printf 'restored %s of %s saved ⇒ ADMISSION signature (WI-1585: upsertHiveMember UNION-merges and an announce carries only the announcing device) ⇒ NO ordering change can hold the strip; stop stripping and build the precondition another way' "$restored" "$saved"
+  else
+    printf 'restored %s of %s saved — restored EXCEEDS saved, which matches NEITHER documented signature; investigate rather than assuming either fix' "$restored" "$saved"
+  fi
+}
+
 _att_row_fingerprint() {
   local frame="$1" gh="$2"
   drv_psql "$frame" "SELECT COALESCE(origin,'?')||'|fed_ts='||COALESCE(fed_ts::text,'NULL')||'|fed_hlc='||COALESCE(fed_hlc,'NULL')||'|author='||COALESCE(left(author_pubkey,12),'NULL')||'|devs='||COALESCE(jsonb_array_length(device_attestations),0)::text FROM harness_shared.pot_members WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$gh;" 2>/dev/null | tr -d '[:space:]'
@@ -367,7 +406,7 @@ _scn_attestation_unattested_device_core() {
     local drift_fp_a
     drift_fp_a="$(_att_row_fingerprint a "$b_gh_id")"
     echo "  · attestation(unattested-device): precondition drifted — B carries $pre_probe attestation(s) on a again after the 35s cache wait; re-stripping both frames once and re-waiting the device→user cache"
-    echo "  · attestation(unattested-device): DRIFT FINGERPRINT (see _att_row_fingerprint) — a at strip: ${strip_fp_a:-<unreadable>} → a now: ${drift_fp_a:-<unreadable>} (b at strip: ${strip_fp_b:-<unreadable>}). origin=remote+newer fed_ts ⇒ a NEWER remote op re-announced B (projection replace); origin=local ⇒ the admission path's UNION merge (upsertHiveMember) re-attested B and NO ordering change can hold the strip. Cross-check the COUNT: $pre_probe restored vs $(printf '%s' "${_ATT_SAVED_ROW}" | grep -o 'device_pubkey' | wc -l) saved — restored 1 out of a larger saved set is the admission signature (an announce carries only the announcing device)."
+    echo "  · attestation(unattested-device): DRIFT FINGERPRINT (see _att_row_fingerprint) — a at strip: ${strip_fp_a:-<unreadable>} → a now: ${drift_fp_a:-<unreadable>} (b at strip: ${strip_fp_b:-<unreadable>}). origin=remote+newer fed_ts ⇒ a NEWER remote op re-announced B (projection replace); origin=local ⇒ the admission path's UNION merge (upsertHiveMember) re-attested B and NO ordering change can hold the strip. Cross-check the COUNT: $(_att_count_verdict "$pre_probe")."
     drv_psql a "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     [ "${_ATT_SAVED_B_OK:-0}" = 1 ] && drv_psql b "UPDATE harness_shared.pot_members SET device_attestations='[]'::jsonb WHERE pot_home_slug='$RIG_HIVE_ID' AND github_user_id=$b_gh_id;" >/dev/null 2>&1
     sleep 35
@@ -376,7 +415,7 @@ _scn_attestation_unattested_device_core() {
       local drift_fp_a2 drift_fp_b2
       drift_fp_a2="$(_att_row_fingerprint a "$b_gh_id")"
       drift_fp_b2="$(_att_row_fingerprint b "$b_gh_id")"
-      echo "attestation(unattested-device) FAIL — PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times ($pre_probe attestation(s) at the second check). WHICH WRITER — read the fingerprint, do not guess: a at strip ${strip_fp_a:-<unreadable>} → a now ${drift_fp_a2:-<unreadable>}; b at strip ${strip_fp_b:-<unreadable>} → b now ${drift_fp_b2:-<unreadable>}. origin=remote with a fed_ts NEWER than the strip ⇒ the PROJECTION applied a genuinely newer remote op (hive-members.ts replaces under an LWW guard our strip's stamp would have beaten, so this is a re-announce, not a replay) ⇒ FIX by moving this leg ahead of the churn legs that trigger reconnect-announces (it must stay strictly below revocation_kcut/90). origin=local ⇒ the ADMISSION path re-attested B: upsertHiveMember UNION-merges device_attestations with no clock guard (WI-1585), so every announce restores it and NO ordering change can hold the strip — the leg must then stop stripping and build its precondition another way (author the probe from a device pubkey that was never attested). Either way: do NOT widen a timeout."
+      echo "attestation(unattested-device) FAIL — PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times. THE COUNT ALREADY DECIDES THIS — $(_att_count_verdict "$pre_probe") [WI-40551: this reading was present but unlabelled for four runs before anyone read it as a measurement; it is the tiebreak between the two branches below, which demand OPPOSITE fixes]. WHICH WRITER — corroborate with the fingerprint, do not guess: a at strip ${strip_fp_a:-<unreadable>} → a now ${drift_fp_a2:-<unreadable>}; b at strip ${strip_fp_b:-<unreadable>} → b now ${drift_fp_b2:-<unreadable>}. origin=remote with a fed_ts NEWER than the strip ⇒ the PROJECTION applied a genuinely newer remote op (hive-members.ts replaces under an LWW guard our strip's stamp would have beaten, so this is a re-announce, not a replay) ⇒ FIX by moving this leg ahead of the churn legs that trigger reconnect-announces (it must stay strictly below revocation_kcut/90). origin=local ⇒ the ADMISSION path re-attested B: upsertHiveMember UNION-merges device_attestations with no clock guard (WI-1585), so every announce restores it and NO ordering change can hold the strip — the leg must then stop stripping and build its precondition another way (author the probe from a device pubkey that was never attested). Either way: do NOT widen a timeout."
       return 1
     fi
   fi
