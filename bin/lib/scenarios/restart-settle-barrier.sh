@@ -63,7 +63,71 @@ RD_SETTLE_WARN_S="${RD_SETTLE_WARN_S:-120}"     # leader's "~2min should be loud
 RD_SETTLE_FAIL_S="${RD_SETTLE_FAIL_S:-900}"     # provisional hard deadline — comfortably above the observed ~12min self-heal (214246) and short of the confound-free "never converged" case (224336, 36+min) — retune only from a clean run
 RD_SETTLE_WARN_IS_FAIL="${RD_SETTLE_WARN_IS_FAIL:-0}"  # set 1 to make crossing RD_SETTLE_WARN_S itself a hard fail, once calibration lands
 
+# ── D-044 / WI-40534: post-restart owner-self-classification re-poll ──────────
+# W1 claims the OWNER frame comes to classify ITSELF `remote` AFTER a restart.
+# The instrument for that already existed and already ran — it was MIS-POSITIONED,
+# not missing: deb-hetzner-matrix.sh:~251 runs this same pot_members query against
+# frame a, but inside a one-shot inline block right after peer_connect (its own
+# header at :227 says so), ~30 orders BEFORE order 80's restart. So the only dump
+# any run ever produced is the BEFORE half, and every local-matrix run to date has
+# been structurally incapable of observing W1 at all. Its PASSes are real, and they
+# are a green that cannot see the thing — they must not be quoted as W1 moving.
+#
+# This is the AFTER half. Run 20260822/m1787374736 banked the BEFORE half for this
+# rig shape: frame a reported BOTH members `local` (zero remote rows) pre-restart,
+# while frame b correctly reported `remote`. Against that baseline a non-zero remote
+# count here is unambiguously restart-CAUSED rather than a standing misclassification.
+#
+# TWO PROPERTIES THAT ARE NOT INCIDENTAL — preserve them if you touch this:
+#
+#  1. It is called as the FIRST statement of scn_restart_settle_barrier, NOT from
+#     inside the settle loop. This barrier has SIX return paths; an instrument
+#     placed lower silently stops running the first time an early return is added
+#     above it, and silence then stops meaning "measured" and starts meaning "never
+#     ran" with no signal. That is the exact standing fragility flagged against the
+#     gate's L392 barrier (see WI-40388's checkpoint, which depends on no early
+#     return between L392 and L410). Top-of-function is already post-restart —
+#     order 80 has run — AND structurally immune to that failure mode.
+#
+#  2. MEASURE-ONLY, but deliberately NOT fail-open. It always `return 0` and never
+#     touches this scenario's verdict: the barrier's PASS/FAIL is about SETTLING,
+#     and folding a live W1 finding into it would both overload that signal and red
+#     the gate on a question still under investigation (WI-40388, claimed). But an
+#     unmeasurable frame prints an explicit NOT-MEASURED line, because "the query
+#     failed" and "the owner classified itself correctly" must never render the same
+#     way — a fail-open instrument reports absence of evidence as health.
+_rsb_owner_self_classification() {
+  local phase="${1:-post-restart}" out="" rc=0 remote_n=0
+  # device_attestations is deliberately NOT selected: it carries JSON, and this
+  # readout is field-split on '|'. origin is $3 of exactly four columns.
+  out="$(drv_psql a "SELECT github_username, pot_home_slug, origin, fed_ts FROM harness_shared.pot_members ORDER BY github_username;" 2>&1)" || rc=$?
+
+  if [ "${rc:-1}" -ne 0 ]; then
+    echo "  ⚠ owner-self-classification ($phase): NOT MEASURED — frame a pot_members query FAILED (rc=${rc}). This is ABSENCE OF EVIDENCE about W1, not a clean owner frame; do NOT read this run as owner-classifies-itself-local."
+    printf '%s\n' "${out:-<no output>}" | sed 's/^/  ⚠   /'
+    return 0
+  fi
+  if [ -z "${out//[[:space:]]/}" ]; then
+    echo "  ⚠ owner-self-classification ($phase): NOT MEASURED — frame a returned ZERO pot_members rows. The query succeeded, so this is not a transport failure; an owner frame with no members at all is itself anomalous and is NOT evidence that W1 did not reproduce."
+    return 0
+  fi
+
+  echo "  · owner-self-classification ($phase) — frame a (OWNER) view of harness_shared.pot_members [github_username|pot_home_slug|origin|fed_ts]:"
+  printf '%s\n' "$out" | sed 's/^/  ·   /'
+
+  remote_n="$(printf '%s\n' "$out" | awk -F'|' '$3 == "remote"' | grep -c . || true)"
+  if [ "${remote_n:-0}" -gt 0 ]; then
+    echo "  ⚠ owner-self-classification ($phase): frame a reports ${remote_n} row(s) origin=remote. The pre-restart baseline for this rig shape is ZERO (m1787374736 measured BOTH rows 'local' on frame a). A non-zero count HERE, against that before-half, is the W1 signal — restart-CAUSED, not a standing misclassification. MEASURE-ONLY: this does not change this scenario's verdict. See WI-40388."
+  else
+    echo "  ✓ owner-self-classification ($phase): frame a reports 0 rows origin=remote — the owner still classifies every member, ITSELF included, as 'local' AFTER the restart. On this run W1 did not reproduce. Bounded claim: this is one run, and it speaks only to this restart."
+  fi
+  return 0
+}
+
 scn_restart_settle_barrier() {
+  # FIRST statement, before every return path — see the block comment above.
+  _rsb_owner_self_classification post-restart
+
   local fid="${RD_LAST_CANARY_FID:-}" member="${RD_LAST_MEMBER:-}" write_ts="${RD_LAST_CANARY_WRITE_TS:-}"
   local ran_at="${RD_LAST_RAN_AT:-}"
   if [ -z "$fid" ] || [ -z "$member" ] || [ -z "$write_ts" ]; then
