@@ -1432,6 +1432,252 @@ def prune_docs(dirs, rules=SIDECAR_PRUNE_RULES):
     return 0
 
 
+# ── D-043 / P-052 VM-release runtime-only payload ───────────────────────────
+#
+# One classifier drives BOTH deletion and certification. This is intentionally
+# separate from FORBIDDEN_PATH: that table describes privacy residue across every
+# distribution, while these classes are a distribution-profile contract. Dogfood
+# keeps its source-rich workflow; only an explicitly selected vm-release enters
+# this path.
+VM_RELEASE_BOUNDARY_PATH = os.path.join(
+    "apps", "operator", "runtime", "vm-release-threat-boundary.json"
+)
+VM_RELEASE_ASSET_ALLOWLIST = (
+    "templates/",                 # materialized app/template product assets
+    "prompts/",                   # runtime agent prompt assets
+    "rubrics/",                   # runtime evaluation assets
+    "internal-docs/",             # rendered/served product documentation
+    "harness/blueprints/",        # runtime harness definitions
+    "harness/hooks/",             # runtime harness hooks
+    "harness/identity/",          # runtime role prompt assets
+    "harness/knowledge-packs/",   # runtime knowledge assets
+    "harness/templates/",         # runtime harness templates
+)
+VM_RELEASE_FORBIDDEN_ROOTS = (
+    "source.tar.zst",
+    "env-sidecars",
+    "seed",
+    "apps/operator-docs/src/content/docs",
+)
+VM_RELEASE_BUILD_CONFIG_NAMES = {
+    "junit.xml", "makefile", "gulpfile.js", "gruntfile.js",
+    "webpack.config.js", "rollup.config.js", "vite.config.js",
+    "vite.config.ts", "vitest.config.js", "vitest.config.ts",
+    "jest.config.js", "jest.config.ts", "tsconfig.json",
+    "tsconfig.build.json", ".eslintrc", ".eslintignore", ".prettierrc",
+    ".prettierignore", ".npmignore", "package-lock.json", "yarn.lock",
+    "pnpm-lock.yaml",
+}
+VM_RELEASE_SOURCE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
+VM_RELEASE_TEST_DIRS = {"__tests__", "test", "tests"}
+VM_RELEASE_TEST_FILE_RE = re.compile(
+    r"(?:^|[._-])(?:test|tests|spec|fixture)(?:[._-]|$)", re.IGNORECASE
+)
+
+
+def _vm_release_rel(path):
+    return path.replace(os.sep, "/").lstrip("./")
+
+
+def _vm_release_asset_allowed(rel):
+    return any(rel == prefix[:-1] or rel.startswith(prefix)
+               for prefix in VM_RELEASE_ASSET_ALLOWLIST)
+
+
+def _vm_release_residue_class(rel, is_dir=False):
+    """Return the forbidden residue class for one sidecar-relative path."""
+    rel = _vm_release_rel(rel).rstrip("/")
+    if not rel:
+        return None
+    for root in VM_RELEASE_FORBIDDEN_ROOTS:
+        if rel == root or rel.startswith(root + "/"):
+            return "dogfood-or-docs-source"
+
+    allowed_asset = _vm_release_asset_allowed(rel)
+    parts = rel.split("/")
+    base = parts[-1]
+    low = base.lower()
+
+    # Templates intentionally carry source/tests/config: they are the bytes the
+    # runtime materializes into a NEW app, not editable Papercusp implementation.
+    if allowed_asset:
+        return None
+    if is_dir and base.lower() in VM_RELEASE_TEST_DIRS:
+        return "test-tree"
+    if any(part.lower() in VM_RELEASE_TEST_DIRS for part in parts[:-1]):
+        return "test-tree"
+    if not is_dir and VM_RELEASE_TEST_FILE_RE.search(low):
+        return "test-fixture"
+    if not is_dir and low.endswith(".map"):
+        return "source-map"
+    if not is_dir and low.endswith(VM_RELEASE_SOURCE_SUFFIXES):
+        return "typescript-source"
+    if not is_dir and (low in VM_RELEASE_BUILD_CONFIG_NAMES
+                       or (low.startswith("tsconfig.") and low.endswith(".json"))):
+        return "build-tool-residue"
+    if is_dir and low in {".github", ".idea", ".vscode", "coverage"}:
+        return "build-tool-residue"
+    if not is_dir and (low.startswith("readme") or low.startswith("changelog")) \
+            and (low.endswith(".md") or low.endswith(".mdx") or "." not in low):
+        return "non-runtime-doc"
+    if not is_dir and low.endswith((".md", ".mdx")):
+        return "non-runtime-doc"
+    return None
+
+
+def _vm_release_findings(root):
+    findings = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            residue = _vm_release_residue_class(rel, is_dir=True)
+            if residue:
+                findings.append((residue, _vm_release_rel(rel) + "/"))
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            residue = _vm_release_residue_class(rel, is_dir=False)
+            if residue:
+                findings.append((residue, _vm_release_rel(rel)))
+    return sorted(set(findings))
+
+
+def _vm_release_boundary(build_sha, version):
+    return {
+        "schemaVersion": 1,
+        "profile": "vm-release",
+        "decisionRefs": [
+            "byoc-cloud-workspaces-gcp-aws-azure-2026-08-22#D-043",
+            "byoc-cloud-workspaces-gcp-aws-azure-2026-08-22#D-044",
+        ],
+        "artifactBinding": {
+            "buildSha": build_sha,
+            "version": version,
+            "signatureRequired": True,
+            "updateMode": "replace-signed-package-or-image",
+        },
+        "localIsolationClaim": {
+            "protectsAgainst": "ordinary-workspace-ssh-user",
+            "runtimeIdentity": "distinct-non-login-service-user",
+            "runtimeOwnership": "root-owned-not-readable-by-workspace-user",
+            "sharedFilesystemScope": "explicit-workspace-directories-only",
+        },
+        "rootCloudOwnerNonGoal": {
+            "adversary": "vm-root-or-cloud-account-owner",
+            "protectedByVmRelease": False,
+            "reason": "root-or-cloud-owner-can-extract-code-executing-on-their-vm",
+        },
+        "hostedBoundary": {
+            "planItem": "P-039",
+            "proprietaryLogicLocation": "papercusp-hosted-control-plane",
+            "vmComponent": "minimal-signed-reverse-data-plane-connector",
+        },
+    }
+
+
+def _write_json_atomic(path, value):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as out:
+        json.dump(value, out, indent=2, sort_keys=True)
+        out.write("\n")
+    os.replace(tmp, path)
+
+
+def prune_vm_release(args):
+    if len(args) != 1 or not os.path.isdir(args[0]):
+        print("AUDIT ERROR: --prune-vm-release needs one existing sidecar directory",
+              file=sys.stderr)
+        return 2
+    root = os.path.realpath(args[0])
+    build_sha = os.environ.get("PAPERCUSP_BUILD_SHA", "").strip()
+    version = os.environ.get("PAPERCUSP_DESKTOP_VERSION", "").strip()
+    if not build_sha or not version or version.lower() == "unknown":
+        print("AUDIT ERROR: vm-release requires non-empty PAPERCUSP_BUILD_SHA and "
+              "PAPERCUSP_DESKTOP_VERSION before pruning", file=sys.stderr)
+        return 2
+
+    removed = []
+    # Top-down deletion prevents a forbidden test/docs subtree from being walked
+    # and makes symlinked directories inert (unlink the link; never follow it).
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        kept = []
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            residue = _vm_release_residue_class(rel, is_dir=True)
+            if residue:
+                if os.path.islink(full):
+                    os.unlink(full)
+                else:
+                    shutil.rmtree(full)
+                removed.append((residue, _vm_release_rel(rel) + "/"))
+            else:
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            residue = _vm_release_residue_class(rel, is_dir=False)
+            if residue:
+                os.unlink(full)
+                removed.append((residue, _vm_release_rel(rel)))
+
+    boundary_path = os.path.join(root, VM_RELEASE_BOUNDARY_PATH)
+    _write_json_atomic(boundary_path, _vm_release_boundary(build_sha, version))
+    print(f"    prune-vm-release: removed {len(removed)} non-runtime path(s); "
+          f"wrote {VM_RELEASE_BOUNDARY_PATH}")
+    by_class = {}
+    for residue, _rel in removed:
+        by_class[residue] = by_class.get(residue, 0) + 1
+    for residue, count in sorted(by_class.items()):
+        print(f"        {residue}: {count}")
+    return 0
+
+
+def audit_vm_release(args):
+    if len(args) != 1 or not os.path.isdir(args[0]):
+        print("AUDIT ERROR: --audit-vm-release needs one existing sidecar directory",
+              file=sys.stderr)
+        return 2
+    root = os.path.realpath(args[0])
+    findings = _vm_release_findings(root)
+    if findings:
+        print(f"\n    ✗ VM-RELEASE NON-RUNTIME RESIDUE ({len(findings)} path(s))")
+        for residue, rel in findings[:80]:
+            print(f"        [{residue}] {rel}")
+        if len(findings) > 80:
+            print(f"        … and {len(findings) - 80} more")
+        return 1
+
+    boundary_path = os.path.join(root, VM_RELEASE_BOUNDARY_PATH)
+    try:
+        with open(boundary_path, encoding="utf-8") as source:
+            boundary = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"AUDIT ERROR: vm-release threat boundary missing/unreadable at "
+              f"{VM_RELEASE_BOUNDARY_PATH}: {exc}", file=sys.stderr)
+        return 2
+
+    expected = _vm_release_boundary(
+        boundary.get("artifactBinding", {}).get("buildSha", ""),
+        boundary.get("artifactBinding", {}).get("version", ""),
+    )
+    binding = boundary.get("artifactBinding", {})
+    if not binding.get("buildSha") or not binding.get("version") \
+            or boundary != expected:
+        print("AUDIT ERROR: vm-release threat boundary does not match the exact "
+              "D-043/P-039 schema/claims", file=sys.stderr)
+        return 2
+
+    print("    ✓ VM-RELEASE CLEAN — no TypeScript/source maps/tests/docs-source/"
+          "build-tool residue outside the runtime asset allowlist")
+    print(f"    ✓ threat boundary: ordinary SSH user isolated; root/cloud owner is "
+          f"an explicit non-goal; hosted connector={boundary['hostedBoundary']['planItem']}")
+    return 0
+
+
 # Archives whose CONTENTS are invisible to a byte-level grep: the payload is
 # compressed, so a plaintext identity literal inside is simply not present in the
 # file's bytes. `grep -a` fixes binary files; only expansion fixes these.

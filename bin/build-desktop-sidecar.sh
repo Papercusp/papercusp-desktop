@@ -42,6 +42,20 @@ REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
+# D-043 / P-052: dogfood remains the historical source-rich developer bundle.
+# vm-release is a separate fail-closed build profile whose final sidecar is
+# pruned and audited below. Keep the profile validation in this producer too:
+# direct sidecar builds must not be able to misspell the knob and silently emit
+# a dogfood payload for a customer VM package.
+DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
+case "$DISTRIBUTION_PROFILE" in
+  dogfood|vm-release) ;;
+  *)
+    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
+    exit 2
+    ;;
+esac
+
 # EI-20971912793028056: the final assembled-sidecar identity audit deliberately
 # refuses to certify unless the owner's NAME is asserted at run time. Git cannot
 # supply it: release builders use automation identities, and accepting those would
@@ -1715,12 +1729,34 @@ fi
 OMP_HOOK_SRC_DIR="$WEB_DIR/scripts/hooks/omp"
 OMP_HOOK_DST_DIR="$SIDECAR_DIR/apps/operator/scripts/hooks/omp"
 if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
-  echo "→ copying omp hook TypeScript bundle → sidecar/apps/operator/scripts/hooks/omp/"
   mkdir -p "$OMP_HOOK_DST_DIR"
-  for omp_hook_src in "$OMP_HOOK_SRC_DIR"/*.ts; do
-    [[ -f "$omp_hook_src" ]] || continue
-    cp -a "$omp_hook_src" "$OMP_HOOK_DST_DIR/"
-  done
+  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+    # P-052: these hooks are genuine runtime pieces, but their readable TS source
+    # is not a runtime asset. Bundle each entry independently so coord and inject
+    # keep their existing install/launch contracts without shipping the source or
+    # its companion module. No sourcemap is emitted.
+    echo "→ esbuild-bundling OMP runtime hooks for vm-release"
+    for omp_hook_entry in coord-hook inject-hook; do
+      [[ -f "$OMP_HOOK_SRC_DIR/$omp_hook_entry.ts" ]] || {
+        echo "ERROR: vm-release requires OMP hook source $OMP_HOOK_SRC_DIR/$omp_hook_entry.ts" >&2
+        exit 1
+      }
+      (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 \
+        "scripts/hooks/omp/$omp_hook_entry.ts" \
+        --bundle --platform=node --format=esm --target=node20 \
+        --outfile="$OMP_HOOK_DST_DIR/$omp_hook_entry.mjs")
+      [[ -s "$OMP_HOOK_DST_DIR/$omp_hook_entry.mjs" ]] || {
+        echo "ERROR: vm-release OMP bundle missing/empty: $OMP_HOOK_DST_DIR/$omp_hook_entry.mjs" >&2
+        exit 1
+      }
+    done
+  else
+    echo "→ copying omp hook TypeScript bundle → sidecar/apps/operator/scripts/hooks/omp/"
+    for omp_hook_src in "$OMP_HOOK_SRC_DIR"/*.ts; do
+      [[ -f "$omp_hook_src" ]] || continue
+      cp -a "$omp_hook_src" "$OMP_HOOK_DST_DIR/"
+    done
+  fi
 fi
 
 # Same reason again, for the CONTEXT-INJECTION pair
@@ -3648,6 +3684,19 @@ if [[ "$CROSS_BUILD" == "0" ]] && command -v strip >/dev/null 2>&1 && [[ "$_stri
     fi
   done
   echo "  ✓ strip pass reclaimed ~$((_strip_saved/1048576))MB"
+fi
+
+# ── D-043/P-052 immutable runtime-only profile ──────────────────────────────
+# Run after every sidecar copy/overlay step and before the runtime verifier and
+# atomic publish. The Python gate owns both the prune predicate and the audit
+# predicate, so a new residue class cannot be deleted by one list while escaping
+# the other. Dogfood does not enter this block and retains its source/templates/
+# multi-environment behavior unchanged.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  echo "→ pruning vm-release sidecar to the runtime-only allowlist (D-043/P-052)"
+  python3 "$HERE/audit-release-bundle.py" --prune-vm-release "$SIDECAR_DIR"
+  echo "→ auditing vm-release payload + root/cloud-owner threat boundary"
+  python3 "$HERE/audit-release-bundle.py" --audit-vm-release "$SIDECAR_DIR"
 fi
 
 # ── release-bundle dependency verifier (WI-3315) ────────────────────────────
