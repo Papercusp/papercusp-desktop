@@ -76,6 +76,27 @@ _cl_read_lww() {
 _cl_read_origin() { drv_psql "$1" "SELECT COALESCE(origin,'') FROM harness_shared.harness_features_consolidated WHERE feature_id='$2' LIMIT 1;" 2>/dev/null | tr -d '[:space:]'; }
 _cl_read_hlc()    { drv_psql "$1" "SELECT COALESCE(fed_hlc,'') FROM harness_shared.harness_features_consolidated WHERE feature_id='$2' AND origin='local' LIMIT 1;" 2>/dev/null | tr -d '[:space:]'; }
 _cl_count_feat()  { local n; n="$(drv_psql "$1" "SELECT count(*) FROM harness_shared.harness_features_consolidated WHERE feature_id='$2';" 2>/dev/null | tr -d '[:space:]')"; echo "${n:-?}"; }
+# _cl_phase2_capture <inst> <fid> <slug> — failure-time discriminator evidence.
+#
+# The cumulative serve logs do not carry op stamps (WI-40571/c.75469), so a later
+# log grep cannot distinguish a delivery gap from a receive-side rejection. Keep
+# this branch failure-only: repeated runs bank a useful witness without making a
+# passing run noisy. The outbox row is the sender-side delivery witness; the
+# receiver's refused-op counters are the explicit rejection witness. Empty or
+# unreadable values remain visible as such and are never interpreted as absence.
+_cl_phase2_capture() {
+  local inst="$1" fid="$2" slug="$3" ws_pred="" row outbox refused
+  [ -n "${RIG_WORKSPACE_ID:-}" ] && ws_pred="workspace_id='${RIG_WORKSPACE_ID}' AND "
+  row="$(drv_psql "$inst" "SELECT feature_id||' | title='||COALESCE(title,'-')||' | status='||COALESCE(status,'-')||' | origin='||COALESCE(origin,'-')||' | harness_slug='||COALESCE(harness_slug,'-')||' | fed_hlc='||COALESCE(fed_hlc,'-')||' | fed_ts='||COALESCE(fed_ts::text,'-') FROM harness_shared.harness_features_consolidated WHERE harness_slug='$slug' AND feature_id='$fid' LIMIT 1;" 2>/dev/null | tr '\n' ' ')"
+  outbox="$(drv_psql "$inst" "SELECT op||' | key='||key||' | ts='||COALESCE(ts::text,'-')||' | row_title='||COALESCE(row->>'title','-')||' | row_status='||COALESCE(row->>'status','-')||' | row_fed_hlc='||COALESCE(row->>'fed_hlc','-')||' | row_fed_ts='||COALESCE(row->>'fed_ts','-')||' | row_origin='||COALESCE(row->>'origin','-')||' | drained='||COALESCE(to_jsonb(substrate_outbox.*)->>'drained_at','NULL')||' | quarantined='||COALESCE(to_jsonb(substrate_outbox.*)->>'quarantined_at','NULL')||' | op_hlc='||COALESCE(to_jsonb(substrate_outbox.*)->>'op_hlc','-') FROM harness_shared.substrate_outbox WHERE ${ws_pred}harness_slug='$slug' AND table_name='harness_features_consolidated' AND key='$fid' ORDER BY ts;" 2>/dev/null | tr '\n' ' ')"
+  refused="$(drv_psql "$inst" "SELECT source_hive||' | '||table_tag||' | '||reason||' | count='||count FROM harness_shared.federation_refused_op_counters WHERE ${ws_pred}harness_slug='$slug' ORDER BY count DESC, source_hive;" 2>/dev/null | tr '\n' ' ')"
+  [ -n "$row" ] || row='<none-or-unreadable>'
+  [ -n "$outbox" ] || outbox='<none-or-unreadable>'
+  [ -n "$refused" ] || refused='<none-or-unreadable>'
+  echo "PHASE2-CAPTURE[$inst] row=[$row]"
+  echo "PHASE2-CAPTURE[$inst] sender-outbox=[$outbox]"
+  echo "PHASE2-CAPTURE[$inst] receiver-refused-counters=[$refused]"
+}
 # _cl_poll_present <inst> <fid> <origin|any> <tries> → 1 (present as requested) / 0 (timeout)
 _cl_poll_present() {
   local inst="$1" fid="$2" want="$3" tries="${4:-80}" i o
@@ -233,11 +254,17 @@ scenario_concurrent_lww() {
   elif [ "$converged" = 1 ]; then
     echo "✗ PHASE 2 FAIL — stable window matched but FINAL reads diverge (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B) — late-arriving op flipped a peer (WI-1673 signature)"
     echo "PHASE2 timing: samples=$phase2_samples matches=$phase2_matches mismatches=$phase2_mismatches max_streak=$phase2_max_streak first_match=[$phase2_first_match] last_match=[$phase2_last_match] first_mismatch=[$phase2_first_mismatch] last_mismatch=[$phase2_last_mismatch]"
+    fed_log "PHASE2-DIAG: failure-time PG capture (row + sender outbox + receiver refusal counters)"
+    _cl_phase2_capture "$OWNER" "$FID_C" "$SLUG_A"
+    _cl_phase2_capture "$MEMBER" "$FID_C" "$SLUG_B"
     fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
     for inst in "$OWNER" "$MEMBER"; do echo "--- $inst roster ---"; rig_read_roster "$inst"; done
   else
     echo "✗ PHASE 2 FAIL — no convergence (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B)"
     echo "PHASE2 timing: samples=$phase2_samples matches=$phase2_matches mismatches=$phase2_mismatches max_streak=$phase2_max_streak first_match=[$phase2_first_match] last_match=[$phase2_last_match] first_mismatch=[$phase2_first_mismatch] last_mismatch=[$phase2_last_mismatch]"
+    fed_log "PHASE2-DIAG: failure-time PG capture (row + sender outbox + receiver refusal counters)"
+    _cl_phase2_capture "$OWNER" "$FID_C" "$SLUG_A"
+    _cl_phase2_capture "$MEMBER" "$FID_C" "$SLUG_B"
     fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
     for inst in "$OWNER" "$MEMBER"; do echo "--- $inst roster ---"; rig_read_roster "$inst"; done
   fi
