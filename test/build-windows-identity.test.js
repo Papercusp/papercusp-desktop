@@ -201,6 +201,65 @@ test('the Linux local release entrypoint runs owner-name preflight before sideca
   );
 });
 
+test('the Linux local release entrypoint self-snapshots before long-running work', () => {
+  const snapshotAt = linuxScript.indexOf('PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT');
+  const reexecAt = linuxScript.indexOf('exec bash "$BUILD_LINUX_SNAPSHOT_DIR/build-linux-local.sh"');
+  const preflightAt = linuxScript.indexOf(
+    'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
+  );
+
+  assert.ok(snapshotAt >= 0, 'build-linux-local.sh must declare its immutable self-snapshot guard');
+  assert.ok(reexecAt >= 0, 'build-linux-local.sh must re-exec the private snapshot');
+  assert.ok(preflightAt >= 0, 'build-linux-local.sh must retain the owner preflight');
+  assert.ok(
+    reexecAt < preflightAt,
+    'the immutable re-exec must happen before any long-running release work can observe a live-tree rewrite',
+  );
+  assert.match(
+    linuxScript.slice(snapshotAt, preflightAt),
+    /PAPERCUSP_BUILD_LINUX_ROOT/,
+    'the snapshot must preserve the original repo root instead of resolving resources under /tmp',
+  );
+});
+
+test('the Linux local release entrypoint can resume from a fully staged sidecar', () => {
+  const resumeAt = linuxScript.indexOf('PAPERCUSP_REUSE_SIDECAR=1 — validating');
+  const packageAt = linuxScript.indexOf('tauri build --bundles deb');
+
+  assert.ok(resumeAt >= 0, 'build-linux-local.sh must expose the existing PAPERCUSP_REUSE_SIDECAR convention');
+  assert.ok(packageAt > resumeAt, 'sidecar validation must precede Tauri packaging');
+  for (const required of [
+    'src-tauri/sidecar/serve.mjs',
+    'src-tauri/sidecar/spa/index.html',
+    'src-tauri/sidecar/env-sidecars/staging',
+    'src-tauri/sidecar/source.tar.zst',
+    'src-tauri/sidecar/build-provenance.json',
+  ]) {
+    assert.match(
+      linuxScript.slice(resumeAt, packageAt),
+      new RegExp(required.replaceAll('.', '\\.').replaceAll('/', '\\/')),
+      `resume mode must fail closed when ${required} is absent`,
+    );
+  }
+  assert.match(
+    linuxScript.slice(resumeAt, packageAt),
+    /verify-sidecar-bundle\.sh/,
+    'resume mode must rerun the canonical sidecar verifier before packaging reused bytes',
+  );
+});
+
+test('the Linux local release entrypoint claims one Cargo target slot before either role builds', () => {
+  const claimAt = linuxScript.indexOf('source "$HERE/lib/claim-target-dir.sh"');
+  const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
+  const packageAt = linuxScript.indexOf('tauri build --bundles deb');
+
+  assert.ok(claimAt >= 0, 'build-linux-local.sh must source the shared target-slot claimant');
+  assert.ok(metadataAt >= 0, 'build-linux-local.sh must retain Cargo target discovery');
+  assert.ok(packageAt >= 0, 'build-linux-local.sh must retain Tauri packaging');
+  assert.ok(claimAt < metadataAt, 'the claimed CARGO_TARGET_DIR must drive Cargo metadata');
+  assert.ok(claimAt < packageAt, 'the target slot must be held before either GUI or Server build starts');
+});
+
 test('owner preflight fails closed for an automation Git identity without an asserted owner name', () => {
   const env = { ...process.env,
     GIT_CONFIG_COUNT: '2',

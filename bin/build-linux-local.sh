@@ -24,6 +24,9 @@
 #
 # Env passthrough (same knobs as release-local.sh's Linux leg):
 #   PAPERCUSP_SKIP_SEED_CUT=1  reuse src-tauri/seed as-is (no live-store seed cut)
+#   PAPERCUSP_REUSE_SIDECAR=1   reuse the already-verified Linux sidecar,
+#                               env-sidecars and source.tar.zst; resume at Tauri
+#                               packaging after an interrupted local build
 #   PAPERCUSP_BUILD_ROLES      subset of "gui server" (default: BOTH — D-004 of
 #                              desktop-build-speed-2026-07-16 restored this after
 #                              WI-5085/P-006's gui-only default silently dropped the
@@ -40,8 +43,26 @@
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  minisign key passphrase (default empty)
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+# A local cut routinely runs for tens of minutes out of the shared tree. Bash
+# re-reads a script by byte offset instead of slurping it up front, so git-sync
+# atomically replacing this file mid-run can shift the offsets and crash a
+# syntactically valid build with a phantom parse error. This is the same hazard
+# and fix as live-federation-gate.sh (EI-16828): re-exec an immutable private
+# snapshot once, while resolving every resource against the original repo root.
+if [[ -z "${PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT:-}" ]]; then
+  BUILD_LINUX_ROOT_FOR_SNAPSHOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  BUILD_LINUX_SNAPSHOT_DIR="$(mktemp -d /tmp/papercusp-build-linux-local.XXXXXX)"
+  cp -- "${BASH_SOURCE[0]}" "$BUILD_LINUX_SNAPSHOT_DIR/build-linux-local.sh"
+  chmod +x "$BUILD_LINUX_SNAPSHOT_DIR/build-linux-local.sh"
+  export PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT=1
+  export PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR="$BUILD_LINUX_SNAPSHOT_DIR"
+  export PAPERCUSP_BUILD_LINUX_ROOT="$BUILD_LINUX_ROOT_FOR_SNAPSHOT"
+  exec bash "$BUILD_LINUX_SNAPSHOT_DIR/build-linux-local.sh" "$@"
+fi
+trap 'rm -rf -- "${PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR:-}"' EXIT
+
+ROOT="${PAPERCUSP_BUILD_LINUX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+HERE="$ROOT/bin"
 cd "$ROOT"
 
 # ── OWNER-NAME PREFLIGHT (EI-21129566831677520). This entrypoint always
@@ -92,6 +113,13 @@ source "$HERE/lib/rust-path-remap.sh"
 papercusp_export_rust_path_remap
 papercusp_export_rust_lld linux
 
+# Claim one stable Cargo target slot for the ENTIRE dual-role build. The GUI
+# and Server share one Rust binary and must therefore reuse the same claimed
+# directory, while an unrelated live desktop/build must never interleave its
+# generated Tauri manifest with this release cut (WI-7101).
+# shellcheck source=lib/claim-target-dir.sh
+source "$HERE/lib/claim-target-dir.sh"
+
 VERSION="$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '')"
 if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
@@ -122,14 +150,37 @@ if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" != "1" ]]; then
   echo "      it ships the committed src-tauri/seed. Use bin/release-local.sh for a seed cut."
 fi
 
-echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
-bash "$ROOT/bin/build-desktop-sidecar.sh"
+case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
+  0)
+    echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
+    bash "$ROOT/bin/build-desktop-sidecar.sh"
 
-echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
-bash "$ROOT/bin/stage-env-sidecars.sh"
+    echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
+    bash "$ROOT/bin/stage-env-sidecars.sh"
 
-echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
-bash "$ROOT/bin/stage-source-tree.sh"
+    echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
+    bash "$ROOT/bin/stage-source-tree.sh"
+    ;;
+  1)
+    echo "==> [1-3/5] PAPERCUSP_REUSE_SIDECAR=1 — validating the staged Linux sidecar before resuming packaging"
+    for required in \
+      src-tauri/sidecar/serve.mjs \
+      src-tauri/sidecar/spa/index.html \
+      src-tauri/sidecar/env-sidecars/staging \
+      src-tauri/sidecar/source.tar.zst \
+      src-tauri/sidecar/build-provenance.json; do
+      [[ -e "$required" ]] || {
+        echo "ERROR: PAPERCUSP_REUSE_SIDECAR=1 but required staged payload is missing: $required" >&2
+        exit 1
+      }
+    done
+    bash "$ROOT/bin/verify-sidecar-bundle.sh" "$ROOT/src-tauri/sidecar"
+    ;;
+  *)
+    echo "ERROR: PAPERCUSP_REUSE_SIDECAR must be 0 or 1 (got '${PAPERCUSP_REUSE_SIDECAR}')" >&2
+    exit 2
+    ;;
+esac
 
 # Never clobber a caller-supplied key: `tauri build` takes CONTENT or a path here, and an
 # unconditional export makes every env-supplied override inert (EI-20549708598153511).
