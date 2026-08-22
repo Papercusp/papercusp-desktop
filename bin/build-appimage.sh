@@ -35,6 +35,11 @@ cd "$DESK"
 CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
 [ -n "$CT" ] || CT="$HOME/.cargo-target"
+# shellcheck source=lib/release-artifacts.sh
+. "$DESK/bin/lib/release-artifacts.sh" || {
+  echo "FATAL: cannot source bin/lib/release-artifacts.sh — refusing to build without release-retention guards" >&2
+  exit 1
+}
 APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 AUDIT_PY="$DESK/bin/audit-release-bundle.py"
@@ -78,7 +83,7 @@ fi
 #    the staged resource intermediate under $CT/release/ (step 0b), NOT from
 #    src-tauri/sidecar/ directly. The fail-closed identity scan in step 3d is the backstop.
 echo "==> purging any stale AppDir under $APPIMG_DIR (WI-4736: a reused stale AppDir ships an un-pruned/leaky sidecar)"
-rm -rf "$APPIMG_DIR"/*.AppDir
+release_artifacts_guarded_delete "$APPIMG_DIR"/*.AppDir || exit 1
 
 # 0b. Opportunistic DISK HYGIENE (NOT the leak fix — see step 2b). The tauri release
 #     resource-staging dirs $CT/release/{sidecar,seed,resources} are copy-into-never-delete,
@@ -155,8 +160,10 @@ APPDIR_SPA="$APPDIR_SIDECAR/spa"
 mkdir -p "$APPDIR_SPA"
 echo "==> force-syncing the allowlisted GUI SPA into the AppDir"
 rsync -a --delete "$GUI_SPA_SOURCE"/ "$APPDIR_SPA"/
-find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -exec rm -rf -- {} +
-rm -rf -- "$LIBDIR/resources" "$LIBDIR/seed"
+while IFS= read -r -d '' _stale_sidecar; do
+  release_artifacts_guarded_delete "$_stale_sidecar" || exit 1
+done < <(find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print0)
+release_artifacts_guarded_delete "$LIBDIR/resources" "$LIBDIR/seed" || exit 1
 if find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print -quit | grep -q .; then
   echo "FATAL: GUI AppDir contains a non-allowlisted sidecar member" >&2; exit 1
 fi
@@ -531,7 +538,7 @@ for _b in "$APPDIR"/usr/bin/*-desktop; do
   case "$(basename "$_b")" in
     papercusp-desktop) continue ;;
   esac
-  rm -f "$_b"
+  release_artifacts_guarded_delete "$_b" || exit 1
   echo "   evicted: usr/bin/$(basename "$_b") (belongs to another project)"
   _evicted=$((_evicted+1))
 done
@@ -608,6 +615,13 @@ if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   else
     echo "   WARN: signing failed — AppImage is usable but the updater .sig is missing" >&2
   fi
+fi
+
+# build-linux-local.sh moves this output into its source-tree collection root;
+# defer retention to that parent so the child does not protect the path from
+# its own final collection move.
+if [ "${PAPERCUSP_BUILD_LINUX_COLLECTING:-0}" != "1" ]; then
+  papercusp_retain_release_paths "$CT" "$APPIMG_DIR" "$OUT" "$OUT.sig" || exit 1
 fi
 
 echo "==> AppImage done:"

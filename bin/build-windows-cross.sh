@@ -628,6 +628,11 @@ elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICE
   fail "spanned Server installer detected but normalization failed (zip missing or failed) — refusing to leave a raw stub+slices set as the direct-build result"
 fi
 
+# Keep the finished Inno output and the Cargo target that produced it stable
+# until the owning cut explicitly releases its retention lease.
+papercusp_retain_release_paths "$CARGO_TARGET_ROOT" "$OUT_DIR" \
+  || fail "could not retain finished Windows release paths"
+
 rm -rf "$STAGE"
 echo "==> done — Windows artifacts (cross-built, no VM) in $OUT_DIR"
 ls -lh "$OUT_DIR"
