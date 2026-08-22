@@ -231,7 +231,8 @@ assert_vm_release_deb_runtime_only() {
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
     echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
-    bash "$ROOT/bin/build-desktop-sidecar.sh"
+    PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_DESKTOP_VERSION="$VERSION" \
+      bash "$ROOT/bin/build-desktop-sidecar.sh"
 
     if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
       echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"

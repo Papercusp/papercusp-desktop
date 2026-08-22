@@ -80,6 +80,14 @@ test('vm-release is fail-closed, Server-only and disables source staging', () =>
   assert.match(linuxScript, /vm-release — skipping env-sidecars and editable source staging/);
 });
 
+test('the sidecar provenance receives the immutable build SHA and version', () => {
+  assert.match(
+    linuxScript,
+    /PAPERCUSP_BUILD_SHA="\$BUILD_SHA" PAPERCUSP_DESKTOP_VERSION="\$VERSION" \\\n\s+bash "\$ROOT\/bin\/build-desktop-sidecar\.sh"/,
+    'the sidecar provenance emitter must not fall back to empty SHA or unknown version',
+  );
+});
+
 test('vm-release Tauri overlay is an exact runtime allowlist with Server identity', () => {
   assert.equal(vmConfig.productName, 'Papercusp Server');
   assert.equal(vmConfig.mainBinaryName, 'papercusp-server');
