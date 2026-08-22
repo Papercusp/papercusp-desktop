@@ -1269,6 +1269,35 @@ else
   log "attestation WRITE preflight OK for both distinct accounts ($P_A_USER, $P_B_USER); proceeding to build."
 fi
 
+# ── build-lock CONTENTION classifier (EI-21164709090643162) ────────────────────
+# A sidecar build that fails ONLY because the bounded lock wait (see the
+# PAPERCUSP_SIDECAR_LOCK_WAIT_SEC comment below) timed out against a STILL-LIVE
+# holder is an evidence-PRODUCER contention failure, not a federation/product
+# regression — the same class WI-1977's busy-display SKIP already carries for
+# a resource this gate does not own exclusively. Banking it as a plain
+# "GATE: RED (sidecar-build)" makes a legitimate concurrent release build (a
+# multi-role `tauri build` + repack-deb-xz.sh's `xz -9`, easily 40+ minutes)
+# look like a federation-behavior verdict, and files a misleading bug EI on
+# every such collision (observed live: EI-21164709090643162, 2026-08-22 —
+# holder pid running `bin/repack-deb-xz.sh`, aged 2419s). Detect the EXACT
+# __pc_report_sidecar_lock_timeout() signature (lib/sidecar-lock-yield.sh)
+# PLUS at least one concrete live-holder line — i.e. the diagnostic PROVED a
+# real process still owns the lock — and classify separately below. Absent a
+# concrete holder line ("holder details unavailable") we cannot confirm this
+# was fair contention rather than a genuine wedge, so that case is
+# deliberately left as a RED. Both grep patterns are pinned to the ONLY
+# emitter of each line shape (papercusp-desktop/test/live-federation-gate-lock-contention.test.js
+# asserts the uniqueness), so this cannot misfire on an unrelated build FATAL.
+BUILD_LOCK_CONTENTION=""
+build_lock_contention_check() {  # <build-log-path> — sets BUILD_LOCK_CONTENTION when confirmed
+  local log="$1" holder
+  [ -f "$log" ] || return 0
+  grep -qaE '^FATAL: timed out after [0-9]+s waiting for the sidecar lock \(' "$log" 2>/dev/null || return 0
+  holder="$(grep -aE '^       pid [0-9]+ \(running [0-9]+s\): ' "$log" 2>/dev/null | tail -1 | sed 's/^ *//')"
+  [ -n "$holder" ] || return 0
+  BUILD_LOCK_CONTENTION="$holder"
+}
+
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
@@ -1306,6 +1335,7 @@ if [ -z "${GATE_DEB:-}" ]; then
     ( cd "$DESKTOP_DIR" && \
       PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}" \
         bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
+    [ "$FAIL_BUILD" = 1 ] && build_lock_contention_check "$WORK/build.log"
   fi
   # Grep the FUNCTION NAME, not a log phrase: the original 'grantEpochKeysToMembers on
   # admit' literal was reworded out of the source and the stale check WARNed on every
@@ -1365,6 +1395,23 @@ if [ "$FAIL_BUILD" = 1 ]; then
   SKIP_MATRIX=1
   SKIP_FROMREPO=1
   log "fresh sidecar build failed — refusing to run content-matrix/from-repo against fallback stale artifacts"
+  # EI-21164709090643162: a CONFIRMED sidecar.lock contention (see
+  # build_lock_contention_check above) never proved or disproved anything about
+  # federation behavior — exit here as a typed, non-green infrastructure SKIP
+  # instead of falling through to the smoke section (every leg would just
+  # decline anyway) and banking "GATE: RED (sidecar-build)". Same backoff
+  # shape as the storm/starvation downgrades: NOT a green (last-green
+  # untouched), short last-downgrade retry TTL, last-red cleared (this run
+  # confirmed nothing red), and no EI filed — there is nothing actionable to
+  # file, the holder is a legitimate concurrent build the log already names.
+  if [ -n "$BUILD_LOCK_CONTENTION" ]; then
+    log "BUILD LOCK CONTENTION (not a federation/product verdict): $BUILD_LOCK_CONTENTION"
+    echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    rm -f "$STATE_DIR/last-red"
+    check_staleness
+    verdict "GATE: SKIPPED-BUILD-LOCK-CONTENTION (sidecar.lock held past the bounded wait by a live writer: $BUILD_LOCK_CONTENTION) — not a federation verdict; logs in $WORK"
+    exit 0
+  fi
 fi
 
 # ── 3. run the smokes ─────────────────────────────────────────────────────────
