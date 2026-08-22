@@ -104,6 +104,16 @@ test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   assert.match(common, /grep -v '\/Papercusp Server_'/);
 });
 
+test('vmctl install waits boundedly for an active guest dpkg frontend lock', () => {
+  const start = vmctl.indexOf('cmd_install()');
+  const end = vmctl.indexOf('\ncmd_launch()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const install = vmctl.slice(start, end);
+
+  assert.match(install, /apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall/);
+});
+
 test('updater E2E proves a different kernel and never seeds live home state', () => {
   const fn = updaterFunction();
   assert.match(fn, /systemd-detect-virt/);

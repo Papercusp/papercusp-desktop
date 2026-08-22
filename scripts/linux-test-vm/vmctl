@@ -137,7 +137,13 @@ cmd_install() {
   # re-laid-down on a --no-reset overlay; without it apt skips "already newest"
   # and a code-only rebuild silently wouldn't land. On a pristine overlay it's a
   # plain install (nothing to reinstall).
-  vm_ssh "$name" 'sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall /tmp/Papercusp.deb'
+  # A Server install can leave a short-lived guest apt transaction behind just
+  # as the caller begins the companion GUI install. apt-get otherwise fails
+  # immediately on /var/lib/dpkg/lock-frontend, turning the supported sequential
+  # co-install flow into a timing race. Use apt's native bounded lock waiter so
+  # every vmctl install shares the same policy and still fails loudly if a guest
+  # package manager is genuinely wedged.
+  vm_ssh "$name" 'sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall /tmp/Papercusp.deb'
   log "installed:"; vm_ssh "$name" "dpkg -l | grep -i papercusp || true"
 }
 
