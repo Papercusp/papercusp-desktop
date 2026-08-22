@@ -159,10 +159,19 @@ static "PASS verdict also reports strip-at-scoring (a PASS on a broken precondit
 # CLASSIFY is the defect itself, and a well-meaning "simplification" back to it would restore a
 # confident wrong answer with no other guard in the tree noticing.
 static_not() {
-  local label="$1" pat="$2"
+  local label="$1" pat="$2" body
   # Comments are allowed to quote the old behaviour (the file documents its own history) —
   # only a LIVE line may not. Strip comment-only lines before matching.
-  if grep -vE '^[[:space:]]*#' "$SCN" | grep -Eq "$pat"; then
+  #
+  # WI-40595: capture the producer to completion, THEN match — deliberately not a
+  # pipeline. Under this file's `set -o pipefail`, `grep -vE … | grep -Eq …` reports a
+  # MATCH as a MISS whenever the early-exiting consumer SIGPIPEs the producer
+  # (PIPESTATUS=[141 0]; measured 11/3000 under CPU contention on the sibling b3
+  # selftest, which is how it reddened green-checkpoint candidate 4bd9c405). Here the
+  # sense is inverted, so the race is WORSE than a flaky red: it takes the else branch
+  # and reports a live banned pattern as PASS. Do NOT restore the pipeline.
+  body="$(grep -vE '^[[:space:]]*#' "$SCN")" || true
+  if grep -Eq "$pat" <<<"$body"; then
     bad "$label — pattern IS present on a live (non-comment) line in $SCN: $pat"
   else
     ok "$label"

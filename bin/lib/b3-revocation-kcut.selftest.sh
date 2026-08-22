@@ -53,6 +53,24 @@ source "$SCN"
 # shellcheck disable=SC1090
 source "$RIG_LIB"
 
+# live_has <file> <fixed-string> — does a NON-COMMENT line of <file> contain <fixed-string>?
+#
+# WI-40595. Deliberately NOT a pipeline. The obvious spelling —
+#   grep -vE '^[[:space:]]*#' "$f" | grep -Fq 'PAT'
+# — is unsafe under this file's `set -o pipefail`: `grep -Fq` exits the instant it
+# matches, the still-writing producer takes SIGPIPE (141), and pipefail promotes that
+# to the pipeline's status, so a MATCH is reported as a MISS. Measured here:
+# PIPESTATUS=[141 0] on 11/3000 runs under CPU contention, 0/400 idle. That is exactly
+# how this selftest passed green-checkpoint isolation attempt 1 and failed attempt 2 on
+# byte-identical files, freezing candidate 4bd9c405 with a guard nobody had broken.
+# Capture the producer's output to completion first, then match it. Do NOT "simplify"
+# this back into a pipeline.
+live_has() {
+  local src="$1" pat="$2" body
+  body="$(grep -vE '^[[:space:]]*#' "$src")" || true
+  grep -Fq -- "$pat" <<<"$body"
+}
+
 for fn in _rv_key_bearing_device _rv_classify_leak; do
   declare -f "$fn" >/dev/null \
     || { echo "FAIL — $fn missing from $SCN (EI-18712383368117845 probe removed or inlined again?)"; exit 1; }
@@ -70,13 +88,13 @@ else
   bad "K-CUT integration: resolver no longer selects a key-bearing pre-ban device"
 fi
 
-if grep -vE '^[[:space:]]*#' "$SCN" | grep -Fq 'rig_read_content b "$FPOST"'; then
+if live_has "$SCN" 'rig_read_content b "$FPOST"'; then
   bad "leak integration: detail path still re-reads metadata through rig_read_content"
 else
   ok "leak integration: detail path does not re-read the arrival predicate"
 fi
 
-if grep -vE '^[[:space:]]*#' "$SCN" | grep -Fq 'SELECT title FROM harness_shared.harness_features_consolidated'; then
+if live_has "$SCN" 'SELECT title FROM harness_shared.harness_features_consolidated'; then
   ok "leak integration: detail path reads the replicated content column"
 else
   bad "leak integration: detail path no longer reads replicated content"
@@ -210,14 +228,12 @@ fi
 # Wiring guard: the helper's nonzero is only protective if both revocation
 # drivers check it BEFORE entering rig_assert_absent. Ignore comments so a prose
 # mention cannot keep the test green after the executable guard is removed.
-if grep -vE '^[[:space:]]*#' "$SCN" \
-  | grep -Fq 'if ! rig_write_content a "$oslug" "$FPOST" "$post_title" todo'; then
+if live_has "$SCN" 'if ! rig_write_content a "$oslug" "$FPOST" "$post_title" todo'; then
   ok "matrix revocation leg checks post-ban authoring before its negative assert"
 else
   bad "matrix revocation leg can still run a vacuous negative assert after a rejected post-ban write"
 fi
-if grep -vE '^[[:space:]]*#' "$STANDALONE" \
-  | grep -Fq 'if ! rig_write_content "$OWNER" "$oslug" "$FPOST"'; then
+if live_has "$STANDALONE" 'if ! rig_write_content "$OWNER" "$oslug" "$FPOST"'; then
   ok "standalone revocation leg checks post-ban authoring before its negative assert"
 else
   bad "standalone revocation leg can still run a vacuous negative assert after a rejected post-ban write"
