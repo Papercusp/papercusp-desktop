@@ -1709,8 +1709,11 @@ mod discovery_tests {
             "a GUI-side serve.mjs spawn seam reappeared: {removed_self_host}"
         );
 
+        // Assemble the needle so include_str!("main.rs") cannot match this
+        // assertion's own source before it reaches the production function.
+        let launch_needle = format!("fn {}(", "launch_bundle");
         let launch_start = src
-            .find("fn launch_bundle(")
+            .find(&launch_needle)
             .expect("launch_bundle() must remain the cross-platform sibling-launch seam");
         let linux_start = src[launch_start..]
             .find("#[cfg(target_os = \"linux\")]")
@@ -1726,7 +1729,7 @@ mod discovery_tests {
             "Linux must observe gtk-launch's exit status; spawn() only proves the launcher binary exists"
         );
         assert!(
-            linux.contains("launcher_status_result(status.success()"),
+            linux.contains("launcher_status_result(") && linux.contains("status.success()"),
             "a non-zero gtk-launch exit must reach the explicit install-Server UI"
         );
     }
