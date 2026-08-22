@@ -35,6 +35,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const root = path.resolve(__dirname, '..');
 const scriptPath = path.resolve(__dirname, '../bin/build-desktop-sidecar.sh');
 
 /** Pull the guard block verbatim out of the real script. */
@@ -111,5 +112,28 @@ test('no assignment in the script pipes into grep without a || true escape', () 
     offenders.map((o) => `${o.n}: ${o.line.trim()}`),
     [],
     'these assignments die under set -e when their grep matches nothing',
+  );
+});
+
+test('no Python bytecode or __pycache__ artifacts are tracked in the release source', () => {
+  // .gitignore prevents new interpreter caches from entering the tree, but it
+  // does not remove a cache that was already tracked. Keep the source-copy
+  // boundary closed against a tracked .pyc carrying this build box's paths.
+  const res = spawnSync(
+    'git',
+    ['ls-files', '-z', '--', '*__pycache__*', '*.pyc', '*.pyo', '*.pyd'],
+    { cwd: root, encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, `git ls-files failed: ${res.stderr}`);
+  const tracked = (res.stdout ?? '')
+    .split('\0')
+    .filter(Boolean)
+    // A deletion is intentionally visible as a worktree change until the
+    // background git-sync commit lands; only paths still present can ship.
+    .filter((file) => fs.existsSync(path.join(root, file)));
+  assert.deepEqual(
+    tracked,
+    [],
+    `tracked interpreter artifacts must be removed from the release source: ${tracked.join(', ')}`,
   );
 });

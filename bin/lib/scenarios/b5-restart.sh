@@ -29,7 +29,7 @@ scn_restart_durability() {
   local out rc tmp
   tmp="$(mktemp)"
   scenario_restart_durability a b >"$tmp" 2>&1; rc=$?
-  out="$(cat "$tmp")"; rm -f "$tmp"
+  out="$(cat "$tmp")"
   if [ "$rc" = 0 ]; then
     rm -f "$tmp"
     echo "restart durability OK (cold sidecar restart lost nothing, re-emitted nothing)"
