@@ -591,19 +591,144 @@ fi
 # WEDGED holder; prefer `systemctl --user stop papercup-live-federation-gate.service`, which
 # stops a timer-launched run via the TERMINATED path (no false RED) and, being cgroup-scoped,
 # provably cannot touch a manually-launched run in another scope.
+# ── GATE-SINGLETON-LOCK (WI-40387) ── BEGIN gate_singleton_lock ───────────────
+# The singleton lock is held by a DEDICATED HELPER PROCESS, never by an fd in THIS shell.
+#
+# ROOT CAUSE this replaces (measured 2026-08-22, WI-40387). This block used to do
+#     exec 7>>"$GATE_LOCK"; flock -n 7
+# which holds the lock in the gate DRIVER's own fd table. bash cannot set FD_CLOEXEC on an
+# exec-assigned fd — probed on the shipping bash 5.2.21, NEITHER `exec 7>` NOR the newer
+# `exec {var}>` form is close-on-exec — so fd 7 was inherited by EVERY descendant. And the
+# content-matrix leg deliberately LEAVES ITS PAIR RUNNING on exit (see the §0y comment
+# above): the gate is *guaranteed* to spawn inheritors that outlive it. A flock lives on the
+# open file DESCRIPTION, so those survivors kept holding the gate lock after the driver died.
+# Observed: the 2026-08-21 13:47 run's orphans (Xvfb :250 + a hyperdht testnet + 2 wedged
+# smoke shells, scope pc-0mt38rqhgmpzjmb1qkz) were still resident 7h12m later; the 00:46Z
+# window banked SKIPPED-GATE-IN-FLIGHT against holder pid 3847345, which had been dead for
+# hours. An inherited fd has NO expiry, so EVERY subsequent window would have skipped the
+# same way, indefinitely — while the gate looked perfectly healthy (timer green, service
+# Result=success, exit 0) and produced no evidence at all. That is the "never runs and
+# nobody notices" class, arrived at through the lock instead of through a TTL.
+#
+# THE FIX HAS TWO INDEPENDENT HALVES. Both are load-bearing; neither subsumes the other.
+#   1. ROOT CAUSE — the lock fd lives ONLY inside a background helper subshell, forked
+#      before any leg runs. The driver's fd table never contains it, so nothing the driver
+#      spawns can inherit it, however long that child outlives the run. The helper holds the
+#      lock while the driver is alive (`kill -0`, plus a /proc start-time identity check so a
+#      recycled pid on this daily-PID-wrap box cannot make it hold forever) and exits within
+#      GATE_LOCK_POLL_S of the driver's death, releasing the lock. Crash-safe: a SIGKILLed
+#      driver releases the lock on the helper's very next poll.
+#   2. SELF-HEAL — if the lock is nevertheless un-takeable while the RECORDED holder pid is
+#      PROVABLY dead (a pre-fix orphan, a rollback, a foreign holder), rotate the wedged
+#      lock file aside and retry once, so the window RUNS instead of skipping forever.
+#      This half is deliberately FAIL-CLOSED: a missing, unparseable, or still-live holder
+#      record means NOT-proven-stale and we skip exactly as before. Absence of evidence must
+#      never break a lock, because a broken lock is the collision §0y exists to prevent.
+#      The break is serialized on its own short-lived breaker flock and re-verifies staleness
+#      INSIDE that critical section, and it rotates the .holder record away with the lock, so
+#      a second racing driver reads "no holder record" ⇒ fail-closed ⇒ it does not also break.
+# GATE_LOCK_SELF_HEAL=0 disables half 2 (used by the recurrence guard to prove half 1 alone).
+gate_singleton_lock_holder_pid() {   # <lockfile> → the recorded holder pid, or nothing
+  sed -n 's/.*[[:space:]]pid=\([0-9][0-9]*\).*/\1/p' "$1.holder" 2>/dev/null | head -n 1
+}
+gate_singleton_lock_break_stale() {  # <lockfile> → 0 IFF a PROVABLY-stale lock was rotated aside
+  local __lock="$1"
+  (
+    exec 8>>"$__lock.break" 2>/dev/null || exit 1
+    flock -w "${GATE_LOCK_BREAK_WAIT_S:-10}" 8 || exit 1
+    # Re-verify EVERY premise inside the critical section — the state can have moved since
+    # the caller looked, and every unproven branch below exits 1 (= do not break).
+    __hpid="$(gate_singleton_lock_holder_pid "$__lock")"
+    [ -n "${__hpid:-}" ] || exit 1                  # no parseable holder record ⇒ not proven stale
+    kill -0 "$__hpid" 2>/dev/null && exit 1         # holder still alive ⇒ not stale
+    flock -n 7 7>>"$__lock" 2>/dev/null && exit 1   # lock is free already ⇒ nothing to break
+    __stamp="$(date +%s)-$$"
+    mv -f "$__lock.holder" "$__lock.orphaned-$__stamp.holder" 2>/dev/null || true
+    mv -f "$__lock" "$__lock.orphaned-$__stamp" 2>/dev/null || exit 1
+    exit 0
+  )
+}
+gate_singleton_lock_take() {  # <lockfile> <driver-pid> <label> [no-self-heal]
+  local __lock="$1" __drv="${2:-$$}" __label="${3:-live-federation-gate}" __noheal="${4:-0}"
+  local __status __st="" __helper __waited=0
+  GATE_SINGLETON_LOCK_STATE=error
+  GATE_SINGLETON_LOCK_HOLDER=""
+  GATE_SINGLETON_LOCK_STALE_HOLDER=""
+  GATE_SINGLETON_LOCK_HELPER_PID=""
+  [ -n "$__lock" ] || return 1
+  __status="$(mktemp "${TMPDIR:-/tmp}/pcusp-gate-lock-status.XXXXXX" 2>/dev/null)" || return 1
+  (
+    # THE WHOLE POINT: this fd exists only in this forked subshell. The driver never has it.
+    exec 9>>"$__lock" 2>/dev/null || { printf 'error\n' >"$__status"; exit 1; }
+    if flock -n 9; then
+      printf '%s pid=%s %s helper=%s\n' "$(date -Is)" "$__drv" "$__label" "$BASHPID" \
+        >"$__lock.holder" 2>/dev/null || true
+      printf 'acquired\n' >"$__status"
+      __drv_start="$(stat -c %Y "/proc/$__drv" 2>/dev/null || echo '')"
+      while kill -0 "$__drv" 2>/dev/null; do
+        # pid-reuse guard: /proc/<pid> mtime is the process start time, so a recycled pid
+        # reads as a DIFFERENT process and we release rather than holding for its lifetime.
+        if [ -n "$__drv_start" ]; then
+          [ "$(stat -c %Y "/proc/$__drv" 2>/dev/null || echo '')" = "$__drv_start" ] || break
+        fi
+        sleep "${GATE_LOCK_POLL_S:-2}"
+      done
+    else
+      printf 'busy\n' >"$__status"
+    fi
+  ) &
+  __helper=$!
+  # Bounded wait for the helper's verdict. A helper that dies without writing one leaves
+  # __st empty ⇒ state 'error' ⇒ the caller PROCEEDS UNLOCKED (see the call site): for this
+  # lock, running is the safe failure and silence is the dangerous one.
+  while [ "$__waited" -lt "${GATE_LOCK_STATUS_WAIT_DS:-100}" ]; do
+    __st="$(cat "$__status" 2>/dev/null || true)"
+    [ -n "$__st" ] && break
+    kill -0 "$__helper" 2>/dev/null || { __st="$(cat "$__status" 2>/dev/null || true)"; break; }
+    sleep 0.1; __waited=$((__waited + 1))
+  done
+  rm -f "$__status" 2>/dev/null || true
+  case "${__st:-}" in
+    acquired*) GATE_SINGLETON_LOCK_STATE=acquired; GATE_SINGLETON_LOCK_HELPER_PID="$__helper"; return 0 ;;
+    busy*)     : ;;
+    *)         GATE_SINGLETON_LOCK_STATE=error; return 1 ;;
+  esac
+  GATE_SINGLETON_LOCK_HOLDER="$(cat "$__lock.holder" 2>/dev/null || echo 'unknown holder')"
+  if [ "$__noheal" = 0 ] && [ "${GATE_LOCK_SELF_HEAL:-1}" = 1 ] \
+     && gate_singleton_lock_break_stale "$__lock"; then
+    local __stale="$GATE_SINGLETON_LOCK_HOLDER"
+    if gate_singleton_lock_take "$__lock" "$__drv" "$__label" 1; then
+      GATE_SINGLETON_LOCK_STATE=stale-broken-acquired
+      GATE_SINGLETON_LOCK_STALE_HOLDER="$__stale"
+      return 0
+    fi
+    GATE_SINGLETON_LOCK_STALE_HOLDER="$__stale"
+  fi
+  GATE_SINGLETON_LOCK_STATE=busy
+  return 1
+}
+# ── END gate_singleton_lock ───────────────────────────────────────────────────
+
 if [ "${GATE_SINGLETON:-1}" = 1 ]; then
   GATE_LOCK="${PCUSP_GATE_LOCK:-/tmp/pcusp-live-fed-gate.lock}"
-  if exec 7>>"$GATE_LOCK" 2>/dev/null; then
-    if ! flock -n 7; then
-      GATE_HOLDER="$(cat "$GATE_LOCK.holder" 2>/dev/null || echo 'unknown holder')"
+  gate_singleton_lock_take "$GATE_LOCK" "$$" \
+    "${USER:-?}:live-federation-gate${GATE_FORCE:+ (GATE_FORCE)}"
+  case "${GATE_SINGLETON_LOCK_STATE:-error}" in
+    acquired) : ;;   # held by our helper for the rest of this process
+    stale-broken-acquired)
+      log "GATE-LOCK SELF-HEAL (WI-40387): $GATE_LOCK was un-takeable but its recorded holder is DEAD (${GATE_SINGLETON_LOCK_STALE_HOLDER:-unknown holder}) — an orphaned inherited fd, which has no expiry and would have skipped every future window forever. Rotated the wedged lock aside and took a fresh one; this window RUNS."
+      ;;
+    busy)
+      GATE_HOLDER="${GATE_SINGLETON_LOCK_HOLDER:-unknown holder}"
       log "another gate run is already in flight (held by: $GATE_HOLDER) — skipping this window rather than starting a second run that would duplicate the verdict and clobber the shared content-matrix lane dir. GATE_SINGLETON=0 overrides (wedged holder only)."
       skip_cleanup
       check_staleness   # same reasoning as the other SKIPPED* exits: a recurring skip must not go unnoticed
       verdict "GATE: SKIPPED-GATE-IN-FLIGHT (held by: $GATE_HOLDER)"; exit 0
-    fi
-    # Held for the rest of this process. Record who, for the next run's message.
-    printf '%s pid=%s %s\n' "$(date -Is)" "$$" "${USER:-?}:live-federation-gate${GATE_FORCE:+ (GATE_FORCE)}" >"$GATE_LOCK.holder" 2>/dev/null || true
-  fi
+      ;;
+    *)
+      log "GATE-LOCK: could not evaluate the singleton lock ($GATE_LOCK) — proceeding UNLOCKED rather than skipping. A lock we cannot read must not be able to silence the gate (WI-40387)."
+      ;;
+  esac
 fi
 
 # ── 0z. rig-lock pre-check (WI-5726/WI-5773 residual gap, 2026-07-25) ──────────
