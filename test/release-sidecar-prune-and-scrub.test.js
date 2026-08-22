@@ -54,6 +54,16 @@ function audit(...args) {
   return spawnSync('python3', [AUDIT, ...args], { encoding: 'utf8', env: AUDIT_ENV });
 }
 
+const VM_RELEASE_ENV = {
+  ...AUDIT_ENV,
+  PAPERCUSP_BUILD_SHA: 'deadbeefcafefeed',
+  PAPERCUSP_DESKTOP_VERSION: '9.8.7-vm-test',
+};
+
+function vmReleaseAudit(...args) {
+  return spawnSync('python3', [AUDIT, ...args], { encoding: 'utf8', env: VM_RELEASE_ENV });
+}
+
 /** A high-entropy identity literal, from the gate's OWN source of truth. */
 function identityLiteral() {
   const r = audit('--identity-literals');
@@ -68,6 +78,109 @@ function identityLiteral() {
 function tmp(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `wi37620-${name}-`));
 }
+
+test('vm-release prune removes non-runtime residue, preserves allowlisted assets, and writes the threat boundary', () => {
+  const dir = tmp('vm-release-prune');
+  const write = (rel, body = 'fixture\n') => {
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, body);
+  };
+  try {
+    // Runtime bytes that must survive.
+    write('serve.mjs', 'export {};\n');
+    write('db-sql/001-runtime.sql', 'select 1;\n');
+    write('apps/operator/scripts/hooks/omp/coord-hook.mjs', 'export {};\n');
+    write('internal-docs/guide.html', '<h1>runtime docs</h1>\n');
+    // Product templates are runtime CONTENT; their own source/tests are copied
+    // into newly materialized apps and are therefore intentionally allowlisted.
+    write('templates/papercusp-webapp/src/main.ts', 'export {};\n');
+    write('templates/papercusp-webapp/tests/template.test.ts', 'export {};\n');
+
+    // Dogfood/source/build residue that must not survive a vm-release.
+    write('source.tar.zst');
+    write('env-sidecars/staging/operator.json', '{}\n');
+    write('seed/private.txt');
+    write('apps/operator-docs/src/content/docs/private.mdx', '# private\n');
+    write('packages/operator-core/lib/runtime.ts', 'export {};\n');
+    write('packages/operator-core/lib/runtime.js.map', '{}\n');
+    write('packages/operator-core/test/runtime.test.js', 'test();\n');
+    write('packages/operator-core/vitest.config.ts', 'export default {};\n');
+    write('.github/workflows/release.yml', 'name: release\n');
+    write('README.md', '# source docs\n');
+
+    const pruned = vmReleaseAudit('--prune-vm-release', dir);
+    assert.equal(pruned.status, 0, `${pruned.stdout}${pruned.stderr}`);
+    for (const rel of [
+      'source.tar.zst',
+      'env-sidecars',
+      'seed',
+      'apps/operator-docs/src/content/docs',
+      'packages/operator-core/lib/runtime.ts',
+      'packages/operator-core/lib/runtime.js.map',
+      'packages/operator-core/test',
+      'packages/operator-core/vitest.config.ts',
+      '.github',
+      'README.md',
+    ]) {
+      assert.equal(fs.existsSync(path.join(dir, rel)), false, `${rel} must be pruned`);
+    }
+    for (const rel of [
+      'serve.mjs',
+      'db-sql/001-runtime.sql',
+      'apps/operator/scripts/hooks/omp/coord-hook.mjs',
+      'internal-docs/guide.html',
+      'templates/papercusp-webapp/src/main.ts',
+      'templates/papercusp-webapp/tests/template.test.ts',
+    ]) {
+      assert.equal(fs.existsSync(path.join(dir, rel)), true, `${rel} must survive`);
+    }
+
+    const boundaryPath = path.join(
+      dir,
+      'apps/operator/runtime/vm-release-threat-boundary.json',
+    );
+    const boundary = JSON.parse(fs.readFileSync(boundaryPath, 'utf8'));
+    assert.equal(boundary.profile, 'vm-release');
+    assert.equal(boundary.artifactBinding.buildSha, VM_RELEASE_ENV.PAPERCUSP_BUILD_SHA);
+    assert.equal(boundary.artifactBinding.version, VM_RELEASE_ENV.PAPERCUSP_DESKTOP_VERSION);
+    assert.equal(boundary.rootCloudOwnerNonGoal.protectedByVmRelease, false);
+    assert.equal(boundary.hostedBoundary.planItem, 'P-039');
+    assert.match(boundary.hostedBoundary.vmComponent, /minimal-signed-reverse-data-plane-connector/);
+
+    const certified = vmReleaseAudit('--audit-vm-release', dir);
+    assert.equal(certified.status, 0, `${certified.stdout}${certified.stderr}`);
+    assert.match(certified.stdout, /VM-RELEASE CLEAN/);
+
+    // The audit is not a ceremonial post-prune pass: adding one newly forbidden
+    // file must make the SAME classifier reject the assembled payload.
+    write('packages/operator-core/lib/late-source.ts', 'export {};\n');
+    const rejected = vmReleaseAudit('--audit-vm-release', dir);
+    assert.equal(rejected.status, 1, `${rejected.stdout}${rejected.stderr}`);
+    assert.match(rejected.stdout, /\[typescript-source\].*late-source\.ts/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('vm-release build profile bundles OMP hooks and gates the final sidecar before verification', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const profileValidation = sh.indexOf('dogfood|vm-release');
+  const bundle = sh.indexOf('esbuild-bundling OMP runtime hooks for vm-release');
+  const prune = sh.indexOf('--prune-vm-release');
+  const auditAt = sh.indexOf('--audit-vm-release');
+  const verifier = sh.indexOf('release-bundle dependency verifier');
+
+  assert.ok(profileValidation > 0, 'the producer must reject unknown distribution profiles');
+  assert.ok(bundle > profileValidation, 'vm-release must bundle its runtime OMP hooks');
+  assert.match(sh.slice(bundle, prune), /--bundle --platform=node --format=esm --target=node20/);
+  assert.doesNotMatch(sh.slice(bundle, prune), /--sourcemap/,
+    'the vm-release OMP bundle must not embed source maps/sourceContent');
+  assert.ok(prune > bundle && auditAt > prune && verifier > auditAt,
+    'bundle → prune → audit must all precede the existing runtime verifier');
+  assert.match(sh, /if \[\[ "\$DISTRIBUTION_PROFILE" == "vm-release" \]\][\s\S]*?else[\s\S]*?copying omp hook TypeScript bundle/,
+    'dogfood must retain the historical readable TypeScript hook copy');
+});
 
 function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
   const dir = tmp('owner-preflight');

@@ -50,6 +50,8 @@ Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
         audit-release-bundle.py --distribution-census <gui|server> <platform> <artifact>...
+        audit-release-bundle.py --prune-vm-release <assembled-sidecar>
+        audit-release-bundle.py --audit-vm-release <assembled-sidecar>
 """
 import base64
 import fnmatch
@@ -1476,7 +1478,11 @@ VM_RELEASE_TEST_FILE_RE = re.compile(
 
 
 def _vm_release_rel(path):
-    return path.replace(os.sep, "/").lstrip("./")
+    rel = path.replace(os.sep, "/")
+    # os.path.relpath() may return a single leading "./" on some callers. Do
+    # not use lstrip("./"): that treats its argument as a CHARACTER SET and
+    # turns `.github` into `github`, silently bypassing the build-tool rule.
+    return rel[2:] if rel.startswith("./") else rel
 
 
 def _vm_release_asset_allowed(rel):
@@ -3442,6 +3448,10 @@ def main():
         return source_leakers(sys.argv[2:])
     if sys.argv[1] == "--prune-docs":
         return prune_docs(sys.argv[2:])
+    if sys.argv[1] == "--prune-vm-release":
+        return prune_vm_release(sys.argv[2:])
+    if sys.argv[1] == "--audit-vm-release":
+        return audit_vm_release(sys.argv[2:])
     if sys.argv[1] == "--scrub-binaries":
         return scrub_binaries(sys.argv[2:])
     if sys.argv[1] == "--scrub-text":
