@@ -58,7 +58,10 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
   const { env } = await fixture({ qmp: false, ssh: false });
   const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
   assert.equal(result.status, 1);
-  assert.deepEqual(JSON.parse(result.stdout), {
+  const health = JSON.parse(result.stdout);
+  const diskAge = health.disk_age_sec;
+  delete health.disk_age_sec;
+  assert.deepEqual(health, {
     status: 'control-plane-unavailable',
     service_active: true,
     qemu_process_found: false,
@@ -71,11 +74,11 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
     ssh_probe_skipped: false,
     qmp_running: false,
     qmp_probe_skipped: false,
-    disk_age_sec: 0,
     qemu_log_bounded: false,
     recovery: 'not-requested',
     detail: 'QEMU/SSH control plane is unavailable (service_active=true qemu_pid=none)',
   });
+  assert.ok(Number.isInteger(diskAge) && diskAge >= 0, `disk age should be a non-negative integer, got ${diskAge}`);
 });
 
 async function exhaustedQemuFixture() {

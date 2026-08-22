@@ -118,7 +118,8 @@ if [[ -n "$qemu_pid" ]]; then
       [[ "$tcp_state" == "08" && -n "$tcp_inode" ]] || continue
       [[ -n "${qemu_socket_inodes[$tcp_inode]+present}" ]] || continue
       ((qemu_close_wait_count += 1))
-    done < <(awk 'NR > 1 { print $4, $11 }' "$tcp_table" 2>/dev/null)
+    # /proc/net/tcp places inode in field 10; field 11 is the socket refcount.
+    done < <(awk 'NR > 1 { print $4, $10 }' "$tcp_table" 2>/dev/null)
   done
 
   if [[ "$qemu_fd_count" =~ ^[0-9]+$ && "$qemu_fd_limit" =~ ^[0-9]+$ && \
