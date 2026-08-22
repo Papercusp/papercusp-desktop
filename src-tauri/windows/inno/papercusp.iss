@@ -154,6 +154,13 @@ Name: "{autoprograms}\Papercusp Tutorial & Setup"; Filename: "{sys}\wsl.exe"; Pa
 [Run]
 Filename: "{app}\papercusp-desktop.exe"; Flags: nowait; Check: IsUpdaterLaunch
 
+[UninstallDelete]
+; Inno normally removes {app} with its payload. Keep the role root cleanup
+; explicit as a recurrence guard for hosts that leave an empty role directory
+; behind. The dirifempty type is intentionally narrow: it cannot remove user
+; config nested under a non-empty directory or the shared %LOCALAPPDATA% parent.
+Type: dirifempty; Name: "{app}"
+
 [Code]
 const
   LegacyUninstallRoot =
@@ -393,6 +400,29 @@ begin
   Result := RegKeyExists(HKCU, LegacyUninstallRoot + Other + '_is1');
 end;
 
+{ RemoveDir is deliberately the only operation used for the install root. It
+  succeeds only for an empty directory, so an unexpected payload/config file
+  makes this a no-op instead of widening the uninstall into user data. The
+  helper is parameterized so the selftest can prove that invariant directly. }
+function RemoveEmptyDirectory(const Directory: String): Boolean;
+begin
+  if not DirExists(Directory) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  Result := RemoveDir(Directory);
+end;
+
+procedure RemoveEmptyInstallDirectory;
+var
+  AppDir: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  if not RemoveEmptyDirectory(AppDir) then
+    Log(Format('windows-uninstall-cleanup: install directory is not empty or could not be removed: %s', [AppDir]));
+end;
+
 { DEFECT 2: after uninstall, `wsl --list` still shows papercup-runtime — the
   imported runtime tarball plus its embedded-PostgreSQL data directory. Multiple
   GB, invisible in Add/Remove Programs, and a normal user has no reason to know
@@ -459,5 +489,12 @@ begin
     from being shown twice. Everything here is an idempotent delete, so the
     doubled entry point costs nothing. }
   if (CurUninstallStep = usUninstall) or (CurUninstallStep = usPostUninstall) then
+  begin
     PerformUninstallCleanup;
+    { usUninstall is the proven callback on the wine/ISCC toolchain; on hosts
+      that invoke usPostUninstall after file teardown this removes a leftover
+      empty root. The [UninstallDelete] dirifempty entry covers the same
+      narrow invariant in Inno's own teardown path. }
+    RemoveEmptyInstallDirectory;
+  end;
 end;

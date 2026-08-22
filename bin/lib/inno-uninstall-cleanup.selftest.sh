@@ -17,6 +17,8 @@
 #   4. a Startup-folder shortcut named after the product is swept
 #   5. SharedRuntimeStillNeeded = TRUE while the other product is installed
 #   6. SharedRuntimeStillNeeded = FALSE once it is not
+#   7. an empty role directory is removable, but a non-empty one is preserved
+#   8. the real uninstall leaves neither the role root nor user config harmed
 #
 # Cases 2 and 5 are the falsifiability controls that matter most. Without (2) a
 # cleanup that blanket-deleted by the shared binary name would pass while
@@ -101,6 +103,11 @@ CODE_LINE="$(grep -n '^\[Code\]' "$ISS" | head -1 | cut -d: -f1)"
   cat <<'PROBE'
 
 function InitializeSetup(): Boolean;
+var
+  FixtureRoot: String;
+  EmptyFixture: String;
+  NonEmptyFixture: String;
+  KeepFile: String;
 begin
   { Publish the Startup folder as INNO resolves it. Guessing this path in bash
     means the test can seed a shortcut somewhere the uninstaller was never going
@@ -112,6 +119,29 @@ begin
     RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'SharedRuntimeStillNeeded', 'yes')
   else
     RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'SharedRuntimeStillNeeded', 'no');
+
+  { Recurrence fixture for the empty-role-directory fix. RemoveDir is the
+    shipping helper's narrow contract: empty directories are removable, while
+    a directory containing even one file is left alone. }
+  FixtureRoot := ExpandConstant('{tmp}\papercusp-uninstall-cleanup-fixture');
+  EmptyFixture := FixtureRoot + '\empty-role';
+  NonEmptyFixture := FixtureRoot + '\non-empty-role';
+  KeepFile := NonEmptyFixture + '\keep.txt';
+  DeleteFile(KeepFile);
+  RemoveDir(NonEmptyFixture);
+  RemoveDir(EmptyFixture);
+  RemoveDir(FixtureRoot);
+  ForceDirectories(EmptyFixture);
+  if RemoveEmptyDirectory(EmptyFixture) and (not DirExists(EmptyFixture)) then
+    RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'EmptyFixtureRemoved', 'yes')
+  else
+    RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'EmptyFixtureRemoved', 'no');
+  ForceDirectories(NonEmptyFixture);
+  SaveStringToFile(KeepFile, 'fixture', False);
+  if (not RemoveEmptyDirectory(NonEmptyFixture)) and FileExists(KeepFile) then
+    RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'NonEmptyFixturePreserved', 'yes')
+  else
+    RegWriteStringValue(HKCU, 'Software\PapercuspSelftest', 'NonEmptyFixturePreserved', 'no');
   Result := True;
 end;
 PROBE
@@ -194,6 +224,12 @@ run_install no-sibling
 [[ "$(rvalue "$PROBE_KEY" SharedRuntimeStillNeeded)" == "no" ]] \
   && ok "shared papercup-runtime becomes removable once no sibling product remains" \
   || bad "the runtime is never offered for removal even as the last product — DEFECT 2 unfixed"
+[[ "$(rvalue "$PROBE_KEY" EmptyFixtureRemoved)" == "yes" ]] \
+  && ok "empty role directory is removed by the narrow helper (recurrence fixture)" \
+  || bad "empty role directory helper did not remove the empty fixture"
+[[ "$(rvalue "$PROBE_KEY" NonEmptyFixturePreserved)" == "yes" ]] \
+  && ok "non-empty role directory is preserved by the narrow helper" \
+  || bad "directory helper would remove a non-empty payload/config directory"
 
 # ── Seed the state a real uninstall must clean (and must NOT) ────────────────
 # The role under test AND its sibling both have autostart registered.
@@ -215,6 +251,11 @@ printf 'stub' > "$STARTUP_DIR/$ROLE_NAME.lnk"
 APPDIR="$(printf '%s' "$TESTPREFIX"/drive_c/users/*/AppData/Local/PapercuspUninstallSelftest)"
 UNINST="$APPDIR/unins000.exe"
 [[ -f "$UNINST" ]] || fail "the harness produced no unins000.exe at $UNINST (install did not complete)"
+# A sibling user-config directory is intentionally outside {app}; it must
+# survive uninstall even when the role root cleanup is exercised.
+CONFIG_SENTINEL="$(dirname "$APPDIR")/Papercusp/uninstall-preserve-sentinel.txt"
+mkdir -p "$(dirname "$CONFIG_SENTINEL")" 2>/dev/null
+printf 'keep-user-config' > "$CONFIG_SENTINEL"
 UNINST_LOG_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK" 2>/dev/null)\\inno-uninstall.log"
 WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
   /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "/LOG=$UNINST_LOG_WIN" >"$WORK/uninstall.log" 2>&1
@@ -230,7 +271,7 @@ for _ in $(seq 1 60); do
   [[ -d "$APPDIR" ]] || break
   sleep 1
 done
-[[ ! -d "$APPDIR" ]] || fail "the uninstaller did not complete within 60s (install dir still at $APPDIR)"
+[[ ! -d "$APPDIR" ]] || fail "the uninstaller left the empty role install directory at $APPDIR"
 # The registry writes happen in usPostUninstall, i.e. after the directory goes.
 sleep 2
 
@@ -250,6 +291,10 @@ sleep 2
 [[ ! -f "$STARTUP_DIR/$ROLE_NAME.lnk" ]] \
   && ok "dangling Startup shortcut swept" \
   || bad "Startup shortcut survived the uninstall"
+
+[[ -f "$CONFIG_SENTINEL" ]] \
+  && ok "user config outside the role directory survived uninstall" \
+  || bad "uninstall removed user config outside the role directory"
 
 if [[ $RC -ne 0 && -f "$WORK/inno-uninstall.log" ]]; then
   echo "--- Inno uninstall log (tail) ---"
