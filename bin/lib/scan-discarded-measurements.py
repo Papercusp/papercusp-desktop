@@ -73,6 +73,58 @@ RETURN_OR_EXIT = re.compile(
 # the defect this hunts.
 BORING = {"rc", "now", "ts", "i", "n", "tmp", "tmpdir", "d", "dir", "pid"}
 
+# A heredoc BODY is not local control flow. `rig_pcusp_run "$inst" <<EOS ... EOS`
+# ships those lines to a shell on ANOTHER MACHINE, so an `exit 1` inside one can
+# never return from the calling bash function. Counting it as an intervening
+# return is a parse error, and it produced 2 of the 13 candidates in the first
+# triage (_att_mcp_call L58, _fdir_mcp_call L43 — both `if [ -z "$TOK" ]; then
+# ...; exit 1; fi` inside a heredoc).
+#
+# Parameter expansion is the opposite case: for an UNQUOTED delimiter the local
+# shell expands `${ws}` before shipping, so a use inside the body is a genuine
+# local use. For a quoted delimiter (<<'EOS') nothing expands, so it is not.
+HEREDOC_START = re.compile(r"<<-?\s*(?P<q>[\"']?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+
+# An assignment written as its own guard cannot strand its measurement: on the
+# guard's failure branch the command substitution FAILED, so there is no measured
+# value to discard. Recognises the multi-line form
+#     if ! ws="$(rig_resolve_ws "$inst")"; then ... return 1; fi
+# The single-line `X="$(...)" || { echo ...; return 1; }` form needs no rule —
+# its return sits on the assignment line, which is already outside the scanned
+# range.
+SELF_GUARD_START = re.compile(r"^\s*if\s+!\s")
+
+# RANKING signal, never a filter. What the RHS is measuring decides how likely a
+# discarded value is to matter: a psql count is a measurement whose loss destroys
+# a verdict; a workspace-id lookup is plumbing whose loss strands nothing.
+#
+# ⚠ This RANKS and never SUPPRESSES, because the file's own docstring is right:
+# this is a candidate generator. Suppression here would be a verdict, and the
+# triage that motivated these tiers found the tiers are ~85% predictive, not
+# 100% — good enough to sort by, nowhere near good enough to hide by.
+RHS_MEASUREMENT = re.compile(
+    r"\b(drv_psql|psql|rig_read_content|rig_assert_absent|_row_present|curl|count\s*\(|SELECT)\b",
+    re.IGNORECASE,
+)
+RHS_LOOKUP = re.compile(r"\b(rig_resolve_ws|rig_github_id|[A-Za-z_]*resolve[A-Za-z_]*)\b")
+RHS_TRANSFORM = re.compile(r"\b(printf|tr|date|seq|basename|dirname|echo)\b")
+
+
+def classify_rhs(rhs: str) -> str:
+    """measurement > lookup > transform. Order matters: a lookup helper may wrap
+    psql internally, but at THIS call site it is a lookup, so the specific
+    helper names are tested before the generic measurement verbs."""
+    if RHS_LOOKUP.search(rhs):
+        return "lookup"
+    if RHS_MEASUREMENT.search(rhs):
+        return "measurement"
+    if RHS_TRANSFORM.search(rhs):
+        return "transform"
+    return "unknown"
+
+
+TIER_ORDER = {"measurement": 0, "unknown": 1, "lookup": 2, "transform": 3}
+
 # The canonical WI-40542 shape, kept as a permanent control. Copied faithfully
 # from the real pre-fix b3-revocation.sh, INCLUDING the two details that each
 # independently blinded an earlier version of this scanner:
@@ -110,6 +162,54 @@ scn_control_clean() {
 }
 '''
 
+# Must NOT fire. Verbatim shape of _att_mcp_call / _fdir_mcp_call / _freap_rest_call,
+# which together produced 4 of the 13 first-triage candidates and are ALL benign for
+# two independent reasons this scanner now models:
+#   1. the `exit 1` sits in a HEREDOC BODY — it runs on the remote frame and can
+#      never return from this function;
+#   2. the `return 1` is the assignment's OWN guard — it fires precisely when the
+#      command substitution failed, so there is no measured value to strand.
+# `${ws}` inside the unquoted heredoc IS a real local expansion, so this control
+# also pins that a heredoc body stays eligible as a first USE.
+HEREDOC_CALIBRATION = '''#!/usr/bin/env bash
+_ctl_heredoc_call() {
+  local inst="$1" ws
+  if ! ws="$(rig_resolve_ws "$inst")"; then
+    echo '{"isError":true,"error":"could not resolve workspace"}'
+    return 1
+  fi
+  rig_pcusp_run "$inst" <<EOS
+TOK="\\$(cat "\\$f" 2>/dev/null)"
+if [ -z "\\$TOK" ]; then echo "NO_TOKEN"; exit 1; fi
+curl -s "http://127.0.0.1/api/mcp?workspace=${ws}"
+EOS
+}
+'''
+
+# MUST FIRE — and it is the most important control in this file, because it pins
+# the WRONG fix shut.
+#
+# While triaging, the tempting precision rule was "an intervening return that
+# ECHOES its own message is reporting, not silently discarding, so suppress it."
+# That rule is false, and this is the counter-example that proves it: the return
+# below does echo a scoped FAIL, yet `$probe` — measured before it, and named in
+# the LATER message as the rig-vs-feature discriminator — is destroyed on that
+# path. Adopting the echo rule would have suppressed b9-attestation.sh's
+# `$wrong_on_b`, the single confirmed true positive in the whole library.
+#
+# The real question is never "did it print something" but "did it print the value
+# it was HOLDING", which is semantic and belongs to a human reading the site.
+REPORTING_RETURN_CONTROL = '''#!/usr/bin/env bash
+_ctl_reporting_return() {
+  local probe measured
+  probe="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_receipts;")"
+  measured="$(drv_psql a "SELECT 1;")"
+  [ -n "$measured" ] || { echo "FAIL — post-probe UNMEASURED (the probe never ran)"; return 1; }
+  echo "FAIL — refused-op across the boundary (probe-on-b=${probe:-<unmeasured>})"
+  return 1
+}
+'''
+
 
 def leading_ws(line: str) -> int:
     return len(line) - len(line.lstrip())
@@ -131,8 +231,56 @@ def find_functions(lines):
     return funcs
 
 
+def heredoc_regions(lines):
+    """(body_lines, nonexpanding_lines) as sets of 0-based indices.
+
+    body_lines        — shipped to another shell; never local control flow.
+    nonexpanding_lines — body of a QUOTED delimiter (<<'EOS'), where the local
+                         shell expands nothing, so `$var` there is not a use.
+    """
+    body, nonexpanding = set(), set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = None
+        for cand in HEREDOC_START.finditer(line):
+            # `<<<word` is a here-STRING, not a here-doc: it has no body and no
+            # terminator, so treating it as one would swallow the rest of the file.
+            if cand.start() > 0 and line[cand.start() - 1] == "<":
+                continue
+            m = cand
+            break
+        if not m:
+            i += 1
+            continue
+        tag, quoted = m.group("tag"), bool(m.group("q"))
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != tag:
+            body.add(j)
+            if quoted:
+                nonexpanding.add(j)
+            j += 1
+        i = j + 1
+    return body, nonexpanding
+
+
+def self_guard_span(lines, n, fend):
+    """If the assignment on line n is its own `if ! VAR=$(...)` guard, return the
+    0-based range of that if-block's body, whose returns fire only when the
+    measurement FAILED and so cannot strand it. Otherwise an empty range."""
+    if not SELF_GUARD_START.match(lines[n]):
+        return range(0, 0)
+    indent = leading_ws(lines[n])
+    for k in range(n + 1, fend + 1):
+        stripped = lines[k].strip()
+        if stripped in ("fi", "fi;") and leading_ws(lines[k]) <= indent:
+            return range(n + 1, k)
+    return range(0, 0)
+
+
 def scan_text(text: str):
     lines = text.splitlines()
+    heredoc_body, heredoc_nonexpanding = heredoc_regions(lines)
     hits = []
     for fname, fstart, fend in find_functions(lines):
         for n in range(fstart, fend + 1):
@@ -149,6 +297,10 @@ def scan_text(text: str):
                 for k in range(n + 1, fend + 1):
                     if lines[k].lstrip().startswith("#"):
                         continue
+                    # A quoted-delimiter heredoc expands nothing, so `$var`
+                    # inside one is literal text, not a use of the measurement.
+                    if k in heredoc_nonexpanding:
+                        continue
                     if use_re.search(lines[k]):
                         first_use = k
                         break
@@ -159,6 +311,7 @@ def scan_text(text: str):
                 # at or shallower than the assignment, is reachable without the
                 # measured value ever being consumed.
                 assign_indent = leading_ws(line)
+                guarded = set(self_guard_span(lines, n, fend))
                 blockers = [
                     k
                     for k in range(n + 1, first_use)
@@ -168,8 +321,14 @@ def scan_text(text: str):
                     if RETURN_OR_EXIT.search(lines[k])
                     and not lines[k].lstrip().startswith("#")
                     and leading_ws(lines[k]) <= assign_indent + 2
+                    # Runs on another machine — cannot return from this function.
+                    and k not in heredoc_body
+                    # Fires only when this very assignment failed, so there is no
+                    # measured value for it to strand.
+                    and k not in guarded
                 ]
                 if blockers:
+                    kind = classify_rhs(rhs)
                     hits.append(
                         {
                             "func": fname,
@@ -179,22 +338,36 @@ def scan_text(text: str):
                             "gap": first_use - n,
                             "returns": [k + 1 for k in blockers],
                             "rhs": rhs.strip()[:90],
+                            "kind": kind,
                         }
                     )
+    # Measurements first: a discarded psql count destroys a verdict, a discarded
+    # workspace-id strands nothing. Stable within tier so line order is kept.
+    hits.sort(key=lambda h: TIER_ORDER.get(h["kind"], 1))
     return hits
 
 
 def self_test(verbose=True):
-    """The control MUST fire and the calibration MUST NOT."""
-    defect = scan_text(CONTROL)
-    clean = scan_text(CALIBRATION)
-    ok = len(defect) == 1 and len(clean) == 0
+    """Controls MUST fire; calibrations MUST NOT.
+
+    Two of these guard against BLINDNESS (a scanner that reports a library clean
+    because it cannot see) and two against OVER-FIRING (a scanner nobody reads
+    because 85% of its output is noise). Both failure modes end the same way:
+    the tool stops being believed.
+    """
+    cases = [
+        ("control — WI-40542 canonical shape", CONTROL, 1, "SCANNER IS BLIND"),
+        ("calibration — consumed before return", CALIBRATION, 0, "SCANNER OVER-FIRES"),
+        ("calibration — heredoc body + self-guard", HEREDOC_CALIBRATION, 0, "SCANNER OVER-FIRES"),
+        ("control — reporting return still strands", REPORTING_RETURN_CONTROL, 1, "SCANNER IS BLIND"),
+    ]
+    results = [(label, len(scan_text(src)), want, err) for label, src, want, err in cases]
+    ok = all(got == want for _, got, want, _ in results)
     if verbose or not ok:
-        print("── self-test (WI-40542 canonical shape) ──")
-        print(f"  control (must fire):      {len(defect)} hit(s) "
-              f"{'✓' if len(defect) == 1 else '✗ SCANNER IS BLIND'}")
-        print(f"  calibration (must NOT):   {len(clean)} hit(s) "
-              f"{'✓' if len(clean) == 0 else '✗ SCANNER OVER-FIRES'}")
+        print("── self-test ──")
+        for label, got, want, err in results:
+            verdict = "✓" if got == want else f"✗ {err}"
+            print(f"  {label:<44} {got} hit(s), want {want}  {verdict}")
     return ok
 
 
@@ -227,7 +400,7 @@ def main(argv):
         for h in hits:
             total += 1
             print(
-                f"  {h['func']}(): ${h['var']} measured at L{h['assigned']}, "
+                f"  [{h['kind']}] {h['func']}(): ${h['var']} measured at L{h['assigned']}, "
                 f"first used at L{h['first_use']} (gap {h['gap']} lines)"
             )
             print(f"      intervening return/exit at: {h['returns']}")

@@ -8,10 +8,13 @@ source "$HERE/release-tag-pin.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 REMOTE="$TMP_ROOT/origin.git"
+CANONICAL_REMOTE="$TMP_ROOT/github.git"
+CANONICAL_REMOTE_URL="file://$CANONICAL_REMOTE"
 WORK="$TMP_ROOT/work"
 TAG="desktop-v9.9.9"
 
 git init --bare -q "$REMOTE"
+git init --bare -q "$CANONICAL_REMOTE"
 git init -q "$WORK"
 git -C "$WORK" config user.name release-tag-pin-selftest
 git -C "$WORK" config user.email release-tag-pin-selftest@example.invalid
@@ -23,6 +26,7 @@ git -C "$WORK" commit -qm canonical
 CANONICAL="$(git -C "$WORK" rev-parse HEAD)"
 git -C "$WORK" tag "$TAG" "$CANONICAL"
 git -C "$WORK" push -q origin "refs/tags/$TAG"
+git -C "$WORK" push -q "$CANONICAL_REMOTE_URL" "refs/tags/$TAG"
 
 printf 'wrong\n' >> "$WORK/source.txt"
 git -C "$WORK" commit -qam wrong
@@ -44,6 +48,10 @@ release_tag_prepare_local_exact "$WORK" "$TAG" "$CANONICAL"
 git -C "$WORK" tag -f "$TAG" "$WRONG" >/dev/null
 git -C "$WORK" push -q --force origin "refs/tags/$TAG"
 git -C "$WORK" tag -f "$TAG" "$CANONICAL" >/dev/null
+git -C "$WORK" tag -f "$TAG" "$WRONG" >/dev/null
+EXPLICIT_REMOTE_OUTPUT="$(release_tag_prepare_local_exact "$WORK" "$TAG" "$CANONICAL" "$CANONICAL_REMOTE_URL")"
+[[ "$EXPLICIT_REMOTE_OUTPUT" == *"local+$CANONICAL_REMOTE_URL refs/tags/$TAG"* ]]
+[[ "$(git -C "$WORK" rev-parse "refs/tags/$TAG")" == "$CANONICAL" ]]
 if release_tag_prepare_local_exact "$WORK" "$TAG" "$CANONICAL" >/dev/null 2>&1; then
   echo "FAIL: normal local-only pin accepted a wrong remote tag" >&2
   exit 1

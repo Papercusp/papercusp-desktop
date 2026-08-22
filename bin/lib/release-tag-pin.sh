@@ -3,9 +3,9 @@
 # containment/repair path. This file is sourced; callers choose their own
 # `set -e` policy.
 
-release_tag_remote_sha() { # <repo> <tag>
-  local repo="$1" tag="$2"
-  git -C "$repo" ls-remote --refs --tags origin "refs/tags/$tag" 2>/dev/null \
+release_tag_remote_sha() { # <repo> <tag> [<remote-or-url>]
+  local repo="$1" tag="$2" remote_ref="${3:-origin}"
+  git -C "$repo" ls-remote --refs --tags "$remote_ref" "refs/tags/$tag" 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
@@ -25,8 +25,9 @@ release_tag_validate_exact_commit() { # <repo> <expected-40-char-commit-sha>
   fi
 }
 
-release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha>
+release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha> [<remote-or-url>]
   local repo="$1" tag="$2" expected_sha="$3"
+  local remote_ref="${4:-origin}"
   local remote_sha local_sha
 
   release_tag_validate_exact_commit "$repo" "$expected_sha" || return $?
@@ -35,9 +36,9 @@ release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha>
     return 2
   fi
 
-  remote_sha="$(release_tag_remote_sha "$repo" "$tag")"
+  remote_sha="$(release_tag_remote_sha "$repo" "$tag" "$remote_ref")"
   if [[ "$remote_sha" != "$expected_sha" ]]; then
-    echo "ERROR: origin refs/tags/$tag is ${remote_sha:-<missing>}, expected $expected_sha" >&2
+    echo "ERROR: $remote_ref refs/tags/$tag is ${remote_sha:-<missing>}, expected $expected_sha" >&2
     echo "       A LOCAL-only cut never creates, moves, or force-pushes a remote tag." >&2
     echo "       Repair/prepare the exact tag through the explicit release-owned tag operation first." >&2
     return 1
@@ -50,12 +51,12 @@ release_tag_prepare_local_exact() { # <repo> <tag> <expected-40-char-commit-sha>
   fi
 
   local_sha="$(git -C "$repo" rev-parse --verify "refs/tags/$tag" 2>/dev/null)"
-  remote_sha="$(release_tag_remote_sha "$repo" "$tag")"
+  remote_sha="$(release_tag_remote_sha "$repo" "$tag" "$remote_ref")"
   if [[ "$local_sha" != "$expected_sha" || "$remote_sha" != "$expected_sha" ]]; then
-    echo "ERROR: release tag verification drifted (local=$local_sha origin=$remote_sha expected=$expected_sha)" >&2
+    echo "ERROR: release tag verification drifted (local=$local_sha remote=$remote_sha expected=$expected_sha)" >&2
     return 1
   fi
-  echo "    ✓ local+origin refs/tags/$tag already pinned to expected source $expected_sha"
+  echo "    ✓ local+$remote_ref refs/tags/$tag already pinned to expected source $expected_sha"
 }
 
 release_tag_create_exact() { # <repo> <tag> <expected-40-char-commit-sha>

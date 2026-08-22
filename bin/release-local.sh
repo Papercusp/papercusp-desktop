@@ -959,7 +959,11 @@ PY
 if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
   echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
-  release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA"
+  # The cut checkout's `origin` may be a local mirror or another checkout. The
+  # shipped dogfood clone comes from GitHub, so certify against that exact
+  # public remote rather than whichever origin the cutter happened to inherit.
+  PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https://github.com/Papercusp/papercup"
+  release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 else
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
   exit 1

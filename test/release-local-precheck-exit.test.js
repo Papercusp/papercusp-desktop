@@ -158,3 +158,23 @@ test('the header warns that this script is not read-only', () => {
     "release-local.sh's header no longer discloses the separate remote-tag creation path",
   );
 });
+
+test('the dogfood pin verifies the canonical GitHub remote, not the cutter origin', () => {
+  const text = src();
+  const dogfoodStart = text.indexOf('# ── Dogfood version pin');
+  const seedStart = text.indexOf('cut_release_seed');
+  assert(dogfoodStart >= 0, 'the dogfood pin section was removed or reworded');
+  assert(seedStart > dogfoodStart, 'the dogfood pin section no longer precedes the seed cut');
+  const dogfood = text.slice(dogfoodStart, seedStart);
+
+  assert.match(
+    dogfood,
+    /PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https:\/\/github\.com\/Papercusp\/papercup"/,
+    'the dogfood pin no longer names the canonical GitHub remote explicitly',
+  );
+  assert.match(
+    dogfood,
+    /release_tag_prepare_local_exact "\$MONOREPO" "\$TAG" "\$EXPECTED_SOURCE_SHA" "\$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"/,
+    'the dogfood pin no longer passes the canonical remote into tag verification',
+  );
+});
