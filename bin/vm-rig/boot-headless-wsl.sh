@@ -12,7 +12,7 @@
 #
 # Layout expected at $CUR (== src-tauri/sidecar, minus source.tar.zst/env-sidecars):
 #   serve.mjs  bin/node  db-sql/  prompts/  harness/  templates/  rubrics/
-#   spa/  internal-docs/  node_modules/  db-seed.tar.gz  [seed/ — hive seed,
+#   spa/  internal-docs/  node_modules/  db-seed.dump  [seed/ — hive seed,
 #   transferred separately: corestore + epoch-keys.json]
 #
 # Run (from the tower):
