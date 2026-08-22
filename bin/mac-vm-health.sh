@@ -148,7 +148,9 @@ fi
 bound_qemu_log() {
   [[ "$QEMU_LOG_MAX_BYTES" =~ ^[0-9]+$ && "$QEMU_LOG_MAX_BYTES" -gt 0 ]] || return 0
   [[ -f "$QEMU_LOG" ]] || return 0
-  log_size="$(stat -c %s "$QEMU_LOG" 2>/dev/null || echo 0)"
+  if ! log_size="$(stat -c %s "$QEMU_LOG" 2>/dev/null)"; then
+    return 0
+  fi
   [[ "$log_size" =~ ^[0-9]+$ && "$log_size" -gt "$QEMU_LOG_MAX_BYTES" ]] || return 0
   log_tmp="$(mktemp "${QEMU_LOG}.cap.XXXXXX" 2>/dev/null || true)"
   [[ -n "$log_tmp" ]] || return 0
