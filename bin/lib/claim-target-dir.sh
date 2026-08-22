@@ -53,6 +53,30 @@
 # under a live holder would let a second instance claim a slot that is still in use.
 __pc_slot_lockdir="${HOME}/.papercusp/desktop-dev-slots"
 
+# Release cuts retain their finished artifacts and the target roots that contain
+# them. Load the shared retention helper here so slot selection can skip a root
+# protected by any active cut, even when this wrapper is used directly rather
+# than through release-local.sh.
+__pc_claim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=release-artifacts.sh
+source "$__pc_claim_dir/release-artifacts.sh"
+
+# Called by release producers after their final outputs exist. Keeping this
+# separate from slot selection is intentional: the current build must be able
+# to clean and populate its own target before it asks later cleaners to respect
+# the durable lease.
+papercusp_retain_release_paths() {
+  [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]] || return 0
+  [[ $# -gt 0 ]] || {
+    echo "release-artifacts: release retention requires at least one target/artifact path." >&2
+    return 2
+  }
+  release_artifacts_retention_lease_acquire "$PAPERCUSP_RELEASE_TAG" "$@" >/dev/null || {
+    echo "release-artifacts: could not retain release paths for ${PAPERCUSP_RELEASE_TAG}." >&2
+    return 1
+  }
+}
+
 # Is a live process EXECUTING out of this target dir?
 #
 # The flock below proves only that a LAUNCHER is alive. It is held by the launcher
@@ -122,6 +146,14 @@ __pc_claim_target_dir() {
     # and a launch path can end up holding both.
     exec 8>>"$lockfile" || continue
     if flock -n 8; then
+      # A completed cut can outlive its launcher. Never reuse a target root that
+      # an active retention lease covers; a later cleanup/build must not erase
+      # the finalized artifact or its isolated Cargo cache.
+      if release_artifacts_retention_path_is_leased "$dir" >/dev/null 2>&1; then
+        echo "→ slot $i SKIPPED: target root $dir is covered by an active release-retention lease" >&2
+        exec 8>&-
+        continue
+      fi
       # The lock was free — but that only means no LAUNCHER is alive. Before building
       # into this dir, ask the question that actually decides safety: is a desktop still
       # RUNNING out of it? If so, skip the slot and isolate. Failing safe costs a cold
