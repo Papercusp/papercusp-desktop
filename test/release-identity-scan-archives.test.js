@@ -430,21 +430,17 @@ test('a LOW-entropy literal in a TEXT file STILL fails the scan (the gate keeps 
   }
 });
 
-test('the PGDATA seed excludes both postmaster.pid and postmaster.opts', () => {
-  // The actual leak found in the shipping bundle. Both record build-box absolute
-  // paths; PG rewrites both on next start, so neither is needed to restore a seed.
+test('the database seed producer uses a logical custom dump, never a PGDATA archive', () => {
+  // The old physical archive carried postmaster paths, tar ownership, and — more
+  // importantly — one cloned pg_control/system_identifier. A logical dump avoids
+  // that entire metadata class rather than growing another exclusion list.
   const seed = fs.readFileSync(
     path.join(root, '../libs/papercusp/packages/embedded-postgres-server/bin/build-seed.mjs'),
     'utf8',
   );
-  for (const f of ['./postmaster.pid', './postmaster.opts']) {
-    assert.equal(
-      seed.includes(`'${f}'`),
-      true,
-      `build-seed.mjs no longer excludes ${f} from db-seed.tar.gz — it records the ` +
-        "builder's absolute paths and the archive ships inside the public desktop bundle (P-012).",
-    );
-  }
+  assert.match(seed, /--format=custom/);
+  assert.match(seed, /--no-owner/);
+  assert.doesNotMatch(seed, /execFileSync\(\s*['"]tar['"]/);
 });
 
 // ── WI-37553: owner-authorised seed-corestore content ────────────────────────

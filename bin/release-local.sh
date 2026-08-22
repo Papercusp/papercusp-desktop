@@ -782,7 +782,7 @@ fi
 # submodule checkout — the actual root cause of the 2026-07-05 incident where a
 # seeded Linux .deb shipped the pre-505/506 schema (agent_facts REPLICA
 # IDENTITY sweep failure, the WI-2914 bug 505 fixes). build-desktop-sidecar.sh
-# bakes db-seed.tar.gz from whatever is CURRENTLY checked out under
+# bakes db-seed.dump from whatever is CURRENTLY checked out under
 # libs/papercusp/libs/db/sql/ — internally consistent by construction, but
 # silently stale if the submodule pointer lags its remote (new migrations
 # merged upstream, never pulled locally). Fail loud on stable/beta; warn on

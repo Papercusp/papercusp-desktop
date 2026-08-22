@@ -39,7 +39,12 @@ if [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
   && command -v deb-systemd-helper >/dev/null 2>&1; then
   deb-systemd-helper --user unmask "$SERVER_USER_UNIT" >/dev/null || true
   if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
-    deb-systemd-helper --user enable "$SERVER_USER_UNIT" >/dev/null || true
+    # `enable` is deliberately first-install-only. When an upgrade changes the
+    # unit's WantedBy target (graphical-session.target → default.target), it
+    # sees the existing helper stamp and leaves the obsolete symlink in place.
+    # `reenable` preserves the user's enabled choice while rebuilding links
+    # from the CURRENT unit, which is exactly the upgrade migration required.
+    deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null || true
   else
     deb-systemd-helper --user update-state "$SERVER_USER_UNIT" >/dev/null || true
   fi

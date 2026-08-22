@@ -360,7 +360,12 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.doesNotMatch(postinstall, /ls -d \/usr\/lib\/Papercusp\*/);
   assert.match(postinstall, /^Icon=papercusp-server$/m);
   assert.match(postinstall, /deb-systemd-helper --quiet --user was-enabled "\$SERVER_USER_UNIT"/);
-  assert.match(postinstall, /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/);
+  assert.match(postinstall, /deb-systemd-helper --user reenable "\$SERVER_USER_UNIT"/);
+  assert.doesNotMatch(
+    postinstall,
+    /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/,
+    'plain enable is first-install-only and cannot migrate a changed WantedBy target',
+  );
   assert.match(postinstall, /deb-systemd-helper --user update-state "\$SERVER_USER_UNIT"/);
   assert.match(postremove, /deb-systemd-helper --user purge papercusp-server\.service/);
   assert.ok(

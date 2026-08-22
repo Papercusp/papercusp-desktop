@@ -2945,44 +2945,48 @@ if [[ -z "$_tree_sql_max" || "$_tree_sql_max" != "$_shipped_sql_max" || "$_tree_
 fi
 echo "    ✓ shipped db-sql/ matches the tree (highest migration $_tree_sql_max, $_tree_sql_count files)"
 
-# ── Pre-migrated PGDATA seed (desktop first-boot fast path) ─────────────────
+# ── Pre-migrated LOGICAL seed (desktop first-boot fast path) ────────────────
 # Boot the JUST-BUNDLED embedded-PG ONCE at build time (initdb + apply every
-# migration in db-sql/), cleanly stop, and archive the resulting data dir into
-# db-seed.tar.gz. On a FRESH install the Server extracts this INSTEAD of running
-# the ~11s "initdb + full migration replay" (see embedded-postgres-server
-# src/index.js seedPath handling — measured ~11x faster first-boot; ~13MB gz).
-# Because it runs the SAME bundled binary that ships, the seed is byte-compatible
-# with THIS bundle's platform by construction (no cross-arch seed hazard). It also
-# doubles as a build-time gate that the full migration set applies cleanly on this
-# platform. Skip with PAPERCUSP_BUILD_PG_SEED=0 (then first-boot falls back to the
-# old initdb+replay path — correct, just slow).
+# migration in db-sql/), pg_dump the migrated database into db-seed.dump, then
+# stop. On a FRESH install the Server runs its OWN initdb (unique cluster
+# system_identifier), restores the logical dump, and applies only migration
+# deltas. This retains the fast path without cloning build-cluster identity into
+# every install (WI-39304). It also gates that the full migration set applies.
+# Skip with PAPERCUSP_BUILD_PG_SEED=0 (first boot falls back to initdb+replay —
+# correct, just slower).
 if [[ "$CROSS_BUILD" == "1" ]]; then
   # WI-5651: the seed is built by BOOTING the just-bundled embedded-PG — which is
   # the TARGET's binary, impossible to exec on this ${_host_os} cross host (the
-  # cross-swap also dropped the host's @embedded-postgres pkg). And a seed built
-  # with the HOST's PG would be exactly the cross-platform PGDATA hazard the note
-  # above says this step avoids "by construction". Skip it: the target machine's
-  # first boot does initdb + replay (correct, ~11s slower on the FIRST launch only).
-  echo "→ WI-5651 skipping pre-migrated seed (cross ${TARGET_OS}-${TARGET_ARCH} bundle — can't boot the target's PG on a ${_host_os} host); first-boot will initdb + replay migrations on the target"
+  # cross-swap also dropped the host's @embedded-postgres pkg). The new logical
+  # format removes the identity hazard, but no cross-host build path is yet
+  # verified against the target's exact PG major/client tools. Skip rather than
+  # silently build an unverified seed; target first boot remains correct.
+  echo "→ WI-5651 skipping logical seed (cross ${TARGET_OS}-${TARGET_ARCH} bundle — can't boot the target's PG on a ${_host_os} host); first boot will initdb + replay migrations on the target"
 elif [[ "${PAPERCUSP_BUILD_PG_SEED:-1}" == "1" ]]; then
-  echo "→ building pre-migrated PGDATA seed (first-boot fast path)"
+  echo "→ building pre-migrated logical seed (unique-cluster first-boot fast path)"
   _seed_tmp="$(mktemp -d)"
+  # Never let a stale physical seed survive an incremental staging directory:
+  # a launcher prefers the new dump, but a missing dump must not fall through to
+  # a freshly-produced identity-cloning tar from an earlier build.
+  rm -f "$SIDECAR_DIR/db-seed.tar.gz" "$SIDECAR_DIR/db-seed.dump"
   if node "$EMBEDDED_PG_DST/bin/build-seed.mjs" \
        --data "$_seed_tmp/pgdata" \
        --sql "$SIDECAR_DIR/db-sql" \
-       --out "$SIDECAR_DIR/db-seed.tar.gz" \
+       --out "$SIDECAR_DIR/db-seed.dump" \
+       --pg-dump "$SIDECAR_DIR/bin/pg_dump" \
        --port "${PAPERCUSP_BUILD_PG_SEED_PORT:-5549}"; then
-    echo "→ db-seed.tar.gz staged ($(du -h "$SIDECAR_DIR/db-seed.tar.gz" | cut -f1))"
+    echo "→ db-seed.dump staged ($(du -h "$SIDECAR_DIR/db-seed.dump" | cut -f1))"
   else
-    echo "ERROR: pre-migrated seed build failed — refusing to ship a bundle without a verified schema."
+    echo "ERROR: pre-migrated logical seed build failed — refusing to ship a bundle without a verified schema."
     echo "  (Set PAPERCUSP_BUILD_PG_SEED=0 to intentionally ship without the first-boot fast path.)"
-    rm -f "$SIDECAR_DIR/db-seed.tar.gz"
+    rm -f "$SIDECAR_DIR/db-seed.dump" "$SIDECAR_DIR/db-seed.tar.gz"
     rm -rf "$_seed_tmp"
     exit 1
   fi
   rm -rf "$_seed_tmp"
 else
-  echo "→ skipping pre-migrated seed (PAPERCUSP_BUILD_PG_SEED=0) — first-boot will initdb + replay migrations"
+  rm -f "$SIDECAR_DIR/db-seed.dump" "$SIDECAR_DIR/db-seed.tar.gz"
+  echo "→ skipping logical seed (PAPERCUSP_BUILD_PG_SEED=0) — first boot will initdb + replay migrations"
 fi
 
 # Bundle the @papercusp/locks (papercusp_su side-DB) migrations. EI-2669:

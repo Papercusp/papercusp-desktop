@@ -154,6 +154,8 @@ pick_port() {  # pick_port LO SPAN → echoes a currently-free port in [LO, LO+S
 # boot error (missing native, bad module) still fails on the first attempt.
 PORT_COLLISION_RE='could not bind|Address already in use|could not create any TCP/IP sockets|EADDRINUSE'
 MAX_ATTEMPTS="${PAPERCUSP_BOOT_GATE_ATTEMPTS:-3}"
+PG_SEED="$B/db-seed.dump"
+[[ -s "$PG_SEED" ]] || PG_SEED="$B/db-seed.tar.gz" # old-bundle compatibility
 
 served=0
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -173,7 +175,8 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     PAPERCUSP_PG_PORT="$PG_PORT" \
     PAPERCUSP_PG_DATA_DIR="$ISO/pgdata" \
     PAPERCUSP_PG_SQL_DIR="$B/db-sql" \
-    PAPERCUSP_PG_SEED_PATH="$B/db-seed.tar.gz" \
+    PAPERCUSP_PG_SEED_PATH="$PG_SEED" \
+    PAPERCUSP_PG_RESTORE_BIN="$B/bin/pg_restore" \
     PAPERCUSP_SEED_DIR="$B/../seed" \
     PAPERCUSP_HARNESS_DIR="$B/harness" \
     PAPERCUSP_RUBRICS_DIR="$B/rubrics" \

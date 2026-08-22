@@ -6101,11 +6101,17 @@ fn spawn_serve(
         .parent()
         .map(|p| p.join("seed"))
         .unwrap_or_else(|| sidecar_dir.join("seed"));
-    // Pre-migrated PGDATA seed (first-boot fast path). Optional: only present when
-    // the bundle was built with PAPERCUSP_BUILD_PG_SEED=1 (the default). serve/
-    // embedded-postgres-server existsSync-checks it and falls back to initdb +
-    // full migration replay when absent, so pointing at a missing path is safe.
-    let db_seed_path = sidecar_dir.join("db-seed.tar.gz");
+    // Pre-migrated logical seed (first-boot fast path). New bundles carry a
+    // pg_dump custom archive: the runtime runs a fresh per-install initdb first,
+    // preserving a unique system_identifier, then restores schema/data. Keep the
+    // old PGDATA tar fallback so upgraded runtimes can still boot older bundles.
+    let logical_db_seed_path = sidecar_dir.join("db-seed.dump");
+    let legacy_db_seed_path = sidecar_dir.join("db-seed.tar.gz");
+    let db_seed_path = if logical_db_seed_path.exists() {
+        logical_db_seed_path
+    } else {
+        legacy_db_seed_path
+    };
     // PG data CANNOT live on DrvFs (/mnt/c) when the sidecar runs in WSL:
     // postmaster hard-requires a 0700/0750 data dir and DrvFs without the
     // metadata mount option can't hold one (found live 2026-06-11:
@@ -6361,6 +6367,13 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_PG_SEED_PATH",
             db_seed_path.to_string_lossy().to_string(),
+        )
+        .env(
+            "PAPERCUSP_PG_RESTORE_BIN",
+            sidecar_dir
+                .join("bin/pg_restore")
+                .to_string_lossy()
+                .to_string(),
         )
         // WI-3308: the bundled dev/local runnable source tree + its writable
         // extract target. Safe to set unconditionally (like PG_SEED_PATH above) —
