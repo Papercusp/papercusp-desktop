@@ -730,6 +730,7 @@ release_artifacts_linux_bundle_root() {
 release_artifacts_write() {
   local tag="$1"; shift
   local out; out="$(release_artifacts_manifest_path "$tag")"
+  local -a manifest_paths=()
   {
     local f
     for f in "$@"; do
@@ -739,10 +740,14 @@ release_artifacts_write() {
       printf '%s\n' "$f"
     done
   } | sort -u > "$out"
+  mapfile -t manifest_paths < "$out" || {
+    echo "release-artifacts: could not read the manifest for $tag." >&2
+    return 1
+  }
   # The manifest is the release pipeline's final byte inventory. Acquire the
   # file-level lease here so every full or incremental writer gets retention by
   # construction; callers add their target roots separately once resolved.
-  release_artifacts_retention_lease_acquire "$tag" "$(cat "$out")" >/dev/null || {
+  release_artifacts_retention_lease_acquire "$tag" "${manifest_paths[@]}" >/dev/null || {
     echo "release-artifacts: could not retain the artifact manifest for $tag." >&2
     return 1
   }
