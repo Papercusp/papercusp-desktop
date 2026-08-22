@@ -913,15 +913,38 @@ trap on_external_term TERM INT
 # confusing RED — catch that class here with a clear message. It adds no real load,
 # so it runs on EVERY invocation, ahead of the load gate. (selftest SKIPs cleanly
 # when python3/curl are absent → never a false RED.)
-if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
-  if bash "$DESKTOP_DIR/bin/lib/federation-asserts.selftest.sh" >"$WORK/selftest.log" 2>&1; then
-    log "assert-core self-test PASS (port self-discovery)"
-  else
-    log "assert-core self-test FAILED — federation-asserts.sh port discovery is broken; see $WORK/selftest.log"
-    sed 's/^/  /' "$WORK/selftest.log" >&2
-    verdict "GATE: RED (assert-core self-test failed — fix federation-asserts.sh before trusting the smokes)"
-    exit 1
+#
+# WI-40591 (2026-08-22): the settle-barrier self-test joined this block. It was previously
+# an ORPHAN — defined at papercusp-desktop/package.json:26 as `test:restart-settle-barrier`
+# and invoked by NOTHING (measured: one grep hit across the tree, its own definition; with
+# federation-asserts.selftest.sh as the positive control, which this very block runs). That
+# left the D-044 owner-origin instrument (restart-settle-barrier.sh `_rsb_owner_self_
+# classification`) unguarded, and that instrument's whole reason to exist is that a FAILED
+# measurement must not render like a clean result — its own cases are "query failure →
+# explicit NOT MEASURED" and "empty result → explicit NOT MEASURED". A silent regression to
+# the fail-OPEN shape would answer the W1 convergence question with a fabricated clean owner
+# frame and no test would have said a word. It is hermetic and costs 0.6s for 13 assertions,
+# so there was never a cost reason to leave it unwired.
+gate_selftest() {  # <label> <script-basename> <logfile> <what-is-broken-if-it-fails>
+  local __label="$1" __script="$2" __log="$3" __broken="$4"
+  if bash "$DESKTOP_DIR/bin/lib/$__script" >"$__log" 2>&1; then
+    log "$__label self-test PASS"
+    return 0
   fi
+  log "$__label self-test FAILED — $__broken; see $__log"
+  sed 's/^/  /' "$__log" >&2
+  verdict "GATE: RED ($__label self-test failed — $__broken. Fix it before trusting the smokes)"
+  exit 1
+}
+if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
+  gate_selftest "assert-core (port self-discovery)" \
+    federation-asserts.selftest.sh "$WORK/selftest.log" \
+    "federation-asserts.sh port discovery is broken"
+  # WI-40591: guards the D-044 owner-origin instrument's three DISTINGUISHABLE outcomes
+  # (0-remote / N-remote / NOT MEASURED). Hermetic, ~0.6s, no .deb and no rig.
+  gate_selftest "settle-barrier (D-044 owner-origin instrument)" \
+    restart-settle-barrier.selftest.sh "$WORK/selftest-settle-barrier.log" \
+    "restart-settle-barrier.sh can no longer distinguish a measured owner frame from an unmeasured one"
 fi
 
 # ── 1. admission gate — CPU PRESSURE, not host loadavg (WI-6151) ──────────────

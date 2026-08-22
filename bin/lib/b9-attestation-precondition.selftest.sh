@@ -191,8 +191,16 @@ static "a per-frame row fingerprint helper exists (origin + clock + author + dev
        "_att_row_fingerprint\(\) \{"
 static "the fingerprint is baselined at strip time, so 'newer than the strip' is decidable" \
        "strip_fp_a=\"\\\$\(_att_row_fingerprint a"
+# WI-40586: this pin used to be the verbatim sentence "WHICH WRITER — read the fingerprint, do
+# not guess". Rewording the verdict's VERB (read → corroborate, 7922ef3b) reddened the guard for
+# ~3h without any invariant having changed. Pin the INVARIANT, not the prose: the directive
+# ("WHICH WRITER"), the METHOD it names ("fingerprint"), and — the part a comment cannot fake —
+# the fingerprint being actually CITED in the emitted message (${strip_fp_a...}). Deliberately
+# loose on the connecting verb; deliberately strict on all three of those. It still fails if the
+# fingerprint citation is dropped, if the directive is dropped, or if the verdict degrades back
+# to naming a suspect in prose. Do NOT re-tighten this to an exact sentence.
 static "the UNHOLDABLE verdict names WHICH writer by fingerprint, not by suspicion" \
-       "WHICH WRITER — read the fingerprint, do not guess"
+       "WHICH WRITER.*fingerprint.*\\\$\{strip_fp_a"
 static "the ordering ceiling below the churn band is recorded where the leg is registered" \
        "matrix_register attestation_unattested_device 79"
 
