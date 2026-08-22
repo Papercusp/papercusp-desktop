@@ -363,3 +363,11 @@ for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh']) {
     );
   });
 }
+
+test('build-mac-cross.sh is executable for direct producer invocation', () => {
+  const script = path.join(BIN, 'build-mac-cross.sh');
+  assert.ok(
+    fs.statSync(script).mode & 0o111,
+    'the documented direct mac cross-build producer must retain an executable mode',
+  );
+});
