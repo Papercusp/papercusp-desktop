@@ -1250,6 +1250,38 @@ assert_no_onnx_gpu_providers() {
   echo "         libs/generic/memory/src/local-embedder-worker.script.mjs)." >&2
   return 1
 }
+# The two owner-confirmed transformers models are intentionally preserved above,
+# but Hugging Face's downloader can leave large `*.tmp.*` fragments beside the
+# finished ONNX data files after an interrupted download.  Those fragments are
+# not model bytes and must never cross the assembled-sidecar boundary (EI-21121880496840788).
+prune_transformers_model_fragments() {
+  local cache_dir="$1"
+  local model_dir
+  [[ -d "$cache_dir/onnx-community" ]] || return 0
+  for model_dir in \
+    "$cache_dir/onnx-community/harrier-oss-v1-0.6b-ONNX" \
+    "$cache_dir/onnx-community/embeddinggemma-300m-ONNX"; do
+    [[ -d "$model_dir" ]] || continue
+    find "$model_dir" -type f -name '*.tmp.*' -delete
+  done
+  return 0
+}
+# Backstop the source prune by scanning the assembled preserved cache.  This is
+# deliberately fail-closed: a future downloader/layout change must stop the
+# build rather than silently shipping another multi-hundred-MiB fragment set.
+assert_no_transformers_model_fragments() {
+  local cache_dir="$1"
+  local fragments
+  [[ -d "$cache_dir" ]] || return 0
+  if ! fragments="$(find "$cache_dir" -type f -name '*.tmp.*' 2>/dev/null)"; then
+    echo "FATAL: unable to inspect the preserved transformers cache for download fragments (EI-21121880496840788)" >&2
+    return 1
+  fi
+  [[ -z "$fragments" ]] && return 0
+  echo "FATAL: transformers model download fragment(s) survived sidecar staging — these temporary files must never ship (EI-21121880496840788):" >&2
+  echo "$fragments" >&2
+  return 1
+}
 # node-gyp SCAFFOLDING carries the build box's absolute paths — and therefore the
 # owner's identity — into the shipped bundle (WI-4419). A compiled native module
 # needs only its addon binary at build/Release/*.node; everything else node-gyp
@@ -1378,6 +1410,7 @@ copy_pkg_closure() {
         find "$_transformers_cache/onnx-community" -mindepth 1 -maxdepth 1 \
           ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' -exec rm -rf {} +
       fi
+      prune_transformers_model_fragments "$_transformers_cache"
     else
       rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"
     fi
@@ -3767,6 +3800,7 @@ if [[ -d "$_expected_cache" ]]; then
     fi
   fi
 fi
+assert_no_transformers_model_fragments "$_expected_cache" || exit 1
 
 # EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
 # NOT guaranteed absent here — a concurrent bare `cargo build` (tauri-dev

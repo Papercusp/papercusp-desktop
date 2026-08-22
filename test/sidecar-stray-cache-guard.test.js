@@ -37,6 +37,20 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const scriptPath = path.resolve(__dirname, '../bin/build-desktop-sidecar.sh');
+const builder = fs.readFileSync(scriptPath, 'utf8');
+
+/** Pull a top-level shell function verbatim out of the real build script. */
+function extractFunction(name) {
+  const lines = builder.split('\n');
+  const start = lines.findIndex((line) => line === `${name}() {`);
+  assert.ok(start >= 0, `${name}() not found in the real sidecar builder`);
+  const end = lines.findIndex((line, index) => index > start && line === '}');
+  assert.ok(end > start, `${name}() has no top-level closing brace`);
+  return lines.slice(start, end + 1).join('\n');
+}
+
+const PRUNE_TRANSFORMER_FRAGMENTS = extractFunction('prune_transformers_model_fragments');
+const ASSERT_NO_TRANSFORMER_FRAGMENTS = extractFunction('assert_no_transformers_model_fragments');
 
 /** Pull the guard block verbatim out of the real script. */
 function extractGuard() {
@@ -64,6 +78,7 @@ function runGuard({ stray }) {
     const script =
       'set -euo pipefail\n' +
       `SIDECAR_DIR=${JSON.stringify(tmp)}\n` +
+      `${ASSERT_NO_TRANSFORMER_FRAGMENTS}\n` +
       extractGuard() +
       '\necho GUARD_COMPLETED\n';
     const res = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
@@ -135,5 +150,82 @@ test('no Python bytecode or __pycache__ artifacts are tracked in the release sou
     tracked,
     [],
     `tracked interpreter artifacts must be removed from the release source: ${tracked.join(', ')}`,
+  );
+});
+
+function makeTransformersCache({ withFragments = true } = {}) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-transformers-cache-'));
+  const cache = tmp;
+  const modelRoot = path.join(cache, 'onnx-community');
+  const models = [
+    'harrier-oss-v1-0.6b-ONNX',
+    'embeddinggemma-300m-ONNX',
+  ];
+  for (const model of models) {
+    const onnx = path.join(modelRoot, model, 'onnx');
+    fs.mkdirSync(onnx, { recursive: true });
+    fs.writeFileSync(path.join(onnx, 'model.onnx_data'), 'real model bytes');
+    if (withFragments) fs.writeFileSync(path.join(onnx, 'model.onnx_data.tmp.123.fragment'), 'partial');
+  }
+  return { tmp, cache };
+}
+
+function runTransformerShell(script) {
+  const res = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`], {
+    encoding: 'utf8',
+  });
+  return { ...res, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+}
+
+test('prune removes temp fragments from both preserved models and keeps model data', () => {
+  const { tmp, cache } = makeTransformersCache();
+  try {
+    const res = runTransformerShell(
+      `${PRUNE_TRANSFORMER_FRAGMENTS}\nprune_transformers_model_fragments ${JSON.stringify(cache)}\necho PRUNE_COMPLETED`,
+    );
+    assert.equal(res.status, 0, `fragment prune failed: ${res.stderr}`);
+    assert.match(res.stdout, /PRUNE_COMPLETED/);
+    for (const model of ['harrier-oss-v1-0.6b-ONNX', 'embeddinggemma-300m-ONNX']) {
+      const onnx = path.join(cache, 'onnx-community', model, 'onnx');
+      assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data')), true, `${model} data must survive`);
+      assert.equal(fs.existsSync(path.join(onnx, 'model.onnx_data.tmp.123.fragment')), false, `${model} fragment must be pruned`);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('assembled-tree guard rejects fragments and passes after the source prune', () => {
+  const { tmp, cache } = makeTransformersCache();
+  try {
+    const before = runTransformerShell(
+      `${ASSERT_NO_TRANSFORMER_FRAGMENTS}\nassert_no_transformers_model_fragments ${JSON.stringify(cache)}`,
+    );
+    assert.equal(before.status, 1, 'guard must reject a surviving download fragment');
+    assert.match(before.stderr, /download fragment/);
+    assert.match(before.stderr, /model\.onnx_data\.tmp\.123\.fragment/);
+
+    const after = runTransformerShell(
+      `${PRUNE_TRANSFORMER_FRAGMENTS}\n${ASSERT_NO_TRANSFORMER_FRAGMENTS}\n` +
+        `prune_transformers_model_fragments ${JSON.stringify(cache)} && ` +
+        `assert_no_transformers_model_fragments ${JSON.stringify(cache)} && echo GUARD_COMPLETED`,
+    );
+    assert.equal(after.status, 0, `guard rejected the pruned cache: ${after.stderr}`);
+    assert.match(after.stdout, /GUARD_COMPLETED/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fragment prune and assembled guard are wired into the real builder', () => {
+  assert.match(
+    builder,
+    /^\s*prune_transformers_model_fragments "\$_transformers_cache"$/m,
+    'the closure walk must prune preserved transformers model fragments',
+  );
+  assert.match(
+    builder,
+    /^assert_no_transformers_model_fragments "\$_expected_cache" \|\| exit 1$/m,
+    'the assembled-sidecar guard must reject preserved transformers model fragments',
   );
 });
