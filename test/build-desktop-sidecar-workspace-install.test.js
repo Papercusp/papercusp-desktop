@@ -192,6 +192,9 @@ test('Debian removal tears down only verified Papercusp process ownership', () =
   assert.match(preRemove, /is_packaged_desktop/);
   assert.match(preRemove, /kill -TERM "\$pid"/);
   assert.match(preRemove, /kill -KILL "\$pid"/);
+  assert.match(preRemove, /papercusp-gui\)[\s\S]*DESKTOP_EXEC=\/usr\/bin\/papercusp-desktop[\s\S]*OWNS_OPERATOR=0/);
+  assert.match(preRemove, /papercusp-server\)[\s\S]*DESKTOP_EXEC=\/usr\/bin\/papercusp-server[\s\S]*OWNS_OPERATOR=1/);
+  assert.match(preRemove, /if \[ "\$OWNS_OPERATOR" = 1 \]; then[\s\S]*signal_operator_group/);
 });
 
 test('Debian removal stays quiet when the packaged desktop exits during the TERM wait', () => {
@@ -227,6 +230,7 @@ test('Debian removal stays quiet when the packaged desktop exits during the TERM
         PAPERCUSP_PREREMOVE_PROC_ROOT: procRoot,
         PAPERCUSP_PREREMOVE_HOME_ROOT: path.join(root, 'home'),
         PAPERCUSP_PREREMOVE_WAIT_SEC: '1',
+        DPKG_MAINTSCRIPT_PACKAGE: 'papercusp-gui',
       },
     });
 
@@ -237,6 +241,51 @@ test('Debian removal stays quiet when the packaged desktop exits during the TERM
       /cmdline: No such file|cmdline: cannot open/,
       'a disappearing process must not leak a /proc/cmdline redirection diagnostic',
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Debian sibling removal selects only the executable owned by that package', () => {
+  const preRemovePath = path.join(desktopRoot, 'src-tauri/deb/preremove.sh');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-prerm-siblings-'));
+  const procRoot = path.join(root, 'proc');
+  const guiPid = '999999991';
+  const serverPid = '999999992';
+
+  try {
+    for (const [pid, executable] of [
+      [guiPid, '/usr/bin/papercusp-desktop'],
+      [serverPid, '/usr/bin/papercusp-server'],
+    ]) {
+      const pidRoot = path.join(procRoot, pid);
+      fs.mkdirSync(pidRoot, { recursive: true });
+      fs.writeFileSync(path.join(pidRoot, 'cmdline'), `${executable}\0`);
+      fs.writeFileSync(path.join(pidRoot, 'environ'), 'HOME=/nonexistent\0');
+    }
+
+    for (const { packageName, ownedPid, siblingPid } of [
+      { packageName: 'papercusp-gui', ownedPid: guiPid, siblingPid: serverPid },
+      { packageName: 'papercusp-server', ownedPid: serverPid, siblingPid: guiPid },
+    ]) {
+      const result = childProcess.spawnSync('sh', [preRemovePath], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DPKG_MAINTSCRIPT_PACKAGE: packageName,
+          PAPERCUSP_PREREMOVE_PROC_ROOT: procRoot,
+          PAPERCUSP_PREREMOVE_HOME_ROOT: path.join(root, 'home'),
+          PAPERCUSP_PREREMOVE_WAIT_SEC: '0',
+        },
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, new RegExp(`stopping packaged desktop pid=${ownedPid}`));
+      assert.doesNotMatch(
+        result.stderr,
+        new RegExp(`stopping packaged desktop pid=${siblingPid}`),
+        `${packageName} removal must not stop its sibling executable`,
+      );
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -257,10 +306,11 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.deepEqual(serverConfig.bundle.linux.deb.files, {
     '/usr/lib/systemd/user/papercusp-server.service': 'systemd/papercusp-server.service',
   });
+  assert.equal(serverConfig.mainBinaryName, 'papercusp-server');
 
   assert.match(unit, /^\[Unit\]$/m);
-  assert.match(unit, /^ConditionFileIsExecutable=\/usr\/bin\/papercusp-desktop$/m);
-  assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-desktop$/m);
+  assert.match(unit, /^ConditionFileIsExecutable=\/usr\/bin\/papercusp-server$/m);
+  assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^KillMode=mixed$/m);
   assert.match(unit, /^WantedBy=graphical-session\.target$/m);
@@ -286,7 +336,7 @@ test('Linux Server deb installs and package-enables one systemd user service', (
       .split('\n')
       .filter(Boolean)
       // The package binary is intentionally absent on a source/CI checkout.
-      .filter((line) => !line.includes('Command /usr/bin/papercusp-desktop is not executable'));
+      .filter((line) => !line.includes('Command /usr/bin/papercusp-server is not executable'));
     assert.deepEqual(
       unexpectedDiagnostics,
       [],
@@ -297,10 +347,21 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.equal(childProcess.spawnSync('sh', ['-n', postremovePath]).status, 0);
 
   assert.match(postinstall, /DPKG_MAINTSCRIPT_PACKAGE:-.*papercusp-server/);
+  assert.ok(
+    postinstall.indexOf('DPKG_MAINTSCRIPT_PACKAGE:-') < postinstall.indexOf('SERVER_USER_UNIT='),
+    'the Server package gate must precede every postinstall side effect',
+  );
+  assert.match(postinstall, /SC="\/usr\/lib\/Papercusp Server\/sidecar"/);
+  assert.doesNotMatch(postinstall, /ls -d \/usr\/lib\/Papercusp\*/);
+  assert.match(postinstall, /^Icon=papercusp-server$/m);
   assert.match(postinstall, /deb-systemd-helper --quiet --user was-enabled "\$SERVER_USER_UNIT"/);
   assert.match(postinstall, /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/);
   assert.match(postinstall, /deb-systemd-helper --user update-state "\$SERVER_USER_UNIT"/);
   assert.match(postremove, /deb-systemd-helper --user purge papercusp-server\.service/);
+  assert.ok(
+    postremove.indexOf('DPKG_MAINTSCRIPT_PACKAGE:-') < postremove.indexOf('case "$1" in'),
+    'the Server package gate must precede manual launcher removal',
+  );
 
   assert.match(rustMain, /#\[cfg\(not\(target_os = "linux"\)\)\]\s+fn enable_login_autostart/s);
   assert.match(rustMain, /#\[cfg\(target_os = "linux"\)\]\s+fn enable_login_autostart/s);

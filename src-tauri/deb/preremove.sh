@@ -16,7 +16,26 @@ set -u
 PROC_ROOT=${PAPERCUSP_PREREMOVE_PROC_ROOT:-/proc}
 HOME_ROOT=${PAPERCUSP_PREREMOVE_HOME_ROOT:-/home}
 WAIT_SEC=${PAPERCUSP_PREREMOVE_WAIT_SEC:-8}
-DESKTOP_EXEC=/usr/bin/papercusp-desktop
+
+# Both products inherit this script, so package identity must select the exact
+# executable and lifecycle authority before we inspect /proc. Only the Server
+# owns the operator process group and discovery records. Removing the GUI may
+# stop its own shell, but must leave the independently installed Server alive.
+case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
+  papercusp-gui)
+    DESKTOP_EXEC=/usr/bin/papercusp-desktop
+    OWNS_OPERATOR=0
+    ;;
+  papercusp-server)
+    DESKTOP_EXEC=/usr/bin/papercusp-server
+    OWNS_OPERATOR=1
+    ;;
+  *)
+    # dpkg always supplies DPKG_MAINTSCRIPT_PACKAGE. Refuse an unknown caller
+    # rather than widening process ownership to a guessed legacy identity.
+    exit 0
+    ;;
+esac
 
 log() {
   echo "[papercusp-prerm] $*" >&2
@@ -156,15 +175,16 @@ stop_packaged_desktop() {
   pid=$1
   is_packaged_desktop "$pid" || return 0
 
-  # Resolve the sidecar record from the desktop's environment before stopping
-  # the parent. The GUI sets HOME for its workspace and serve.ts treats
-  # PAPERCUSP_HOME as an already-qualified .papercusp directory.
-  papercusp_home=$(proc_env_value "$pid" PAPERCUSP_HOME)
-  home=$(proc_env_value "$pid" HOME)
-  if [ -n "$papercusp_home" ] && [ -f "$papercusp_home/operator.json" ]; then
-    signal_operator_group "$papercusp_home/operator.json"
-  elif [ -n "$home" ] && [ -f "$home/.papercusp/operator.json" ]; then
-    signal_operator_group "$home/.papercusp/operator.json"
+  if [ "$OWNS_OPERATOR" = 1 ]; then
+    # Resolve the sidecar record from the Server's environment before stopping
+    # the parent. PAPERCUSP_HOME is an already-qualified .papercusp directory.
+    papercusp_home=$(proc_env_value "$pid" PAPERCUSP_HOME)
+    home=$(proc_env_value "$pid" HOME)
+    if [ -n "$papercusp_home" ] && [ -f "$papercusp_home/operator.json" ]; then
+      signal_operator_group "$papercusp_home/operator.json"
+    elif [ -n "$home" ] && [ -f "$home/.papercusp/operator.json" ]; then
+      signal_operator_group "$home/.papercusp/operator.json"
+    fi
   fi
 
   # Never kill the desktop's process group: it may be the user's session
@@ -180,9 +200,8 @@ stop_packaged_desktop() {
   fi
 }
 
-# Discover every package-owned GUI/Server process. They share the Rust binary
-# and only differ by the Tauri identifier. Reading /proc rather than root's
-# HOME is the important Debian maintainer-script seam.
+# Discover only the executable owned by the package being removed. Reading
+# /proc rather than root's HOME is the important Debian maintainer-script seam.
 for proc_dir in "$PROC_ROOT"/[0-9]*; do
   [ -d "$proc_dir" ] || continue
   pid=${proc_dir##*/}
@@ -190,16 +209,18 @@ for proc_dir in "$PROC_ROOT"/[0-9]*; do
   stop_packaged_desktop "$pid"
 done
 
-# If the desktop exited before its environment could be read, or if an older
+# If the Server exited before its environment could be read, or if an older
 # build left the parent dead, clean only records that independently pass the
-# same identity + role + process-group checks. The paths are deliberately
-# narrow; custom homes are covered by the live desktop environment above.
-for discovery in \
-  "$HOME_ROOT"/*/.papercusp/operator.json \
-  "$HOME_ROOT"/.papercusp/operator.json \
-  /root/.papercusp/operator.json; do
-  [ -f "$discovery" ] || continue
-  signal_operator_group "$discovery"
-done
+# same identity + role + process-group checks. GUI removal never enters this
+# fallback: those discovery records belong to the sibling Server product.
+if [ "$OWNS_OPERATOR" = 1 ]; then
+  for discovery in \
+    "$HOME_ROOT"/*/.papercusp/operator.json \
+    "$HOME_ROOT"/.papercusp/operator.json \
+    /root/.papercusp/operator.json; do
+    [ -f "$discovery" ] || continue
+    signal_operator_group "$discovery"
+  done
+fi
 
 exit 0
