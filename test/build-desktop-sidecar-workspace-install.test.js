@@ -211,10 +211,40 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   });
 
   assert.match(unit, /^\[Unit\]$/m);
+  assert.match(unit, /^ConditionFileIsExecutable=\/usr\/bin\/papercusp-desktop$/m);
   assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-desktop$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^KillMode=mixed$/m);
   assert.match(unit, /^WantedBy=graphical-session\.target$/m);
+
+  const systemdAnalyze = ['/usr/bin/systemd-analyze', '/bin/systemd-analyze'].find((candidate) => fs.existsSync(candidate));
+  if (systemdAnalyze) {
+    const unitSearchPath = [
+      path.dirname(unitPath),
+      '/etc/systemd/user',
+      '/usr/local/lib/systemd/user',
+      '/usr/lib/systemd/user',
+      '/usr/share/systemd/user',
+    ].join(':');
+    const verified = childProcess.spawnSync(
+      systemdAnalyze,
+      ['--user', 'verify', 'papercusp-server.service'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, SYSTEMD_UNIT_PATH: unitSearchPath },
+      },
+    );
+    const unexpectedDiagnostics = verified.stderr
+      .split('\n')
+      .filter(Boolean)
+      // The package binary is intentionally absent on a source/CI checkout.
+      .filter((line) => !line.includes('Command /usr/bin/papercusp-desktop is not executable'));
+    assert.deepEqual(
+      unexpectedDiagnostics,
+      [],
+      `systemd-analyze rejected papercusp-server.service:\n${verified.stderr}`,
+    );
+  }
   assert.equal(childProcess.spawnSync('sh', ['-n', postinstallPath]).status, 0);
   assert.equal(childProcess.spawnSync('sh', ['-n', postremovePath]).status, 0);
 

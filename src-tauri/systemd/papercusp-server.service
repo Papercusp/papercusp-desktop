@@ -3,7 +3,7 @@ Description=Papercusp Server
 Documentation=https://papercuspai.com
 After=graphical-session.target
 PartOf=graphical-session.target
-ConditionPathIsExecutable=/usr/bin/papercusp-desktop
+ConditionFileIsExecutable=/usr/bin/papercusp-desktop
 
 [Service]
 Type=simple
