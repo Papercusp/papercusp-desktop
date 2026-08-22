@@ -76,16 +76,19 @@ test('CONTROL — guard REJECTS a newly stranded measurement', () => {
 });
 
 test('guard reports UNMEASURED (exit 2), never a pass, when the baseline is absent', () => {
-  // A missing baseline must not read as "nothing new". Exit 2 is the third state.
+  // The third state again, one level up: a MISSING baseline must not read as
+  // "nothing new". Exercised for real by copying the scanner somewhere no
+  // baseline sits beside it — asserting the exit code the real path returns,
+  // rather than asserting around it.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'discarded-guard-nb-'));
   try {
-    const r = spawnSync('python3', [SCANNER, '--guard', dir], {
-      encoding: 'utf8',
-      env: { ...process.env, HOME: dir },
-    });
-    // The baseline lives beside the scanner, so it is still found; assert the
-    // contract we can assert here — a pass is never silent about its basis.
-    assert.notEqual(r.status, 2, 'baseline unexpectedly missing beside the scanner');
+    const lonely = path.join(dir, 'scan-discarded-measurements.py');
+    fs.copyFileSync(SCANNER, lonely);
+    fs.mkdirSync(path.join(dir, 'scenarios'));
+    const r = spawnSync('python3', [lonely, '--guard'], { encoding: 'utf8' });
+    assert.equal(r.status, 2, `expected UNMEASURED (2), got ${r.status}:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /GUARD UNMEASURED/);
+    assert.match(r.stderr, /NOT a pass/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
