@@ -21,8 +21,15 @@
 # Usage:
 #   bin/build-linux-local.sh                 # version from tauri.conf.json
 #   PAPERCUSP_SKIP_SEED_CUT=1 bin/build-linux-local.sh   # reuse committed seed
+#   PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh
+#                                                   # immutable Server-only VM package
 #
 # Env passthrough (same knobs as release-local.sh's Linux leg):
+#   PAPERCUSP_DISTRIBUTION_PROFILE
+#                              dogfood (default): preserve the source/env-sidecar,
+#                              GUI+Server and multi-environment developer package;
+#                              vm-release: emit one immutable runtime-only Server
+#                              .deb and reject conflicting role selection
 #   PAPERCUSP_SKIP_SEED_CUT=1  reuse src-tauri/seed as-is (no live-store seed cut)
 #   PAPERCUSP_REUSE_SIDECAR=1   reuse the already-verified Linux sidecar,
 #                               env-sidecars and source.tar.zst; resume at Tauri
@@ -64,6 +71,31 @@ trap 'rm -rf -- "${PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR:-}"' EXIT
 ROOT="${PAPERCUSP_BUILD_LINUX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HERE="$ROOT/bin"
 cd "$ROOT"
+
+# D-043 / P-049: customer VM releases are a separate, explicit packaging
+# profile. The absent knob MUST keep the historical dogfood behavior: both
+# roles, staged environment sidecars, editable source and the broad Server
+# overlay. The vm-release profile is deliberately fail-closed; no caller can
+# accidentally widen it back to GUI/dev payloads through PAPERCUSP_BUILD_ROLES.
+DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
+case "$DISTRIBUTION_PROFILE" in
+  dogfood)
+    ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+    ;;
+  vm-release)
+    if [[ "${PAPERCUSP_BUILD_ROLES+x}" == x && "$PAPERCUSP_BUILD_ROLES" != "server" ]]; then
+      echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE=vm-release requires PAPERCUSP_BUILD_ROLES=server (or unset); got '${PAPERCUSP_BUILD_ROLES}'" >&2
+      exit 2
+    fi
+    ROLES="server"
+    export PAPERCUSP_BUILD_ROLES="$ROLES"
+    export PAPERCUSP_STAGE_SOURCE=0
+    ;;
+  *)
+    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
+    exit 2
+    ;;
+esac
 
 # ── OWNER-NAME PREFLIGHT (EI-21129566831677520). This entrypoint always
 # produces release artifacts, and its final identity audit cannot certify the
@@ -128,7 +160,6 @@ if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
   echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$PAPERCUSP_RELEASE_TAG)"
 fi
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
-ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -f "$KEY_FILE" ]] || {
   echo "ERROR: minisign signing key not found at $KEY_FILE"
   echo "       Run bin/setup-signing-key.sh, set TAURI_SIGNING_PRIVATE_KEY_PATH,"
@@ -139,15 +170,17 @@ ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 # Collection destination — the same tree Mac/Windows artifacts land in.
 DEST_BUNDLE="$ROOT/src-tauri/target/release/bundle"
 
-echo "==> Linux local build: desktop sha=${BUILD_SHA:-<none>} version=$VERSION roles='$ROLES'  $(date -u +%H:%M:%SZ)"
+echo "==> Linux local build: desktop sha=${BUILD_SHA:-<none>} version=$VERSION profile=$DISTRIBUTION_PROFILE roles='$ROLES'  $(date -u +%H:%M:%SZ)"
 echo "    (provenance baked via option_env! → /api/health self-reports sha+version)"
 
 # ── Seed: reuse the committed src-tauri/seed unless a cut is explicitly wanted.
 # A live-store seed cut belongs in release-local.sh (it owns cut_release_seed);
 # a local rebuild almost always reuses the committed seed.
-if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" != "1" ]]; then
+if [[ "$DISTRIBUTION_PROFILE" == "dogfood" && "${PAPERCUSP_SKIP_SEED_CUT:-0}" != "1" ]]; then
   echo "WARN: PAPERCUSP_SKIP_SEED_CUT!=1 — this local script does NOT cut a fresh seed;"
   echo "      it ships the committed src-tauri/seed. Use bin/release-local.sh for a seed cut."
+elif [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  echo "==> vm-release excludes src-tauri/seed; updates replace the signed package"
 fi
 
 hold_sidecar_read_lock() {
@@ -169,27 +202,64 @@ hold_sidecar_read_lock() {
   echo "→ sidecar resources pinned by shared lock for this finite package read" >&2
 }
 
+assert_vm_release_deb_runtime_only() {
+  local deb="${1:?vm-release deb path required}"
+  local members_file="$PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR/vm-release-deb-members.txt"
+  local leaked=0
+
+  # Inspect the FINISHED Debian payload, not only the Tauri config. A future
+  # config merge/default change must fail here if dogfood-only bytes reappear.
+  if ! dpkg-deb --fsys-tarfile "$deb" | tar -tf - >"$members_file"; then
+    echo "ERROR: could not enumerate vm-release Debian payload: $deb" >&2
+    exit 1
+  fi
+  while IFS= read -r member; do
+    case "$member" in
+      *"/sidecar/source.tar.zst"|*"/sidecar/env-sidecars"|*"/sidecar/env-sidecars/"*|*"/seed"|*"/seed/"*|*"/resources/"*)
+        echo "ERROR: vm-release forbidden payload member: $member" >&2
+        leaked=1
+        ;;
+    esac
+  done <"$members_file"
+  [[ "$leaked" == 0 ]] || exit 1
+
+  # Reuse the archive-aware identity scanner so a runtime-only release cannot
+  # pass merely because its container bytes were opaque to grep.
+  python3 "$HERE/audit-release-bundle.py" --scan-artifact "$deb"
+}
+
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
     echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
     bash "$ROOT/bin/build-desktop-sidecar.sh"
 
-    echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
-    bash "$ROOT/bin/stage-env-sidecars.sh"
+    if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
+      echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
+      bash "$ROOT/bin/stage-env-sidecars.sh"
 
-    echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
-    bash "$ROOT/bin/stage-source-tree.sh"
-    hold_sidecar_read_lock
+      echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
+      bash "$ROOT/bin/stage-source-tree.sh"
+      hold_sidecar_read_lock
+    else
+      echo "==> [2-3/5] vm-release — skipping env-sidecars and editable source staging"
+      hold_sidecar_read_lock
+    fi
     ;;
   1)
     echo "==> [1-3/5] PAPERCUSP_REUSE_SIDECAR=1 — validating the staged Linux sidecar before resuming packaging"
     hold_sidecar_read_lock
-    for required in \
+    required_payload=(
       src-tauri/sidecar/serve.mjs \
       src-tauri/sidecar/spa/index.html \
-      src-tauri/sidecar/env-sidecars/staging \
-      src-tauri/sidecar/source.tar.zst \
-      src-tauri/sidecar/build-provenance.json; do
+      src-tauri/sidecar/build-provenance.json
+    )
+    if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
+      required_payload+=(
+        src-tauri/sidecar/env-sidecars/staging
+        src-tauri/sidecar/source.tar.zst
+      )
+    fi
+    for required in "${required_payload[@]}"; do
       [[ -e "$required" ]] || {
         echo "ERROR: PAPERCUSP_REUSE_SIDECAR=1 but required staged payload is missing: $required" >&2
         exit 1
@@ -201,8 +271,12 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
     # while still carrying that producer's local identity in SPA/docs content.
     # Catch that before the Rust build instead of several minutes later in the
     # AppImage's final assembled-tree scan (WI-40598).
-    python3 "$ROOT/bin/audit-release-bundle.py" \
-      --scan-dir "$ROOT/src-tauri/sidecar"
+    if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
+      python3 "$ROOT/bin/audit-release-bundle.py" \
+        --scan-dir "$ROOT/src-tauri/sidecar"
+    else
+      echo "==> vm-release reused runtime will be identity-scanned from the finished .deb"
+    fi
     ;;
   *)
     echo "ERROR: PAPERCUSP_REUSE_SIDECAR must be 0 or 1 (got '${PAPERCUSP_REUSE_SIDECAR}')" >&2
@@ -226,12 +300,22 @@ SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 
   | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
 [[ -n "$SRC_ROOT" ]] || SRC_ROOT="$ROOT/src-tauri/target"
 
-echo "==> [4/5] tauri build --bundles deb (roles: $ROLES)"
+VM_RELEASE_FRESHNESS_MARKER=""
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  VM_RELEASE_FRESHNESS_MARKER="$PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR/vm-release-cut-start"
+  : >"$VM_RELEASE_FRESHNESS_MARKER"
+fi
+
+echo "==> [4/5] tauri build --bundles deb (profile: $DISTRIBUTION_PROFILE; roles: $ROLES)"
 for role in $ROLES; do
   role_cfg=()
   role_binary=papercusp-desktop
   if [[ "$role" == "server" ]]; then
-    role_cfg=(--config src-tauri/tauri.server.conf.json)
+    if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+      role_cfg=(--config src-tauri/tauri.vm-release.conf.json)
+    else
+      role_cfg=(--config src-tauri/tauri.server.conf.json)
+    fi
     role_binary=papercusp-server
   fi
   echo "    -- role=$role  $(date -u +%H:%M:%SZ)"
@@ -252,12 +336,36 @@ for role in $ROLES; do
     || { echo "ERROR: role=$role — release host not baked; refusing to package a permanently-un-updatable app"; exit 1; }
 done
 
-# Tauri's Debian bundler emits gzip payloads. Repack every requested role only
-# after the loop so GUI and Server are both present, then replace their updater
-# signatures over the final bytes.
-for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
-  [[ -f "$deb" ]] && bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
-done
+# Tauri's Debian bundler emits gzip payloads. Dogfood preserves the historical
+# all-role sweep. vm-release first selects exactly the fresh Server package by
+# Debian identity, then repacks/audits ONLY that package: a stale same-version
+# GUI artifact in the shared Cargo target must never enter the VM collector.
+vm_release_debs=()
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  shopt -s nullglob
+  for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
+    [[ "$deb" -nt "$VM_RELEASE_FRESHNESS_MARKER" ]] || continue
+    [[ "$(dpkg-deb -f "$deb" Package 2>/dev/null || true)" == "papercusp-server" ]] || continue
+    vm_release_debs+=("$deb")
+  done
+  shopt -u nullglob
+  [[ ${#vm_release_debs[@]} -eq 1 ]] || {
+    echo "ERROR: vm-release expected exactly one fresh papercusp-server .deb for version $VERSION; found ${#vm_release_debs[@]}" >&2
+    exit 1
+  }
+  for deb in "${vm_release_debs[@]}"; do
+    bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+    [[ -f "$deb.sig" && "$deb.sig" -nt "$VM_RELEASE_FRESHNESS_MARKER" ]] || {
+      echo "ERROR: vm-release package is not accompanied by a fresh updater signature: $deb.sig" >&2
+      exit 1
+    }
+    assert_vm_release_deb_runtime_only "$deb"
+  done
+else
+  for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
+    [[ -f "$deb" ]] && bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+  done
+fi
 
 if [[ " $ROLES " == *" gui "* ]]; then
   echo "==> [5/5] building Linux AppImage (gui, build-appimage.sh)"
@@ -277,19 +385,34 @@ SRC_BUNDLE="$SRC_ROOT/release/bundle"
 collected=()
 if [[ "$(readlink -f "$SRC_BUNDLE" 2>/dev/null)" == "$(readlink -f "$DEST_BUNDLE" 2>/dev/null)" ]]; then
   echo "    cargo already targets the source tree — artifacts are in place ($DEST_BUNDLE)"
-  for f in "$DEST_BUNDLE"/deb/*_"$VERSION"_*.deb "$DEST_BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
-           "$DEST_BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$DEST_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
-    [[ -f "$f" ]] && collected+=("$f")
-  done
+  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+    for f in "${vm_release_debs[@]}"; do
+      collected+=("$f" "$f.sig")
+    done
+  else
+    for f in "$DEST_BUNDLE"/deb/*_"$VERSION"_*.deb "$DEST_BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
+             "$DEST_BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$DEST_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
+      [[ -f "$f" ]] && collected+=("$f")
+    done
+  fi
 else
   mkdir -p "$DEST_BUNDLE/deb" "$DEST_BUNDLE/appimage"
   shopt -s nullglob
-  for f in "$SRC_BUNDLE"/deb/*_"$VERSION"_*.deb "$SRC_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
-    mv -f "$f" "$DEST_BUNDLE/deb/"; collected+=("$DEST_BUNDLE/deb/$(basename "$f")")
-  done
-  for f in "$SRC_BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$SRC_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
-    mv -f "$f" "$DEST_BUNDLE/appimage/"; collected+=("$DEST_BUNDLE/appimage/$(basename "$f")")
-  done
+  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+    for deb in "${vm_release_debs[@]}"; do
+      for f in "$deb" "$deb.sig"; do
+        mv -f "$f" "$DEST_BUNDLE/deb/"
+        collected+=("$DEST_BUNDLE/deb/$(basename "$f")")
+      done
+    done
+  else
+    for f in "$SRC_BUNDLE"/deb/*_"$VERSION"_*.deb "$SRC_BUNDLE"/deb/*_"$VERSION"_*.deb.sig; do
+      mv -f "$f" "$DEST_BUNDLE/deb/"; collected+=("$DEST_BUNDLE/deb/$(basename "$f")")
+    done
+    for f in "$SRC_BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$SRC_BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
+      mv -f "$f" "$DEST_BUNDLE/appimage/"; collected+=("$DEST_BUNDLE/appimage/$(basename "$f")")
+    done
+  fi
   shopt -u nullglob
 fi
 

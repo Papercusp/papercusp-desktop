@@ -322,9 +322,8 @@ test('the Linux local release entrypoint claims one Cargo target slot before eit
 
 test('the Linux local release entrypoint pins one immutable sidecar snapshot through packaging', () => {
   const helperAt = linuxScript.indexOf('hold_sidecar_read_lock()');
-  const freshCallAt = linuxScript.indexOf(
-    'bash "$ROOT/bin/stage-source-tree.sh"\n    hold_sidecar_read_lock',
-  );
+  const freshCallAt =
+    /bash "\$ROOT\/bin\/stage-source-tree\.sh"\r?\n\s+hold_sidecar_read_lock/.exec(linuxScript)?.index ?? -1;
   const reuseAt = linuxScript.indexOf('PAPERCUSP_REUSE_SIDECAR=1 — validating');
   const reuseCallAt = linuxScript.indexOf('hold_sidecar_read_lock', reuseAt);
   const verifyAt = linuxScript.indexOf('verify-sidecar-bundle.sh', reuseAt);
