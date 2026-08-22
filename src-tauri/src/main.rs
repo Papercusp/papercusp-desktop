@@ -1732,6 +1732,14 @@ mod discovery_tests {
             linux.contains("launcher_status_result(") && linux.contains("status.success()"),
             "a non-zero gtk-launch exit must reach the explicit install-Server UI"
         );
+        assert!(
+            linux.contains("format!(\"{product_name}.desktop\")"),
+            "Linux must launch the desktop filename Tauri derives from productName"
+        );
+        assert!(
+            !linux.contains("format!(\"{bundle_id}.desktop\")"),
+            "the reverse-domain bundle identifier is not Tauri's installed desktop filename"
+        );
     }
 
     #[test]
@@ -1741,7 +1749,7 @@ mod discovery_tests {
         let error = launcher_status_result(
             false,
             "Papercusp Server",
-            "gtk-launch com.papercusp.server.desktop exited with status 2",
+            "gtk-launch Papercusp Server.desktop exited with status 2",
         )
         .expect_err("a failed sibling launcher must not be reported as success");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -5405,8 +5413,8 @@ fn launcher_status_result(
 /// Cross-platform "launch the sibling app bundle by identity".
 ///   * macOS  — `open -b <bundle-id>`: LaunchServices resolves the installed
 ///     .app regardless of where it lives. Solid + used as the primary path.
-///   * Linux  — `gtk-launch <bundle-id>.desktop` (the freedesktop way to start
-///     an installed app by its desktop-entry id), best-effort.
+///   * Linux  — `gtk-launch <product-name>.desktop` (Tauri's Debian bundler
+///     names the installed desktop file from productName, not identifier).
 ///   * Windows — NOT yet wired: both bundles ship the SAME binary name
 ///     (`papercusp-desktop`), so a sibling-exe launch can't tell them apart —
 ///     it needs the per-bundle install path (registry / Start-menu). Until then
@@ -5421,13 +5429,19 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        // The deb/appimage desktop-entry id follows the bundle identifier.
+        let _ = bundle_id;
+        // Tauri's Debian bundler names these from productName. Verified from
+        // the assembled sibling packages, not inferred from the config:
+        //   /usr/share/applications/Papercusp GUI.desktop
+        //   /usr/share/applications/Papercusp Server.desktop
+        // Using the reverse-domain bundle identifier here makes gtk-launch
+        // exit 2 even when the sibling package is installed.
         // `spawn()` alone is a false success when the sibling is not installed:
         // gtk-launch itself starts, exits 2 in ~30ms, and the GUI waits 120s on
         // an operator that cannot appear. `status()` returns just as promptly
         // for a valid desktop entry (gtk-launch delegates the app and exits),
         // while letting us surface the explicit install-Server gate immediately.
-        let desktop_id = format!("{bundle_id}.desktop");
+        let desktop_id = format!("{product_name}.desktop");
         let status = Command::new("gtk-launch").arg(&desktop_id).status()?;
         launcher_status_result(
             status.success(),
