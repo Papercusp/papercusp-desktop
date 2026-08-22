@@ -110,6 +110,23 @@ RHS_LOOKUP = re.compile(r"\b(rig_resolve_ws|rig_github_id|[A-Za-z_]*resolve[A-Za
 RHS_TRANSFORM = re.compile(r"\b(printf|tr|date|seq|basename|dirname|echo)\b")
 
 
+def is_counter_increment(var: str, rhs: str) -> bool:
+    """True for `x=$((x + 1))` — a SELF-REFERENTIAL arithmetic update.
+
+    Such a variable is an accumulator, not a reading: nothing was measured at this
+    line, so an early `return` below it strands nothing. Suppressing it is not
+    leniency, it is accuracy — and it matters because the canonical example is
+    rig_assert_absent()'s `measured=$((measured + 1))`, which counts probes that
+    actually ran and is the EXEMPLAR of the three-state discipline this scanner
+    exists to enforce. Flagging it told a reader the model implementation was an
+    instance of the defect (it did, once, to a peer — hence this function).
+
+    An over-firing detector is worse than a missing one: it gets ignored, and then
+    it is not a guard at all.
+    """
+    return re.search(r"\$\(\(\s*" + re.escape(var) + r"\b", rhs) is not None
+
+
 def classify_rhs(rhs: str) -> str:
     """measurement > lookup > transform. Order matters: a lookup helper may wrap
     psql internally, but at THIS call site it is a lookup, so the specific
@@ -147,6 +164,30 @@ scn_control_defect() {
   fi
   echo "  behavioral leg: $absent"
   return 0
+}
+'''
+
+# Must NOT fire. VERBATIM shape of rig_assert_absent()'s probe counter — the real
+# code this scanner over-fired on, reported to a peer as an instance of the defect,
+# and retracted. `measured` is an ACCUMULATOR: nothing is read at that line, so the
+# `return 1` below it strands nothing. The function it comes from is in fact the
+# EXEMPLAR of the three-state discipline (it scores UNMEASURED when measured==0),
+# which is what made the false positive actively harmful rather than merely noisy.
+COUNTER_CALIBRATION = '''#!/usr/bin/env bash
+rig_assert_absent() {
+  local inst="$1" fid="$2" tries="${3:-20}" i row rc measured=0
+  for i in $(seq 1 "$tries"); do
+    row="$(drv_psql "$inst" "SELECT 1 FROM t WHERE feature_id='$fid' LIMIT 1;" 2>/dev/null)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      measured=$((measured + 1))
+      if [ "$row" = "1" ]; then echo 0; return 1; fi
+    fi
+    sleep 3
+  done
+  if [ "$measured" -eq 0 ]; then
+    echo "  ✗ ALL $tries probes failed to run — UNMEASURED; scoring FAIL" >&2
+    echo 0; return 1
+  fi
 }
 '''
 
@@ -327,7 +368,7 @@ def scan_text(text: str):
                     # measured value for it to strand.
                     and k not in guarded
                 ]
-                if blockers:
+                if blockers and not is_counter_increment(var, rhs):
                     kind = classify_rhs(rhs)
                     hits.append(
                         {
@@ -360,6 +401,7 @@ def self_test(verbose=True):
         ("calibration — consumed before return", CALIBRATION, 0, "SCANNER OVER-FIRES"),
         ("calibration — heredoc body + self-guard", HEREDOC_CALIBRATION, 0, "SCANNER OVER-FIRES"),
         ("control — reporting return still strands", REPORTING_RETURN_CONTROL, 1, "SCANNER IS BLIND"),
+        ("calibration — counter increment is not a reading", COUNTER_CALIBRATION, 0, "SCANNER OVER-FIRES"),
     ]
     results = [(label, len(scan_text(src)), want, err) for label, src, want, err in cases]
     ok = all(got == want for _, got, want, _ in results)
@@ -374,6 +416,9 @@ def self_test(verbose=True):
 BASELINE_PATH = Path(__file__).resolve().parent / "scan-discarded-measurements.baseline.txt"
 
 
+LIB_ROOT = Path(__file__).resolve().parent
+
+
 def _identity(path, hit):
     """Line-INDEPENDENT identity for a candidate site.
 
@@ -381,8 +426,17 @@ def _identity(path, hit):
     to L443 by inserting lines ABOVE it, and a line-keyed baseline would have gone
     stale on that unrelated edit. A baseline that goes stale on every edit trains
     people to re-seed it blindly, which is how an allowlist stops being a guard.
+
+    Path-qualified (relative to bin/lib) rather than bare basename, so two files with
+    the same name in different directories cannot collide into one baseline entry —
+    a collision would let a NEW strand inherit an existing entry's amnesty silently.
     """
-    return f"{Path(path).name}::{hit['func']}::{hit['var']}"
+    p = Path(path).resolve()
+    try:
+        name = str(p.relative_to(LIB_ROOT))
+    except ValueError:
+        name = p.name
+    return f"{name}::{hit['func']}::{hit['var']}"
 
 
 def _load_baseline():
@@ -412,11 +466,16 @@ def main(argv):
     if only_self_test:
         return 0
 
-    roots = args or [str(Path(__file__).resolve().parent / "scenarios")]
+    # Default population is ALL of bin/lib, not just scenarios/. The class is not
+    # scenario-specific: deb-hetzner-rig.sh — which DEFINES rig_reading, the very
+    # mechanism scenarios use to report at the measurement point — carries the same
+    # shape, and a guard covering 15 of 58 comparable files reports GUARD OK while
+    # the class walks in through the other 43.
+    roots = args or [str(LIB_ROOT)]
     files = []
     for r in roots:
         p = Path(r)
-        files.extend(sorted(p.glob("*.sh")) if p.is_dir() else [p])
+        files.extend(sorted(p.rglob("*.sh")) if p.is_dir() else [p])
 
     total = 0
     found = []

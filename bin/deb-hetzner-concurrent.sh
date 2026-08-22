@@ -198,15 +198,27 @@ scenario_concurrent_lww() {
   # STABLE window (5 consecutive matched re-reads, 3s apart, streak resets on any mismatch), and
   # additionally gate the verdict on the FINAL reads below agreeing.
   local converged WINTUPLE ta tb ca cb FINAL_A FINAL_B CNT_A CNT_B O_A O_B phase2_pass streak
+  local phase2_samples phase2_matches phase2_mismatches phase2_max_streak
+  local phase2_first_match phase2_last_match phase2_first_mismatch phase2_last_mismatch
   converged=0; WINTUPLE=""; streak=0
+  phase2_samples=0; phase2_matches=0; phase2_mismatches=0; phase2_max_streak=0
+  phase2_first_match=""; phase2_last_match=""; phase2_first_mismatch=""; phase2_last_mismatch=""
   for i in $(seq 1 100); do
     ta="$(_cl_read_lww "$OWNER" "$FID_C")"; tb="$(_cl_read_lww "$MEMBER" "$FID_C")"
     ca="$(_cl_count_feat "$OWNER" "$FID_C")"; cb="$(_cl_count_feat "$MEMBER" "$FID_C")"
+    phase2_samples="$i"
     if [ -n "$ta" ] && [ "$ta" = "$tb" ] && [ "$ca" = 1 ] && [ "$cb" = 1 ]; then
+      phase2_matches=$((phase2_matches + 1))
       streak=$((streak + 1))
+      [ "$streak" -gt "$phase2_max_streak" ] && phase2_max_streak="$streak"
+      [ -n "$phase2_first_match" ] || phase2_first_match="sample=$i streak=$streak a=[$ta] b=[$tb] cnt=$ca/$cb"
+      phase2_last_match="sample=$i streak=$streak a=[$ta] b=[$tb] cnt=$ca/$cb"
       if [ "$streak" -ge 5 ]; then converged=1; WINTUPLE="$ta"; break; fi
     else
+      phase2_mismatches=$((phase2_mismatches + 1))
       streak=0
+      [ -n "$phase2_first_mismatch" ] || phase2_first_mismatch="sample=$i a=[$ta] b=[$tb] cnt=$ca/$cb"
+      phase2_last_mismatch="sample=$i a=[$ta] b=[$tb] cnt=$ca/$cb"
     fi
     sleep 3
   done
@@ -220,10 +232,12 @@ scenario_concurrent_lww() {
     phase2_pass=1; echo "✓ PHASE 2 PASS — both peers converged to the SAME LWW winner [$WINTUPLE], stable over 5 re-reads + matching finals, 1 row each, no split-brain/dup"
   elif [ "$converged" = 1 ]; then
     echo "✗ PHASE 2 FAIL — stable window matched but FINAL reads diverge (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B) — late-arriving op flipped a peer (WI-1673 signature)"
+    echo "PHASE2 timing: samples=$phase2_samples matches=$phase2_matches mismatches=$phase2_mismatches max_streak=$phase2_max_streak first_match=[$phase2_first_match] last_match=[$phase2_last_match] first_mismatch=[$phase2_first_mismatch] last_mismatch=[$phase2_last_mismatch]"
     fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
     for inst in "$OWNER" "$MEMBER"; do echo "--- $inst roster ---"; rig_read_roster "$inst"; done
   else
     echo "✗ PHASE 2 FAIL — no convergence (a=[$FINAL_A] b=[$FINAL_B] cnt a=$CNT_A b=$CNT_B)"
+    echo "PHASE2 timing: samples=$phase2_samples matches=$phase2_matches mismatches=$phase2_mismatches max_streak=$phase2_max_streak first_match=[$phase2_first_match] last_match=[$phase2_last_match] first_mismatch=[$phase2_first_mismatch] last_mismatch=[$phase2_last_mismatch]"
     fed_log "PHASE2-DIAG: rosters (empty roster drops peer ops)"
     for inst in "$OWNER" "$MEMBER"; do echo "--- $inst roster ---"; rig_read_roster "$inst"; done
   fi

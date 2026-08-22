@@ -22,9 +22,9 @@ scn_concurrent_lww() {
     echo "concurrent writes OK (no loss on different keys; deterministic byte-identical LWW winner on the same key)"
   else
     echo "concurrent writes / LWW FAIL — key lines:"
-    printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
+    printf '%s\n' "$out" | grep -E '✗|OVERALL:|PHASE2 timing:' | sed 's/^/      /'
     echo "      ── full assert transcript (all ✓/✗) ──"
-    printf '%s\n' "$out" | grep -E '✓|✗|OVERALL:' | sed 's/^/      /'
+    printf '%s\n' "$out" | grep -E '✓|✗|OVERALL:|PHASE2 timing:' | sed 's/^/      /'
   fi
   return "$rc"
 }

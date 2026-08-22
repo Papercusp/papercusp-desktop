@@ -37,7 +37,7 @@ source "$SCEN_DIR/b6-concurrent.sh" >/dev/null 2>&1
 source "$SCEN_DIR/b7-coord-controlplane.sh" >/dev/null 2>&1
 
 assert_failure_transcript() {
-  local fn="$1" label="$2" verdict="$3" out rc
+  local fn="$1" label="$2" verdict="$3" diagnostic="${4:-}" out rc
   out="$("$fn" a b 2>&1)"
   rc=$?
   if [ "$rc" != 1 ] && [ "$rc" != 6 ]; then
@@ -48,6 +48,7 @@ assert_failure_transcript() {
     && grep -Fq '✓ assert-one' <<<"$out" \
     && grep -Fq '✓ assert-three' <<<"$out" \
     && grep -Fq '✗ assert-two' <<<"$out" \
+    && { [ -z "$diagnostic" ] || grep -Fq "$diagnostic" <<<"$out"; } \
     && grep -Fq "$verdict" <<<"$out"; then
     ok "$label: failure retains every passing assertion and its verdict"
   else
@@ -61,7 +62,7 @@ scenario_reconnect_catchup() {
   return 1
 }
 scenario_concurrent_lww() {
-  printf '%s\n' '  ✓ assert-one' '  ✓ assert-three' '  ✗ assert-two' 'OVERALL: INCOMPLETE'
+  printf '%s\n' '  ✓ assert-one' '  ✓ assert-three' '  ✗ assert-two' 'PHASE2 timing: samples=4 matches=2 mismatches=2 max_streak=2' 'OVERALL: INCOMPLETE'
   return 6
 }
 scenario_coord_controlplane() {
@@ -70,7 +71,7 @@ scenario_coord_controlplane() {
 }
 
 assert_failure_transcript scn_reconnect_catchup "reconnect/catch-up" 'OVERALL: INCOMPLETE'
-assert_failure_transcript scn_concurrent_lww "concurrent writes / LWW" 'OVERALL: INCOMPLETE'
+assert_failure_transcript scn_concurrent_lww "concurrent writes / LWW" 'OVERALL: INCOMPLETE' 'PHASE2 timing: samples=4 matches=2 mismatches=2 max_streak=2'
 assert_failure_transcript scn_coord_controlplane "coord control-plane" 'BRIEF 7 MATRIX: FAIL'
 
 # ── 2. Success remains terse and does not leak the captured raw transcript ───

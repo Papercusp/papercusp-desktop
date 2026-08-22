@@ -8,11 +8,16 @@
 # the guard. Removing one (by fixing the site) is the intended direction of travel.
 #
 # Identity is file::function::var, deliberately line-INDEPENDENT.
-b9-attestation.sh::_scn_attestation_unattested_device_core::reasons_before
-b9-attestation.sh::_scn_attestation_unattested_device_core::ws
-b9-attestation.sh::scn_attestation_membership::a_gh_id
-b9-attestation.sh::scn_attestation_membership::ws
-fed-reap.sh::scn_fed_reap::bws
-fed-reap.sh::scn_fed_reap::fleet
-membership-churn.sh::scn_membership_churn::backfill
-membership-churn.sh::scn_membership_churn::upstream
+deb-hetzner-rig.sh::rig_ban_member::ws
+release-artifacts.sh::release_artifacts_assert_baked_host_from_bytes::expected_fp
+release-artifacts.sh::release_artifacts_assert_fresh::stamp
+release-artifacts.sh::release_artifacts_resolve_root::resolved
+release-tag-pin.sh::release_tag_validate_exact_commit::resolved_sha
+scenarios/b9-attestation.sh::_scn_attestation_unattested_device_core::reasons_before
+scenarios/b9-attestation.sh::_scn_attestation_unattested_device_core::ws
+scenarios/b9-attestation.sh::scn_attestation_membership::a_gh_id
+scenarios/b9-attestation.sh::scn_attestation_membership::ws
+scenarios/fed-reap.sh::scn_fed_reap::bws
+scenarios/fed-reap.sh::scn_fed_reap::fleet
+scenarios/membership-churn.sh::scn_membership_churn::backfill
+scenarios/membership-churn.sh::scn_membership_churn::upstream
