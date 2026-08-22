@@ -61,22 +61,6 @@ __pc_claim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release-artifacts.sh
 source "$__pc_claim_dir/release-artifacts.sh"
 
-# Called by release producers after their final outputs exist. Keeping this
-# separate from slot selection is intentional: the current build must be able
-# to clean and populate its own target before it asks later cleaners to respect
-# the durable lease.
-papercusp_retain_release_paths() {
-  [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]] || return 0
-  [[ $# -gt 0 ]] || {
-    echo "release-artifacts: release retention requires at least one target/artifact path." >&2
-    return 2
-  }
-  release_artifacts_retention_lease_acquire "$PAPERCUSP_RELEASE_TAG" "$@" >/dev/null || {
-    echo "release-artifacts: could not retain release paths for ${PAPERCUSP_RELEASE_TAG}." >&2
-    return 1
-  }
-}
-
 # Is a live process EXECUTING out of this target dir?
 #
 # The flock below proves only that a LAUNCHER is alive. It is held by the launcher

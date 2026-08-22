@@ -97,6 +97,7 @@ CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-v
 [[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
 
 NEW_ARTIFACTS=()
+RETENTION_PATHS=()
 case "$PLATFORM" in
   linux)
     # build-linux-local.sh moves finished bundles out of Cargo's (possibly
@@ -104,6 +105,7 @@ case "$PLATFORM" in
     # Prefer that canonical post-build tree; keep Cargo's tree only as a legacy
     # fallback for direct/older builders that did not perform collection.
     BUNDLE="$(release_artifacts_linux_bundle_root "$ROOT" "$CARGO_TARGET_ROOT" "$VERSION")"
+    RETENTION_PATHS=("$CARGO_TARGET_ROOT" "$BUNDLE")
     for f in "$BUNDLE"/deb/*_"$VERSION"_*.deb "$BUNDLE"/deb/*_"$VERSION"_*.deb.sig \
              "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage "$BUNDLE"/appimage/*_"$VERSION"_*.AppImage.sig; do
       [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
@@ -119,6 +121,7 @@ case "$PLATFORM" in
     # slices remain unpublished. A single-file Server (no slices) and the GUI
     # installer are valid and pass through unchanged.
     _win_inno_dir="$ROOT/src-tauri/target/windows-vm/bundle/inno"
+    RETENTION_PATHS=("$ROOT/src-tauri/target/windows-vm" "$_win_inno_dir")
     if papercusp_normalize_spanned_server "$_win_inno_dir" "$VERSION"; then
       _win_kept=()
       for _a in "${NEW_ARTIFACTS[@]}"; do
@@ -136,6 +139,7 @@ case "$PLATFORM" in
     ;;
   mac)
     OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+    RETENTION_PATHS=("$ROOT/src-tauri/target/universal-apple-darwin" "$OUT")
     for f in "$OUT"/dmg/*_"$VERSION"_*.dmg "$OUT"/macos/*.app.tar.gz "$OUT"/macos/*.app.tar.gz.sig; do
       [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
     done
@@ -201,6 +205,7 @@ else
   echo "==> no prior artifact-set recorded for $TAG — this is the first platform recorded"
 fi
 release_artifacts_write "$TAG" "${EXISTING_ARTIFACTS[@]}" "${NEW_ARTIFACTS[@]}" >/dev/null
+papercusp_retain_release_paths "${RETENTION_PATHS[@]}" "${NEW_ARTIFACTS[@]}" || exit 1
 
 # ── [5] recurrence guard + hand-off ──────────────────────────────────────────
 if release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON"; then

@@ -40,10 +40,16 @@ ok()  { echo "  ✓ $*"; }
 bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 
 WORK="$(mktemp -d /tmp/relart-selftest.XXXXXX)"
+# Keep lease and audit state hermetic; release-artifacts.sh defaults to the
+# user's durable retention directory in production.
+RETENTION_ROOT="$WORK/retention"
+export PAPERCUSP_RELEASE_RETENTION_ROOT="$RETENTION_ROOT"
+export PAPERCUSP_RELEASE_DELETION_AUDIT_PATH="$RETENTION_ROOT/deletion-audit.tsv"
 # Unique tags so the /tmp manifests can't collide with a real cut or a parallel run.
 TAG="desktop-v0.0.0-selftest-$$"
 TAG_EMPTY="desktop-v0.0.0-selftest-empty-$$"
 TAG_FRESH="desktop-v0.0.0-selftest-fresh-$$"
+TAG_GUARD="desktop-v0.0.0-selftest-guard-$$"
 cleanup() {
   rm -rf "$WORK"
   rm -f "$(release_artifacts_manifest_path "$TAG")" "$(release_artifacts_manifest_path "$TAG_EMPTY")" "$(release_artifacts_manifest_path "$TAG_FRESH")" "$(release_artifacts_cut_start_path "$TAG_FRESH")"
@@ -218,6 +224,24 @@ else
   ok "single-file Server is not classified as spanned"
 fi
 
+# 0d) release callers must all use the shared retention/guard seam. A helper
+# unit alone is not enough: a raw cleanup added back to one producer would
+# silently reopen the disappearing-artifact class.
+declare -A wiring_need=(
+  [build-linux-local.sh]='papercusp_retain_release_paths'
+  [build-appimage.sh]='release_artifacts_guarded_delete'
+  [build-windows-cross.sh]='papercusp_retain_release_paths'
+  [publish-platform-incremental.sh]='papercusp_retain_release_paths'
+  [release-local.sh]='release_artifacts_guarded_delete'
+)
+for script in "${!wiring_need[@]}"; do
+  if grep -Fq "${wiring_need[$script]}" "$DIR/../$script"; then
+    ok "$script uses the shared release-retention seam"
+  else
+    bad "$script bypasses the shared release-retention seam"
+  fi
+done
+
 # 1) write -> read round-trip carries the .bin slices AND the inno .exe/.sig.
 release_artifacts_write "$TAG" "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB" >/dev/null
 mapfile -t GOT < <(release_artifacts_read "$TAG")
@@ -227,6 +251,56 @@ have_in_got "$BIN1" && ok "carries Server .bin slice 1 (gap 2)"        || bad ".
 have_in_got "$BIN2" && ok "carries Server .bin slice 2 (gap 2)"        || bad ".bin slice 2 was dropped (gap 2 regression)"
 have_in_got "$EXE"  && ok "carries the inno -setup.exe (gap 1)"        || bad "inno .exe missing (gap 1 regression)"
 have_in_got "$SIG"  && ok "carries the inno .sig"                      || bad "inno .sig missing"
+
+# The lease handoff must preserve each path independently. Passing the whole
+# manifest through one command substitution collapses all five paths into one
+# malformed marker, especially when names contain spaces.
+LEASE="$(release_artifacts_retention_lease_path "$TAG")"
+mapfile -t LEASE_PATHS < <(release_artifacts_retention_lease_read_paths "$LEASE")
+if [[ ${#LEASE_PATHS[@]} -eq 5 ]]; then
+  ok "retention lease records each manifest path independently"
+else
+  bad "retention lease recorded ${#LEASE_PATHS[@]} paths, expected 5"
+fi
+for expected in "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB"; do
+  expected="$(release_artifacts_normalize_path "$expected")"
+  have_lease_path=0
+  for leased in "${LEASE_PATHS[@]}"; do
+    [[ "$leased" == "$expected" ]] && have_lease_path=1 && break
+  done
+  [[ "$have_lease_path" -eq 1 ]] \
+    && ok "lease retains $(basename "$expected") as an independent path" \
+    || bad "lease omitted independent path $(basename "$expected")"
+done
+
+# 1b) guarded deletion denies an actively leased root, allows an unleased path,
+# and audits both decisions with the deleter identity.
+PROTECTED="$WORK/protected-target"; FREE="$WORK/free-target"
+mkdir -p "$PROTECTED"; : > "$PROTECTED/final.deb"; : > "$FREE"
+release_artifacts_retention_lease_acquire "$TAG_GUARD" "$PROTECTED" >/dev/null
+if release_artifacts_guarded_delete "$PROTECTED" >/dev/null 2>&1; then
+  bad "guarded deletion allowed an actively leased target root"
+else
+  ok "guarded deletion denies an actively leased target root"
+fi
+[[ -d "$PROTECTED" ]] && ok "denied target root remains intact" || bad "denied target root was removed"
+if grep -Fq "decision=deny" "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
+  ok "denied deletion is audited"
+else
+  bad "denied deletion was not audited"
+fi
+if release_artifacts_guarded_delete "$FREE" >/dev/null 2>&1; then
+  ok "guarded deletion allows an unleased path"
+else
+  bad "guarded deletion rejected an unleased path"
+fi
+[[ ! -e "$FREE" ]] && ok "allowed target path is removed" || bad "allowed target path remains"
+if grep -Fq "decision=allow" "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
+  ok "allowed deletion is audited"
+else
+  bad "allowed deletion was not audited"
+fi
+release_artifacts_retention_lease_release "$TAG_GUARD" >/dev/null
 
 # 2) read drops a vanished file and de-duplicates a repeated path.
 release_artifacts_write "$TAG" "$EXE" "$EXE" "$SIG" "$BIN1" "$BIN2" "$DEB" >/dev/null  # $EXE twice
