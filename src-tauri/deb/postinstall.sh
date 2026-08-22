@@ -15,6 +15,29 @@ set -e
 # Only on a real install/upgrade configure.
 [ "$1" = "configure" ] || exit 0
 
+# The Linux Server is a real, package-owned systemd user service. Use Debian's
+# standard package-wide user-unit helper rather than reaching into one logged-in
+# user's HOME from this root maintainer script. `enable` creates the global
+# graphical-session.target.wants link on first install, so every user manager
+# starts the Server at its next graphical login; `update-state` preserves an
+# administrator's explicit disable across upgrades.
+#
+# This maintainer script is shared by the GUI and Server overlays. Gate on the
+# binary package name so installing/upgrading the GUI cannot claim ownership of
+# the Server unit merely because the sibling product is already on disk.
+SERVER_USER_UNIT=papercusp-server.service
+if [ "${DPKG_MAINTSCRIPT_PACKAGE:-}" = "papercusp-server" ] \
+  && [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
+  && [ -z "${DPKG_ROOT:-}" ] \
+  && command -v deb-systemd-helper >/dev/null 2>&1; then
+  deb-systemd-helper --user unmask "$SERVER_USER_UNIT" >/dev/null || true
+  if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
+    deb-systemd-helper --user enable "$SERVER_USER_UNIT" >/dev/null || true
+  else
+    deb-systemd-helper --user update-state "$SERVER_USER_UNIT" >/dev/null || true
+  fi
+fi
+
 # Resolve the installed sidecar dir. Tauri names the app dir after the bundle's
 # productName ("Papercusp GUI" / "Papercusp Server" — WITH a space), so the old
 # hardcoded /usr/lib/Papercusp/sidecar never matched on a real install and

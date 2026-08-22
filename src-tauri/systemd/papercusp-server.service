@@ -1,0 +1,17 @@
+[Unit]
+Description=Papercusp Server
+Documentation=https://papercuspai.com
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionPathIsExecutable=/usr/bin/papercusp-desktop
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/papercusp-desktop
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=graphical-session.target

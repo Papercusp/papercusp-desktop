@@ -194,6 +194,41 @@ test('Debian removal tears down only verified Papercusp process ownership', () =
   assert.match(preRemove, /kill -KILL "\$pid"/);
 });
 
+test('Linux Server deb installs and package-enables one systemd user service', () => {
+  const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
+  const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
+  const unitPath = path.join(desktopRoot, 'src-tauri/systemd/papercusp-server.service');
+  const unit = fs.readFileSync(unitPath, 'utf8');
+  const postinstallPath = path.join(desktopRoot, 'src-tauri/deb/postinstall.sh');
+  const postinstall = fs.readFileSync(postinstallPath, 'utf8');
+  const postremovePath = path.join(desktopRoot, 'src-tauri/deb/postremove.sh');
+  const postremove = fs.readFileSync(postremovePath, 'utf8');
+  const rustMain = fs.readFileSync(path.join(desktopRoot, 'src-tauri/src/main.rs'), 'utf8');
+
+  assert.equal(baseConfig.bundle.linux.deb.files, undefined, 'the GUI package must not ship the Server unit');
+  assert.deepEqual(serverConfig.bundle.linux.deb.files, {
+    '/usr/lib/systemd/user/papercusp-server.service': 'systemd/papercusp-server.service',
+  });
+
+  assert.match(unit, /^\[Unit\]$/m);
+  assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-desktop$/m);
+  assert.match(unit, /^Restart=on-failure$/m);
+  assert.match(unit, /^KillMode=mixed$/m);
+  assert.match(unit, /^WantedBy=graphical-session\.target$/m);
+  assert.equal(childProcess.spawnSync('sh', ['-n', postinstallPath]).status, 0);
+  assert.equal(childProcess.spawnSync('sh', ['-n', postremovePath]).status, 0);
+
+  assert.match(postinstall, /DPKG_MAINTSCRIPT_PACKAGE:-.*papercusp-server/);
+  assert.match(postinstall, /deb-systemd-helper --quiet --user was-enabled "\$SERVER_USER_UNIT"/);
+  assert.match(postinstall, /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/);
+  assert.match(postinstall, /deb-systemd-helper --user update-state "\$SERVER_USER_UNIT"/);
+  assert.match(postremove, /deb-systemd-helper --user purge papercusp-server\.service/);
+
+  assert.match(rustMain, /#\[cfg\(not\(target_os = "linux"\)\)\]\s+fn enable_login_autostart/s);
+  assert.match(rustMain, /#\[cfg\(target_os = "linux"\)\]\s+fn enable_login_autostart/s);
+  assert.match(rustMain, /login auto-start is managed by papercusp-server\.service/);
+});
+
 test('sidecar ships the standalone project-history generator with the shared ESM banner', () => {
   const postinstall = fs.readFileSync(
     path.join(desktopRoot, 'src-tauri/deb/postinstall.sh'),

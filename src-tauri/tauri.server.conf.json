@@ -15,6 +15,9 @@
     ],
     "linux": {
       "deb": {
+        "files": {
+          "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service"
+        },
         "conflicts": ["papercusp-gui"],
         "replaces": ["papercusp-gui"]
       }

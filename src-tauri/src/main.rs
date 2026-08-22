@@ -5559,6 +5559,14 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 /// Register the Server bundle to launch at login (idempotent).
+///
+/// Linux is package-owned instead: the Server `.deb` installs and globally
+/// enables `papercusp-server.service` for `graphical-session.target`. Calling
+/// the Tauri plugin here as well would create an XDG autostart entry only after
+/// the first manual launch and then double-launch the systemd-managed Server on
+/// later logins. Keep the runtime plugin for the macOS/Windows installers,
+/// whose login-item registration is intentionally performed by the app.
+#[cfg(not(target_os = "linux"))]
 fn enable_login_autostart(app: &tauri::App) {
     use tauri_plugin_autostart::ManagerExt;
     let mgr = app.autolaunch();
@@ -5570,6 +5578,13 @@ fn enable_login_autostart(app: &tauri::App) {
         },
         Err(e) => eprintln!("[papercusp-server] auto-start state unknown: {e}"),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn enable_login_autostart(_app: &tauri::App) {
+    println!(
+        "[papercusp-server] login auto-start is managed by papercusp-server.service"
+    );
 }
 
 /// Prepare rotated stdout+stderr sinks for the sidecar under
@@ -8097,10 +8112,11 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
         // dev-path registers shortcuts, so a packaged build carries nothing.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        // Login auto-start for the Server role (enabled only in server_setup).
-        // Cross-platform: macOS LaunchAgent, Windows HKCU Run, Linux XDG
-        // autostart. Registered on both roles (shared Builder) but only the
-        // Server ever calls .enable(), so the GUI carries an inert plugin.
+        // Runtime login auto-start for the Server role (enabled only in
+        // server_setup). macOS uses a LaunchAgent and Windows uses HKCU Run.
+        // Linux is package-owned by papercusp-server.service instead; the
+        // plugin stays registered there only because this Builder is shared,
+        // but enable_login_autostart deliberately does not call `.enable()`.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,

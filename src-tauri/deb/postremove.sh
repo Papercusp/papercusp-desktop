@@ -3,6 +3,19 @@
 # dpkg-tracked files, so dpkg won't reap them on its own). ghostty is left
 # installed — it's a normal apt package the user may want independently.
 set -e
+
+# Match dh_installsystemduser's purge semantics for the Server-only user unit.
+# `remove` intentionally preserves the administrator's enable/disable choice so
+# a later reinstall restores it; `purge` removes the helper state and global
+# graphical-session.target.wants link. The package-name gate matters because
+# this postrm is shared with the independently installed GUI product.
+if [ "$1" = "purge" ] \
+  && [ "${DPKG_MAINTSCRIPT_PACKAGE:-}" = "papercusp-server" ] \
+  && [ -z "${DPKG_ROOT:-}" ] \
+  && command -v deb-systemd-helper >/dev/null 2>&1; then
+  deb-systemd-helper --user purge papercusp-server.service >/dev/null || true
+fi
+
 case "$1" in
   remove|purge)
     rm -f /usr/bin/psu /usr/bin/ptool /usr/bin/papercusp
