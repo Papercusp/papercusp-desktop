@@ -1119,9 +1119,16 @@ preflight_attestation_write_account() {
     return 1
   fi
 
-  actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null || true)"
-  if [ -z "$actual_login" ]; then
+  # Preserve the command verdict. `gh api --jq` can still print GitHub's JSON
+  # error body on a non-zero response (observed live: HTTP 403 rate-limit), so
+  # `... || true` turned that whole object into `actual_login` and mislabeled an
+  # unavailable identity as a mismatched account.
+  if ! actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)"; then
     echo "ATTESTATION_WRITE: user=$expected_user code=identity_unavailable detail=GET-/user-failed"
+    return 1
+  fi
+  if [ -z "$actual_login" ]; then
+    echo "ATTESTATION_WRITE: user=$expected_user code=identity_unavailable detail=GET-/user-empty"
     return 1
   fi
   if [[ "${actual_login,,}" != "${expected_user,,}" ]]; then
@@ -1197,6 +1204,7 @@ P_B_USER="${P_B_USER:-aviynw}"
 ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
 ATTESTATION_PREFLIGHT_RC=$?
 ATTESTATION_BLOCKED=0
+ATTESTATION_IDENTITY_BLOCKED=0
 if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
   printf '%s\n' "$ATTESTATION_PREFLIGHT_OUTPUT" >"$WORK/attestation-preflight.out"
   ATTESTATION_PREFLIGHT_SUMMARY="$(printf '%s' "$ATTESTATION_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
@@ -1204,22 +1212,34 @@ if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
   log "ATTESTATION WRITE PREFLIGHT RED before build: $ATTESTATION_PREFLIGHT_SUMMARY"
   echo "$(now_s)" >"$STATE_DIR/last-run"
 
-  # WI-39359 — DO NOT BLIND THE WHOLE GATE ON A CREDENTIAL WALL.
-  # Measured 2026-08-16: local-matrix.sh has ZERO functional attestation dependency (its only
-  # three gist/attest matches are comments), while two-instance-content-matrix-smoke.sh has 37
-  # (incl. its own preflight_attestation) and two-instance-hive-from-repo-smoke.sh has 45. So
-  # when both GitHub identities cannot mint an attestation gist, the two GitHub-dependent legs
-  # genuinely cannot run — but the 18-scenario local matrix (membership_churn, content_bidir,
-  # replication_soak, restart_durability) still can, and it is the leg that carries the core
-  # federation behaviour. Between 2026-08-14 and 2026-08-16 this early exit voided ~50 runs of
-  # p2p coverage over a credential fault none of those scenarios touch.
+  # WI-40008: local-matrix is independent of attestation GIST WRITES, but it is
+  # not independent of GitHub IDENTITY AUTHENTICATION. Its join-pot path must
+  # resolve each frame's token to the expected account before the frame can join
+  # a Hive. Run 20260822-105117 already carried an identity_mismatch/HTTP-403
+  # result here, but the carve-out below ignored it, provisioned three frames,
+  # and spent ~52 minutes reporting no_member_joined + vacuous convergence
+  # timeouts as a product RED. Only a write-only wall (for example
+  # email_unverified after GET /user succeeded) may use the independent leg.
+  if printf '%s\n' "$ATTESTATION_PREFLIGHT_OUTPUT" \
+      | grep -qE 'code=(token_missing|identity_unavailable|identity_mismatch|same_account)([[:space:]]|$)'; then
+    ATTESTATION_IDENTITY_BLOCKED=1
+  fi
+
+  # WI-39359 — DO NOT BLIND THE WHOLE GATE ON A WRITE-ONLY CREDENTIAL WALL.
+  # local-matrix does not create attestation gists, so a token that authenticates
+  # successfully but cannot POST a gist may still exercise its core federation
+  # scenarios. Identity-unavailable/mismatched tokens cannot: join-pot depends on
+  # the resolved GitHub principal and will reject every join before swarm entry.
   # COST CONTROL: only continue when the local-matrix leg is genuinely DUE, so the cheap early
   # exit (the reason this preflight exists — it saves a multi-GB build) still governs every
   # other window. Never GREEN in this state; see the ATTESTATION_BLOCKED guard at the verdict.
-  if local_matrix_due; then
+  if local_matrix_due && [ "$ATTESTATION_IDENTITY_BLOCKED" != 1 ]; then
     ATTESTATION_BLOCKED=1
-    log "ATTESTATION WALL: neither identity can mint an attestation gist, but local-matrix is DUE and has no attestation dependency — running it instead of voiding the window. GitHub-dependent legs will report SKIPPED-ATTESTATION-WALL."
+    log "ATTESTATION WRITE WALL: both identities authenticated, but at least one cannot mint an attestation gist; local-matrix is DUE and gist-write-independent, so running it while GitHub-dependent legs report SKIPPED-ATTESTATION-WALL."
   else
+    if [ "$ATTESTATION_IDENTITY_BLOCKED" = 1 ]; then
+      log "ATTESTATION IDENTITY WALL: at least one frame identity cannot authenticate as its expected GitHub account — local-matrix cannot admit joiners; refusing a vacuous, expensive run."
+    fi
     verdict "GATE: RED (attestation-write-preflight) — $SUMMARY ; logs in $WORK"
   fi
 
