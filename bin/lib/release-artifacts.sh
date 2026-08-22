@@ -187,11 +187,11 @@ release_artifacts_retention_lease_acquire() {
     return 2
   }
   root="$(release_artifacts_retention_root)"
-  lease="$(release_artifacts_retention_lease_path "$tag")"
   mkdir -p "$root" || {
     echo "release-artifacts: cannot create retention root $root." >&2
     return 1
   }
+  lease="$(release_artifacts_retention_lease_path "$tag")"
 
   local -a paths=()
   existing_expires=""
@@ -239,9 +239,9 @@ release_artifacts_retention_lease_acquire() {
     echo "release-artifacts: PAPERCUSP_RELEASE_RETENTION_TTL_SEC must be a non-negative integer." >&2
     return 2
   }
+  tmp="$(mktemp "${lease}.tmp.XXXXXX")" || return 1
   expires=0
   (( ttl > 0 )) && expires=$((now + ttl * 1000000000))
-  tmp="$(mktemp "${lease}.tmp.XXXXXX")" || return 1
   {
     printf 'schema=papercusp-release-retention/v1\n'
     printf 'tag=%s\n' "$tag"
@@ -300,9 +300,14 @@ release_artifacts_retention_lease_read_paths() {
 release_artifacts_retention_path_is_leased() {
   local candidate="${1:-}" root lease paths status path normalized
   [[ -n "$candidate" ]] || return 2
-  normalized="$(release_artifacts_normalize_path "$candidate")" || return 2
+  # Preserve the invalid-candidate status even when the retention root is absent,
+  # but do not retain the normalized reading across the root-existence return.
+  if ! release_artifacts_normalize_path "$candidate" >/dev/null; then
+    return 2
+  fi
   root="$(release_artifacts_retention_root)"
   [[ -d "$root" ]] || return 1
+  normalized="$(release_artifacts_normalize_path "$candidate")" || return 2
   local found=1
   for lease in "$root"/lease-*.tsv; do
     [[ -f "$lease" ]] || continue
@@ -338,10 +343,10 @@ release_artifacts_deletion_audit() {
   audit="$(release_artifacts_deletion_audit_path)"
   actor="${PAPERCUSP_RELEASE_DELETER:-${BASH_SOURCE[1]##*/}}"
   [[ -n "$actor" ]] || actor="${0##*/}"
-  timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
   decision="${decision//$'\t'/ }"; path="${path//$'\t'/ }"
   leases="${leases//$'\t'/ }"; reason="${reason//$'\t'/ }"
   mkdir -p "$(dirname "$audit")" || return 1
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
   printf '%s\tpid=%s\tdeleter=%s\tdecision=%s\tpath=%s\tlease=%s\treason=%s\n' \
     "$timestamp" "$$" "$actor" "$decision" "$path" "${leases:-none}" "${reason:-none}" >> "$audit"
 }
