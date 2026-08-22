@@ -492,6 +492,14 @@ mod tests {
     }
 
     fn spawn_test(args: &[&str]) -> (String, Arc<PtyEntry>, mpsc::Receiver<Vec<u8>>) {
+        // portable-pty snapshots HOME when CommandBuilder is created and uses
+        // it as the default current directory. The workspace tests also
+        // temporarily replace and remove HOME, so let every PTY test share the
+        // crate-wide guard or a concurrent spawn can fail with ENOENT before
+        // bash starts (the error is reported as "spawn child").
+        let _home_guard = crate::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let opts = PtySpawnOpts {
             command: "bash".into(),
             args: args.iter().map(|s| s.to_string()).collect(),
