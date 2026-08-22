@@ -257,6 +257,7 @@ done
 if [[ " $ROLES " == *" gui "* ]]; then
   echo "==> [5/5] building Linux AppImage (gui, build-appimage.sh)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+     PAPERCUSP_BUILD_LINUX_COLLECTING=1 \
      TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
      bash "$ROOT/bin/build-appimage.sh")
 fi
@@ -288,6 +289,11 @@ else
 fi
 
 [[ ${#collected[@]} -gt 0 ]] || { echo "ERROR: no Linux artifacts collected for version $VERSION under $SRC_BUNDLE"; exit 1; }
+
+# The AppImage leg is a child of this producer and moves its finished output
+# into DEST_BUNDLE; retain the final roots only after that collection is done
+# so the lease cannot block the producer's own move.
+papercusp_retain_release_paths "$SRC_ROOT" "$DEST_BUNDLE" "${collected[@]}" || exit 1
 
 echo "=== LINUX BUILD DONE  $(date -u +%H:%M:%SZ) ==="
 echo "Artifacts (under papercusp-desktop/src-tauri/target/release/bundle):"
