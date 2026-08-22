@@ -318,3 +318,31 @@ test('every leg that PACKS a sidecar names it; the salvage path deliberately doe
       'because the mac block gained one, that is a fabricated provenance record, not a fix.',
   );
 });
+
+test('the future Darwin sidecar build receives release identity and source provenance', () => {
+  const releaseLocal = fs.readFileSync(path.join(BIN, 'release-local.sh'), 'utf8');
+  const start = releaseLocal.indexOf('echo "==> building darwin sidecar');
+  const end = releaseLocal.indexOf('mac_env=(', start);
+  assert.ok(start >= 0, 'release-local.sh is missing the Darwin sidecar build block');
+  assert.ok(end > start, 'Darwin sidecar block no longer ends before mac_env');
+
+  const block = releaseLocal.slice(start, end);
+  const invocation = block.match(
+    /env\s+\\\s*TARGET_OS=darwin[\s\S]*?bash "\$ROOT\/bin\/build-desktop-sidecar\.sh"/,
+  );
+  assert.ok(
+    invocation,
+    'the Darwin sidecar must be launched through the release-local env boundary',
+  );
+
+  const command = invocation[0];
+  assert.match(command, /PAPERCUSP_SIDECAR_OUT="\$MAC_SIDECAR_DIR"/);
+  assert.match(
+    command,
+    /PAPERCUSP_BUILD_SHA=\$BUILD_SHA/,
+    'the sidecar emitter must receive the cut-start build SHA, not an empty default',
+  );
+  assert.match(command, /PAPERCUSP_BUILD_VERSION=\$VERSION/);
+  assert.match(command, /PROVENANCE_SOURCE_GIT_HEAD=\$PROVENANCE_SOURCE_GIT_HEAD/);
+  assert.match(command, /PROVENANCE_SOURCE_GIT_DIRTY=\$PROVENANCE_SOURCE_GIT_DIRTY/);
+});
