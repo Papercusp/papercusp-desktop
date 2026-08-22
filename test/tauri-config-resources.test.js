@@ -311,8 +311,16 @@ test('manual platform producers preserve the exact thin-GUI allowlist', () => {
   const inno = readText('src-tauri', 'windows', 'inno', 'papercusp.iss');
 
   assert.match(appImage, /GUI_SPA_SOURCE="\$DESK\/src-tauri\/sidecar\/spa"/);
-  assert.match(appImage, /find "\$APPDIR_SIDECAR"[^\n]+! -name spa[^\n]+rm -rf/);
-  assert.match(appImage, /rm -rf -- "\$LIBDIR\/resources" "\$LIBDIR\/seed"/);
+  assert.match(
+    appImage,
+    /while IFS= read -r -d '' _stale_sidecar; do[\s\S]*release_artifacts_guarded_delete "\$_stale_sidecar"[\s\S]*done < <\(find "\$APPDIR_SIDECAR"[^)]*! -name spa -print0\)/,
+    'the AppImage producer must delete every non-SPA sidecar member through the retention-aware guard',
+  );
+  assert.match(
+    appImage,
+    /release_artifacts_guarded_delete "\$LIBDIR\/resources" "\$LIBDIR\/seed"/,
+    'Server-only resource roots must be removed through the retention-aware guard',
+  );
   assert.doesNotMatch(
     appImage,
     /rsync -a --delete "\$DESK\/src-tauri\/sidecar"\//,
