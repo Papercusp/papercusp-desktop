@@ -129,6 +129,11 @@ scn_attestation_membership() {
   # did not bump the counter".
   local wrong_on_b
   wrong_on_b="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_wrong';" 2>/dev/null | tr -d '[:space:]')"
+  # WI-40549: report AT the measurement point. The scoring message below is only
+  # reached on ONE of this leg's exit paths; the post-probe-UNMEASURED bail
+  # returns without ever printing this, and that is precisely the path where
+  # "did the probe land on b?" decides rig-fault vs product-fault.
+  rig_reading "LEG3.probe-on-b" "$wrong_on_b"
   rc_after=""; rc_after_measured=0
   for i in $(seq 1 40); do
     rc_after="$(drv_psql a "SELECT COALESCE(sum(count),0) FROM harness_shared.p2p_refused_op_counters WHERE harness_slug='$RIG_HIVE_ID' AND reason='receipt-apply:responder_mismatch';" 2>/dev/null | tr -d '[:space:]')"
@@ -392,6 +397,11 @@ _scn_attestation_unattested_device_core() {
   # scoring message below, where it separates "rig never emitted the probe" from "A failed to refuse".
   local probe_on_b
   probe_on_b="$(drv_psql b "SELECT count(*) FROM harness_shared.p2p_receipts WHERE harness_slug='$RIG_HIVE_ID' AND receipt_id='$rid_rem';" 2>/dev/null | tr -d '[:space:]')"
+  # WI-40549: report AT the measurement point. BOTH the post-probe-UNMEASURED
+  # bail below and the OK path return without printing this reading, so on a
+  # green run and on a dead-probe run alike it was silently discarded — leaving
+  # no way to tell "the rig never emitted the probe" from "A behaved correctly".
+  rig_reading "LEG4.probe-on-b" "$probe_on_b"
   rc_after=""; rc_after_measured=0
   local i
   for i in $(seq 1 40); do

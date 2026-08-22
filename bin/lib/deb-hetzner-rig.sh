@@ -1429,6 +1429,43 @@ EOF
 }
 
 # ── NEGATIVE assertion (the Brief 3 revocation / security primitive) ──────────
+# rig_reading <label> <value> — emit a measured value AT ITS MEASUREMENT POINT, in
+# three DISTINGUISHABLE states, so that no later early-return can discard it.
+#
+# WI-40549 (the "computed here, reported there" class). A scenario repeatedly
+# measures a diagnostic, then reaches its scoring message through one of SEVERAL
+# exit paths — and only ONE of those paths interpolates the value. Every other
+# path (an UNMEASURED bail, an early PASS) returns having silently thrown the
+# reading away. Two live instances in b9-attestation.sh alone: $wrong_on_b is
+# measured at L131 but the post-probe-UNMEASURED return at L139 prints it
+# nowhere, and $probe_on_b is measured at L394 and discarded by BOTH the L405
+# UNMEASURED return and the L443 OK path. The reading is most valuable in
+# exactly the paths that dropped it: when a leg bails early, "did the probe ever
+# land?" is the question separating a rig fault from a real product failure, and
+# it is unrecoverable after the fact because the frames are torn down.
+#
+# The fix is positional, not per-exit-path: report at the point of MEASUREMENT
+# and every exit path inherits it for free. Patching each scoring message
+# instead leaves the next added early-return silently broken again.
+#
+# THREE states, never two — an empty reading is NOT a zero. Collapsing them is
+# the same false-negative class rig_assert_absent guards below: "the probe
+# returned 0" and "the probe never ran" imply opposite conclusions about whether
+# to suspect the rig or the feature.
+#
+# Writes to stderr: scenario STDOUT is the scored verdict channel (b5-restart.sh
+# redirects it to a tmp file), so a diagnostic on stdout could corrupt scoring.
+rig_reading() {
+  local label="$1" value="${2-}"
+  if [ -z "$value" ]; then
+    echo "  ⚠ reading[$label]=<unmeasured> — the probe returned nothing, so 'zero' and 'never ran' are indistinguishable here; suspect the rig before the feature" >&2
+  elif [ "$value" = "0" ]; then
+    echo "  · reading[$label]=0 (genuinely measured as zero)" >&2
+  else
+    echo "  · reading[$label]=$value (measured)" >&2
+  fi
+}
+
 # rig_assert_absent <inst> <feature_id> [tries] — assert a feature row does NOT
 # arrive on <inst> within tries×3s. The inverse of fed_*_merge_assert: it WAITS
 # the full window and PASSES iff the row never shows up (a revoked/banned member
