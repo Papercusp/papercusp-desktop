@@ -820,7 +820,7 @@ pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 
 #[cfg(test)]
 mod tests {
-    use super::windows_path_to_wsl;
+    use super::{provision_env_operators_for_profile, windows_path_to_wsl};
     use std::path::PathBuf;
 
     fn t(input: &str, expected: &str) {
@@ -872,6 +872,8 @@ mod tests {
             "PAPERCUSP_BIND_HOST",
             "PAPERCUSP_SIDECAR_BIN",
             "PAPERCUSP_SERVE_UI",
+            // D-043/P-050: the immutable runtime guard reads the exact profile.
+            "PAPERCUSP_DISTRIBUTION_PROFILE",
             // WI-39304: logical seed restore needs the bundled pg_restore path;
             // dropping it here makes Windows silently fall back to full replay.
             "PAPERCUSP_PG_RESTORE_BIN",
@@ -887,6 +889,13 @@ mod tests {
                  It will look fine on Linux and Mac and be dead on Windows. WSLENV = {wslenv}"
             );
         }
+    }
+
+    #[test]
+    fn vm_release_forces_environment_operator_provisioning_off() {
+        assert_eq!(provision_env_operators_for_profile("vm-release"), "0");
+        assert_eq!(provision_env_operators_for_profile("dogfood"), "1");
+        assert_eq!(provision_env_operators_for_profile(""), "1");
     }
 
     /// WI-37736 — the INVERSE of the test above, and the reason it exists:
@@ -6015,7 +6024,7 @@ fn bring_up_sidecar(
 /// So: if you add a `.env(...)` to `spawn_serve` that the SIDECAR reads, add it
 /// here too. `wslenv_forwards_every_var_the_sidecar_reads` pins the ones we know
 /// are load-bearing.
-const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
+const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_DISTRIBUTION_PROFILE:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
      PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
      PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
      PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_PG_RESTORE_BIN/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
@@ -6028,6 +6037,18 @@ const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCU
      PAPERCUSP_SOURCE_ARCHIVE/p:PAPERCUSP_DEV_SOURCE_DIR:\
      PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP:\
      PAPERCUSP_RELEASE_HOST:PAPERCUSP_WORKSPACES_ROOT/p:PAPERCUSP_HOME/p";
+
+fn baked_distribution_profile() -> &'static str {
+    option_env!("PAPERCUSP_DISTRIBUTION_PROFILE").unwrap_or("dogfood")
+}
+
+fn provision_env_operators_for_profile(profile: &str) -> &'static str {
+    if profile == "vm-release" {
+        "0"
+    } else {
+        "1"
+    }
+}
 
 fn spawn_serve(
     via_wsl: bool,
@@ -6257,6 +6278,10 @@ fn spawn_serve(
             "PAPERCUSP_BUILD_VERSION",
             option_env!("PAPERCUSP_BUILD_VERSION").unwrap_or(""),
         )
+        .env(
+            "PAPERCUSP_DISTRIBUTION_PROFILE",
+            baked_distribution_profile(),
+        )
         // AUTO-UPDATE: where the shipped app looks for releases (WI-4389,
         // plan desktop-release-hosting-r2-2026-07-12 D-001..D-003).
         //
@@ -6320,7 +6345,10 @@ fn spawn_serve(
         // graceful (skips already-served ports / missing source tree or
         // toolchain) and every spawned sibling is request-only (EI-126
         // single-writer), so arming it on every desktop sidecar spawn is safe.
-        .env("PAPERCUSP_PROVISION_ENV_OPERATORS", "1")
+        .env(
+            "PAPERCUSP_PROVISION_ENV_OPERATORS",
+            provision_env_operators_for_profile(baked_distribution_profile()),
+        )
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
         .env("PAPERCUSP_SHARED_OPERATOR", "1")

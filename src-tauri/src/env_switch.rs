@@ -61,6 +61,21 @@ const TARGETS: [(&str, &str, u16, &str); 4] = [
     ),
 ];
 
+fn fixed_targets_for_profile(
+    profile: Option<&str>,
+) -> &'static [(&'static str, &'static str, u16, &'static str)] {
+    if profile == Some("vm-release") {
+        &[]
+    } else {
+        &TARGETS
+    }
+}
+
+fn fixed_targets() -> &'static [(&'static str, &'static str, u16, &'static str)] {
+    let profile = std::env::var("PAPERCUSP_DISTRIBUTION_PROFILE").ok();
+    fixed_targets_for_profile(profile.as_deref())
+}
+
 /// One env button the in-webview bar renders. Serialized camelCase for JS.
 #[derive(serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -99,7 +114,7 @@ fn read_persisted_target() -> Option<u16> {
     let txt = std::fs::read_to_string(persisted_target_path()?).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let port = v.get("port")?.as_u64()? as u16;
-    TARGETS
+    fixed_targets()
         .iter()
         .any(|(_, _, p, _)| *p == port)
         .then_some(port)
@@ -218,6 +233,9 @@ fn first_reachable(candidates: &[u16], reachable: impl Fn(u16) -> bool) -> Optio
 /// installs. Self is excluded: it just failed, so only the deployed fixed-port
 /// envs are fallback candidates.
 pub fn reachable_fallback_env() -> Option<u16> {
+    if fixed_targets().is_empty() {
+        return None;
+    }
     first_reachable(&[3070, 3170], port_reachable)
 }
 
@@ -244,7 +262,7 @@ pub fn retarget_for_url(app: &tauri::AppHandle, url: &url::Url) {
         return;
     }
     let Some(port) = url.port() else { return };
-    let Some((_, name, _, _)) = TARGETS.iter().find(|(_, _, p, _)| *p == port) else {
+    let Some((_, name, _, _)) = fixed_targets().iter().find(|(_, _, p, _)| *p == port) else {
         return;
     };
     retarget_api(app, port);
@@ -281,7 +299,7 @@ fn env_visible(dev_build: bool, reachable: bool, is_self: bool) -> bool {
 pub fn list_envs(window: tauri::WebviewWindow) -> Vec<EnvInfo> {
     let dev_build = cfg!(debug_assertions);
     let cur = window.url().ok().and_then(|u| u.port());
-    TARGETS
+    fixed_targets()
         .iter()
         .filter_map(|(label, name, port, tooltip)| {
             let reachable = port_reachable(*port);
@@ -336,7 +354,7 @@ pub fn navigate_to_env(window: &tauri::WebviewWindow, port: u16) {
 pub fn register_backstop_shortcuts(app: &tauri::App) {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
     let gs = app.global_shortcut();
-    for (idx, (_, _, port, _)) in TARGETS.iter().enumerate() {
+    for (idx, (_, _, port, _)) in fixed_targets().iter().enumerate() {
         let accel = format!("CmdOrCtrl+Alt+{}", idx + 1);
         let p = *port;
         let res = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
@@ -560,5 +578,12 @@ mod tests {
         assert!(!env_visible(false, false, false)); // unreachable + not self → hidden
         assert!(env_visible(false, true, false)); // a provisioned bundled sidecar → shown
         assert!(env_visible(false, false, true)); // the env we're currently on → always shown
+    }
+
+    #[test]
+    fn vm_release_has_no_fixed_dogfood_environment_targets() {
+        assert!(fixed_targets_for_profile(Some("vm-release")).is_empty());
+        assert_eq!(fixed_targets_for_profile(Some("dogfood")).len(), 4);
+        assert_eq!(fixed_targets_for_profile(None).len(), 4);
     }
 }
