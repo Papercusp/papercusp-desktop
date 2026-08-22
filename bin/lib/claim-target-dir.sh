@@ -138,6 +138,28 @@ __pc_claim_target_dir() {
         exec 8>&-
         continue
       fi
+      # A slot name can outlive the storage it points at. This host deliberately
+      # relocates the warm Cargo caches with symlinks; after the backing root was
+      # removed, slot 1 remained a dangling ~/.cargo-target-dev2 symlink. `flock`
+      # quite correctly claimed the OUT-OF-TREE lock, but Cargo then failed before
+      # compilation with ENOTDIR while trying to create the target directory.
+      #
+      # Fail safe for the whole non-directory class. A missing ordinary path is
+      # valid (Cargo creates it), but a symlink whose target is missing, a symlink
+      # to a file, or a regular file occupying the slot can never become a target
+      # directory without deleting/replacing something this launcher does not own.
+      # Skip it and let the next stable slot (or private pid fallback) carry the
+      # build instead of destructively repairing host state here.
+      if [[ -L "$dir" && ! -e "$dir" ]]; then
+        echo "→ slot $i SKIPPED: target root $dir is a broken symlink — preserving it and isolating the build" >&2
+        exec 8>&-
+        continue
+      fi
+      if [[ -e "$dir" && ! -d "$dir" ]]; then
+        echo "→ slot $i SKIPPED: target root $dir exists but is not a directory — preserving it and isolating the build" >&2
+        exec 8>&-
+        continue
+      fi
       # The lock was free — but that only means no LAUNCHER is alive. Before building
       # into this dir, ask the question that actually decides safety: is a desktop still
       # RUNNING out of it? If so, skip the slot and isolate. Failing safe costs a cold

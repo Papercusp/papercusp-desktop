@@ -12,7 +12,15 @@
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { execFileSync, spawn } = require('node:child_process');
-const { mkdtempSync, rmSync, existsSync } = require('node:fs');
+const {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  lstatSync,
+  readlinkSync,
+  symlinkSync,
+  writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
@@ -109,6 +117,42 @@ test('slots are handed out in order, and exhaustion falls back to a PRIVATE dir 
     assert.notStrictEqual(overflow, join(home, '.cargo-target'));
   } finally {
     holders.forEach((h) => h.child.kill());
+  }
+});
+
+test('a broken target-dir symlink is preserved and skipped for the next usable slot', async () => {
+  const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' });
+  try {
+    assert.strictEqual(held.dir, join(home, '.cargo-target'));
+    const broken = join(home, '.cargo-target-dev2');
+    const missingTarget = join(home, 'relocated-cache-that-no-longer-exists');
+    symlinkSync(missingTarget, broken);
+
+    assert.strictEqual(
+      claim({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' }),
+      join(home, '.cargo-target-dev3'),
+    );
+    assert.ok(lstatSync(broken).isSymbolicLink(), 'the allocator must not replace the symlink');
+    assert.strictEqual(readlinkSync(broken), missingTarget, 'the allocator must preserve its target');
+  } finally {
+    held.child.kill();
+  }
+});
+
+test('a non-directory target-slot occupant is preserved and skipped', async () => {
+  const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' });
+  try {
+    assert.strictEqual(held.dir, join(home, '.cargo-target'));
+    const occupied = join(home, '.cargo-target-dev2');
+    writeFileSync(occupied, 'belongs to somebody else');
+
+    assert.strictEqual(
+      claim({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' }),
+      join(home, '.cargo-target-dev3'),
+    );
+    assert.strictEqual(require('node:fs').readFileSync(occupied, 'utf8'), 'belongs to somebody else');
+  } finally {
+    held.child.kill();
   }
 });
 
