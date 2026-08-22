@@ -67,17 +67,44 @@ echo "release-artifacts self-test (tag=$TAG)"
 # 0a) all three Windows entry points source and invoke the same helper. This is
 # a static wiring guard: a green helper unit alone would not catch a caller
 # silently bypassing it again.
+#
+# The source line is matched on the LIB PATH, not on one hard-coded spelling of
+# the directory variable. release-local.sh deliberately keeps two of them —
+# ORCHESTRATOR_HERE (from BASH_SOURCE, the real script dir) and HERE (from $0),
+# because an exact-source salvage cut sources this file with $0 pointed at a
+# frozen target tree — and it sources the helper via ORCHESTRATOR_HERE. Pinning
+# the guard to the literal `$HERE/` spelling therefore failed a caller that is
+# correctly wired, which is a false red on the shared gate rather than a caught
+# bypass.
+wiring_re='source[[:space:]]+"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/lib/inno-spanned-server\.sh"'
 for script in \
   "$DIR/../build-windows-cross.sh" \
   "$DIR/../publish-platform-incremental.sh" \
   "$DIR/../release-local.sh"; do
-  if grep -Fq 'source "$HERE/lib/inno-spanned-server.sh"' "$script" \
+  if grep -Eq "$wiring_re" "$script" \
      && grep -Fq 'papercusp_normalize_spanned_server' "$script"; then
     ok "$(basename "$script") uses shared Server span normalization"
   else
     bad "$(basename "$script") bypasses shared Server span normalization"
   fi
 done
+
+# 0a-CONTROL: the wiring guard must still FAIL a genuine bypass. Without this a
+# regex that matches nothing — or everything — reads as a clean pass.
+_wiring_probe="$(mktemp)"
+printf 'papercusp_normalize_spanned_server "$@"\n' > "$_wiring_probe"
+if grep -Eq "$wiring_re" "$_wiring_probe"; then
+  bad "CONTROL: wiring guard PASSED a script that never sources the helper"
+else
+  ok "CONTROL: wiring guard still fails a caller that only calls, never sources"
+fi
+printf 'source "$SOMEWHERE/lib/inno-spanned-server.sh"\n' > "$_wiring_probe"
+if grep -Eq "$wiring_re" "$_wiring_probe"; then
+  ok "CONTROL: wiring guard accepts any directory variable, not one spelling"
+else
+  bad "CONTROL: wiring guard rejected a correctly-sourced helper"
+fi
+rm -f "$_wiring_probe"
 
 # 0b) target roots may be symlinks. Resolve the root before any manual
 # artifact scan and follow links explicitly; a bare find over the link returns
