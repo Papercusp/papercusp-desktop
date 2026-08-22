@@ -5,6 +5,8 @@
 // the old Server and falsely attribute the resulting no-flip to EI-9002. Drive
 // the real Bash verifier through hermetic ssh/scp shims and require the complete,
 // provenance-matched Server Inno span to install before either app relaunches.
+// The Linux fixture also models a pristine overlay whose cached apt lists are
+// stale, so the verifier must refresh them before resolving the local .deb.
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -46,7 +48,7 @@ function writeProvenance(dir, sha = TARGET_SHA) {
   }));
 }
 
-function fixture() {
+function fixture({ requireHostKeyOptions = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-server-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -63,6 +65,10 @@ function fixture() {
   const flipped = join(root, 'flipped');
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking=no"* ]]; then
+  printf 'Host key verification failed: rotated host key\\n' >&2
+  exit 255
+fi
 case "$*" in
   *"cmd /c echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"--exec cat /home/papercup/.papercusp/operator.json"*) printf '{"port":15747}\\n' ;;
@@ -78,9 +84,13 @@ esac
 `);
   const scp = executable(shims, 'scp', `#!/usr/bin/env bash
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking=no"* ]]; then
+  printf 'Host key verification failed: rotated host key\\n' >&2
+  exit 255
+fi
 `);
 
-  return { root, gui, server, slices, log, flipped, ssh, scp };
+  return { root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions };
 }
 
 function linuxFixture() {
@@ -100,8 +110,19 @@ function linuxFixture() {
   const log = join(root, 'transport.log');
   const flipped = join(root, 'flipped');
   const configured = join(root, 'configured');
+  const updated = join(root, 'updated');
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$*" == *"apt-get update -qq"* ]]; then
+  : > "$MOCK_UPDATED"
+fi
+if [[ "$*" == *"apt-get install --yes"* ]]; then
+  if [[ ! -f "$MOCK_UPDATED" ]]; then
+    printf 'E: stale package indexes; refresh apt lists before installing\\n' >&2
+    exit 100
+  fi
+  : > "$MOCK_CONFIGURED"
+fi
 case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"operator.json"*) printf '{"port":15747}\\n' ;;
@@ -120,7 +141,6 @@ case "$*" in
     fi
     ;;
   *"dpkg-deb -f"*) printf 'papercusp-gui\\n' ;;
-  *"apt-get install --yes"*) : > "$MOCK_CONFIGURED" ;;
   *"dpkg -i"*)
     printf 'dpkg: dependency problems: libwebkit2gtk-4.1-0 is not installed\\n' >&2
     exit 1
@@ -143,7 +163,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, deb, log, flipped, configured, ssh, scp };
+  return { root, deb, log, flipped, configured, updated, ssh, scp };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -156,6 +176,8 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
     MOCK_FLIPPED: f.flipped,
   };
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
+  if (f.updated) env.MOCK_UPDATED = f.updated;
+  if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   return spawnSync('bash', [
     SCRIPT,
     '--platform', platform,
@@ -212,6 +234,36 @@ test('Windows refuses a provenance-listed Server span when any disk is absent', 
   }
 });
 
+test('diagnoses a rotated host key instead of reporting only vm unreachable', () => {
+  const f = fixture({ requireHostKeyOptions: true });
+  try {
+    const result = runVerify(f);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /host-key verification failed/);
+    assert.doesNotMatch(result.stderr, /cannot establish the pre-update baseline/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('accepts explicit SSH and SCP host-key options for a reset VM', () => {
+  const f = fixture({ requireHostKeyOptions: true });
+  try {
+    const result = runVerify(f, [
+      '--ssh-option', 'StrictHostKeyChecking=no',
+      '--ssh-option', 'UserKnownHostsFile=/dev/null',
+      '--scp-option', 'StrictHostKeyChecking=no',
+      '--scp-option', 'UserKnownHostsFile=/dev/null',
+    ]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    assert.ok(lines.some((line) => line.startsWith('SSH ') && line.includes('StrictHostKeyChecking=no') && line.includes('UserKnownHostsFile=/dev/null')));
+    assert.ok(lines.some((line) => line.startsWith('SCP ') && line.includes('StrictHostKeyChecking=no') && line.includes('UserKnownHostsFile=/dev/null')));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('an explicit Server installer must attest the same build sha as the GUI', () => {
   const f = fixture();
   try {
@@ -241,9 +293,12 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     assert.equal(verdict.portHeld, true);
 
     const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const update = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get update -qq'));
     const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes'));
     const packageCheck = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('dpkg-query -W'));
     const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('setsid bash -c'));
+    assert.ok(update >= 0, 'Linux must refresh apt indexes before installing a local deb');
+    assert.ok(update < install, 'Linux must refresh apt indexes before dependency resolution');
     assert.ok(install >= 0, 'Linux must use apt-get local-file installation, not dpkg -i');
     assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
     assert.ok(packageCheck > install, 'package configuration must be checked after installation');

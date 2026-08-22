@@ -47,6 +47,8 @@
 #                                  build-provenance.json next to the artifact
 #   --expected-version VER         optional; default: version from that provenance
 #   --ssh-key / --ssh-port / --ssh-host / --distro / --app-image
+#   --ssh-option NAME=VALUE    repeatable extra -o option for SSH
+#   --scp-option NAME=VALUE    repeatable extra -o option for SCP
 #   --remote-dir DIR               where to scp the artifact (default per platform)
 #   --install-cmd CMD              installer command; `__ARTIFACT__` -> remote path
 #   --server-install-cmd CMD       Server installer command;
@@ -85,6 +87,8 @@ POLL_INTERVAL="${POLL_INTERVAL:-5}"
 # installer RUNNING detached, so the step must fail loudly, never barrel on.
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-900}"
 JSON=0
+SSH_OPTIONS=()
+SCP_OPTIONS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +100,12 @@ while [[ $# -gt 0 ]]; do
     --ssh-key) SSH_KEY="${2:-}"; shift 2 ;;
     --ssh-port) SSH_PORT="${2:-}"; shift 2 ;;
     --ssh-host) SSH_HOST="${2:-}"; shift 2 ;;
+    --ssh-option)
+      [[ -n "${2:-}" ]] || { echo "--ssh-option needs NAME=VALUE" >&2; exit 2; }
+      SSH_OPTIONS+=("${2}"); shift 2 ;;
+    --scp-option)
+      [[ -n "${2:-}" ]] || { echo "--scp-option needs NAME=VALUE" >&2; exit 2; }
+      SCP_OPTIONS+=("${2}"); shift 2 ;;
     --distro) DISTRO="${2:-}"; shift 2 ;;
     --app-image) APP_IMAGE="${2:-}"; shift 2 ;;
     --remote-dir) REMOTE_DIR="${2:-}"; shift 2 ;;
@@ -156,9 +166,12 @@ case "$PLATFORM" in
     # `dpkg -i` unpacks a .deb but deliberately does not resolve its declared
     # dependencies. On a pristine Ubuntu VM that leaves the GUI in iU state
     # when WebKit is absent, so the relaunch fails before the bundled operator
-    # can report the target build. apt-get's local-file install resolves and
-    # configures the dependency closure before we attempt the relaunch.
-    INSTALL_CMD="${INSTALL_CMD:-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __ARTIFACT__}"
+    # can report the target build. A golden-image overlay can also carry stale
+    # package lists: the first dependency install then requests versions that
+    # mirrors have already retired and fails with 404s. Refresh the indexes in
+    # the same remote command before apt's local-file install resolves and
+    # configures the dependency closure.
+    INSTALL_CMD="${INSTALL_CMD:-sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __ARTIFACT__}"
     # LINUX relaunch (LIVE-VALIDATED 2026-07-19 on the linux-test VM, WI-5484):
     # the app is a plain Tauri GUI in the user X session, NOT a systemd service
     # (the old `systemctl --user restart papercusp-desktop.service` default was
@@ -308,7 +321,13 @@ fi
 # ── ssh/scp transport (PC_SSH / PC_SCP overridable for the D-007 mock path) ─
 SSH_BIN="${PC_SSH:-ssh}"
 SCP_BIN="${PC_SCP:-scp}"
-SSH=("$SSH_BIN" -i "$SSH_KEY" -p "$SSH_PORT" -o IdentitiesOnly=yes -o ConnectTimeout=10 -o BatchMode=yes "$SSH_HOST")
+SSH=("$SSH_BIN" -i "$SSH_KEY" -p "$SSH_PORT" -o IdentitiesOnly=yes -o ConnectTimeout=10 -o BatchMode=yes)
+for option in "${SSH_OPTIONS[@]}"; do SSH+=( -o "$option" ); done
+SSH+=("$SSH_HOST")
+
+transport_host_key_failure() {
+  grep -Eqi 'host key|known_hosts|offending .*key|remote host identification' <<<"$1"
+}
 
 # op_exec: run a command in the operator's network namespace. On Windows the
 # operator lives INSIDE the WSL distro, so wrap in `wsl --exec` (space-free args
@@ -345,8 +364,15 @@ if [[ "$PLATFORM" == "windows" ]]; then
 else
   REACH_CMD='echo VM-OK'
 fi
-if ! "${SSH[@]}" "$REACH_CMD" 2>/dev/null | tr -d '\r' | grep -q 'VM-OK'; then
-  echo "vm unreachable on :$SSH_PORT ($SSH_HOST) — cannot establish the pre-update baseline" >&2
+REACH_OUT=""
+REACH_RC=0
+REACH_OUT="$("${SSH[@]}" "$REACH_CMD" 2>&1 | tr -d '\r\0')" || REACH_RC=$?
+if [[ "$REACH_RC" -ne 0 || "$REACH_OUT" != *VM-OK* ]]; then
+  if transport_host_key_failure "$REACH_OUT"; then
+    echo "vm unreachable on :$SSH_PORT ($SSH_HOST) — host-key verification failed; for a reset VM pass repeatable --ssh-option StrictHostKeyChecking=no and --ssh-option UserKnownHostsFile=/dev/null (and matching --scp-option values)" >&2
+  else
+    echo "vm unreachable on :$SSH_PORT ($SSH_HOST) — cannot establish the pre-update baseline" >&2
+  fi
   exit 2
 fi
 
@@ -381,13 +407,29 @@ if [[ -z "$SHA_BEFORE" ]]; then
 fi
 
 # ── 2. PUSH ─────────────────────────────────────────────────────────────────
-if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT"; then
-  fail_check "push: scp of $REMOTE_BASENAME to $REMOTE_ARTIFACT failed"
+SCP=("$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes)
+for option in "${SCP_OPTIONS[@]}"; do SCP+=( -o "$option" ); done
+SCP_OUT=""
+SCP_RC=0
+SCP_OUT="$("${SCP[@]}" "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT" 2>&1)" || SCP_RC=$?
+if [[ "$SCP_RC" -ne 0 ]]; then
+  if transport_host_key_failure "$SCP_OUT"; then
+    fail_check "push: scp of $REMOTE_BASENAME to $REMOTE_ARTIFACT failed due to host-key verification; pass repeatable --scp-option StrictHostKeyChecking=no and --scp-option UserKnownHostsFile=/dev/null for a reset VM"
+  else
+    fail_check "push: scp of $REMOTE_BASENAME to $REMOTE_ARTIFACT failed${SCP_OUT:+ — output: ${SCP_OUT:0:400}}"
+  fi
 fi
 for server_path in "${SERVER_ARTIFACTS[@]}"; do
   server_basename="$(basename "$server_path")"
-  if ! "$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes "$server_path" "$SSH_HOST:$REMOTE_DIR/$server_basename"; then
-    fail_check "push: scp of $server_basename to $REMOTE_DIR/$server_basename failed"
+  SCP_OUT=""
+  SCP_RC=0
+  SCP_OUT="$("${SCP[@]}" "$server_path" "$SSH_HOST:$REMOTE_DIR/$server_basename" 2>&1)" || SCP_RC=$?
+  if [[ "$SCP_RC" -ne 0 ]]; then
+    if transport_host_key_failure "$SCP_OUT"; then
+      fail_check "push: scp of $server_basename to $REMOTE_DIR/$server_basename failed due to host-key verification; pass repeatable --scp-option StrictHostKeyChecking=no and --scp-option UserKnownHostsFile=/dev/null for a reset VM"
+    else
+      fail_check "push: scp of $server_basename to $REMOTE_DIR/$server_basename failed${SCP_OUT:+ — output: ${SCP_OUT:0:400}}"
+    fi
   fi
 done
 
