@@ -192,9 +192,24 @@ default_deb() {
   # This is the GUI desktop VM. The same bundle directory also contains a
   # newer-looking "Papercusp Server_*.deb" on some release cuts; a broad
   # newest-file glob silently installed that different product here.
+  # ⚠ The trailing `|| true` is LOAD-BEARING — do not "tidy" it away. This file runs
+  # under `set -euo pipefail` (top of common.sh), and EVERY stage of this pipeline has
+  # a normal, non-error way to exit non-zero. pipefail propagates it and `set -e` then
+  # kills the shell AT THIS ASSIGNMENT — before the printf below — so the function
+  # returns nothing at all, not even the empty line callers expect:
+  #   • `ls` exits 2 when EITHER directory is absent (the usual state on a box that
+  #     pins CARGO_TARGET_DIR, where the in-tree src-tauri/target/ never exists) —
+  #     even though it still prints the file it DID find on the other path;
+  #   • `grep -v` exits 1 when it filters out every line (only a Server_ deb present);
+  #   • `head -1` can SIGPIPE the producer (141) once it has its line.
+  # The contract here is "print the newest matching deb, or empty" — all three of the
+  # above are EMPTY, not FAILED, and every caller tests `[ -n "$DEB" ]` accordingly.
+  # Measured 2026-08-22: this silently broke bin/local-matrix.sh's preflight, which
+  # reports the bare exit code as "no usable .deb — default_deb() refused (exit 2)"
+  # while a perfectly good GUI .deb sat in ~/.cargo-target. ~13 rig scripts call this.
   deb="$(ls -t "$DESKTOP_REPO"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
                "${CARGO_TARGET_DIR:-$HOME/.cargo-target}"/release/bundle/deb/Papercusp*_amd64.deb \
-               2>/dev/null | grep -v '/Papercusp Server_' | head -1)"
+               2>/dev/null | grep -v '/Papercusp Server_' | head -1 || true)"
   [ -n "$deb" ] && _warn_if_deb_stale "$deb"
   printf '%s\n' "$deb"
 }
