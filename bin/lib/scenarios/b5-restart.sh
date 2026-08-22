@@ -31,10 +31,14 @@ scn_restart_durability() {
   scenario_restart_durability a b >"$tmp" 2>&1; rc=$?
   out="$(cat "$tmp")"; rm -f "$tmp"
   if [ "$rc" = 0 ]; then
+    rm -f "$tmp"
     echo "restart durability OK (cold sidecar restart lost nothing, re-emitted nothing)"
   else
     echo "restart durability FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
+    echo "      ── full assert transcript (all ✓/✗) ──"
+    printf '%s\n' "$out" | grep -E '✓|✗|OVERALL:' | sed 's/^/      /'
+    rm -f "$tmp"
   fi
   return "$rc"
 }

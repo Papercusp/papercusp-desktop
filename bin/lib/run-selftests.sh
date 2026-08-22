@@ -37,6 +37,7 @@ TESTS=(
   seat-offer-diag.selftest.sh
   b9-attestation-precondition.selftest.sh
   b3-revocation-kcut.selftest.sh
+  b5-restart.selftest.sh
   replication-soak-diagnostics.selftest.sh
   restart-settle-barrier.selftest.sh
   rig-wait-converged.selftest.sh
