@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -31,23 +32,32 @@ function mainWindowVisible(tree) {
 }
 
 function operatorPortProbe(name) {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-op-port-'));
+  const commandPath = path.join(probeDir, 'command');
   const result = spawnSync(
     'bash',
     [
       '-c',
       [
         'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
-        'vm_ssh() { printf \'%s\\n\' "$2" >&2; printf \'3093\\n\'; }',
+        'vm_ssh() { printf \'%s\\n\' "$2" >"$PROBE_FILE"; printf \'3093\\n\'; }',
         'op_port "$2"',
-      ].join('\\n'),
+      ].join('\n'),
       'bash',
       vmctlPath,
       name,
     ],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', env: { ...process.env, PROBE_FILE: commandPath } },
   );
-  assert.equal(result.status, 0, result.stderr);
-  return { port: result.stdout.trim(), command: result.stderr };
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    return {
+      port: result.stdout.trim(),
+      command: fs.readFileSync(commandPath, 'utf8'),
+    };
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
 }
 
 test('updater E2E is pinned to a dedicated disposable VM lane', () => {
@@ -90,7 +100,7 @@ test('VM status resolves updater-e2e operator discovery from its isolated HOME',
   const updater = operatorPortProbe('updater');
   assert.equal(updater.port, '3093');
   assert.match(updater.command, /updater-e2e\/home\/\.papercusp\/operator\.json/);
-  assert.doesNotMatch(updater.command, /expanduser\('\/~?\.papercusp\/operator\.json/);
+  assert.doesNotMatch(updater.command, /expanduser\('~\/\.papercusp\/operator\.json'\)/);
 
   const updaterLane = operatorPortProbe('updater-2');
   assert.match(updaterLane.command, /updater-e2e\/home\/\.papercusp\/operator\.json/);

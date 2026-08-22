@@ -145,8 +145,12 @@ __pc_run_dev_with_yieldable_reader() {
     if wait "$child_pid"; then
       status=0
       break
+    else
+      # Capture wait's non-zero status inside the condition. Reading `$?` after
+      # the `if` compound command would observe the condition's completed
+      # status (0), swallowing a plain Tauri failure.
+      status=$?
     fi
-    status=$?
     # Bash reports 128+SIGUSR1 when the wait is interrupted to run the
     # cooperative-yield trap. Resume waiting while the Tauri child remains
     # alive; only return once the child itself has exited.
