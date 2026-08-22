@@ -114,6 +114,14 @@ test('Server distribution contract retains every backend runtime class before GU
 
   assert.equal(contract.gui.connection.readinessProbe, '/api/health');
   assert.equal(contract.gui.connection.versionProbe, '/api/desktop/version');
+  assert.deepEqual(contract.gui.connection.missingServerChoices, [
+    'install-or-start-local-server',
+    'connect-remote-or-hosted-server',
+  ]);
+  assert.equal(
+    contract.gui.connection.remoteTransport,
+    'credential-free-https-origin-with-browser-http-sse',
+  );
   assert.equal(
     contract.gui.versionNegotiation.releaseRule,
     'gui-and-server-must-share-release-version',

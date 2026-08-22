@@ -5258,6 +5258,33 @@ fn ensure_server_running(
             "[papercusp-gui] could not launch Papercusp Server ({e}); \
              will keep polling in case it is installed or started another way"
         );
+        surface_server_connection_required(
+            app_handle,
+            &format!("Papercusp Server could not be launched: {e}"),
+        );
+    }
+}
+
+/// P-007: tell the already-rendered bundled SPA that the attach-only GUI has no
+/// usable Server endpoint. Keep the diagnostic on `window` as well as emitting
+/// an event: the page and this worker race on cold boot, and a one-shot event
+/// alone can land before React installs its listener.
+fn surface_server_connection_required(app_handle: &tauri::AppHandle, reason: &str) {
+    let Some(window) = app_handle.get_webview_window("main") else {
+        return;
+    };
+    let reason = serde_json::to_string(reason)
+        .unwrap_or_else(|_| "\"No Papercusp Server endpoint is available.\"".to_string());
+    let inject = format!(
+        "window.__papercuspServerConnectionRequired = {reason}; \
+         window.dispatchEvent(new CustomEvent('papercusp:server-connection-required', \
+           {{ detail: {reason} }}));"
+    );
+    // A document navigation can replace the JS world during this exact cold-
+    // boot window. Re-apply briefly; the global makes each delivery idempotent.
+    for _ in 0..8 {
+        let _ = window.eval(&inject);
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 

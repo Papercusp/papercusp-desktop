@@ -89,6 +89,11 @@
       "readinessProbe": "/api/health",
       "versionProbe": "/api/desktop/version",
       "missingServerState": "install-papercusp-server",
+      "missingServerChoices": [
+        "install-or-start-local-server",
+        "connect-remote-or-hosted-server"
+      ],
+      "remoteTransport": "credential-free-https-origin-with-browser-http-sse",
       "rule": "Never self-host. Attach to a healthy Server or render explicit install/start/retry guidance without looping silently."
     },
     "versionNegotiation": {
