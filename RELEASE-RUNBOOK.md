@@ -177,6 +177,11 @@ version **flip** old→new [EI-9002: not a silent no-op update] and (b) the oper
 > On Windows the script auto-resolves the exact-version Server stub beside the
 > GUI artifact and fails closed unless its provenance matches and every listed
 > span is present; use `--server-artifact PATH` only to override that location.
+> For a disposable/reset VM whose host key is intentionally rotated, opt in to
+> the transport overrides explicitly on both legs:
+> `--ssh-option StrictHostKeyChecking=no --ssh-option UserKnownHostsFile=/dev/null
+> --scp-option StrictHostKeyChecking=no --scp-option UserKnownHostsFile=/dev/null`.
+> Host-key checking remains strict by default.
 
 **In-app backstop (P-013):** every user's first launch after an update runs a
 built-in self-check (`run_update_self_check` in `src-tauri/src/main.rs`): if the
