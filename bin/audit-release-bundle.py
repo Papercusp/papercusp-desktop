@@ -49,10 +49,13 @@ unscannable bundle is not a clean one). Never prints a secret VALUE.
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
+        audit-release-bundle.py --distribution-census <gui|server> <platform> <artifact>...
 """
 import base64
 import fnmatch
 import functools
+import hashlib
+import json
 import os
 import pwd
 import re
@@ -2407,6 +2410,127 @@ def _tree_bytes(root):
     return total
 
 
+def _tree_census(root):
+    """Logical and unique-inode bytes for an expanded artifact tree.
+
+    A release tree can contain hardlinks. Counting only directory-entry sizes
+    overstates what is physically installed, while counting only unique inodes
+    understates the logical footprint users and package manifests observe. The
+    distribution contract intentionally records both, so keep the two measures
+    together at the one archive-expansion seam every platform already reuses.
+    """
+    logical = 0
+    unique = 0
+    files = 0
+    symlinks = 0
+    seen = set()
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            try:
+                stat = os.lstat(path)
+            except OSError:
+                continue
+            if os.path.islink(path):
+                symlinks += 1
+                continue
+            if not os.path.isfile(path):
+                continue
+            files += 1
+            logical += stat.st_size
+            identity = (stat.st_dev, stat.st_ino)
+            if identity not in seen:
+                seen.add(identity)
+                unique += stat.st_size
+    return {
+        "files": files,
+        "symlinks": symlinks,
+        "logicalBytes": logical,
+        "uniqueInodeBytes": unique,
+    }
+
+
+def _tar_member_census(fileobj, mode="r|*"):
+    files = 0
+    total = 0
+    with tarfile.open(fileobj=fileobj, mode=mode) as archive:
+        for member in archive:
+            if member.isfile():
+                files += 1
+                total += member.size
+    return {"archiveFileMembers": files, "archiveMemberBytes": total}
+
+
+def _artifact_member_census(path, expanded):
+    """Member bytes from the archive directory, not the expanded tree.
+
+    This is deliberately distinct from `_tree_census`: a hardlink member has
+    zero payload bytes in tar but contributes another logical file after
+    extraction. Formats whose native directory is not directly readable fall
+    back loudly to the expanded-tree measure; Linux deb/tar and zip artifacts
+    use their real member tables.
+    """
+    low = path.lower()
+    if low.endswith(".deb"):
+        process = subprocess.Popen(
+            ["dpkg-deb", "--fsys-tarfile", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            result = _tar_member_census(process.stdout)
+        finally:
+            if process.stdout:
+                process.stdout.close()
+        stderr = (process.stderr.read() if process.stderr else b"")
+        rc = process.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"dpkg-deb could not read payload members (exit {rc}): "
+                f"{stderr.decode(errors='replace')[:200]}"
+            )
+        return {**result, "archiveMemberBytesSource": "deb-data-tar"}
+    if low.endswith((".tar.gz", ".tgz", ".app.tar.gz")):
+        with open(path, "rb") as source:
+            return {
+                **_tar_member_census(source, "r:gz"),
+                "archiveMemberBytesSource": "tar-directory",
+            }
+    if low.endswith(".tar.zst"):
+        process = subprocess.Popen(
+            ["zstd", "-dc", "--", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            result = _tar_member_census(process.stdout)
+        finally:
+            if process.stdout:
+                process.stdout.close()
+        stderr = (process.stderr.read() if process.stderr else b"")
+        rc = process.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"zstd could not read payload members (exit {rc}): "
+                f"{stderr.decode(errors='replace')[:200]}"
+            )
+        return {**result, "archiveMemberBytesSource": "tar-directory"}
+    if low.endswith(".zip"):
+        with zipfile.ZipFile(path) as archive:
+            members = [member for member in archive.infolist() if not member.is_dir()]
+        return {
+            "archiveFileMembers": len(members),
+            "archiveMemberBytes": sum(member.file_size for member in members),
+            "archiveMemberBytesSource": "zip-directory",
+        }
+    census = _tree_census(expanded)
+    return {
+        "archiveFileMembers": census["files"],
+        "archiveMemberBytes": census["logicalBytes"],
+        "archiveMemberBytesSource": "expanded-tree-fallback",
+    }
+
+
 def _expand_installer(path, dest):
     """Expand ONE finished installer container. Returns (ok, method).
 
@@ -2728,6 +2852,221 @@ def scan_artifact(paths):
         return scan_dir(dests)
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _relative_inventory(root):
+    files = set()
+    dirs = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        if rel_dir != ".":
+            dirs.add(rel_dir)
+        for dirname in dirnames:
+            rel = os.path.relpath(os.path.join(dirpath, dirname), root)
+            dirs.add(rel.replace(os.sep, "/"))
+        for filename in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, filename), root)
+            files.add(rel.replace(os.sep, "/"))
+    return files, dirs
+
+
+def _distribution_contract():
+    default = os.path.normpath(os.path.join(
+        os.path.dirname(__file__), "..", "src-tauri", "distribution-contract.json"
+    ))
+    path = os.environ.get("PAPERCUSP_DISTRIBUTION_CONTRACT", default)
+    with open(path, "r", encoding="utf-8") as source:
+        return path, json.load(source)
+
+
+def distribution_census(argv):
+    """Expand finished artifacts, enforce the role contract, and emit byte facts.
+
+    Usage: --distribution-census <gui|server> <linux|macos|windows> <artifact...>
+
+    The identity auditor already owns every installer/archive reader. Extending
+    that seam avoids a second extractor that can disagree about what an archive
+    contains. Linux is fully enforced now; macOS/Windows calls stay fail-closed
+    until their per-platform resource roots and fresh size ceilings are recorded
+    on their next release cuts (P-011).
+    """
+    if len(argv) < 3:
+        print(
+            "AUDIT ERROR: --distribution-census needs "
+            "<gui|server> <linux|macos|windows> <artifact...>",
+            file=sys.stderr,
+        )
+        return 2
+    role, platform, *artifacts = argv
+    if role not in ("gui", "server") or platform not in ("linux", "macos", "windows"):
+        print(
+            f"AUDIT ERROR: invalid distribution role/platform: {role}/{platform}",
+            file=sys.stderr,
+        )
+        return 2
+    missing = [path for path in artifacts if not os.path.isfile(path)]
+    if missing:
+        print(f"AUDIT ERROR: missing distribution artifact(s): {missing}", file=sys.stderr)
+        return 2
+
+    contract_path, contract = _distribution_contract()
+    role_contract = contract[role]
+    identity = role_contract["installedIdentities"]
+    resource_key = f"{platform}ResourceRoot"
+    if resource_key not in identity:
+        print(
+            f"AUDIT ERROR: {role}/{platform} has no {resource_key} in {contract_path}; "
+            "record the fresh artifact layout before certifying it",
+            file=sys.stderr,
+        )
+        return 2
+
+    reports = []
+    any_violations = False
+    with tempfile.TemporaryDirectory(prefix="papercusp-distribution-census-") as tmp:
+        for index, artifact in enumerate(artifacts):
+            expanded = os.path.join(tmp, f"artifact-{index}")
+            ok, method = _expand_installer(artifact, expanded)
+            expanded_bytes = _tree_bytes(expanded) if ok else 0
+            artifact_bytes = os.path.getsize(artifact)
+            if not ok or expanded_bytes == 0:
+                print(
+                    f"AUDIT ERROR: cannot expand distribution artifact {artifact} "
+                    f"(tried: {method})",
+                    file=sys.stderr,
+                )
+                return 2
+            if artifact_bytes and expanded_bytes / artifact_bytes < ARTIFACT_MIN_EXPANSION_RATIO:
+                print(
+                    f"AUDIT ERROR: distribution expansion recovered only "
+                    f"{expanded_bytes}/{artifact_bytes} bytes from {artifact}",
+                    file=sys.stderr,
+                )
+                return 2
+
+            tree = _tree_census(expanded)
+            try:
+                members = _artifact_member_census(artifact, expanded)
+            except Exception as exc:
+                print(f"AUDIT ERROR: cannot census archive members in {artifact}: {exc}", file=sys.stderr)
+                return 2
+
+            resource_root = os.path.join(
+                expanded, *identity[resource_key].lstrip("/\\").replace("\\", "/").split("/")
+            )
+            violations = []
+            if not os.path.isdir(resource_root):
+                violations.append(f"installed resource root is absent: {identity[resource_key]}")
+                resource_files, resource_dirs = set(), set()
+            else:
+                resource_files, resource_dirs = _relative_inventory(resource_root)
+
+            if role == "gui":
+                allowed = []
+                for entry in role_contract["resourceAllowlist"]:
+                    if platform not in entry.get("platforms", []):
+                        continue
+                    prefix = entry["glob"].split("/**", 1)[0].rstrip("/")
+                    allowed.append((prefix, entry.get("optional", False)))
+                for prefix, optional in allowed:
+                    if optional:
+                        continue
+                    if not any(path == prefix or path.startswith(prefix + "/") for path in resource_files):
+                        violations.append(f"required GUI allowlist root is empty/absent: {prefix}")
+                for path in sorted(resource_files):
+                    if not any(path == prefix or path.startswith(prefix + "/") for prefix, _ in allowed):
+                        violations.append(f"GUI resource escaped the allowlist: {path}")
+                for raw_prefix in role_contract["forbiddenResourcePrefixes"]:
+                    prefix = raw_prefix.rstrip("/")
+                    if any(
+                        path == prefix or path.startswith(prefix + "/")
+                        for path in resource_files | resource_dirs
+                    ):
+                        violations.append(f"GUI contains forbidden Server resource: {raw_prefix}")
+
+                budgets = role_contract["budgets"]
+                platform_budget = budgets["platforms"].get(platform, {})
+                download_ceiling = platform_budget.get(
+                    "downloadCeilingBytes", budgets.get("initialDownloadCeiling")
+                )
+                unpacked_ceiling = platform_budget.get("unpackedCeilingBytes")
+                if download_ceiling is None or unpacked_ceiling is None:
+                    violations.append(
+                        f"{platform} has no explicit compressed+unpacked ceilings; "
+                        "fresh measurement is still pending"
+                    )
+                else:
+                    if artifact_bytes > download_ceiling:
+                        violations.append(
+                            f"compressed artifact {artifact_bytes} exceeds ceiling {download_ceiling}"
+                        )
+                    if tree["uniqueInodeBytes"] > unpacked_ceiling:
+                        violations.append(
+                            f"unique-inode unpacked bytes {tree['uniqueInodeBytes']} "
+                            f"exceed ceiling {unpacked_ceiling}"
+                        )
+                artifact_sha = _sha256_file(artifact)
+                if artifact_sha == platform_budget.get("sourceArtifactSha256"):
+                    if artifact_bytes != platform_budget.get("downloadBytes"):
+                        violations.append("baseline artifact downloadBytes no longer matches its own sha")
+                    if tree["uniqueInodeBytes"] != platform_budget.get("unpackedBytes"):
+                        violations.append("baseline artifact unpackedBytes no longer matches its own sha")
+            else:
+                artifact_sha = _sha256_file(artifact)
+                for required in role_contract["requiredResources"]:
+                    required_path = required.rstrip("/")
+                    if required.endswith("/"):
+                        if required_path not in resource_dirs:
+                            violations.append(f"Server required directory is absent: {required}")
+                    elif required_path not in resource_files:
+                        violations.append(f"Server required file is absent: {required}")
+                fragment_patterns = {
+                    pattern
+                    for pack in role_contract.get("optionalPacks", [])
+                    for pattern in pack.get("forbidden", [])
+                }
+                for path in sorted(resource_files):
+                    name = os.path.basename(path)
+                    if any(fnmatch.fnmatch(name, pattern) for pattern in fragment_patterns):
+                        violations.append(f"Server model download fragment survived: {path}")
+
+            report = {
+                "ok": not violations,
+                "role": role,
+                "platform": platform,
+                "artifact": os.path.abspath(artifact),
+                "artifactSha256": artifact_sha,
+                "compressedArtifactBytes": artifact_bytes,
+                "unpackedLogicalBytes": tree["logicalBytes"],
+                "unpackedUniqueInodeBytes": tree["uniqueInodeBytes"],
+                "expandedFiles": tree["files"],
+                "expandedSymlinks": tree["symlinks"],
+                **members,
+                "expansionMethod": method,
+                "violations": violations,
+            }
+            reports.append(report)
+            any_violations = any_violations or bool(violations)
+
+    result = {"ok": not any_violations, "contract": contract_path, "reports": reports}
+    print(json.dumps(result, sort_keys=True))
+    if any_violations:
+        for report in reports:
+            for violation in report["violations"]:
+                print(
+                    f"DISTRIBUTION VIOLATION [{role}/{platform}] {violation}",
+                    file=sys.stderr,
+                )
+        return 1
+    return 0
+
+
 def print_identity_literals():
     """Emit `value<TAB>redaction<TAB>wordboundary(0/1)<TAB>sed_ere` for every identity
     literal the gate hunts — build-box identity + the known cross-box sensitive set — so
@@ -2858,6 +3197,8 @@ def main():
         return scan_dir(sys.argv[2:])
     if sys.argv[1] == "--scan-artifact":
         return scan_artifact(sys.argv[2:])
+    if sys.argv[1] == "--distribution-census":
+        return distribution_census(sys.argv[2:])
     bundle = sys.argv[1]
     if not os.path.isfile(bundle):
         print(f"AUDIT ERROR: no such bundle: {bundle}", file=sys.stderr)

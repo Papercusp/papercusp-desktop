@@ -39,7 +39,7 @@
     },
     "installedIdentities": {
       "linuxExecutable": "/usr/bin/papercusp-desktop",
-      "linuxDesktopEntry": "papercusp-desktop.desktop",
+      "linuxDesktopEntry": "Papercusp GUI.desktop",
       "linuxIcon": "papercusp-desktop",
       "linuxResourceRoot": "/usr/lib/Papercusp GUI",
       "macosInstallRoot": "/Applications/Papercusp GUI.app",
@@ -124,13 +124,15 @@
       ],
       "hardlinks": "count-each-inode-once-and-report-logical-bytes-separately",
       "archives": "inspect-members-and-report-container-bytes-separately",
-      "tighteningRule": "Replace the 250 MiB safety ceiling with the clean per-platform shell baseline plus explicit headroom before release.",
+      "tighteningRule": "A platform with a fresh artifact must pin exact measured bytes plus explicit compressed and unpacked ceilings; pending platforms retain the 250 MiB download safety ceiling but cannot pass distribution census until measured.",
       "platforms": {
         "linux": {
-          "status": "pre-change-derived-shell-baseline",
-          "downloadBytes": 80082225,
-          "unpackedBytes": 241816623,
-          "sourceArtifactSha256": "db7543ec42c383b85a098ce4bd5b7d704298e32aa4981f4140ae1843e650abf5",
+          "status": "fresh-0.0.18-clean-vm-artifact",
+          "downloadBytes": 80174804,
+          "unpackedBytes": 241927695,
+          "downloadCeilingBytes": 89128960,
+          "unpackedCeilingBytes": 268435456,
+          "sourceArtifactSha256": "ab32148a2b31f6f019b32158457366142a807eefae24aab74c1471d24b1e8af7",
           "mustRemeasureFreshArtifact": true
         },
         "macos": {
@@ -154,7 +156,7 @@
     },
     "installedIdentities": {
       "linuxExecutable": "/usr/bin/papercusp-server",
-      "linuxDesktopEntry": "papercusp-server.desktop",
+      "linuxDesktopEntry": "Papercusp Server.desktop",
       "linuxIcon": "papercusp-server",
       "linuxResourceRoot": "/usr/lib/Papercusp Server",
       "linuxUserUnit": "/usr/lib/systemd/user/papercusp-server.service",
