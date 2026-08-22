@@ -2410,7 +2410,7 @@ def _tree_bytes(root):
     return total
 
 
-def _tree_census(root):
+def _tree_census(root, exclude_top_level=()):
     """Logical and unique-inode bytes for an expanded artifact tree.
 
     A release tree can contain hardlinks. Counting only directory-entry sizes
@@ -2424,7 +2424,10 @@ def _tree_census(root):
     files = 0
     symlinks = 0
     seen = set()
-    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+    excluded = set(exclude_top_level)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        if os.path.abspath(dirpath) == os.path.abspath(root) and excluded:
+            dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded]
         for filename in filenames:
             path = os.path.join(dirpath, filename)
             try:
@@ -2950,7 +2953,13 @@ def distribution_census(argv):
                 )
                 return 2
 
-            tree = _tree_census(expanded)
+            # The privacy scanner deliberately expands a Debian control archive
+            # into __control__ so maintainer fields are inspected. dpkg never
+            # installs those files, so distribution size/accounting must census
+            # only the fsys payload. The archive-member read below likewise uses
+            # dpkg-deb --fsys-tarfile, keeping both measures on the installed set.
+            census_excludes = {"__control__"} if artifact.lower().endswith(".deb") else set()
+            tree = _tree_census(expanded, census_excludes)
             try:
                 members = _artifact_member_census(artifact, expanded)
             except Exception as exc:
