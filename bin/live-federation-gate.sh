@@ -1293,7 +1293,11 @@ build_lock_contention_check() {  # <build-log-path> — sets BUILD_LOCK_CONTENTI
   local log="$1" holder
   [ -f "$log" ] || return 0
   grep -qaE '^FATAL: timed out after [0-9]+s waiting for the sidecar lock \(' "$log" 2>/dev/null || return 0
-  holder="$(grep -aE '^       pid [0-9]+ \(running [0-9]+s\): ' "$log" 2>/dev/null | tail -1 | sed 's/^ *//')"
+  # First reported holder line, not the last: __pc_sidecar_lock_holder_lines()
+  # (lib/sidecar-lock-yield.sh) lists the flock's DIRECT pid(s) before any
+  # inherited-fd descendants (fuser's own listing order), so this is the
+  # outermost driving process — the one most useful in a human-facing verdict.
+  holder="$(grep -aE '^       pid [0-9]+ \(running [0-9]+s\): ' "$log" 2>/dev/null | head -1 | sed 's/^ *//')"
   [ -n "$holder" ] || return 0
   BUILD_LOCK_CONTENTION="$holder"
 }
