@@ -509,8 +509,11 @@ cmd_status() {
       # relaunch — `vmctl launch` now auto-reaps). One healthy operator = 1 desktop +
       # a couple serve.mjs (operator + sidecar), so judge by the desktop count.
       local ndesk nsrv
-      ndesk="$(vm_ssh "$name" 'pgrep -cf [p]apercusp-desktop 2>/dev/null || echo 0' 2>/dev/null)"
-      nsrv="$(vm_ssh "$name" 'pgrep -cf [s]erve.mjs 2>/dev/null || echo 0' 2>/dev/null)"
+      # pgrep -c already prints a single 0 when there are no matches, but exits
+      # non-zero. Do not append an echo fallback: that turns one scalar into
+      # two lines and breaks the status record's shape.
+      ndesk="$(vm_ssh "$name" 'pgrep -cf [p]apercusp-desktop 2>/dev/null || true' 2>/dev/null)"
+      nsrv="$(vm_ssh "$name" 'pgrep -cf [s]erve.mjs 2>/dev/null || true' 2>/dev/null)"
       echo "procs:      desktop=${ndesk:-?} serve.mjs=${nsrv:-?}$([ "${ndesk:-0}" -gt 1 ] 2>/dev/null && echo '  ⚠ DUPLICATE desktop — split-brain')"
       # operator runs on a DYNAMIC port — resolve it from operator.json (op_port), not
       # the app log (the packaged build doesn't log the "listening" line there).

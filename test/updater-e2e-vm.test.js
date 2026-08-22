@@ -60,6 +60,31 @@ function operatorPortProbe(name) {
   }
 }
 
+function statusNoProcessProbe() {
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      [
+        'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+        // A pgrep -c miss writes one zero and exits 1, matching GNU pgrep.
+        'pgrep() { printf "0\\n"; return 1; }',
+        'export -f pgrep',
+        'vm_running() { return 0; }',
+        'vm_pid() { printf "4242\\n"; }',
+        'vm_ssh() { local _name="$1"; shift; [ "${1:-}" = true ] && return 0; bash -c "${1:-}"; }',
+        'op_port() { :; }',
+        'cmd_status clean',
+      ].join('\n'),
+      'bash',
+      vmctlPath,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
 test('updater E2E is pinned to a dedicated disposable VM lane', () => {
   const fn = updaterFunction();
   assert.match(common, /updater\) idx=3/);
@@ -136,4 +161,10 @@ test('VM verification accepts only a full-size Papercusp main window', () => {
     false,
     'a titled placeholder below the configured minimum geometry must not pass',
   );
+});
+
+test('VM status reports one scalar zero for absent process counts', () => {
+  const output = statusNoProcessProbe();
+  assert.match(output, /^procs:\s+desktop=0 serve\.mjs=0$/m);
+  assert.doesNotMatch(output, /^0$/m, 'an absent process must not add a second fallback zero line');
 });
