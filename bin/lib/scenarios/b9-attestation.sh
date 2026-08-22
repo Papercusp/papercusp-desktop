@@ -271,7 +271,12 @@ _att_count_verdict() {
   saved="$(printf '%s' "${_ATT_SAVED_ROW}" | grep -o 'device_pubkey' | wc -l | tr -d '[:space:]')"
   # An unreadable count and a zero count are NOT the same claim; never collapse them.
   if [ -z "$restored" ]; then
-    printf 'count=<unreadable> — the count tiebreak is unavailable, so read the origin fingerprint and do NOT infer a writer from this line'
+    # WI-40549: $saved was measured one line above and this return is the only path that
+    # never reports it. The TIEBREAK is genuinely unavailable here (it needs both halves),
+    # but the saved count is still a reading in its own right — it says whether the saved
+    # set was captured at all, which is what separates "nothing to compare against" from
+    # "compared and unreadable". Emit it AT the measurement, in its own three states.
+    printf 'restored=<unreadable> of %s saved — the count tiebreak is unavailable (the restored half could not be read), so read the origin fingerprint and do NOT infer a writer from this line' "${saved:-<unreadable>}"
     return 0
   fi
   if ! [ "${saved:-0}" -gt 0 ] 2>/dev/null; then
