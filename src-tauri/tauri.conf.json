@@ -53,8 +53,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "sidecar/**/*",
-      "resources/*"
+      "sidecar/spa/**/*"
     ],
     "publisher": "Papercusp",
     "homepage": "https://papercuspai.com",

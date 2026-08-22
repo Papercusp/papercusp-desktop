@@ -5,9 +5,8 @@
 # -----------
 # `tauri build --bundles appimage` runs linuxdeploy across the WHOLE AppDir.
 # linuxdeploy recursively "deploys dependencies" for every ELF it finds — which
-# includes our large, self-contained sidecar tree (bundled node, code-server's
-# node_modules native addons, @anthropic-ai/sandbox-runtime's static + FOREIGN-ARCH
-# (arm64) seccomp helpers, libsql, the claude agent binary, …). It hits
+# historically included our large, self-contained sidecar tree (bundled node,
+# native addons, agent binaries, …). It hit
 # `patchelf ... cannot find section .dynamic` on the static/foreign binaries and
 # then hard-CRASHES: `terminate ... Failed to run ldd: exited with code 1` (exit
 # 127). No .AppImage is produced. Because `appimage` is one of the tauri.conf
@@ -22,10 +21,9 @@
 # the self-contained sidecar — which must not be patchelf'd anyway. So we let tauri
 # create the AppDir (ignore the linuxdeploy crash), then finish the job ourselves:
 # supply the root icon appimagetool wants, and package the AppDir with appimagetool
-# directly (appimagetool just squashfs-packs the tree — it does NOT ELF-scan, so it
-# can't hit the crash). The resulting AppImage self-hosts identically to the .deb
-# (verified on the clean-room VM 2026-07-05: sidecar resolves from the AppImage
-# mount, operator + embedded-PG come up).
+# directly (appimagetool just squashfs-packs the tree). The GUI AppImage is now a
+# thin shell: it carries only the shared SPA under sidecar/spa and attaches to the
+# separately installed Papercusp Server.
 #
 # Env (inherited from release-local.sh; all optional here):
 #   PAPERCUSP_BUILD_SHA / PAPERCUSP_BUILD_VERSION  — build provenance (baked in)
@@ -136,41 +134,33 @@ APPDIR="$(ls -d "$APPIMG_DIR"/*.AppDir 2>/dev/null | grep -vi server | head -1)"
 [ -n "$APPDIR" ] && [ -d "$APPDIR" ] || { echo "FATAL: no AppDir under $APPIMG_DIR — tauri didn't get far enough" >&2; exit 1; }
 echo "==> finishing AppDir: $APPDIR"
 
-# 2b. THE LEAK FIX (EI-11730, su-b0fbf 2026-07-14) — correct-by-construction.
-#     tauri's appimage bundler populates the AppDir's bundled sidecar from an opaque
-#     staging path that, UNLIKE the .deb, accumulates dropped trees (code-server,
-#     meridian-host) + pre-prune docs across cuts. Wiping the AppDir (step 0) AND the
-#     $CT/release/* staging (step 0b) both PROVED INSUFFICIENT — a fresh AppDir still
-#     carried 339 leaking files, sourced from a location neither wipe controls (two
-#     relocated target trees confound it). So instead of chasing tauri's copy source, we
-#     make the shipped bytes a PURE FUNCTION of the single source of truth: rsync --delete
-#     the freshly pruned+identity-scanned src-tauri/sidecar/ over the AppDir's sidecar.
-#     After this the AppDir sidecar EQUALS the clean .deb sidecar exactly — anything tauri
-#     staged that is absent from the clean source (code-server, meridian-host, stale docs)
-#     is deleted here. The step-3d scan then validates the result as a fail-closed backstop.
-#     tauri.conf bundle.resources = [sidecar/**, resources/*, seed/**], so the AppDir
-#     carries THREE sibling resource trees under usr/lib/<product>/ (sidecar, resources,
-#     seed) — the leak spanned sidecar/ AND seed/ (a stale corestore/db/LOG). Force-sync
-#     EACH from its clean src-tauri/<name>/ source; if a source is gone but the AppDir has
-#     a stale tree (e.g. a dropped resource), delete it outright.
+# 2b. FAIL-CLOSED GUI RESOURCE SYNC (P-007 / D-004).
+#     Tauri resource staging is copy-into-never-delete, so a reused target can retain
+#     Server bytes even after the base config narrows. Make the shipped AppDir a pure
+#     function of the GUI allowlist: mirror ONLY sidecar/spa, remove every sibling under
+#     sidecar, and remove the Server-only resources/ and seed/ roots. This preserves the
+#     bundled bootstrap SPA while making a stale staged serve.mjs, node runtime, model,
+#     rootfs or seed impossible to ship. The finished-artifact audit remains the
+#     fail-closed backstop.
 APPDIR_SIDECAR="$(ls -d "$APPDIR"/usr/lib/*/sidecar 2>/dev/null | head -1)"
 if [ -z "$APPDIR_SIDECAR" ] || [ ! -d "$APPDIR_SIDECAR" ]; then
-  echo "FATAL: no bundled sidecar under $APPDIR/usr/lib/*/sidecar — tauri bundle incomplete" >&2; exit 1
+  echo "FATAL: no bundled GUI resource root under $APPDIR/usr/lib/*/sidecar — tauri bundle incomplete" >&2; exit 1
 fi
 LIBDIR="$(dirname "$APPDIR_SIDECAR")"   # $APPDIR/usr/lib/<product>
-for _res in sidecar resources seed; do
-  _src="$DESK/src-tauri/$_res"
-  _dst="$LIBDIR/$_res"
-  [ -e "$_dst" ] || continue           # AppDir doesn't carry this resource → nothing to fix
-  if [ -d "$_src" ]; then
-    echo "==> force-syncing AppDir/$_res to the clean src-tauri/$_res (EI-11730: correct-by-construction)"
-    rsync -a --delete "$_src"/ "$_dst"/
-    echo "   AppDir/$_res now mirrors the clean source ($(du -sh "$_dst" 2>/dev/null | cut -f1))"
-  else
-    echo "==> AppDir carries /$_res but src-tauri/$_res is absent — removing the stale tree (EI-11730)"
-    rm -rf "$_dst"
-  fi
-done
+GUI_SPA_SOURCE="$DESK/src-tauri/sidecar/spa"
+APPDIR_SPA="$APPDIR_SIDECAR/spa"
+[ -f "$GUI_SPA_SOURCE/index.html" ] || {
+  echo "FATAL: GUI SPA source is missing $GUI_SPA_SOURCE/index.html" >&2; exit 1
+}
+mkdir -p "$APPDIR_SPA"
+echo "==> force-syncing the allowlisted GUI SPA into the AppDir"
+rsync -a --delete "$GUI_SPA_SOURCE"/ "$APPDIR_SPA"/
+find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -exec rm -rf -- {} +
+rm -rf -- "$LIBDIR/resources" "$LIBDIR/seed"
+if find "$APPDIR_SIDECAR" -mindepth 1 -maxdepth 1 ! -name spa -print -quit | grep -q .; then
+  echo "FATAL: GUI AppDir contains a non-allowlisted sidecar member" >&2; exit 1
+fi
+echo "   GUI resources now contain only sidecar/spa ($(du -sh "$APPDIR_SPA" 2>/dev/null | cut -f1))"
 
 # 2c. DEPLOY THE GTK/WEBKIT RUNTIME CLOSURE (EI-20075266271803900). ────────────
 #     The header above claimed "by the time linuxdeploy crashes it has ALREADY

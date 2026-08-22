@@ -105,19 +105,16 @@ WizardStyle=modern
 ; `ignoreversion` makes the exe follow the same unconditional-overwrite semantics
 ; as every other file in this installer.
 Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-; source.tar.zst is excluded here: Server-only (see below) — sweeping it into
-; the GUI bundle too would put the GUI installer itself past the ~4 GB max.
+#if AppId == "com.papercusp.gui"
+; D-004 / P-007: fail-closed thin GUI. The shell carries the shared bootstrap
+; SPA and no Server/runtime sibling. Do not widen this to sidecar\* or resources\*.
+Source: "{#BuildRoot}\sidecar\spa\*"; DestDir: "{app}\sidecar\spa"; Flags: recursesubdirs createallsubdirs
+#endif
+#if AppId == "com.papercusp.server"
+; The Server owns the full operator/runtime closure, Windows WSL runtime, seed,
+; environment sidecars and optional dev-source archive.
 Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
-; SEED IS SERVER-BUNDLE-ONLY (WI-3234). On Windows the GUI role NEVER restores a
-; seed: main.rs ensure_server_running() either ATTACHES to a running Papercusp
-; Server or launch_bundle()s it — only the SERVER role owns the seed-restoring
-; sidecar (self-hosting is Linux-single-bundle only). Shipping the ~2.1 GB seed
-; in BOTH bundles is pure dead weight AND made two installs need ~6.9 GB, which
-; overran the disk mid-GUI-install (1.78 GB free) → the GUI files never landed →
-; its Start-Menu shortcut pointed at a missing exe → "GUI doesn't launch". Guard
-; the seed to the Server bundle so the GUI installer is ~0.5 GB (exe+sidecar).
-#if AppId == "com.papercusp.server"
 Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs createallsubdirs nocompression
 ; Bundled env sidecars (WI-3285; pinned contract, plan
 ; env-switcher-packaged-all-platforms-2026-07-06): the packaged env switcher

@@ -5918,12 +5918,12 @@ fn spawn_serve(
     // WHICH BUNDLES ACTUALLY CARRY IT (WI-6075 — do not read this as "every
     // build"): `seed/**/*` is declared ONLY in the overlays, never in the base
     // tauri.conf.json, because the seed is ~2GB and must not ship inside the GUI
-    // product. Server installs get it via tauri.server.conf.json; the
-    // live-federation gate's deb gets it via tauri.gate.conf.json (passed by
-    // bin/build-and-archive-deb.sh). A plain `tauri build` — i.e. the GUI —
-    // deliberately ships NO seed and cold-joins. test/tauri-config-resources
-    // .test.js pins that split; it had silently regressed for a while because
-    // nothing ran it.
+    // product. Server installs — including the live-federation gate's archived
+    // deb from bin/build-and-archive-deb.sh — get it via
+    // tauri.server.conf.json. A plain `tauri build` — i.e. the GUI — deliberately
+    // ships NO seed and never owns the sidecar. test/tauri-config-resources.test.js
+    // pins that split; it had silently regressed for a while because nothing ran
+    // it.
     //
     // The seed is a SIBLING of the sidecar dir, not inside it: the configs bundle
     // `seed/**` and `sidecar/**` as sibling resources, so both the packaged

@@ -201,20 +201,25 @@ command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not installed (apt install
 [[ -f "$ISCC_EXE" ]] || fail "ISCC not found at $ISCC_EXE — provision Inno Setup 6.7.3 under WINEPREFIX=$WINEPREFIX_INNO"
 [[ -f "$KEY_FILE" ]] || fail "updater signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 
-# ── Payload presence (fail-closed, mirror of the VM script's asserts). This
-# script never REBUILDS these — release-local.sh does; we ship them as-is.
-[[ -d "$SRC_TAURI/sidecar/apps" ]] || fail "sidecar not built — run bin/build-desktop-sidecar.sh first"
-# "we ship them as-is" is exactly why staleness here is invisible (EI-19446480107603858):
-# the assert above is loud when the sidecar is MISSING and silent when it is merely OLD.
-# Announce its recorded age/gitHead, honor any caller-supplied content assertions,
-# and always require proof that the FINAL assembled sidecar passed its release
-# identity scan. Without the attestation, this direct cross-builder could spend
-# minutes compiling before its later payload scan rediscovers an unaudited dev tree.
-PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
-node "$ROOT/bin/check-sidecar-freshness.js" \
-  --sidecar "$SRC_TAURI/sidecar" --repo-root "$ROOT/.." --label "sidecar-freshness:windows" \
-  || fail "sidecar freshness check refused this build (see above)"
-[[ -f "$SRC_TAURI/resources/papercup-runtime.tar.gz" ]] || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
+# ── Payload presence, scoped to the requested products. A GUI-only cut needs
+# only the shared SPA. The full sidecar audit and WSL runtime are Server gates.
+if [[ " $ROLES " == *" gui "* ]]; then
+  [[ -f "$SRC_TAURI/sidecar/spa/index.html" ]] \
+    || fail "GUI SPA missing — run bin/build-desktop-sidecar.sh first"
+  node "$ROOT/bin/check-spa-freshness.js" \
+    || fail "GUI SPA freshness check refused this build (see above)"
+fi
+if [[ " $ROLES " == *" server "* ]]; then
+  [[ -d "$SRC_TAURI/sidecar/apps" ]] || fail "Server sidecar not built — run bin/build-desktop-sidecar.sh first"
+  # "we ship it as-is" is exactly why staleness here is invisible. Require
+  # proof that the final assembled Server sidecar passed its release audit.
+  PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
+  node "$ROOT/bin/check-sidecar-freshness.js" \
+    --sidecar "$SRC_TAURI/sidecar" --repo-root "$ROOT/.." --label "sidecar-freshness:windows" \
+    || fail "Server sidecar freshness check refused this build (see above)"
+  [[ -f "$SRC_TAURI/resources/papercup-runtime.tar.gz" ]] \
+    || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
+fi
 [[ -f "$SRC_TAURI/icons/icon.ico" ]] || fail "src-tauri/icons/icon.ico missing (papercusp.iss SetupIconFile)"
 
 VERSION="${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$SRC_TAURI/tauri.conf.json').version" 2>/dev/null || echo unknown)}"
@@ -274,36 +279,36 @@ authenticode_sign() {
 # Convert an absolute Linux path to the wine drive path (Z: maps to /).
 winpath() { printf 'Z:%s' "$(printf '%s' "$1" | sed 's:/:\\:g')"; }
 
-# ── Source-tree + env-sidecar staging (mirror of the VM script's flock block).
+# ── Server-only source-tree + env-sidecar staging. A GUI-only cut must neither
+# construct nor snapshot these runtime payloads.
 # stage-source-tree.sh writes src-tauri/sidecar/source.tar.zst (the Server span
 # trigger); env-sidecars/staging is the packaged env switcher's staging bundle.
 # Both re-staged fresh, serialized against a concurrent sidecar publish via the
 # same flock on src-tauri/sidecar.lock. The shared helper first grants a short
 # startup grace, then asks only tauri-guarded readers to yield, and finally
 # bounds the remaining wait with holder diagnostics.
-(
-  __pc_acquire_sidecar_flock "$SRC_TAURI/sidecar.lock" || exit $?
-  PAPERCUSP_SIDECAR_LOCK_HELD=1 bash "$ROOT/bin/stage-source-tree.sh"
-  if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
-    [[ -f "$SRC_TAURI/sidecar/source.tar.zst" ]] \
-      || fail "PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no sidecar/source.tar.zst"
-    echo "    source.tar.zst staged ($(du -h "$SRC_TAURI/sidecar/source.tar.zst" | cut -f1)) — Server role will DiskSpan"
-  fi
-  # env-sidecars/staging: hardlink the primary sidecar payload (tar/ISCC store
-  # once). Staged OUTSIDE sidecar/ (build-desktop-sidecar.sh's atomic publish
-  # replaces sidecar/ wholesale). Sidecar-shaped: serve.mjs + spa/ + db-sql/
-  # (+ prompts/harness when present); NO bin/, NO internal-docs, NO db-seed.
-  ENV_SC="$SRC_TAURI/env-sidecars/staging"
-  rm -rf "$SRC_TAURI/env-sidecars"
-  mkdir -p "$ENV_SC"
-  cp -al "$SRC_TAURI/sidecar/serve.mjs" "$ENV_SC/serve.mjs"
-  cp -al "$SRC_TAURI/sidecar/spa" "$ENV_SC/spa"
-  cp -al "$SRC_TAURI/sidecar/db-sql" "$ENV_SC/db-sql"
-  for extra in prompts harness; do
-    [[ -d "$SRC_TAURI/sidecar/$extra" ]] && cp -al "$SRC_TAURI/sidecar/$extra" "$ENV_SC/$extra"
-  done
-  echo "    env-sidecars/staging staged (hardlinked)"
-) 9>>"$SRC_TAURI/sidecar.lock"
+if [[ " $ROLES " == *" server "* ]]; then
+  (
+    __pc_acquire_sidecar_flock "$SRC_TAURI/sidecar.lock" || exit $?
+    PAPERCUSP_SIDECAR_LOCK_HELD=1 bash "$ROOT/bin/stage-source-tree.sh"
+    if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
+      [[ -f "$SRC_TAURI/sidecar/source.tar.zst" ]] \
+        || fail "PAPERCUSP_STAGE_SOURCE=1 but stage-source-tree.sh left no sidecar/source.tar.zst"
+      echo "    source.tar.zst staged ($(du -h "$SRC_TAURI/sidecar/source.tar.zst" | cut -f1)) — Server role will DiskSpan"
+    fi
+    # env-sidecars/staging: hardlink the primary Server payload.
+    ENV_SC="$SRC_TAURI/env-sidecars/staging"
+    rm -rf "$SRC_TAURI/env-sidecars"
+    mkdir -p "$ENV_SC"
+    cp -al "$SRC_TAURI/sidecar/serve.mjs" "$ENV_SC/serve.mjs"
+    cp -al "$SRC_TAURI/sidecar/spa" "$ENV_SC/spa"
+    cp -al "$SRC_TAURI/sidecar/db-sql" "$ENV_SC/db-sql"
+    for extra in prompts harness; do
+      [[ -d "$SRC_TAURI/sidecar/$extra" ]] && cp -al "$SRC_TAURI/sidecar/$extra" "$ENV_SC/$extra"
+    done
+    echo "    env-sidecars/staging staged (hardlinked)"
+  ) 9>>"$SRC_TAURI/sidecar.lock"
+fi
 
 # ── Immutable build-source snapshot ─────────────────────────────────────────
 # The shared checkout can change while this ~12-minute build is running: git-sync
@@ -348,9 +353,20 @@ copy_snapshot_input() {
 for _release_input in package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json; do
   copy_snapshot_input "$_release_input"
 done
-for _generated_input in src-tauri/sidecar src-tauri/env-sidecars src-tauri/seed src-tauri/resources; do
-  copy_snapshot_input "$_generated_input"
-done
+if [[ " $ROLES " == *" server "* ]]; then
+  for _generated_input in src-tauri/sidecar src-tauri/env-sidecars src-tauri/seed src-tauri/resources; do
+    copy_snapshot_input "$_generated_input"
+  done
+else
+  # Fail closed: a GUI-only snapshot contains no path from which Inno could
+  # accidentally sweep Server assets. Preserve only the generated SPA.
+  rm -rf -- \
+    "$BUILD_ROOT/src-tauri/sidecar" \
+    "$BUILD_ROOT/src-tauri/resources" \
+    "$BUILD_ROOT/src-tauri/seed" \
+    "$BUILD_ROOT/src-tauri/env-sidecars"
+  copy_snapshot_input "src-tauri/sidecar/spa"
+fi
 
 # ROOT/SRC_TAURI now name the immutable source. OUTPUT_SRC_TAURI remains the
 # canonical shared output tree consumed by release-local.sh after this process
@@ -498,13 +514,16 @@ exclusive — see the _WIN_CRT_STATIC comment above)."
   # Inno follows and ships. Point at the real assembled inputs instead. The GUI's
   # source.tar.zst is independently audited by stage-source-tree.sh and is not
   # included by papercusp.iss; the Server root includes it here via sidecar/.
-  _WIN_SCAN_DIRS=(
-    "$STAGE/target/release"
-    "$SRC_TAURI/sidecar"
-    "$SRC_TAURI/resources"
-  )
-  if [[ "$role" == "server" ]]; then
-    _WIN_SCAN_DIRS+=("$SRC_TAURI/seed" "$SRC_TAURI/env-sidecars/staging")
+  _WIN_SCAN_DIRS=("$STAGE/target/release")
+  if [[ "$role" == "gui" ]]; then
+    _WIN_SCAN_DIRS+=("$SRC_TAURI/sidecar/spa")
+  else
+    _WIN_SCAN_DIRS+=(
+      "$SRC_TAURI/sidecar"
+      "$SRC_TAURI/resources"
+      "$SRC_TAURI/seed"
+      "$SRC_TAURI/env-sidecars/staging"
+    )
   fi
   # Exit 2 (COULD NOT CHECK) and exit 1 (FOUND LEAKS) must not share a message. Both
   # stop the build — this is a diagnosability fix, not a safety one — but reporting a

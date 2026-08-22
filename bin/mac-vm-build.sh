@@ -515,7 +515,7 @@ if [[ "$BUILD_IOPOLICY" != "off" ]] && command -v taskpolicy >/dev/null 2>&1; th
 fi
 for role in $PAPERCUSP_BUILD_ROLES; do
   case "$role" in
-    gui)    role_cfg=() ;             role_label="Papercusp GUI" ;;
+    gui)    role_cfg=(--config src-tauri/tauri.gui.macos.conf.json) ; role_label="Papercusp GUI" ;;
     server) role_cfg=(--config src-tauri/tauri.server.conf.json) ; role_label="Papercusp Server" ;;
     *) echo "WARN: unknown PAPERCUSP_BUILD_ROLES entry '$role' — skipping"; continue ;;
   esac
@@ -562,7 +562,7 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   if [[ "$role" == "gui" && -f "$SRC_ZST" ]]; then mv "$SRC_ZST" "$SRC_ZST_STASH"; fi
   if [[ "$role" == "server" && -f "$SRC_ZST_STASH" ]]; then mv "$SRC_ZST_STASH" "$SRC_ZST"; fi
   # ── WI-4723: correct-by-construction resource hygiene (mac creds-leak fix) ──
-  # tauri copies the bundle `resources` (sidecar/**, seed/**, resources/*) into a
+  # tauri copies the role's bundle `resources` into a
   # PERSISTENT per-target staging tree next to the binary and assembles the .app
   # FROM there with a copy-into-NEVER-delete step, so the staging accumulates the
   # UNION of every past cut. That is how the PRUNED mac-VM creds docs
@@ -571,11 +571,10 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   # though src-tauri/sidecar SOURCE is clean (audit --scan-dir RC=0). This role
   # target dir is PERSISTENT BY DESIGN (role-$role, kept incremental across legs,
   # L353-357), so it carries that accumulation from cut to cut. Make the shipped
-  # bytes a PURE FUNCTION of the clean source: rsync -a --delete src-tauri/{sidecar,
-  # seed,resources} over every per-arch + universal staging resource tree BEFORE
-  # the build. --delete evicts stale files the source no longer has; tauri's
-  # in-build copy only re-adds (clean) source files, so it cannot re-introduce the
-  # cruft. This MUST precede the build, not follow it: `tauri build --bundles app`
+  # bytes a PURE FUNCTION of the role allowlist. Server staging mirrors
+  # src-tauri/{sidecar,seed,resources}. GUI staging is rebuilt from ONLY
+  # sidecar/spa plus the optional macOS terminal shim; every Server-only sibling
+  # is removed. This MUST precede the build, not follow it: `tauri build --bundles app`
   # mints the .app AND the signed .app.tar.gz+.sig in the SAME step, so cleaning
   # the .app afterwards is a FALSE fix — the tarball is already minted from the
   # dirty .app. We clean the INPUT; the post-build --scan-dir gate below proves it.
@@ -587,14 +586,28 @@ for role in $PAPERCUSP_BUILD_ROLES; do
       "$CARGO_TARGET_DIR/aarch64-apple-darwin/release" \
       "$CARGO_TARGET_DIR/x86_64-apple-darwin/release" \
       "$CARGO_TARGET_DIR/$MAC_BUILD_TARGET/release"; do
-    for _res in sidecar seed resources; do
-      _res_src="$ROOT/src-tauri/$_res"
-      _res_dst="$_stage_rel/$_res"
-      [[ -d "$_res_src" && -d "$_res_dst" ]] || continue
-      echo "    (WI-4723 resource-hygiene: rsync --delete $_res → ${_stage_rel#$PWD/})"
-      rsync -a --delete "$_res_src"/ "$_res_dst"/
-      strip_mac_signing_xattrs "$_res_dst"
-    done
+    [[ -d "$_stage_rel" ]] || continue
+    if [[ "$role" == "gui" ]]; then
+      rm -rf -- "$_stage_rel/sidecar" "$_stage_rel/seed" "$_stage_rel/resources"
+      mkdir -p "$_stage_rel/sidecar/spa"
+      rsync -a --delete "$ROOT/src-tauri/sidecar/spa"/ "$_stage_rel/sidecar/spa"/
+      if [[ -f "$ROOT/src-tauri/resources/libPapercuspTermShim.dylib" ]]; then
+        mkdir -p "$_stage_rel/resources"
+        cp "$ROOT/src-tauri/resources/libPapercuspTermShim.dylib" "$_stage_rel/resources/"
+      fi
+      strip_mac_signing_xattrs "$_stage_rel/sidecar"
+      [[ ! -d "$_stage_rel/resources" ]] || strip_mac_signing_xattrs "$_stage_rel/resources"
+      echo "    (P-007 GUI resource-hygiene: rebuilt allowlisted sidecar/spa + optional terminal shim → ${_stage_rel#$PWD/})"
+    else
+      for _res in sidecar seed resources; do
+        _res_src="$ROOT/src-tauri/$_res"
+        _res_dst="$_stage_rel/$_res"
+        [[ -d "$_res_src" && -d "$_res_dst" ]] || continue
+        echo "    (WI-4723 Server resource-hygiene: rsync --delete $_res → ${_stage_rel#$PWD/})"
+        rsync -a --delete "$_res_src"/ "$_res_dst"/
+        strip_mac_signing_xattrs "$_res_dst"
+      done
+    fi
   done
   CI=true "${iopolicy_cmd[@]}" npx tauri build "${verbose_flag[@]}" --target "$MAC_BUILD_TARGET" --bundles app "${role_cfg[@]}" "${fast_cfg[@]}"
   [[ -d "$role_bundle_dir/macos/$role_label.app" ]] || { echo "ERROR: $role_label build produced no .app"; exit 1; }

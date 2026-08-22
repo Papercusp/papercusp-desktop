@@ -345,8 +345,8 @@ stage_env_sidecars() { # $1=sidecar dir (inside the .app)
 }
 
 # ── Hand-assemble the .app to Tauri's macOS layout. ───────────────────────────
-assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
-  local ident="$1" name="$2" bin="$3" app="$4"
+assemble_app() { # $1=role $2=identifier $3=productName $4=universal_binary $5=app_out
+  local role="$1" ident="$2" name="$3" bin="$4" app="$5"
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   gen_info_plist "$ident" "$name" "$app/Contents/Info.plist"
@@ -354,14 +354,23 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
   chmod 755 "$app/Contents/MacOS/papercusp-desktop"
   cp "$SRC_TAURI/icons/icon.icns" "$app/Contents/Resources/icon.icns"
 
-  # sidecar/** -> Contents/Resources/sidecar/ (a real copy per role: signing
-  # seals the nested Mach-O in place, so the two roles can't share bytes).
-  echo "    (copying darwin sidecar → $name.app Resources — $(du -sh "$DARWIN_SIDECAR" | cut -f1))"
-  cp -a "$DARWIN_SIDECAR" "$app/Contents/Resources/sidecar"
-  stage_env_sidecars "$app/Contents/Resources/sidecar"
+  if [[ "$role" == "server" ]]; then
+    # The Server owns the complete operator/runtime closure.
+    echo "    (copying darwin Server sidecar → $name.app Resources — $(du -sh "$DARWIN_SIDECAR" | cut -f1))"
+    cp -a "$DARWIN_SIDECAR" "$app/Contents/Resources/sidecar"
+    stage_env_sidecars "$app/Contents/Resources/sidecar"
+  else
+    # D-004: the GUI is fail-closed. It carries the one shared SPA for bootstrap
+    # and attachment UI, never serve.mjs, Node, Postgres, models or agent tools.
+    [[ -f "$DARWIN_SIDECAR/spa/index.html" ]] \
+      || fail "GUI SPA missing at $DARWIN_SIDECAR/spa/index.html"
+    mkdir -p "$app/Contents/Resources/sidecar"
+    cp -a "$DARWIN_SIDECAR/spa" "$app/Contents/Resources/sidecar/spa"
+    echo "    ✓ copied allowlisted GUI SPA only"
+  fi
 
-  # source.tar.zst (dev/local "run from source" buttons) — see KNOWN GAPS; opt-in.
-  if [[ "$PAPERCUSP_STAGE_SOURCE" == "1" ]]; then
+  # source.tar.zst (dev/local "run from source" buttons) is Server-only.
+  if [[ "$role" == "server" && "$PAPERCUSP_STAGE_SOURCE" == "1" ]]; then
     # WI-3307: cross-install a genuinely-darwin node_modules tree FIRST, so the
     # staged source doesn't carry this Linux box's native modules under the
     # bundled darwin node. v1 always cross-installs x86_64 only, even for a
@@ -377,24 +386,25 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out
       && cp -a "$SRC_TAURI/sidecar/source.tar.zst" "$app/Contents/Resources/sidecar/source.tar.zst"
   fi
 
-  # seed/** -> Contents/Resources/seed/
-  if [[ -d "$SRC_TAURI/seed" && -f "$SRC_TAURI/seed/manifest.json" ]]; then
-    cp -a "$SRC_TAURI/seed" "$app/Contents/Resources/seed"
-  else
-    echo "    WARN: no cut seed at $SRC_TAURI/seed — the app ships without a first-boot seed"
+  # seed/** is Server-only.
+  if [[ "$role" == "server" ]]; then
+    if [[ -d "$SRC_TAURI/seed" && -f "$SRC_TAURI/seed/manifest.json" ]]; then
+      cp -a "$SRC_TAURI/seed" "$app/Contents/Resources/seed"
+    else
+      echo "    WARN: no cut seed at $SRC_TAURI/seed — the Server ships without a first-boot seed"
+    fi
   fi
 
-  # resources/* -> Contents/Resources/resources/ — MAC-SELECTIVE. The WSL rootfs
-  # (papercup-runtime.tar.gz) + its bootstrap are windows/linux-only; a real mac
-  # bundle ships only .gitkeep + libPapercuspTermShim.dylib (when built). Do NOT
-  # blind-copy resources/*.
-  mkdir -p "$app/Contents/Resources/resources"
-  [[ -f "$SRC_TAURI/resources/.gitkeep" ]] && cp "$SRC_TAURI/resources/.gitkeep" "$app/Contents/Resources/resources/" || true
-  if [[ -f "$SRC_TAURI/resources/libPapercuspTermShim.dylib" ]]; then
-    cp "$SRC_TAURI/resources/libPapercuspTermShim.dylib" "$app/Contents/Resources/resources/"
-    echo "    ✓ vendored libPapercuspTermShim.dylib (embedded terminal enabled)"
-  else
-    echo "    (no libPapercuspTermShim.dylib — embedded terminal degrades to NewWindow; see KNOWN GAPS)"
+  # The optional macOS terminal shim is a GUI-shell resource. The Server has no
+  # window and receives no resources/ tree on macOS.
+  if [[ "$role" == "gui" ]]; then
+    mkdir -p "$app/Contents/Resources/resources"
+    if [[ -f "$SRC_TAURI/resources/libPapercuspTermShim.dylib" ]]; then
+      cp "$SRC_TAURI/resources/libPapercuspTermShim.dylib" "$app/Contents/Resources/resources/"
+      echo "    ✓ vendored libPapercuspTermShim.dylib (embedded terminal enabled)"
+    else
+      echo "    (no libPapercuspTermShim.dylib — embedded terminal degrades to NewWindow; see KNOWN GAPS)"
+    fi
   fi
 
 }
@@ -648,7 +658,7 @@ for role in $ROLES; do
 
   app="$OUT_BUNDLE/macos/$product.app"
   echo "    [$role] assembling $product.app"
-  assemble_app "$app_id" "$product" "$uni_bin" "$app"
+  assemble_app "$role" "$app_id" "$product" "$uni_bin" "$app"
 
   # `cp -a` preserves extended attributes when the source filesystem supports
   # them. Remove only FinderInfo/resource-fork metadata before any signature or

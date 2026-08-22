@@ -130,14 +130,25 @@ test('Server distribution contract retains every backend runtime class before GU
 
 test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () => {
   const base = readConfig('tauri.conf.json');
+  const guiMac = readConfig('tauri.gui.macos.conf.json');
   const server = readConfig('tauri.server.conf.json');
+  const contract = readDistributionContract();
 
   // NOTE (WI-6075): 'sidecar/db-sql/*' is intentionally absent — the recursive
   // 'sidecar/**/*' already covers it. Verified in the shipped artifact, not
   // assumed: dpkg-deb -c on the gate deb lists ./usr/lib/<product>/sidecar/
   // db-sql/000-baseline.sql even though only the recursive glob is declared.
   const baseResources = base.bundle.resources;
-  assert.deepEqual(baseResources, ['sidecar/**/*', 'resources/*']);
+  assert.deepEqual(
+    baseResources,
+    ['sidecar/spa/**/*'],
+    'the cross-platform GUI base must carry only the shared bootstrap SPA',
+  );
+  assert.deepEqual(
+    guiMac.bundle.resources,
+    contract.gui.resourceAllowlist.map(({ glob }) => glob),
+    'the macOS GUI overlay may add only the reviewed native terminal shim',
+  );
   assert(!baseResources.some((resource) => resource.includes('seed')), 'GUI/base resources must not include the multi-GB seed');
 
   // Tauri --config overwrites conflicting values, so the server override must
@@ -149,30 +160,10 @@ test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () 
   ]);
 });
 
-// WI-6075: the seed lives in exactly two overlays, never in the base config. The
-// live-federation gate scavenges the deb built by bin/build-and-archive-deb.sh,
-// so that build has to opt INTO the seed explicitly — otherwise the only way to
-// keep the gate supplied is to put seed/**/* back in the base config, which is
-// precisely the regression above. Guard the overlay so the split cannot quietly
-// collapse again (it has already flapped three times).
-test('gate overlay carries the seed explicitly, so the base config never has to', () => {
-  const base = readConfig('tauri.conf.json');
-  const gate = readConfig('tauri.gate.conf.json');
-
-  // The overlay repeats `identifier` ONLY because the Tauri config schema marks
-  // it required at top level (node_modules/@tauri-apps/cli/config.schema.json:
-  // required: ['identifier']) — so the overlay stays valid on its own. It must
-  // therefore stay EQUAL to the base identifier: this overlay is a resources
-  // flavor of the GUI product, not a separate product like the server override.
-  // If these ever diverge, the gate would silently build a different app id.
-  assert.equal(gate.identifier, base.identifier, 'gate overlay must not fork the product identity — it only adds the seed');
-
-  assert.deepEqual(gate.bundle.resources, [
-    'sidecar/**/*',
-    'resources/*',
-    'seed/**/*',
-  ], 'gate overlay must repeat the COMPLETE resources list — tauri --config overwrites, it does not merge');
-
+// WI-6075 / P-007: the live-federation gate needs the full seeded runtime, so
+// its archived deb is a Server artifact. A one-off full-runtime GUI overlay was
+// the exact exception that let the shared GUI contract widen again.
+test('archived federation deb reuses the canonical Server overlay', () => {
   // Resolve `--config <token>` against the script's own simple VAR="..."
   // assignments, so the check follows the indirection instead of demanding an
   // inline literal (the script quite reasonably uses a variable).
@@ -187,8 +178,13 @@ test('gate overlay carries the seed explicitly, so the base config never has to'
   });
 
   assert(
-    configured.includes('src-tauri/tauri.gate.conf.json'),
-    `build-and-archive-deb.sh must pass the gate overlay via --config, or the gate deb loses its seed (resolved --config values: ${JSON.stringify(configured)})`,
+    configured.includes('src-tauri/tauri.server.conf.json'),
+    `build-and-archive-deb.sh must produce a seeded Server artifact (resolved --config values: ${JSON.stringify(configured)})`,
+  );
+  assert.equal(
+    fs.existsSync(path.join(root, 'src-tauri', 'tauri.gate.conf.json')),
+    false,
+    'a full-runtime GUI gate overlay must not reappear',
   );
 });
 
@@ -201,9 +197,9 @@ test('release overlays preserve the shared GUI feature contract', () => {
   const base = readConfig('tauri.conf.json');
   const overlays = [
     ['server', readConfig('tauri.server.conf.json')],
+    ['gui-macos', readConfig('tauri.gui.macos.conf.json')],
     ['windows', readConfig('tauri.windows.conf.json')],
     ['nightly', readConfig('tauri.nightly.conf.json')],
-    ['gate', readConfig('tauri.gate.conf.json')],
   ];
 
   assert.equal(base.build.beforeDevCommand, 'bash bin/dev-operator-ifneeded.sh');
@@ -263,6 +259,46 @@ test('release overlays preserve the shared GUI feature contract', () => {
       `shared release/dev capability contract lost ${permission}`,
     );
   }
+});
+
+test('manual platform producers preserve the exact thin-GUI allowlist', () => {
+  const appImage = readText('bin', 'build-appimage.sh');
+  const macCross = readText('bin', 'build-mac-cross.sh');
+  const macVm = readText('bin', 'mac-vm-build.sh');
+  const windowsCross = readText('bin', 'build-windows-cross.sh');
+  const inno = readText('src-tauri', 'windows', 'inno', 'papercusp.iss');
+
+  assert.match(appImage, /GUI_SPA_SOURCE="\$DESK\/src-tauri\/sidecar\/spa"/);
+  assert.match(appImage, /find "\$APPDIR_SIDECAR"[^\n]+! -name spa[^\n]+rm -rf/);
+  assert.match(appImage, /rm -rf -- "\$LIBDIR\/resources" "\$LIBDIR\/seed"/);
+  assert.doesNotMatch(
+    appImage,
+    /rsync -a --delete "\$DESK\/src-tauri\/sidecar"\//,
+    'AppImage post-processing must never widen the staged GUI back to the full sidecar',
+  );
+
+  assert.match(macCross, /if \[\[ "\$role" == "server" \]\]; then[\s\S]*copying darwin Server sidecar/);
+  assert.match(macCross, /cp -a "\$DARWIN_SIDECAR\/spa" "\$app\/Contents\/Resources\/sidecar\/spa"/);
+  assert.match(macCross, /if \[\[ "\$role" == "gui" \]\]; then[\s\S]*libPapercuspTermShim\.dylib/);
+
+  assert.match(
+    macVm,
+    /gui\)\s+role_cfg=\(--config src-tauri\/tauri\.gui\.macos\.conf\.json\)/,
+    'native macOS Tauri builds must opt into the reviewed GUI-only mac resource overlay',
+  );
+  assert.match(macVm, /P-007 GUI resource-hygiene: rebuilt allowlisted sidecar\/spa/);
+
+  const filesSection = inno.slice(inno.indexOf('[Files]'), inno.indexOf('[Icons]'));
+  const guiBlock = filesSection.match(/#if AppId == "com\.papercusp\.gui"([\s\S]*?)#endif/)?.[1] ?? '';
+  const serverBlock = filesSection.match(/#if AppId == "com\.papercusp\.server"([\s\S]*?)#endif/)?.[1] ?? '';
+  assert(guiBlock.includes('sidecar\\spa\\*'), 'Windows GUI must package the shared SPA');
+  for (const forbidden of ['sidecar\\*', 'resources\\*', 'seed\\*']) {
+    assert(!guiBlock.includes(`{#BuildRoot}\\${forbidden}`), `Windows GUI widened to ${forbidden}`);
+  }
+  for (const required of ['sidecar\\*', 'resources\\*', 'seed\\*']) {
+    assert(serverBlock.includes(`{#BuildRoot}\\${required}`), `Windows Server lost ${required}`);
+  }
+  assert.match(windowsCross, /if \[\[ "\$role" == "gui" \]\]; then[\s\S]*"\$SRC_TAURI\/sidecar\/spa"/);
 });
 
 test('all public platform writers consume the shared sidecar, source and command registry', () => {
