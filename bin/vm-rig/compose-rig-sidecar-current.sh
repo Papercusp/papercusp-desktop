@@ -79,6 +79,10 @@ PROMPTS_SRC="$WEB_DIR/prompts"
 for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$PROMPTS_SRC" "$WEB_DIR/bin/bundle-host-common.sh"; do
   [ -e "$d" ] || { echo "FATAL: missing $d" >&2; exit 1; }
 done
+[ -x "$HERE/boot-headless-current.sh" ] || {
+  echo "FATAL: $HERE/boot-headless-current.sh must be executable (tracked mode 0755)" >&2
+  exit 1
+}
 
 # --- sanity: the two sources must NOT be the same shape (catches a bad edit here)
 [ -e "$LOCKS_SQL_SRC/001-bootstrap.sql" ] || { echo "FATAL: $LOCKS_SQL_SRC is not the locks set (no 001-bootstrap.sql)" >&2; exit 1; }
@@ -190,7 +194,7 @@ if [ "$PUSH" = "1" ]; then
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
-  rsync -a "$HERE/boot-headless-current.sh" "$VM:$REMOTE_CONTROL"
+  rsync -a --chmod=F755 "$HERE/boot-headless-current.sh" "$VM:$REMOTE_CONTROL"
   ssh "$VM" "bash $REMOTE_CONTROL_Q --stage $REMOTE_STAGE_Q --cleanup-control $REMOTE_CONTROL_Q"
   echo "→ staged deploy completed through exact-PID restart/rollback boundary"
   echo "→ verify what the far side is RUNNING (not what you think it is):"

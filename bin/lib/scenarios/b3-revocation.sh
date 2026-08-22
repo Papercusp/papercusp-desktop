@@ -123,6 +123,34 @@ scn_revocation_kcut() {
   fi
   local absent; absent="$(rig_assert_absent b "$FPOST" 30)"
 
+  # WI-40542: REPORT THE BEHAVIORAL VERDICT HERE, where it is computed — not only at the
+  # `if [ "$absent" != 1 ]` block far below. That block sits AFTER the WI-560 crypto K-CUT
+  # assert, which `return 1`s on failure, so a crypto failure used to discard this result
+  # entirely: the 30s window above was paid in full and the answer never reached the log.
+  # Run m1787374736 hit exactly that — the crypto leg failed, and D-045's discriminator
+  # ("did post-ban content reach B?") was unanswerable from a run that had MEASURED it.
+  #
+  # Read the silence correctly: absence of a leak line used to mean "not reported", NOT
+  # "no leak". This line removes that ambiguity on every path.
+  #
+  # Diagnostic only — the FAIL verdict and both asserts are deliberately UNCHANGED.
+  #
+  # ⚠ ARRIVAL IS NOT DISCLOSURE. rig_assert_absent probes whether the ROW reached B's
+  # consolidated table. Revocation is designed as a DECRYPT cut, not a replication cut, so
+  # arrival alone is a delivery leak, NOT proof B could read the bytes. The disclosure
+  # discriminator is the `title` comparison in the block below (and the live
+  # content-undecryptability witness that WI-6266 says is still missing). Do not upgrade
+  # this line's wording to imply disclosure — that exact over-claim was already made and
+  # retracted once (see the retraction note at the `absent != 1` block).
+  # THREE states, not two. An unreadable probe is UNMEASURED — it must render as neither
+  # "clean" nor "leaked", or this line reintroduces the absence-of-evidence-as-health trap
+  # it exists to remove.
+  case "${absent:-}" in
+    1) echo "  · revocation: BEHAVIORAL leg — post-ban content did NOT arrive on banned B (row-absence over a 30s window; arrival-plane only, says nothing about decryptability)" ;;
+    0) echo "  · revocation: BEHAVIORAL leg — post-ban content DID arrive on banned B — a DELIVERY leak; see the title-comparison below for whether plaintext was actually disclosed" ;;
+    *) echo "  · revocation: BEHAVIORAL leg — UNMEASURED: rig_assert_absent returned '${absent:-<empty>}', neither 1 nor 0. This is NOT a clean result and NOT a leak; it is absence of evidence, and it must not be scored either way." ;;
+  esac
+
   # WI-560 K-CUT CRYPTO WITNESS (diagnostic — the assertion above is deliberately UNCHANGED).
   #
   # The pass/fail leg of this scenario is BEHAVIORAL and self-describes as "mechanism-agnostic"
