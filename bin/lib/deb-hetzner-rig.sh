@@ -923,17 +923,119 @@ rig_setup_all() {
 }
 
 # ── kill / restart sidecar (the offline/restart primitives, Briefs 4+5) ───────
+# rig_stop_postgres_gracefully <ip> — request the same PostgreSQL fast shutdown
+# used by the shipped embedded-postgres client (`pg.stop()` sends SIGINT and
+# waits for the postmaster child’s actual exit). Do not replace this with a
+# broad `pkill` + short sleep: a fast shutdown can spend minutes in its
+# checkpoint on a contended frame, and killing it or deleting postmaster.pid
+# before the real exit turns an ordinary restart into unclean recovery.
+#
+# The timeout is a safety bound for a wedged rig, not a kill deadline. On
+# expiry this helper fails closed and leaves pgdata untouched; the caller must
+# not relaunch over a still-live postmaster. The default is deliberately above
+# the 270s fsync observed in WI-40553’s incident evidence, while remaining
+# finite so a genuinely wedged frame is surfaced to the scenario.
+rig_stop_postgres_gracefully() {
+  local ip="$1"
+  local timeout_s="${RIG_POSTGRES_STOP_TIMEOUT_SEC:-600}"
+  case "$timeout_s" in
+    ''|*[!0-9]*)
+      echo "FATAL invalid RIG_POSTGRES_STOP_TIMEOUT_SEC='$timeout_s' (expected integer seconds)"
+      return 2
+      ;;
+  esac
+  rig_ssh "$ip" "runuser -u pcusp -- env RIG_PG_STOP_TIMEOUT_SEC='$timeout_s' bash -s" <<'PGEOF'
+set -u
+H=/home/pcusp
+PGDATA="$H/pgdata"
+PIDFILE="$PGDATA/postmaster.pid"
+MAX_WAIT="${RIG_PG_STOP_TIMEOUT_SEC:-600}"
+
+pg_processes() {
+  pgrep -u pcusp -f 'bin/postgres' 2>/dev/null || true
+}
+
+pg_pid=""
+if [ -r "$PIDFILE" ]; then
+  pg_pid="$(awk 'NR == 1 { print $1; exit }' "$PIDFILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+
+# Fail closed when the pid file is malformed or missing but a postgres process
+# still exists. Guessing a PID here could signal another frame-local process.
+if [ -z "$pg_pid" ]; then
+  live="$(pg_processes)"
+  if [ -n "$live" ]; then
+    echo "FATAL postgres is live but $PIDFILE has no usable postmaster PID; refusing restart"
+    exit 1
+  fi
+  rm -f "$PIDFILE"
+  echo "postgres already stopped (no live process)"
+  exit 0
+fi
+case "$pg_pid" in
+  ''|*[!0-9]*|0)
+    live="$(pg_processes)"
+    if [ -n "$live" ]; then
+      echo "FATAL invalid postmaster PID '$pg_pid' with live postgres process; refusing restart"
+      exit 1
+    fi
+    rm -f "$PIDFILE"
+    echo "removed stale postmaster.pid (postgres already stopped)"
+    exit 0
+    ;;
+esac
+
+if ! kill -0 "$pg_pid" 2>/dev/null; then
+  live="$(pg_processes)"
+  if [ -n "$live" ]; then
+    echo "FATAL postmaster PID $pg_pid is gone but postgres descendants remain; refusing restart"
+    exit 1
+  fi
+  rm -f "$PIDFILE"
+  echo "removed stale postmaster.pid (postmaster already stopped)"
+  exit 0
+fi
+
+echo "postgres fast shutdown: SIGINT postmaster pid=$pg_pid; waiting for actual exit (max ${MAX_WAIT}s)"
+kill -INT "$pg_pid" 2>/dev/null || true
+started_at="$(date +%s)"
+while kill -0 "$pg_pid" 2>/dev/null; do
+  elapsed=$(( $(date +%s) - started_at ))
+  if [ "$elapsed" -ge "$MAX_WAIT" ]; then
+    echo "FATAL postgres postmaster pid=$pg_pid did not exit within ${MAX_WAIT}s; refusing SIGKILL and preserving pgdata"
+    exit 1
+  fi
+  sleep 1
+done
+
+# The postmaster should reap its children before exit. Give the last backend
+# processes a short postmaster-exit settling window, but never kill them here.
+for _ in $(seq 1 30); do
+  live="$(pg_processes)"
+  [ -z "$live" ] && break
+  sleep 1
+done
+live="$(pg_processes)"
+if [ -n "$live" ]; then
+  echo "FATAL postgres descendants remain after postmaster exit; refusing restart and preserving pgdata"
+  exit 1
+fi
+rm -f "$PIDFILE"
+echo "postgres stopped cleanly (postmaster exited; pgdata preserved)"
+PGEOF
+}
+
 # rig_kill_sidecar <inst> — stop the pcusp serve.mjs WITHOUT wiping pgdata (the
 # "take this member offline" primitive: reconnect/catch-up + restart-durability).
 rig_kill_sidecar() {
   local inst="$1"; local ip="${FRAME_IP[$inst]}"
   fed_log "[$inst] kill sidecar (preserve pgdata — member goes offline)"
-  # Kill node AND the embedded-postgres children: pkill by 'serve.mjs' matches
-  # only the node process; the postgres backends sometimes survive the parent
-  # and then hold pgdata/postmaster.pid + the PG port, so the NEXT boot dies
-  # with EMBEDDED_PG_FAILED (seen live: m1783106818 cycles 3/5 on frame b).
-  # A real desktop quit takes PG down with it — emulate that, preserve pgdata.
-  rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; sleep 1; pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true; sleep 2; pgrep -u pcusp -f 'serve.mjs|bin/postgres' >/dev/null && echo 'STILL-RUNNING' || echo 'sidecar stopped'\""
+  # Stop the Node wrapper first, then ask the postmaster to perform its own
+  # fast shutdown and wait for the actual process exit. This mirrors the
+  # shipped `pg.stop()` API rather than orphaning PG behind a wrapper pkill.
+  rig_ssh "$ip" "runuser -u pcusp -- bash -lc \"pkill -u pcusp -f 'serve.mjs' 2>/dev/null || true; for i in \\\$(seq 1 15); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done; pgrep -u pcusp -f 'serve.mjs' >/dev/null && pkill -9 -u pcusp -f 'serve.mjs' 2>/dev/null || true; echo 'sidecar wrapper stopped'\"" \
+    || return 1
+  rig_stop_postgres_gracefully "$ip" || return 1
 }
 
 # rig_restart_sidecar <inst> — relaunch serve.mjs WITHOUT wiping pgdata/.papercusp
@@ -959,20 +1061,14 @@ if pgrep -u pcusp -f 'serve.mjs' >/dev/null; then
   pkill -9 -u pcusp -f 'serve.mjs' 2>/dev/null || true
   for i in $(seq 1 10); do pgrep -u pcusp -f 'serve.mjs' >/dev/null || break; sleep 1; done
 fi
-pkill -u pcusp -f 'bin/postgres' 2>/dev/null || true
+rig_stop_postgres_gracefully "$ip" || exit 1
 # shm-race hygiene (WI-183 rig hardening; seen LIVE 2026-07-03 19:46Z frame b):
 # the old pkill + sleep 2 + pid-file-clear UNDER-COVERS the class — PG backends
 # can outlive the 2s grace still ATTACHED to the old SysV segment, and the
 # relaunched postmaster then dies 'pre-existing shared memory block … is still
-# in use' (EMBEDDED_PG_FAILED). So: (a) WAIT until every pcusp postgres has
-# actually EXITED (escalate to SIGKILL once), then (b) reap ALL leftover
-# pcusp-owned SysV shm+sem IDs — no legit PG for this pgdata exists at this
-# point, so anything left is an orphan holding the key the new postmaster wants.
-for i in $(seq 1 20); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
-if pgrep -u pcusp -f 'bin/postgres' >/dev/null; then
-  pkill -9 -u pcusp -f 'bin/postgres' 2>/dev/null || true
-  for i in $(seq 1 10); do pgrep -u pcusp -f 'bin/postgres' >/dev/null || break; sleep 1; done
-fi
+# in use' (EMBEDDED_PG_FAILED). The helper above now waits for the actual
+# postmaster/descendant exit before this cleanup, so reap only truly orphaned
+# IPC objects after PG is gone.
 for id in $(ipcs -m 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -m "$id" 2>/dev/null || true; done
 for id in $(ipcs -s 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -s "$id" 2>/dev/null || true; done
 # stale-lock hygiene: an orphaned/killed PG can leave postmaster.pid behind;
