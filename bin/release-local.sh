@@ -1580,7 +1580,8 @@ elif [[ "$WITH_MAC" == "1" ]]; then
   # has no version in its filename), so a prior cut's dmg/app would contaminate
   # this release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
   mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
-  rm -f "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig 2>/dev/null || true
+  release_artifacts_guarded_delete "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig \
+    || { echo "ERROR: release-retention guard refused stale macOS output cleanup" >&2; exit 1; }
   (
     set -euo pipefail
     # 1) darwin sidecar (Mach-O). Inherits the release env exported above
@@ -1948,6 +1949,16 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
     || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
 fi
+
+# Retain all final target/artifact roots only after every enabled leg has
+# finished and ARTIFACTS contains the exact bytes this cut will publish.
+papercusp_retain_release_paths \
+  "$CARGO_TARGET_ROOT" \
+  "$ROOT/src-tauri/target/release" \
+  "$ROOT/src-tauri/target/windows-vm" \
+  "$ROOT/src-tauri/target/universal-apple-darwin" \
+  "${ARTIFACTS[@]}" \
+  || { echo "ERROR: could not retain final release target/artifact paths" >&2; exit 1; }
 
 echo "==> generating latest.json + latest-server.json"
 # EI-18101626616739029: the manifest-generation logic itself now lives in
