@@ -383,6 +383,11 @@ fi
 echo "==> collecting Linux artifacts into $DEST_BUNDLE"
 SRC_BUNDLE="$SRC_ROOT/release/bundle"
 
+# The canonical source-tree target may be a host relocation symlink. A cleanup
+# can remove its referent after the expensive package build finishes; recover
+# that one safe missing-directory case before mkdir descends through the link.
+papercusp_prepare_collection_target_root "$ROOT/src-tauri/target"
+
 collected=()
 if [[ "$(readlink -f "$SRC_BUNDLE" 2>/dev/null)" == "$(readlink -f "$DEST_BUNDLE" 2>/dev/null)" ]]; then
   echo "    cargo already targets the source tree — artifacts are in place ($DEST_BUNDLE)"

@@ -20,11 +20,14 @@ const {
   readlinkSync,
   symlinkSync,
   writeFileSync,
+  mkdirSync,
+  readFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
 const HELPER = join(__dirname, '..', 'bin', 'lib', 'claim-target-dir.sh');
+const BUILD_LINUX = readFileSync(join(__dirname, '..', 'bin', 'build-linux-local.sh'), 'utf8');
 
 let home;
 beforeEach(() => {
@@ -40,6 +43,19 @@ function claim(env = {}) {
     'bash',
     ['-c', `set -euo pipefail; . "${HELPER}"; printf '%s' "\${CARGO_TARGET_DIR:-}"`],
     { env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env }, encoding: 'utf8' },
+  );
+}
+
+function prepareCollectionTarget(root) {
+  return execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail; export CARGO_TARGET_DIR="$HOME/deliberate"; . "${HELPER}" >/dev/null; papercusp_prepare_collection_target_root "$1"`,
+      'prepare-collection-target',
+      root,
+    ],
+    { env: { ...process.env, HOME: home }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   );
 }
 
@@ -137,6 +153,40 @@ test('a broken target-dir symlink is preserved and skipped for the next usable s
   } finally {
     held.child.kill();
   }
+});
+
+test('artifact collection restores only a missing relocation referent and preserves the symlink', () => {
+  const relocationParent = join(home, 'relocated-builds');
+  const referent = join(relocationParent, 'desktop-target');
+  const link = join(home, 'source-target');
+  mkdirSync(relocationParent);
+  symlinkSync(referent, link);
+
+  prepareCollectionTarget(link);
+
+  assert.ok(lstatSync(link).isSymbolicLink(), 'collection recovery must preserve the relocation symlink');
+  assert.strictEqual(readlinkSync(link), referent);
+  assert.ok(lstatSync(referent).isDirectory(), 'collection recovery must recreate the missing referent');
+});
+
+test('artifact collection fails closed when the relocation parent is also missing', () => {
+  const referent = join(home, 'missing-parent', 'desktop-target');
+  const link = join(home, 'source-target');
+  symlinkSync(referent, link);
+
+  assert.throws(
+    () => prepareCollectionTarget(link),
+    /refusing to manufacture the relocation hierarchy/,
+  );
+  assert.ok(lstatSync(link).isSymbolicLink(), 'fail-closed recovery must preserve the symlink');
+  assert.ok(!existsSync(referent), 'fail-closed recovery must not create an untrusted parent hierarchy');
+});
+
+test('Linux artifact collection invokes relocation recovery before creating bundle children', () => {
+  const prepareAt = BUILD_LINUX.indexOf('papercusp_prepare_collection_target_root "$ROOT/src-tauri/target"');
+  const mkdirAt = BUILD_LINUX.indexOf('mkdir -p "$DEST_BUNDLE/deb" "$DEST_BUNDLE/appimage"');
+  assert.ok(prepareAt >= 0, 'build-linux-local must prepare its canonical collection target');
+  assert.ok(prepareAt < mkdirAt, 'collection target recovery must precede mkdir through the symlink');
 });
 
 test('a non-directory target-slot occupant is preserved and skipped', async () => {

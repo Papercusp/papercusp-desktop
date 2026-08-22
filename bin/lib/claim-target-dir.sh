@@ -94,6 +94,50 @@ __pc_desktop_running_in() {
   fuser -s "${dir}/debug/papercusp-desktop" 2>/dev/null
 }
 
+# Prepare a source-tree collection target without replacing relocation links.
+#
+# The build slot allocator above MUST skip a dangling symlink: choosing it as a
+# Cargo target could corrupt host state. Artifact collection is different. The
+# completed package already lives in an isolated Cargo root and must be copied
+# into the canonical source-tree target. If that canonical target is a
+# relocation symlink whose immediate referent disappeared, recreate only the
+# missing referent directory. Never replace the symlink, never manufacture a
+# missing parent hierarchy, and never route around a non-directory occupant.
+papercusp_prepare_collection_target_root() {
+  local root="${1:?collection target root required}"
+  local raw_target target parent
+
+  if [[ -L "$root" && ! -e "$root" ]]; then
+    raw_target="$(readlink "$root")" || {
+      echo "ERROR: cannot read collection target symlink: $root" >&2
+      return 1
+    }
+    case "$raw_target" in
+      /*) target="$raw_target" ;;
+      *) target="$(dirname "$root")/$raw_target" ;;
+    esac
+    parent="$(dirname "$target")"
+    [[ -d "$parent" ]] || {
+      echo "ERROR: collection target symlink $root points below missing parent $parent — refusing to manufacture the relocation hierarchy" >&2
+      return 1
+    }
+    mkdir -- "$target" || {
+      echo "ERROR: cannot recreate missing collection target referent $target for $root" >&2
+      return 1
+    }
+    echo "→ restored missing collection target referent $target (preserved symlink $root)" >&2
+  fi
+
+  if [[ -e "$root" && ! -d "$root" ]]; then
+    echo "ERROR: collection target root exists but is not a directory: $root" >&2
+    return 1
+  fi
+  [[ ! -L "$root" || -d "$root" ]] || {
+    echo "ERROR: collection target symlink remains unusable after recovery: $root" >&2
+    return 1
+  }
+}
+
 __pc_claim_target_dir() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
