@@ -169,6 +169,50 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
+function macFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
+  const artifacts = join(root, 'artifacts');
+  const shims = join(root, 'shims');
+  mkdirSync(artifacts);
+  mkdirSync(shims);
+
+  const dmg = join(artifacts, `Papercusp GUI_${VERSION}_universal-apple-darwin.dmg`);
+  writeFileSync(dmg, 'signed macOS dmg fixture');
+  writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
+    version: VERSION,
+    buildSha: TARGET_SHA,
+  }));
+
+  const log = join(root, 'transport.log');
+  const flipped = join(root, 'flipped');
+  const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
+printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+case "$*" in
+  *"echo VM-OK"*) printf 'VM-OK\\n' ;;
+  *"operator.json"*) printf '{"port":3070}\\n' ;;
+  *"api/health"*)
+    if [[ -f "$MOCK_FLIPPED" ]]; then
+      printf '{"sha":"${TARGET_SHA}","version":"${VERSION}"}\\n'
+    else
+      printf '{"sha":null,"version":"0.0.0"}\\n'
+    fi
+    ;;
+  *"codesign --verify --deep --strict"*)
+    if [[ "$*" != *"ditto --noextattr --noqtn"* || "$*" != *"xattr -cr"* ]]; then
+      printf 'resource fork, Finder information, or similar detritus not allowed\\n' >&2
+      exit 1
+    fi
+    ;;
+  *"open -n"*"Papercusp GUI.app"*) : > "$MOCK_FLIPPED" ;;
+esac
+`);
+  const scp = executable(shims, 'scp', `#!/usr/bin/env bash
+printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
+`);
+
+  return { root, dmg, log, flipped, ssh, scp };
+}
+
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   const env = {
     ...process.env,
@@ -313,6 +357,34 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
     assert.ok(packageCheck > install, 'package configuration must be checked after installation');
     assert.ok(relaunch > packageCheck, 'Linux must not relaunch before package configuration is confirmed');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS DMG install stages an xattr-clean, strictly signed app before replacement and relaunch', () => {
+  const f = macFixture();
+  try {
+    const result = runVerify(f, [], 'mac', f.dmg);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.flipped, true);
+    assert.equal(verdict.portHeld, true);
+
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach'));
+    const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('open -n') && line.includes('Papercusp GUI.app'));
+    assert.ok(install >= 0, 'macOS DMG must use the guarded mount/copy install path');
+    assert.ok(relaunch > install, 'macOS must not relaunch before the staged app verifies');
+
+    const command = lines[install];
+    assert.ok(command.includes('ditto --noextattr --noqtn'), 'DMG copy must suppress extended attributes and quarantine');
+    assert.ok(command.includes('xattr -cr'), 'staged app must clear any residual extended attributes');
+    const codesign = command.indexOf('codesign --verify --deep --strict');
+    const replace = command.indexOf('rm -rf "/Applications/Papercusp GUI.app"');
+    assert.ok(codesign >= 0, 'staged app must pass strict codesign verification');
+    assert.ok(replace > codesign, 'the known-good installed app must not be replaced before strict codesign passes');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

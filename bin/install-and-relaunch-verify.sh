@@ -131,8 +131,9 @@ json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" 
 
 # ── Per-platform defaults ───────────────────────────────────────────────────
 # windows = the validated platform (EI-9002/WI-3783 live on the WSL operator).
-# mac/linux command DEFAULTS are provided but their install/relaunch specifics
-# are caller-overridable and validated by RENDER only (no live mac/linux VM here).
+# mac/linux command DEFAULTS are caller-overridable. The macOS DMG path stages
+# and verifies the app before replacing the installed bundle so a failed copy or
+# signature check cannot destroy the known-good app or trigger a relaunch.
 case "$PLATFORM" in
   windows)
     REMOTE_DIR="${REMOTE_DIR:-C:/Users/user}"
@@ -157,7 +158,18 @@ case "$PLATFORM" in
   mac)
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
     OPJSON_PATH="\$HOME/.papercusp/operator.json"                # remote shell expands $HOME
-    INSTALL_CMD="${INSTALL_CMD:-installer -pkg __ARTIFACT__ -target CurrentUserHomeDirectory}"
+    if [[ "$REMOTE_BASENAME" == *.dmg ]]; then
+      # `ditto` preserves FinderInfo/resource-fork xattrs by default. Strict
+      # codesign then rejects the otherwise-valid copied bundle with
+      # "resource fork, Finder information, or similar detritus not allowed".
+      # Copy without xattrs/quarantine, clear any residue, and verify the staged
+      # bundle BEFORE replacing /Applications. The old app therefore survives
+      # every fail-closed path and no relaunch happens unless strict codesign is
+      # green (EI-21177389547731632).
+      INSTALL_CMD="${INSTALL_CMD:-set -e; mount_dir=\$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage=\"/Applications/.Papercusp GUI.app.install.\$\$\"; cleanup() { hdiutil detach \"\$mount_dir\" >/dev/null 2>&1 || true; rmdir \"\$mount_dir\" >/dev/null 2>&1 || true; rm -rf \"\$stage\"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint \"\$mount_dir\" __ARTIFACT__ >/dev/null; app_src=\"\$mount_dir/Papercusp GUI.app\"; test -d \"\$app_src\"; rm -rf \"\$stage\"; ditto --noextattr --noqtn \"\$app_src\" \"\$stage\"; xattr -cr \"\$stage\"; codesign --verify --deep --strict \"\$stage\"; rm -rf \"/Applications/Papercusp GUI.app\"; mv \"\$stage\" \"/Applications/Papercusp GUI.app\"}"
+    else
+      INSTALL_CMD="${INSTALL_CMD:-installer -pkg __ARTIFACT__ -target CurrentUserHomeDirectory}"
+    fi
     RELAUNCH_CMD="${RELAUNCH_CMD:-open -n \"/Applications/Papercusp GUI.app\"}"
     ;;
   linux)
