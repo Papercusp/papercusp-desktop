@@ -129,6 +129,253 @@ release_artifacts_cut_start_ensure() {
   fi
 }
 
+# ── Durable release retention ────────────────────────────────────────────────
+# A target-dir slot's flock only protects a live launcher.  Once that launcher
+# exits, a later cleanup can mistake a completed cut for an abandoned cache and
+# remove the very .deb/AppImage (and the isolated Cargo root that contains it)
+# the owner still needs to upload.  Keep the retention record outside the target
+# tree so deleting a target can never delete the evidence that deletion was
+# forbidden.
+
+release_artifacts_retention_root() {
+  printf '%s\n' "${PAPERCUSP_RELEASE_RETENTION_ROOT:-${HOME}/.papercusp/release-retention}"
+}
+
+release_artifacts_retention_validate_tag() {
+  local tag="${1:-}"
+  [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "release-artifacts: retention lease requires a safe non-empty tag (got '$tag')." >&2
+    return 2
+  }
+}
+
+release_artifacts_retention_lease_path() {
+  local tag="${1:-}"
+  release_artifacts_retention_validate_tag "$tag" || return $?
+  printf '%s/lease-%s.tsv\n' "$(release_artifacts_retention_root)" "$tag"
+}
+
+release_artifacts_deletion_audit_path() {
+  printf '%s\n' "${PAPERCUSP_RELEASE_DELETION_AUDIT_PATH:-$(release_artifacts_retention_root)/deletion-audit.tsv}"
+}
+
+release_artifacts_normalize_path() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 2
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "$path"
+    return $?
+  fi
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$(pwd -P)" "$path"
+  fi
+}
+
+# release_artifacts_retention_lease_acquire <tag> <path...> — atomically create
+# or extend a durable lease. Paths may be files or directories that do not yet
+# exist; all are normalized before persistence. A zero TTL (the default) means
+# explicit release is required. Set PAPERCUSP_RELEASE_RETENTION_TTL_SEC for a
+# bounded lease when the release workflow has a known retention window.
+release_artifacts_retention_lease_acquire() {
+  local tag="${1:-}" lease root tmp line existing_expires now ttl expires
+  shift || true
+  release_artifacts_retention_validate_tag "$tag" || return $?
+  [[ $# -gt 0 ]] || {
+    echo "release-artifacts: retention lease for $tag requires at least one path." >&2
+    return 2
+  }
+  root="$(release_artifacts_retention_root)"
+  lease="$(release_artifacts_retention_lease_path "$tag")"
+  mkdir -p "$root" || {
+    echo "release-artifacts: cannot create retention root $root." >&2
+    return 1
+  }
+
+  local -a paths=()
+  existing_expires=""
+  if [[ -f "$lease" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        schema=papercusp-release-retention/v1) ;;
+        tag="$tag" ) ;;
+        created_ns=*) ;;
+        expires_ns=*) existing_expires="${line#expires_ns=}" ;;
+        path=*) paths+=("${line#path=}") ;;
+        "") ;;
+        *)
+          echo "release-artifacts: malformed retention lease $lease — refusing to overwrite it." >&2
+          return 1
+          ;;
+      esac
+    done < "$lease"
+    [[ "$existing_expires" =~ ^[0-9]+$ ]] || {
+      echo "release-artifacts: malformed retention lease $lease — invalid expiry." >&2
+      return 1
+    }
+    now="$(release_artifacts_cut_start_now_ns)" || return 1
+    if (( existing_expires > 0 && existing_expires <= now )); then
+      paths=()
+    fi
+  fi
+
+  for line in "$@"; do
+    [[ -n "$line" ]] || continue
+    line="$(release_artifacts_normalize_path "$line")" || {
+      echo "release-artifacts: could not normalize retention path '$line'." >&2
+      return 1
+    }
+    paths+=("$line")
+  done
+  [[ ${#paths[@]} -gt 0 ]] || {
+    echo "release-artifacts: retention lease for $tag has no paths." >&2
+    return 2
+  }
+
+  now="$(release_artifacts_cut_start_now_ns)" || return 1
+  ttl="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-0}"
+  [[ "$ttl" =~ ^[0-9]+$ ]] || {
+    echo "release-artifacts: PAPERCUSP_RELEASE_RETENTION_TTL_SEC must be a non-negative integer." >&2
+    return 2
+  }
+  expires=0
+  (( ttl > 0 )) && expires=$((now + ttl * 1000000000))
+  tmp="$(mktemp "${lease}.tmp.XXXXXX")" || return 1
+  {
+    printf 'schema=papercusp-release-retention/v1\n'
+    printf 'tag=%s\n' "$tag"
+    printf 'created_ns=%s\n' "$now"
+    printf 'expires_ns=%s\n' "$expires"
+    printf '%s\n' "${paths[@]}" | LC_ALL=C sort -u | sed 's/^/path=/'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! mv -f -- "$tmp" "$lease"; then
+    rm -f "$tmp"
+    echo "release-artifacts: could not persist retention lease at $lease." >&2
+    return 1
+  fi
+  printf '%s\n' "$lease"
+}
+
+# Print the paths in one lease. Return 1 for an expired lease and 2 for a
+# malformed lease; callers that make a destructive decision must fail closed on
+# the latter rather than treating an unreadable marker as no marker.
+release_artifacts_retention_lease_read_paths() {
+  local lease="${1:-}" line schema="" tag="" expires="" now
+  [[ -f "$lease" ]] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      schema=*) schema="${line#schema=}" ;;
+      tag=*) tag="${line#tag=}" ;;
+      expires_ns=*) expires="${line#expires_ns=}" ;;
+      path=*) printf '%s\n' "${line#path=}" ;;
+      created_ns=*) ;;
+      "") ;;
+      *) return 2 ;;
+    esac
+  done < "$lease"
+  [[ "$schema" == "papercusp-release-retention/v1" && -n "$tag" && "$expires" =~ ^[0-9]+$ ]] || return 2
+  now="$(release_artifacts_cut_start_now_ns)" || return 2
+  (( expires == 0 || expires > now )) || return 1
+}
+
+# Return 0 and print matching lease tags when a path is protected. Return 1
+# when no active lease covers it. Malformed markers are reported as a match so
+# every deletion caller fails closed.
+release_artifacts_retention_path_is_leased() {
+  local candidate="${1:-}" root lease paths status path normalized
+  [[ -n "$candidate" ]] || return 2
+  normalized="$(release_artifacts_normalize_path "$candidate")" || return 2
+  root="$(release_artifacts_retention_root)"
+  [[ -d "$root" ]] || return 1
+  local found=1
+  for lease in "$root"/lease-*.tsv; do
+    [[ -f "$lease" ]] || continue
+    if paths="$(release_artifacts_retention_lease_read_paths "$lease")"; then
+      while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        path="$(release_artifacts_normalize_path "$path")" || {
+          printf 'invalid:%s\n' "$lease"
+          found=0
+          break
+        }
+        if [[ "$normalized" == "$path" || "$normalized" == "$path/"* || "$path" == "$normalized/"* ]]; then
+          printf '%s\n' "${lease##*/lease-}" | sed 's/\.tsv$//'
+          found=0
+          break
+        fi
+      done <<< "$paths"
+    else
+      status=$?
+      if [[ "$status" -eq 1 ]]; then
+        continue
+      fi
+      printf 'invalid:%s\n' "$lease"
+      found=0
+    fi
+  done
+  return "$found"
+}
+
+release_artifacts_deletion_audit() {
+  local decision="${1:-}" path="${2:-}" leases="${3:-}" reason="${4:-}"
+  local audit actor timestamp
+  audit="$(release_artifacts_deletion_audit_path)"
+  actor="${PAPERCUSP_RELEASE_DELETER:-${BASH_SOURCE[1]##*/}}"
+  [[ -n "$actor" ]] || actor="${0##*/}"
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+  decision="${decision//$'\t'/ }"; path="${path//$'\t'/ }"
+  leases="${leases//$'\t'/ }"; reason="${reason//$'\t'/ }"
+  mkdir -p "$(dirname "$audit")" || return 1
+  printf '%s\tpid=%s\tdeleter=%s\tdecision=%s\tpath=%s\tlease=%s\treason=%s\n' \
+    "$timestamp" "$$" "$actor" "$decision" "$path" "${leases:-none}" "${reason:-none}" >> "$audit"
+}
+
+# release_artifacts_guarded_delete <path...> — delete only paths not covered
+# by an active retention lease. Every attempted deletion is audited, including
+# denied and missing paths. A denied path returns non-zero and is never handed
+# to rm; callers should propagate that failure rather than routing around it.
+release_artifacts_guarded_delete() {
+  local candidate matches status rc=0
+  for candidate in "$@"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      release_artifacts_deletion_audit skip-missing "$candidate" "" "path absent" || rc=1
+      continue
+    fi
+    if matches="$(release_artifacts_retention_path_is_leased "$candidate" 2>/dev/null)"; then
+      release_artifacts_deletion_audit deny "$candidate" "$matches" "active retention lease" || rc=1
+      echo "release-artifacts: refusing to delete leased path $candidate ($matches)." >&2
+      rc=1
+      continue
+    else
+      status=$?
+      if [[ "$status" -eq 2 ]]; then
+        matches="unreadable-retention-marker"
+        release_artifacts_deletion_audit deny "$candidate" "$matches" "retention marker unreadable" || rc=1
+        echo "release-artifacts: refusing to delete $candidate — retention marker unreadable." >&2
+        rc=1
+        continue
+      fi
+    fi
+    release_artifacts_deletion_audit allow "$candidate" "" "guard passed" || rc=1
+    if [[ -d "$candidate" && ! -L "$candidate" ]]; then
+      rm -rf -- "$candidate" || rc=1
+    else
+      rm -f -- "$candidate" || rc=1
+    fi
+  done
+  return "$rc"
+}
+
+release_artifacts_retention_lease_release() {
+  local tag="${1:-}" lease
+  lease="$(release_artifacts_retention_lease_path "$tag")" || return $?
+  [[ -f "$lease" ]] || return 1
+  release_artifacts_deletion_audit lease-release "$lease" "$tag" "explicit retention release" || return 1
+  rm -f -- "$lease"
+}
+
 # release_artifacts_assert_fresh <tag> [artifact...] — fail closed unless each
 # supplied artifact was written STRICTLY AFTER this cut's start. With no
 # explicit artifact list, inspect every path recorded in the tag manifest,
@@ -492,6 +739,13 @@ release_artifacts_write() {
       printf '%s\n' "$f"
     done
   } | sort -u > "$out"
+  # The manifest is the release pipeline's final byte inventory. Acquire the
+  # file-level lease here so every full or incremental writer gets retention by
+  # construction; callers add their target roots separately once resolved.
+  release_artifacts_retention_lease_acquire "$tag" "$(cat "$out")" >/dev/null || {
+    echo "release-artifacts: could not retain the artifact manifest for $tag." >&2
+    return 1
+  }
   printf '%s\n' "$out"
 }
 
