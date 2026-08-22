@@ -39,6 +39,7 @@ TESTS=(
   b3-revocation-kcut.selftest.sh
   b5-restart.selftest.sh
   matrix-scenario-adapters.selftest.sh
+  matrix-verdict-states.selftest.sh
   replication-soak-diagnostics.selftest.sh
   restart-settle-barrier.selftest.sh
   rig-wait-converged.selftest.sh
