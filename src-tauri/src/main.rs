@@ -2182,6 +2182,10 @@ mod discovery_tests {
     // before any `Command` is built, so nothing is executed.
     #[test]
     fn spawn_serve_refuses_a_broken_install_before_launching_anything() {
+        // The production latch is process-global because the updater and the
+        // sidecar supervisor communicate through it. Keep this test's latch
+        // local so a sibling test cannot clear it between spawn and read-back.
+        let install_defect = super::InstallDefectLatch::new();
         let missing_dir = std::env::temp_dir().join(format!(
             "papercusp-wi5390-nonexistent-{}-{:?}",
             std::process::id(),
@@ -2196,6 +2200,7 @@ mod discovery_tests {
             0,
             &missing_dir,
             &missing_dir,
+            &install_defect,
         )
         .expect_err("a sidecar dir with no serve.mjs must not spawn");
 
@@ -2205,8 +2210,7 @@ mod discovery_tests {
         assert!(text.to_lowercase().contains("reinstall"), "error is actionable: {text}");
 
         // And it latched the defect for the updater to report.
-        assert!(super::current_install_defect().is_some());
-        super::set_install_defect(None);
+        assert!(install_defect.current().is_some());
     }
 
     // The message a user actually sees must name the missing files AND where they
@@ -2228,16 +2232,14 @@ mod discovery_tests {
     // "try again after boot completes" is a lie when boot can never complete.
     #[test]
     fn sidecar_port_message_distinguishes_broken_install_from_still_booting() {
-        super::set_install_defect(None);
-        let booting = super::sidecar_port_unavailable_message();
+        let install_defect = super::InstallDefectLatch::new();
+        let booting = super::sidecar_port_unavailable_message_for(&install_defect);
         assert!(booting.contains("try again after boot completes"));
 
-        super::set_install_defect(Some("installation is incomplete".to_string()));
-        let broken = super::sidecar_port_unavailable_message();
+        install_defect.set(Some("installation is incomplete".to_string()));
+        let broken = super::sidecar_port_unavailable_message_for(&install_defect);
         assert!(broken.contains("installation is incomplete"));
         assert!(!broken.contains("try again after boot completes"));
-
-        super::set_install_defect(None);
     }
 
     #[test]
@@ -3603,16 +3605,36 @@ fn install_defect_message(sidecar_dir: &std::path::Path, missing: &[&'static str
 /// spawn preflight / supervisor; read by the updater endpoint builders so a
 /// user-facing "can't check for updates" reports the TERMINAL cause instead of
 /// the transient-sounding "try again after boot completes".
-static INSTALL_DEFECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+struct InstallDefectLatch {
+    message: std::sync::Mutex<Option<String>>,
+}
 
-fn set_install_defect(message: Option<String>) {
-    if let Ok(mut guard) = INSTALL_DEFECT.lock() {
-        *guard = message;
+impl InstallDefectLatch {
+    const fn new() -> Self {
+        Self {
+            message: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn set(&self, message: Option<String>) {
+        if let Ok(mut guard) = self.message.lock() {
+            *guard = message;
+        }
+    }
+
+    fn current(&self) -> Option<String> {
+        self.message.lock().ok().and_then(|g| g.clone())
     }
 }
 
+static INSTALL_DEFECT: InstallDefectLatch = InstallDefectLatch::new();
+
+fn set_install_defect(message: Option<String>) {
+    INSTALL_DEFECT.set(message);
+}
+
 fn current_install_defect() -> Option<String> {
-    INSTALL_DEFECT.lock().ok().and_then(|g| g.clone())
+    INSTALL_DEFECT.current()
 }
 
 /// The error a port-dependent call (update check, rollback) should report while
@@ -3621,7 +3643,11 @@ fn current_install_defect() -> Option<String> {
 /// latter as a soft retry is the same silent-failure shape
 /// `assert-release-host-baked.sh` exists to kill.
 fn sidecar_port_unavailable_message() -> String {
-    match current_install_defect() {
+    sidecar_port_unavailable_message_for(&INSTALL_DEFECT)
+}
+
+fn sidecar_port_unavailable_message_for(install_defect: &InstallDefectLatch) -> String {
+    match install_defect.current() {
         Some(defect) => format!("cannot check for updates — {defect}"),
         None => "sidecar port not yet known; try again after boot completes".to_string(),
     }
@@ -5327,6 +5353,7 @@ fn spawn_self_hosted_sidecar(
         pg_port_hint,
         &shared_state_dir,
         workspace_home,
+        &INSTALL_DEFECT,
     )?;
 
     if let Some(state) = app_handle.try_state::<SidecarState>() {
@@ -5866,6 +5893,7 @@ fn bring_up_sidecar(
         pg_port_hint,
         &shared_state_dir,
         &workspace_home,
+        &INSTALL_DEFECT,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -5947,6 +5975,7 @@ fn spawn_serve(
     pg_port_hint: u16,
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
+    install_defect: &InstallDefectLatch,
 ) -> std::io::Result<Child> {
     // WI-5390: fail CLOSED on a structurally broken install instead of spawning a
     // command that cannot possibly work. Without this the spawn "succeeds" (the
@@ -5956,11 +5985,11 @@ fn spawn_serve(
     let missing = missing_sidecar_entrypoints(sidecar_dir);
     if !missing.is_empty() {
         let message = install_defect_message(sidecar_dir, &missing);
-        set_install_defect(Some(message.clone()));
+        install_defect.set(Some(message.clone()));
         eprintln!("[papercusp-desktop] FATAL: {message} (WI-5390)");
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, message));
     }
-    set_install_defect(None);
+    install_defect.set(None);
     println!(
         "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}",
         port_hint,
@@ -6647,6 +6676,7 @@ fn spawn_serve_supervisor(
                         sup_pg_hint,
                         &sup_shared,
                         &sup_home,
+                        &INSTALL_DEFECT,
                     ) {
                         Ok(c) => {
                             *state.child.lock().unwrap() = Some(c);
