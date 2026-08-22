@@ -68,6 +68,15 @@ if [[ ! -x "$MONO/node_modules/.bin/tsx" ]]; then
   exit 1
 fi
 
+# ── OWNER-NAME PREFLIGHT (EI-20976222603137006). The final bundle audit is
+# intentionally fail-closed when no explicit owner name is available, but that
+# check used to happen only after this script had scrubbed, tarred, and zstd-
+# compressed roughly 1 GiB of source. Run the same audit-owned resolver before
+# opening the sidecar lock or creating an archive so an automation Git identity
+# cannot turn an expensive, doomed staging attempt into the first signal.
+python3 "$HERE/audit-release-bundle.py" --owner-preflight \
+  || { echo "ERROR: owner-name preflight failed — refusing to start source staging" >&2; exit 2; }
+
 OUT="$SIDECAR/source.tar.zst"
 
 # ── Serialize against build-desktop-sidecar.sh (2026-07-12) ─────────────────

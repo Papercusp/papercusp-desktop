@@ -734,6 +734,31 @@ def identity_literals():
     return lits
 
 
+def owner_preflight():
+    """Fail before expensive staging when the owner name is not asserted.
+
+    The archive audit already refuses to certify a bundle without this literal,
+    but that check runs only after tar/zstd have spent minutes producing the
+    candidate. Keep this as a cheap entrypoint over the same resolver and
+    predicate used by the final audit so the producer can fail before it starts
+    archive work without creating a second identity policy.
+    """
+    lits = identity_literals()
+    if has_owner_name_literal(lits):
+        count = len(explicit_owner_values(OWNER_NAME_ENV))
+        print(f"==> owner-name preflight: {count} explicit owner-name literal(s) resolved")
+        return 0
+
+    print(
+        "✗ REFUSING TO STAGE — no owner-name literal resolved, so the release "
+        "audit cannot detect the owner's name.\n"
+        "  Cause: `git config user.name` is unset or belongs to automation.\n"
+        f"  Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def needs_word_boundary(lit):
     """A SHORT literal must match as a whole word or it matches half the bundle.
 
@@ -2815,6 +2840,8 @@ def main():
         return 2
     if sys.argv[1] == "--tar-excludes":
         return print_tar_excludes()
+    if sys.argv[1] == "--owner-preflight":
+        return owner_preflight()
     if sys.argv[1] == "--identity-literals":
         return print_identity_literals()
     if sys.argv[1] == "--source-leakers":

@@ -1,10 +1,13 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
+const audit = path.join(root, 'bin/audit-release-bundle.py');
 
 // WHY THIS GUARD EXISTS (2026-08-10, WI-37553 / EI-20094260886633250)
 //
@@ -161,6 +164,56 @@ test('each Windows role scans the assembled payload before ISCC packs it', () =>
     script,
     /_WIN_SCAN_DIRS\+=\("\$SRC_TAURI\/seed"\s+"\$SRC_TAURI\/env-sidecars\/staging"\)/,
     'server payload roots (seed and env-sidecars) must be scanned too',
+  );
+});
+
+test('source staging runs the owner-name preflight before creating or compressing the archive', () => {
+  const preflightAt = stageSource.indexOf(
+    'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
+  );
+  const outputAt = stageSource.indexOf('OUT_TMP="$(mktemp "${OUT}.tmp.XXXXXX")"');
+  const tarAt = stageSource.indexOf('"$TAR_BIN" --numeric-owner');
+
+  assert.ok(preflightAt >= 0, 'stage-source-tree.sh must invoke --owner-preflight');
+  assert.ok(outputAt >= 0, 'stage-source-tree.sh must still create its temporary archive');
+  assert.ok(tarAt >= 0, 'stage-source-tree.sh must still invoke the archive producer');
+  assert.ok(preflightAt < outputAt, 'owner preflight must run before OUT_TMP is created');
+  assert.ok(preflightAt < tarAt, 'owner preflight must run before tar/zstd archive work');
+});
+
+test('owner preflight fails closed for an automation Git identity without an asserted owner name', () => {
+  const env = { ...process.env,
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'user.name',
+    GIT_CONFIG_VALUE_0: 'ci-build-bot',
+    GIT_CONFIG_KEY_1: 'user.email',
+    GIT_CONFIG_VALUE_1: 'ci-build-bot@example.invalid',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  delete env.PAPERCUSP_RELEASE_OWNER_NAME;
+  delete env.PAPERCUSP_RELEASE_OWNER_EMAIL;
+
+  const missing = spawnSync('python3', [audit, '--owner-preflight'], {
+    cwd: root,
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(
+    missing.status,
+    2,
+    `automation identity without an owner assertion must refuse staging:\n${missing.stdout}\n${missing.stderr}`,
+  );
+  assert.match(`${missing.stdout}\n${missing.stderr}`, /no owner-name literal resolved/i);
+
+  const asserted = spawnSync('python3', [audit, '--owner-preflight'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...env, PAPERCUSP_RELEASE_OWNER_NAME: 'Synthetic Gateowner' },
+  });
+  assert.equal(
+    asserted.status,
+    0,
+    `an explicit owner assertion must satisfy the preflight:\n${asserted.stdout}\n${asserted.stderr}`,
   );
 });
 
