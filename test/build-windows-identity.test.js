@@ -260,6 +260,28 @@ test('the Linux local release entrypoint claims one Cargo target slot before eit
   assert.ok(claimAt < packageAt, 'the target slot must be held before either GUI or Server build starts');
 });
 
+test('the Linux local release entrypoint pins one immutable sidecar snapshot through packaging', () => {
+  const helperAt = linuxScript.indexOf('hold_sidecar_read_lock()');
+  const freshCallAt = linuxScript.indexOf(
+    'bash "$ROOT/bin/stage-source-tree.sh"\n    hold_sidecar_read_lock',
+  );
+  const reuseAt = linuxScript.indexOf('PAPERCUSP_REUSE_SIDECAR=1 — validating');
+  const reuseCallAt = linuxScript.indexOf('hold_sidecar_read_lock', reuseAt);
+  const verifyAt = linuxScript.indexOf('verify-sidecar-bundle.sh', reuseAt);
+  const packageAt = linuxScript.indexOf('tauri build --bundles deb');
+
+  assert.ok(helperAt >= 0, 'build-linux-local.sh must define the sidecar reader-lock helper');
+  assert.ok(freshCallAt >= 0, 'a fresh build must pin the published sidecar after staging');
+  assert.ok(reuseAt >= 0 && reuseCallAt > reuseAt, 'resume mode must pin the reused sidecar');
+  assert.ok(reuseCallAt < verifyAt, 'resume validation must run against the already-pinned sidecar tree');
+  assert.ok(verifyAt < packageAt, 'sidecar validation must precede Tauri packaging');
+  assert.match(
+    linuxScript.slice(helperAt, reuseAt),
+    /exec 9>>"\$lock"[\s\S]*flock -sn 9[\s\S]*flock -s 9/,
+    'the helper must reuse the existing shared-fd9 reader protocol, including a blocking writer wait',
+  );
+});
+
 test('owner preflight fails closed for an automation Git identity without an asserted owner name', () => {
   const env = { ...process.env,
     GIT_CONFIG_COUNT: '2',

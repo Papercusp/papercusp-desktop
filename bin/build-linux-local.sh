@@ -150,6 +150,25 @@ if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" != "1" ]]; then
   echo "      it ships the committed src-tauri/seed. Use bin/release-local.sh for a seed cut."
 fi
 
+hold_sidecar_read_lock() {
+  local lock="$ROOT/src-tauri/sidecar.lock"
+  command -v flock >/dev/null 2>&1 || {
+    echo "ERROR: flock(1) is required to package the live sidecar safely on Linux" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$lock")"
+  # Match tauri-guarded/cargo-build-safe.sh: the sidecar builder owns this
+  # lock EXCLUSIVELY while publishing; finite Tauri packaging owns it SHARED
+  # while build.rs and the bundler enumerate resources. fd 8 is the Cargo
+  # target-slot claim, so keep the reader on the established fd 9 convention.
+  exec 9>>"$lock"
+  if ! flock -sn 9; then
+    echo "→ build-desktop-sidecar.sh holds $lock exclusively — waiting before packaging sidecar/" >&2
+    flock -s 9
+  fi
+  echo "→ sidecar resources pinned by shared lock for this finite package read" >&2
+}
+
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
     echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
@@ -160,9 +179,11 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
 
     echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
     bash "$ROOT/bin/stage-source-tree.sh"
+    hold_sidecar_read_lock
     ;;
   1)
     echo "==> [1-3/5] PAPERCUSP_REUSE_SIDECAR=1 — validating the staged Linux sidecar before resuming packaging"
+    hold_sidecar_read_lock
     for required in \
       src-tauri/sidecar/serve.mjs \
       src-tauri/sidecar/spa/index.html \
