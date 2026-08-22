@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
 const windowsBuilder = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
 const sidecarLockHelper = fs.readFileSync(path.join(root, 'bin/lib/sidecar-lock-yield.sh'), 'utf8');
+const liveFederationGate = fs.readFileSync(path.join(root, 'bin/live-federation-gate.sh'), 'utf8');
 
 const SIDECAR_LOCK_SECTION = (
   builder.match(/^exec 9>"\$SIDECAR_FINAL_DIR\.lock"\n[\s\S]*?^SIDECAR_DIR="\$SIDECAR_TMP_DIR"$/m) || []
@@ -46,6 +47,14 @@ test('every release writer uses the shared bounded cooperative sidecar-lock help
   assert.match(sidecarLockHelper, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
   assert.match(sidecarLockHelper, /kill -USR1/);
   assert.match(sidecarLockHelper, /holder context follows/);
+});
+
+test('the scheduled live federation gate waits boundedly for a progressing package writer', () => {
+  assert.match(
+    liveFederationGate,
+    /PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600\}"\s+\\\s+bash bin\/build-desktop-sidecar\.sh/,
+    'the four-hour gate must not inherit the interactive builder\'s 60-second contention timeout',
+  );
 });
 
 test('the real builder lock path survives vanished fuser PIDs and yields a live tauri reader', async () => {

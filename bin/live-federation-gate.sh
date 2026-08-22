@@ -1296,7 +1296,16 @@ if [ -z "${GATE_DEB:-}" ]; then
     if [ "${GIT_DIRTY:-0}" != "0" ] && [ "${GIT_DIRTY:-?}" != "?" ]; then
       ( cd "$DESKTOP_DIR/.." && git status --porcelain ) >"$WORK/dirty-files.txt" 2>/dev/null || true
     fi
-    ( cd "$DESKTOP_DIR" && bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
+    # EI-20519805872304008: this scheduled gate shares the canonical sidecar
+    # output with real desktop/package builds. The builder's 60s default is
+    # intentionally short for an interactive caller, but it turned a healthy
+    # 40-minute .deb repack into an immediate gate RED while the writer was
+    # visibly progressing. Queue within this unit's four-hour budget instead;
+    # the shared helper still times out and reports the holder when a writer is
+    # genuinely wedged. An explicit operator override remains authoritative.
+    ( cd "$DESKTOP_DIR" && \
+      PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}" \
+        bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
   fi
   # Grep the FUNCTION NAME, not a log phrase: the original 'grantEpochKeysToMembers on
   # admit' literal was reworded out of the source and the stale check WARNed on every
