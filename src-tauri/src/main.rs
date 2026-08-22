@@ -1649,6 +1649,33 @@ mod discovery_tests {
         assert_gui_boot_reresolves_wsl_route(&body[..end]);
     }
 
+    /// D-001/P-001 recurrence guard: every packaged GUI, including Linux, is
+    /// an attach-only shell. The GUI startup helper may launch the sibling
+    /// Server product, but no GUI-only Linux function may spawn serve.mjs.
+    #[test]
+    fn gui_startup_launches_the_sibling_server_and_has_no_self_host_path() {
+        let src = include_str!("main.rs");
+        let start_needle = format!("fn {}(", "ensure_server_running");
+        let start = src
+            .find(&start_needle)
+            .expect("ensure_server_running() must remain the GUI's sibling-launch seam");
+        let end_needle = format!("/// {}", "Cross-platform \"launch the sibling app bundle");
+        let end = src[start..]
+            .find(&end_needle)
+            .expect("launch_bundle documentation must follow the GUI startup helper");
+        let body = &src[start..start + end];
+
+        assert!(
+            body.contains("launch_bundle(SERVER_BUNDLE_ID, \"Papercusp Server\")"),
+            "GUI startup must launch the separately-installed Server bundle on every platform"
+        );
+        let removed_self_host = ["spawn", "self", "hosted", "sidecar"].join("_");
+        assert!(
+            !src.contains(&removed_self_host),
+            "a GUI-side serve.mjs spawn seam reappeared: {removed_self_host}"
+        );
+    }
+
     /// A guard that has never failed is a guard nobody has tested. This feeds
     /// the predicate the exact shape the fix REPLACED — the startup snapshot
     /// passed straight into `finish_boot` — and asserts it is rejected.
@@ -4148,39 +4175,16 @@ fn spawn_operator_watcher(
                         gave_up = false;
                     }
                     deferred_to_shell = false;
-                    // WI-3686: on Linux there is NO separately-installed "Papercusp
-                    // Server" bundle to gtk-launch — a single .deb/.AppImage ships
-                    // ONE process, and on Linux that process self-hosts its own
-                    // operator sidecar (ensure_server_running/spawn_self_hosted_
-                    // sidecar) under spawn_serve_supervisor's OWN in-process
-                    // respawn-with-backoff (WI-1878). This watcher's job here was
-                    // written for the Windows/macOS two-bundle model, where a dead
-                    // Server process genuinely needs a sibling bundle re-launched.
-                    // On Linux, `gtk-launch com.papercusp.server.desktop` always
-                    // fails (no such .desktop entry — no GUI-only install ships
-                    // one) and this branch would otherwise hot-loop it up to the
-                    // respawn cap every ~15s of unreachability, forever, on any
-                    // GUI-only Linux install. The self-hosted child already has its
-                    // own supervisor; nothing more to do here but log once per
-                    // respawn-cycle and let that supervisor do the actual revival.
-                    #[cfg(target_os = "linux")]
-                    {
-                        eprintln!(
-                            "[papercusp-desktop] Papercusp Server unreachable ~{}s — Linux single-bundle \
-                             install has no separate Server bundle to relaunch; the self-hosted operator's \
-                             own supervisor (spawn_serve_supervisor) owns its respawn (WI-3686)",
-                            (dead_count as u64) * 1500 / 1000
-                        );
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        eprintln!(
-                            "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
-                            (dead_count as u64) * 1500 / 1000
-                        );
-                        if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
-                            eprintln!("[papercusp-desktop] Server respawn failed: {e}");
-                        }
+                    // Every platform ships the Server as an independently-installed
+                    // sibling product. Re-launch that bundle by identity; the
+                    // Server's own in-process supervisor remains responsible for a
+                    // serve.mjs child that dies while its shell stays alive.
+                    eprintln!(
+                        "[papercusp-desktop] Papercusp Server unreachable ~{}s — respawning the Server bundle (WI-2667)",
+                        (dead_count as u64) * 1500 / 1000
+                    );
+                    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
+                        eprintln!("[papercusp-desktop] Server respawn failed: {e}");
                     }
                     respawn_times.push(now);
                     consecutive_dead = 0;
@@ -5035,12 +5039,8 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
 // ===========================================================================
 
 /// Bundle identifiers — MUST match the two tauri configs (tauri.conf.json →
-/// GUI, tauri.server.conf.json → Server). On Linux (single self-hosted
-/// bundle — WI-2902/WI-3686) neither the watcher's respawn arm nor
-/// ensure_server_running ever calls launch_bundle with this id in non-test
-/// builds, so it's allowed dead there; it's still referenced by the
-/// cross-platform unit tests below.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+/// GUI, tauri.server.conf.json → Server). Every platform uses these identities
+/// to launch the independently-installed sibling product.
 const SERVER_BUNDLE_ID: &str = "com.papercusp.server";
 const GUI_BUNDLE_ID: &str = "com.papercusp.gui";
 
@@ -5152,10 +5152,10 @@ fn apply_pending_route<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 /// WI-4827 — open a same-origin app `route` in the MAIN operator window and
 /// dismiss the Quick Panel palette (Spotlight-style). Invoked from the panel
 /// webview when a control would otherwise navigate the small palette window into
-/// the full app. Branch-1 (dev + the Linux single-bundle install): the `main`
-/// window is in THIS process — focus + soft-navigate it. Branch-2 (macOS/Windows
-/// two-bundle): the GUI is a separate process — persist the route and launch /
-/// focus the GUI bundle, which applies it via `apply_pending_route`.
+/// the full app. In dev the `main` window is in THIS process — focus +
+/// soft-navigate it. In every packaged Server (Linux/macOS/Windows), the GUI is
+/// a separate product process — persist the route and launch/focus the GUI
+/// bundle, which applies it via `apply_pending_route`.
 #[tauri::command]
 #[specta::specta]
 fn open_route_in_app(app: AppHandle, route: String) {
@@ -5173,8 +5173,7 @@ fn open_route_in_app(app: AppHandle, route: String) {
         }
     }
     // Dismiss the palette so the main app is what the user sees. Focus loss on
-    // the palette also hides it (its blur handler), but be deterministic — and
-    // in the Linux single-process case the palette must go regardless.
+    // the palette also hides it (its blur handler), but be deterministic.
     if let Some(palette) = app.get_webview_window(docs_search::WINDOW_LABEL) {
         let _ = palette.hide();
     }
@@ -5253,130 +5252,13 @@ fn ensure_server_running(
         println!("[papercusp-gui] a Papercusp Server is already running — attaching");
         return;
     }
-    // On Linux the app ships as ONE self-contained bundle (a single .deb /
-    // .AppImage). There is no separately-installed "Papercusp Server" bundle to
-    // gtk-launch — the Windows/macOS two-bundle split has no clean Linux
-    // packaging analog (two debs collide on /usr/bin/papercusp-desktop + the
-    // shared icons, and a `gtk-launch com.papercusp.server.desktop` can't resolve
-    // the productName-named "Papercusp Server.desktop" entry anyway). So on Linux
-    // the GUI process spawns + OWNS the operator sidecar itself, exactly like the
-    // Server role does — making a single `apt install` fully functional on a fresh
-    // machine. If a separate Server IS running it was already reached above, so
-    // this only fires when nothing is up. The child goes into SidecarState so the
-    // normal GUI quit path (kill_sidecar) tears embedded-PG + the operator down
-    // cleanly. (WI-2902, 2026-07-05.)
-    #[cfg(target_os = "linux")]
-    {
-        println!(
-            "[papercusp-gui] no Server reachable — self-hosting the operator sidecar (single-bundle Linux)"
-        );
-        if let Err(e) = spawn_self_hosted_sidecar(app_handle, workspace_home, via_wsl) {
-            eprintln!(
-                "[papercusp-gui] could not self-host the operator sidecar ({e}); \
-                 will keep polling in case it comes up another way"
-            );
-            // WI-5390: "keep polling" is right for a transient failure and WRONG
-            // as the user's only signal when the install itself is broken — that
-            // poll can never succeed. Report the terminal cause once.
-            if let Some(defect) = current_install_defect() {
-                notify_install_broken(app_handle, &defect);
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        println!("[papercusp-gui] no Server reachable — launching the Papercusp Server bundle");
-        if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
-            eprintln!(
-                "[papercusp-gui] could not launch Papercusp Server ({e}); \
-                 will keep polling in case it comes up another way"
-            );
-        }
-    }
-}
-
-/// Linux single-bundle self-host: spawn + OWN the operator sidecar from the GUI
-/// process. Mirrors the Server-role boot in run()'s setup (embedded-PG + the Hono
-/// operator, all inside `serve.mjs --ensure`) MINUS the tray — so a
-/// single `apt install ./papercusp.deb` (or the AppImage) is fully self-contained
-/// on a fresh machine, with no separately installed "Papercusp Server" bundle
-/// required. The `serve.mjs` child is stored in `SidecarState.child` so the
-/// ordinary GUI quit path (`kill_sidecar`) shuts embedded-PG + the operator down
-/// gracefully instead of orphaning postgres.
-///
-/// WI-1878: this path used to skip the respawn supervisor entirely — a dead
-/// serve.mjs child here (SIGTERM, crash) stayed down until the user manually
-/// quit + reopened the whole app, because nothing else owns or watches this
-/// child on single-bundle Linux. Now shares `spawn_serve_supervisor` with the
-/// Server-role boot path, so a killed operator child gets the same
-/// respawn-with-backoff + crash-loop cap here too.
-#[cfg(target_os = "linux")]
-fn spawn_self_hosted_sidecar(
-    app_handle: &tauri::AppHandle,
-    workspace_home: &std::path::Path,
-    via_wsl: bool,
-) -> std::io::Result<()> {
-    // First-launch ~/.papercusp migration + per-workspace credential homes
-    // (same call the Server role makes before spawning serve).
-    if let Err(e) = workspaces::ensure_initialized() {
+    println!("[papercusp-gui] no Server reachable — launching the Papercusp Server bundle");
+    if let Err(e) = launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server") {
         eprintln!(
-            "[papercusp-gui] workspace registry init failed: {e} (continuing with shared home)"
+            "[papercusp-gui] could not launch Papercusp Server ({e}); \
+             will keep polling in case it is installed or started another way"
         );
     }
-    let sidecar_dir = app_handle
-        .path()
-        .resolve("sidecar", tauri::path::BaseDirectory::Resource)
-        .unwrap_or_else(|_| std::path::PathBuf::from("./sidecar"));
-    let shared_state_dir = workspaces::shared_data_dir();
-    if let Err(e) = std::fs::create_dir_all(&shared_state_dir) {
-        eprintln!(
-            "[papercusp-gui] could not create shared state dir {}: {e}",
-            shared_state_dir.display()
-        );
-    }
-    let port = find_free_port().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            "no free port available for the operator",
-        )
-    })?;
-    let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
-
-    // (EI-8894/WI-3633 leg 2) Same boot-time orphan sweep as the Server-role
-    // path (bring_up_sidecar) — this self-hosted-on-Linux path bypasses that
-    // function entirely, so it needs its own call right before spawn_serve.
-    sweep_stale_operator_orphan(workspace_home, via_wsl);
-    let child = spawn_serve(
-        via_wsl,
-        port,
-        &sidecar_dir,
-        pg_port_hint,
-        &shared_state_dir,
-        workspace_home,
-        &INSTALL_DEFECT,
-    )?;
-
-    if let Some(state) = app_handle.try_state::<SidecarState>() {
-        *state.child.lock().unwrap() = Some(child);
-        *state.port.lock().unwrap() = Some(port);
-        // WI-1878: this self-hosted child otherwise has no supervisor — wire
-        // it into the same respawn-with-backoff loop the Server role uses.
-        spawn_serve_supervisor(
-            app_handle.clone(),
-            via_wsl,
-            port,
-            sidecar_dir,
-            pg_port_hint,
-            shared_state_dir,
-            workspace_home.to_path_buf(),
-        );
-    } else {
-        // Managed state missing (should never happen — it's registered on the
-        // builder in run()). Leak the handle so the process survives: std's
-        // Child::drop does NOT kill the process, but being explicit documents it.
-        std::mem::forget(child);
-    }
-    Ok(())
 }
 
 /// Cross-platform "launch the sibling app bundle by identity".
@@ -5914,8 +5796,8 @@ fn bring_up_sidecar(
     let state: tauri::State<SidecarState> = app.state();
     *state.child.lock().unwrap() = Some(serve_child);
 
-    // WI-2667/WI-3170/WI-3270 (respawn-with-backoff), shared with the Linux
-    // GUI self-host path (spawn_self_hosted_sidecar).
+    // WI-2667/WI-3170/WI-3270: the Server role owns one respawn-with-backoff
+    // supervisor for its serve.mjs child on every platform.
     spawn_serve_supervisor(
         app.clone(),
         via_wsl,
@@ -6374,15 +6256,6 @@ fn spawn_serve(
 
 /// Spawn the background thread that supervises + respawns a `serve.mjs`
 /// child we OWN, with a debounced-unreachable check + crash-loop cap.
-///
-/// WI-1878: this used to live inline in the Server-role boot path only —
-/// which meant the Linux single-bundle self-host path (`spawn_self_hosted_sidecar`,
-/// used by `npm run dev` / a plain `apt install` with no separate "Papercusp
-/// Server" bundle running) span up `serve.mjs` with NO supervision at all: a
-/// SIGTERM'd or crashed operator child stayed dead until the user manually
-/// quit + reopened the whole app. Extracted so BOTH sidecar-owning boot paths
-/// (Server role, and the Linux GUI self-host) get the same respawn-with-backoff
-/// behavior — see decide_serve_respawn's doc for the state machine itself.
 ///
 /// WI-2667 (defect-2 gap fix): supervise our OWN serve.mjs child. The
 /// GUI-side watcher's `open -b` CANNOT revive an operator that died
