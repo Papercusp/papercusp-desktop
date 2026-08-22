@@ -31,7 +31,10 @@ is_pid() {
 }
 
 proc_cmdline() {
-  tr '\000' ' ' < "$PROC_ROOT/$1/cmdline" 2>/dev/null
+  # The process may disappear between the ownership check and the post-stop
+  # recheck. Read through cat so a vanished /proc entry cannot leak the shell's
+  # input-redirection diagnostic from the maintainer script.
+  cat "$PROC_ROOT/$1/cmdline" 2>/dev/null | tr '\000' ' '
 }
 
 proc_env_value() {

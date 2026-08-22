@@ -194,6 +194,54 @@ test('Debian removal tears down only verified Papercusp process ownership', () =
   assert.match(preRemove, /kill -KILL "\$pid"/);
 });
 
+test('Debian removal stays quiet when the packaged desktop exits during the TERM wait', () => {
+  const preRemovePath = path.join(desktopRoot, 'src-tauri/deb/preremove.sh');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-prerm-race-'));
+  const procRoot = path.join(root, 'proc');
+  const pid = '999999999';
+  const pidRoot = path.join(procRoot, pid);
+  const bin = path.join(root, 'bin');
+  const sleepShim = path.join(bin, 'sleep');
+
+  try {
+    fs.mkdirSync(pidRoot, { recursive: true });
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(pidRoot, 'cmdline'), '/usr/bin/papercusp-desktop\0');
+    fs.writeFileSync(path.join(pidRoot, 'environ'), 'HOME=/nonexistent\0');
+    fs.writeFileSync(
+      sleepShim,
+      [
+        '#!/bin/sh',
+        `rm -f ${JSON.stringify(path.join(pidRoot, 'cmdline'))} ${JSON.stringify(path.join(pidRoot, 'environ'))}`,
+        `rmdir ${JSON.stringify(pidRoot)} 2>/dev/null || true`,
+        '',
+      ].join('\n'),
+    );
+    fs.chmodSync(sleepShim, 0o755);
+
+    const result = childProcess.spawnSync('sh', [preRemovePath], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        PAPERCUSP_PREREMOVE_PROC_ROOT: procRoot,
+        PAPERCUSP_PREREMOVE_HOME_ROOT: path.join(root, 'home'),
+        PAPERCUSP_PREREMOVE_WAIT_SEC: '1',
+      },
+    });
+
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`stopping packaged desktop pid=${pid}`));
+    assert.doesNotMatch(
+      result.stderr,
+      /cmdline: No such file|cmdline: cannot open/,
+      'a disappearing process must not leak a /proc/cmdline redirection diagnostic',
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Linux Server deb installs and package-enables one systemd user service', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
