@@ -228,7 +228,12 @@ SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 
 
 echo "==> [4/5] tauri build --bundles deb (roles: $ROLES)"
 for role in $ROLES; do
-  role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
+  role_cfg=()
+  role_binary=papercusp-desktop
+  if [[ "$role" == "server" ]]; then
+    role_cfg=(--config src-tauri/tauri.server.conf.json)
+    role_binary=papercusp-server
+  fi
   echo "    -- role=$role  $(date -u +%H:%M:%SZ)"
   (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
      npx --yes -p @tauri-apps/cli@"${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" tauri build --bundles deb "${role_cfg[@]}")
@@ -243,7 +248,7 @@ for role in $ROLES; do
   # spuriously red the build. Same reason the mac leg gates the .app's Mach-O and
   # not the .dmg. Both roles build the single [[bin]] papercusp-desktop, so this
   # path is rewritten each iteration — which is exactly what we want to check.
-  bash "$HERE/assert-release-host-baked.sh" "$SRC_ROOT/release/papercusp-desktop" \
+  bash "$HERE/assert-release-host-baked.sh" "$SRC_ROOT/release/$role_binary" \
     || { echo "ERROR: role=$role — release host not baked; refusing to package a permanently-un-updatable app"; exit 1; }
 done
 
