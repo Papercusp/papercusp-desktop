@@ -524,7 +524,7 @@ fi
 # by line number, so moving this below provisioning fails the selftest rather
 # than silently restoring the bug.
 preflight_host_preconditions() {
-  local missing=0 u seen="" tok dht_reused=0 common_sh deb_out deb_rc
+  local missing=0 u seen="" tok actual_login dht_reused=0 common_sh deb_out deb_rc
   local sidecar_node="$DESKTOP_DIR/src-tauri/sidecar/bin/node"
 
   # (1) sidecar node binary — needed to start the containerized testnet DHT. A
@@ -589,6 +589,15 @@ preflight_host_preconditions() {
         echo "FATAL(preflight): no gh token for '$u' — rig_set_identity would abort this run mid-flight (lib/deb-hetzner-rig.sh:683)" >&2
         echo "  fix: gh auth login -h github.com   (verify with: gh auth token --user $u)" >&2
         missing=$((missing + 1))
+      elif ! actual_login="$(GH_TOKEN="$tok" gh api user --jq .login 2>/dev/null)"; then
+        echo "FATAL(preflight): gh token for '$u' cannot authenticate GitHub GET /user — refusing to provision frames that cannot join a Hive" >&2
+        missing=$((missing + 1))
+      elif [ -z "$actual_login" ]; then
+        echo "FATAL(preflight): gh token for '$u' returned an empty GitHub identity — refusing to provision frames that cannot join a Hive" >&2
+        missing=$((missing + 1))
+      elif [[ "${actual_login,,}" != "${u,,}" ]]; then
+        echo "FATAL(preflight): gh token requested for '$u' authenticates as '$actual_login' — refusing a wrong-account federation run" >&2
+        missing=$((missing + 1))
       fi
     done
   fi
@@ -598,7 +607,7 @@ preflight_host_preconditions() {
     echo "  PCUSP_RIG_SKIP_PREFLIGHT=1 proceeds anyway — i.e. chooses to discover the miss after the cores are gone." >&2
     return 1
   fi
-  log "preflight: host preconditions OK (sidecar node, .deb, gh identities)"
+  log "preflight: host preconditions OK (sidecar node, .deb, authenticated gh identities)"
   return 0
 }
 

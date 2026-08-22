@@ -406,8 +406,9 @@ missing_cover=""
 case "$pf_body" in *'sidecar/bin/node'*) : ;; *) missing_cover="$missing_cover sidecar-node" ;; esac
 case "$pf_body" in *'default_deb'*)      : ;; *) missing_cover="$missing_cover deb" ;; esac
 case "$pf_body" in *'gh auth token'*)    : ;; *) missing_cover="$missing_cover gh-token" ;; esac
+case "$pf_body" in *'gh api user'*)      : ;; *) missing_cover="$missing_cover gh-identity-auth" ;; esac
 if [ -z "$missing_cover" ]; then
-  ok "local-matrix.sh's host preflight covers the whole precondition class (sidecar node, .deb, gh identities)"
+  ok "local-matrix.sh's host preflight covers the whole precondition class (sidecar node, .deb, authenticated gh identities)"
 else
   bad "local-matrix.sh's host preflight no longer checks:$missing_cover — the class fix has decayed back toward point-fixes (EI-20578660332729593)"
 fi
