@@ -421,7 +421,14 @@ _scn_attestation_unattested_device_core() {
       drift_fp_a2="$(_att_row_fingerprint a "$b_gh_id")"
       drift_fp_b2="$(_att_row_fingerprint b "$b_gh_id")"
       echo "OVERALL: UNMEASURED — attestation(unattested-device) PRECONDITION UNHOLDABLE, so this leg CANNOT score the feature (NOT a product defect): B's device_attestations were stripped on both frames twice and came back on frame a both times. THE COUNT ALREADY DECIDES THIS — $(_att_count_verdict "$pre_probe") [WI-40551: this reading was present but unlabelled for four runs before anyone read it as a measurement; it is the tiebreak between the two branches below, which demand OPPOSITE fixes]. WHICH WRITER — corroborate with the fingerprint, do not guess: a at strip ${strip_fp_a:-<unreadable>} → a now ${drift_fp_a2:-<unreadable>}; b at strip ${strip_fp_b:-<unreadable>} → b now ${drift_fp_b2:-<unreadable>}. origin=remote with a fed_ts NEWER than the strip ⇒ the PROJECTION applied a genuinely newer remote op (hive-members.ts replaces under an LWW guard our strip's stamp would have beaten, so this is a re-announce, not a replay) ⇒ FIX by moving this leg ahead of the churn legs that trigger reconnect-announces (it must stay strictly below revocation_kcut/90). origin=local ⇒ the ADMISSION path re-attested B: upsertHiveMember UNION-merges device_attestations with no clock guard (WI-1585), so every announce restores it and NO ordering change can hold the strip — the leg must then stop stripping and build its precondition another way (author the probe from a device pubkey that was never attested). Either way: do NOT widen a timeout."
-      return 1
+      # WI-6046: rc=2, NOT 1. This leg ran and could not hold its own precondition, so
+      # it measured NOTHING about the product — returning 1 collapsed that into a
+      # product FAIL, which red-pinned the gate on a rig-side setup problem and read as
+      # a defect in the unattested-device feature. rc=2 is the rig's ratified
+      # "not measured" code (lib/federation-asserts.selftest.sh, WI-6012); the matrix
+      # runner maps it to the UNMS row. Still nonzero, so every existing `-ne 0`
+      # consumer (e.g. b3-revocation.sh's SCN_RC attribution) is unaffected.
+      return 2
     fi
   fi
 

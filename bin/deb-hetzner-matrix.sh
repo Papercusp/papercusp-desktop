@@ -406,8 +406,22 @@ if [ -n "${RIG_DHT_BOOTSTRAP:-}" ]; then _rig_dht="private testnet DHT @ $RIG_DH
 else _rig_dht="real public DHT"; fi
 echo "  rig: $_rig_where, ${#RIG_FRAMES[@]}-frame, $_rig_dht   run=$MATRIX_RUN_ID"
 fails=0; passes=0
+# WI-6046: rc=2 is the rig-wide "NOT MEASURED" convention — already ratified and
+# guarded for the discovery layer (lib/federation-asserts.selftest.sh, WI-6012 /
+# EI-18687938054040755: "no OVERALL scores unmeasured discovery as FAIL") but never
+# wired at the scenario/runner layer, which is why a scenario that RAN and could not
+# hold its own precondition was still collapsed into FAIL. That is a false-FAIL
+# indistinguishable from a real product break: it red-pins the gate on a rig-side
+# setup problem and reads, in release evidence, as a product defect.
+#
+# UNMEASURED is emphatically NOT a pass. It stays out of `passes` so a run can never
+# claim coverage it did not actually measure, and it is reported on its own axis
+# below. The three states are PASS / FAIL / UNMS — "did not measure it" and "measured
+# it and it was broken" are different findings and must not share a cell.
+declare -a UNMEASURED_IDS=()
 for id in "${RUN_IDS[@]}"; do
   if [ "${SCN_RC[$id]}" -eq 0 ]; then st="PASS"; passes=$((passes+1))
+  elif [ "${SCN_RC[$id]}" -eq 2 ]; then st="UNMS"; UNMEASURED_IDS+=("$id")
   else st="FAIL"; fails=$((fails+1)); fi
   printf "  %-4s  %-26s %s\n" "$st" "$id" "${SCN_LINE[$id]}"
 done
@@ -417,7 +431,7 @@ done
 for id in "${SKIP_IDS[@]}"; do
   printf "  %-4s  %-26s %s\n" "SKIP" "$id" "${SKIP_REASON[$id]}"
 done
-echo "  ── $passes passed, $fails failed, ${#SKIP_IDS[@]} skipped of ${#MATRIX_IDS[@]} registered ──"
+echo "  ── $passes passed, $fails failed, ${#UNMEASURED_IDS[@]} unmeasured, ${#SKIP_IDS[@]} skipped of ${#MATRIX_IDS[@]} registered ──"
 
 # ── roll-call reconciliation (EI-18660392396897977) ───────────────────────────
 # Every registered scenario must be accounted for as either run or explicitly
@@ -433,8 +447,20 @@ if [ "$accounted" -ne "${#MATRIX_IDS[@]}" ]; then
 fi
 
 if [ "$fails" -eq 0 ]; then
-  if [ "${#SKIP_IDS[@]}" -gt 0 ]; then
-    echo "OVERALL: PASS — all $passes EXECUTED scenarios green, but ${#SKIP_IDS[@]} of ${#MATRIX_IDS[@]} registered were SKIPPED (see table): this is NOT full-matrix coverage"
+  # WI-6046: an UNMEASURED scenario must never be absorbed into a clean green. It did
+  # not fail — so it does not red-pin the gate, exactly as a SKIP does not — but it
+  # also did not measure anything, so a verdict that stayed silent about it would
+  # assert coverage this run does not have. Same honesty contract the SKIP branch
+  # below already keeps, and for the same reason: this text is release evidence, and
+  # a reader quoting it must not be able to overstate what was actually exercised.
+  if [ "${#UNMEASURED_IDS[@]}" -gt 0 ] || [ "${#SKIP_IDS[@]}" -gt 0 ]; then
+    _cov_note=""
+    [ "${#UNMEASURED_IDS[@]}" -gt 0 ] && _cov_note="${#UNMEASURED_IDS[@]} UNMEASURED (ran but could not hold its own precondition, so it scored nothing about the product: ${UNMEASURED_IDS[*]})"
+    if [ "${#SKIP_IDS[@]}" -gt 0 ]; then
+      [ -n "$_cov_note" ] && _cov_note="$_cov_note; "
+      _cov_note="$_cov_note${#SKIP_IDS[@]} SKIPPED (never ran: ${SKIP_IDS[*]})"
+    fi
+    echo "OVERALL: PASS — all $passes EXECUTED-AND-MEASURED scenarios green, but $_cov_note. Of ${#MATRIX_IDS[@]} registered, this is NOT full-matrix coverage"
   else
     echo "OVERALL: PASS — every live federation scenario green across 2 real Hetzner VMs"
   fi
