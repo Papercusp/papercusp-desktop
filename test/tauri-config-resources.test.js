@@ -72,6 +72,20 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
 
   assert.deepEqual(contract.coinstall.conflicts, []);
   assert.deepEqual(contract.coinstall.replaces, []);
+  const guiDeb = readConfig('tauri.conf.json').bundle?.linux?.deb ?? {};
+  const serverDeb = readConfig('tauri.server.conf.json').bundle?.linux?.deb ?? {};
+  for (const [role, deb] of [['GUI', guiDeb], ['Server', serverDeb]]) {
+    assert.deepEqual(
+      deb.conflicts ?? [],
+      [],
+      `${role} Debian package must remain co-installable with its sibling product`,
+    );
+    assert.deepEqual(
+      deb.replaces ?? [],
+      [],
+      `${role} Debian package must not replace its sibling product`,
+    );
+  }
   assert.notEqual(contract.gui.identifier, contract.server.identifier);
   assert.notEqual(contract.gui.productName, contract.server.productName);
   assert.equal(contract.verification.archiveAware, true);

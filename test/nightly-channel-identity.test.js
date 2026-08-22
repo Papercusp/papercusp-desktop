@@ -98,8 +98,8 @@ test('nightly overlay is visibly a different product, not a re-skin of the same 
 
 test('nightly deb must not conflict with or replace the stable package', () => {
   // The whole point of a side-by-side channel is coexistence. `tauri.server.conf.json`
-  // deliberately declares conflicts/replaces against papercusp-gui; copying that
-  // pattern here would make installing nightly UNINSTALL the app in daily use.
+  // is independently co-installable with the GUI; nightly must preserve the same
+  // rule relative to the stable GUI instead of uninstalling the app in daily use.
   const nightly = readConfig('tauri.nightly.conf.json');
   const deb = nightly.bundle?.linux?.deb ?? {};
   assert.deepEqual(deb.conflicts ?? [], []);

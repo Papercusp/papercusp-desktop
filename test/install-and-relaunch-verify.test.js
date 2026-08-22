@@ -298,7 +298,13 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     const packageCheck = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('dpkg-query -W'));
     const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('setsid bash -c'));
     assert.ok(update >= 0, 'Linux must refresh apt indexes before installing a local deb');
-    assert.ok(update < install, 'Linux must refresh apt indexes before dependency resolution');
+    const installLine = lines[install] || '';
+    assert.ok(
+      update < install
+        || (update === install
+          && installLine.indexOf('apt-get update -qq') < installLine.indexOf('apt-get install --yes')),
+      'Linux must refresh apt indexes before dependency resolution',
+    );
     assert.ok(install >= 0, 'Linux must use apt-get local-file installation, not dpkg -i');
     assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
     assert.ok(packageCheck > install, 'package configuration must be checked after installation');
