@@ -1,6 +1,6 @@
 // P-011 (plan memory-corpus-hygiene-and-release-distribution-2026-08-03) —
-// bin/build-desktop-sidecar.sh must never bake a DATABASE DUMP into the shipped
-// bundle, and the republish overlay carry-forward must stay an ALLOWLIST.
+// bin/build-desktop-sidecar.sh must never bake a LIVE/EXTERNAL DATABASE DUMP
+// into the shipped bundle, and republish carry-forward stays an ALLOWLIST.
 //
 // WHY THIS TEST EXISTS
 // The script used to `pg_dump` an entire database into $SIDECAR_DIR/seed.dump
@@ -12,10 +12,12 @@
 // P-011 asked for: it wanted the bake to "refuse by default", and instead the
 // producer no longer exists.
 //
-// But that removal left only a COMMENT. Nothing prevents the class returning, and
-// the class is quiet: a re-added bake produces a bundle that builds, verifies and
-// ships green — the only symptom is data in a public artifact, which no existing
-// check looks for. This test is the recurrence guard the removal did not land.
+// WI-39304 introduces one deliberately different artifact: db-seed.dump is made
+// from a throwaway initdb that applies ONLY the repository's shipped migrations.
+// It accepts no database URL/live source and the runtime restores it only after
+// a fresh per-install initdb, preserving system_identifier isolation. This test
+// admits exactly that hermetic producer while retaining the blanket rejection for
+// every other .dump path or configurable database source.
 //
 // It reads the REAL script rather than a copy, so re-introducing the bake — under
 // any filename — fails here.
@@ -35,27 +37,63 @@ const test = require('node:test');
 
 const scriptPath = path.resolve(__dirname, '../bin/build-desktop-sidecar.sh');
 const script = fs.readFileSync(scriptPath, 'utf8');
+const seedBuilderPath = path.resolve(
+  __dirname,
+  '../../libs/papercusp/packages/embedded-postgres-server/bin/build-seed.mjs',
+);
+const seedBuilder = fs.readFileSync(seedBuilderPath, 'utf8');
 
 /** Lines with the comment body and blank lines removed — i.e. what actually RUNS. */
-function executableLines() {
-  return script
+function executableLines(source = script) {
+  return source
     .split('\n')
     .map((line, i) => ({ n: i + 1, text: line }))
     .filter(({ text }) => text.trim() !== '' && !text.trim().startsWith('#'));
 }
 
-test('no database dump artifact is written into the shipped bundle', () => {
-  // A dump baked into the bundle is a data artifact, whatever it is called. The
-  // tombstone comment retains the words "seed.dump", so restrict to lines that RUN.
-  const offenders = executableLines().filter(({ text }) => /\.dump\b/.test(text));
+test('the sole database dump artifact is the hermetic migration-only logical seed', () => {
+  // Preserve the blanket rule: every executable .dump reference must name the
+  // one reviewed filename. A future live.dump / snapshot.dump is still red.
+  const dumpLines = executableLines().filter(({ text }) => /\.dump\b/.test(text));
+  const offenders = dumpLines.filter(({ text }) => !/\bdb-seed\.dump\b/.test(text));
   assert.deepEqual(
     offenders.map(({ n, text }) => `${n}: ${text.trim()}`),
     [],
-    'build-desktop-sidecar.sh writes a .dump artifact into the bundle. A database dump ' +
-      'in a public desktop bundle ships every engineer issue, coord message, plan and ' +
-      'memory row with no pack review (P-011). If a build-time data seed is genuinely ' +
-      'needed again, restore its CONSUMER first and gate it on a shareable filter.',
+    'build-desktop-sidecar.sh writes a non-reviewed .dump artifact. Only db-seed.dump ' +
+      'from the hermetic migration-only producer is allowed; any other database dump ' +
+      'can ship engineer issues, coord, plans, and memory rows (P-011).',
   );
+  assert.ok(dumpLines.length > 0, 'the WI-39304 logical seed writer disappeared; re-check this contract');
+
+  const writers = dumpLines.filter(({ text }) => /--out\s+"\$SIDECAR_DIR\/db-seed\.dump"/.test(text));
+  assert.equal(writers.length, 1, 'db-seed.dump must have exactly one build writer');
+
+  // The writer receives only a fresh mktemp PGDATA and the already-staged,
+  // repository-authored migration directory. No live database URL can enter.
+  assert.match(script, /_seed_tmp="\$\(mktemp -d\)"/);
+  assert.match(script, /--data\s+"\$_seed_tmp\/pgdata"/);
+  assert.match(script, /--sql\s+"\$SIDECAR_DIR\/db-sql"/);
+  assert.match(script, /--pg-dump\s+"\$SIDECAR_DIR\/bin\/pg_dump"/);
+  assert.doesNotMatch(script, /PAPERCUSP_SEED_PG_URL|DATABASE_URL/);
+
+  // The called producer destroys/recreates its temp data dir, force-disables
+  // seed inheritance, boots the real migration path, and emits a logical archive
+  // without ownership/physical cluster metadata.
+  assert.match(seedBuilder, /PAPERCUSP_PG_DISABLE_SEED\s*=\s*['"]1['"]/);
+  assert.match(seedBuilder, /rm\(dataDir,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}/);
+  assert.match(seedBuilder, /startEmbeddedPostgresServer\(\{\s*dataDir,\s*port,\s*dbSqlDir:\s*sqlDir/);
+  assert.match(seedBuilder, /--format=custom/);
+  assert.match(seedBuilder, /--no-owner/);
+  assert.doesNotMatch(seedBuilder, /PAPERCUSP_SEED_PG_URL|DATABASE_URL|--url\b/);
+});
+
+test('the dump-path detector remains falsifiable for an arbitrary live-store artifact', () => {
+  const poisoned = `${script}\npg_dump --file "$SIDECAR_DIR/live-store.dump" "$DATABASE_URL"\n`;
+  const offenders = executableLines(poisoned)
+    .filter(({ text }) => /\.dump\b/.test(text))
+    .filter(({ text }) => !/\bdb-seed\.dump\b/.test(text));
+  assert.equal(offenders.length, 1);
+  assert.match(offenders[0].text, /live-store\.dump/);
 });
 
 test('the PAPERCUSP_SEED_PG_URL bake knob does not come back', () => {

@@ -31,16 +31,35 @@ function executable(dir, name, source) {
   return file;
 }
 
-function runPreflight({ root, sshSource, monitorSocket, screenDir }) {
+function runPreflight({
+  root,
+  sshSource,
+  monitorSocket,
+  screenDir,
+  freeGb = 50,
+  qemuStatus = 'running',
+  qemuIoStatus = 'ok',
+}) {
   const shimDir = join(root, 'shims');
   mkdirSync(shimDir);
   const ssh = executable(shimDir, 'ssh', sshSource);
+  const diskPath = join(root, 'windows_hdd.qcow2');
+  const hmpLog = join(root, 'hmp.log');
+  writeFileSync(diskPath, 'qcow2 fixture');
+  const statusLine = qemuStatus === 'paused-io-error'
+    ? 'VM status: paused (io-error)'
+    : qemuStatus === 'paused'
+      ? 'VM status: paused'
+      : 'VM status: running';
   const socat = executable(
     shimDir,
     'socat',
     `#!/usr/bin/env bash
 IFS= read -r command || exit 1
+printf '%s\\n' "$command" >> '${hmpLog}'
 case "$command" in
+  'info status') printf '%s\\n' '${statusLine}' ;;
+  'info block') printf '%s\\n' 'hd0: windows_hdd.qcow2 (qcow2)' 'I/O status: ${qemuIoStatus}' ;;
   screendump*)
     ppm="\${command#screendump }"
     printf 'P3\\n1 1\\n255\\n0 0 0\\n' > "$ppm"
@@ -56,14 +75,35 @@ esac
 printf 'PNG-ARTIFACT\\n' > "\${2:?output path required}"
 `,
   );
+  const df = executable(
+    shimDir,
+    'df',
+    `#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'
+printf '/dev/mock 104857600 52428800 ${freeGb * 1048576} 50%% /mock\\n'
+`,
+  );
 
-  return spawnSync('bash', [SCRIPT, '--skip-host-pgrep', '--monitor-socket', monitorSocket, '--screendump-dir', screenDir, '--json'], {
+  return spawnSync('bash', [
+    SCRIPT,
+    '--skip-host-pgrep',
+    '--monitor-socket',
+    monitorSocket,
+    '--screendump-dir',
+    screenDir,
+    '--disk-path',
+    diskPath,
+    '--min-host-free-gb',
+    '10',
+    '--json',
+  ], {
     encoding: 'utf8',
     env: {
       ...process.env,
       HOME: root,
       PC_SSH: ssh,
       PC_SOCAT: socat,
+      PC_DF: df,
       PC_CONVERT: convert,
     },
   });
@@ -109,6 +149,8 @@ test('SSH failure captures a host-side QEMU screendump artifact', async () => {
 
     assert.equal(verdict.ok, false);
     assert.equal(verdict.ssh, 'false');
+    assert.equal(verdict.qemuStatus, 'running');
+    assert.equal(verdict.qemuIoStatus, 'ok');
     assert.equal(verdict.guestScreenStatus, 'captured');
     assert.match(verdict.guestScreenPng, /\.png$/);
     assert.ok(existsSync(verdict.guestScreenPng), `missing PNG artifact: ${verdict.guestScreenPng}`);
@@ -132,6 +174,8 @@ test('SSH failure reports unavailable monitor diagnosis instead of a bare unreac
     const verdict = JSON.parse(result.stdout);
 
     assert.equal(verdict.guestScreenStatus, 'unavailable');
+    assert.equal(verdict.qemuStatus, 'unavailable');
+    assert.equal(verdict.qemuIoStatus, 'unavailable');
     assert.equal(verdict.guestScreenPng, '');
     assert.match(verdict.failures.join('\n'), /guest-state monitor diagnosis unavailable/);
     assert.match(verdict.notes.join('\n'), /monitor socket not found/);
@@ -154,9 +198,74 @@ test('healthy SSH path remains authoritative and does not create a screen artifa
     assert.equal(verdict.ok, true);
     assert.equal(verdict.ssh, 'true');
     assert.equal(verdict.innerHealthy, 'true');
+    assert.equal(verdict.hostFreeGb, 50);
+    assert.equal(verdict.qemuStatus, 'unavailable');
+    assert.equal(verdict.qemuIoStatus, 'unavailable');
     assert.equal(verdict.guestScreenStatus, 'not-attempted');
     assert.equal(verdict.guestScreenPng, '');
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('low host free space fails before a healthy VM can mask the recurrence risk', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ei210981-vm-preflight-low-space-'));
+  const screenDir = join(root, 'screens');
+  const monitorSocket = join(root, 'qemu-monitor.sock');
+  mkdirSync(screenDir);
+  const server = await listeningUnixSocket(monitorSocket);
+
+  try {
+    const result = runPreflight({
+      root,
+      sshSource: sshHealthy(),
+      monitorSocket,
+      screenDir,
+      freeGb: 4,
+    });
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.hostFreeGb, 4);
+    assert.equal(verdict.minHostFreeGb, 10);
+    assert.equal(verdict.qemuStatus, 'running');
+    assert.equal(verdict.qemuIoStatus, 'ok');
+    assert.match(verdict.failures.join('\n'), /low space can pause QEMU with io-error/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('paused QEMU io-error and nospace block status are surfaced without mutating HMP state', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ei210981-vm-preflight-paused-'));
+  const screenDir = join(root, 'screens');
+  const monitorSocket = join(root, 'qemu-monitor.sock');
+  mkdirSync(screenDir);
+  const server = await listeningUnixSocket(monitorSocket);
+
+  try {
+    const result = runPreflight({
+      root,
+      sshSource: sshFails(),
+      monitorSocket,
+      screenDir,
+      qemuStatus: 'paused-io-error',
+      qemuIoStatus: 'nospace',
+    });
+    assert.equal(result.status, 1, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.qemuStatus, 'paused-io-error');
+    assert.equal(verdict.qemuIoStatus, 'nospace');
+    assert.match(verdict.failures.join('\n'), /paused \(io-error\)/);
+    assert.match(verdict.failures.join('\n'), /I\/O status is 'nospace'/);
+    const hmpCommands = readFileSync(join(root, 'hmp.log'), 'utf8');
+    assert.doesNotMatch(hmpCommands, /^(cont|quit)$/m);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     rmSync(root, { recursive: true, force: true });
   }
 });

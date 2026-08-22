@@ -40,9 +40,11 @@
 # Options:
 #   --platform windows|mac|linux   (default windows — the EI-9002/WI-3783 platform)
 #   --artifact PATH                the NEW installer to push+install (required)
-#   --server-artifact PATH         Windows Server installer stub. Optional when
-#                                  the exact-version stub is beside --artifact;
-#                                  its Inno spans are read from provenance.
+#   --server-artifact PATH         matching Server installer. Required for the
+#                                  split Windows/macOS products; auto-resolved
+#                                  beside --artifact when the exact-version file
+#                                  is unambiguous. Windows Inno spans are read
+#                                  from provenance.
 #   --expected-sha SHA             the new build's sha; default: buildSha from a
 #                                  build-provenance.json next to the artifact
 #   --expected-version VER         optional; default: version from that provenance
@@ -129,6 +131,16 @@ REMOTE_BASENAME="$(basename "$ARTIFACT")"
 json_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
 
+# Render the remote install command for one macOS DMG role. Product is one of
+# our fixed bundle names, and artifact_placeholder is replaced with the quoted
+# remote path after platform resolution. Keeping this in one helper prevents
+# the GUI and Server safety sequences from drifting apart.
+mac_dmg_install_command() { # $1=product name, $2=artifact placeholder
+  local product="$1" artifact_placeholder="$2"
+  printf 'set -e; mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage="/Applications/.%s.app.install.$$"; target="/Applications/%s.app"; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$stage"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; test -d "$app_src"; rm -rf "$stage"; ditto --noextattr --noqtn "$app_src" "$stage"; xattr -cr "$stage"; codesign --verify --deep --strict "$stage"; rm -rf "$target"; mv "$stage" "$target"' \
+    "$product" "$product" "$artifact_placeholder" "$product"
+}
+
 # ── Per-platform defaults ───────────────────────────────────────────────────
 # windows = the validated platform (EI-9002/WI-3783 live on the WSL operator).
 # mac/linux command DEFAULTS are caller-overridable. The macOS DMG path stages
@@ -166,11 +178,17 @@ case "$PLATFORM" in
       # bundle BEFORE replacing /Applications. The old app therefore survives
       # every fail-closed path and no relaunch happens unless strict codesign is
       # green (EI-21177389547731632).
-      INSTALL_CMD="${INSTALL_CMD:-set -e; mount_dir=\$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage=\"/Applications/.Papercusp GUI.app.install.\$\$\"; cleanup() { hdiutil detach \"\$mount_dir\" >/dev/null 2>&1 || true; rmdir \"\$mount_dir\" >/dev/null 2>&1 || true; rm -rf \"\$stage\"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint \"\$mount_dir\" __ARTIFACT__ >/dev/null; app_src=\"\$mount_dir/Papercusp GUI.app\"; test -d \"\$app_src\"; rm -rf \"\$stage\"; ditto --noextattr --noqtn \"\$app_src\" \"\$stage\"; xattr -cr \"\$stage\"; codesign --verify --deep --strict \"\$stage\"; rm -rf \"/Applications/Papercusp GUI.app\"; mv \"\$stage\" \"/Applications/Papercusp GUI.app\"}"
+      INSTALL_CMD="${INSTALL_CMD:-$(mac_dmg_install_command "Papercusp GUI" "__ARTIFACT__")}"
+      SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-$(mac_dmg_install_command "Papercusp Server" "__SERVER_ARTIFACT__")}"
     else
       INSTALL_CMD="${INSTALL_CMD:-installer -pkg __ARTIFACT__ -target CurrentUserHomeDirectory}"
     fi
-    RELAUNCH_CMD="${RELAUNCH_CMD:-open -n \"/Applications/Papercusp GUI.app\"}"
+    # macOS is the same split product as Windows: the GUI attaches when a Server
+    # operator already answers, so GUI-only relaunch can never exercise the
+    # build-mismatch replacement. Launch the newly-installed Server first; its
+    # own serve --ensure must replace the stale operator. The verifier itself
+    # never kills it (EI-21178626752348167).
+    RELAUNCH_CMD="${RELAUNCH_CMD:-open -n \"/Applications/Papercusp Server.app\"; open -n \"/Applications/Papercusp GUI.app\"}"
     ;;
   linux)
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
@@ -321,8 +339,30 @@ PY
     echo "provenance resolved no Windows Server artifacts" >&2
     exit 2
   }
+elif [[ "$PLATFORM" == "mac" ]]; then
+  if [[ -z "$SERVER_ARTIFACT" ]]; then
+    [[ -n "$EXPECTED_VERSION" ]] || {
+      echo "need --server-artifact: cannot auto-resolve the macOS Server DMG without an expected version" >&2
+      exit 2
+    }
+    shopt -s nullglob
+    server_candidates=( "$(dirname "$ARTIFACT")"/*Server*_$EXPECTED_VERSION\_*.dmg )
+    shopt -u nullglob
+    if (( ${#server_candidates[@]} != 1 )); then
+      echo "need --server-artifact: expected exactly one Papercusp Server ${EXPECTED_VERSION} DMG beside $(basename "$ARTIFACT"), found ${#server_candidates[@]}" >&2
+      exit 2
+    fi
+    SERVER_ARTIFACT="${server_candidates[0]}"
+  fi
+  [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
+  SERVER_BASENAME="$(basename "$SERVER_ARTIFACT")"
+  [[ -n "$EXPECTED_VERSION" && "$SERVER_BASENAME" == *"Server_${EXPECTED_VERSION}_"*.dmg ]] || {
+    echo "macOS Server artifact filename does not match expected version $EXPECTED_VERSION: $SERVER_BASENAME" >&2
+    exit 2
+  }
+  SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" )
 elif [[ -n "$SERVER_ARTIFACT" ]]; then
-  echo "--server-artifact is currently supported only for --platform windows" >&2
+  echo "--server-artifact is supported only for --platform windows|mac" >&2
   exit 2
 fi
 SERVER_REMOTE_Q=""

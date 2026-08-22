@@ -195,8 +195,20 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before startup
     guard = spawn('bash', [GUARD, 'dev'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     guard.stdout.on('data', (chunk) => { stdout += chunk; });
     guard.stderr.on('data', (chunk) => { stderr += chunk; });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Wait for the condition this test claims to exercise, not an assumed
+    // scheduler budget. Under the full concurrent node:test suite the child can
+    // spend >150ms starting/claiming its isolated target slot; releasing the
+    // writer at that fixed instant lets it reach an already-free sidecar lock and
+    // falsely fails on a missing wait banner. A bounded banner wait proves the
+    // child reached the contended flock before we release it.
+    const waitBannerDeadline = Date.now() + 5000;
+    while (!/waiting before reading sidecar/.test(stderr) && guard.exitCode === null) {
+      assert(Date.now() < waitBannerDeadline, `Tauri never reached the contended sidecar lock; stderr: ${stderr}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     assert.equal(guard.exitCode, null, 'Tauri must remain blocked while the sidecar writer holds the lock');
+    assert.match(stderr, /waiting before reading sidecar/);
 
     try { process.kill(-holder.pid, 'SIGTERM'); } catch {}
     await new Promise((resolve) => holder.once('close', resolve));

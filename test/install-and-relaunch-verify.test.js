@@ -177,7 +177,9 @@ function macFixture() {
   mkdirSync(shims);
 
   const dmg = join(artifacts, `Papercusp GUI_${VERSION}_universal-apple-darwin.dmg`);
-  writeFileSync(dmg, 'signed macOS dmg fixture');
+  const server = join(artifacts, `Papercusp Server_${VERSION}_universal-apple-darwin.dmg`);
+  writeFileSync(dmg, 'signed macOS GUI dmg fixture');
+  writeFileSync(server, 'signed macOS Server dmg fixture');
   writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
     version: VERSION,
     buildSha: TARGET_SHA,
@@ -210,7 +212,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, log, flipped, ssh, scp };
+  return { root, dmg, server, log, flipped, ssh, scp };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -362,7 +364,7 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
   }
 });
 
-test('macOS DMG install stages an xattr-clean, strictly signed app before replacement and relaunch', () => {
+test('macOS DMG install verifies matching GUI and Server apps before split-role relaunch', () => {
   const f = macFixture();
   try {
     const result = runVerify(f, [], 'mac', f.dmg);
@@ -373,18 +375,46 @@ test('macOS DMG install stages an xattr-clean, strictly signed app before replac
     assert.equal(verdict.portHeld, true);
 
     const lines = readFileSync(f.log, 'utf8').trim().split('\n');
-    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach'));
+    const guiPush = lines.findIndex((line) => line.startsWith('SCP ') && line.includes(f.dmg));
+    const serverPush = lines.findIndex((line) => line.startsWith('SCP ') && line.includes(f.server));
+    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach') && line.includes(basename(f.dmg)));
+    const serverInstall = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach') && line.includes(basename(f.server)));
     const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('open -n') && line.includes('Papercusp GUI.app'));
+    assert.ok(guiPush >= 0, 'macOS GUI DMG must be pushed');
+    assert.ok(serverPush > guiPush, 'matching macOS Server DMG must be pushed after the GUI DMG');
     assert.ok(install >= 0, 'macOS DMG must use the guarded mount/copy install path');
-    assert.ok(relaunch > install, 'macOS must not relaunch before the staged app verifies');
+    assert.ok(serverInstall > install, 'matching Server must install after the GUI');
+    assert.ok(relaunch > serverInstall, 'macOS must not relaunch before both staged apps verify');
 
     const command = lines[install];
     assert.ok(command.includes('ditto --noextattr --noqtn'), 'DMG copy must suppress extended attributes and quarantine');
     assert.ok(command.includes('xattr -cr'), 'staged app must clear any residual extended attributes');
     const codesign = command.indexOf('codesign --verify --deep --strict');
-    const replace = command.indexOf('rm -rf "/Applications/Papercusp GUI.app"');
+    const replace = command.indexOf('rm -rf "$target"');
     assert.ok(codesign >= 0, 'staged app must pass strict codesign verification');
     assert.ok(replace > codesign, 'the known-good installed app must not be replaced before strict codesign passes');
+
+    const serverCommand = lines[serverInstall];
+    assert.ok(serverCommand.includes('ditto --noextattr --noqtn'));
+    assert.ok(serverCommand.includes('codesign --verify --deep --strict'));
+    assert.ok(serverCommand.includes('Papercusp Server.app'));
+    const relaunchCommand = lines[relaunch];
+    assert.ok(
+      relaunchCommand.indexOf('Papercusp Server.app') < relaunchCommand.indexOf('Papercusp GUI.app'),
+      'new Server must launch first so its serve --ensure owns the identity flip',
+    );
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS refuses a GUI-only transition when the matching Server DMG is absent', () => {
+  const f = macFixture();
+  try {
+    unlinkSync(f.server);
+    const result = runVerify(f, [], 'mac', f.dmg);
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /need --server-artifact/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

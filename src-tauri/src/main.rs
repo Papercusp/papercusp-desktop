@@ -5407,9 +5407,7 @@ fn launcher_status_result(
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        format!(
-            "{product_name} is not installed or could not be started ({launcher_diagnostic})"
-        ),
+        format!("{product_name} is not installed or could not be started ({launcher_diagnostic})"),
     ))
 }
 
