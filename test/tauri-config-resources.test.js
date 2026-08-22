@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -15,6 +17,63 @@ function readText(...segments) {
 
 function readDistributionContract() {
   return JSON.parse(readText('src-tauri', 'distribution-contract.json'));
+}
+
+function writeFixture(rootDir, relative, contents = 'fixture') {
+  const target = path.join(rootDir, relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, contents);
+  return target;
+}
+
+function buildDistributionDeb(role, { forbiddenGui = false, modelFragment = false } = {}) {
+  const contract = readDistributionContract();
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), `papercusp-distribution-${role}-`));
+  const packageRoot = path.join(temp, 'package');
+  const packageName = role === 'gui' ? 'papercusp-gui-fixture' : 'papercusp-server-fixture';
+  writeFixture(
+    packageRoot,
+    'DEBIAN/control',
+    `Package: ${packageName}\nVersion: 1.0.0\nArchitecture: amd64\nMaintainer: Test <test@example.invalid>\nDescription: distribution census fixture\n`,
+  );
+
+  const resourceRoot = contract[role].installedIdentities.linuxResourceRoot.replace(/^\//, '');
+  if (role === 'gui') {
+    writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/spa/index.html'), 'spa');
+    const primary = writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/spa/chunk.js'), 'shared-chunk');
+    fs.linkSync(primary, path.join(packageRoot, resourceRoot, 'sidecar/spa/chunk-copy.js'));
+    if (forbiddenGui) writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/serve.mjs'), 'server');
+  } else {
+    for (const required of contract.server.requiredResources) {
+      const relative = path.join(resourceRoot, required.replace(/\/$/, ''));
+      if (required.endsWith('/')) fs.mkdirSync(path.join(packageRoot, relative), { recursive: true });
+      else writeFixture(packageRoot, relative, required);
+    }
+    if (modelFragment) {
+      writeFixture(
+        packageRoot,
+        path.join(resourceRoot, 'sidecar/node_modules/model/onnx/model.onnx_data.part'),
+        'partial',
+      );
+    }
+  }
+
+  const artifact = path.join(temp, `${packageName}.deb`);
+  const built = spawnSync('dpkg-deb', ['--build', packageRoot, artifact], { encoding: 'utf8' });
+  assert.equal(built.status, 0, built.stderr);
+  return { temp, artifact };
+}
+
+function runDistributionCensus(role, artifact, env = {}) {
+  const audit = path.join(root, 'bin', 'audit-release-bundle.py');
+  const run = spawnSync(
+    'python3',
+    [audit, '--distribution-census', role, 'linux', artifact],
+    { encoding: 'utf8', env: { ...process.env, ...env } },
+  );
+  const lines = (run.stdout ?? '').trim().split('\n').filter(Boolean);
+  const report = lines.length ? JSON.parse(lines.at(-1)) : null;
+  return { ...run, report };
 }
 
 test('GUI/Server distribution contract is fail-closed and archive-aware', () => {
@@ -52,7 +111,8 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   }
 
   assert.equal(contract.gui.budgets.initialDownloadCeiling, 250 * mib);
-  assert.match(contract.gui.budgets.tighteningRule, /Replace the 250 MiB safety ceiling/);
+  assert.match(contract.gui.budgets.tighteningRule, /fresh artifact must pin exact measured bytes/);
+  assert.match(contract.gui.budgets.tighteningRule, /cannot pass distribution census until measured/);
   assert.deepEqual(Object.keys(contract.gui.budgets.platforms).sort(), [
     'linux',
     'macos',
@@ -61,8 +121,10 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   for (const platform of Object.values(contract.gui.budgets.platforms)) {
     assert.equal(platform.mustRemeasureFreshArtifact, true);
   }
-  assert.equal(contract.gui.budgets.platforms.linux.downloadBytes, 80_082_225);
-  assert.equal(contract.gui.budgets.platforms.linux.unpackedBytes, 241_816_623);
+  assert.equal(contract.gui.budgets.platforms.linux.downloadBytes, 80_174_804);
+  assert.equal(contract.gui.budgets.platforms.linux.unpackedBytes, 241_927_695);
+  assert.equal(contract.gui.budgets.platforms.linux.downloadCeilingBytes, 85 * mib);
+  assert.equal(contract.gui.budgets.platforms.linux.unpackedCeilingBytes, 256 * mib);
   assert.deepEqual(contract.gui.budgets.measurement, [
     'compressed-artifact-bytes',
     'unpacked-unique-inode-bytes',
@@ -88,6 +150,8 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   }
   assert.notEqual(contract.gui.identifier, contract.server.identifier);
   assert.notEqual(contract.gui.productName, contract.server.productName);
+  assert.equal(contract.gui.installedIdentities.linuxDesktopEntry, 'Papercusp GUI.desktop');
+  assert.equal(contract.server.installedIdentities.linuxDesktopEntry, 'Papercusp Server.desktop');
   assert.deepEqual(contract.coinstall.sharedExecutablePaths, []);
   for (const key of [
     'linuxExecutable',
@@ -112,6 +176,62 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   assert.equal(contract.verification.installedTreeAware, true);
   assert.equal(contract.verification.browserTransportParityRequired, true);
   assert.equal(contract.verification.desktopTransportParityRequired, true);
+});
+
+test('distribution census reads archive members, separates hardlinks, and enforces GUI budgets', () => {
+  const fixture = buildDistributionDeb('gui');
+  try {
+    const clean = runDistributionCensus('gui', fixture.artifact);
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.equal(clean.report.ok, true);
+    const measured = clean.report.reports[0];
+    assert.equal(measured.archiveMemberBytesSource, 'deb-data-tar');
+    assert(measured.compressedArtifactBytes > 0);
+    assert(measured.archiveMemberBytes > 0);
+    assert(
+      measured.unpackedLogicalBytes > measured.unpackedUniqueInodeBytes,
+      'two installed hardlink paths must count logically while their inode bytes count once',
+    );
+
+    const tinyContractPath = path.join(fixture.temp, 'tiny-contract.json');
+    const tiny = readDistributionContract();
+    tiny.gui.budgets.platforms.linux.downloadCeilingBytes = 1;
+    tiny.gui.budgets.platforms.linux.unpackedCeilingBytes = 1;
+    fs.writeFileSync(tinyContractPath, `${JSON.stringify(tiny)}\n`);
+    const overBudget = runDistributionCensus('gui', fixture.artifact, {
+      PAPERCUSP_DISTRIBUTION_CONTRACT: tinyContractPath,
+    });
+    assert.equal(overBudget.status, 1);
+    assert.equal(overBudget.report.ok, false);
+    assert.match(overBudget.stderr, /compressed artifact .* exceeds ceiling 1/);
+    assert.match(overBudget.stderr, /unique-inode unpacked bytes .* exceed ceiling 1/);
+  } finally {
+    fs.rmSync(fixture.temp, { recursive: true, force: true });
+  }
+});
+
+test('distribution census rejects GUI Server resources and incomplete model fragments', () => {
+  const gui = buildDistributionDeb('gui', { forbiddenGui: true });
+  const server = buildDistributionDeb('server');
+  const fragmentedServer = buildDistributionDeb('server', { modelFragment: true });
+  try {
+    const guiResult = runDistributionCensus('gui', gui.artifact);
+    assert.equal(guiResult.status, 1);
+    assert.match(guiResult.stderr, /GUI resource escaped the allowlist: sidecar\/serve\.mjs/);
+    assert.match(guiResult.stderr, /GUI contains forbidden Server resource: sidecar\/serve\.mjs/);
+
+    const serverResult = runDistributionCensus('server', server.artifact);
+    assert.equal(serverResult.status, 0, serverResult.stderr);
+    assert.equal(serverResult.report.ok, true);
+
+    const fragmentResult = runDistributionCensus('server', fragmentedServer.artifact);
+    assert.equal(fragmentResult.status, 1);
+    assert.match(fragmentResult.stderr, /Server model download fragment survived: .*\.part/);
+  } finally {
+    fs.rmSync(gui.temp, { recursive: true, force: true });
+    fs.rmSync(server.temp, { recursive: true, force: true });
+    fs.rmSync(fragmentedServer.temp, { recursive: true, force: true });
+  }
 });
 
 test('Server distribution contract retains every backend runtime class before GUI exclusion', () => {
