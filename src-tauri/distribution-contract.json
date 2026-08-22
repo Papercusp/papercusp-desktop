@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "contract": "papercusp-gui-server-distribution-v1",
+  "decisions": [
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-001",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-002",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-003",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-004",
+    "linux-desktop-split-server-like-mac-win-2026-07-19#D-005"
+  ],
+  "sharedSpa": {
+    "source": "apps/operator-vite/dist",
+    "guiResourceGlob": "sidecar/spa/**/*",
+    "serverResourceGlob": "sidecar/spa/**/*",
+    "browserTransport": [
+      "http",
+      "sse"
+    ],
+    "desktopTransport": [
+      "tauri-endpoint-ipc",
+      "http-fallback",
+      "sse-adapter"
+    ],
+    "nativeOnlySeams": [
+      "tauri-command",
+      "binary-transfer",
+      "native-pty",
+      "websocket"
+    ],
+    "rule": "One generated SPA and one client API. The browser keeps native HTTP/SSE; Tauri installs adapters without forking UI code."
+  },
+  "gui": {
+    "productName": "Papercusp GUI",
+    "identifier": "com.papercusp.gui",
+    "packageNames": {
+      "linux": "papercusp-gui",
+      "macos": "Papercusp GUI.app",
+      "windows": "Papercusp GUI"
+    },
+    "resourceAllowlist": [
+      {
+        "glob": "sidecar/spa/**/*",
+        "owner": "shared-generated-ui",
+        "platforms": [
+          "linux",
+          "macos",
+          "windows"
+        ]
+      },
+      {
+        "glob": "resources/libPapercuspTermShim.dylib",
+        "owner": "gui-shell",
+        "platforms": [
+          "macos"
+        ],
+        "optional": true
+      }
+    ],
+    "forbiddenResourcePrefixes": [
+      "seed/",
+      "sidecar/apps/",
+      "sidecar/bin/",
+      "sidecar/db-sql/",
+      "sidecar/env-sidecars/",
+      "sidecar/harness/",
+      "sidecar/internal-docs/",
+      "sidecar/node_modules/",
+      "sidecar/prompts/",
+      "sidecar/rubrics/",
+      "sidecar/scripts/",
+      "sidecar/source.tar.zst",
+      "sidecar/templates/",
+      "sidecar/serve.mjs",
+      "resources/papercup-bootstrap.sh",
+      "resources/papercup-rootfs-recipe",
+      "resources/papercup-runtime.tar.gz"
+    ],
+    "requiredCapabilities": [
+      "render-shared-spa-before-server-ready",
+      "discover-running-server",
+      "launch-installed-server",
+      "show-install-server-guidance",
+      "negotiate-server-version",
+      "preserve-browser-http-sse",
+      "install-desktop-ipc-adapters"
+    ],
+    "connection": {
+      "discoveryRecord": "~/.papercusp/operator.json",
+      "readinessProbe": "/api/health",
+      "versionProbe": "/api/desktop/version",
+      "missingServerState": "install-papercusp-server",
+      "rule": "Never self-host. Attach to a healthy Server or render explicit install/start/retry guidance without looping silently."
+    },
+    "versionNegotiation": {
+      "serverFields": [
+        "appVersion",
+        "sidecarSha"
+      ],
+      "releaseRule": "gui-and-server-must-share-release-version",
+      "sourceRule": "same-source-build-sha-required-when-both-shas-are-known",
+      "unknownRule": "unknown provenance is diagnostic and cannot satisfy release verification"
+    },
+    "budgets": {
+      "unit": "bytes",
+      "initialDownloadCeiling": 262144000,
+      "measurement": [
+        "compressed-artifact-bytes",
+        "unpacked-unique-inode-bytes",
+        "unpacked-logical-bytes",
+        "archive-member-bytes"
+      ],
+      "hardlinks": "count-each-inode-once-and-report-logical-bytes-separately",
+      "archives": "inspect-members-and-report-container-bytes-separately",
+      "tighteningRule": "Replace the 250 MiB safety ceiling with the clean per-platform shell baseline plus explicit headroom before release.",
+      "platforms": {
+        "linux": {
+          "status": "pre-change-derived-shell-baseline",
+          "downloadBytes": 80082225,
+          "unpackedBytes": 241816623,
+          "sourceArtifactSha256": "db7543ec42c383b85a098ce4bd5b7d704298e32aa4981f4140ae1843e650abf5",
+          "mustRemeasureFreshArtifact": true
+        },
+        "macos": {
+          "status": "pending-fresh-artifact",
+          "mustRemeasureFreshArtifact": true
+        },
+        "windows": {
+          "status": "pending-fresh-artifact",
+          "mustRemeasureFreshArtifact": true
+        }
+      }
+    }
+  },
+  "server": {
+    "productName": "Papercusp Server",
+    "identifier": "com.papercusp.server",
+    "packageNames": {
+      "linux": "papercusp-server",
+      "macos": "Papercusp Server.app",
+      "windows": "Papercusp Server"
+    },
+    "requiredResources": [
+      "sidecar/serve.mjs",
+      "sidecar/sidecar-preload.js",
+      "sidecar/spa/index.html",
+      "sidecar/bin/node",
+      "sidecar/db-sql/",
+      "sidecar/harness/",
+      "sidecar/internal-docs/",
+      "sidecar/node_modules/",
+      "sidecar/prompts/",
+      "sidecar/rubrics/",
+      "sidecar/scripts/",
+      "sidecar/templates/"
+    ],
+    "requiredCapabilities": [
+      "operator-health",
+      "embedded-postgres",
+      "workspace-host",
+      "browser-spa-http-sse",
+      "desktop-endpoint-ipc",
+      "mcp",
+      "agent-runtime",
+      "local-embedding",
+      "docs-search",
+      "environment-sidecars"
+    ],
+    "optionalPacks": [
+      {
+        "name": "local-models",
+        "paths": [
+          "sidecar/node_modules/@huggingface/transformers/.cache/onnx-community/harrier-oss-v1-0.6b-ONNX/",
+          "sidecar/node_modules/@huggingface/transformers/.cache/onnx-community/embeddinggemma-300m-ONNX/"
+        ],
+        "forbidden": [
+          "*.tmp.*",
+          "*.partial",
+          "*.part"
+        ]
+      },
+      {
+        "name": "dev-source",
+        "paths": [
+          "sidecar/source.tar.zst"
+        ]
+      },
+      {
+        "name": "bootstrap-seed",
+        "paths": [
+          "seed/**/*"
+        ]
+      },
+      {
+        "name": "windows-wsl-runtime",
+        "platforms": [
+          "windows"
+        ],
+        "paths": [
+          "resources/papercup-bootstrap.sh",
+          "resources/papercup-rootfs-recipe",
+          "resources/papercup-runtime.tar.gz"
+        ]
+      }
+    ],
+    "capabilitySmoke": {
+      "health": "/api/health",
+      "version": "/api/desktop/version",
+      "spa": "/",
+      "stream": "endpoint-ipc-or-sse-round-trip",
+      "database": "embedded-postgres-ready",
+      "agent": "mcp-initialize-and-read-only-tool"
+    }
+  },
+  "coinstall": {
+    "conflicts": [],
+    "replaces": [],
+    "sharedExecutablePaths": [],
+    "singleInstanceScope": "bundle-identifier",
+    "updaterProducts": [
+      "gui",
+      "server"
+    ],
+    "uninstallRule": "Each product may remove only files and processes proven to belong to its own package/bundle identifier."
+  },
+  "verification": {
+    "freshSameSourceArtifactsRequired": true,
+    "archiveAware": true,
+    "installedTreeAware": true,
+    "browserTransportParityRequired": true,
+    "desktopTransportParityRequired": true,
+    "guiOnlyFailureMustBeGraceful": true,
+    "serverOnlyOperationMustBeSupported": true
+  }
+}

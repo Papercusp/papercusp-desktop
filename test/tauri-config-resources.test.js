@@ -13,6 +13,121 @@ function readText(...segments) {
   return fs.readFileSync(path.join(root, ...segments), 'utf8');
 }
 
+function readDistributionContract() {
+  return JSON.parse(readText('src-tauri', 'distribution-contract.json'));
+}
+
+test('GUI/Server distribution contract is fail-closed and archive-aware', () => {
+  const contract = readDistributionContract();
+  const mib = 1024 * 1024;
+
+  assert.equal(contract.schemaVersion, 1);
+  assert.equal(contract.sharedSpa.source, 'apps/operator-vite/dist');
+  assert.deepEqual(contract.sharedSpa.browserTransport, ['http', 'sse']);
+  assert.deepEqual(contract.sharedSpa.desktopTransport, [
+    'tauri-endpoint-ipc',
+    'http-fallback',
+    'sse-adapter',
+  ]);
+
+  const guiGlobs = contract.gui.resourceAllowlist.map(({ glob }) => glob);
+  assert.deepEqual(guiGlobs, [
+    'sidecar/spa/**/*',
+    'resources/libPapercuspTermShim.dylib',
+  ]);
+  for (const forbiddenBroadGlob of ['sidecar/**/*', 'resources/*', 'seed/**/*']) {
+    assert(!guiGlobs.includes(forbiddenBroadGlob), `GUI allowlist widened to ${forbiddenBroadGlob}`);
+  }
+  for (const requiredServerOnlyPrefix of [
+    'seed/',
+    'sidecar/bin/',
+    'sidecar/node_modules/',
+    'sidecar/serve.mjs',
+    'resources/papercup-runtime.tar.gz',
+  ]) {
+    assert(
+      contract.gui.forbiddenResourcePrefixes.includes(requiredServerOnlyPrefix),
+      `GUI forbidden-resource contract lost ${requiredServerOnlyPrefix}`,
+    );
+  }
+
+  assert.equal(contract.gui.budgets.initialDownloadCeiling, 250 * mib);
+  assert.match(contract.gui.budgets.tighteningRule, /Replace the 250 MiB safety ceiling/);
+  assert.deepEqual(Object.keys(contract.gui.budgets.platforms).sort(), [
+    'linux',
+    'macos',
+    'windows',
+  ]);
+  for (const platform of Object.values(contract.gui.budgets.platforms)) {
+    assert.equal(platform.mustRemeasureFreshArtifact, true);
+  }
+  assert.equal(contract.gui.budgets.platforms.linux.downloadBytes, 80_082_225);
+  assert.equal(contract.gui.budgets.platforms.linux.unpackedBytes, 241_816_623);
+  assert.deepEqual(contract.gui.budgets.measurement, [
+    'compressed-artifact-bytes',
+    'unpacked-unique-inode-bytes',
+    'unpacked-logical-bytes',
+    'archive-member-bytes',
+  ]);
+
+  assert.deepEqual(contract.coinstall.conflicts, []);
+  assert.deepEqual(contract.coinstall.replaces, []);
+  assert.notEqual(contract.gui.identifier, contract.server.identifier);
+  assert.notEqual(contract.gui.productName, contract.server.productName);
+  assert.equal(contract.verification.archiveAware, true);
+  assert.equal(contract.verification.installedTreeAware, true);
+  assert.equal(contract.verification.browserTransportParityRequired, true);
+  assert.equal(contract.verification.desktopTransportParityRequired, true);
+});
+
+test('Server distribution contract retains every backend runtime class before GUI exclusion', () => {
+  const contract = readDistributionContract();
+  const required = new Set(contract.server.requiredResources);
+  for (const resource of [
+    'sidecar/serve.mjs',
+    'sidecar/sidecar-preload.js',
+    'sidecar/spa/index.html',
+    'sidecar/bin/node',
+    'sidecar/db-sql/',
+    'sidecar/harness/',
+    'sidecar/internal-docs/',
+    'sidecar/node_modules/',
+    'sidecar/prompts/',
+    'sidecar/rubrics/',
+    'sidecar/scripts/',
+    'sidecar/templates/',
+  ]) {
+    assert(required.has(resource), `Server required-resource manifest lost ${resource}`);
+  }
+
+  const packs = new Map(contract.server.optionalPacks.map((pack) => [pack.name, pack]));
+  assert.deepEqual([...packs.keys()].sort(), [
+    'bootstrap-seed',
+    'dev-source',
+    'local-models',
+    'windows-wsl-runtime',
+  ]);
+  assert.deepEqual(packs.get('local-models').forbidden, ['*.tmp.*', '*.partial', '*.part']);
+  assert.deepEqual(packs.get('bootstrap-seed').paths, ['seed/**/*']);
+  assert.deepEqual(packs.get('dev-source').paths, ['sidecar/source.tar.zst']);
+  assert.deepEqual(packs.get('windows-wsl-runtime').platforms, ['windows']);
+
+  assert.equal(contract.gui.connection.readinessProbe, '/api/health');
+  assert.equal(contract.gui.connection.versionProbe, '/api/desktop/version');
+  assert.equal(
+    contract.gui.versionNegotiation.releaseRule,
+    'gui-and-server-must-share-release-version',
+  );
+  assert.deepEqual(Object.keys(contract.server.capabilitySmoke).sort(), [
+    'agent',
+    'database',
+    'health',
+    'spa',
+    'stream',
+    'version',
+  ]);
+});
+
 test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () => {
   const base = readConfig('tauri.conf.json');
   const server = readConfig('tauri.server.conf.json');
