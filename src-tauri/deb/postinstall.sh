@@ -15,6 +15,13 @@ set -e
 # Only on a real install/upgrade configure.
 [ "$1" = "configure" ] || exit 0
 
+# This script is inherited by both Tauri products, but every side effect below
+# belongs to the Server package: its user unit, bundled psu/ptool launchers,
+# tutorial dispatcher and terminal dependency. The thin GUI carries only the
+# SPA and must neither manufacture nor overwrite Server-owned files merely
+# because its sibling happens to be installed.
+[ "${DPKG_MAINTSCRIPT_PACKAGE:-}" = "papercusp-server" ] || exit 0
+
 # The Linux Server is a real, package-owned systemd user service. Use Debian's
 # standard package-wide user-unit helper rather than reaching into one logged-in
 # user's HOME from this root maintainer script. `enable` creates the global
@@ -26,8 +33,7 @@ set -e
 # binary package name so installing/upgrading the GUI cannot claim ownership of
 # the Server unit merely because the sibling product is already on disk.
 SERVER_USER_UNIT=papercusp-server.service
-if [ "${DPKG_MAINTSCRIPT_PACKAGE:-}" = "papercusp-server" ] \
-  && [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
+if [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
   && [ -z "${DPKG_ROOT:-}" ] \
   && command -v deb-systemd-helper >/dev/null 2>&1; then
   deb-systemd-helper --user unmask "$SERVER_USER_UNIT" >/dev/null || true
@@ -38,14 +44,10 @@ if [ "${DPKG_MAINTSCRIPT_PACKAGE:-}" = "papercusp-server" ] \
   fi
 fi
 
-# Resolve the installed sidecar dir. Tauri names the app dir after the bundle's
-# productName ("Papercusp GUI" / "Papercusp Server" — WITH a space), so the old
-# hardcoded /usr/lib/Papercusp/sidecar never matched on a real install and
-# psu/ptool/papercusp were silently never wired to PATH (WI-2902, 2026-07-05).
-# Glob the real path; both bundles carry identical launcher scripts, so the first
-# match is fine. Fall back to the legacy path if the glob finds nothing.
-SC="$(ls -d /usr/lib/Papercusp*/sidecar 2>/dev/null | head -1)"
-[ -n "$SC" ] || SC=/usr/lib/Papercusp/sidecar
+# The Server's productName deterministically owns this root. Never glob across
+# both siblings: after the thin-GUI split, /usr/lib/Papercusp GUI/sidecar has
+# only the SPA, and choosing it first silently leaves psu/ptool unwired.
+SC="/usr/lib/Papercusp Server/sidecar"
 
 # ── (1) psu / ptool → /usr/bin (immediate, deterministic) ───────────────────
 # Thin wrappers that exec the BUNDLED node + launcher (so they work even with no
@@ -86,9 +88,8 @@ esac
 WRAP
   chmod 755 /usr/bin/papercusp
 
-  # Third icon: reuse the app icon the Tauri bundle installed (papercusp-desktop
-  # is the shared binary/icon name for both bundles). Terminal=true → the DE
-  # opens its default terminal emulator running the concierge.
+  # Third icon: reuse the Server-owned icon. Terminal=true → the DE opens its
+  # default terminal emulator running the concierge.
   if [ -d /usr/share/applications ]; then
     cat > /usr/share/applications/papercusp-tutorial.desktop <<'DESK'
 [Desktop Entry]
@@ -96,7 +97,7 @@ Type=Application
 Name=Papercusp Tutorial & Setup
 Comment=Open the guided Papercusp tutorial and setup (tabs for both)
 Exec=/usr/bin/papercusp tutorial
-Icon=papercusp-desktop
+Icon=papercusp-server
 Terminal=true
 Categories=Development;
 DESK

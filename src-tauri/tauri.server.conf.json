@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Papercusp Server",
+  "mainBinaryName": "papercusp-server",
   "identifier": "com.papercusp.server",
   "app": {
     "windows": []

@@ -88,6 +88,26 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   }
   assert.notEqual(contract.gui.identifier, contract.server.identifier);
   assert.notEqual(contract.gui.productName, contract.server.productName);
+  assert.deepEqual(contract.coinstall.sharedExecutablePaths, []);
+  for (const key of [
+    'linuxExecutable',
+    'linuxDesktopEntry',
+    'linuxIcon',
+    'linuxResourceRoot',
+    'macosInstallRoot',
+    'windowsInstallRoot',
+  ]) {
+    assert.notEqual(
+      contract.gui.installedIdentities[key],
+      contract.server.installedIdentities[key],
+      `${key} must be independently owned by GUI and Server`,
+    );
+  }
+  assert.equal(
+    readConfig('tauri.server.conf.json').mainBinaryName,
+    path.posix.basename(contract.server.installedIdentities.linuxExecutable),
+    'the Server overlay must make Tauri package the Server-owned executable name',
+  );
   assert.equal(contract.verification.archiveAware, true);
   assert.equal(contract.verification.installedTreeAware, true);
   assert.equal(contract.verification.browserTransportParityRequired, true);

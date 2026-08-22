@@ -3,11 +3,11 @@ Description=Papercusp Server
 Documentation=https://papercuspai.com
 After=graphical-session.target
 PartOf=graphical-session.target
-ConditionFileIsExecutable=/usr/bin/papercusp-desktop
+ConditionFileIsExecutable=/usr/bin/papercusp-server
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/papercusp-desktop
+ExecStart=/usr/bin/papercusp-server
 Restart=on-failure
 RestartSec=5s
 KillMode=mixed

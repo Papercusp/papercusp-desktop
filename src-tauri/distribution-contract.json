@@ -37,6 +37,14 @@
       "macos": "Papercusp GUI.app",
       "windows": "Papercusp GUI"
     },
+    "installedIdentities": {
+      "linuxExecutable": "/usr/bin/papercusp-desktop",
+      "linuxDesktopEntry": "papercusp-desktop.desktop",
+      "linuxIcon": "papercusp-desktop",
+      "linuxResourceRoot": "/usr/lib/Papercusp GUI",
+      "macosInstallRoot": "/Applications/Papercusp GUI.app",
+      "windowsInstallRoot": "%LOCALAPPDATA%\\Papercusp GUI"
+    },
     "resourceAllowlist": [
       {
         "glob": "sidecar/spa/**/*",
@@ -143,6 +151,15 @@
       "linux": "papercusp-server",
       "macos": "Papercusp Server.app",
       "windows": "Papercusp Server"
+    },
+    "installedIdentities": {
+      "linuxExecutable": "/usr/bin/papercusp-server",
+      "linuxDesktopEntry": "papercusp-server.desktop",
+      "linuxIcon": "papercusp-server",
+      "linuxResourceRoot": "/usr/lib/Papercusp Server",
+      "linuxUserUnit": "/usr/lib/systemd/user/papercusp-server.service",
+      "macosInstallRoot": "/Applications/Papercusp Server.app",
+      "windowsInstallRoot": "%LOCALAPPDATA%\\Papercusp Server"
     },
     "requiredResources": [
       "sidecar/serve.mjs",
