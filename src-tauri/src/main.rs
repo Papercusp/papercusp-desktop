@@ -57,6 +57,7 @@ mod pty;
 mod workspaces;
 mod wsl_setup;
 
+use endpoint_ipc::is_tcp_endpoint;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -190,14 +191,6 @@ fn endpoint_ipc_socket_path_supported_for_target(socket_path: &str, target_windo
 fn is_windows_named_pipe_path(socket_path: &str) -> bool {
     let lower = socket_path.to_ascii_lowercase();
     lower.starts_with("\\\\.\\pipe\\") || lower.starts_with("\\\\?\\pipe\\")
-}
-
-/// A `tcp://host:port` endpoint-IPC address (WI-3395). Emitted by the Node
-/// server's `parse_endpoint` when the sidecar is told to bind loopback TCP
-/// (`PAPERCUSP_IPC_TCP=1` — the WSL2/Windows case). Kept in lockstep with that
-/// classifier and `parse_tcp_endpoint` in endpoint_ipc.rs.
-fn is_tcp_endpoint(socket_path: &str) -> bool {
-    socket_path.trim().to_ascii_lowercase().starts_with("tcp://")
 }
 
 /// EI-190: the operator PORT the desktop's /api endpoint-IPC currently
@@ -2487,9 +2480,13 @@ mod helper_tests {
             "tcp://127.0.0.1:35745",
             false
         ));
-        // The classifier itself: scheme-only, trimmed + case-insensitive.
+        // The classifier is strict, trimmed, case-sensitive, and validates
+        // both the host and numeric port like the Node server parser.
         assert!(is_tcp_endpoint("tcp://127.0.0.1:0"));
-        assert!(is_tcp_endpoint("  TCP://127.0.0.1:0 "));
+        assert!(!is_tcp_endpoint("  TCP://127.0.0.1:0 "));
+        assert!(!is_tcp_endpoint("tcp://127.0.0.1"));
+        assert!(!is_tcp_endpoint("tcp://127.0.0.1:not-a-port"));
+        assert!(!is_tcp_endpoint("tcp://127.0.0.1:1:2"));
         assert!(!is_tcp_endpoint("/tmp/x.sock"));
         assert!(!is_tcp_endpoint("\\\\.\\pipe\\papercusp-1"));
     }

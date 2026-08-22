@@ -352,12 +352,44 @@ impl AsyncWrite for IpcStream {
 
 /// Classify the discovered endpoint string: `Some("host:port")` for a
 /// `tcp://host:port` address, else `None` (a Unix-socket / named-pipe path).
-/// Mirrors `parse_endpoint` (Node) + `is_tcp_endpoint` (main.rs guard) — the
-/// three must agree on what a TCP endpoint looks like. Handles a bracketed
-/// IPv6 literal too (`tcp://[::1]:8080` → `[::1]:8080`), which
+/// Mirrors `parse_endpoint` (Node) and is shared with the main.rs target guard
+/// so all endpoint-IPC call sites use the same strict syntax. Handles a
+/// bracketed IPv6 literal too (`tcp://[::1]:8080` → `[::1]:8080`), which
 /// `ToSocketAddrs` for `&str` parses natively.
+pub(crate) fn is_tcp_endpoint(socket: &str) -> bool {
+    parse_tcp_endpoint(socket).is_some()
+}
+
 fn parse_tcp_endpoint(socket: &str) -> Option<&str> {
-    socket.trim().strip_prefix("tcp://")
+    let trimmed = socket.trim();
+    let hostport = trimmed.strip_prefix("tcp://")?;
+
+    // Keep this grammar aligned with server.ts' parseEndpoint regex:
+    // `tcp://[host]:port` or `tcp://host:port`, with a numeric port. The
+    // bracketed form may contain colons (IPv6); the unbracketed form may not.
+    let (host, port, bracketed_host) = if let Some(bracketed) = hostport.strip_prefix('[') {
+        let close = bracketed.find(']')?;
+        let host = &bracketed[..close];
+        let port = bracketed[close + 1..].strip_prefix(':')?;
+        (host, port, true)
+    } else {
+        let (host, port) = hostport.rsplit_once(':')?;
+        (host, port, false)
+    };
+
+    if host.is_empty()
+        || (!bracketed_host
+            && (host.contains('/')
+                || host.contains(':')
+                || host.contains('[')
+                || host.contains(']')))
+        || port.is_empty()
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(hostport)
 }
 
 /// Dial the endpoint at `socket_path` and return the opened stream. A
@@ -1822,6 +1854,17 @@ mod tests {
         );
         assert_eq!(parse_tcp_endpoint("\\\\.\\pipe\\papercusp-1"), None);
         assert_eq!(parse_tcp_endpoint(""), None);
+
+        for malformed in [
+            "TCP://127.0.0.1:35745",
+            "tcp://127.0.0.1",
+            "tcp://127.0.0.1:not-a-port",
+            "tcp://127.0.0.1:35745:1",
+            "tcp://:1",
+            "tcp://[]:1",
+        ] {
+            assert_eq!(parse_tcp_endpoint(malformed), None, "{malformed}");
+        }
     }
 
     /// End-to-end over a real loopback TCP listener: the client dials a
