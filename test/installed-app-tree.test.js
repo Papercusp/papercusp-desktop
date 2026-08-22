@@ -72,6 +72,16 @@ test('resolves the resource tree the way a launched binary does', () => {
   assert.equal(resourceRootFor(debBin), '/x/data/usr/lib/Papercusp GUI');
   assert.equal(sidecarDirFor(debBin), '/x/data/usr/lib/Papercusp GUI/sidecar');
 
+  const serverDebBin = '/x/data/usr/bin/papercusp-server';
+  assert.equal(
+    resourceRootFor(serverDebBin, 'Papercusp Server'),
+    '/x/data/usr/lib/Papercusp Server',
+  );
+  assert.equal(
+    sidecarDirFor(serverDebBin, 'Papercusp Server'),
+    '/x/data/usr/lib/Papercusp Server/sidecar',
+  );
+
   const cargoBin = '/t/release/papercusp-desktop';
   assert.equal(sidecarDirFor(cargoBin), '/t/lib/Papercusp GUI/sidecar');
 });
