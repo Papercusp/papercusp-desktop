@@ -61,7 +61,11 @@ PY
 qmp_cmd query-status >/dev/null 2>&1 && qmp_running=true
 
 status=unhealthy
-detail="service is not active"
+if [[ "$service_active" == true ]]; then
+  detail="service is active but QEMU/QMP is unavailable"
+else
+  detail="service is not active"
+fi
 if [[ "$ssh_ok" == true ]]; then
   status=healthy; detail="macOS guest SSH is reachable"
 elif [[ "$service_active" == true && "$qmp_running" == true && "$disk_age" -ge "$STALE_SEC" ]]; then

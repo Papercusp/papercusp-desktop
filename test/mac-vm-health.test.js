@@ -40,6 +40,21 @@ test('classifies a running QEMU with dead SSH and stale disk as picker-suspect',
   assert.equal(JSON.parse(result.stdout).status, 'picker-suspect');
 });
 
+test('distinguishes an active service from an unavailable QEMU control plane', async () => {
+  const { env } = await fixture({ qmp: false, ssh: false });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    status: 'unhealthy',
+    service_active: true,
+    ssh_ok: false,
+    qmp_running: false,
+    disk_age_sec: 0,
+    recovery: 'not-requested',
+    detail: 'service is active but QEMU/QMP is unavailable',
+  });
+});
+
 test('recovery is opt-in and refused without the picker signature', async () => {
   const { env } = await fixture({ qmp: false, ssh: false });
   const result = spawnSync('bash', [script, '--recover-picker'], { env, encoding: 'utf8' });
