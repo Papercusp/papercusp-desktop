@@ -31,6 +31,8 @@ scn_coord_controlplane() {
   else
     echo "coord control-plane boundary FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|BRIEF 7 MATRIX' | sed 's/^/      /'
+    echo "      ── full assert transcript (all ✓/✗) ──"
+    printf '%s\n' "$out" | grep -E '✓|✗|BRIEF 7 MATRIX' | sed 's/^/      /'
   fi
   return "$rc"
 }

@@ -26,6 +26,8 @@ scn_reconnect_catchup() {
   else
     echo "reconnect/catch-up FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
+    echo "      ── full assert transcript (all ✓/✗) ──"
+    printf '%s\n' "$out" | grep -E '✓|✗|OVERALL:' | sed 's/^/      /'
   fi
   return "$rc"
 }

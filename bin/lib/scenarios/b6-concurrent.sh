@@ -23,6 +23,8 @@ scn_concurrent_lww() {
   else
     echo "concurrent writes / LWW FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:' | sed 's/^/      /'
+    echo "      ── full assert transcript (all ✓/✗) ──"
+    printf '%s\n' "$out" | grep -E '✓|✗|OVERALL:' | sed 's/^/      /'
   fi
   return "$rc"
 }
