@@ -5,9 +5,10 @@
 # suite (1085+ backbone green) but FAIL the real packaged binary, because the integration
 # tests mock/inject the substrate federation. The two-instance live smokes catch this class
 # but only run manually → regressions reach the shipped binary undetected. This gate runs
-# them on a load-gated quiet box on a schedule + files an EI on any RED, so the class is
-# caught within ~a day instead of by chance. (Distinct from the per-bug hermetic guards the
-# team adds — those catch the specific regression; this catches the CLASS.)
+# them behind CPU/memory pressure admission on a schedule + files an EI on any RED, so the
+# class is caught within ~a day instead of by chance. Host loadavg is logged for forensics but
+# is not the admission signal when PSI is available. (Distinct from the per-bug hermetic guards
+# the team adds — those catch the specific regression; this catches the CLASS.)
 #
 # Usage:  bin/live-federation-gate.sh
 # Env:
@@ -27,7 +28,7 @@
 #   LOAD_GATE         (default max(15, 85% of nproc)) — NO LONGER THE ADMISSION SIGNAL. Kept
 #                                     as the fallback used only when the kernel exposes no PSI,
 #                                     and still logged alongside every admission decision.
-#   STORM_GATE        (default nproc*0.6) — a FAIL with end-of-run load above this is
+#   STORM_GATE        (default nproc*0.9) — a FAIL with end-of-run load above this is
 #                                     downgraded to SKIPPED-STORM (starvation, not signal).
 #   GATE_SUCCESS_TTL_H(default 22)  — a GREEN younger than this ⇒ instant FRESH exit
 #                                     (pairs with the hourly timer: ~daily actual run).
@@ -163,8 +164,9 @@ source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 # reason to withhold verification — engineer isolation instead. That isolation now exists:
 # local-matrix.sh pins each frame to a reserved cpuset (+ elevated cpu-shares), so host load
 # no longer starves the frames' node main threads (run 174333 forensics: 18×30s substrate
-# boot timeouts / 10 late-adopts / event-loop p99 1.48s on an UNPINNED rig-b). Admission now
-# skips only near true saturation, where even reserved cores can't be kept clear.
+# boot timeouts / 10 late-adopts / event-loop p99 1.48s on an UNPINNED rig-b). On a kernel
+# without PSI, the loadavg fallback skips only near saturation; PSI-capable hosts use the
+# path-specific pressure admission below instead.
 NPROC="$(nproc 2>/dev/null || echo 8)"
 LOAD_GATE="${LOAD_GATE:-$(( NPROC * 85 / 100 > 15 ? NPROC * 85 / 100 : 15 ))}"
 # STORM downgrade moves with it (0.6n → 0.9n): with pinned frames, host loadavg is a weak
