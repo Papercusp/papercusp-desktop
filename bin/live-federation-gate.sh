@@ -1144,6 +1144,8 @@ fi
 # own preflight keeps a direct/ad-hoc invocation honest.
 preflight_attestation_write_account() {
   local expected_user="$1" token actual_login probe_out probe_rc
+  local identity_attempts="${ATTESTATION_IDENTITY_ATTEMPTS:-3}"
+  local identity_retry_delay="${ATTESTATION_IDENTITY_RETRY_DELAY_SEC:-10}"
   token="$(gh auth token --user "$expected_user" 2>/dev/null || true)"
   if [ -z "$token" ]; then
     echo "ATTESTATION_WRITE: user=$expected_user code=token_missing detail=no-gh-token"
@@ -1154,8 +1156,8 @@ preflight_attestation_write_account() {
   # error body on a non-zero response (observed live: HTTP 403 rate-limit), so
   # `... || true` turned that whole object into `actual_login` and mislabeled an
   # unavailable identity as a mismatched account.
-  if ! actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)"; then
-    echo "ATTESTATION_WRITE: user=$expected_user code=identity_unavailable detail=GET-/user-failed"
+  if ! actual_login="$(fed_github_login_with_retry "$token" "$identity_attempts" "$identity_retry_delay")"; then
+    echo "ATTESTATION_WRITE: user=$expected_user code=identity_unavailable detail=GET-/user-failed-after-${identity_attempts}-attempts"
     return 1
   fi
   if [ -z "$actual_login" ]; then

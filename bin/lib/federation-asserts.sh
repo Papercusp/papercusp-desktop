@@ -58,6 +58,34 @@ fed_select_newest_deb_by_package() {
   printf '%s\n' "$newest"
 }
 
+# fed_github_login_with_retry <token> [attempts] [delay-sec]
+#
+# Resolve the authenticated GitHub login with the same bounded retry posture as
+# live-federation-gate's credentialed REST preflight.  GitHub can transiently
+# fail one credentialed GET /user (edge/rate-limit class) while the token is
+# otherwise valid; treating that single sample as a durable identity failure
+# red-pins the whole federation gate before any product proof runs.
+fed_github_login_with_retry() {
+  local token="$1" attempts="${2:-3}" retry_delay="${3:-10}"
+  local attempt actual_login
+
+  [ -n "$token" ] || return 1
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=3
+  [[ "$retry_delay" =~ ^[0-9]+([.][0-9]+)?$ ]] || retry_delay=10
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)" \
+      && [ -n "$actual_login" ]; then
+      printf '%s\n' "$actual_login"
+      return 0
+    fi
+    if [ "$attempt" -lt "$attempts" ] && [ "$retry_delay" != 0 ]; then
+      sleep "$retry_delay"
+    fi
+  done
+  return 1
+}
+
 # scn_diag [prefix] — EI-18762718908280875: a scenario's diagnostic output only
 # SURVIVES a PASSING matrix run if every line starts with the `·` marker
 # (deb-hetzner-matrix.sh greps for it after a scenario returns 0 — see WI-6057).
