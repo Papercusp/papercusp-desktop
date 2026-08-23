@@ -30,6 +30,45 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK" "$WORK2"; }
 trap cleanup EXIT
 
+# WI-40912: a single transient authenticated GET /user failure must not red-pin
+# the entire live federation gate.  Stub gh with file-backed counters because
+# command substitution runs the helper in a subshell.
+GH_RETRY_EVENTUAL_COUNT="$WORK/gh-retry-eventual.count"
+GH_RETRY_NEVER_COUNT="$WORK/gh-retry-never.count"
+printf '0\n' >"$GH_RETRY_EVENTUAL_COUNT"
+printf '0\n' >"$GH_RETRY_NEVER_COUNT"
+gh() {
+  local counter count
+  case "${GH_TOKEN:-}" in
+    retry-eventual)
+      counter="$GH_RETRY_EVENTUAL_COUNT"
+      count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
+      [ "$count" -ge 3 ] && { printf 'aviynw\n'; return 0; }
+      return 1
+      ;;
+    retry-never)
+      counter="$GH_RETRY_NEVER_COUNT"
+      count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
+      return 1
+      ;;
+    *) command gh "$@" ;;
+  esac
+}
+retry_login="$(fed_github_login_with_retry retry-eventual 3 0)"; retry_rc=$?
+if [ "$retry_rc" -eq 0 ] && [ "$retry_login" = aviynw ] \
+  && [ "$(cat "$GH_RETRY_EVENTUAL_COUNT")" = 3 ]; then
+  ok "fed_github_login_with_retry recovers after two transient GET /user failures (WI-40912)"
+else
+  bad "fed_github_login_with_retry did not recover on attempt 3 (rc=$retry_rc login=$retry_login attempts=$(cat "$GH_RETRY_EVENTUAL_COUNT"))"
+fi
+if fed_github_login_with_retry retry-never 3 0 >/dev/null \
+  || [ "$(cat "$GH_RETRY_NEVER_COUNT")" != 3 ]; then
+  bad "fed_github_login_with_retry does not fail closed after three exhausted attempts (WI-40912)"
+else
+  ok "fed_github_login_with_retry fails closed after three exhausted attempts (WI-40912)"
+fi
+unset -f gh
+
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
 # start_listener <port> <sidecar|decoy> — a synthetic instance http listener.
