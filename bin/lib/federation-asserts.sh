@@ -1300,6 +1300,100 @@ _fed_outbox_drained() {
   drv_psql "$src" "SELECT CASE WHEN drained_at IS NOT NULL THEN 'Y' ELSE 'N' END FROM harness_shared.substrate_outbox WHERE key='$key' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]'
 }
 
+# fed_assert_hive_lifecycle_ready <src> <dst> <canary-fid> <target-harness> <pot-home>
+#
+# Fail-closed admission for the folded re-key witness. HTTP readiness and even
+# an earlier content PASS are not enough when the target substrate entered the
+# boot-timeout zombie window: the real boot may be late-adopted while the
+# presence member cache still rejects the peer, leaving authority one-way and a
+# remote cursor that can stall at the later revoke boundary (WI-40905).
+#
+# Reuse the writers already present instead of inventing a parallel health
+# surface:
+#   * source outbox proves the same-stream canary actually drained and names its
+#     source log;
+#   * destination row + merge cursor prove that exact log was applied and is
+#     explicitly active;
+#   * instance logs prove the target harness never crossed a zombie/late-adopt
+#     boundary, its presence topic is wired, any rejection streak recovered,
+#     and the exact source log had no named merge-apply stall.
+#
+# This is deliberately stricter than product liveness. Late adoption remains a
+# valid availability repair; it is simply not an admissible substrate for a
+# security CUT witness. Diagnostics go to stderr so callers may use the return
+# code without contaminating their result tokens.
+fed_assert_hive_lifecycle_ready() {
+  local src="$1" dst="$2" canary="$3" target_harness="$4" pot_home="$5"
+  local source_rec log_key drained_ms destination_present cursor_rec cursor_pos cursor_state cursor_binding cursor_ms
+  local inst logf qlog qtarget qpot qkey scan
+
+  source_rec="$(drv_psql "$src" "SELECT coalesce(drained_log_key,'')||'|'||coalesce(((extract(epoch FROM drained_at)*1000)::bigint)::text,'') FROM harness_shared.substrate_outbox WHERE key='$canary' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  log_key="${source_rec%%|*}"; drained_ms="${source_rec#*|}"
+  if [ -z "$source_rec" ] || [ "$log_key" = "$source_rec" ] || [ -z "$log_key" ] || [ -z "$drained_ms" ]; then
+    echo "LIFECYCLE NOT READY: canary $canary has no attributable drained source-log row on $src (got '${source_rec:-<empty>}')" >&2
+    return 1
+  fi
+
+  destination_present="$(drv_psql "$dst" "SELECT CASE WHEN count(*)>0 THEN 'Y' ELSE 'N' END FROM harness_shared.harness_features_consolidated WHERE feature_id='$canary' AND origin='remote';" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$destination_present" != "Y" ]; then
+    echo "LIFECYCLE NOT READY: same-stream canary $canary drained to $log_key but is not materialized origin=remote on $dst" >&2
+    return 1
+  fi
+
+  cursor_rec="$(drv_psql "$dst" "SELECT position::text||'|'||peer_lifecycle_state||'|'||coalesce(apply_binding,'<none>')||'|'||((extract(epoch FROM updated_at)*1000)::bigint)::text FROM harness_shared.substrate_merge_cursor WHERE log_keyhex='$log_key' ORDER BY updated_at DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  IFS='|' read -r cursor_pos cursor_state cursor_binding cursor_ms <<< "$cursor_rec"
+  if [ -z "${cursor_pos:-}" ] || [ "$cursor_state" != "active" ] || ! [ "$cursor_pos" -gt 0 ] 2>/dev/null; then
+    echo "LIFECYCLE NOT READY: destination cursor for canary log $log_key is not active+advanced (cursor='${cursor_rec:-ABSENT}')" >&2
+    return 1
+  fi
+
+  for inst in "$src" "$dst"; do
+    logf="$(drv_applog "$inst")"
+    printf -v qlog '%q' "$logf"
+    printf -v qtarget '%q' "$target_harness"
+    printf -v qpot '%q' "$pot_home"
+    printf -v qkey '%q' "$log_key"
+    scan="$(drv_exec "$inst" <<EOF
+log=$qlog; target=$qtarget; pot=$qpot; key=$qkey
+if grep -aqF "::\${target}) zombie window entered" "\$log" 2>/dev/null \
+  || grep -aqF "::\${target}) late boot ADOPTED" "\$log" 2>/dev/null \
+  || grep -aqF "::\${pot}) zombie window entered" "\$log" 2>/dev/null \
+  || grep -aqF "::\${pot}) late boot ADOPTED" "\$log" 2>/dev/null; then
+  echo "FAIL target substrate crossed boot-timeout/late-adopt lifecycle"
+  exit 0
+fi
+if grep -aqF "STAGE STALL for \${key}:" "\$log" 2>/dev/null; then
+  echo "FAIL exact canary source log recorded a named merge-apply stall"
+  exit 0
+fi
+topic="\$(grep -aF '[wire-presence] wired ' "\$log" 2>/dev/null | grep -F "pot=\$pot" | tail -1 | sed -n 's/.*topic=\([0-9a-f]*\).*/\1/p')"
+if [ -z "\$topic" ]; then
+  echo "FAIL target presence topic was never wired"
+  exit 0
+fi
+prefix="\${topic:0:12}"
+reject_line="\$(grep -anF "REJECTED inbound presence frame on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+admit_line="\$(grep -anF "inbound presence ADMITTED again on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+if [ -n "\$reject_line" ] && { [ -z "\$admit_line" ] || [ "\$admit_line" -le "\$reject_line" ]; }; then
+  echo "FAIL target presence rejection streak is unresolved (topic=\$prefix reject=\$reject_line admit=\${admit_line:-none})"
+  exit 0
+fi
+echo "READY topic=\$prefix"
+EOF
+)"
+    case "$scan" in
+      READY*) ;;
+      *)
+        echo "LIFECYCLE NOT READY: $inst ${scan:-could not inspect target lifecycle log}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  echo "LIFECYCLE READY: canary=$canary log=$log_key drained_ms=$drained_ms dst_cursor_pos=$cursor_pos lifecycle=$cursor_state apply=$cursor_binding cursor_updated_ms=$cursor_ms" >&2
+  return 0
+}
+
 # fed_merge_assert <src> <dst> <slug> <feature_id> <title> <status> [tries]
 # INSERT origin='local' on src; poll dst for the row with origin='remote'.
 # Echoes 1 (merged) or 0. On failure, prints a fed_diagnose_unmerged line to

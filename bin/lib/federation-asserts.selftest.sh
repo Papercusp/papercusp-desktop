@@ -1582,6 +1582,90 @@ rm -f "$WI5472_ERR"
 unset -f drv_psql
 unset WI5472_ERR res
 
+# ── WI-40905 folded-witness lifecycle admission ───────────────────────────
+# HTTP/core readiness must not admit a security CUT witness after the target
+# substrate crossed a boot-timeout/late-adopt window, while target presence is
+# still rejecting its peer, or while the exact same-stream cursor is not active
+# and advanced. The preserved 18:22 witness had all three misleading layers:
+# core probes passed, K3 passed, but F-RKCUT never reached B's epoch gate.
+WI40905_A_LOG="$(mktemp /tmp/wi40905-lifecycle-a.XXXXXX)"
+WI40905_B_LOG="$(mktemp /tmp/wi40905-lifecycle-b.XXXXXX)"
+WI40905_ERR="$(mktemp /tmp/wi40905-lifecycle-err.XXXXXX)"
+WI40905_CURSOR_STATE=active
+WI40905_CURSOR_POS=42
+
+write_wi40905_healthy_logs() {
+  cat >"$WI40905_A_LOG" <<'EOF'
+[wire-presence] wired ws::member — gossipWriter=on topic=abcdef1234567890 pot=pot-home
+EOF
+  cat >"$WI40905_B_LOG" <<'EOF'
+[wire-presence] wired ws::member — gossipWriter=on topic=abcdef1234567890 pot=pot-home
+[presence-gossip] REJECTED inbound presence frame on topic abcdef123456… — 0 admitted
+[presence-gossip] inbound presence ADMITTED again on topic abcdef123456… after 1 rejected frame(s)
+EOF
+}
+drv_applog() {
+  [ "$1" = src ] && echo "$WI40905_A_LOG" || echo "$WI40905_B_LOG"
+}
+drv_exec() {
+  local _inst="$1"
+  bash -s
+}
+drv_psql() {
+  local _inst="$1" sql="$2"
+  case "$sql" in
+    *"FROM harness_shared.substrate_outbox WHERE key='F-CANARY'"*) echo 'deadbeef1234|1000' ;;
+    *"count(*)>0"*"feature_id='F-CANARY'"*) echo Y ;;
+    *"FROM harness_shared.substrate_merge_cursor"*) echo "${WI40905_CURSOR_POS}|${WI40905_CURSOR_STATE}|ws::pot-home|2000" ;;
+  esac
+}
+
+write_wi40905_healthy_logs
+if fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: drained same-stream canary + active cursor + recovered presence is admitted"
+else
+  bad "fed_assert_hive_lifecycle_ready rejected the healthy control: $(cat "$WI40905_ERR")"
+fi
+
+printf '%s\n' '[hyperbee-substrate] (ws::member) zombie window entered after '\''boot timeout after 30000ms'\''' >>"$WI40905_B_LOG"
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
+  && grep -q 'boot-timeout/late-adopt lifecycle' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: a target-harness zombie window fails closed"
+else
+  bad "fed_assert_hive_lifecycle_ready admitted a target-harness zombie/late-adopt history"
+fi
+
+write_wi40905_healthy_logs
+sed -i '/ADMITTED again/d' "$WI40905_B_LOG"
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
+  && grep -q 'presence rejection streak is unresolved' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: unresolved target-topic admission rejection fails closed"
+else
+  bad "fed_assert_hive_lifecycle_ready admitted an unresolved presence rejection streak"
+fi
+
+write_wi40905_healthy_logs
+WI40905_CURSOR_STATE=retired
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
+  && grep -q 'not active+advanced' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: a retired destination cursor fails closed"
+else
+  bad "fed_assert_hive_lifecycle_ready admitted a retired destination cursor"
+fi
+
+WI40905_CURSOR_STATE=active
+printf '%s\n' '[stage-stall] STAGE STALL for deadbeef1234: '\''merge-apply (features::F-CANARY)'\'' still pending after 15000ms' >>"$WI40905_B_LOG"
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
+  && grep -q 'exact canary source log recorded a named merge-apply stall' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: a named stall on the exact canary log fails closed"
+else
+  bad "fed_assert_hive_lifecycle_ready admitted an exact-log merge-apply stall"
+fi
+
+rm -f "$WI40905_A_LOG" "$WI40905_B_LOG" "$WI40905_ERR"
+unset -f write_wi40905_healthy_logs drv_applog drv_exec drv_psql
+unset WI40905_A_LOG WI40905_B_LOG WI40905_ERR WI40905_CURSOR_STATE WI40905_CURSOR_POS
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi
 echo "FAIL — $FAILS assertion(s) failed"; exit 1

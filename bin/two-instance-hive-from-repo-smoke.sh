@@ -868,12 +868,29 @@ fi
 #      octocat fixture → seed claim_status or use a papercupai-owned repo for those).
 ak_default_ok=0; ak_ban_ok=0; ak_unban_ok=0
 rk_keys_ok=0; rk_ctrl_ok=0; rk_revoke_ok=0; rk_cut_ok=0; witness_ran=0
+witness_lifecycle_ready=1
 rk_ctrl_measurable=1  # WI-37144: 0 ⇒ the K1 CONTROL leg could not run at all (empty B_DEV) ⇒ INCONCLUSIVE, not FAIL
 # P-008 CONTENT-level cut (the work-item's literal assertion). rk_content_applicable=1 only
 # when the K4a pre-revoke content control proves content federation A→B is healthy THIS run
 # (else WI-259 stalls content → K4b is INCONCLUSIVE, never a false-RED; the key-level K3 governs).
 rk_content_ctrl_ok=0; rk_content_cut_ok=0; rk_content_applicable=0
+# WI-40905 lifecycle admission: the core F-HIVE3 control is the immediate
+# same-stream canary. Before mutating membership/re-key state, require its
+# source row to be drained, B's exact-log cursor active+advanced, both target
+# presence topics wired/recovered, and no target boot-timeout/late-adopt or
+# exact-log named-stall history. A failed guard is a NON-QUALIFYING witness
+# environment, not a C-001 product verdict; preserve the rig and stop this
+# subset before AK/K mutations can destroy the forensic boundary.
 if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  if [ "$hive_cont_ok" != 1 ]; then
+    witness_lifecycle_ready=0
+    echo "LIFECYCLE NOT READY: continuous same-stream canary F-HIVE3 did not materialize on B"
+  elif ! fed_assert_hive_lifecycle_ready a b F-HIVE3 "$MEMBER_SLUG" "$HIVE_SLUG"; then
+    witness_lifecycle_ready=0
+  fi
+fi
+
+if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ] && [ "$witness_lifecycle_ready" = 1 ]; then
   witness_ran=1
   log "═══ FOLDED LIVE WITNESS (AK enforcement + P-008 re-key cut) ═══"
   WS_ID="$(drv_psql a "SELECT workspace_id FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
@@ -1168,6 +1185,10 @@ print("1 "+" ".join(map(str,counts)))
   else
     echo "  K4b CONTENT CUT: INCONCLUSIVE (K4a did not establish healthy content federation A→B this run — WI-259; device-filtered key-level K3-CUT is the governing release proof)"
   fi
+elif [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
+  echo "WITNESS LIFECYCLE ADMISSION: FAIL — target boot/presence/merge state is not a trustworthy security-cut substrate; AK/K mutations were not started"
+  echo "WITNESS OVERALL: INCOMPLETE — lifecycle admission guard refused this rig before the folded witness"
+  FAILED_SUBSETS="$FAILED_SUBSETS witness-lifecycle"
 fi
 
 # ── 6.5 MODERATION FEDERATION witness (opt-in: MODERATION_PROBE=1) ─────────────────
