@@ -351,6 +351,18 @@ if grep -q 'fresh sidecar build failed — refusing to run content-matrix/from-r
 else
   bad "live-federation-gate can still run consumer legs after FAIL_BUILD=1 — an empty GATE_DEB will silently select a stale .deb/sidecar and forge secondary reds (WI-40008)"
 fi
+# WI-40905: GUI and Server artifacts intentionally share the Papercusp*.deb
+# filename family.  A newest-file selector without a Debian package-identity
+# check repacked papercusp-server and handed it to the GUI content matrix.  Pin
+# both the selector and the post-extraction executable guard so a future role
+# split or filename change cannot silently reintroduce that class.
+if grep -q 'dpkg-deb -f "$candidate" Package' "$gate_file" \
+  && grep -q '\[ "$candidate_pkg" = "papercusp-gui" \]' "$gate_file" \
+  && grep -q 'test -x pkg/usr/bin/papercusp-desktop' "$gate_file"; then
+  ok "live-federation-gate selects a Debian GUI package by writer-owned identity and verifies its desktop executable (WI-40905)"
+else
+  bad "live-federation-gate can select/repack a non-GUI Papercusp Debian artifact for the GUI content matrix (WI-40905)"
+fi
 # EI-20580419609576585: the .deb REPACK produces $GATE_DEB, and $GATE_DEB is what the gate
 # passes to local-matrix.sh as `--deb=`. Gating that repack on SKIP_MATRIX ALONE couples two
 # unrelated things: the attestation wall sets SKIP_MATRIX=1 to force-skip the two GITHUB legs,

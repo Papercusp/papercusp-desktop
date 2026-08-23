@@ -4863,6 +4863,90 @@ fn wait_for_operator(
     ))
 }
 
+/// A credential-free HTTPS document is an intentional remote/hosted Server
+/// selection made by the thin GUI's connection gate. Local attach workers are
+/// allowed to diagnose the bundled/custom-protocol and loopback documents, but
+/// they must never paint a late local-Server failure over this remote document.
+fn is_remote_server_navigation(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn window_has_remote_server_navigation<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> bool {
+    window
+        .url()
+        .ok()
+        .map(|url| is_remote_server_navigation(&url))
+        .unwrap_or(false)
+}
+
+/// Evaluate a local-attach diagnostic only while the current document still
+/// belongs to local boot. The Rust URL check stops the bounded retry loop after
+/// a remote navigation. The same predicate is repeated inside the evaluated JS
+/// so a navigation that commits between `window.url()` and `window.eval()`
+/// cannot receive one final stale event from the previous document generation.
+fn eval_local_attach_diagnostic<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    inject: &str,
+    ticks: u32,
+    delay: Duration,
+) {
+    let guarded_inject = format!(
+        "if (!(window.location.protocol === 'https:' && \
+         !window.location.username && !window.location.password)) {{ {inject} }}"
+    );
+    for _ in 0..ticks {
+        if window_has_remote_server_navigation(window) {
+            println!(
+                "[papercusp-gui] remote HTTPS Server navigation owns the main window — suppressing stale local attach diagnostic"
+            );
+            return;
+        }
+        let _ = window.eval(&guarded_inject);
+        std::thread::sleep(delay);
+    }
+}
+
+#[cfg(test)]
+mod remote_server_navigation_tests {
+    use super::is_remote_server_navigation;
+
+    #[test]
+    fn credential_free_https_is_an_intentional_remote_server_navigation() {
+        for endpoint in [
+            "https://server.example.com/",
+            "https://localhost:19443/",
+            "https://server.example.com:8443/harness?ws=demo",
+        ] {
+            let url = url::Url::parse(endpoint).unwrap();
+            assert!(
+                is_remote_server_navigation(&url),
+                "remote Server endpoint should suppress stale local attach work: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_boot_and_credentialed_urls_still_receive_the_local_gate() {
+        for endpoint in [
+            "papercusp://localhost/",
+            "http://127.0.0.1:21835/",
+            "https://user:secret@server.example.com/",
+            "file:///tmp/index.html",
+        ] {
+            let url = url::Url::parse(endpoint).unwrap();
+            assert!(
+                !is_remote_server_navigation(&url),
+                "non-remote boot URL must not suppress the local Server gate: {endpoint}"
+            );
+        }
+    }
+}
+
 /// Keep a timed-out first boot recoverable on every desktop target.
 ///
 /// install_load_failure_recovery is a WebKitGTK signal hook and therefore
@@ -4892,6 +4976,17 @@ fn spawn_boot_recovery_watcher(
             );
             return;
         };
+
+        // EI-21230348495664772: the user may have deliberately selected a
+        // hosted/remote Server while this local discovery worker was sleeping.
+        // That navigation owns the window now; a later local operator must not
+        // silently pull it back to loopback.
+        if window_has_remote_server_navigation(&window) {
+            println!(
+                "[papercusp-gui] initial-load recovery stopping — main window intentionally navigated to a remote HTTPS Server"
+            );
+            return;
+        }
 
         let Some(discovery) = find_operator_discovery(&workspace_home, via_wsl) else {
             continue;
@@ -5077,10 +5172,7 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
                         serde_json::to_string(&reason)
                             .unwrap_or_else(|_| "\"operator boot failed\"".to_string())
                     );
-                for _ in 0..20 {
-                    let _ = window.eval(&inject);
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                eval_local_attach_diagnostic(&window, &inject, 20, Duration::from_millis(500));
             }
             return;
         }
@@ -5394,11 +5486,9 @@ fn surface_server_connection_required(app_handle: &tauri::AppHandle, reason: &st
            {{ detail: {reason} }}));"
     );
     // A document navigation can replace the JS world during this exact cold-
-    // boot window. Re-apply briefly; the global makes each delivery idempotent.
-    for _ in 0..8 {
-        let _ = window.eval(&inject);
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    // boot window. Re-apply briefly while it remains a local document; an
+    // intentional remote HTTPS navigation cancels this stale local result.
+    eval_local_attach_diagnostic(&window, &inject, 8, Duration::from_millis(250));
 }
 
 /// Turn a platform launcher verdict into the lifecycle signal the thin GUI

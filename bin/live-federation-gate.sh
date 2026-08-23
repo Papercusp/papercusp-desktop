@@ -1418,14 +1418,27 @@ if [ -z "${GATE_DEB:-}" ]; then
   # nothing would use it, instead of tying it to an unrelated flag.
   if [ "$FAIL_BUILD" != 1 ] && { [ "$SKIP_MATRIX" != 1 ] || local_matrix_due; }; then
     CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
-    BASE_DEB="$(ls -t \
+    # WI-40905: GUI and Server Debian artifacts share the Papercusp*_amd64.deb
+    # filename family.  Selecting only by mtime fed a newer papercusp-server
+    # package to the GUI content-matrix; the repack succeeded, then the smoke
+    # failed because /usr/bin/papercusp-desktop was absent.  Read the package
+    # identity that the Debian writer emits and keep the newest GUI candidate.
+    BASE_DEB=""
+    while IFS= read -r candidate; do
+      [ -f "$candidate" ] || continue
+      candidate_pkg="$(dpkg-deb -f "$candidate" Package 2>/dev/null || true)"
+      [ "$candidate_pkg" = "papercusp-gui" ] || continue
+      BASE_DEB="$candidate"
+      break
+    done < <(ls -t \
       "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
       "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
       "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
-      /tmp/*/Papercusp_integrated.deb 2>/dev/null | head -1)"
+      /tmp/*/Papercusp_integrated.deb 2>/dev/null)
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \
+          && test -x pkg/usr/bin/papercusp-desktop \
           && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$DESKTOP_DIR/src-tauri/sidecar" "$APPDIR/sidecar" \
           && dpkg-deb -b pkg "$GATE_DEB" && rm -rf pkg ) >"$WORK/repack.log" 2>&1 \
         && log "repacked fresh .deb (base=$BASE_DEB)" || { log "repack FAILED ($WORK/repack.log) — skipping content-matrix"; GATE_DEB=""; SKIP_MATRIX=1; }
