@@ -35,24 +35,33 @@ trap cleanup EXIT
 # command substitution runs the helper in a subshell.
 GH_RETRY_EVENTUAL_COUNT="$WORK/gh-retry-eventual.count"
 GH_RETRY_NEVER_COUNT="$WORK/gh-retry-never.count"
+GH_RETRY_JSON_EVENTUAL_COUNT="$WORK/gh-retry-json-eventual.count"
+GH_RETRY_JSON_NEVER_COUNT="$WORK/gh-retry-json-never.count"
 printf '0\n' >"$GH_RETRY_EVENTUAL_COUNT"
 printf '0\n' >"$GH_RETRY_NEVER_COUNT"
+printf '0\n' >"$GH_RETRY_JSON_EVENTUAL_COUNT"
+printf '0\n' >"$GH_RETRY_JSON_NEVER_COUNT"
 gh() {
-  local counter count
+  local counter count output
   case "${GH_TOKEN:-}" in
     retry-eventual)
       counter="$GH_RETRY_EVENTUAL_COUNT"
-      count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
-      [ "$count" -ge 3 ] && { printf 'aviynw\n'; return 0; }
-      return 1
       ;;
     retry-never)
       counter="$GH_RETRY_NEVER_COUNT"
-      count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
-      return 1
       ;;
+    retry-json-eventual) counter="$GH_RETRY_JSON_EVENTUAL_COUNT" ;;
+    retry-json-never) counter="$GH_RETRY_JSON_NEVER_COUNT" ;;
     *) command gh "$@" ;;
   esac
+  count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
+  [[ "${GH_TOKEN:-}" != *never ]] && [ "$count" -ge 3 ] || return 1
+  output='{"id":12345,"login":"aviynw"}'
+  if printf ' %s ' "$*" | grep -qF ' --jq .login '; then
+    printf 'aviynw\n'
+  else
+    printf '%s\n' "$output"
+  fi
 }
 retry_login="$(fed_github_login_with_retry retry-eventual 3 0)"; retry_rc=$?
 if [ "$retry_rc" -eq 0 ] && [ "$retry_login" = aviynw ] \
@@ -66,6 +75,20 @@ if fed_github_login_with_retry retry-never 3 0 >/dev/null \
   bad "fed_github_login_with_retry does not fail closed after three exhausted attempts (WI-40912)"
 else
   ok "fed_github_login_with_retry fails closed after three exhausted attempts (WI-40912)"
+fi
+retry_user_json="$(fed_github_user_json_with_retry retry-json-eventual 3 0)"; retry_json_rc=$?
+if [ "$retry_json_rc" -eq 0 ] \
+  && [ "$retry_user_json" = '{"id":12345,"login":"aviynw"}' ] \
+  && [ "$(cat "$GH_RETRY_JSON_EVENTUAL_COUNT")" = 3 ]; then
+  ok "fed_github_user_json_with_retry recovers full GET /user JSON after two transient failures (WI-40912)"
+else
+  bad "fed_github_user_json_with_retry did not recover full JSON on attempt 3 (rc=$retry_json_rc json=$retry_user_json attempts=$(cat "$GH_RETRY_JSON_EVENTUAL_COUNT"))"
+fi
+if fed_github_user_json_with_retry retry-json-never 3 0 >/dev/null \
+  || [ "$(cat "$GH_RETRY_JSON_NEVER_COUNT")" != 3 ]; then
+  bad "fed_github_user_json_with_retry does not fail closed after three exhausted attempts (WI-40912)"
+else
+  ok "fed_github_user_json_with_retry fails closed after three exhausted attempts (WI-40912)"
 fi
 unset -f gh
 
@@ -1155,28 +1178,28 @@ else
   bad "fed_diagnose_unmerged did NOT flag a missing outbox row"
 fi
 
-diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N" || true)"
+diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N|?|?" || true)"
 if grep -qF "NEVER DRAINED" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: enqueued-but-undrained → TEST-TARGETING bug (the WI-6209 trap)"
 else
   bad "fed_diagnose_unmerged did NOT flag an undrained outbox row — the WI-6209 silent false-negative is back"
 fi
 
-diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N" || true)"
+diag_result="$(diag_out "workspace-319be5e5|spoon-knife|N|N|?|?" || true)"
 if grep -qF "pots.public_key" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: the undrained diagnosis names the actual fix (pair frames by pots.public_key)"
 else
   bad "fed_diagnose_unmerged's undrained diagnosis no longer tells the reader how to fix it"
 fi
 
-diag_result="$(diag_out "workspace-b31a7a01|octocat-spoon-knife|Y|N" || true)"
+diag_result="$(diag_out "workspace-b31a7a01|octocat-spoon-knife|Y|N|abc123|1787470000000" || true)"
 if grep -qF "genuine replication/transport failure" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: drained-but-never-arrived → genuine replication failure"
 else
   bad "fed_diagnose_unmerged did NOT report a drained-but-unarrived row as a real replication failure"
 fi
 
-diag_result="$(diag_out "workspace-b31a7a01|spoon-knife|N|Y" || true)"
+diag_result="$(diag_out "workspace-b31a7a01|spoon-knife|N|Y|?|?" || true)"
 if grep -qF "QUARANTINED" <<<"$diag_result"; then
   ok "fed_diagnose_unmerged: quarantined row is reported as refused-to-publish"
 else
@@ -1184,12 +1207,33 @@ else
 fi
 
 # Non-vacuity: the two headline classes must never collapse to the same verdict.
-if [ "$(diag_out 'ws|slug|N|N')" = "$(diag_out 'ws|slug|Y|N')" ]; then
+if [ "$(diag_out 'ws|slug|N|N|?|?')" = "$(diag_out 'ws|slug|Y|N|abc123|1787470000000')" ]; then
   bad "CONTROL: fed_diagnose_unmerged gives IDENTICAL output for drained vs undrained — the guard is vacuous"
 else
   ok "CONTROL: fed_diagnose_unmerged distinguishes the two failure classes (guard is not vacuous)"
 fi
 unset -f drv_psql diag_out
+
+# WI-40905: a bare drained=true still conflates two different upstream misses.
+# Pin the writer log attribution and the destination's durable cursor/lifecycle
+# in the same diagnostic so a failed live witness says whether the destination
+# ever admitted that exact log and how far its fold advanced.
+drv_psql() {
+  local inst="$1" sql="$2"
+  if [ "$inst" = frameA ]; then
+    echo "ws|pot|Y|N|deadbeef|1787470000000"
+  elif grep -qF "FROM harness_shared.substrate_merge_cursor" <<<"$sql"; then
+    echo "ws/pot pos=41 apply=pot lifecycle=active updated=2026-08-23 05:00:00+00"
+  fi
+}
+diag_result="$(fed_diagnose_unmerged frameA F-WI40905 frameB 2>&1 >/dev/null || true)"
+if grep -qF "DRAINED to log=deadbeef" <<<"$diag_result" \
+  && grep -qF "destination cursor/lifecycle=ws/pot pos=41" <<<"$diag_result"; then
+  ok "fed_diagnose_unmerged: drained log attribution + destination cursor/lifecycle localize an upstream non-arrival (WI-40905)"
+else
+  bad "fed_diagnose_unmerged omitted the drained_log_key or destination cursor/lifecycle needed to classify WI-40905 (got '$diag_result')"
+fi
+unset -f drv_psql
 
 # ── fed_merge_assert / fed_hive_merge_probe extended-window (WI-6217) ──────
 # A `fed_merge_assert`/`fed_hive_merge_probe` fast-path timeout on a row that
