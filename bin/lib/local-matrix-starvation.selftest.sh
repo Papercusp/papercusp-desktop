@@ -29,12 +29,16 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$DIR/../live-federation-gate.sh"
+LOCAL_MATRIX="$DIR/../local-matrix.sh"
+RIG="$DIR/deb-hetzner-rig.sh"
 
 FAILS=0
 ok()  { echo "  ✓ $*"; }
 bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 
-[ -f "$GATE" ] || { echo "SKIP: gate script not found at $GATE"; exit 0; }
+for required in "$GATE" "$LOCAL_MATRIX" "$RIG"; do
+  [ -f "$required" ] || { echo "SKIP: required script not found at $required"; exit 0; }
+done
 
 # ── Extract the two starvation-downgrade functions (+ their shared whitelist var)
 #    from the REAL gate source and eval them, so this test exercises the shipping
@@ -193,6 +197,38 @@ if grep -q 'check_local_matrix_frame_starvation' <<<"$wiring_block" \
 else
   bad "gate no longer wires the starvation downgrade — a later edit may have dropped it"
 fi
+
+# ── 5. structural: rig frames stay isolated from the real home harness ──────────
+# WI-5631's live fix has two independent halves. local-matrix must give every frame
+# a synthetic home-harness slug, and both the first-boot and restart launch paths
+# must forward that slug while suppressing the canonical dogfood auto-join. Extract
+# the real function bodies so a later refactor cannot silently fix one path while
+# regressing the other.
+if grep -Fqx 'RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-${NET}-home}"' "$LOCAL_MATRIX" \
+  && grep -Fq 'RIG_HOME_HARNESS_SLUG="$RIG_HOME_HARNESS_SLUG"' "$LOCAL_MATRIX"; then
+  ok "rig isolation: local-matrix defaults and forwards a synthetic per-network home-harness slug"
+else
+  bad "rig isolation: local-matrix no longer defaults/forwards the synthetic home-harness slug"
+fi
+
+SETUP_SRC="$(sed -n '/^rig_setup_frame() {/,/^}/p' "$RIG")"
+RESTART_SRC="$(sed -n '/^rig_restart_sidecar() {/,/^}/p' "$RIG")"
+for launch in setup restart; do
+  if [ "$launch" = setup ]; then
+    launch_src="$SETUP_SRC"
+  else
+    launch_src="$RESTART_SRC"
+  fi
+
+  if [ -n "$launch_src" ] \
+    && grep -Fq "HHSLUG='\$RIG_HOME_HARNESS_SLUG'" <<<"$launch_src" \
+    && grep -Fq '${HHSLUG:+PAPERCUSP_POT_HOME_SLUG="$HHSLUG"}' <<<"$launch_src" \
+    && grep -Fq 'PAPERCUSP_DISABLE_DOGFOOD_HIVE=1' <<<"$launch_src"; then
+    ok "rig isolation: $launch path forwards the synthetic home slug and disables dogfood auto-join"
+  else
+    bad "rig isolation: $launch path lost home-slug forwarding or dogfood auto-join suppression"
+  fi
+done
 
 echo
 if [ "$FAILS" -eq 0 ]; then
