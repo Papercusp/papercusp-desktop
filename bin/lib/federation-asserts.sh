@@ -58,6 +58,43 @@ fed_select_newest_deb_by_package() {
   printf '%s\n' "$newest"
 }
 
+# _fed_github_user_with_retry <token> <json|login> [attempts] [delay-sec]
+#
+# Shared bounded GET /user primitive.  Callers that need the numeric id as well
+# as the login consume the full JSON; identity-only callers use the login mode.
+# Keeping both paths here prevents a nested smoke from accidentally reintroducing
+# the one-shot read that red-pinned WI-40912 after the wrapper preflight recovered.
+_fed_github_user_with_retry() {
+  local token="$1" output_mode="$2" attempts="${3:-3}" retry_delay="${4:-10}"
+  local attempt user_out
+
+  [ -n "$token" ] || return 1
+  [[ "$output_mode" = json || "$output_mode" = login ]] || return 1
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=3
+  [[ "$retry_delay" =~ ^[0-9]+([.][0-9]+)?$ ]] || retry_delay=10
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if [ "$output_mode" = login ]; then
+      user_out="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)"
+    else
+      user_out="$(GH_TOKEN="$token" gh api user 2>/dev/null)"
+    fi
+    if [ "$?" -eq 0 ] && [ -n "$user_out" ]; then
+      printf '%s\n' "$user_out"
+      return 0
+    fi
+    if [ "$attempt" -lt "$attempts" ] && [ "$retry_delay" != 0 ]; then
+      sleep "$retry_delay"
+    fi
+  done
+  return 1
+}
+
+# fed_github_user_json_with_retry <token> [attempts] [delay-sec]
+fed_github_user_json_with_retry() {
+  _fed_github_user_with_retry "$1" json "${2:-3}" "${3:-10}"
+}
+
 # fed_github_login_with_retry <token> [attempts] [delay-sec]
 #
 # Resolve the authenticated GitHub login with the same bounded retry posture as
@@ -66,24 +103,7 @@ fed_select_newest_deb_by_package() {
 # otherwise valid; treating that single sample as a durable identity failure
 # red-pins the whole federation gate before any product proof runs.
 fed_github_login_with_retry() {
-  local token="$1" attempts="${2:-3}" retry_delay="${3:-10}"
-  local attempt actual_login
-
-  [ -n "$token" ] || return 1
-  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=3
-  [[ "$retry_delay" =~ ^[0-9]+([.][0-9]+)?$ ]] || retry_delay=10
-
-  for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if actual_login="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)" \
-      && [ -n "$actual_login" ]; then
-      printf '%s\n' "$actual_login"
-      return 0
-    fi
-    if [ "$attempt" -lt "$attempts" ] && [ "$retry_delay" != 0 ]; then
-      sleep "$retry_delay"
-    fi
-  done
-  return 1
+  _fed_github_user_with_retry "$1" login "${2:-3}" "${3:-10}"
 }
 
 # scn_diag [prefix] — EI-18762718908280875: a scenario's diagnostic output only
@@ -1021,7 +1041,7 @@ EOF
 
 # ── the MERGE assert (the hard bidirectional gate) ──────────────────────────
 
-# fed_diagnose_unmerged <src> <key>
+# fed_diagnose_unmerged <src> <key> [dst]
 # Explain WHY a merge probe did not land, instead of leaving a bare "0".
 #
 # WI-6209: a merge probe that reads 0 has TWO utterly different causes, and the
@@ -1043,26 +1063,35 @@ EOF
 # federated probes drained=t). Diagnostics go to STDERR on purpose: every caller
 # captures these functions' stdout in `$(...)` to read the 1/0.
 fed_diagnose_unmerged() {
-  local src="$1" key="$2" rec ws slug drained quar
+  local src="$1" key="$2" dst="${3:-}" rec ws slug drained quar drained_log_key drained_at dst_cursor
   # Emit EXPLICIT Y/N tokens rather than letting the booleans render themselves:
   # `boolean || text` casts via boolean::text, which yields 'true'/'false' — NOT
   # psql's 't'/'f'. A guard comparing against 't' therefore misclassifies every
   # row. Caught only by running this against the live rig; the fixture test had
   # encoded the same wrong assumption and passed happily (WI-6209).
-  rec="$(drv_psql "$src" "SELECT coalesce(workspace_id,'?')||'|'||coalesce(harness_slug,'?')||'|'||CASE WHEN drained_at IS NOT NULL THEN 'Y' ELSE 'N' END||'|'||CASE WHEN quarantined_at IS NOT NULL THEN 'Y' ELSE 'N' END FROM harness_shared.substrate_outbox WHERE key='$key' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  rec="$(drv_psql "$src" "SELECT coalesce(workspace_id,'?')||'|'||coalesce(harness_slug,'?')||'|'||CASE WHEN drained_at IS NOT NULL THEN 'Y' ELSE 'N' END||'|'||CASE WHEN quarantined_at IS NOT NULL THEN 'Y' ELSE 'N' END||'|'||coalesce(drained_log_key,'?')||'|'||coalesce(drained_at::text,'?') FROM harness_shared.substrate_outbox WHERE key='$key' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   if [ -z "$rec" ]; then
     echo "DIAG($src,$key): the write never reached substrate_outbox at all — the capture trigger did not enqueue it, so the INSERT targeted something not federated. TEST-TARGETING bug, not a replication failure." >&2
     return 0
   fi
   ws="${rec%%|*}"; rec="${rec#*|}"
   slug="${rec%%|*}"; rec="${rec#*|}"
-  drained="${rec%%|*}"; quar="${rec#*|}"
+  drained="${rec%%|*}"; rec="${rec#*|}"
+  quar="${rec%%|*}"; rec="${rec#*|}"
+  drained_log_key="${rec%%|*}"; drained_at="${rec#*|}"
   if [ "$quar" = "Y" ]; then
     echo "DIAG($src,$key): outbox row $ws/$slug is QUARANTINED — the substrate refused to publish it. Not a transport failure." >&2
   elif [ "$drained" != "Y" ]; then
     echo "DIAG($src,$key): outbox row $ws/$slug enqueued but NEVER DRAINED — no booted substrate binding on '$src' owns ($ws,$slug), so nothing will ever publish it. TEST-TARGETING bug, NOT a replication failure: a workspace_id/slug was almost certainly resolved on the OTHER frame. Pair frames by harness_shared.pots.public_key and resolve each frame's OWN (workspace_id,harness_slug). See WI-6209." >&2
   else
-    echo "DIAG($src,$key): outbox row $ws/$slug DRAINED to a peer log but never arrived at the destination — this IS a genuine replication/transport failure, OR the arrival was simply slower than the poll window (WI-6209 observed a legitimate >90s arrival on a healthy link)." >&2
+    dst_cursor=""
+    if [ -n "$dst" ] && [ -n "$drained_log_key" ] && [ "$drained_log_key" != "?" ]; then
+      dst_cursor="$(drv_psql "$dst" "SELECT workspace_id||'/'||harness_slug||' pos='||position::text||' apply='||coalesce(apply_binding,'<none>')||' lifecycle='||peer_lifecycle_state||' updated='||updated_at::text FROM harness_shared.substrate_merge_cursor WHERE log_keyhex='$drained_log_key' ORDER BY updated_at DESC LIMIT 4;" 2>/dev/null | paste -sd ';' -)"
+      [ -n "$dst_cursor" ] || dst_cursor="ABSENT (destination never admitted or cursor-tracked this drained log)"
+    else
+      dst_cursor="unavailable (no destination or drained_log_key attribution)"
+    fi
+    echo "DIAG($src,$key): outbox row $ws/$slug DRAINED to log=$drained_log_key at=$drained_at but never arrived at $dst; destination cursor/lifecycle=$dst_cursor. This IS a genuine replication/transport failure, OR the arrival was simply slower than the poll window (WI-6209 observed a legitimate >90s arrival on a healthy link)." >&2
   fi
 }
 
@@ -1111,7 +1140,7 @@ fed_merge_assert() {
       sleep 3
     done
   fi
-  fed_diagnose_unmerged "$src" "$fid"
+  fed_diagnose_unmerged "$src" "$fid" "$dst"
   echo 0; return 1
 }
 
@@ -1233,7 +1262,7 @@ fed_hive_merge_probe() {
   fi
   # WI-6209: distinguish a mis-targeted write (enqueued, never drained) from a
   # genuine replication failure — a bare "0" conflates them.
-  fed_diagnose_unmerged "$src" "$fid"
+  fed_diagnose_unmerged "$src" "$fid" "$dst"
   echo "0"; return 1
 }
 
