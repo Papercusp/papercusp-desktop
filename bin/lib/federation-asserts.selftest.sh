@@ -354,6 +354,14 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   fi
 done
 
+# WI-40905: credentialed attestation preflight must not inherit the operator's
+# ambient HOME; gh/npx and encrypted-key fallback state stay account-scoped.
+if grep -q 'HOME="\$identity_dir"' "$DIR/federation-asserts.sh"; then
+  ok "attestation preflight scopes HOME to the account identity directory (WI-40905)"
+else
+  bad "attestation preflight inherits ambient HOME (WI-40905 cross-account identity leak)"
+fi
+
 
 # Every committed caller that needs a distinct identity must pass only the
 # account selector. The launch helper rejects legacy token assignments, and
@@ -573,6 +581,13 @@ if grep -q 'A_IDENTITY_DIR=".*MACHINE_IDENTITY_DIR/\$P_A_USER' "$from_repo_file"
   ok "from-repo smoke isolates durable per-account identity roots (WI-40905)"
 else
   bad "from-repo smoke shares an identity root across accounts (WI-40905 cross-instance Hive-key regression)"
+fi
+if grep -q 'A_IDENTITY_DIR="$(readlink -m -- "\$A_IDENTITY_DIR")"' "$from_repo_file" \
+  && grep -q 'B_IDENTITY_DIR="$(readlink -m -- "\$B_IDENTITY_DIR")"' "$from_repo_file" \
+  && grep -q '\[ "\$A_IDENTITY_DIR" != "\$B_IDENTITY_DIR" \]' "$from_repo_file"; then
+  ok "from-repo smoke fails closed when resolved A/B identity roots are equal (WI-40905)"
+else
+  bad "from-repo smoke lacks a resolved A!=B identity-root admission guard (WI-40905)"
 fi
 # WI-40905 / WI-38088 sibling recurrence: sharing the durable device-identity
 # directory must not collapse the two local processes onto one persisted

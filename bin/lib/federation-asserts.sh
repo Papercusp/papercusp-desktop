@@ -184,6 +184,9 @@ fed_preflight_attestation_account() {
 
   gist_id="$(
     cd "$repo_dir" &&
+      # Keep gh/npx and any encrypted-key fallback HOME-scoped to this account;
+      # ambient HOME must never influence a cross-account preflight.
+      HOME="$identity_dir" \
       PAPERCUSP_IDENTITY_DIR="$identity_dir" \
       PAPERCUSP_ATTEST_TOKEN="$token" \
       PAPERCUSP_ATTEST_USER_ID="$user_id" \

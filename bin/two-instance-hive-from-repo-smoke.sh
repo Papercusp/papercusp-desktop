@@ -115,6 +115,14 @@ MACHINE_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR:-$HOME/.papercusp/ident
 # account's attestation while preventing cross-instance Hive-key sharing.
 A_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR_A:-$MACHINE_IDENTITY_DIR/$P_A_USER}"
 B_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR_B:-$MACHINE_IDENTITY_DIR/$P_B_USER}"
+# Resolve configured roots before any credentialed preflight or process launch;
+ # equal roots would reintroduce cross-account Hive/Noise key sharing.
+A_IDENTITY_DIR="$(readlink -m -- "$A_IDENTITY_DIR")"
+B_IDENTITY_DIR="$(readlink -m -- "$B_IDENTITY_DIR")"
+[ "$A_IDENTITY_DIR" != "$B_IDENTITY_DIR" ] || {
+  echo "FATAL: A/B identity roots resolve to the same directory ($A_IDENTITY_DIR) — refusing cross-instance key sharing"
+  exit 8
+}
 # Give these same-machine processes stable, distinct transport identities via
 # the supported multi-process escape hatch (the content-matrix sibling does the
 # same under WI-38088).
