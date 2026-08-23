@@ -136,6 +136,8 @@ if [ -z "${GATE_SELF_SNAPSHOT:-}" ]; then
 fi
 set -uo pipefail
 DESKTOP_DIR="${DESKTOP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=lib/federation-asserts.sh
+source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 # LOAD_GATE default is SATURATION-BASED (WI-5319 / plan D-003): max(15, 85% of nproc).
 # History: the old absolute 15 never fired on the 128-core fleet box; nproc/4=32 and then
 # 3*nproc/8=48 each still sat below the fleet-era operating floor — on 2026-07-17 the box ran
@@ -1423,18 +1425,18 @@ if [ -z "${GATE_DEB:-}" ]; then
     # package to the GUI content-matrix; the repack succeeded, then the smoke
     # failed because /usr/bin/papercusp-desktop was absent.  Read the package
     # identity that the Debian writer emits and keep the newest GUI candidate.
-    BASE_DEB=""
-    while IFS= read -r candidate; do
-      [ -f "$candidate" ] || continue
-      candidate_pkg="$(dpkg-deb -f "$candidate" Package 2>/dev/null || true)"
-      [ "$candidate_pkg" = "papercusp-gui" ] || continue
-      BASE_DEB="$candidate"
-      break
-    done < <(ls -t \
+    if BASE_DEB="$(fed_select_newest_deb_by_package papercusp-gui \
       "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
       "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
       "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
-      /tmp/*/Papercusp_integrated.deb 2>/dev/null)
+      /tmp/*/Papercusp_integrated.deb)"; then
+      :
+    else
+      log "no existing Debian candidate declares Package=papercusp-gui — refusing Server-role fallback; skipping content-matrix and local-matrix"
+      BASE_DEB=""
+      SKIP_MATRIX=1
+      RUN_LOCAL_MATRIX=0
+    fi
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \

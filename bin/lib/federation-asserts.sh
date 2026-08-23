@@ -33,6 +33,31 @@ declare -ga FED_PORT_LOCK_FDS FED_PORT_LOCK_PATHS
 
 fed_log() { printf '\n=== %s ===\n' "$*"; }
 
+# fed_select_newest_deb_by_package <debian-package-name> <candidate>...
+#
+# Select by the writer-owned Debian Package field first, then by mtime.  GUI and
+# Server bundles intentionally share a Papercusp*.deb filename family, so a
+# filename-only newest-artifact choice can silently cross product roles.
+fed_select_newest_deb_by_package() {
+  local expected_package="$1" candidate candidate_package newest="" seen=0
+  shift
+  for candidate in "$@"; do
+    [ -f "$candidate" ] || continue
+    seen=$((seen + 1))
+    candidate_package="$(dpkg-deb -f "$candidate" Package 2>/dev/null || true)"
+    [ "$candidate_package" = "$expected_package" ] || continue
+    if [ -z "$newest" ] || [ "$candidate" -nt "$newest" ]; then
+      newest="$candidate"
+    fi
+  done
+  if [ -z "$newest" ]; then
+    printf 'FATAL: no Debian package with Package=%s among %s existing candidate(s)\n' \
+      "$expected_package" "$seen" >&2
+    return 1
+  fi
+  printf '%s\n' "$newest"
+}
+
 # scn_diag [prefix] — EI-18762718908280875: a scenario's diagnostic output only
 # SURVIVES a PASSING matrix run if every line starts with the `·` marker
 # (deb-hetzner-matrix.sh greps for it after a scenario returns 0 — see WI-6057).
