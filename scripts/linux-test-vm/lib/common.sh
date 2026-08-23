@@ -67,7 +67,7 @@ run_testvm_scoped() {  # <name> <guest-ram-mib> <qemu> [args...]
 
   log "resource envelope $unit — memory high:${high_mb}MiB max:${max_mb}MiB swap-max:${swap_max_mb}MiB"
   "$systemd_run" --user --scope --quiet --collect \
-    -p CollectMode=inactive-or-failed --unit "$unit" \
+    --property=CollectMode=inactive-or-failed --unit "$unit" \
     -p MemoryAccounting=yes \
     -p "MemoryHigh=${high_mb}M" \
     -p "MemoryMax=${max_mb}M" \
