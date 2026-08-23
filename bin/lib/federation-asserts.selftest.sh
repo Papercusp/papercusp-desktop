@@ -496,6 +496,36 @@ gate_file="$DIR/../live-federation-gate.sh"
 matrix_file="$DIR/../two-instance-content-matrix-smoke.sh"
 from_repo_file="$DIR/../two-instance-hive-from-repo-smoke.sh"
 verify_file="$DIR/../verify-sidecar-bundle.sh"
+if grep -qF 'desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD' "$gate_file" \
+  && grep -qF '"desktop_head":"%s"' "$gate_file" \
+  && grep -qF '"$head" "$desktop_head" "$invoker"' "$gate_file"; then
+  ok "live-federation-gate verdicts bank the executed Desktop submodule SHA beside the operator-parent head (WI-40958)"
+else
+  bad "live-federation-gate verdict provenance cannot identify the executed Desktop script/driver bytes (WI-40958)"
+fi
+
+# WI-40958 behavioral guard: exercise the real verdict writer through its cheap
+# FRESH exit. Explicitly neutralize an inherited GATE_FORCE from an outer live
+# gate so this hermetic probe can never fall through into build/GitHub work.
+verdict_state="$WORK/verdict-state"
+verdict_log="$verdict_state/verdicts.jsonl"
+mkdir -p "$verdict_state"
+date +%s >"$verdict_state/last-green"
+if GATE_FORCE=0 GATE_SUCCESS_TTL_H=22 GATE_STATE_DIR="$verdict_state" \
+  GATE_VERDICT_LOG="$verdict_log" GATE_NO_FILE=1 GATE_SKIP_SELFTEST=1 \
+  bash "$gate_file" >"$WORK/verdict-fresh.out" 2>&1; then
+  banked_desktop_head="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[-1])["desktop_head"])' "$verdict_log" 2>/dev/null)"
+  expected_desktop_head="$(git -C "$DIR/.." rev-parse --short HEAD 2>/dev/null)"
+  if [ -n "$banked_desktop_head" ] \
+    && [ "$banked_desktop_head" = "$expected_desktop_head" ] \
+    && git -C "$DIR/.." cat-file -e "$banked_desktop_head:bin/live-federation-gate.sh" 2>/dev/null; then
+    ok "banked desktop_head resolves to the commit containing the executed live-federation-gate.sh (WI-40958)"
+  else
+    bad "banked desktop_head '$banked_desktop_head' does not resolve to executed Desktop HEAD '$expected_desktop_head' (WI-40958)"
+  fi
+else
+  bad "isolated live-federation-gate FRESH probe failed before banking desktop_head (WI-40958)"
+fi
 if grep -q 'fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"' "$gate_file" \
   && grep -q 'bash "$smoke_snapshot"' "$gate_file" \
   && grep -qF 'DESKTOP_DIR="${DESKTOP_DIR:-' "$matrix_file" \
