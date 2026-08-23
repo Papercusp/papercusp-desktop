@@ -75,7 +75,7 @@
 #   bin/two-instance-hive-from-repo-smoke.sh [path/to/Papercusp_*.deb]
 #   MODERATION_PROBE=1 bin/two-instance-hive-from-repo-smoke.sh   # + the moderation witness
 set -uo pipefail
-DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DESKTOP_DIR="${DESKTOP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
 # Default to the NEWEST built .deb (version-agnostic — the desktop version is

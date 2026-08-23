@@ -22,7 +22,7 @@
 #
 # Usage: bin/two-instance-content-matrix-smoke.sh [path/to/Papercusp_*.deb]
 set -uo pipefail
-DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DESKTOP_DIR="${DESKTOP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
 REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
