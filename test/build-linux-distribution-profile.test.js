@@ -88,6 +88,29 @@ test('the sidecar provenance receives the immutable build SHA and version', () =
   );
 });
 
+test('vm-release sidecar reuse rejects provenance that differs from the launcher build SHA', () => {
+  const reuseBlock = linuxScript.slice(
+    linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'),
+    linuxScript.indexOf('# Never clobber a caller-supplied key'),
+  );
+  const verifierAt = reuseBlock.indexOf('bin/verify-provenance.sh');
+  const structureAt = reuseBlock.indexOf('bin/verify-sidecar-bundle.sh');
+
+  assert.ok(verifierAt >= 0, 'vm-release reuse must run the maintained provenance verifier');
+  assert.ok(
+    verifierAt < structureAt,
+    'mixed-SHA reuse must fail before the broader sidecar validation and Tauri build',
+  );
+  assert.match(
+    reuseBlock,
+    /if \[\[ "\$DISTRIBUTION_PROFILE" == "vm-release" \]\]; then[\s\S]*verify-provenance\.sh" "\$ROOT\/src-tauri\/sidecar" \\\n\s+--health-sha "\$BUILD_SHA" --allow-dirty/,
+  );
+  assert.match(
+    reuseBlock,
+    /vm-release sidecar reuse must match build SHA \$BUILD_SHA; rebuild without PAPERCUSP_REUSE_SIDECAR=1/,
+  );
+});
+
 test('vm-release Tauri overlay is an exact runtime allowlist with Server identity', () => {
   assert.equal(vmConfig.productName, 'Papercusp Server');
   assert.equal(vmConfig.mainBinaryName, 'papercusp-server');

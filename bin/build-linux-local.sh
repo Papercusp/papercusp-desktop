@@ -266,6 +266,19 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
         exit 1
       }
     done
+    # vm-release binds its Rust launcher and sidecar runtime to ONE immutable
+    # build identity. The runtime enforces the same equality at startup; letting
+    # a stale-but-structurally-valid sidecar reach Tauri therefore produces a
+    # signed package that installs successfully and then refuses every launch.
+    # Reuse the maintained provenance verifier here so the mixed-SHA package is
+    # rejected before Cargo/Tauri work instead of after a clean-VM install.
+    if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+      if ! bash "$ROOT/bin/verify-provenance.sh" "$ROOT/src-tauri/sidecar" \
+        --health-sha "$BUILD_SHA" --allow-dirty; then
+        echo "ERROR: vm-release sidecar reuse must match build SHA $BUILD_SHA; rebuild without PAPERCUSP_REUSE_SIDECAR=1" >&2
+        exit 1
+      fi
+    fi
     bash "$ROOT/bin/verify-sidecar-bundle.sh" "$ROOT/src-tauri/sidecar"
     # Reuse is a byte-for-byte packaging shortcut, not a release-policy bypass.
     # A sidecar assembled by a dev/background producer can be structurally valid
