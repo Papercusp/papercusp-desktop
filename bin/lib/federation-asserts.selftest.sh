@@ -1696,6 +1696,15 @@ else
 fi
 
 write_wi40905_healthy_logs
+printf '%s\n' '[presence-gossip] REJECTED inbound presence frame on topic abcdef123456… — later rejection' >>"$WI40905_B_LOG"
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 3 0.02 2>"$WI40905_ERR" \
+  && grep -q 'presence rejection streak is unresolved' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: a later rejection supersedes an earlier accepted recovery"
+else
+  bad "fed_assert_hive_lifecycle_ready masked a later rejection behind an earlier accepted recovery"
+fi
+
+write_wi40905_healthy_logs
 WI40905_CURSOR_STATE=retired
 if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
   && grep -q 'not active+advanced' "$WI40905_ERR"; then

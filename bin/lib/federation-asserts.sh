@@ -1419,6 +1419,15 @@ if grep -aqF "STAGE STALL for \${key}:" "\$log" 2>/dev/null; then
   echo "FAIL exact canary source log recorded a named merge-apply stall"
   exit 0
 fi
+# Take the presence-edge snapshot last. A rejection that landed after the poll
+# recovered must supersede the earlier admission; this is the closest possible
+# append-only-log boundary to the READY verdict.
+reject_line="\$(grep -anF "REJECTED inbound presence frame on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+admit_line="\$(grep -anF "inbound presence ADMITTED again on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+if [ -n "\$reject_line" ] && { [ -z "\$admit_line" ] || [ "\$admit_line" -le "\$reject_line" ]; }; then
+  echo "FAIL target presence rejection streak became unresolved at final admission read (topic=\$prefix reject=\$reject_line admit=\${admit_line:-none})"
+  exit 0
+fi
 echo "READY topic=\$prefix"
 EOF
 )"
