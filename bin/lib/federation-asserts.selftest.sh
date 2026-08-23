@@ -1598,6 +1598,25 @@ else
   bad "from-repo folded witness no longer fail-closes through the lifecycle guard before mutation"
 fi
 
+# F-HIVE3 is only the baseline: the C-001 setup and AK probes run afterward.
+# Pin the fresh F-RKCTRL lifecycle check between its own materialization probe
+# and the K2 revoke, and pin the revoke inside the witness_cut_ready gate. This
+# is the regression guard for the exact live failure where an early same-stream
+# PASS was followed by a stalled stream at the later revoke boundary.
+wi40905_fresh_probe_line="$(grep -n 'rkctrl="$(fed_hive_merge_probe a b .*F-RKCTRL' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+wi40905_fresh_guard_line="$(grep -n 'fed_assert_hive_lifecycle_ready a b F-RKCTRL' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+wi40905_cut_gate_line="$(grep -n 'if \[ "$witness_cut_ready" = 1 \]; then' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+wi40905_revoke_line="$(grep -n 'rk_revoke_out="$(mcp_call a "substrate:revoke_contributor"' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+if [ -n "$wi40905_fresh_probe_line" ] && [ -n "$wi40905_fresh_guard_line" ] \
+  && [ -n "$wi40905_cut_gate_line" ] && [ -n "$wi40905_revoke_line" ] \
+  && [ "$wi40905_fresh_probe_line" -lt "$wi40905_fresh_guard_line" ] \
+  && [ "$wi40905_fresh_guard_line" -lt "$wi40905_cut_gate_line" ] \
+  && [ "$wi40905_cut_gate_line" -lt "$wi40905_revoke_line" ]; then
+  ok "from-repo folded witness revalidates the fresh F-RKCTRL stream and gates K2/K4 on that admission"
+else
+  bad "from-repo folded witness no longer fail-closes K2/K4 behind the fresh F-RKCTRL lifecycle admission"
+fi
+
 WI40905_A_LOG="$(mktemp /tmp/wi40905-lifecycle-a.XXXXXX)"
 WI40905_B_LOG="$(mktemp /tmp/wi40905-lifecycle-b.XXXXXX)"
 WI40905_ERR="$(mktemp /tmp/wi40905-lifecycle-err.XXXXXX)"
