@@ -143,14 +143,22 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   }
   const linuxFormats = contract.gui.budgets.platforms.linux.formats;
   assert.deepEqual(Object.keys(linuxFormats).sort(), ['appimage', 'deb']);
-  assert.equal(linuxFormats.deb.downloadBytes, 49_547_020);
-  assert.equal(linuxFormats.deb.unpackedBytes, 241_963_741);
+  assert.equal(linuxFormats.deb.downloadBytes, 49_561_648);
+  assert.equal(linuxFormats.deb.unpackedBytes, 259_870_182);
   assert.equal(linuxFormats.deb.downloadCeilingBytes, 64 * mib);
   assert.equal(linuxFormats.deb.unpackedCeilingBytes, 256 * mib);
-  assert.equal(linuxFormats.appimage.downloadBytes, 141_175_288);
-  assert.equal(linuxFormats.appimage.unpackedBytes, 514_901_883);
+  assert.equal(
+    linuxFormats.deb.sourceArtifactSha256,
+    'dc092e0bb13cc19faf1e282f448da58fb21e02b7093faa821c607dfc7ed548a3',
+  );
+  assert.equal(linuxFormats.appimage.downloadBytes, 145_484_280);
+  assert.equal(linuxFormats.appimage.unpackedBytes, 532_806_788);
   assert.equal(linuxFormats.appimage.downloadCeilingBytes, 150 * mib);
   assert.equal(linuxFormats.appimage.unpackedCeilingBytes, 512 * mib);
+  assert.equal(
+    linuxFormats.appimage.sourceArtifactSha256,
+    '1c373f53c64afb6f348600dbcced32dd6193671fcf272474274ff47cdaab0958',
+  );
   assert.deepEqual(contract.gui.budgets.measurement, [
     'compressed-artifact-bytes',
     'unpacked-unique-inode-bytes',
