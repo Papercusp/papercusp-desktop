@@ -11,8 +11,6 @@
 deb-hetzner-rig.sh::rig_ban_member::ws
 release-artifacts.sh::release_artifacts_assert_baked_host_from_bytes::expected_fp
 release-artifacts.sh::release_artifacts_assert_fresh::stamp
-release-artifacts.sh::release_artifacts_resolve_root::resolved
-release-tag-pin.sh::release_tag_validate_exact_commit::resolved_sha
 scenarios/b9-attestation.sh::_scn_attestation_unattested_device_core::reasons_before
 scenarios/b9-attestation.sh::_scn_attestation_unattested_device_core::ws
 scenarios/b9-attestation.sh::scn_attestation_membership::a_gh_id

@@ -94,6 +94,21 @@ HEREDOC_START = re.compile(r"<<-?\s*(?P<q>[\"']?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)
 # range.
 SELF_GUARD_START = re.compile(r"^\s*if\s+!\s")
 
+# The equivalent multiline assignment guard:
+#
+#     value="$(probe)" || {
+#       echo "probe failed"
+#       return 1
+#     }
+#
+# A return in that block fires only when the command substitution failed, so no
+# measured value exists to strand. The scanner already handled the one-line
+# `value="$(probe)" || { ...; return 1; }` form accidentally (the return shares
+# the assignment line and is outside the scanned range); without this explicit
+# model, merely formatting the same guard over several lines creates a false
+# positive.
+ASSIGN_FAILURE_BLOCK_START = re.compile(r"\|\|\s*\{\s*(?:#.*)?$")
+
 # RANKING signal, never a filter. What the RHS is measuring decides how likely a
 # discarded value is to matter: a psql count is a measurement whose loss destroys
 # a verdict; a workspace-id lookup is plumbing whose loss strands nothing.
@@ -227,6 +242,23 @@ EOS
 }
 '''
 
+# Must NOT fire. This is the multiline spelling of an assignment's own failure
+# guard. The return is reachable only when `readlink` failed, so `raw_target`
+# was never measured. Kept verbatim-shaped after claim-target-dir.sh exposed
+# the scanner's previous formatting-dependent false positive.
+MULTILINE_ASSIGNMENT_GUARD_CALIBRATION = '''#!/usr/bin/env bash
+restore_missing_referent() {
+  local root="$1" raw_target target
+  raw_target="$(readlink "$root")" || {
+    echo "cannot read symlink"
+    return 1
+  }
+  [[ -n "$raw_target" ]] || return 1
+  target="$raw_target"
+  echo "$target"
+}
+'''
+
 # MUST FIRE — and it is the most important control in this file, because it pins
 # the WRONG fix shut.
 #
@@ -306,16 +338,25 @@ def heredoc_regions(lines):
 
 
 def self_guard_span(lines, n, fend):
-    """If the assignment on line n is its own `if ! VAR=$(...)` guard, return the
-    0-based range of that if-block's body, whose returns fire only when the
-    measurement FAILED and so cannot strand it. Otherwise an empty range."""
-    if not SELF_GUARD_START.match(lines[n]):
-        return range(0, 0)
+    """Return the body of an assignment's own failure guard.
+
+    Returns inside either `if ! VAR=$(...)` or multiline `VAR=$(...) || { ... }`
+    fire only when the command substitution failed, so there is no measured
+    value for them to strand.
+    """
     indent = leading_ws(lines[n])
-    for k in range(n + 1, fend + 1):
-        stripped = lines[k].strip()
-        if stripped in ("fi", "fi;") and leading_ws(lines[k]) <= indent:
-            return range(n + 1, k)
+    if SELF_GUARD_START.match(lines[n]):
+        for k in range(n + 1, fend + 1):
+            stripped = lines[k].strip()
+            if stripped in ("fi", "fi;") and leading_ws(lines[k]) <= indent:
+                return range(n + 1, k)
+        return range(0, 0)
+
+    if ASSIGN_FAILURE_BLOCK_START.search(lines[n]):
+        for k in range(n + 1, fend + 1):
+            stripped = lines[k].strip()
+            if stripped in ("}", "};") and leading_ws(lines[k]) <= indent:
+                return range(n + 1, k)
     return range(0, 0)
 
 
@@ -400,6 +441,7 @@ def self_test(verbose=True):
         ("control — WI-40542 canonical shape", CONTROL, 1, "SCANNER IS BLIND"),
         ("calibration — consumed before return", CALIBRATION, 0, "SCANNER OVER-FIRES"),
         ("calibration — heredoc body + self-guard", HEREDOC_CALIBRATION, 0, "SCANNER OVER-FIRES"),
+        ("calibration — multiline assignment guard", MULTILINE_ASSIGNMENT_GUARD_CALIBRATION, 0, "SCANNER OVER-FIRES"),
         ("control — reporting return still strands", REPORTING_RETURN_CONTROL, 1, "SCANNER IS BLIND"),
         ("calibration — counter increment is not a reading", COUNTER_CALIBRATION, 0, "SCANNER OVER-FIRES"),
     ]
