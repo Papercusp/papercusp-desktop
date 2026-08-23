@@ -30,6 +30,32 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORK" "$WORK2"; }
 trap cleanup EXIT
 
+# EI-21235839358679656: prove the immutable child copy survives a destructive
+# edit to the original after execution starts.  This is the child-script form
+# of live-federation-gate's existing EI-16828 self-snapshot invariant.
+SNAP_SOURCE="$WORK/mutable-long-smoke.sh"
+SNAP_COPY="$WORK/snapshots/long-smoke.sh"
+SNAP_OUT="$WORK/snapshot.out"
+printf '#!/usr/bin/env bash\necho before-edit\nsleep 1\necho after-edit\n' >"$SNAP_SOURCE"
+if ! fed_snapshot_shell_script "$SNAP_SOURCE" "$SNAP_COPY"; then
+  bad "fed_snapshot_shell_script could not create a syntax-checked immutable child copy"
+else
+  bash "$SNAP_COPY" >"$SNAP_OUT" 2>&1 & snapshot_pid=$!
+  for _ in $(seq 1 20); do
+    grep -q '^before-edit$' "$SNAP_OUT" 2>/dev/null && break
+    sleep 0.05
+  done
+  printf '#!/usr/bin/env bash\nthis is a syntax error (\n' >"$SNAP_SOURCE"
+  if wait "$snapshot_pid" \
+    && grep -q '^before-edit$' "$SNAP_OUT" \
+    && grep -q '^after-edit$' "$SNAP_OUT" \
+    && ! bash -n "$SNAP_SOURCE" 2>/dev/null; then
+    ok "fed_snapshot_shell_script insulates a running child from a destructive mid-run source edit"
+  else
+    bad "fed_snapshot_shell_script did not insulate a running child from a destructive mid-run source edit"
+  fi
+fi
+
 # WI-40912: a single transient authenticated GET /user failure must not red-pin
 # the entire live federation gate.  Stub gh with file-backed counters because
 # command substitution runs the helper in a subshell.
@@ -441,7 +467,16 @@ fi
 # overrides, and the direct smoke must not keep the retired filename as its default.
 gate_file="$DIR/../live-federation-gate.sh"
 matrix_file="$DIR/../two-instance-content-matrix-smoke.sh"
+from_repo_file="$DIR/../two-instance-hive-from-repo-smoke.sh"
 verify_file="$DIR/../verify-sidecar-bundle.sh"
+if grep -q 'fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"' "$gate_file" \
+  && grep -q 'bash "$smoke_snapshot"' "$gate_file" \
+  && grep -qF 'DESKTOP_DIR="${DESKTOP_DIR:-' "$matrix_file" \
+  && grep -qF 'DESKTOP_DIR="${DESKTOP_DIR:-' "$from_repo_file"; then
+  ok "live-federation-gate snapshots both mutable child smokes and injects canonical DESKTOP_DIR (EI-21235839358679656)"
+else
+  bad "live-federation-gate can execute a long child smoke directly from the mutable tree (EI-21235839358679656)"
+fi
 if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
   ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"
 else
