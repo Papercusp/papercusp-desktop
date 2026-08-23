@@ -259,28 +259,31 @@ __json_str() {  # stdin → a JSON string BODY (caller supplies the quotes)
 }
 bank_verdict() {  # <the full "GATE: …" line>
   [ "${GATE_NO_VERDICT_LOG:-0}" = 1 ] && return 0
-  local line="$1" token esc head invoker
+  local line="$1" token esc head desktop_head invoker
   # The verdict TOKEN (GREEN / RED / FRESH-RED / SKIPPED-STARVATION / TERMINATED / …) is what a
   # reader greps on; the full line is kept beside it so nothing is lost to the extraction.
   token="$(printf '%s' "$line" | sed -n 's/^GATE: \([A-Za-z-]*\).*/\1/p')"
   [ -n "$token" ] || token=UNKNOWN
   esc="$(printf '%s' "$line" | __json_str)"
   # Resolved HERE rather than on the hot fresh-exit path: bank_verdict runs exactly once per
-  # run, at the terminal exit, so this costs one rev-parse per run and never touches the
+  # run, at the terminal exit, so this costs two rev-parses per run and never touches the
   # ~0-cost hourly FRESH window. GIT_HEAD (§2) is NOT usable — every fresh/skip path exits
-  # long before the rebuild that sets it.
+  # long before the rebuild that sets it. `head` remains the operator-parent checkout for
+  # compatibility and because the gate runs parent-owned sidecar code; `desktop_head` names
+  # the submodule bytes that supplied this gate and its federation drivers (WI-40958).
   head="$(cd "$DESKTOP_DIR/.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   # systemd exports INVOCATION_ID to a unit's processes and nothing else does — so this
   # records whether the run was journald-observable, which is the distinction that made the
   # 08-12 green unrecoverable in the first place.
   if [ -n "${INVOCATION_ID:-}" ]; then invoker=systemd; else invoker=hand; fi
-  if ! printf '{"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
+  if ! printf '{"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","desktop_head":"%s","invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(now_s)" "$token" \
       "${MATRIX_RES:-?}" "${FROMREPO_RES:-?}" "${WITNESS_RES:-?}" "${MATRIXFULL_RES:-?}" \
       "$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)" \
       "$(printf '%s' "${SUMMARY:-}" | __json_str)" \
       "$(printf '%s' "${MATRIX_SKIP_REASON:-}" | __json_str)" \
-      "$head" "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
+      "$head" "$desktop_head" "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
     log "bank_verdict: could not append to $GATE_VERDICT_LOG — verdict still emitted on stdout"
     return 0
   fi
