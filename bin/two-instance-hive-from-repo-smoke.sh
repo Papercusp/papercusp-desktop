@@ -108,9 +108,13 @@ CUPBOARD_URL="${HIVE_SMOKE_CUPBOARD_URL:-http://127.0.0.1:9}"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
 MACHINE_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR:-$HOME/.papercusp/identity}"
-# A/B share the durable device-key directory so each GitHub account reuses its
-# attested key. That directory also holds the machine-scoped Hyperswarm seed,
-# however, and Hyperswarm refuses a remote presenting its own Noise identity.
+# Keep durable attestation state across runs, but isolate each account's
+# keychain namespace. A shared identity directory also carries the Hive/Noise
+# seed; when A and B use it, the second side can present A's transport identity
+# and the live witness fails before admission. Per-account roots preserve each
+# account's attestation while preventing cross-instance Hive-key sharing.
+A_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR_A:-$MACHINE_IDENTITY_DIR/$P_A_USER}"
+B_IDENTITY_DIR="${PAPERCUSP_FROM_REPO_IDENTITY_DIR_B:-$MACHINE_IDENTITY_DIR/$P_B_USER}"
 # Give these same-machine processes stable, distinct transport identities via
 # the supported multi-process escape hatch (the content-matrix sibling does the
 # same under WI-38088).
@@ -170,8 +174,8 @@ fi
 # before boot.  Fresh per-run HOMEs otherwise depend on boot-time gist discovery;
 # a quota failure there announces UNATTESTED and spends the entire rig on a
 # deterministic admission rejection (EI-21239383769017696).
-fed_preflight_attestation_account "$P_A_USER" "$A_TOKEN" "$DESKTOP_DIR/.." "$MACHINE_IDENTITY_DIR" || exit 8
-fed_preflight_attestation_account "$P_B_USER" "$B_TOKEN" "$DESKTOP_DIR/.." "$MACHINE_IDENTITY_DIR" || exit 8
+fed_preflight_attestation_account "$P_A_USER" "$A_TOKEN" "$DESKTOP_DIR/.." "$A_IDENTITY_DIR" || exit 8
+fed_preflight_attestation_account "$P_B_USER" "$B_TOKEN" "$DESKTOP_DIR/.." "$B_IDENTITY_DIR" || exit 8
 
 # ── from-repo support gate (the directory smoke's static-grep pattern) ─────────
 # An older serve.mjs silently 404s POST /harness/pots/from-repo and announces
@@ -379,13 +383,13 @@ REKEY_ENV=(); [ -n "${PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY:-}" ] && REKEY_ENV=(PA
 # ── launch two isolated instances with distinct identities ─────────────────────
 log "launch A ($P_A_USER) + B ($P_B_USER) [$RUN_MODE]"
 if [ "$RUN_MODE" = deb ]; then
-  fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_A" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
-  fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_B" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
+  fed_local_launch "$A_HOME" "${FED_LOG[a]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$A_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_IDENTITY_DIR="$A_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_A" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
+  fed_local_launch "$B_HOME" "${FED_LOG[b]}" "$BIN" "$DISPLAY_NUM" GH_TOKEN="$B_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_IDENTITY_DIR="$B_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_B" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
 else
   A_HONO="$(pick_free_port 18071)"; A_PG="$(pick_free_port 18532)"
-  sc_launch "$A_HOME" "${FED_LOG[a]}" "$A_HONO" "$A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_A" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
+  sc_launch "$A_HOME" "${FED_LOG[a]}" "$A_HONO" "$A_PG" GH_TOKEN="$A_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_A_USER" PAPERCUSP_IDENTITY_DIR="$A_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_A" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
   B_HONO="$(pick_free_port $((A_HONO + 1)))"; B_PG="$(pick_free_port $((A_PG + 100)))"
-  sc_launch "$B_HOME" "${FED_LOG[b]}" "$B_HONO" "$B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_B" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
+  sc_launch "$B_HOME" "${FED_LOG[b]}" "$B_HONO" "$B_PG" GH_TOKEN="$B_TOKEN" PAPERCUSP_GITHUB_LOGIN="$P_B_USER" PAPERCUSP_IDENTITY_DIR="$B_IDENTITY_DIR" PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_B" PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP" PAPERCUSP_CUPBOARD_URL="$CUPBOARD_URL" "${REKEY_ENV[@]}"
 fi
 
 fed_wait_boot a 60 || { echo "A boot failed: $FED_BOOT_ERR"; tail -20 "${FED_LOG[a]}"; exit 4; }
