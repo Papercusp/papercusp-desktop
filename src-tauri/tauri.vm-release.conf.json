@@ -14,7 +14,7 @@
       "sidecar/bin/**/*",
       "sidecar/build-provenance.json",
       "sidecar/cpu-task-worker.script.mjs",
-      "sidecar/db-seed.tar.gz",
+      "sidecar/db-seed.dump",
       "sidecar/db-sql/**/*",
       "sidecar/event-loop-sentinel.worker.mjs",
       "sidecar/git-ext-bridge.mjs",
