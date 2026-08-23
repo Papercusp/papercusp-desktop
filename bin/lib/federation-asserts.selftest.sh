@@ -742,6 +742,7 @@ fi
 # invocation and passes on its second — assert it retries and returns PASS, and that a
 # GENUINE (non-empty-body) failure is still NOT retried.
 runsmoke_snippet="$(awk '/^run_smoke\(\)/{p=1} p{print} p&&/^}$/{exit}' "$gate_file")"
+snapshot_helper_snippet="$(declare -f fed_snapshot_shell_script)"
 if [ -z "$runsmoke_snippet" ]; then
   bad "could not extract run_smoke() from live-federation-gate.sh (structure changed — update this test)"
 else
@@ -777,6 +778,7 @@ EOF
     DESKTOP_DIR="$RS_ROOT/papercusp-desktop" WORK="$RS_WORK" DISCOVERY_ATTEMPTS=3 \
     bash -c "$(cat <<BASH
 log() { :; }
+$snapshot_helper_snippet
 $runsmoke_snippet
 run_smoke flaky flaky-then-pass.sh ""
 BASH
@@ -787,6 +789,7 @@ BASH
     DESKTOP_DIR="$RS_ROOT/papercusp-desktop" WORK="$RS_WORK" DISCOVERY_ATTEMPTS=3 \
     bash -c "$(cat <<BASH
 log() { :; }
+$snapshot_helper_snippet
 $runsmoke_snippet
 run_smoke genuine genuine-fail.sh ""
 BASH
