@@ -352,16 +352,50 @@ else
   bad "live-federation-gate can still run consumer legs after FAIL_BUILD=1 — an empty GATE_DEB will silently select a stale .deb/sidecar and forge secondary reds (WI-40008)"
 fi
 # WI-40905: GUI and Server artifacts intentionally share the Papercusp*.deb
-# filename family.  A newest-file selector without a Debian package-identity
-# check repacked papercusp-server and handed it to the GUI content matrix.  Pin
-# both the selector and the post-extraction executable guard so a future role
-# split or filename change cannot silently reintroduce that class.
-if grep -q 'dpkg-deb -f "$candidate" Package' "$gate_file" \
-  && grep -q '\[ "$candidate_pkg" = "papercusp-gui" \]' "$gate_file" \
+# filename family. A filename-only newest-file selector repacked papercusp-server
+# and handed it to the GUI content matrix. Pin the live call and the executable
+# guard, then exercise the shared selector below with real synthetic packages.
+if grep -q 'fed_select_newest_deb_by_package papercusp-gui' "$gate_file" \
   && grep -q 'test -x pkg/usr/bin/papercusp-desktop' "$gate_file"; then
   ok "live-federation-gate selects a Debian GUI package by writer-owned identity and verifies its desktop executable (WI-40905)"
 else
   bad "live-federation-gate can select/repack a non-GUI Papercusp Debian artifact for the GUI content matrix (WI-40905)"
+fi
+if command -v dpkg-deb >/dev/null 2>&1; then
+  DEB_FIXTURE="$WORK/deb-selector"
+  mkdir -p "$DEB_FIXTURE"
+  make_selector_deb() {
+    local output="$1" package="$2" binary="$3" root
+    root="$DEB_FIXTURE/root-$package"
+    rm -rf "$root"
+    mkdir -p "$root/DEBIAN" "$root/usr/bin"
+    printf 'Package: %s\nVersion: 1.0.0\nArchitecture: amd64\nMaintainer: Papercusp Test <test@example.invalid>\nDescription: selector fixture\n' \
+      "$package" >"$root/DEBIAN/control"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$root/usr/bin/$binary"
+    chmod +x "$root/usr/bin/$binary"
+    dpkg-deb -b "$root" "$output" >/dev/null
+  }
+  GUI_DEB="$DEB_FIXTURE/Papercusp_GUI_older_amd64.deb"
+  SERVER_DEB="$DEB_FIXTURE/Papercusp_Server_newer_amd64.deb"
+  make_selector_deb "$GUI_DEB" papercusp-gui papercusp-desktop
+  make_selector_deb "$SERVER_DEB" papercusp-server papercusp-server
+  touch -t 202608230800 "$GUI_DEB"
+  touch -t 202608230801 "$SERVER_DEB"
+  selected_deb="$(fed_select_newest_deb_by_package papercusp-gui "$GUI_DEB" "$SERVER_DEB" 2>"$DEB_FIXTURE/select.err")"
+  if [ "$selected_deb" = "$GUI_DEB" ]; then
+    ok "deb selector keeps the older GUI package when a newer Server package exists (WI-40905)"
+  else
+    bad "deb selector chose '$selected_deb' instead of older GUI '$GUI_DEB' with newer Server present (WI-40905)"
+  fi
+  if no_gui_diag="$(fed_select_newest_deb_by_package papercusp-gui "$SERVER_DEB" 2>&1)"; then
+    bad "deb selector accepted a Server-only candidate set for the GUI content matrix (WI-40905)"
+  elif grep -qF 'no Debian package with Package=papercusp-gui' <<<"$no_gui_diag"; then
+    ok "deb selector fails closed with an explicit diagnostic when no GUI package exists (WI-40905)"
+  else
+    bad "deb selector rejected a Server-only set without the required no-GUI diagnostic: $no_gui_diag (WI-40905)"
+  fi
+else
+  ok "deb selector behavior test skipped: dpkg-deb unavailable on this host"
 fi
 # EI-20580419609576585: the .deb REPACK produces $GATE_DEB, and $GATE_DEB is what the gate
 # passes to local-matrix.sh as `--deb=`. Gating that repack on SKIP_MATRIX ALONE couples two
