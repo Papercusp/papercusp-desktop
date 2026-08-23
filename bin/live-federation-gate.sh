@@ -1410,6 +1410,143 @@ build_lock_contention_check() {  # <build-log-path> — sets BUILD_LOCK_CONTENTI
   BUILD_LOCK_CONTENTION="$holder"
 }
 
+# ── live source-lock CONTENTION classifier (EI-21266997625575412) ─────────────
+# This gate builds from the shared WORKING TREE. A lock holder can therefore
+# expose a real, short-lived midpoint of an atomic edit to esbuild (the live
+# incident saw a new re-export and the old declarations at once). Capture the
+# cross-domain lock ledger immediately before the build and after a failure,
+# then downgrade ONLY when a repository-relative ACTIVE lock path appears
+# literally in the build error. Missing/malformed MCP evidence, waiting locks,
+# and non-overlapping active locks deliberately leave BUILD_SOURCE_LOCK_CONTENTION
+# empty so the ordinary product RED remains fail-closed.
+capture_source_lock_snapshot() {  # <output-path> — best effort; persists raw JSON/SSE
+  local out="$1"
+  local -a auth_hdr=()
+  [ -n "$GATE_SUPERUSER_BEARER" ] && auth_hdr=(-H "authorization: Bearer $GATE_SUPERUSER_BEARER")
+  if ! curl -sS -m 15 -X POST "$OPERATOR_MCP_URL" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' "${auth_hdr[@]}" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"locks:queue","arguments":{}}}' \
+    >"$out" 2>"$out.curl.err"; then
+    log "WARN: source-lock snapshot failed — classifier will fail closed to ordinary RED (details: $out.curl.err)"
+  fi
+}
+
+BUILD_SOURCE_LOCK_CONTENTION=""
+source_lock_contention_check() {  # <build-log-path> <raw-lock-snapshot>... — sets BUILD_SOURCE_LOCK_CONTENTION
+  local build_log="$1" match
+  shift
+  [ -f "$build_log" ] || return 0
+  [ "$#" -gt 0 ] || return 0
+  match="$(python3 - "$build_log" "$@" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+
+def decoded_roots(raw):
+    raw = raw.strip()
+    if raw:
+        try:
+            yield json.loads(raw)
+        except Exception:
+            pass
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            yield json.loads(payload)
+        except Exception:
+            pass
+
+
+def walk_json(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_json(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_json(child)
+    elif isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith(("{", "[")):
+            try:
+                yield from walk_json(json.loads(candidate))
+            except Exception:
+                pass
+
+
+def one_line(value, fallback):
+    text = " ".join(str(value or fallback).split())
+    return text or fallback
+
+
+try:
+    build_text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+except Exception:
+    raise SystemExit(0)
+
+build_lines = build_text.splitlines()
+error_marker = re.compile(r"(?:^|[\s\[(:])(?:error|fatal|failed|failure)(?:$|[\s\]):])", re.IGNORECASE)
+error_lines = [index for index, line in enumerate(build_lines) if error_marker.search(line)]
+
+
+def path_occurs_in_error(repo_path):
+    # Toolchains put the path on the diagnostic line itself (tsc) or in a
+    # nearby source-location line (esbuild/rustc). A mere progress mention
+    # elsewhere in a failed log must not downgrade an unrelated real error.
+    if not error_lines:
+        return False
+    for path_line, line in enumerate(build_lines):
+        if repo_path not in line:
+            continue
+        if any(abs(path_line - marker_line) <= 8 for marker_line in error_lines):
+            return True
+    return False
+
+seen = set()
+for snapshot_name in sys.argv[2:]:
+    try:
+        raw = pathlib.Path(snapshot_name).read_text(errors="replace")
+    except Exception:
+        continue
+    for root in decoded_roots(raw):
+        for node in walk_json(root):
+            active_locks = node.get("active_locks")
+            if not isinstance(active_locks, list):
+                continue
+            for lock in active_locks:
+                if not isinstance(lock, dict):
+                    continue
+                raw_path = lock.get("path")
+                if not isinstance(raw_path, str):
+                    continue
+                repo_path = raw_path.strip()
+                while repo_path.startswith("./"):
+                    repo_path = repo_path[2:]
+                # Only a genuine repository-relative path can prove this class.
+                if not repo_path or repo_path.startswith(("/", "../")):
+                    continue
+                key = (repo_path, str(lock.get("owner", "")), str(lock.get("intent", "")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not path_occurs_in_error(repo_path):
+                    continue
+                owner = one_line(lock.get("owner"), "unknown-owner")
+                intent = one_line(lock.get("intent"), "unknown-intent")
+                print(f"path={repo_path} owner={owner} intent={intent}")
+                raise SystemExit(0)
+PY
+  )" || match=""
+  [ -n "$match" ] && BUILD_SOURCE_LOCK_CONTENTION="$match"
+}
+
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
@@ -1444,10 +1581,16 @@ if [ -z "${GATE_DEB:-}" ]; then
     # visibly progressing. Queue within this unit's four-hour budget instead;
     # the shared helper still times out and reports the holder when a writer is
     # genuinely wedged. An explicit operator override remains authoritative.
+    capture_source_lock_snapshot "$WORK/source-locks-before-build.json"
     ( cd "$DESKTOP_DIR" && \
       PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}" \
         bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
-    [ "$FAIL_BUILD" = 1 ] && build_lock_contention_check "$WORK/build.log"
+    if (( FAIL_BUILD == 1 )); then
+      capture_source_lock_snapshot "$WORK/source-locks-after-build-failure.json"
+      build_lock_contention_check "$WORK/build.log"
+      source_lock_contention_check "$WORK/build.log" \
+        "$WORK/source-locks-before-build.json" "$WORK/source-locks-after-build-failure.json"
+    fi
   fi
   # Grep the FUNCTION NAME, not a log phrase: the original 'grantEpochKeysToMembers on
   # admit' literal was reworded out of the source and the stale check WARNed on every
@@ -1542,6 +1685,21 @@ if [ "$FAIL_BUILD" = 1 ]; then
     rm -f "$STATE_DIR/last-red"
     check_staleness
     verdict "GATE: SKIPPED-BUILD-LOCK-CONTENTION (sidecar.lock held past the bounded wait by a live writer: $BUILD_LOCK_CONTENTION) — not a federation verdict; logs in $WORK"
+    exit 0
+  fi
+  # EI-21266997625575412: the build error names a source file that the
+  # cross-domain lock ledger proves was actively being edited at one of the
+  # build boundaries. This is the source-tree analogue of sidecar.lock
+  # contention above: a transient evidence-producer snapshot, not a product
+  # verdict. The exact literal overlap is intentionally required; otherwise a
+  # missing ledger, malformed SSE, waiting lock, or unrelated active edit stays
+  # on the ordinary RED path.
+  if [ -n "$BUILD_SOURCE_LOCK_CONTENTION" ]; then
+    log "BUILD SOURCE-LOCK CONTENTION (not a federation/product verdict): $BUILD_SOURCE_LOCK_CONTENTION"
+    echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    rm -f "$STATE_DIR/last-red"
+    check_staleness
+    verdict "GATE: SKIPPED-BUILD-SOURCE-LOCK-CONTENTION (active source edit overlapped the build error: $BUILD_SOURCE_LOCK_CONTENTION) — not a federation verdict; logs in $WORK"
     exit 0
   fi
 fi

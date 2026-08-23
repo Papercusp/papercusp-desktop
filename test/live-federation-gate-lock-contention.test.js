@@ -18,6 +18,11 @@ const test = require('node:test');
 // verdict and exits before ever reaching "GATE: RED (sidecar-build)", and
 // (3) the classifier is falsifiable — it does NOT fire on an unrelated
 // build failure, nor on a lock-timeout whose holder could not be confirmed.
+// EI-21266997625575412 extends the same evidence-producer disposition to a
+// working-tree build failure whose error literally names a path held in an
+// active cross-domain source lock. Raw lock snapshots can be plain JSON or
+// SSE-wrapped MCP responses; missing, malformed, waiting-only, or non-
+// overlapping evidence must stay fail-closed on the ordinary RED path.
 
 const root = path.resolve(__dirname, '..');
 const gate = fs.readFileSync(path.join(root, 'bin/live-federation-gate.sh'), 'utf8');
@@ -27,17 +32,32 @@ const CONTENTION_CHECK_FN = (
   gate.match(/^BUILD_LOCK_CONTENTION=""\nbuild_lock_contention_check\(\) \{[\s\S]*?\n\}$/m) || []
 )[0];
 
+const SOURCE_CONTENTION_CHECK_FN = (
+  gate.match(/^BUILD_SOURCE_LOCK_CONTENTION=""\nsource_lock_contention_check\(\) \{[\s\S]*?\n\}$/m) || []
+)[0];
+
 const FAIL_BUILD_BLOCK = (
   gate.match(/^if \[ "\$FAIL_BUILD" = 1 \]; then\n[\s\S]*?\n^fi$/m) || []
 )[0];
 
-test('the classifier + the typed FAIL_BUILD branch are present in the shipped gate', () => {
+test('the classifiers + typed FAIL_BUILD branches are present in the shipped gate', () => {
   assert(CONTENTION_CHECK_FN, 'could not locate build_lock_contention_check() in live-federation-gate.sh');
+  assert(SOURCE_CONTENTION_CHECK_FN, 'could not locate source_lock_contention_check() in live-federation-gate.sh');
   assert(FAIL_BUILD_BLOCK, 'could not locate the "if FAIL_BUILD = 1" branch in live-federation-gate.sh');
   assert.match(
     gate,
-    /\[ "\$FAIL_BUILD" = 1 \] && build_lock_contention_check "\$WORK\/build\.log"/,
-    'the classifier must run against $WORK/build.log immediately after the build subshell',
+    /capture_source_lock_snapshot "\$WORK\/source-locks-before-build\.json"[\s\S]*?bash bin\/build-desktop-sidecar\.sh/,
+    'the first active-lock snapshot must be captured before the working-tree build',
+  );
+  assert.match(
+    gate,
+    /capture_source_lock_snapshot "\$WORK\/source-locks-after-build-failure\.json"[\s\S]*?source_lock_contention_check "\$WORK\/build\.log"/,
+    'a failed build must capture the second snapshot before classifying the build log',
+  );
+  assert.match(
+    gate,
+    /build_lock_contention_check "\$WORK\/build\.log"/,
+    'the sidecar lock classifier must still run against $WORK/build.log after failure',
   );
   assert.match(
     FAIL_BUILD_BLOCK,
@@ -45,6 +65,11 @@ test('the classifier + the typed FAIL_BUILD branch are present in the shipped ga
     'a confirmed lock contention must bank a typed SKIPPED verdict, not a RED',
   );
   assert.match(FAIL_BUILD_BLOCK, /exit 0/, 'the contention branch must exit before reaching the RED verdict below');
+  assert.match(
+    FAIL_BUILD_BLOCK,
+    /GATE: SKIPPED-BUILD-SOURCE-LOCK-CONTENTION/,
+    'an exact active source-lock overlap must bank its own typed SKIPPED verdict',
+  );
 });
 
 test('the classifier pattern is pinned to sidecar-lock-yield.sh\'s ONLY emitter of each line shape', () => {
@@ -149,6 +174,121 @@ test('build_lock_contention_check: does NOT fire when the holder could not be co
   }
 });
 
+function runSourceLockClassifier(buildLog, snapshots) {
+  assert(SOURCE_CONTENTION_CHECK_FN, 'source classifier extraction failed');
+  const script = [
+    'set -uo pipefail',
+    SOURCE_CONTENTION_CHECK_FN,
+    `source_lock_contention_check ${JSON.stringify(buildLog)} ${snapshots.map((snapshot) => JSON.stringify(snapshot)).join(' ')}`,
+    'printf \'RESULT:%s\\n\' "$BUILD_SOURCE_LOCK_CONTENTION"',
+  ].join('\n');
+  return spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+}
+
+test('source_lock_contention_check: decodes plain JSON and reports an exact active path overlap', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-source-lock-json-'));
+  try {
+    const buildLog = path.join(tmp, 'build.log');
+    const before = path.join(tmp, 'before.json');
+    const after = path.join(tmp, 'after.json');
+    const lockedPath = 'packages/operator-core/lib/agent-tools/work_items/complete.ts';
+    fs.writeFileSync(
+      buildLog,
+      `✘ [ERROR] Multiple exports\n    ../../${lockedPath}:1111:16:\n`,
+    );
+    fs.writeFileSync(before, JSON.stringify({ active_locks: [] }));
+    fs.writeFileSync(after, JSON.stringify({
+      active_locks: [{
+        path: lockedPath,
+        owner: 'su-f83cc',
+        intent: 'EI-21259433290500193 completion-freshness extraction',
+      }],
+      waiting: [],
+    }));
+
+    const result = runSourceLockClassifier(buildLog, [before, after]);
+    assert.equal(result.status, 0, `classifier exited ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, new RegExp(`RESULT:path=${lockedPath.replaceAll('.', '\\.')}`));
+    assert.match(result.stdout, /owner=su-f83cc/);
+    assert.match(result.stdout, /intent=EI-21259433290500193 completion-freshness extraction/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('source_lock_contention_check: decodes an SSE-wrapped MCP text payload', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-source-lock-sse-'));
+  try {
+    const buildLog = path.join(tmp, 'build.log');
+    const snapshot = path.join(tmp, 'locks.sse');
+    const lockedPath = 'apps/operator/lib/tools/example.ts';
+    fs.writeFileSync(buildLog, `✘ [ERROR] Build failed\n    ../../${lockedPath}:42:1:\n`);
+    const toolText = JSON.stringify({
+      active_locks: [{ path: lockedPath, owner: 'su-source', intent: 'atomic edit' }],
+      waiting: [],
+    });
+    const envelope = {
+      jsonrpc: '2.0',
+      id: 1,
+      result: { content: [{ type: 'text', text: toolText }] },
+    };
+    fs.writeFileSync(snapshot, `:stream-open\n\ndata: ${JSON.stringify(envelope)}\n\n`);
+
+    const result = runSourceLockClassifier(buildLog, [snapshot]);
+    assert.equal(result.status, 0, `classifier exited ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /RESULT:path=apps\/operator\/lib\/tools\/example\.ts owner=su-source intent=atomic edit/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('source_lock_contention_check: ignores malformed, waiting-only, non-exact, and progress-only lock evidence', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-source-lock-negative-'));
+  try {
+    const buildLog = path.join(tmp, 'build.log');
+    const malformed = path.join(tmp, 'malformed.sse');
+    const waiting = path.join(tmp, 'waiting.json');
+    const basenameOnly = path.join(tmp, 'basename-only.json');
+    const progressOnly = path.join(tmp, 'progress-only.json');
+    const progressPath = 'packages/operator-core/lib/progress-only.ts';
+    fs.writeFileSync(
+      buildLog,
+      [
+        `→ scanned ../../${progressPath}`,
+        ...Array.from({ length: 10 }, (_, index) => `progress line ${index}`),
+        '✘ [ERROR] Build failed',
+        '    ../../other/complete.ts:10:1:',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(malformed, 'data: {definitely-not-json}\n');
+    fs.writeFileSync(waiting, JSON.stringify({
+      active_locks: [],
+      waiting: [{ path: 'other/complete.ts', owner: 'su-waiting', intent: 'not active' }],
+    }));
+    fs.writeFileSync(basenameOnly, JSON.stringify({
+      active_locks: [{
+        path: 'packages/operator-core/lib/agent-tools/work_items/complete.ts',
+        owner: 'su-other',
+        intent: 'different path with same basename',
+      }],
+    }));
+    fs.writeFileSync(progressOnly, JSON.stringify({
+      active_locks: [{ path: progressPath, owner: 'su-progress', intent: 'unrelated active edit' }],
+    }));
+
+    const result = runSourceLockClassifier(buildLog, [malformed, waiting, basenameOnly, progressOnly]);
+    assert.equal(result.status, 0, `classifier exited ${result.status}: ${result.stderr}`);
+    assert.match(
+      result.stdout,
+      /^RESULT:$/m,
+      'anything short of an active lock whose full repository path appears literally must remain ordinary RED',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // Behavioral counterpart of the static "typed branch" test above: actually RUNS
 // the exact FAIL_BUILD block extracted from the shipped script and proves a
 // confirmed contention exits 0 with the typed verdict, records the same
@@ -172,6 +312,7 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
       'SKIP_MATRIX=0',
       'SKIP_FROMREPO=0',
       'BUILD_LOCK_CONTENTION="pid 3892704 (running 2419s): bash bin/repack-deb-xz.sh Papercusp_Server.deb"',
+      'BUILD_SOURCE_LOCK_CONTENTION=""',
       'log() { :; }', // real log() writes to stderr only — irrelevant here
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',
@@ -201,6 +342,46 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
   }
 });
 
+test('the real FAIL_BUILD branch banks a typed source-lock SKIP and exits before RED (behavioral)', () => {
+  assert(FAIL_BUILD_BLOCK, 'extraction failed');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-source-failbuild-'));
+  try {
+    const stateDir = path.join(tmp, 'state');
+    fs.mkdirSync(stateDir);
+    fs.writeFileSync(path.join(stateDir, 'last-red'), '111');
+    const workDir = path.join(tmp, 'work');
+    fs.mkdirSync(workDir);
+
+    const script = [
+      'set -uo pipefail',
+      `STATE_DIR=${JSON.stringify(stateDir)}`,
+      `WORK=${JSON.stringify(workDir)}`,
+      'FAIL_BUILD=1',
+      'SKIP_MATRIX=0',
+      'SKIP_FROMREPO=0',
+      'BUILD_LOCK_CONTENTION=""',
+      'BUILD_SOURCE_LOCK_CONTENTION="path=packages/operator-core/lib/agent-tools/work_items/complete.ts owner=su-f83cc intent=atomic edit"',
+      'log() { :; }',
+      'now_s() { echo 1700000000; }',
+      'check_staleness() { echo CHECK_STALENESS_CALLED; }',
+      'verdict() { echo "$1"; }',
+      FAIL_BUILD_BLOCK,
+      'echo UNREACHABLE_AFTER_SOURCE_CONTENTION_EXIT',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `expected a clean exit 0, got ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /GATE: SKIPPED-BUILD-SOURCE-LOCK-CONTENTION/);
+    assert.doesNotMatch(result.stdout, /GATE: RED/);
+    assert.doesNotMatch(result.stdout, /UNREACHABLE_AFTER_SOURCE_CONTENTION_EXIT/);
+    assert.match(result.stdout, /CHECK_STALENESS_CALLED/);
+    assert.equal(fs.existsSync(path.join(stateDir, 'last-downgrade')), true);
+    assert.equal(fs.existsSync(path.join(stateDir, 'last-red')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('the real FAIL_BUILD branch falls through to the ordinary RED path when contention was NOT confirmed', () => {
   assert(FAIL_BUILD_BLOCK, 'extraction failed');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-failbuild-fallthrough-'));
@@ -218,6 +399,7 @@ test('the real FAIL_BUILD branch falls through to the ordinary RED path when con
       'SKIP_MATRIX=0',
       'SKIP_FROMREPO=0',
       'BUILD_LOCK_CONTENTION=""', // unconfirmed — e.g. a genuine build defect
+      'BUILD_SOURCE_LOCK_CONTENTION=""',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',
