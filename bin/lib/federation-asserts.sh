@@ -108,6 +108,59 @@ fed_github_login_with_retry() {
   _fed_github_user_with_retry "$1" login "${2:-3}" "${3:-10}"
 }
 
+# preflight_github_rest_accounts [github-repo-url]
+#
+# Probe the exact authenticated REST read both federation smoke identities need
+# before launching a DHT and two heavyweight sidecars. GitHub can leave
+# /rate_limit and git-over-HTTPS healthy while credentialed repo reads return
+# 403/5xx; without this guard a credential outage becomes a product-shaped
+# discovery/join red after several minutes. Shared by live-federation-gate and
+# direct two-instance-hive-from-repo-smoke invocations so the two entrypoints
+# cannot drift on this classification again (WI-40905).
+preflight_github_rest_accounts() {
+  local repo_url="${1:-${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}}"
+  local repo_path api_url user token code attempt failed=0
+  local attempts="${GITHUB_REST_PREFLIGHT_ATTEMPTS:-3}"
+  local retry_delay="${GITHUB_REST_PREFLIGHT_RETRY_DELAY_SEC:-10}"
+
+  case "$repo_url" in
+    https://github.com/*) repo_path="${repo_url#https://github.com/}" ;;
+    git@github.com:*) repo_path="${repo_url#git@github.com:}" ;;
+    *)
+      echo "GITHUB_REST: code=unsupported_repo_url url=$repo_url"
+      return 1
+      ;;
+  esac
+  repo_path="${repo_path%.git}"; repo_path="${repo_path%/}"
+  api_url="https://api.github.com/repos/$repo_path"
+
+  for user in "${P_A_USER:-papercupai}" "${P_B_USER:-aviynw}"; do
+    token="$(gh auth token --user "$user" 2>/dev/null || true)"
+    if [ -z "$token" ]; then
+      echo "GITHUB_REST: user=$user code=token_missing detail=no-gh-token"
+      failed=1
+      continue
+    fi
+
+    code=000
+    for attempt in $(seq 1 "$attempts"); do
+      if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+        -H "Authorization: Bearer $token" "$api_url" 2>/dev/null)"; then
+        code=000
+      fi
+      [ "$code" = 200 ] && break
+      [ "$attempt" -lt "$attempts" ] && [ "$retry_delay" != 0 ] && sleep "$retry_delay"
+    done
+    if [ "$code" = 200 ]; then
+      echo "GITHUB_REST: user=$user code=ok http=200"
+    else
+      echo "GITHUB_REST: user=$user code=unhealthy http=$code attempts=$attempts"
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
 # scn_diag [prefix] — EI-18762718908280875: a scenario's diagnostic output only
 # SURVIVES a PASSING matrix run if every line starts with the `·` marker
 # (deb-hetzner-matrix.sh greps for it after a scenario returns 0 — see WI-6057).

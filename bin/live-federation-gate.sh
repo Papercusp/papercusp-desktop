@@ -1078,42 +1078,10 @@ P_B_USER="${P_B_USER:-aviynw}"
 # working — so the box looked healthy, but every run burned ~25 min into a false
 # RED that mimics a code regression (announced=False, publish.memberLinks=0).
 # Probe the exact call class the smokes need (authenticated REST read of the
-# fixture repo) for BOTH identities and SKIP loudly — like the load gate — when it is down:
-# environmental, not a failure. check_staleness still runs, so a persistent
-# outage trips the staleness EI instead of looking green.
-preflight_github_rest_accounts() {
-  local user token code attempt failed=0
-  for user in "$P_A_USER" "$P_B_USER"; do
-    token="$(gh auth token --user "$user" 2>/dev/null || true)"
-    if [ -z "$token" ]; then
-      # This identity is load-bearing for the smoke, so an absent token means the
-      # credentialed preflight did not run. Preserve that as a nonzero verdict;
-      # the caller will SKIP safely (or honour the explicit GATE_FORCE override)
-      # instead of letting an unchecked identity look preflight-green.
-      echo "GITHUB_REST: user=$user code=token_missing detail=no-gh-token"
-      failed=1
-      continue
-    fi
-
-    code=000
-    for attempt in 1 2 3; do
-      if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-        -H "Authorization: Bearer $token" \
-        https://api.github.com/repos/octocat/Hello-World 2>/dev/null)"; then
-        code=000
-      fi
-      [ "$code" = 200 ] && break
-      sleep 10
-    done
-    if [ "$code" = 200 ]; then
-      echo "GITHUB_REST: user=$user code=ok http=200"
-    else
-      echo "GITHUB_REST: user=$user code=unhealthy http=$code attempts=3"
-      failed=1
-    fi
-  done
-  return "$failed"
-}
+# fixture repo) for BOTH identities and SKIP loudly — like the load gate — when
+# it is down. The implementation lives in federation-asserts.sh because the
+# direct from-repo witness must apply the identical preflight before it boots a
+# rig; keeping a second local copy is the drift that caused WI-40905's false run.
 
 if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
   GH_PREFLIGHT_OUTPUT="$(preflight_github_rest_accounts 2>&1)"
