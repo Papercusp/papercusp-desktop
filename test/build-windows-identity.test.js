@@ -308,6 +308,25 @@ test('the Linux AppImage producer removes Tauri intermediates before audited pac
   );
 });
 
+test('the Linux AppImage producer preflights owner identity before toolchain work', () => {
+  const preflightAt = appimageScript.indexOf('python3 "$AUDIT_PY" --owner-preflight');
+  const metadataAt = appimageScript.indexOf('cargo metadata --no-deps --format-version 1');
+  const tauriAt = appimageScript.indexOf(
+    'npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage',
+  );
+
+  assert.ok(preflightAt >= 0, 'build-appimage.sh must fail fast on a missing owner-name assertion');
+  assert.ok(metadataAt >= 0, 'build-appimage.sh must retain Cargo target discovery');
+  assert.ok(tauriAt >= 0, 'build-appimage.sh must retain the Tauri AppDir producer');
+  assert.ok(preflightAt < metadataAt, 'owner-name preflight must precede Cargo metadata/toolchain work');
+  assert.ok(preflightAt < tauriAt, 'owner-name preflight must precede Tauri packaging');
+  assert.match(
+    appimageScript.slice(preflightAt, metadataAt),
+    /owner-name preflight failed.*AppImage build/i,
+    'the direct AppImage failure must identify the early owner-name boundary',
+  );
+});
+
 test('the Linux local release entrypoint claims one Cargo target slot before either role builds', () => {
   const claimAt = linuxScript.indexOf('source "$HERE/lib/claim-target-dir.sh"');
   const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
