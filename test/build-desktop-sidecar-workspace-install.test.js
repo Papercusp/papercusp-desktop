@@ -360,7 +360,22 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.doesNotMatch(postinstall, /ls -d \/usr\/lib\/Papercusp\*/);
   assert.match(postinstall, /^Icon=papercusp-server$/m);
   assert.match(postinstall, /deb-systemd-helper --quiet --user was-enabled "\$SERVER_USER_UNIT"/);
+  assert.match(
+    postinstall,
+    /LEGACY_SERVER_USER_LINK="\/etc\/systemd\/user\/graphical-session\.target\.wants\/\$SERVER_USER_UNIT"/,
+  );
+  assert.match(
+    postinstall,
+    /readlink "\$LEGACY_SERVER_USER_LINK"[^\n]+\/usr\/lib\/systemd\/user\/\$SERVER_USER_UNIT/,
+    'the migration must trust only the exact package-owned legacy link',
+  );
   assert.match(postinstall, /deb-systemd-helper --user reenable "\$SERVER_USER_UNIT"/);
+  assert.match(postinstall, /rm -f -- "\$LEGACY_SERVER_USER_LINK"/);
+  assert.ok(
+    postinstall.indexOf('deb-systemd-helper --user reenable "$SERVER_USER_UNIT"')
+      < postinstall.indexOf('rm -f -- "$LEGACY_SERVER_USER_LINK"'),
+    'the legacy link must be removed only after reenable succeeds',
+  );
   assert.doesNotMatch(
     postinstall,
     /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/,

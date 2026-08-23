@@ -27,24 +27,47 @@ set -e
 # user's HOME from this root maintainer script. `enable` creates the global
 # default.target.wants link on first install, so every user manager starts the
 # Server at its next login even when a lightweight desktop does not activate
-# graphical-session.target; `update-state` preserves an administrator's
-# explicit disable across upgrades.
+# graphical-session.target. An upgrade from the legacy target must also treat
+# that exact package-owned link as enabled evidence: a prior `enable` can append
+# the new state entry without creating its link, making `was-enabled` false on
+# the next upgrade even though the legacy link is still live. `update-state`
+# remains the disabled-install path.
 #
 # This maintainer script is shared by the GUI and Server overlays. Gate on the
 # binary package name so installing/upgrading the GUI cannot claim ownership of
 # the Server unit merely because the sibling product is already on disk.
 SERVER_USER_UNIT=papercusp-server.service
+LEGACY_SERVER_USER_LINK="/etc/systemd/user/graphical-session.target.wants/$SERVER_USER_UNIT"
 if [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
   && [ -z "${DPKG_ROOT:-}" ] \
   && command -v deb-systemd-helper >/dev/null 2>&1; then
   deb-systemd-helper --user unmask "$SERVER_USER_UNIT" >/dev/null || true
+  SERVER_USER_WAS_ENABLED=0
   if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
+    SERVER_USER_WAS_ENABLED=1
+  elif [ -L "$LEGACY_SERVER_USER_LINK" ] \
+    && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "/usr/lib/systemd/user/$SERVER_USER_UNIT" ]; then
+    SERVER_USER_WAS_ENABLED=1
+  fi
+
+  if [ "$SERVER_USER_WAS_ENABLED" = 1 ]; then
     # `enable` is deliberately first-install-only. When an upgrade changes the
     # unit's WantedBy target (graphical-session.target → default.target), it
     # sees the existing helper stamp and leaves the obsolete symlink in place.
     # `reenable` preserves the user's enabled choice while rebuilding links
     # from the CURRENT unit, which is exactly the upgrade migration required.
-    deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null || true
+    if deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null; then
+      # State may already have drifted to default.target while the legacy link
+      # remained live. Remove only the exact package-owned legacy link, and
+      # only after reenable successfully created the current target link.
+      if [ -L "$LEGACY_SERVER_USER_LINK" ] \
+        && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "/usr/lib/systemd/user/$SERVER_USER_UNIT" ]; then
+        rm -f -- "$LEGACY_SERVER_USER_LINK"
+        rmdir "$(dirname "$LEGACY_SERVER_USER_LINK")" 2>/dev/null || true
+      fi
+    else
+      echo "WARN: could not reenable $SERVER_USER_UNIT; preserving existing links" >&2
+    fi
   else
     deb-systemd-helper --user update-state "$SERVER_USER_UNIT" >/dev/null || true
   fi
