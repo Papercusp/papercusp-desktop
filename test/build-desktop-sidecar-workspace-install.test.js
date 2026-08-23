@@ -372,19 +372,23 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   );
   assert.match(
     postinstall,
+    /CURRENT_SERVER_USER_STATE="\/var\/lib\/systemd\/deb-systemd-user-helper-enabled\/default\.target\.wants\/\$SERVER_USER_UNIT"/,
+  );
+  assert.match(
+    postinstall,
     /LEGACY_SERVER_USER_STATE="\/var\/lib\/systemd\/deb-systemd-user-helper-enabled\/graphical-session\.target\.wants\/\$SERVER_USER_UNIT"/,
   );
   assert.match(
     postinstall,
-    /readlink "\$LEGACY_SERVER_USER_LINK"[^\n]+\$SERVER_USER_PATH/,
-    'the migration must trust only the exact package-owned legacy link',
+    /readlink -f -- "\$1"[^\n]+\$SERVER_USER_PATH/,
+    'link ownership must compare canonical package paths so /lib and /usr/lib aliases agree',
   );
+  assert.match(postinstall, /server_user_link_is_package_owned "\$LEGACY_SERVER_USER_LINK"/);
   assert.match(postinstall, /deb-systemd-helper --user reenable "\$SERVER_USER_UNIT"/);
-  assert.match(
-    postinstall,
-    /readlink "\$CURRENT_SERVER_USER_LINK"[^\n]+\$SERVER_USER_PATH/,
-    'reenable must be verified against the exact current package-owned link',
-  );
+  assert.match(postinstall, /server_user_link_is_package_owned "\$CURRENT_SERVER_USER_LINK"/);
+  assert.match(postinstall, /SERVER_USER_NEEDS_STATE_REPAIR=0/);
+  assert.match(postinstall, /SERVER_USER_NEEDS_STATE_REPAIR=1/);
+  assert.match(postinstall, /rm -f -- "\$CURRENT_SERVER_USER_STATE"/);
   assert.match(postinstall, /rm -f -- "\$LEGACY_SERVER_USER_LINK"/);
   assert.match(postinstall, /rm -f -- "\$LEGACY_SERVER_USER_STATE"/);
   const debianInstalledIndex = postinstall.indexOf(
@@ -401,12 +405,17 @@ test('Linux Server deb installs and package-enables one systemd user service', (
     'fresh installs must enable before the upgrade-only enabled-state branch',
   );
   assert.ok(
+    postinstall.indexOf('rm -f -- "$CURRENT_SERVER_USER_STATE"')
+      < postinstall.indexOf('deb-systemd-helper --user reenable "$SERVER_USER_UNIT"'),
+    'the exact blocking helper stamp must be cleared before reenable',
+  );
+  assert.ok(
     postinstall.indexOf('deb-systemd-helper --user reenable "$SERVER_USER_UNIT"')
-      < postinstall.indexOf('readlink "$CURRENT_SERVER_USER_LINK"'),
+      < postinstall.indexOf('server_user_link_is_package_owned "$CURRENT_SERVER_USER_LINK"'),
     'the current link must be checked only after reenable runs',
   );
   assert.ok(
-    postinstall.indexOf('readlink "$CURRENT_SERVER_USER_LINK"')
+    postinstall.indexOf('server_user_link_is_package_owned "$CURRENT_SERVER_USER_LINK"')
       < postinstall.indexOf('rm -f -- "$LEGACY_SERVER_USER_STATE"'),
     'legacy recovery state must survive until the current link is proven',
   );

@@ -44,7 +44,14 @@ SERVER_USER_UNIT=papercusp-server.service
 SERVER_USER_PATH="/usr/lib/systemd/user/$SERVER_USER_UNIT"
 CURRENT_SERVER_USER_LINK="/etc/systemd/user/default.target.wants/$SERVER_USER_UNIT"
 LEGACY_SERVER_USER_LINK="/etc/systemd/user/graphical-session.target.wants/$SERVER_USER_UNIT"
+CURRENT_SERVER_USER_STATE="/var/lib/systemd/deb-systemd-user-helper-enabled/default.target.wants/$SERVER_USER_UNIT"
 LEGACY_SERVER_USER_STATE="/var/lib/systemd/deb-systemd-user-helper-enabled/graphical-session.target.wants/$SERVER_USER_UNIT"
+
+server_user_link_is_package_owned() {
+  [ -L "$1" ] \
+    && [ "$(readlink -f -- "$1" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]
+}
+
 if [ -f "$SERVER_USER_PATH" ] \
   && [ -z "${DPKG_ROOT:-}" ] \
   && command -v deb-systemd-helper >/dev/null 2>&1; then
@@ -57,23 +64,29 @@ if [ -f "$SERVER_USER_PATH" ] \
     fi
   else
     SERVER_USER_WAS_ENABLED=0
+    SERVER_USER_NEEDS_STATE_REPAIR=0
     if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
       SERVER_USER_WAS_ENABLED=1
-    elif [ -L "$LEGACY_SERVER_USER_LINK" ] \
-      && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
+    elif server_user_link_is_package_owned "$LEGACY_SERVER_USER_LINK"; then
       SERVER_USER_WAS_ENABLED=1
+      SERVER_USER_NEEDS_STATE_REPAIR=1
     elif [ -f "$LEGACY_SERVER_USER_STATE" ]; then
       # One-time repair for the earlier state-only migration. This exact stale
       # package-helper entry is removed after the current link is proven.
       SERVER_USER_WAS_ENABLED=1
+      SERVER_USER_NEEDS_STATE_REPAIR=1
     fi
 
     if [ "$SERVER_USER_WAS_ENABLED" = 1 ]; then
+      if [ "$SERVER_USER_NEEDS_STATE_REPAIR" = 1 ]; then
+        # make_systemd_links deliberately skips a link whose per-link state
+        # stamp already exists. Remove only the exact CURRENT stamp stranded by
+        # the old migration so reenable can recreate both link and stamp.
+        rm -f -- "$CURRENT_SERVER_USER_STATE"
+      fi
       if deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null; then
-        if [ -L "$CURRENT_SERVER_USER_LINK" ] \
-          && [ "$(readlink "$CURRENT_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
-          if [ -L "$LEGACY_SERVER_USER_LINK" ] \
-            && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
+        if server_user_link_is_package_owned "$CURRENT_SERVER_USER_LINK"; then
+          if server_user_link_is_package_owned "$LEGACY_SERVER_USER_LINK"; then
             rm -f -- "$LEGACY_SERVER_USER_LINK"
             rmdir "$(dirname "$LEGACY_SERVER_USER_LINK")" 2>/dev/null || true
           fi
