@@ -46,7 +46,7 @@ function compileFixtureTree() {
     return file;
   };
   const compile = (output, input, args = []) => {
-    const result = spawnSync(CC, ['-shared', '-fPIC', '-Wl,-z,now', ...args, '-o', output, input], {
+    const result = spawnSync(CC, ['-shared', '-fPIC', '-Wl,-z,now', '-o', output, input, ...args], {
       encoding: 'utf8',
     });
     assert.equal(result.status, 0, `fixture compile failed: ${result.stdout}${result.stderr}`);
