@@ -1062,6 +1062,12 @@ else
   echo "ADMISSION: PROCEED ($ADMIT_SIGNAL $ADMIT_VALUE <= $ADMIT_GATE; $ADMIT_CONTEXT)"
 fi
 
+# Both real smoke identities are load-bearing. Keep these definitions ahead of every
+# credential preflight so the cheap gate-start probe and the post-content-matrix recheck use
+# exactly the same account set as the smokes themselves.
+P_A_USER="${P_A_USER:-papercupai}"
+P_B_USER="${P_B_USER:-aviynw}"
+
 # ── 1b. GitHub credentialed-REST preflight (2026-07-16 outage class) ───────────
 # The smokes create/publish hives from REAL GitHub repos using the smoke accounts'
 # tokens (fetchGithubRepoMeta repo-id lookup, resolveOwner attestation). On
@@ -1070,35 +1076,54 @@ fi
 # working — so the box looked healthy, but every run burned ~25 min into a false
 # RED that mimics a code regression (announced=False, publish.memberLinks=0).
 # Probe the exact call class the smokes need (authenticated REST read of the
-# fixture repo) and SKIP loudly — like the load gate — when it is down:
+# fixture repo) for BOTH identities and SKIP loudly — like the load gate — when it is down:
 # environmental, not a failure. check_staleness still runs, so a persistent
 # outage trips the staleness EI instead of looking green.
-if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
-  GH_PREFLIGHT_USER="${GATE_GH_USER:-papercupai}"
-  GH_PREFLIGHT_TOKEN="$(gh auth token --user "$GH_PREFLIGHT_USER" 2>/dev/null || true)"
-  if [ -z "$GH_PREFLIGHT_TOKEN" ]; then
-    # No token is a local misconfig, not the outage class — let the smoke surface it.
-    log "WARN: no gh token for $GH_PREFLIGHT_USER — cannot preflight credentialed GitHub REST; proceeding."
-  else
-    GH_CODE=000
-    for _try in 1 2 3; do
-      GH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-        -H "Authorization: Bearer $GH_PREFLIGHT_TOKEN" \
-        https://api.github.com/repos/octocat/Hello-World 2>/dev/null || echo 000)"
-      [ "$GH_CODE" = 200 ] && break
+preflight_github_rest_accounts() {
+  local user token code attempt failed=0
+  for user in "$P_A_USER" "$P_B_USER"; do
+    token="$(gh auth token --user "$user" 2>/dev/null || true)"
+    if [ -z "$token" ]; then
+      # No token is a local misconfig, not the outage class — let the smoke surface it.
+      echo "GITHUB_REST: user=$user code=token_missing detail=no-gh-token; smoke-will-surface"
+      continue
+    fi
+
+    code=000
+    for attempt in 1 2 3; do
+      if ! code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+        -H "Authorization: Bearer $token" \
+        https://api.github.com/repos/octocat/Hello-World 2>/dev/null)"; then
+        code=000
+      fi
+      [ "$code" = 200 ] && break
       sleep 10
     done
-    if [ "$GH_CODE" != 200 ]; then
-      if [ "${GATE_FORCE:-0}" = 1 ]; then
-        log "credentialed GitHub REST unhealthy (HTTP $GH_CODE) but GATE_FORCE=1 — proceeding anyway."
-      else
-        log "SKIP: credentialed GitHub REST unhealthy (HTTP $GH_CODE for $GH_PREFLIGHT_USER after 3 tries) — smokes would false-RED (announced=False/memberLinks=0); retry next window (not a failure)."
-        check_staleness
-        skip_cleanup
-        verdict "GATE: SKIPPED (github-api-unhealthy HTTP $GH_CODE)"; exit 0
-      fi
+    if [ "$code" = 200 ]; then
+      echo "GITHUB_REST: user=$user code=ok http=200"
     else
-      log "credentialed GitHub REST OK (200 for $GH_PREFLIGHT_USER); proceeding."
+      echo "GITHUB_REST: user=$user code=unhealthy http=$code attempts=3"
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
+  GH_PREFLIGHT_OUTPUT="$(preflight_github_rest_accounts 2>&1)"
+  GH_PREFLIGHT_RC=$?
+  while IFS= read -r GH_PREFLIGHT_LINE; do
+    [ -n "$GH_PREFLIGHT_LINE" ] && log "$GH_PREFLIGHT_LINE"
+  done <<<"$GH_PREFLIGHT_OUTPUT"
+  if [ "$GH_PREFLIGHT_RC" -ne 0 ]; then
+    GH_PREFLIGHT_SUMMARY="$(printf '%s' "$GH_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
+    if [ "${GATE_FORCE:-0}" = 1 ]; then
+      log "credentialed GitHub REST unhealthy for a smoke identity but GATE_FORCE=1 — proceeding anyway: $GH_PREFLIGHT_SUMMARY"
+    else
+      log "SKIP: credentialed GitHub REST unhealthy for a smoke identity — smokes would false-RED (announced=False/memberLinks=0); retry next window (not a failure): $GH_PREFLIGHT_SUMMARY"
+      check_staleness
+      skip_cleanup
+      verdict "GATE: SKIPPED (github-api-unhealthy-before-build $GH_PREFLIGHT_SUMMARY)"; exit 0
     fi
   fi
 fi
@@ -1199,8 +1224,6 @@ local_matrix_due() {
   return 0
 }
 
-P_A_USER="${P_A_USER:-papercupai}"
-P_B_USER="${P_B_USER:-aviynw}"
 ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
 ATTESTATION_PREFLIGHT_RC=$?
 ATTESTATION_BLOCKED=0
@@ -1726,6 +1749,26 @@ fi
 # fired 2026-07-31 (23:00Z, 00:02Z) while this file still described the leg as expected.
 FROMREPO_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
 WITNESS_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
+if [ "$SKIP_FROMREPO" != 1 ] && [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
+  GH_FROMREPO_PREFLIGHT_OUTPUT="$(preflight_github_rest_accounts 2>&1)"
+  GH_FROMREPO_PREFLIGHT_RC=$?
+  while IFS= read -r GH_FROMREPO_PREFLIGHT_LINE; do
+    [ -n "$GH_FROMREPO_PREFLIGHT_LINE" ] && log "$GH_FROMREPO_PREFLIGHT_LINE"
+  done <<<"$GH_FROMREPO_PREFLIGHT_OUTPUT"
+  if [ "$GH_FROMREPO_PREFLIGHT_RC" -ne 0 ]; then
+    GH_FROMREPO_PREFLIGHT_SUMMARY="$(printf '%s' "$GH_FROMREPO_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
+    if [ "${GATE_FORCE:-0}" = 1 ]; then
+      log "credentialed GitHub REST became unhealthy before from-repo but GATE_FORCE=1 — proceeding anyway: $GH_FROMREPO_PREFLIGHT_SUMMARY"
+    else
+      FROMREPO_RES="SKIPPED-GITHUB-API"
+      WITNESS_RES="SKIPPED-GITHUB-API"
+      SUMMARY="content-matrix=$MATRIX_RES from-repo=$FROMREPO_RES from-repo-witness=$WITNESS_RES local-matrix=${MATRIXFULL_RES:-SKIPPED} build=$([ "$FAIL_BUILD" = 1 ] && echo FAIL || echo OK)"
+      log "credentialed GitHub REST became unhealthy before from-repo — refusing a product-looking false RED: $GH_FROMREPO_PREFLIGHT_SUMMARY"
+      check_staleness
+      verdict "GATE: PARTIAL (github-api-unhealthy-before-from-repo) — $SUMMARY; $GH_FROMREPO_PREFLIGHT_SUMMARY"; exit 1
+    fi
+  fi
+fi
 if [ "$SKIP_FROMREPO" != 1 ]; then
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
     HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
