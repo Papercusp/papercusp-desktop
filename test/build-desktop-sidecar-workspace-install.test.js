@@ -359,27 +359,56 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.match(postinstall, /SC="\/usr\/lib\/Papercusp Server\/sidecar"/);
   assert.doesNotMatch(postinstall, /ls -d \/usr\/lib\/Papercusp\*/);
   assert.match(postinstall, /^Icon=papercusp-server$/m);
+  assert.match(postinstall, /deb-systemd-helper --quiet --user debian-installed "\$SERVER_USER_UNIT"/);
+  assert.match(postinstall, /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/);
   assert.match(postinstall, /deb-systemd-helper --quiet --user was-enabled "\$SERVER_USER_UNIT"/);
+  assert.match(
+    postinstall,
+    /CURRENT_SERVER_USER_LINK="\/etc\/systemd\/user\/default\.target\.wants\/\$SERVER_USER_UNIT"/,
+  );
   assert.match(
     postinstall,
     /LEGACY_SERVER_USER_LINK="\/etc\/systemd\/user\/graphical-session\.target\.wants\/\$SERVER_USER_UNIT"/,
   );
   assert.match(
     postinstall,
-    /readlink "\$LEGACY_SERVER_USER_LINK"[^\n]+\/usr\/lib\/systemd\/user\/\$SERVER_USER_UNIT/,
+    /LEGACY_SERVER_USER_STATE="\/var\/lib\/systemd\/deb-systemd-user-helper-enabled\/graphical-session\.target\.wants\/\$SERVER_USER_UNIT"/,
+  );
+  assert.match(
+    postinstall,
+    /readlink "\$LEGACY_SERVER_USER_LINK"[^\n]+\$SERVER_USER_PATH/,
     'the migration must trust only the exact package-owned legacy link',
   );
   assert.match(postinstall, /deb-systemd-helper --user reenable "\$SERVER_USER_UNIT"/);
+  assert.match(
+    postinstall,
+    /readlink "\$CURRENT_SERVER_USER_LINK"[^\n]+\$SERVER_USER_PATH/,
+    'reenable must be verified against the exact current package-owned link',
+  );
   assert.match(postinstall, /rm -f -- "\$LEGACY_SERVER_USER_LINK"/);
+  assert.match(postinstall, /rm -f -- "\$LEGACY_SERVER_USER_STATE"/);
+  const debianInstalledIndex = postinstall.indexOf(
+    'deb-systemd-helper --quiet --user debian-installed "$SERVER_USER_UNIT"',
+  );
+  const firstInstallEnableIndex = postinstall.indexOf(
+    'deb-systemd-helper --user enable "$SERVER_USER_UNIT"',
+  );
+  const wasEnabledIndex = postinstall.indexOf(
+    'deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"',
+  );
+  assert.ok(
+    debianInstalledIndex < firstInstallEnableIndex && firstInstallEnableIndex < wasEnabledIndex,
+    'fresh installs must enable before the upgrade-only enabled-state branch',
+  );
   assert.ok(
     postinstall.indexOf('deb-systemd-helper --user reenable "$SERVER_USER_UNIT"')
-      < postinstall.indexOf('rm -f -- "$LEGACY_SERVER_USER_LINK"'),
-    'the legacy link must be removed only after reenable succeeds',
+      < postinstall.indexOf('readlink "$CURRENT_SERVER_USER_LINK"'),
+    'the current link must be checked only after reenable runs',
   );
-  assert.doesNotMatch(
-    postinstall,
-    /deb-systemd-helper --user enable "\$SERVER_USER_UNIT"/,
-    'plain enable is first-install-only and cannot migrate a changed WantedBy target',
+  assert.ok(
+    postinstall.indexOf('readlink "$CURRENT_SERVER_USER_LINK"')
+      < postinstall.indexOf('rm -f -- "$LEGACY_SERVER_USER_STATE"'),
+    'legacy recovery state must survive until the current link is proven',
   );
   assert.match(postinstall, /deb-systemd-helper --user update-state "\$SERVER_USER_UNIT"/);
   assert.match(postremove, /deb-systemd-helper --user purge papercusp-server\.service/);

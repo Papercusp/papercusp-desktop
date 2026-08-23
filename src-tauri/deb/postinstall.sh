@@ -24,52 +24,70 @@ set -e
 
 # The Linux Server is a real, package-owned systemd user service. Use Debian's
 # standard package-wide user-unit helper rather than reaching into one logged-in
-# user's HOME from this root maintainer script. `enable` creates the global
-# default.target.wants link on first install, so every user manager starts the
-# Server at its next login even when a lightweight desktop does not activate
-# graphical-session.target. An upgrade from the legacy target must also treat
-# that exact package-owned link as enabled evidence: a prior `enable` can append
-# the new state entry without creating its link, making `was-enabled` false on
-# the next upgrade even though the legacy link is still live. `update-state`
-# remains the disabled-install path.
+# user's HOME from this root maintainer script. A fresh install must call
+# `enable`; an upgrade must preserve the administrator's existing choice via
+# `was-enabled`, using `reenable` only when the unit was enabled. `update-state`
+# remains the deliberately-disabled upgrade path.
+#
+# The first default.target migration accidentally called `enable` on an already
+# installed unit. Debian deliberately makes that action first-install-only, so
+# it updated helper state without creating the new link. The obsolete helper
+# state file is therefore one-time evidence of an install stranded by that
+# migration even when the obsolete real link has already disappeared. Once the
+# current link is rebuilt, remove that exact stale state entry; a later explicit
+# user disable then remains respected on future upgrades.
 #
 # This maintainer script is shared by the GUI and Server overlays. Gate on the
 # binary package name so installing/upgrading the GUI cannot claim ownership of
 # the Server unit merely because the sibling product is already on disk.
 SERVER_USER_UNIT=papercusp-server.service
+SERVER_USER_PATH="/usr/lib/systemd/user/$SERVER_USER_UNIT"
+CURRENT_SERVER_USER_LINK="/etc/systemd/user/default.target.wants/$SERVER_USER_UNIT"
 LEGACY_SERVER_USER_LINK="/etc/systemd/user/graphical-session.target.wants/$SERVER_USER_UNIT"
-if [ -f "/usr/lib/systemd/user/$SERVER_USER_UNIT" ] \
+LEGACY_SERVER_USER_STATE="/var/lib/systemd/deb-systemd-user-helper-enabled/graphical-session.target.wants/$SERVER_USER_UNIT"
+if [ -f "$SERVER_USER_PATH" ] \
   && [ -z "${DPKG_ROOT:-}" ] \
   && command -v deb-systemd-helper >/dev/null 2>&1; then
   deb-systemd-helper --user unmask "$SERVER_USER_UNIT" >/dev/null || true
-  SERVER_USER_WAS_ENABLED=0
-  if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
-    SERVER_USER_WAS_ENABLED=1
-  elif [ -L "$LEGACY_SERVER_USER_LINK" ] \
-    && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "/usr/lib/systemd/user/$SERVER_USER_UNIT" ]; then
-    SERVER_USER_WAS_ENABLED=1
-  fi
-
-  if [ "$SERVER_USER_WAS_ENABLED" = 1 ]; then
-    # `enable` is deliberately first-install-only. When an upgrade changes the
-    # unit's WantedBy target (graphical-session.target → default.target), it
-    # sees the existing helper stamp and leaves the obsolete symlink in place.
-    # `reenable` preserves the user's enabled choice while rebuilding links
-    # from the CURRENT unit, which is exactly the upgrade migration required.
-    if deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null; then
-      # State may already have drifted to default.target while the legacy link
-      # remained live. Remove only the exact package-owned legacy link, and
-      # only after reenable successfully created the current target link.
-      if [ -L "$LEGACY_SERVER_USER_LINK" ] \
-        && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "/usr/lib/systemd/user/$SERVER_USER_UNIT" ]; then
-        rm -f -- "$LEGACY_SERVER_USER_LINK"
-        rmdir "$(dirname "$LEGACY_SERVER_USER_LINK")" 2>/dev/null || true
-      fi
-    else
-      echo "WARN: could not reenable $SERVER_USER_UNIT; preserving existing links" >&2
+  if ! deb-systemd-helper --quiet --user debian-installed "$SERVER_USER_UNIT"; then
+    # The helper's `enable` action is intentionally first-install-only. It
+    # applies the system preset and records the package-owned links.
+    if ! deb-systemd-helper --user enable "$SERVER_USER_UNIT" >/dev/null; then
+      echo "WARN: could not enable $SERVER_USER_UNIT on first install" >&2
     fi
   else
-    deb-systemd-helper --user update-state "$SERVER_USER_UNIT" >/dev/null || true
+    SERVER_USER_WAS_ENABLED=0
+    if deb-systemd-helper --quiet --user was-enabled "$SERVER_USER_UNIT"; then
+      SERVER_USER_WAS_ENABLED=1
+    elif [ -L "$LEGACY_SERVER_USER_LINK" ] \
+      && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
+      SERVER_USER_WAS_ENABLED=1
+    elif [ -f "$LEGACY_SERVER_USER_STATE" ]; then
+      # One-time repair for the earlier state-only migration. This exact stale
+      # package-helper entry is removed after the current link is proven.
+      SERVER_USER_WAS_ENABLED=1
+    fi
+
+    if [ "$SERVER_USER_WAS_ENABLED" = 1 ]; then
+      if deb-systemd-helper --user reenable "$SERVER_USER_UNIT" >/dev/null; then
+        if [ -L "$CURRENT_SERVER_USER_LINK" ] \
+          && [ "$(readlink "$CURRENT_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
+          if [ -L "$LEGACY_SERVER_USER_LINK" ] \
+            && [ "$(readlink "$LEGACY_SERVER_USER_LINK" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]; then
+            rm -f -- "$LEGACY_SERVER_USER_LINK"
+            rmdir "$(dirname "$LEGACY_SERVER_USER_LINK")" 2>/dev/null || true
+          fi
+          rm -f -- "$LEGACY_SERVER_USER_STATE"
+          rmdir "$(dirname "$LEGACY_SERVER_USER_STATE")" 2>/dev/null || true
+        else
+          echo "WARN: reenable did not create $CURRENT_SERVER_USER_LINK; preserving recovery evidence" >&2
+        fi
+      else
+        echo "WARN: could not reenable $SERVER_USER_UNIT; preserving existing links" >&2
+      fi
+    else
+      deb-systemd-helper --user update-state "$SERVER_USER_UNIT" >/dev/null || true
+    fi
   fi
 fi
 
