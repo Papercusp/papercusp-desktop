@@ -285,6 +285,9 @@ sc_launch() {
   mkdir -p "$home/.config" "$home/.papercusp"
   ln -sf "$HOME/.config/gh" "$home/.config/gh"
   ln -sf "$HOME/.gitconfig" "$home/.gitconfig" 2>/dev/null || true
+  # This local launcher is headless and intentionally detaches from its
+  # short-lived shell; opt out of the real-desktop parent-death watch so
+  # expected reparenting cannot self-terminate the witness.
   ( cd "$SIDECAR_SRC"
     # r7 fix (EI-13590/WI-953, 2026-07-17): this local sc_launch had drifted from
     # the canonical fed_local_launch_sidecar() in federation-asserts.sh in two
@@ -330,6 +333,7 @@ sc_launch() {
         HOME="$home" \
         PATH="$SIDECAR_SRC/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
+        PAPERCUSP_PARENT_DEATH_WATCH=0 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
         PAPERCUSP_BACKGROUND_WORKERS=1 \
         PAPERCUSP_DHT_HOST= \

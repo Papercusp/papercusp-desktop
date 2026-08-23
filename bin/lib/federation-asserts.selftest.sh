@@ -346,6 +346,12 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   elif [ "$fn" = fed_local_launch_sidecar ]; then
     bad "$fn no longer scrubs ambient GH_TOKEN/GITHUB_TOKEN (EI-20241165263819645)"
   fi
+  if [ "$fn" = fed_local_launch_sidecar ] \
+    && grep -q 'PAPERCUSP_PARENT_DEATH_WATCH=0' <<<"$body"; then
+    ok "$fn opts out of the desktop parent-death watch for detached headless sidecars (EI-21255273747013942)"
+  elif [ "$fn" = fed_local_launch_sidecar ]; then
+    bad "$fn no longer opts out of PAPERCUSP_PARENT_DEATH_WATCH for detached headless sidecars (EI-21255273747013942)"
+  fi
 done
 
 
@@ -391,6 +397,11 @@ if grep -q -- '-u PAPERCUSP_HOME' "$SC_LAUNCH_FILE"; then
   ok "two-instance-hive-from-repo-smoke sc_launch scrubs ambient PAPERCUSP_HOME (EI-15308)"
 else
   bad "two-instance-hive-from-repo-smoke sc_launch no longer scrubs PAPERCUSP_HOME (EI-15308 regression)"
+fi
+if grep -q 'PAPERCUSP_PARENT_DEATH_WATCH=0' "$SC_LAUNCH_FILE"; then
+  ok "two-instance-hive-from-repo-smoke sc_launch opts out of the desktop parent-death watch for detached headless sidecars (EI-21255273747013942)"
+else
+  bad "two-instance-hive-from-repo-smoke sc_launch no longer opts out of PAPERCUSP_PARENT_DEATH_WATCH for detached headless sidecars (EI-21255273747013942)"
 fi
 
 # 7c) WI-37222 — SUBSET-FAILURE HONESTY + EVIDENCE PRESERVATION.

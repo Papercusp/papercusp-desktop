@@ -614,6 +614,10 @@ fed_local_launch_sidecar() {
   # via a standalone single-instance repro. Same leak class as the
   # DATABASE_URL family above (WI-1666) and PAPERCUSP_BACKGROUND_WORKERS
   # (EI-13590) — an unlisted `env VAR=val cmd` var is inherited, never cleared.
+  # This launcher is a headless shell-owned sidecar, not a Tauri child. The
+  # shell deliberately exits after setsid/nohup detaches serve.mjs; applying
+  # the desktop parent-death watch here would interpret that expected
+  # reparenting as an orphan and kill the witness during boot.
   ( cd "$side"
     env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL \
         -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
@@ -621,6 +625,7 @@ fed_local_launch_sidecar() {
         HOME="$home" \
         PATH="$side/bin:$(dirname "$(command -v node)"):$PATH" \
         NODE_ENV=production PAPERCUSP_DESKTOP=1 \
+        PAPERCUSP_PARENT_DEATH_WATCH=0 \
         PAPERCUSP_BIND_HOST=127.0.0.1 HOSTNAME=127.0.0.1 \
         PAPERCUSP_BACKGROUND_WORKERS=1 \
         PAPERCUSP_DHT_HOST= \
