@@ -310,7 +310,11 @@ test('Linux Server deb installs and package-enables one systemd user service', (
 
   assert.match(unit, /^\[Unit\]$/m);
   assert.match(unit, /^ConditionFileIsExecutable=\/usr\/bin\/papercusp-server$/m);
-  assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server$/m);
+  assert.match(
+    unit,
+    /^Environment="PAPERCUSP_SIDECAR_DIR=\/usr\/lib\/Papercusp Server\/sidecar"$/m,
+  );
+  assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server --headless-service$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^KillMode=mixed$/m);
   assert.match(unit, /^WantedBy=default\.target$/m);
@@ -429,6 +433,15 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.match(rustMain, /#\[cfg\(not\(target_os = "linux"\)\)\]\s+fn enable_login_autostart/s);
   assert.match(rustMain, /#\[cfg\(target_os = "linux"\)\]\s+fn enable_login_autostart/s);
   assert.match(rustMain, /login auto-start is managed by papercusp-server\.service/);
+  const headlessGate = rustMain.indexOf('if headless_service_requested(std::env::args_os())');
+  const tauriBuilder = rustMain.indexOf('let base = tauri::Builder::default()');
+  assert.ok(headlessGate >= 0, 'Linux service flag must have an explicit pre-Tauri branch');
+  assert.ok(
+    headlessGate < tauriBuilder,
+    'the headless service branch must run before Tauri/GTK initialization',
+  );
+  assert.match(rustMain, /fn run_linux_headless_service\(\) -> !/);
+  assert.match(rustMain, /spawn_serve\([\s\S]*?&INSTALL_DEFECT/);
 });
 
 test('sidecar ships the standalone project-history generator with the shared ESM banner', () => {

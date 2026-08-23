@@ -8105,7 +8105,131 @@ mod dmabuf_render_tests {
     }
 }
 
+const HEADLESS_SERVICE_ARG: &str = "--headless-service";
+
+fn headless_service_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == std::ffi::OsStr::new(HEADLESS_SERVICE_ARG))
+}
+
+/// Linux's package-owned user service starts at `default.target`, before a
+/// graphical session is guaranteed to exist. Entering Tauri there initializes
+/// GTK before `setup()` can discover the Server role and panics with "Failed to
+/// initialize GTK". The service therefore uses the same `spawn_serve` contract
+/// as the desktop Server shell, but takes this pre-Tauri branch and remains the
+/// systemd-owned parent of `serve.mjs`.
+///
+/// `PAPERCUSP_SIDECAR_DIR` is supplied by the Debian unit because the resource
+/// root is a packaging fact (`/usr/lib/Papercusp Server/sidecar`), not something
+/// a `/usr/bin` binary can derive from its own executable path. `spawn_serve`
+/// still owns every runtime env/path decision, so this is not a second headless
+/// launch recipe that can drift from the desktop path.
+#[cfg(target_os = "linux")]
+fn run_linux_headless_service() -> ! {
+    let sidecar_dir = match std::env::var_os("PAPERCUSP_SIDECAR_DIR") {
+        Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
+        _ => {
+            eprintln!(
+                "[papercusp-server] FATAL: {HEADLESS_SERVICE_ARG} requires PAPERCUSP_SIDECAR_DIR"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(error) = workspaces::ensure_initialized() {
+        eprintln!(
+            "[papercusp-server] workspace registry init failed: {error} (continuing with shared home)"
+        );
+    }
+    let workspace_home = workspaces::shared_sidecar_home();
+    let shared_state_dir = workspaces::shared_data_dir();
+    if let Err(error) = std::fs::create_dir_all(&shared_state_dir) {
+        eprintln!(
+            "[papercusp-server] could not create shared state dir {}: {error}",
+            shared_state_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    let port_hint = find_free_port().unwrap_or_else(|| {
+        eprintln!("[papercusp-server] no free operator port available");
+        std::process::exit(1);
+    });
+    let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
+    println!(
+        "[papercusp-server] Linux headless service: sidecar={} operator_hint={} pg_hint={}",
+        sidecar_dir.display(),
+        port_hint,
+        pg_port_hint
+    );
+
+    let mut child = match spawn_serve(
+        false,
+        port_hint,
+        &sidecar_dir,
+        pg_port_hint,
+        &shared_state_dir,
+        &workspace_home,
+        &INSTALL_DEFECT,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("[papercusp-server] failed to spawn headless operator: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let status = child.wait();
+    eprintln!("[papercusp-server] headless operator exited: {status:?}");
+
+    // `serve --ensure` exits 0 when it found an already-healthy singleton. In
+    // that narrow handoff case, stay active while the discovered operator is
+    // healthy instead of making systemd restart this shell every five seconds.
+    // Once it disappears, exit non-zero so Restart=on-failure creates a fresh
+    // owned operator.
+    if status.as_ref().is_ok_and(|status| status.success()) {
+        while find_operator_discovery(&workspace_home, false)
+            .as_ref()
+            .is_some_and(|discovery| {
+                discovery_pid_alive(discovery.pid, false) && operator_http_ready(discovery.port)
+            })
+        {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+    std::process::exit(1);
+}
+
+#[cfg(test)]
+mod headless_service_arg_tests {
+    use super::headless_service_requested;
+
+    #[test]
+    fn only_the_explicit_headless_service_flag_bypasses_tauri() {
+        assert!(headless_service_requested([
+            "papercusp-server",
+            "--headless-service"
+        ]));
+        assert!(!headless_service_requested(["papercusp-server"]));
+        assert!(!headless_service_requested([
+            "papercusp-server",
+            "--headless"
+        ]));
+    }
+}
+
 pub fn run() {
+    // Must precede `tauri::Builder::default()`: the whole purpose of the Linux
+    // service entrypoint is to avoid initializing GTK when no display exists.
+    #[cfg(target_os = "linux")]
+    if headless_service_requested(std::env::args_os()) {
+        run_linux_headless_service();
+    }
+
     // Before anything opens an fd or spawns a child: lift THIS process's fd soft
     // limit off the 256 macOS hands a GUI app. rlimits inherit across fork/exec,
     // so one call here also covers every NON-node child (gateway sidecar,

@@ -5,7 +5,8 @@ ConditionFileIsExecutable=/usr/bin/papercusp-server
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/papercusp-server
+Environment="PAPERCUSP_SIDECAR_DIR=/usr/lib/Papercusp Server/sidecar"
+ExecStart=/usr/bin/papercusp-server --headless-service
 Restart=on-failure
 RestartSec=5s
 KillMode=mixed
