@@ -17,6 +17,13 @@ function updaterFunction() {
   return vmctl.slice(start, end);
 }
 
+function guiPasteFunction() {
+  const start = vmctl.indexOf('cmd_gui_paste()');
+  const end = vmctl.indexOf('\n# A QEMU screendump', start);
+  assert(start >= 0 && end > start, 'cmd_gui_paste must exist before screenshot helpers');
+  return vmctl.slice(start, end);
+}
+
 function mainWindowVisible(tree) {
   const result = spawnSync(
     'bash',
@@ -142,6 +149,16 @@ test('vmctl GUI launch preserves the independently-owned Server runtime', () => 
   assert.match(launch, /pkill -9 -f '\[p\]apercusp-desktop'/);
   assert.doesNotMatch(launch, /pkill[^\n]*(?:serve\.mjs|embedded-postgres|code-server)/);
   assert.doesNotMatch(launch, /pgrep[^\n]*serve\.mjs/);
+});
+
+test('vmctl gui-paste preserves exact URL bytes and captures before submit', () => {
+  const fn = guiPasteFunction();
+  assert.match(fn, /CLIPBOARD_B64=/);
+  assert.match(fn, /xclip -selection clipboard -in/);
+  assert.match(fn, /xdotool key --window "\$active_window" --clearmodifiers ctrl\+v/);
+  assert.doesNotMatch(fn, /xdotool type/);
+  assert.match(fn, /screenshot "\$name" "\$out"/);
+  assert.match(fn, /submit separately after inspecting/);
 });
 
 test('updater E2E proves a different kernel and never seeds live home state', () => {

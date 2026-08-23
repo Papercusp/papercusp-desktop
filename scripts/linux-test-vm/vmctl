@@ -17,6 +17,7 @@
 #   vmctl updater-e2e APPIMAGE    reset the dedicated VM and launch an isolated
 #                                 updater/revert baseline (never host PID space)
 #   vmctl gui     [name]          open a SPICE viewer (run this yourself; opens a window)
+#   vmctl gui-paste [name] TEXT   paste exact text into the focused guest field and capture it
 #   vmctl verify  [name]          assert install/PG/operator/window; capture logs+screenshot
 #   vmctl status  [name]          VM up? app up? operator :3070? disk free?
 #   vmctl help
@@ -384,6 +385,39 @@ cmd_gui() {
   exec remote-viewer "spice://127.0.0.1:$spice"
 }
 
+# Paste exact text into the currently focused guest field without routing special
+# characters through xdotool's keyboard parser. This is the reliable path for
+# connection-gate URLs: `xdotool type` can corrupt/truncate URL punctuation on
+# the VM's X11 path, while clipboard paste preserves the bytes. Capture the
+# post-paste framebuffer before the caller submits the form, so a failed remote
+# navigation can be distinguished from a malformed test-driver input.
+cmd_gui_paste() {
+  local name="${1:-clean}" text="${2:-}" out="${3:-}"
+  [ -n "$text" ] || die "usage: vmctl gui-paste [name] TEXT [screenshot.ppm]"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  [ -n "$out" ] || out="$(vm_rundir "$name")/gui-paste.ppm"
+  mkdir -p "$(dirname "$out")"
+
+  # Pass only base64 into the guest script: even a URL containing shell
+  # metacharacters remains data, never remote shell syntax.
+  local encoded; encoded="$(printf '%s' "$text" | base64 -w0)"
+  log "pasting ${#text} bytes into the focused guest field (no submit)"
+  vm_run "$name" "CLIPBOARD_B64=$encoded" <<'EOF'
+set -euo pipefail
+export DISPLAY=:0
+export XAUTHORITY="$HOME/.Xauthority"
+command -v xclip >/dev/null 2>&1 || { echo "xclip is required in the guest for exact GUI paste" >&2; exit 1; }
+command -v xdotool >/dev/null 2>&1 || { echo "xdotool is required in the guest for GUI paste" >&2; exit 1; }
+active_window="$(xdotool getactivewindow 2>/dev/null || true)"
+[ -n "$active_window" ] || { echo "no active guest X11 window; focus the target field before gui-paste" >&2; exit 1; }
+printf '%s' "$CLIPBOARD_B64" | base64 -d | xclip -selection clipboard -in
+xdotool key --window "$active_window" --clearmodifiers ctrl+v
+EOF
+
+  screenshot "$name" "$out" || die "could not capture the post-paste guest framebuffer: $out"
+  log "post-paste screenshot captured → $out (submit separately after inspecting it)"
+}
+
 # A QEMU screendump can be a syntactically valid, full-size PPM whose payload is
 # entirely black while the guest X framebuffer is healthy (observed on the QXL
 # clean VM during WI-40443). Nonempty is therefore not evidence. Parse only the
@@ -650,6 +684,7 @@ case "$cmd" in
   hotpatch)  cmd_hotpatch "$@" ;;
   updater-e2e) cmd_updater_e2e "$@" ;;
   gui)       cmd_gui "$@" ;;
+  gui-paste) cmd_gui_paste "$@" ;;
   verify)    cmd_verify "$@" ;;
   status)    cmd_status "$@" ;;
   help|-h|--help) cmd_help ;;
