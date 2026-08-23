@@ -1084,8 +1084,12 @@ preflight_github_rest_accounts() {
   for user in "$P_A_USER" "$P_B_USER"; do
     token="$(gh auth token --user "$user" 2>/dev/null || true)"
     if [ -z "$token" ]; then
-      # No token is a local misconfig, not the outage class — let the smoke surface it.
-      echo "GITHUB_REST: user=$user code=token_missing detail=no-gh-token; smoke-will-surface"
+      # This identity is load-bearing for the smoke, so an absent token means the
+      # credentialed preflight did not run. Preserve that as a nonzero verdict;
+      # the caller will SKIP safely (or honour the explicit GATE_FORCE override)
+      # instead of letting an unchecked identity look preflight-green.
+      echo "GITHUB_REST: user=$user code=token_missing detail=no-gh-token"
+      failed=1
       continue
     fi
 
