@@ -198,6 +198,11 @@ GATE_SUPERUSER_TOKEN_PATH="${GATE_SUPERUSER_TOKEN_PATH:-$HOME/.papercusp/superus
 GATE_SUPERUSER_BEARER="$(cat "$GATE_SUPERUSER_TOKEN_PATH" 2>/dev/null | tr -d '[:space:]' || true)"
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo run)"
 WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
+# Every child smoke/sidecar/embedded-PG inherits this exact run marker. The EXIT
+# reaper uses it to distinguish THIS gate's detached children from another live
+# manual/direct rig that happens to use the same /tmp prefix (WI-40905). A
+# prefix is a workload class, not ownership.
+export PAPERCUSP_LIVE_FED_GATE_RUN="$WORK"
 # Run-dir retention (WI-3087, 2026-07-05): this gate leaked ~3.5GB per heavy run (the
 # dpkg-deb -R unpacked pkg/ tree + the repacked gate .deb were never cleaned) — 67 dirs /
 # 111GB of /tmp by the time it filled the root disk. Keep only the newest
@@ -858,8 +863,13 @@ guard_prod_ports() { # <when-label> — kill rig-owned listeners on prod ports; 
 # run). Complements guard_prod_ports (which only reaps prod-port squatters).
 GATE_SIDECAR_REAP_GRACE_S="${GATE_SIDECAR_REAP_GRACE_S:-2}"
 gate_owns_rig_pid() { # <pid> — true iff pid belongs to THIS gate's rig sandbox
-  local pid="$1" info
+  local pid="$1" info marker
   grep -qa 'live-federation-gate' "/proc/$pid/cgroup" 2>/dev/null && return 0
+  # Direct/manual gates do not have a dedicated systemd cgroup. Their children
+  # carry an exact per-run marker instead; requiring equality prevents an EXIT
+  # from reaping a peer's concurrently-live /tmp/hive-fromrepo-smoke.* process.
+  marker="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -m1 '^PAPERCUSP_LIVE_FED_GATE_RUN=' || true)"
+  [ "$marker" = "PAPERCUSP_LIVE_FED_GATE_RUN=$WORK" ] && return 0
   # Capture cwd + cmdline into a var, then grep a here-string — NOT `{ …; } | grep -q`.
   # This file runs under `set -o pipefail` (top): with a pipeline, `grep -q` short-circuits
   # on the FIRST (cwd) line and closes the pipe, so `tr` gets SIGPIPE and the pipeline
@@ -867,7 +877,7 @@ gate_owns_rig_pid() { # <pid> — true iff pid belongs to THIS gate's rig sandbo
   # for a genuinely rig-owned pid (an owned orphan then slips past reap_gate_sidecars'
   # `|| continue` and is NEVER reaped — the exact EI-14500 leak this reaper exists to close).
   info="$(readlink -f "/proc/$pid/cwd" 2>/dev/null; tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
-  grep -qaE "papercusp-lane-[a-z0-9-]*-fed|/tmp/hive-fromrepo-smoke\.|/tmp/hive-dir-smoke\.|/tmp/merge-smoke\.|/tmp/p3-smoke\.|$WORK" <<<"$info" && return 0
+  grep -qaF "$WORK" <<<"$info" && return 0
   return 1
 }
 reap_gate_sidecars() { # reap rig-owned leftover serve.mjs/serve.ts sidecars + embedded PG
