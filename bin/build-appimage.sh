@@ -32,6 +32,16 @@ set -uo pipefail   # deliberately NOT -e: the tauri appimage step is EXPECTED to
 DESK="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DESK"
 
+# ── OWNER-NAME PREFLIGHT (EI-21227487662710416). The final AppImage identity
+# audit cannot certify the bundle without an explicitly asserted human owner
+# name. Refuse before Cargo metadata, cleanup, or any packaging work so a direct
+# invocation fails at the boundary that requires the input rather than after
+# minutes of runtime-closure work. Keep the policy in the shared audit helper;
+# the value is runtime-only and is never written into the tree.
+AUDIT_PY="$DESK/bin/audit-release-bundle.py"
+python3 "$AUDIT_PY" --owner-preflight \
+  || { echo "ERROR: owner-name preflight failed — refusing to start AppImage build" >&2; exit 2; }
+
 CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
 [ -n "$CT" ] || CT="$HOME/.cargo-target"
@@ -42,7 +52,6 @@ CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
 }
 APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
-AUDIT_PY="$DESK/bin/audit-release-bundle.py"
 OUT="$APPIMG_DIR/Papercusp_GUI_${VERSION}_amd64.AppImage"
 
 # ── CHANNEL IDENTITY (WI-36794) ───────────────────────────────────────────────
