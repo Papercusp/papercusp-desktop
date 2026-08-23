@@ -496,7 +496,8 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 # discover them one at a time. Do not re-add `--prefer-offline` here without
 # re-verifying against a VM whose npm cache is cold for the packages in
 # question.
-(cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
+(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install \
+  --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
   --workspace=@papercusp/web --workspace=@papercusp/operator-vite \
   --workspace=@papercusp/sse)
 
@@ -520,7 +521,8 @@ build_runtime_workspace_outputs_after_install() {
   local workspace
   for workspace in "${RUNTIME_BUILD_WORKSPACES[@]}"; do
     echo "→ reifying build-time devDependencies for $workspace"
-    if ! (cd "$REPO_ROOT" && npm install --legacy-peer-deps --no-audit --no-fund \
+    if ! (cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install \
+      --legacy-peer-deps --no-audit --no-fund \
       --ignore-scripts --include=dev --workspace="$workspace"); then
       echo "ERROR: could not reify build-time devDependencies for $workspace" >&2
       exit 1
@@ -569,8 +571,36 @@ console.log(
       echo "ERROR: resolved TypeScript does not satisfy the workspace pin for $workspace" >&2
       exit 1
     fi
-    echo "→ rebuilding post-install runtime output for $workspace"
-    (cd "$REPO_ROOT" && npm --workspace "$workspace" run build)
+    # EI-21252365249211374: the shared root node_modules can still be in a
+    # short extraction/visibility window immediately after npm exits (or a
+    # queued, serialized install can begin as soon as our install releases the
+    # mutex). The later dependency check already retries this exact class, but
+    # runtime workspace builds happened BEFORE it and failed on the first
+    # transient TS2688 missing-type read. Reify + rebuild up to three times at
+    # the actual failure boundary; persistent failures still fail closed.
+    local runtime_build_attempts=3
+    local runtime_build_attempt
+    local runtime_build_ok=0
+    for runtime_build_attempt in $(seq 1 "$runtime_build_attempts"); do
+      echo "→ rebuilding post-install runtime output for $workspace (attempt $runtime_build_attempt/$runtime_build_attempts)"
+      if (cd "$REPO_ROOT" && npm --workspace "$workspace" run build); then
+        runtime_build_ok=1
+        break
+      fi
+      if [[ "$runtime_build_attempt" -lt "$runtime_build_attempts" ]]; then
+        echo "runtime-build: $workspace attempt $runtime_build_attempt failed; reifying under npm-install-safe and retrying in 2s"
+        sleep 2
+        if ! (cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install \
+          --legacy-peer-deps --no-audit --no-fund --ignore-scripts \
+          --include=dev --workspace="$workspace"); then
+          echo "runtime-build: dependency reify failed for $workspace on retry $runtime_build_attempt" >&2
+        fi
+      fi
+    done
+    if [[ "$runtime_build_ok" -ne 1 ]]; then
+      echo "FATAL: runtime workspace build for $workspace failed after $runtime_build_attempts reify+build attempts — not a transient extraction race" >&2
+      exit 1
+    fi
   done
 }
 build_runtime_workspace_outputs_after_install

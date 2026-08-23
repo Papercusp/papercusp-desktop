@@ -135,7 +135,7 @@ test('sidecar dependency install includes both source workspaces with exact name
   assert.equal(operatorName, '@papercusp/web');
   assert.equal(viteName, '@papercusp/operator-vite');
   const installStart = builder.indexOf(
-    '(cd "$REPO_ROOT" && npm install --legacy-peer-deps',
+    '(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install',
   );
   const installEnd = builder.indexOf(
     ')\n\n# POST-INSTALL RUNTIME BUILDS',
@@ -148,6 +148,7 @@ test('sidecar dependency install includes both source workspaces with exact name
   assert.match(install, /--workspace=@papercusp\/web(?:\s|$)/);
   assert.match(install, /--workspace=@papercusp\/operator-vite(?:\s|$)/);
   assert.doesNotMatch(install, /--workspace=@papercusp\/operator(?:\s|$)/);
+  assert.doesNotMatch(install, /&& npm install /, 'the shared root install must never bypass npm-install-safe');
 });
 
 test('sidecar runtime workspace builds require native TypeScript 7 plus the TypeScript 6 API alias', () => {
@@ -164,6 +165,21 @@ test('sidecar runtime workspace builds require native TypeScript 7 plus the Type
   assert.match(builder, /actualApi\.name === "@typescript\/typescript6"/);
   assert.match(builder, /native TypeScript/);
   assert.match(builder, /API compatibility/);
+});
+
+test('runtime workspace build retries transient post-install extraction gaps under the safe install mutex', () => {
+  const start = builder.indexOf('build_runtime_workspace_outputs_after_install() {');
+  const end = builder.indexOf('\nbuild_runtime_workspace_outputs_after_install\n', start);
+  assert(start >= 0 && end > start, 'could not isolate runtime workspace build helper');
+  const helper = builder.slice(start, end);
+
+  assert.match(helper, /runtime_build_attempts=3/);
+  assert.match(helper, /for runtime_build_attempt in \$\(seq 1 "\$runtime_build_attempts"\)/);
+  assert.match(helper, /npm --workspace "\$workspace" run build/);
+  assert.match(helper, /node scripts\/npm-install-safe\.mjs install[\s\S]*--include=dev --workspace="\$workspace"/);
+  assert.match(helper, /retrying in 2s/);
+  assert.match(helper, /failed after \$runtime_build_attempts reify\+build attempts/);
+  assert.doesNotMatch(helper, /&& npm install /, 'runtime reification must never bypass npm-install-safe');
 });
 
 test('Debian removal tears down only verified Papercusp process ownership', () => {
