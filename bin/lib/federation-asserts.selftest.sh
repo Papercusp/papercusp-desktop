@@ -1588,6 +1588,16 @@ unset WI5472_ERR res
 # still rejecting its peer, or while the exact same-stream cursor is not active
 # and advanced. The preserved 18:22 witness had all three misleading layers:
 # core probes passed, K3 passed, but F-RKCUT never reached B's epoch gate.
+wi40905_guard_line="$(grep -n 'fed_assert_hive_lifecycle_ready a b F-HIVE3' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+wi40905_first_mutation_line="$(grep -n 'pot:membership_decide' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+if [ -n "$wi40905_guard_line" ] && [ -n "$wi40905_first_mutation_line" ] \
+  && [ "$wi40905_guard_line" -lt "$wi40905_first_mutation_line" ] \
+  && grep -q 'FAILED_SUBSETS="$FAILED_SUBSETS witness-lifecycle"' "$FROMREPO_SMOKE_FILE"; then
+  ok "from-repo folded witness invokes the lifecycle guard before its first membership/re-key mutation"
+else
+  bad "from-repo folded witness no longer fail-closes through the lifecycle guard before mutation"
+fi
+
 WI40905_A_LOG="$(mktemp /tmp/wi40905-lifecycle-a.XXXXXX)"
 WI40905_B_LOG="$(mktemp /tmp/wi40905-lifecycle-b.XXXXXX)"
 WI40905_ERR="$(mktemp /tmp/wi40905-lifecycle-err.XXXXXX)"
