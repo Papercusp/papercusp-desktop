@@ -33,6 +33,22 @@ declare -ga FED_PORT_LOCK_FDS FED_PORT_LOCK_PATHS
 
 fed_log() { printf '\n=== %s ===\n' "$*"; }
 
+# fed_snapshot_shell_script <source> <immutable-copy>
+#
+# Bash re-reads a long-running script by byte offset while it executes.  A
+# concurrent in-place edit can therefore make the running parser consume a
+# mixture of old and new bytes even when both complete file versions are valid.
+# Copy + syntax-check the exact bytes before launch so the process never reads
+# the shared working-tree file again during the run (EI-21235839358679656).
+fed_snapshot_shell_script() {
+  local source_script="$1" snapshot_script="$2"
+  [ -f "$source_script" ] || return 1
+  mkdir -p "$(dirname "$snapshot_script")" || return 1
+  cp -- "$source_script" "$snapshot_script" || return 1
+  chmod +x "$snapshot_script" || return 1
+  bash -n "$snapshot_script"
+}
+
 # fed_select_newest_deb_by_package <debian-package-name> <candidate>...
 #
 # Select by the writer-owned Debian Package field first, then by mtime.  GUI and

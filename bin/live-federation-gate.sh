@@ -1471,9 +1471,24 @@ fi
 run_smoke() {  # <label> <script> <deb-or-empty> <extra-env...>
   local label="$1" script="$2" deb="$3"; shift 3
   local out="$WORK/$label.out" attempts="${DISCOVERY_ATTEMPTS:-3}" i res
+  local smoke_source="$DESKTOP_DIR/bin/$script"
+  local smoke_snapshot_root="${GATE_SELF_SNAPSHOT_DIR:-${WORK:?smoke snapshot root missing}}"
+  local smoke_snapshot="$smoke_snapshot_root/smoke-$label.sh"
+
+  # The gate's own self-snapshot protects only this wrapper.  Each child below
+  # is also a long-running Bash script over the shared mutable tree, so launch
+  # an immutable, syntax-checked copy for the same EI-16828 byte-offset reason.
+  # DESKTOP_DIR is injected because BASH_SOURCE now points into /tmp; both child
+  # scripts honor it and continue resolving the canonical live assets/libs.
+  if ! fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"; then
+    log "$label: FATAL could not snapshot + syntax-check $smoke_source"
+    printf 'FATAL: could not snapshot + syntax-check %s\n' "$smoke_source" >"$out"
+    echo FAIL
+    return
+  fi
   for i in $(seq 1 "$attempts"); do
     log "running $label (attempt $i/$attempts) …"
-    ( cd "$DESKTOP_DIR/.." && env "$@" bash "papercusp-desktop/bin/$script" ${deb:+"$deb"} ) >"$out" 2>&1 || true
+    ( cd "$DESKTOP_DIR/.." && env DESKTOP_DIR="$DESKTOP_DIR" "$@" bash "$smoke_snapshot" ${deb:+"$deb"} ) >"$out" 2>&1 || true
     # ANCHORED (WI-37222). This pattern was `OVERALL: PASS` unanchored, which also matches the
     # SUBSET verdict lines the smokes emit — `WITNESS OVERALL: PASS`, `MODERATION OVERALL: PASS`,
     # `ATTESTATION OVERALL: PASS`. A run whose CORE legs failed but whose witness/moderation/
