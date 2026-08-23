@@ -868,19 +868,20 @@ fi
 #      octocat fixture → seed claim_status or use a papercupai-owned repo for those).
 ak_default_ok=0; ak_ban_ok=0; ak_unban_ok=0
 rk_keys_ok=0; rk_ctrl_ok=0; rk_revoke_ok=0; rk_cut_ok=0; witness_ran=0
-witness_lifecycle_ready=1
+witness_lifecycle_ready=1; witness_cut_ready=0
 rk_ctrl_measurable=1  # WI-37144: 0 ⇒ the K1 CONTROL leg could not run at all (empty B_DEV) ⇒ INCONCLUSIVE, not FAIL
 # P-008 CONTENT-level cut (the work-item's literal assertion). rk_content_applicable=1 only
 # when the K4a pre-revoke content control proves content federation A→B is healthy THIS run
 # (else WI-259 stalls content → K4b is INCONCLUSIVE, never a false-RED; the key-level K3 governs).
 rk_content_ctrl_ok=0; rk_content_cut_ok=0; rk_content_applicable=0
-# WI-40905 lifecycle admission: the core F-HIVE3 control is the immediate
-# same-stream canary. Before mutating membership/re-key state, require its
+# WI-40905 lifecycle admission: the core F-HIVE3 control is the baseline
+# same-stream canary. Before starting the folded witness, require its
 # source row to be drained, B's exact-log cursor active+advanced, both target
 # presence topics wired/recovered, and no target boot-timeout/late-adopt or
-# exact-log named-stall history. A failed guard is a NON-QUALIFYING witness
-# environment, not a C-001 product verdict; preserve the rig and stop this
-# subset before AK/K mutations can destroy the forensic boundary.
+# exact-log named-stall history. K4a authors a second, fresh F-RKCTRL canary
+# after the C-001 setup and AK probes; that exact stream must pass the same
+# guard immediately before K2 mutates revocation state. Either failed guard is
+# a NON-QUALIFYING witness environment, not a C-001 product verdict.
 if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   if [ "$hive_cont_ok" != 1 ]; then
     witness_lifecycle_ready=0
@@ -994,6 +995,23 @@ if [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ] && [ "$witness_lifecycle_
   [ "${rkctrl%% *}" = 1 ] && rk_content_ctrl_ok=1
   echo "  K4a CONTENT CONTROL (B reads pre-revoke encrypted content F-RKCTRL): $([ "$rk_content_ctrl_ok" = 1 ] && echo "PASS (content federation A→B healthy ⇒ K4b will assert the cut)" || echo "INCONCLUSIVE (content A→B unhealthy this run — WI-259; key-level K3-CUT governs)")"
 
+  # WI-40905: F-HIVE3 is too early to admit the security cut by itself. The
+  # C-001 setup and AK probes above can change membership/presence state after
+  # that control passed. Treat the just-authored F-RKCTRL as the fresh,
+  # immediate pre-K2/K4 same-stream canary and re-run the full lifecycle guard
+  # against its exact source log. K2 and every post-revoke assertion are
+  # structurally inside this gate so a failed admission cannot mutate the rig
+  # or emit a product-shaped cut verdict.
+  if [ "$rk_content_ctrl_ok" = 1 ] \
+    && fed_assert_hive_lifecycle_ready a b F-RKCTRL "$MEMBER_SLUG" "$HIVE_SLUG"; then
+    witness_cut_ready=1
+    echo "  PRE-CUT LIFECYCLE ADMISSION: PASS (fresh F-RKCTRL stream drained, materialized, cursor active+advanced, presence/history healthy)"
+  else
+    witness_cut_ready=0
+    echo "  PRE-CUT LIFECYCLE ADMISSION: FAIL — fresh F-RKCTRL did not prove a trustworthy same-stream substrate; K2/K3/K4b skipped without revocation mutation"
+  fi
+
+  if [ "$witness_cut_ready" = 1 ]; then
   # K2 REVOKE — A revokes B → epoch advance + re-key the REMAINING members (NOT B).
   # WI-37144: CAPTURE the call's own result. This was `>/dev/null 2>&1`, which discarded the one
   # piece of evidence separating "the revoke ERRORED" from "the revoke succeeded but the epoch did
@@ -1184,6 +1202,7 @@ print("1 "+" ".join(map(str,counts)))
     echo "  K4b CONTENT CUT (B receives but can NO LONGER decrypt post-revoke content F-RKCUT; remaining member A reads it): $rk_content_cut_why"
   else
     echo "  K4b CONTENT CUT: INCONCLUSIVE (K4a did not establish healthy content federation A→B this run — WI-259; device-filtered key-level K3-CUT is the governing release proof)"
+  fi
   fi
 elif [ "${WITNESS_PROBE:-0}" = 1 ] && [ "$join_ok" = 1 ]; then
   echo "WITNESS LIFECYCLE ADMISSION: FAIL — target boot/presence/merge state is not a trustworthy security-cut substrate; AK/K mutations were not started"
