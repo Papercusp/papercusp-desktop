@@ -204,16 +204,27 @@ while IFS= read -r nodefile; do
   fi
 done < <(find "$OUT/node_modules" -name '*.node' -type f 2>/dev/null)
 
-declare -A family_has_macho=()
+family_list_contains() {
+  local needle="$1" candidate
+  shift
+  for candidate in "$@"; do
+    [[ "$candidate" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+declare -a family_has_macho=()
 for i in "${!all_nodefiles[@]}"; do
-  [[ "${ismacho[$i]}" == "1" ]] && family_has_macho["${families[$i]}"]=1
+  if [[ "${ismacho[$i]}" == "1" ]] && ! family_list_contains "${families[$i]}" "${family_has_macho[@]}"; then
+    family_has_macho+=("${families[$i]}")
+  fi
 done
 
 declare -a bad=() excused=()
 for i in "${!all_nodefiles[@]}"; do
   [[ "${ismacho[$i]}" == "1" ]] && continue
   fam="${families[$i]}"
-  if [[ "${family_has_macho[$fam]:-0}" == "1" ]]; then
+  if family_list_contains "$fam" "${family_has_macho[@]}"; then
     continue  # a Mach-O sibling exists elsewhere in this same platform-variant family — inert other-platform bundle, ignore
   fi
   pkgroot="${pkgroots[$i]}"

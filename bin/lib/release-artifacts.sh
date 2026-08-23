@@ -90,7 +90,7 @@ release_artifacts_cut_start_write() {
 # missing, multi-line, or malformed stamp is an error; callers must not mint a
 # replacement while deciding whether an existing artifact is safe to publish.
 release_artifacts_cut_start_read() {
-  local tag="${1:-}" path stamp
+  local tag="${1:-}" path stamp line
   local -a lines=()
   [[ -n "$tag" ]] || { echo "release-artifacts: cut-start stamp requires a tag." >&2; return 2; }
   path="$(release_artifacts_cut_start_path "$tag")"
@@ -98,7 +98,9 @@ release_artifacts_cut_start_read() {
     echo "release-artifacts: no cut-start stamp at $path — refusing to trust same-version artifacts." >&2
     return 1
   }
-  mapfile -t lines < "$path" || {
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines+=("$line")
+  done < "$path" || {
     echo "release-artifacts: could not read cut-start stamp at $path." >&2
     return 1
   }
@@ -750,6 +752,7 @@ release_artifacts_linux_bundle_root() {
 release_artifacts_write() {
   local tag="$1"; shift
   local out; out="$(release_artifacts_manifest_path "$tag")"
+  local manifest_path
   local -a manifest_paths=()
   {
     local f
@@ -760,7 +763,9 @@ release_artifacts_write() {
       printf '%s\n' "$f"
     done
   } | sort -u > "$out"
-  mapfile -t manifest_paths < "$out" || {
+  while IFS= read -r manifest_path || [[ -n "$manifest_path" ]]; do
+    manifest_paths+=("$manifest_path")
+  done < "$out" || {
     echo "release-artifacts: could not read the manifest for $tag." >&2
     return 1
   }
