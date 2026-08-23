@@ -1643,7 +1643,15 @@ drv_exec() {
 drv_psql() {
   local _inst="$1" sql="$2"
   case "$sql" in
-    *"FROM harness_shared.substrate_outbox WHERE key='F-CANARY'"*) echo 'deadbeef1234|1000' ;;
+    *"FROM harness_shared.substrate_outbox WHERE key='F-CANARY'"*)
+      # Live substrate_outbox.drained_at is BIGINT epoch-ms. Reject the exact
+      # type error that made the first guarded witness misreport a drained,
+      # materialized F-HIVE3 as an absent outbox row.
+      if grep -qF 'drained_at::text' <<<"$sql" \
+        && ! grep -qF 'extract(epoch FROM drained_at)' <<<"$sql"; then
+        echo 'deadbeef1234|1000'
+      fi
+      ;;
     *"count(*)>0"*"feature_id='F-CANARY'"*) echo Y ;;
     *"FROM harness_shared.substrate_merge_cursor"*) echo "${WI40905_CURSOR_POS}|${WI40905_CURSOR_STATE}|ws::pot-home|2000" ;;
   esac

@@ -1327,7 +1327,12 @@ fed_assert_hive_lifecycle_ready() {
   local source_rec log_key drained_ms destination_present cursor_rec cursor_pos cursor_state cursor_binding cursor_ms
   local inst logf qlog qtarget qpot qkey scan
 
-  source_rec="$(drv_psql "$src" "SELECT coalesce(drained_log_key,'')||'|'||coalesce(((extract(epoch FROM drained_at)*1000)::bigint)::text,'') FROM harness_shared.substrate_outbox WHERE key='$canary' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+  # substrate_outbox.drained_at is already BIGINT epoch-ms (the outbox drain
+  # writes Date.now()). Do not apply extract(epoch FROM ...): PostgreSQL rejects
+  # that timestamp-only function on BIGINT, and the intentionally quiet probe
+  # would then collapse the SQL error into a misleading "no row" admission
+  # failure even when the canary drained and materialized (WI-40905).
+  source_rec="$(drv_psql "$src" "SELECT coalesce(drained_log_key,'')||'|'||coalesce(drained_at::text,'') FROM harness_shared.substrate_outbox WHERE key='$canary' ORDER BY id DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
   log_key="${source_rec%%|*}"; drained_ms="${source_rec#*|}"
   if [ -z "$source_rec" ] || [ "$log_key" = "$source_rec" ] || [ -z "$log_key" ] || [ -z "$drained_ms" ]; then
     echo "LIFECYCLE NOT READY: canary $canary has no attributable drained source-log row on $src (got '${source_rec:-<empty>}')" >&2
