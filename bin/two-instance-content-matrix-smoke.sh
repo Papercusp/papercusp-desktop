@@ -415,7 +415,6 @@ jr="$(curl -s -m 610 -X POST "$(sc b)/api/discovery/join-pot" -H 'content-type: 
 # the OWNER (A) took to admit the JOINER's (B's) log core. That delay is the single
 # quantity that decides the incr-B→A matrix — see the report section for why.
 JOIN_MS="$(( $(date +%s) * 1000 ))"
-sleep 5
 # WS_B RE-DERIVE (2026-07-03, WI-971 differential; WI-38136 hardening): the
 # pre-join `LIMIT 1` registry read can return a meta-only workspace row (e.g. the
 # seeded 'papercusp-workspace' carrying only hiveDirectoryMeta). A project with the
@@ -426,7 +425,8 @@ sleep 5
 # either violate pot_members_pot_fkey or drain into a scope A never receives, forging
 # a prefix of "incr-B→A NEVER crossed" reds. Resolve through the authoritative
 # relational pair instead: the joined Pot row plus THIS B account's membership.
-WS_B_JOINED="$(q b "
+WS_B_JOINED="$(fed_capture_nonempty_with_retry \
+  "${MEMBERSHIP_RETRIES:-40}" "${MEMBERSHIP_RETRY_DELAY_SEC:-3}" -- q b "
   SELECT m.workspace_id
   FROM harness_shared.pot_members m
   JOIN harness_shared.pots p
@@ -435,11 +435,12 @@ WS_B_JOINED="$(q b "
   WHERE m.pot_home_slug = '$HIVE_SLUG'
     AND lower(m.github_username) = lower('$P_B_USER')
   ORDER BY m.workspace_id
-  LIMIT 1;")"
+  LIMIT 1;")" || true
 if [ -z "$WS_B_JOINED" ]; then
-  echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER'"
+  echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER' after ${MEMBERSHIP_RETRIES:-40} attempts"
   exit 6
 fi
+echo "  membership-persistence=PASS workspace='$WS_B_JOINED' (bounded asynchronous projection wait)"
 if [ -n "$WS_B_JOINED" ] && [ "$WS_B_JOINED" != "$WS_B" ]; then
   echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (Pot '$HIVE_SLUG' + B member '$P_B_USER' persisted there)"
   WS_B="$WS_B_JOINED"
