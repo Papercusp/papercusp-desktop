@@ -221,7 +221,10 @@ fed_preflight_attestation_account() {
             githubLogin,
             token,
           });
-          const verified = await verifyAttestation(gistId, keypair.pubkeyBase64, githubUserId, { skipCache: true });
+          const verified = await verifyAttestation(gistId, keypair.pubkeyBase64, githubUserId, {
+            skipCache: true,
+            token,
+          });
           if (!verified.valid) throw new Error(`attestation ${gistId} failed verification: ${verified.reason}`);
           console.log(gistId);
         }

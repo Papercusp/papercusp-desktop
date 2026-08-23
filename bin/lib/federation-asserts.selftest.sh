@@ -368,6 +368,12 @@ if grep -q 'HOME="\$identity_dir"' "$DIR/federation-asserts.sh"; then
 else
   bad "attestation preflight inherits ambient HOME (WI-40905 cross-account identity leak)"
 fi
+if sed -n '/const verified = await verifyAttestation/,/});/p' "$DIR/federation-asserts.sh" \
+    | grep -q 'token,'; then
+  ok "attestation preflight reuses its validated token for final candidate verification (WI-40905)"
+else
+  bad "attestation preflight drops its validated token before final candidate verification (WI-40905)"
+fi
 
 
 # Every committed caller that needs a distinct identity must pass only the
