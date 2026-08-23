@@ -49,6 +49,35 @@ fed_snapshot_shell_script() {
   bash -n "$snapshot_script"
 }
 
+# fed_capture_nonempty_with_retry <attempts> <delay-sec> -- <command...>
+#
+# Run a read-side probe until it returns a non-empty value, print that value,
+# and otherwise fail after a bounded number of attempts.  Federation projections
+# are asynchronous: an API mutation can commit its local view before a remote
+# projection becomes queryable, so a one-shot relational read is not a valid
+# convergence verdict (EI-21237890330979066).
+fed_capture_nonempty_with_retry() {
+  local attempts="$1" retry_delay="$2" attempt probe_out probe_rc
+  shift 2
+  [ "${1:-}" = -- ] && shift
+  [ "$#" -gt 0 ] || return 1
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=40
+  [[ "$retry_delay" =~ ^[0-9]+([.][0-9]+)?$ ]] || retry_delay=3
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    probe_out="$("$@")"
+    probe_rc=$?
+    if [ "$probe_rc" -eq 0 ] && [ -n "$probe_out" ]; then
+      printf '%s\n' "$probe_out"
+      return 0
+    fi
+    if [ "$attempt" -lt "$attempts" ] && [ "$retry_delay" != 0 ]; then
+      sleep "$retry_delay"
+    fi
+  done
+  return 1
+}
+
 # fed_select_newest_deb_by_package <debian-package-name> <candidate>...
 #
 # Select by the writer-owned Debian Package field first, then by mtime.  GUI and
