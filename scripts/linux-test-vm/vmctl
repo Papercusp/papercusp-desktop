@@ -197,18 +197,15 @@ export DISPLAY=:0
 export XAUTHORITY="$HOME/.Xauthority"
 for _ in $(seq 1 30); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 1; done
 xdpyinfo -display :0 >/dev/null 2>&1 || { echo "X :0 not ready (see ~/startx.log)"; exit 1; }
-# Anti-split-brain (shared-hive-member-content-federation D-024): a desktop/operator
-# from a PRIOR boot can survive (`vmctl status` shows app:stopped if only the GUI proc
-# died, while the orphaned sidecar/operator keeps serving). Launching on top of it
-# creates DUPLICATE operators → a stale boot set + incoherent federation (hours to
-# diagnose). Reap any survivors before launching so there is exactly ONE operator.
-if pgrep -f papercusp-desktop >/dev/null 2>&1 || pgrep -f serve.mjs >/dev/null 2>&1; then
-  echo "reaping stale papercusp processes before launch (anti split-brain)…"
-  pkill -9 -f papercusp-desktop 2>/dev/null
-  pkill -9 -f 'serve.mjs' 2>/dev/null
-  pkill -9 -f 'code-server' 2>/dev/null
-  pkill -9 -f 'embedded-postgres' 2>/dev/null
-  sleep 4
+# D-001 split-product invariant: the Server owns serve.mjs + embedded Postgres
+# independently of the GUI. The old self-host-era cleanup killed those healthy
+# Server children before every GUI launch, forcing systemd to restart the Server
+# and racing the attach-only GUI against its replacement operator. Reap only a
+# prior GUI process here; package/service lifecycle tests own Server teardown.
+if pgrep -f '[p]apercusp-desktop' >/dev/null 2>&1; then
+  echo "reaping prior Papercusp GUI process before launch…"
+  pkill -9 -f '[p]apercusp-desktop' 2>/dev/null
+  sleep 2
 fi
 # WI-6209: ~/fed.env carries PAPERCUSP_DHT_BOOTSTRAP (and the GH identity) on a
 # federation VM. A relaunch that omits it does not fail — the app boots, peers,
@@ -534,6 +531,13 @@ cmd_verify() {
   done
 
   check "app process running"                "vm_ssh '$name' 'pgrep -f [p]apercusp-desktop >/dev/null' 2>/dev/null"
+  # D-009/P-011: package name and executable path do not prove the configured
+  # Tauri role. A Server-configured binary repacked as papercusp-gui installs
+  # cleanly but logs role=server, creates only the 10x10 tray placeholder, and
+  # can never map the GUI webview. Read the writer's runtime log before accepting
+  # any window/process evidence.
+  check "GUI runtime role + bundle identifier" \
+    "vm_ssh '$name' 'grep -Fq \"[papercusp-desktop] role=gui (identifier com.papercusp.gui)\" \"\$HOME/.papercusp/logs/gui.log\"' 2>/dev/null"
   # PG ready = a postgres serving the embedded data dir is actually running.
   check "embedded Postgres running"          "vm_ssh '$name' 'pgrep -af [p]ostgres 2>/dev/null | grep -q embedded-pg-data' 2>/dev/null"
   if [ -n "$op" ] && op_responds "$name" "$op"; then

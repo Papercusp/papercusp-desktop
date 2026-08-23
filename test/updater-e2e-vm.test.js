@@ -132,6 +132,18 @@ test('vmctl install waits boundedly for every guest apt lock before update and i
   assert.match(install, /apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall/);
 });
 
+test('vmctl GUI launch preserves the independently-owned Server runtime', () => {
+  const start = vmctl.indexOf('cmd_launch()');
+  const end = vmctl.indexOf('\n# cmd_hotpatch', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const launch = vmctl.slice(start, end);
+
+  assert.match(launch, /pkill -9 -f '\[p\]apercusp-desktop'/);
+  assert.doesNotMatch(launch, /pkill[^\n]*(?:serve\.mjs|embedded-postgres|code-server)/);
+  assert.doesNotMatch(launch, /pgrep[^\n]*serve\.mjs/);
+});
+
 test('updater E2E proves a different kernel and never seeds live home state', () => {
   const fn = updaterFunction();
   assert.match(fn, /systemd-detect-virt/);
@@ -197,6 +209,18 @@ test('VM verification accepts only a full-size Papercusp main window', () => {
     false,
     'a titled placeholder below the configured minimum geometry must not pass',
   );
+});
+
+test('VM verification requires the packaged GUI runtime role and bundle identifier', () => {
+  const start = vmctl.indexOf('cmd_verify()');
+  const end = vmctl.indexOf('\ncmd_status()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const verify = vmctl.slice(start, end);
+
+  assert.match(verify, /GUI runtime role \+ bundle identifier/);
+  assert.match(verify, /role=gui \(identifier com\.papercusp\.gui\)/);
+  assert.match(verify, /\.papercusp\/logs\/gui\.log/);
 });
 
 test('VM screenshot rejects a nonempty all-black PPM and keeps the guest fallback reachable', () => {
