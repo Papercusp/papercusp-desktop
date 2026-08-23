@@ -1674,11 +1674,25 @@ fi
 
 write_wi40905_healthy_logs
 sed -i '/ADMITTED again/d' "$WI40905_B_LOG"
-if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 2>"$WI40905_ERR" \
-  && grep -q 'presence rejection streak is unresolved' "$WI40905_ERR"; then
-  ok "fed_assert_hive_lifecycle_ready: unresolved target-topic admission rejection fails closed"
+(
+  sleep 0.10
+  printf '%s\n' '[presence-gossip] inbound presence ADMITTED again on topic abcdef123456… after 1 rejected frame(s)' >>"$WI40905_B_LOG"
+) &
+wi40905_recovery_writer_pid=$!
+if fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 20 0.05 2>"$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: a later accepted presence frame clears a transient rejection"
 else
-  bad "fed_assert_hive_lifecycle_ready admitted an unresolved presence rejection streak"
+  bad "fed_assert_hive_lifecycle_ready rejected bounded asynchronous presence recovery: $(cat "$WI40905_ERR")"
+fi
+wait "$wi40905_recovery_writer_pid"
+
+write_wi40905_healthy_logs
+sed -i '/ADMITTED again/d' "$WI40905_B_LOG"
+if ! fed_assert_hive_lifecycle_ready src dst F-CANARY member pot-home 3 0.02 2>"$WI40905_ERR" \
+  && grep -q 'presence rejection streak is unresolved' "$WI40905_ERR"; then
+  ok "fed_assert_hive_lifecycle_ready: terminal target-topic admission rejection fails closed after the bounded wait"
+else
+  bad "fed_assert_hive_lifecycle_ready admitted a terminal presence rejection streak"
 fi
 
 write_wi40905_healthy_logs
@@ -1701,7 +1715,7 @@ fi
 
 rm -f "$WI40905_A_LOG" "$WI40905_B_LOG" "$WI40905_ERR"
 unset -f write_wi40905_healthy_logs drv_applog drv_exec drv_psql
-unset WI40905_A_LOG WI40905_B_LOG WI40905_ERR WI40905_CURSOR_STATE WI40905_CURSOR_POS
+unset WI40905_A_LOG WI40905_B_LOG WI40905_ERR WI40905_CURSOR_STATE WI40905_CURSOR_POS wi40905_recovery_writer_pid
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "PASS — port self-discovery self-test green"; exit 0; fi

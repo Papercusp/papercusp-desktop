@@ -1301,6 +1301,7 @@ _fed_outbox_drained() {
 }
 
 # fed_assert_hive_lifecycle_ready <src> <dst> <canary-fid> <target-harness> <pot-home>
+#   [presence-recovery-polls] [presence-recovery-sleep-sec]
 #
 # Fail-closed admission for the folded re-key witness. HTTP readiness and even
 # an earlier content PASS are not enough when the target substrate entered the
@@ -1324,8 +1325,13 @@ _fed_outbox_drained() {
 # code without contaminating their result tokens.
 fed_assert_hive_lifecycle_ready() {
   local src="$1" dst="$2" canary="$3" target_harness="$4" pot_home="$5"
+  # The presence writer polls every 5s but unchanged state is emitted on a 30s
+  # keep-alive cadence. Allow two refresh-widths by default: one accepted frame
+  # is enough to prove that the receiver's membership cache recovered, while a
+  # bounded miss still fails closed. The optional arguments are test seams only.
+  local presence_recovery_polls="${6:-60}" presence_recovery_sleep_sec="${7:-1}"
   local source_rec log_key drained_ms destination_present cursor_rec cursor_pos cursor_state cursor_binding cursor_ms
-  local inst logf qlog qtarget qpot qkey scan
+  local inst logf qlog qtarget qpot qkey qpolls qsleep scan
 
   # substrate_outbox.drained_at is already BIGINT epoch-ms (the outbox drain
   # writes Date.now()). Do not apply extract(epoch FROM ...): PostgreSQL rejects
@@ -1358,8 +1364,10 @@ fed_assert_hive_lifecycle_ready() {
     printf -v qtarget '%q' "$target_harness"
     printf -v qpot '%q' "$pot_home"
     printf -v qkey '%q' "$log_key"
+    printf -v qpolls '%q' "$presence_recovery_polls"
+    printf -v qsleep '%q' "$presence_recovery_sleep_sec"
     scan="$(drv_exec "$inst" <<EOF
-log=$qlog; target=$qtarget; pot=$qpot; key=$qkey
+log=$qlog; target=$qtarget; pot=$qpot; key=$qkey; recovery_polls=$qpolls; recovery_sleep=$qsleep
 if grep -aqF "::\${target}) zombie window entered" "\$log" 2>/dev/null \
   || grep -aqF "::\${target}) late boot ADOPTED" "\$log" 2>/dev/null \
   || grep -aqF "::\${pot}) zombie window entered" "\$log" 2>/dev/null \
@@ -1380,7 +1388,35 @@ prefix="\${topic:0:12}"
 reject_line="\$(grep -anF "REJECTED inbound presence frame on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
 admit_line="\$(grep -anF "inbound presence ADMITTED again on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
 if [ -n "\$reject_line" ] && { [ -z "\$admit_line" ] || [ "\$admit_line" -le "\$reject_line" ]; }; then
-  echo "FAIL target presence rejection streak is unresolved (topic=\$prefix reject=\$reject_line admit=\${admit_line:-none})"
+  attempt=0
+  while [ "\$attempt" -lt "\$recovery_polls" ]; do
+    sleep "\$recovery_sleep"
+    attempt=\$((attempt + 1))
+    # Re-read BOTH edges on every poll. A later rejection must supersede an
+    # earlier recovery; announce/device admission alone is not authoritative.
+    reject_line="\$(grep -anF "REJECTED inbound presence frame on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+    admit_line="\$(grep -anF "inbound presence ADMITTED again on topic \$prefix" "\$log" 2>/dev/null | tail -1 | cut -d: -f1)"
+    if [ -z "\$reject_line" ] || { [ -n "\$admit_line" ] && [ "\$admit_line" -gt "\$reject_line" ]; }; then
+      break
+    fi
+  done
+  if [ -n "\$reject_line" ] && { [ -z "\$admit_line" ] || [ "\$admit_line" -le "\$reject_line" ]; }; then
+    echo "FAIL target presence rejection streak is unresolved after \${recovery_polls} bounded poll(s) (topic=\$prefix reject=\$reject_line admit=\${admit_line:-none})"
+    exit 0
+  fi
+fi
+# A lifecycle fault may appear while the bounded presence recovery wait is in
+# flight. Re-check the fail-closed predicates before returning READY so a later
+# accepted heartbeat cannot mask a newly-recorded zombie or exact-log stall.
+if grep -aqF "::\${target}) zombie window entered" "\$log" 2>/dev/null \
+  || grep -aqF "::\${target}) late boot ADOPTED" "\$log" 2>/dev/null \
+  || grep -aqF "::\${pot}) zombie window entered" "\$log" 2>/dev/null \
+  || grep -aqF "::\${pot}) late boot ADOPTED" "\$log" 2>/dev/null; then
+  echo "FAIL target substrate crossed boot-timeout/late-adopt lifecycle"
+  exit 0
+fi
+if grep -aqF "STAGE STALL for \${key}:" "\$log" 2>/dev/null; then
+  echo "FAIL exact canary source log recorded a named merge-apply stall"
   exit 0
 fi
 echo "READY topic=\$prefix"
