@@ -194,7 +194,59 @@ test('Debian removal tears down only verified Papercusp process ownership', () =
   assert.match(preRemove, /kill -KILL "\$pid"/);
   assert.match(preRemove, /papercusp-gui\)[\s\S]*DESKTOP_EXEC=\/usr\/bin\/papercusp-desktop[\s\S]*OWNS_OPERATOR=0/);
   assert.match(preRemove, /papercusp-server\)[\s\S]*DESKTOP_EXEC=\/usr\/bin\/papercusp-server[\s\S]*OWNS_OPERATOR=1/);
+  assert.match(preRemove, /deb-systemd-invoke --user stop "\$SERVER_USER_UNIT"/);
+  assert.ok(
+    preRemove.indexOf('deb-systemd-invoke --user stop "$SERVER_USER_UNIT"')
+      < preRemove.indexOf('for proc_dir in "$PROC_ROOT"/[0-9]*'),
+    'Server removal must stop the user unit before direct PID cleanup can trigger Restart=on-failure',
+  );
   assert.match(preRemove, /if \[ "\$OWNS_OPERATOR" = 1 \]; then[\s\S]*signal_operator_group/);
+});
+
+test('Debian Server removal stops the user unit without changing GUI removal or upgrade behavior', () => {
+  const preRemovePath = path.join(desktopRoot, 'src-tauri/deb/preremove.sh');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-prerm-systemd-'));
+  const procRoot = path.join(root, 'proc');
+  const bin = path.join(root, 'bin');
+  const invokeLog = path.join(root, 'deb-systemd-invoke.log');
+  const invokeShim = path.join(bin, 'deb-systemd-invoke');
+
+  try {
+    fs.mkdirSync(procRoot, { recursive: true });
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      invokeShim,
+      ['#!/bin/sh', 'printf "%s\\n" "$*" >> "$PAPERCUSP_SYSTEMD_INVOKE_LOG"', ''].join('\n'),
+    );
+    fs.chmodSync(invokeShim, 0o755);
+
+    const run = (packageName, action) => childProcess.spawnSync('sh', [preRemovePath, action], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DPKG_MAINTSCRIPT_PACKAGE: packageName,
+        PAPERCUSP_PREREMOVE_PROC_ROOT: procRoot,
+        PAPERCUSP_PREREMOVE_HOME_ROOT: path.join(root, 'home'),
+        PAPERCUSP_SYSTEMD_INVOKE_LOG: invokeLog,
+      },
+    });
+
+    const serverRemove = run('papercusp-server', 'remove');
+    assert.equal(serverRemove.status, 0, `${serverRemove.stdout}${serverRemove.stderr}`);
+    assert.equal(fs.readFileSync(invokeLog, 'utf8').trim(), '--user stop papercusp-server.service');
+
+    fs.rmSync(invokeLog);
+    const guiRemove = run('papercusp-gui', 'remove');
+    assert.equal(guiRemove.status, 0, `${guiRemove.stdout}${guiRemove.stderr}`);
+    assert.equal(fs.existsSync(invokeLog), false, 'GUI removal must not stop the Server unit');
+
+    const serverUpgrade = run('papercusp-server', 'upgrade');
+    assert.equal(serverUpgrade.status, 0, `${serverUpgrade.stdout}${serverUpgrade.stderr}`);
+    assert.equal(fs.existsSync(invokeLog), false, 'upgrade keeps the existing restart-on-replacement behavior');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Debian removal stays quiet when the packaged desktop exits during the TERM wait', () => {
@@ -424,7 +476,13 @@ test('Linux Server deb installs and package-enables one systemd user service', (
     'legacy recovery state must survive until the current link is proven',
   );
   assert.match(postinstall, /deb-systemd-helper --user update-state "\$SERVER_USER_UNIT"/);
-  assert.match(postremove, /deb-systemd-helper --user purge papercusp-server\.service/);
+  assert.match(postremove, /deb-systemd-invoke --user daemon-reload/);
+  assert.match(postremove, /deb-systemd-helper --user purge "\$SERVER_USER_UNIT"/);
+  assert.ok(
+    postremove.indexOf('deb-systemd-invoke --user daemon-reload')
+      < postremove.indexOf('deb-systemd-helper --user purge "$SERVER_USER_UNIT"'),
+    'live user managers must discard the removed fragment before purge state is considered',
+  );
   assert.ok(
     postremove.indexOf('DPKG_MAINTSCRIPT_PACKAGE:-') < postremove.indexOf('case "$1" in'),
     'the Server package gate must precede manual launcher removal',
