@@ -83,11 +83,10 @@ gh() {
   count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
   [[ "${GH_TOKEN:-}" != *never ]] && [ "$count" -ge 3 ] || return 1
   output='{"id":12345,"login":"aviynw"}'
-  if printf ' %s ' "$*" | grep -qF ' --jq .login '; then
-    printf 'aviynw\n'
-  else
-    printf '%s\n' "$output"
-  fi
+  case " $* " in
+    *" --jq .login "*) printf 'aviynw\n' ;;
+    *) printf '%s\n' "$output" ;;
+  esac
 }
 retry_login="$(fed_github_login_with_retry retry-eventual 3 0)"; retry_rc=$?
 if [ "$retry_rc" -eq 0 ] && [ "$retry_login" = aviynw ] \
