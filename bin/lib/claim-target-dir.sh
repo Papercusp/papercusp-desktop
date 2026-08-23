@@ -94,39 +94,48 @@ __pc_desktop_running_in() {
   fuser -s "${dir}/debug/papercusp-desktop" 2>/dev/null
 }
 
-# Prepare a source-tree collection target without replacing relocation links.
+# Restore a missing relocation referent without replacing its symlink.
 #
-# The build slot allocator above MUST skip a dangling symlink: choosing it as a
-# Cargo target could corrupt host state. Artifact collection is different. The
-# completed package already lives in an isolated Cargo root and must be copied
-# into the canonical source-tree target. If that canonical target is a
-# relocation symlink whose immediate referent disappeared, recreate only the
-# missing referent directory. Never replace the symlink, never manufacture a
-# missing parent hierarchy, and never route around a non-directory occupant.
-papercusp_prepare_collection_target_root() {
-  local root="${1:?collection target root required}"
+__pc_restore_missing_symlink_referent() {
+  local root="${1:?symlink root required}"
+  local label="${2:-target}"
   local raw_target target parent
 
-  if [[ -L "$root" && ! -e "$root" ]]; then
-    raw_target="$(readlink "$root")" || {
-      echo "ERROR: cannot read collection target symlink: $root" >&2
-      return 1
-    }
-    case "$raw_target" in
-      /*) target="$raw_target" ;;
-      *) target="$(dirname "$root")/$raw_target" ;;
-    esac
-    parent="$(dirname "$target")"
-    [[ -d "$parent" ]] || {
-      echo "ERROR: collection target symlink $root points below missing parent $parent — refusing to manufacture the relocation hierarchy" >&2
-      return 1
-    }
-    mkdir -- "$target" || {
-      echo "ERROR: cannot recreate missing collection target referent $target for $root" >&2
-      return 1
-    }
-    echo "→ restored missing collection target referent $target (preserved symlink $root)" >&2
+  [[ -L "$root" && ! -e "$root" ]] || return 0
+  raw_target="$(readlink "$root")" || {
+    echo "ERROR: cannot read $label symlink: $root" >&2
+    return 1
+  }
+  [[ -n "$raw_target" ]] || {
+    echo "ERROR: $label symlink has an empty referent: $root" >&2
+    return 1
+  }
+  case "$raw_target" in
+    /*) target="$raw_target" ;;
+    *) target="$(dirname "$root")/$raw_target" ;;
+  esac
+  parent="$(dirname "$target")"
+  [[ -d "$parent" ]] || {
+    echo "ERROR: $label symlink $root points below missing parent $parent — refusing to manufacture the relocation hierarchy" >&2
+    return 1
+  }
+  if ! mkdir -- "$target" 2>/dev/null && [[ ! -d "$target" ]]; then
+    echo "ERROR: cannot recreate missing $label referent $target for $root" >&2
+    return 1
   fi
+  echo "→ restored missing $label referent $target (preserved symlink $root)" >&2
+}
+
+# Prepare a source-tree collection target without replacing relocation links.
+# The completed package already lives in an isolated Cargo root and must be
+# copied into the canonical source-tree target. Recreate only the missing
+# referent directory when its immediate parent already exists; never replace
+# the symlink, manufacture a missing parent hierarchy, or route around a
+# non-directory occupant.
+papercusp_prepare_collection_target_root() {
+  local root="${1:?collection target root required}"
+
+  __pc_restore_missing_symlink_referent "$root" "collection target" || return 1
 
   if [[ -e "$root" && ! -d "$root" ]]; then
     echo "ERROR: collection target root exists but is not a directory: $root" >&2
@@ -187,17 +196,16 @@ __pc_claim_target_dir() {
       # removed, slot 1 remained a dangling ~/.cargo-target-dev2 symlink. `flock`
       # quite correctly claimed the OUT-OF-TREE lock, but Cargo then failed before
       # compilation with ENOTDIR while trying to create the target directory.
-      #
-      # Fail safe for the whole non-directory class. A missing ordinary path is
-      # valid (Cargo creates it), but a symlink whose target is missing, a symlink
-      # to a file, or a regular file occupying the slot can never become a target
-      # directory without deleting/replacing something this launcher does not own.
-      # Skip it and let the next stable slot (or private pid fallback) carry the
-      # build instead of destructively repairing host state here.
+      # Restore only a missing referent whose immediate parent already exists:
+      # this preserves the relocation link and makes the stable warm slot usable
+      # again without deleting or replacing host state. If the parent is missing,
+      # or the referent cannot be recreated, preserve the link and fail closed.
       if [[ -L "$dir" && ! -e "$dir" ]]; then
-        echo "→ slot $i SKIPPED: target root $dir is a broken symlink — preserving it and isolating the build" >&2
-        exec 8>&-
-        continue
+        if ! __pc_restore_missing_symlink_referent "$dir" "target slot"; then
+          echo "→ slot $i SKIPPED: target root $dir is a broken symlink — preserving it and isolating the build" >&2
+          exec 8>&-
+          continue
+        fi
       fi
       if [[ -e "$dir" && ! -d "$dir" ]]; then
         echo "→ slot $i SKIPPED: target root $dir exists but is not a directory — preserving it and isolating the build" >&2

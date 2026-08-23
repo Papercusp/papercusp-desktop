@@ -136,20 +136,43 @@ test('slots are handed out in order, and exhaustion falls back to a PRIVATE dir 
   }
 });
 
-test('a broken target-dir symlink is preserved and skipped for the next usable slot', async () => {
+test('a broken relocated target-dir symlink is healed in place for the same warm slot', async () => {
   const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' });
   try {
     assert.strictEqual(held.dir, join(home, '.cargo-target'));
     const broken = join(home, '.cargo-target-dev2');
-    const missingTarget = join(home, 'relocated-cache-that-no-longer-exists');
+    const relocationParent = join(home, 'relocated-builds');
+    const missingTarget = join(relocationParent, 'cargo-target-dev2');
+    mkdirSync(relocationParent);
+    symlinkSync(missingTarget, broken);
+
+    assert.strictEqual(
+      claim({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' }),
+      broken,
+    );
+    assert.ok(lstatSync(broken).isSymbolicLink(), 'the allocator must preserve the relocation symlink');
+    assert.strictEqual(readlinkSync(broken), missingTarget, 'the allocator must preserve its target');
+    assert.ok(lstatSync(missingTarget).isDirectory(), 'the allocator must restore the missing referent directory');
+  } finally {
+    held.child.kill();
+  }
+});
+
+test('a broken target-dir symlink with a missing relocation parent stays preserved and skipped', async () => {
+  const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' });
+  try {
+    assert.strictEqual(held.dir, join(home, '.cargo-target'));
+    const broken = join(home, '.cargo-target-dev2');
+    const missingTarget = join(home, 'missing-relocation-parent', 'cargo-target-dev2');
     symlinkSync(missingTarget, broken);
 
     assert.strictEqual(
       claim({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '3' }),
       join(home, '.cargo-target-dev3'),
     );
-    assert.ok(lstatSync(broken).isSymbolicLink(), 'the allocator must not replace the symlink');
+    assert.ok(lstatSync(broken).isSymbolicLink(), 'the allocator must preserve an unsafe symlink');
     assert.strictEqual(readlinkSync(broken), missingTarget, 'the allocator must preserve its target');
+    assert.ok(!existsSync(missingTarget), 'the allocator must not manufacture a missing relocation hierarchy');
   } finally {
     held.child.kill();
   }
