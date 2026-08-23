@@ -92,6 +92,47 @@ else
 fi
 unset -f gh
 
+# WI-40905: direct from-repo runs must share the live gate's fail-fast
+# credentialed REST preflight. Pin both the two-account verdict and the ordering
+# (preflight call before testnet/sidecar launch) so a future refactor cannot
+# silently reintroduce a multi-minute product-shaped quota failure.
+gh() {
+  [ "${1:-}" = auth ] && [ "${2:-}" = token ] && [ "${3:-}" = --user ] \
+    && { printf 'token-%s\n' "$4"; return 0; }
+  command gh "$@"
+}
+curl() {
+  if [[ " $* " == *" token-aviynw "* ]]; then
+    printf '%s' "${WI40905_B_HTTP:-200}"
+  else
+    printf '200'
+  fi
+}
+P_A_USER=papercupai P_B_USER=aviynw
+if preflight_out="$(GITHUB_REST_PREFLIGHT_RETRY_DELAY_SEC=0 preflight_github_rest_accounts https://github.com/octocat/Hello-World)" \
+  && grep -qF 'user=papercupai code=ok http=200' <<<"$preflight_out" \
+  && grep -qF 'user=aviynw code=ok http=200' <<<"$preflight_out"; then
+  ok "preflight_github_rest_accounts proves both smoke identities before rig launch (WI-40905)"
+else
+  bad "preflight_github_rest_accounts did not verify both identities (output='$preflight_out')"
+fi
+if WI40905_B_HTTP=403 GITHUB_REST_PREFLIGHT_RETRY_DELAY_SEC=0 preflight_github_rest_accounts https://github.com/octocat/Hello-World >/dev/null; then
+  bad "preflight_github_rest_accounts accepted a quota-exhausted B identity (WI-40905)"
+else
+  ok "preflight_github_rest_accounts fails closed when either smoke identity is quota-exhausted (WI-40905)"
+fi
+direct_smoke="$DIR/../two-instance-hive-from-repo-smoke.sh"
+direct_preflight_ln="$(grep -n 'GH_PREFLIGHT_OUTPUT=.*preflight_github_rest_accounts' "$direct_smoke" | head -1 | cut -d: -f1)"
+direct_testnet_ln="$(grep -n 'fed_start_testnet_dht' "$direct_smoke" | head -1 | cut -d: -f1)"
+if [ -n "$direct_preflight_ln" ] && [ -n "$direct_testnet_ln" ] \
+  && [ "$direct_preflight_ln" -lt "$direct_testnet_ln" ]; then
+  ok "direct from-repo witness runs the shared REST preflight before DHT/sidecar launch (WI-40905)"
+else
+  bad "direct from-repo witness no longer proves GitHub REST before rig launch (preflight=$direct_preflight_ln testnet=$direct_testnet_ln)"
+fi
+unset -f gh curl
+unset WI40905_B_HTTP
+
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
 # start_listener <port> <sidecar|decoy> — a synthetic instance http listener.
