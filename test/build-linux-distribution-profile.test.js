@@ -5,6 +5,11 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8');
+const hetznerFederationScript = fs.readFileSync(
+  path.join(root, 'bin/deb-hetzner-federation.sh'),
+  'utf8',
+);
+const hetznerRigScript = fs.readFileSync(path.join(root, 'bin/lib/deb-hetzner-rig.sh'), 'utf8');
 const vmConfig = JSON.parse(
   fs.readFileSync(path.join(root, 'src-tauri/tauri.vm-release.conf.json'), 'utf8'),
 );
@@ -36,6 +41,25 @@ const expectedVmResources = [
   'sidecar/sql/**/*',
   'sidecar/templates/**/*',
 ];
+
+test('Hetzner .deb federation defaults to the Ubuntu 24.04 ABI while retaining an explicit image override', () => {
+  assert.match(
+    hetznerFederationScript,
+    /LOCS="ash,ash"; STYPE="cpx31"; DEB=""; KEEP_UP=0; IMAGE="ubuntu-24\.04"/,
+    'the packaged-.deb proof must not fall back to Ubuntu 22.04 (glibc 2.35)',
+  );
+  assert.match(
+    hetznerFederationScript,
+    /--image=\*\) IMAGE="\$\{arg#--image=\}" ;;/,
+    'deliberate compatibility probes must retain the --image override',
+  );
+  assert.match(hetznerRigScript, /GLIBC_2\.38[\s\S]*ubuntu-24\.04/);
+  assert.match(
+    hetznerRigScript,
+    /RIG_IMAGE="\$\{2:-\$\{RIG_IMAGE:-ubuntu-24\.04\}\}"/,
+    'direct rig consumers need the same ABI-safe fallback as the two-frame driver',
+  );
+});
 
 test('dogfood remains the absent-knob default with both roles and developer staging', () => {
   assert.match(
