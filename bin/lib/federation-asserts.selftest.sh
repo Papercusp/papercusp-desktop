@@ -504,6 +504,13 @@ if grep -q 'fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"' "$gate_
 else
   bad "live-federation-gate can execute a long child smoke directly from the mutable tree (EI-21235839358679656)"
 fi
+if grep -q 'fed_snapshot_shell_script "$__source" "$__snapshot"' "$gate_file" \
+  && grep -q 'bash "$__snapshot"' "$gate_file" \
+  && ! grep -q 'bash "$DESKTOP_DIR/bin/lib/$__script"' "$gate_file"; then
+  ok "live-federation-gate snapshots its own selftests before execution (EI-21245861434158598)"
+else
+  bad "live-federation-gate can tear its own selftest by executing it from the mutable shared tree (EI-21245861434158598)"
+fi
 if grep -q 'fed_capture_nonempty_with_retry' "$matrix_file" \
   && grep -q 'membership-persistence=PASS' "$matrix_file"; then
   ok "content-matrix waits for the authoritative asynchronous pot_members projection (EI-21237890330979066)"
@@ -518,6 +525,19 @@ if grep -q 'fed_preflight_attestation_account "$1" "$2" "$REPO_DIR" "$MACHINE_ID
   ok "both live smokes share full attestation preflight and durable per-GitHub identity bindings (EI-21239383769017696)"
 else
   bad "from-repo smoke can still launch fresh identities without full attestation proof + durable binding (EI-21239383769017696)"
+fi
+# WI-40905 / WI-38088 sibling recurrence: sharing the durable device-identity
+# directory must not collapse the two local processes onto one persisted
+# Hyperswarm Noise identity. Pin both distinct defaults and every deb/sidecar
+# launch path so an omitted branch cannot leave DHT healthy while all peer and
+# directory channels stay at zero.
+if grep -q 'FROMREPO_SWARM_ID_A="${PAPERCUSP_FROM_REPO_SWARM_ID_A:-fromrepo-$P_A_USER-a}"' "$from_repo_file" \
+  && grep -q 'FROMREPO_SWARM_ID_B="${PAPERCUSP_FROM_REPO_SWARM_ID_B:-fromrepo-$P_B_USER-b}"' "$from_repo_file" \
+  && [ "$(grep -c 'PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_A"' "$from_repo_file")" -ge 2 ] \
+  && [ "$(grep -c 'PAPERCUSP_SWARM_IDENTITY_ID="$FROMREPO_SWARM_ID_B"' "$from_repo_file")" -ge 2 ]; then
+  ok "from-repo smoke gives A/B distinct persisted Hyperswarm transport identities on every launch path (WI-40905/WI-38088)"
+else
+  bad "from-repo smoke can give A/B the same machine-scoped Hyperswarm identity and prevent self-peering (WI-40905/WI-38088)"
 fi
 if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
   ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"

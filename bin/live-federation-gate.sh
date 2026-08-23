@@ -928,8 +928,20 @@ trap on_external_term TERM INT
 # frame and no test would have said a word. It is hermetic and costs 0.6s for 13 assertions,
 # so there was never a cost reason to leave it unwired.
 gate_selftest() {  # <label> <script-basename> <logfile> <what-is-broken-if-it-fails>
-  local __label="$1" __script="$2" __log="$3" __broken="$4"
-  if bash "$DESKTOP_DIR/bin/lib/$__script" >"$__log" 2>&1; then
+  local __label="$1" __script="$2" __log="$3" __broken="$4" __source __snapshot
+  __source="$DESKTOP_DIR/bin/lib/$__script"
+  __snapshot="$WORK/selftest-snapshot-$__script"
+  # EI-21245861434158598: Bash reads a script progressively. Executing the
+  # shared-tree file directly let a peer's legitimate in-place edit shift later
+  # offsets while this process was already running, yielding a parse error that
+  # neither HEAD nor the final working file contained. Snapshot through the same
+  # syntax-checked immutable-child seam used by the long smokes below.
+  if ! fed_snapshot_shell_script "$__source" "$__snapshot"; then
+    log "$__label self-test SNAPSHOT FAILED — source unreadable or syntactically invalid; see $__log"
+    verdict "GATE: RED ($__label self-test snapshot failed — refusing a torn mutable-tree verdict)"
+    exit 1
+  fi
+  if bash "$__snapshot" >"$__log" 2>&1; then
     log "$__label self-test PASS"
     return 0
   fi
