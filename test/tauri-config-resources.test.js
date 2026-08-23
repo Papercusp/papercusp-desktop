@@ -524,9 +524,10 @@ test('manual platform producers preserve the exact thin-GUI allowlist', () => {
 
 test('direct Tauri builds reject a raw SPA docs duplicate before bundling', () => {
   const buildRs = readText('src-tauri', 'build.rs');
-  const guardAt = buildRs.indexOf('reject_unpruned_spa_docs(&manifest_dir)');
-  const placeholderAt = buildRs.indexOf('ensure_sidecar_placeholder(&manifest_dir)');
-  const tauriBuildAt = buildRs.indexOf('tauri_build::try_build');
+  const mainAt = buildRs.indexOf('fn main()');
+  const guardAt = buildRs.indexOf('reject_unpruned_spa_docs(&manifest_dir)', mainAt);
+  const placeholderAt = buildRs.indexOf('ensure_sidecar_placeholder(&manifest_dir)', mainAt);
+  const tauriBuildAt = buildRs.indexOf('tauri_build::try_build', mainAt);
 
   assert.match(
     buildRs,
@@ -538,7 +539,7 @@ test('direct Tauri builds reject a raw SPA docs duplicate before bundling', () =
     /cargo:rerun-if-changed=sidecar\/spa\/internal\/docs/,
     'adding the forbidden directory must invalidate a cached build-script verdict',
   );
-  assert.ok(guardAt > 0, 'the raw-SPA-docs guard must be called from build.rs main');
+  assert.ok(mainAt > 0 && guardAt > mainAt, 'the raw-SPA-docs guard must be called from build.rs main');
   assert.ok(
     guardAt < placeholderAt && placeholderAt < tauriBuildAt,
     'reject the duplicate before placeholder repair and before Tauri sees bundle resources',
