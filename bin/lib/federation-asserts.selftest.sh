@@ -116,6 +116,34 @@ if fed_github_user_json_with_retry retry-json-never 3 0 >/dev/null \
 else
   ok "fed_github_user_json_with_retry fails closed after three exhausted attempts (WI-40912)"
 fi
+
+# EI-21237890330979066: join-pot returns after the local view/rekey commit;
+# pot_members arrives asynchronously through federation.  The shared relational
+# probe must recover delayed convergence and still fail closed when absent.
+ASYNC_PROBE_EVENTUAL_COUNT="$WORK/async-probe-eventual.count"
+ASYNC_PROBE_NEVER_COUNT="$WORK/async-probe-never.count"
+printf '0\n' >"$ASYNC_PROBE_EVENTUAL_COUNT"
+printf '0\n' >"$ASYNC_PROBE_NEVER_COUNT"
+async_probe() {
+  local mode="$1" counter count
+  if [ "$mode" = eventual ]; then counter="$ASYNC_PROBE_EVENTUAL_COUNT"; else counter="$ASYNC_PROBE_NEVER_COUNT"; fi
+  count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
+  [ "$mode" = eventual ] && [ "$count" -ge 3 ] && printf 'workspace-joined\n'
+}
+async_value="$(fed_capture_nonempty_with_retry 3 0 -- async_probe eventual)"; async_rc=$?
+if [ "$async_rc" -eq 0 ] && [ "$async_value" = workspace-joined ] \
+  && [ "$(cat "$ASYNC_PROBE_EVENTUAL_COUNT")" = 3 ]; then
+  ok "fed_capture_nonempty_with_retry recovers an asynchronous projection on attempt 3"
+else
+  bad "fed_capture_nonempty_with_retry missed delayed convergence (rc=$async_rc value=$async_value attempts=$(cat "$ASYNC_PROBE_EVENTUAL_COUNT"))"
+fi
+if fed_capture_nonempty_with_retry 3 0 -- async_probe never >/dev/null \
+  || [ "$(cat "$ASYNC_PROBE_NEVER_COUNT")" != 3 ]; then
+  bad "fed_capture_nonempty_with_retry does not fail closed after an exhausted projection wait"
+else
+  ok "fed_capture_nonempty_with_retry fails closed after an exhausted projection wait"
+fi
+unset -f async_probe
 unset -f gh
 
 # WI-40905: direct from-repo runs must share the live gate's fail-fast
@@ -476,6 +504,12 @@ if grep -q 'fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"' "$gate_
   ok "live-federation-gate snapshots both mutable child smokes and injects canonical DESKTOP_DIR (EI-21235839358679656)"
 else
   bad "live-federation-gate can execute a long child smoke directly from the mutable tree (EI-21235839358679656)"
+fi
+if grep -q 'fed_capture_nonempty_with_retry' "$matrix_file" \
+  && grep -q 'membership-persistence=PASS' "$matrix_file"; then
+  ok "content-matrix waits for the authoritative asynchronous pot_members projection (EI-21237890330979066)"
+else
+  bad "content-matrix still treats pot_members as synchronous immediately after join-pot (EI-21237890330979066)"
 fi
 if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
   ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"
