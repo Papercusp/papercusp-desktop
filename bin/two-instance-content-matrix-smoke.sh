@@ -146,8 +146,10 @@ B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 # exiting 0 as evidence that pushes work.
 preflight_attestation() {
   local expected_user="$1" token="$2" user_json user_id login gist_id
-  user_json="$(GH_TOKEN="$token" gh api user 2>/dev/null)" || {
-    echo "FATAL: GitHub identity preflight failed for '$expected_user' (GET /user)"
+  local identity_attempts="${ATTESTATION_IDENTITY_ATTEMPTS:-3}"
+  local identity_retry_delay="${ATTESTATION_IDENTITY_RETRY_DELAY_SEC:-10}"
+  user_json="$(fed_github_user_json_with_retry "$token" "$identity_attempts" "$identity_retry_delay")" || {
+    echo "FATAL: GitHub identity preflight failed for '$expected_user' (GET /user after ${identity_attempts} attempts)"
     return 1
   }
   user_id="$(jget "$user_json" 'd["id"]')"
