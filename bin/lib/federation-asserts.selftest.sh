@@ -52,7 +52,7 @@ gh() {
       ;;
     retry-json-eventual) counter="$GH_RETRY_JSON_EVENTUAL_COUNT" ;;
     retry-json-never) counter="$GH_RETRY_JSON_NEVER_COUNT" ;;
-    *) command gh "$@" ;;
+    *) command gh "$@"; return $? ;;
   esac
   count="$(cat "$counter")"; count=$((count + 1)); printf '%s\n' "$count" >"$counter"
   [[ "${GH_TOKEN:-}" != *never ]] && [ "$count" -ge 3 ] || return 1
