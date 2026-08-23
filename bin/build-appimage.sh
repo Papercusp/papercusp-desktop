@@ -303,6 +303,157 @@ cp -a "$GST_SCANNER_SOURCE" "$GST_SCANNER_DEST" || {
   echo "FATAL: failed to copy the GStreamer plugin scanner into the AppDir" >&2
   exit 1
 }
+
+# 2c-gst-i. COPY THE TRANSITIVE PLUGIN ELF CLOSURE.
+#     A plugin directory is not self-contained just because its .so files were
+#     copied. Each plugin is a separately loaded ELF, and its DT_NEEDED chain is
+#     resolved by the dynamic linker at the moment GStreamer discovers it. The
+#     old guard checked only that libgstapp.so existed, so libgstopenal.so could
+#     ship while libopenal.so.1 was absent and every build still passed.
+#
+#     Walk the real DT_NEEDED graph rather than using ldd output as a flat list:
+#     every library copied here is itself inspected, and each soname is either
+#     already in the AppDir, copied from the build host, or rejected. Libraries
+#     are placed in usr/lib because AppRun puts that directory first in
+#     LD_LIBRARY_PATH. The host-directory override is colon-separated so tests
+#     can exercise the exact production walker with a throwaway ELF fixture.
+copy_gstreamer_plugin_closure() {
+  local _gst_objdump
+  _gst_objdump="$(command -v objdump 2>/dev/null || true)"
+  if [ -z "$_gst_objdump" ] || [ ! -x "$_gst_objdump" ]; then
+    echo "FATAL: objdump is required to resolve the GStreamer plugin ELF closure" >&2
+    return 1
+  fi
+
+  local _gst_host_dirs="${PAPERCUSP_GSTREAMER_LIBRARY_DIRS:-/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib:/lib}"
+  local _gst_ldconfig="${PAPERCUSP_GSTREAMER_LDCONFIG:-}"
+  local _gst_ldconfig_candidate
+  if [ -z "$_gst_ldconfig" ]; then
+    for _gst_ldconfig_candidate in \
+      "$(command -v ldconfig 2>/dev/null || true)" \
+      /usr/sbin/ldconfig \
+      /sbin/ldconfig; do
+      if [ -n "$_gst_ldconfig_candidate" ] && [ -x "$_gst_ldconfig_candidate" ]; then
+        _gst_ldconfig="$_gst_ldconfig_candidate"
+        break
+      fi
+    done
+  fi
+
+  # These are the loader/libc components supplied by the Ubuntu baseline. All
+  # other dependencies, including libstdc++, libz, and libopenal, must be
+  # present in the AppDir or copied into it; allowing those to remain host-only
+  # recreates the clean-room failure this closure guard is meant to prevent.
+  local _gst_base_libs="ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1 libutil.so.1 libresolv.so.2 libnsl.so.2 libcrypt.so.1"
+  local -a _gst_host_dir_list=()
+  local -a _gst_queue=()
+  local _gst_current _gst_real _gst_needed _gst_need _gst_candidate _gst_candidate_real
+  local _gst_local _gst_host _gst_source_real _gst_filename _gst_target _gst_link
+  local _gst_processed=0
+  local _gst_count=0
+  IFS=: read -r -a _gst_host_dir_list <<< "$_gst_host_dirs"
+
+  while IFS= read -r -d '' _gst_current; do
+    _gst_queue+=("$_gst_current")
+  done < <(find "$GST_PLUGIN_DEST" -maxdepth 1 -type f -name 'libgst*.so*' -print0 2>/dev/null)
+  [ "${#_gst_queue[@]}" -gt 0 ] || {
+    echo "FATAL: no ELF GStreamer plugins were copied into $GST_PLUGIN_DEST" >&2
+    return 1
+  }
+
+  # Associative keys are canonical real paths, so a library reached through
+  # several plugins is inspected once while every edge is still validated.
+  declare -A _gst_seen=()
+  while [ "${#_gst_queue[@]}" -gt 0 ]; do
+    _gst_current="${_gst_queue[0]}"
+    _gst_queue=("${_gst_queue[@]:1}")
+    _gst_real="$(readlink -f "$_gst_current" 2>/dev/null || true)"
+    [ -f "$_gst_real" ] || {
+      echo "FATAL: GStreamer closure entry is not a readable file: $_gst_current" >&2
+      return 1
+    }
+    if [ -n "${_gst_seen[$_gst_real]:-}" ]; then
+      continue
+    fi
+    _gst_seen["$_gst_real"]=1
+    _gst_processed=$((_gst_processed + 1))
+    if ! "$_gst_objdump" -p "$_gst_real" >/dev/null 2>&1; then
+      echo "FATAL: GStreamer closure entry is not a readable ELF: $_gst_real" >&2
+      return 1
+    fi
+
+    _gst_needed="$("$_gst_objdump" -p "$_gst_real" 2>/dev/null | awk '$1 == "NEEDED" { print $2 }')"
+    while IFS= read -r _gst_need; do
+      [ -n "$_gst_need" ] || continue
+      case " $_gst_base_libs " in
+        *" $_gst_need "*) continue ;;
+      esac
+
+      _gst_local=""
+      while IFS= read -r -d '' _gst_candidate; do
+        _gst_candidate_real="$(readlink -f "$_gst_candidate" 2>/dev/null || true)"
+        if [ -f "$_gst_candidate_real" ]; then
+          _gst_local="$_gst_candidate"
+          break
+        fi
+      done < <(find "$APPDIR/usr/lib" -name "$_gst_need" \( -type f -o -type l \) -print0 2>/dev/null)
+      if [ -n "$_gst_local" ]; then
+        _gst_queue+=("$_gst_local")
+        continue
+      fi
+
+      _gst_host=""
+      for _gst_candidate in "${_gst_host_dir_list[@]}"; do
+        [ -n "$_gst_candidate" ] || continue
+        if [ -e "$_gst_candidate/$_gst_need" ]; then
+          _gst_host="$_gst_candidate/$_gst_need"
+          break
+        fi
+      done
+      if [ -z "$_gst_host" ] && [ -n "$_gst_ldconfig" ]; then
+        _gst_host="$("$_gst_ldconfig" -p 2>/dev/null | awk -v need="$_gst_need" '$1 == need { print $NF; exit }' || true)"
+      fi
+      if [ -z "$_gst_host" ] || [ ! -e "$_gst_host" ]; then
+        echo "FATAL: GStreamer plugin $(basename "$_gst_real") needs $_gst_need, but no host or AppDir copy resolves it" >&2
+        return 1
+      fi
+
+      _gst_source_real="$(readlink -f "$_gst_host" 2>/dev/null || true)"
+      if [ ! -f "$_gst_source_real" ]; then
+        echo "FATAL: GStreamer dependency $_gst_need resolves to no regular file: $_gst_host" >&2
+        return 1
+      fi
+      _gst_filename="$(basename "$_gst_source_real")"
+      _gst_target="$APPDIR/usr/lib/$_gst_filename"
+      if [ -L "$_gst_target" ] && [ ! -e "$_gst_target" ]; then
+        rm -f "$_gst_target"
+      fi
+      if [ ! -e "$_gst_target" ]; then
+        cp -a "$_gst_source_real" "$_gst_target" || {
+          echo "FATAL: failed to copy GStreamer dependency $_gst_need from $_gst_source_real" >&2
+          return 1
+        }
+        _gst_count=$((_gst_count + 1))
+      fi
+      _gst_link="$APPDIR/usr/lib/$_gst_need"
+      if [ "$_gst_filename" != "$_gst_need" ] && [ ! -e "$_gst_link" ]; then
+        ln -s "$_gst_filename" "$_gst_link" || {
+          echo "FATAL: failed to create GStreamer dependency soname link $_gst_link" >&2
+          return 1
+        }
+      fi
+      [ -e "$_gst_link" ] || [ -L "$_gst_link" ] || {
+        echo "FATAL: GStreamer dependency $_gst_need was not materialized in the AppDir" >&2
+        return 1
+      }
+      _gst_queue+=("$_gst_link")
+    done <<< "$_gst_needed"
+  done
+
+  echo "   GStreamer plugin ELF closure verified: $_gst_processed ELF(s), $_gst_count library/libraries copied"
+}
+
+copy_gstreamer_plugin_closure || exit 1
 [ -f "$GST_PLUGIN_DEST/libgstapp.so" ] || {
   echo "FATAL: AppDir is missing the GStreamer appsink provider (libgstapp.so)" >&2
   exit 1
