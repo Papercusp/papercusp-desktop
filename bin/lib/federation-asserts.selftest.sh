@@ -1589,7 +1589,7 @@ unset WI5472_ERR res
 # and advanced. The preserved 18:22 witness had all three misleading layers:
 # core probes passed, K3 passed, but F-RKCUT never reached B's epoch gate.
 wi40905_guard_line="$(grep -n 'fed_assert_hive_lifecycle_ready a b F-HIVE3' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
-wi40905_first_mutation_line="$(grep -n 'pot:membership_decide' "$FROMREPO_SMOKE_FILE" 2>/dev/null | head -1 | cut -d: -f1)"
+wi40905_first_mutation_line="$(grep -n 'dec="$(mcp_call a "pot:membership_decide"' "$FROMREPO_SMOKE_FILE" 2>/dev/null | tail -1 | cut -d: -f1)"
 if [ -n "$wi40905_guard_line" ] && [ -n "$wi40905_first_mutation_line" ] \
   && [ "$wi40905_guard_line" -lt "$wi40905_first_mutation_line" ] \
   && grep -q 'FAILED_SUBSETS="$FAILED_SUBSETS witness-lifecycle"' "$FROMREPO_SMOKE_FILE"; then
