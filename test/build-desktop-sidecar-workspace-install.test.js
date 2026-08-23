@@ -697,7 +697,7 @@ test('sidecar server bundle declares DBOS telemetry runtime requirements', () =>
 
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
   const runtimeStart = builder.indexOf('PAPERCUSP_REQUIRED_NODE_MAJOR=');
-  const installStart = builder.indexOf('npm install --legacy-peer-deps');
+  const installStart = builder.indexOf('node scripts/npm-install-safe.mjs install');
   assert(runtimeStart >= 0, 'missing repo-pinned Node runtime selector');
   assert(installStart > runtimeStart, 'Node runtime selection must happen before npm install');
 
