@@ -1,6 +1,29 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+/// EI-21234338815162020: the operator Vite dist contains a wholesale public/
+/// copy, including `internal/docs`. The canonical sidecar builder removes that
+/// duplicate because `/internal/docs/*` is served from `sidecar/internal-docs`;
+/// packaging it under `sidecar/spa` is dead weight and can reintroduce private
+/// build/agent documentation after the sidecar's privacy audit has already run.
+///
+/// A direct `tauri build` used to accept a manually refreshed raw SPA and emit a
+/// correctly signed installer carrying those never-ship bytes. Fail at compile
+/// time as well as at the finished-artifact audit, so bypassing the release
+/// wrapper cannot silently recreate the class.
+fn reject_unpruned_spa_docs(manifest_dir: &Path) {
+    let duplicate_docs = manifest_dir.join("sidecar/spa/internal/docs");
+    if duplicate_docs.exists() {
+        panic!(
+            "refusing to bundle {}: sidecar/spa/internal/docs is the raw Vite duplicate of \
+             the dedicated sidecar/internal-docs tree and may carry private build docs. \
+             Rebuild the sidecar with bin/build-desktop-sidecar.sh (which prunes and audits \
+             the SPA) before running tauri build.",
+            duplicate_docs.display(),
+        );
+    }
+}
+
 /// EI-160 (point 2): `src-tauri/sidecar/` is a gitignored ~2.2GB artifact
 /// (bin/build-desktop-sidecar.sh). On a fresh or cleaned checkout it is
 /// absent, and `generate_context!`'s `bundle.resources` globs
@@ -177,6 +200,8 @@ fn main() {
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .expect("Cargo must provide CARGO_MANIFEST_DIR to build.rs");
+    println!("cargo:rerun-if-changed=sidecar/spa/internal/docs");
+    reject_unpruned_spa_docs(&manifest_dir);
     ensure_sidecar_placeholder(&manifest_dir);
     ensure_seed_placeholder(&manifest_dir);
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");

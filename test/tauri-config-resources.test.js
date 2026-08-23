@@ -522,6 +522,29 @@ test('manual platform producers preserve the exact thin-GUI allowlist', () => {
   assert.match(windowsCross, /if \[\[ "\$role" == "gui" \]\]; then[\s\S]*"\$SRC_TAURI\/sidecar\/spa"/);
 });
 
+test('direct Tauri builds reject a raw SPA docs duplicate before bundling', () => {
+  const buildRs = readText('src-tauri', 'build.rs');
+  const guardAt = buildRs.indexOf('reject_unpruned_spa_docs(&manifest_dir)');
+  const placeholderAt = buildRs.indexOf('ensure_sidecar_placeholder(&manifest_dir)');
+  const tauriBuildAt = buildRs.indexOf('tauri_build::try_build');
+
+  assert.match(
+    buildRs,
+    /fn reject_unpruned_spa_docs[\s\S]*sidecar\/spa\/internal\/docs[\s\S]*panic!\(/,
+    'build.rs must fail instead of signing a raw Vite docs duplicate',
+  );
+  assert.match(
+    buildRs,
+    /cargo:rerun-if-changed=sidecar\/spa\/internal\/docs/,
+    'adding the forbidden directory must invalidate a cached build-script verdict',
+  );
+  assert.ok(guardAt > 0, 'the raw-SPA-docs guard must be called from build.rs main');
+  assert.ok(
+    guardAt < placeholderAt && placeholderAt < tauriBuildAt,
+    'reject the duplicate before placeholder repair and before Tauri sees bundle resources',
+  );
+});
+
 test('all public platform writers consume the shared sidecar, source and command registry', () => {
   const releaseLocal = readText('bin', 'release-local.sh');
   const windows = readText('bin', 'build-windows-cross.sh');
