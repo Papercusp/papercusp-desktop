@@ -589,6 +589,12 @@ if grep -q 'A_IDENTITY_DIR="$(readlink -m -- "\$A_IDENTITY_DIR")"' "$from_repo_f
 else
   bad "from-repo smoke lacks a resolved A!=B identity-root admission guard (WI-40905)"
 fi
+sample_gist_stream=$'\n0123456789abcdef0123456789abcdef\n\nnpm notice New major version of npm available!\n'
+if [ "$(printf '%s' "$sample_gist_stream" | fed_extract_attestation_gist_id)" = "0123456789abcdef0123456789abcdef" ]; then
+  ok "attestation preflight extracts gist id despite trailing npm notices (WI-40905)"
+else
+  bad "attestation preflight gist-id extraction regression (WI-40905)"
+fi
 # WI-40905 / WI-38088 sibling recurrence: sharing the durable device-identity
 # directory must not collapse the two local processes onto one persisted
 # Hyperswarm Noise identity. Pin both distinct defaults and every deb/sidecar

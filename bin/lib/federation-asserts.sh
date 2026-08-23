@@ -153,6 +153,12 @@ fed_github_login_with_retry() {
   _fed_github_user_with_retry "$1" login "${2:-3}" "${3:-10}"
 }
 
+# Extract the attestation gist id from a mixed stdout/stderr stream. The
+# producer prints the id on its own line; npm may append notices afterward.
+fed_extract_attestation_gist_id() {
+  grep -E '^[[:space:]]*[0-9A-Fa-f]{32}[[:space:]]*$' | tail -1 | tr -d '[:space:]'
+}
+
 # fed_preflight_attestation_account <expected-user> <token> <repo-dir> <identity-dir>
 #
 # Prove the exact production device-attestation write + readback path before a
@@ -225,7 +231,9 @@ fed_preflight_attestation_account() {
     echo "FATAL: real device-attestation preflight failed for '$login': $gist_id"
     return 1
   }
-  gist_id="$(printf '%s\n' "$gist_id" | tail -1 | tr -d '[:space:]')"
+  # npx may append an npm update notice to stderr after the script's stdout;
+  # never assume the gist id is the final line.
+  gist_id="$(printf '%s\n' "$gist_id" | fed_extract_attestation_gist_id)"
   [[ "$gist_id" =~ ^[0-9a-fA-F]{32}$ ]] || {
     echo "FATAL: attestation preflight for '$login' returned no valid gist id"
     return 1
