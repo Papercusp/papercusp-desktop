@@ -18,6 +18,11 @@
 #                                     gate does not lock it out. See §1 for the whole story.
 #   PRESSURE_FIELD    (default avg60) — which PSI window admission reads (avg10|avg60|avg300).
 #   CPU_PRESSURE_FILE (default /sys/fs/cgroup/cpu.pressure) — test seam.
+#   MEMORY_PRESSURE_GATE (default 5) — SKIP before each expensive phase when
+#                                     cgroup-v2 memory PSI `full avg10` is at or
+#                                     above this threshold; unavailable telemetry
+#                                     also fails safe unless GATE_FORCE=1.
+#   MEMORY_PRESSURE_FILE (default /sys/fs/cgroup/memory.pressure) — test seam.
 #   LOADAVG_FILE      (default /proc/loadavg) — test seam.
 #   LOAD_GATE         (default max(15, 85% of nproc)) — NO LONGER THE ADMISSION SIGNAL. Kept
 #                                     as the fallback used only when the kernel exposes no PSI,
@@ -107,6 +112,17 @@
 #                                     expiry days and leg-set changes while one regression
 #                                     stands. Dupes can no longer leak past an expired marker.
 # ── self-snapshot re-exec (EI-16828 root-cause fix) ─────────────────────────────
+# Enrol both systemd and direct invocations in the canonical heavy-work slot
+# domain. pc-heavy exports PC_HEAVY_BYPASS=1 into the child, so the re-exec is
+# one-shot and nested build/test wrappers do not reacquire a slot. Disable
+# coalescing: this gate owns its own singleton + freshness semantics and must
+# never replay another invocation's cached stdout as a new gate verdict.
+if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
+  __gate_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  exec env PC_HEAVY_COALESCE=0 "$__gate_repo_root/scripts/pc-heavy.sh" -- \
+    bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 # This gate runs via a `Type=oneshot` systemd unit for up to 4h (TimeoutStartSec=14400)
 # executing THIS file directly out of the shared tree, which many agents edit
 # concurrently. bash does not slurp a plain script into memory up front — it re-reads
@@ -163,6 +179,7 @@ STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
 # Default 30 = genuine contention, ~12x this box's observed steady state (`some avg60`
 # 2.18-2.41 while loadavg read 78-85, sampled 2026-07-26).
 PRESSURE_GATE="${PRESSURE_GATE:-30}"
+MEMORY_PRESSURE_GATE="${MEMORY_PRESSURE_GATE:-5}"
 REBUILD="${REBUILD:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"  # from-repo default 1→0, 2026-07-27, D-016 (WI-971 + WI-5783 both resolved)
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
@@ -928,23 +945,33 @@ trap on_external_term TERM INT
 # frame and no test would have said a word. It is hermetic and costs 0.6s for 13 assertions,
 # so there was never a cost reason to leave it unwired.
 gate_selftest() {  # <label> <script-basename> <logfile> <what-is-broken-if-it-fails>
-  local __label="$1" __script="$2" __log="$3" __broken="$4" __source __snapshot
+  local __label="$1" __script="$2" __log="$3" __broken="$4" __source __snapshot __evidence
   __source="$DESKTOP_DIR/bin/lib/$__script"
-  __snapshot="$WORK/selftest-snapshot-$__script"
+  # Keep dirname($0) identical to the source script: these selftests source
+  # federation-asserts.sh and inspect ../ driver files relative to themselves.
+  # A run-dir-only copy is immutable but semantically wrong (it cannot find the
+  # siblings). The dotfile is unique, does not match bin/lib/*.sh sweeps, and is
+  # removed before build/exit; the evidence copy stays with the run.
+  __snapshot="$DESKTOP_DIR/bin/lib/.gate-selftest-snapshot-$__script.$$"
+  __evidence="$WORK/selftest-snapshot-$__script"
   # EI-21245861434158598: Bash reads a script progressively. Executing the
   # shared-tree file directly let a peer's legitimate in-place edit shift later
   # offsets while this process was already running, yielding a parse error that
   # neither HEAD nor the final working file contained. Snapshot through the same
   # syntax-checked immutable-child seam used by the long smokes below.
   if ! fed_snapshot_shell_script "$__source" "$__snapshot"; then
+    rm -f -- "$__snapshot"
     log "$__label self-test SNAPSHOT FAILED — source unreadable or syntactically invalid; see $__log"
     verdict "GATE: RED ($__label self-test snapshot failed — refusing a torn mutable-tree verdict)"
     exit 1
   fi
+  cp -- "$__snapshot" "$__evidence" 2>/dev/null || true
   if bash "$__snapshot" >"$__log" 2>&1; then
+    rm -f -- "$__snapshot"
     log "$__label self-test PASS"
     return 0
   fi
+  rm -f -- "$__snapshot"
   log "$__label self-test FAILED — $__broken; see $__log"
   sed 's/^/  /' "$__log" >&2
   verdict "GATE: RED ($__label self-test failed — $__broken. Fix it before trusting the smokes)"
@@ -961,7 +988,7 @@ if [ "${GATE_SKIP_SELFTEST:-0}" != 1 ]; then
     "restart-settle-barrier.sh can no longer distinguish a measured owner frame from an unmeasured one"
 fi
 
-# ── 1. admission gate — CPU PRESSURE, not host loadavg (WI-6151) ──────────────
+# ── 1. admission gate — MEMORY FULL PSI + CPU PRESSURE ───────────────────────
 # WHAT CHANGED + WHY (2026-07-26): admission used to skip on the host 1-min loadavg, which
 # made this gate UNRUNNABLE BY CONSTRUCTION on the shared fleet box — 14:42 "GATE: SKIPPED
 # (load 165.71 > 108)", 15:42 "(load 149.81 > 108)", ~10 SKIPPED fires in 24h and no verdict
@@ -1025,6 +1052,43 @@ fi
 #
 # Both numbers are logged on every path (and carried on the SKIPPED line) so the next
 # investigator can recalibrate from real data instead of re-deriving this.
+gate_memory_pressure_full() {
+  # Memory `full` is the host-thrashing signal: every runnable task is stalled
+  # on reclaim. Read avg10 so a phase boundary reacts to the pressure that is
+  # happening now, matching kopia-backup-guard.sh and pc-heavy.sh.
+  local field="${1:-avg10}" f="${MEMORY_PRESSURE_FILE:-/sys/fs/cgroup/memory.pressure}" line v
+  [ -r "$f" ] || return 0
+  line="$(grep -m1 '^full ' "$f" 2>/dev/null)" || return 0
+  case "$line" in *"$field="*) ;; *) return 0 ;; esac
+  v="${line#*"$field"=}"; v="${v%% *}"
+  case "$v" in ''|*[!0-9.]*) return 0 ;; esac
+  printf '%s' "$v"
+}
+
+memory_phase_guard() { # <phase-label>
+  local phase="$1" value reason
+  value="$(gate_memory_pressure_full avg10)"
+  if [ -z "$value" ]; then
+    reason="memory-pressure-full-avg10 unavailable"
+  elif awk "BEGIN{exit !($value >= $MEMORY_PRESSURE_GATE)}"; then
+    reason="memory-pressure-full-avg10 $value >= $MEMORY_PRESSURE_GATE"
+  else
+    log "memory admission OK: full avg10 $value < gate $MEMORY_PRESSURE_GATE at phase=$phase."
+    return 0
+  fi
+
+  if [ "${GATE_FORCE:-0}" = 1 ]; then
+    log "$reason at phase=$phase but GATE_FORCE=1 — proceeding with the systemd envelope armed."
+    return 0
+  fi
+  log "SKIP: $reason at phase=$phase — refusing to add allocation/reclaim churn; retry next window (not a federation failure)."
+  check_staleness
+  skip_cleanup
+  verdict "GATE: SKIPPED ($reason; phase=$phase; not a federation verdict)"; exit 0
+}
+
+memory_phase_guard "start"
+
 gate_cpu_pressure_some() {
   # echo the host root-cgroup CPU PSI `some <field>` (a 0-100 percentage; field defaults to
   # avg60), or "" when the kernel or cgroup mount does not expose PSI. NEVER fatal and never
@@ -1400,6 +1464,9 @@ if [ -z "${GATE_DEB:-}" ]; then
   # content-matrix (SKIP_MATRIX != 1) or the local-matrix leg (local_matrix_due, the same
   # predicate the wall itself consults at :1009). Keeps the repack cost off windows where
   # nothing would use it, instead of tying it to an unrelated flag.
+  if [ "$FAIL_BUILD" != 1 ]; then
+    memory_phase_guard "post-build/pre-repack"
+  fi
   if [ "$FAIL_BUILD" != 1 ] && { [ "$SKIP_MATRIX" != 1 ] || local_matrix_due; }; then
     CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
     # WI-40905: GUI and Server Debian artifacts share the Papercusp*_amd64.deb
@@ -1430,6 +1497,10 @@ if [ -z "${GATE_DEB:-}" ]; then
       log "no base .deb to repack — skipping content-matrix leg"; SKIP_MATRIX=1
     fi
   fi
+fi
+
+if [ "$FAIL_BUILD" != 1 ]; then
+  memory_phase_guard "post-repack/pre-smokes"
 fi
 
 # WI-40008: a failed fresh build invalidates every consumer leg. Before this

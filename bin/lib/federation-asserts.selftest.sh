@@ -506,10 +506,11 @@ else
 fi
 if grep -q 'fed_snapshot_shell_script "$__source" "$__snapshot"' "$gate_file" \
   && grep -q 'bash "$__snapshot"' "$gate_file" \
+  && grep -qF '__snapshot="$DESKTOP_DIR/bin/lib/.gate-selftest-snapshot-$__script.$$"' "$gate_file" \
   && ! grep -q 'bash "$DESKTOP_DIR/bin/lib/$__script"' "$gate_file"; then
-  ok "live-federation-gate snapshots its own selftests before execution (EI-21245861434158598)"
+  ok "live-federation-gate snapshots its own selftests immutably without changing dirname semantics (EI-21245861434158598)"
 else
-  bad "live-federation-gate can tear its own selftest by executing it from the mutable shared tree (EI-21245861434158598)"
+  bad "live-federation-gate can tear its selftest or move it away from required relative siblings (EI-21245861434158598)"
 fi
 if grep -q 'fed_capture_nonempty_with_retry' "$matrix_file" \
   && grep -q 'membership-persistence=PASS' "$matrix_file"; then
