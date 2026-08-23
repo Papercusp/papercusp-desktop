@@ -141,6 +141,22 @@ A_TOKEN="$(gh auth token --user "$P_A_USER" 2>/dev/null)" || true
 B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 [ -n "$A_TOKEN" ] && [ -n "$B_TOKEN" ] || { echo "FATAL: need gh tokens for $P_A_USER + $P_B_USER (gh auth login). Every leg needs A's; B's discovery/offer/join legs need B's."; exit 1; }
 
+# WI-40905: the direct witness used to omit live-federation-gate's credentialed
+# REST preflight. A quota-exhausted B then stayed local-only, but only after the
+# script had booted two sidecars and waited through discovery did it report a
+# product-shaped federation red. Reuse the shared gate helper before any DHT or
+# sidecar starts; the existing GATE_SKIP_GH_PREFLIGHT escape hatch remains the
+# one explicit override for both entrypoints.
+if [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
+  GH_PREFLIGHT_OUTPUT="$(preflight_github_rest_accounts "$REPO_URL" 2>&1)"
+  GH_PREFLIGHT_RC=$?
+  printf '%s\n' "$GH_PREFLIGHT_OUTPUT"
+  if [ "$GH_PREFLIGHT_RC" -ne 0 ]; then
+    echo "FATAL: credentialed GitHub REST unhealthy for a smoke identity — refusing a product-shaped federation verdict before rig launch"
+    exit 8
+  fi
+fi
+
 # ── from-repo support gate (the directory smoke's static-grep pattern) ─────────
 # An older serve.mjs silently 404s POST /harness/pots/from-repo and announces
 # without member_repos (B's offer leg can never hit) — fail fast instead.
