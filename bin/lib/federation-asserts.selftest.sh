@@ -679,14 +679,15 @@ fi
 attest_line="$(grep -n 'preflight_attestation "\$P_A_USER"' "$matrix_file" | head -1 | cut -d: -f1)"
 extract_line="$(grep -n 'log "extract \$DEB"' "$matrix_file" | head -1 | cut -d: -f1)"
 if [ -n "$attest_line" ] && [ -n "$extract_line" ] && [ "$attest_line" -lt "$extract_line" ] \
-  && grep -q 'ensureAttestationGist' "$matrix_file" \
-  && grep -q 'verifyAttestation' "$matrix_file"; then
+  && grep -q 'fed_preflight_attestation_account "$1" "$2" "$REPO_DIR" "$MACHINE_IDENTITY_DIR"' "$matrix_file" \
+  && grep -q 'ensureAttestationGist' "$DIR/federation-asserts.sh" \
+  && grep -q 'verifyAttestation' "$DIR/federation-asserts.sh"; then
   ok "content-matrix proves the real device attestation before expensive package extraction (D-030)"
 else
   bad "content-matrix no longer fail-fast proves real device attestation before package extraction (D-030)"
 fi
-if grep -q 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file" \
-  && [ "$(grep -c 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file")" -ge 3 ]; then
+if grep -q 'fed_preflight_attestation_account "$1" "$2" "$REPO_DIR" "$MACHINE_IDENTITY_DIR"' "$matrix_file" \
+  && [ "$(grep -c 'PAPERCUSP_IDENTITY_DIR="\$MACHINE_IDENTITY_DIR"' "$matrix_file")" -ge 2 ]; then
   ok "content-matrix preflight and both sidecars share the durable machine identity directory (D-030)"
 else
   bad "content-matrix fake HOMEs can mint run-scoped device keys instead of reusing machine identity (D-030)"
