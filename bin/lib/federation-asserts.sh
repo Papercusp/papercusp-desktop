@@ -66,7 +66,7 @@ fed_select_newest_deb_by_package() {
 # the one-shot read that red-pinned WI-40912 after the wrapper preflight recovered.
 _fed_github_user_with_retry() {
   local token="$1" output_mode="$2" attempts="${3:-3}" retry_delay="${4:-10}"
-  local attempt user_out
+  local attempt user_out gh_rc
 
   [ -n "$token" ] || return 1
   [[ "$output_mode" = json || "$output_mode" = login ]] || return 1
@@ -76,10 +76,12 @@ _fed_github_user_with_retry() {
   for ((attempt = 1; attempt <= attempts; attempt++)); do
     if [ "$output_mode" = login ]; then
       user_out="$(GH_TOKEN="$token" gh api user --jq .login 2>/dev/null)"
+      gh_rc=$?
     else
       user_out="$(GH_TOKEN="$token" gh api user 2>/dev/null)"
+      gh_rc=$?
     fi
-    if [ "$?" -eq 0 ] && [ -n "$user_out" ]; then
+    if [ "$gh_rc" -eq 0 ] && [ -n "$user_out" ]; then
       printf '%s\n' "$user_out"
       return 0
     fi
