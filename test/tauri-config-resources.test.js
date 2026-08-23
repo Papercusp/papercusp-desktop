@@ -64,6 +64,26 @@ function buildDistributionDeb(role, { forbiddenGui = false, modelFragment = fals
   return { temp, artifact };
 }
 
+function buildDistributionAppImage() {
+  const contract = readDistributionContract();
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-distribution-gui-appimage-'));
+  const resourceRoot = contract.gui.installedIdentities.linuxResourceRoot.replace(/^\//, '');
+  const artifact = path.join(temp, 'papercusp-gui-fixture.AppImage');
+  fs.writeFileSync(
+    artifact,
+    `#!/bin/sh
+set -eu
+[ "\${1:-}" = "--appimage-extract" ]
+root="squashfs-root/${resourceRoot}"
+mkdir -p "$root/sidecar/spa"
+printf spa > "$root/sidecar/spa/index.html"
+head -c 4096 /dev/zero > "$root/sidecar/spa/chunk.js"
+`,
+    { mode: 0o755 },
+  );
+  return { temp, artifact };
+}
+
 function runDistributionCensus(role, artifact, env = {}) {
   const audit = path.join(root, 'bin', 'audit-release-bundle.py');
   const run = spawnSync(
@@ -121,10 +141,16 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
   for (const platform of Object.values(contract.gui.budgets.platforms)) {
     assert.equal(platform.mustRemeasureFreshArtifact, true);
   }
-  assert.equal(contract.gui.budgets.platforms.linux.downloadBytes, 80_174_804);
-  assert.equal(contract.gui.budgets.platforms.linux.unpackedBytes, 241_927_695);
-  assert.equal(contract.gui.budgets.platforms.linux.downloadCeilingBytes, 85 * mib);
-  assert.equal(contract.gui.budgets.platforms.linux.unpackedCeilingBytes, 256 * mib);
+  const linuxFormats = contract.gui.budgets.platforms.linux.formats;
+  assert.deepEqual(Object.keys(linuxFormats).sort(), ['appimage', 'deb']);
+  assert.equal(linuxFormats.deb.downloadBytes, 49_547_020);
+  assert.equal(linuxFormats.deb.unpackedBytes, 241_963_741);
+  assert.equal(linuxFormats.deb.downloadCeilingBytes, 64 * mib);
+  assert.equal(linuxFormats.deb.unpackedCeilingBytes, 256 * mib);
+  assert.equal(linuxFormats.appimage.downloadBytes, 141_175_288);
+  assert.equal(linuxFormats.appimage.unpackedBytes, 514_901_883);
+  assert.equal(linuxFormats.appimage.downloadCeilingBytes, 150 * mib);
+  assert.equal(linuxFormats.appimage.unpackedCeilingBytes, 512 * mib);
   assert.deepEqual(contract.gui.budgets.measurement, [
     'compressed-artifact-bytes',
     'unpacked-unique-inode-bytes',
@@ -195,14 +221,39 @@ test('distribution census reads archive members, separates hardlinks, and enforc
 
     const tinyContractPath = path.join(fixture.temp, 'tiny-contract.json');
     const tiny = readDistributionContract();
-    tiny.gui.budgets.platforms.linux.downloadCeilingBytes = 1;
-    tiny.gui.budgets.platforms.linux.unpackedCeilingBytes = 1;
+    tiny.gui.budgets.platforms.linux.formats.deb.downloadCeilingBytes = 1;
+    tiny.gui.budgets.platforms.linux.formats.deb.unpackedCeilingBytes = 1;
     fs.writeFileSync(tinyContractPath, `${JSON.stringify(tiny)}\n`);
     const overBudget = runDistributionCensus('gui', fixture.artifact, {
       PAPERCUSP_DISTRIBUTION_CONTRACT: tinyContractPath,
     });
     assert.equal(overBudget.status, 1);
     assert.equal(overBudget.report.ok, false);
+    assert.match(overBudget.stderr, /compressed artifact .* exceeds ceiling 1/);
+    assert.match(overBudget.stderr, /unique-inode unpacked bytes .* exceed ceiling 1/);
+  } finally {
+    fs.rmSync(fixture.temp, { recursive: true, force: true });
+  }
+});
+
+test('distribution census normalizes the AppImage squashfs root and uses its format budget', () => {
+  const fixture = buildDistributionAppImage();
+  try {
+    const clean = runDistributionCensus('gui', fixture.artifact);
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.equal(clean.report.ok, true);
+    assert.equal(clean.report.reports[0].artifactFormat, 'appimage');
+    assert.equal(clean.report.reports[0].violations.length, 0);
+
+    const tinyContractPath = path.join(fixture.temp, 'tiny-appimage-contract.json');
+    const tiny = readDistributionContract();
+    tiny.gui.budgets.platforms.linux.formats.appimage.downloadCeilingBytes = 1;
+    tiny.gui.budgets.platforms.linux.formats.appimage.unpackedCeilingBytes = 1;
+    fs.writeFileSync(tinyContractPath, `${JSON.stringify(tiny)}\n`);
+    const overBudget = runDistributionCensus('gui', fixture.artifact, {
+      PAPERCUSP_DISTRIBUTION_CONTRACT: tinyContractPath,
+    });
+    assert.equal(overBudget.status, 1);
     assert.match(overBudget.stderr, /compressed artifact .* exceeds ceiling 1/);
     assert.match(overBudget.stderr, /unique-inode unpacked bytes .* exceed ceiling 1/);
   } finally {

@@ -3140,6 +3140,36 @@ def _distribution_contract():
         return path, json.load(source)
 
 
+def _distribution_artifact_format(path):
+    """Stable contract key for a finished installer/container."""
+    lower = path.lower()
+    for suffix, name in (
+        (".appimage", "appimage"),
+        (".deb", "deb"),
+        (".dmg", "dmg"),
+        (".msi", "msi"),
+        (".exe", "exe"),
+    ):
+        if lower.endswith(suffix):
+            return name
+    return os.path.splitext(lower)[1].lstrip(".") or "unknown"
+
+
+def _distribution_payload_root(expanded, artifact_format):
+    """Return the installed-tree root, not an extractor-owned wrapper dir.
+
+    AppImage's runtime always materializes ``squashfs-root`` below the selected
+    extraction directory. Debian and the other installer readers materialize
+    their filesystem payload directly at ``expanded``. Contract paths are
+    installed paths, so the wrapper must never become part of their lookup.
+    """
+    if artifact_format == "appimage":
+        squashfs_root = os.path.join(expanded, "squashfs-root")
+        if os.path.isdir(squashfs_root):
+            return squashfs_root
+    return expanded
+
+
 def distribution_census(argv):
     """Expand finished artifacts, enforce the role contract, and emit byte facts.
 
@@ -3188,6 +3218,7 @@ def distribution_census(argv):
         for index, artifact in enumerate(artifacts):
             expanded = os.path.join(tmp, f"artifact-{index}")
             ok, method = _expand_installer(artifact, expanded)
+            artifact_format = _distribution_artifact_format(artifact)
             expanded_bytes = _tree_bytes(expanded) if ok else 0
             artifact_bytes = os.path.getsize(artifact)
             if not ok or expanded_bytes == 0:
@@ -3210,8 +3241,9 @@ def distribution_census(argv):
             # installs those files, so distribution size/accounting must census
             # only the fsys payload. The archive-member read below likewise uses
             # dpkg-deb --fsys-tarfile, keeping both measures on the installed set.
-            census_excludes = {"__control__"} if artifact.lower().endswith(".deb") else set()
-            tree = _tree_census(expanded, census_excludes)
+            payload_root = _distribution_payload_root(expanded, artifact_format)
+            census_excludes = {"__control__"} if artifact_format == "deb" else set()
+            tree = _tree_census(payload_root, census_excludes)
             try:
                 members = _artifact_member_census(artifact, expanded)
             except Exception as exc:
@@ -3219,7 +3251,7 @@ def distribution_census(argv):
                 return 2
 
             resource_root = os.path.join(
-                expanded, *identity[resource_key].lstrip("/\\").replace("\\", "/").split("/")
+                payload_root, *identity[resource_key].lstrip("/\\").replace("\\", "/").split("/")
             )
             violations = []
             if not os.path.isdir(resource_root):
@@ -3253,10 +3285,22 @@ def distribution_census(argv):
 
                 budgets = role_contract["budgets"]
                 platform_budget = budgets["platforms"].get(platform, {})
-                download_ceiling = platform_budget.get(
+                format_budgets = platform_budget.get("formats")
+                if isinstance(format_budgets, dict):
+                    format_budget = format_budgets.get(artifact_format)
+                    if not isinstance(format_budget, dict):
+                        format_budget = {}
+                        violations.append(
+                            f"{platform}/{artifact_format} has no explicit measured budget"
+                        )
+                else:
+                    # Backward compatibility for pending platforms and older
+                    # single-format contracts. Linux now declares formats.
+                    format_budget = platform_budget
+                download_ceiling = format_budget.get(
                     "downloadCeilingBytes", budgets.get("initialDownloadCeiling")
                 )
-                unpacked_ceiling = platform_budget.get("unpackedCeilingBytes")
+                unpacked_ceiling = format_budget.get("unpackedCeilingBytes")
                 if download_ceiling is None or unpacked_ceiling is None:
                     violations.append(
                         f"{platform} has no explicit compressed+unpacked ceilings; "
@@ -3273,10 +3317,10 @@ def distribution_census(argv):
                             f"exceed ceiling {unpacked_ceiling}"
                         )
                 artifact_sha = _sha256_file(artifact)
-                if artifact_sha == platform_budget.get("sourceArtifactSha256"):
-                    if artifact_bytes != platform_budget.get("downloadBytes"):
+                if artifact_sha == format_budget.get("sourceArtifactSha256"):
+                    if artifact_bytes != format_budget.get("downloadBytes"):
                         violations.append("baseline artifact downloadBytes no longer matches its own sha")
-                    if tree["uniqueInodeBytes"] != platform_budget.get("unpackedBytes"):
+                    if tree["uniqueInodeBytes"] != format_budget.get("unpackedBytes"):
                         violations.append("baseline artifact unpackedBytes no longer matches its own sha")
             else:
                 artifact_sha = _sha256_file(artifact)
@@ -3301,6 +3345,7 @@ def distribution_census(argv):
                 "ok": not violations,
                 "role": role,
                 "platform": platform,
+                "artifactFormat": artifact_format,
                 "artifact": os.path.abspath(artifact),
                 "artifactSha256": artifact_sha,
                 "compressedArtifactBytes": artifact_bytes,

@@ -127,12 +127,23 @@
       "tighteningRule": "A platform with a fresh artifact must pin exact measured bytes plus explicit compressed and unpacked ceilings; pending platforms retain the 250 MiB download safety ceiling but cannot pass distribution census until measured.",
       "platforms": {
         "linux": {
-          "status": "fresh-0.0.18-clean-vm-artifact",
-          "downloadBytes": 80174804,
-          "unpackedBytes": 241927695,
-          "downloadCeilingBytes": 89128960,
-          "unpackedCeilingBytes": 268435456,
-          "sourceArtifactSha256": "ab32148a2b31f6f019b32158457366142a807eefae24aab74c1471d24b1e8af7",
+          "status": "fresh-0.0.18-exact-source-artifacts",
+          "formats": {
+            "deb": {
+              "downloadBytes": 49547020,
+              "unpackedBytes": 241963741,
+              "downloadCeilingBytes": 67108864,
+              "unpackedCeilingBytes": 268435456,
+              "sourceArtifactSha256": "43501b5b6d9a7c92aabf5a1a44d26500ebc0569608f7c0044ad3f61f2a00201e"
+            },
+            "appimage": {
+              "downloadBytes": 141175288,
+              "unpackedBytes": 514901883,
+              "downloadCeilingBytes": 157286400,
+              "unpackedCeilingBytes": 536870912,
+              "sourceArtifactSha256": "f229a15b57718310e1bb1ca9a086db906a54974bbd83907e2556366ac389dbc8"
+            }
+          },
           "mustRemeasureFreshArtifact": true
         },
         "macos": {
