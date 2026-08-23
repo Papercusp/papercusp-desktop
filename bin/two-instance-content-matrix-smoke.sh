@@ -145,70 +145,7 @@ B_TOKEN="$(gh auth token --user "$P_B_USER" 2>/dev/null)" || true
 # it from a successful read is the same mistake as reading `git ls-remote`
 # exiting 0 as evidence that pushes work.
 preflight_attestation() {
-  local expected_user="$1" token="$2" user_json user_id login gist_id
-  local identity_attempts="${ATTESTATION_IDENTITY_ATTEMPTS:-3}"
-  local identity_retry_delay="${ATTESTATION_IDENTITY_RETRY_DELAY_SEC:-10}"
-  user_json="$(fed_github_user_json_with_retry "$token" "$identity_attempts" "$identity_retry_delay")" || {
-    echo "FATAL: GitHub identity preflight failed for '$expected_user' (GET /user after ${identity_attempts} attempts)"
-    return 1
-  }
-  user_id="$(jget "$user_json" 'd["id"]')"
-  login="$(jget "$user_json" 'd["login"]')"
-  [[ "$user_id" =~ ^[1-9][0-9]*$ ]] && [ -n "$login" ] || {
-    echo "FATAL: GitHub identity preflight returned an invalid user for '$expected_user'"
-    return 1
-  }
-  [[ "${login,,}" = "${expected_user,,}" ]] || {
-    echo "FATAL: token requested for '$expected_user' authenticates as '$login'"
-    return 1
-  }
-
-  gist_id="$(
-    cd "$REPO_DIR" &&
-      PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR" \
-      PAPERCUSP_ATTEST_TOKEN="$token" \
-      PAPERCUSP_ATTEST_USER_ID="$user_id" \
-      PAPERCUSP_ATTEST_LOGIN="$login" \
-      npx tsx -e '
-        import { ensureAttestationGist, loadOrGenerateDeviceKeypair, verifyAttestation, probeGistWriteCapability } from "./packages/operator-core/lib/identity/attest.ts";
-        import { resolveDeviceKeychainId } from "./packages/operator-core/lib/identity/device-keychain-id.ts";
-        async function main() {
-          const githubUserId = Number(process.env.PAPERCUSP_ATTEST_USER_ID);
-          const githubLogin = process.env.PAPERCUSP_ATTEST_LOGIN!;
-          const token = process.env.PAPERCUSP_ATTEST_TOKEN!;
-          const cap = await probeGistWriteCapability(token);
-          if (!cap.ok) {
-            throw new Error(
-              `${githubLogin} CANNOT create attestation gists (${cap.code}): ${cap.detail}` +
-                (cap.remediation ? ` -- remediate: ${cap.remediation}` : ""),
-            );
-          }
-          const keychainId = resolveDeviceKeychainId(githubUserId);
-          const keypair = await loadOrGenerateDeviceKeypair(keychainId);
-          const gistId = await ensureAttestationGist({
-            keychainId,
-            pubkeyBase64: keypair.pubkeyBase64,
-            deviceLabel: `papercusp-${githubLogin}`,
-            githubUserId,
-            githubLogin,
-            token,
-          });
-          const verified = await verifyAttestation(gistId, keypair.pubkeyBase64, githubUserId, { skipCache: true });
-          if (!verified.valid) throw new Error(`attestation ${gistId} failed verification: ${verified.reason}`);
-          console.log(gistId);
-        }
-        main().catch((err) => { console.error(String(err)); process.exit(1); });
-      ' 2>&1
-  )" || {
-    echo "FATAL: real device-attestation preflight failed for '$login': $gist_id"
-    return 1
-  }
-  gist_id="$(printf '%s\n' "$gist_id" | tail -1 | tr -d '[:space:]')"
-  [[ "$gist_id" =~ ^[0-9a-fA-F]{32}$ ]] || {
-    echo "FATAL: attestation preflight for '$login' returned no valid gist id"
-    return 1
-  }
-  echo "ATTESTATION: $login#$user_id ready (gist=$gist_id, identity_dir=$MACHINE_IDENTITY_DIR)"
+  fed_preflight_attestation_account "$1" "$2" "$REPO_DIR" "$MACHINE_IDENTITY_DIR"
 }
 
 preflight_attestation "$P_A_USER" "$A_TOKEN" || exit 1

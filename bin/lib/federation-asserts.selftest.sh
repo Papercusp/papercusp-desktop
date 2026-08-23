@@ -511,6 +511,15 @@ if grep -q 'fed_capture_nonempty_with_retry' "$matrix_file" \
 else
   bad "content-matrix still treats pot_members as synchronous immediately after join-pot (EI-21237890330979066)"
 fi
+if grep -q 'fed_preflight_attestation_account "$1" "$2" "$REPO_DIR" "$MACHINE_IDENTITY_DIR"' "$matrix_file" \
+  && grep -q 'fed_preflight_attestation_account "$P_A_USER" "$A_TOKEN" "$DESKTOP_DIR/.." "$MACHINE_IDENTITY_DIR"' "$from_repo_file" \
+  && grep -q 'fed_preflight_attestation_account "$P_B_USER" "$B_TOKEN" "$DESKTOP_DIR/.." "$MACHINE_IDENTITY_DIR"' "$from_repo_file" \
+  && [ "$(grep -c 'PAPERCUSP_IDENTITY_DIR="$MACHINE_IDENTITY_DIR"' "$from_repo_file")" -ge 4 ] \
+  && [ "$(grep -c 'PAPERCUSP_GITHUB_LOGIN="$P_[AB]_USER"' "$from_repo_file")" -ge 4 ]; then
+  ok "both live smokes share full attestation preflight and durable per-GitHub identity bindings (EI-21239383769017696)"
+else
+  bad "from-repo smoke can still launch fresh identities without full attestation proof + durable binding (EI-21239383769017696)"
+fi
 if grep -q 'does not exist — ignoring stale override' "$gate_file"; then
   ok "live-federation-gate ignores a missing GATE_DEB override instead of feeding it to the smoke"
 else

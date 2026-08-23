@@ -153,6 +153,83 @@ fed_github_login_with_retry() {
   _fed_github_user_with_retry "$1" login "${2:-3}" "${3:-10}"
 }
 
+# fed_preflight_attestation_account <expected-user> <token> <repo-dir> <identity-dir>
+#
+# Prove the exact production device-attestation write + readback path before a
+# federation rig launches.  A successful repo read or GET /user does not prove
+# gist write capability, and relying on boot-time self-publish lets a quota wall
+# produce an UNATTESTED announce after the expensive pair is already running.
+# Both live smoke entrypoints share this helper and the same durable per-GitHub
+# identity store so their admission posture cannot drift (EI-21239383769017696).
+fed_preflight_attestation_account() {
+  local expected_user="$1" token="$2" repo_dir="$3" identity_dir="$4"
+  local user_json user_id login gist_id
+  local identity_attempts="${ATTESTATION_IDENTITY_ATTEMPTS:-3}"
+  local identity_retry_delay="${ATTESTATION_IDENTITY_RETRY_DELAY_SEC:-10}"
+
+  user_json="$(fed_github_user_json_with_retry "$token" "$identity_attempts" "$identity_retry_delay")" || {
+    echo "FATAL: GitHub identity preflight failed for '$expected_user' (GET /user after ${identity_attempts} attempts)"
+    return 1
+  }
+  user_id="$(printf '%s' "$user_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id", ""))' 2>/dev/null)"
+  login="$(printf '%s' "$user_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("login", ""))' 2>/dev/null)"
+  [[ "$user_id" =~ ^[1-9][0-9]*$ ]] && [ -n "$login" ] || {
+    echo "FATAL: GitHub identity preflight returned an invalid user for '$expected_user'"
+    return 1
+  }
+  [[ "${login,,}" = "${expected_user,,}" ]] || {
+    echo "FATAL: token requested for '$expected_user' authenticates as '$login'"
+    return 1
+  }
+
+  gist_id="$(
+    cd "$repo_dir" &&
+      PAPERCUSP_IDENTITY_DIR="$identity_dir" \
+      PAPERCUSP_ATTEST_TOKEN="$token" \
+      PAPERCUSP_ATTEST_USER_ID="$user_id" \
+      PAPERCUSP_ATTEST_LOGIN="$login" \
+      npx tsx -e '
+        import { ensureAttestationGist, loadOrGenerateDeviceKeypair, verifyAttestation, probeGistWriteCapability } from "./packages/operator-core/lib/identity/attest.ts";
+        import { resolveDeviceKeychainId } from "./packages/operator-core/lib/identity/device-keychain-id.ts";
+        async function main() {
+          const githubUserId = Number(process.env.PAPERCUSP_ATTEST_USER_ID);
+          const githubLogin = process.env.PAPERCUSP_ATTEST_LOGIN!;
+          const token = process.env.PAPERCUSP_ATTEST_TOKEN!;
+          const cap = await probeGistWriteCapability(token);
+          if (!cap.ok) {
+            throw new Error(
+              `${githubLogin} CANNOT create attestation gists (${cap.code}): ${cap.detail}` +
+                (cap.remediation ? ` -- remediate: ${cap.remediation}` : ""),
+            );
+          }
+          const keychainId = resolveDeviceKeychainId(githubUserId);
+          const keypair = await loadOrGenerateDeviceKeypair(keychainId);
+          const gistId = await ensureAttestationGist({
+            keychainId,
+            pubkeyBase64: keypair.pubkeyBase64,
+            deviceLabel: `papercusp-${githubLogin}`,
+            githubUserId,
+            githubLogin,
+            token,
+          });
+          const verified = await verifyAttestation(gistId, keypair.pubkeyBase64, githubUserId, { skipCache: true });
+          if (!verified.valid) throw new Error(`attestation ${gistId} failed verification: ${verified.reason}`);
+          console.log(gistId);
+        }
+        main().catch((err) => { console.error(String(err)); process.exit(1); });
+      ' 2>&1
+  )" || {
+    echo "FATAL: real device-attestation preflight failed for '$login': $gist_id"
+    return 1
+  }
+  gist_id="$(printf '%s\n' "$gist_id" | tail -1 | tr -d '[:space:]')"
+  [[ "$gist_id" =~ ^[0-9a-fA-F]{32}$ ]] || {
+    echo "FATAL: attestation preflight for '$login' returned no valid gist id"
+    return 1
+  }
+  echo "ATTESTATION: $login#$user_id ready (gist=$gist_id, identity_dir=$identity_dir)"
+}
+
 # preflight_github_rest_accounts [github-repo-url]
 #
 # Probe the exact authenticated REST read both federation smoke identities need
