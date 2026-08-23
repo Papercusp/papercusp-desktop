@@ -11,7 +11,8 @@
 # processes, gated by the SAME rig-ownership test as the prod-port guard so a REAL (prod/live)
 # operator sidecar is NEVER touched. This self-test proves, on the REAL gate functions:
 #   1. gate_owns_rig_pid attributes a rig-sandbox process as OWNED and a neutral one as NOT.
-#   2. reap_gate_sidecars kills the rig-owned leftover and SPARES the non-rig one.
+#   2. reap_gate_sidecars kills the rig-owned leftover and SPARES the non-rig one
+#      plus a concurrently-live FOREIGN rig using the same canonical /tmp prefix.
 #   3. the EXIT trap actually wires reap_gate_sidecars (structural — guards trap removal).
 # It STUBS pgrep to a controlled fake-pid list, so it NEVER touches a real box process (even
 # a concurrent live gate run). Purely local: two backgrounded `sleep` stand-ins, ~1s.
@@ -21,7 +22,8 @@
 # Why a bash self-test and not Vitest: the unit under test is bash. Mirrors
 # federation-asserts.selftest.sh / release-artifacts.selftest.sh — the four canonical
 # TS/Cargo/LLM frameworks don't host shell units; the live gate is the integration test.
-# A node:test wrapper (test/live-federation-gate-reaper.test.js) runs this in CI.
+# A Vitest wrapper (packages/operator-core/lib/live-federation-gate-reaper.test.ts)
+# runs this in CI.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$DIR/../live-federation-gate.sh"
@@ -53,8 +55,9 @@ eval "$FN_SRC"
 # NOT reaped, so if it inherited this test's stdout it would hold the caller's capture pipe
 # open until it exits (120s) — hanging any harness that reads our output to EOF.
 spawn_fake_serve() {
-  local cwd="$1"
-  ( cd "$cwd" && exec -a "node --require sidecar-preload.js serve.mjs --ensure" sleep 120 ) \
+  local cwd="$1" marker="${2:-}"
+  ( cd "$cwd" && PAPERCUSP_LIVE_FED_GATE_RUN="$marker" \
+      exec -a "node --require sidecar-preload.js serve.mjs --ensure" sleep 120 ) \
     </dev/null >/dev/null 2>&1 &
   echo $!
 }
@@ -65,21 +68,25 @@ spawn_fake_serve() {
 # never be reaped (the live incident: a stray/concurrent gate's exit-trap reap killed a
 # DIFFERENT gate's in-flight sidecar build this way, twice in a row).
 spawn_fake_build() {
-  local cwd="$1"
-  ( cd "$cwd" && exec -a "node esbuild bin/serve.ts --outfile=$cwd/serve.mjs --bundle" sleep 120 ) \
+  local cwd="$1" marker="${2:-}"
+  ( cd "$cwd" && PAPERCUSP_LIVE_FED_GATE_RUN="$marker" \
+      exec -a "node esbuild bin/serve.ts --outfile=$cwd/serve.mjs --bundle" sleep 120 ) \
     </dev/null >/dev/null 2>&1 &
   echo $!
 }
 
-# A rig-sandbox cwd MATCHES gate_owns_rig_pid's regex (…/tmp/merge-smoke.*); the neutral cwd
-# matches NOTHING in it — so it stands in for a real prod/live sidecar that must be spared.
+# The owned fake carries THIS gate's exact run marker. The foreign fake uses the
+# same canonical rig-prefix class with a DIFFERENT marker, while the neutral fake
+# carries none — both must be spared.
 RIG_DIR="$(mktemp -d /tmp/merge-smoke.XXXXXX)"
+FOREIGN_RIG_DIR="$(mktemp -d /tmp/hive-fromrepo-smoke.XXXXXX)"
 NEUTRAL_DIR="$(mktemp -d /tmp/reaper-neutral.XXXXXX)"
 BUILD_DIR="$(mktemp -d /tmp/merge-smoke.XXXXXX)"
-RIG_PID="$(spawn_fake_serve "$RIG_DIR")"
+RIG_PID="$(spawn_fake_serve "$RIG_DIR" "$WORK")"
+FOREIGN_RIG_PID="$(spawn_fake_serve "$FOREIGN_RIG_DIR" "/tmp/live-fed-gate-foreign-$$")"
 NEUTRAL_PID="$(spawn_fake_serve "$NEUTRAL_DIR")"
-BUILD_PID="$(spawn_fake_build "$BUILD_DIR")"
-cleanup() { kill "$RIG_PID" "$NEUTRAL_PID" "$BUILD_PID" 2>/dev/null || true; rm -rf "$RIG_DIR" "$NEUTRAL_DIR" "$BUILD_DIR"; }
+BUILD_PID="$(spawn_fake_build "$BUILD_DIR" "$WORK")"
+cleanup() { kill "$RIG_PID" "$FOREIGN_RIG_PID" "$NEUTRAL_PID" "$BUILD_PID" 2>/dev/null || true; rm -rf "$RIG_DIR" "$FOREIGN_RIG_DIR" "$NEUTRAL_DIR" "$BUILD_DIR"; }
 trap cleanup EXIT INT TERM
 sleep 0.3   # let the execs settle so /proc/<pid>/cwd resolves
 
@@ -94,11 +101,16 @@ if gate_owns_rig_pid "$NEUTRAL_PID"; then
 else
   ok "gate_owns_rig_pid: neutral cwd → NOT owned (a real sidecar is protected)"
 fi
+if gate_owns_rig_pid "$FOREIGN_RIG_PID"; then
+  bad "gate_owns_rig_pid: foreign live rig pid $FOREIGN_RIG_PID wrongly claimed by prefix — one gate EXIT would kill a peer run (WI-40905)"
+else
+  ok "gate_owns_rig_pid: foreign canonical-prefix rig → NOT owned (exact run marker protects peers)"
+fi
 
 # ── 2. reap kills the rig-owned leftover, spares the non-rig one + a rig-owned BUILD ──
 # Stub pgrep so reap_gate_sidecars operates ONLY on our controlled pids — it NEVER
 # scans / signals a real box process, even during a concurrent live gate run.
-pgrep() { printf '%s\n%s\n%s\n' "$RIG_PID" "$NEUTRAL_PID" "$BUILD_PID"; }
+pgrep() { printf '%s\n%s\n%s\n%s\n' "$RIG_PID" "$FOREIGN_RIG_PID" "$NEUTRAL_PID" "$BUILD_PID"; }
 reap_gate_sidecars
 unset -f pgrep
 sleep 0.3
@@ -112,6 +124,11 @@ if kill -0 "$NEUTRAL_PID" 2>/dev/null; then
   ok "reap_gate_sidecars: non-rig serve.mjs spared"
 else
   bad "reap_gate_sidecars: non-rig serve.mjs was KILLED — ownership guard failed (would kill prod/live sidecars)"
+fi
+if kill -0 "$FOREIGN_RIG_PID" 2>/dev/null; then
+  ok "reap_gate_sidecars: foreign concurrently-live rig spared (WI-40905)"
+else
+  bad "reap_gate_sidecars: foreign live rig was KILLED by shared-prefix fallback (WI-40905)"
 fi
 if kill -0 "$BUILD_PID" 2>/dev/null; then
   ok "reap_gate_sidecars: rig-owned esbuild BUILD step (no --ensure) spared (WI-5701)"
