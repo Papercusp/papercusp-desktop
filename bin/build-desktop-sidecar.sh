@@ -2028,6 +2028,37 @@ if [[ "$rubric_count" -lt 1 ]]; then
 fi
 echo "  ✓ $rubric_count first-party rubrics bundled → $RUBRICS_DST"
 
+# Bundle the first-party goal packages (work-on-everything-goal-2026-08-23 P-007) —
+# same design as the rubrics block above: self-describing dirs (goal.json +
+# listing.json) resolved at runtime from the bundled layer via
+# PAPERCUSP_GOAL_PACKAGES_DIR (Tauri main.rs → <resources>/sidecar/goal-packages;
+# dev falls back to the in-repo goal-packages/ dir), so a fresh install has the
+# standing work-on-everything stewardship goal installable on day one.
+GOAL_PACKAGES_SRC="$REPO_ROOT/goal-packages"
+GOAL_PACKAGES_DST="$SIDECAR_DIR/goal-packages"
+echo "→ copying first-party goal packages from $GOAL_PACKAGES_SRC"
+if [[ ! -d "$GOAL_PACKAGES_SRC" ]]; then
+  echo "ERROR: first-party goal-packages dir not found at $GOAL_PACKAGES_SRC"
+  exit 1
+fi
+mkdir -p "$GOAL_PACKAGES_DST"
+( cd "$GOAL_PACKAGES_SRC" && find . -type f \
+    -not -path "./node_modules/*" \
+    -not -path "*/.git/*" ) > /tmp/goal-package-files.txt
+while IFS= read -r f; do
+  rel="${f#./}"
+  mkdir -p "$GOAL_PACKAGES_DST/$(dirname "$rel")"
+  cp "$GOAL_PACKAGES_SRC/$rel" "$GOAL_PACKAGES_DST/$rel"
+done < /tmp/goal-package-files.txt
+rm -f /tmp/goal-package-files.txt
+# Sanity: the first-party set + their self-describing listing.json actually landed.
+goal_pkg_count=$(find "$GOAL_PACKAGES_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
+if [[ "$goal_pkg_count" -lt 1 ]]; then
+  echo "ERROR: no first-party goal-package listing.json landed at $GOAL_PACKAGES_DST"
+  exit 1
+fi
+echo "  ✓ $goal_pkg_count first-party goal packages bundled → $GOAL_PACKAGES_DST"
+
 # Bundle the @papercusp/orchestrator entry bins as self-contained esbuild .mjs,
 # shipped as a SIBLING of harness/ (sidecar/orchestrator/bin/*.mjs) — the path
 # harnessPath('../orchestrator/bin/...') + the preflight harness check resolve to.
