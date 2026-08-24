@@ -285,6 +285,46 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
   }
 });
 
+// WI-41422: the live npx → tsx launcher normalised a signalled Hono child to
+// exit 0. The old loop treated that as an intentional stop and ended the whole
+// wrapper, so dev:restart returned success while :3270 stayed down. Wrapper
+// signals already carry the real stop intent via `stopping=1`; a child-only
+// zero exit must therefore restart just like every other child exit.
+test('supervision loop: a child-only exit 0 restarts while the wrapper remains live', async () => {
+  const port = await testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-zero-exit-'));
+  const marker = path.join(tmp, 'attempts');
+  let wrapper;
+  try {
+    const devCmd = `echo x >> '${marker}'; exit 0`;
+    wrapper = spawn('bash', [script], {
+      env: { ...process.env, OPERATOR_DEV_PORT: String(port), OPERATOR_DEV_CMD: devCmd },
+    });
+    let stderr = '';
+    wrapper.stderr.on('data', (d) => {
+      stderr += d;
+    });
+
+    const restarted = await waitFor(
+      () =>
+        fs.existsSync(marker) &&
+        fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length >= 2,
+      { timeoutMs: 12_000 },
+    );
+    assert(restarted, `child exit 0 ended the wrapper instead of restarting — stderr was: ${stderr}`);
+    assert.match(stderr, /operator dev server exited code=0 — restarting/);
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        wrapper.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // EI-18745117818375852: under load, a just-recycled sidecar's own exiting
 // process (or the memory-watchdog's predecessor) can still hold $PORT when
 // the fixed-3s-backoff restart fires — a blind respawn then died INSTANTLY on
