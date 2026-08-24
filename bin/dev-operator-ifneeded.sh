@@ -95,8 +95,8 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # next_fire_at advance guarantees single-fire across operators — no double
 # git-sync/deploy. AUTOLOOP stays OFF (not claim-guarded → would double-drive
 # the pipeline). Revert PAPERCUSP_DBOS_ROUTINES=0 to restore request-only.
-# NOTE (WI-3042): no `exec` here — the supervision loop below re-runs this
-# command after a non-zero exit (the memory-watchdog recycle path), and an
+# NOTE (WI-3042/WI-41422): no `exec` here — the supervision loop below re-runs
+# this command after every child-only exit (including a hard recycle), and an
 # `exec` would replace the loop shell on the first iteration, killing the loop.
 # NOTE (WI-3556, 2026-07-09): PAPERCUSP_CLUSTER=0 is PINNED. Agent sessions
 # inherit the release host's env (PAPERCUSP_CLUSTER=16 on the 128-core box);
