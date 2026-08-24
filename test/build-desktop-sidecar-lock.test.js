@@ -11,8 +11,8 @@ const windowsBuilder = fs.readFileSync(path.join(root, 'bin/build-windows-cross.
 const sidecarLockHelper = fs.readFileSync(path.join(root, 'bin/lib/sidecar-lock-yield.sh'), 'utf8');
 const liveFederationGate = fs.readFileSync(path.join(root, 'bin/live-federation-gate.sh'), 'utf8');
 
-const SIDECAR_LOCK_SECTION = (
-  builder.match(/^exec 9>"\$SIDECAR_FINAL_DIR\.lock"\n[\s\S]*?^SIDECAR_DIR="\$SIDECAR_TMP_DIR"$/m) || []
+const SIDECAR_PUBLISH_LOCK_FUNCTION = (
+  builder.match(/^__pc_acquire_sidecar_publish_lock\(\) \{\n[\s\S]*?^\}$/m) || []
 )[0];
 
 async function waitForFile(file, timeoutMs = 3000) {
@@ -57,8 +57,43 @@ test('the scheduled live federation gate waits boundedly for a progressing packa
   );
 });
 
+test('long build serialization is distinct from the reader-facing publication lock', async () => {
+  const buildLockAt = builder.indexOf('exec 8>"$SIDECAR_BUILD_LOCK"');
+  const dependencyWorkAt = builder.indexOf('node scripts/npm-install-safe.mjs install');
+  const verifyAt = builder.indexOf('"$ROOT/bin/verify-sidecar-bundle.sh"');
+  const publishLockAt = builder.indexOf('__pc_acquire_sidecar_publish_lock || exit $?');
+  assert(buildLockAt > 0 && buildLockAt < dependencyWorkAt, 'the build-only lock must serialize the whole build');
+  assert(publishLockAt > verifyAt, 'the reader-facing lock must wait until the staged bundle is verified');
+  assert.match(builder, /SIDECAR_BUILD_LOCK="\$SIDECAR_FINAL_DIR\.build\.lock"/);
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-lock-split-'));
+  const base = path.join(tmp, 'sidecar');
+  const ready = path.join(tmp, 'ready');
+  const holder = spawn('flock', ['-x', `${base}.build.lock`, 'bash', '-c', ': >"$READY"; sleep 30'], {
+    stdio: 'ignore',
+    env: { ...process.env, READY: ready },
+  });
+  try {
+    await waitForFile(ready);
+    assert.equal(
+      spawnSync('flock', ['-s', '-n', `${base}.lock`, '-c', 'true']).status,
+      0,
+      'a long-running build lock must not block a sidecar reader',
+    );
+    assert.notEqual(
+      spawnSync('flock', ['-x', '-n', `${base}.build.lock`, '-c', 'true']).status,
+      0,
+      'the same long-running build lock must still serialize a second builder',
+    );
+  } finally {
+    if (holder.exitCode === null) holder.kill('SIGTERM');
+    await new Promise((resolve) => holder.once('close', resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('the real builder lock path survives vanished fuser PIDs and yields a live tauri reader', async () => {
-  assert(SIDECAR_LOCK_SECTION, 'could not extract the shipped sidecar lock section');
+  assert(SIDECAR_PUBLISH_LOCK_FUNCTION, 'could not extract the shipped sidecar publish-lock function');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-builder-yield-'));
   const lockBase = path.join(tmp, 'sidecar');
   const holderScript = path.join(tmp, 'tauri-guarded');
@@ -107,7 +142,8 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
       'PAPERCUSP_SIDECAR_LOCK_WAIT_SEC=2',
       'PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC=0',
       sidecarLockHelper,
-      SIDECAR_LOCK_SECTION,
+      SIDECAR_PUBLISH_LOCK_FUNCTION,
+      '__pc_acquire_sidecar_publish_lock',
       'echo LOCK_ACQUIRED',
     ].join('\n');
     const result = spawnSync('bash', ['-c', harness], {
@@ -154,7 +190,7 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
 // excluded: the script legitimately talks ABOUT bare `cargo build` in several
 // places, and matching prose is the spelling-vs-property error one level up.
 const CARGO_INVOCATION = /cargo (?:build|zigbuild) /;
-const FD_CLOSING_SUBSHELL = /\( exec 9>&-;/;
+const FD_CLOSING_SUBSHELL = /\( exec 8>&- 9>&-;/;
 
 const cargoInvocationLines = builder
   .split('\n')
@@ -169,8 +205,8 @@ test('every cargo build closes the sidecar flock fd before sccache can daemonize
   assert.deepEqual(
     unprotected,
     [],
-    'each of these cargo invocations runs WITHOUT `( exec 9>&-; …)`, so RUSTC_WRAPPER (sccache) ' +
-      'can daemonize holding the inherited sidecar flock fd 9 and wedge every later build',
+    'each of these cargo invocations runs WITHOUT `( exec 8>&- 9>&-; …)`, so RUSTC_WRAPPER (sccache) ' +
+      'can daemonize holding an inherited build/publication lock and wedge later work',
   );
 
   // Tripwire, kept from the original guard: a NEW cargo invocation should make
@@ -210,7 +246,7 @@ test('desktop sidecar consumes the lock-held Vite snapshot, not live dist/', () 
 // goes wrong).
 test('the guard actually catches an unprotected cargo build', () => {
   const unprotectedSample = 'cd "$REPO/apps/tui" && RUSTFLAGS="-x" cargo build --release';
-  const protectedSample = '( exec 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="-x" cargo build --release )';
+  const protectedSample = '( exec 8>&- 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="-x" cargo build --release )';
   const proseSample = '# it does NOT protect a plain `cargo build`/`cargo check` under src-tauri';
   const echoSample = 'echo "    → cross: cargo zigbuild pui for ${_pui_triple}"';
 

@@ -274,10 +274,11 @@ fi
 # Two builds racing into the same live SIDECAR_DIR used to interleave
 # rm -rf/cp — a reader (a running `tauri dev`, the federation smoke rigs)
 # caught mid-swap saw a half-written bundle, and a second builder could
-# truncate binaries the first was still copying. Serialize whole builds with
-# flock, build into a temp sibling, and publish with an atomic rename at the
-# very end so readers only ever see the complete old tree or the complete
-# new tree.
+# truncate binaries the first was still copying. Serialize whole builds on a
+# BUILD-ONLY lock, build into a temp sibling, then take the reader-facing
+# publication lock only for the final atomic rename. Readers therefore keep
+# using the complete old tree while a long build/install/fingerprint runs and
+# pause only for the short publish transaction.
 #
 # EI-200: this protects OTHER invocations of THIS script from each other —
 # it does NOT protect a plain `cargo build`/`cargo check` under src-tauri
@@ -295,35 +296,79 @@ SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
 # shellcheck source=lib/sidecar-lock-yield.sh
 source "$HERE/lib/sidecar-lock-yield.sh"
-exec 9>"$SIDECAR_FINAL_DIR.lock"
-SIDECAR_LOCKDIR=""
+SIDECAR_BUILD_LOCK="$SIDECAR_FINAL_DIR.build.lock"
+SIDECAR_BUILD_LOCKDIR=""
+SIDECAR_PUBLISH_LOCKDIR=""
 
+# Build-to-build serialization must never reuse the reader-facing sidecar.lock:
+# dependency generation and npm installs routinely take minutes, while Tauri only
+# needs a stable already-published tree. A distinct lock keeps those readers live.
 if command -v flock >/dev/null 2>&1; then
-  __pc_acquire_sidecar_flock "$SIDECAR_FINAL_DIR.lock" || exit $?
-else
-  # macOS ships no flock(1) — same EI-160 serialization via a mkdir
-  # spinlock with stale-PID reclaim.
-  SIDECAR_LOCKDIR="$SIDECAR_FINAL_DIR.lockdir"
-  if [[ -d "$SIDECAR_LOCKDIR" ]]; then
-    echo "→ sidecar lock is busy; allowing the current writer ${SIDECAR_READER_YIELD_AFTER}s before requesting a cooperative yield"
-    ((SIDECAR_READER_YIELD_AFTER == 0)) || sleep "$SIDECAR_READER_YIELD_AFTER"
-    __pc_request_cooperative_reader_yield "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_LOCKDIR"
+  exec 8>"$SIDECAR_BUILD_LOCK"
+  if ! flock -w "$SIDECAR_LOCK_WAIT" 8; then
+    echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar BUILD lock ($SIDECAR_BUILD_LOCK)." >&2
+    exit 5
   fi
-  __pc_lock_deadline=$(( $(date +%s) + SIDECAR_LOCK_WAIT ))
-  while ! mkdir "$SIDECAR_LOCKDIR" 2>/dev/null; do
-    holder="$(cat "$SIDECAR_LOCKDIR/pid" 2>/dev/null || true)"
+else
+  # macOS ships no flock(1) — serialize builders with a PID-stamped mkdir.
+  SIDECAR_BUILD_LOCKDIR="$SIDECAR_FINAL_DIR.build.lockdir"
+  __pc_build_lock_deadline=$(( $(date +%s) + SIDECAR_LOCK_WAIT ))
+  while ! mkdir "$SIDECAR_BUILD_LOCKDIR" 2>/dev/null; do
+    holder="$(cat "$SIDECAR_BUILD_LOCKDIR/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$SIDECAR_LOCKDIR"
+      rm -rf "$SIDECAR_BUILD_LOCKDIR"
       continue
     fi
-    if (( $(date +%s) >= __pc_lock_deadline )); then
-      __pc_report_sidecar_lock_timeout "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_LOCKDIR"
+    if (( $(date +%s) >= __pc_build_lock_deadline )); then
+      echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar BUILD lock ($SIDECAR_BUILD_LOCKDIR)." >&2
       exit 5
     fi
     sleep 1
   done
-  echo "$$" > "$SIDECAR_LOCKDIR/pid"
+  echo "$$" > "$SIDECAR_BUILD_LOCKDIR/pid"
 fi
+
+# Acquire/release the reader-facing lock only around the verified tree's final
+# rename transaction. The helper retains its bounded cooperative-yield behavior
+# for a Tauri reader that happens to be inside its tiny startup critical section.
+__pc_acquire_sidecar_publish_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$SIDECAR_FINAL_DIR.lock"
+    __pc_acquire_sidecar_flock "$SIDECAR_FINAL_DIR.lock"
+    return $?
+  fi
+
+  SIDECAR_PUBLISH_LOCKDIR="$SIDECAR_FINAL_DIR.lockdir"
+  if [[ -d "$SIDECAR_PUBLISH_LOCKDIR" ]]; then
+    echo "→ sidecar publish lock is busy; allowing the current reader ${SIDECAR_READER_YIELD_AFTER}s before requesting a cooperative yield"
+    ((SIDECAR_READER_YIELD_AFTER == 0)) || sleep "$SIDECAR_READER_YIELD_AFTER"
+    __pc_request_cooperative_reader_yield "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_PUBLISH_LOCKDIR"
+  fi
+  __pc_publish_lock_deadline=$(( $(date +%s) + SIDECAR_LOCK_WAIT ))
+  while ! mkdir "$SIDECAR_PUBLISH_LOCKDIR" 2>/dev/null; do
+    holder="$(cat "$SIDECAR_PUBLISH_LOCKDIR/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$SIDECAR_PUBLISH_LOCKDIR"
+      continue
+    fi
+    if (( $(date +%s) >= __pc_publish_lock_deadline )); then
+      __pc_report_sidecar_lock_timeout "$SIDECAR_FINAL_DIR.lock" "$SIDECAR_PUBLISH_LOCKDIR"
+      return 5
+    fi
+    sleep 1
+  done
+  echo "$$" > "$SIDECAR_PUBLISH_LOCKDIR/pid"
+}
+
+__pc_release_sidecar_publish_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -u 9 || true
+    exec 9>&-
+  elif [[ -n "$SIDECAR_PUBLISH_LOCKDIR" ]]; then
+    rm -rf "$SIDECAR_PUBLISH_LOCKDIR"
+    SIDECAR_PUBLISH_LOCKDIR=""
+  fi
+}
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
 
 # STALE STAGING SWEEP (WI-38368 / EI-18882950272344248) — reap residue the EXIT
@@ -338,8 +383,8 @@ SIDECAR_DIR="$SIDECAR_TMP_DIR"
 # to sit here for over a day. A sweep is therefore not redundant with the
 # trap; it is the only mechanism that can close the remaining class.
 #
-# Placed deliberately AFTER the lock is held and BEFORE the disk preflight:
-#   - holding the EXCLUSIVE flock means no concurrent build is between
+# Placed deliberately AFTER the build lock is held and BEFORE the disk preflight:
+#   - holding the exclusive BUILD lock means no concurrent build is between
 #     lock-acquire and lock-release, so anything matching here is by
 #     construction not an in-flight peer's tree;
 #   - sweeping before the preflight means reclaimed space COUNTS toward the
@@ -417,7 +462,7 @@ papercusp_require_free_gb "$SIDECAR_DIR" "${PAPERCUSP_SIDECAR_MIN_FREE_GB:-8}" "
 # already-gone path is a silent no-op; the trap never fires MID-run (only at
 # actual process exit), so it cannot race the overlay-preservation read that
 # copies FROM OLD_DIR just after the swap.
-trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_LOCKDIR:+"$SIDECAR_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}' EXIT
+trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}' EXIT
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
@@ -3638,10 +3683,10 @@ case "$_PUI_WASM_RUSTFLAGS" in
 esac
 
 # 1. pui (apps/tui) — release build for the TARGET triple.
-# Close the sidecar lock fd in the cargo subtree. RUSTC_WRAPPER may start the
-# long-lived sccache server; if that daemon inherits fd 9 it keeps the flock
-# alive after this builder exits and wedges stage-source-tree forever. The
-# parent shell still owns fd 9, so the lock remains held for this whole build.
+# Close both lock fds in the cargo subtree. RUSTC_WRAPPER may start the
+# long-lived sccache server; if that daemon inherits the build-lock fd 8 it
+# keeps later builders wedged after this shell exits. fd 9 is closed too for
+# compatibility with the publish-lock protocol (it is normally unopened here).
 # WI-5651: for a cross darwin bundle, pui is a native binary — build it with
 # `cargo zigbuild --target <triple>` (same zig+SDK toolchain the tauri binary
 # uses), NOT the host `cargo build`, or the dock would ship a linux ELF `pui`.
@@ -3665,10 +3710,10 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
     echo "      curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C \"\$HOME/.papercusp\" && mv \"\$HOME/.papercusp/zig-linux-x86_64-0.13.0\" \"\$HOME/.papercusp/zig\")" >&2
     exit 1
   }
-  ( exec 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo zigbuild --release --target "$_pui_triple" )
+  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo zigbuild --release --target "$_pui_triple" )
   _pui_target_sub="$_pui_triple/release/pui"
 else
-  ( exec 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release )
+  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release )
   _pui_target_sub="release/pui"
 fi
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
@@ -3684,7 +3729,7 @@ cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 # 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( exec 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1 )
+( exec 8>&- 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1 )
 WASM=""
 for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
   [[ -f "$_c" ]] && WASM="$_c" && break
@@ -3790,6 +3835,10 @@ fi
 "$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"
 
 # ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
+# The minutes-long build above held only sidecar.build.lock. Take the
+# reader-facing lock now, after the staged bundle is complete and verified.
+__pc_acquire_sidecar_publish_lock || exit $?
+
 # Retire the old bundle via rename, rename the temp build into place, then
 # delete the retired tree. Renames on one filesystem are atomic, so a
 # concurrent reader sees only complete-old or complete-new — never the
@@ -4046,6 +4095,10 @@ fs.renameSync(tmpPath, stampPath);
 NODE
   echo "→ recorded release identity-audit attestation in .sidecar-build-stamp"
 fi
+
+# Publication and its final metadata writes are complete. Release readers
+# before the non-mutating size/report epilogue.
+__pc_release_sidecar_publish_lock
 
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
