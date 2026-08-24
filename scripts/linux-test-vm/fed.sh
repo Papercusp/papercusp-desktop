@@ -11,7 +11,24 @@
 # Usage:
 #   fed.sh <a|b> ports                      # show the discovered operator/PG ports
 #   fed.sh <a|b> sql  "<SQL>"               # psql against the VM's embedded PG
-#   fed.sh <a|b> sqlt "<SQL>"               # tuples-only, unaligned SQL for assertions
+#        ⚠ HUMAN-FORMATTED output: aligned, with a COLUMN HEADER and a "(N rows)"
+#        footer. NEVER BRANCH ON THIS. A MISS still emits a non-empty first line
+#        (the header), so the natural assertion
+#            row=$(fed.sh b sql "SELECT harness_slug ..." | grep -v '^$' \
+#                  | grep -v 'row)' | head -1); [ -n "$row" ] && echo FEDERATED
+#        prints the literal string `harness_slug` on a miss and reports success
+#        UNCONDITIONALLY. The failure mode is a GREEN result, not an error — a
+#        federation proof written this way passes with the link severed.
+#        Demonstrate it:
+#            printf ' harness_slug \n------\n(0 rows)\n' | grep -v '^$' \
+#              | grep -v 'row)' | head -1        # → harness_slug  (non-empty!)
+#        Use `sql` for eyeballing only; use `sqlt` for anything you test.
+#   fed.sh <a|b> sqlt "<SQL>"               # tuples-only, unaligned (-tA) — USE
+#        THIS FOR EVERY ASSERTION. A miss emits NOTHING, so empty is a true
+#        negative and `[ -n "$out" ]` means what it says. (Belt-and-braces even
+#        here: self-tag the value in the SQL and grep the tag rather than parsing
+#        by line position — SELECT 'FOUND:'||harness_slug ... → grep -o 'FOUND:[^ ]*'
+#        — which stays correct under either output mode.)
 #        (uses the guest's psql if on PATH, else the app's bundled
 #        sidecar/bin/psql — real client binaries ship with the app since
 #        2026-07-07; installs built before that shipped a broken pg_wrapper
