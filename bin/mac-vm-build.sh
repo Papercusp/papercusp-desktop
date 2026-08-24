@@ -351,13 +351,26 @@ echo "--- chat dock: pui + companion wasm + zellij 0.44.3 ---"
 REPO="$(cd "$ROOT/.." && pwd)"
 SIDECAR="$ROOT/src-tauri/sidecar"
 mkdir -p "$SIDECAR/bin"
+# Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config.toml
+# `[build] target-dir` — a box-level redirect puts artifacts NOWHERE under
+# <crate>/target/, which broke pui-zellij-plugin's build-install.sh the same way,
+# P-002 2026-08-24). Fail-soft like build-desktop-sidecar.sh (WI-40008): loud
+# WARN, then the standard in-crate/workspace candidates below still apply.
+if ! CARGO_TGT="$(
+  cd "$REPO/apps/tui" \
+    && cargo metadata --no-deps --format-version 1 \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))'
+)"; then
+  echo "    WARN: cargo metadata could not resolve the target directory — falling back to standard crate/workspace target paths" >&2
+  CARGO_TGT=""
+fi
 # 1. pui binary (apps/tui) — native release build.
 ( cd "$REPO/apps/tui" && cargo build --release )
 # Existence-checked candidates (NOT `find` over maybe-missing dirs — under
 # `set -eo pipefail` a missing path arg makes find non-zero → pipefail → exit).
 PUI_BIN=""
-for _c in "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
-  [[ -f "$_c" ]] && PUI_BIN="$_c" && break
+for _c in "${CARGO_TGT:+$CARGO_TGT/release/pui}" "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
+  [[ -n "$_c" && -f "$_c" ]] && PUI_BIN="$_c" && break
 done
 [[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
 cp "$PUI_BIN" "$SIDECAR/bin/pui"; chmod 755 "$SIDECAR/bin/pui"
@@ -366,8 +379,8 @@ echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
 rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
 ( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
 WASM=""
-for _c in "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
-  [[ -f "$_c" ]] && WASM="$_c" && break
+for _c in "${CARGO_TGT:+$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm}" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
+  [[ -n "$_c" && -f "$_c" ]] && WASM="$_c" && break
 done
 [[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
 cp "$WASM" "$SIDECAR/pui-companion.wasm"
