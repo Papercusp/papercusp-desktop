@@ -46,11 +46,21 @@ _rd_poll_remote() { return "${STUB_POLL_RC:-1}"; }
 # the default so the existing scenario cases exercise the positive path too.
 STUB_OWNER_QUERY_RC=0
 STUB_OWNER_ROWS=$'papercupai|hello-world-pot|local|100\naviynw|hello-world-pot|local|101'
+# D-067 route-(b) positive control: the instrument also reads frame b (JOINER),
+# whose pot_members rows must be origin='remote'. Default healthy so every
+# pre-existing case exercises the control-pass path.
+STUB_MEMBER_QUERY_RC=0
+STUB_MEMBER_ROWS=$'papercupai|hello-world-pot|remote|100\naviynw|hello-world-pot|remote|101'
 drv_psql() {
   local inst="${1:-}" sql="${2:-}"
   if [ "$inst" = a ] && [[ "$sql" == *"FROM harness_shared.pot_members"* ]]; then
     [ "${STUB_OWNER_QUERY_RC:-0}" -eq 0 ] || return "$STUB_OWNER_QUERY_RC"
     printf '%s\n' "${STUB_OWNER_ROWS:-}"
+    return 0
+  fi
+  if [ "$inst" = b ] && [[ "$sql" == *"FROM harness_shared.pot_members"* ]]; then
+    [ "${STUB_MEMBER_QUERY_RC:-0}" -eq 0 ] || return "$STUB_MEMBER_QUERY_RC"
+    printf '%s\n' "${STUB_MEMBER_ROWS:-}"
     return 0
   fi
   return 1
@@ -67,6 +77,8 @@ reset_env() {
   STUB_ORIGIN=""; STUB_POLL_RC=1
   STUB_OWNER_QUERY_RC=0
   STUB_OWNER_ROWS=$'papercupai|hello-world-pot|local|100\naviynw|hello-world-pot|local|101'
+  STUB_MEMBER_QUERY_RC=0
+  STUB_MEMBER_ROWS=$'papercupai|hello-world-pot|remote|100\naviynw|hello-world-pot|remote|101'
 }
 
 # ── D-044 / WI-40534: the measure-only W1 leg must distinguish all outcomes ──
@@ -76,7 +88,8 @@ reset_env
 out="$(_rsb_owner_self_classification post-restart)"; rc=$?
 [ "$rc" = 0 ] && grep -q "0 rows origin=remote" <<<"$out" \
   && ! grep -q "NOT MEASURED" <<<"$out" && ! grep -q "W1 signal" <<<"$out" \
-  && ok "owner-self all-local → measured healthy, explicit 0 remote" \
+  && grep -q "positive control" <<<"$out" && grep -q "COUNTABLE toward W1 retirement" <<<"$out" \
+  && ok "owner-self all-local → measured healthy, explicit 0 remote, control PASS/countable" \
   || bad "owner-self all-local case: rc=$rc out='$out'"
 
 # W1b. A remote row on the owner frame is the bounded W1 signal, never a
@@ -107,6 +120,41 @@ out="$(_rsb_owner_self_classification post-restart)"; rc=$?
   && grep -q "ZERO pot_members rows" <<<"$out" \
   && ok "owner-self empty result → explicit NOT MEASURED" \
   || bad "owner-self empty-result case: rc=$rc out='$out'"
+
+# ── D-067 route-(b) positive control: three outcomes must stay distinguishable ──
+
+# W1f. A should-be-remote row reading 'local' on frame b = the WI-39363 class is
+# LIVE in the run → CONTROL DEGRADED, the frame-a reading must not count — and
+# the instrument stays measure-only (rc 0).
+reset_env
+STUB_MEMBER_ROWS=$'papercupai|hello-world-pot|remote|100\naviynw|hello-world-pot|local|101'
+out="$(_rsb_owner_self_classification post-restart)"; rc=$?
+[ "$rc" = 0 ] && grep -q "CONTROL DEGRADED" <<<"$out" \
+  && grep -q "must NOT count toward W1 retirement" <<<"$out" \
+  && ! grep -q "COUNTABLE toward W1 retirement" <<<"$out" \
+  && ok "control: local row on frame b → CONTROL DEGRADED, not countable" \
+  || bad "control-degraded case: rc=$rc out='$out'"
+
+# W1g. Frame-b query failure must render CONTROL NOT MEASURED (absence of
+# evidence), never a pass — and never a countable frame-a reading.
+reset_env
+STUB_MEMBER_QUERY_RC=7
+out="$(_rsb_owner_self_classification post-restart)"; rc=$?
+[ "$rc" = 0 ] && grep -q "positive control" <<<"$out" && grep -q "NOT MEASURED" <<<"$out" \
+  && grep -q "must NOT count toward W1 retirement" <<<"$out" \
+  && ! grep -q "COUNTABLE toward W1 retirement" <<<"$out" \
+  && ok "control: frame-b query failure → CONTROL NOT MEASURED, not countable" \
+  || bad "control-query-failure case: rc=$rc out='$out'"
+
+# W1h. A successful-but-empty frame-b result is independently NOT MEASURED.
+reset_env
+STUB_MEMBER_ROWS=""
+out="$(_rsb_owner_self_classification post-restart)"; rc=$?
+[ "$rc" = 0 ] && grep -q "ZERO pot_members rows" <<<"$out" \
+  && grep -q "must NOT count toward W1 retirement" <<<"$out" \
+  && ! grep -q "COUNTABLE toward W1 retirement" <<<"$out" \
+  && ok "control: frame-b empty result → CONTROL NOT MEASURED, not countable" \
+  || bad "control-empty-result case: rc=$rc out='$out'"
 
 # W1e. Placement is load-bearing: this call must remain the first executable
 # statement so no future early return can silently bypass the instrument.
@@ -190,6 +238,6 @@ out="$(scn_restart_settle_barrier)"; rc=$?
   && ok "poll never lands within budget → FAIL" \
   || bad "poll-timeout case: rc=$rc out='$out'"
 
-echo "── restart-settle-barrier.selftest: $((13 - FAILS))/13 passed ──"
+echo "── restart-settle-barrier.selftest: $((16 - FAILS))/16 passed ──"
 [ "$FAILS" = 0 ] && { echo "OVERALL: PASS"; exit 0; }
 echo "OVERALL: FAIL ($FAILS failing)"; exit 1

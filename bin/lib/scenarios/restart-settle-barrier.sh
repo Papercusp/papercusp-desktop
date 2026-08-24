@@ -121,6 +121,37 @@ _rsb_owner_self_classification() {
   else
     echo "  ✓ owner-self-classification ($phase): frame a reports 0 rows origin=remote — the owner still classifies every member, ITSELF included, as 'local' AFTER the restart. On this run W1 did not reproduce. Bounded claim: this is one run, and it speaks only to this restart."
   fi
+  # ── D-067 positive control (adjudication mt6u5sj2, route (b)): the frame-a
+  # reading above cannot fail in the tested direction if a WI-39363-class
+  # mis-stamp (a should-be-remote row rendered 'local') is live in the run —
+  # 'clean' and 'mis-stamped' read identically. Route (a) disjointness FAILED:
+  # every hyperbee projection derives origin from the SAME ProvenanceContext
+  # with the SAME `?? 'local'` fallback (feature-queue.ts:129 ≡
+  # hive-members.ts:180), so a provenance-loss defect reaches pot_members too.
+  # Frame b (JOINER) is the in-run control: its pot_members rows are
+  # owner-authored and arrive federated, so they MUST read origin='remote'
+  # (banked BEFORE-half m1787374736: frame b correctly reported 'remote').
+  # MEASURE-ONLY like the leg above — never changes this scenario's verdict;
+  # it marks the frame-a reading COUNTABLE or NOT toward the W1 retirement
+  # bar (plan p2p-public-release-remaining-lanes-2026-07-16 D-067). Same
+  # fail-closed rendering: a failed/empty control query is ABSENCE OF
+  # EVIDENCE, never a pass.
+  local b_out="" b_rc=0 b_remote_n=0 b_local_n=0
+  b_out="$(drv_psql b "SELECT github_username, pot_home_slug, origin, fed_ts FROM harness_shared.pot_members ORDER BY github_username;" 2>&1)" || b_rc=$?
+  if [ "${b_rc:-1}" -ne 0 ]; then
+    echo "  ⚠ owner-origin positive control ($phase): NOT MEASURED — frame b pot_members query FAILED (rc=${b_rc}). Without the control, the frame-a reading above must NOT count toward W1 retirement (D-067)."
+  elif [ -z "${b_out//[[:space:]]/}" ]; then
+    echo "  ⚠ owner-origin positive control ($phase): NOT MEASURED — frame b returned ZERO pot_members rows. Without the control, the frame-a reading above must NOT count toward W1 retirement (D-067)."
+  else
+    b_remote_n="$(printf '%s\n' "$b_out" | awk -F'|' '$3 == "remote"' | grep -c . || true)"
+    b_local_n="$(printf '%s\n' "$b_out" | awk -F'|' '$3 == "local"' | grep -c . || true)"
+    if [ "${b_remote_n:-0}" -ge 1 ] && [ "${b_local_n:-0}" -eq 0 ]; then
+      echo "  ✓ owner-origin positive control ($phase): frame b (JOINER) reports ${b_remote_n} row(s) origin=remote and 0 origin=local — the origin pipeline CAN stamp/preserve 'remote' in THIS run; the frame-a reading above is COUNTABLE toward W1 retirement (D-067)."
+    else
+      echo "  ⚠ owner-origin positive control ($phase): CONTROL DEGRADED — frame b reports ${b_local_n} row(s) origin=local / ${b_remote_n} origin=remote (expected all-remote for this rig shape, baseline m1787374736). A WI-39363-class mis-stamp is LIVE in this run; the frame-a reading above must NOT count toward W1 retirement (D-067)."
+      printf '%s\n' "$b_out" | sed 's/^/  ⚠   /'
+    fi
+  fi
   return 0
 }
 
