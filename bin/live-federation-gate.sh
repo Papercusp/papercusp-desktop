@@ -120,7 +120,7 @@
 # never replay another invocation's cached stdout as a new gate verdict.
 if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
   __gate_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  exec env PC_HEAVY_COALESCE=0 "$__gate_repo_root/scripts/pc-heavy.sh" -- \
+  exec env PC_HEAVY_COALESCE=0 PC_HEAVY_PREEMPTIBLE=1 "$__gate_repo_root/scripts/pc-heavy.sh" -- \
     bash "${BASH_SOURCE[0]}" "$@"
 fi
 
