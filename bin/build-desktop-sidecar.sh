@@ -930,6 +930,26 @@ if [[ ! -f "$SIDECAR_DIR/git-ext-bridge.mjs" ]]; then
   exit 1
 fi
 
+# systemd-scope-env-runner.mjs — systemd-scope.ts resolves this dependency-free
+# payload runner as a SIBLING of its executing module.  In the bundled desktop
+# every operator-core module collapses into serve.mjs, so the path resolves to
+# $SIDECAR_DIR/systemd-scope-env-runner.mjs rather than back into the source
+# tree.  Missing it is not a slow fallback: every systemd-confined capability,
+# task-manager and agent launch fails with MODULE_NOT_FOUND after systemd has
+# already accepted the unit.  Stage it as a required runtime asset and fail the
+# build if the source/copy is absent (EI-21306004866205635).
+SYSTEMD_ENV_RUNNER_SRC="$REPO_ROOT/packages/operator-core/lib/systemd-scope-env-runner.mjs"
+if [[ ! -f "$SYSTEMD_ENV_RUNNER_SRC" ]]; then
+  echo "ERROR: systemd scope environment runner not found at $SYSTEMD_ENV_RUNNER_SRC"
+  exit 1
+fi
+cp "$SYSTEMD_ENV_RUNNER_SRC" "$SIDECAR_DIR/systemd-scope-env-runner.mjs"
+if [[ ! -f "$SIDECAR_DIR/systemd-scope-env-runner.mjs" ]]; then
+  echo "ERROR: failed to stage systemd-scope-env-runner.mjs next to serve.mjs"
+  exit 1
+fi
+echo "    ✓ staged systemd-scope-env-runner.mjs next to serve.mjs"
+
 # WORKER SCRIPTS — the SAME dirname(import.meta.url) gotcha as git-ext-bridge.mjs
 # above, and it has been silently live in the packaged desktop app (WI-37555,
 # measured 2026-08-09). Each of these modules spawns `new Worker(resolve(dirname(
