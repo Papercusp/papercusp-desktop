@@ -7,8 +7,19 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const vmctlPath = path.join(root, 'scripts/linux-test-vm/vmctl');
+const vmctlCompatPath = path.join(root, 'scripts/linux-test-vm/vmctl.sh');
 const vmctl = fs.readFileSync(vmctlPath, 'utf8');
 const common = fs.readFileSync(path.join(root, 'scripts/linux-test-vm/lib/common.sh'), 'utf8');
+
+test('vmctl.sh compatibility entrypoint delegates to canonical vmctl', () => {
+  assert.doesNotThrow(() => fs.accessSync(vmctlCompatPath, fs.constants.X_OK));
+  const canonical = spawnSync(vmctlPath, ['help'], { encoding: 'utf8' });
+  const compatibility = spawnSync(vmctlCompatPath, ['help'], { encoding: 'utf8' });
+  assert.equal(canonical.status, 0, canonical.stderr);
+  assert.equal(compatibility.status, 0, compatibility.stderr);
+  assert.equal(compatibility.stdout, canonical.stdout);
+  assert.equal(compatibility.stderr, canonical.stderr);
+});
 
 function updaterFunction() {
   const start = vmctl.indexOf('cmd_updater_e2e()');
