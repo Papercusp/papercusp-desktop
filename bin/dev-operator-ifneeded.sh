@@ -262,9 +262,13 @@ GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
 # supervisor to bring up a fresh low-RSS process — systemd does that for
 # :3070/:3170, but nothing did here, so a recycle left the desktop dead
 # behind a "window will reconnect automatically" recovery page forever.
-# Restart on non-zero exit (3s backoff); a graceful stop (exit 0 — e.g. the
-# SIGTERM connection-drain path) still ends the session. Each iteration runs
-# in a subshell so DEV_CMD's `cd` starts from the same cwd every time.
+# Restart after ANY child-only exit (3s backoff); only a stop signal delivered
+# to THIS wrapper ends the session (`stopping=1`). WI-41422 measured the real
+# npx → tsx chain normalising a signalled Hono child's exit to 0, so treating
+# code 0 as an intentional wrapper stop made the sanctioned dev:restart turn
+# :3270 off permanently. The wrapper's own TERM/INT/HUP trap is the authoritative
+# stop intent; a child cannot declare its supervisor finished by exit code alone.
+# Each iteration runs in a subshell so DEV_CMD's `cd` starts from the same cwd.
 #
 # EI-256 (found while writing the reaper's first hermetic test): reap()/the
 # watchdog kill the WHOLE group with `kill -TERM -- "-$GROUP"` — that reaches
@@ -302,7 +306,6 @@ setsid bash -c 'echo "$$" > "$1"; shift
   while :; do
     ( eval "$1" ); code=$?
     [ "$stopping" = 1 ] && exit 0
-    [ "$code" -eq 0 ] && exit 0
     fails=$((fails + 1))
     if in_use "$port"; then
       echo "[tauri] operator dev server exited code=$code (attempt $fails/$max_fails) — :$port is STILL held (likely by the exiting process itself); waiting up to 30s for it to free before restarting (WI-3042 / EI-18745117818375852)" >&2
