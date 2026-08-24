@@ -6114,7 +6114,7 @@ fn bring_up_sidecar(
 /// So: if you add a `.env(...)` to `spawn_serve` that the SIDECAR reads, add it
 /// here too. `wslenv_forwards_every_var_the_sidecar_reads` pins the ones we know
 /// are load-bearing.
-const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_DISTRIBUTION_PROFILE:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:\
+const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_DISTRIBUTION_PROFILE:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:PAPERCUSP_GOAL_PACKAGES_DIR/p:\
      PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
      PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
      PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_PG_RESTORE_BIN/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
@@ -6180,6 +6180,11 @@ fn spawn_serve(
     // store's bundled layer (dev falls back to the in-repo rubrics/ dir).
     // local-first-party-rubric-bundling-2026-07-07.
     let rubrics_dir = sidecar_dir.join("rubrics");
+    // First-party goal packages bundled at sidecar/goal-packages — same design as
+    // templates/rubrics above, for the goal-package store's bundled layer (dev
+    // falls back to the in-repo goal-packages/ dir).
+    // work-on-everything-goal-2026-08-23 P-007.
+    let goal_packages_dir = sidecar_dir.join("goal-packages");
     let prompts_dir = sidecar_dir.join("prompts");
     let db_sql_dir = sidecar_dir.join("db-sql");
     // Installer-bundled hive seed (plan hive-seed-bundle-2026-07-04). Optional:
@@ -6410,6 +6415,10 @@ fn spawn_serve(
         .env(
             "PAPERCUSP_RUBRICS_DIR",
             rubrics_dir.to_string_lossy().to_string(),
+        )
+        .env(
+            "PAPERCUSP_GOAL_PACKAGES_DIR",
+            goal_packages_dir.to_string_lossy().to_string(),
         )
         .env("PAPERCUSP_DESKTOP", "1")
         // NOTE: PAPERCUSP_DESKTOP_PARENT_PID is deliberately NOT set here — it is
