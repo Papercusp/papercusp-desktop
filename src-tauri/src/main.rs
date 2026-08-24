@@ -1752,6 +1752,33 @@ mod discovery_tests {
             !linux.contains("format!(\"{bundle_id}.desktop\")"),
             "the reverse-domain bundle identifier is not Tauri's installed desktop filename"
         );
+
+        // Windows resolves each NSIS bundle from its product-specific install
+        // directory. Keep this source-shape guard beside the Linux guard so a
+        // future cleanup cannot regress sibling launching back to the old
+        // "not wired" state without a focused test failure.
+        let windows_end = src[windows_start..]
+            .find("\n    }\n}\n")
+            .map(|offset| windows_start + offset);
+        let windows = &src[windows_start
+            ..windows_end.expect(
+                "the Windows launch branch must have a closed body before launch_bundle ends",
+            )];
+        for needle in [
+            "LOCALAPPDATA",
+            "product_name",
+            "papercusp-desktop.exe",
+            "CREATE_BREAKAWAY_FROM_JOB",
+            "CREATE_NEW_PROCESS_GROUP",
+            "DETACHED_PROCESS",
+            ".creation_flags(",
+            ".spawn()",
+        ] {
+            assert!(
+                windows.contains(needle),
+                "Windows sibling launch must retain {needle:?}"
+            );
+        }
     }
 
     #[test]
@@ -5515,11 +5542,10 @@ fn launcher_status_result(
 ///     .app regardless of where it lives. Solid + used as the primary path.
 ///   * Linux  — `gtk-launch <product-name>.desktop` (Tauri's Debian bundler
 ///     names the installed desktop file from productName, not identifier).
-///   * Windows — NOT yet wired: both bundles ship the SAME binary name
-///     (`papercusp-desktop`), so a sibling-exe launch can't tell them apart —
-///     it needs the per-bundle install path (registry / Start-menu). Until then
-///     the GUI surfaces "start the Server" rather than mis-launching itself.
-///     (Tracked as the Windows-launch follow-up.)
+///   * Windows — resolve the sibling executable from its product-specific
+///     `%LOCALAPPDATA%/<ProductName>/papercusp-desktop.exe` install path and
+///     launch it detached. Both bundles share the binary name, so the product
+///     directory is the identity boundary (parity fix landed 2026-07-02).
 fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
