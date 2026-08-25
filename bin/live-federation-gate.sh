@@ -257,6 +257,10 @@ STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_
 # a write error is logged and swallowed, and the verdict still goes to stdout regardless.
 GATE_VERDICT_LOG="${GATE_VERDICT_LOG:-$STATE_DIR/verdicts.jsonl}"
 GATE_VERDICT_KEEP="${GATE_VERDICT_KEEP:-500}"
+# The protection marker is published before the ordinary gate configuration below is
+# initialized. Keep the clock helper beside the verdict writer so every early refusal can
+# bank a valid record instead of tripping over an as-yet undefined function (WI-40905).
+now_s() { date +%s 2>/dev/null || echo 0; }
 __json_str() {  # stdin → a JSON string BODY (caller supplies the quotes)
   # Order matters: double the backslashes FIRST, so the ones introduced below stay escapes.
   # Every control character must then be accounted for or the line is not parseable JSON —
@@ -393,7 +397,6 @@ MATRIX_LEG_STALE=0
 # runs) needs the answer THIS window, not eight days later. Every §3b path that declines to run
 # the leg sets this, so the suppression is always attributable at the verdict line.
 MATRIX_SKIP_REASON=""
-now_s() { date +%s 2>/dev/null || echo 0; }
 # Wall-clock start of THIS gate run — the default evidence window for frame_pressure_note()
 # below, so a verdict reached BEFORE the local-matrix leg ran (MATRIX_LEG_START_TS unset)
 # still scopes its frame evidence to this run instead of reading a stale bank file.

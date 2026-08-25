@@ -131,6 +131,27 @@ test('a failed nested FRESH provenance probe preserves its causal output in the 
   );
 });
 
+test('the nested FRESH probe cannot inherit the parent gate pc-heavy marker', () => {
+  assert.match(
+    federationAssertsSelftest,
+    /export PC_HEAVY_PREEMPT_READY_FILE="\$inherited_ready_marker"[\s\S]*?PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE=/,
+    'the behavioral probe must seed an occupied parent marker and then scrub it for the nested gate',
+  );
+});
+
+test('every early protection refusal can bank a verdict before ordinary gate setup', () => {
+  const clockHelper = gate.indexOf('now_s() {');
+  const verdictWriter = gate.indexOf('bank_verdict() {');
+  const protectionCall = gate.indexOf('\ngate_preempt_protect_until_first_verdict\n');
+  assert(clockHelper >= 0, 'could not locate now_s()');
+  assert(verdictWriter >= 0, 'could not locate bank_verdict()');
+  assert(protectionCall >= 0, 'could not locate the early pc-heavy protection call');
+  assert(
+    clockHelper < verdictWriter && verdictWriter < protectionCall,
+    'now_s() and bank_verdict() must be defined before the early protection call can refuse',
+  );
+});
+
 function runDependencyContentionClassifier(buildLog) {
   assert(DEPENDENCY_CONTENTION_CHECK_FN, 'dependency classifier extraction failed');
   const script = [

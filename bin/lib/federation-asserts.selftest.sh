@@ -543,9 +543,19 @@ verdict_state="$WORK/verdict-state"
 verdict_log="$verdict_state/verdicts.jsonl"
 mkdir -p "$verdict_state"
 date +%s >"$verdict_state/last-green"
-if GATE_FORCE=0 GATE_SUCCESS_TTL_H=22 GATE_STATE_DIR="$verdict_state" \
-  GATE_VERDICT_LOG="$verdict_log" GATE_NO_FILE=1 GATE_SKIP_SELFTEST=1 \
-  bash "$gate_file" >"$WORK/verdict-fresh.out" 2>&1; then
+# A real outer gate runs this self-test while holding pc-heavy's unique after-ready marker.
+# The nested FRESH probe is not a new protected gate run and must never inherit/re-publish
+# that parent-owned path. Seed an occupied marker to make the regression deterministic, then
+# explicitly scrub it for the nested process while retaining PC_HEAVY_BYPASS from the parent.
+inherited_ready_marker="$WORK/inherited-pc-heavy-ready"
+printf '%s\n' "parent-$$" >"$inherited_ready_marker"
+if (
+  export PC_HEAVY_PREEMPT_READY_FILE="$inherited_ready_marker"
+  PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE= \
+    GATE_FORCE=0 GATE_SUCCESS_TTL_H=22 GATE_STATE_DIR="$verdict_state" \
+    GATE_VERDICT_LOG="$verdict_log" GATE_NO_FILE=1 GATE_SKIP_SELFTEST=1 \
+    bash "$gate_file"
+) >"$WORK/verdict-fresh.out" 2>&1; then
   banked_desktop_head="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1], encoding="utf-8").read().splitlines()[-1])["desktop_head"])' "$verdict_log" 2>/dev/null)"
   expected_desktop_head="$(git -C "$DIR/.." rev-parse --short HEAD 2>/dev/null)"
   if [ -n "$banked_desktop_head" ] \
