@@ -8,6 +8,7 @@ const test = require("node:test");
 const root = path.resolve(__dirname, "..");
 const vmctlPath = path.join(root, "scripts/linux-test-vm/vmctl");
 const vmctlCompatPath = path.join(root, "scripts/linux-test-vm/vmctl.sh");
+const federationAssertsPath = path.join(root, "bin/lib/federation-asserts.sh");
 const vmctl = fs.readFileSync(vmctlPath, "utf8");
 const common = fs.readFileSync(
   path.join(root, "scripts/linux-test-vm/lib/common.sh"),
@@ -73,6 +74,68 @@ function runMemberLinksResolution(createLinks, directoryLinks = "[]") {
     : 0;
   fs.rmSync(temp, { recursive: true, force: true });
   return { result, directoryCalls };
+}
+
+function runDhtCleanupProbe(keepUp) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "vm-fed-keep-up-"));
+  const fakeBin = path.join(temp, "bin");
+  const work = path.join(temp, "work-marker");
+  const pidFile = path.join(temp, "node.pid");
+  fs.mkdirSync(fakeBin);
+  fs.mkdirSync(work);
+  const fakeNode = path.join(fakeBin, "node");
+  fs.writeFileSync(
+    fakeNode,
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$$" >"$FAKE_NODE_PID_FILE"',
+      'printf "BOOTSTRAP=127.0.0.1:4242\\n"',
+      "trap 'exit 0' TERM INT",
+      "while :; do sleep 1; done",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'source "$1"',
+        "fed_log() { :; }",
+        'export PATH="$2:$PATH" FAKE_NODE_PID_FILE="$6"',
+        'bootstrap="$(fed_start_testnet_dht "$3" "$4" "127.0.0.1" "$5")" || exit 91',
+        'pid="$(cat "$6")"',
+        'pid_live() { local state; state="$(awk "{print \\$3}" "/proc/$pid/stat" 2>/dev/null)"; [ -n "$state" ] && [ "$state" != Z ]; }',
+        "pid_live || exit 92",
+        'fed_cleanup_scoped "$4" || exit 93',
+        "for _ in $(seq 1 20); do pid_live || break; sleep 0.05; done",
+        "if pid_live; then after=alive; else after=dead; fi",
+        'if [ "$5" = 1 ] && [ "$after" = alive ]; then kill -9 "$pid" 2>/dev/null || true; fi',
+        'printf "bootstrap=%s after=%s\\n" "$bootstrap" "$after"',
+      ].join("\n"),
+      "bash",
+      federationAssertsPath,
+      fakeBin,
+      root,
+      work,
+      String(keepUp),
+      pidFile,
+    ],
+    { encoding: "utf8" },
+  );
+
+  if (fs.existsSync(pidFile)) {
+    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+    if (Number.isInteger(pid)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
+  }
+  fs.rmSync(temp, { recursive: true, force: true });
+  return result;
 }
 
 test("vmctl.sh compatibility entrypoint delegates to canonical vmctl", () => {
@@ -143,6 +206,28 @@ test("missing post-join directory projection is an observable warning, not a fai
     /directory announce not observed on B.*continuing/,
   );
   assert.match(result.stdout, /SURVIVED/);
+});
+
+test("VM federation cleanup reaps an ordinary testnet DHT but preserves --keep-up for reuse", () => {
+  const ordinary = runDhtCleanupProbe(0);
+  assert.equal(ordinary.status, 0, ordinary.stderr);
+  assert.match(ordinary.stdout, /bootstrap=127\.0\.0\.1:4242 after=dead/);
+
+  const kept = runDhtCleanupProbe(1);
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.match(kept.stdout, /bootstrap=127\.0\.0\.1:4242 after=alive/);
+
+  const dhtSetup = federationFragment('BOOTSTRAP=""', "\n# ── 7.");
+  assert.match(dhtSetup, /BOOTSTRAP="\$DHT_BOOTSTRAP_OVERRIDE"/);
+  assert.match(
+    dhtSetup,
+    /fed_start_testnet_dht "\$OPERATOR_DIR" "\$WORK" "\$FEDBR_HOST_IP" "\$KEEP_UP"/,
+  );
+  assert(
+    dhtSetup.indexOf('BOOTSTRAP="$DHT_BOOTSTRAP_OVERRIDE"') <
+      dhtSetup.indexOf("fed_start_testnet_dht"),
+    "an explicit reusable bootstrap must bypass spawning a new testnet",
+  );
 });
 
 function updaterFunction() {
