@@ -348,7 +348,7 @@ launch_vm_instance() {  # <inst> [wipe]   wipe=1 (first launch) clears PG state
   local inst="$1" wipe="${2:-1}" name="${FED_VM[$inst]}"
   fed_log "launch packaged app in $name (identity ${FED_USER[$inst]}${wipe:+, wipe=$wipe})"
   # env file over SSH stdin (0600) — keeps the token out of argv/ps
-  printf 'GH_TOKEN=%s\n%s' "${FED_TOKEN[$inst]}" \
+  printf 'GH_TOKEN=%s\nPAPERCUSP_FED_DHT_MODE=%s\n%s\n' "${FED_TOKEN[$inst]}" "$DHT" \
     "${BOOTSTRAP:+PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP}" \
     | vm_ssh "$name" 'umask 077; cat > ~/fed.env'
   # The desktop puts the embedded-PG data dir at ~/.papercusp-workspaces/.shared/

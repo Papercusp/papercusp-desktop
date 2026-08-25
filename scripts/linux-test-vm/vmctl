@@ -93,8 +93,37 @@ ensure_overlay() {  # ensure_overlay <name>
   fi
 }
 
+is_federation_vm_name() {
+  case "$1" in
+    fed-*) return 0 ;;
+    *)     return 1 ;;
+  esac
+}
+
+require_federation_boot_context() {
+  local name="$1"
+  is_federation_vm_name "$name" || return 0
+  if [ -z "${FED_NIC:-}" ] || [ -z "${SLIRP_NET:-}" ]; then
+    die "refusing to boot federation VM $name without FED_NIC + SLIRP_NET — use papercusp-desktop/bin/vm-federation.sh (add --no-reset --skip-install to reuse an overlay); plain 'vmctl up $name' cannot create a peerable rig"
+  fi
+}
+
+require_federation_launch_context() {
+  local name="$1"
+  is_federation_vm_name "$name" || return 0
+  vm_ssh "$name" '
+    test -s "$HOME/fed.env" &&
+      grep -q "^GH_TOKEN=." "$HOME/fed.env" &&
+      {
+        grep -q "^PAPERCUSP_DHT_BOOTSTRAP=." "$HOME/fed.env" ||
+          grep -qx "PAPERCUSP_FED_DHT_MODE=public" "$HOME/fed.env"
+      }
+  ' 2>/dev/null || die "refusing to launch federation VM $name without a validated ~/fed.env (GitHub identity plus an isolated DHT bootstrap or explicit public mode) — use papercusp-desktop/bin/vm-federation.sh"
+}
+
 cmd_up() {
   local name="${1:-clean}"
+  require_federation_boot_context "$name"
   ensure_overlay "$name"
   bash "$SELF_DIR/boot-vm.sh" "$name"
   wait_ssh "$name" 180 || warn "SSH not up yet — check 'vmctl status $name' / $(vm_serial "$name")"
@@ -190,6 +219,7 @@ EOF
 cmd_launch() {
   local name="${1:-clean}"
   vm_running "$name" || die "$name is not running. vmctl up $name"
+  require_federation_launch_context "$name"
   log "launching the app in $name's X session (display :0)…"
   # startx (getty autologin) runs the openbox session as tester on :0 and writes
   # the cookie to ~/.Xauthority, so this is deterministic — no session probing.
