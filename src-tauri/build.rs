@@ -235,6 +235,14 @@ fn main() {
     // app's `~/.papercusp` — the exact state of the desktop in daily use.
     println!("cargo:rerun-if-env-changed=PAPERCUSP_CHANNEL");
     println!("cargo:rerun-if-env-changed=PAPERCUSP_CHANNEL_DATA_HOME");
+    // EI-21467292301306028 — verify-tauri-headless can lose its first devUrl
+    // port to a bind-time squatter and retry with a fresh one. The Tauri CLI's
+    // changed `--config` value alone did not invalidate a warm Cargo target in
+    // the observed retry, so generate_context! reused the first attempt's baked
+    // origin. The verifier exports the effective URL through this explicit
+    // build-script key; changing ports now forces tauri_build to regenerate the
+    // context before the retry launches.
+    println!("cargo:rerun-if-env-changed=PAPERCUSP_VERIFY_TAURI_DEV_URL");
 
     // WI-1976 / WI-2143 — allow the renderer to invoke the native-shell app commands.
     // The operator SPA loads from a REMOTE http origin (http://127.0.0.1:<port>),
