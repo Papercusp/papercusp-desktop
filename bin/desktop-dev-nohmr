@@ -78,11 +78,16 @@ cd "$__here/.."
 # exports CARGO_TARGET_DIR and holds a lock fd that the `exec` below inherits.
 # Single-instance launches keep the shared dir and its warm cache, unchanged.
 . "$__here/lib/claim-target-dir.sh"
+. "$__here/lib/resolve-dev-operator-port.sh"
 
 # Pin content + /api to the session's own operator (EI-296 seam) — outranks a
 # previously persisted prod/staging bar selection, and is never persisted, so
 # it can't repoint anyone else's launch.
-export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-3270}"
+# The beforeDevCommand sources the same resolver. Exporting the selected port
+# here makes the Tauri webview and its Hono child agree when bg-host reserves
+# the default :3270 and the operator is relocated (EI-21445362974769138).
+export OPERATOR_DEV_PORT="$(resolve_dev_operator_port "${OPERATOR_DEV_PORT:-3270}")"
+export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-$OPERATOR_DEV_PORT}"
 
 # tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
 # We only override devUrl; everything else stays the same.
@@ -92,4 +97,4 @@ export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-3270}"
 # only (0.0.0.0), a `localhost` devUrl makes WebKitGTK hit ::1, fail, and the
 # webview reload-loops on first load before limping onto IPv4. (Same reason
 # main.rs injects the runtime base as 127.0.0.1.)
-exec npm run tauri -- dev --config '{"build":{"devUrl":"http://127.0.0.1:3270"}}'
+exec npm run tauri -- dev --config "{\"build\":{\"devUrl\":\"http://127.0.0.1:${OPERATOR_DEV_PORT}\"}}"

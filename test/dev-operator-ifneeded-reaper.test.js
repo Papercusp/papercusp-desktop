@@ -285,6 +285,26 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
   }
 });
 
+test('desktop launcher shares the resolved operator port with Tauri devUrl (EI-21445362974769138)', () => {
+  const launcher = fs.readFileSync(path.join(root, 'bin/desktop-dev-nohmr'), 'utf8');
+
+  assert.match(
+    launcher,
+    /resolve-dev-operator-port\.sh/,
+    'desktop launcher must use the same resolver as beforeDevCommand',
+  );
+  assert.match(
+    launcher,
+    /export OPERATOR_DEV_PORT="\$\(resolve_dev_operator_port /,
+    'desktop launcher must export the selected port before Tauri starts beforeDevCommand',
+  );
+  assert.match(
+    launcher,
+    /devUrl.*\$\{OPERATOR_DEV_PORT\}/,
+    'Tauri devUrl must follow the selected operator port instead of hardcoding :3270',
+  );
+});
+
 // WI-41422: the live npx → tsx launcher normalised a signalled Hono child to
 // exit 0. The old loop treated that as an intentional stop and ended the whole
 // wrapper, so dev:restart returned success while :3270 stayed down. Wrapper
