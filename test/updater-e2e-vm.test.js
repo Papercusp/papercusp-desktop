@@ -10,6 +10,7 @@ const vmctlPath = path.join(root, 'scripts/linux-test-vm/vmctl');
 const vmctlCompatPath = path.join(root, 'scripts/linux-test-vm/vmctl.sh');
 const vmctl = fs.readFileSync(vmctlPath, 'utf8');
 const common = fs.readFileSync(path.join(root, 'scripts/linux-test-vm/lib/common.sh'), 'utf8');
+const federationDriver = fs.readFileSync(path.join(root, 'bin/vm-federation.sh'), 'utf8');
 
 test('vmctl.sh compatibility entrypoint delegates to canonical vmctl', () => {
   assert.doesNotThrow(() => fs.accessSync(vmctlCompatPath, fs.constants.X_OK));
@@ -148,6 +149,76 @@ test('vmctl install waits boundedly for every guest apt lock before update and i
   assert.ok(waitCalls.some((index) => index > definition && index < update));
   assert.ok(waitCalls.some((index) => index > update && index < packageInstall));
   assert.match(install, /apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall/);
+});
+
+test('vmctl refuses a fed-* boot without the federation NIC and distinct slirp context', () => {
+  const runGuard = (setup, name = 'fed-a') =>
+    spawnSync(
+      'bash',
+      [
+        '-c',
+        `PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"\n${setup}\nrequire_federation_boot_context "$2"`,
+        'bash',
+        vmctlPath,
+        name,
+      ],
+      { encoding: 'utf8' },
+    );
+
+  const missing = runGuard('unset FED_NIC SLIRP_NET');
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /refusing to boot federation VM fed-a without FED_NIC \+ SLIRP_NET/);
+  assert.match(missing.stderr, /bin\/vm-federation\.sh/);
+
+  const partial = runGuard('export FED_NIC=nic; unset SLIRP_NET');
+  assert.equal(partial.status, 1);
+
+  const configured = runGuard('export FED_NIC=nic SLIRP_NET=10.31.1.0/24');
+  assert.equal(configured.status, 0, configured.stderr);
+
+  const ordinaryVm = runGuard('unset FED_NIC SLIRP_NET', 'clean');
+  assert.equal(ordinaryVm.status, 0, ordinaryVm.stderr);
+});
+
+test('vmctl refuses a fed-* launch without identity and an intentional DHT mode', () => {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-fed-launch-'));
+  const runGuard = (fedEnv, name = 'fed-a') => {
+    fs.rmSync(path.join(probeDir, 'fed.env'), { force: true });
+    if (fedEnv !== null) fs.writeFileSync(path.join(probeDir, 'fed.env'), fedEnv);
+    return spawnSync(
+      'bash',
+      [
+        '-c',
+        [
+          'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+          'vm_ssh() { local _name="$1"; shift; HOME="$FAKE_HOME" bash -c "$*"; }',
+          'require_federation_launch_context "$2"',
+        ].join('\n'),
+        'bash',
+        vmctlPath,
+        name,
+      ],
+      { encoding: 'utf8', env: { ...process.env, FAKE_HOME: probeDir } },
+    );
+  };
+
+  try {
+    const missing = runGuard(null);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /refusing to launch federation VM fed-a without a validated ~\/fed\.env/);
+
+    assert.equal(runGuard('GH_TOKEN=test-token\n').status, 1);
+    assert.equal(
+      runGuard('GH_TOKEN=test-token\nPAPERCUSP_DHT_BOOTSTRAP=10.77.0.1:40059\n').status,
+      0,
+    );
+    assert.equal(runGuard('GH_TOKEN=test-token\nPAPERCUSP_FED_DHT_MODE=public\n').status, 0);
+    assert.equal(runGuard(null, 'clean').status, 0);
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+
+  assert.match(federationDriver, /PAPERCUSP_FED_DHT_MODE=%s/);
 });
 
 test('vmctl GUI launch preserves the independently-owned Server runtime', () => {
