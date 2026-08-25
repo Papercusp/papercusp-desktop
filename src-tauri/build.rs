@@ -73,8 +73,7 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
             .expect("write db-sql placeholder");
     }
     if !has_spa_entry {
-        std::fs::write(spa.join("PLACEHOLDER-README.txt"), note)
-            .expect("write SPA placeholder");
+        std::fs::write(spa.join("PLACEHOLDER-README.txt"), note).expect("write SPA placeholder");
     }
     println!(
         "cargo:warning=src-tauri/sidecar/ is incomplete — placeholder resources created so \
