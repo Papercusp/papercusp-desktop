@@ -554,6 +554,29 @@ test('direct Tauri builds reject a raw SPA docs duplicate before bundling', () =
   );
 });
 
+test('fresh-checkout sidecar placeholders cover the base SPA resource glob', () => {
+  const buildRs = readText('src-tauri', 'build.rs');
+  const config = readConfig('tauri.conf.json');
+
+  assert(
+    config.bundle.resources.includes('sidecar/spa/**/*'),
+    'the regression guard must track the base resource glob that broke cargo test',
+  );
+  assert.match(buildRs, /let spa = sidecar\.join\("spa"\);/);
+  assert.match(buildRs, /let has_spa_entry = std::fs::read_dir\(&spa\)/);
+  assert.match(
+    buildRs,
+    /if has_serve && has_db_sql_entry && has_spa_entry \{/,
+    'the placeholder fast path must validate the SPA glob independently',
+  );
+  assert.match(buildRs, /std::fs::create_dir_all\(&spa\)/);
+  assert.match(
+    buildRs,
+    /std::fs::write\(spa\.join\("PLACEHOLDER-README\.txt"\), note\)/,
+    'a cleaned checkout must receive a file that satisfies sidecar/spa/**/*',
+  );
+});
+
 test('all public platform writers consume the shared sidecar, source and command registry', () => {
   const releaseLocal = readText('bin', 'release-local.sh');
   const windows = readText('bin', 'build-windows-cross.sh');

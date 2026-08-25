@@ -27,7 +27,8 @@ fn reject_unpruned_spa_docs(manifest_dir: &Path) {
 /// EI-160 (point 2): `src-tauri/sidecar/` is a gitignored ~2.2GB artifact
 /// (bin/build-desktop-sidecar.sh). On a fresh or cleaned checkout it is
 /// absent, and `generate_context!`'s `bundle.resources` globs
-/// (`sidecar/**/*` + `sidecar/db-sql/*`) then fail the WHOLE build —
+/// (`sidecar/spa/**/*` in the base GUI config plus the broader server
+/// resources) then fail the WHOLE build —
 /// cargo build / tauri dev / tauri build alike — with a cryptic
 /// "path not found or didn't match any files", nothing pointing at the
 /// sidecar build script.
@@ -40,8 +41,13 @@ fn reject_unpruned_spa_docs(manifest_dir: &Path) {
 fn ensure_sidecar_placeholder(manifest_dir: &Path) {
     let sidecar = manifest_dir.join("sidecar");
     let db_sql = sidecar.join("db-sql");
+    let spa = sidecar.join("spa");
     let has_serve = sidecar.join("serve.mjs").exists();
     let has_db_sql_entry = std::fs::read_dir(&db_sql)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some();
+    let has_spa_entry = std::fs::read_dir(&spa)
         .ok()
         .and_then(|mut entries| entries.next())
         .is_some();
@@ -49,10 +55,11 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
     // sidecar can contain serve.mjs while db-sql is absent (the green
     // checkpoint clean-copy shape); the old early return then let
     // tauri_build panic on sidecar/db-sql/*.
-    if has_serve && has_db_sql_entry {
+    if has_serve && has_db_sql_entry && has_spa_entry {
         return;
     }
     std::fs::create_dir_all(&db_sql).expect("create sidecar placeholder dirs");
+    std::fs::create_dir_all(&spa).expect("create SPA placeholder dir");
     let note = "Placeholder created by build.rs so the bundle.resources globs match on a\n\
                 fresh checkout (EI-160). Dev builds never spawn the sidecar; for a real\n\
                 bundle run bin/build-desktop-sidecar.sh, which replaces this directory\n\
@@ -65,9 +72,13 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
         std::fs::write(db_sql.join("PLACEHOLDER-README.txt"), note)
             .expect("write db-sql placeholder");
     }
+    if !has_spa_entry {
+        std::fs::write(spa.join("PLACEHOLDER-README.txt"), note)
+            .expect("write SPA placeholder");
+    }
     println!(
-        "cargo:warning=src-tauri/sidecar/ has no serve.mjs — placeholder created so the \
-         build can proceed. Dev is fine (the sidecar is never spawned); DO NOT package \
+        "cargo:warning=src-tauri/sidecar/ is incomplete — placeholder resources created so \
+         the build can proceed. Dev is fine (the sidecar is never spawned); DO NOT package \
          this tree without running bin/build-desktop-sidecar.sh first."
     );
 }
