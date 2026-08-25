@@ -152,38 +152,58 @@ test('vmctl install waits boundedly for every guest apt lock before update and i
 });
 
 test('vmctl refuses a fed-* boot without the federation NIC and distinct slirp context', () => {
-  const runGuard = (setup, name = 'fed-a') =>
-    spawnSync(
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-fed-boot-'));
+  const marker = path.join(probeDir, 'booted');
+  const runCommand = (setup, name = 'fed-a') => {
+    fs.rmSync(marker, { force: true });
+    return spawnSync(
       'bash',
       [
         '-c',
-        `PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"\n${setup}\nrequire_federation_boot_context "$2"`,
+        [
+          'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+          setup,
+          'ensure_overlay() { printf "overlay\\n" >>"$MARKER"; }',
+          'bash() { printf "qemu\\n" >>"$MARKER"; }',
+          'wait_ssh() { return 0; }',
+          'cmd_up "$2"',
+        ].join('\n'),
         'bash',
         vmctlPath,
         name,
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', env: { ...process.env, MARKER: marker } },
     );
+  };
 
-  const missing = runGuard('unset FED_NIC SLIRP_NET');
-  assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /refusing to boot federation VM fed-a without FED_NIC \+ SLIRP_NET/);
-  assert.match(missing.stderr, /bin\/vm-federation\.sh/);
+  try {
+    const missing = runCommand('unset FED_NIC SLIRP_NET');
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /refusing to boot federation VM fed-a without FED_NIC \+ SLIRP_NET/);
+    assert.match(missing.stderr, /bin\/vm-federation\.sh/);
+    assert.equal(fs.existsSync(marker), false, 'invalid fed-* context must fail before overlay/QEMU work');
 
-  const partial = runGuard('export FED_NIC=nic; unset SLIRP_NET');
-  assert.equal(partial.status, 1);
+    const partial = runCommand('export FED_NIC=nic; unset SLIRP_NET');
+    assert.equal(partial.status, 1);
+    assert.equal(fs.existsSync(marker), false);
 
-  const configured = runGuard('export FED_NIC=nic SLIRP_NET=10.31.1.0/24');
-  assert.equal(configured.status, 0, configured.stderr);
+    const configured = runCommand('export FED_NIC=nic SLIRP_NET=10.31.1.0/24');
+    assert.equal(configured.status, 0, configured.stderr);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'overlay\nqemu\n');
 
-  const ordinaryVm = runGuard('unset FED_NIC SLIRP_NET', 'clean');
-  assert.equal(ordinaryVm.status, 0, ordinaryVm.stderr);
+    const ordinaryVm = runCommand('unset FED_NIC SLIRP_NET', 'clean');
+    assert.equal(ordinaryVm.status, 0, ordinaryVm.stderr);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'overlay\nqemu\n');
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
 });
 
 test('vmctl refuses a fed-* launch without identity and an intentional DHT mode', () => {
   const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-fed-launch-'));
   const runGuard = (fedEnv, name = 'fed-a') => {
     fs.rmSync(path.join(probeDir, 'fed.env'), { force: true });
+    fs.rmSync(path.join(probeDir, 'launched'), { force: true });
     if (fedEnv !== null) fs.writeFileSync(path.join(probeDir, 'fed.env'), fedEnv);
     return spawnSync(
       'bash',
@@ -192,7 +212,9 @@ test('vmctl refuses a fed-* launch without identity and an intentional DHT mode'
         [
           'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
           'vm_ssh() { local _name="$1"; shift; HOME="$FAKE_HOME" bash -c "$*"; }',
-          'require_federation_launch_context "$2"',
+          'vm_running() { return 0; }',
+          'vm_run() { cat >/dev/null; printf "launched\\n" >"$FAKE_HOME/launched"; }',
+          'cmd_launch "$2"',
         ].join('\n'),
         'bash',
         vmctlPath,
@@ -206,14 +228,22 @@ test('vmctl refuses a fed-* launch without identity and an intentional DHT mode'
     const missing = runGuard(null);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /refusing to launch federation VM fed-a without a validated ~\/fed\.env/);
+    assert.equal(fs.existsSync(path.join(probeDir, 'launched')), false);
 
     assert.equal(runGuard('GH_TOKEN=test-token\n').status, 1);
-    assert.equal(
-      runGuard('GH_TOKEN=test-token\nPAPERCUSP_DHT_BOOTSTRAP=10.77.0.1:40059\n').status,
-      0,
-    );
-    assert.equal(runGuard('GH_TOKEN=test-token\nPAPERCUSP_FED_DHT_MODE=public\n').status, 0);
-    assert.equal(runGuard(null, 'clean').status, 0);
+    assert.equal(fs.existsSync(path.join(probeDir, 'launched')), false);
+
+    const testnet = runGuard('GH_TOKEN=test-token\nPAPERCUSP_DHT_BOOTSTRAP=10.77.0.1:40059\n');
+    assert.equal(testnet.status, 0, testnet.stderr);
+    assert.equal(fs.readFileSync(path.join(probeDir, 'launched'), 'utf8'), 'launched\n');
+
+    const publicDht = runGuard('GH_TOKEN=test-token\nPAPERCUSP_FED_DHT_MODE=public\n');
+    assert.equal(publicDht.status, 0, publicDht.stderr);
+    assert.equal(fs.readFileSync(path.join(probeDir, 'launched'), 'utf8'), 'launched\n');
+
+    const ordinaryVm = runGuard(null, 'clean');
+    assert.equal(ordinaryVm.status, 0, ordinaryVm.stderr);
+    assert.equal(fs.readFileSync(path.join(probeDir, 'launched'), 'utf8'), 'launched\n');
   } finally {
     fs.rmSync(probeDir, { recursive: true, force: true });
   }
