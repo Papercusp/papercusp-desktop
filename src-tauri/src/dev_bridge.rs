@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 #[cfg(test)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -17,6 +18,28 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Bridge protocol version exposed via `GET /version`. Bumped whenever the
 /// HTTP surface changes shape so CLI clients can feature-detect.
 pub const BRIDGE_VERSION: &str = "0.7.0";
+
+/// Owns the discovery token for exactly as long as the Tauri application.
+///
+/// This must be registered as managed app state. A function-local drop guard
+/// removes the token as soon as `start_bridge` returns, while the bridge thread
+/// and desktop process are still healthy, making every later PID-targeted CLI
+/// call report `No bridge found`.
+struct BridgeTokenFileGuard {
+    path: PathBuf,
+}
+
+impl BridgeTokenFileGuard {
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl Drop for BridgeTokenFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Deserialize)]
 struct EvalRequest {
@@ -506,11 +529,14 @@ pub fn start_bridge(
     let token_json = serde_json::to_string_pretty(&token_file).unwrap();
     fs::write(&token_path, &token_json).map_err(|e| format!("Failed to write token file: {e}"))?;
 
-    // Clean up token file on exit
-    let cleanup_path = token_path.clone();
-    let _guard = scopeguard::guard((), move |_| {
-        let _ = fs::remove_file(&cleanup_path);
-    });
+    // Keep cleanup state alive for the application lifetime. A local guard is
+    // incorrect here: `start_bridge` returns immediately after spawning the
+    // HTTP thread, so it would delete the discovery token before the caller's
+    // first `tauri-agent-tools eval`.
+    if !app.manage(BridgeTokenFileGuard::new(&token_path)) {
+        let _ = fs::remove_file(&token_path);
+        return Err("Bridge token file guard was already registered".to_string());
+    }
 
     // Create log buffer and install tracing layer
     let log_buffer = Arc::new(LogBuffer::new());
@@ -555,9 +581,6 @@ pub fn start_bridge(
         .unwrap_or_else(|_| reqwest::blocking::Client::new());
 
     thread::spawn(move || {
-        // Keep _guard alive for the lifetime of the server thread
-        let _cleanup = _guard;
-
         // Survive handler panics (P-057): a panic anywhere in the
         // per-request handling used to unwind this whole thread, silently
         // killing the bridge for the rest of the session. Catch, log, and
@@ -1084,6 +1107,28 @@ fn devtools_response() -> DevtoolsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_token_file_guard_keeps_token_until_application_state_drops() {
+        let path = std::env::temp_dir().join(format!(
+            "papercusp-dev-bridge-token-guard-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::write(&path, "token").unwrap();
+
+        let guard = BridgeTokenFileGuard::new(path.clone());
+        assert!(
+            path.exists(),
+            "managed bridge state must retain the discovery token"
+        );
+
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "dropping application state must remove the discovery token"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
