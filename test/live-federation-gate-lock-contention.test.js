@@ -37,6 +37,10 @@ const dependencyGeneration = fs.readFileSync(
   'utf8',
 );
 const npmInstallSafe = fs.readFileSync(path.join(repoRoot, 'scripts/npm-install-safe.mjs'), 'utf8');
+const federationAssertsSelftest = fs.readFileSync(
+  path.join(root, 'bin/lib/federation-asserts.selftest.sh'),
+  'utf8',
+);
 
 const CONTENTION_CHECK_FN = (
   gate.match(/^BUILD_LOCK_CONTENTION=""\nbuild_lock_contention_check\(\) \{[\s\S]*?\n\}$/m) || []
@@ -116,6 +120,14 @@ test('dependency contention patterns are pinned to the immutable publisher\'s ca
   assert.match(
     npmInstallSafe,
     /NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited \$\{status\}; the install is healthy but no checkpoint-safe generation was published\./,
+  );
+});
+
+test('a failed nested FRESH provenance probe preserves its causal output in the outer gate log', () => {
+  assert.match(
+    federationAssertsSelftest,
+    /verdict_probe_rc=\$\?[\s\S]*?nested output follows[\s\S]*?sed 's\/\^\/    \| \/' "\$WORK\/verdict-fresh\.out"/,
+    'the outer self-test log must retain the nested gate output before its temporary WORK cleanup',
   );
 });
 

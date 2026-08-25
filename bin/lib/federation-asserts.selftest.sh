@@ -556,7 +556,15 @@ if GATE_FORCE=0 GATE_SUCCESS_TTL_H=22 GATE_STATE_DIR="$verdict_state" \
     bad "banked desktop_head '$banked_desktop_head' does not resolve to executed Desktop HEAD '$expected_desktop_head' (WI-40958)"
   fi
 else
-  bad "isolated live-federation-gate FRESH probe failed before banking desktop_head (WI-40958)"
+  verdict_probe_rc=$?
+  bad "isolated live-federation-gate FRESH probe failed before banking desktop_head (rc=$verdict_probe_rc, WI-40958); nested output follows"
+  # WI-40905: this probe once red-pinned the outer standing gate, but the EXIT
+  # cleanup removed $WORK and took the only causal output with it. A later
+  # exact-byte/exact-env rerun passed, leaving no honest root-cause diagnosis.
+  # Copy the bounded nested output into this self-test's stdout so gate_selftest
+  # persists it in the outer run's durable selftest.log before cleanup.
+  sed 's/^/    | /' "$WORK/verdict-fresh.out" 2>/dev/null || \
+    echo "    | <nested verdict-fresh.out missing>"
 fi
 if grep -q 'fed_snapshot_shell_script "$smoke_source" "$smoke_snapshot"' "$gate_file" \
   && grep -q 'bash "$smoke_snapshot"' "$gate_file" \
