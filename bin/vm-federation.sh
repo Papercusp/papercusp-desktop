@@ -553,6 +553,25 @@ case "$disc" in
   *)    echo "⚠ no data path proven in ~90s" ;;
 esac
 
+# WI-6191: choosing A's create-response links above deliberately removes
+# directory gossip from the join's critical path. Keep directory propagation
+# observable as a SEPARATE verdict once the existing discovery wait has given
+# the announce time to cross, but never turn a missing projection into a join
+# failure: the join already succeeded from the canonical links A returned.
+if [ "$links_via" = "create-response(A)" ]; then
+  fed_log "B: observe A's directory announce after join (non-fatal)"
+  announce_row="$(fed_hive_dir_row b "$HIVE_SLUG" || true)"
+  announce_links="[]"
+  if [ -n "$announce_row" ]; then
+    announce_links="$(fed_json "$announce_row" "json.dumps(d.get('memberLinks') or [])" 2>/dev/null || printf '[]')"
+  fi
+  if [ -n "$announce_links" ] && [ "$announce_links" != "[]" ]; then
+    echo "✓ directory announce observed on B: $(fed_json "$announce_links" 'len(d)') link(s)"
+  else
+    echo "⚠ directory announce not observed on B after discovery wait — join used A's create-response links; continuing"
+  fi
+fi
+
 # ── 11. the bidirectional MERGE gate (slug-agnostic hive probe) ─────────────
 # The hive model may remap harness_slug across peers, so poll the dst for the
 # feature_id under ANY slug (fed_hive_merge_probe), seeded on the src's member
