@@ -23,13 +23,27 @@ const test = require('node:test');
 // active cross-domain source lock. Raw lock snapshots can be plain JSON or
 // SSE-wrapped MCP responses; missing, malformed, waiting-only, or non-
 // overlapping evidence must stay fail-closed on the ordinary RED path.
+// WI-40905 extends it to dependency-generation's explicit rc75 contract: the
+// before/after manifests proved a concurrent live node_modules writer and the
+// immutable publisher refused the torn snapshot, so the gate must bank a typed
+// non-green infrastructure skip instead of a federation/product red.
 
 const root = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(root, '..');
 const gate = fs.readFileSync(path.join(root, 'bin/live-federation-gate.sh'), 'utf8');
 const sidecarLockHelper = fs.readFileSync(path.join(root, 'bin/lib/sidecar-lock-yield.sh'), 'utf8');
+const dependencyGeneration = fs.readFileSync(
+  path.join(repoRoot, 'apps/operator/bin/release/dependency-generation.sh'),
+  'utf8',
+);
+const npmInstallSafe = fs.readFileSync(path.join(repoRoot, 'scripts/npm-install-safe.mjs'), 'utf8');
 
 const CONTENTION_CHECK_FN = (
   gate.match(/^BUILD_LOCK_CONTENTION=""\nbuild_lock_contention_check\(\) \{[\s\S]*?\n\}$/m) || []
+)[0];
+
+const DEPENDENCY_CONTENTION_CHECK_FN = (
+  gate.match(/^BUILD_DEPENDENCY_CONTENTION=""\nbuild_dependency_contention_check\(\) \{[\s\S]*?\n\}$/m) || []
 )[0];
 
 const SOURCE_CONTENTION_CHECK_FN = (
@@ -42,6 +56,10 @@ const FAIL_BUILD_BLOCK = (
 
 test('the classifiers + typed FAIL_BUILD branches are present in the shipped gate', () => {
   assert(CONTENTION_CHECK_FN, 'could not locate build_lock_contention_check() in live-federation-gate.sh');
+  assert(
+    DEPENDENCY_CONTENTION_CHECK_FN,
+    'could not locate build_dependency_contention_check() in live-federation-gate.sh',
+  );
   assert(SOURCE_CONTENTION_CHECK_FN, 'could not locate source_lock_contention_check() in live-federation-gate.sh');
   assert(FAIL_BUILD_BLOCK, 'could not locate the "if FAIL_BUILD = 1" branch in live-federation-gate.sh');
   assert.match(
@@ -60,6 +78,11 @@ test('the classifiers + typed FAIL_BUILD branches are present in the shipped gat
     'the sidecar lock classifier must still run against $WORK/build.log after failure',
   );
   assert.match(
+    gate,
+    /build_dependency_contention_check "\$WORK\/build\.log"/,
+    'the dependency-generation classifier must run against $WORK/build.log after failure',
+  );
+  assert.match(
     FAIL_BUILD_BLOCK,
     /GATE: SKIPPED-BUILD-LOCK-CONTENTION/,
     'a confirmed lock contention must bank a typed SKIPPED verdict, not a RED',
@@ -70,6 +93,11 @@ test('the classifiers + typed FAIL_BUILD branches are present in the shipped gat
     /GATE: SKIPPED-BUILD-SOURCE-LOCK-CONTENTION/,
     'an exact active source-lock overlap must bank its own typed SKIPPED verdict',
   );
+  assert.match(
+    FAIL_BUILD_BLOCK,
+    /GATE: SKIPPED-DEPENDENCY-CONTENTION/,
+    'an exact dependency-generation rc75 race must bank its own typed SKIPPED verdict',
+  );
 });
 
 test('the classifier pattern is pinned to sidecar-lock-yield.sh\'s ONLY emitter of each line shape', () => {
@@ -78,6 +106,71 @@ test('the classifier pattern is pinned to sidecar-lock-yield.sh\'s ONLY emitter 
   // stops matching and every future contention window falls back to RED.
   assert.match(sidecarLockHelper, /echo "FATAL: timed out after \$\{SIDECAR_LOCK_WAIT\}s waiting for the sidecar lock/);
   assert.match(sidecarLockHelper, /printf '       pid %s \(running %ss\): %s\\n'/);
+});
+
+test('dependency contention patterns are pinned to the immutable publisher\'s canonical rc75 emitters', () => {
+  assert.match(
+    dependencyGeneration,
+    /FATAL: live node_modules changed during generation build; refusing a torn snapshot/,
+  );
+  assert.match(
+    npmInstallSafe,
+    /NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited \$\{status\}; the install is healthy but no checkpoint-safe generation was published\./,
+  );
+});
+
+function runDependencyContentionClassifier(buildLog) {
+  assert(DEPENDENCY_CONTENTION_CHECK_FN, 'dependency classifier extraction failed');
+  const script = [
+    'set -uo pipefail',
+    DEPENDENCY_CONTENTION_CHECK_FN,
+    `build_dependency_contention_check ${JSON.stringify(buildLog)}`,
+    'printf \'RESULT:%s\\n\' "$BUILD_DEPENDENCY_CONTENTION"',
+  ].join('\n');
+  return spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+}
+
+test('build_dependency_contention_check: reports the exact immutable-generation rc75 race', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-dependency-contention-'));
+  try {
+    const buildLog = path.join(tmp, 'build.log');
+    fs.writeFileSync(
+      buildLog,
+      [
+        '[dependency-generation] changed input: apps/operator/node_modules (metadata fingerprint changed)',
+        '[dependency-generation] FATAL: live node_modules changed during generation build; refusing a torn snapshot',
+        'NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited 75; the install is healthy but no checkpoint-safe generation was published.',
+        '',
+      ].join('\n'),
+    );
+    const result = runDependencyContentionClassifier(buildLog);
+    assert.equal(result.status, 0, `classifier exited ${result.status}: ${result.stderr}`);
+    assert.match(
+      result.stdout,
+      /^RESULT:apps\/operator\/node_modules \(metadata fingerprint changed\)$/m,
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('build_dependency_contention_check: fails closed unless both canonical rc75 diagnostics are present', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-dependency-contention-neg-'));
+  try {
+    const buildLog = path.join(tmp, 'build.log');
+    for (const contents of [
+      '[dependency-generation] FATAL: live node_modules changed during generation build; refusing a torn snapshot\n',
+      'NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited 75; the install is healthy but no checkpoint-safe generation was published.\n',
+      'NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited 1; the install is healthy but no checkpoint-safe generation was published.\n',
+    ]) {
+      fs.writeFileSync(buildLog, contents);
+      const result = runDependencyContentionClassifier(buildLog);
+      assert.equal(result.status, 0, `classifier exited ${result.status}: ${result.stderr}`);
+      assert.match(result.stdout, /^RESULT:$/m, 'an incomplete or different failure must remain RED');
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('build_lock_contention_check: sets BUILD_LOCK_CONTENTION for a confirmed lock timeout with a live holder', () => {

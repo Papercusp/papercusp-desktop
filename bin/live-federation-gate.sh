@@ -1460,6 +1460,26 @@ build_lock_contention_check() {  # <build-log-path> — sets BUILD_LOCK_CONTENTI
   BUILD_LOCK_CONTENTION="$holder"
 }
 
+# ── dependency-generation CONTENTION classifier (WI-40905) ───────────────────
+# npm-install-safe deliberately releases its writer mutex before copying the
+# immutable dependency generation: a long metadata copy must not block every
+# other workspace install. A concurrent install is therefore an expected,
+# explicitly guarded race. dependency-generation.sh proves that race by
+# comparing before/after manifests, refuses the torn snapshot, and returns the
+# dedicated rc75; npm-install-safe then prints that the install itself remains
+# healthy. That is an evidence-PRODUCER contention failure, not evidence that
+# the sidecar or federation product is broken. Require BOTH canonical emitter
+# lines so an unrelated dependency/build failure remains fail-closed on RED.
+BUILD_DEPENDENCY_CONTENTION=""
+build_dependency_contention_check() {  # <build-log-path> — sets BUILD_DEPENDENCY_CONTENTION when confirmed
+  local log="$1" changed
+  [ -f "$log" ] || return 0
+  grep -qaF '[dependency-generation] FATAL: live node_modules changed during generation build; refusing a torn snapshot' "$log" 2>/dev/null || return 0
+  grep -qaF 'NPM_INSTALL_SAFE_FATAL: immutable dependency generation publish exited 75; the install is healthy but no checkpoint-safe generation was published.' "$log" 2>/dev/null || return 0
+  changed="$(grep -aF '[dependency-generation] changed input:' "$log" 2>/dev/null | head -1 | sed 's/^\[dependency-generation\] changed input: *//')"
+  BUILD_DEPENDENCY_CONTENTION="${changed:-live node_modules manifest changed}"
+}
+
 # ── live source-lock CONTENTION classifier (EI-21266997625575412) ─────────────
 # This gate builds from the shared WORKING TREE. A lock holder can therefore
 # expose a real, short-lived midpoint of an atomic edit to esbuild (the live
@@ -1638,6 +1658,7 @@ if [ -z "${GATE_DEB:-}" ]; then
     if (( FAIL_BUILD == 1 )); then
       capture_source_lock_snapshot "$WORK/source-locks-after-build-failure.json"
       build_lock_contention_check "$WORK/build.log"
+      build_dependency_contention_check "$WORK/build.log"
       source_lock_contention_check "$WORK/build.log" \
         "$WORK/source-locks-before-build.json" "$WORK/source-locks-after-build-failure.json"
     fi
@@ -1735,6 +1756,18 @@ if [ "$FAIL_BUILD" = 1 ]; then
     rm -f "$STATE_DIR/last-red"
     check_staleness
     verdict "GATE: SKIPPED-BUILD-LOCK-CONTENTION (sidecar.lock held past the bounded wait by a live writer: $BUILD_LOCK_CONTENTION) — not a federation verdict; logs in $WORK"
+    exit 0
+  fi
+  # WI-40905: dependency-generation rc75 is the snapshot guard doing its job.
+  # The generation was NOT published, so no torn bytes reached the build; the
+  # exact paired diagnostics above prove a concurrent live dependency writer.
+  # Preserve non-green freshness semantics while declining a false product RED.
+  if [ -n "$BUILD_DEPENDENCY_CONTENTION" ]; then
+    log "DEPENDENCY GENERATION CONTENTION (not a federation/product verdict): $BUILD_DEPENDENCY_CONTENTION"
+    echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    rm -f "$STATE_DIR/last-red"
+    check_staleness
+    verdict "GATE: SKIPPED-DEPENDENCY-CONTENTION (immutable dependency snapshot changed under a concurrent install: $BUILD_DEPENDENCY_CONTENTION) — not a federation verdict; logs in $WORK"
     exit 0
   fi
   # EI-21266997625575412: the build error names a source file that the
