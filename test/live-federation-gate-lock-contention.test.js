@@ -405,6 +405,7 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
       'SKIP_MATRIX=0',
       'SKIP_FROMREPO=0',
       'BUILD_LOCK_CONTENTION="pid 3892704 (running 2419s): bash bin/repack-deb-xz.sh Papercusp_Server.deb"',
+      'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION=""',
       'log() { :; }', // real log() writes to stderr only — irrelevant here
       'now_s() { echo 1700000000; }',
@@ -435,6 +436,47 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
   }
 });
 
+test('the real FAIL_BUILD branch banks a typed dependency-contention SKIP and exits before RED (behavioral)', () => {
+  assert(FAIL_BUILD_BLOCK, 'extraction failed');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-dependency-failbuild-'));
+  try {
+    const stateDir = path.join(tmp, 'state');
+    fs.mkdirSync(stateDir);
+    fs.writeFileSync(path.join(stateDir, 'last-red'), '111');
+    const workDir = path.join(tmp, 'work');
+    fs.mkdirSync(workDir);
+
+    const script = [
+      'set -uo pipefail',
+      `STATE_DIR=${JSON.stringify(stateDir)}`,
+      `WORK=${JSON.stringify(workDir)}`,
+      'FAIL_BUILD=1',
+      'SKIP_MATRIX=0',
+      'SKIP_FROMREPO=0',
+      'BUILD_LOCK_CONTENTION=""',
+      'BUILD_DEPENDENCY_CONTENTION="apps/operator/node_modules (metadata fingerprint changed)"',
+      'BUILD_SOURCE_LOCK_CONTENTION=""',
+      'log() { :; }',
+      'now_s() { echo 1700000000; }',
+      'check_staleness() { echo CHECK_STALENESS_CALLED; }',
+      'verdict() { echo "$1"; }',
+      FAIL_BUILD_BLOCK,
+      'echo UNREACHABLE_AFTER_DEPENDENCY_CONTENTION_EXIT',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `expected a clean exit 0, got ${result.status}: ${result.stderr}`);
+    assert.match(result.stdout, /GATE: SKIPPED-DEPENDENCY-CONTENTION/);
+    assert.doesNotMatch(result.stdout, /GATE: RED/);
+    assert.doesNotMatch(result.stdout, /UNREACHABLE_AFTER_DEPENDENCY_CONTENTION_EXIT/);
+    assert.match(result.stdout, /CHECK_STALENESS_CALLED/);
+    assert.equal(fs.existsSync(path.join(stateDir, 'last-downgrade')), true);
+    assert.equal(fs.existsSync(path.join(stateDir, 'last-red')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('the real FAIL_BUILD branch banks a typed source-lock SKIP and exits before RED (behavioral)', () => {
   assert(FAIL_BUILD_BLOCK, 'extraction failed');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-source-failbuild-'));
@@ -453,6 +495,7 @@ test('the real FAIL_BUILD branch banks a typed source-lock SKIP and exits before
       'SKIP_MATRIX=0',
       'SKIP_FROMREPO=0',
       'BUILD_LOCK_CONTENTION=""',
+      'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION="path=packages/operator-core/lib/agent-tools/work_items/complete.ts owner=su-f83cc intent=atomic edit"',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
@@ -492,6 +535,7 @@ test('the real FAIL_BUILD branch falls through to the ordinary RED path when con
       'SKIP_MATRIX=0',
       'SKIP_FROMREPO=0',
       'BUILD_LOCK_CONTENTION=""', // unconfirmed — e.g. a genuine build defect
+      'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION=""',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
@@ -504,6 +548,7 @@ test('the real FAIL_BUILD branch falls through to the ordinary RED path when con
 
     assert.equal(result.status, 0, `expected a clean exit 0, got ${result.status}: ${result.stderr}`);
     assert.doesNotMatch(result.stdout, /GATE: SKIPPED-BUILD-LOCK-CONTENTION/, 'must not fire the contention verdict when unconfirmed');
+    assert.doesNotMatch(result.stdout, /GATE: SKIPPED-DEPENDENCY-CONTENTION/);
     assert.match(result.stdout, /REACHED_ORDINARY_RED_PATH/, 'an unconfirmed build failure must still reach the gate\'s ordinary RED verdict path');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
