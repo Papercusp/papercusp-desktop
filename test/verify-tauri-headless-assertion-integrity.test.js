@@ -60,3 +60,15 @@ test('the sha256 manifest turns a mutated assertion file into a failing verdict'
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('cleans bridge credentials from the runtime temp directory used for discovery', () => {
+  assert.match(
+    source,
+    /rm -f -- "\$\{TMPDIR:-\/tmp\}\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
+  );
+  assert.doesNotMatch(
+    source,
+    /rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
+    'a hard-coded /tmp cleanup diverges from Node os.tmpdir() when TMPDIR is scoped',
+  );
+});

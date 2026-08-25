@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -39,6 +39,16 @@ impl Drop for BridgeTokenFileGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+fn bridge_token_path_in(temp_dir: impl AsRef<Path>, pid: u32) -> PathBuf {
+    temp_dir
+        .as_ref()
+        .join(format!("tauri-dev-bridge-{pid}.token"))
+}
+
+fn bridge_token_path(pid: u32) -> PathBuf {
+    bridge_token_path_in(std::env::temp_dir(), pid)
 }
 
 #[derive(Deserialize)]
@@ -525,7 +535,11 @@ pub fn start_bridge(
         token: token.clone(),
         pid: std::process::id(),
     };
-    let token_path = format!("/tmp/tauri-dev-bridge-{}.token", std::process::id());
+    // Match tauri-agent-tools' discovery contract: its Node client scans
+    // os.tmpdir(), so a Codex/runtime-specific TMPDIR must affect the Rust
+    // producer too. Hard-coding /tmp makes every bridge undiscoverable when
+    // TMPDIR is scoped (the normal verifier/session setup).
+    let token_path = bridge_token_path(std::process::id());
     let token_json = serde_json::to_string_pretty(&token_file).unwrap();
     fs::write(&token_path, &token_json).map_err(|e| format!("Failed to write token file: {e}"))?;
 
@@ -533,7 +547,7 @@ pub fn start_bridge(
     // incorrect here: `start_bridge` returns immediately after spawning the
     // HTTP thread, so it would delete the discovery token before the caller's
     // first `tauri-agent-tools eval`.
-    if !app.manage(BridgeTokenFileGuard::new(&token_path)) {
+    if !app.manage(BridgeTokenFileGuard::new(token_path.clone())) {
         let _ = fs::remove_file(&token_path);
         return Err("Bridge token file guard was already registered".to_string());
     }
@@ -951,7 +965,7 @@ pub fn start_bridge(
     });
 
     eprintln!("Dev bridge {BRIDGE_VERSION} started on port {port}");
-    eprintln!("Token file: {token_path}");
+    eprintln!("Token file: {}", token_path.display());
 
     Ok((port, log_buffer, sidecar_registry))
 }
@@ -1127,6 +1141,16 @@ mod tests {
         assert!(
             !path.exists(),
             "dropping application state must remove the discovery token"
+        );
+    }
+
+    #[test]
+    fn bridge_token_path_uses_the_runtime_temp_directory_contract() {
+        let scoped_temp = PathBuf::from("/tmp/papercusp-runtime-scoped-temp");
+
+        assert_eq!(
+            bridge_token_path_in(&scoped_temp, 4242),
+            scoped_temp.join("tauri-dev-bridge-4242.token")
         );
     }
 
