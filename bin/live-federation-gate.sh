@@ -120,7 +120,15 @@
 # never replay another invocation's cached stdout as a new gate verdict.
 if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
   __gate_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  exec env PC_HEAVY_COALESCE=0 PC_HEAVY_PREEMPTIBLE=1 "$__gate_repo_root/scripts/pc-heavy.sh" -- \
+  # EI-21412456902012315: keep the run cooperatively yieldable, but give it one bounded
+  # protected region. The child publishes pc-heavy's existing after-ready marker below and
+  # removes it as soon as content-matrix has a concrete state. An exclusive materializer can
+  # still preempt the long from-repo/local-matrix tail, but it can no longer erase EVERY
+  # federation leg after this gate already spent tens of minutes rebuilding the candidate.
+  # Respect an explicit operator escape hatch; protection is the shipping default.
+  exec env PC_HEAVY_COALESCE=0 PC_HEAVY_PREEMPTIBLE=1 \
+    PC_HEAVY_PREEMPT_AFTER_READY="${PC_HEAVY_PREEMPT_AFTER_READY:-1}" \
+    "$__gate_repo_root/scripts/pc-heavy.sh" -- \
     bash "${BASH_SOURCE[0]}" "$@"
 fi
 
@@ -306,6 +314,46 @@ bank_verdict() {  # <the full "GATE: …" line>
 # not be able to cost us the durable record. The echoed string is byte-identical to what the
 # bare echo produced, so every existing verdict-greping caller is unaffected.
 verdict() { bank_verdict "$1"; echo "$1"; }
+
+# ── bounded pc-heavy protection (EI-21412456902012315) ────────────────────────
+# pc-heavy owns the unique ABSENT marker path and exports it only when the outer wrapper opted
+# into PC_HEAVY_PREEMPT_AFTER_READY. Publishing the marker tells an exclusive dependency
+# materializer to wait instead of TERMing this holder. This gate keeps that protection only
+# through its FIRST federation-leg decision: after MATRIX_RES is PASS/FAIL/SKIPPED, the ordinary
+# cooperative-preemption contract resumes and on_external_term() can bank that concrete state.
+#
+# This is deliberately narrower than PC_HEAVY_PREEMPTIBLE=0. A full gate can run for hours; it
+# must not hold dependency materialization behind the from-repo/local-matrix tail. Conversely,
+# leaving it preemptible for the whole run produced five consecutive all-'?' TERMINATED records
+# on 2026-08-25 — no federation verdict at all. One bounded shield gives both systems progress.
+GATE_PC_HEAVY_PROTECTED=0
+gate_preempt_protect_until_first_verdict() {
+  local marker="${PC_HEAVY_PREEMPT_READY_FILE:-}"
+  [ -n "$marker" ] || return 0  # explicit PC_HEAVY_PREEMPT_AFTER_READY=0 escape hatch
+  # pc-heavy allocated this path uniquely and removed the mktemp placeholder. noclobber is the
+  # fail-closed proof that an unrelated/stale file can never be mistaken for THIS run's marker.
+  if ! (umask 077; set -C; printf '%s\n' "$$" >"$marker") 2>/dev/null; then
+    log "FATAL: could not publish pc-heavy after-ready marker $marker — refusing an unprotected all-unknown gate run"
+    verdict "GATE: REFUSED-PREEMPT-PROTECTION (could not publish the unique pc-heavy after-ready marker; no federation legs ran)"
+    exit 75
+  fi
+  GATE_PC_HEAVY_PROTECTED=1
+  log "pc-heavy protection ACTIVE until content-matrix has a concrete state (marker=$marker)"
+}
+gate_preempt_release_after_first_verdict() {
+  local marker="${PC_HEAVY_PREEMPT_READY_FILE:-}"
+  [ "$GATE_PC_HEAVY_PROTECTED" = 1 ] || return 0
+  if ! rm -f -- "$marker" 2>/dev/null; then
+    # Safe failure direction: keep the materializer waiting until this process exits and
+    # pc-heavy's monitor performs its last-resort cleanup. Never claim the shield was released.
+    log "WARN: could not remove pc-heavy after-ready marker $marker — protection remains until process exit"
+    return 0
+  fi
+  GATE_PC_HEAVY_PROTECTED=0
+  log "pc-heavy protection RELEASED after content-matrix=$MATRIX_RES; later legs are cooperatively preemptible"
+}
+
+gate_preempt_protect_until_first_verdict
 
 GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 # A WI-5329 frame-starvation downgrade is NOT a genuine green (D-005: a starvation SKIP never
@@ -1988,6 +2036,10 @@ if [ "$SKIP_MATRIX" != 1 ]; then
   fi
   log "content-matrix → $MATRIX_RES"
 fi
+# MATRIX_RES is now concrete even when the leg was deliberately skipped. From this point on,
+# on_external_term() banks that state instead of another all-'?' TERMINATED record, so let an
+# exclusive materializer reclaim the ordinary heavy-slot domain if it is waiting.
+gate_preempt_release_after_first_verdict
 # The from-repo leg runs WITNESS_PROBE=1 + the re-key flag so it also exercises the AK
 # owner-enforcement + the device-filtered C-001 re-key cut (K0-K3) — the re-key was the 3rd
 # green-rig/red-binary bug (A-003, WI-259, WI-280), all hermetically-green but live-red, so the
