@@ -1564,6 +1564,16 @@ echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
 copy_pkg_closure luxon
 echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"
 
+# Design comparison loads these packages through createRequire so the same
+# implementation works in the unbundled operator and the packaged sidecar.
+# esbuild cannot see those runtime calls; copy the three package roots (a root
+# copy also covers lost-pixel/package.json and lost-pixel/dist/* subpaths).
+echo "→ copying createRequire runtime deps lost-pixel, pixelmatch, pngjs (+ closures) into the sidecar"
+copy_pkg_closure lost-pixel
+copy_pkg_closure pixelmatch
+copy_pkg_closure pngjs
+echo "  design-compare closures copied ($nat_copied total package(s), $nat_missing missing)"
+
 # EI-19981394187273902 (2026-08-09) — IDENTICAL createRequire gotcha as rrule/luxon
 # above, caught by the sidecar-createrequire-bundling.test.ts recurrence guard
 # (EI-1589). device-push-dispatcher.ts loads BOTH
