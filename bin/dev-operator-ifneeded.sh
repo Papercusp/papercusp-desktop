@@ -230,7 +230,7 @@ GROUP_FILE="$(mktemp -t dev-operator-group.XXXXXX)"
 # TERM INT HUP` tells "we were asked to stop" apart from "the command
 # crashed on its own", closing that narrow theoretical race as cheap
 # defense-in-depth.
-export -f in_use
+export -f dev_operator_port_in_use in_use
 # EI-18745117818375852: under load, the sidecar this loop just spawned can
 # still be alive (mid-shutdown, or the memory-watchdog's own exiting process
 # hasn't released its listen socket yet) when the 3s backoff expires — the

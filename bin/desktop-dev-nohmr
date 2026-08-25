@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Launch the desktop app in DEV mode WITHOUT HMR.
 #
-# ⚠ THIS SCRIPT LOADS :3270 — THIS SESSION'S OWN WORKING TREE. Not :3070.
+# ⚠ THIS SCRIPT LOADS THIS SESSION'S OWN WORKING-TREE OPERATOR (default :3270;
+#    it relocates when papercup-bg-host reserves the default). Not :3070.
 #
 # Do not restate the port here. The `exec` at the bottom of this file is the
 # authority, and tauri.conf.json's `devUrl` is the fallback when it is bypassed.
@@ -13,7 +14,8 @@
 # (hud-session-chat-release-audit-2026-08-11 D-004 → D-005). See WI-37907.
 #   - `frontendDist` in tauri.conf.json is the PRODUCTION-build path. It is NOT
 #     what `tauri dev` loads, and reading it as the dev target is the same trap.
-#   - Because :3270 is `npx tsx bin/hono-host.ts` over apps/operator, it serves
+#   - Because the resolved dev port is `npx tsx bin/hono-host.ts` over apps/operator,
+#     it serves
 #     the WORKING TREE — UNCOMMITTED edits included. There is no build artifact
 #     and no git object in that path, so "is my change committed/promoted?" is
 #     the wrong question for this shell. `dev:pipeline_position` answers a git
@@ -43,8 +45,9 @@
 #   :3170 = the fleet's shared staging operator — the working tree, but
 #   restarted by agents at will (drain protocol), so the owner's webview
 #   would die/reload under them.
-#   :3270 = THIS session's own working-tree operator, spawned by
-#   beforeDevCommand (bin/dev-operator-ifneeded.sh). Same tree as :3170,
+#   :3270 (or its resolved fallback when bg-host reserves it) = THIS session's
+#   own working-tree operator, spawned by beforeDevCommand
+#   (bin/dev-operator-ifneeded.sh). Same tree as :3170,
 #   nothing else restarts it — `npm run dev` finally shows YOUR edits.
 #   The dev-wrapper bar still switches to prod :3070 / staging :3170 at will.
 #
