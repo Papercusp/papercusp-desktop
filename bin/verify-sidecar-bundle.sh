@@ -541,6 +541,7 @@ else
   if [[ -z "$_ri_node" && "$CROSS" != "1" && -x "$BIN/node" ]]; then _ri_node="$BIN/node"; fi
   _ri_timeout=""
   command -v timeout >/dev/null 2>&1 && _ri_timeout="timeout 30"
+  _ri_invalid_request="{\"protocolVersion\":\"$_ri_ver\"}"
 
   if [[ -z "$_ri_node" ]]; then
     # Not a pass. Say so plainly rather than printing a tick nobody can act on.
@@ -551,14 +552,16 @@ else
     # asserted, not an error to propagate. (This script runs under `set -uo pipefail`, not -e, so
     # the guard is belt-and-braces — but a later `set -e` must not silently turn this into a
     # verifier that dies on its own successful probe.)
-    _ri_out="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>/dev/null || true)"
-    _ri_err="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>&1 >/dev/null || true)"
+    _ri_out="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<"$_ri_invalid_request" 2>/dev/null || true)"
+    _ri_err="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<"$_ri_invalid_request" 2>&1 >/dev/null || true)"
     if [[ -n "$_ri_out" ]]; then
       fail "papercusp-remote-initializer: wrote to STDOUT on the error path ('${_ri_out:0:120}') — stdout must carry the protocol and nothing else"
     elif [[ "$_ri_err" != *"WorkspaceHostRemoteInitializerProtocolError"* ]]; then
       fail "papercusp-remote-initializer: an invalid request did not produce a protocol error; got: $(echo "$_ri_err" | head -1 | cut -c1-160)"
+    elif [[ "$_ri_err" == *"unsupported protocol version"* ]]; then
+      fail "papercusp-remote-initializer: packaged artifact rejected verifier protocol '$_ri_ver' — producer/verifier version skew"
     else
-      ok "protocol cycle: invalid request rejected as WorkspaceHostRemoteInitializerProtocolError, stdout clean"
+      ok "protocol cycle: same-version invalid step rejected as WorkspaceHostRemoteInitializerProtocolError, stdout clean"
     fi
 
     # (b) argv guard is live.
