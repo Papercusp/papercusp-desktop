@@ -224,8 +224,14 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'downloads must be content-verified, not version-label trusted');
   assert.match(helper, /--with-ssl=openssl/,
     'PostgreSQL must make its pgcrypto/OpenSSL closure explicit');
-  assert.match(helper, /CREATE EXTENSION pgcrypto/,
-    'the source build must execute the extension instead of trusting compilation');
+  assert.match(helper, /for extension in pgcrypto pg_trgm/,
+    'the source build must install every contrib extension required by first boot');
+  assert.match(helper, /CREATE EXTENSION pgcrypto; CREATE EXTENSION pg_trgm;[\s\S]*similarity\(/,
+    'the source build must execute both required extensions instead of trusting compilation');
+  assert.match(helper, /postgresql\/lib\/pg_trgm\.so[\s\S]*postgresql\/share\/extension\/pg_trgm\.control/,
+    'cache admission must reject a PostgreSQL payload missing pg_trgm runtime files');
+  assert.match(helper, /"pg_trgm": \{[\s\S]*postgresql\/lib\/pg_trgm\.so[\s\S]*pg_trgm\.control/,
+    'the trust manifest must digest-bind the admitted pg_trgm binary and control file');
   assert.match(helper, /patchelf --set-rpath '\$ORIGIN\/\.\.\/lib'/,
     'source-built PostgreSQL tools must remain relocatable after cache copy');
   assert.match(helper, /_pc_vm_sanitize_postgres_config_info[\s\S]*config_info\.c/,

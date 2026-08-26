@@ -9,7 +9,7 @@
 # two upstream Go release binaries that were still Grype-red are rebuilt from
 # their signed release commits with only the fixed dependency versions below.
 
-PAPERCUSP_VM_TRUST_REVISION="2026-08-26-r1"
+PAPERCUSP_VM_TRUST_REVISION="2026-08-26-r2"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -90,6 +90,9 @@ _pc_vm_cache_valid() {
      && -x "$root/postgresql/bin/initdb" \
      && -x "$root/postgresql/bin/pg_ctl" \
      && -f "$root/postgresql/lib/pgcrypto.so" \
+     && -f "$root/postgresql/lib/pg_trgm.so" \
+     && -f "$root/postgresql/share/extension/pgcrypto.control" \
+     && -f "$root/postgresql/share/extension/pg_trgm.control" \
      && -f "$root/postgresql/lib/libcrypto.so.3" \
      && -f "$root/postgresql/lib/libssl.so.3" ]] || return 1
 
@@ -239,9 +242,11 @@ PY
   started=1
   output="$("$prefix/bin/psql" -h "$socket_dir" -p "$probe_port" -U postgres \
     -d postgres -v ON_ERROR_STOP=1 -Atc \
-    "CREATE EXTENSION pgcrypto; SELECT extversion FROM pg_extension WHERE extname='pgcrypto'; SELECT length(gen_random_bytes(16));")"
-  grep -Fq '1.4' <<<"$output"
+    "CREATE EXTENSION pgcrypto; CREATE EXTENSION pg_trgm; SELECT extname || ':' || extversion FROM pg_extension WHERE extname IN ('pgcrypto', 'pg_trgm') ORDER BY extname; SELECT length(gen_random_bytes(16)); SELECT CASE WHEN similarity('papercusp', 'papercup') > 0 THEN 'pg_trgm-ok' ELSE 'pg_trgm-bad' END;")"
+  grep -Fq 'pgcrypto:' <<<"$output"
+  grep -Fq 'pg_trgm:' <<<"$output"
   grep -Fq '16' <<<"$output"
+  grep -Fq 'pg_trgm-ok' <<<"$output"
   "$prefix/bin/pg_ctl" -D "$data_dir" -m fast -w stop >/dev/null
   started=0
   trap - RETURN
@@ -326,16 +331,26 @@ _pc_vm_build_postgres() {
     _pc_vm_sanitize_postgres_config_info "$postgres_src"
     make -j"${PAPERCUSP_VM_BUILD_JOBS:-4}" >"$work/postgresql-make.log" 2>&1
     make DESTDIR="$stage" install >"$work/postgresql-install.log" 2>&1
-    make -C contrib/pgcrypto -j"${PAPERCUSP_VM_BUILD_JOBS:-4}" \
-      >"$work/pgcrypto-make.log" 2>&1
-    make -C contrib/pgcrypto DESTDIR="$stage" install \
-      >"$work/pgcrypto-install.log" 2>&1
+    # The operator's first-boot and pre-migrated-seed paths both create these
+    # extensions before applying schema migrations. Building only pgcrypto can
+    # pass the trust probe yet leave every release unable to create the
+    # pg_trgm-backed lexical indexes. Compile, install, and probe both required
+    # contrib modules as one admitted PostgreSQL runtime closure.
+    for extension in pgcrypto pg_trgm; do
+      make -C "contrib/$extension" -j"${PAPERCUSP_VM_BUILD_JOBS:-4}" \
+        >"$work/${extension}-make.log" 2>&1
+      make -C "contrib/$extension" DESTDIR="$stage" install \
+        >"$work/${extension}-install.log" 2>&1
+    done
   )
 
   _pc_vm_patch_elf_rpaths "$prefix"
   _pc_vm_prune_postgres_build_residue "$prefix"
   [[ "$("$prefix/bin/postgres" --version)" == "postgres (PostgreSQL) $PAPERCUSP_VM_POSTGRES_VERSION" ]]
-  [[ -f "$prefix/lib/pgcrypto.so" && -f "$prefix/share/extension/pgcrypto.control" ]]
+  [[ -f "$prefix/lib/pgcrypto.so" \
+     && -f "$prefix/share/extension/pgcrypto.control" \
+     && -f "$prefix/lib/pg_trgm.so" \
+     && -f "$prefix/share/extension/pg_trgm.control" ]]
   ldd "$prefix/bin/postgres" | grep -F 'libssl.so.3 =>' | grep -Fq "$prefix"
   ldd "$prefix/lib/pgcrypto.so" | grep -F 'libcrypto.so.3 =>' | grep -Fq "$prefix"
   _pc_vm_probe_postgres "$prefix" "$work"
@@ -404,6 +419,16 @@ manifest = {
         "opensslVersion": "$PAPERCUSP_VM_OPENSSL_VERSION",
         "opensslSourceSha256": "$PAPERCUSP_VM_OPENSSL_SOURCE_SHA256",
         "postgresBinarySha256": digest("postgresql/bin/postgres"),
+        "extensions": {
+            "pgcrypto": {
+                "binarySha256": digest("postgresql/lib/pgcrypto.so"),
+                "controlSha256": digest("postgresql/share/extension/pgcrypto.control"),
+            },
+            "pg_trgm": {
+                "binarySha256": digest("postgresql/lib/pg_trgm.so"),
+                "controlSha256": digest("postgresql/share/extension/pg_trgm.control"),
+            },
+        },
     },
 }
 tmp = root / "manifest.json.tmp"
