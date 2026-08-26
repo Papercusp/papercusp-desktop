@@ -520,7 +520,25 @@ fi
 # agent CLIs, so it belongs in the on-target initialization test, not a bundle gate.
 echo "[7/7] workspace-host remote initializer answers a real protocol cycle"
 _ri="$BIN/papercusp-remote-initializer"
-_ri_ver="papercusp-gcp-iap-initialization-v2"
+# WI-42161: DERIVED from the source constant, never hardcoded here. r5c burned ~48 minutes
+# and failed at line 22,607 of a 22,612-line log because this literal still said v1 while the
+# constant it checks had moved to v2 — inside the SAME snapshot, so the bundle was correct and
+# only this assertion was stale. The source file's own comment already promises this derivation
+# ("builder derives its constant from here so the two ends cannot drift apart in a way that only
+# shows up against a real host"); it was documented but never implemented here, so every protocol
+# bump re-armed the same trap. Matches the CONSTANT declaration, not the older example version
+# that still appears in that file's leading doc comment.
+_ri_src="$(cd "$(dirname "$0")/../.." && pwd)/libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts"
+_ri_ver="$(grep -A1 'WORKSPACE_HOST_REMOTE_INITIALIZER_PROTOCOL_VERSION *=' "$_ri_src" 2>/dev/null \
+           | grep -oE "'papercusp-gcp-iap-initialization-v[0-9]+'" | head -1 | tr -d "'")"
+if [[ -z "$_ri_ver" ]]; then
+  # FAIL CLOSED, and deliberately not with an empty string: the content assertion below is
+  # `grep -qF "$_ri_ver"`, which an empty value makes match EVERY artifact — a silently vacuous
+  # gate is strictly worse than the drift this replaces. The sentinel cannot occur in a bundle,
+  # so the assertion fails loudly too even if this fail() is ever made non-fatal.
+  fail "cannot derive initializer protocol version from $_ri_src — refusing a vacuous content assertion"
+  _ri_ver="__UNDERIVABLE_INITIALIZER_PROTOCOL_VERSION__"
+fi
 if [[ ! -f "$_ri" ]]; then
   # [1] already failed this; repeat it here so this section is never silently vacuous.
   fail "papercusp-remote-initializer: MISSING — cannot run a protocol cycle"
