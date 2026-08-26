@@ -83,10 +83,10 @@ kopia --version
 # Shim/profile installs (fnm, nvm) are invisible there. Keep this exact
 # version in lockstep with the bundled sidecar so native addons load under the
 # same ABI. The URL is pinned to a release, never a moving latest-v* alias.
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.18.1}"
 NODE_VERSION="${NODE_VERSION#v}"
 if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.15.0); got '$NODE_VERSION'" >&2
+  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.18.1); got '$NODE_VERSION'" >&2
   exit 2
 fi
 NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"

@@ -20,12 +20,12 @@ set -euo pipefail
 UBUNTU_IMAGE="${UBUNTU_IMAGE:-ubuntu:24.04}"
 # Windows launches the sidecar with `wsl.exe --exec node`, so the guest's
 # runtime must match the exact Node release used to build the sidecar's native
-# modules (build-desktop-sidecar.sh defaults to v24.15.0). A major-only,
+# modules (build-desktop-sidecar.sh defaults to v24.18.1). A major-only,
 # latest-v* lookup can silently produce an ABI mismatch and is not reproducible.
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.18.1}"
 NODE_VERSION="${NODE_VERSION#v}"
 if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.15.0); got '$NODE_VERSION'" >&2
+  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.18.1); got '$NODE_VERSION'" >&2
   exit 2
 fi
 PNPM_VERSION="${PNPM_VERSION:-9.15.0}"
@@ -139,10 +139,10 @@ kopia --version
 # Shim/profile installs (fnm, nvm) are invisible there. Keep this exact
 # version in lockstep with the bundled sidecar so native addons load under the
 # same ABI. The URL is pinned to a release, never a moving latest-v* alias.
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.18.1}"
 NODE_VERSION="${NODE_VERSION#v}"
 if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.15.0); got '$NODE_VERSION'" >&2
+  echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.18.1); got '$NODE_VERSION'" >&2
   exit 2
 fi
 NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"

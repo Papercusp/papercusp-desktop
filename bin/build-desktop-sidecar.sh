@@ -400,6 +400,15 @@ __pc_release_sidecar_publish_lock() {
 }
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
 
+# EI-1869 + EI-21492557010868835: fetched runtime binaries and the expensive
+# vm-release source-built trust toolchain live outside the per-build temporary
+# sidecar.  Define the cache before embedded PostgreSQL is assembled (the old
+# definition lived near Node, hundreds of lines too late for the pinned PG
+# source path).  The helper owns its own cache lock, while the sidecar build lock
+# above still serializes this assembled output tree.
+SIDECAR_BIN_CACHE="${PAPERCUSP_SIDECAR_BIN_CACHE:-$HOME/.cache/papercusp-sidecar-bins}"
+mkdir -p "$SIDECAR_BIN_CACHE"
+
 # STALE STAGING SWEEP (WI-38368 / EI-18882950272344248) — reap residue the EXIT
 # trap structurally CANNOT catch.
 #
@@ -2295,6 +2304,48 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   # tar/umask can drop the exec bit on extract; the assertion below requires -x.
   chmod +x "$_epg_root/darwin-${TARGET_ARCH}/native/bin/"* 2>/dev/null || true
 fi
+
+# EI-21492557010868835: the npm platform packages lag PostgreSQL security
+# releases (the newest Linux package was 18.4 while the current security floor
+# is 18.6).  A vm-release must never silently inherit that stale binary or the
+# build host's ambient Node/gh/Kopia.  Build the exact Linux x64 trust toolchain
+# from checksum-pinned upstream inputs, then replace ONLY the installed
+# @embedded-postgres platform package's native payload.  The package's tiny JS
+# path-export shim remains the maintained embedded-postgres integration seam.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  # shellcheck source=lib/vm-release-trust-toolchain.sh
+  source "$HERE/lib/vm-release-trust-toolchain.sh"
+  papercusp_prepare_vm_release_trust_toolchain \
+    "${PAPERCUSP_VM_RELEASE_TRUST_CACHE_DIR:-$SIDECAR_BIN_CACHE/vm-release-trust}" \
+    "$TARGET_OS" "$TARGET_ARCH"
+
+  _epg_root="$EMBEDDED_PG_DST/node_modules/@embedded-postgres"
+  _epg_platform_dir="$_epg_root/linux-x64"
+  if [[ ! -d "$_epg_platform_dir" ]]; then
+    echo "ERROR: vm-release expected the installed @embedded-postgres/linux-x64 package at $_epg_platform_dir" >&2
+    exit 1
+  fi
+  rm -rf "$_epg_platform_dir/native"
+  mkdir -p "$_epg_platform_dir/native"
+  cp -a "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/postgresql/." "$_epg_platform_dir/native/"
+  node - "$_epg_platform_dir/package.json" "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/manifest.json" <<'NODE'
+const fs = require('node:fs');
+const packagePath = process.argv[2];
+const manifestPath = process.argv[3];
+const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+pkg.version = '18.6.0-papercusp.1';
+pkg.papercuspVmRelease = {
+  revision: manifest.revision,
+  source: manifest.postgresql,
+};
+fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+NODE
+  mkdir -p "$SIDECAR_DIR/apps/operator/runtime"
+  cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/manifest.json" \
+    "$SIDECAR_DIR/apps/operator/runtime/vm-release-trust-toolchain.json"
+  echo "  ✓ replaced npm PostgreSQL payload with pinned PostgreSQL $PAPERCUSP_VM_POSTGRES_VERSION + OpenSSL $PAPERCUSP_VM_OPENSSL_VERSION"
+fi
 # Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
 if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -q .; then
   echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
@@ -2540,11 +2591,23 @@ if [[ -n "${pgv_lib_src:-}" ]]; then
   if [[ -f "$pgv_lib_src" && -d "$pgv_ext_src" ]]; then
     for plat_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native; do
       [[ -d "$plat_dir" ]] || continue
-      mkdir -p "$plat_dir/lib/postgresql" "$plat_dir/share/postgresql/extension"
+      # The upstream npm binaries use Debian's lib/postgresql +
+      # share/postgresql/extension layout.  The pinned vm-release source build
+      # uses PostgreSQL's relocatable prefix layout (lib + share/extension).
+      # Select from the tree we actually assembled; never copy vector into a
+      # second directory the running postmaster does not search.
+      if [[ -f "$plat_dir/lib/pgcrypto.so" && -d "$plat_dir/share/extension" ]]; then
+        _pgv_runtime_lib_dir="$plat_dir/lib"
+        _pgv_runtime_ext_dir="$plat_dir/share/extension"
+      else
+        _pgv_runtime_lib_dir="$plat_dir/lib/postgresql"
+        _pgv_runtime_ext_dir="$plat_dir/share/postgresql/extension"
+      fi
+      mkdir -p "$_pgv_runtime_lib_dir" "$_pgv_runtime_ext_dir"
       # cp -f, not GNU-only -u: BSD/macOS cp has no -u.
-      cp -f "$pgv_lib_src" "$plat_dir/lib/postgresql/"
-      cp -f "$pgv_ext_src"/vector*.sql "$plat_dir/share/postgresql/extension/"
-      cp -f "$pgv_ext_src/vector.control" "$plat_dir/share/postgresql/extension/"
+      cp -f "$pgv_lib_src" "$_pgv_runtime_lib_dir/"
+      cp -f "$pgv_ext_src"/vector*.sql "$_pgv_runtime_ext_dir/"
+      cp -f "$pgv_ext_src/vector.control" "$_pgv_runtime_ext_dir/"
       pgvector_copied=$((pgvector_copied + 1))
     done
     echo "  ✓ pgvector copied into $pgvector_copied embedded-postgres tree(s) (lib.${pgv_lib_ext} + sql + control)"
@@ -2625,7 +2688,21 @@ _cross_darwin=0
 # The embedded server's major version — vendored client tools must match it
 # (pg_dump cannot dump a server NEWER than itself, so distro-default clients —
 # e.g. Ubuntu 24.04's v16 vs our embedded 18 — are not acceptable sources).
-if [[ "$_cross_darwin" == "1" ]]; then
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  [[ -n "${PAPERCUSP_VM_RELEASE_TRUST_ROOT:-}" \
+     && -x "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/kopia" ]] || {
+    echo "ERROR: vm-release pinned Kopia output is unavailable" >&2
+    exit 1
+  }
+  cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/kopia" "$SIDECAR_DIR/bin/kopia"
+  chmod 755 "$SIDECAR_DIR/bin/kopia"
+  "$SIDECAR_DIR/bin/kopia" --version | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1" || {
+    echo "ERROR: vm-release copied Kopia does not match the pinned patched build" >&2
+    exit 1
+  }
+  echo "  kopia: pinned source build $PAPERCUSP_VM_KOPIA_VERSION-papercusp.1 ($PAPERCUSP_VM_KOPIA_COMMIT)"
+  echo "kopia: pinned source build (${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1 $PAPERCUSP_VM_KOPIA_COMMIT)" >> "$SOURCE_NOTE_FILE"
+elif [[ "$_cross_darwin" == "1" ]]; then
   # Can't exec the darwin `postgres` binary on this linux host — derive the major
   # from the installed @embedded-postgres/<platform> package version instead
   # (e.g. 18.3.0-beta.17 → 18). EMBEDDED_PG_BIN_DIR is <pkg>/native/bin.
@@ -3295,23 +3372,15 @@ echo "→ bundling external binaries for $target_os-$target_arch$([[ "$CROSS_BUI
 OMP_DIR="$SIDECAR_DIR/bin"
 mkdir -p "$OMP_DIR"
 
-# EI-1869: SIDECAR_DIR is a fresh `sidecar.tmp.$$` tree every single build (the
-# EI-160 atomic-publish scheme above), so a same-build "already extracted"
-# check inside it can never hit across builds — every rebuild re-downloaded
-# Node (~118M) + gh (~38M) from scratch, ~10min of identical re-fetch on the
-# edit→build→verify loop. Vendor fetched binaries into a stable,
-# version-keyed cache OUTSIDE the per-build tmp tree; a version bump
-# (NODE_VERSION/GH_VERSION) naturally busts its own cache slot since the key
-# includes the version. Override with PAPERCUSP_SIDECAR_BIN_CACHE (e.g. to
-# point CI at a persisted cache dir).
-SIDECAR_BIN_CACHE="${PAPERCUSP_SIDECAR_BIN_CACHE:-$HOME/.cache/papercusp-sidecar-bins}"
-mkdir -p "$SIDECAR_BIN_CACHE"
+# EI-1869: SIDECAR_BIN_CACHE is initialized before assembly, above.  Keep the
+# Node/GH slots below version+platform keyed; a pin change naturally misses the
+# old slot without deleting another build's cache.
 
 # Node.js — vendor a known-good runtime so users don't need Node on PATH.
 # Tauri main spawns the sidecar + embedded-postgres-server with this binary
 # explicitly (see resolve_node_bin in main.rs). Bare `node` only — we don't need npm
 # at runtime, the standalone bundle has its dependencies pre-installed.
-NODE_VERSION="${NODE_VERSION:-v24.15.0}"
+NODE_VERSION="${NODE_VERSION:-v24.18.1}"
 node_dst=""
 case "$target_os" in
   linux)   node_archive="node-${NODE_VERSION}-linux-${target_arch}.tar.xz" ;;
@@ -3327,7 +3396,24 @@ if [[ -n "${node_archive:-}" ]]; then
   node_cache_bin="node"
   [[ "$target_os" == "windows" ]] && node_cache_bin="node.exe"
   node_cache_dir="$SIDECAR_BIN_CACHE/node-${NODE_VERSION}-${target_os}-${target_arch}"
-  if [[ -f "$node_cache_dir/$node_cache_bin" ]]; then
+  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+    [[ "$NODE_VERSION" == "$PAPERCUSP_VM_NODE_VERSION" ]] || {
+      echo "ERROR: vm-release Node override $NODE_VERSION differs from pinned $PAPERCUSP_VM_NODE_VERSION" >&2
+      exit 1
+    }
+    [[ -x "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/node" ]] || {
+      echo "ERROR: vm-release pinned Node output is unavailable" >&2
+      exit 1
+    }
+    cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/node" "$OMP_DIR/node"
+    chmod 755 "$OMP_DIR/node"
+    node_dst="$OMP_DIR/node"
+    [[ "$("$node_dst" --version)" == "$PAPERCUSP_VM_NODE_VERSION" ]] || {
+      echo "ERROR: vm-release copied Node does not match $PAPERCUSP_VM_NODE_VERSION" >&2
+      exit 1
+    }
+    echo "  ✓ node $PAPERCUSP_VM_NODE_VERSION from checksum-pinned vm-release trust toolchain"
+  elif [[ -f "$node_cache_dir/$node_cache_bin" ]]; then
     cp "$node_cache_dir/$node_cache_bin" "$OMP_DIR/$node_cache_bin"
     chmod +x "$OMP_DIR/$node_cache_bin"
     node_dst="$OMP_DIR/$node_cache_bin"
@@ -3370,7 +3456,7 @@ fi
 # gh (GitHub CLI) — single Go binary, used by harness flows that
 # create/comment on GitHub PRs. cli/cli releases ship per-platform
 # tarballs; we extract just `bin/gh[.exe]` into our sidecar/bin/.
-GH_VERSION="${GH_VERSION:-2.92.0}"
+GH_VERSION="${GH_VERSION:-2.98.0}"
 gh_archive=""
 gh_inner_dir=""
 case "$target_os" in
@@ -3388,7 +3474,24 @@ if [[ -n "$gh_archive" ]]; then
   gh_cache_bin="gh"
   [[ "$target_os" == "windows" ]] && gh_cache_bin="gh.exe"
   gh_cache_dir="$SIDECAR_BIN_CACHE/gh-${GH_VERSION}-${target_os}-${target_arch}"
-  if [[ -f "$gh_cache_dir/$gh_cache_bin" ]]; then
+  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+    [[ "$GH_VERSION" == "$PAPERCUSP_VM_GH_VERSION" ]] || {
+      echo "ERROR: vm-release GitHub CLI override $GH_VERSION differs from pinned $PAPERCUSP_VM_GH_VERSION" >&2
+      exit 1
+    }
+    [[ -x "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/gh" ]] || {
+      echo "ERROR: vm-release pinned GitHub CLI output is unavailable" >&2
+      exit 1
+    }
+    gh_dst="$OMP_DIR/gh"
+    cp "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/gh" "$gh_dst"
+    chmod 755 "$gh_dst"
+    "$gh_dst" --version | head -1 | grep -Fq "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1" || {
+      echo "ERROR: vm-release copied GitHub CLI does not match the pinned patched build" >&2
+      exit 1
+    }
+    echo "  ✓ gh $PAPERCUSP_VM_GH_VERSION-papercusp.1 from checksum-pinned release source"
+  elif [[ -f "$gh_cache_dir/$gh_cache_bin" ]]; then
     gh_dst="$OMP_DIR/$gh_cache_bin"
     cp "$gh_cache_dir/$gh_cache_bin" "$gh_dst"
     chmod +x "$gh_dst"
@@ -3921,6 +4024,20 @@ fi
 # is exactly how the pg_wrapper psql (WI-3311) and unbundled kopia (WI-3312)
 # shipped broken. See the verifier's header before touching its allowlists.
 "$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"
+
+# EI-21492557010868835: dependency/runtime verification is necessary but not a
+# security verdict.  Generate a real CycloneDX SBOM of the finished temporary
+# sidecar, scan it with the current valid Grype DB, and refuse every High or
+# Critical match BEFORE the atomic publish lock is taken.  Evidence lives
+# outside the scanned tree to avoid self-referential SBOMs; the audit writes a
+# small digest-bound green attestation into the tree only after a clean verdict.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  VM_RELEASE_TRUST_OUTPUT_DIR="${PAPERCUSP_VM_RELEASE_TRUST_OUTPUT_DIR:-$SIDECAR_DIR.release-trust}"
+  echo "→ generating vm-release SBOM + fail-closed High/Critical vulnerability verdict"
+  python3 "$HERE/audit-release-bundle.py" --audit-vulnerabilities \
+    "$SIDECAR_DIR" "$VM_RELEASE_TRUST_OUTPUT_DIR"
+  echo "  ✓ vm-release vulnerability evidence: $VM_RELEASE_TRUST_OUTPUT_DIR"
+fi
 
 # ── EI-160: atomic publish (P-056) ──────────────────────────────────────────
 # The minutes-long build above held only sidecar.build.lock. Take the

@@ -52,6 +52,7 @@ Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --distribution-census <gui|server> <platform> <artifact>...
         audit-release-bundle.py --prune-vm-release <assembled-sidecar>
         audit-release-bundle.py --audit-vm-release <assembled-sidecar>
+        audit-release-bundle.py --audit-vulnerabilities <assembled-sidecar> <evidence-dir>
 """
 import base64
 import fnmatch
@@ -68,6 +69,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 
 # ── PATH rules — the class that actually bit us: a scratch/state dir sweeping in
 # wholesale. Cheap, and applied to every member name.
@@ -1504,6 +1506,21 @@ def _vm_release_residue_class(rel, is_dir=False):
     base = parts[-1]
     low = base.lower()
 
+    # EI-21492557010868835: lost-pixel's production comparator is retained for
+    # parity, but its config-loader closure drags esbuild's Go executable into
+    # node_modules.  The vm-release calls the already-compiled comparator and
+    # never builds TypeScript config, so the platform compiler is build residue,
+    # not runtime.  Prune every @esbuild platform package plus esbuild's CLI bin
+    # directory while preserving esbuild/lib (bundle-require imports that module
+    # eagerly when lost-pixel is loaded, even though it never starts the service
+    # on the comparator path).
+    for index, part in enumerate(parts):
+        if part == "@esbuild" and "node_modules" in parts[:index]:
+            return "build-tool-residue"
+    if is_dir and low == "bin" and len(parts) >= 2 \
+            and parts[-2] == "esbuild" and "node_modules" in parts[:-2]:
+        return "build-tool-residue"
+
     # Templates intentionally carry source/tests/config: they are the bytes the
     # runtime materializes into a NEW app, not editable Papercusp implementation.
     if allowed_asset:
@@ -1681,6 +1698,249 @@ def audit_vm_release(args):
           "build-tool residue outside the runtime asset allowlist")
     print(f"    ✓ threat boundary: ordinary SSH user isolated; root/cloud owner is "
           f"an explicit non-goal; hosted connector={boundary['hostedBoundary']['planItem']}")
+    return 0
+
+
+VM_RELEASE_VULNERABILITY_ATTESTATION_PATH = os.path.join(
+    "apps", "operator", "runtime", "vm-release-vulnerability-attestation.json"
+)
+VM_RELEASE_GATED_SEVERITIES = {"high", "critical"}
+VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS = 72
+
+
+def _parse_tool_json(command, label, env=None, timeout=60):
+    """Run one metadata command and fail closed on exit/JSON/schema errors."""
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"{label} could not run: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"{label} exited {result.returncode}: {detail[:1000]}"
+        )
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} returned invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} returned {type(value).__name__}, expected object")
+    return value
+
+
+def _parse_utc_timestamp(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"{label} is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is not an ISO-8601 timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        raise RuntimeError(f"{label} has no timezone: {value}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _vulnerability_location(match):
+    artifact = match.get("artifact", {}) if isinstance(match, dict) else {}
+    locations = artifact.get("locations", []) if isinstance(artifact, dict) else []
+    for location in locations:
+        if isinstance(location, dict) and location.get("path"):
+            return str(location["path"])
+        if isinstance(location, str) and location:
+            return location
+    return "<unknown-path>"
+
+
+def audit_vulnerabilities(args):
+    """Generate a real SBOM + Grype verdict for one finished vm-release tree."""
+    if len(args) != 2 or not os.path.isdir(args[0]):
+        print("AUDIT ERROR: --audit-vulnerabilities needs an existing sidecar "
+              "directory and an external evidence directory", file=sys.stderr)
+        return 2
+    root = os.path.realpath(args[0])
+    output = os.path.realpath(args[1])
+    try:
+        if os.path.commonpath([root, output]) == root:
+            print("AUDIT ERROR: vulnerability evidence directory must be outside "
+                  "the scanned sidecar (self-referential SBOM refused)", file=sys.stderr)
+            return 2
+    except ValueError:
+        pass
+    if os.path.exists(output) and os.listdir(output):
+        print(f"AUDIT ERROR: vulnerability evidence directory is not empty: {output}",
+              file=sys.stderr)
+        return 2
+    os.makedirs(output, exist_ok=True)
+
+    build_sha = os.environ.get("PAPERCUSP_BUILD_SHA", "").strip()
+    version = os.environ.get("PAPERCUSP_DESKTOP_VERSION", "").strip()
+    if not build_sha or not version or version.lower() == "unknown":
+        print("AUDIT ERROR: vulnerability verdict requires PAPERCUSP_BUILD_SHA and "
+              "PAPERCUSP_DESKTOP_VERSION", file=sys.stderr)
+        return 2
+
+    syft = shutil.which("syft")
+    grype = shutil.which("grype")
+    if not syft or not grype:
+        print("AUDIT ERROR: vm-release vulnerability verdict requires both syft "
+              "and grype on PATH", file=sys.stderr)
+        return 2
+
+    metadata_env = os.environ.copy()
+    metadata_env["SYFT_CHECK_FOR_APP_UPDATE"] = "false"
+    metadata_env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+    metadata_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+    try:
+        syft_version = _parse_tool_json(
+            [syft, "version", "-o", "json"], "syft version", metadata_env
+        )
+        grype_version = _parse_tool_json(
+            [grype, "version", "-o", "json"], "grype version", metadata_env
+        )
+        db_status = _parse_tool_json(
+            [grype, "db", "status", "-o", "json"], "grype db status", metadata_env
+        )
+        if db_status.get("valid") is not True:
+            raise RuntimeError("grype DB reports valid != true")
+        db_built = _parse_utc_timestamp(db_status.get("built"), "grype DB built")
+        db_age = datetime.now(timezone.utc) - db_built
+        if db_age.total_seconds() < -3600:
+            raise RuntimeError(f"grype DB build time is in the future: {db_built.isoformat()}")
+        if db_age.total_seconds() > VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS * 3600:
+            raise RuntimeError(
+                f"grype DB is {db_age.total_seconds() / 3600:.1f}h old; "
+                f"maximum is {VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS}h"
+            )
+    except RuntimeError as exc:
+        print(f"AUDIT ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    sbom_path = os.path.join(output, "sbom.cdx.json")
+    grype_path = os.path.join(output, "grype.json")
+    source_version = f"{version}+{build_sha[:12]}"
+    try:
+        syft_result = subprocess.run(
+            [
+                syft,
+                f"dir:{root}",
+                "--source-name", "papercusp-vm-release",
+                "--source-version", source_version,
+                "-o", f"cyclonedx-json={sbom_path}",
+            ],
+            capture_output=True,
+            text=True,
+            env=metadata_env,
+            timeout=1800,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"AUDIT ERROR: syft scan could not run: {exc}", file=sys.stderr)
+        return 2
+    if syft_result.returncode != 0 or not os.path.isfile(sbom_path):
+        detail = (syft_result.stderr or syft_result.stdout).strip()
+        print(f"AUDIT ERROR: syft scan failed ({syft_result.returncode}): "
+              f"{detail[:1000]}", file=sys.stderr)
+        return 2
+    try:
+        with open(grype_path, "w", encoding="utf-8") as report:
+            grype_result = subprocess.run(
+                [grype, f"sbom:{sbom_path}", "-o", "json"],
+                stdout=report,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=metadata_env,
+                timeout=1800,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"AUDIT ERROR: grype scan could not run: {exc}", file=sys.stderr)
+        return 2
+    if grype_result.returncode != 0:
+        print(f"AUDIT ERROR: grype scan failed ({grype_result.returncode}): "
+              f"{(grype_result.stderr or '').strip()[:1000]}", file=sys.stderr)
+        return 2
+    try:
+        with open(grype_path, encoding="utf-8") as source:
+            grype_report = json.load(source)
+        matches = grype_report["matches"]
+        if not isinstance(matches, list):
+            raise TypeError("matches is not a list")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        print(f"AUDIT ERROR: grype report is unreadable or missing matches: {exc}",
+              file=sys.stderr)
+        return 2
+
+    severity_counts = {}
+    gated = []
+    for match in matches:
+        vulnerability = match.get("vulnerability", {}) if isinstance(match, dict) else {}
+        severity = str(vulnerability.get("severity", "unknown")).strip().lower()
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        if severity in VM_RELEASE_GATED_SEVERITIES:
+            gated.append(match)
+
+    summary = {
+        "schemaVersion": 1,
+        "policy": {
+            "denySeverities": ["High", "Critical"],
+            "grypeDbMaxAgeHours": VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS,
+            "failClosed": True,
+        },
+        "artifactBinding": {
+            "buildSha": build_sha,
+            "version": version,
+        },
+        "scanner": {
+            "syftVersion": syft_version.get("version"),
+            "grypeVersion": grype_version.get("version"),
+            "grypeDbSchema": db_status.get("schemaVersion"),
+            "grypeDbBuilt": db_built.isoformat().replace("+00:00", "Z"),
+        },
+        "evidence": {
+            "sbomSha256": _sha256_file(sbom_path),
+            "grypeReportSha256": _sha256_file(grype_path),
+        },
+        "result": {
+            "status": "red" if gated else "green",
+            "totalMatches": len(matches),
+            "gatedMatches": len(gated),
+            "bySeverity": dict(sorted(severity_counts.items())),
+        },
+    }
+    _write_json_atomic(os.path.join(output, "summary.json"), summary)
+
+    if gated:
+        print(f"\n    ✗ VM-RELEASE VULNERABILITY GATE RED "
+              f"({len(gated)} High/Critical match(es))")
+        def finding_key(match):
+            vulnerability = match.get("vulnerability", {})
+            artifact = match.get("artifact", {})
+            return (
+                _vulnerability_location(match),
+                str(artifact.get("name", "")),
+                str(vulnerability.get("id", "")),
+            )
+        for match in sorted(gated, key=finding_key)[:80]:
+            vulnerability = match.get("vulnerability", {})
+            artifact = match.get("artifact", {})
+            print(
+                f"        [{vulnerability.get('severity', 'Unknown')}] "
+                f"{_vulnerability_location(match)} — "
+                f"{artifact.get('name', '<unknown>')}@{artifact.get('version', '<unknown>')} "
+                f"{vulnerability.get('id', '<unknown>')}"
+            )
+        if len(gated) > 80:
+            print(f"        … and {len(gated) - 80} more")
+        return 1
+
+    attestation_path = os.path.join(root, VM_RELEASE_VULNERABILITY_ATTESTATION_PATH)
+    _write_json_atomic(attestation_path, summary)
+    print("    ✓ VM-RELEASE VULNERABILITY GATE GREEN — zero High/Critical matches")
+    print(f"    ✓ SBOM {_sha256_file(sbom_path)}; Grype report {_sha256_file(grype_path)}")
     return 0
 
 
@@ -3497,6 +3757,8 @@ def main():
         return prune_vm_release(sys.argv[2:])
     if sys.argv[1] == "--audit-vm-release":
         return audit_vm_release(sys.argv[2:])
+    if sys.argv[1] == "--audit-vulnerabilities":
+        return audit_vulnerabilities(sys.argv[2:])
     if sys.argv[1] == "--scrub-binaries":
         return scrub_binaries(sys.argv[2:])
     if sys.argv[1] == "--scrub-text":

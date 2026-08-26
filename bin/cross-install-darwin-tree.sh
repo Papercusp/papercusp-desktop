@@ -113,7 +113,7 @@ fi
 # Must match the runtime the dev/local buttons actually boot under — the
 # BUNDLED SIDECAR node (build-desktop-sidecar.sh's own NODE_VERSION default),
 # never this build box's node. See the "ABI GAP" header comment above.
-NODE_VERSION="${NODE_VERSION:-v24.15.0}"
+NODE_VERSION="${NODE_VERSION:-v24.18.1}"
 case "$ARCH" in
   x64|arm64) : ;;
   *) echo "ERROR: arch must be x64 or arm64 (got '$ARCH')" >&2; exit 1 ;;

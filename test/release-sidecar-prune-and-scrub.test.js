@@ -32,6 +32,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
+const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
 
 /**
  * A SYNTHETIC owner name, asserted for every AUDIT invocation.
@@ -96,6 +97,7 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     // into newly materialized apps and are therefore intentionally allowlisted.
     write('templates/papercusp-webapp/src/main.ts', 'export {};\n');
     write('templates/papercusp-webapp/tests/template.test.ts', 'export {};\n');
+    write('node_modules/lost-pixel/dist/compare/compare.js', 'module.exports = {};\n');
 
     // Dogfood/source/build residue that must not survive a vm-release.
     write('source.tar.zst');
@@ -108,6 +110,8 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     write('packages/operator-core/vitest.config.ts', 'export default {};\n');
     write('.github/workflows/release.yml', 'name: release\n');
     write('README.md', '# source docs\n');
+    write('node_modules/lost-pixel/node_modules/@esbuild/linux-x64/bin/esbuild', 'compiler\n');
+    write('node_modules/lost-pixel/node_modules/esbuild/bin/esbuild', 'cli shim\n');
 
     const pruned = vmReleaseAudit('--prune-vm-release', dir);
     assert.equal(pruned.status, 0, `${pruned.stdout}${pruned.stderr}`);
@@ -122,6 +126,8 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'packages/operator-core/vitest.config.ts',
       '.github',
       'README.md',
+      'node_modules/lost-pixel/node_modules/@esbuild',
+      'node_modules/lost-pixel/node_modules/esbuild/bin',
     ]) {
       assert.equal(fs.existsSync(path.join(dir, rel)), false, `${rel} must be pruned`);
     }
@@ -132,6 +138,7 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'internal-docs/guide.html',
       'templates/papercusp-webapp/src/main.ts',
       'templates/papercusp-webapp/tests/template.test.ts',
+      'node_modules/lost-pixel/dist/compare/compare.js',
     ]) {
       assert.equal(fs.existsSync(path.join(dir, rel)), true, `${rel} must survive`);
     }
@@ -170,16 +177,183 @@ test('vm-release build profile bundles OMP hooks and gates the final sidecar bef
   const prune = sh.indexOf('--prune-vm-release');
   const auditAt = sh.indexOf('--audit-vm-release');
   const verifier = sh.indexOf('release-bundle dependency verifier');
+  const vulnerabilityGate = sh.indexOf('--audit-vulnerabilities');
+  const publish = sh.indexOf('__pc_acquire_sidecar_publish_lock || exit', verifier);
 
   assert.ok(profileValidation > 0, 'the producer must reject unknown distribution profiles');
   assert.ok(bundle > profileValidation, 'vm-release must bundle its runtime OMP hooks');
   assert.match(sh.slice(bundle, prune), /--bundle --platform=node --format=esm --target=node20/);
   assert.doesNotMatch(sh.slice(bundle, prune), /--sourcemap/,
     'the vm-release OMP bundle must not embed source maps/sourceContent');
-  assert.ok(prune > bundle && auditAt > prune && verifier > auditAt,
-    'bundle → prune → audit must all precede the existing runtime verifier');
+  assert.ok(
+    prune > bundle && auditAt > prune && verifier > auditAt &&
+      vulnerabilityGate > verifier && publish > vulnerabilityGate,
+    'bundle → prune → audit → runtime verify → SBOM/Grype must all precede atomic publish',
+  );
   assert.match(sh, /if \[\[ "\$DISTRIBUTION_PROFILE" == "vm-release" \]\][\s\S]*?else[\s\S]*?copying omp hook TypeScript bundle/,
     'dogfood must retain the historical readable TypeScript hook copy');
+});
+
+test('vm-release trust toolchain pins every upstream input and the measured clean dependency overrides', () => {
+  const helper = fs.readFileSync(TRUST_TOOLCHAIN, 'utf8');
+  const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+
+  for (const exact of [
+    'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
+    'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
+    'PAPERCUSP_VM_GO_VERSION="1.26.6"',
+    '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89',
+    'PAPERCUSP_VM_GH_VERSION="2.98.0"',
+    'a255baf71d13fe5947a4eb7ad521ffd412d64cee',
+    'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"',
+    'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
+    '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
+    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.53.0"',
+    'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
+    'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.56.0"',
+    'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.39.0"',
+    'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.82.1"',
+    'PAPERCUSP_VM_POSTGRES_VERSION="18.6"',
+    '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f',
+    'PAPERCUSP_VM_OPENSSL_VERSION="3.5.8"',
+    'a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2',
+  ]) {
+    assert.equal(helper.includes(exact), true, `missing trust-toolchain pin: ${exact}`);
+  }
+  assert.match(helper, /_pc_vm_verify_sha256[\s\S]*actual[\s\S]*expected/,
+    'downloads must be content-verified, not version-label trusted');
+  assert.match(helper, /--with-ssl=openssl/,
+    'PostgreSQL must make its pgcrypto/OpenSSL closure explicit');
+  assert.match(helper, /CREATE EXTENSION pgcrypto/,
+    'the source build must execute the extension instead of trusting compilation');
+  assert.match(helper, /patchelf --set-rpath '\$ORIGIN\/\.\.\/lib'/,
+    'source-built PostgreSQL tools must remain relocatable after cache copy');
+  assert.match(helper, /rg -a -l -F "\$work" "\$output"/,
+    'temporary source/build paths must fail the cache admission gate');
+
+  const prepare = builder.indexOf('papercusp_prepare_vm_release_trust_toolchain');
+  const replacePg = builder.indexOf('replaced npm PostgreSQL payload', prepare);
+  const copyKopia = builder.indexOf('pinned source build $PAPERCUSP_VM_KOPIA_VERSION', prepare);
+  const copyNode = builder.indexOf('checksum-pinned vm-release trust toolchain', prepare);
+  const copyGh = builder.indexOf('checksum-pinned release source', prepare);
+  assert.ok(prepare > 0 && replacePg > prepare && copyKopia > prepare && copyNode > prepare && copyGh > prepare,
+    'the maintained sidecar builder must consume every validated helper output');
+});
+
+function writeExecutable(file, source) {
+  fs.writeFileSync(file, source);
+  fs.chmodSync(file, 0o755);
+}
+
+function runFakeVulnerabilityAudit({ matches = [], dbValid = true, report = null } = {}) {
+  const dir = tmp('vulnerability-gate');
+  const sidecar = path.join(dir, 'sidecar');
+  const evidence = path.join(dir, 'evidence');
+  const tools = path.join(dir, 'tools');
+  fs.mkdirSync(sidecar, { recursive: true });
+  fs.mkdirSync(tools, { recursive: true });
+  fs.writeFileSync(path.join(sidecar, 'serve.mjs'), 'export {};\n');
+
+  writeExecutable(path.join(tools, 'syft'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'version') {
+  process.stdout.write(JSON.stringify({ application: 'syft', version: '1.51.0-test' }));
+  process.exit(0);
+}
+const target = args.find((arg) => arg.startsWith('cyclonedx-json='));
+if (!target) process.exit(41);
+fs.writeFileSync(target.slice('cyclonedx-json='.length), JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.7', components: [] }));
+`);
+  writeExecutable(path.join(tools, 'grype'), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'version') {
+  process.stdout.write(JSON.stringify({ application: 'grype', version: '0.117.0-test' }));
+  process.exit(0);
+}
+if (args[0] === 'db' && args[1] === 'status') {
+  process.stdout.write(JSON.stringify({
+    schemaVersion: 'test-v1',
+    built: process.env.FAKE_GRYPE_DB_BUILT,
+    valid: process.env.FAKE_GRYPE_DB_VALID === 'true',
+  }));
+  process.exit(0);
+}
+process.stdout.write(process.env.FAKE_GRYPE_REPORT);
+`);
+
+  const env = {
+    ...VM_RELEASE_ENV,
+    PATH: `${tools}${path.delimiter}${process.env.PATH}`,
+    FAKE_GRYPE_DB_BUILT: new Date().toISOString(),
+    FAKE_GRYPE_DB_VALID: String(dbValid),
+    FAKE_GRYPE_REPORT: JSON.stringify(report ?? { matches }),
+  };
+  const result = spawnSync(
+    'python3',
+    [AUDIT, '--audit-vulnerabilities', sidecar, evidence],
+    { encoding: 'utf8', env },
+  );
+  return { dir, sidecar, evidence, result };
+}
+
+test('vm-release vulnerability audit emits digest-bound evidence and attests only a zero-High/Critical result', () => {
+  const run = runFakeVulnerabilityAudit();
+  try {
+    assert.equal(run.result.status, 0, `${run.result.stdout}${run.result.stderr}`);
+    assert.match(run.result.stdout, /VULNERABILITY GATE GREEN/);
+    const summary = JSON.parse(fs.readFileSync(path.join(run.evidence, 'summary.json'), 'utf8'));
+    const attestation = JSON.parse(fs.readFileSync(
+      path.join(run.sidecar, 'apps/operator/runtime/vm-release-vulnerability-attestation.json'),
+      'utf8',
+    ));
+    assert.equal(summary.result.status, 'green');
+    assert.equal(summary.result.gatedMatches, 0);
+    assert.match(summary.evidence.sbomSha256, /^[a-f0-9]{64}$/);
+    assert.match(summary.evidence.grypeReportSha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(attestation, summary, 'the shipped attestation must bind the external evidence exactly');
+  } finally {
+    fs.rmSync(run.dir, { recursive: true, force: true });
+  }
+});
+
+test('vm-release vulnerability audit rejects a real High match and never writes a green attestation', () => {
+  const run = runFakeVulnerabilityAudit({
+    matches: [{
+      artifact: { name: 'demo-runtime', version: '1.0.0', locations: [{ path: '/bin/demo' }] },
+      vulnerability: { id: 'CVE-2099-0001', severity: 'High' },
+    }],
+  });
+  try {
+    assert.equal(run.result.status, 1, `${run.result.stdout}${run.result.stderr}`);
+    assert.match(run.result.stdout, /VULNERABILITY GATE RED/);
+    assert.match(run.result.stdout, /\/bin\/demo.*CVE-2099-0001/);
+    const summary = JSON.parse(fs.readFileSync(path.join(run.evidence, 'summary.json'), 'utf8'));
+    assert.equal(summary.result.status, 'red');
+    assert.equal(summary.result.gatedMatches, 1);
+    assert.equal(
+      fs.existsSync(path.join(run.sidecar, 'apps/operator/runtime/vm-release-vulnerability-attestation.json')),
+      false,
+      'a red scan must not leave a shippable green-looking attestation',
+    );
+  } finally {
+    fs.rmSync(run.dir, { recursive: true, force: true });
+  }
+});
+
+test('vm-release vulnerability audit fails closed when the Grype DB is invalid or the report is unjudgeable', () => {
+  for (const input of [
+    { dbValid: false, label: 'invalid DB' },
+    { report: {}, label: 'missing matches array' },
+  ]) {
+    const run = runFakeVulnerabilityAudit(input);
+    try {
+      assert.equal(run.result.status, 2, `${input.label}\n${run.result.stdout}${run.result.stderr}`);
+      assert.match(`${run.result.stdout}${run.result.stderr}`, /AUDIT ERROR/);
+    } finally {
+      fs.rmSync(run.dir, { recursive: true, force: true });
+    }
+  }
 });
 
 function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
