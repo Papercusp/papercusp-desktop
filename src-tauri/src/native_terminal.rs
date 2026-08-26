@@ -621,12 +621,7 @@ pub fn gui_geometry_after_terminal_collapse(
 /// Restore the GUI rect before remapping a collapsed terminal into its saved
 /// docking band. This consumes the same `extent + gap` that collapse released;
 /// dimensions stay at least one pixel for defensive behavior on tiny windows.
-pub fn gui_geometry_for_terminal_reopen(
-    side: DockSide,
-    gui: Rect,
-    extent: i32,
-    gap: i32,
-) -> Rect {
+pub fn gui_geometry_for_terminal_reopen(side: DockSide, gui: Rect, extent: i32, gap: i32) -> Rect {
     let band = extent.max(1).saturating_add(gap).max(0);
     match side {
         DockSide::Left => Rect {
@@ -1008,9 +1003,10 @@ mod x11_glue {
     //! reparenting WMs). Foreign-window positioning is exactly what X11 uniquely
     //! allows (D-003) and Wayland forbids.
     use super::{
-        classify_sibling_change, compute_sibling_geometry, iconify_transition, partner_to_raise,
-        rects_close, reflow_gui_for_seam, resized_extent, sibling_extent, DockSide, GlueConfig,
-        Rect, SiblingDelta,
+        classify_sibling_change, compute_sibling_geometry, gui_geometry_after_terminal_collapse,
+        gui_geometry_for_terminal_reopen, iconify_transition, partner_to_raise, rects_close,
+        reflow_gui_for_seam, resized_extent, sibling_extent, DockSide, GlueConfig, Rect,
+        SiblingDelta,
     };
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
@@ -1401,14 +1397,10 @@ mod x11_glue {
                 // released. Preserve the terminal extent so reopen can invert
                 // this geometry without deriving a larger value from the
                 // temporarily expanded GUI.
-                let extent = self
-                    .extent
-                    .filter(|extent| *extent > 0)
-                    .unwrap_or_else(|| {
-                        sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
-                    });
-                let grown =
-                    gui_geometry_after_terminal_collapse(self.side, main, extent, self.gap);
+                let extent = self.extent.filter(|extent| *extent > 0).unwrap_or_else(|| {
+                    sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
+                });
+                let grown = gui_geometry_after_terminal_collapse(self.side, main, extent, self.gap);
                 let _ = self.conn.unmap_window(self.sibling);
                 let _ = self.conn.flush();
                 self.move_resize(self.gui, grown.x, grown.y, grown.w, grown.h);
@@ -1424,26 +1416,13 @@ mod x11_glue {
                 // before placing the sibling in the reclaimed band. Restore
                 // with the extent that collapse saved; only then resolve a
                 // newly requested fraction against the original GUI size.
-                let prior_extent = self
-                    .extent
-                    .filter(|extent| *extent > 0)
-                    .unwrap_or_else(|| {
-                        sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
-                    });
-                let shrunk = gui_geometry_for_terminal_reopen(
-                    self.side,
-                    main,
-                    prior_extent,
-                    self.gap,
-                );
+                let prior_extent = self.extent.filter(|extent| *extent > 0).unwrap_or_else(|| {
+                    sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
+                });
+                let shrunk =
+                    gui_geometry_for_terminal_reopen(self.side, main, prior_extent, self.gap);
                 let extent = if fraction_changed {
-                    sibling_extent(
-                        shrunk,
-                        self.side,
-                        layout.fraction,
-                        self.min_px,
-                        self.max_px,
-                    )
+                    sibling_extent(shrunk, self.side, layout.fraction, self.min_px, self.max_px)
                 } else {
                     prior_extent.clamp(self.min_px.min(self.max_px), self.max_px.max(self.min_px))
                 };
@@ -1460,13 +1439,8 @@ mod x11_glue {
                 // Already expanded — just a fraction change (the divider was
                 // dragged in the webview): resize the sibling in place, GUI
                 // untouched (matches the plain-resize tick's target math).
-                let extent = sibling_extent(
-                    main,
-                    self.side,
-                    layout.fraction,
-                    self.min_px,
-                    self.max_px,
-                );
+                let extent =
+                    sibling_extent(main, self.side, layout.fraction, self.min_px, self.max_px);
                 let target = compute_sibling_geometry(main, self.side, extent, self.gap);
                 self.move_resize(self.sibling, target.x, target.y, target.w, target.h);
                 self.last_target = Some(target);
