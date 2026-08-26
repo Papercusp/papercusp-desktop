@@ -577,6 +577,85 @@ pub fn reflow_gui_for_seam(side: DockSide, gui: Rect, sibling: Rect, gap: i32) -
     }
 }
 
+/// The GUI rect after a collapsed terminal releases its whole docking band.
+///
+/// Unlike `reflow_gui_for_seam`, this is not driven by a new sibling seam: the
+/// sibling is about to be unmapped, so the GUI must grow by the remembered
+/// terminal extent plus the inter-window gap. The pair's far outer edge stays
+/// anchored. Pure, and exactly inverted by `gui_geometry_for_terminal_reopen`.
+pub fn gui_geometry_after_terminal_collapse(
+    side: DockSide,
+    gui: Rect,
+    extent: i32,
+    gap: i32,
+) -> Rect {
+    let band = extent.max(1).saturating_add(gap).max(0);
+    match side {
+        DockSide::Left => Rect {
+            x: gui.x.saturating_sub(band),
+            y: gui.y,
+            w: gui.w.saturating_add(band),
+            h: gui.h,
+        },
+        DockSide::Right => Rect {
+            x: gui.x,
+            y: gui.y,
+            w: gui.w.saturating_add(band),
+            h: gui.h,
+        },
+        DockSide::Top => Rect {
+            x: gui.x,
+            y: gui.y.saturating_sub(band),
+            w: gui.w,
+            h: gui.h.saturating_add(band),
+        },
+        DockSide::Bottom => Rect {
+            x: gui.x,
+            y: gui.y,
+            w: gui.w,
+            h: gui.h.saturating_add(band),
+        },
+    }
+}
+
+/// Restore the GUI rect before remapping a collapsed terminal into its saved
+/// docking band. This consumes the same `extent + gap` that collapse released;
+/// dimensions stay at least one pixel for defensive behavior on tiny windows.
+pub fn gui_geometry_for_terminal_reopen(
+    side: DockSide,
+    gui: Rect,
+    extent: i32,
+    gap: i32,
+) -> Rect {
+    let band = extent.max(1).saturating_add(gap).max(0);
+    match side {
+        DockSide::Left => Rect {
+            x: gui.x.saturating_add(band),
+            y: gui.y,
+            w: gui.w.saturating_sub(band).max(1),
+            h: gui.h,
+        },
+        DockSide::Right => Rect {
+            x: gui.x,
+            y: gui.y,
+            w: gui.w.saturating_sub(band).max(1),
+            h: gui.h,
+        },
+        DockSide::Top => Rect {
+            x: gui.x,
+            y: gui.y.saturating_add(band),
+            w: gui.w,
+            h: gui.h.saturating_sub(band).max(1),
+        },
+        DockSide::Bottom => Rect {
+            x: gui.x,
+            y: gui.y,
+            w: gui.w,
+            h: gui.h.saturating_sub(band).max(1),
+        },
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // P-004 — the Ghostty launch argv (pure, testable)
 // ───────────────────────────────────────────────────────────────────────────
@@ -1307,37 +1386,68 @@ mod x11_glue {
             if !fraction_changed && !collapse_changed {
                 return false;
             }
-            self.fraction = layout.fraction;
             let Some(main) = self.geometry(self.gui) else {
                 return false;
             };
             if layout.collapsed {
-                // Unmap the sibling and grow the GUI to fill the space it
-                // freed (mirrors the D-012 seam-reflow math with a
-                // zero-extent target).
-                let zero_target = compute_sibling_geometry(main, self.side, 1, self.gap);
-                let grown = reflow_gui_for_seam(self.side, main, zero_target, self.gap);
+                if self.collapsed {
+                    // A fraction update while collapsed is deliberately
+                    // deferred. Keeping `self.fraction` unchanged makes the
+                    // reopen transition resolve that new fraction against the
+                    // restored (not band-expanded) GUI rect.
+                    return false;
+                }
+                // Unmap the sibling and grow the GUI into the exact band it
+                // released. Preserve the terminal extent so reopen can invert
+                // this geometry without deriving a larger value from the
+                // temporarily expanded GUI.
+                let extent = self
+                    .extent
+                    .filter(|extent| *extent > 0)
+                    .unwrap_or_else(|| {
+                        sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
+                    });
+                let grown =
+                    gui_geometry_after_terminal_collapse(self.side, main, extent, self.gap);
                 let _ = self.conn.unmap_window(self.sibling);
                 let _ = self.conn.flush();
                 self.move_resize(self.gui, grown.x, grown.y, grown.w, grown.h);
                 self.last_gui = Some(grown);
                 self.gui_settle = 2;
-                self.extent = Some(0);
-                self.last_target = Some(zero_target);
+                self.extent = Some(extent);
+                self.last_target = None;
                 self.collapsed = true;
                 return true;
             }
-            // Expanding (or a plain fraction change while already expanded):
-            // resolve a fresh extent from the (possibly new) fraction against
-            // the CURRENT gui rect.
-            let extent = sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px);
-            self.extent = Some(extent);
             if self.collapsed {
                 // Was collapsed: remap, then shrink the GUI back to make room
-                // before placing the sibling in the reclaimed band.
+                // before placing the sibling in the reclaimed band. Restore
+                // with the extent that collapse saved; only then resolve a
+                // newly requested fraction against the original GUI size.
+                let prior_extent = self
+                    .extent
+                    .filter(|extent| *extent > 0)
+                    .unwrap_or_else(|| {
+                        sibling_extent(main, self.side, self.fraction, self.min_px, self.max_px)
+                    });
+                let shrunk = gui_geometry_for_terminal_reopen(
+                    self.side,
+                    main,
+                    prior_extent,
+                    self.gap,
+                );
+                let extent = if fraction_changed {
+                    sibling_extent(
+                        shrunk,
+                        self.side,
+                        layout.fraction,
+                        self.min_px,
+                        self.max_px,
+                    )
+                } else {
+                    prior_extent.clamp(self.min_px.min(self.max_px), self.max_px.max(self.min_px))
+                };
                 let _ = self.conn.map_window(self.sibling);
-                let target = compute_sibling_geometry(main, self.side, extent, self.gap);
-                let shrunk = reflow_gui_for_seam(self.side, main, target, self.gap);
                 self.move_resize(self.gui, shrunk.x, shrunk.y, shrunk.w, shrunk.h);
                 self.last_gui = Some(shrunk);
                 self.gui_settle = 2;
@@ -1345,15 +1455,25 @@ mod x11_glue {
                 self.move_resize(self.sibling, t2.x, t2.y, t2.w, t2.h);
                 self.restack_above(self.sibling, self.gui);
                 self.last_target = Some(t2);
+                self.extent = Some(extent);
             } else {
                 // Already expanded — just a fraction change (the divider was
                 // dragged in the webview): resize the sibling in place, GUI
                 // untouched (matches the plain-resize tick's target math).
+                let extent = sibling_extent(
+                    main,
+                    self.side,
+                    layout.fraction,
+                    self.min_px,
+                    self.max_px,
+                );
                 let target = compute_sibling_geometry(main, self.side, extent, self.gap);
                 self.move_resize(self.sibling, target.x, target.y, target.w, target.h);
                 self.last_target = Some(target);
                 self.last_gui = Some(main);
+                self.extent = Some(extent);
             }
+            self.fraction = layout.fraction;
             self.collapsed = false;
             true
         }
@@ -3773,6 +3893,70 @@ mod tests {
                 h: 550
             }
         );
+    }
+
+    #[test]
+    fn terminal_collapse_claims_the_exact_sibling_band_on_all_sides() {
+        let gui = Rect {
+            x: 600,
+            y: 400,
+            w: 1200,
+            h: 800,
+        };
+        let extent = 240;
+        let gap = 8;
+        let band = extent + gap;
+
+        assert_eq!(
+            gui_geometry_after_terminal_collapse(DockSide::Left, gui, extent, gap),
+            Rect {
+                x: gui.x - band,
+                w: gui.w + band,
+                ..gui
+            }
+        );
+        assert_eq!(
+            gui_geometry_after_terminal_collapse(DockSide::Right, gui, extent, gap),
+            Rect {
+                w: gui.w + band,
+                ..gui
+            }
+        );
+        assert_eq!(
+            gui_geometry_after_terminal_collapse(DockSide::Top, gui, extent, gap),
+            Rect {
+                y: gui.y - band,
+                h: gui.h + band,
+                ..gui
+            }
+        );
+        assert_eq!(
+            gui_geometry_after_terminal_collapse(DockSide::Bottom, gui, extent, gap),
+            Rect {
+                h: gui.h + band,
+                ..gui
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_collapse_reopen_geometry_roundtrips_all_sides() {
+        let gui = Rect {
+            x: 600,
+            y: 400,
+            w: 1200,
+            h: 800,
+        };
+        for side in [
+            DockSide::Left,
+            DockSide::Right,
+            DockSide::Top,
+            DockSide::Bottom,
+        ] {
+            let collapsed = gui_geometry_after_terminal_collapse(side, gui, 240, 8);
+            let reopened = gui_geometry_for_terminal_reopen(side, collapsed, 240, 8);
+            assert_eq!(reopened, gui, "{side:?}");
+        }
     }
 
     // ── P-004 launch argv ────────────────────────────────────────────────────
