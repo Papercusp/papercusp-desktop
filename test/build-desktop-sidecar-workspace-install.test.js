@@ -113,6 +113,46 @@ test('sidecar build restores Cargo from CARGO_HOME before the expensive build', 
   assert.match(guard, /exit 1/);
 });
 
+test('sidecar target architecture stays shell-local before native GNU Make builds', () => {
+  const start = builder.indexOf('TARGET_OS="${TARGET_OS:-$_host_os}"');
+  const end = builder.indexOf('CROSS_BUILD=0', start);
+  const trustBuild = builder.indexOf('papercusp_prepare_vm_release_trust_toolchain', end);
+  assert(start >= 0 && end > start, 'could not isolate target normalization');
+  assert(trustBuild > end, 'native trust build must follow target normalization');
+
+  const normalization = builder.slice(start, end);
+  assert.match(normalization, /TARGET_ARCH="\$\{TARGET_ARCH:-\$_host_arch\}"/);
+  assert.match(normalization, /export -n TARGET_ARCH/);
+  assert.match(normalization, /GNU Make reserves TARGET_ARCH/);
+
+  const bash = ['/usr/bin/bash', '/bin/bash'].find((candidate) => fs.existsSync(candidate));
+  assert.ok(bash, 'a bash interpreter is required to exercise target normalization');
+  const result = childProcess.spawnSync(
+    bash,
+    [
+      '-c',
+      [
+        'set -euo pipefail',
+        '_host_os=linux',
+        '_host_arch=x64',
+        normalization,
+        'printf "shell=%s\\n" "$TARGET_ARCH"',
+        "if env | grep -q '^TARGET_ARCH='; then exit 97; fi",
+      ].join('\n'),
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, TARGET_OS: 'linux', TARGET_ARCH: 'x64' },
+    },
+  );
+  assert.equal(
+    result.status,
+    0,
+    `target normalization leaked TARGET_ARCH to child processes: ${result.stdout}${result.stderr}`,
+  );
+  assert.equal(result.stdout.trim(), 'shell=x64');
+});
+
 test('sidecar build fails closed unless all five official mobile templates are packaged', () => {
   for (const ref of [
     'papercusp-mobile-base',
