@@ -2893,7 +2893,7 @@ def scan_dir(dirs):
 #: time, so the fail-closed rule below applies to the handful of files we are
 #: about to publish and to nothing else.
 ARTIFACT_SUFFIXES = (".exe", ".msi", ".dmg", ".appimage", ".zip", ".bin",
-                     ".deb", ".tar.gz", ".tar.zst", ".app.tar.gz")
+                     ".deb", ".tar.gz", ".tgz", ".tar.zst", ".app.tar.gz")
 
 #: An expansion that "succeeded" while recovering almost nothing is the SAME
 #: false-clean this entrypoint exists to remove, one level deeper — and it is

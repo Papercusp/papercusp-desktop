@@ -185,6 +185,45 @@ test('a literal INSIDE a .tar.gz fails the scan and names the member', () => {
   }
 });
 
+test('a clean finished .tgz is expanded and certified by --scan-artifact', () => {
+  const dir = fixture('finished-tgz-clean');
+  try {
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, 'ok.txt'), 'harmless finished artifact\n');
+    const artifact = path.join(dir, 'server.tgz');
+    execFileSync('tar', [
+      '--owner=0', '--group=0', '--numeric-owner', '-czf', artifact, '-C', stage, 'ok.txt',
+    ]);
+
+    const r = scanArtifact(artifact);
+    assert.equal(r.status, 0, `expected clean finished .tgz to pass:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /expanded via archive-pass/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('THE FALSIFIER: a literal inside a finished .tgz fails --scan-artifact', () => {
+  const lit = identityLiteral();
+  const dir = fixture('finished-tgz-dirty');
+  try {
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, 'secret.txt'), `leaked ${lit}\n`);
+    const artifact = path.join(dir, 'server.tgz');
+    execFileSync('tar', [
+      '--owner=0', '--group=0', '--numeric-owner', '-czf', artifact, '-C', stage, 'secret.txt',
+    ]);
+
+    const r = scanArtifact(artifact);
+    assert.equal(r.status, 1, `expected dirty finished .tgz to fail:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /secret\.txt/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // CALIBRATION CONTROL: without this, a scan that failed on EVERYTHING would satisfy
 // both assertions above while being useless.
 test('a clean bundle — including a clean archive and a clean binary — passes', () => {
