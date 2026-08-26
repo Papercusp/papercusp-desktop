@@ -255,6 +255,13 @@ case "$(uname -m)" in
 esac
 TARGET_OS="${TARGET_OS:-$_host_os}"
 TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"
+# GNU Make reserves TARGET_ARCH and appends it verbatim to its built-in compile
+# rules.  A caller-supplied environment value keeps its exported attribute after
+# the assignment above, so TARGET_ARCH=x64 made PostgreSQL invoke
+# `gcc ... x64 -c ...` and fail every object build.  The sidecar builder itself
+# still needs the normalized value, but subprocesses receive explicit target
+# flags at their call sites; keep this control variable shell-local.
+export -n TARGET_ARCH
 CROSS_BUILD=0
 if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   CROSS_BUILD=1
