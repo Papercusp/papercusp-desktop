@@ -128,6 +128,7 @@ if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
   # Respect an explicit operator escape hatch; protection is the shipping default.
   exec env PC_HEAVY_COALESCE=0 PC_HEAVY_PREEMPTIBLE=1 \
     PC_HEAVY_PREEMPT_AFTER_READY="${PC_HEAVY_PREEMPT_AFTER_READY:-1}" \
+    PC_HEAVY_RETRY_PREEMPTIONS="${PC_HEAVY_RETRY_PREEMPTIONS:-1}" \
     "$__gate_repo_root/scripts/pc-heavy.sh" -- \
     bash "${BASH_SOURCE[0]}" "$@"
 fi
