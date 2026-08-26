@@ -532,7 +532,8 @@ from_repo_file="$DIR/../two-instance-hive-from-repo-smoke.sh"
 verify_file="$DIR/../verify-sidecar-bundle.sh"
 if grep -qF 'desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD' "$gate_file" \
   && grep -qF '"desktop_head":"%s"' "$gate_file" \
-  && grep -qF '"$head" "$desktop_head" "$invoker"' "$gate_file"; then
+  && grep -qF '"$head" "$desktop_head"' "$gate_file" \
+  && grep -qF '"$invoker" "$$"' "$gate_file"; then
   ok "live-federation-gate verdicts bank the executed Desktop submodule SHA beside the operator-parent head (WI-40958)"
 else
   bad "live-federation-gate verdict provenance cannot identify the executed Desktop script/driver bytes (WI-40958)"
