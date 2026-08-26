@@ -144,16 +144,33 @@ test('the nested FRESH probe cannot inherit the parent gate pc-heavy marker', ()
   );
 });
 
-test('every early protection refusal can bank a verdict before ordinary gate setup', () => {
+test('a protection refusal can bank a verdict and the bounded lease starts after build/repack', () => {
   const clockHelper = gate.indexOf('now_s() {');
   const verdictWriter = gate.indexOf('bank_verdict() {');
-  const protectionCall = gate.indexOf('\ngate_preempt_protect_until_first_verdict\n');
+  const postRepackBoundary = gate.indexOf('memory_phase_guard "post-repack/pre-smokes"');
+  const matrixBranch = gate.indexOf('if [ "$SKIP_MATRIX" != 1 ]; then', postRepackBoundary);
+  const protectionCall = gate.indexOf('\n  gate_preempt_protect_until_first_verdict\n', matrixBranch);
+  const matrixRun = gate.indexOf('MATRIX_RES="$(run_smoke content-matrix', protectionCall);
+  const protectionRelease = gate.indexOf('\ngate_preempt_release_after_first_verdict\n', matrixRun);
+  const protectionCalls = gate.match(/^[\t ]*gate_preempt_protect_until_first_verdict[\t ]*$/gm) || [];
   assert(clockHelper >= 0, 'could not locate now_s()');
   assert(verdictWriter >= 0, 'could not locate bank_verdict()');
-  assert(protectionCall >= 0, 'could not locate the early pc-heavy protection call');
+  assert(postRepackBoundary >= 0, 'could not locate the post-repack boundary');
+  assert(matrixBranch >= 0, 'could not locate the non-skipped content-matrix branch');
+  assert(protectionCall >= 0, 'could not locate the content-matrix pc-heavy protection call');
+  assert(matrixRun >= 0, 'could not locate the protected content-matrix run');
+  assert(protectionRelease >= 0, 'could not locate the post-matrix protection release');
+  assert.equal(protectionCalls.length, 1, 'the gate must publish exactly one after-ready marker');
   assert(
     clockHelper < verdictWriter && verdictWriter < protectionCall,
-    'now_s() and bank_verdict() must be defined before the early protection call can refuse',
+    'now_s() and bank_verdict() must be defined before marker publication can refuse',
+  );
+  assert(
+    postRepackBoundary < matrixBranch &&
+      matrixBranch < protectionCall &&
+      protectionCall < matrixRun &&
+      matrixRun < protectionRelease,
+    'the 600-second lease must begin after build/repack, only around content-matrix, then release',
   );
 });
 
