@@ -120,12 +120,14 @@
 # never replay another invocation's cached stdout as a new gate verdict.
 if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
   __gate_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  # EI-21412456902012315: keep the run cooperatively yieldable, but give it one bounded
-  # protected region. The child publishes pc-heavy's existing after-ready marker below and
-  # removes it as soon as content-matrix has a concrete state. An exclusive materializer can
-  # still preempt the long from-repo/local-matrix tail, but it can no longer erase EVERY
-  # federation leg after this gate already spent tens of minutes rebuilding the candidate.
-  # Respect an explicit operator escape hatch; protection is the shipping default.
+  # EI-21412456902012315: keep the run cooperatively yieldable, but give its first real
+  # federation leg one bounded protected region. The child publishes pc-heavy's existing
+  # after-ready marker only AFTER selftests/build/repack, immediately before content-matrix,
+  # and removes it as soon as that leg has a concrete state. An exclusive materializer that
+  # arrives during preparation therefore uses ordinary preemption + the exact typed retry
+  # below instead of consuming the whole 600-second protected lease before a leg begins.
+  # The long from-repo/local-matrix tail remains preemptible. Respect an explicit operator
+  # escape hatch; protection is the shipping default.
   exec env PC_HEAVY_COALESCE=0 PC_HEAVY_PREEMPTIBLE=1 \
     PC_HEAVY_PREEMPT_AFTER_READY="${PC_HEAVY_PREEMPT_AFTER_READY:-1}" \
     PC_HEAVY_RETRY_PREEMPTIONS="${PC_HEAVY_RETRY_PREEMPTIONS:-1}" \
@@ -350,9 +352,10 @@ verdict() { bank_verdict "$1"; echo "$1"; }
 # ── bounded pc-heavy protection (EI-21412456902012315) ────────────────────────
 # pc-heavy owns the unique ABSENT marker path and exports it only when the outer wrapper opted
 # into PC_HEAVY_PREEMPT_AFTER_READY. Publishing the marker tells an exclusive dependency
-# materializer to wait instead of TERMing this holder. This gate keeps that protection only
-# through its FIRST federation-leg decision: after MATRIX_RES is PASS/FAIL/SKIPPED, the ordinary
-# cooperative-preemption contract resumes and on_external_term() can bank that concrete state.
+# materializer to wait instead of TERMing this holder. This gate publishes it only after all
+# preparation/derivation is complete and only while content-matrix is actually running. After
+# MATRIX_RES is PASS/FAIL/SKIPPED, the ordinary cooperative-preemption contract resumes and
+# on_external_term() can bank that concrete state.
 #
 # This is deliberately narrower than PC_HEAVY_PREEMPTIBLE=0. A full gate can run for hours; it
 # must not hold dependency materialization behind the from-repo/local-matrix tail. Conversely,
@@ -384,8 +387,6 @@ gate_preempt_release_after_first_verdict() {
   GATE_PC_HEAVY_PROTECTED=0
   log "pc-heavy protection RELEASED after content-matrix=$MATRIX_RES; later legs are cooperatively preemptible"
 }
-
-gate_preempt_protect_until_first_verdict
 
 GATE_SUCCESS_TTL_H="${GATE_SUCCESS_TTL_H:-22}"
 # A WI-5329 frame-starvation downgrade is NOT a genuine green (D-005: a starvation SKIP never
@@ -2071,6 +2072,11 @@ frame_pressure_note() { # [start-epoch-s] -> one-line frame-scoped reading
 
 MATRIX_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
 if [ "$SKIP_MATRIX" != 1 ]; then
+  # D-084 / EI-214124: begin the bounded lease at the protected WORK, not at gate entry.
+  # The failed 2026-08-26 retry started pc-heavy's 600s clock while build.log was still
+  # advancing and left under three minutes for this leg. Preparation stays ordinarily
+  # preemptible (and exactly retryable); only the first real federation decision is atomic.
+  gate_preempt_protect_until_first_verdict
   MATRIX_RES="$(run_smoke content-matrix two-instance-content-matrix-smoke.sh "${GATE_DEB:-}" \
     PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100)"
   # EI-18721667437666267 — bank the pair's federation logs into this run's artifact dir

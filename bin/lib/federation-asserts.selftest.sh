@@ -530,6 +530,30 @@ gate_file="$DIR/../live-federation-gate.sh"
 matrix_file="$DIR/../two-instance-content-matrix-smoke.sh"
 from_repo_file="$DIR/../two-instance-hive-from-repo-smoke.sh"
 verify_file="$DIR/../verify-sidecar-bundle.sh"
+
+# D-084 / EI-214124 recurrence guard. The generic 600-second pc-heavy lease is
+# intentionally shorter than an exclusive materializer's 900-second drain. It therefore
+# must cover only the first real federation leg, never selftests/build/repack. The live
+# failure this guards started the lease while build.log was still advancing and reached
+# content-matrix with less than three minutes left. Require exactly one publication call,
+# inside the non-skipped content-matrix branch and after the post-repack boundary.
+ready_call_lines="$(grep -nE '^[[:space:]]*gate_preempt_protect_until_first_verdict[[:space:]]*$' "$gate_file" | cut -d: -f1 || true)"
+ready_call_count="$(printf '%s\n' "$ready_call_lines" | awk 'NF { n += 1 } END { print n + 0 }')"
+ready_call_line="$(printf '%s\n' "$ready_call_lines" | head -1)"; ready_call_line="${ready_call_line:-0}"
+post_repack_line="$(grep -nF 'memory_phase_guard "post-repack/pre-smokes"' "$gate_file" | head -1 | cut -d: -f1 || true)"; post_repack_line="${post_repack_line:-0}"
+matrix_branch_line="$(grep -nF 'if [ "$SKIP_MATRIX" != 1 ]; then' "$gate_file" | head -1 | cut -d: -f1 || true)"; matrix_branch_line="${matrix_branch_line:-0}"
+matrix_run_line="$(grep -nF 'run_smoke content-matrix' "$gate_file" | head -1 | cut -d: -f1 || true)"; matrix_run_line="${matrix_run_line:-0}"
+ready_release_line="$(grep -nE '^[[:space:]]*gate_preempt_release_after_first_verdict[[:space:]]*$' "$gate_file" | head -1 | cut -d: -f1 || true)"; ready_release_line="${ready_release_line:-0}"
+if [ "$ready_call_count" -eq 1 ] \
+  && [ "$ready_call_line" -gt "$post_repack_line" ] \
+  && [ "$ready_call_line" -gt "$matrix_branch_line" ] \
+  && [ "$ready_call_line" -lt "$matrix_run_line" ] \
+  && [ "$ready_release_line" -gt "$matrix_run_line" ]; then
+  ok "live-federation-gate spends its bounded after-ready lease only around content-matrix, after build/repack (EI-214124)"
+else
+  bad "live-federation-gate after-ready boundary drifted (calls=$ready_call_count ready=$ready_call_line post-repack=$post_repack_line matrix-if=$matrix_branch_line matrix-run=$matrix_run_line release=$ready_release_line; EI-214124)"
+fi
+
 if grep -qF 'desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD' "$gate_file" \
   && grep -qF '"desktop_head":"%s"' "$gate_file" \
   && grep -qF '"$head" "$desktop_head"' "$gate_file" \
