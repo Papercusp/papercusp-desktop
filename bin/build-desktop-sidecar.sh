@@ -2166,6 +2166,53 @@ if [[ ! -f "$ORCH_DST/bin/invoke-once.mjs" ]]; then
 fi
 echo "  ✓ orchestrator bins bundled → $ORCH_DST/bin"
 
+# ── EI-21474474153847007 / D-110: the remote-initializer executable ──────────
+# `WORKSPACE_HOST_REMOTE_INITIALIZER_ENTRYPOINT` (workspace-host-build-manifest.ts) declares the
+# controller spawns `bin/papercusp-remote-initializer` on a workspace host, and
+# `workspace-host-bootstrap.ts` pins the same path. Until this block existed NOTHING emitted that
+# file: tauri.vm-release.conf.json globs `sidecar/bin/**/*`, so the package would have shipped
+# whatever happened to be there — and the manifest check only validates a CALLER-SUPPLIED material
+# record for the path, so the whole suite stayed green while a real VM bundle omitted the program
+# and every initialization step failed remotely. That is the exact gap D-110 names.
+#
+# Bundled self-contained (same reasoning as the orchestrator bins above): the host runs this as a
+# separate `node` process with no node_modules tree and no tsx, over an SSH invocation where a
+# module-resolution failure surfaces as an opaque non-zero exit.
+#
+# FAIL-CLOSED. A missing or non-executable artifact exits non-zero here rather than producing a
+# bundle that looks complete. `verify-sidecar-bundle.sh` re-checks the finished package and runs a
+# real protocol cycle against it, so this is the producer half of a two-sided guard.
+DEPLOY_DRIVER_SRC="$REPO_ROOT/libs/generic/deployment-driver"
+REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
+echo "→ esbuild-bundling the workspace-host remote initializer from $DEPLOY_DRIVER_SRC"
+if [[ ! -f "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" ]]; then
+  echo "ERROR: remote initializer entrypoint not found at $DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" >&2
+  echo "       D-103/D-110 require this executable in every workspace-host bundle; refusing to ship without it." >&2
+  exit 1
+fi
+mkdir -p "$SIDECAR_DIR/bin"
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" \
+  --bundle --platform=node --format=esm --target=node22 \
+  "${MINIFY_ARGS[@]}" \
+  --banner:js='#!/usr/bin/env node' \
+  --outfile="$REMOTE_INIT_BIN")
+chmod 755 "$REMOTE_INIT_BIN"
+if [[ ! -s "$REMOTE_INIT_BIN" ]]; then
+  echo "ERROR: $REMOTE_INIT_BIN was not produced (or is empty) by esbuild" >&2
+  exit 1
+fi
+if [[ ! -x "$REMOTE_INIT_BIN" ]]; then
+  echo "ERROR: $REMOTE_INIT_BIN is present but not executable — the host spawns it directly" >&2
+  exit 1
+fi
+# Assert the shebang survived the bundle: the host spawns this file by path, so without a
+# shebang it is an ordinary data file with the executable bit set and exec() fails ENOEXEC.
+if ! head -c 2 "$REMOTE_INIT_BIN" | grep -q '#!'; then
+  echo "ERROR: $REMOTE_INIT_BIN has no '#!' line — exec() on the host would fail ENOEXEC" >&2
+  exit 1
+fi
+echo "  ✓ remote initializer bundled → $REMOTE_INIT_BIN ($(wc -c < "$REMOTE_INIT_BIN") bytes)"
+
 # Bundle the embedded-postgres-server package (real PG with logical
 # replication enabled). This is the ONLY desktop DB — the legacy
 # pglite-server fallback was removed 2026-06-01 (a failed embedded-PG must
