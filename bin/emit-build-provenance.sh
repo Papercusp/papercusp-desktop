@@ -64,29 +64,13 @@
 # the cutter regenerated tracked env-sidecars (EI-20555742146560765).
 set -euo pipefail
 
-if [[ $# -lt 4 ]]; then
-  echo "usage: $0 OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT..." >&2
-  exit 2
-fi
-OUT_DIR="$1"; VERSION="$2"; BUILD_SHA="$3"; REUSED="$4"; shift 4
-[[ "$REUSED" == "true" || "$REUSED" == "false" ]] || { echo "REUSED must be true|false, got '$REUSED'" >&2; exit 2; }
-[[ -d "$OUT_DIR" ]] || { echo "OUT_DIR '$OUT_DIR' is not a directory" >&2; exit 2; }
-
-GIT_ROOT="${PROVENANCE_GIT_ROOT:-$PWD}"
-GIT_ROOT="$(git -C "$GIT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$GIT_ROOT")"
-GIT_HEAD_AT_EMIT="$(git -C "$GIT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-
-# A superproject's `git diff HEAD` is not a complete clean-snapshot proof. Git
-# can report an uninitialized/empty submodule as clean for that path (the
-# gitlink is still the committed value), while `git -C <path>` may resolve up
-# into the superproject and return a plausible HEAD. That is exactly the shape
-# that produced a dirty-looking tree with papercusp-desktop lacking its own
-# checked-out commit, then let provenance consumers treat the snapshot as
-# usable. Before recording `gitDirty=false`, verify every recursive submodule's
-# worktree root and HEAD against the gitlink printed by `submodule status`.
-submodule_worktree_dirty() {
+# One source-state oracle for both emission time and direct producers that must
+# preserve their clean input before they generate tracked build state. Printing
+# two newline-delimited scalars keeps the capture mode shell-safe without eval.
+provenance_submodule_worktree_dirty() {
+  local git_root="${1:?git root required}"
   local status_output line expected path sub_root actual top
-  if ! status_output="$(git -C "$GIT_ROOT" submodule status --recursive 2>/dev/null)"; then
+  if ! status_output="$(git -C "$git_root" submodule status --recursive 2>/dev/null)"; then
     # An unreadable status is not evidence of a clean snapshot.
     return 0
   fi
@@ -94,7 +78,7 @@ submodule_worktree_dirty() {
   if [[ -z "$status_output" ]]; then
     # `submodule status` can be empty when the config/worktree is damaged. If
     # HEAD still contains a gitlink, fail closed rather than accepting it.
-    if git -C "$GIT_ROOT" ls-tree -r HEAD 2>/dev/null | grep -q '^160000 '; then
+    if git -C "$git_root" ls-tree -r HEAD 2>/dev/null | grep -q '^160000 '; then
       return 0
     fi
     return 1
@@ -110,7 +94,7 @@ submodule_worktree_dirty() {
     path="${path%% *}"
     [[ -n "$expected" && -n "$path" ]] || return 0
 
-    sub_root="$GIT_ROOT/$path"
+    sub_root="$git_root/$path"
     [[ -d "$sub_root" ]] || return 0
     # A missing/empty submodule `.git` must not fall through to the parent
     # repository's HEAD. The top-level check makes that distinction explicit.
@@ -123,10 +107,38 @@ submodule_worktree_dirty() {
   return 1
 }
 
-GIT_DIRTY_AT_EMIT=true
-if git -C "$GIT_ROOT" diff --quiet HEAD 2>/dev/null && ! submodule_worktree_dirty; then
-  GIT_DIRTY_AT_EMIT=false
+capture_provenance_source() {
+  local candidate="${1:?git root required}"
+  local git_root
+  git_root="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$candidate")"
+  CAPTURED_PROVENANCE_GIT_HEAD="$(git -C "$git_root" rev-parse HEAD 2>/dev/null || echo unknown)"
+  CAPTURED_PROVENANCE_GIT_DIRTY=true
+  if git -C "$git_root" diff --quiet HEAD 2>/dev/null \
+     && ! provenance_submodule_worktree_dirty "$git_root"; then
+    CAPTURED_PROVENANCE_GIT_DIRTY=false
+  fi
+}
+
+if [[ "${1:-}" == "--capture-source" ]]; then
+  [[ $# -eq 2 ]] || { echo "usage: $0 --capture-source GIT_ROOT" >&2; exit 2; }
+  capture_provenance_source "$2"
+  printf '%s\n%s\n' "$CAPTURED_PROVENANCE_GIT_HEAD" "$CAPTURED_PROVENANCE_GIT_DIRTY"
+  exit 0
 fi
+
+if [[ $# -lt 4 ]]; then
+  echo "usage: $0 OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT..." >&2
+  exit 2
+fi
+OUT_DIR="$1"; VERSION="$2"; BUILD_SHA="$3"; REUSED="$4"; shift 4
+[[ "$REUSED" == "true" || "$REUSED" == "false" ]] || { echo "REUSED must be true|false, got '$REUSED'" >&2; exit 2; }
+[[ -d "$OUT_DIR" ]] || { echo "OUT_DIR '$OUT_DIR' is not a directory" >&2; exit 2; }
+
+GIT_ROOT="${PROVENANCE_GIT_ROOT:-$PWD}"
+GIT_ROOT="$(git -C "$GIT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$GIT_ROOT")"
+capture_provenance_source "$GIT_ROOT"
+GIT_HEAD_AT_EMIT="$CAPTURED_PROVENANCE_GIT_HEAD"
+GIT_DIRTY_AT_EMIT="$CAPTURED_PROVENANCE_GIT_DIRTY"
 
 # The orchestrator is the only layer that can observe the release INPUT before
 # it performs its own version/staging mutations. Direct emitter callers omit

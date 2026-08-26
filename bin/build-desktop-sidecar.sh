@@ -42,6 +42,35 @@ REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
+# Direct sidecar builds are release producers too. Preserve the source state at
+# entry, before dependency generations/npm installs mutate tracked build state;
+# emit-build-provenance.sh records the later checkout separately as *AtEmit.
+# A release orchestrator that already captured the phase boundary supplies both
+# seams, and remains authoritative.
+if [[ "${PROVENANCE_SOURCE_GIT_HEAD+x}" != "${PROVENANCE_SOURCE_GIT_DIRTY+x}" ]]; then
+  echo "ERROR: PROVENANCE_SOURCE_GIT_HEAD and PROVENANCE_SOURCE_GIT_DIRTY must be supplied together" >&2
+  exit 2
+fi
+if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh" ]]; then
+  _provenance_source_output="$(
+    bash "$HERE/emit-build-provenance.sh" --capture-source "$REPO_ROOT"
+  )" || {
+    echo "ERROR: could not capture sidecar source provenance before build mutations" >&2
+    exit 2
+  }
+  mapfile -t _provenance_source_fields <<< "$_provenance_source_output"
+  if [[ "${#_provenance_source_fields[@]}" -ne 2 \
+     || -z "${_provenance_source_fields[0]}" \
+     || ( "${_provenance_source_fields[1]}" != "true" \
+       && "${_provenance_source_fields[1]}" != "false" ) ]]; then
+    echo "ERROR: invalid source-provenance capture from emit-build-provenance.sh" >&2
+    exit 2
+  fi
+  export PROVENANCE_SOURCE_GIT_HEAD="${_provenance_source_fields[0]}"
+  export PROVENANCE_SOURCE_GIT_DIRTY="${_provenance_source_fields[1]}"
+  unset _provenance_source_output _provenance_source_fields
+fi
+
 # D-043 / P-052: dogfood remains the historical source-rich developer bundle.
 # vm-release is a separate fail-closed build profile whose final sidecar is
 # pruned and audited below. Keep the profile validation in this producer too:

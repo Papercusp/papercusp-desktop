@@ -58,6 +58,18 @@ function emit({ sidecarDir, gitRoot, extraEnv = {} } = {}) {
   return JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json'), 'utf8'));
 }
 
+function captureSource(gitRoot) {
+  const result = spawnSync('bash', [EMITTER, '--capture-source', gitRoot], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, `source capture exited ${result.status}: ${result.stderr}`);
+  const fields = result.stdout.trim().split('\n');
+  assert.equal(fields.length, 2, `source capture returned ${fields.length} fields`);
+  assert.match(fields[0], /^[0-9a-f]{40}$/);
+  assert.match(fields[1], /^(?:true|false)$/);
+  return { head: fields[0], dirty: fields[1] };
+}
+
 /** A sidecar dir carrying its OWN provenance, written by the same real emitter. */
 function sidecarWithProvenance() {
   const dir = tmp();
@@ -191,7 +203,9 @@ test('clean build-start provenance survives cutter-authored dirt at emit time', 
   fs.writeFileSync(path.join(repo, 'staging.txt'), 'clean input\n');
   git(['add', '.']);
   git(['commit', '-qm', 'clean source']);
-  const sourceHead = git(['rev-parse', 'HEAD']);
+  const source = captureSource(repo);
+  assert.equal(source.head, git(['rev-parse', 'HEAD']));
+  assert.equal(source.dirty, 'false');
 
   // Model the real cutter: its preflight accepted the clean commit, then its
   // own version/env-sidecar staging changed a tracked file before emit.
@@ -199,15 +213,31 @@ test('clean build-start provenance survives cutter-authored dirt at emit time', 
   const doc = emit({
     gitRoot: repo,
     extraEnv: {
-      PROVENANCE_SOURCE_GIT_HEAD: sourceHead,
-      PROVENANCE_SOURCE_GIT_DIRTY: 'false',
+      PROVENANCE_SOURCE_GIT_HEAD: source.head,
+      PROVENANCE_SOURCE_GIT_DIRTY: source.dirty,
     },
   });
 
-  assert.equal(doc.gitHead, sourceHead);
+  assert.equal(doc.gitHead, source.head);
   assert.equal(doc.gitDirty, false, 'the ship gate must describe the source accepted at cut start');
-  assert.equal(doc.gitHeadAtEmit, sourceHead);
+  assert.equal(doc.gitHeadAtEmit, source.head);
   assert.equal(doc.gitDirtyAtEmit, true, 'post-preflight cutter mutations stay visible as diagnostics');
+});
+
+test('direct sidecar producer captures provenance before dependency mutations', () => {
+  const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
+  const captureAt = builder.indexOf('emit-build-provenance.sh" --capture-source');
+  const dependencyMutationAt = builder.indexOf('node scripts/npm-install-safe.mjs install');
+  const emitAt = builder.lastIndexOf('bash "$HERE/emit-build-provenance.sh"');
+
+  assert.ok(captureAt > 0, 'direct sidecar builder never captures its source phase boundary');
+  assert.ok(
+    dependencyMutationAt > captureAt,
+    'source provenance must be captured before npm/dependency generation can dirty tracked build state',
+  );
+  assert.ok(emitAt > dependencyMutationAt, 'final provenance must still be emitted after artifact assembly');
+  assert.match(builder, /export PROVENANCE_SOURCE_GIT_HEAD=/);
+  assert.match(builder, /export PROVENANCE_SOURCE_GIT_DIRTY=/);
 });
 
 test('verify-provenance gates build-start dirt, not later cutter mutations', () => {
