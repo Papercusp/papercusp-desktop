@@ -168,6 +168,21 @@ test('sidecar build fails closed unless all five official mobile templates are p
   assert.match(builder, /required official mobile template entry missing from sidecar/);
 });
 
+test('sidecar privacy prune covers every assembled documentation copy', () => {
+  const start = builder.indexOf('python3 "$_audit_py" --prune-docs');
+  const end = builder.indexOf('\n  # The prune above deletes by PATH', start);
+  assert(start >= 0 && end > start, 'could not isolate the sidecar docs-prune invocation');
+
+  const prune = builder.slice(start, end);
+  for (const docsRoot of [
+    '$SIDECAR_DIR/internal-docs',
+    '$SIDECAR_DIR/apps/operator-docs/src/content/docs',
+    '$SIDECAR_DIR/spa/docs',
+  ]) {
+    assert.match(prune, new RegExp(docsRoot.replaceAll('$', '\\$')));
+  }
+});
+
 test('sidecar dependency install includes both source workspaces with exact names', () => {
   const operatorName = require(path.join(repoRoot, 'apps/operator/package.json')).name;
   const viteName = require(path.join(repoRoot, 'apps/operator-vite/package.json')).name;
