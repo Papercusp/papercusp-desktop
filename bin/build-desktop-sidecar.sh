@@ -85,6 +85,24 @@ case "$DISTRIBUTION_PROFILE" in
     ;;
 esac
 
+# WI-41712: build-linux-local.sh supplies these two values, but this producer is
+# also a supported direct entrypoint. A direct vm-release build once spent nearly
+# two hours assembling the sidecar before the prune gate discovered both values
+# were absent. Mirror audit-release-bundle.py's exact non-empty/known contract
+# here, before any toolchain or dependency work, while retaining the final audit
+# as the artifact-bound backstop.
+_vm_release_build_sha="${PAPERCUSP_BUILD_SHA:-}"
+_vm_release_desktop_version="${PAPERCUSP_DESKTOP_VERSION:-}"
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
+   && ( -z "${_vm_release_build_sha//[[:space:]]/}" \
+     || -z "${_vm_release_desktop_version//[[:space:]]/}" \
+     || "$_vm_release_desktop_version" =~ ^[[:space:]]*[Uu][Nn][Kk][Nn][Oo][Ww][Nn][[:space:]]*$ ) ]]; then
+  echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE=vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building." >&2
+  echo "       Pass the immutable source SHA and desktop version explicitly; refusing before toolchain work." >&2
+  exit 2
+fi
+unset _vm_release_build_sha _vm_release_desktop_version
+
 # EI-20971912793028056: the final assembled-sidecar identity audit deliberately
 # refuses to certify unless the owner's NAME is asserted at run time. Git cannot
 # supply it: release builders use automation identities, and accepting those would
