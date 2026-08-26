@@ -137,6 +137,11 @@ test('the nested FRESH probe cannot inherit the parent gate pc-heavy marker', ()
     /export PC_HEAVY_PREEMPT_READY_FILE="\$inherited_ready_marker"[\s\S]*?PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE=/,
     'the behavioral probe must seed an occupied parent marker and then scrub it for the nested gate',
   );
+  assert.match(
+    federationAssertsSelftest,
+    /PC_HEAVY_BYPASS=1 PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE=/,
+    'the synthetic FRESH probe must not re-enrol an ordinary npm test in the production heavy-work queue',
+  );
 });
 
 test('every early protection refusal can bank a verdict before ordinary gate setup', () => {

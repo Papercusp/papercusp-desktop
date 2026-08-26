@@ -553,7 +553,10 @@ inherited_ready_marker="$WORK/inherited-pc-heavy-ready"
 printf '%s\n' "parent-$$" >"$inherited_ready_marker"
 if (
   export PC_HEAVY_PREEMPT_READY_FILE="$inherited_ready_marker"
-  PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE= \
+  # This is already the nested, synthetic FRESH probe—not a new heavy gate run.
+  # Without the explicit bypass, an ordinary `npm test` invocation re-enrols here
+  # and can wait the production pc-heavy timeout before reading synthetic last-green.
+  PC_HEAVY_BYPASS=1 PC_HEAVY_PREEMPT_AFTER_READY=0 PC_HEAVY_PREEMPT_READY_FILE= \
     GATE_FORCE=0 GATE_SUCCESS_TTL_H=22 GATE_STATE_DIR="$verdict_state" \
     GATE_VERDICT_LOG="$verdict_log" GATE_NO_FILE=1 GATE_SKIP_SELFTEST=1 \
     bash "$gate_file"
