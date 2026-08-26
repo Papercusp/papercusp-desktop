@@ -200,6 +200,7 @@ _pc_vm_prune_postgres_build_residue() {
   rm -rf \
     "$prefix/include" \
     "$prefix/lib/cmake" \
+    "$prefix/lib/pgxs" \
     "$prefix/lib/pkgconfig" \
     "$prefix/lib/postgresql/pgxs" \
     "$prefix/share/doc" \
