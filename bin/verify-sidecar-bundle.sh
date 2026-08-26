@@ -547,9 +547,12 @@ else
     echo "  ⚠ no node available to exec the initializer — protocol cycle NOT run (content check above still applied)"
   else
     # (a) correct argv, a request the engine must reject.
-    _ri_out="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>/dev/null)"
-    _ri_err="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>&1 >/dev/null)"
-    _ri_code=$?
+    # `|| true` on both: a rejected request EXITS 1 by design, and that is the result being
+    # asserted, not an error to propagate. (This script runs under `set -uo pipefail`, not -e, so
+    # the guard is belt-and-braces — but a later `set -e` must not silently turn this into a
+    # verifier that dies on its own successful probe.)
+    _ri_out="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>/dev/null || true)"
+    _ri_err="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>&1 >/dev/null || true)"
     if [[ -n "$_ri_out" ]]; then
       fail "papercusp-remote-initializer: wrote to STDOUT on the error path ('${_ri_out:0:120}') — stdout must carry the protocol and nothing else"
     elif [[ "$_ri_err" != *"WorkspaceHostRemoteInitializerProtocolError"* ]]; then
