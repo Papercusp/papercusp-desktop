@@ -258,6 +258,19 @@ STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_
 # a write error is logged and swallowed, and the verdict still goes to stdout regardless.
 GATE_VERDICT_LOG="${GATE_VERDICT_LOG:-$STATE_DIR/verdicts.jsonl}"
 GATE_VERDICT_KEEP="${GATE_VERDICT_KEEP:-500}"
+# P-010: schema 2 adds the immutable-source evidence an ordinary deploy needs
+# to distinguish "this exact green pin was certified" from "some nearby shared
+# working tree happened to pass". These defaults keep early FRESH/SKIPPED exits
+# parseable while making them explicitly non-certifying.
+GATE_VERDICT_SCHEMA_VERSION=2
+GATE_SOURCE_MODE="${GATE_SOURCE_MODE:-unmeasured}"
+GATE_SOURCE_HEAD="${GATE_SOURCE_HEAD:-unknown}"
+GATE_SOURCE_DESKTOP_HEAD="${GATE_SOURCE_DESKTOP_HEAD:-unknown}"
+GATE_SOURCE_DIRTY_FILES="${GATE_SOURCE_DIRTY_FILES:--1}"
+GATE_TERMINAL_HEAD="${GATE_TERMINAL_HEAD:-unknown}"
+GATE_TERMINAL_DESKTOP_HEAD="${GATE_TERMINAL_DESKTOP_HEAD:-unknown}"
+GATE_TERMINAL_DIRTY_FILES="${GATE_TERMINAL_DIRTY_FILES:--1}"
+GATE_CERTIFICATION_TARGET_SHA="${GATE_CERTIFICATION_TARGET_SHA:-}"
 # The protection marker is published before the ordinary gate configuration below is
 # initialized. Keep the clock helper beside the verdict writer so every early refusal can
 # bank a valid record instead of tripping over an as-yet undefined function (WI-40905).
@@ -274,7 +287,7 @@ __json_str() {  # stdin → a JSON string BODY (caller supplies the quotes)
 }
 bank_verdict() {  # <the full "GATE: …" line>
   [ "${GATE_NO_VERDICT_LOG:-0}" = 1 ] && return 0
-  local line="$1" token esc head desktop_head invoker
+  local line="$1" token esc head desktop_head invoker source_dirty terminal_dirty expires_epoch target_esc mode_esc
   # The verdict TOKEN (GREEN / RED / FRESH-RED / SKIPPED-STARVATION / TERMINATED / …) is what a
   # reader greps on; the full line is kept beside it so nothing is lost to the extraction.
   token="$(printf '%s' "$line" | sed -n 's/^GATE: \([A-Za-z-]*\).*/\1/p')"
@@ -286,19 +299,33 @@ bank_verdict() {  # <the full "GATE: …" line>
   # long before the rebuild that sets it. `head` remains the operator-parent checkout for
   # compatibility and because the gate runs parent-owned sidecar code; `desktop_head` names
   # the submodule bytes that supplied this gate and its federation drivers (WI-40958).
-  head="$(cd "$DESKTOP_DIR/.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  head="$GATE_TERMINAL_HEAD"
+  [ "$head" != unknown ] || head="$(cd "$DESKTOP_DIR/.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  desktop_head="$GATE_TERMINAL_DESKTOP_HEAD"
+  [ "$desktop_head" != unknown ] || desktop_head="$(cd "$DESKTOP_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  terminal_dirty="$GATE_TERMINAL_DIRTY_FILES"
+  if [ "$terminal_dirty" = -1 ]; then
+    terminal_dirty="$(cd "$DESKTOP_DIR/.." 2>/dev/null && git status --porcelain 2>/dev/null | wc -l || echo -1)"
+  fi
+  source_dirty="$GATE_SOURCE_DIRTY_FILES"
+  case "$source_dirty" in ''|*[!0-9-]*) source_dirty=-1 ;; esac
+  case "$terminal_dirty" in ''|*[!0-9-]*) terminal_dirty=-1 ;; esac
+  expires_epoch=$(( $(now_s) + ${GATE_SUCCESS_TTL_H:-22} * 3600 ))
+  target_esc="$(printf '%s' "$GATE_CERTIFICATION_TARGET_SHA" | __json_str)"
+  mode_esc="$(printf '%s' "$GATE_SOURCE_MODE" | __json_str)"
   # systemd exports INVOCATION_ID to a unit's processes and nothing else does — so this
   # records whether the run was journald-observable, which is the distinction that made the
   # 08-12 green unrecoverable in the first place.
   if [ -n "${INVOCATION_ID:-}" ]; then invoker=systemd; else invoker=hand; fi
-  if ! printf '{"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","desktop_head":"%s","invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(now_s)" "$token" \
+  if ! printf '{"schema_version":%s,"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","desktop_head":"%s","source_mode":"%s","source_head":"%s","source_desktop_head":"%s","source_dirty_files":%s,"terminal_dirty_files":%s,"certification_target_sha":"%s","certification_expires_epoch":%s,"invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
+      "$GATE_VERDICT_SCHEMA_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(now_s)" "$token" \
       "${MATRIX_RES:-?}" "${FROMREPO_RES:-?}" "${WITNESS_RES:-?}" "${MATRIXFULL_RES:-?}" \
       "$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)" \
       "$(printf '%s' "${SUMMARY:-}" | __json_str)" \
       "$(printf '%s' "${MATRIX_SKIP_REASON:-}" | __json_str)" \
-      "$head" "$desktop_head" "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
+      "$head" "$desktop_head" "$mode_esc" "$GATE_SOURCE_HEAD" "$GATE_SOURCE_DESKTOP_HEAD" \
+      "$source_dirty" "$terminal_dirty" "$target_esc" "$expires_epoch" \
+      "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
     log "bank_verdict: could not append to $GATE_VERDICT_LOG — verdict still emitted on stdout"
     return 0
   fi
@@ -1624,6 +1651,10 @@ PY
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
+GATE_SOURCE_MODE=prebuilt
+GATE_SOURCE_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_SOURCE_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_SOURCE_DIRTY_FILES="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo -1)"
 if [ -n "${GATE_DEB:-}" ] && [ ! -f "$GATE_DEB" ]; then
   log "WARN: GATE_DEB=$GATE_DEB does not exist — ignoring stale override and rebuilding/repacking if enabled."
   GATE_DEB=""
@@ -1637,6 +1668,23 @@ if [ -z "${GATE_DEB:-}" ]; then
     # dirty-file count so every verdict is attributable and a torn-tree red is diagnosable.
     GIT_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     GIT_DIRTY="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo '?')"
+    GATE_SOURCE_MODE=rebuilt
+    GATE_SOURCE_HEAD="$GIT_HEAD"
+    GATE_SOURCE_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    GATE_SOURCE_DIRTY_FILES="$GIT_DIRTY"
+    if [ -n "$GATE_CERTIFICATION_TARGET_SHA" ]; then
+      case "$GATE_CERTIFICATION_TARGET_SHA" in
+        "$GATE_SOURCE_HEAD"*) ;;
+        *)
+          verdict "GATE: SKIPPED-CERTIFICATION-TARGET-MISMATCH (requested $GATE_CERTIFICATION_TARGET_SHA, source $GATE_SOURCE_HEAD) — no live certificate produced"
+          exit 1
+          ;;
+      esac
+      if [ "$GATE_SOURCE_DIRTY_FILES" != 0 ]; then
+        verdict "GATE: SKIPPED-CERTIFICATION-DIRTY-SOURCE (dirty-files=$GATE_SOURCE_DIRTY_FILES) — exact-SHA live certification requires a clean source checkout"
+        exit 1
+      fi
+    fi
     log "rebuilding sidecar from working tree (HEAD=$GIT_HEAD, dirty-files=$GIT_DIRTY)…"
     echo "head=$GIT_HEAD dirty=$GIT_DIRTY ts=$(date -Is)" >"$WORK/provenance"
     # WI-5706: a bare dirty COUNT let two agents correlate "dirty=1" to a schema-drift
@@ -2268,6 +2316,19 @@ storm_downgrade_eligible() {
 
 # ── 4. verdict ────────────────────────────────────────────────────────────────
 REDS=()
+GATE_TERMINAL_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_TERMINAL_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_TERMINAL_DIRTY_FILES="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo -1)"
+if [ -n "$GATE_CERTIFICATION_TARGET_SHA" ]; then
+  [ "$GATE_SOURCE_MODE" = rebuilt ] || REDS+=("certification-source-not-rebuilt")
+  case "$GATE_CERTIFICATION_TARGET_SHA" in
+    "$GATE_TERMINAL_HEAD"*) ;;
+    *) REDS+=("certification-source-head-moved") ;;
+  esac
+  [ "$GATE_TERMINAL_DIRTY_FILES" = 0 ] || REDS+=("certification-source-dirty-at-verdict")
+  [ "$GATE_SOURCE_DESKTOP_HEAD" = "$GATE_TERMINAL_DESKTOP_HEAD" ] \
+    || REDS+=("certification-desktop-head-moved")
+fi
 [ "$FAIL_BUILD" = 1 ] && REDS+=("sidecar-build")
 [ "$MATRIX_RES" = FAIL ] && REDS+=("content-matrix")
 [ "$FROMREPO_RES" = FAIL ] && REDS+=("from-repo")
