@@ -35,6 +35,30 @@ bin_dir="$release_root/bin"
 [[ -x "$bin_dir/papercusp-remote-initializer" ]] \
   || die "remote initializer is missing or not executable"
 
+# EI-21548386804468550: the pinned vm-release PostgreSQL tree includes real
+# client binaries, and the builder historically exposed them through absolute
+# symlinks into sidecar.tmp.<pid>. They passed the pre-publish verifier, then
+# broke when the staging directory was atomically renamed. Normalize every
+# internal client link from the release tree we are actually qualifying. This
+# also repairs a copied admitted r6 tree without touching its preserved source.
+normalized_pg_links=0
+for tool in pg_dump psql pg_dumpall pg_restore; do
+  if [[ -L "$bin_dir/$tool" ]]; then
+    pg_candidates=()
+    for candidate in \
+      "$release_root"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/bin/"$tool"; do
+      [[ -f "$candidate" && -x "$candidate" ]] || continue
+      pg_candidates+=("$candidate")
+    done
+    [[ "${#pg_candidates[@]}" -eq 1 ]] \
+      || die "$tool symlink needs exactly one bundled native target (found ${#pg_candidates[@]})"
+    pg_rel_src="${pg_candidates[0]#"$release_root"/}"
+    ln -sfn "../$pg_rel_src" "$bin_dir/$tool"
+    normalized_pg_links=$((normalized_pg_links + 1))
+  fi
+  [[ -x "$bin_dir/$tool" ]] || die "PostgreSQL client is missing or not executable: bin/$tool"
+done
+
 stage="$(mktemp -d "$release_root/.workspace-host-entrypoints.XXXXXX")"
 cleanup() { rm -rf "$stage"; }
 trap cleanup EXIT
@@ -231,4 +255,4 @@ for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
   [[ -x "$bin_dir/$entrypoint" ]] || die "failed to emit executable bin/$entrypoint"
 done
 
-printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 11 bootstrap entrypoints executable\n'
+printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 11 bootstrap entrypoints executable; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"

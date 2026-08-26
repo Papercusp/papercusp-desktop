@@ -2945,7 +2945,22 @@ for tool in pg_dump psql pg_dumpall pg_restore; do
     exit 1
   fi
   case "$method" in
-    symlink*) ln -sfn "$src" "$SIDECAR_DIR/bin/$tool" ;;
+    symlink*)
+      # EI-21548386804468550: SIDECAR_DIR is sidecar.tmp.<pid> until the atomic
+      # publish. An absolute link to $src passes every pre-publish probe and is
+      # broken by the final rename. The embedded target is inside this same
+      # tree, so make the link relative to bin/ and fail if that premise drifts.
+      case "$src" in
+        "$SIDECAR_DIR"/*)
+          _pg_rel_src="${src#"$SIDECAR_DIR"/}"
+          ln -sfn "../$_pg_rel_src" "$SIDECAR_DIR/bin/$tool"
+          ;;
+        *)
+          echo "ERROR: refusing non-relocatable PostgreSQL client symlink outside the sidecar: $src" >&2
+          exit 1
+          ;;
+      esac
+      ;;
     copy*)
       if [[ "$_cross_darwin" == "1" ]]; then
         # WI-5651: cross-baking darwin ON linux — the build host IS Linux, so the
@@ -4272,8 +4287,27 @@ if [[ ! -f "$SIDECAR_FINAL_DIR/serve.mjs" && -d "$SIDECAR_FINAL_DIR/$_tmp_base" 
   echo "→ repaired nested publish (a squatter raced the final rename)"
 fi
 [[ -f "$SIDECAR_FINAL_DIR/serve.mjs" ]] || { echo "FATAL: published sidecar has no serve.mjs — publish corrupted, refusing to report success" >&2; exit 1; }
-rm -rf "$OLD_DIR"
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
+
+# EI-21548386804468550: the pre-publish verifier observes the staged pathname.
+# Path-sensitive defects (most notably an absolute symlink into sidecar.tmp.PID)
+# can therefore pass and become broken only after the atomic rename. Reuse the
+# exact verifier against the reader-visible final path while the publish lock is
+# still held. Keep OLD_DIR until this verdict; on red, preserve the bad tree and
+# atomically restore the prior published sidecar rather than stranding readers.
+echo "→ re-verifying atomically published sidecar at its final path"
+if ! "$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"; then
+  _failed_publish="$SIDECAR_FINAL_DIR.failed-post-publish.$$"
+  mv "$SIDECAR_FINAL_DIR" "$_failed_publish"
+  if [[ -d "$OLD_DIR" ]]; then
+    mv "$OLD_DIR" "$SIDECAR_FINAL_DIR"
+    echo "FATAL: final-path sidecar verification failed; restored prior sidecar and preserved failed bytes at $_failed_publish" >&2
+  else
+    echo "FATAL: final-path sidecar verification failed; preserved failed bytes at $_failed_publish (no prior sidecar existed)" >&2
+  fi
+  exit 1
+fi
+rm -rf "$OLD_DIR"
 
 # ── Provenance (EI-19446480107603858) ────────────────────────────────────────
 # Record WHAT SOURCE this sidecar was baked from, using the SAME shared emitter
