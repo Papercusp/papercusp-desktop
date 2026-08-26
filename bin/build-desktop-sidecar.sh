@@ -2191,10 +2191,12 @@ if [[ ! -f "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" ]]; then
   exit 1
 fi
 mkdir -p "$SIDECAR_DIR/bin"
+# The TypeScript entrypoint owns its `#!/usr/bin/env node` line and esbuild preserves it. Do not
+# add the same text with `--banner:js`: that produces a second shebang on line 2, which Node parses
+# as JavaScript and rejects before the initializer can enforce argv or read the protocol request.
 (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
-  --banner:js='#!/usr/bin/env node' \
   --outfile="$REMOTE_INIT_BIN")
 chmod 755 "$REMOTE_INIT_BIN"
 if [[ ! -s "$REMOTE_INIT_BIN" ]]; then
