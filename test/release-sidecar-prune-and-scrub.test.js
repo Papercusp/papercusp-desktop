@@ -406,6 +406,62 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
   }
 }
 
+function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false }) {
+  const dir = tmp('vm-release-identity-preflight');
+  const env = {
+    ...process.env,
+    PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release',
+    PAPERCUSP_RELEASE_AUDIT: '0',
+    // Rejecting cases use a missing repo to prove identity fails before the
+    // first runtime-pin read. The admitted case advances safely to the missing
+    // Papercusp dependency without starting a build.
+    REPO_ROOT: advance ? path.resolve(root, '..') : path.join(dir, 'missing-repo'),
+    PAPERCUSP_ROOT: path.join(dir, 'missing-papercusp'),
+  };
+  delete env.PAPERCUSP_BUILD_SHA;
+  delete env.PAPERCUSP_DESKTOP_VERSION;
+  if (sha !== undefined) env.PAPERCUSP_BUILD_SHA = sha;
+  if (version !== undefined) env.PAPERCUSP_DESKTOP_VERSION = version;
+  try {
+    return spawnSync('bash', [path.join(root, 'bin/build-desktop-sidecar.sh')], {
+      encoding: 'utf8',
+      env,
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('vm-release sidecar build rejects missing artifact identity before toolchain work', () => {
+  for (const input of [
+    { sha: undefined, version: '9.8.7', label: 'missing SHA' },
+    { sha: 'deadbeef', version: undefined, label: 'missing version' },
+    { sha: ' \t ', version: '9.8.7', label: 'blank SHA' },
+    { sha: 'deadbeef', version: ' unknown ', label: 'unknown version' },
+  ]) {
+    const r = runBuilderVmReleaseIdentityPreflight(input);
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 2, `${input.label}\n${output}`);
+    assert.match(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building/);
+    assert.match(output, /refusing before toolchain work/);
+    assert.doesNotMatch(output, /could not read the repo-pinned Node major/,
+      'the identity rejection must precede the first toolchain/runtime preflight');
+  }
+});
+
+test('vm-release sidecar identity preflight admits an explicit immutable SHA and version', () => {
+  const r = runBuilderVmReleaseIdentityPreflight({
+    sha: 'deadbeefcafefeed',
+    version: '9.8.7-vm-test',
+    advance: true,
+  });
+  const output = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, output);
+  assert.match(output, /papercusp not found at/,
+    'valid vm-release identity must advance past the preflight');
+  assert.doesNotMatch(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA/);
+});
+
 test('release-audited sidecar build rejects a missing owner name before toolchain work', () => {
   for (const owner of [undefined, '', ' , ; \t ']) {
     const r = runBuilderOwnerPreflight({ audit: '1', owner });
