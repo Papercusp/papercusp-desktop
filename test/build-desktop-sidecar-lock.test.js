@@ -357,15 +357,14 @@ test('WI-6557: the real EXIT trap line removes OLD_DIR on a mid-publish failure 
 // Same discipline as the trap tests above: extract and run the REAL function
 // from the shipped script, never a hand-copied duplicate that could drift.
 const SWEEP_FN = (builder.match(/^__pc_sweep_stale_staging\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
+const BUILDER_PID_FN = (builder.match(/^__pc_pid_is_sidecar_builder\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
 
 test('WI-38368: the stale-staging sweep function is present in the shipped script', () => {
   assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
   assert.match(SWEEP_FN, /kill -0/, 'the sweep must check whether the owning pid is alive');
-  assert.match(
-    SWEEP_FN,
-    /ps -p "\$pid" -o args=/,
-    'kill -0 alone is insufficient — pid wrap would protect dead residue forever, so the sweep must also confirm the pid is really a build-desktop-sidecar process',
-  );
+  assert(BUILDER_PID_FN, 'the sweep must inspect NUL-delimited argv tokens');
+  assert.match(SWEEP_FN, /__pc_pid_is_sidecar_builder "\$pid"/);
+  assert.doesNotMatch(SWEEP_FN, /ps -p .*args=/, 'flattened process text creates agent-prompt false positives');
 });
 
 // Behavioral: a static match cannot prove the globbing, the pid check, or the
@@ -373,14 +372,17 @@ test('WI-38368: the stale-staging sweep function is present in the shipped scrip
 // mimics the true directory layout, with one genuinely-live decoy process.
 test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eats its own staging dir (behavioral)', () => {
   assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
+  assert(BUILDER_PID_FN, 'could not locate __pc_pid_is_sidecar_builder() in build-desktop-sidecar.sh');
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-sweep-'));
   let live = 0;
+  let promptOnly = 0;
   try {
     const final = path.join(tmp, 'sidecar');
     // A real, live process whose `ps args` genuinely contains the script name —
     // the decoy the sweep must refuse to touch.
-    const decoy = path.join(tmp, 'build-desktop-sidecar.sh');
+    const decoy = path.join(tmp, 'bin', 'build-desktop-sidecar.sh');
+    fs.mkdirSync(path.dirname(decoy));
     fs.writeFileSync(decoy, 'sleep 30\n');
     live = Number(
       execFileSync('bash', ['-c', 'bash "$1" >/dev/null 2>&1 & echo $!', 'bash', decoy], {
@@ -388,6 +390,14 @@ test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eat
       }).trim(),
     );
     assert(Number.isInteger(live) && live > 1, 'failed to start the live decoy build');
+    promptOnly = Number(
+      execFileSync(
+        'bash',
+        ['-c', 'bash -c "sleep 30" "$1" >/dev/null 2>&1 & echo $!', 'bash', 'agent prompt mentions bin/build-desktop-sidecar.sh but executes something else'],
+        { encoding: 'utf8' },
+      ).trim(),
+    );
+    assert(Number.isInteger(promptOnly) && promptOnly > 1, 'failed to start the agent-context decoy');
 
     // A pid that is dead: allocate one, then reap it.
     const deadPid = Number(
@@ -397,15 +407,17 @@ test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eat
     const deadTmp = `${final}.tmp.${deadPid}`;
     const deadOld = `${final}.old.${deadPid}`;
     const liveTmp = `${final}.tmp.${live}`;
+    const promptOnlyTmp = `${final}.tmp.${promptOnly}`;
     const ownTmp = `${final}.tmp.999999`; // stands in for THIS run's own staging tree
     const notPidStamped = `${final}.tmp.notanumber`;
-    for (const d of [deadTmp, deadOld, liveTmp, ownTmp, notPidStamped]) fs.mkdirSync(d);
+    for (const d of [deadTmp, deadOld, liveTmp, promptOnlyTmp, ownTmp, notPidStamped]) fs.mkdirSync(d);
     fs.writeFileSync(path.join(deadTmp, 'a-1.4g-build-would-have-files-like-this'), 'x');
 
     const script = [
       'set -euo pipefail',
       `SIDECAR_FINAL_DIR=${JSON.stringify(final)}`,
       `SIDECAR_TMP_DIR=${JSON.stringify(ownTmp)}`,
+      BUILDER_PID_FN,
       SWEEP_FN, // the ACTUAL function from the shipped script
       '__pc_sweep_stale_staging',
     ].join('\n');
@@ -420,6 +432,11 @@ test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eat
       true,
       'a CONCURRENT build’s staging dir must never be deleted out from under it',
     );
+    assert.equal(
+      fs.existsSync(promptOnlyTmp),
+      false,
+      'a live agent launcher that merely mentions the builder in prompt argv is not a live build',
+    );
     assert.equal(fs.existsSync(ownTmp), true, 'the sweep must never remove this run’s own SIDECAR_TMP_DIR');
     assert.equal(
       fs.existsSync(notPidStamped),
@@ -430,6 +447,11 @@ test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eat
     if (live > 1) {
       try {
         process.kill(live, 'SIGKILL');
+      } catch {}
+    }
+    if (promptOnly > 1) {
+      try {
+        process.kill(promptOnly, 'SIGKILL');
       } catch {}
     }
     fs.rmSync(tmp, { recursive: true, force: true });

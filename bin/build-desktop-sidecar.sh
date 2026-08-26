@@ -463,6 +463,17 @@ mkdir -p "$SIDECAR_BIN_CACHE"
 # build-desktop-sidecar.sh process. Both checks failing open (skip, don't
 # delete) is the safe direction — a missed reap costs disk, a wrong reap
 # costs someone else's build.
+__pc_pid_is_sidecar_builder() {
+  local pid="$1" arg
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    case "$arg" in
+      build-desktop-sidecar.sh|*/bin/build-desktop-sidecar.sh) return 0 ;;
+    esac
+  done < "/proc/$pid/cmdline"
+  return 1
+}
+
 __pc_sweep_stale_staging() {
   local d pid base reaped=0 freed_kb=0 sz
   for d in "$SIDECAR_FINAL_DIR".tmp.* "$SIDECAR_FINAL_DIR".old.*; do
@@ -473,8 +484,7 @@ __pc_sweep_stale_staging() {
     # A non-numeric suffix is not a pid-stamped staging dir we own — leave it.
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [[ "$pid" == "$$" ]] && continue
-    if kill -0 "$pid" 2>/dev/null &&
-       ps -p "$pid" -o args= 2>/dev/null | grep -q 'build-desktop-sidecar'; then
+    if kill -0 "$pid" 2>/dev/null && __pc_pid_is_sidecar_builder "$pid"; then
       echo "[sweep] skip $(basename "$d") — pid $pid is a LIVE build"
       continue
     fi
