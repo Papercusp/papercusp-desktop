@@ -520,7 +520,7 @@ fi
 # agent CLIs, so it belongs in the on-target initialization test, not a bundle gate.
 echo "[7/7] workspace-host remote initializer answers a real protocol cycle"
 _ri="$BIN/papercusp-remote-initializer"
-_ri_ver="papercusp-gcp-iap-initialization-v1"
+_ri_ver="papercusp-gcp-iap-initialization-v2"
 if [[ ! -f "$_ri" ]]; then
   # [1] already failed this; repeat it here so this section is never silently vacuous.
   fail "papercusp-remote-initializer: MISSING — cannot run a protocol cycle"
