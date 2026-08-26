@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Emit the fixed workspace-host bootstrap entrypoints into an assembled Server
+# sidecar.  The generated files are deliberately thin: the bundled Node,
+# serve.mjs, and scripts/psu.mjs remain the only runtime/agent implementations.
+#
+# Usage: install-workspace-host-entrypoints.sh --release-root SIDEcar_DIR
+set -Eeuo pipefail
+
+die() {
+  printf 'install-workspace-host-entrypoints: ERROR: %s\n' "$1" >&2
+  exit 1
+}
+
+release_root=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --release-root)
+      [[ $# -ge 2 && -n "$2" ]] || die "--release-root needs a directory"
+      release_root="$2"
+      shift 2
+      ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$release_root" ]] || die "--release-root is required"
+[[ -d "$release_root" ]] || die "release root is not a directory: $release_root"
+release_root="$(cd "$release_root" && pwd -P)"
+bin_dir="$release_root/bin"
+
+[[ -x "$bin_dir/node" ]] || die "bundled Node is missing or not executable: bin/node"
+[[ -s "$release_root/serve.mjs" ]] || die "Server runtime is missing or empty: serve.mjs"
+[[ -s "$release_root/scripts/psu.mjs" ]] || die "agent launcher is missing or empty: scripts/psu.mjs"
+[[ -d "$release_root/db-sql" ]] || die "migration payload is missing: db-sql/"
+[[ -x "$bin_dir/papercusp-remote-initializer" ]] \
+  || die "remote initializer is missing or not executable"
+
+stage="$(mktemp -d "$release_root/.workspace-host-entrypoints.XXXXXX")"
+cleanup() { rm -rf "$stage"; }
+trap cleanup EXIT
+
+cat > "$stage/papercusp-install" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+die() { printf 'papercusp-install: ERROR: %s\n' "$1" >&2; exit 1; }
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+action=""; release_root=""; state_root=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --action) [[ $# -ge 2 ]] || die "--action needs a value"; action="$2"; shift 2 ;;
+    --release-root) [[ $# -ge 2 ]] || die "--release-root needs a value"; release_root="$2"; shift 2 ;;
+    --state-root) [[ $# -ge 2 ]] || die "--state-root needs a value"; state_root="$2"; shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+case "$action" in install|upgrade|rollback) ;; *) die "--action must be install, upgrade, or rollback" ;; esac
+[[ -d "$release_root" ]] || die "release root is not a directory"
+release_root="$(cd "$release_root" && pwd -P)"
+[[ "$release_root" == "$ROOT" ]] || die "release root does not name this immutable release"
+[[ "$state_root" == /* && -d "$state_root" && -w "$state_root" ]] \
+  || die "state root must be an existing writable absolute directory"
+for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
+  papercusp-server papercusp-health psu claude codex omp papercusp-remote-initializer; do
+  [[ -x "$BIN/$entrypoint" ]] || die "missing executable release entrypoint: bin/$entrypoint"
+done
+[[ -s "$ROOT/serve.mjs" ]] || die "serve.mjs is missing or empty"
+[[ -s "$ROOT/scripts/psu.mjs" ]] || die "scripts/psu.mjs is missing or empty"
+[[ -d "$ROOT/db-sql" ]] || die "db-sql migration payload is missing"
+ENTRYPOINT
+
+cat > "$stage/papercusp-rollback" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+die() { printf 'papercusp-rollback: ERROR: %s\n' "$1" >&2; exit 1; }
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+from=""; to=""; state_root=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from) [[ $# -ge 2 ]] || die "--from needs a value"; from="$2"; shift 2 ;;
+    --to) [[ $# -ge 2 ]] || die "--to needs a value"; to="$2"; shift 2 ;;
+    --state-root) [[ $# -ge 2 ]] || die "--state-root needs a value"; state_root="$2"; shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ "$from" == /* && -d "$from" ]] || die "--from must name an existing absolute release directory"
+[[ "$to" == /* && -d "$to" ]] || die "--to must name an existing absolute release directory"
+to="$(cd "$to" && pwd -P)"
+[[ "$to" == "$ROOT" ]] || die "--to does not name this immutable release"
+[[ "$state_root" == /* && -d "$state_root" && -w "$state_root" ]] \
+  || die "state root must be an existing writable absolute directory"
+[[ -x "$from/bin/papercusp-server" ]] || die "previous release has no executable Server entrypoint"
+ENTRYPOINT
+
+cat > "$stage/papercusp-migrate" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+# The Server's existing embedded-Postgres boot path owns migration execution.
+# This phase is its fail-closed readiness check; the later health-green service
+# proves that the real migration runner completed before the bootstrap attests.
+set -Eeuo pipefail
+die() { printf 'papercusp-migrate: ERROR: %s\n' "$1" >&2; exit 1; }
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+database_root=""; migration_id=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --database-root) [[ $# -ge 2 ]] || die "--database-root needs a value"; database_root="$2"; shift 2 ;;
+    --migration-id) [[ $# -ge 2 ]] || die "--migration-id needs a value"; migration_id="$2"; shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ "$database_root" == /* && -d "$database_root" && -w "$database_root" ]] \
+  || die "database root must be an existing writable absolute directory"
+[[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] \
+  || die "migration id is missing or unsafe"
+[[ -x "$BIN/node" && -s "$ROOT/serve.mjs" ]] || die "bundled Server runtime is incomplete"
+set -- "$ROOT"/db-sql/*.sql
+[[ -f "$1" ]] || die "db-sql contains no migration files"
+ENTRYPOINT
+
+cat > "$stage/papercusp-server" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+die() { printf 'papercusp-server: ERROR: %s\n' "$1" >&2; exit 1; }
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+NODE="$BIN/node"
+PROVENANCE="$ROOT/build-provenance.json"
+[[ -x "$NODE" ]] || die "bundled Node is missing or not executable"
+[[ -s "$ROOT/serve.mjs" ]] || die "serve.mjs is missing or empty"
+[[ -s "$PROVENANCE" ]] || die "build-provenance.json is missing or empty"
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) die "serve.mjs has no side-effect-free help mode; refusing to boot it for help" ;;
+  esac
+done
+read_provenance_field() {
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[process.argv[2]];
+    if (typeof value !== "string" || value.length === 0) process.exit(2);
+    process.stdout.write(value);
+  ' "$PROVENANCE" "$1"
+}
+PAPERCUSP_BUILD_VERSION="$(read_provenance_field version)" \
+  || die "provenance has no exact version"
+PAPERCUSP_BUILD_SHA="$(read_provenance_field buildSha)" \
+  || die "provenance has no exact buildSha"
+[[ -n "${PAPERCUSP_PORT:-}" ]] || die "PAPERCUSP_PORT is required"
+[[ -n "${PAPERCUSP_EMBEDDED_PG_ROOT:-}" ]] || die "PAPERCUSP_EMBEDDED_PG_ROOT is required"
+if [[ -n "${PAPERCUSP_HONO_PORT:-}" && "$PAPERCUSP_HONO_PORT" != "$PAPERCUSP_PORT" ]]; then
+  die "PAPERCUSP_HONO_PORT conflicts with PAPERCUSP_PORT"
+fi
+export PAPERCUSP_HONO_PORT="$PAPERCUSP_PORT"
+export PAPERCUSP_PG_DATA_DIR="$PAPERCUSP_EMBEDDED_PG_ROOT"
+export PAPERCUSP_PG_SQL_DIR="$ROOT/db-sql"
+export PAPERCUSP_SIDECAR_BIN="$BIN"
+export PAPERCUSP_BUILD_VERSION PAPERCUSP_BUILD_SHA
+export PAPERCUSP_DISTRIBUTION_PROFILE=vm-release
+export PAPERCUSP_PROVISION_ENV_OPERATORS=0
+exec "$NODE" "$ROOT/serve.mjs" "$@"
+ENTRYPOINT
+
+cat > "$stage/papercusp-health" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+die() { printf 'papercusp-health: ERROR: %s\n' "$1" >&2; exit 1; }
+host=""; port=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host) [[ $# -ge 2 ]] || die "--host needs a value"; host="$2"; shift 2 ;;
+    --port) [[ $# -ge 2 ]] || die "--port needs a value"; port="$2"; shift 2 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ "$host" == "127.0.0.1" ]] || die "health probes are restricted to 127.0.0.1"
+[[ "$port" =~ ^[0-9]+$ && "$port" -ge 1024 && "$port" -le 65535 ]] \
+  || die "port must be an unprivileged TCP port"
+timeout_sec="${PAPERCUSP_HEALTH_TIMEOUT_SEC:-120}"
+[[ "$timeout_sec" =~ ^[0-9]+$ && "$timeout_sec" -ge 1 && "$timeout_sec" -le 600 ]] \
+  || die "PAPERCUSP_HEALTH_TIMEOUT_SEC must be 1..600"
+command -v curl >/dev/null 2>&1 || die "curl is required for the health probe"
+started="$SECONDS"
+url="http://127.0.0.1:$port/api/health"
+while (( SECONDS - started < timeout_sec )); do
+  if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 "$url" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 1
+done
+die "operator did not become healthy at $url within ${timeout_sec}s"
+ENTRYPOINT
+
+cat > "$stage/psu" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+[[ -x "$BIN/node" && -s "$ROOT/scripts/psu.mjs" ]] \
+  || { echo "psu: bundled launcher is incomplete" >&2; exit 1; }
+export PAPERCUSP_SIDECAR_BIN="$BIN"
+exec "$BIN/node" "$ROOT/scripts/psu.mjs" "$@"
+ENTRYPOINT
+
+for backend in claude codex omp; do
+  cat > "$stage/$backend" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+BACKEND="$(basename "${BASH_SOURCE[0]}")"
+[[ -x "$BIN/node" && -s "$ROOT/scripts/psu.mjs" ]] \
+  || { echo "$BACKEND: bundled psu launcher is incomplete" >&2; exit 1; }
+for arg in "$@"; do
+  case "$arg" in --agent|--agent=*) echo "$BACKEND: --agent cannot override this pinned backend" >&2; exit 1 ;; esac
+done
+export PAPERCUSP_SIDECAR_BIN="$BIN"
+exec "$BIN/node" "$ROOT/scripts/psu.mjs" "--agent=$BACKEND" "$@"
+ENTRYPOINT
+done
+
+for entrypoint in papercusp-install papercusp-rollback papercusp-migrate \
+  papercusp-server papercusp-health psu claude codex omp; do
+  chmod 755 "$stage/$entrypoint"
+  mv -f "$stage/$entrypoint" "$bin_dir/$entrypoint"
+done
+
+for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
+  papercusp-server papercusp-health psu claude codex omp papercusp-remote-initializer; do
+  [[ -x "$bin_dir/$entrypoint" ]] || die "failed to emit executable bin/$entrypoint"
+done
+
+printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 11 bootstrap entrypoints executable\n'

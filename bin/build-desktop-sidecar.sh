@@ -4044,6 +4044,18 @@ if [[ "$CROSS_BUILD" == "0" ]] && command -v strip >/dev/null 2>&1 && [[ "$_stri
   echo "  ✓ strip pass reclaimed ~$((_strip_saved/1048576))MB"
 fi
 
+# ── D-105 workspace-host bootstrap entrypoints ─────────────────────────────
+# The provider-neutral bootstrap executes eleven fixed paths. Node and the
+# remote initializer are real binaries/bundles; the remaining nine are thin
+# wrappers over this sidecar's existing Server and psu surfaces. Emit them only
+# for the immutable Server profile, after every delegate exists and before the
+# runtime-only prune/verifier. The helper is also the one-shot overlay used to
+# qualify an already-built immutable sidecar without rebuilding it.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  echo "→ emitting workspace-host bootstrap entrypoints"
+  bash "$HERE/install-workspace-host-entrypoints.sh" --release-root "$SIDECAR_DIR"
+fi
+
 # ── D-043/P-052 immutable runtime-only profile ──────────────────────────────
 # Run after every sidecar copy/overlay step and before the runtime verifier and
 # atomic publish. The Python gate owns both the prune predicate and the audit

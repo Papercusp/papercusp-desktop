@@ -116,8 +116,11 @@ _is_target_format() {
 #     seed baking, db-tools; kopia — packages/backup/src/workspace-backup.ts;
 #   node — script runners; gh — git identity flows; pui/zellij — chat dock
 #   + agent ptys; papercup — operator console shim.
-#   omp is deliberately NOT required here: WI-3343 retired the bundled omp
-#   sidecar dependency, and the desktop app resolves the user's installed omp.
+#   omp's heavyweight backend is deliberately NOT bundled (WI-3343). The
+#   workspace-host profile does ship a thin bin/omp wrapper that delegates to
+#   scripts/psu.mjs, which resolves/installs the user's backend through the one
+#   maintained launcher surface. The other workspace-host wrappers work the
+#   same way: scripts are the product entrypoints, not build-host shims.
 #   papercusp-remote-initializer — the workspace-host initialization entrypoint
 #     (WORKSPACE_HOST_REMOTE_INITIALIZER_ENTRYPOINT / workspace-host-bootstrap.ts). Unlike the
 #     tools above it is spawned by the CONTROLLER over SSH on a provisioned VM, not by this
@@ -125,7 +128,12 @@ _is_target_format() {
 #     invokes it, so its absence is invisible until a real initialization fails remotely, and the
 #     manifest check one layer up validates only a caller-supplied material record for the path
 #     (D-110 / EI-21474474153847007). Section [6] runs a real protocol cycle against it.
-REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup papercusp-remote-initializer"
+WORKSPACE_HOST_TOOLS=""
+if [[ "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == "vm-release" \
+   || -f "$SIDECAR/apps/operator/runtime/vm-release-threat-boundary.json" ]]; then
+  WORKSPACE_HOST_TOOLS="papercusp-install papercusp-rollback papercusp-migrate papercusp-server papercusp-health psu claude codex omp"
+fi
+REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
 # whose flags we don't control are not executed).
 probe_args() {
@@ -177,6 +185,12 @@ for f in "$BIN"/*; do
   case "$b" in
     papercup|papercup-status.mjs)
       ok "$b (allowlisted script)" ;;
+    papercusp-install|papercusp-rollback|papercusp-migrate|papercusp-server|papercusp-health|psu|claude|codex|omp)
+      # Maintained release entrypoints emitted by
+      # install-workspace-host-entrypoints.sh. They delegate only to bundled
+      # Node + serve.mjs/scripts/psu.mjs (or curl for bounded loopback health),
+      # and the focused producer test executes their success/reject paths.
+      ok "$b (allowlisted workspace-host release entrypoint)" ;;
     papercusp-remote-initializer)
       # Allowlisted for the OPPOSITE reason to the pg wrappers: this is not a shim fronting a
       # build-host binary, it is a self-contained esbuild bundle whose only external dependency
