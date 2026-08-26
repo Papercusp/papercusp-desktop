@@ -247,6 +247,44 @@ PY
   trap - RETURN
 }
 
+_pc_vm_sanitize_postgres_config_info() {
+  local source_root="$1"
+  python3 - "$source_root/src/common/config_info.c" \
+    "$PAPERCUSP_VM_POSTGRES_VERSION" "$PAPERCUSP_VM_OPENSSL_VERSION" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+postgres_version = sys.argv[2]
+openssl_version = sys.argv[3]
+source = path.read_text(encoding="utf-8")
+replacements = {
+    "pstrdup(CONFIGURE_ARGS)": (
+        f'pstrdup("--prefix=/opt/papercusp-postgresql-{postgres_version} '
+        f'--with-ssl=openssl (Papercusp vm-release pinned source build)")'
+    ),
+    "pstrdup(VAL_CPPFLAGS)": (
+        f'pstrdup("OpenSSL {openssl_version} headers (checksum-pinned source)")'
+    ),
+    "pstrdup(VAL_CFLAGS)": (
+        'pstrdup("-O2 -ffile-prefix-map=<build>=/usr/src/papercusp-vm-release")'
+    ),
+    "pstrdup(VAL_CFLAGS_SL)": 'pstrdup("-fPIC")',
+    "pstrdup(VAL_LDFLAGS)": (
+        'pstrdup("-Wl,-rpath,$ORIGIN/../lib (relocatable vendored OpenSSL)")'
+    ),
+    "pstrdup(VAL_LDFLAGS_EX)": 'pstrdup("relocatable executable")',
+    "pstrdup(VAL_LDFLAGS_SL)": 'pstrdup("relocatable shared library")',
+}
+for old, new in replacements.items():
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(f"expected one {old!r} in {path}, found {count}")
+    source = source.replace(old, new)
+path.write_text(source, encoding="utf-8")
+PY
+}
+
 _pc_vm_build_postgres() {
   local work="$1" output="$2"
   local openssl_src="$work/openssl-src" postgres_src="$work/postgresql-src"
@@ -281,6 +319,11 @@ _pc_vm_build_postgres() {
         --without-readline --without-zlib --without-icu --without-ldap \
         --without-libxml --without-libxslt --without-lz4 --without-zstd \
         >"$work/postgresql-configure.log" 2>&1
+    # PostgreSQL exposes its build flags through pg_config()/config_info.c and
+    # otherwise compiles our random temporary SDK paths into the postmaster.
+    # Keep the useful configuration facts while replacing only those diagnostic
+    # strings with stable, non-identifying equivalents before compilation.
+    _pc_vm_sanitize_postgres_config_info "$postgres_src"
     make -j"${PAPERCUSP_VM_BUILD_JOBS:-4}" >"$work/postgresql-make.log" 2>&1
     make DESTDIR="$stage" install >"$work/postgresql-install.log" 2>&1
     make -C contrib/pgcrypto -j"${PAPERCUSP_VM_BUILD_JOBS:-4}" \

@@ -228,6 +228,8 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'the source build must execute the extension instead of trusting compilation');
   assert.match(helper, /patchelf --set-rpath '\$ORIGIN\/\.\.\/lib'/,
     'source-built PostgreSQL tools must remain relocatable after cache copy');
+  assert.match(helper, /_pc_vm_sanitize_postgres_config_info[\s\S]*config_info\.c/,
+    'PostgreSQL build diagnostics must not retain a random source/SDK path');
   assert.match(helper, /rg -a -l -F "\$work" "\$output"/,
     'temporary source/build paths must fail the cache admission gate');
 
