@@ -371,6 +371,17 @@ BENIGN_ERE = [
     r"phc_RDNnzvANh1mNm9JKogF9UunG3Ky02YCxWP9gXScKShk",
 ]
 
+# Exact-value acceptances for credential-shaped THIRD-PARTY binary string-table
+# concatenations. Store only SHA-256 identities, never the token-looking bytes
+# themselves and never a broad regex. These two values are deterministic strings
+# in the upstream gh 2.80.0 linux/amd64 executable (file SHA-256
+# bed75733a24bea4fed8eb4315513c1f51cb2dd68aeaf798f01b9030f50fd8dd4), not
+# credentials. A one-byte change is a different digest and still fails closed.
+BENIGN_CREDENTIAL_VALUE_SHA256 = {
+    "902a57265300171f27289680dac688d3c2354f0893c50f89ec0522e0e123c3fe",
+    "969f9aa3fba6e5195cb91063037eb9e5b00224886de6dc1667cc3b1e38da6dfc",
+}
+
 
 # Attribution reads whole members into memory to regex them. Phase B has already
 # convicted the bundle by this point, so a member too big to attribute costs us a
@@ -1058,6 +1069,14 @@ def phase_a_paths(bundle, lits):
                 name = member.name
                 for rule, rx, _globs in FORBIDDEN_PATH:
                     if rx.search(name):
+                        # Product templates intentionally ship their own source,
+                        # checks and fixtures: those are materialized into a NEW
+                        # app and are explicitly retained by the vm-release asset
+                        # allowlist. Keep implementation tests forbidden anywhere
+                        # else; this is the same policy at the outer-tar boundary.
+                        if (rule == "test-files"
+                                and _vm_release_asset_allowed(_vm_release_rel(name))):
+                            continue
                         hits.append((rule, name))
                         break
                 else:
@@ -1143,6 +1162,10 @@ def phase_b_content(bundle, lits):
                 if re.fullmatch(pat.replace("[[:space:]]", r"\s"), val):
                     rule = name
                     break
+        if (rule in {name for name, _pat in CREDENTIAL_ERE}
+                and hashlib.sha256(val.encode()).hexdigest()
+                in BENIGN_CREDENTIAL_VALUE_SHA256):
+            continue
         found.append((rule or "credential-or-identity", int(n), val))
     found.extend(phase_b_low_entropy_text(bundle, lits))
     return sorted(found, key=lambda row: (-row[1], row[0], row[2]))
@@ -1376,7 +1399,11 @@ def _rule_rx(name):
 #: FORBIDDEN_PATH rules the sidecar prune applies. Both are LEAK CLASSES that the
 #: tar-exclude path already strips from source.tar.zst but which reach the sidecar
 #: by a different route, so both must be re-applied here.
-SIDECAR_PRUNE_RULES = ("internal-build-infra-docs", "pagefind-search-index")
+SIDECAR_PRUNE_RULES = (
+    "internal-build-infra-docs",
+    "pagefind-search-index",
+    "papercusp-state-dir",
+)
 
 
 def prune_docs(dirs, rules=SIDECAR_PRUNE_RULES):
