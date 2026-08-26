@@ -1856,7 +1856,8 @@ if [[ -f "$_audit_py" ]]; then
   echo "→ pruning internal-build-infra docs from sidecar (release-privacy, WI-4419)"
   python3 "$_audit_py" --prune-docs \
     "$SIDECAR_DIR/internal-docs" \
-    "$SIDECAR_DIR/apps/operator-docs/src/content/docs"
+    "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
+    "$SIDECAR_DIR/spa/docs"
   # The prune above deletes by PATH; the gate below fails by CONTENT. A doc whose
   # path is not internal-build-infra but whose TEXT quotes this box's identity slips
   # between the two — 65 assembled files did exactly that on the 0.0.16 cut. Redact
