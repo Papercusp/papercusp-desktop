@@ -173,9 +173,27 @@ rm -rf "$OUT/prompts"; cp -a "$PROMPTS_SRC" "$OUT/prompts"
   || { echo "FATAL: composed sql/ is not the locks set" >&2; exit 1; }
 repo_max="$(ls "$MAIN_SQL_SRC"/*.sql | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
 out_max="$(ls "$OUT/db-sql"/*.sql   | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
+out_count="$(find "$OUT/db-sql" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')"
 [ "$out_max" = "$repo_max" ] \
   || { echo "FATAL: composed db-sql/ at $out_max but repo is at $repo_max" >&2; exit 1; }
-echo "  ✓ sql/ = locks set;  db-sql/ fresh at migration $out_max"
+printf 'dbSqlHighest=%s\ndbSqlCount=%s\n' "$out_max" "$out_count" >> "$OUT/BUILD-STAMP.txt"
+
+# EI-20225452142754784: the old physical deploy copied directories with ad-hoc
+# rsync commands and validated only local source shape. A trailing-slash mistake
+# could leave the remote db-sql/ directory empty while placing its contents at
+# the staging root; an already-migrated database could still boot, permanently
+# publishing a payload that fails on the next fresh install. Bind every staged
+# file to a deterministic manifest and stamp the migration shape. The remote
+# installer verifies BOTH before it can swap the active sibling directory.
+(
+  cd "$OUT"
+  manifest_tmp="PAYLOAD-MANIFEST.sha256.tmp.$$"
+  find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+    | LC_ALL=C sort -z \
+    | xargs -0 sha256sum > "$manifest_tmp"
+  mv -f "$manifest_tmp" PAYLOAD-MANIFEST.sha256
+)
+echo "  ✓ sql/ = locks set; db-sql/ fresh at migration $out_max ($out_count files); payload manifest sealed"
 
 # ── 5. push ─────────────────────────────────────────────────────────────────
 if [ "$PUSH" = "1" ]; then
@@ -191,6 +209,7 @@ if [ "$PUSH" = "1" ]; then
   ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/node_modules"
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
   rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_STAGE/BUILD-STAMP.txt"
+  rsync -a "$OUT/PAYLOAD-MANIFEST.sha256" "$VM:$REMOTE_STAGE/PAYLOAD-MANIFEST.sha256"
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"

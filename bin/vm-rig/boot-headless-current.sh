@@ -66,17 +66,41 @@ cleanup_control() {
 trap cleanup_control EXIT
 
 validate_payload() {
-  local root="$1" require_stamp="${2:-0}" f
+  local root="$1" require_stamp="${2:-0}" f expected_max expected_count actual_max actual_count
   for f in "$root/serve.mjs" "$root/db-sql" "$root/node_modules" "$root/sql" "$root/prompts"; do
     [ -e "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
   done
-  if [ "$require_stamp" = "1" ] && [ ! -s "$root/BUILD-STAMP.txt" ]; then
-    echo "FATAL: staged payload is missing BUILD-STAMP.txt" >&2
-    return 1
+  if [ "$require_stamp" = "1" ]; then
+    for f in "$root/BUILD-STAMP.txt" "$root/PAYLOAD-MANIFEST.sha256"; do
+      [ -s "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
+    done
   fi
   if [ -e "$root/sql/000-baseline.sql" ] || [ ! -e "$root/sql/001-bootstrap.sql" ]; then
     echo "FATAL: staged payload sql/ is not the locks migration set" >&2
     return 1
+  fi
+  [ -e "$root/db-sql/000-baseline.sql" ] \
+    || { echo "FATAL: staged payload db-sql/ is not the main migration set" >&2; return 1; }
+  actual_max="$(find "$root/db-sql" -maxdepth 1 -type f -name '*.sql' -exec basename {} \; \
+    | grep -oE '^[0-9]+' | sort -n | tail -1)"
+  actual_count="$(find "$root/db-sql" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')"
+  if [ "$require_stamp" = "1" ]; then
+    expected_max="$(sed -n 's/^dbSqlHighest=//p' "$root/BUILD-STAMP.txt" | tail -1)"
+    expected_count="$(sed -n 's/^dbSqlCount=//p' "$root/BUILD-STAMP.txt" | tail -1)"
+    [ -n "$expected_max" ] && [ -n "$expected_count" ] \
+      || { echo "FATAL: BUILD-STAMP.txt lacks dbSqlHighest/dbSqlCount" >&2; return 1; }
+    [ "$actual_max" = "$expected_max" ] && [ "$actual_count" = "$expected_count" ] \
+      || { echo "FATAL: staged db-sql shape differs from BUILD-STAMP.txt" >&2; return 1; }
+    if command -v shasum >/dev/null 2>&1; then
+      (cd "$root" && shasum -a 256 -c PAYLOAD-MANIFEST.sha256 >/dev/null) \
+        || { echo "FATAL: staged payload hash verification failed" >&2; return 1; }
+    elif command -v sha256sum >/dev/null 2>&1; then
+      (cd "$root" && sha256sum -c PAYLOAD-MANIFEST.sha256 >/dev/null) \
+        || { echo "FATAL: staged payload hash verification failed" >&2; return 1; }
+    else
+      echo "FATAL: no SHA-256 verifier is available for the staged payload" >&2
+      return 1
+    fi
   fi
 }
 
@@ -89,6 +113,23 @@ overlay_payload() {
     cp -a "$stage/$subtree" "$candidate/$subtree"
   done
   cp -a "$stage/BUILD-STAMP.txt" "$candidate/BUILD-STAMP.txt"
+  cp -a "$stage/PAYLOAD-MANIFEST.sha256" "$candidate/PAYLOAD-MANIFEST.sha256"
+}
+
+write_self_test_manifest() {
+  local root="$1"
+  (
+    cd "$root" || exit 1
+    if command -v shasum >/dev/null 2>&1; then
+      find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 shasum -a 256 > PAYLOAD-MANIFEST.sha256
+    else
+      find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum > PAYLOAD-MANIFEST.sha256
+    fi
+  )
 }
 
 prepare_candidate() {
@@ -128,11 +169,32 @@ run_filesystem_self_test() {
   mkdir -p "$stage/db-sql" "$stage/sql" "$stage/prompts" "$stage/node_modules"
   printf '%s\n' old > "$current/serve.mjs"
   printf '%s\n' new > "$stage/serve.mjs"
-  printf '%s\n' stamp > "$stage/BUILD-STAMP.txt"
+  printf 'stamp\ndbSqlHighest=000\ndbSqlCount=1\n' > "$stage/BUILD-STAMP.txt"
   : > "$current/sql/001-bootstrap.sql"
   : > "$stage/sql/001-bootstrap.sql"
   : > "$stage/db-sql/000-baseline.sql"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
   validate_payload "$stage" 1 || { rm -rf "$root"; return 1; }
+
+  printf '%s\n' tampered >> "$stage/serve.mjs"
+  if validate_payload "$stage" 1 >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL: staged hash mismatch was admitted" >&2
+    rm -rf "$root"
+    return 1
+  fi
+  printf '%s\n' new > "$stage/serve.mjs"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
+
+  rm -f "$stage/db-sql/000-baseline.sql"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
+  if validate_payload "$stage" 1 >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL: empty/wrong db-sql shape was admitted" >&2
+    rm -rf "$root"
+    return 1
+  fi
+  : > "$stage/db-sql/000-baseline.sql"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
+
   prepare_candidate "$current" "$stage" "$candidate" || { rm -rf "$root"; return 1; }
   [ "$(cat "$candidate/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   swap_payload "$current" "$candidate" "$backup" || { rm -rf "$root"; return 1; }
@@ -141,7 +203,7 @@ run_filesystem_self_test() {
   [ "$(cat "$current/serve.mjs")" = old ] || { rm -rf "$root"; return 1; }
   [ "$(cat "$failed/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   rm -rf "$root"
-  echo "SELF-TEST PASS: staged swap and rollback preserve the previous payload"
+  echo "SELF-TEST PASS: staged validation rejects missing/tampered payloads and swap/rollback preserves the previous payload"
 }
 
 if [ "$SELF_TEST" = "1" ]; then

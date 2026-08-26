@@ -205,15 +205,16 @@ test('vm-rig driver forwards a parseable JSON MCP result and exits 0', async () 
   }
 });
 
-test('current mac rig launcher is directly executable and deployment preserves that contract', async () => {
+test('current mac rig launcher validates staged integrity and deployment preserves the executable contract', async () => {
   const mode = (await stat(currentBoot)).mode & 0o777;
   assert.equal(mode & 0o111, 0o111, 'boot-headless-current.sh must have executable bits set');
 
   const result = spawnSync(currentBoot, ['--self-test'], { encoding: 'utf8' });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /SELF-TEST PASS/);
+  assert.match(result.stdout, /SELF-TEST PASS: staged validation rejects missing\/tampered payloads/);
 
   const composer = await readFile(currentComposer, 'utf8');
   assert.match(composer, /\[ -x "\$HERE\/boot-headless-current\.sh" \]/);
   assert.match(composer, /rsync -a --chmod=F755 "\$HERE\/boot-headless-current\.sh"/);
+  assert.match(composer, /PAYLOAD-MANIFEST\.sha256/);
 });
