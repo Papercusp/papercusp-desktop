@@ -242,6 +242,25 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'the maintained sidecar builder must consume every validated helper output');
 });
 
+test('vm-release derives the embedded PostgreSQL major before profile-specific Kopia wiring', () => {
+  const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const majorStart = builder.indexOf('# The embedded server\'s major version');
+  const majorGuard = builder.indexOf('if [[ -z "$EMBEDDED_PG_MAJOR" ]]', majorStart);
+  const kopiaGuard = builder.indexOf('vm-release pinned Kopia output is unavailable', majorStart);
+
+  assert.ok(majorStart > 0 && majorGuard > majorStart,
+    'the embedded PostgreSQL major must be derived and fail-closed before client-tool wiring');
+  const majorBlock = builder.slice(majorStart, majorGuard);
+  assert.match(majorBlock, /if \[\[ "\$_cross_darwin" == "1" \]\]; then/,
+    'cross-darwin must derive the major without executing a target-platform binary');
+  assert.match(majorBlock, /else[\s\S]*EMBEDDED_PG_MAJOR=.*postgres.*--version/,
+    'native and vm-release builds must derive the major from the assembled postgres binary');
+  assert.doesNotMatch(majorBlock, /DISTRIBUTION_PROFILE/,
+    'a distribution-profile arm must never bypass EMBEDDED_PG_MAJOR initialization');
+  assert.ok(kopiaGuard > majorGuard,
+    'vm-release Kopia wiring must be independent and occur only after the major is known');
+});
+
 function writeExecutable(file, source) {
   fs.writeFileSync(file, source);
   fs.chmodSync(file, 0o755);

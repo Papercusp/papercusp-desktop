@@ -2688,6 +2688,24 @@ _cross_darwin=0
 # The embedded server's major version — vendored client tools must match it
 # (pg_dump cannot dump a server NEWER than itself, so distro-default clients —
 # e.g. Ubuntu 24.04's v16 vs our embedded 18 — are not acceptable sources).
+if [[ "$_cross_darwin" == "1" ]]; then
+  # Can't exec the darwin `postgres` binary on this linux host — derive the major
+  # from the installed @embedded-postgres/<platform> package version instead
+  # (e.g. 18.3.0-beta.17 → 18). EMBEDDED_PG_BIN_DIR is <pkg>/native/bin.
+  _epg_pkg_json="$(cd "$EMBEDDED_PG_BIN_DIR/../.." 2>/dev/null && pwd)/package.json"
+  EMBEDDED_PG_MAJOR="$(node -e "console.log(String(require('$_epg_pkg_json').version).split('.')[0])" 2>/dev/null)"
+else
+  EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+fi
+if [[ -z "$EMBEDDED_PG_MAJOR" ]]; then
+  echo "ERROR: could not determine embedded postgres major version from $EMBEDDED_PG_BIN_DIR/postgres"
+  exit 1
+fi
+
+# vm-release consumes the pinned Kopia output independently of how the embedded
+# PostgreSQL major was derived. Keeping this as a separate branch is load-bearing:
+# making it an arm of the major-version branch leaves EMBEDDED_PG_MAJOR unset under
+# `set -u` and aborts the release build before atomic sidecar publication.
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   [[ -n "${PAPERCUSP_VM_RELEASE_TRUST_ROOT:-}" \
      && -x "$PAPERCUSP_VM_RELEASE_TRUST_ROOT/bin/kopia" ]] || {
@@ -2702,18 +2720,6 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   }
   echo "  kopia: pinned source build $PAPERCUSP_VM_KOPIA_VERSION-papercusp.1 ($PAPERCUSP_VM_KOPIA_COMMIT)"
   echo "kopia: pinned source build (${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1 $PAPERCUSP_VM_KOPIA_COMMIT)" >> "$SOURCE_NOTE_FILE"
-elif [[ "$_cross_darwin" == "1" ]]; then
-  # Can't exec the darwin `postgres` binary on this linux host — derive the major
-  # from the installed @embedded-postgres/<platform> package version instead
-  # (e.g. 18.3.0-beta.17 → 18). EMBEDDED_PG_BIN_DIR is <pkg>/native/bin.
-  _epg_pkg_json="$(cd "$EMBEDDED_PG_BIN_DIR/../.." 2>/dev/null && pwd)/package.json"
-  EMBEDDED_PG_MAJOR="$(node -e "console.log(String(require('$_epg_pkg_json').version).split('.')[0])" 2>/dev/null)"
-else
-  EMBEDDED_PG_MAJOR="$("$EMBEDDED_PG_BIN_DIR/postgres" --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
-fi
-if [[ -z "$EMBEDDED_PG_MAJOR" ]]; then
-  echo "ERROR: could not determine embedded postgres major version from $EMBEDDED_PG_BIN_DIR/postgres"
-  exit 1
 fi
 
 # WI-5651 cross-darwin: pre-fetch the darwin PostgreSQL client tools (Homebrew
