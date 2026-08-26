@@ -118,7 +118,14 @@ _is_target_format() {
 #   + agent ptys; papercup — operator console shim.
 #   omp is deliberately NOT required here: WI-3343 retired the bundled omp
 #   sidecar dependency, and the desktop app resolves the user's installed omp.
-REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup"
+#   papercusp-remote-initializer — the workspace-host initialization entrypoint
+#     (WORKSPACE_HOST_REMOTE_INITIALIZER_ENTRYPOINT / workspace-host-bootstrap.ts). Unlike the
+#     tools above it is spawned by the CONTROLLER over SSH on a provisioned VM, not by this
+#     runtime — which is exactly why it needs to be listed here. Nothing on the build host ever
+#     invokes it, so its absence is invisible until a real initialization fails remotely, and the
+#     manifest check one layer up validates only a caller-supplied material record for the path
+#     (D-110 / EI-21474474153847007). Section [6] runs a real protocol cycle against it.
+REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup papercusp-remote-initializer"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
 # whose flags we don't control are not executed).
 probe_args() {
@@ -128,7 +135,7 @@ probe_args() {
   esac
 }
 
-echo "[1/6] required runtime tools present + probing as-installed"
+echo "[1/7] required runtime tools present + probing as-installed"
 for t in $REQUIRED_TOOLS; do
   p="$BIN/$t"
   [[ -f "$p" || -f "$p.exe" ]] || { fail "$t: MISSING from sidecar/bin — the runtime spawns it by bare name"; continue; }
@@ -162,7 +169,7 @@ for t in $REQUIRED_TOOLS; do
 done
 
 # ── [2] script shims ────────────────────────────────────────────────────────
-echo "[2/6] script-shim scan of sidecar/bin"
+echo "[2/7] script-shim scan of sidecar/bin"
 for f in "$BIN"/*; do
   [[ -f "$f" ]] || continue
   _is_script "$f" || continue
@@ -170,6 +177,11 @@ for f in "$BIN"/*; do
   case "$b" in
     papercup|papercup-status.mjs)
       ok "$b (allowlisted script)" ;;
+    papercusp-remote-initializer)
+      # Allowlisted for the OPPOSITE reason to the pg wrappers: this is not a shim fronting a
+      # build-host binary, it is a self-contained esbuild bundle whose only external dependency
+      # is `node`, which this same manifest requires in sidecar/bin. Section [6] proves it runs.
+      ok "$b (allowlisted self-contained bundle)" ;;
     psql|pg_dump|pg_dumpall|pg_restore)
       # generated LD_LIBRARY_PATH wrappers (Linux); must front a real binary
       if [[ "$OS" == "Linux" && -f "$BIN/.pg-real/$b" ]] && ! _is_script "$BIN/.pg-real/$b"; then
@@ -183,7 +195,7 @@ for f in "$BIN"/*; do
 done
 
 # ── [3] linkage closure (Linux) ─────────────────────────────────────────────
-echo "[3/6] ELF linkage closure (bundle libs + base allowlist only)"
+echo "[3/7] ELF linkage closure (bundle libs + base allowlist only)"
 if [[ "$OS" == "Linux" ]]; then
   if ! command -v objdump >/dev/null 2>&1; then
     fail "objdump not on build host — cannot verify linkage (apt install binutils)"
@@ -238,7 +250,7 @@ else
 fi
 
 # ── [4] macOS: brew-keg absolute install-names ──────────────────────────────
-echo "[4/6] darwin keg-path scan"
+echo "[4/7] darwin keg-path scan"
 if [[ "$TARGET_OS_N" == "darwin" ]]; then
   # WI-5651: gate on the TARGET, not the host — a darwin bundle cross-baked on
   # linux needs this scan too. Native mac uses otool; the linux cross host uses
@@ -326,7 +338,7 @@ else
 fi
 
 # ── [5] Windows: sibling DLLs for vendored exes ─────────────────────────────
-echo "[5/6] windows DLL presence"
+echo "[5/7] windows DLL presence"
 case "$OS" in
   MINGW*|MSYS*|CYGWIN*)
     if [[ -f "$BIN/psql.exe" && ! -f "$BIN/libpq.dll" ]]; then
@@ -381,7 +393,7 @@ fs-native-extensions
 OPTIONAL_NATIVE_MODULES="
 onnxruntime-node
 "
-echo "[6/6] native modules load under the bundled node"
+echo "[6/7] native modules load under the bundled node"
 if [[ "$CROSS" == "1" ]]; then
   # WI-5651: can't exec the target's node here — assert STATICALLY that every
   # required native ships a TARGET-format *.node in the bundle. This catches the
@@ -488,6 +500,72 @@ GUARD_EOF
   [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
   [[ "$FAIL" == 0 ]] && ok "all $_nat_ok required native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
 fi
+fi
+
+# ── [7] remote initializer answers a real protocol cycle ────────────────────
+# EI-21474474153847007 / D-110. Sections [1]/[2] prove the file is PRESENT, EXECUTABLE and a
+# self-contained bundle. None of that proves it is the RIGHT program: an empty file, a stale
+# artifact, or a bundle built from a stub would pass all three. The manifest check one layer up
+# proves even less — it validates a caller-supplied material record naming this path, so a
+# hand-written record satisfies it while the package ships nothing.
+#
+# So run the thing. Two probes, neither of which mutates the host:
+#   (a) the exact controller argv + a request the protocol engine must REJECT. This reaches
+#       exec -> shebang -> bundle -> argv guard -> stdin read -> protocol engine, and asserts the
+#       documented contract that stdout carries the protocol and NOTHING else (a diagnostic on
+#       stdout is reported at the controller as a malformed response, mis-naming the failure).
+#   (b) wrong argv, asserting the argv guard is live — a bundle that ignored argv would accept
+#       whatever the controller sent and act on a contract it never verified.
+# A SUCCESS-path step is deliberately not attempted: every step kind mutates the host or spawns
+# agent CLIs, so it belongs in the on-target initialization test, not a bundle gate.
+echo "[7/7] workspace-host remote initializer answers a real protocol cycle"
+_ri="$BIN/papercusp-remote-initializer"
+_ri_ver="papercusp-gcp-iap-initialization-v1"
+if [[ ! -f "$_ri" ]]; then
+  # [1] already failed this; repeat it here so this section is never silently vacuous.
+  fail "papercusp-remote-initializer: MISSING — cannot run a protocol cycle"
+else
+  # Content assertion first: the protocol version const must be IN the artifact. This is what
+  # separates "a JS file exists" from "the initializer was bundled into it", and it is the one
+  # check that still works when no runtime is available to exec with.
+  if grep -qF "$_ri_ver" "$_ri"; then
+    ok "protocol version '$_ri_ver' present in the bundled artifact"
+  else
+    fail "papercusp-remote-initializer: does not contain the protocol version '$_ri_ver' — this is not the initializer bundle"
+  fi
+
+  # The artifact is platform-independent JS, so the BUILD host's node can exec it even for a
+  # cross bundle. Prefer the build host's node for exactly that reason; fall back to the bundled
+  # one only for a native (non-cross) build, where it is the same platform.
+  _ri_node="$(command -v node 2>/dev/null || true)"
+  if [[ -z "$_ri_node" && "$CROSS" != "1" && -x "$BIN/node" ]]; then _ri_node="$BIN/node"; fi
+  _ri_timeout=""
+  command -v timeout >/dev/null 2>&1 && _ri_timeout="timeout 30"
+
+  if [[ -z "$_ri_node" ]]; then
+    # Not a pass. Say so plainly rather than printing a tick nobody can act on.
+    echo "  ⚠ no node available to exec the initializer — protocol cycle NOT run (content check above still applied)"
+  else
+    # (a) correct argv, a request the engine must reject.
+    _ri_out="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>/dev/null)"
+    _ri_err="$($_ri_timeout "$_ri_node" "$_ri" --protocol-version "$_ri_ver" --json-stdin <<<'{}' 2>&1 >/dev/null)"
+    _ri_code=$?
+    if [[ -n "$_ri_out" ]]; then
+      fail "papercusp-remote-initializer: wrote to STDOUT on the error path ('${_ri_out:0:120}') — stdout must carry the protocol and nothing else"
+    elif [[ "$_ri_err" != *"WorkspaceHostRemoteInitializerProtocolError"* ]]; then
+      fail "papercusp-remote-initializer: an invalid request did not produce a protocol error; got: $(echo "$_ri_err" | head -1 | cut -c1-160)"
+    else
+      ok "protocol cycle: invalid request rejected as WorkspaceHostRemoteInitializerProtocolError, stdout clean"
+    fi
+
+    # (b) argv guard is live.
+    _ri_argv_err="$($_ri_timeout "$_ri_node" "$_ri" --version <<<'{}' 2>&1 >/dev/null || true)"
+    if [[ "$_ri_argv_err" == *"remote initializer expects argv"* ]]; then
+      ok "argv guard live: the fixed controller argv is enforced"
+    else
+      fail "papercusp-remote-initializer: accepted argv '--version' — the argv guard is not in this bundle; got: $(echo "$_ri_argv_err" | head -1 | cut -c1-160)"
+    fi
+  fi
 fi
 
 echo
