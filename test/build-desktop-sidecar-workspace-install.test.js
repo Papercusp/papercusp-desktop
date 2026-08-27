@@ -437,14 +437,12 @@ test('Linux Server deb installs and package-enables one systemd user service', (
     unit,
     /^Environment="PAPERCUSP_SIDECAR_DIR=\/usr\/lib\/Papercusp Server\/sidecar"$/m,
   );
-  assert.match(unit, /^Environment="PAPERCUSP_WORKSPACE_HOST_SSH_USER=papercusp-workspace"$/m);
-  assert.match(
+  assert.match(unit, /^StateDirectory=papercusp\/controller$/m);
+  assert.match(unit, /^StateDirectoryMode=0700$/m);
+  assert.doesNotMatch(
     unit,
-    /^Environment="PAPERCUSP_WORKSPACE_HOST_KNOWN_HOSTS=\/var\/lib\/papercusp\/controller\/known_hosts"$/m,
-  );
-  assert.match(
-    unit,
-    /^Environment="PAPERCUSP_WORKSPACE_HOST_REMOTE_ENTRYPOINT=\/opt\/papercusp\/current\/bin\/papercusp-remote-initializer"$/m,
+    /PAPERCUSP_WORKSPACE_HOST_(?:SSH_USER|KNOWN_HOSTS|REMOTE_ENTRYPOINT)=/,
+    'the resolver must derive workspace-host controller defaults from the deployment contract and systemd StateDirectory',
   );
   assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server --headless-service$/m);
   assert.match(unit, /^Restart=on-failure$/m);
