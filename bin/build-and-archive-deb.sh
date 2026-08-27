@@ -295,6 +295,7 @@ papercusp_export_rust_lld linux
 # the final assembled-sidecar identity scan records releaseIdentityAudit only
 # after it passes, and this assertion cannot be bypassed by ALLOW_STALE.
 PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
+  PAPERCUSP_REQUIRE_SOURCE_COHERENCE=1 \
   node "$LIVE_DESKTOP_DIR/bin/check-sidecar-freshness.js" \
     --sidecar "$DESKTOP_DIR/src-tauri/sidecar" \
     --repo-root "$LIVE_REPO_DIR" \

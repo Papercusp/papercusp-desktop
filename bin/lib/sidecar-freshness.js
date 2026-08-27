@@ -408,6 +408,167 @@ function describe(result) {
   }
 }
 
+// EI-21649958701175888 — a Server sidecar is assembled from three independently
+// refreshed views of the database migrations:
+//
+//   * source.tar.zst's runnable source tree,
+//   * sidecar/db-sql, which the bundled operator actually executes, and
+//   * build-provenance.json's clean Git commit.
+//
+// A preserved source overlay can survive a later sidecar rebuild. Provenance and
+// db-sql then look fresh while the installed dev/local source silently lags. Keep
+// the verdict pure: the CLI resolves tar/Git/filesystem facts, while this function
+// decides whether those facts earn a release assertion.
+function migrationManifest(entries, { requireHashes = false } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+
+  const rows = new Map();
+  for (const entry of entries) {
+    const name = typeof entry === 'string' ? entry : entry?.name;
+    const sha256 = typeof entry === 'object' && entry !== null ? entry.sha256 : null;
+    if (typeof name !== 'string' || !/^[^/]+\.sql$/.test(name) || rows.has(name)) return null;
+    if (requireHashes && (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256))) {
+      return null;
+    }
+    rows.set(name, sha256 ?? null);
+  }
+
+  const names = [...rows.keys()].sort();
+  return {
+    count: names.length,
+    highest: names.at(-1) ?? null,
+    names,
+    hashes: rows,
+  };
+}
+
+function sameNames(a, b) {
+  return a.names.length === b.names.length && a.names.every((name, i) => name === b.names[i]);
+}
+
+function manifestSummary(manifest) {
+  return manifest
+    ? { count: manifest.count, highest: manifest.highest }
+    : { count: null, highest: null };
+}
+
+function inspectSidecarSourceCoherence({
+  required = false,
+  provenanceHead = null,
+  provenanceDirty = null,
+  sourceArchivePresent = false,
+  sourceEntries = null,
+  shippedEntries = null,
+  provenanceEntries = null,
+} = {}) {
+  const base = {
+    provenanceHead,
+    provenanceDirty,
+    source: { count: null, highest: null },
+    shipped: { count: null, highest: null },
+    provenance: { count: null, highest: null },
+    hashMismatches: [],
+  };
+
+  if (!required) return { ...base, verdict: 'not-required' };
+  if (typeof provenanceHead !== 'string' || !/^[0-9a-f]{40}$/i.test(provenanceHead)) {
+    return { ...base, verdict: 'provenance-unverifiable' };
+  }
+  if (provenanceDirty !== false) return { ...base, verdict: 'provenance-dirty' };
+  if (!sourceArchivePresent) return { ...base, verdict: 'source-missing' };
+
+  const source = migrationManifest(sourceEntries, { requireHashes: true });
+  const shipped = migrationManifest(shippedEntries, { requireHashes: true });
+  const provenance = migrationManifest(provenanceEntries);
+  const facts = {
+    ...base,
+    source: manifestSummary(source),
+    shipped: manifestSummary(shipped),
+    provenance: manifestSummary(provenance),
+  };
+
+  if (!source) return { ...facts, verdict: 'source-unverifiable' };
+  if (!shipped) return { ...facts, verdict: 'runtime-unverifiable' };
+  if (!provenance) return { ...facts, verdict: 'provenance-migrations-unverifiable' };
+  if (!sameNames(source, shipped) || !sameNames(source, provenance)) {
+    return { ...facts, verdict: 'migration-set-skew' };
+  }
+
+  const hashMismatches = source.names.filter(
+    (name) => source.hashes.get(name) !== shipped.hashes.get(name),
+  );
+  if (hashMismatches.length > 0) {
+    return {
+      ...facts,
+      verdict: 'source-runtime-byte-skew',
+      hashMismatches: hashMismatches.slice(0, 8),
+    };
+  }
+
+  return { ...facts, verdict: 'coherent' };
+}
+
+function sourceCoherenceBlocksBuild(verdict) {
+  return verdict !== 'not-required' && verdict !== 'coherent';
+}
+
+function describeSourceCoherence(result) {
+  const summary =
+    `  source.tar.zst: ${result.source.count ?? 'unavailable'} migration(s), highest ${result.source.highest ?? 'unavailable'}\n` +
+    `  shipped db-sql: ${result.shipped.count ?? 'unavailable'} migration(s), highest ${result.shipped.highest ?? 'unavailable'}\n` +
+    `  provenance Git: ${result.provenance.count ?? 'unavailable'} migration(s), highest ${result.provenance.highest ?? 'unavailable'}`;
+  const fix =
+    '\n\n  Rebuild and stage the sidecar/source overlay from one clean commit, then retry.\n' +
+    '  PAPERCUSP_ALLOW_STALE_SIDECAR does not bypass source coherence.';
+
+  switch (result.verdict) {
+    case 'coherent':
+      return (
+        `sidecar source coherence OK — ${result.source.count} migration(s) agree by name; ` +
+        `source/runtime SQL bytes match; provenance ${result.provenanceHead}.`
+      );
+    case 'source-missing':
+      return 'FATAL: INCOHERENT SIDECAR SOURCE — source.tar.zst is missing.' + fix;
+    case 'provenance-unverifiable':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — build provenance has no full source gitHead, ' +
+        'so the preserved source cannot be tied to a commit.' + fix
+      );
+    case 'provenance-dirty':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — build provenance records a dirty source state.\n' +
+        '  A commit cannot attest uncommitted bytes, so three-way coherence is unprovable.' + fix
+      );
+    case 'source-unverifiable':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — source.tar.zst could not yield one unambiguous ' +
+        'libs/db/sql migration set.\n' + summary + fix
+      );
+    case 'runtime-unverifiable':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — shipped sidecar/db-sql could not yield one ' +
+        'unambiguous migration set.\n' + summary + fix
+      );
+    case 'provenance-migrations-unverifiable':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — the provenance commit\'s papercusp gitlink ' +
+        'could not yield a migration set.\n' + summary + fix
+      );
+    case 'migration-set-skew':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — source.tar.zst, shipped db-sql, and provenance ' +
+        'name different migration sets.\n' + summary + fix
+      );
+    case 'source-runtime-byte-skew':
+      return (
+        'FATAL: INCOHERENT SIDECAR SOURCE — source.tar.zst and shipped db-sql carry ' +
+        'different SQL bytes for: ' + result.hashMismatches.join(', ') + '.\n' + summary + fix
+      );
+    default:
+      return 'sidecar source coherence was not required';
+  }
+}
+
 module.exports = {
   parseProvenance,
   formatAge,
@@ -415,4 +576,7 @@ module.exports = {
   blocksBuild,
   provenanceLine,
   describe,
+  inspectSidecarSourceCoherence,
+  sourceCoherenceBlocksBuild,
+  describeSourceCoherence,
 };

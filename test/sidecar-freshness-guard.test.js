@@ -23,6 +23,9 @@ const {
   describe,
   formatAge,
   parseProvenance,
+  inspectSidecarSourceCoherence,
+  sourceCoherenceBlocksBuild,
+  describeSourceCoherence,
 } = require('../bin/lib/sidecar-freshness.js');
 
 const BIN = path.resolve(__dirname, '../bin');
@@ -198,14 +201,17 @@ test('formatAge / parseProvenance edges are total (never throw, never NaN-print)
 
 // ── the CLI ──────────────────────────────────────────────────────────────────
 
-function runCli(sidecarDir, env = {}) {
+function runCli(sidecarDir, env = {}, { repoRoot } = {}) {
   const childEnv = { ...process.env };
   delete childEnv.PAPERCUSP_EXPECTED_SERVE_SHA;
   delete childEnv.PAPERCUSP_SIDECAR_MIN_EPOCH_SEC;
   delete childEnv.PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT;
+  delete childEnv.PAPERCUSP_REQUIRE_SOURCE_COHERENCE;
+  const args = [path.join(BIN, 'check-sidecar-freshness.js'), '--sidecar', sidecarDir];
+  if (repoRoot) args.push('--repo-root', repoRoot);
   return spawnSync(
     process.execPath,
-    [path.join(BIN, 'check-sidecar-freshness.js'), '--sidecar', sidecarDir],
+    args,
     { encoding: 'utf8', env: { ...childEnv, ...env } },
   );
 }
@@ -332,6 +338,188 @@ test('CLI: release cross-build assertion accepts a successfully audited sidecar'
   assert.match(r.stdout, /release identity audit attested/);
 });
 
+// ── preserved source/runtime/provenance coherence ───────────────────────────
+
+function sourceEntries(names, contents = {}) {
+  return names.map((name) => ({ name, sha256: sha256(contents[name] ?? `-- ${name}\n`) }));
+}
+
+test('source coherence: clean provenance plus identical names and bytes passes', () => {
+  const names = ['001-one.sql', '002-two.sql'];
+  const r = inspectSidecarSourceCoherence({
+    required: true,
+    provenanceHead: 'a'.repeat(40),
+    provenanceDirty: false,
+    sourceArchivePresent: true,
+    sourceEntries: sourceEntries(names),
+    shippedEntries: sourceEntries(names),
+    provenanceEntries: names,
+  });
+  assert.equal(r.verdict, 'coherent');
+  assert.equal(sourceCoherenceBlocksBuild(r.verdict), false);
+  assert.match(describeSourceCoherence(r), /source coherence OK/);
+});
+
+test('source coherence: stale names, same-name byte skew, missing source, and dirty provenance fail closed', () => {
+  const full = ['001-one.sql', '002-two.sql'];
+  const base = {
+    required: true,
+    provenanceHead: 'a'.repeat(40),
+    provenanceDirty: false,
+    sourceArchivePresent: true,
+    sourceEntries: sourceEntries(full),
+    shippedEntries: sourceEntries(full),
+    provenanceEntries: full,
+  };
+
+  const stale = inspectSidecarSourceCoherence({
+    ...base,
+    sourceEntries: sourceEntries(['001-one.sql']),
+  });
+  assert.equal(stale.verdict, 'migration-set-skew');
+  assert.match(describeSourceCoherence(stale), /name different migration sets/);
+
+  const byteSkew = inspectSidecarSourceCoherence({
+    ...base,
+    shippedEntries: sourceEntries(full, { '002-two.sql': '-- changed\n' }),
+  });
+  assert.equal(byteSkew.verdict, 'source-runtime-byte-skew');
+  assert.deepEqual(byteSkew.hashMismatches, ['002-two.sql']);
+
+  const missing = inspectSidecarSourceCoherence({ ...base, sourceArchivePresent: false });
+  assert.equal(missing.verdict, 'source-missing');
+  assert.equal(sourceCoherenceBlocksBuild(missing.verdict), true);
+
+  const dirty = inspectSidecarSourceCoherence({ ...base, provenanceDirty: true });
+  assert.equal(dirty.verdict, 'provenance-dirty');
+  assert.match(describeSourceCoherence(dirty), /dirty source state/);
+});
+
+function runGit(cwd, args) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+function makeCoherenceFixture({ archiveFiles, shippedFiles, provenanceFiles, omitArchive = false }) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-source-coherence-'));
+  const papercuspRepo = path.join(tmp, 'papercusp-lib');
+  const repoRoot = path.join(tmp, 'repo');
+  const sidecarDir = path.join(tmp, 'sidecar');
+  fs.mkdirSync(papercuspRepo, { recursive: true });
+  fs.mkdirSync(repoRoot, { recursive: true });
+  fs.mkdirSync(path.join(sidecarDir, 'db-sql'), { recursive: true });
+
+  for (const repo of [papercuspRepo, repoRoot]) {
+    runGit(repo, ['init', '-q', '-b', 'main']);
+    runGit(repo, ['config', 'user.email', 'coherence@test.invalid']);
+    runGit(repo, ['config', 'user.name', 'Coherence Test']);
+    runGit(repo, ['config', 'commit.gpgsign', 'false']);
+  }
+
+  const dbDir = path.join(papercuspRepo, 'libs/db/sql');
+  fs.mkdirSync(dbDir, { recursive: true });
+  for (const [name, contents] of Object.entries(provenanceFiles)) {
+    fs.writeFileSync(path.join(dbDir, name), contents);
+  }
+  runGit(papercuspRepo, ['add', '.']);
+  runGit(papercuspRepo, ['commit', '-qm', 'migrations']);
+
+  fs.writeFileSync(path.join(repoRoot, 'root.txt'), 'root\n');
+  runGit(repoRoot, ['add', '.']);
+  runGit(repoRoot, ['commit', '-qm', 'root']);
+  runGit(repoRoot, [
+    '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', papercuspRepo, 'libs/papercusp',
+  ]);
+  runGit(repoRoot, ['commit', '-qm', 'pin papercusp']);
+  const provenanceHead = runGit(repoRoot, ['rev-parse', 'HEAD']);
+
+  fs.writeFileSync(path.join(sidecarDir, 'serve.mjs'), '// fixture\n');
+  fs.writeFileSync(
+    path.join(sidecarDir, 'build-provenance.json'),
+    prov({ gitHead: provenanceHead, gitDirty: false }),
+  );
+  for (const [name, contents] of Object.entries(shippedFiles)) {
+    fs.writeFileSync(path.join(sidecarDir, 'db-sql', name), contents);
+  }
+
+  if (!omitArchive) {
+    const archiveRoot = path.join(tmp, 'archive-root');
+    const archiveDb = path.join(archiveRoot, 'libs/papercusp/libs/db/sql');
+    fs.mkdirSync(archiveDb, { recursive: true });
+    for (const [name, contents] of Object.entries(archiveFiles)) {
+      fs.writeFileSync(path.join(archiveDb, name), contents);
+    }
+    const tarPath = path.join(tmp, 'source.tar');
+    const tarResult = spawnSync('tar', ['-C', archiveRoot, '-cf', tarPath, '.'], { encoding: 'utf8' });
+    assert.equal(tarResult.status, 0, tarResult.stderr);
+    const zstdResult = spawnSync(
+      'zstd', ['-q', '-f', tarPath, '-o', path.join(sidecarDir, 'source.tar.zst')],
+      { encoding: 'utf8' },
+    );
+    assert.equal(zstdResult.status, 0, zstdResult.stderr);
+  }
+
+  return { tmp, repoRoot, sidecarDir };
+}
+
+test('CLI: hermetic coherent archive/runtime/provenance fixture passes', (t) => {
+  const files = { '001-one.sql': '-- one\n', '002-two.sql': '-- two\n' };
+  const fixture = makeCoherenceFixture({
+    archiveFiles: files,
+    shippedFiles: files,
+    provenanceFiles: files,
+  });
+  t.after(() => fs.rmSync(fixture.tmp, { recursive: true, force: true }));
+
+  const r = runCli(
+    fixture.sidecarDir,
+    { PAPERCUSP_REQUIRE_SOURCE_COHERENCE: '1' },
+    { repoRoot: fixture.repoRoot },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /source coherence OK/);
+});
+
+test('CLI: hermetic stale, same-name byte-skew, and missing archives all refuse', (t) => {
+  const complete = { '001-one.sql': '-- one\n', '002-two.sql': '-- two\n' };
+  const cases = [
+    {
+      archiveFiles: { '001-one.sql': '-- one\n' },
+      shippedFiles: complete,
+      provenanceFiles: complete,
+      expected: /name different migration sets/,
+    },
+    {
+      archiveFiles: complete,
+      shippedFiles: { ...complete, '002-two.sql': '-- changed\n' },
+      provenanceFiles: complete,
+      expected: /different SQL bytes for: 002-two\.sql/,
+    },
+    {
+      archiveFiles: complete,
+      shippedFiles: complete,
+      provenanceFiles: complete,
+      omitArchive: true,
+      expected: /source\.tar\.zst is missing/,
+    },
+  ];
+
+  for (const fixtureArgs of cases) {
+    const fixture = makeCoherenceFixture(fixtureArgs);
+    t.after(() => fs.rmSync(fixture.tmp, { recursive: true, force: true }));
+    const r = runCli(
+      fixture.sidecarDir,
+      { PAPERCUSP_REQUIRE_SOURCE_COHERENCE: '1', PAPERCUSP_ALLOW_STALE_SIDECAR: '1' },
+      { repoRoot: fixture.repoRoot },
+    );
+    assert.equal(r.status, 4, `expected refusal; stdout=${r.stdout}\nstderr=${r.stderr}`);
+    assert.match(r.stderr, /INCOHERENT SIDECAR SOURCE/);
+    assert.match(r.stderr, fixtureArgs.expected);
+    assert.match(r.stderr, /does not bypass source coherence/);
+  }
+});
+
 // ── the wiring (the half that actually prevents the recurrence) ───────────────
 
 test('build-desktop-sidecar.sh RECORDS provenance into the published sidecar', () => {
@@ -370,4 +558,12 @@ test('build-mac-cross.sh is executable for direct producer invocation', () => {
     fs.statSync(script).mode & 0o111,
     'the documented direct mac cross-build producer must retain an executable mode',
   );
+});
+
+test('the Debian release producer requires source coherence before its expensive build lock', () => {
+  const src = fs.readFileSync(path.join(BIN, 'build-and-archive-deb.sh'), 'utf8');
+  const assertionAt = src.indexOf('PAPERCUSP_REQUIRE_SOURCE_COHERENCE=1');
+  const mutexAt = src.indexOf('# --- BUNDLE MUTEX');
+  assert.ok(assertionAt > 0, 'the Debian producer must opt into the fail-closed coherence assertion');
+  assert.ok(assertionAt < mutexAt, 'coherence must fail before the expensive build mutex/compiler leg');
 });

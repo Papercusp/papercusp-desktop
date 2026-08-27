@@ -17,6 +17,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
@@ -24,6 +25,9 @@ const {
   inspectSidecarFreshness,
   blocksBuild,
   describe,
+  inspectSidecarSourceCoherence,
+  sourceCoherenceBlocksBuild,
+  describeSourceCoherence,
 } = require('./lib/sidecar-freshness.js');
 
 const desktopDir = path.resolve(__dirname, '..');
@@ -75,6 +79,97 @@ function gitOrNull(args) {
   }
 }
 
+function sha256MigrationEntries(dir, { recursive = false } = {}) {
+  const files = [];
+  const visit = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const file = path.join(current, entry.name);
+      if (entry.isDirectory() && recursive) {
+        visit(file);
+      } else if (entry.isFile() && entry.name.endsWith('.sql')) {
+        const relative = path.relative(dir, file).split(path.sep).join('/');
+        if (!recursive || /(^|\/)libs\/db\/sql\/[^/]+\.sql$/.test(relative)) {
+          files.push({ name: entry.name, sha256: sha256FileOrNull(file) });
+        }
+      }
+    }
+  };
+
+  try {
+    visit(dir);
+    return files;
+  } catch {
+    return null;
+  }
+}
+
+function sourceArchiveMigrations(archive) {
+  if (!fs.existsSync(archive)) return { present: false, entries: null, error: null };
+  const extracted = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-coherence-'));
+  try {
+    const result = spawnSync(
+      'tar',
+      [
+        '--use-compress-program=zstd',
+        '-xf', archive,
+        '-C', extracted,
+        '--no-same-owner',
+        '--no-same-permissions',
+        '--wildcards',
+        '--no-anchored',
+        'libs/db/sql/*.sql',
+      ],
+      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+    );
+    if (result.status !== 0) {
+      return {
+        present: true,
+        entries: null,
+        error: String(result.stderr || `tar exited ${result.status}`).trim(),
+      };
+    }
+    return {
+      present: true,
+      entries: sha256MigrationEntries(extracted, { recursive: true }),
+      error: null,
+    };
+  } catch (error) {
+    return { present: true, entries: null, error: String(error?.message || error) };
+  } finally {
+    fs.rmSync(extracted, { recursive: true, force: true });
+  }
+}
+
+function provenanceMigrations(head) {
+  if (!head) return null;
+  try {
+    const rootTree = spawnSync(
+      'git',
+      ['-C', repoRoot, 'ls-tree', head, '--', 'libs/papercusp'],
+      { encoding: 'utf8' },
+    );
+    if (rootTree.status !== 0) return null;
+    const gitlink = String(rootTree.stdout).match(
+      /^160000 commit ([0-9a-f]{40})\tlibs\/papercusp$/m,
+    )?.[1];
+    if (!gitlink) return null;
+
+    const papercuspRepo = path.join(repoRoot, 'libs/papercusp');
+    const listing = spawnSync(
+      'git',
+      ['-C', papercuspRepo, 'ls-tree', '-r', '--name-only', gitlink, '--', 'libs/db/sql'],
+      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+    );
+    if (listing.status !== 0) return null;
+    return String(listing.stdout)
+      .split('\n')
+      .filter((file) => /^libs\/db\/sql\/[^/]+\.sql$/.test(file))
+      .map((file) => path.basename(file));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Does `head` (the sidecar's recorded commit) contain `needle`?
  * true / false / null when either object is unknown to this checkout — the three
@@ -107,12 +202,16 @@ const stampEpochSec = stamp && Object.prototype.hasOwnProperty.call(stamp, 'epoc
   : null;
 const requireReleaseAudit = process.env.PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT === '1';
 const releaseAuditPassed = stamp?.releaseIdentityAudit?.passed === true;
+const requireSourceCoherence = process.env.PAPERCUSP_REQUIRE_SOURCE_COHERENCE === '1';
 
 // Resolve the sidecar's own gitHead first so ancestry can be asked against it.
 let recordedHead = null;
+let provenanceDoc = null;
 try {
-  const doc = provenanceText ? JSON.parse(provenanceText) : null;
-  if (doc && typeof doc.gitHead === 'string') recordedHead = doc.gitHead;
+  provenanceDoc = provenanceText ? JSON.parse(provenanceText) : null;
+  if (provenanceDoc && typeof provenanceDoc.gitHead === 'string') {
+    recordedHead = provenanceDoc.gitHead;
+  }
 } catch {
   /* inspect() reports the unreadable verdict; nothing to resolve here */
 }
@@ -148,3 +247,25 @@ if (blocksBuild(result.verdict)) {
 }
 
 console.log(`[${label}] ${message}`);
+
+if (requireSourceCoherence) {
+  const archive = sourceArchiveMigrations(path.join(sidecarDir, 'source.tar.zst'));
+  const coherence = inspectSidecarSourceCoherence({
+    required: true,
+    provenanceHead: recordedHead,
+    provenanceDirty: provenanceDoc?.gitDirty,
+    sourceArchivePresent: archive.present,
+    sourceEntries: archive.entries,
+    shippedEntries: sha256MigrationEntries(path.join(sidecarDir, 'db-sql')),
+    provenanceEntries: provenanceMigrations(recordedHead),
+  });
+  const coherenceMessage = describeSourceCoherence(coherence);
+  if (sourceCoherenceBlocksBuild(coherence.verdict)) {
+    const archiveError = archive.error
+      ? `\n  archive read failed: ${archive.error.slice(0, 500)}`
+      : '';
+    console.error(`[${label}] ${coherenceMessage}${archiveError}`);
+    process.exit(4);
+  }
+  console.log(`[${label}] ${coherenceMessage}`);
+}
