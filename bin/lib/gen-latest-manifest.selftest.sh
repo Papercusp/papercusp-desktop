@@ -116,25 +116,29 @@ else
   bad "mixed cut did not write both manifests (gui=$([[ -f "$MIX_JSON" ]] && echo y || echo n), server=$([[ -f "$MIX_SERVER_JSON" ]] && echo y || echo n))"
 fi
 
-# 4) A normalized Server DiskSpan is a release-page zip, not an updater
-# installer.  A same-version merge base must not resurrect its old Windows
-# stub entry when the current artifact set contains only the normalized zip.
+# 4) A signed normalized Server DiskSpan zip is a Windows updater artifact.
+# It must replace a same-version stale stub entry with its encoded ZIP URL and
+# ZIP signature.
 BASE_SERVER_ZIP="$WORK/base-server-zip.json"
 cat > "$BASE_SERVER_ZIP" <<JSON
 { "version": "$VER", "channel": "stable", "notes": "x", "pub_date": "2026-01-01T00:00:00Z",
   "platforms": { "windows-x86_64": { "signature": "OLD-stub-sig", "url": "https://example.com/releases/desktop-v${VER}/Papercusp%20Server_${VER}_x64-setup.exe" } } }
 JSON
 SERVER_ZIP="$WORK/Papercusp Server_${VER}_x64-setup.zip"
-: > "$SERVER_ZIP"
+SERVER_ZIP_SIG="$SERVER_ZIP.sig"
+: > "$SERVER_ZIP"; printf 'server-zip-signature' > "$SERVER_ZIP_SIG"
 TAG_SERVER_ZIP="$(desktop_release_tag "$VER" stable)"
 SERVER_ZIP_JSON="$(gen_latest_manifest_server_json_path "$TAG_SERVER_ZIP")"
 printf '%s\n' '{"stale":true}' > "$SERVER_ZIP_JSON"
 GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$BASE_SERVER_ZIP" \
 PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
   gen_latest_manifest "$VER" stable "$TAG_SERVER_ZIP" "$SERVER_ZIP" >/dev/null 2>&1
-[[ ! -f "$SERVER_ZIP_JSON" ]] \
-  && ok "normalized Server zip removes a stale same-version Windows stub entry" \
-  || bad "normalized Server zip left a stale Windows stub entry in latest-server.json"
+python3 - "$SERVER_ZIP_JSON" <<'PY' && ok "normalized Server zip replaces stale Windows stub with signed updater entry" || bad "normalized Server zip was not emitted as a signed Windows updater entry"
+import json, sys
+entry = json.load(open(sys.argv[1]))["platforms"]["windows-x86_64"]
+assert entry["url"].endswith("Papercusp%20Server_1.2.3_x64-setup.zip"), entry
+assert entry["signature"] == "server-zip-signature", entry
+PY
 
 # 5) MERGE MODE (EI-18111560213741904): publishing a SECOND platform onto an
 #    already-published manifest must overlay its own entry while carrying every
