@@ -185,6 +185,26 @@ test('snapshot placement stays on the workspace filesystem and has an EXDEV-safe
   assert.match(full, /cp -a --reflink=auto -- "\$source" "\$dest"/);
 });
 
+test('the immutable boundary carries a byte-independent package-local Tauri CLI pinned to the desktop lockfile', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const toolchainCopyAt = full.indexOf(
+    'snapshot_copy_tree_independent "$LIVE_DESKTOP_DIR/node_modules"',
+  );
+  const switchAt = full.indexOf('DESKTOP_DIR="$DEB_SOURCE_SNAPSHOT_DESKTOP"');
+
+  assert.match(
+    full,
+    /snapshot_copy_tree_independent\(\)[\s\S]*cp -a --reflink=auto -- "\$source" "\$dest"/,
+    'package-local build tools must be independent bytes, never a live symlink or hardlink snapshot',
+  );
+  assert.ok(toolchainCopyAt > 0, 'the private desktop worktree must receive its package-local node_modules');
+  assert.ok(toolchainCopyAt < switchAt, 'complete and verify the toolchain before exposing the snapshot');
+  assert.match(full, /_snapshot_desktop_lock_sha[\s\S]*_live_desktop_lock_sha_before/);
+  assert.match(full, /_live_desktop_lock_sha_after[\s\S]*_live_desktop_lock_sha_before/);
+  assert.match(full, /node_modules\/\.bin\/tauri/);
+  assert.match(full, /_copied_tauri_version[\s\S]*_pinned_tauri_version/);
+});
+
 test('snapshot provenance cannot be bypassed by live patch mtimes and cleanup is part of the existing exit trap', () => {
   const full = fs.readFileSync(scriptPath, 'utf8');
 

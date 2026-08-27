@@ -74,6 +74,17 @@ snapshot_copy_tree() {
   fi
 }
 
+# Package-local build tools are not publish-once outputs like the sidecar.
+# Keep their snapshot byte-independent from the live install: a later `npm ci`
+# may rewrite files in place, which would also mutate a hardlink snapshot.
+snapshot_copy_tree_independent() {
+  local source="${1:?snapshot source required}"
+  local dest="${2:?snapshot destination required}"
+  mkdir -p -- "$(dirname "$dest")"
+  rm -rf -- "$dest"
+  cp -a --reflink=auto -- "$source" "$dest"
+}
+
 DEBUG=0
 KEEP=10
 while [ $# -gt 0 ]; do
@@ -179,6 +190,51 @@ if ! git -C "$LIVE_DESKTOP_DIR" worktree add --detach \
   exit 4
 fi
 DEB_SOURCE_SNAPSHOT_WORKTREE=1
+
+# The desktop package owns @tauri-apps/cli in its own package-lock/node_modules;
+# the superproject root deliberately does not. A detached worktree therefore
+# has no `tauri` executable unless we carry this package-local toolchain too.
+# Refuse to mix the pinned desktop source with an install for a different lock,
+# then make an independent copy so a concurrent/future npm install cannot
+# mutate the build inputs through shared hardlink inodes.
+_snapshot_desktop_lock="$DEB_SOURCE_SNAPSHOT_DESKTOP/package-lock.json"
+_live_desktop_lock="$LIVE_DESKTOP_DIR/package-lock.json"
+[[ -s "$_snapshot_desktop_lock" && -s "$_live_desktop_lock" ]] || {
+  echo "FATAL: desktop package-lock.json is missing; cannot pin the deb build toolchain." >&2
+  exit 4
+}
+_snapshot_desktop_lock_sha="$(sha256sum "$_snapshot_desktop_lock" | awk '{print $1}')"
+_live_desktop_lock_sha_before="$(sha256sum "$_live_desktop_lock" | awk '{print $1}')"
+[[ "$_snapshot_desktop_lock_sha" == "$_live_desktop_lock_sha_before" ]] || {
+  echo "FATAL: live desktop dependencies do not match pinned source $DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT." >&2
+  echo "       Run npm ci in $LIVE_DESKTOP_DIR at the pinned package-lock before retrying." >&2
+  exit 4
+}
+[[ -d "$LIVE_DESKTOP_DIR/node_modules" ]] || {
+  echo "FATAL: $LIVE_DESKTOP_DIR/node_modules is missing; run npm ci there before retrying." >&2
+  exit 4
+}
+snapshot_copy_tree_independent "$LIVE_DESKTOP_DIR/node_modules" \
+  "$DEB_SOURCE_SNAPSHOT_DESKTOP/node_modules"
+_live_desktop_lock_sha_after="$(sha256sum "$_live_desktop_lock" | awk '{print $1}')"
+[[ "$_live_desktop_lock_sha_after" == "$_live_desktop_lock_sha_before" ]] || {
+  echo "FATAL: desktop package-lock.json changed while snapshotting the deb build toolchain." >&2
+  exit 4
+}
+[[ -x "$DEB_SOURCE_SNAPSHOT_DESKTOP/node_modules/.bin/tauri" ]] || {
+  echo "FATAL: pinned desktop toolchain has no executable node_modules/.bin/tauri." >&2
+  echo "       Run npm ci in $LIVE_DESKTOP_DIR, then retry." >&2
+  exit 4
+}
+_pinned_tauri_version="$(node -p \
+  "require('${DEB_SOURCE_SNAPSHOT_DESKTOP}/package-lock.json').packages['node_modules/@tauri-apps/cli'].version" 2>/dev/null || true)"
+_copied_tauri_version="$(node -p \
+  "require('${DEB_SOURCE_SNAPSHOT_DESKTOP}/node_modules/@tauri-apps/cli/package.json').version" 2>/dev/null || true)"
+[[ -n "$_pinned_tauri_version" && "$_copied_tauri_version" == "$_pinned_tauri_version" ]] || {
+  echo "FATAL: copied Tauri CLI version '${_copied_tauri_version:-missing}' does not match pinned lock '${_pinned_tauri_version:-missing}'." >&2
+  exit 4
+}
+echo "==> immutable desktop toolchain: tauri=$_copied_tauri_version lock=${_snapshot_desktop_lock_sha:0:10}"
 
 command -v flock >/dev/null 2>&1 || {
   echo "FATAL: flock(1) is required to snapshot the sidecar safely." >&2
