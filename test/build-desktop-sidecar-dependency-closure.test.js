@@ -60,7 +60,10 @@ function makeFixture() {
   writePackage(path.join(nodeModules, 'lost-pixel'), {
     name: 'lost-pixel',
     version: '3.22.0',
-    dependencies: { 'posthog-node': '3.5.0' },
+    dependencies: {
+      'posthog-node': '3.5.0',
+      'onnxruntime-web': '1.0.0',
+    },
   });
   writePackage(path.join(nodeModules, 'lost-pixel/node_modules/posthog-node'), {
     name: 'posthog-node',
@@ -70,6 +73,14 @@ function makeFixture() {
   writePackage(path.join(nodeModules, 'rusha'), {
     name: 'rusha',
     version: '0.8.14',
+  });
+  // Parent copies can smuggle a skipped nested package into the destination.
+  // Its unresolved dependencies must not force an exception in the final-tree
+  // guard; the existing browser-only rule promises to omit this package itself.
+  writePackage(path.join(nodeModules, 'lost-pixel/node_modules/onnxruntime-web'), {
+    name: 'onnxruntime-web',
+    version: '1.0.0',
+    dependencies: { 'browser-only-missing-dep': '1.0.0' },
   });
 
   return { fixtureRoot, repoRoot, sidecarDir };
@@ -141,6 +152,11 @@ test('closure preserves nested package identity and follows its hoisted dependen
       '3.5.0',
     );
     assert.equal(readVersion(path.join(installed, 'rusha')), '0.8.14');
+    assert.equal(
+      fs.existsSync(path.join(installed, 'lost-pixel/node_modules/onnxruntime-web')),
+      false,
+      'the browser-only package must be removed even when a parent copy brought it across',
+    );
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }

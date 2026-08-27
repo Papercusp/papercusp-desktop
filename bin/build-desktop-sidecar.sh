@@ -1259,10 +1259,13 @@ fi
 # 'require-addon'"). BFS each native package's package.json `dependencies`.
 echo "→ copying externalized native deps + their dependency closure into the sidecar"
 nat_copied=0; nat_missing=0
-# Visited-set as a space-delimited string, NOT `declare -A` — macOS ships
-# bash 3.2 (no associative arrays) and this script must run on the mac
-# build VM (mac-desktop-release-readiness-2026-06-11).
-_seen=" "
+# Visited-set keyed by RESOLVED SOURCE PATH, not package name. Different versions
+# of one package legitimately coexist at different npm topology positions (for
+# example top-level posthog-node@5.x and lost-pixel's nested posthog-node@3.5.0).
+# A name-keyed set skips the nested manifest and therefore its unique runtime
+# dependencies. Keep the delimiter-string shape instead of `declare -A`: macOS
+# ships bash 3.2 (no associative arrays) and this script runs on the mac build VM.
+_seen="|"
 # The bare-*/holepunch native packages (bare-type, bare-fs, bare-os, …) ship
 # npm-published prebuilds for EVERY platform they support — not just desktop
 # (linux/darwin/win32) but android-{ia32,arm,arm64,x64} and ios-{arm64,x64}
@@ -1544,35 +1547,106 @@ prune_gyp_build_intermediates() {
 # voice stack.) Note the musl-strip further down already spoke of "@img/sharp-linuxmusl-*"
 # arriving "as optional deps" — it was stripping packages that never got copied.
 #
-# A queued name may carry a leading '?', meaning "reached via optionalDependencies".
-# For those, NOT FOUND is the expected, correct outcome — npm only installs the
-# optionalDeps matching THIS platform, so @img/sharp-darwin-arm64 is legitimately
-# absent on Linux — so it is a silent skip. A missing REQUIRED dep still warns and
-# counts, because that one is a real defect.
-copy_pkg_closure() {
-  local queue=("$1")
-  while [[ ${#queue[@]} -gt 0 ]]; do
-    local cur="${queue[0]}"; queue=("${queue[@]:1}")
-    local optional=0
-    if [[ "$cur" == '?'* ]]; then optional=1; cur="${cur#\?}"; fi
-    case "$_seen" in *" $cur "*) continue ;; esac
-    _seen="${_seen}${cur} "
-    # onnxruntime-web is a @huggingface/transformers dependency but is ONLY used on
-    # the browser backend — the node path loads onnxruntime-node. Copying it would
-    # add 134M of wasm/js to the sidecar that can never execute. Skip it outright.
-    [[ "$cur" == "onnxruntime-web" ]] && { echo "  ⊘ skipping onnxruntime-web (browser-only backend; node uses onnxruntime-node)"; continue; }
-    [[ -e "$SIDECAR_DIR/node_modules/$cur" ]] && continue
-    local src=""
-    for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
-      [[ -d "$base/$cur" ]] && { src="$base/$cur"; break; }
+# Resolve a dependency from the package that REQUESTED it, following Node's
+# node_modules ancestor search. Falling back to a top-level package by name is not
+# equivalent: lost-pixel depends on its nested posthog-node@3.5.0, while this repo
+# also carries top-level posthog-node@5.x. The old name-only lookup read 5.x's
+# manifest, missed 3.5.0's rusha dependency, and produced a signed Server bundle
+# that installed successfully but died on clean-machine boot.
+resolve_pkg_source() {
+  local pkg="$1" requester="${2:-}" probe parent candidate base
+  if [[ -n "$requester" ]]; then
+    probe="$requester"
+    while :; do
+      # Node does not probe node_modules/node_modules while ascending.
+      if [[ "$(basename "$probe")" != "node_modules" ]]; then
+        candidate="$probe/node_modules/$pkg"
+        [[ -d "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+      fi
+      parent="$(dirname "$probe")"
+      [[ "$parent" != "$probe" ]] || break
+      probe="$parent"
     done
-    if [[ -z "$src" ]]; then
+  fi
+  # Entrypoints have no requester. These are the same three install roots the
+  # original copier searched, in the same precedence order.
+  for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
+    [[ -d "$base/$pkg" ]] && { printf '%s\n' "$base/$pkg"; return 0; }
+  done
+  return 1
+}
+
+# Preserve the source node_modules topology in the sidecar. This lets top-level
+# and nested versions coexist at the exact paths Node will search at runtime.
+pkg_dest_for_source() {
+  local src="$1" base rel
+  for base in "$WEB_DIR/node_modules" "$REPO_ROOT/node_modules" "$ROOT/node_modules"; do
+    case "$src" in
+      "$base"/*)
+        rel="${src#"$base/"}"
+        printf '%s\n' "$SIDECAR_DIR/node_modules/$rel"
+        return 0
+        ;;
+    esac
+  done
+  echo "ERROR: resolved package source is outside every known node_modules root: $src" >&2
+  return 1
+}
+
+# A queued row carries name + requesting source + optionality in parallel arrays.
+# For optionalDependencies, NOT FOUND is the expected, correct outcome — npm only
+# installs the packages matching THIS platform, so @img/sharp-darwin-arm64 is
+# legitimately absent on Linux. A missing REQUIRED dep still warns and counts;
+# the assembled-tree guard below then fails closed with the complete referrer list.
+copy_pkg_closure() {
+  local queue_names=("$1")
+  local queue_requesters=("")
+  local queue_optional=(0)
+  while [[ ${#queue_names[@]} -gt 0 ]]; do
+    local cur="${queue_names[0]}"
+    local requester_src="${queue_requesters[0]}"
+    local optional="${queue_optional[0]}"
+    queue_names=("${queue_names[@]:1}")
+    queue_requesters=("${queue_requesters[@]:1}")
+    queue_optional=("${queue_optional[@]:1}")
+    local src=""
+    if ! src="$(resolve_pkg_source "$cur" "$requester_src")"; then
       # An optionalDep for another platform is SUPPOSED to be absent here — not a defect.
-      [[ $optional -eq 1 ]] && continue
-      echo "  ⚠ closure dep '$cur' not found in any node_modules"; nat_missing=$((nat_missing+1)); continue
+      [[ "$optional" == 1 ]] && continue
+      echo "  ⚠ closure dep '$cur' required by '${requester_src:-<entrypoint>}' not found in its Node resolution path"
+      nat_missing=$((nat_missing+1))
+      continue
     fi
-    mkdir -p "$SIDECAR_DIR/node_modules/$(dirname "$cur")"
-    cp -aL "$src" "$SIDECAR_DIR/node_modules/$cur"
+    # A name-keyed seen-set suppresses distinct nested versions. Source-path
+    # identity preserves both while still deduplicating repeat visits.
+    case "$_seen" in *"|$src|"*) continue ;; esac
+    _seen="${_seen}${src}|"
+
+    local dest=""
+    if ! dest="$(pkg_dest_for_source "$src")"; then
+      nat_missing=$((nat_missing+1))
+      continue
+    fi
+    # onnxruntime-web is a @huggingface/transformers dependency but is ONLY used
+    # on the browser backend — the node path loads onnxruntime-node. A parent
+    # package copy can bring its nested directory across before this queue row is
+    # visited, so "continue" alone does not skip it: delete its exact mapped
+    # destination and then stop traversal. Otherwise 134M of inert wasm/js ships,
+    # and the final-tree dependency audit correctly sees its deliberately-omitted
+    # browser dependencies as unresolved.
+    if [[ "$cur" == "onnxruntime-web" ]]; then
+      rm -rf "$dest"
+      echo "  ⊘ skipping onnxruntime-web (browser-only backend; node uses onnxruntime-node)"
+      continue
+    fi
+    # A parent `cp -aL` may already have brought a nested dependency directory
+    # across. Do not copy it twice, but DO traverse its manifest: skipping the
+    # traversal is the exact path by which nested posthog-node lost rusha.
+    if [[ ! -e "$dest" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      cp -aL "$src" "$dest"
+      nat_copied=$((nat_copied+1))
+    fi
     # WI-5638 (2026-07-20, revised 2026-07-27): strip runtime model-download
     # scratch — but NOT the two embedding models the desktop app actually
     # needs at runtime. @huggingface/transformers' DEFAULT cacheDir resolves
@@ -1590,7 +1664,7 @@ copy_pkg_closure() {
     # intentionally bundled, not dead weight) — keep BOTH. Only bge-small
     # (Xenova/bge-small-en-v1.5, 'local' mode) and any other/future scratch
     # under `.cache` is genuinely unused and safe to strip.
-    _transformers_cache="$SIDECAR_DIR/node_modules/$cur/.cache"
+    local _transformers_cache="$dest/.cache"
     if [[ "$cur" == "@huggingface/transformers" && -d "$_transformers_cache" ]]; then
       find "$_transformers_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' -exec rm -rf {} +
       if [[ -d "$_transformers_cache/onnx-community" ]]; then
@@ -1599,15 +1673,124 @@ copy_pkg_closure() {
       fi
       prune_transformers_model_fragments "$_transformers_cache"
     else
-      rm -rf "$SIDECAR_DIR/node_modules/$cur/.cache"
+      rm -rf "$dest/.cache"
     fi
-    prune_foreign_prebuilds "$SIDECAR_DIR/node_modules/$cur"
-    prune_foreign_onnx_bins "$SIDECAR_DIR/node_modules/$cur"
-    prune_onnx_gpu_providers "$SIDECAR_DIR/node_modules/$cur"
-    nat_copied=$((nat_copied+1))
-    local deps; deps=$(node -e "try{const p=require('$src/package.json');const r=Object.keys(p.dependencies||{});const o=Object.keys(p.optionalDependencies||{}).map(n=>'?'+n);process.stdout.write([...r,...o].join(' '))}catch(e){}" 2>/dev/null)
-    for d in $deps; do queue+=("$d"); done
+    prune_foreign_prebuilds "$dest"
+    prune_foreign_onnx_bins "$dest"
+    prune_onnx_gpu_providers "$dest"
+
+    local deps
+    deps=$(node -e 'try { const p=require(process.argv[1]); const optional=new Set(Object.keys(p.optionalDependencies||{})); const required=Object.keys(p.dependencies||{}).filter((name)=>!optional.has(name)); const opt=[...optional].map((name)=>`?${name}`); process.stdout.write([...required,...opt].join(" ")); } catch {}' "$src/package.json" 2>/dev/null)
+    local d dep_optional
+    for d in $deps; do
+      dep_optional=0
+      if [[ "$d" == '?'* ]]; then dep_optional=1; d="${d#\?}"; fi
+      queue_names+=("$d")
+      queue_requesters+=("$src")
+      queue_optional+=("$dep_optional")
+    done
   done
+}
+
+# Class-level backstop: inspect every actual package in the ASSEMBLED sidecar and
+# resolve every required dependency using only that tree. This does not replace
+# the clean-root boot gate (which exercises the real artifact); it catches the
+# dependency class immediately at staging time and names every broken referrer.
+assert_runtime_dependency_closure() {
+  local root="$1"
+  [[ -d "$root/node_modules" ]] || {
+    echo "ERROR: assembled sidecar has no node_modules directory" >&2
+    return 1
+  }
+  node - "$root" <<'NODE'
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  const root = path.resolve(process.argv[2]);
+  const nodeModulesRoot = path.join(root, 'node_modules');
+  const visited = new Set();
+  const failures = new Set();
+  // This package is deliberately deleted by copy_pkg_closure: the packaged
+  // operator is Node-only and uses onnxruntime-node, while onnxruntime-web is a
+  // browser backend whose 134M wasm payload cannot execute here. Keep the
+  // exception exact; every other required dependency remains fail-closed.
+  const intentionallyOmitted = new Set(['onnxruntime-web']);
+
+  function isDirectory(candidate) {
+    try { return fs.statSync(candidate).isDirectory(); } catch { return false; }
+  }
+
+  function isInsideRoot(candidate) {
+    return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+  }
+
+  function dependencyDir(fromPackage, dependency) {
+    let cursor = fromPackage;
+    while (isInsideRoot(cursor)) {
+      if (path.basename(cursor) !== 'node_modules') {
+        const candidate = path.join(cursor, 'node_modules', ...dependency.split('/'));
+        if (fs.existsSync(path.join(candidate, 'package.json'))) return candidate;
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+    return null;
+  }
+
+  function visitPackage(packageDir) {
+    const logicalDir = path.resolve(packageDir);
+    if (visited.has(logicalDir)) return;
+    visited.add(logicalDir);
+
+    const manifestPath = path.join(logicalDir, 'package.json');
+    if (!fs.existsSync(manifestPath)) return;
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (error) {
+      failures.add(`${path.relative(nodeModulesRoot, logicalDir)} -> invalid package.json (${error.message})`);
+      return;
+    }
+
+    const optional = new Set(Object.keys(manifest.optionalDependencies || {}));
+    const required = Object.keys(manifest.dependencies || {}).filter(
+      (dependency) => !optional.has(dependency) && !intentionallyOmitted.has(dependency),
+    );
+    const label = `${path.relative(nodeModulesRoot, logicalDir)}@${manifest.version || 'unknown'}`;
+    for (const dependency of required) {
+      if (!dependencyDir(logicalDir, dependency)) failures.add(`${label} -> ${dependency}`);
+    }
+
+    visitNodeModules(path.join(logicalDir, 'node_modules'));
+  }
+
+  function visitNodeModules(nodeModulesDir) {
+    if (!isDirectory(nodeModulesDir)) return;
+    for (const entry of fs.readdirSync(nodeModulesDir)) {
+      if (entry === '.bin') continue;
+      const entryPath = path.join(nodeModulesDir, entry);
+      if (!isDirectory(entryPath)) continue;
+      if (entry.startsWith('@')) {
+        for (const scopedEntry of fs.readdirSync(entryPath)) {
+          const scopedPath = path.join(entryPath, scopedEntry);
+          if (isDirectory(scopedPath)) visitPackage(scopedPath);
+        }
+      } else {
+        visitPackage(entryPath);
+      }
+    }
+  }
+
+  visitNodeModules(nodeModulesRoot);
+  if (failures.size > 0) {
+    console.error(`ERROR: ${failures.size} unresolved runtime dependencies in assembled sidecar:`);
+    for (const failure of [...failures].slice(0, 100)) console.error(`  - ${failure}`);
+    if (failures.size > 100) console.error(`  - ... ${failures.size - 100} more`);
+    process.exit(1);
+  }
+  console.log(`  ✓ runtime dependency closure resolved inside sidecar (${visited.size} packages checked)`);
+NODE
 }
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
@@ -1847,6 +2030,9 @@ echo "→ pruning node-gyp build scaffolding from sidecar native modules (releas
 prune_gyp_build_intermediates "$SIDECAR_DIR"
 echo "→ pruning vendored test fixtures from sidecar (release-privacy, WI-37620)"
 prune_vendored_test_fixtures "$SIDECAR_DIR"
+
+echo "→ verifying every required Node runtime dependency resolves inside the assembled sidecar"
+assert_runtime_dependency_closure "$SIDECAR_DIR" || exit 1
 
 echo "→ verifying no ONNX GPU execution providers survive in the sidecar (WI-38682)"
 assert_no_onnx_gpu_providers "$SIDECAR_DIR" || exit 1
