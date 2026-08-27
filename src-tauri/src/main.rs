@@ -2522,7 +2522,8 @@ mod helper_tests {
         bundled_path_env, classify_advertisement, cmdline_looks_like_operator,
         endpoint_ipc_socket_path_supported_for_target, find_endpoint_ipc_socket,
         inspect_advertisement, is_tcp_endpoint, local_process_cmdline, read_dev_ipc_socket,
-        read_dev_ipc_socket_for_port, resolve_dev_ipc_socket, url_encode, AdvertisementState,
+        read_dev_ipc_socket_for_port, resolve_dev_ipc_socket, resolve_wsl_endpoint_ipc_socket,
+        url_encode, AdvertisementState,
     };
 
     /// Well above any realistic pid_max (and positive as i32) → ESRCH / no
@@ -3160,6 +3161,30 @@ mod helper_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Packaged Windows reads the endpoint advertisement from inside the WSL
+    /// distro, where the bundled sidecar is the operator serving this webview.
+    /// That successful read must therefore enable content-origin-scoped IPC
+    /// (including `/api/desktop/version`) instead of silently taking HTTP.
+    #[test]
+    fn packaged_wsl_resolution_proves_content_origin_for_a_found_endpoint() {
+        let resolved = resolve_wsl_endpoint_ipc_socket(Some(
+            "tcp://127.0.0.1:21958".to_string(),
+        ));
+        assert_eq!(
+            resolved.path,
+            Some(std::path::PathBuf::from("tcp://127.0.0.1:21958"))
+        );
+        assert!(
+            resolved.owner_is_content_origin,
+            "the packaged WSL sidecar owns the operator serving this webview: {}",
+            resolved.detail
+        );
+
+        let missing = resolve_wsl_endpoint_ipc_socket(None);
+        assert_eq!(missing.path, None);
+        assert!(!missing.owner_is_content_origin);
+    }
 }
 
 #[cfg(test)]
@@ -3527,6 +3552,26 @@ fn read_endpoint_ipc_socket_via_wsl() -> Option<String> {
     parse_endpoint_ipc_socket(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Classify an endpoint read from the packaged Windows sidecar's WSL-native
+/// discovery file. The sidecar launched by this desktop is the operator serving
+/// the webview, so a successful WSL read proves the IPC owner is the content
+/// origin even though the WSL read does not carry a pid for liveness validation.
+/// Keep this classification separate from the read so Linux CI can exercise the
+/// owner-origin contract without invoking `wsl.exe`.
+#[cfg(any(target_os = "windows", test))]
+fn resolve_wsl_endpoint_ipc_socket(socket: Option<String>) -> endpoint_ipc::SocketResolution {
+    match socket {
+        Some(s) => endpoint_ipc::SocketResolution::found(
+            s,
+            "read from the WSL distro's ~/.papercusp/endpoint-ipc.json",
+        )
+        .from_content_origin(),
+        None => endpoint_ipc::SocketResolution::missing(
+            "no endpoint-ipc.json readable inside the WSL distro yet",
+        ),
+    }
+}
+
 /// Unified endpoint-IPC socket discovery — mirrors `find_operator_discovery`.
 /// On Windows routed via WSL, read the discovery JSON from INSIDE the distro
 /// (the sidecar's WSL-native `~/.papercusp`, cross-filesystem from the Windows
@@ -3554,32 +3599,24 @@ fn find_endpoint_ipc_socket(workspace_home: &std::path::Path, via_wsl: bool) -> 
 /// operator nothing about whether the sidecar had yet advertised, had died, or
 /// had left a stale file behind.
 ///
-/// The WSL cat-read branch (Windows-only, un-exercisable on this fleet's Linux
-/// dev boxes) stays a raw read — it carries no pid to validate against without
-/// a matching change to `read_endpoint_ipc_socket_via_wsl`.
+/// The WSL cat-read branch carries no pid to validate against, but that does not
+/// weaken its ownership proof: in packaged Windows it reads the WSL-native
+/// discovery file written by the sidecar that serves this webview. Its explicit
+/// owner-origin classification is kept in `resolve_wsl_endpoint_ipc_socket`, a
+/// helper also covered by Linux CI.
 fn find_endpoint_ipc_socket_resolved(
     workspace_home: &std::path::Path,
     via_wsl: bool,
 ) -> endpoint_ipc::SocketResolution {
     #[cfg(target_os = "windows")]
     if via_wsl {
-        return match read_endpoint_ipc_socket_via_wsl() {
-            Some(s) => endpoint_ipc::SocketResolution::found(
-                s,
-                "read from the WSL distro's ~/.papercusp/endpoint-ipc.json",
-            ),
-            None => endpoint_ipc::SocketResolution::missing(
-                "no endpoint-ipc.json readable inside the WSL distro yet",
-            ),
-        };
+        return resolve_wsl_endpoint_ipc_socket(read_endpoint_ipc_socket_via_wsl());
     }
     let path = workspace_home.join(".papercusp/endpoint-ipc.json");
     let state = inspect_advertisement(&path, via_wsl);
     match state.live_socket() {
         // Production: the sidecar we spawned IS the operator serving this
-        // webview, so the IPC owner is the content origin by construction. (The
-        // WSL branch above must not claim this — it is D-005's one declared
-        // HTTP exception, and it carries no pid to validate against.)
+        // webview, so the IPC owner is the content origin by construction.
         Some(socket) => endpoint_ipc::SocketResolution::found(
             socket,
             format!("sidecar discovery file: {}", state.describe()),

@@ -775,9 +775,9 @@ impl SocketResolution {
     ///
     /// Only two call sites may use it, and both are structural rather than
     /// heuristic: the per-port dev advertisement, and the production sidecar
-    /// (which IS the operator serving the webview). The singleton fallback and
-    /// the WSL cat-read path must NOT — the former can name a foreign operator,
-    /// and the latter is D-005's one declared HTTP exception.
+    /// (which IS the operator serving the webview, including its packaged
+    /// Windows-via-WSL WSL-native discovery read). The singleton fallback must
+    /// NOT use it because that legacy file can name a foreign operator.
     #[must_use]
     pub fn from_content_origin(mut self) -> Self {
         self.owner_is_content_origin = true;
