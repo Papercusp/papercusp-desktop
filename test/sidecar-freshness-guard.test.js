@@ -348,7 +348,7 @@ test('build-desktop-sidecar.sh RECORDS provenance into the published sidecar', (
     'the release audit attestation must be recorded only AFTER the final scan succeeds');
 });
 
-for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh']) {
+for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh', 'build-and-archive-deb.sh']) {
   test(`${script} CONSULTS the freshness check, not just existence`, () => {
     const src = fs.readFileSync(path.join(BIN, script), 'utf8');
     assert.match(

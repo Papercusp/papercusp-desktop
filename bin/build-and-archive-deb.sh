@@ -270,6 +270,20 @@ export PAPERCUSP_REPO_DIR="$DEB_SOURCE_SNAPSHOT_ROOT"
 export PAPERCUSP_BUILD_SHA="${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}"
 echo "==> immutable deb source: root=${DEB_SOURCE_SNAPSHOT_COMMIT:0:10} desktop=${DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT:0:10} path=$DEB_SOURCE_SNAPSHOT_ROOT"
 
+# This wrapper CONSUMES a sidecar it did not build. A normal/dev sidecar can be
+# runtime-complete yet still carry the build box's identity because the release
+# scrub needs PAPERCUSP_RELEASE_OWNER_NAME at build time. That exact gap escaped
+# into the WI-3496 canonical archive: the later finished-artifact audit found 39
+# leaking paths only after the multi-GB package had been built and repacked.
+# Reuse the cross-build freshness contract rather than inventing a second stamp:
+# the final assembled-sidecar identity scan records releaseIdentityAudit only
+# after it passes, and this assertion cannot be bypassed by ALLOW_STALE.
+PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
+  node "$LIVE_DESKTOP_DIR/bin/check-sidecar-freshness.js" \
+    --sidecar "$DESKTOP_DIR/src-tauri/sidecar" \
+    --repo-root "$LIVE_REPO_DIR" \
+    --label build-and-archive-deb
+
 # --- SEED OVERLAY / SERVER PRODUCT (WI-6075 / GUI-Server split P-007) ---
 #
 # The multi-GB hive seed (src-tauri/seed, ~2GB) is deliberately NOT in the base
@@ -617,6 +631,8 @@ cleanup_build_cgroup() {
 
 BUILD_PGID=""
 ARCHIVE_TMP=""
+ARCHIVE_SIG_TMP=""
+ARCHIVE_SIG_PUBLISHED=""
 stop_build_group() {
   if [ -n "$BUILD_PGID" ] && kill -0 "-$BUILD_PGID" 2>/dev/null; then
     echo "==> stopping build process group $BUILD_PGID (so it cannot orphan into the shared staging dir)" >&2
@@ -631,6 +647,16 @@ stop_build_group() {
   cleanup_build_cgroup
   if [ -n "$ARCHIVE_TMP" ]; then
     rm -f -- "$ARCHIVE_TMP"
+  fi
+  if [ -n "$ARCHIVE_SIG_TMP" ]; then
+    rm -f -- "$ARCHIVE_SIG_TMP"
+  fi
+  # The signature is published first and the .deb is the discoverable commit
+  # marker. Roll back a signature-only publication after any ordinary failure;
+  # after the .deb move succeeds this condition is false and the pair remains.
+  if [ -n "$ARCHIVE_SIG_PUBLISHED" ] \
+     && [ ! -f "${ARCHIVE_SIG_PUBLISHED%.sig}" ]; then
+    rm -f -- "$ARCHIVE_SIG_PUBLISHED"
   fi
   cleanup_deb_source_snapshot
 }
@@ -783,25 +809,72 @@ fi
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASENAME="$(basename "$DEB_PATH" .deb)"
 ARCHIVED_PATH="$ARCHIVE_DIR/${STAMP}-${GIT_SHA}-${BASENAME}.deb"
+ARCHIVED_SIG_PATH="${ARCHIVED_PATH}.sig"
+LIVE_SIG_PATH="${DEB_PATH}.sig"
 
 mkdir -p "$ARCHIVE_DIR"
-# Never hardlink the fixed live bundle path into the archive. Tauri/dpkg may
-# rewrite that path in place on the next build; a hardlink then rewrites the
-# supposedly immutable OLD archive too (observed live 2026-08-20: the archive
-# named 04:47:18Z acquired the 06:07 build's inode, mtime, and bytes). A reflink
-# retains the near-zero incremental storage benefit where the filesystem
-# supports CoW while giving the archive its own inode; --reflink=auto falls
-# back to an ordinary byte copy everywhere else.
+[[ -s "$LIVE_SIG_PATH" ]] || {
+  echo "FATAL: signed deb has no non-empty updater signature: $LIVE_SIG_PATH" >&2
+  echo "       Refusing to publish an archive that a downloader cannot verify." >&2
+  exit 9
+}
+
+# Never hardlink either fixed live path into the archive. Tauri/dpkg may rewrite
+# the .deb and signer may rewrite its .sig on the next build; a hardlink then
+# mutates the supposedly immutable OLD archive too. Reflinks retain the near-zero
+# incremental storage benefit while giving both archived files distinct inodes.
 ARCHIVE_TMP="${ARCHIVED_PATH}.partial.$$"
-rm -f -- "$ARCHIVE_TMP"
+ARCHIVE_SIG_TMP="${ARCHIVED_SIG_PATH}.partial.$$"
+rm -f -- "$ARCHIVE_TMP" "$ARCHIVE_SIG_TMP"
 cp --reflink=auto --preserve=mode,timestamps -- "$DEB_PATH" "$ARCHIVE_TMP"
+cp --reflink=auto --preserve=mode,timestamps -- "$LIVE_SIG_PATH" "$ARCHIVE_SIG_TMP"
 if [[ "$(stat -c '%d:%i' "$DEB_PATH")" == "$(stat -c '%d:%i' "$ARCHIVE_TMP")" ]]; then
   echo "FATAL: archive copy shares the live deb inode; refusing a mutable archive ($ARCHIVE_TMP)." >&2
   exit 9
 fi
+if [[ "$(stat -c '%d:%i' "$LIVE_SIG_PATH")" == "$(stat -c '%d:%i' "$ARCHIVE_SIG_TMP")" ]]; then
+  echo "FATAL: archive copy shares the live signature inode; refusing a mutable archive ($ARCHIVE_SIG_TMP)." >&2
+  exit 9
+fi
+cmp -s -- "$DEB_PATH" "$ARCHIVE_TMP" || {
+  echo "FATAL: staged archive deb differs from the signed live bytes." >&2
+  exit 9
+}
+cmp -s -- "$LIVE_SIG_PATH" "$ARCHIVE_SIG_TMP" || {
+  echo "FATAL: staged archive signature differs from the live signature bytes." >&2
+  exit 9
+}
+
+# Verify the STAGED pair, not the live pair. This proves the exact bytes about
+# to become immutable are accepted by the updater key embedded in this pinned
+# desktop source. Read the maintained Tauri config directly so the archive
+# verifier cannot drift onto a parallel key/config surface.
+UPDATER_PUBKEY="$(python3 - "$DESKTOP_DIR/src-tauri/tauri.conf.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8'))['plugins']['updater']['pubkey'])
+except (OSError, KeyError, TypeError, ValueError):
+    print('')
+PY
+)"
+[[ -n "$UPDATER_PUBKEY" ]] || {
+  echo "FATAL: pinned Tauri config has no updater public key; signature cannot be verified." >&2
+  exit 9
+}
+node "$LIVE_DESKTOP_DIR/bin/verify-tauri-signature.mjs" \
+  "$UPDATER_PUBKEY" "$ARCHIVE_TMP" "$ARCHIVE_SIG_TMP"
+
+# Publish the signature first, then the .deb as the commit marker. Archive
+# consumers enumerate *.deb, so there is no observable package without its
+# already-verified sibling. The EXIT trap rolls back a signature-only result if
+# the second rename fails.
+mv -- "$ARCHIVE_SIG_TMP" "$ARCHIVED_SIG_PATH"
+ARCHIVE_SIG_TMP=""
+ARCHIVE_SIG_PUBLISHED="$ARCHIVED_SIG_PATH"
 mv -- "$ARCHIVE_TMP" "$ARCHIVED_PATH"
 ARCHIVE_TMP=""
-echo "✓ archived (immutable reflink/copy): $ARCHIVED_PATH"
+ARCHIVE_SIG_PUBLISHED=""
+echo "✓ archived + updater-signature verified (immutable reflink/copies): $ARCHIVED_PATH (+ .sig)"
 
 # Prune to the last $KEEP archived builds (oldest-first deletion), so an
 # unattended repeated build (e.g. a periodic gate) never grows this unbounded.
@@ -811,8 +884,11 @@ if [ "$COUNT" -gt "$KEEP" ]; then
   PRUNE_COUNT=$((COUNT - KEEP))
   for ((i = 0; i < PRUNE_COUNT; i++)); do
     echo "  pruning old archive: ${ARCHIVED[$i]}"
-    rm -f "${ARCHIVED[$i]}"
+    # Hide the discoverable .deb first, then remove its companion. At no point
+    # can a retained archive package be visible without a signature.
+    rm -f -- "${ARCHIVED[$i]}"
+    rm -f -- "${ARCHIVED[$i]}.sig"
   done
 fi
 
-echo "=== done: live artifact $DEB_PATH, archived copy $ARCHIVED_PATH, $KEEP most-recent builds retained ==="
+echo "=== done: live artifact $DEB_PATH, archived verified pair $ARCHIVED_PATH (+ .sig), $KEEP most-recent builds retained ==="
