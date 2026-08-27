@@ -175,8 +175,8 @@ test('the prune is actually wired into the closure walk, and the guard into the 
   // Both functions can be perfect and still never run. These are the call sites.
   assert.match(
     builder,
-    /^\s*prune_onnx_gpu_providers "\$SIDECAR_DIR\/node_modules\/\$cur"$/m,
-    'prune_onnx_gpu_providers must be called per-package inside copy_pkg_closure',
+    /^\s*prune_onnx_gpu_providers "\$dest"$/m,
+    'prune_onnx_gpu_providers must be called for each resolved destination inside copy_pkg_closure',
   );
   assert.match(
     builder,
