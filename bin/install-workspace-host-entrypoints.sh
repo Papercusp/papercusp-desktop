@@ -156,7 +156,11 @@ PROVENANCE="$ROOT/build-provenance.json"
 [[ -s "$PROVENANCE" ]] || die "build-provenance.json is missing or empty"
 for arg in "$@"; do
   case "$arg" in
-    -h|--help) die "serve.mjs has no side-effect-free help mode; refusing to boot it for help" ;;
+    # EI-21546899007927487: serve.mjs handles help before sidecar dispatch,
+    # lock acquisition, Postgres, or migrations. Delegate before this wrapper's
+    # runtime-only provenance/port/data-root validation so help stays usable on
+    # an otherwise unconfigured installation.
+    -h|--help) exec "$NODE" "$ROOT/serve.mjs" "$@" ;;
   esac
 done
 read_provenance_field() {
