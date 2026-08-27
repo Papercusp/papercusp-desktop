@@ -62,9 +62,12 @@ __pc_sidecar_lock_holder_lines() {
     elapsed="$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
     printf '       pid %s (running %ss): %s\n' "$pid" "${elapsed:-?}" "$argv" >&2
     found=1
-  # Do not let process-substitution helpers inherit the writer's fd 9; fuser
-  # would otherwise report the helper itself as a transient holder.
-  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
+  # Do not let process-substitution helpers inherit either writer lock fd;
+  # fuser would otherwise report the helper itself as a transient holder.
+  # fd 9 is the reader-facing lock, while fd 8 is the build-only lock used by
+  # build-desktop-sidecar.sh. Closing both keeps this diagnostic reusable for
+  # either timeout path.
+  done < <(exec 8>&- 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
   if ((found == 0)); then
     echo "       holder details unavailable (install fuser/procps or inspect /proc/locks)" >&2
   fi
@@ -85,7 +88,7 @@ __pc_request_cooperative_reader_yield() {
         echo "→ requested tauri-guarded pid $pid to yield its startup sidecar reader lock" >&2
       fi
     fi
-  done < <(exec 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
+  done < <(exec 8>&- 9>&-; __pc_sidecar_lock_pids "$lock_path" "$lockdir")
 }
 
 __pc_report_sidecar_lock_timeout() {

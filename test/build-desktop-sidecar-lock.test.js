@@ -47,6 +47,16 @@ test('every release writer uses the shared bounded cooperative sidecar-lock help
   assert.match(sidecarLockHelper, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
   assert.match(sidecarLockHelper, /kill -USR1/);
   assert.match(sidecarLockHelper, /holder context follows/);
+  assert.match(
+    builder,
+    /if ! flock -w "\$SIDECAR_LOCK_WAIT" 8; then[\s\S]*?__pc_report_sidecar_lock_timeout "\$SIDECAR_BUILD_LOCK"/,
+    'the Linux build-lock timeout must include live holder context',
+  );
+  assert.match(
+    builder,
+    /if \(\( \$\(date \+%s\) >= __pc_build_lock_deadline \)\); then[\s\S]*?__pc_report_sidecar_lock_timeout "\$SIDECAR_BUILD_LOCK" "\$SIDECAR_BUILD_LOCKDIR"/,
+    'the macOS build-lock timeout must include lockdir holder context',
+  );
 });
 
 test('the scheduled live federation gate waits boundedly for a progressing package writer', () => {
@@ -164,6 +174,58 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
     if (holder.exitCode === null) {
       try { process.kill(-holder.pid, 'SIGTERM'); } catch {}
       await new Promise((resolve) => holder.once('close', resolve));
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a build-lock timeout reports the live builder holder instead of an unowned exit', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-build-lock-timeout-'));
+  const lock = path.join(tmp, 'sidecar.build.lock');
+  const holderScript = path.join(tmp, 'build-desktop-sidecar.sh');
+  const ready = path.join(tmp, 'ready');
+  let holder;
+  try {
+    fs.writeFileSync(
+      holderScript,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'exec 8>"$1"',
+        'flock -x 8',
+        'printf ready >"$2"',
+        'while :; do sleep 0.05; done',
+      ].join('\n'),
+    );
+    fs.chmodSync(holderScript, 0o755);
+    holder = spawn('bash', [holderScript, lock, ready], { stdio: 'ignore', detached: true });
+
+    await waitForFile(ready);
+    const writerScript = [
+      'set -uo pipefail',
+      'PAPERCUSP_SIDECAR_LOCK_WAIT_SEC=1',
+      'PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC=0',
+      sidecarLockHelper,
+      `exec 8>${JSON.stringify(lock)}`,
+      'if flock -w "$SIDECAR_LOCK_WAIT" 8; then exit 99; fi',
+      `__pc_report_sidecar_lock_timeout ${JSON.stringify(lock)}`,
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', writerScript], { encoding: 'utf8' });
+    const diagnostic = `${result.stdout}${result.stderr}`;
+
+    assert.equal(result.status, 0, `diagnostic helper should return cleanly:\n${diagnostic}`);
+    assert.match(diagnostic, /holder context follows/);
+    assert.match(
+      diagnostic,
+      new RegExp(`pid ${holder.pid} \\([^\\n]*\\): [^\\n]*build-desktop-sidecar\\.sh`),
+      `expected the live builder pid in the timeout diagnostic:\n${diagnostic}`,
+    );
+    assert.doesNotMatch(diagnostic, /holder details unavailable/);
+  } finally {
+    if (holder && holder.exitCode === null) {
+      try {
+        process.kill(-holder.pid, 'SIGTERM');
+      } catch {}
     }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
