@@ -360,7 +360,7 @@ SIDECAR_PUBLISH_LOCKDIR=""
 if command -v flock >/dev/null 2>&1; then
   exec 8>"$SIDECAR_BUILD_LOCK"
   if ! flock -w "$SIDECAR_LOCK_WAIT" 8; then
-    echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar BUILD lock ($SIDECAR_BUILD_LOCK)." >&2
+    __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK"
     exit 5
   fi
 else
@@ -374,7 +374,7 @@ else
       continue
     fi
     if (( $(date +%s) >= __pc_build_lock_deadline )); then
-      echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar BUILD lock ($SIDECAR_BUILD_LOCKDIR)." >&2
+      __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK" "$SIDECAR_BUILD_LOCKDIR"
       exit 5
     fi
     sleep 1
