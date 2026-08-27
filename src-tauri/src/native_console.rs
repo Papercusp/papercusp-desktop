@@ -1287,7 +1287,13 @@ fn spawn_windows_terminal_script(
     cfs_write(&script_path, &script).map_err(|e| format!("write console launch script: {e}"))?;
 
     // Prefer Windows Terminal — `-w new` forces a new window every
-    // invocation. We deliberately DON'T pass wt --startingDirectory: it
+    // invocation. Resolve PATH first, then known absolute Windows Terminal
+    // locations. Task Scheduler commonly omits the per-user WindowsApps
+    // directory from PATH even when the app-execution alias is installed, so
+    // a bare `wt.exe` probe alone is not sufficient here. The resolver only
+    // checks fixed roots plus a bounded direct-child package scan; it never
+    // recursively walks user profiles. We deliberately DON'T pass wt
+    // --startingDirectory: it
     // needs a WINDOWS path, and the only Windows view of the WSL cwd is the
     // \\wsl.localhost UNC — which is UNRELIABLE on real installs (found live
     // 2026-07-03, WI-2149: an unresolvable --startingDirectory makes wt's
@@ -1295,8 +1301,8 @@ fn spawn_windows_terminal_script(
     // the exact "window appears, psu never starts" symptom). The `wsl.exe
     // --cd <cwd>` below already lands the shell in the right WSL dir, so
     // --startingDirectory was only ever cosmetic for wt's own notion of cwd.
-    if is_on_path_windows("wt.exe") {
-        let mut cmd = std::process::Command::new("wt.exe");
+    if let Some(wt_executable) = windows_terminal_executable() {
+        let mut cmd = std::process::Command::new(&wt_executable);
         cmd.arg("-w").arg("new");
         // windows-desktop-feature-parity-2026-07-02 P-010: title the window
         // (console_launch: `Papercup — <session_id>`) so it can be found +
@@ -1326,19 +1332,20 @@ fn spawn_windows_terminal_script(
         match cmd.spawn() {
             Ok(child) => return Ok(Some(child.id())),
             Err(e) => {
-                // wt.exe was ON PATH but launching it FAILED — don't hard-error,
+                // Windows Terminal was found but launching it FAILED — don't hard-error,
                 // fall through to the bare wsl.exe conhost path below (no Windows
                 // Terminal needed). The classic real-machine cause is an ORPHANED
                 // WindowsApps execution alias: uninstalling the Store "Windows
                 // Terminal" app leaves a 0-byte `wt.exe` reparse point in
                 // %LOCALAPPDATA%\Microsoft\WindowsApps (still on PATH, so
-                // is_on_path_windows sees it), whose execution fails or pops a
+                // the resolver sees it), whose execution fails or pops a
                 // Store "how do you want to open this?" dialog. The bare-wsl.exe
                 // fallback still surfaces its own error rather than hanging if WSL
                 // itself is missing.
                 eprintln!(
-                    "[console] wt.exe on PATH but spawn failed ({e}); \
-                     falling back to bare wsl.exe conhost"
+                    "[console] wt.exe at {:?} failed to spawn ({e}); \
+                     falling back to bare wsl.exe conhost",
+                    wt_executable
                 );
             }
         }
@@ -1374,21 +1381,144 @@ fn spawn_windows_wsl_new_window(
 }
 
 #[cfg(target_os = "windows")]
-fn is_on_path_windows(bin: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|d| {
-        // On Windows PATHEXT matters but for known .exe names we can
-        // skip that — we only check well-known commands by full name.
-        d.join(bin).exists()
-    })
+const WINDOWS_TERMINAL_PACKAGE_PREFIX: &str = "Microsoft.WindowsTerminal_";
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TERMINAL_EXECUTABLE: &str = "wt.exe";
+// WindowsApps is normally small, but keep the fallback bounded even if a
+// machine has an unusually large package directory. The direct scan is only
+// needed for machine-installed packages whose versioned directory is unknown.
+#[cfg(target_os = "windows")]
+const MAX_WINDOWS_TERMINAL_PACKAGE_SCAN_ENTRIES: usize = 128;
+
+/// Return the first regular file in a candidate list. This is deliberately a
+/// small, platform-neutral helper so the PATH-poor scheduled-task regression
+/// can be tested on Linux without compiling or mocking Win32 APIs.
+#[cfg(any(target_os = "windows", test))]
+fn first_existing_file<I>(candidates: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
-#[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
-fn is_on_path_windows(_bin: &str) -> bool {
-    false
+/// Prefer the normal PATH resolution, but fall back to known absolute paths.
+/// Keeping the two phases explicit prevents an absent WindowsApps PATH entry
+/// from being mistaken for an uninstalled Windows Terminal.
+#[cfg(any(target_os = "windows", test))]
+fn resolve_existing_windows_terminal<P, K>(
+    path_candidates: P,
+    known_candidates: K,
+) -> Option<PathBuf>
+where
+    P: IntoIterator<Item = PathBuf>,
+    K: IntoIterator<Item = PathBuf>,
+{
+    first_existing_file(path_candidates).or_else(|| first_existing_file(known_candidates))
+}
+
+/// Build fixed, non-recursive Windows Terminal locations. The per-user
+/// execution alias is the important scheduled-task path; the machine roots
+/// cover installations where the alias is absent or disabled.
+#[cfg(any(target_os = "windows", test))]
+fn windows_terminal_known_candidates(
+    local_app_data: Option<&std::path::Path>,
+    program_file_roots: &[&std::path::Path],
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = local_app_data {
+        candidates.push(
+            local_app_data
+                .join("Microsoft")
+                .join("WindowsApps")
+                .join(WINDOWS_TERMINAL_EXECUTABLE),
+        );
+    }
+    for root in program_file_roots {
+        candidates.push(root.join("WindowsApps").join(WINDOWS_TERMINAL_EXECUTABLE));
+        candidates.push(
+            root.join("Microsoft")
+                .join("WindowsApps")
+                .join(WINDOWS_TERMINAL_EXECUTABLE),
+        );
+    }
+    candidates
+}
+
+#[cfg(target_os = "windows")]
+fn append_windows_terminal_package_candidates(
+    windows_apps_root: &std::path::Path,
+    candidates: &mut Vec<PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(windows_apps_root) else {
+        return;
+    };
+
+    let mut package_dirs = entries
+        .take(MAX_WINDOWS_TERMINAL_PACKAGE_SCAN_ENTRIES)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_string_lossy()
+                .starts_with(WINDOWS_TERMINAL_PACKAGE_PREFIX)
+                .then_some(entry.path())
+        })
+        .collect::<Vec<_>>();
+    // Package names contain the version, so descending lexical order selects
+    // the newest-looking installed package without invoking PowerShell or
+    // recursively traversing the WindowsApps tree.
+    package_dirs.sort_by(|left, right| {
+        let left = left
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let right = right
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        right.cmp(&left)
+    });
+    candidates.extend(
+        package_dirs
+            .into_iter()
+            .map(|package_dir| package_dir.join(WINDOWS_TERMINAL_EXECUTABLE)),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn windows_terminal_executable() -> Option<PathBuf> {
+    let path_candidates = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(WINDOWS_TERMINAL_EXECUTABLE))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let mut program_file_roots = ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
+        .collect::<Vec<_>>();
+    program_file_roots.sort();
+    program_file_roots.dedup();
+    let program_file_root_refs = program_file_roots
+        .iter()
+        .map(|root| root.as_path())
+        .collect::<Vec<_>>();
+
+    let mut known_candidates =
+        windows_terminal_known_candidates(local_app_data.as_deref(), &program_file_root_refs);
+    for root in &program_file_roots {
+        append_windows_terminal_package_candidates(
+            &root.join("WindowsApps"),
+            &mut known_candidates,
+        );
+    }
+    // Environment variables are expected to be absolute on Windows. Keep the
+    // fallback honest if a hostile/test environment supplies a relative one.
+    known_candidates.retain(|candidate| candidate.is_absolute());
+
+    resolve_existing_windows_terminal(path_candidates, known_candidates)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -1570,6 +1700,59 @@ mod tests {
         assert_eq!(shell_escape_single("simple"), "'simple'");
         assert_eq!(shell_escape_single("a b"), "'a b'");
         assert_eq!(shell_escape_single("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn windows_terminal_resolution_falls_back_to_user_alias_without_path() {
+        // Task Scheduler may omit `%LOCALAPPDATA%\\Microsoft\\WindowsApps`
+        // from PATH even though its wt.exe app-execution alias is installed.
+        // Keep this regression guard platform-neutral so it runs in the
+        // normal Linux-focused test suite as well as the Windows cfg build.
+        let root = std::env::temp_dir().join(format!(
+            "papercusp-wt-resolver-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let local_app_data = root.join("local-app-data");
+        let alias = local_app_data
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join(WINDOWS_TERMINAL_EXECUTABLE);
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        std::fs::write(&alias, b"windows-terminal-alias").unwrap();
+
+        let missing_path_candidate = root.join("path-without-wt").join("wt.exe");
+        let known_candidates =
+            windows_terminal_known_candidates(Some(local_app_data.as_path()), &[]);
+        let selected =
+            resolve_existing_windows_terminal(vec![missing_path_candidate], known_candidates);
+
+        assert_eq!(selected, Some(alias.clone()));
+        assert!(selected.unwrap().is_absolute());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn windows_terminal_resolution_prefers_path_before_absolute_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "papercusp-wt-resolution-order-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path_hit = root.join("path").join("wt.exe");
+        let absolute_fallback = root
+            .join("local-app-data")
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("wt.exe");
+        std::fs::create_dir_all(path_hit.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(absolute_fallback.parent().unwrap()).unwrap();
+        std::fs::write(&path_hit, b"path-wt").unwrap();
+        std::fs::write(&absolute_fallback, b"fallback-wt").unwrap();
+
+        let selected =
+            resolve_existing_windows_terminal(vec![path_hit.clone()], vec![absolute_fallback]);
+
+        assert_eq!(selected, Some(path_hit));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
