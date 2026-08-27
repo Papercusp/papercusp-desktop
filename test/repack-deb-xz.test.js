@@ -30,6 +30,51 @@ test('bounds xz workers and compression memory independently of host core count'
   assert.match(source, /PAPERCUSP_XZ_MEMORY_LIMIT must be a non-zero KiB\/MiB\/GiB value/);
 });
 
+test('a repack pipeline failure names every component and preserves the original deb', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-failure-'));
+  try {
+    const pkg = path.join(tmp, 'pkg');
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+      'Package: papercusp-repack-failure-test',
+      'Version: 1.0.0',
+      'Architecture: all',
+      'Maintainer: Papercusp <test@example.invalid>',
+      'Description: repack failure fixture',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'original bytes survive\n');
+    const deb = path.join(tmp, 'fixture.deb');
+    run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+    const original = fs.readFileSync(deb);
+
+    const fakeBin = path.join(tmp, 'bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'xz'), '#!/usr/bin/env bash\nexit 42\n', { mode: 0o755 });
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        TAURI_SIGNING_PRIVATE_KEY: '',
+      },
+    });
+
+    assert.equal(res.status, 9, `expected dedicated repack-pipeline failure, got ${res.status}: ${res.stderr}`);
+    assert.match(res.stderr, /FATAL: Debian data repack pipeline failed/);
+    assert.match(
+      res.stderr,
+      /component statuses: ar=0 decompress\(gzip\)=0 dedupe-python=[1-9][0-9]* xz=42/,
+      'the primary xz failure and its upstream BrokenPipe must both remain attributable',
+    );
+    assert.deepEqual(fs.readFileSync(deb), original, 'a failed pipeline must not replace the known-good gzip deb');
+    assert.match(run('ar', ['t', deb]), /data\.tar\.gz/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('replaces only data.tar.gz with data.tar.xz and remains dpkg-readable', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-test-'));
   try {

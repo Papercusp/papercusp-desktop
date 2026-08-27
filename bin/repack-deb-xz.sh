@@ -90,10 +90,25 @@ fi
 
 ar p "$DEB_PATH" debian-binary > "$WORK/debian-binary"
 ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
+
+# A pipefail exit alone identifies none of the four components. That made a
+# real release build terminate with status 1 immediately after Tauri emitted
+# its bundle, with no repack diagnostic and no way to distinguish ar,
+# decompression, dedupe, or xz (EI-21564012530779610). Capture PIPESTATUS
+# immediately and name every component on failure. The original deb remains
+# untouched because publication is still the atomic mv below.
+set +e
 ar p "$DEB_PATH" "${MEMBERS[2]}" \
   | "${DECOMPRESS[@]}" \
   | python3 "$SCRIPT_DIR/dedupe-env-sidecar-tar.py" \
   | xz -9 "-T${XZ_THREADS}" "--memlimit-compress=${XZ_MEMORY_LIMIT}" -c > "$WORK/data.tar.xz"
+REPACK_PIPESTATUS=("${PIPESTATUS[@]}")
+set -e
+if (( REPACK_PIPESTATUS[0] != 0 || REPACK_PIPESTATUS[1] != 0 || REPACK_PIPESTATUS[2] != 0 || REPACK_PIPESTATUS[3] != 0 )); then
+  echo "FATAL: Debian data repack pipeline failed for $DEB_PATH" >&2
+  echo "       component statuses: ar=${REPACK_PIPESTATUS[0]} decompress(${DECOMPRESS[0]})=${REPACK_PIPESTATUS[1]} dedupe-python=${REPACK_PIPESTATUS[2]} xz=${REPACK_PIPESTATUS[3]}" >&2
+  exit 9
+fi
 
 REPLACEMENT="$WORK/repacked.deb"
 (cd "$WORK" && ar rc "$REPLACEMENT" debian-binary "${MEMBERS[1]}" data.tar.xz)

@@ -84,6 +84,22 @@ mapfile -d '' -t BUILT_DEBS < <(
   exit 7
 }
 
+# build-and-archive-deb.sh owns a dedicated, independently bounded repack
+# phase. Generic npm/tauri callers keep the historical behavior below; only
+# that outer archive producer opts into deferral after proving a fresh deb was
+# emitted. This prevents a cold compile from consuming the xz phase's budget.
+case "${PAPERCUSP_DEFER_DEB_REPACK:-0}" in
+  0) ;;
+  1)
+    echo "==> deferring xz repack for ${#BUILT_DEBS[@]} fresh Debian bundle(s) to the archive wrapper's dedicated phase"
+    exit 0
+    ;;
+  *)
+    echo "FATAL: PAPERCUSP_DEFER_DEB_REPACK must be 0 or 1" >&2
+    exit 8
+    ;;
+esac
+
 for deb in "${BUILT_DEBS[@]}"; do
   bash "$SCRIPT_DIR/repack-deb-xz.sh" "$deb"
 done

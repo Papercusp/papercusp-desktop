@@ -85,10 +85,10 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 SERVER_OVERLAY="src-tauri/tauri.server.conf.json"
 
 PROFILE_DIR="release"
-BUILD_CMD="npm run build -- --config $SERVER_OVERLAY"
+BUILD_CMD="PAPERCUSP_DEFER_DEB_REPACK=1 npm run build -- --config $SERVER_OVERLAY"
 if [ "$DEBUG" = 1 ]; then
   PROFILE_DIR="debug"
-  BUILD_CMD="npm run build:debug -- --config $SERVER_OVERLAY"
+  BUILD_CMD="PAPERCUSP_DEFER_DEB_REPACK=1 npm run build:debug -- --config $SERVER_OVERLAY"
 fi
 
 DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"
@@ -345,7 +345,23 @@ mkdir -p "$(dirname "$BUNDLE_LOCK")"
 # behavior when cgroup v2 isn't available/delegated — never fails the build
 # over this.
 BUILD_TIMEOUT_SEC="${PAPERCUSP_DEB_BUILD_TIMEOUT_SEC:-3600}"
+# EI-21561573003367567: compile/bundle and xz are separate phases with
+# independent budgets. A cold compile can no longer consume the repack's
+# clock, and an advancing xz is never mislabeled as a wedged compiler merely
+# because the combined wall time crossed the old one-hour ceiling.
+REPACK_TIMEOUT_SEC="${PAPERCUSP_DEB_REPACK_TIMEOUT_SEC:-5400}"
 WATCHDOG_GRACE_SEC="${PAPERCUSP_DEB_WATCHDOG_GRACE_SEC:-45}"
+for _timeout_name in BUILD_TIMEOUT_SEC REPACK_TIMEOUT_SEC; do
+  _timeout_value="${!_timeout_name}"
+  [[ "$_timeout_value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "FATAL: $_timeout_name must be a positive integer, got: $_timeout_value" >&2
+    exit 8
+  }
+done
+[[ "$WATCHDOG_GRACE_SEC" =~ ^[0-9]+$ ]] || {
+  echo "FATAL: WATCHDOG_GRACE_SEC must be a non-negative integer, got: $WATCHDOG_GRACE_SEC" >&2
+  exit 8
+}
 
 CGROOT="${PAPERCUSP_CGROUP_ROOT:-/sys/fs/cgroup}"
 BUILD_CGROUP=""
@@ -418,9 +434,9 @@ if ! flock -w "$BUNDLE_LOCK_WAIT" 9; then
 fi
 echo "==> holding deb bundle lock ($BUNDLE_LOCK)"
 
-echo "=== building ($BUILD_CMD), bounded to ${BUILD_TIMEOUT_SEC}s ==="
-set +e
-run_build_bounded() {
+run_bounded_phase() {
+  local phase_timeout_sec="$1"
+  shift
   # Self-migrate into the cgroup as our OWN very first act (before setsid /
   # exec) so cgroup-v2 membership is inherited by every descendant from
   # birth — no race against something forking before we get a chance to
@@ -430,10 +446,8 @@ run_build_bounded() {
   if [ -n "$BUILD_CGROUP" ]; then
     echo "$BASHPID" > "$BUILD_CGROUP/cgroup.procs" 2>/dev/null || true
   fi
-  exec setsid timeout --signal=TERM --kill-after=30 "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD"
+  exec setsid timeout --signal=TERM --kill-after=30 "$phase_timeout_sec" "$@"
 }
-run_build_bounded &
-BUILD_PGID=$!
 
 # Independent watchdog (EI-18726398328755840): does NOT trust `timeout`'s own
 # process to still be alive to enforce anything — it just re-checks the
@@ -454,9 +468,14 @@ BUILD_PGID=$!
 # uncertainty entirely — no reliance on pgid semantics at all.
 WATCHDOG_PID=""
 WATCHDOG_DONE_FLAG=""
-if [ -n "$BUILD_CGROUP" ]; then
+start_phase_watchdog() {
+  local phase_label="$1"
+  local phase_timeout_sec="$2"
+  WATCHDOG_PID=""
+  WATCHDOG_DONE_FLAG=""
+  [ -n "$BUILD_CGROUP" ] || return 0
   WATCHDOG_DONE_FLAG="$(mktemp -u "${TMPDIR:-/tmp}/papercusp-deb-watchdog-done.XXXXXX")"
-  ( DEADLINE=$((BUILD_TIMEOUT_SEC + 30 + WATCHDOG_GRACE_SEC))
+  ( DEADLINE=$((phase_timeout_sec + 30 + WATCHDOG_GRACE_SEC))
     ELAPSED=0
     while [ "$ELAPSED" -lt "$DEADLINE" ]; do
       [ -e "$WATCHDOG_DONE_FLAG" ] && exit 0
@@ -464,23 +483,32 @@ if [ -n "$BUILD_CGROUP" ]; then
       ELAPSED=$((ELAPSED + 1))
     done
     if [ -s "$BUILD_CGROUP/cgroup.procs" ] 2>/dev/null; then
-      echo "WATCHDOG: build subtree still alive well past its ${BUILD_TIMEOUT_SEC}s+kill-after deadline — the primary timeout enforcement did not land (EI-18726398328755840). Forcing the cgroup kill." >&2
+      echo "WATCHDOG: $phase_label subtree still alive well past its ${phase_timeout_sec}s+kill-after deadline — the primary timeout enforcement did not land (EI-18726398328755840). Forcing the cgroup kill." >&2
       kill_build_cgroup
     fi
   ) &
   WATCHDOG_PID=$!
-fi
+}
 
-wait "$BUILD_PGID"
-BUILD_RC=$?
-if [ -n "$WATCHDOG_PID" ]; then
+stop_phase_watchdog() {
+  [ -n "$WATCHDOG_PID" ] || return 0
   : > "$WATCHDOG_DONE_FLAG" 2>/dev/null || true
   wait "$WATCHDOG_PID" 2>/dev/null || true
   rm -f "$WATCHDOG_DONE_FLAG" 2>/dev/null || true
-fi
+  WATCHDOG_PID=""
+  WATCHDOG_DONE_FLAG=""
+}
+
+echo "=== building ($BUILD_CMD), bounded to ${BUILD_TIMEOUT_SEC}s ==="
+set +e
+run_bounded_phase "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
+BUILD_PGID=$!
+start_phase_watchdog build "$BUILD_TIMEOUT_SEC"
+wait "$BUILD_PGID"
+BUILD_RC=$?
+stop_phase_watchdog
 set -e
 BUILD_PGID=""
-cleanup_build_cgroup
 if [ "$BUILD_RC" -eq 124 ] || [ "$BUILD_RC" -eq 137 ] || [ "$BUILD_RC" -eq 143 ]; then
   echo "FATAL: build exceeded the ${BUILD_TIMEOUT_SEC}s timeout and was killed (rc=$BUILD_RC)." >&2
   echo "       This is very likely a WEDGED build (stuck toolchain fetch, a runaway" >&2
@@ -512,7 +540,28 @@ fi
 # P-003 / desktop-release-size-reduction-2026-08-14: Tauri emits a
 # data.tar.gz. Recompress it before archiving (and re-sign the changed bytes),
 # saving ~193MB on the measured GUI artifact while retaining old-dpkg support.
-bash "$DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH"
+# This is deliberately NOT inside BUILD_TIMEOUT_SEC: a cold compile and an
+# advancing xz each own a full phase budget (EI-21561573003367567).
+echo "=== repacking ($DEB_PATH), independently bounded to ${REPACK_TIMEOUT_SEC}s ==="
+set +e
+run_bounded_phase "$REPACK_TIMEOUT_SEC" bash -c 'exec 9>&-; exec bash "$1" "$2"' _ "$DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH" &
+BUILD_PGID=$!
+start_phase_watchdog repack "$REPACK_TIMEOUT_SEC"
+wait "$BUILD_PGID"
+REPACK_RC=$?
+stop_phase_watchdog
+set -e
+BUILD_PGID=""
+cleanup_build_cgroup
+if [ "$REPACK_RC" -eq 124 ] || [ "$REPACK_RC" -eq 137 ] || [ "$REPACK_RC" -eq 143 ]; then
+  echo "FATAL: xz repack exceeded its dedicated ${REPACK_TIMEOUT_SEC}s phase budget and was killed (rc=$REPACK_RC)." >&2
+  echo "       The compile budget is independent and did not consume this clock. Check the component diagnostics and tune PAPERCUSP_DEB_REPACK_TIMEOUT_SEC only for a deliberately longer repack." >&2
+  exit 9
+fi
+if [ "$REPACK_RC" -ne 0 ]; then
+  echo "FATAL: xz repack phase failed (rc=$REPACK_RC); see the component statuses above." >&2
+  exit "$REPACK_RC"
+fi
 
 GIT_SHA="$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

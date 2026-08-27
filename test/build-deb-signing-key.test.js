@@ -90,7 +90,7 @@ test('signing-key preflight runs before seed staging and the expensive build', (
   const full = fs.readFileSync(scriptPath, 'utf8');
   const preflightAt = full.indexOf('# --- UPDATER SIGNING KEY');
   const stageAt = full.indexOf('bash "$DESKTOP_DIR/bin/stage-env-sidecars.sh"');
-  const buildAt = full.indexOf('run_build_bounded &');
+  const buildAt = full.indexOf('run_bounded_phase "$BUILD_TIMEOUT_SEC"');
 
   assert.ok(preflightAt > 0 && stageAt > preflightAt, 'key preflight must precede env-sidecar staging');
   assert.ok(buildAt > stageAt, 'key preflight and staging must both precede the expensive build');

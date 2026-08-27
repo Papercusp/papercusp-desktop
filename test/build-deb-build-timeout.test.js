@@ -117,6 +117,31 @@ test('a build that fails for an ordinary reason (rc != 0, not a timeout) still g
   }
 });
 
+test('compile and xz repack have independent phase budgets in the archive wrapper', () => {
+  const source = fs.readFileSync(scriptPath, 'utf8');
+  const wrapper = fs.readFileSync(path.join(root, 'bin/build-deb-repacked.sh'), 'utf8');
+
+  assert.match(source, /BUILD_TIMEOUT_SEC="\$\{PAPERCUSP_DEB_BUILD_TIMEOUT_SEC:-3600\}"/);
+  assert.match(source, /REPACK_TIMEOUT_SEC="\$\{PAPERCUSP_DEB_REPACK_TIMEOUT_SEC:-5400\}"/);
+  assert.match(
+    source,
+    /BUILD_CMD="PAPERCUSP_DEFER_DEB_REPACK=1 npm run build/,
+    'the bounded compile phase must defer xz to the outer wrapper',
+  );
+  assert.match(
+    wrapper,
+    /PAPERCUSP_DEFER_DEB_REPACK:-0[\s\S]*deferring xz repack/,
+    'the generic npm build wrapper must honor the explicit archive-wrapper deferral',
+  );
+
+  const compilePhase = source.indexOf('run_bounded_phase "$BUILD_TIMEOUT_SEC"');
+  const debLookup = source.indexOf('DEB_PATH="$(find');
+  const repackPhase = source.indexOf('run_bounded_phase "$REPACK_TIMEOUT_SEC"');
+  assert.ok(compilePhase > 0 && compilePhase < debLookup, 'compile must run under its budget before artifact selection');
+  assert.ok(repackPhase > debLookup, 'xz repack must run later under its own fresh budget');
+  assert.match(source, /The compile budget is independent and did not consume this clock/);
+});
+
 test('no process from the wedged build survives the wrapper (the process-group reap still works with timeout spliced in)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-timeout-'));
   try {
