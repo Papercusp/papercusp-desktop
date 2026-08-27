@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -205,6 +206,88 @@ test('the Linux local release entrypoint runs owner-name preflight before sideca
     /PAPERCUSP_RELEASE_OWNER_NAME/,
     'the Linux entrypoint header must document the required runtime-only owner-name contract',
   );
+});
+
+test('the Linux local release entrypoint restores Cargo from CARGO_HOME before build work', () => {
+  const preflightAt = linuxScript.indexOf(
+    'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
+  );
+  const cargoGuardAt = linuxScript.indexOf('_cargo_home="${CARGO_HOME:-$HOME/.cargo}"');
+  const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
+
+  assert.ok(cargoGuardAt > preflightAt, 'Cargo resolution must preserve owner-preflight ordering');
+  assert.ok(sidecarAt > cargoGuardAt, 'Cargo must fail closed before sidecar assembly starts');
+  assert.ok(metadataAt > cargoGuardAt, 'Cargo must be resolved before parent target discovery');
+  const guard = linuxScript.slice(cargoGuardAt, sidecarAt);
+  assert.match(guard, /! command -v cargo[^\n]+&& \[\[ -x "\$_cargo_home\/bin\/cargo" \]\]/);
+  assert.match(guard, /export PATH="\$_cargo_home\/bin:\$PATH"/);
+  assert.match(guard, /hash -r/);
+  assert.match(guard, /Linux release build requires Cargo/);
+  assert.match(guard, /exit 1/);
+
+  const runPreflight = ({ installCargo, installAmbientCargo = false }) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wi240169-linux-cargo-'));
+    const cargoHome = path.join(home, 'cargo-home');
+    const ambientBin = path.join(home, 'ambient-bin');
+    fs.mkdirSync(path.join(cargoHome, 'bin'), { recursive: true });
+    if (installCargo) {
+      const cargo = path.join(cargoHome, 'bin', 'cargo');
+      fs.writeFileSync(cargo, '#!/bin/sh\necho "cargo 1.99.0-test"\n');
+      fs.chmodSync(cargo, 0o755);
+    }
+    if (installAmbientCargo) {
+      fs.mkdirSync(ambientBin, { recursive: true });
+      const cargo = path.join(ambientBin, 'cargo');
+      fs.writeFileSync(cargo, '#!/bin/sh\necho "cargo 2.0.0-ambient"\n');
+      fs.chmodSync(cargo, 0o755);
+    }
+
+    const env = {
+      ...process.env,
+      PATH: installAmbientCargo ? `${ambientBin}:/usr/bin:/bin` : '/usr/bin:/bin',
+      HOME: home,
+      CARGO_HOME: cargoHome,
+      CARGO_TARGET_DIR: path.join(home, 'cargo-target'),
+      PAPERCUSP_RELEASE_OWNER_NAME: 'Synthetic Gateowner',
+      PAPERCUSP_RELEASE_HOST: 'updates.invalid.test',
+      PAPERCUSP_SKIP_SEED_CUT: '1',
+      TAURI_SIGNING_PRIVATE_KEY_PATH: path.join(home, 'missing-signing-key'),
+    };
+    delete env.TAURI_SIGNING_PRIVATE_KEY;
+
+    try {
+      return spawnSync('bash', [path.join(root, 'bin/build-linux-local.sh')], {
+        cwd: root,
+        encoding: 'utf8',
+        env,
+      });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  const restored = runPreflight({ installCargo: true });
+  const restoredOutput = `${restored.stdout}${restored.stderr}`;
+  assert.equal(restored.status, 1, restoredOutput);
+  assert.match(restoredOutput, /using Cargo toolchain: .*cargo-home\/bin\/cargo \(cargo 1\.99\.0-test\)/);
+  assert.match(restoredOutput, /minisign signing key not found/,
+    'the probe must advance beyond Cargo and stop before sidecar assembly at the missing signing key');
+  assert.doesNotMatch(restoredOutput, /\[1\/5\] building sidecar/);
+
+  const missing = runPreflight({ installCargo: false });
+  const missingOutput = `${missing.stdout}${missing.stderr}`;
+  assert.equal(missing.status, 1, missingOutput);
+  assert.match(missingOutput, /Linux release build requires Cargo/);
+  assert.doesNotMatch(missingOutput, /minisign signing key not found|\[1\/5\] building sidecar/,
+    'missing Cargo must fail before later release preflights or build work');
+
+  const callerSelected = runPreflight({ installCargo: true, installAmbientCargo: true });
+  const callerSelectedOutput = `${callerSelected.stdout}${callerSelected.stderr}`;
+  assert.equal(callerSelected.status, 1, callerSelectedOutput);
+  assert.match(callerSelectedOutput, /using Cargo toolchain: .*ambient-bin\/cargo \(cargo 2\.0\.0-ambient\)/,
+    'an existing caller-selected Cargo must win over CARGO_HOME/bin');
+  assert.doesNotMatch(callerSelectedOutput, /cargo 1\.99\.0-test/);
 });
 
 test('the Linux local release entrypoint self-snapshots before long-running work', () => {
