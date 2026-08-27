@@ -117,7 +117,7 @@ cleanup() { [ -n "${KEEP_UP:-}" ] && { echo "KEEP_UP=1 — sidecar left running;
 trap cleanup EXIT
 
 log "extract $DEB"
-fed_extract_deb "$DEB" "$PKG" || exit 1
+fed_extract_deb "$DEB" "$PKG" papercusp-server || exit 1
 SIDE="$(fed_sidecar_dir "$PKG")"
 [ -d "$SIDE/node_modules/luxon" ] || { echo "→ A-001 fix: injecting luxon"; cp -aL "$LUXON_SRC" "$SIDE/node_modules/luxon" || exit 1; }
 fed_clobber_check "$PKG" || exit 2

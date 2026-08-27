@@ -346,16 +346,22 @@ fed_run_with_heartbeat() {
 
 # ── .deb extraction + integrity ─────────────────────────────────────────────
 
-# fed_extract_deb <deb> <pkgdir> — extract; assert the desktop binary exists.
+# fed_extract_deb <deb> <pkgdir> [expected-binary] — extract; assert the
+# requested role binary exists. The GUI remains the default for existing
+# federation callers; server-only drills must opt in to papercusp-server.
 # Also detects + exports FED_APP_DIRNAME (the /usr/lib/<name> install dir): the
 # 2026-07-01 two-role split renamed the GUI productName "Papercusp" → "Papercusp
 # GUI", so the install root is no longer a constant. Every path consumer reads
 # fed_sidecar_dir instead of hardcoding it.
 fed_extract_deb() {
-  local deb="$1" pkg="$2" appdir
+  local deb="$1" pkg="$2" expected_binary="${3:-papercusp-desktop}" appdir
   [ -f "$deb" ] || { echo "FATAL: .deb not found: $deb"; return 1; }
+  case "$expected_binary" in
+    papercusp-desktop|papercusp-server) ;;
+    *) echo "FATAL: unsupported Papercusp role binary: $expected_binary"; return 1 ;;
+  esac
   mkdir -p "$pkg"; dpkg-deb -x "$deb" "$pkg"
-  [ -x "$pkg/usr/bin/papercusp-desktop" ] || { echo "FATAL: binary missing in .deb: $pkg/usr/bin/papercusp-desktop"; return 1; }
+  [ -x "$pkg/usr/bin/$expected_binary" ] || { echo "FATAL: binary missing in .deb: $pkg/usr/bin/$expected_binary"; return 1; }
   appdir="$(find "$pkg/usr/lib" -maxdepth 2 -type d -name sidecar 2>/dev/null | head -1)"
   [ -n "$appdir" ] || { echo "FATAL: no */sidecar dir under $pkg/usr/lib in the .deb"; return 1; }
   FED_APP_DIRNAME="$(basename "$(dirname "$appdir")")"

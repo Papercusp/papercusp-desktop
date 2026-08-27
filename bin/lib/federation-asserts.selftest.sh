@@ -529,6 +529,7 @@ fi
 gate_file="$DIR/../live-federation-gate.sh"
 matrix_file="$DIR/../two-instance-content-matrix-smoke.sh"
 from_repo_file="$DIR/../two-instance-hive-from-repo-smoke.sh"
+hive_git_drill_file="$DIR/../hive-git-drill.sh"
 verify_file="$DIR/../verify-sidecar-bundle.sh"
 
 # D-084 / EI-214124 recurrence guard. The generic 600-second pc-heavy lease is
@@ -685,24 +686,53 @@ if grep -q 'fed_select_newest_deb_by_package papercusp-gui' "$gate_file" \
 else
   bad "live-federation-gate can select/repack a non-GUI Papercusp Debian artifact for the GUI content matrix (WI-40905)"
 fi
+if grep -qF 'fed_extract_deb "$DEB" "$PKG" papercusp-server' "$hive_git_drill_file"; then
+  ok "hive-git drill explicitly admits the Server role binary instead of assuming a GUI package (WI-3496)"
+else
+  bad "hive-git drill can reject the canonical Server release artifact through the GUI-default extractor (WI-3496)"
+fi
 if command -v dpkg-deb >/dev/null 2>&1; then
   DEB_FIXTURE="$WORK/deb-selector"
   mkdir -p "$DEB_FIXTURE"
   make_selector_deb() {
-    local output="$1" package="$2" binary="$3" root
+    local output="$1" package="$2" binary="$3" root appdir
     root="$DEB_FIXTURE/root-$package"
     rm -rf "$root"
-    mkdir -p "$root/DEBIAN" "$root/usr/bin"
+    case "$binary" in
+      papercusp-desktop) appdir='Papercusp GUI' ;;
+      papercusp-server) appdir='Papercusp Server' ;;
+      *) appdir='Papercusp Test' ;;
+    esac
+    mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/lib/$appdir/sidecar"
     printf 'Package: %s\nVersion: 1.0.0\nArchitecture: amd64\nMaintainer: Papercusp Test <test@example.invalid>\nDescription: selector fixture\n' \
       "$package" >"$root/DEBIAN/control"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$root/usr/bin/$binary"
     chmod +x "$root/usr/bin/$binary"
+    : >"$root/usr/lib/$appdir/sidecar/.fixture"
     dpkg-deb -b "$root" "$output" >/dev/null
   }
   GUI_DEB="$DEB_FIXTURE/Papercusp_GUI_older_amd64.deb"
   SERVER_DEB="$DEB_FIXTURE/Papercusp_Server_newer_amd64.deb"
   make_selector_deb "$GUI_DEB" papercusp-gui papercusp-desktop
   make_selector_deb "$SERVER_DEB" papercusp-server papercusp-server
+  if fed_extract_deb "$GUI_DEB" "$DEB_FIXTURE/gui-extract" >"$DEB_FIXTURE/gui-extract.out" 2>&1; then
+    ok "deb extractor keeps papercusp-desktop as the fail-closed default role"
+  else
+    bad "deb extractor rejected a valid GUI package: $(cat "$DEB_FIXTURE/gui-extract.out")"
+  fi
+  if fed_extract_deb "$SERVER_DEB" "$DEB_FIXTURE/server-extract" papercusp-server >"$DEB_FIXTURE/server-extract.out" 2>&1; then
+    ok "deb extractor accepts a Server package only when the caller explicitly selects papercusp-server (WI-3496)"
+  else
+    bad "deb extractor rejected an explicitly selected Server package: $(cat "$DEB_FIXTURE/server-extract.out")"
+  fi
+  if fed_extract_deb "$SERVER_DEB" "$DEB_FIXTURE/server-as-gui" >"$DEB_FIXTURE/server-as-gui.out" 2>&1; then
+    bad "deb extractor accepted a Server package through the GUI-default role"
+  elif grep -qF 'binary missing in .deb:' "$DEB_FIXTURE/server-as-gui.out" \
+    && grep -qF '/usr/bin/papercusp-desktop' "$DEB_FIXTURE/server-as-gui.out"; then
+    ok "deb extractor still fails closed when a Server artifact reaches a GUI-only caller"
+  else
+    bad "deb extractor rejected a Server-as-GUI package without the expected role diagnostic: $(cat "$DEB_FIXTURE/server-as-gui.out")"
+  fi
   touch -t 202608230800 "$GUI_DEB"
   touch -t 202608230801 "$SERVER_DEB"
   selected_deb="$(fed_select_newest_deb_by_package papercusp-gui "$GUI_DEB" "$SERVER_DEB" 2>"$DEB_FIXTURE/select.err")"
