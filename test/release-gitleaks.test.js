@@ -59,6 +59,12 @@ function generatedFixtures() {
     'const generatedToken = { token, "' + generatedValue + '" };',
     'const guidance = { accountToken: "' + generatedValue + '" }; // token/account guidance',
   ];
+  const decodedBpePrefix = 'Authentication IFJhbms=';
+  serveLines.push(
+    'const bpeVocabulary = "' +
+      Buffer.from(decodedBpePrefix + ' ' + generatedValue, 'utf8').toString('base64') +
+      '";',
+  );
   return {
     'spa/assets/chunk-TEST.js':
       'const firebase = { apiKey: "' + publicGcpKey + '", authDomain: "example.firebaseapp.com", projectId: "public" };',
@@ -80,7 +86,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 5);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 6);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -93,6 +99,9 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   assert.match(config, /\\b50257\\b/);
   assert.ok(config.includes('canonical[-_ ])?invite[-_ ]secret'));
   assert.match(config, /\\btoken,/);
+  assert.match(config, /regexTarget = "match"/);
+  assert.match(config, /Authentication IFJhbms=/);
+  assert.match(config, /\\.ContainsKey IGNvbGxhcHNlZA==/);
   assert.match(config, /personal-vault/);
 });
 
@@ -107,6 +116,33 @@ test('known generated contexts pass only under their path-and-line allowlists', 
   const allowed = scan(fixtures);
   assert.equal(allowed.status, 0, 'known generated contexts must be suppressed by the release config');
   assert.deepEqual(allowed.report, []);
+});
+
+test('decoded BPE match allowlist is exact and remains path-constrained', () => {
+  const generatedValue = ['N3y-9Aq2P1', 'rS7vX4cL'].join('');
+  const known = Buffer.from('Authentication IFJhbms= ' + generatedValue, 'utf8').toString('base64');
+  const nearMiss = Buffer.from('Authentication DIFFERENT= ' + generatedValue, 'utf8').toString('base64');
+  const fixtures = {
+    'serve.mjs': 'const known = "' + known + '";\nconst nearMiss = "' + nearMiss + '";\n',
+  };
+
+  const baseline = scan(fixtures, { config: false });
+  assert.equal(baseline.status, 1, 'decoded BPE canaries did not exercise the default detector');
+  assert.ok(
+    baseline.report.some((finding) => finding.Tags?.includes('decoded:base64')),
+    'the BPE fixture did not exercise gitleaks base64 decoding',
+  );
+
+  const result = scan(fixtures);
+  assert.equal(result.status, 1, 'the near-match unexpectedly passed the release gate');
+  assert.ok(
+    result.report.some((finding) => finding.Match?.includes('Authentication DIFFERENT=')),
+    'the near-match was not retained as a finding',
+  );
+  assert.ok(
+    !result.report.some((finding) => finding.Match?.includes('Authentication IFJhbms=')),
+    'the known public BPE match was not suppressed',
+  );
 });
 
 test('an unrelated raw token remains a release-gate finding', () => {

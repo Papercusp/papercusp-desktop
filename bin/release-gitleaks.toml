@@ -102,6 +102,35 @@ regexes = [
     '''(?i)(?:account.{0,80}token|token.{0,80}account)''',
 ]
 
+# Gitleaks also recursively decodes base64-looking substrings before applying
+# the generic detector. Those findings target the decoded match rather than
+# the original (multi-megabyte) source line, so the line markers above cannot
+# cover them. Keep this exception to the exact public BPE vocabulary prefixes
+# observed in the generated bundle; a different decoded key-like phrase must
+# continue to fail the release gate.
+[[rules.allowlists]]
+description = "Known public BPE vocabulary matches decoded from generated serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''Authentication IFJhbms=''',
+    '''\.ContainsKey IGNvbGxhcHNlZA==''',
+    '''cancellationToken IFBhbGVzdGluaWFucw==''',
+    '''authenticated ZHY=''',
+    '''IOKApi4=''',
+    '''PasswordEncoder IHbDqXI=''',
+    '''IllegalAccessException PEJveA==''',
+    '''\.FirebaseAuth dXR0bGU=''',
+    '''authenticity L3BuZw==''',
+    '''IOyekeyEsQ==''',
+    '''jsonwebtoken IOCmhuCmnOCmvw==''',
+    '''KeyXkA==''',
+]
+
 # The privacy page is public documentation, and the same generated sentence is
 # projected into three bundle paths. Keep the prose exception tied to both the
 # exact projection path and its distinctive line text; never exempt the whole
