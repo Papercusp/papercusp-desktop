@@ -107,6 +107,27 @@ esac
 python3 "$HERE/audit-release-bundle.py" --owner-preflight \
   || { echo "ERROR: owner-name preflight failed — refusing to start Linux release build" >&2; exit 2; }
 
+# WI-240169: systemd user managers retain their launch-time PATH, which commonly
+# omits Cargo's default install directory even when the owner has a healthy
+# Rust toolchain at ~/.cargo/bin. The sidecar builder repairs that only for its
+# own child process; without the same parent-entrypoint preflight, a release cut
+# can finish the expensive sidecar work and then fail at this script's later
+# `cargo metadata` / Tauri invocation. Keep the owner-name policy check first,
+# then resolve Cargo before any build work. Honour a caller-selected cargo and a
+# relocated CARGO_HOME; amend PATH only when cargo is otherwise unavailable.
+_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+if ! command -v cargo >/dev/null 2>&1 && [[ -x "$_cargo_home/bin/cargo" ]]; then
+  export PATH="$_cargo_home/bin:$PATH"
+  hash -r
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR: Linux release build requires Cargo, but PATH has no cargo and $_cargo_home/bin/cargo is not executable." >&2
+  echo "       Install/expose the Rust toolchain (systemd callers usually need CARGO_HOME/bin on PATH), then re-run." >&2
+  exit 1
+fi
+echo "→ using Cargo toolchain: $(command -v cargo) ($(cargo --version))"
+unset _cargo_home
+
 # ── Update source. LOAD IT HERE, in the producer (WI-4389) ───────────────────
 # This script used to have no idea PAPERCUSP_RELEASE_HOST existed: it worked only
 # because release-local.sh exported it and the value inherited across the local
