@@ -133,10 +133,11 @@ printf '%s\n' '{"stale":true}' > "$SERVER_ZIP_JSON"
 GEN_LATEST_MANIFEST_MERGE_SERVER_JSON="$BASE_SERVER_ZIP" \
 PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
   gen_latest_manifest "$VER" stable "$TAG_SERVER_ZIP" "$SERVER_ZIP" >/dev/null 2>&1
-python3 - "$SERVER_ZIP_JSON" <<'PY' && ok "normalized Server zip replaces stale Windows stub with signed updater entry" || bad "normalized Server zip was not emitted as a signed Windows updater entry"
+python3 - "$SERVER_ZIP_JSON" "$VER" <<'PY' && ok "normalized Server zip replaces stale Windows stub with signed updater entry" || bad "normalized Server zip was not emitted as a signed Windows updater entry"
 import json, sys
+version = sys.argv[2]
 entry = json.load(open(sys.argv[1]))["platforms"]["windows-x86_64"]
-assert entry["url"].endswith("Papercusp%20Server_1.2.3_x64-setup.zip"), entry
+assert entry["url"].endswith(f"Papercusp%20Server_{version}_x64-setup.zip"), entry
 assert entry["signature"] == "server-zip-signature", entry
 PY
 
