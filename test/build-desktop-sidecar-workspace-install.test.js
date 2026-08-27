@@ -437,6 +437,15 @@ test('Linux Server deb installs and package-enables one systemd user service', (
     unit,
     /^Environment="PAPERCUSP_SIDECAR_DIR=\/usr\/lib\/Papercusp Server\/sidecar"$/m,
   );
+  assert.match(unit, /^Environment="PAPERCUSP_WORKSPACE_HOST_SSH_USER=papercusp-workspace"$/m);
+  assert.match(
+    unit,
+    /^Environment="PAPERCUSP_WORKSPACE_HOST_KNOWN_HOSTS=\/var\/lib\/papercusp\/controller\/known_hosts"$/m,
+  );
+  assert.match(
+    unit,
+    /^Environment="PAPERCUSP_WORKSPACE_HOST_REMOTE_ENTRYPOINT=\/opt\/papercusp\/current\/bin\/papercusp-remote-initializer"$/m,
+  );
   assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server --headless-service$/m);
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^KillMode=mixed$/m);

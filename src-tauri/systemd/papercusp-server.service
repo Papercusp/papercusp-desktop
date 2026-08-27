@@ -6,6 +6,9 @@ ConditionFileIsExecutable=/usr/bin/papercusp-server
 [Service]
 Type=simple
 Environment="PAPERCUSP_SIDECAR_DIR=/usr/lib/Papercusp Server/sidecar"
+Environment="PAPERCUSP_WORKSPACE_HOST_SSH_USER=papercusp-workspace"
+Environment="PAPERCUSP_WORKSPACE_HOST_KNOWN_HOSTS=/var/lib/papercusp/controller/known_hosts"
+Environment="PAPERCUSP_WORKSPACE_HOST_REMOTE_ENTRYPOINT=/opt/papercusp/current/bin/papercusp-remote-initializer"
 ExecStart=/usr/bin/papercusp-server --headless-service
 Restart=on-failure
 RestartSec=5s
