@@ -192,7 +192,7 @@ fi
 #    Accepts EITHER wiring: sourcing this lib (preferred), or a self-contained
 #    inline `--remap-path-prefix` export (what the mac legs still carry). The
 #    point is that the script does not depend on a caller.
-for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross.sh build-linux-local.sh; do
+for SCRIPT in build-appimage.sh release-local.sh mac-vm-build.sh build-mac-cross.sh build-linux-local.sh build-and-archive-deb.sh; do
   P="$DIR/../$SCRIPT"
   if [ ! -f "$P" ]; then
     bad "$SCRIPT missing — update this list if it was renamed/removed"

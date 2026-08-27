@@ -270,6 +270,22 @@ export PAPERCUSP_REPO_DIR="$DEB_SOURCE_SNAPSHOT_ROOT"
 export PAPERCUSP_BUILD_SHA="${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}"
 echo "==> immutable deb source: root=${DEB_SOURCE_SNAPSHOT_COMMIT:0:10} desktop=${DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT:0:10} path=$DEB_SOURCE_SNAPSHOT_ROOT"
 
+# --- BUILD-BOX PATH REMAP (WI-3496) -----------------------------------------
+#
+# This standalone Debian producer compiles the shipped Tauri ELF itself. It
+# therefore must establish the same Rust source-path hygiene as every other
+# release producer instead of relying on an ambient release-local.sh export.
+# Without the remap, rustc bakes $HOME/.cargo and $HOME/.rustup source paths
+# into usr/bin/papercusp-server; the finished-artifact identity audit correctly
+# rejects that package after the multi-GB build has already completed.
+#
+# Keep the linker flag paired with RUSTFLAGS: once the environment variable is
+# present, Cargo no longer applies target.*.rustflags from .cargo/config.toml.
+# shellcheck source=lib/rust-path-remap.sh
+source "$LIVE_DESKTOP_DIR/bin/lib/rust-path-remap.sh"
+papercusp_export_rust_path_remap
+papercusp_export_rust_lld linux
+
 # This wrapper CONSUMES a sidecar it did not build. A normal/dev sidecar can be
 # runtime-complete yet still carry the build box's identity because the release
 # scrub needs PAPERCUSP_RELEASE_OWNER_NAME at build time. That exact gap escaped
