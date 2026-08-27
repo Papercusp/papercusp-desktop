@@ -22,6 +22,7 @@
 // against a rewrite that reintroduced the hole by another route.
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -146,6 +147,78 @@ function fixture(name) {
   fs.mkdirSync(path.join(dir, 'bundle'));
   return dir;
 }
+
+function auditSourceBundle(name, files) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `p012-${name}-`));
+  const source = path.join(dir, 'source');
+  const tar = path.join(dir, 'source.tar');
+  const bundle = path.join(dir, 'source.tar.zst');
+  fs.mkdirSync(source);
+  for (const [relative, contents] of Object.entries(files)) {
+    const target = path.join(source, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  }
+  execFileSync('tar', [
+    '--numeric-owner', '--owner=0', '--group=0', '-C', source, '-cf', tar, '.',
+  ]);
+  execFileSync('zstd', ['-q', '-f', '-o', bundle, tar]);
+  const result = spawnSync('python3', [AUDIT, bundle], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+  return result;
+}
+
+// @workos-inc/node 10.10.0 publishes this value as JSDoc @example text in
+// src/pipes/pipes.ts. Keep it split so tracked test source never itself contains
+// a credential-shaped literal. The digest pins the exact public fixture: any byte
+// drift must return to the fail-closed path.
+const WORKOS_PUBLIC_OAUTH_EXAMPLE_SHA256 =
+  'bc3ae723f57c6b9e3fd80b699fcc420f6074b0b1718039669d22631d508ac0a7';
+
+function workosPublicOauthExample() {
+  return ['gho_', '16C7e42F292c', '6912E7710c838347', 'Ae178B4a'].join('');
+}
+
+test('the exact WorkOS public OAuth JSDoc fixture is accepted by digest', () => {
+  const value = workosPublicOauthExample();
+  assert.equal(
+    crypto.createHash('sha256').update(value).digest('hex'),
+    WORKOS_PUBLIC_OAUTH_EXAMPLE_SHA256,
+    'the reconstructed fixture drifted from the reviewed upstream value',
+  );
+  const result = auditSourceBundle('workos-public-example', {
+    'node_modules/@workos-inc/node/lib/factory-fixture.mjs':
+      `* @param options.accessToken\n* @example "${value}"\n`,
+  });
+  assert.equal(
+    result.status,
+    0,
+    `the exact reviewed public fixture must not block the release:\n${result.stdout}${result.stderr}`,
+  );
+  assert.match(result.stdout, /✓ CLEAN/);
+});
+
+test('a changed WorkOS-shaped value and an unrelated GitHub token still fail closed', () => {
+  const reviewed = workosPublicOauthExample();
+  const changed = reviewed.slice(0, -1) + (reviewed.endsWith('a') ? 'b' : 'a');
+  const unrelated = ['gho_', 'A1b2C3d4E5f6', 'G7h8I9j0K1l2', 'M3n4O5p6Q7r8'].join('');
+  for (const [label, value] of [['changed', changed], ['unrelated', unrelated]]) {
+    const result = auditSourceBundle(`workos-${label}`, {
+      'node_modules/@workos-inc/node/lib/factory-fixture.mjs':
+        `* @param options.accessToken\n* @example "${value}"\n`,
+    });
+    assert.equal(
+      result.status,
+      1,
+      `${label} token-shaped bytes unexpectedly passed:\n${result.stdout}${result.stderr}`,
+    );
+    assert.match(result.stdout, /\[github-token\]/);
+    assert.ok(!result.stdout.includes(value), 'the failing gate printed credential-shaped bytes');
+  }
+});
 
 test('a literal in a BINARY file fails the scan (the -I regression)', () => {
   const lit = identityLiteral();
