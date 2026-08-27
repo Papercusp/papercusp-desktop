@@ -51,6 +51,29 @@ function executableLines(source = script) {
     .filter(({ text }) => text.trim() !== '' && !text.trim().startsWith('#'));
 }
 
+function assertPgToolPackagingContract(source = script) {
+  assert.match(
+    source,
+    /cp -L "\$src" "\$SIDECAR_DIR\/bin\/\.pg-real\/\$tool"/,
+    'Linux PostgreSQL client tools must ship their real binaries under bin/.pg-real',
+  );
+  assert.match(
+    source,
+    /exec "\\\$d\/\.pg-real\/\$tool" "\\\$@"/,
+    'the public pg_dump/psql wrappers must delegate to the shipped real binaries',
+  );
+  assert.match(
+    source,
+    /if ! _probe_out="\$\(\"\$_final\" --version 2>&1\)"/,
+    'the finished wrappers must be executed during the sidecar build',
+  );
+  assert.match(
+    source,
+    /ldd "\$SIDECAR_DIR\/bin\/\.pg-real\/\$tool"/,
+    'the build must reject unresolved shared libraries on each real binary',
+  );
+}
+
 test('the sole database dump artifact is the hermetic migration-only logical seed', () => {
   // Preserve the blanket rule: every executable .dump reference must name the
   // one reviewed filename. A future live.dump / snapshot.dump is still red.
@@ -104,6 +127,24 @@ test('the PAPERCUSP_SEED_PG_URL bake knob does not come back', () => {
     'PAPERCUSP_SEED_PG_URL is back in build-desktop-sidecar.sh — it armed the seed.dump ' +
       'bake that EI-19455334533123459 removed.',
   );
+});
+
+test('snapshot PostgreSQL tools ship real binaries and fail closed when they are not loadable', () => {
+  // EI-21632019953045982: the Aug-20 Windows bundle carried the generated
+  // bin/pg_dump wrapper but omitted bin/.pg-real/pg_dump. Snapshot creation
+  // therefore degraded silently and captured no database dump. Pin the four
+  // load-bearing stages together: copy the real binary, point the wrapper at
+  // it, execute the installed wrapper, and ldd-check the real binary closure.
+  assertPgToolPackagingContract();
+});
+
+test('the PostgreSQL client packaging guard is falsifiable when the real-binary copy disappears', () => {
+  const poisoned = script.replace(
+    'cp -L "$src" "$SIDECAR_DIR/bin/.pg-real/$tool"',
+    'cp -L "$src" "$SIDECAR_DIR/bin/$tool"',
+  );
+  assert.notEqual(poisoned, script, 'the fixture must remove the reviewed .pg-real copy');
+  assert.throws(() => assertPgToolPackagingContract(poisoned), /real binaries/);
 });
 
 test('republish overlay carry-forward stays an ALLOWLIST, never a blanket copy', () => {
