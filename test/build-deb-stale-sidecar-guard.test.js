@@ -129,6 +129,60 @@ test('guard sits BEFORE the mutex and the build, so it cannot burn a full tauri 
   assert.ok(mutexAt < buildAt, 'the lock must be held before the build starts');
 });
 
+// EI-21575353881676545 — the canonical local sidecar+deb flow used to read the
+// shared checkout at two different times. A busy Vite build could change dist
+// after sidecar verification and make every honest packaging attempt fail.
+test('the deb build pins the sidecar provenance commit and packages a private desktop worktree', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(
+    full,
+    /SIDECAR_PROVENANCE="\$LIVE_DESKTOP_DIR\/src-tauri\/sidecar\/build-provenance\.json"/,
+    'the source boundary must begin with the sidecar writer\'s own provenance',
+  );
+  assert.match(
+    full,
+    /git -C "\$LIVE_REPO_DIR" ls-tree "\$DEB_SOURCE_SNAPSHOT_COMMIT" papercusp-desktop/,
+    'the root commit must resolve the exact desktop submodule commit it names',
+  );
+  assert.match(
+    full,
+    /git -C "\$LIVE_DESKTOP_DIR" worktree add --detach/,
+    'packaging must compile a private immutable desktop worktree, not the moving live tree',
+  );
+  assert.match(
+    full,
+    /DESKTOP_DIR="\$DEB_SOURCE_SNAPSHOT_DESKTOP"\nREPO_DIR="\$DEB_SOURCE_SNAPSHOT_ROOT"/,
+    'all later guards and npm/tauri work must switch to the snapshot paths',
+  );
+});
+
+test('the immutable source boundary carries the exact sidecar SPA instead of consulting live dist', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const sidecarCopyAt = full.indexOf('cp -al -- "$LIVE_DESKTOP_DIR/src-tauri/sidecar"');
+  const spaCopyAt = full.indexOf('cp -al -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa"');
+  const switchAt = full.indexOf('DESKTOP_DIR="$DEB_SOURCE_SNAPSHOT_DESKTOP"');
+  const buildAt = full.indexOf('run_bounded_phase "$BUILD_TIMEOUT_SEC"');
+
+  assert.ok(sidecarCopyAt > 0, 'the built sidecar must be copied under its reader lock');
+  assert.ok(spaCopyAt > sidecarCopyAt, 'the SPA reference must come from the copied sidecar snapshot');
+  assert.ok(switchAt > spaCopyAt, 'do not expose the snapshot root until every generated input is present');
+  assert.ok(buildAt > switchAt, 'the expensive build must consume only the completed snapshot');
+  assert.match(full, /flock -s 8[\s\S]*cp -al -- "\$LIVE_DESKTOP_DIR\/src-tauri\/sidecar"[\s\S]*flock -u 8/);
+});
+
+test('snapshot provenance cannot be bypassed by live patch mtimes and cleanup is part of the existing exit trap', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(full, /PINNED_SIDECAR_HEAD[\s\S]*DEB_SOURCE_SNAPSHOT_COMMIT/);
+  assert.match(full, /cleanup_deb_source_snapshot\n}\ntrap stop_build_group EXIT INT TERM/);
+  assert.match(
+    full,
+    /GIT_SHA="\$\{DEB_SOURCE_SNAPSHOT_COMMIT:0:10\}"/,
+    'archive identity must name the pinned boundary, not a later live HEAD',
+  );
+});
+
 // EI-18698595682442781 — the bundle mutex + process-group ownership.
 // These are load-bearing against a SHARED $CARGO_TARGET staging dir; each
 // property below corresponds to a way the original code corrupted a peer.
@@ -136,11 +190,12 @@ test('guard sits BEFORE the mutex and the build, so it cannot burn a full tauri 
 test('the build runs with the lock fd CLOSED so a daemonizing child cannot retain it', () => {
   const full = fs.readFileSync(scriptPath, 'utf8');
   // Same hazard build-desktop-sidecar-lock.test.js pins for the sidecar build:
-  // sccache/node can daemonize and inherit fd 9, holding the flock after we exit.
+  // sccache/node can daemonize and inherit fd 8/9, holding either the sidecar
+  // reader or bundle flock after we exit.
   // The reusable bounded-phase runner owns setsid+timeout, while each caller
   // supplies the fd-closing bash command. Pin the build caller specifically;
   // the repack caller closes the same fd independently.
-  assert.match(full, /run_bounded_phase "\$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-;/);
+  assert.match(full, /run_bounded_phase "\$BUILD_TIMEOUT_SEC" bash -c 'exec 8>&- 9>&-;/);
 });
 
 // EI-18721897570279658 — the hard build timeout.

@@ -30,9 +30,32 @@
 #   --debug     build the debug bundle (tauri build --debug) instead of release
 #   --keep N    number of archived builds to retain (default 10)
 set -euo pipefail
-DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
+LIVE_DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIVE_REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
+DESKTOP_DIR="$LIVE_DESKTOP_DIR"
+REPO_DIR="$LIVE_REPO_DIR"
 CARGO_TARGET="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+
+DEB_SOURCE_SNAPSHOT_ROOT=""
+DEB_SOURCE_SNAPSHOT_DESKTOP=""
+DEB_SOURCE_SNAPSHOT_COMMIT=""
+DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT=""
+DEB_SOURCE_SNAPSHOT_WORKTREE=0
+
+cleanup_deb_source_snapshot() {
+  if [[ "$DEB_SOURCE_SNAPSHOT_WORKTREE" == "1" && -n "$DEB_SOURCE_SNAPSHOT_DESKTOP" ]]; then
+    git -C "$LIVE_DESKTOP_DIR" worktree remove --force "$DEB_SOURCE_SNAPSHOT_DESKTOP" \
+      >/dev/null 2>&1 || true
+    DEB_SOURCE_SNAPSHOT_WORKTREE=0
+  fi
+  if [[ -n "$DEB_SOURCE_SNAPSHOT_ROOT" ]]; then
+    case "$DEB_SOURCE_SNAPSHOT_ROOT" in
+      /tmp/papercusp-deb-source-*) rm -rf -- "$DEB_SOURCE_SNAPSHOT_ROOT" ;;
+      *) echo "WARN: refusing to remove unexpected deb snapshot path: $DEB_SOURCE_SNAPSHOT_ROOT" >&2 ;;
+    esac
+    DEB_SOURCE_SNAPSHOT_ROOT=""
+  fi
+}
 
 DEBUG=0
 KEEP=10
@@ -67,6 +90,107 @@ else
   echo "==> updater signing key: supplied via TAURI_SIGNING_PRIVATE_KEY"
 fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
+# --- IMMUTABLE SOURCE BOUNDARY (EI-21575353881676545) -----------------------
+#
+# The sidecar and this wrapper used to consume the same SHARED checkout at two
+# different times. On an active box that is not a source boundary: git-sync and
+# peer Vite builds can move HEAD/dist between a verified sidecar and npm's
+# prebuild check. The guard correctly refused that skew, but rebuilding in a
+# loop could never make forward progress while the tree kept moving.
+#
+# Reuse the Windows producer's maintained contract: the sidecar provenance
+# names the accepted superproject commit; that commit names the exact desktop
+# submodule commit. Package from a private detached desktop worktree at that
+# gitlink, and copy the already-built sidecar plus its Vite snapshot into the
+# private root while holding the established sidecar reader lock. The live
+# checkout may keep changing, but none of those paths are build inputs anymore.
+# No stale override is involved: the pinned commit is checked again below, and
+# npm's normal SPA content guard runs against the pinned snapshot.
+SIDECAR_PROVENANCE="$LIVE_DESKTOP_DIR/src-tauri/sidecar/build-provenance.json"
+[[ -s "$SIDECAR_PROVENANCE" ]] || {
+  echo "FATAL: sidecar build-provenance.json is missing; cannot establish an immutable deb source boundary." >&2
+  echo "       Rebuild with bin/build-desktop-sidecar.sh, then retry." >&2
+  exit 4
+}
+
+DEB_SOURCE_SNAPSHOT_COMMIT="$(python3 - "$SIDECAR_PROVENANCE" <<'PY'
+import json, re, sys
+try:
+    value = json.load(open(sys.argv[1], encoding='utf-8')).get('gitHead', '')
+except (OSError, ValueError, TypeError):
+    value = ''
+print(value if isinstance(value, str) and re.fullmatch(r'[0-9a-fA-F]{40}', value) else '')
+PY
+)"
+[[ -n "$DEB_SOURCE_SNAPSHOT_COMMIT" ]] || {
+  echo "FATAL: sidecar provenance has no full 40-hex gitHead; refusing an unpinned deb build." >&2
+  exit 4
+}
+git -C "$LIVE_REPO_DIR" cat-file -e "$DEB_SOURCE_SNAPSHOT_COMMIT^{commit}" 2>/dev/null || {
+  echo "FATAL: sidecar source commit $DEB_SOURCE_SNAPSHOT_COMMIT is unknown to $LIVE_REPO_DIR." >&2
+  exit 4
+}
+
+DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT="$(
+  git -C "$LIVE_REPO_DIR" ls-tree "$DEB_SOURCE_SNAPSHOT_COMMIT" papercusp-desktop 2>/dev/null \
+    | awk '$1 == "160000" && $2 == "commit" { print $3; exit }'
+)"
+[[ "$DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "FATAL: source commit $DEB_SOURCE_SNAPSHOT_COMMIT has no papercusp-desktop gitlink." >&2
+  exit 4
+}
+git -C "$LIVE_DESKTOP_DIR" cat-file -e "$DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT^{commit}" 2>/dev/null || {
+  echo "FATAL: desktop source commit $DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT is unavailable locally." >&2
+  exit 4
+}
+
+DEB_SOURCE_SNAPSHOT_ROOT="$(mktemp -d /tmp/papercusp-deb-source-XXXXXX)"
+DEB_SOURCE_SNAPSHOT_DESKTOP="$DEB_SOURCE_SNAPSHOT_ROOT/papercusp-desktop"
+trap cleanup_deb_source_snapshot EXIT INT TERM
+if ! git -C "$LIVE_DESKTOP_DIR" worktree add --detach \
+  "$DEB_SOURCE_SNAPSHOT_DESKTOP" "$DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT" >/dev/null 2>&1; then
+  echo "FATAL: could not create immutable desktop source at $DEB_SOURCE_SNAPSHOT_DESKTOP." >&2
+  exit 4
+fi
+DEB_SOURCE_SNAPSHOT_WORKTREE=1
+
+command -v flock >/dev/null 2>&1 || {
+  echo "FATAL: flock(1) is required to snapshot the sidecar safely." >&2
+  exit 4
+}
+exec 8>>"$LIVE_DESKTOP_DIR/src-tauri/sidecar.lock"
+flock -s 8
+rm -rf -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar"
+mkdir -p -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri"
+cp -al -- "$LIVE_DESKTOP_DIR/src-tauri/sidecar" \
+  "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar"
+flock -u 8
+exec 8>&-
+
+mkdir -p -- "$DEB_SOURCE_SNAPSHOT_ROOT/apps/operator-vite"
+cp -al -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa" \
+  "$DEB_SOURCE_SNAPSHOT_ROOT/apps/operator-vite/dist"
+ln -s -- "$LIVE_REPO_DIR/node_modules" "$DEB_SOURCE_SNAPSHOT_ROOT/node_modules"
+
+_snapshot_provenance_head="$(python3 - "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/build-provenance.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get('gitHead', ''))
+except (OSError, ValueError, TypeError):
+    print('')
+PY
+)"
+[[ "$_snapshot_provenance_head" == "$DEB_SOURCE_SNAPSHOT_COMMIT" ]] || {
+  echo "FATAL: copied sidecar provenance changed while establishing the source boundary." >&2
+  exit 4
+}
+
+DESKTOP_DIR="$DEB_SOURCE_SNAPSHOT_DESKTOP"
+REPO_DIR="$DEB_SOURCE_SNAPSHOT_ROOT"
+export PAPERCUSP_REPO_DIR="$DEB_SOURCE_SNAPSHOT_ROOT"
+export PAPERCUSP_BUILD_SHA="${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}"
+echo "==> immutable deb source: root=${DEB_SOURCE_SNAPSHOT_COMMIT:0:10} desktop=${DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT:0:10} path=$DEB_SOURCE_SNAPSHOT_ROOT"
 
 # --- SEED OVERLAY / SERVER PRODUCT (WI-6075 / GUI-Server split P-007) ---
 #
@@ -201,8 +325,16 @@ echo "==> sidecar looks real (serve.mjs, $SIDECAR_SQL_COUNT migration file(s), s
 # a knowingly-older sidecar: PAPERCUSP_ALLOW_STALE_SIDECAR=1.
 SIDECAR_STAMP="$DESKTOP_DIR/src-tauri/sidecar/.sidecar-build-stamp"
 if [[ -f "$SIDECAR_STAMP" && "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" != "1" ]]; then
-  STAMP_EPOCH="$(sed -n 's/.*"epochSec"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$SIDECAR_STAMP" | head -1)"
-  if [[ -n "$STAMP_EPOCH" ]]; then
+  if [[ -n "${DEB_SOURCE_SNAPSHOT_COMMIT:-}" ]]; then
+    PINNED_SIDECAR_HEAD="$(sed -n 's/.*"gitHead"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DESKTOP_DIR/src-tauri/sidecar/build-provenance.json" | head -1)"
+    if [[ "$PINNED_SIDECAR_HEAD" != "$DEB_SOURCE_SNAPSHOT_COMMIT" ]]; then
+      echo "FATAL: STALE SIDECAR — pinned source $DEB_SOURCE_SNAPSHOT_COMMIT does not match sidecar provenance $PINNED_SIDECAR_HEAD." >&2
+      exit 4
+    fi
+    echo "==> sidecar source boundary pinned to ${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}; live patch mtimes are not inputs"
+  else
+    STAMP_EPOCH="$(sed -n 's/.*"epochSec"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$SIDECAR_STAMP" | head -1)"
+    if [[ -n "$STAMP_EPOCH" ]]; then
     NEWEST_PATCH=""
     NEWEST_PATCH_EPOCH=0
     while IFS= read -r -d '' p; do
@@ -239,6 +371,7 @@ if [[ -f "$SIDECAR_STAMP" && "${PAPERCUSP_ALLOW_STALE_SIDECAR:-0}" != "1" ]]; th
       echo "  Background: /internal/docs/agent-insights/stale-bundle-fabricates-diagnostic-confirmation" >&2
       echo "" >&2
       exit 4
+    fi
     fi
   fi
 fi
@@ -421,6 +554,7 @@ stop_build_group() {
   if [ -n "$ARCHIVE_TMP" ]; then
     rm -f -- "$ARCHIVE_TMP"
   fi
+  cleanup_deb_source_snapshot
 }
 trap stop_build_group EXIT INT TERM
 
@@ -501,7 +635,7 @@ stop_phase_watchdog() {
 
 echo "=== building ($BUILD_CMD), bounded to ${BUILD_TIMEOUT_SEC}s ==="
 set +e
-run_bounded_phase "$BUILD_TIMEOUT_SEC" bash -c 'exec 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
+run_bounded_phase "$BUILD_TIMEOUT_SEC" bash -c 'exec 8>&- 9>&-; cd "$1" && eval "$2"' _ "$DESKTOP_DIR" "$BUILD_CMD" &
 BUILD_PGID=$!
 start_phase_watchdog build "$BUILD_TIMEOUT_SEC"
 wait "$BUILD_PGID"
@@ -544,7 +678,7 @@ fi
 # advancing xz each own a full phase budget (EI-21561573003367567).
 echo "=== repacking ($DEB_PATH), independently bounded to ${REPACK_TIMEOUT_SEC}s ==="
 set +e
-run_bounded_phase "$REPACK_TIMEOUT_SEC" bash -c 'exec 9>&-; exec bash "$1" "$2"' _ "$DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH" &
+run_bounded_phase "$REPACK_TIMEOUT_SEC" bash -c 'exec 8>&- 9>&-; exec bash "$1" "$2"' _ "$LIVE_DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH" &
 BUILD_PGID=$!
 start_phase_watchdog repack "$REPACK_TIMEOUT_SEC"
 wait "$BUILD_PGID"
@@ -563,7 +697,11 @@ if [ "$REPACK_RC" -ne 0 ]; then
   exit "$REPACK_RC"
 fi
 
-GIT_SHA="$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
+if [[ -n "$DEB_SOURCE_SNAPSHOT_COMMIT" ]]; then
+  GIT_SHA="${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}"
+else
+  GIT_SHA="$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
+fi
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASENAME="$(basename "$DEB_PATH" .deb)"
 ARCHIVED_PATH="$ARCHIVE_DIR/${STAMP}-${GIT_SHA}-${BASENAME}.deb"
