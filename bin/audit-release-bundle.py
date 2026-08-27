@@ -371,15 +371,20 @@ BENIGN_ERE = [
     r"phc_RDNnzvANh1mNm9JKogF9UunG3Ky02YCxWP9gXScKShk",
 ]
 
-# Exact-value acceptances for credential-shaped THIRD-PARTY binary string-table
-# concatenations. Store only SHA-256 identities, never the token-looking bytes
-# themselves and never a broad regex. These two values are deterministic strings
-# in the upstream gh 2.80.0 linux/amd64 executable (file SHA-256
+# Exact-value acceptances for credential-shaped THIRD-PARTY published bytes.
+# Store only SHA-256 identities, never the token-looking bytes themselves and
+# never a broad regex. The first two values are deterministic string-table
+# concatenations in the upstream gh 2.80.0 linux/amd64 executable (file SHA-256
 # bed75733a24bea4fed8eb4315513c1f51cb2dd68aeaf798f01b9030f50fd8dd4), not
-# credentials. A one-byte change is a different digest and still fails closed.
+# credentials. The third is the OAuth access-token JSDoc example published twice
+# in @workos-inc/node 10.10.0's src/pipes/pipes.ts and repeated by its ESM, CJS,
+# declaration, and source-map outputs. It was reviewed against WorkOS's public
+# v10.10.0 tag. A one-byte change is a different digest and still fails closed;
+# test/release-identity-scan-archives.test.js exercises that negative control.
 BENIGN_CREDENTIAL_VALUE_SHA256 = {
     "902a57265300171f27289680dac688d3c2354f0893c50f89ec0522e0e123c3fe",
     "969f9aa3fba6e5195cb91063037eb9e5b00224886de6dc1667cc3b1e38da6dfc",
+    "bc3ae723f57c6b9e3fd80b699fcc420f6074b0b1718039669d22631d508ac0a7",
 }
 
 
