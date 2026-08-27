@@ -43,7 +43,18 @@ function runBuild({ buildCmd, timeoutSec, lockPath, desktopDir }) {
   assert.ok(start > 0, 'BUNDLE_LOCK assignment not found — did it move or get renamed?');
   assert.ok(end > start, 'DEB_PATH lookup not found, or moved before the build block');
 
-  const harness = ['set -euo pipefail', `DESKTOP_DIR=${JSON.stringify(desktopDir)}`, `BUILD_CMD=${JSON.stringify(buildCmd)}`, full.slice(start, end), 'echo "TEST_HARNESS_BUILD_RC=$BUILD_RC"', ''].join('\n');
+  const harness = [
+    'set -euo pipefail',
+    // The extracted production cleanup now also owns the immutable-source
+    // snapshot. This focused harness never creates one, so preserve the real
+    // teardown call while supplying its no-op boundary dependency explicitly.
+    'cleanup_deb_source_snapshot() { :; }',
+    `DESKTOP_DIR=${JSON.stringify(desktopDir)}`,
+    `BUILD_CMD=${JSON.stringify(buildCmd)}`,
+    full.slice(start, end),
+    'echo "TEST_HARNESS_BUILD_RC=$BUILD_RC"',
+    '',
+  ].join('\n');
 
   return spawnSync('bash', ['-c', harness], {
     encoding: 'utf8',
@@ -221,6 +232,7 @@ test('the independent watchdog bounds the build via the cgroup even when the esc
     const end = full.indexOf('DEB_PATH="$(find');
     const harness = [
       'set -euo pipefail',
+      'cleanup_deb_source_snapshot() { :; }',
       `DESKTOP_DIR=${JSON.stringify(tmp)}`,
       `BUILD_CMD=${JSON.stringify(`setsid bash -c 'sleep 30; touch ${marker}' & wait`)}`,
       full.slice(start, end),

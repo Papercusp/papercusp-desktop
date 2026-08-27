@@ -22,9 +22,9 @@ function runSigningPreflight({ createDefaultKey = false, explicitKey, keyPath, p
 
     const full = fs.readFileSync(scriptPath, 'utf8');
     const start = full.indexOf('# --- UPDATER SIGNING KEY');
-    const end = full.indexOf('# --- SEED OVERLAY', start);
+    const end = full.indexOf('# --- IMMUTABLE SOURCE BOUNDARY', start);
     assert.ok(start > 0, 'updater signing-key preflight block not found');
-    assert.ok(end > start, 'signing-key preflight must finish before seed staging');
+    assert.ok(end > start, 'signing-key preflight must finish before immutable source setup');
 
     const harness = [
       'set -euo pipefail',
