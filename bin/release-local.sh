@@ -1252,6 +1252,31 @@ if ! python3 "$ROOT/bin/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sid
   exit 1
 fi
 
+# ── ASSEMBLED-BUNDLE GITLEAKS GATE (EI-21546652106775901) ─────────────────────
+# The Python audit above owns build-box/identity literals. Gitleaks is a
+# supplementary credential detector: run it after every staging step, over the
+# same two resource roots, with a release-local config whose generated-byte
+# exceptions require BOTH a known path and a known line marker. Keep values
+# fully redacted in release logs; a finding still fails the cut.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "ERROR: gitleaks is required for the assembled-bundle release gate (EI-21546652106775901)." >&2
+  exit 1
+fi
+_GITLEAKS_STATUS=0
+for _gitleaks_root in "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; do
+  if ! gitleaks dir "$_gitleaks_root" \
+      --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
+      --no-banner --log-level=error --redact=100 \
+      --report-format=json --report-path=/dev/null; then
+    _GITLEAKS_STATUS=1
+  fi
+done
+if [[ "$_GITLEAKS_STATUS" != "0" ]]; then
+  echo "ERROR: gitleaks found an unallowlisted credential pattern in the fully-assembled bundle — refusing to launch the platform legs (EI-21546652106775901)." >&2
+  echo "       Findings are redacted. Fix the source or add a narrowly path+line-constrained allowlist only after verifying the bytes are public/generated." >&2
+  exit 1
+fi
+
 # ── BOOT GATE (desktop-release-0-0-8) — the sidecar must actually START ────────
 # 0.0.9 shipped a sidecar that could not boot on ANY platform (sharp native
 # missing from the closure copy). FIVE green cuts missed it, because a dev box
