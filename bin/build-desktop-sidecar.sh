@@ -774,7 +774,11 @@ const path = require("path");
 const { createRequire } = require("module");
 const repoRoot = process.argv[1];
 const attempt = process.argv[2];
-const pkgs = ["apps/operator/package.json", "apps/operator-vite/package.json"];
+const pkgs = [
+  "apps/operator/package.json",
+  "apps/operator-vite/package.json",
+  "packages/operator-core/package.json",
+];
 const missing = [];
 const runtimeDetails = [];
 
