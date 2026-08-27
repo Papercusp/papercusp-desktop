@@ -1,0 +1,135 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const test = require('node:test');
+
+const root = path.resolve(__dirname, '..');
+const configPath = path.join(root, 'bin', 'release-gitleaks.toml');
+const scriptPath = path.join(root, 'bin', 'release-local.sh');
+const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
+
+function scan(entries, { config = true } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-gitleaks-'));
+  try {
+    for (const [relative, contents] of Object.entries(entries)) {
+      const file = path.join(temp, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, contents);
+    }
+
+    const args = [
+      'dir',
+      temp,
+      ...(config ? ['--config', configPath] : []),
+      '--no-banner',
+      '--log-level=error',
+      '--redact=100',
+      '--report-format=json',
+      '--report-path=-',
+    ];
+    const result = spawnSync(gitleaksBin, args, { encoding: 'utf8' });
+    assert.equal(result.error, undefined, 'gitleaks could not run: ' + (result.error?.message || 'unknown error'));
+    let report = [];
+    if (result.stdout.trim()) {
+      report = JSON.parse(result.stdout);
+    }
+    return { status: result.status, report };
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+function generatedFixtures() {
+  // These are deterministic, synthetic values. They are assembled at runtime
+  // so the canaries never become findings in this test source itself.
+  const publicGcpKey = ['AIzaSy', 'B9cD7eF1gH2jK3mN4pQ5rS6tU7vW8xY0z'].join('');
+  const generatedValue = ['N3y-9Aq2P1', 'rS7vX4cL'].join('');
+  const serveLines = [
+    'const iterator = { key: "' + generatedValue + '" }; // case key/value iterator',
+    'const bpe = { tokenTable: "secretaries IOKApiI= 50257 ICA= ICAg ICAgIA==" , key: "' + generatedValue + '" };',
+    'const sort = "sortKey3=e3.sortKey===void 0?null:String(e3.sortKey); key: "' + generatedValue + '";',
+    'const firebase = { projectKey: "' + generatedValue + '" };',
+    'const roles = { fullAccessRoles: "' + generatedValue + '" };',
+    'const invite = { "invite-secret": "' + generatedValue + '" };',
+    'const canonicalInvite = { CANONICAL_INVITE_SECRET: "' + generatedValue + '" };',
+    'const generatedToken = { token, "' + generatedValue + '" };',
+    'const guidance = { accountToken: "' + generatedValue + '" }; // token/account guidance',
+  ];
+  return {
+    'spa/assets/chunk-TEST.js':
+      'const firebase = { apiKey: "' + publicGcpKey + '", authDomain: "example.firebaseapp.com", projectId: "public" };',
+    'spa/excalidraw/chunk-TEST.js':
+      'const firebase = { apiKey: "' + publicGcpKey + '", authDomain: "example.firebaseapp.com", projectId: "public" };',
+    'spa/monaco/vs/editor-TEST.js':
+      'const l = { NKeyMap: "' + generatedValue + '" };',
+    'serve.mjs': serveLines.join('\n') + '\n',
+    'apps/operator-docs/src/content/docs/privacy/personal-vault.mdx':
+      'same-key restore succeeds, "' + generatedValue + '"\n',
+    'internal-docs/privacy/personal-vault.html':
+      'same-key restore succeeds, "' + generatedValue + '"\n',
+    'internal-docs/privacy/personal-vault.md':
+      'same-key restore succeeds, "' + generatedValue + '"\n',
+  };
+}
+
+test('release gitleaks config keeps default detectors and uses conjunctive generated-byte exceptions', () => {
+  const config = fs.readFileSync(configPath, 'utf8');
+  assert.match(config, /minVersion = "v8\.30\.1"/);
+  assert.match(config, /\[extend\]\s+useDefault = true/);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 5);
+  assert.match(config, /targetRules = \["gcp-api-key"\]/);
+  assert.match(config, /targetRules = \["generic-api-key"\]/);
+  assert.match(config, /regexTarget = "line"/);
+  assert.match(config, /spa\/assets\/chunk-/);
+  assert.match(config, /spa\/excalidraw\/chunk-/);
+  assert.match(config, /spa\/monaco\/vs\/editor-/);
+  assert.ok(config.includes('(?:^|/)serve\\.mjs$'));
+  assert.match(config, /\\bsecretaries\\b/);
+  assert.match(config, /IOKApiI=/);
+  assert.match(config, /\\b50257\\b/);
+  assert.ok(config.includes('canonical[-_ ])?invite[-_ ]secret'));
+  assert.match(config, /\\btoken,/);
+  assert.match(config, /personal-vault/);
+});
+
+test('known generated contexts pass only under their path-and-line allowlists', () => {
+  const fixtures = generatedFixtures();
+  const baseline = scan(fixtures, { config: false });
+  const baselineRules = new Set(baseline.report.map((finding) => finding.RuleID));
+  assert.equal(baseline.status, 1, 'synthetic generated contexts did not exercise the default detector set');
+  assert.ok(baselineRules.has('gcp-api-key'), 'the GCP fixture no longer exercises gcp-api-key');
+  assert.ok(baselineRules.has('generic-api-key'), 'the generated-code fixtures no longer exercise generic-api-key');
+
+  const allowed = scan(fixtures);
+  assert.equal(allowed.status, 0, 'known generated contexts must be suppressed by the release config');
+  assert.deepEqual(allowed.report, []);
+});
+
+test('an unrelated raw token remains a release-gate finding', () => {
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const result = scan({
+    'unrelated/raw.js': 'const token = "' + canary + '";\n',
+  });
+  assert.equal(result.status, 1, 'an unrelated token-shaped value unexpectedly passed the release gate');
+  assert.ok(
+    result.report.some((finding) => finding.RuleID === 'generic-api-key'),
+    'the unrelated token canary was not classified by generic-api-key',
+  );
+});
+
+test('release-local runs gitleaks after the Python assembled-bundle audit and before the boot gate', () => {
+  const source = fs.readFileSync(scriptPath, 'utf8');
+  const pythonGate = source.indexOf('python3 "$ROOT/bin/audit-release-bundle.py"');
+  const gitleaksGate = source.indexOf('release-gitleaks.toml');
+  const bootGate = source.indexOf('# ── BOOT GATE');
+  assert.ok(pythonGate >= 0, 'the Python assembled-bundle audit is missing');
+  assert.ok(gitleaksGate > pythonGate, 'gitleaks must run after the Python assembled-bundle audit');
+  assert.ok(gitleaksGate < bootGate, 'gitleaks must run before the boot/platform-leg gates');
+  assert.match(source, /"\$ROOT\/src-tauri\/sidecar" "\$ROOT\/src-tauri\/resources"/);
+  assert.match(source, /--redact=100/);
+  assert.match(source, /--report-path=\/dev\/null/);
+});
