@@ -7,6 +7,7 @@ import test from 'node:test';
 
 const script = new URL('../bin/mac-vm-health.sh', import.meta.url).pathname;
 const vmcall = new URL('../bin/vm-rig/vmcall.sh', import.meta.url).pathname;
+const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.url).pathname;
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
 
@@ -200,6 +201,57 @@ test('vm-rig driver forwards a parseable JSON MCP result and exits 0', async () 
     const result = spawnSync('bash', [vmcall, 'coord:whoami', '{}'], { env, encoding: 'utf8' });
     assert.equal(result.status, 0);
     assert.deepEqual(JSON.parse(result.stdout), { ok: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function loginPreflightFixture({ processes, operatorHealthy }) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'vm-rig-login-preflight-'));
+  const bin = path.join(dir, 'bin');
+  await mkdir(bin, { recursive: true });
+  const ssh = path.join(bin, 'ssh');
+  await writeFile(ssh, `#!/usr/bin/env bash
+case "$*" in
+  *" true") exit 0 ;;
+  *"stat -f %Su /dev/console"*) printf 'root ${processes}\\n' ;;
+  *"lsof -nP -iTCP -sTCP:LISTEN"*)
+    ${operatorHealthy ? "printf '3070\\n'" : "exit 1"}
+    ;;
+  *"sudo od"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+`);
+  await chmod(ssh, 0o755);
+  return {
+    dir,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      PCUSP_VM_SSH: 'tester@vm',
+    },
+  };
+}
+
+test('login preflight rejects a Papercusp process with no healthy Hono endpoint', async () => {
+  const { dir, env } = await loginPreflightFixture({ processes: 1, operatorHealthy: false });
+  try {
+    const result = spawnSync('bash', [loginPreflight], { env, encoding: 'utf8' });
+    assert.equal(result.status, 3, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /process\(es\) present \(1\)/);
+    assert.match(`${result.stdout}${result.stderr}`, /no local Hono \/api\/health endpoint/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /OK — Papercusp app is running/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('login preflight requires and accepts the actual Hono health endpoint', async () => {
+  const { dir, env } = await loginPreflightFixture({ processes: 1, operatorHealthy: true });
+  try {
+    const result = spawnSync('bash', [loginPreflight], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Hono operator \/api\/health is healthy on :3070/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -14,12 +14,13 @@
 #
 # Usage:  bin/vm-rig/preflight-login.sh [user@vm-ip]
 # Env:    PCUSP_VM_SSH   default ssh target (default aviweiss@172.31.44.2)
-# Exit:   0 = rig login healthy (app already up, OR auto-login invariant intact)
+# Exit:   0 = rig login healthy (the Hono operator's /api/health is healthy)
 #         2 = kcpassword DRIFT — auto-login WILL fail. NOT owner-blocking: recover
 #             it yourself with bin/vm-rig/boot-headless-current.sh RUN ON THE VM
 #             (the operator runs headless at the loginwindow). A GUI login is
 #             needed only to repair AUTO-login, i.e. durability across a reboot.
-#         3 = app down for a DIFFERENT reason (invariant OK / unverifiable)
+#         3 = no healthy operator endpoint (invariant OK / unverifiable, or a
+#             Papercusp process exists without a ready Hono listener)
 #         4 = VM unreachable over SSH
 #
 # NB: never prints the decoded password — only PASS/FAIL of the invariant.
@@ -39,13 +40,55 @@ state="$("${SSH[@]}" 'printf "%s %s" "$(stat -f %Su /dev/console 2>/dev/null)" "
 console="${state%% *}"; procs="${state##* }"; procs="${procs:-0}"
 echo "PREFLIGHT: console=$console papercusp_procs=$procs"
 
-if [ "${procs:-0}" -gt 0 ] 2>/dev/null; then
-  echo "PREFLIGHT: OK — Papercusp app is running on the VM."
+# 3. prove operator readiness from the VM itself. A process-name match is not
+# enough: the GUI/sidecar, a stale child, or a root/console ownership split can
+# leave Papercusp processes present while the Hono server has no usable port.
+# The health body identifies the Papercusp operator, so an unrelated local HTTP
+# service cannot make this preflight green. Discovery files are diagnostic only;
+# the listener + /api/health response is the readiness signal.
+operator_port="$("${SSH[@]}" '
+  set -u
+  if command -v lsof >/dev/null 2>&1; then
+    cands=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+      | grep -oE "127\\.0\\.0\\.1:[0-9]+|\\*:[0-9]+" \
+      | grep -oE "[0-9]+$" | sort -u)
+  elif command -v ss >/dev/null 2>&1; then
+    cands=$(ss -tlnH 2>/dev/null | awk "{print \$4}" \
+      | grep -oE "[0-9]+$" | sort -u)
+  else
+    cands=""
+  fi
+  printf "%s\n" "$cands" | while IFS= read -r p; do
+    case "$p" in ""|*[!0-9]*) continue ;; esac
+    health=$(curl -fsS -m 2 "http://127.0.0.1:$p/api/health" 2>/dev/null || true)
+    if printf "%s" "$health" \
+      | grep -qE "\"service\"[[:space:]]*:[[:space:]]*\"papercusp-operator\""; then
+      printf "%s\\n" "$p"
+      exit 0
+    fi
+  done
+  exit 1
+' 2>/dev/null | head -1 || true)"
+case "$operator_port" in
+  ""|*[!0-9]*) operator_port="" ;;
+esac
+
+if [ -n "$operator_port" ]; then
+  echo "PREFLIGHT: OK — Hono operator /api/health is healthy on :$operator_port (Papercusp processes=$procs)."
   exit 0
 fi
 
-# 3. app is DOWN — diagnose WHY via the auto-login invariant.
-echo "PREFLIGHT: app is DOWN — verifying the unattended-login invariant…"
+# A process without a healthy endpoint is an operator readiness failure, not a
+# healthy app. Do not let this path fall through to kcpassword: auto-login is
+# irrelevant while a process is already running, and the actionable diagnosis
+# is the sidecar/startup/port ownership path.
+if [ "${procs:-0}" -gt 0 ] 2>/dev/null; then
+  echo "PREFLIGHT: FAIL(3) — Papercusp process(es) present ($procs), but no local Hono /api/health endpoint returned 200. Process presence is not operator readiness; inspect operator.json, sidecar startup/logs, and console/root ownership." >&2
+  exit 3
+fi
+
+# 4. app is DOWN — diagnose WHY via the auto-login invariant.
+echo "PREFLIGHT: app is DOWN — no healthy Hono /api/health endpoint; verifying the unattended-login invariant…"
 hex="$("${SSH[@]}" 'sudo od -An -tx1 /etc/kcpassword 2>/dev/null' 2>/dev/null | tr -d ' \n')"
 if [ -z "$hex" ]; then
   echo "PREFLIGHT: FAIL(3) — app down and /etc/kcpassword unreadable (no auto-login configured, or sudo blocked). Human GUI login likely needed." >&2

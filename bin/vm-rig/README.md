@@ -264,8 +264,10 @@ that's the last delivery hop, not a federation failure.
   then re-run `deploy.sh`. Durable fix (keep kcpassword in sync) tracked in
   EI-13010.
 - **VM `/tmp` is wiped on reboot** — always `deploy.sh` after a reboot; a
-  `NO_OPERATOR_PORT` from vmcall means the VM app isn't running (start
-  Papercusp Server.app in the VM), not a driver bug.
+  `NO_OPERATOR_PORT` from vmcall means no healthy Hono `/api/health` listener was
+  found. A Papercusp process may still be present while its sidecar is wedged or
+  the discovery/port ownership is stale; `deploy.sh`'s login preflight checks the
+  endpoint itself before diagnosing auto-login drift.
 - **The pre-mig-557 relation errors fire LAZILY (~5min in), so a boot-time
   "0 relation errors" grep is a FALSE GREEN** (WI-4070 verify, 2026-07-17).
   The `hive-owner-key-health` / directory sweeps are what hit the renamed
