@@ -159,8 +159,8 @@ test('the deb build pins the sidecar provenance commit and packages a private de
 
 test('the immutable source boundary carries the exact sidecar SPA instead of consulting live dist', () => {
   const full = fs.readFileSync(scriptPath, 'utf8');
-  const sidecarCopyAt = full.indexOf('cp -al -- "$LIVE_DESKTOP_DIR/src-tauri/sidecar"');
-  const spaCopyAt = full.indexOf('cp -al -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa"');
+  const sidecarCopyAt = full.indexOf('snapshot_copy_tree "$LIVE_DESKTOP_DIR/src-tauri/sidecar"');
+  const spaCopyAt = full.indexOf('snapshot_copy_tree "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa"');
   const switchAt = full.indexOf('DESKTOP_DIR="$DEB_SOURCE_SNAPSHOT_DESKTOP"');
   const buildAt = full.indexOf('run_bounded_phase "$BUILD_TIMEOUT_SEC"');
 
@@ -168,7 +168,21 @@ test('the immutable source boundary carries the exact sidecar SPA instead of con
   assert.ok(spaCopyAt > sidecarCopyAt, 'the SPA reference must come from the copied sidecar snapshot');
   assert.ok(switchAt > spaCopyAt, 'do not expose the snapshot root until every generated input is present');
   assert.ok(buildAt > switchAt, 'the expensive build must consume only the completed snapshot');
-  assert.match(full, /flock -s 8[\s\S]*cp -al -- "\$LIVE_DESKTOP_DIR\/src-tauri\/sidecar"[\s\S]*flock -u 8/);
+  assert.match(full, /flock -s 8[\s\S]*snapshot_copy_tree "\$LIVE_DESKTOP_DIR\/src-tauri\/sidecar"[\s\S]*flock -u 8/);
+});
+
+test('snapshot placement stays on the workspace filesystem and has an EXDEV-safe fallback', () => {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(
+    full,
+    /PAPERCUSP_DEB_SNAPSHOT_PARENT:-\$\(dirname "\$LIVE_REPO_DIR"\)\/\.papercusp-build-snapshots/,
+    'the multi-GB hardlink snapshot must not default to a potentially separate /tmp mount',
+  );
+  assert.match(full, /source_dev="\$\(stat -c '%d' "\$source"\)"/);
+  assert.match(full, /dest_dev="\$\(stat -c '%d' "\$\(dirname "\$dest"\)"\)"/);
+  assert.match(full, /cp -al -- "\$source" "\$dest"/);
+  assert.match(full, /cp -a --reflink=auto -- "\$source" "\$dest"/);
 });
 
 test('snapshot provenance cannot be bypassed by live patch mtimes and cleanup is part of the existing exit trap', () => {

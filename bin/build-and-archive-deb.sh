@@ -37,6 +37,7 @@ REPO_DIR="$LIVE_REPO_DIR"
 CARGO_TARGET="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
 
 DEB_SOURCE_SNAPSHOT_ROOT=""
+DEB_SOURCE_SNAPSHOT_PARENT=""
 DEB_SOURCE_SNAPSHOT_DESKTOP=""
 DEB_SOURCE_SNAPSHOT_COMMIT=""
 DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT=""
@@ -50,10 +51,26 @@ cleanup_deb_source_snapshot() {
   fi
   if [[ -n "$DEB_SOURCE_SNAPSHOT_ROOT" ]]; then
     case "$DEB_SOURCE_SNAPSHOT_ROOT" in
-      /tmp/papercusp-deb-source-*) rm -rf -- "$DEB_SOURCE_SNAPSHOT_ROOT" ;;
+      "$DEB_SOURCE_SNAPSHOT_PARENT"/papercusp-deb-source-*) rm -rf -- "$DEB_SOURCE_SNAPSHOT_ROOT" ;;
       *) echo "WARN: refusing to remove unexpected deb snapshot path: $DEB_SOURCE_SNAPSHOT_ROOT" >&2 ;;
     esac
     DEB_SOURCE_SNAPSHOT_ROOT=""
+  fi
+}
+
+snapshot_copy_tree() {
+  local source="${1:?snapshot source required}"
+  local dest="${2:?snapshot destination required}"
+  local source_dev dest_dev
+  mkdir -p -- "$(dirname "$dest")"
+  rm -rf -- "$dest"
+  source_dev="$(stat -c '%d' "$source")"
+  dest_dev="$(stat -c '%d' "$(dirname "$dest")")"
+  if [[ "$source_dev" == "$dest_dev" ]]; then
+    cp -al -- "$source" "$dest"
+  else
+    echo "==> snapshot copy crosses filesystems; using an independent copy for $source" >&2
+    cp -a --reflink=auto -- "$source" "$dest"
   fi
 }
 
@@ -145,7 +162,15 @@ git -C "$LIVE_DESKTOP_DIR" cat-file -e "$DEB_SOURCE_SNAPSHOT_DESKTOP_COMMIT^{com
   exit 4
 }
 
-DEB_SOURCE_SNAPSHOT_ROOT="$(mktemp -d /tmp/papercusp-deb-source-XXXXXX)"
+# Keep the default beside the workspace so the 6GB sidecar can be snapshotted
+# with hardlinks. /tmp is a separate mount on common dev hosts; blindly using
+# it produced millions of EXDEV diagnostics before failing (the first live
+# recurrence run for EI-21575353881676545). An explicit cross-device parent is
+# still supported via the independent-copy fallback in snapshot_copy_tree.
+DEB_SOURCE_SNAPSHOT_PARENT="${PAPERCUSP_DEB_SNAPSHOT_PARENT:-$(dirname "$LIVE_REPO_DIR")/.papercusp-build-snapshots}"
+mkdir -p -- "$DEB_SOURCE_SNAPSHOT_PARENT"
+DEB_SOURCE_SNAPSHOT_PARENT="$(cd "$DEB_SOURCE_SNAPSHOT_PARENT" && pwd -P)"
+DEB_SOURCE_SNAPSHOT_ROOT="$(mktemp -d "$DEB_SOURCE_SNAPSHOT_PARENT/papercusp-deb-source-XXXXXX")"
 DEB_SOURCE_SNAPSHOT_DESKTOP="$DEB_SOURCE_SNAPSHOT_ROOT/papercusp-desktop"
 trap cleanup_deb_source_snapshot EXIT INT TERM
 if ! git -C "$LIVE_DESKTOP_DIR" worktree add --detach \
@@ -161,15 +186,12 @@ command -v flock >/dev/null 2>&1 || {
 }
 exec 8>>"$LIVE_DESKTOP_DIR/src-tauri/sidecar.lock"
 flock -s 8
-rm -rf -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar"
-mkdir -p -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri"
-cp -al -- "$LIVE_DESKTOP_DIR/src-tauri/sidecar" \
+snapshot_copy_tree "$LIVE_DESKTOP_DIR/src-tauri/sidecar" \
   "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar"
 flock -u 8
 exec 8>&-
 
-mkdir -p -- "$DEB_SOURCE_SNAPSHOT_ROOT/apps/operator-vite"
-cp -al -- "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa" \
+snapshot_copy_tree "$DEB_SOURCE_SNAPSHOT_DESKTOP/src-tauri/sidecar/spa" \
   "$DEB_SOURCE_SNAPSHOT_ROOT/apps/operator-vite/dist"
 ln -s -- "$LIVE_REPO_DIR/node_modules" "$DEB_SOURCE_SNAPSHOT_ROOT/node_modules"
 
