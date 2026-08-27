@@ -14,6 +14,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
+const macCross = fs.readFileSync(path.join(root, 'bin/build-mac-cross.sh'), 'utf8');
 const repacker = path.join(root, 'bin/repack-deb-xz.sh');
 
 function run(command, args, options = {}) {
@@ -31,6 +32,30 @@ test('stage-source-tree keeps its scrub quarantine outside the packaged sidecar'
     'the scrub quarantine must never be created under the packaged sidecar');
   assert.doesNotMatch(stageSource, /mktemp -d "\$SIDECAR\/\.stage-scrub-/,
     'the old in-sidecar quarantine path must not return');
+});
+
+test('source staging overlays and verifies an external committed package-lock pin', () => {
+  assert.match(stageSource, /SOURCE_PACKAGE_LOCK_PIN="\$\{PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN:-\}\"/,
+    'stage-source-tree.sh must accept an externally materialized lockfile pin');
+  assert.match(stageSource, /--exclude='\.\/package-lock\.json'/,
+    'the mutable source-tree lockfile must be excluded from the archive pass');
+  assert.ok(stageSource.includes("declare -a PACKAGE_LOCK_TRANSFORM=(--transform='s|^\\./PINNED/|./|')"),
+    'the pinned lockfile must be transformed back to the canonical archive member');
+  assert.match(stageSource, /cmp -s "\$SOURCE_PACKAGE_LOCK_PIN_COPY" "\$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"/,
+    'the produced archive member must be compared with the committed pin');
+});
+
+test('mac cross-build captures the committed lockfile before scratch staging', () => {
+  const pin = macCross.indexOf('git -C "$ROOT/.." show HEAD:package-lock.json > "$SOURCE_PACKAGE_LOCK_PIN"');
+  const crossInstall = macCross.indexOf('bash "$HERE/cross-install-darwin-tree.sh"');
+  const stage = macCross.indexOf('bash "$HERE/stage-source-tree.sh"');
+  assert.ok(pin >= 0, 'build-mac-cross.sh must materialize the committed root lockfile');
+  assert.ok(crossInstall > pin, 'the lockfile pin must be captured before cross-install');
+  assert.ok(stage > crossInstall, 'source staging must follow cross-install');
+  assert.match(macCross, /PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN="\$SOURCE_PACKAGE_LOCK_PIN"/,
+    'build-mac-cross.sh must pass the external pin into stage-source-tree.sh');
+  assert.match(macCross, /rm -f "\$SOURCE_PACKAGE_LOCK_PIN"/,
+    'the caller must clean up its external pin after the build');
 });
 
 test('Debian repacker rejects stale in-sidecar scrub members', () => {

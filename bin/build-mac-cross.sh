@@ -190,6 +190,25 @@ DARWIN_SIDECAR="${PAPERCUSP_DARWIN_SIDECAR_DIR:-/var/tmp/darwin-sidecar-test}"
 # KNOWN GAPS header). Opt in with PAPERCUSP_STAGE_SOURCE=1.
 PAPERCUSP_STAGE_SOURCE="${PAPERCUSP_STAGE_SOURCE:-0}"
 
+# Capture the committed source lockfile before any build step can reify npm
+# dependencies in the shared checkout. The cross-installed staging tree is a
+# scratch copy with no .git, so stage-source-tree.sh cannot derive this pin from
+# its own MONO path; keep the pin external and pass it explicitly to the
+# producer. The archive must represent this cut's committed source, not the
+# mutable post-install lockfile.
+SOURCE_PACKAGE_LOCK_PIN=""
+if [[ "$PAPERCUSP_STAGE_SOURCE" == "1" ]]; then
+  SOURCE_PACKAGE_LOCK_PIN="$(mktemp "${TMPDIR:-/tmp}/papercusp-source-package-lock-pin.XXXXXX")"
+  if ! git -C "$ROOT/.." show HEAD:package-lock.json > "$SOURCE_PACKAGE_LOCK_PIN"; then
+    rm -f "$SOURCE_PACKAGE_LOCK_PIN"
+    SOURCE_PACKAGE_LOCK_PIN=""
+    fail "could not materialize committed HEAD:package-lock.json for source staging"
+  fi
+  [[ -s "$SOURCE_PACKAGE_LOCK_PIN" ]] \
+    || fail "committed HEAD:package-lock.json is empty — refusing to stage source"
+  export PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN="$SOURCE_PACKAGE_LOCK_PIN"
+fi
+
 VERSION="${PAPERCUSP_BUILD_VERSION:-$(node -p "require('$SRC_TAURI/tauri.conf.json').version" 2>/dev/null || echo unknown)}"
 if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
   PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$PAPERCUSP_RELEASE_TAG")"
@@ -225,6 +244,7 @@ cleanup() {
   local status="$?"
   trap - EXIT
   [[ -n "$MAC_CERT_P12" && -f "$MAC_CERT_P12" ]] && rm -f "$MAC_CERT_P12"
+  [[ -n "$SOURCE_PACKAGE_LOCK_PIN" && -f "$SOURCE_PACKAGE_LOCK_PIN" ]] && rm -f "$SOURCE_PACKAGE_LOCK_PIN"
   exit "$status"
 }
 trap cleanup EXIT
@@ -381,7 +401,10 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
     DARWIN_TREE="${PAPERCUSP_DARWIN_SOURCE_TREE_DIR:-/var/tmp/darwin-source-tree-x64}"
     echo "    ⚠ PAPERCUSP_STAGE_SOURCE=1 — cross-installing a darwin(x64) source tree for the dev/local buttons (WI-3307; not yet end-to-end runtime-verified)"
     bash "$HERE/cross-install-darwin-tree.sh" x64 "$DARWIN_TREE"
-    PAPERCUSP_STAGE_SOURCE=1 PAPERCUSP_STAGE_SOURCE_ROOT="$DARWIN_TREE" bash "$HERE/stage-source-tree.sh"
+    PAPERCUSP_STAGE_SOURCE=1 \
+      PAPERCUSP_STAGE_SOURCE_ROOT="$DARWIN_TREE" \
+      PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN="$SOURCE_PACKAGE_LOCK_PIN" \
+      bash "$HERE/stage-source-tree.sh"
     [[ -f "$SRC_TAURI/sidecar/source.tar.zst" ]] \
       && cp -a "$SRC_TAURI/sidecar/source.tar.zst" "$app/Contents/Resources/sidecar/source.tar.zst"
   fi

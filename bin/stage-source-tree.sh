@@ -46,6 +46,11 @@ ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
 # bundled darwin node instead of breaking at runtime).
 MONO="$(cd "${PAPERCUSP_STAGE_SOURCE_ROOT:-$ROOT/..}" && pwd)"
 SIDECAR="$ROOT/src-tauri/sidecar"
+SOURCE_PACKAGE_LOCK_PIN="${PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN:-}"
+SOURCE_PACKAGE_LOCK_PIN_TMP=""
+SOURCE_PACKAGE_LOCK_PIN_DIR=""
+SOURCE_PACKAGE_LOCK_PIN_COPY=""
+SOURCE_PACKAGE_LOCK_ARCHIVE_TMP=""
 
 if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" != "1" ]]; then
   echo "==> stage-source-tree: skipped (PAPERCUSP_STAGE_SOURCE=0 — building without the dev/local runnable source tree; only the 3 bundled-sidecar buttons will work — WI-3308)"
@@ -67,6 +72,29 @@ if [[ ! -x "$MONO/node_modules/.bin/tsx" ]]; then
   echo "ERROR: $MONO/node_modules/.bin/tsx missing — run 'npm install' at the monorepo root first (defaultHasToolchain needs <root>/node_modules/.bin; installs have no npm)" >&2
   exit 1
 fi
+
+# The sidecar build may reify a workspace-scoped npm install in the shared
+# source tree. npm is allowed to update package-lock.json while doing so, but
+# source.tar.zst is a committed-source artifact: it must contain the lockfile
+# from the pinned Git commit, never the mutable post-install copy. Mac's
+# cross-install caller supplies this file because its scratch tree has no .git;
+# direct Linux/Windows callers derive the same external pin here. The pin stays
+# outside MONO and SIDECAR so neither the package nor the archive can discover it
+# accidentally.
+if [[ -z "$SOURCE_PACKAGE_LOCK_PIN" ]]; then
+  SOURCE_PACKAGE_LOCK_PIN_TMP="$(mktemp "${TMPDIR:-/tmp}/papercusp-source-package-lock-pin.XXXXXX")"
+  if ! git -C "$MONO" show HEAD:package-lock.json > "$SOURCE_PACKAGE_LOCK_PIN_TMP"; then
+    rm -f "$SOURCE_PACKAGE_LOCK_PIN_TMP"
+    SOURCE_PACKAGE_LOCK_PIN_TMP=""
+    echo "ERROR: could not materialize committed HEAD:package-lock.json — refusing to stage mutable source" >&2
+    exit 1
+  fi
+  SOURCE_PACKAGE_LOCK_PIN="$SOURCE_PACKAGE_LOCK_PIN_TMP"
+fi
+[[ -f "$SOURCE_PACKAGE_LOCK_PIN" && -s "$SOURCE_PACKAGE_LOCK_PIN" ]] \
+  || { echo "ERROR: committed package-lock pin is missing or empty: $SOURCE_PACKAGE_LOCK_PIN" >&2; exit 1; }
+[[ -f "$MONO/package-lock.json" ]] \
+  || { echo "ERROR: $MONO/package-lock.json missing — refusing to stage without a committed lockfile member" >&2; exit 1; }
 
 # ── OWNER-NAME PREFLIGHT (EI-20976222603137006). The final bundle audit is
 # intentionally fail-closed when no explicit owner name is available, but that
@@ -133,7 +161,7 @@ else
 fi
 SCRUB_DIR=""
 OUT_TMP=""
-trap 'rm -f ${OUT_TMP:+"$OUT_TMP"}; rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"} ${SCRUB_DIR:+"$SCRUB_DIR"}' EXIT
+trap 'rm -f ${OUT_TMP:+"$OUT_TMP"} ${SOURCE_PACKAGE_LOCK_PIN_TMP:+"$SOURCE_PACKAGE_LOCK_PIN_TMP"} ${SOURCE_PACKAGE_LOCK_ARCHIVE_TMP:+"$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"}; rm -rf ${STAGE_LOCKDIR:+"$STAGE_LOCKDIR"} ${SCRUB_DIR:+"$SCRUB_DIR"} ${SOURCE_PACKAGE_LOCK_PIN_DIR:+"$SOURCE_PACKAGE_LOCK_PIN_DIR"}' EXIT
 
 # Re-check AFTER taking the lock: a rebuild we just waited on may have replaced
 # the sidecar (the serve.mjs check above ran unlocked, so its answer is stale).
@@ -340,6 +368,20 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
   fi
 fi
 
+# Keep the pin overlay external, like the identity-scrub quarantine. Exclude the
+# mutable source member and add the committed copy under a temporary prefix;
+# GNU tar transforms the prefix back to ./package-lock.json in the stream. The
+# prefix matters: an exclude for ./package-lock.json must not also suppress the
+# replacement member.
+SOURCE_PACKAGE_LOCK_PIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-source-package-lock-overlay-XXXXXX")"
+mkdir -p "$SOURCE_PACKAGE_LOCK_PIN_DIR/PINNED"
+SOURCE_PACKAGE_LOCK_PIN_COPY="$SOURCE_PACKAGE_LOCK_PIN_DIR/PINNED/package-lock.json"
+cp -p "$SOURCE_PACKAGE_LOCK_PIN" "$SOURCE_PACKAGE_LOCK_PIN_COPY"
+declare -a PACKAGE_LOCK_EXCLUDES=(--exclude='./package-lock.json')
+declare -a PACKAGE_LOCK_TRANSFORM=(--transform='s|^\./PINNED/|./|')
+declare -a PACKAGE_LOCK_TAIL=(-C "$SOURCE_PACKAGE_LOCK_PIN_DIR" ./PINNED/package-lock.json)
+echo "    committed package-lock pin: overlaying Git HEAD copy into source.tar.zst"
+
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
 # GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
 # flags above are GNU dialect — macOS bsdtar rejects --owner outright and
@@ -371,9 +413,11 @@ set +e +o pipefail
 declare -a _scrub_tail=()
 [[ -n "$SCRUB_DIR" ]] && _scrub_tail=(-C "$SCRUB_DIR" "${SCRUB_MEMBERS[@]}")
 "$TAR_BIN" --numeric-owner --owner=0 --group=0 \
-  "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${SCRUB_TRANSFORM[@]}" \
+  "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${PACKAGE_LOCK_EXCLUDES[@]}" \
+  "${SCRUB_TRANSFORM[@]}" "${PACKAGE_LOCK_TRANSFORM[@]}" \
   -C "$MONO" -cf - "${INCLUDES[@]}" \
   "${_scrub_tail[@]}" \
+  "${PACKAGE_LOCK_TAIL[@]}" \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT_TMP"
 rcs=("${PIPESTATUS[@]}")
 set -e -o pipefail
@@ -383,6 +427,26 @@ set -e -o pipefail
 sz="$(du -h "$OUT_TMP" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"
 echo "      → first boot extracts it to a writable dir; PAPERCUSP_INTEGRATION_ROOT points at it (WI-3308)"
+
+# ── COMMITTED-LOCK GUARD. Compare the archive member, not the source tree we
+# intended to read. This catches a future tar/exclude/overlay regression and
+# remains meaningful even when npm has legitimately rewritten MONO/package-lock.
+# A missing member or a decompression/tar failure is also fatal: a source tree
+# without its committed lockfile cannot be repaired on an installed machine.
+SOURCE_PACKAGE_LOCK_ARCHIVE_TMP="$(mktemp "${TMPDIR:-/tmp}/papercusp-source-package-lock-archive.XXXXXX")"
+set +e
+zstd -dc "$OUT_TMP" | "$TAR_BIN" -xOf - ./package-lock.json > "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"
+_lock_rcs=("${PIPESTATUS[@]}")
+set -e
+(( _lock_rcs[0] == 0 && _lock_rcs[1] == 0 )) \
+  || { echo "ERROR: could not extract ./package-lock.json from staged source.tar.zst — refusing to publish" >&2; exit 1; }
+if ! cmp -s "$SOURCE_PACKAGE_LOCK_PIN_COPY" "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"; then
+  echo "ERROR: staged source.tar.zst ./package-lock.json differs from the committed Git pin — refusing to publish" >&2
+  echo "  committed pin bytes: $(wc -c < "$SOURCE_PACKAGE_LOCK_PIN_COPY")" >&2
+  echo "  archive member bytes: $(wc -c < "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP")" >&2
+  exit 1
+fi
+echo "    ✓ source.tar.zst ./package-lock.json matches committed Git pin"
 
 # ── THE GATE (WI-4419). Audit what we ACTUALLY produced, not what we meant to.
 # Wired HERE, in the producer, rather than in each of the three callers
