@@ -426,6 +426,19 @@ MATRIX_LEG_STALE=0
 # runs) needs the answer THIS window, not eight days later. Every §3b path that declines to run
 # the leg sets this, so the suppression is always attributable at the verdict line.
 MATRIX_SKIP_REASON=""
+# WI-478707 — set by the base-package selector in §2 when NO Package=papercusp-gui .deb exists to
+# repack. That ONE selector failure disables BOTH federation legs at once (SKIP_MATRIX=1 +
+# RUN_LOCAL_MATRIX=0 at the same site), and because the from-repo leg still PASSES, the
+# vacuous-pass trap in §5 — which requires content-matrix AND from-repo AND local-matrix to all be
+# skips — does not fire. Net: the run reports GREEN having exercised ZERO federation coverage, and
+# the 22h GREEN-freshness TTL then short-circuits every subsequent hourly window for a day.
+# Measured 2026-08-28: all 4 GREENs in the retained 374-row bank are exactly that shape
+# (content_matrix=SKIPPED local_matrix=SKIPPED from_repo=PASS, matrix_skip="leg disabled for this
+# run (RUN_LOCAL_MATRIX=0)", invoker=systemd), and live-release-certification.ts projects DEPLOY
+# certification from those GREENs. This is a FLAG, not another MATRIX_SKIP_REASON string, because
+# the reason string only ANNOTATES the verdict line (EI-18715623477356990's fix) — this condition
+# has to CHANGE the verdict. A detector without an actuator is what let this run for 15 days.
+MATRIX_BASE_DEB_MISSING=0
 # Wall-clock start of THIS gate run — the default evidence window for frame_pressure_note()
 # below, so a verdict reached BEFORE the local-matrix leg ran (MATRIX_LEG_START_TS unset)
 # still scopes its frame evidence to this run instead of reading a stale bank file.
@@ -1765,6 +1778,10 @@ if [ -z "${GATE_DEB:-}" ]; then
       BASE_DEB=""
       SKIP_MATRIX=1
       RUN_LOCAL_MATRIX=0
+      # WI-478707 — this branch disables BOTH federation legs, so the window can prove nothing
+      # about the packaged binary. Record it so §5 can refuse the green outright rather than
+      # emitting one annotated with a skip reason nobody reads. See the flag's own comment at §0.
+      MATRIX_BASE_DEB_MISSING=1
     fi
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
@@ -2383,6 +2400,22 @@ if [ ${#REDS[@]} -eq 0 ]; then
   if [ "${ATTESTATION_BLOCKED:-0}" = 1 ]; then
     check_matrix_staleness
     verdict "GATE: PARTIAL (attestation-blocked) — local-matrix=$MATRIXFULL_RES ran WITHOUT attestation; content-matrix/from-repo/from-repo-witness NOT exercised (both GitHub identities cannot mint an attestation gist). NOT a green: $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix)"
+    exit 1
+  fi
+  # WI-478707 — A WINDOW THAT COULD NOT OBTAIN THE PACKAGED BINARY CAN NEVER BE GREEN.
+  # Same false-green class as the WI-39359 attestation wall directly above, reached through a
+  # different door: there the credential was missing, here the ARTIFACT is. When no
+  # Package=papercusp-gui .deb exists to repack, §2 sets SKIP_MATRIX=1 AND RUN_LOCAL_MATRIX=0
+  # together, so BOTH federation legs go dark in one step. The surviving from-repo leg runs from
+  # SOURCE, not from the package, so it structurally cannot stand in for the green-rig/red-binary
+  # class this gate exists to catch — a green here asserts packaged-binary coverage that nothing
+  # produced. Deliberately do NOT stamp last-green: that is what suppressed re-runs behind the 22h
+  # freshness TTL and let this sit undetected for 15 days (4 GREENs, all consumed by
+  # live-release-certification.ts as DEPLOY certification). Exit 1 like the attestation branch so
+  # the systemd result is nonzero and the fault is visible without reading the bank.
+  if [ "${MATRIX_BASE_DEB_MISSING:-0}" = 1 ]; then
+    check_matrix_staleness
+    verdict "GATE: BLOCKED (base-package-missing) — no Package=papercusp-gui .deb existed to repack, so content-matrix AND local-matrix were BOTH disabled and this window exercised ZERO federation coverage; from-repo runs from source and cannot substitute. NOT a green: $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix) ; produce a base package with: cd papercusp-desktop && bash bin/build-desktop-sidecar.sh && npm run build"
     exit 1
   fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs" "$STATE_DIR/last-red"
