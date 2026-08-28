@@ -70,6 +70,20 @@ test('detects a sidecar lost across a guest reboot even though SSH recovered', a
   assert.match(health.detail, /stale discovery pid=1753 port=3070/);
 });
 
+test('preserves a recent guest kernel panic as a hard health failure', async () => {
+  const { env } = await fixture({
+    operatorProbe: '1787873119|1787872730754|1753|0|3070|0|1787873168|Kernel-2026-08-27-215608.panic',
+  });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'guest-kernel-panic');
+  assert.equal(health.guest_kernel_panic, true);
+  assert.equal(health.guest_panic_epoch, 1787873168);
+  assert.equal(health.guest_panic_report, 'Kernel-2026-08-27-215608.panic');
+  assert.match(health.detail, /guest kernel panic report Kernel-2026-08-27-215608\.panic/);
+});
+
 test('requires both the recorded operator process and listener to prove post-reboot continuity', async () => {
   for (const operatorProbe of [
     '1787873119|1787872730754|1753|0|3070|1',
@@ -129,6 +143,9 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
     operator_port: -1,
     operator_port_listening: false,
     operator_lost_after_reboot: false,
+    guest_kernel_panic: false,
+    guest_panic_epoch: 0,
+    guest_panic_report: '',
     qmp_running: false,
     qmp_probe_skipped: false,
     qemu_log_bounded: false,

@@ -55,6 +55,9 @@ operator_pid_alive=false
 operator_port=-1
 operator_port_listening=false
 operator_lost_after_reboot=false
+guest_kernel_panic=false
+guest_panic_epoch=0
+guest_panic_report=""
 
 disk_basename="$(basename "$DISK_IMAGE")"
 qmp_basename="$(basename "$QMP_SOCK")"
@@ -193,6 +196,22 @@ else
         port=-1
         pid_alive=0
         port_listening=0
+        panic_epoch=0
+        panic_file=""
+        # Keep the timestamp of the newest kernel panic report across reboots.
+        # A reboot can leave SSH healthy while the sidecar is dead; the panic
+        # artifact is the only durable terminal-cause evidence in that state.
+        for candidate in "$HOME/Library/Logs/DiagnosticReports"/Kernel-*.panic \
+                         "$HOME/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic; do
+          [ -f "$candidate" ] || continue
+          candidate_epoch="$(stat -f %m "$candidate" 2>/dev/null || echo 0)"
+          case "$candidate_epoch" in ""|*[!0-9]*) candidate_epoch=0 ;; esac
+          if [ "$candidate_epoch" -gt "$panic_epoch" ]; then
+            panic_epoch="$candidate_epoch"
+            panic_file="$candidate"
+          fi
+        done
+        panic_report="${panic_file##*/}"
         if [ -f "$discovery" ]; then
           started="$(sed -nE "s/.*\"startedAt\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$discovery" | head -1)"
           pid="$(sed -nE "s/.*\"pid\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$discovery" | head -1)"
@@ -209,15 +228,17 @@ else
            lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
           port_listening=1
         fi
-        printf "%s|%s|%s|%s|%s|%s\n" \
-          "${boot:--1}" "$started" "$pid" "$pid_alive" "$port" "$port_listening"
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
+          "${boot:--1}" "$started" "$pid" "$pid_alive" "$port" "$port_listening" \
+          "$panic_epoch" "$panic_report"
       ' 2>/dev/null
   )"; then
     ssh_ok=true
   fi
   if [[ -n "$operator_probe" ]]; then
     IFS='|' read -r probe_boot_epoch probe_started_at_ms probe_pid \
-      probe_pid_alive probe_port probe_port_listening <<< "$operator_probe"
+      probe_pid_alive probe_port probe_port_listening probe_panic_epoch \
+      probe_panic_report <<< "$operator_probe"
     if [[ "$probe_boot_epoch" =~ ^[0-9]+$ && \
           "$probe_started_at_ms" =~ ^-?[0-9]+$ && \
           "$probe_pid" =~ ^-?[0-9]+$ && \
@@ -231,6 +252,14 @@ else
       operator_port="$probe_port"
       [[ "$probe_pid_alive" == 1 ]] && operator_pid_alive=true
       [[ "$probe_port_listening" == 1 ]] && operator_port_listening=true
+      if [[ "$probe_panic_epoch" =~ ^[0-9]+$ ]]; then
+        guest_panic_epoch="$probe_panic_epoch"
+        guest_panic_report="$probe_panic_report"
+        if (( guest_panic_epoch > 0 && operator_started_at_ms > 0 && \
+              guest_panic_epoch * 1000 >= operator_started_at_ms )); then
+          guest_kernel_panic=true
+        fi
+      fi
       if (( operator_started_at_ms > 0 && \
             operator_started_at_ms < guest_boot_epoch * 1000 )) && \
          [[ "$operator_pid_alive" == false || "$operator_port_listening" == false ]]; then
@@ -281,6 +310,9 @@ detail="service is not active"
 if [[ "$qemu_fd_exhausted" == true ]]; then
   status=fd-exhausted
   detail="QEMU FD capacity exhausted (${qemu_fd_count}/${qemu_fd_limit}) with ${qemu_close_wait_count} CLOSE_WAIT sockets; SSH/QMP probes skipped"
+elif [[ "$ssh_ok" == true && "$guest_kernel_panic" == true ]]; then
+  status=guest-kernel-panic
+  detail="guest kernel panic report ${guest_panic_report:-unknown} was written at epoch ${guest_panic_epoch} after operator start; preserve the report before recovery"
 elif [[ "$ssh_ok" == true && "$operator_lost_after_reboot" == true ]]; then
   status=operator-lost-after-reboot
   detail="guest rebooted after operator start; stale discovery pid=${operator_pid} port=${operator_port} is not backed by both its operator process (alive=${operator_pid_alive}) and listener (listening=${operator_port_listening})"
@@ -309,12 +341,13 @@ fi
 
 if [[ "$JSON" == 1 ]]; then
   if [[ "$qemu_pid" =~ ^[0-9]+$ ]]; then qemu_pid_json="$qemu_pid"; else qemu_pid_json=null; fi
-  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"operator_probe_ok":%s,"guest_boot_epoch":%s,"operator_started_at_ms":%s,"operator_pid":%s,"operator_pid_alive":%s,"operator_port":%s,"operator_port_listening":%s,"operator_lost_after_reboot":%s,"qmp_running":%s,"qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
+  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"operator_probe_ok":%s,"guest_boot_epoch":%s,"operator_started_at_ms":%s,"operator_pid":%s,"operator_pid_alive":%s,"operator_port":%s,"operator_port_listening":%s,"operator_lost_after_reboot":%s,"guest_kernel_panic":%s,"guest_panic_epoch":%s,"guest_panic_report":"%s","qmp_running":%s,"qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
     "$status" "$service_active" "$qemu_process_found" "$qemu_pid_json" \
     "$qemu_fd_count" "$qemu_fd_limit" "$qemu_close_wait_count" "$qemu_fd_exhausted" \
     "$ssh_ok" "$ssh_probe_skipped" "$operator_probe_ok" "$guest_boot_epoch" \
     "$operator_started_at_ms" "$operator_pid" "$operator_pid_alive" "$operator_port" \
     "$operator_port_listening" "$operator_lost_after_reboot" \
+    "$guest_kernel_panic" "$guest_panic_epoch" "$guest_panic_report" \
     "$qmp_running" "$qmp_probe_skipped" "$disk_age" \
     "$qemu_log_bounded" "$recovery" "$detail"
 else
