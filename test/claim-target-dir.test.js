@@ -28,6 +28,7 @@ const { join } = require('node:path');
 
 const HELPER = join(__dirname, '..', 'bin', 'lib', 'claim-target-dir.sh');
 const BUILD_LINUX = readFileSync(join(__dirname, '..', 'bin', 'build-linux-local.sh'), 'utf8');
+const BUILD_APPIMAGE = readFileSync(join(__dirname, '..', 'bin', 'build-appimage.sh'), 'utf8');
 
 let home;
 beforeEach(() => {
@@ -210,6 +211,14 @@ test('Linux artifact collection invokes relocation recovery before creating bund
   const mkdirAt = BUILD_LINUX.indexOf('mkdir -p "$DEST_BUNDLE/deb" "$DEST_BUNDLE/appimage"');
   assert.ok(prepareAt >= 0, 'build-linux-local must prepare its canonical collection target');
   assert.ok(prepareAt < mkdirAt, 'collection target recovery must precede mkdir through the symlink');
+});
+
+test('direct AppImage entrypoint claims a target slot before Cargo metadata', () => {
+  const claimAt = BUILD_APPIMAGE.indexOf('. "$DESK/bin/lib/claim-target-dir.sh"');
+  const metadataAt = BUILD_APPIMAGE.indexOf('cargo metadata --no-deps');
+  assert.ok(claimAt >= 0, 'build-appimage must source claim-target-dir.sh');
+  assert.ok(metadataAt >= 0, 'build-appimage must read Cargo metadata');
+  assert.ok(claimAt < metadataAt, 'target-dir claim must precede Cargo metadata in the direct entrypoint');
 });
 
 test('a non-directory target-slot occupant is preserved and skipped', async () => {
