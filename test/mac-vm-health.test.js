@@ -13,13 +13,13 @@ const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.u
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
 
-async function fixture({ ssh = true, qmp = true } = {}) {
+async function fixture({ ssh = true, qmp = true, operatorProbe = '' } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mac-vm-health-'));
   const bin = path.join(dir, 'bin');
   execFileSync('mkdir', ['-p', bin]);
   for (const [name, body] of Object.entries({
     systemctl: '#!/bin/sh\nexit 0\n',
-    ssh: `#!/bin/sh\nif [ -n "$MAC_VM_SSH_MARKER" ]; then : > "$MAC_VM_SSH_MARKER"; fi\nexit ${ssh ? 0 : 1}\n`,
+    ssh: `#!/bin/sh\nif [ -n "$MAC_VM_SSH_MARKER" ]; then : > "$MAC_VM_SSH_MARKER"; fi\nif [ -n "$MAC_VM_OPERATOR_PROBE_RESULT" ]; then printf '%s\\n' "$MAC_VM_OPERATOR_PROBE_RESULT"; fi\nexit ${ssh ? 0 : 1}\n`,
     qmp: `#!/bin/sh\nif [ -n "$MAC_VM_QMP_MARKER" ]; then : > "$MAC_VM_QMP_MARKER"; fi\nexit ${qmp ? 0 : 1}\n`,
   })) {
     const file = path.join(bin, name);
@@ -39,6 +39,7 @@ async function fixture({ ssh = true, qmp = true } = {}) {
       MAC_VM_STALE_SEC: '0',
       MAC_VM_SSH_MARKER: path.join(dir, 'ssh-called'),
       MAC_VM_QMP_MARKER: path.join(dir, 'qmp-called'),
+      MAC_VM_OPERATOR_PROBE_RESULT: operatorProbe,
     },
   };
 }
@@ -48,6 +49,51 @@ test('reports healthy when guest SSH answers', async () => {
   const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
   assert.equal(result.status, 0);
   assert.equal(JSON.parse(result.stdout).status, 'healthy');
+});
+
+test('detects a sidecar lost across a guest reboot even though SSH recovered', async () => {
+  const { env } = await fixture({
+    operatorProbe: '1787873119|1787872730754|1753|0|3070|0',
+  });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'operator-lost-after-reboot');
+  assert.equal(health.operator_probe_ok, true);
+  assert.equal(health.guest_boot_epoch, 1787873119);
+  assert.equal(health.operator_started_at_ms, 1787872730754);
+  assert.equal(health.operator_pid, 1753);
+  assert.equal(health.operator_pid_alive, false);
+  assert.equal(health.operator_port, 3070);
+  assert.equal(health.operator_port_listening, false);
+  assert.equal(health.operator_lost_after_reboot, true);
+  assert.match(health.detail, /stale discovery pid=1753 port=3070/);
+});
+
+test('requires both the recorded operator process and listener to prove post-reboot continuity', async () => {
+  for (const operatorProbe of [
+    '1787873119|1787872730754|1753|0|3070|1',
+    '1787873119|1787872730754|1753|1|3070|0',
+  ]) {
+    const { env } = await fixture({ operatorProbe });
+    const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+    assert.equal(result.status, 1, operatorProbe);
+    const health = JSON.parse(result.stdout);
+    assert.equal(health.status, 'operator-lost-after-reboot', operatorProbe);
+    assert.equal(health.operator_lost_after_reboot, true, operatorProbe);
+  }
+});
+
+test('does not call a current live operator lost after reboot', async () => {
+  const { env } = await fixture({
+    operatorProbe: '1787873119|1787872730754|1753|1|3070|1',
+  });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'healthy');
+  assert.equal(health.operator_probe_ok, true);
+  assert.equal(health.operator_lost_after_reboot, false);
 });
 
 test('classifies a running QEMU with dead SSH and stale disk as picker-suspect', async () => {
@@ -75,6 +121,14 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
     qemu_fd_exhausted: false,
     ssh_ok: false,
     ssh_probe_skipped: false,
+    operator_probe_ok: false,
+    guest_boot_epoch: -1,
+    operator_started_at_ms: -1,
+    operator_pid: -1,
+    operator_pid_alive: false,
+    operator_port: -1,
+    operator_port_listening: false,
+    operator_lost_after_reboot: false,
     qmp_running: false,
     qmp_probe_skipped: false,
     qemu_log_bounded: false,

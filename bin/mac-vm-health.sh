@@ -47,6 +47,14 @@ qemu_fd_exhausted=false
 qemu_log_bounded=false
 ssh_probe_skipped=false
 qmp_probe_skipped=false
+operator_probe_ok=false
+guest_boot_epoch=-1
+operator_started_at_ms=-1
+operator_pid=-1
+operator_pid_alive=false
+operator_port=-1
+operator_port_listening=false
+operator_lost_after_reboot=false
 
 disk_basename="$(basename "$DISK_IMAGE")"
 qmp_basename="$(basename "$QMP_SOCK")"
@@ -166,8 +174,70 @@ ssh_ok=false
 if [[ "$qemu_fd_exhausted" == true ]]; then
   ssh_probe_skipped=true
 else
-  ssh -i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_HOST" true 2>/dev/null && ssh_ok=true
+  # One SSH round-trip proves both guest reachability and operator continuity.
+  # A guest reboot keeps QEMU and SSH healthy while killing the sidecar; the
+  # persistent operator.json then predates the new boot and points at a dead
+  # PID/port. The old SSH-only probe called that exact state healthy
+  # (EI-21650884970130146), leaving the staging witness silently dead.
+  operator_probe=""
+  if operator_probe="$(
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes \
+      -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$SSH_HOST" '
+        # macOS prints `{ sec = 1787873119, usec = 729032 }`. Matching
+        # `.*sec` is wrong because it greedily lands on the later `usec` field.
+        boot="$(sysctl -n kern.boottime 2>/dev/null \
+          | cut -d= -f2 | cut -d, -f1 | tr -cd "0-9")"
+        discovery="$HOME/.papercusp/operator.json"
+        started=-1
+        pid=-1
+        port=-1
+        pid_alive=0
+        port_listening=0
+        if [ -f "$discovery" ]; then
+          started="$(sed -nE "s/.*\"startedAt\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$discovery" | head -1)"
+          pid="$(sed -nE "s/.*\"pid\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$discovery" | head -1)"
+          port="$(sed -nE "s/.*\"port\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$discovery" | head -1)"
+        fi
+        case "$started" in ""|*[!0-9]*) started=-1 ;; esac
+        case "$pid" in ""|*[!0-9]*) pid=-1 ;; esac
+        case "$port" in ""|*[!0-9]*) port=-1 ;; esac
+        if [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
+          cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+          case "$cmd" in *serve.mjs*--ensure*) pid_alive=1 ;; esac
+        fi
+        if [ "$port" -gt 0 ] 2>/dev/null && \
+           lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+          port_listening=1
+        fi
+        printf "%s|%s|%s|%s|%s|%s\n" \
+          "${boot:--1}" "$started" "$pid" "$pid_alive" "$port" "$port_listening"
+      ' 2>/dev/null
+  )"; then
+    ssh_ok=true
+  fi
+  if [[ -n "$operator_probe" ]]; then
+    IFS='|' read -r probe_boot_epoch probe_started_at_ms probe_pid \
+      probe_pid_alive probe_port probe_port_listening <<< "$operator_probe"
+    if [[ "$probe_boot_epoch" =~ ^[0-9]+$ && \
+          "$probe_started_at_ms" =~ ^-?[0-9]+$ && \
+          "$probe_pid" =~ ^-?[0-9]+$ && \
+          "$probe_pid_alive" =~ ^[01]$ && \
+          "$probe_port" =~ ^-?[0-9]+$ && \
+          "$probe_port_listening" =~ ^[01]$ ]]; then
+      operator_probe_ok=true
+      guest_boot_epoch="$probe_boot_epoch"
+      operator_started_at_ms="$probe_started_at_ms"
+      operator_pid="$probe_pid"
+      operator_port="$probe_port"
+      [[ "$probe_pid_alive" == 1 ]] && operator_pid_alive=true
+      [[ "$probe_port_listening" == 1 ]] && operator_port_listening=true
+      if (( operator_started_at_ms > 0 && \
+            operator_started_at_ms < guest_boot_epoch * 1000 )) && \
+         [[ "$operator_pid_alive" == false || "$operator_port_listening" == false ]]; then
+        operator_lost_after_reboot=true
+      fi
+    fi
+  fi
 fi
 
 disk_age=-1
@@ -211,6 +281,9 @@ detail="service is not active"
 if [[ "$qemu_fd_exhausted" == true ]]; then
   status=fd-exhausted
   detail="QEMU FD capacity exhausted (${qemu_fd_count}/${qemu_fd_limit}) with ${qemu_close_wait_count} CLOSE_WAIT sockets; SSH/QMP probes skipped"
+elif [[ "$ssh_ok" == true && "$operator_lost_after_reboot" == true ]]; then
+  status=operator-lost-after-reboot
+  detail="guest rebooted after operator start; stale discovery pid=${operator_pid} port=${operator_port} is not backed by both its operator process (alive=${operator_pid_alive}) and listener (listening=${operator_port_listening})"
 elif [[ "$ssh_ok" == true ]]; then
   status=healthy; detail="macOS guest SSH is reachable"
 elif [[ "$service_active" == true && "$qmp_running" == true && "$disk_age" -ge "$STALE_SEC" ]]; then
@@ -236,14 +309,18 @@ fi
 
 if [[ "$JSON" == 1 ]]; then
   if [[ "$qemu_pid" =~ ^[0-9]+$ ]]; then qemu_pid_json="$qemu_pid"; else qemu_pid_json=null; fi
-  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"qmp_running":%s,"qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
+  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"operator_probe_ok":%s,"guest_boot_epoch":%s,"operator_started_at_ms":%s,"operator_pid":%s,"operator_pid_alive":%s,"operator_port":%s,"operator_port_listening":%s,"operator_lost_after_reboot":%s,"qmp_running":%s,"qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
     "$status" "$service_active" "$qemu_process_found" "$qemu_pid_json" \
     "$qemu_fd_count" "$qemu_fd_limit" "$qemu_close_wait_count" "$qemu_fd_exhausted" \
-    "$ssh_ok" "$ssh_probe_skipped" "$qmp_running" "$qmp_probe_skipped" "$disk_age" \
+    "$ssh_ok" "$ssh_probe_skipped" "$operator_probe_ok" "$guest_boot_epoch" \
+    "$operator_started_at_ms" "$operator_pid" "$operator_pid_alive" "$operator_port" \
+    "$operator_port_listening" "$operator_lost_after_reboot" \
+    "$qmp_running" "$qmp_probe_skipped" "$disk_age" \
     "$qemu_log_bounded" "$recovery" "$detail"
 else
-  printf 'mac-vm-health: %s — %s (service=%s ssh=%s qmp=%s fd=%s/%s close_wait=%s log_bounded=%s disk_age=%ss recovery=%s)\n' \
-    "$status" "$detail" "$service_active" "$ssh_ok" "$qmp_running" \
+  printf 'mac-vm-health: %s — %s (service=%s ssh=%s operator_reboot=%s qmp=%s fd=%s/%s close_wait=%s log_bounded=%s disk_age=%ss recovery=%s)\n' \
+    "$status" "$detail" "$service_active" "$ssh_ok" "$operator_lost_after_reboot" \
+    "$qmp_running" \
     "$qemu_fd_count" "$qemu_fd_limit" "$qemu_close_wait_count" "$qemu_log_bounded" \
     "$disk_age" "$recovery"
 fi
