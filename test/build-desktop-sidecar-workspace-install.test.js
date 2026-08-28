@@ -493,6 +493,58 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   assert.equal(childProcess.spawnSync('bash', ['-n', installerPath]).status, 0);
 });
 
+test('Linux Server ships an opt-in boot-start helper, because a user unit alone dies with the last login', () => {
+  const helperPath = path.join(desktopRoot, 'src-tauri/systemd/enable-boot-start.sh');
+  const helper = fs.readFileSync(helperPath, 'utf8');
+  const unit = fs.readFileSync(
+    path.join(desktopRoot, 'src-tauri/systemd/papercusp-server.service'),
+    'utf8',
+  );
+  const contract = require(path.join(desktopRoot, 'src-tauri/distribution-contract.json'));
+
+  // THE DEFECT THIS PINS (WI-479556, sibling of WI-475896's macOS half).
+  // papercusp-server.service is a systemd USER unit, and a per-user manager is
+  // started at login and torn down with the user's last session. Without
+  // lingering, a headless Linux peer is up only while somebody is logged in —
+  // and nothing errors, so it reads as a federation fault rather than a service
+  // that was never started.
+  assert.match(unit, /^WantedBy=default\.target$/m, 'this test only makes sense for a user unit');
+  assert.match(helper, /loginctl enable-linger/, 'boot-start requires lingering for the owning account');
+  assert.match(helper, /loginctl disable-linger/, 'the helper must be reversible');
+
+  // enable-linger can report success while the state does not stick (a
+  // read-only /var/lib/systemd/linger, for one). Verify, do not assume.
+  assert.match(
+    helper,
+    /show-user[^\n]*--property=Linger/,
+    'the helper must VERIFY linger took, not just request it',
+  );
+
+  // Without XDG_RUNTIME_DIR a `systemctl --user` run under sudo addresses
+  // ROOT's manager and reports success while changing nothing for the account
+  // that matters — a silent no-op with a green exit code.
+  assert.match(
+    helper,
+    /XDG_RUNTIME_DIR=/,
+    'systemctl --user must be pointed at the target account\'s own manager',
+  );
+
+  // It is deliberately NOT wired into postinstall: a deb maintainer script runs
+  // as root with no SUDO_USER and cannot know which account should own the peer.
+  const postinstall = fs.readFileSync(
+    path.join(desktopRoot, 'src-tauri/deb/postinstall.sh'),
+    'utf8',
+  );
+  assert.doesNotMatch(
+    postinstall,
+    /enable-linger/,
+    'postinstall cannot know which account to enable linger for; keep this opt-in',
+  );
+
+  assert.equal(contract.server.installedIdentities.linuxBootStartHelper, 'systemd/enable-boot-start.sh');
+  assert.equal(childProcess.spawnSync('bash', ['-n', helperPath]).status, 0);
+});
+
 test('Linux Server deb installs and package-enables one systemd user service', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
