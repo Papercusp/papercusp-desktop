@@ -42,6 +42,15 @@ AUDIT_PY="$DESK/bin/audit-release-bundle.py"
 python3 "$AUDIT_PY" --owner-preflight \
   || { echo "ERROR: owner-name preflight failed — refusing to start AppImage build" >&2; exit 2; }
 
+# Claim a target-dir slot before Cargo metadata or any release-tree cleanup. This
+# direct entrypoint is also invoked outside release-local.sh, so it must establish
+# the same per-instance isolation itself (EI-217146).
+# shellcheck source=lib/claim-target-dir.sh
+. "$DESK/bin/lib/claim-target-dir.sh" || {
+  echo "FATAL: cannot source bin/lib/claim-target-dir.sh — refusing to build without target-dir isolation" >&2
+  exit 1
+}
+
 CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
 [ -n "$CT" ] || CT="$HOME/.cargo-target"
