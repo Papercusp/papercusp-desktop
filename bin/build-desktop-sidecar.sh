@@ -58,7 +58,17 @@ if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh
     echo "ERROR: could not capture sidecar source provenance before build mutations" >&2
     exit 2
   }
-  mapfile -t _provenance_source_fields <<< "$_provenance_source_output"
+  # EI-21687905052970165: NOT `mapfile -t` — that is a bash 4.0+ builtin and
+  # macOS ships /bin/bash 3.2.57 system-wide, so it fails ~an hour into a mac VM
+  # build (the recurrence this file's sibling comments and
+  # scripts/check-mac-bash-portability.mjs exist to prevent). The while-read
+  # accumulation below is exactly equivalent for a here-string: `<<<` always
+  # supplies a trailing newline, so both forms yield the same element count for
+  # 2-line, 1-line, empty, trailing-blank and whitespace-bearing input.
+  _provenance_source_fields=()
+  while IFS= read -r _provenance_source_line; do
+    _provenance_source_fields+=("$_provenance_source_line")
+  done <<< "$_provenance_source_output"
   if [[ "${#_provenance_source_fields[@]}" -ne 2 \
      || -z "${_provenance_source_fields[0]}" \
      || ( "${_provenance_source_fields[1]}" != "true" \
@@ -68,7 +78,7 @@ if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh
   fi
   export PROVENANCE_SOURCE_GIT_HEAD="${_provenance_source_fields[0]}"
   export PROVENANCE_SOURCE_GIT_DIRTY="${_provenance_source_fields[1]}"
-  unset _provenance_source_output _provenance_source_fields
+  unset _provenance_source_output _provenance_source_fields _provenance_source_line
 fi
 
 # Release-audited cuts must start from a clean source snapshot. The provenance
