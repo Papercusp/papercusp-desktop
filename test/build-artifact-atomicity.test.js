@@ -70,6 +70,19 @@ test('Windows rootfs atomic temporary archive is gitignored while it streams', (
   );
 });
 
+test('Windows WSL bootstrap installs iproute2 for ss listener inspection', () => {
+  for (const [name, source] of [
+    ['build-rootfs.sh', buildRootfs],
+    ['papercup-bootstrap.sh', bootstrapResource],
+  ]) {
+    assert.match(
+      executableLines(source),
+      /\n  iproute2 \\\n/,
+      `${name} must install iproute2, which provides the ss listener-inspection command`,
+    );
+  }
+});
+
 test('Windows WSL bootstrap pins the sidecar Node runtime and ABI', () => {
   const sidecarMatch = sidecarBuilder.match(
     /^NODE_VERSION="\$\{NODE_VERSION:-v([0-9]+\.[0-9]+\.[0-9]+)\}"$/m,

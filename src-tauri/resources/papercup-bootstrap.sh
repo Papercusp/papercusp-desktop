@@ -52,6 +52,7 @@ apt-get install -y --no-install-recommends \
   tmux \
   xz-utils \
   ripgrep \
+  iproute2 \
   libasound2t64
 
 # overmind is not in the Ubuntu archive — fetch the release binary.
