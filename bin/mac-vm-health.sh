@@ -265,8 +265,17 @@ else
       if [[ "$probe_panic_epoch" =~ ^[0-9]+$ ]]; then
         guest_panic_epoch="$probe_panic_epoch"
         guest_panic_report="$probe_panic_report"
-        if (( guest_panic_epoch > 0 && operator_started_at_ms > 0 && \
-              guest_panic_epoch * 1000 >= operator_started_at_ms )); then
+        # When operator.json is absent (or has no valid startedAt), the
+        # sidecar cannot provide the old "panic after operator start" ordering.
+        # A panic report at/after the current guest boot is still definitive:
+        # it belongs to this guest run even when sidecar start metadata is
+        # unavailable, while older reports predate this boot epoch. Keep this
+        # fail-closed so SSH reachability cannot mask a fresh kernel failure.
+        if (( guest_panic_epoch > 0 && \
+              ((operator_started_at_ms > 0 && \
+                guest_panic_epoch * 1000 >= operator_started_at_ms) || \
+               (operator_started_at_ms <= 0 && guest_boot_epoch > 0 && \
+                guest_panic_epoch >= guest_boot_epoch)) )); then
           guest_kernel_panic=true
         fi
       fi
@@ -322,7 +331,11 @@ if [[ "$qemu_fd_exhausted" == true ]]; then
   detail="QEMU FD capacity exhausted (${qemu_fd_count}/${qemu_fd_limit}) with ${qemu_close_wait_count} CLOSE_WAIT sockets; SSH/QMP probes skipped"
 elif [[ "$ssh_ok" == true && "$guest_kernel_panic" == true ]]; then
   status=guest-kernel-panic
-  detail="guest kernel panic report ${guest_panic_report:-unknown} was written at epoch ${guest_panic_epoch} after operator start; preserve the report before recovery"
+  if (( operator_started_at_ms > 0 )); then
+    detail="guest kernel panic report ${guest_panic_report:-unknown} was written at epoch ${guest_panic_epoch} after operator start; preserve the report before recovery"
+  else
+    detail="guest kernel panic report ${guest_panic_report:-unknown} was written at/after guest boot epoch ${guest_boot_epoch}; operator metadata is unavailable, preserve the report before recovery"
+  fi
 elif [[ "$ssh_ok" == true && "$operator_lost_after_reboot" == true ]]; then
   status=operator-lost-after-reboot
   detail="guest rebooted after operator start; stale discovery pid=${operator_pid} port=${operator_port} is not backed by both its operator process (alive=${operator_pid_alive}) and listener (listening=${operator_port_listening})"

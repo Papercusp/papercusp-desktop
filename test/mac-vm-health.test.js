@@ -84,6 +84,32 @@ test('preserves a recent guest kernel panic as a hard health failure', async () 
   assert.match(health.detail, /guest kernel panic report Kernel-2026-08-27-215608\.panic/);
 });
 
+test('fails closed on a current-boot panic when operator metadata is absent', async () => {
+  const { env } = await fixture({
+    operatorProbe: '1787873119|-1|-1|0|-1|0|1787873168|Kernel-2026-08-27-215608.panic',
+  });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'guest-kernel-panic');
+  assert.equal(health.guest_kernel_panic, true);
+  assert.equal(health.operator_started_at_ms, -1);
+  assert.equal(health.guest_panic_epoch, 1787873168);
+  assert.match(health.detail, /at\/after guest boot epoch 1787873119; operator metadata is unavailable/);
+});
+
+test('does not treat a stale panic report as current without operator metadata', async () => {
+  const { env } = await fixture({
+    operatorProbe: '1787873119|-1|-1|0|-1|0|1787870000|Kernel-2026-08-27-190000.panic',
+  });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'healthy');
+  assert.equal(health.guest_kernel_panic, false);
+  assert.equal(health.operator_started_at_ms, -1);
+});
+
 test('guards the remote panic glob for macOS default zsh with no matching reports', async () => {
   const source = await readFile(script, 'utf8');
   assert.match(source, /ZSH_VERSION.*NULL_GLOB/s);
