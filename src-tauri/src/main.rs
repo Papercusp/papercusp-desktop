@@ -802,6 +802,51 @@ fn windows_path_to_wsl(path: &std::path::Path) -> String {
     normalized
 }
 
+/// Content generation used for the distro-local Windows sidecar snapshot.
+///
+/// The sidecar build already writes this SHA into `.sidecar-build-stamp`; reuse
+/// that canonical content identity instead of inventing a second fingerprint.
+/// A generation is deliberately the full lowercase SHA so the destination path
+/// is collision-resistant and contains no caller-controlled separators.
+#[cfg(any(target_os = "windows", test))]
+fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<String> {
+    let stamp_path = sidecar_dir.join(".sidecar-build-stamp");
+    let stamp_text = std::fs::read_to_string(&stamp_path)?;
+    let stamp: serde_json::Value = serde_json::from_str(&stamp_text).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid {}: {error}", stamp_path.display()),
+        )
+    })?;
+    let generation = stamp
+        .get("serveSha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} has no valid 64-hex serveSha256", stamp_path.display()),
+            )
+        })?;
+    Ok(generation)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn wsl_runtime_sidecar_path(base: &str, generation: &str) -> std::io::Result<std::path::PathBuf> {
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sidecar runtime generation must be exactly 64 hex characters",
+        ));
+    }
+    Ok(std::path::PathBuf::from(format!(
+        "{}/runtime-sidecars/{}",
+        base.trim_end_matches('/'),
+        generation.to_ascii_lowercase()
+    )))
+}
+
 /// Serializes every test IN THIS BINARY that mutates the process-global
 /// `HOME` (or `USERPROFILE`) env var. `cargo test` runs test functions on
 /// separate threads within ONE process by default, so two HOME-mutating
@@ -820,7 +865,10 @@ pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 
 #[cfg(test)]
 mod tests {
-    use super::{provision_env_operators_for_profile, windows_path_to_wsl};
+    use super::{
+        provision_env_operators_for_profile, sidecar_runtime_generation, sidecar_wslenv,
+        windows_path_to_wsl, wsl_runtime_sidecar_path,
+    };
     use std::path::PathBuf;
 
     fn t(input: &str, expected: &str) {
@@ -896,6 +944,75 @@ mod tests {
         assert_eq!(provision_env_operators_for_profile("vm-release"), "0");
         assert_eq!(provision_env_operators_for_profile("dogfood"), "1");
         assert_eq!(provision_env_operators_for_profile(""), "1");
+    }
+
+    #[test]
+    fn windows_sidecar_runtime_generation_is_content_addressed_and_path_safe() {
+        let dir = std::env::temp_dir().join(format!(
+            "papercusp-wi305737-generation-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sha = "ABCDEF0123456789".repeat(4);
+        std::fs::write(
+            dir.join(".sidecar-build-stamp"),
+            format!(r#"{{"serveSha256":"{sha}"}}"#),
+        )
+        .unwrap();
+
+        let generation = sidecar_runtime_generation(&dir).unwrap();
+        assert_eq!(generation, sha.to_ascii_lowercase());
+        assert_eq!(
+            wsl_runtime_sidecar_path("/home/papercup/.papercusp/", &generation).unwrap(),
+            std::path::PathBuf::from(format!(
+                "/home/papercup/.papercusp/runtime-sidecars/{generation}"
+            ))
+        );
+        assert!(wsl_runtime_sidecar_path("/home/papercup/.papercusp", "../escape").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn distro_local_sidecar_paths_are_not_retranslated_by_wslenv() {
+        let native = sidecar_wslenv(true);
+        let translated = sidecar_wslenv(false);
+        for name in [
+            "PAPERCUSP_HARNESS_DIR",
+            "PAPERCUSP_TEMPLATES_DIR",
+            "PAPERCUSP_RUBRICS_DIR",
+            "PAPERCUSP_GOAL_PACKAGES_DIR",
+            "PAPERCUSP_PG_SQL_DIR",
+            "PAPERCUSP_PG_RESTORE_BIN",
+            "PAPERCUSP_SPA_DIST",
+            "PAPERCUSP_DOCS_ROOT",
+            "PAPERCUSP_PROMPTS_DIR",
+            "PAPERCUSP_SIDECAR_BIN",
+        ] {
+            assert!(
+                native.split(':').any(|entry| entry == name),
+                "{name} must cross unchanged once its value is WSL-native: {native}"
+            );
+            assert!(
+                translated
+                    .split(':')
+                    .any(|entry| entry == format!("{name}/p")),
+                "{name} must retain Windows→WSL translation before staging: {translated}"
+            );
+        }
+        for still_windows_native in [
+            "PAPERCUSP_SEED_DIR/p",
+            "PAPERCUSP_PG_SEED_PATH/p",
+            "PAPERCUSP_SOURCE_ARCHIVE/p",
+            "PAPERCUSP_IDENTITY_DIR/p",
+        ] {
+            assert!(
+                native.split(':').any(|entry| entry == still_windows_native),
+                "one-time Windows resource {still_windows_native} must keep /p translation"
+            );
+        }
     }
 
     /// WI-37736 — the INVERSE of the test above, and the reason it exists:
@@ -2351,6 +2468,7 @@ mod discovery_tests {
             false,
             0,
             &missing_dir,
+            None,
             0,
             &missing_dir,
             &missing_dir,
@@ -3168,9 +3286,7 @@ mod helper_tests {
     /// (including `/api/desktop/version`) instead of silently taking HTTP.
     #[test]
     fn packaged_wsl_resolution_proves_content_origin_for_a_found_endpoint() {
-        let resolved = resolve_wsl_endpoint_ipc_socket(Some(
-            "tcp://127.0.0.1:21958".to_string(),
-        ));
+        let resolved = resolve_wsl_endpoint_ipc_socket(Some("tcp://127.0.0.1:21958".to_string()));
         assert_eq!(
             resolved.path,
             Some(std::path::PathBuf::from("tcp://127.0.0.1:21958"))
@@ -3493,6 +3609,108 @@ fn terminate_distro() -> bool {
     cmd.args(["--terminate", wsl_setup::DISTRO_NAME_PUB]);
     no_console_window(&mut cmd);
     matches!(cmd.status(), Ok(s) if s.success())
+}
+
+/// Run one argument-safe command inside the packaged WSL distro with a hard
+/// deadline. The sidecar snapshot's source is DrvFs, so a 9P stall can block a
+/// plain `Command::status()` forever; on timeout, terminate the distro (the
+/// existing WI-3360 recovery, no unregister/data loss) before returning.
+#[cfg(target_os = "windows")]
+fn run_wsl_exec_with_timeout(
+    args: &[String],
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec"])
+        .args(args);
+    no_console_window(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = terminate_distro();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "WSL sidecar staging command exceeded {}s and the distro was reset",
+                        timeout.as_secs()
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// Materialize the hot Windows sidecar tree on WSL ext4 and return its native
+/// Linux path. The installed bundle remains the immutable source of truth;
+/// `.sidecar-build-stamp` content-addresses a distro-local snapshot, so normal
+/// launches are a single marker probe and updates publish through a temp dir.
+///
+/// `source.tar.zst` and the DB seed archives are intentionally excluded: they
+/// are one-time extraction inputs (and can be multi-gigabyte), not hot runtime
+/// files. Their env vars keep pointing at the Windows install with WSLENV `/p`.
+#[cfg(target_os = "windows")]
+fn prepare_wsl_sidecar_runtime(
+    sidecar_dir: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let generation = sidecar_runtime_generation(sidecar_dir)?;
+    let runtime_dir = wsl_runtime_sidecar_path(&wsl_papercusp_home_dir(), &generation)?;
+    let marker = runtime_dir.join(".papercusp-runtime-complete");
+    let marker_args = vec![
+        "/usr/bin/test".to_string(),
+        "-f".to_string(),
+        marker.to_string_lossy().to_string(),
+    ];
+    if run_wsl_exec_with_timeout(&marker_args, Duration::from_secs(10))?.success() {
+        return Ok(runtime_dir);
+    }
+
+    let source_wsl = windows_path_to_wsl(sidecar_dir);
+    let temporary = format!("{}.tmp.{}", runtime_dir.display(), std::process::id());
+    let script = r#"set -euo pipefail
+source_dir=$1
+temporary_dir=$2
+runtime_dir=$3
+runtime_parent=${runtime_dir%/*}
+rm -rf -- "$temporary_dir"
+mkdir -p -- "$temporary_dir" "$runtime_parent"
+tar -C "$source_dir" \
+  --exclude='./source.tar.zst' \
+  --exclude='./db-seed.dump' \
+  --exclude='./db-seed.tar.gz' \
+  -cf - . | tar -C "$temporary_dir" -xf -
+test -f "$temporary_dir/serve.mjs"
+test -f "$temporary_dir/sidecar-preload.js"
+touch "$temporary_dir/.papercusp-runtime-complete"
+if test -e "$runtime_dir"; then
+  rm -rf -- "$temporary_dir"
+else
+  mv -- "$temporary_dir" "$runtime_dir"
+fi
+"#;
+    let stage_args = vec![
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+        "papercusp-stage-sidecar".to_string(),
+        source_wsl,
+        temporary,
+        runtime_dir.to_string_lossy().to_string(),
+    ];
+    let status = run_wsl_exec_with_timeout(&stage_args, Duration::from_secs(1_200))?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "WSL sidecar staging exited with {status}"
+        )));
+    }
+    Ok(runtime_dir)
 }
 
 /// Unified operator discovery shared by BOTH the initial boot wait and the
@@ -6102,6 +6320,35 @@ fn bring_up_sidecar(
     shared_state_dir: std::path::PathBuf,
     workspace_home: std::path::PathBuf,
 ) {
+    // WI-305737: executing the installed sidecar directly from `/mnt/c` leaves
+    // Node's hot code/resource reads on DrvFs. A live Windows guest reproduced
+    // the resulting kernel-D `p9_cli` hang with a stale operator.json and closed
+    // API port. Materialize one content-addressed ext4 snapshot before spawn;
+    // the immutable Windows install remains the source/seed archive location.
+    let runtime_sidecar_dir: Option<std::path::PathBuf> = {
+        #[cfg(target_os = "windows")]
+        {
+            if via_wsl {
+                match prepare_wsl_sidecar_runtime(&sidecar_dir) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        let message =
+                            format!("could not stage the Windows sidecar into WSL ext4: {error}");
+                        INSTALL_DEFECT.set(Some(message.clone()));
+                        eprintln!("[papercusp-desktop] FATAL: {message} (WI-305737)");
+                        notify_install_broken(app, &message);
+                        return;
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    };
     // (EI-8894/WI-3633 leg 2) Boot-time orphan sweep — belt-and-suspenders
     // alongside the parent-death self-exit watch (serve.ts), which only
     // self-terminates a sidecar that is ITSELF still alive and polling its
@@ -6113,6 +6360,7 @@ fn bring_up_sidecar(
         via_wsl,
         port,
         &sidecar_dir,
+        runtime_sidecar_dir.as_deref(),
         pg_port_hint,
         &shared_state_dir,
         &workspace_home,
@@ -6144,6 +6392,7 @@ fn bring_up_sidecar(
         via_wsl,
         port,
         sidecar_dir.clone(),
+        runtime_sidecar_dir,
         pg_port_hint,
         shared_state_dir.clone(),
         workspace_home.clone(),
@@ -6191,6 +6440,45 @@ const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCU
      PAPERCUSP_IPC_ENABLE:PAPERCUSP_IPC_TCP:\
      PAPERCUSP_RELEASE_HOST:PAPERCUSP_WORKSPACES_ROOT/p:PAPERCUSP_HOME/p";
 
+/// WSLENV shape for the sidecar launch.
+///
+/// `/p` is directional Windows→WSL translation, not a generic "this is a
+/// path" annotation. Live Windows verification for WI-305737 proved that WSL
+/// drops an already-POSIX `/home/...` value when its entry still carries `/p`.
+/// Once the hot sidecar tree has been staged onto distro ext4, strip `/p` only
+/// from the variables whose values now point into that tree. Seed/source
+/// archives and Windows-owned identity/state paths deliberately remain on the
+/// installed Windows tree and must retain translation.
+fn sidecar_wslenv(runtime_sidecar_is_wsl_native: bool) -> String {
+    if !runtime_sidecar_is_wsl_native {
+        return SIDECAR_WSLENV.to_string();
+    }
+    const WSL_NATIVE_RUNTIME_PATHS: [&str; 10] = [
+        "PAPERCUSP_HARNESS_DIR",
+        "PAPERCUSP_TEMPLATES_DIR",
+        "PAPERCUSP_RUBRICS_DIR",
+        "PAPERCUSP_GOAL_PACKAGES_DIR",
+        "PAPERCUSP_PG_SQL_DIR",
+        "PAPERCUSP_PG_RESTORE_BIN",
+        "PAPERCUSP_SPA_DIST",
+        "PAPERCUSP_DOCS_ROOT",
+        "PAPERCUSP_PROMPTS_DIR",
+        "PAPERCUSP_SIDECAR_BIN",
+    ];
+    SIDECAR_WSLENV
+        .split(':')
+        .map(|entry| {
+            let name = entry.strip_suffix("/p").unwrap_or(entry).trim();
+            if WSL_NATIVE_RUNTIME_PATHS.contains(&name) {
+                name
+            } else {
+                entry
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 fn baked_distribution_profile() -> &'static str {
     option_env!("PAPERCUSP_DISTRIBUTION_PROFILE").unwrap_or("dogfood")
 }
@@ -6207,6 +6495,7 @@ fn spawn_serve(
     via_wsl: bool,
     port_hint: u16,
     sidecar_dir: &std::path::Path,
+    runtime_sidecar_dir: Option<&std::path::Path>,
     pg_port_hint: u16,
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
@@ -6226,30 +6515,36 @@ fn spawn_serve(
     }
     install_defect.set(None);
     println!(
-        "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}",
+        "[papercusp-desktop] spawning serve --ensure (port hint {}) from {}{}",
         port_hint,
-        sidecar_dir.display()
+        runtime_sidecar_dir.unwrap_or(sidecar_dir).display(),
+        if runtime_sidecar_dir.is_some() {
+            " (WSL ext4 snapshot)"
+        } else {
+            ""
+        }
     );
 
-    let server_js = sidecar_dir.join("serve.mjs");
-    let spa_dist = sidecar_dir.join("spa");
-    let docs_root = sidecar_dir.join("internal-docs");
-    let harness_dir = sidecar_dir.join("harness");
+    let runtime_sidecar_dir = runtime_sidecar_dir.unwrap_or(sidecar_dir);
+    let server_js = runtime_sidecar_dir.join("serve.mjs");
+    let spa_dist = runtime_sidecar_dir.join("spa");
+    let docs_root = runtime_sidecar_dir.join("internal-docs");
+    let harness_dir = runtime_sidecar_dir.join("harness");
     // First-party app-templates bundled at sidecar/templates (build-desktop-sidecar.sh);
     // template-store.ts resolves them via PAPERCUSP_TEMPLATES_DIR (dev falls back to the
     // in-repo templates/ dir). local-first-party-template-bundling-2026-07-07.
-    let templates_dir = sidecar_dir.join("templates");
+    let templates_dir = runtime_sidecar_dir.join("templates");
     // First-party rubrics bundled at sidecar/rubrics — same design, for the rubric
     // store's bundled layer (dev falls back to the in-repo rubrics/ dir).
     // local-first-party-rubric-bundling-2026-07-07.
-    let rubrics_dir = sidecar_dir.join("rubrics");
+    let rubrics_dir = runtime_sidecar_dir.join("rubrics");
     // First-party goal packages bundled at sidecar/goal-packages — same design as
     // templates/rubrics above, for the goal-package store's bundled layer (dev
     // falls back to the in-repo goal-packages/ dir).
     // work-on-everything-goal-2026-08-23 P-007.
-    let goal_packages_dir = sidecar_dir.join("goal-packages");
-    let prompts_dir = sidecar_dir.join("prompts");
-    let db_sql_dir = sidecar_dir.join("db-sql");
+    let goal_packages_dir = runtime_sidecar_dir.join("goal-packages");
+    let prompts_dir = runtime_sidecar_dir.join("prompts");
+    let db_sql_dir = runtime_sidecar_dir.join("db-sql");
     // Installer-bundled hive seed (plan hive-seed-bundle-2026-07-04). Optional:
     // only carries a manifest.json when a release cut a real seed into
     // src-tauri/seed/ (a dev build ships only the placeholder README).
@@ -6323,10 +6618,10 @@ fn spawn_serve(
     // ~/.papercusp/ (operator.json, embedded-pg.json, endpoint-ipc.json,
     // superuser-token) all resolve into <workspace_home>/. See workspaces.rs.
     let workspace_home_str = workspace_home.to_string_lossy().to_string();
-    let new_path = bundled_path_env(sidecar_dir);
+    let new_path = bundled_path_env(runtime_sidecar_dir);
 
-    let preload = sidecar_dir.join("sidecar-preload.js");
-    let mut cmd = make_sidecar_command(via_wsl, sidecar_dir, &preload, &server_js);
+    let preload = runtime_sidecar_dir.join("sidecar-preload.js");
+    let mut cmd = make_sidecar_command(via_wsl, runtime_sidecar_dir, &preload, &server_js);
     cmd.arg("--ensure");
     // When routed via WSL, env vars must be listed in WSLENV to cross the
     // Windows→Linux boundary. The `/p` flag translates Windows paths.
@@ -6342,7 +6637,7 @@ fn spawn_serve(
     // resolves — the rootfs bakes node into /usr/local for exactly that
     // no-shell lookup (P-004).
     if via_wsl {
-        cmd.env("WSLENV", SIDECAR_WSLENV);
+        cmd.env("WSLENV", sidecar_wslenv(runtime_sidecar_dir != sidecar_dir));
         // WI-3395: the sidecar runs INSIDE WSL2 (process.platform==='linux'),
         // where defaultSocketPath() would otherwise create a UNIX socket the
         // Windows-native webview host can't open (and can't create a `\\.\pipe\`
@@ -6408,7 +6703,10 @@ fn spawn_serve(
         // platforms the PATH above already carries it (harmless duplicate).
         .env(
             "PAPERCUSP_SIDECAR_BIN",
-            sidecar_dir.join("bin").to_string_lossy().to_string(),
+            runtime_sidecar_dir
+                .join("bin")
+                .to_string_lossy()
+                .to_string(),
         )
         // serve reads PAPERCUSP_HONO_PORT (cold-start hint; reuse may differ).
         .env("PAPERCUSP_HONO_PORT", port_hint.to_string())
@@ -6561,7 +6859,7 @@ fn spawn_serve(
         )
         .env(
             "PAPERCUSP_PG_RESTORE_BIN",
-            sidecar_dir
+            runtime_sidecar_dir
                 .join("bin/pg_restore")
                 .to_string_lossy()
                 .to_string(),
@@ -6658,6 +6956,7 @@ fn spawn_serve_supervisor(
     via_wsl: bool,
     port: u16,
     sidecar_dir: std::path::PathBuf,
+    runtime_sidecar_dir: Option<std::path::PathBuf>,
     pg_port_hint: u16,
     shared_state_dir: std::path::PathBuf,
     workspace_home: std::path::PathBuf,
@@ -6677,6 +6976,7 @@ fn spawn_serve_supervisor(
     let sup_port = port;
     let sup_pg_hint = pg_port_hint;
     let sup_sidecar = sidecar_dir;
+    let sup_runtime_sidecar = runtime_sidecar_dir;
     let sup_shared = shared_state_dir;
     let sup_home = workspace_home;
     std::thread::spawn(move || {
@@ -6933,6 +7233,7 @@ fn spawn_serve_supervisor(
                         sup_via_wsl,
                         sup_port,
                         &sup_sidecar,
+                        sup_runtime_sidecar.as_deref(),
                         sup_pg_hint,
                         &sup_shared,
                         &sup_home,
@@ -8333,6 +8634,7 @@ fn run_linux_headless_service() -> ! {
         false,
         port_hint,
         &sidecar_dir,
+        None,
         pg_port_hint,
         &shared_state_dir,
         &workspace_home,
@@ -9186,10 +9488,28 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 // powershell.exe and must never hold up boot.
                 std::thread::spawn(wsl_setup::ensure_windows_cli_shims);
             }
-            // Spawn + wire the operator sidecar. Fast path (WSL already Ready /
-            // non-Windows) runs it inline here; the Windows deferred watcher above
-            // calls the SAME helper in-process once WSL flips Ready — no restart,
-            // no second instance (WI-3407). Tray / shortcut / autostart already ran.
+            // Spawn + wire the operator sidecar. On Windows the fast path now
+            // stages a content-addressed ext4 runtime before spawn (WI-305737),
+            // which can copy several GiB after an update. Keep that finite copy
+            // off Tauri's setup thread so the shell/tray remain responsive. The
+            // deferred-Windows path above is already running on its watcher
+            // thread; non-Windows has no staging leg and keeps the direct path.
+            #[cfg(target_os = "windows")]
+            {
+                let sidecar_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    bring_up_sidecar(
+                        &sidecar_handle,
+                        via_wsl,
+                        port,
+                        sidecar_dir,
+                        pg_port_hint,
+                        shared_state_dir,
+                        workspace_home,
+                    );
+                });
+            }
+            #[cfg(not(target_os = "windows"))]
             bring_up_sidecar(
                 app.handle(),
                 via_wsl,
