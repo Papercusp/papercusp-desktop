@@ -71,6 +71,17 @@ if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh
   unset _provenance_source_output _provenance_source_fields
 fi
 
+# Release-audited cuts must start from a clean source snapshot. The provenance
+# verifier already rejects gitDirty=true after the expensive build, but doing
+# the same check here fails before dependency/toolchain work and prevents a
+# dirty or partially-synced tree from producing a release-shaped artifact.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
+   && "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" != "false" ]]; then
+  echo "ERROR: release-audited sidecar requires a clean source tree at cut start (gitDirty=${PROVENANCE_SOURCE_GIT_DIRTY:-unset})." >&2
+  echo "       Wait for the source tree to settle and retry; refusing to build mixed-provenance bytes." >&2
+  exit 1
+fi
+
 # D-043 / P-052: dogfood remains the historical source-rich developer bundle.
 # vm-release is a separate fail-closed build profile whose final sidecar is
 # pruned and audited below. Keep the profile validation in this producer too:
@@ -4467,6 +4478,20 @@ assert_no_transformers_model_fragments "$_expected_cache" || exit 1
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
   echo "→ WARN: $SIDECAR_FINAL_DIR reappeared mid-publish (concurrent cargo build.rs placeholder) — evicting squatter before the publish rename"
   rm -rf "$SIDECAR_FINAL_DIR"
+fi
+# A clean source can still move while this long build runs (for example when
+# git-sync commits a peer's change). Refuse to publish bytes whose source HEAD
+# no longer matches the snapshot captured at cut start. This check is release-
+# audit-only: developer builds retain their existing iterative behavior.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
+  _provenance_current_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD:-}" \
+     || "$_provenance_current_head" != "$PROVENANCE_SOURCE_GIT_HEAD" ]]; then
+    echo "ERROR: release-audited sidecar source HEAD moved during build (start=${PROVENANCE_SOURCE_GIT_HEAD:-unset}, current=$_provenance_current_head); refusing publish." >&2
+    echo "       Re-run from a clean stable source snapshot; no mixed-provenance sidecar was published." >&2
+    exit 1
+  fi
+  unset _provenance_current_head
 fi
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
 _tmp_base="$(basename "$SIDECAR_TMP_DIR")"

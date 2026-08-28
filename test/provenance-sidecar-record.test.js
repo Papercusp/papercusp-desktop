@@ -240,6 +240,25 @@ test('direct sidecar producer captures provenance before dependency mutations', 
   assert.match(builder, /export PROVENANCE_SOURCE_GIT_DIRTY=/);
 });
 
+test('release-audited sidecar fails closed on dirty or moving source before publish', () => {
+  const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
+  const dirtyGuardAt = builder.indexOf('release-audited sidecar requires a clean source tree');
+  const publishGuardAt = builder.indexOf('release-audited sidecar source HEAD moved during build');
+  const publishAt = builder.indexOf('mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"');
+
+  assert.ok(dirtyGuardAt > 0, 'release-audited producer must reject a dirty cut-start source');
+  assert.match(
+    builder.slice(Math.max(0, dirtyGuardAt - 900), dirtyGuardAt + 500),
+    /PROVENANCE_SOURCE_GIT_DIRTY.*!= "false"/s,
+    'the dirty-source guard must fail closed rather than merely warn',
+  );
+  assert.ok(publishGuardAt > 0, 'release-audited producer must detect a source HEAD move');
+  assert.ok(
+    publishGuardAt < publishAt,
+    'the source-HEAD guard must run before the temporary sidecar is atomically published',
+  );
+});
+
 test('verify-provenance gates build-start dirt, not later cutter mutations', () => {
   const dir = tmp();
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
