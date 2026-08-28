@@ -212,8 +212,10 @@ else
                          "/Library/Logs/DiagnosticReports"/Kernel-*.panic \
                          "/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic; do
           [ -f "$candidate" ] || continue
-          candidate_epoch="$(stat -f %m "$candidate" 2>/dev/null || echo 0)"
-          case "$candidate_epoch" in ""|*[!0-9]*) candidate_epoch=0 ;; esac
+          if ! candidate_epoch="$(stat -f %m "$candidate" 2>/dev/null)"; then
+            continue
+          fi
+          case "$candidate_epoch" in ""|*[!0-9]*) continue ;; esac
           if [ "$candidate_epoch" -gt "$panic_epoch" ]; then
             panic_epoch="$candidate_epoch"
             panic_file="$candidate"
