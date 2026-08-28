@@ -61,13 +61,20 @@ shim_slices_satisfied() {
 assert_shim_slices() {
   local dylib="$1" target="$2" archs required
   required="$(required_shim_slices "$target")"
+  # R7 (WI-40549), caught by check-assert-integrity against this very file:
+  # report the contract AT the measurement, not past the early `return` below.
+  # The UNMEASURED bail is exactly the path where a reader most needs to know
+  # what was demanded — it is what separates "the probe never ran" from "the
+  # artifact is wrong" — and reporting here means every exit path inherits it,
+  # including any early return added later.
+  echo "    term shim contract: target=$target requires ${required:-<none>}"
   archs="$(lipo -archs "$dylib" 2>/dev/null || true)"
   if [ -z "$archs" ]; then
     echo "FATAL: could not read architectures from '$dylib' — lipo returned nothing."
     echo "       Scoring UNMEASURED as FAIL rather than assuming the slices are present (WI-484916)."
     return 1
   fi
-  echo "    term shim archs: $archs (target=$target, required: ${required:-<none>})"
+  echo "    term shim archs: $archs"
   if ! shim_slices_satisfied "$archs" "$target"; then
     echo "FATAL: '$dylib' is MISSING a required slice for target=$target."
     echo "       has: $archs / required: $required"
