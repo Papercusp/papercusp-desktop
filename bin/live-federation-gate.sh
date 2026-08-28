@@ -154,9 +154,73 @@ fi
 # DESKTOP_DIR from THAT would resolve to /tmp instead of papercusp-desktop. Compute it
 # once here, export it, and the post-snapshot line below only falls back to recomputing
 # it when GATE_SELF_SNAPSHOT is unset (i.e. this file was invoked directly, un-snapshotted).
+#
+# Nested scratch + sweep-on-mint for the snapshot dir (WI-75008, plan P-002).
+# This self-snapshot used to mint DIRECTLY at /tmp (hardcoded, ignoring
+# TMPDIR), so every gate invocation cost the shared TMPDIR one top-level
+# dirent, kept forever because these dirs have no reaper of their own -- the
+# retention glob below (near line 226) is DELIBERATELY narrowed to the
+# stamped run-dir shape and must stay that way (EI-20943443385083338: a
+# broader glob once pruned real RED evidence). Measured 2026-08-27: 2,857
+# live-fed-gate-snapshot.* dirs sat in /tmp, the 3rd-largest contributor to
+# the shared-TMPDIR leak (WI-75008).
+#
+# Same two-guard contract as scripts/pc-heavy.sh's nest+sweep (plan P-001)
+# and libs/test-config/src/hermetic-tmpdir.ts: nest every snapshot under ONE
+# parent so a leak costs one top-level entry; reap a sibling only when it is
+# BOTH older than an age floor (default 240min) AND its creator pid --
+# embedded as name field 2, dot-separated -- is no longer alive. Age alone
+# would reap a snapshot a live run (up to 4h, per the oneshot unit above) is
+# still executing FROM -- bash reopens this file by path as it runs (see the
+# torn-read note above) -- and pid-liveness alone would never expire a
+# snapshot whose creator pid got recycled (this host wraps pids ~daily under
+# fleet load); the age floor is the backstop for that, "kept too long" never
+# "deleted too soon". Fail-OPEN to the historical flat path (now honoring
+# TMPDIR) if the nested parent can't be created: this snapshot exists so the
+# gate survives a mid-run tree edit, so admission control here must never be
+# the reason the gate can't run.
+GATE_SNAPSHOT_ROOT_DEFAULT="${TMPDIR:-/tmp}/live-fed-gate-snapshot"
+
+_gate_sweep_snapshot_root() {
+  local _root="${1:-}"
+  local _max_age_min="${GATE_SNAPSHOT_SWEEP_MAX_AGE_MIN:-240}"
+  case "$_max_age_min" in ''|*[!0-9]*) _max_age_min=240 ;; esac
+  [ -n "$_root" ] && [ -d "$_root" ] || return 0
+  local _path='' _entry='' _pid=''
+  while IFS= read -r -d '' _path; do
+    _entry="${_path##*/}"
+    _pid="$(printf '%s' "$_entry" | cut -d. -f2 2>/dev/null || true)"
+    case "$_pid" in ''|*[!0-9]*) _pid='' ;; esac
+    # Creator still alive (or its pid belongs to another user, which we
+    # cannot disprove) -> never touch it, however old it looks.
+    if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+      continue
+    fi
+    rm -rf -- "$_path" 2>/dev/null || true
+  done < <(find "$_root" -mindepth 1 -maxdepth 1 -mmin "+${_max_age_min}" -print0 2>/dev/null)
+}
+
+# Mint this run's snapshot dir under the nested root, embedding $$ as name
+# field 2 (dot-separated) so the sweep above can judge liveness, sweeping
+# dead siblings first. Prints the new dir on success; mirrors plain
+# `mktemp -d`'s empty-output/non-zero-exit contract on failure, including
+# the fail-open fallback to the historical flat shape (TMPDIR-honoring now)
+# when the nested parent cannot be created.
+_gate_mint_snapshot_dir() {
+  local _root="${GATE_SNAPSHOT_ROOT:-$GATE_SNAPSHOT_ROOT_DEFAULT}"
+  if mkdir -p "$_root" 2>/dev/null; then
+    _gate_sweep_snapshot_root "$_root"
+    if mktemp -d "$_root/snap.$$.XXXXXX" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # Fail open: old flat shape (now TMPDIR-honoring), so it stays greppable.
+  mktemp -d "${TMPDIR:-/tmp}/live-fed-gate-snapshot.XXXXXX" 2>/dev/null
+}
+
 if [ -z "${GATE_SELF_SNAPSHOT:-}" ]; then
   DESKTOP_DIR_FOR_SNAPSHOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  __snap_dir="$(mktemp -d /tmp/live-fed-gate-snapshot.XXXXXX)"
+  __snap_dir="$(_gate_mint_snapshot_dir)"
   cp -- "${BASH_SOURCE[0]}" "$__snap_dir/live-federation-gate.sh"
   chmod +x "$__snap_dir/live-federation-gate.sh"
   export GATE_SELF_SNAPSHOT=1 GATE_SELF_SNAPSHOT_DIR="$__snap_dir" DESKTOP_DIR="$DESKTOP_DIR_FOR_SNAPSHOT"
