@@ -8579,20 +8579,33 @@ where
         .any(|arg| arg.as_ref() == std::ffi::OsStr::new(HEADLESS_SERVICE_ARG))
 }
 
-/// Linux's package-owned user service starts at `default.target`, before a
-/// graphical session is guaranteed to exist. Entering Tauri there initializes
-/// GTK before `setup()` can discover the Server role and panics with "Failed to
-/// initialize GTK". The service therefore uses the same `spawn_serve` contract
-/// as the desktop Server shell, but takes this pre-Tauri branch and remains the
-/// systemd-owned parent of `serve.mjs`.
+/// The package-owned service starts before a graphical session is guaranteed to
+/// exist — Linux's user unit at `default.target`, macOS's LaunchDaemon at boot.
+/// Entering Tauri there initializes the GUI toolkit before `setup()` can
+/// discover the Server role: on Linux it panics with "Failed to initialize GTK",
+/// and on macOS with no console session the process simply stalls with no
+/// window server to attach to. The service therefore uses the same `spawn_serve`
+/// contract as the desktop Server shell, but takes this pre-Tauri branch and
+/// remains the service-manager-owned parent of `serve.mjs`.
 ///
-/// `PAPERCUSP_SIDECAR_DIR` is supplied by the Debian unit because the resource
-/// root is a packaging fact (`/usr/lib/Papercusp Server/sidecar`), not something
-/// a `/usr/bin` binary can derive from its own executable path. `spawn_serve`
-/// still owns every runtime env/path decision, so this is not a second headless
-/// launch recipe that can drift from the desktop path.
-#[cfg(target_os = "linux")]
-fn run_linux_headless_service() -> ! {
+/// ⚠ This branch is compiled for BOTH Linux and macOS on purpose. It was
+/// `#[cfg(target_os = "linux")]` until 2026-08-28, which made
+/// `--headless-service` parse-and-be-ignored on macOS (`headless_service_requested`
+/// is platform-neutral, so the flag validated and the binary then fell through
+/// into `tauri::Builder::default()` anyway). That is why a logged-out Mac peer
+/// stalled at 0% CPU instead of serving: an accepted-and-ignored flag looks
+/// supported. Do not re-narrow this gate without also rejecting the flag on the
+/// excluded platform. See WI-475896.
+///
+/// `PAPERCUSP_SIDECAR_DIR` is supplied by the packaged service unit because the
+/// resource root is a packaging fact (`/usr/lib/Papercusp Server/sidecar` on
+/// Linux, `/Applications/Papercusp Server.app/Contents/Resources/sidecar` on
+/// macOS), not something the installed binary can derive from its own
+/// executable path. `spawn_serve` still owns every runtime env/path decision, so
+/// this is not a second headless launch recipe that can drift from the desktop
+/// path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_headless_service() -> ! {
     let sidecar_dir = match std::env::var_os("PAPERCUSP_SIDECAR_DIR") {
         Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
         _ => {
@@ -8624,7 +8637,7 @@ fn run_linux_headless_service() -> ! {
     });
     let pg_port_hint = portpicker::pick_unused_port().unwrap_or(15432);
     println!(
-        "[papercusp-server] Linux headless service: sidecar={} operator_hint={} pg_hint={}",
+        "[papercusp-server] headless service: sidecar={} operator_hint={} pg_hint={}",
         sidecar_dir.display(),
         port_hint,
         pg_port_hint
@@ -8687,11 +8700,12 @@ mod headless_service_arg_tests {
 }
 
 pub fn run() {
-    // Must precede `tauri::Builder::default()`: the whole purpose of the Linux
-    // service entrypoint is to avoid initializing GTK when no display exists.
-    #[cfg(target_os = "linux")]
+    // Must precede `tauri::Builder::default()`: the whole purpose of the service
+    // entrypoint is to avoid initializing a GUI toolkit when no display exists —
+    // GTK on Linux, the window server on a logged-out Mac.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if headless_service_requested(std::env::args_os()) {
-        run_linux_headless_service();
+        run_headless_service();
     }
 
     // Before anything opens an fd or spawns a child: lift THIS process's fd soft
