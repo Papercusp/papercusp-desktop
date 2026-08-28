@@ -208,7 +208,9 @@ else
           setopt NULL_GLOB
         fi
         for candidate in "$HOME/Library/Logs/DiagnosticReports"/Kernel-*.panic \
-                         "$HOME/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic; do
+                         "$HOME/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic \
+                         "/Library/Logs/DiagnosticReports"/Kernel-*.panic \
+                         "/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic; do
           [ -f "$candidate" ] || continue
           candidate_epoch="$(stat -f %m "$candidate" 2>/dev/null || echo 0)"
           case "$candidate_epoch" in ""|*[!0-9]*) candidate_epoch=0 ;; esac

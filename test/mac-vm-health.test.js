@@ -88,6 +88,8 @@ test('guards the remote panic glob for macOS default zsh with no matching report
   const source = await readFile(script, 'utf8');
   assert.match(source, /ZSH_VERSION.*NULL_GLOB/s);
   assert.match(source, /setopt NULL_GLOB/);
+  assert.match(source, /"\/Library\/Logs\/DiagnosticReports"\/Kernel-\*\.panic/);
+  assert.match(source, /"\/Library\/Logs\/DiagnosticReports\/Retired"\/Kernel-\*\.panic/);
 });
 
 test('requires both the recorded operator process and listener to prove post-reboot continuity', async () => {
