@@ -278,11 +278,38 @@ cut_release_seed() {
 cut_release_seed
 
 echo "--- term shim (SwiftPM) ---"
+# WI-484916: which slices must this artifact carry to be shippable for the
+# requested target? Derived from MAC_BUILD_TARGET, never from the build host —
+# the build host is Intel and the ship target is universal, so "it built here"
+# says nothing about the arm64 half.
+case "$MAC_BUILD_TARGET" in
+  universal-apple-darwin) REQUIRED_SHIM_SLICES="x86_64 arm64" ;;
+  aarch64-apple-darwin)   REQUIRED_SHIM_SLICES="arm64" ;;
+  x86_64-apple-darwin)    REQUIRED_SHIM_SLICES="x86_64" ;;
+  *)                      REQUIRED_SHIM_SLICES="" ;;
+esac
 (
   cd src-tauri/macos-term-shim
-  swift build -c release --arch x86_64 --arch arm64 \
-    || { echo "universal shim build failed; retrying host-arch only"; swift build -c release; }
-)
+  if swift build -c release --arch x86_64 --arch arm64; then
+    exit 0
+  fi
+  # WI-484916: the host-arch retry is only SAFE when the host arch alone can
+  # satisfy the target. This build box is Intel, so falling back for a target
+  # that needs arm64 embeds an x86_64-ONLY dylib into an arm64-capable bundle:
+  # it loads fine on Intel and FAILS on Apple Silicon, where the embedded
+  # terminal silently downgrades. Nothing downstream catches it — the only Mac
+  # available is this Intel VM and CI has no macOS runners at all — so the
+  # degraded artifact would reach public users unexecuted by anyone.
+  case " $REQUIRED_SHIM_SLICES " in
+    *" arm64 "*)
+      echo "FATAL: universal term-shim build FAILED and MAC_BUILD_TARGET=$MAC_BUILD_TARGET requires an arm64 slice."
+      echo "       Refusing the host-arch fallback — it would ship an x86_64-only shim to Apple Silicon users (WI-484916)."
+      exit 1
+      ;;
+  esac
+  echo "universal shim build failed; retrying host-arch only (target=$MAC_BUILD_TARGET does not require arm64)"
+  swift build -c release
+) || { echo "FATAL: term shim build failed (target=$MAC_BUILD_TARGET)"; exit 1; }
 SHIM=""
 for p in \
   src-tauri/macos-term-shim/.build/apple/Products/Release/libPapercuspTermShim.dylib \
@@ -292,7 +319,28 @@ done
 mkdir -p src-tauri/resources
 if [[ -n "$SHIM" ]]; then
   cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib
-  lipo -info src-tauri/resources/libPapercuspTermShim.dylib || true
+  # WI-484916: ASSERT the slices, do not merely print them. This line was
+  # `lipo -info ... || true`, a probe whose failure was unobservable — the
+  # can-falsely-pass class P-411/WI-5788 eliminated for rig scenarios, sitting
+  # in the build path instead. An UNMEASURED read is scored as FAIL: "lipo told
+  # us nothing" and "the slices are fine" must never be indistinguishable.
+  shim_archs="$(lipo -archs src-tauri/resources/libPapercuspTermShim.dylib 2>/dev/null || true)"
+  if [[ -z "$shim_archs" ]]; then
+    echo "FATAL: could not read architectures from the term shim — lipo returned nothing."
+    echo "       Scoring UNMEASURED as FAIL rather than assuming the slices are present (WI-484916)."
+    exit 1
+  fi
+  echo "    term shim archs: $shim_archs (target=$MAC_BUILD_TARGET, required: ${REQUIRED_SHIM_SLICES:-<none>})"
+  for _need in $REQUIRED_SHIM_SLICES; do
+    case " $shim_archs " in
+      *" $_need "*) ;;
+      *)
+        echo "FATAL: term shim is MISSING the '$_need' slice (has: $shim_archs) for MAC_BUILD_TARGET=$MAC_BUILD_TARGET."
+        echo "       Shipping this would break the embedded terminal on $_need (WI-484916)."
+        exit 1
+        ;;
+    esac
+  done
 else
   echo "WARN: term shim dylib not produced — embedded terminal will downgrade to NewWindow"
 fi
