@@ -96,6 +96,8 @@ AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-imac-probe}"
 BEAT="${PCUSP_PROBE_BEAT_SEC:-30}"
 PLAN_RUN="${PCUSP_PROBE_PLAN_RUN_ID:-1}"
 TOWER_DSN="${PCUSP_TOWER_DSN:-postgresql://harness_admin:harness_admin_pwd@127.0.0.1:5432/papercusp}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY="$HERE/deploy.sh"
 
 REMOTE_LOOP="/tmp/live1-probe-session-loop.sh"
 PIDFILE="/tmp/live1-probe-session.pid"
@@ -164,9 +166,15 @@ case "${1:-start}" in
   start)
     echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)}"
 
-    # Preflight: the driver must be deployed (VM /tmp is wiped on reboot).
+    # A VM reboot clears /tmp. Restore exact, hash-verified checked-in helpers
+    # through the canonical deploy seam before retaining the fatal preflight as
+    # the detector for an unreachable VM or a failed/corrupt install.
     if ! "${SSH[@]}" 'test -x /tmp/vmcall.sh && test -f /tmp/mcp-call.mjs' 2>/dev/null; then
-      echo "FATAL: /tmp/vmcall.sh or /tmp/mcp-call.mjs missing on $VM — run bin/vm-rig/deploy.sh first." >&2
+      echo "probe-session: VM reboot cleared /tmp helpers; restoring through $DEPLOY"
+      "$DEPLOY" "$VM" || true
+    fi
+    if ! "${SSH[@]}" 'test -x /tmp/vmcall.sh && test -f /tmp/mcp-call.mjs' 2>/dev/null; then
+      echo "FATAL: /tmp/vmcall.sh or /tmp/mcp-call.mjs still missing on $VM after automatic deploy." >&2
       exit 1
     fi
 

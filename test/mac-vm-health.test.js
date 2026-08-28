@@ -7,6 +7,8 @@ import test from 'node:test';
 
 const script = new URL('../bin/mac-vm-health.sh', import.meta.url).pathname;
 const vmcall = new URL('../bin/vm-rig/vmcall.sh', import.meta.url).pathname;
+const vmRigDeploy = new URL('../bin/vm-rig/deploy.sh', import.meta.url).pathname;
+const probeSession = new URL('../bin/vm-rig/probe-session.sh', import.meta.url).pathname;
 const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.url).pathname;
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
@@ -269,4 +271,18 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   assert.match(composer, /\[ -x "\$HERE\/boot-headless-current\.sh" \]/);
   assert.match(composer, /rsync -a --chmod=F755 "\$HERE\/boot-headless-current\.sh"/);
   assert.match(composer, /PAYLOAD-MANIFEST\.sha256/);
+});
+
+test('vm-rig helpers survive reboot through verified persistent install and probe self-repair', async () => {
+  const deploy = await readFile(vmRigDeploy, 'utf8');
+  assert.match(deploy, /\$HOME\/\.papercusp\/vm-rig/);
+  assert.match(deploy, /shasum -a 256 '\$remote_vmcall' \| grep -q/);
+  assert.match(deploy, /install -m 0755 .*persistent\/vmcall\.sh.* \/tmp\/vmcall\.sh/);
+  assert.match(deploy, /install -m 0644 .*persistent\/mcp-call\.mjs.* \/tmp\/mcp-call\.mjs/);
+
+  const probe = await readFile(probeSession, 'utf8');
+  const repair = probe.indexOf('"$DEPLOY" "$VM" || true');
+  const fatal = probe.indexOf('still missing on $VM after automatic deploy');
+  assert.ok(repair >= 0, 'probe-session must repair reboot-cleared helpers through deploy.sh');
+  assert.ok(fatal > repair, 'fatal preflight must run after the automatic repair attempt');
 });
