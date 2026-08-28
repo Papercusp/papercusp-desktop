@@ -63,7 +63,7 @@
 # bin/vm-federation.sh for the 2-instance and real-VM driver patterns this
 # would graduate to.
 #
-# Usage: bin/hive-git-drill.sh [path/to/Papercusp*.deb]
+# Usage: bin/hive-git-drill.sh [path/to/Papercusp\ Server_..._amd64.deb]
 #   KEEP_UP=1   leave the sidecar running for inspection
 #   HIVE_GIT_PHYSICAL_PROBE_CMD=/absolute/executable
 #               optional real-rig adapter. It MUST resolve to the checked-in
@@ -83,11 +83,27 @@ REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercus
 # later, right before LEG F — so LEG D's imports resolved to '/storage' etc.).
 HGGIT="$REPO_DIR/packages/operator-core/lib/sync/pot-git"
 DEB="${1:-}"
+EXPECTED_DEB_PACKAGE="papercusp-server"
 if [ -z "$DEB" ]; then
-  DEB="$(ls -t /home/marsh-office/.cargo-target/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null | head -1)"
+  # The shared Cargo bundle can contain GUI, Server, and other Papercusp products.
+  # Select by the writer-owned Debian Package field, not the ambiguous filename
+  # family or newest mtime (WI-40905). Preserve spaces in product names while
+  # passing every candidate to the shared identity-aware selector.
+  DEB_CANDIDATES=()
+  while IFS= read -r candidate; do
+    DEB_CANDIDATES+=("$candidate")
+  done < <(ls -1t /home/marsh-office/.cargo-target/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null || true)
+  if [ "${#DEB_CANDIDATES[@]}" -gt 0 ]; then
+    DEB="$(fed_select_newest_deb_by_package "$EXPECTED_DEB_PACKAGE" "${DEB_CANDIDATES[@]}")" || exit 2
+  fi
 fi
 DEB="$(readlink -f "$DEB" 2>/dev/null || echo "${DEB:-}")"
 [ -f "$DEB" ] || { echo "FATAL: no .deb found (pass one; tried .cargo-target bundle dir)"; exit 2; }
+DEB_PACKAGE="$(dpkg-deb -f "$DEB" Package 2>/dev/null || true)"
+if [ "$DEB_PACKAGE" != "$EXPECTED_DEB_PACKAGE" ]; then
+  echo "FATAL: selected .deb '$DEB' has Package='${DEB_PACKAGE:-unknown}', expected Package='$EXPECTED_DEB_PACKAGE' (wrong Papercusp product); pass a Server .deb explicitly."
+  exit 2
+fi
 LUXON_SRC="$REPO_DIR/node_modules/luxon"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
 DRILL_HIVE_TITLE="P-301 hive-git drill"
