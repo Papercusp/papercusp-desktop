@@ -434,9 +434,20 @@ function migrationManifest(entries, { requireHashes = false } = {}) {
   }
 
   const names = [...rows.keys()].sort();
+  const highest = names.reduce((best, name) => {
+    if (best == null) return name;
+    const number = Number.parseInt(name.match(/^(\d+)/)?.[1] ?? '', 10);
+    const bestNumber = Number.parseInt(best.match(/^(\d+)/)?.[1] ?? '', 10);
+    if (Number.isFinite(number) && Number.isFinite(bestNumber)) {
+      return number > bestNumber || (number === bestNumber && name > best) ? name : best;
+    }
+    if (Number.isFinite(number)) return name;
+    if (Number.isFinite(bestNumber)) return best;
+    return name > best ? name : best;
+  }, null);
   return {
     count: names.length,
-    highest: names.at(-1) ?? null,
+    highest,
     names,
     hashes: rows,
   };
@@ -479,6 +490,11 @@ function inspectSidecarSourceCoherence({
 
   const source = migrationManifest(sourceEntries, { requireHashes: true });
   const shipped = migrationManifest(shippedEntries, { requireHashes: true });
+  // Provenance names the clean, pre-release Git tree. Both shipped copies are
+  // deliberately identity-scrubbed after that boundary, so their bytes are not
+  // expected to equal raw Git. The clean provenance bit + complete name set tie
+  // the release to Git; exact hashes tie the two transformed/shipped copies to
+  // each other.
   const provenance = migrationManifest(provenanceEntries);
   const facts = {
     ...base,

@@ -116,8 +116,7 @@ function sourceArchiveMigrations(archive) {
         '--no-same-owner',
         '--no-same-permissions',
         '--wildcards',
-        '--no-anchored',
-        'libs/db/sql/*.sql',
+        './libs/papercusp/libs/db/sql/*.sql',
       ],
       { encoding: 'utf8', maxBuffer: 1024 * 1024 },
     );
@@ -130,7 +129,9 @@ function sourceArchiveMigrations(archive) {
     }
     return {
       present: true,
-      entries: sha256MigrationEntries(extracted, { recursive: true }),
+      entries: sha256MigrationEntries(
+        path.join(extracted, 'libs/papercusp/libs/db/sql'),
+      ),
       error: null,
     };
   } catch (error) {
@@ -232,16 +233,16 @@ const result = inspectSidecarFreshness({
 
 const message = describe(result);
 
-if (
+const freshnessOverridden =
   blocksBuild(result.verdict)
   && result.verdict !== 'release-audit-unattested'
-  && process.env.PAPERCUSP_ALLOW_STALE_SIDECAR === '1'
-) {
+  && process.env.PAPERCUSP_ALLOW_STALE_SIDECAR === '1';
+
+if (freshnessOverridden) {
   console.warn(`[${label}] OVERRIDDEN by PAPERCUSP_ALLOW_STALE_SIDECAR=1:\n${message}`);
-  process.exit(0);
 }
 
-if (blocksBuild(result.verdict)) {
+if (blocksBuild(result.verdict) && !freshnessOverridden) {
   console.error(`[${label}] ${message}`);
   process.exit(4);
 }
@@ -249,7 +250,11 @@ if (blocksBuild(result.verdict)) {
 console.log(`[${label}] ${message}`);
 
 if (requireSourceCoherence) {
-  const archive = sourceArchiveMigrations(path.join(sidecarDir, 'source.tar.zst'));
+  const provenanceCanAttest = /^[0-9a-f]{40}$/i.test(recordedHead || '')
+    && provenanceDoc?.gitDirty === false;
+  const archive = provenanceCanAttest
+    ? sourceArchiveMigrations(path.join(sidecarDir, 'source.tar.zst'))
+    : { present: false, entries: null, error: null };
   const coherence = inspectSidecarSourceCoherence({
     required: true,
     provenanceHead: recordedHead,
@@ -257,7 +262,7 @@ if (requireSourceCoherence) {
     sourceArchivePresent: archive.present,
     sourceEntries: archive.entries,
     shippedEntries: sha256MigrationEntries(path.join(sidecarDir, 'db-sql')),
-    provenanceEntries: provenanceMigrations(recordedHead),
+    provenanceEntries: provenanceCanAttest ? provenanceMigrations(recordedHead) : null,
   });
   const coherenceMessage = describeSourceCoherence(coherence);
   if (sourceCoherenceBlocksBuild(coherence.verdict)) {

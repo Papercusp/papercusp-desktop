@@ -395,6 +395,25 @@ test('source coherence: stale names, same-name byte skew, missing source, and di
   assert.match(describeSourceCoherence(dirty), /dirty source state/);
 });
 
+test('source coherence accepts release-scrubbed shipped bytes against a clean raw Git manifest', () => {
+  const names = ['630-owner-header.sql', '631-owner-header.sql'];
+  const scrubbed = {
+    '630-owner-header.sql': '-- [owner:redacted]\nSELECT 1;\n',
+    '631-owner-header.sql': '-- /home/redacted\nSELECT 2;\n',
+  };
+  const r = inspectSidecarSourceCoherence({
+    required: true,
+    provenanceHead: 'a'.repeat(40),
+    provenanceDirty: false,
+    sourceArchivePresent: true,
+    sourceEntries: sourceEntries(names, scrubbed),
+    shippedEntries: sourceEntries(names, scrubbed),
+    provenanceEntries: names,
+  });
+  assert.equal(r.verdict, 'coherent');
+  assert.equal(sourceCoherenceBlocksBuild(r.verdict), false);
+});
+
 function runGit(cwd, args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
@@ -518,6 +537,29 @@ test('CLI: hermetic stale, same-name byte-skew, and missing archives all refuse'
     assert.match(r.stderr, fixtureArgs.expected);
     assert.match(r.stderr, /does not bypass source coherence/);
   }
+});
+
+test('CLI: a legacy stale override cannot bypass a failing source-coherence assertion', (t) => {
+  const complete = { '001-one.sql': '-- one\n', '002-two.sql': '-- two\n' };
+  const fixture = makeCoherenceFixture({
+    archiveFiles: { '001-one.sql': '-- one\n' },
+    shippedFiles: complete,
+    provenanceFiles: complete,
+  });
+  t.after(() => fs.rmSync(fixture.tmp, { recursive: true, force: true }));
+
+  const r = runCli(
+    fixture.sidecarDir,
+    {
+      PAPERCUSP_REQUIRE_SOURCE_COHERENCE: '1',
+      PAPERCUSP_REQUIRE_SIDECAR_CONTAINS: 'f'.repeat(40),
+      PAPERCUSP_ALLOW_STALE_SIDECAR: '1',
+    },
+    { repoRoot: fixture.repoRoot },
+  );
+  assert.equal(r.status, 4, `override bypassed coherence; stdout=${r.stdout}\nstderr=${r.stderr}`);
+  assert.match(r.stderr, /OVERRIDDEN by PAPERCUSP_ALLOW_STALE_SIDECAR=1/);
+  assert.match(r.stderr, /INCOHERENT SIDECAR SOURCE/);
 });
 
 // ── the wiring (the half that actually prevents the recurrence) ───────────────
