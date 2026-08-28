@@ -414,6 +414,85 @@ test('Debian sibling removal selects only the executable owned by that package',
   }
 });
 
+test('macOS Server starts without a console login (LaunchDaemon, not a gui-domain LaunchAgent)', () => {
+  const launchdDir = path.join(desktopRoot, 'src-tauri/launchd');
+  const templatePath = path.join(launchdDir, 'com.papercusp.server.plist.template');
+  const installerPath = path.join(launchdDir, 'install-launchdaemon.sh');
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const installer = fs.readFileSync(installerPath, 'utf8');
+  const rustMain = fs.readFileSync(path.join(desktopRoot, 'src-tauri/src/main.rs'), 'utf8');
+  const contract = require(path.join(desktopRoot, 'src-tauri/distribution-contract.json'));
+
+  // THE DEFECT THIS PINS (WI-475896). The headless entrypoint was
+  // #[cfg(target_os = "linux")] while headless_service_requested() stayed
+  // platform-neutral, so on macOS `--headless-service` parsed, was ignored, and
+  // the binary fell through into tauri::Builder::default(). With no console
+  // session there is no window server to attach to, so the peer stalled at 0%
+  // CPU and the federation link went silent with no error anywhere. An
+  // accepted-and-ignored flag is worse than a rejected one.
+  assert.match(
+    rustMain,
+    /#\[cfg\(any\(target_os = "linux", target_os = "macos"\)\)\]\s*\n\s*if headless_service_requested/,
+    '--headless-service must be honoured on macOS, not parsed and silently ignored',
+  );
+  assert.doesNotMatch(
+    rustMain,
+    /run_linux_headless_service/,
+    'the headless entrypoint is no longer Linux-only; the Linux-specific name would re-imply it is',
+  );
+
+  // A LaunchAgent loads into launchd's gui/<uid> domain, which does not exist
+  // while the Mac sits at the login window. Only a system-domain LaunchDaemon
+  // delivers "up whenever the machine is up".
+  assert.match(installer, /\/Library\/LaunchDaemons/, 'the service must install into the system domain');
+  assert.match(installer, /launchctl bootstrap system/);
+  assert.doesNotMatch(
+    template,
+    /LimitLoadToSessionType/,
+    'a session-type restriction would re-bind the service to a GUI login',
+  );
+
+  assert.match(template, /<key>RunAtLoad<\/key>\s*<true\/>/, 'must start at boot');
+  assert.match(template, /<key>KeepAlive<\/key>/, 'must restart after a crash');
+  assert.match(template, /<key>UserName<\/key>/, 'running as root would create a root-owned state tree');
+  assert.match(template, /--headless-service/);
+
+  // EI-21708848218896947: launchd defaults CWD to "/" and the shipped sidecar
+  // fatals during prompt assembly anywhere but its own directory.
+  assert.match(
+    template,
+    /<key>WorkingDirectory<\/key>\s*<string>\/Applications\/Papercusp Server\.app\/Contents\/Resources\/sidecar<\/string>/,
+    'without WorkingDirectory the daemon boots embedded Postgres and then dies on prompt assembly',
+  );
+  // `UserName` alone does NOT populate HOME — launchd leaves it unset or at
+  // /var/root — and every workspace path the sidecar resolves hangs off HOME.
+  assert.match(template, /<key>HOME<\/key>/);
+
+  // Any placeholder the template declares must be one the installer actually
+  // substitutes, or a live plist ships pointing at a literal __TOKEN__ path.
+  const declared = [...new Set(template.match(/__PAPERCUSP_[A-Z_]+__/g) || [])];
+  assert.ok(declared.length > 0, 'the template is expected to carry install-time placeholders');
+  for (const token of declared) {
+    assert.ok(
+      installer.includes(`//${token}/`),
+      `install-launchdaemon.sh declares no substitution for ${token}`,
+    );
+  }
+
+  // The contract recorded linuxUserUnit and no macOS counterpart, which is how
+  // the platform asymmetry stayed invisible. Keep both named.
+  assert.equal(
+    contract.server.installedIdentities.macosServiceDaemon,
+    '/Library/LaunchDaemons/com.papercusp.server.plist',
+  );
+  assert.equal(
+    contract.server.installedIdentities.linuxUserUnit,
+    '/usr/lib/systemd/user/papercusp-server.service',
+  );
+
+  assert.equal(childProcess.spawnSync('bash', ['-n', installerPath]).status, 0);
+});
+
 test('Linux Server deb installs and package-enables one systemd user service', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
@@ -571,12 +650,16 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.match(rustMain, /login auto-start is managed by papercusp-server\.service/);
   const headlessGate = rustMain.indexOf('if headless_service_requested(std::env::args_os())');
   const tauriBuilder = rustMain.indexOf('let base = tauri::Builder::default()');
-  assert.ok(headlessGate >= 0, 'Linux service flag must have an explicit pre-Tauri branch');
+  assert.ok(headlessGate >= 0, 'the service flag must have an explicit pre-Tauri branch');
   assert.ok(
     headlessGate < tauriBuilder,
     'the headless service branch must run before Tauri/GTK initialization',
   );
-  assert.match(rustMain, /fn run_linux_headless_service\(\) -> !/);
+  // Renamed from run_linux_headless_service on 2026-08-28 (WI-475896) when the
+  // branch was widened to macOS. The macOS-specific coverage — that the cfg gate
+  // actually names darwin, so the flag cannot go back to being parsed-and-ignored
+  // — lives in the LaunchDaemon test above.
+  assert.match(rustMain, /fn run_headless_service\(\) -> !/);
   assert.match(rustMain, /spawn_serve\([\s\S]*?&INSTALL_DEFECT/);
 });
 

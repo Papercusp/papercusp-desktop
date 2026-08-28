@@ -172,6 +172,7 @@
       "linuxResourceRoot": "/usr/lib/Papercusp Server",
       "linuxUserUnit": "/usr/lib/systemd/user/papercusp-server.service",
       "macosInstallRoot": "/Applications/Papercusp Server.app",
+      "macosServiceDaemon": "/Library/LaunchDaemons/com.papercusp.server.plist",
       "windowsInstallRoot": "%LOCALAPPDATA%\\Papercusp Server"
     },
     "requiredResources": [
