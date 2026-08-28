@@ -232,7 +232,11 @@ else
         case "$port" in ""|*[!0-9]*) port=-1 ;; esac
         if [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
           cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
-          case "$cmd" in *serve.mjs*--ensure*) pid_alive=1 ;; esac
+          # operator.json records the sidecar PID after it has started.  The
+          # installed Server process may be launched bare (without --ensure),
+          # while dev/boot wrappers commonly include that flag; both are the
+          # same operator identity and must count as alive.
+          case "$cmd" in *serve.mjs*) pid_alive=1 ;; esac
         fi
         if [ "$port" -gt 0 ] 2>/dev/null && \
            lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then

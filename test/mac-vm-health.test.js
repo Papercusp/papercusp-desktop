@@ -51,6 +51,12 @@ test('reports healthy when guest SSH answers', async () => {
   assert.equal(JSON.parse(result.stdout).status, 'healthy');
 });
 
+test('accepts an installed Server serve.mjs process without --ensure', async () => {
+  const source = await readFile(script, 'utf8');
+  assert.match(source, /case "\$cmd" in \*serve\.mjs\*\)/);
+  assert.doesNotMatch(source, /serve\.mjs\*--ensure/);
+});
+
 test('detects a sidecar lost across a guest reboot even though SSH recovered', async () => {
   const { env } = await fixture({
     operatorProbe: '1787873119|1787872730754|1753|0|3070|0',
