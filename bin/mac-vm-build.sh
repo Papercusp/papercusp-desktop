@@ -281,13 +281,10 @@ echo "--- term shim (SwiftPM) ---"
 # WI-484916: which slices must this artifact carry to be shippable for the
 # requested target? Derived from MAC_BUILD_TARGET, never from the build host —
 # the build host is Intel and the ship target is universal, so "it built here"
-# says nothing about the arm64 half.
-case "$MAC_BUILD_TARGET" in
-  universal-apple-darwin) REQUIRED_SHIM_SLICES="x86_64 arm64" ;;
-  aarch64-apple-darwin)   REQUIRED_SHIM_SLICES="arm64" ;;
-  x86_64-apple-darwin)    REQUIRED_SHIM_SLICES="x86_64" ;;
-  *)                      REQUIRED_SHIM_SLICES="" ;;
-esac
+# says nothing about the arm64 half. The contract lives in lib/ so a test can
+# execute it without a Mac (mac-shim-arch-guard.test.ts).
+source "$HERE/lib/mac-shim-arch.sh"
+REQUIRED_SHIM_SLICES="$(required_shim_slices "$MAC_BUILD_TARGET")"
 (
   cd src-tauri/macos-term-shim
   if swift build -c release --arch x86_64 --arch arm64; then
@@ -319,28 +316,13 @@ done
 mkdir -p src-tauri/resources
 if [[ -n "$SHIM" ]]; then
   cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib
-  # WI-484916: ASSERT the slices, do not merely print them. This line was
+  # WI-484916: ASSERT the slices, do not merely print them. This was
   # `lipo -info ... || true`, a probe whose failure was unobservable — the
   # can-falsely-pass class P-411/WI-5788 eliminated for rig scenarios, sitting
-  # in the build path instead. An UNMEASURED read is scored as FAIL: "lipo told
-  # us nothing" and "the slices are fine" must never be indistinguishable.
-  shim_archs="$(lipo -archs src-tauri/resources/libPapercuspTermShim.dylib 2>/dev/null || true)"
-  if [[ -z "$shim_archs" ]]; then
-    echo "FATAL: could not read architectures from the term shim — lipo returned nothing."
-    echo "       Scoring UNMEASURED as FAIL rather than assuming the slices are present (WI-484916)."
-    exit 1
-  fi
-  echo "    term shim archs: $shim_archs (target=$MAC_BUILD_TARGET, required: ${REQUIRED_SHIM_SLICES:-<none>})"
-  for _need in $REQUIRED_SHIM_SLICES; do
-    case " $shim_archs " in
-      *" $_need "*) ;;
-      *)
-        echo "FATAL: term shim is MISSING the '$_need' slice (has: $shim_archs) for MAC_BUILD_TARGET=$MAC_BUILD_TARGET."
-        echo "       Shipping this would break the embedded terminal on $_need (WI-484916)."
-        exit 1
-        ;;
-    esac
-  done
+  # in the build path instead. assert_shim_slices scores an UNMEASURED lipo
+  # read as FAIL, so "lipo told us nothing" and "the slices are fine" can no
+  # longer look identical.
+  assert_shim_slices src-tauri/resources/libPapercuspTermShim.dylib "$MAC_BUILD_TARGET" || exit 1
 else
   echo "WARN: term shim dylib not produced — embedded terminal will downgrade to NewWindow"
 fi
