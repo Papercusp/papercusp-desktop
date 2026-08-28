@@ -24,6 +24,10 @@
 # universal build parity was never actually exercised end-to-end.)
 set -uo pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/mac-dmg-pullback.sh
+source "$HERE/lib/mac-dmg-pullback.sh"
+
 MONOREPO=/home/marsh-office/papercupai-workspace/papercusp
 DESKTOP="$MONOREPO/papercusp-desktop"
 KEY_FILE="$HOME/.papercusp/signing/papercusp.key"
@@ -163,7 +167,21 @@ ssh "${SSH_OPTS[@]}" "$VM" 'chmod 600 .papercusp-updater.key; bash -lc "
 "' || { echo "FATAL: remote build failed"; exit 1; }
 
 step "6/6 pull DMGs back"
+# WI-489075: this pull-back is the ONLY evidence the verification build produced
+# a shippable artifact, so every leg of it is fail-closed. Previously the scp was
+# suffixed `|| true` and the listing `2>/dev/null`; with no `set -e` anywhere in
+# this script, a failed pull / an empty bundle dir / a MAC_BUILD_TARGET path
+# mismatch all still printed "BUILD DONE" and exited 0. A probe that cannot fail
+# is not a check. Failure handling here matches the remote-build leg above
+# (explicit `|| { echo FATAL; exit 1; }`) rather than a script-wide errexit.
 scp -i "$HOME/.ssh/papercup-vm-mac" -P 2222 -o BatchMode=yes \
-  "$VM:$VMDIR/papercusp-desktop/src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/*.dmg" "$SCRATCH/dmg/" || true
-echo; echo "=== DMGs ==="; ls -la "$SCRATCH/dmg/" 2>/dev/null
+  "$VM:$VMDIR/papercusp-desktop/src-tauri/target/$MAC_BUILD_TARGET/release/bundle/dmg/*.dmg" "$SCRATCH/dmg/" \
+  || { echo "FATAL: DMG pull-back failed (scp) — no release artifact retrieved for target=$MAC_BUILD_TARGET"; exit 1; }
+
+echo; echo "=== DMGs ==="; ls -la "$SCRATCH/dmg/"
+
+# The contract lives in lib/mac-dmg-pullback.sh so a test can execute it with no
+# Mac, no VM and no network — see that file's header for the full rationale.
+assert_dmg_pullback "$SCRATCH/dmg" "$MAC_BUILD_TARGET" || exit 1
+
 echo "=== BUILD DONE sha=$SHA $(date -u +%H:%M:%SZ) ==="
