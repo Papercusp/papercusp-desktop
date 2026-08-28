@@ -84,6 +84,12 @@ test('preserves a recent guest kernel panic as a hard health failure', async () 
   assert.match(health.detail, /guest kernel panic report Kernel-2026-08-27-215608\.panic/);
 });
 
+test('guards the remote panic glob for macOS default zsh with no matching reports', async () => {
+  const source = await readFile(script, 'utf8');
+  assert.match(source, /ZSH_VERSION.*NULL_GLOB/s);
+  assert.match(source, /setopt NULL_GLOB/);
+});
+
 test('requires both the recorded operator process and listener to prove post-reboot continuity', async () => {
   for (const operatorProbe of [
     '1787873119|1787872730754|1753|0|3070|1',

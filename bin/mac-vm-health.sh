@@ -201,6 +201,12 @@ else
         # Keep the timestamp of the newest kernel panic report across reboots.
         # A reboot can leave SSH healthy while the sidecar is dead; the panic
         # artifact is the only durable terminal-cause evidence in that state.
+        # macOS users commonly default to zsh, whose NO_MATCHES option aborts
+        # an unmatched glob before the loop body runs.  An empty report
+        # directory is normal, so make the expansion produce zero words.
+        if [ -n "${ZSH_VERSION:-}" ]; then
+          setopt NULL_GLOB
+        fi
         for candidate in "$HOME/Library/Logs/DiagnosticReports"/Kernel-*.panic \
                          "$HOME/Library/Logs/DiagnosticReports/Retired"/Kernel-*.panic; do
           [ -f "$candidate" ] || continue
