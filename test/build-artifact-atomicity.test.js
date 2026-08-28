@@ -57,6 +57,18 @@ test('Windows rootfs export is published only after gzip succeeds', () => {
   );
 });
 
+test('Windows rootfs recipe fingerprint probe is read-only', () => {
+  const executable = executableLines(buildRootfs);
+  const printProbe = executable.indexOf('if [[ "${1:-}" == "--print-recipe-fingerprint" ]]');
+  const destructiveCleanup = executable.indexOf('rm -f "$OUT_TARBALL"');
+
+  assert.ok(printProbe >= 0, 'build-rootfs.sh must expose the recipe fingerprint probe');
+  assert.ok(
+    destructiveCleanup > printProbe,
+    '--print-recipe-fingerprint must return before deleting the existing rootfs tarball',
+  );
+});
+
 test('Windows rootfs atomic temporary archive is gitignored while it streams', () => {
   const temporaryArchive = 'src-tauri/resources/papercup-runtime.tar.gz.tmp.guard';
   const ignored = spawnSync('git', ['-C', root, 'check-ignore', '-q', '--', temporaryArchive], {

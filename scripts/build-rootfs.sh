@@ -33,22 +33,6 @@ OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/src-tauri/resources"
 OUT_TARBALL="${OUT_DIR}/papercup-runtime.tar.gz"
 CONTAINER="papercup-runtime-build-$$"
 
-mkdir -p "$OUT_DIR"
-# A failed export must leave no final-path artifact for a later build guard to
-# mistake for a complete rootfs. Publish the successful export with rename(2)
-# below so readers see either no file or the complete tarball.
-rm -f "$OUT_TARBALL"
-OUT_TMP="$(mktemp "${OUT_TARBALL}.tmp.XXXXXX")"
-
-cleanup() {
-  local status="$?"
-  trap - EXIT
-  [[ -z "$OUT_TMP" ]] || rm -f "$OUT_TMP"
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  exit "$status"
-}
-trap cleanup EXIT
-
 # ── Bootstrap script that runs inside the container ──────────────────
 # This script ALSO ships inside the rootfs at /opt/papercup/bootstrap so
 # wsl_setup::run_bootstrap() can re-run it on the user's machine after
@@ -207,6 +191,25 @@ if [[ "${1:-}" == "--print-recipe-fingerprint" ]]; then
   recipe_fingerprint
   exit 0
 fi
+
+# A failed export must leave no final-path artifact for a later build guard to
+# mistake for a complete rootfs. Publish the successful export with rename(2)
+# below so readers see either no file or the complete tarball. Keep this
+# destructive cleanup AFTER the read-only fingerprint fast path: callers use
+# --print-recipe-fingerprint to validate an existing tarball and that probe
+# must never remove the artifact it is checking (EI-21677432340139970).
+mkdir -p "$OUT_DIR"
+rm -f "$OUT_TARBALL"
+OUT_TMP="$(mktemp "${OUT_TARBALL}.tmp.XXXXXX")"
+
+cleanup() {
+  local status="$?"
+  trap - EXIT
+  [[ -z "$OUT_TMP" ]] || rm -f "$OUT_TMP"
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  exit "$status"
+}
+trap cleanup EXIT
 
 # ── Run the bootstrap inside the container ───────────────────────────
 docker pull "$UBUNTU_IMAGE"
