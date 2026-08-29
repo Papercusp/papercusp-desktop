@@ -208,10 +208,14 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
     '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
-    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.53.0"',
+    // These three move TOGETHER and must be bumped here in the same change that bumps
+    // the helper: x/crypto v0.53.0 -> v0.55.0 for GO-2026-6303 (High) forced x/net to
+    // >= v0.57.0 (v0.58.0 chosen, matching the gh leg) and x/text to v0.41.0. See the
+    // co-pin comments in bin/lib/vm-release-trust-toolchain.sh.
+    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.55.0"',
     'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
-    'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.56.0"',
-    'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.39.0"',
+    'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"',
+    'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"',
     'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.82.1"',
     'PAPERCUSP_VM_POSTGRES_VERSION="18.6"',
     '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f',
