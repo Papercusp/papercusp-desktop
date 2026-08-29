@@ -33,7 +33,10 @@ it collision-free:
 - **File locking is ENFORCED, not advisory — so edit freely; don't self-censor.** Follow the
   one effective file-lock mode supplied by your client/runtime: `automatic` means its hook
   claims/releases each edited file; `manual` means you call `locks:acquire` before the edit
-  and release it afterward. Either mode BLOCKS on a peer hold (you'll see holder + intent +
+  and release it afterward. For a manual lock, `paths` must be repository-relative POSIX
+  paths resolved from the harness repository root (not an absolute checkout path, which
+  is rejected with `InvalidPathError`); an absolute file under your home directory uses
+  `external_paths` instead. Either mode BLOCKS on a peer hold (you'll see holder + intent +
   expiry). Never combine both modes. When blocked: pivot to other useful work, or re-queue the lock and
   END YOUR TURN — you're re-invoked on grant. NEVER route around a block (rename/copy/force)
   — that lock is a peer's in-flight work. Beyond that one rule, do NOT hold back from
