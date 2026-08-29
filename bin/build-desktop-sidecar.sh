@@ -4616,9 +4616,27 @@ fi
 # execution path can reuse it instead of re-deriving this fix.
 # shellcheck source=lib/portable-sha256.sh
 source "$HERE/lib/portable-sha256.sh"
+# EI-21826568874232796: the stamp's gitHead must record the sha this build was CUT
+# FROM, not whatever HEAD happens to be by the time this line runs. This is a long
+# build on a shared checkout, and git-sync commits peers' work on a schedule, so a
+# live read here stamps provenance the published bytes were never built from — and
+# it fails silently, because a plausible-looking sha is indistinguishable from the
+# right one after the fact. Prefer the immutable PAPERCUSP_BUILD_SHA pin; fall back
+# to the live checkout only when there is no pin. Extracted to
+# bin/lib/stamp-git-head.sh so the HEAD-moved-mid-build case is reachable by a test
+# (packages/operator-core/lib/sidecar-stamp-git-head-pin.test.ts).
+#
+# ⚠ Deliberately NOT shared with the release-audit HEAD-move guard further down
+# (the PAPERCUSP_RELEASE_AUDIT block before the publish rename). That guard must
+# keep reading LIVE HEAD: its whole job is to observe the world independently and
+# disagree with the pin. Route it through this prefer-the-pin helper and its
+# comparison becomes pin != pin — always false — so it would keep passing while
+# having been made incapable of failing.
+# shellcheck source=lib/stamp-git-head.sh
+source "$HERE/lib/stamp-git-head.sh"
 _stamp_serve_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/serve.mjs")"
 _stamp_proxy_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/mcp-proxy.mjs")"
-_stamp_git_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+_stamp_git_head="$(papercusp_stamp_git_head "$REPO_ROOT")"
 {
   printf '{\n'
   printf '  "serveSha256": "%s",\n'    "${_stamp_serve_sha:-}"
