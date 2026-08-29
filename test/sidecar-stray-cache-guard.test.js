@@ -27,6 +27,17 @@
 // This test runs the REAL guard text out of the script (not a copy) so that
 // removing the `|| true`, or reintroducing the same shape elsewhere in the
 // block, fails here instead of silently destroying sidecar builds again.
+//
+// ⚠ UPDATED BY D-178 (2026-08-29). The `grep -v -F -x "$_expected_cache"` filter
+// described above NO LONGER EXISTS: the two live embedding models moved out of
+// `.cache/` into the transformers package's default `models/` dir, so there is no
+// legitimate cache left to carve out and the stray scan is a bare `find` again.
+// That retires the `|| true` hazard at this site rather than fixing it — the
+// class-level test below ("no assignment ... pipes into grep without a || true")
+// is what keeps the shape from coming back anywhere in the script. The
+// allowlisting the old block did (exactly harrier-oss + embeddinggemma, nothing
+// else) moved to the models guard, and is covered here at equal strength, in both
+// directions: an unexpected model fails, and so does a MISSING one.
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -55,25 +66,43 @@ const ASSERT_NO_TRANSFORMER_FRAGMENTS = extractFunction('assert_no_transformers_
 /** Pull the guard block verbatim out of the real script. */
 function extractGuard() {
   const full = fs.readFileSync(scriptPath, 'utf8');
-  const start = full.indexOf('_expected_cache=');
+  // D-178 removed `_expected_cache=` (there is no longer a legitimate cache at
+  // all), so the block is anchored on the stray scan itself.
+  const start = full.indexOf('_stray_caches=$(find');
   assert.notEqual(start, -1, 'could not find the stray-.cache guard in the script');
   const end = full.indexOf('# EI-200 epilogue', start);
   assert.notEqual(end, -1, 'could not find the end of the stray-.cache guard block');
   return full.slice(start, end);
 }
 
+const MODELS_REL = 'node_modules/@huggingface/transformers/models/onnx-community';
+const LIVE_MODELS = ['harrier-oss-v1-0.6b-ONNX', 'embeddinggemma-300m-ONNX'];
+
 /**
  * Execute the guard against a synthetic staged tree, under the SAME shell flags
  * the real script uses — `set -euo pipefail` is the whole point of the test.
+ *
+ * D-178: the two live embedding models moved OUT of `.cache/` into the
+ * transformers package's default `models/` dir, so the fixture builds them there
+ * and a `.cache` anywhere — including under transformers itself — is now stray.
  */
-function runGuard({ stray }) {
+function runGuard({ stray = false, strayUnderTransformers = false, models = LIVE_MODELS } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-stray-cache-'));
   try {
     const nodeModules = path.join(tmp, 'node_modules');
-    // The one legitimately-preserved cache (owner-confirmed live models).
-    const expected = path.join(nodeModules, '@huggingface/transformers/.cache');
-    fs.mkdirSync(path.join(expected, 'onnx-community'), { recursive: true });
+    // Always create node_modules, even for the models:[] fixture. A missing root
+    // makes the guard's `find` fail, and under `set -euo pipefail` that killed the
+    // block with EMPTY stderr — indistinguishable from the guard firing correctly.
+    fs.mkdirSync(nodeModules, { recursive: true });
+    for (const model of models) {
+      fs.mkdirSync(path.join(tmp, MODELS_REL, model, 'onnx'), { recursive: true });
+    }
     if (stray) fs.mkdirSync(path.join(nodeModules, 'some-pkg/.cache'), { recursive: true });
+    if (strayUnderTransformers) {
+      fs.mkdirSync(path.join(nodeModules, '@huggingface/transformers/.cache/onnx-community'), {
+        recursive: true,
+      });
+    }
 
     const script =
       'set -euo pipefail\n' +
@@ -95,8 +124,8 @@ test('the guard SURVIVES a clean bundle (no stray caches)', () => {
   assert.equal(
     res.status,
     0,
-    `guard killed a healthy build (status ${res.status}). If the \`|| true\` was removed from ` +
-      `the grep, that is the cause — see this file's header.\nstderr: ${res.stderr}`,
+    `guard killed a healthy build (status ${res.status}). If a grep was reintroduced into the ` +
+      `stray scan without \`|| true\`, that is the cause — see this file's header.\nstderr: ${res.stderr}`,
   );
   assert.match(res.stdout, /GUARD_COMPLETED/, 'execution must continue past the guard');
 });
@@ -108,6 +137,47 @@ test('the guard still FAILS the build on a genuine stray cache', () => {
   assert.match(res.stderr, /runtime \.cache dir\(s\) found/);
   assert.match(res.stderr, /some-pkg/, 'the error names the offending directory');
   assert.doesNotMatch(res.stdout, /GUARD_COMPLETED/, 'execution must stop at the guard');
+});
+
+test('D-178: transformers no longer gets a .cache exception', () => {
+  // This is the invariant that changed. A `.cache` under @huggingface/transformers
+  // used to be the ONE allowed cache in the bundle; it is now as fatal as any
+  // other, because the models it used to justify live at models/ instead. If this
+  // test starts passing a .cache through, the release identity gate's
+  // `[build-cache]` rule will red the cut again (33-finding r12 lineage).
+  const res = runGuard({ strayUnderTransformers: true });
+  assert.equal(res.status, 1, 'a .cache under transformers must now fail the build');
+  assert.match(res.stderr, /runtime \.cache dir\(s\) found/);
+  assert.match(res.stderr, /@huggingface\/transformers/, 'the error names the offending directory');
+  assert.doesNotMatch(res.stdout, /GUARD_COMPLETED/, 'execution must stop at the guard');
+});
+
+test('D-178: the guard is fail-closed on MISSING models, not just unexpected ones', () => {
+  // Fail-closed in both directions is deliberate. "Models silently absent" ships a
+  // product whose local embedding is quietly broken — a .deb installs its
+  // resources root-owned and read-only, so a missing model cannot be
+  // re-downloaded at runtime; it just fails. That is strictly harder to detect
+  // than a red gate, which is why absence is fatal here.
+  for (const missing of LIVE_MODELS) {
+    const res = runGuard({ models: LIVE_MODELS.filter((m) => m !== missing) });
+    assert.equal(res.status, 1, `a missing ${missing} must fail the build`);
+    assert.match(res.stderr, /required embedding model missing after relocation/);
+    assert.match(res.stderr, new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+
+  // …and the whole models root being absent is fatal too, with its own message.
+  const res = runGuard({ models: [] });
+  assert.equal(res.status, 1, 'an absent models root must fail the build');
+  assert.match(res.stderr, /relocated transformers models missing/);
+});
+
+test('D-178: an unexpected third model still fails the build', () => {
+  // The allowlist that used to live in the .cache block moved here at equal
+  // strength: exactly the two owner-confirmed models, nothing else.
+  const res = runGuard({ models: [...LIVE_MODELS, 'some-other-model-ONNX'] });
+  assert.equal(res.status, 1, 'an unexpected model dir must fail the build');
+  assert.match(res.stderr, /unexpected entries beside the relocated models/);
+  assert.match(res.stderr, /some-other-model-ONNX/);
 });
 
 test('no assignment in the script pipes into grep without a || true escape', () => {
@@ -228,12 +298,25 @@ test('assembled-tree guard rejects fragments and passes after the source prune',
 test('fragment prune and assembled guard are wired into the real builder', () => {
   assert.match(
     builder,
-    /^\s*prune_transformers_model_fragments "\$_transformers_cache"$/m,
-    'the closure walk must prune preserved transformers model fragments',
+    /^\s*prune_transformers_model_fragments "\$_transformers_models"$/m,
+    'the closure walk must prune preserved transformers model fragments (D-178: at models/, not .cache/)',
   );
   assert.match(
     builder,
-    /^assert_no_transformers_model_fragments "\$_expected_cache" \|\| exit 1$/m,
+    /^assert_no_transformers_model_fragments "\$SIDECAR_DIR\/node_modules\/@huggingface\/transformers\/models" \|\| exit 1$/m,
     'the assembled-sidecar guard must reject preserved transformers model fragments',
+  );
+  // D-178: the models must actually be MOVED out of .cache, not merely tolerated
+  // there. Without this, a future edit could drop the relocation and the build
+  // would still pass every test above while shipping the forbidden path again.
+  assert.match(
+    builder,
+    /mv "\$_transformers_cache\/onnx-community" "\$_transformers_models\/onnx-community"/,
+    'the closure walk must relocate the models out of .cache/ (D-178)',
+  );
+  assert.match(
+    builder,
+    /^\s*rm -rf "\$dest\/\.cache"$/m,
+    'the closure walk must unconditionally remove .cache/ after relocating (D-178)',
   );
 });

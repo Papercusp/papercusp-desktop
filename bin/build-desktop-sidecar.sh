@@ -1475,13 +1475,16 @@ assert_no_onnx_gpu_providers() {
 # fragments beside the finished ONNX data files after an interrupted download.
 # Those fragments are not model bytes and must never cross the assembled-sidecar
 # boundary (EI-21121880496840788 / P-008).
+# Takes the directory CONTAINING `onnx-community/`. Since D-178 that is the
+# package's `models/` dir, not its `.cache/` — the layout beneath is identical,
+# so this function is unchanged apart from what it is pointed at.
 prune_transformers_model_fragments() {
-  local cache_dir="$1"
+  local models_root="$1"
   local model_dir
-  [[ -d "$cache_dir/onnx-community" ]] || return 0
+  [[ -d "$models_root/onnx-community" ]] || return 0
   for model_dir in \
-    "$cache_dir/onnx-community/harrier-oss-v1-0.6b-ONNX" \
-    "$cache_dir/onnx-community/embeddinggemma-300m-ONNX"; do
+    "$models_root/onnx-community/harrier-oss-v1-0.6b-ONNX" \
+    "$models_root/onnx-community/embeddinggemma-300m-ONNX"; do
     [[ -d "$model_dir" ]] || continue
     find "$model_dir" -type f \( \
       -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
@@ -1489,23 +1492,134 @@ prune_transformers_model_fragments() {
   done
   return 0
 }
-# Backstop the source prune by scanning the assembled preserved cache.  This is
-# deliberately fail-closed: a future downloader/layout change must stop the
-# build rather than silently shipping another multi-hundred-MiB fragment set.
+# Backstop the source prune by scanning the assembled model tree (the package's
+# `models/` dir since D-178).  This is deliberately fail-closed: a future
+# downloader/layout change must stop the build rather than silently shipping
+# another multi-hundred-MiB fragment set.
 assert_no_transformers_model_fragments() {
-  local cache_dir="$1"
+  local models_root="$1"
   local fragments
-  [[ -d "$cache_dir" ]] || return 0
-  if ! fragments="$(find "$cache_dir" -type f \( \
+  [[ -d "$models_root" ]] || return 0
+  if ! fragments="$(find "$models_root" -type f \( \
     -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
   \) 2>/dev/null)"; then
-    echo "FATAL: unable to inspect the preserved transformers cache for download fragments (EI-21121880496840788)" >&2
+    echo "FATAL: unable to inspect the preserved transformers models for download fragments (EI-21121880496840788)" >&2
     return 1
   fi
   [[ -z "$fragments" ]] && return 0
   echo "FATAL: transformers model download fragment(s) survived sidecar staging — these temporary files must never ship (EI-21121880496840788):" >&2
   echo "$fragments" >&2
   return 1
+}
+# ── Derived privacy/scratch excludes for the tree copiers (WI-4419, D-178) ────
+#
+# `bin/stage-source-tree.sh` does not hand-maintain its exclude list: it asks
+# `audit-release-bundle.py --tar-excludes` for it, so THE EXCLUDE AND THE GATE
+# THAT CATCHES A MISSED EXCLUDE COME FROM ONE RULE. The tree copiers below
+# (harness, templates, rubrics, goal-packages) predate that principle and each
+# hand-rolled two or three `find` prunes instead, which is how the r12 bundle
+# shipped 14 findings the gate already had patterns for:
+#
+#   */.vite  */junit.xml  */.vitest-tmp  */*.test.ts  */sshcrypto.node
+#
+# Every one of those was ALREADY emitted by --tar-excludes. Nothing was missing
+# from the staging allowlist; these copiers simply never consulted it. Worse,
+# their `-not -path "./node_modules/*"` prune is anchored at the copied tree's
+# ROOT, so a NESTED `templates/<tpl>/node_modules/` was never excluded at all.
+#
+# So route them through the SAME rule, in the SAME GNU-tar pattern dialect. Two
+# properties are load-bearing and must survive any rewrite here:
+#   1. `find -type f` — NOT `cp -a`/`tar` directory recursion. Symlinks are
+#      skipped ON PURPOSE (the harness carries dev-time symlinks that dangle on
+#      CI and break Tauri's resource bundler / `cp` on Windows).
+#   2. `--no-recursion` — tar must archive exactly the enumerated files and not
+#      re-expand a named directory, or property 1 is silently undone.
+declare -a SIDECAR_TREE_EXCLUDES=()
+load_sidecar_tree_excludes() {
+  (( ${#SIDECAR_TREE_EXCLUDES[@]} > 0 )) && return 0
+  local pat
+  while IFS= read -r pat; do
+    [[ -n "$pat" ]] && SIDECAR_TREE_EXCLUDES+=(--exclude="$pat")
+  done < <(python3 "$HERE/audit-release-bundle.py" --tar-excludes)
+  if (( ${#SIDECAR_TREE_EXCLUDES[@]} == 0 )); then
+    echo "ERROR: audit-release-bundle.py --tar-excludes returned nothing — refusing to copy an UNFILTERED tree into the sidecar (WI-4419)" >&2
+    exit 1
+  fi
+  # GNU tar REQUIRED: bsdtar's --exclude anchoring dialect differs subtly, which
+  # would be a silent-content bug rather than a loud one (same reason
+  # stage-source-tree.sh asserts this).
+  if ! tar --version 2>/dev/null | head -1 | grep -qi 'gnu tar'; then
+    echo "ERROR: GNU tar required for filtered sidecar tree copies (macOS: brew install gnu-tar)" >&2
+    exit 1
+  fi
+  echo "    tree-copy excludes: ${#SIDECAR_TREE_EXCLUDES[@]} patterns (derived from the gate's rules)"
+}
+# ⚠ THE EXCLUDE SET IS NOT UNIFORMLY APPLICABLE — one class needs an exemption.
+#
+# `--tar-excludes` emits raw globs; it does NOT encode the per-rule exemptions the
+# auditor applies when it JUDGES a bundle. There is exactly one that matters here.
+# `phase_a_paths()` skips a `test-files` hit when the member sits under
+# VM_RELEASE_ASSET_ALLOWLIST:
+#
+#     if (rule == "test-files" and _vm_release_asset_allowed(...)): continue
+#     # "Product templates intentionally ship their own source, checks and
+#     #  fixtures: those are materialized into a NEW app…"
+#
+# So `templates/` and `rubrics/` legitimately SHIP their `*.test.ts` — a
+# materialized app is supposed to arrive with its checks. Applying the test/spec
+# patterns to those two trees would silently delete 26 product files the gate has
+# no objection to (measured against the r12 member list). Pass `keep_product_tests`
+# for a tree the auditor exempts; every other tree gets the full set, so an
+# implementation test still cannot leak from harness/ or goal-packages/.
+#
+# This is the THIRD time in this release that a correct blanket rule turned out to
+# be wrong for one deliberate case (the other two: the transformers `.cache/`
+# models, D-177/D-178). Hence the drift guard below rather than a bare comment.
+assert_vm_release_asset_allowed() {
+  local root="$1"
+  if ! grep -qF "\"$root\"," "$HERE/audit-release-bundle.py"; then
+    echo "ERROR: '$root' is no longer in the auditor's VM_RELEASE_ASSET_ALLOWLIST, so its tests are no longer exempt — drop keep_product_tests for this tree (D-178)" >&2
+    exit 1
+  fi
+}
+# copy_tree_filtered <src> <dst> [keep_product_tests|--] [extra find predicates...]
+# Enumerates regular files under <src> (honouring any extra `find` predicates the
+# caller needs), then copies them to <dst> with the derived excludes applied.
+copy_tree_filtered() {
+  local src="$1" dst="$2" mode="$3"
+  shift 3
+  load_sidecar_tree_excludes
+  local -a excludes=("${SIDECAR_TREE_EXCLUDES[@]}")
+  if [[ "$mode" == "keep_product_tests" ]]; then
+    local -a kept=() e
+    for e in "${excludes[@]}"; do
+      # Drop ONLY the test/spec class; every other derived pattern still applies.
+      [[ "$e" == *".test."* || "$e" == *".spec."* || "$e" == *"__tests__"* ]] && continue
+      kept+=("$e")
+    done
+    excludes=("${kept[@]}")
+  fi
+  local list
+  list="$(mktemp "${TMPDIR:-/tmp}/papercusp-tree-copy.XXXXXX")"
+  ( cd "$src" && find . -type f "$@" ) > "$list"
+  if [[ ! -s "$list" ]]; then
+    echo "ERROR: copy_tree_filtered enumerated ZERO files under $src — refusing to continue with an empty copy" >&2
+    rm -f "$list"
+    exit 1
+  fi
+  mkdir -p "$dst"
+  # ⚠ ARGUMENT ORDER IS LOAD-BEARING. GNU tar treats --exclude as POSITIONAL: it
+  # affects only the arguments that FOLLOW it, so `-T "$list" "${excludes[@]}"`
+  # makes every single exclude inert. tar says so ("--exclude ‘X’ has no effect",
+  # once per pattern) and then exits non-zero — but the failure is easy to
+  # misread, because a caller that also prunes via `find` still LOOKS filtered.
+  # That is how it first went in here: the templates tree came out with zero
+  # `.vite` files (the find predicate had removed them) while the harness tree
+  # kept 5 leaks, and only the second tree revealed the excludes were doing
+  # nothing at all. Keep every option BEFORE `-T`.
+  tar -C "$src" "${excludes[@]}" --no-recursion -c -f - -T "$list" \
+    | tar -C "$dst" -xf -
+  rm -f "$list"
 }
 # node-gyp SCAFFOLDING carries the build box's absolute paths — and therefore the
 # owner's identity — into the shipped bundle (WI-4419). A compiled native module
@@ -1564,6 +1678,34 @@ prune_gyp_build_intermediates() {
     pruned=$((pruned+1))
   done < <(find "$root" -type d -name build -path '*/node_modules/*' -print0 2>/dev/null)
   [[ $pruned -gt 0 ]] && echo "  ✂ pruned node-gyp build scaffolding from $pruned native-module build/ dir(s) (WI-4419: they embed build-box paths)"
+  # ssh2's OPTIONAL native crypto accelerator. The scaffolding prune above
+  # deliberately PRESERVES compiled `build/Release/*.node` addons (better-sqlite3
+  # has no JS fallback and MUST ship), but this ONE addon has to go: node-gyp
+  # compiles it here and the compiler bakes the build-box home path into a
+  # .rodata __FILE__ string via an assert() macro. That is a CONTENT leak the
+  # stager cannot redact (its scrub skips binaries) and the audit cannot attribute
+  # (binary member), so removal is the only mechanism that reaches it — the
+  # auditor says exactly this and emits `*/sshcrypto.node` in --tar-excludes.
+  # It reached the r12 bundle because packages arrive here via `cp -aL`, which
+  # consults no exclude list at all.
+  #
+  # Safe to drop: ssh2 wraps `require('.../sshcrypto.node')` in try/catch and
+  # falls back to pure-JS crypto when it is absent
+  # (node_modules/ssh2/lib/protocol/crypto.js). Scoped BY NAME on purpose.
+  #
+  # The durable class fix — noted as a follow-up in the auditor and NOT done here
+  # — is to compile native addons with -ffile-prefix-map (or a neutral node-gyp
+  # cache dir) so __FILE__ never captures the box path for ANY addon.
+  if ! grep -qF '"ssh2-native-crypto-addon"' "$HERE/audit-release-bundle.py"; then
+    echo "ERROR: the auditor no longer carries the ssh2-native-crypto-addon rule — re-check whether this prune is still required (D-178)" >&2
+    exit 1
+  fi
+  local addon_pruned=0 addon
+  while IFS= read -r -d '' addon; do
+    rm -f "$addon"
+    addon_pruned=$((addon_pruned+1))
+  done < <(find "$root" -type f -name 'sshcrypto.node' -print0 2>/dev/null)
+  [[ $addon_pruned -gt 0 ]] && echo "  ✂ pruned $addon_pruned ssh2 native crypto addon(s) (WI-4419: __FILE__ embeds the build-box path; ssh2 falls back to pure-JS crypto)"
   return 0
 }
 # Walks a package's dependency closure and copies each package into the sidecar.
@@ -1699,17 +1841,67 @@ copy_pkg_closure() {
     # intentionally bundled, not dead weight) — keep BOTH. Only bge-small
     # (Xenova/bge-small-en-v1.5, 'local' mode) and any other/future scratch
     # under `.cache` is genuinely unused and safe to strip.
+    #
+    # D-178 (2026-08-29) REVISES the paragraph above on one point. It claimed
+    # "there is no env.cacheDir/localModelPath override ... so that in-bundle
+    # path is the ONLY place the packaged app looks." The models do NOT have to
+    # live under `.cache/` for the runtime to find them, and no override is
+    # needed to move them, because the library ships a SECOND resolution root
+    # that is enabled by default:
+    #
+    #   env.cacheDir       -> <pkg>/.cache/   (the forbidden path)
+    #   env.localModelPath -> <pkg>/models/   (NOT a .cache path)
+    #   env.allowLocalModels = true
+    #
+    # Both roots take the SAME relative layout — `<repo_id>/<filename>`, with no
+    # revision segment for the default revision 'main' (src/utils/hub.js:125-146)
+    # — so relocating is a literal `mv`, not a re-layout. Resolution consults the
+    # cache first and then falls through to localModelPath (hub.js:270-298), so a
+    # bundle with NO `.cache/` at all resolves cleanly from `models/`.
+    #
+    # Measured on the shipped node build (dist/transformers.node.mjs) with the
+    # .cache route neutralised and the network FORBIDDEN (allowRemoteModels=false,
+    # so a silent re-download cannot masquerade as success):
+    #   models at a non-.cache localModelPath -> full feature-extraction pipeline
+    #     loaded, PROBE_FULL=OK dims=[1,768] l2norm=1.0000
+    #   same config, empty localModelPath     -> PROBE_FULL=FAIL (correctly)
+    # The positive arm ran the FULL pipeline on purpose: ONNX external data
+    # (model.onnx_data, 1.2GB) is resolved by onnxruntime relative to the .onnx
+    # file, NOT by the transformers hub layer, so a config-only probe would have
+    # left the largest artifact untested.
+    #
+    # WHY THIS MATTERS: the release identity audit forbids `(^|/)\.cache/`
+    # outright, on the premise that nothing in a .cache/ is needed to RUN the
+    # tree. For this one path that premise was false, so the audit and this build
+    # were in direct conflict — one demanding deletion, the other FATAL-ing on
+    # absence. Relocating satisfies BOTH at full strength: `.cache/` stays
+    # categorically forbidden with no auditor exception, and the weights still
+    # ship at a path the runtime already resolves by default. WI-5638's intent is
+    # unchanged — both models still ship, still behind a fail-closed guard; only
+    # the directory changed.
     local _transformers_cache="$dest/.cache"
+    local _transformers_models="$dest/models"
     if [[ "$cur" == "@huggingface/transformers" && -d "$_transformers_cache" ]]; then
       find "$_transformers_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' -exec rm -rf {} +
       if [[ -d "$_transformers_cache/onnx-community" ]]; then
         find "$_transformers_cache/onnx-community" -mindepth 1 -maxdepth 1 \
           ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' -exec rm -rf {} +
+        # Relocate the survivors OUT of .cache/ (D-178). Merge rather than
+        # clobber: `models/` may already exist in a future package version.
+        mkdir -p "$_transformers_models"
+        if [[ -d "$_transformers_models/onnx-community" ]]; then
+          echo "ERROR: $_transformers_models/onnx-community already exists — refusing to merge two model roots (D-178)" >&2
+          exit 1
+        fi
+        mv "$_transformers_cache/onnx-community" "$_transformers_models/onnx-community" \
+          || { echo "ERROR: failed to relocate transformers models out of .cache (D-178)" >&2; exit 1; }
       fi
-      prune_transformers_model_fragments "$_transformers_cache"
-    else
-      rm -rf "$dest/.cache"
+      prune_transformers_model_fragments "$_transformers_models"
     fi
+    # `.cache/` is now unconditionally removed — including for
+    # @huggingface/transformers, whose models were just relocated above. There is
+    # no longer any package for which a shipped `.cache/` is legitimate.
+    rm -rf "$dest/.cache"
     prune_foreign_prebuilds "$dest"
     prune_foreign_onnx_bins "$dest"
     prune_onnx_gpu_providers "$dest"
@@ -2270,19 +2462,14 @@ mkdir -p "$HARNESS_DST"
 #  3. Skip node_modules — those would be re-installed at runtime if needed,
 #     not bundled.
 echo "→ enumerating harness files (skipping symlinks, docs-viewer, node_modules)"
-( cd "$HARNESS_SRC" && find . -type f \
-    -not -path "./docs-viewer/*" \
-    -not -path "./node_modules/*" \
-    -not -path "*/.git/*" ) > /tmp/harness-files.txt
-file_count=$(wc -l < /tmp/harness-files.txt)
-echo "  $file_count files to copy"
-while IFS= read -r f; do
-  rel="${f#./}"
-  dst_dir="$HARNESS_DST/$(dirname "$rel")"
-  mkdir -p "$dst_dir"
-  cp "$HARNESS_SRC/$rel" "$HARNESS_DST/$rel"
-done < /tmp/harness-files.txt
-rm -f /tmp/harness-files.txt
+# Full exclude set: `harness/` is NOT wholesale in the auditor's asset allowlist
+# (only harness/blueprints, hooks, identity, knowledge-packs, templates are), so an
+# implementation test here is forbidden — `harness/paths.test.ts` was one of the
+# r12 findings, via its env-sidecars mirror.
+copy_tree_filtered "$HARNESS_SRC" "$HARNESS_DST" -- \
+  -not -path "./docs-viewer/*" \
+  -not -path "*/node_modules/*" \
+  -not -path "*/.git/*"
 
 # Sanity-check the artifacts the orchestrator actually needs.
 # (run.sh was retired — see harness commit 4b7e162 "retire run.sh — the TS
@@ -2331,15 +2518,16 @@ if [[ ! -d "$TEMPLATES_SRC" ]]; then
   exit 1
 fi
 mkdir -p "$TEMPLATES_DST"
-( cd "$TEMPLATES_SRC" && find . -type f \
-    -not -path "./node_modules/*" \
-    -not -path "*/.git/*" ) > /tmp/template-files.txt
-while IFS= read -r f; do
-  rel="${f#./}"
-  mkdir -p "$TEMPLATES_DST/$(dirname "$rel")"
-  cp "$TEMPLATES_SRC/$rel" "$TEMPLATES_DST/$rel"
-done < /tmp/template-files.txt
-rm -f /tmp/template-files.txt
+# ⚠ The node_modules prune is `*/node_modules/*`, NOT `./node_modules/*`. The
+# anchored form only ever matched a node_modules at the TEMPLATES ROOT, so every
+# PER-TEMPLATE `templates/<tpl>/node_modules/` shipped — which is how
+# `templates/papercusp-iphone-shell/node_modules/.vite/vitest/…` reached the r12
+# bundle and red'd the release identity gate (6 of its 33 findings). `*/…` matches
+# the root case too (`.` matches the leading `*`), so this is strictly wider.
+assert_vm_release_asset_allowed "templates/"
+copy_tree_filtered "$TEMPLATES_SRC" "$TEMPLATES_DST" keep_product_tests \
+  -not -path "*/node_modules/*" \
+  -not -path "*/.git/*"
 # official-mobile-app-templates-2026-08-20 P-016: the generic copier above is
 # deliberately future-proof, but a successful copy count cannot prove the five
 # launch-critical mobile directories landed. Fail the release build on the exact
@@ -2381,15 +2569,10 @@ if [[ ! -d "$RUBRICS_SRC" ]]; then
   exit 1
 fi
 mkdir -p "$RUBRICS_DST"
-( cd "$RUBRICS_SRC" && find . -type f \
-    -not -path "./node_modules/*" \
-    -not -path "*/.git/*" ) > /tmp/rubric-files.txt
-while IFS= read -r f; do
-  rel="${f#./}"
-  mkdir -p "$RUBRICS_DST/$(dirname "$rel")"
-  cp "$RUBRICS_SRC/$rel" "$RUBRICS_DST/$rel"
-done < /tmp/rubric-files.txt
-rm -f /tmp/rubric-files.txt
+assert_vm_release_asset_allowed "rubrics/"
+copy_tree_filtered "$RUBRICS_SRC" "$RUBRICS_DST" keep_product_tests \
+  -not -path "*/node_modules/*" \
+  -not -path "*/.git/*"
 # Sanity: the first-party set + their self-describing listing.json actually landed.
 rubric_count=$(find "$RUBRICS_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
 if [[ "$rubric_count" -lt 1 ]]; then
@@ -2412,15 +2595,10 @@ if [[ ! -d "$GOAL_PACKAGES_SRC" ]]; then
   exit 1
 fi
 mkdir -p "$GOAL_PACKAGES_DST"
-( cd "$GOAL_PACKAGES_SRC" && find . -type f \
-    -not -path "./node_modules/*" \
-    -not -path "*/.git/*" ) > /tmp/goal-package-files.txt
-while IFS= read -r f; do
-  rel="${f#./}"
-  mkdir -p "$GOAL_PACKAGES_DST/$(dirname "$rel")"
-  cp "$GOAL_PACKAGES_SRC/$rel" "$GOAL_PACKAGES_DST/$rel"
-done < /tmp/goal-package-files.txt
-rm -f /tmp/goal-package-files.txt
+# Full exclude set: `goal-packages/` is not in the auditor's asset allowlist.
+copy_tree_filtered "$GOAL_PACKAGES_SRC" "$GOAL_PACKAGES_DST" -- \
+  -not -path "*/node_modules/*" \
+  -not -path "*/.git/*"
 # Sanity: the first-party set + their self-describing listing.json actually landed.
 goal_pkg_count=$(find "$GOAL_PACKAGES_DST" -maxdepth 2 -name listing.json 2>/dev/null | wc -l)
 if [[ "$goal_pkg_count" -lt 1 ]]; then
@@ -4457,57 +4635,67 @@ echo "→ wrote sidecar freshness stamp (serve.mjs ${_stamp_serve_sha:0:12}…, 
 # download-scratch `.cache` dir must still never reach the .deb from any
 # OTHER path (a new closure entry point, the embedded-postgres/node-pty
 # copies, a future package, …) — that class-level backstop stays absolute.
-# The ONE exception is the transformers package's own `.cache`, which now
-# deliberately CARRIES the two owner-confirmed live embedding models
-# (harrier-oss + embeddinggemma); this guard still fails the build if
-# anything else survives there (a stray third model, a future regression
-# reintroducing the full scratch tree, …), so the exception can't silently
-# widen.
-_expected_cache="$SIDECAR_DIR/node_modules/@huggingface/transformers/.cache"
-# `|| true` IS LOAD-BEARING — do not remove it (EI-18885442084466501).
-# `grep -v` exits 1 when it filters out every line, and under this script's
-# `set -euo pipefail` that non-zero status kills the whole build. The healthy
-# case — no stray caches, so grep emits nothing — is therefore the case that
-# died, silently and with no message, making this guard's ONLY non-fatal path
-# a fatal one.
 #
-# It failed here rather than anywhere else because of WHERE this line sits: the
-# destructive `mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"` has already run, and the
-# EXIT trap installed at the top then `rm -rf`s the staged tmp dir. So each run
-# moved the previous sidecar aside, built a complete bundle, verified it
-# ("verify-sidecar-bundle: OK"), printed its freshness stamp — and then deleted
-# the result and left the tree with NO sidecar at all, worse off than before.
-# The last line printed was success-shaped, so it read as a clean build.
+# Since D-178 it is absolute with NO exception at all. The transformers
+# package's `.cache` used to be carved out because it carried the two
+# owner-confirmed live embedding models; those models now live at
+# <transformers>/models/onnx-community/, so a `.cache/` anywhere under the
+# staged node_modules is unambiguously scratch again. The allowlist that used
+# to protect them moved to the models guard below, at equal strength.
+# D-178: there is NO LONGER AN EXPECTED CACHE. The two live embedding models are
+# relocated to <transformers>/models/onnx-community/ during package staging, so
+# every `.cache/` under the staged node_modules is now scratch without exception,
+# and this guard is absolute again.
 #
-# 11 orphaned sidecar.old.<pid> dirs were sitting in src-tauri/ when this was
-# found: one per build that died right here. That litter had already been filed
-# as a cleanup omission (EI-18882950272344248) — it is not. The script never
-# reaches its cleanup because it never gets past this line.
-_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null \
-  | { grep -v -F -x "$_expected_cache" || true; })
+# ⚠ The `| { grep -v -F -x "$_expected_cache" || true; }` filter that used to
+# carve out the exception is GONE, and so is the trap it carried
+# (EI-18885442084466501): `grep -v` exits 1 when it filters out every line, and
+# under `set -euo pipefail` that killed the build on the HEALTHY path — after the
+# destructive `mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"` had already run and with the
+# EXIT trap then deleting the staged tree, so each run moved the previous sidecar
+# aside, built a complete bundle, verified it, and then left the tree with NO
+# sidecar at all. The last line printed was success-shaped. 11 orphaned
+# sidecar.old.<pid> dirs were the only visible symptom, and they had been filed
+# as a cleanup omission (EI-18882950272344248) — they were not.
+# If you ever reintroduce a filter here, it needs `|| true` for that reason.
+# The `|| true` is the SAME load-bearing escape the old grep needed, for the same
+# reason one level down: `find` exits non-zero when its root is missing, and under
+# `set -euo pipefail` a command substitution that fails kills the build HERE —
+# after the destructive `mv`, with no message at all. Removing the grep retired
+# the old instance of this shape and momentarily reintroduced it; the guard's
+# own test caught it (a missing-models fixture exited 1 with empty stderr, which
+# looks exactly like the guard firing correctly). Keep the escape: this block must
+# only ever fail LOUDLY, via its explicit echo+exit paths below.
+_stray_caches=$(find "$SIDECAR_DIR/node_modules" -type d -name ".cache" 2>/dev/null || true)
 if [[ -n "$_stray_caches" ]]; then
-  echo "FATAL: runtime .cache dir(s) found in staged sidecar node_modules — these are download scratch that must never ship (WI-5638):" >&2
+  echo "FATAL: runtime .cache dir(s) found in staged sidecar node_modules — these are download scratch that must never ship (WI-5638), and since D-178 there is no exception: the live embedding models belong at <transformers>/models/onnx-community/:" >&2
   echo "$_stray_caches" >&2
   exit 1
 fi
-if [[ -d "$_expected_cache" ]]; then
-  _unexpected_cache_entries=$(find "$_expected_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' 2>/dev/null)
-  if [[ -n "$_unexpected_cache_entries" ]]; then
-    echo "FATAL: unexpected top-level entries in the preserved transformers .cache — only onnx-community/{harrier-oss,embeddinggemma} should survive (WI-5638):" >&2
-    echo "$_unexpected_cache_entries" >&2
+# The allowlisting job the block above used to do MOVES HERE, unchanged in
+# strength: exactly the two owner-confirmed models, at the relocated path, and
+# nothing else. Fail-closed in BOTH directions — a missing model is as fatal as
+# an unexpected one, because "models silently absent" is the failure mode that
+# ships a product whose local embedding is quietly broken (WI-5638).
+_expected_models="$SIDECAR_DIR/node_modules/@huggingface/transformers/models/onnx-community"
+if [[ ! -d "$_expected_models" ]]; then
+  echo "FATAL: relocated transformers models missing at $_expected_models — the desktop app runs a live hybrid of harrier-oss + embeddinggemma and cannot regenerate them at runtime (WI-5638 / D-178)" >&2
+  exit 1
+fi
+for _required_model in harrier-oss-v1-0.6b-ONNX embeddinggemma-300m-ONNX; do
+  if [[ ! -d "$_expected_models/$_required_model" ]]; then
+    echo "FATAL: required embedding model missing after relocation: $_expected_models/$_required_model (WI-5638 / D-178)" >&2
     exit 1
   fi
-  if [[ -d "$_expected_cache/onnx-community" ]]; then
-    _unexpected_model_entries=$(find "$_expected_cache/onnx-community" -mindepth 1 -maxdepth 1 \
-      ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' 2>/dev/null)
-    if [[ -n "$_unexpected_model_entries" ]]; then
-      echo "FATAL: unexpected model dir(s) survived the transformers .cache strip — only harrier-oss + embeddinggemma are owner-confirmed live (WI-5638):" >&2
-      echo "$_unexpected_model_entries" >&2
-      exit 1
-    fi
-  fi
+done
+_unexpected_model_entries=$(find "$_expected_models" -mindepth 1 -maxdepth 1 \
+  ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' 2>/dev/null)
+if [[ -n "$_unexpected_model_entries" ]]; then
+  echo "FATAL: unexpected entries beside the relocated models — only harrier-oss + embeddinggemma are owner-confirmed live (WI-5638 / D-178):" >&2
+  echo "$_unexpected_model_entries" >&2
+  exit 1
 fi
-assert_no_transformers_model_fragments "$_expected_cache" || exit 1
+assert_no_transformers_model_fragments "$SIDECAR_DIR/node_modules/@huggingface/transformers/models" || exit 1
 
 # EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
 # NOT guaranteed absent here — a concurrent bare `cargo build` (tauri-dev
