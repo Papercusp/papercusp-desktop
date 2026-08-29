@@ -18,7 +18,14 @@
 # returned by an authentication callback was enforced only on the PublicKeyCallback
 # and VerifiedPublicKeyCallback paths. gh in this same toolchain already resolves
 # x/crypto v0.55.0, so the version is known to build here.
-PAPERCUSP_VM_TRUST_REVISION="2026-08-29-r1"
+# 2026-08-29-r2 — r1 never produced a binary: it moved x/crypto to v0.55.0 without its
+# co-pin, so the kopia leg died on the x/net constraint below and the sidecar build
+# exited 1. Bumping the revision here is belt-and-braces only: _pc_vm_cache_valid() now
+# compares EVERY pin against what manifest.json records (EI-21812346842496214), so the
+# changed x/net alone already invalidates the cache. Both are kept deliberately — the
+# revision is the human-legible marker, the pin comparison is the one that cannot be
+# forgotten.
+PAPERCUSP_VM_TRUST_REVISION="2026-08-29-r2"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -38,8 +45,25 @@ PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
 PAPERCUSP_VM_KOPIA_SOURCE_SHA256="5c4267ff00cc09eded390e03b6ff33f59e7df1c8d9230ce001dc509e7cadf8f1"
 PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.55.0"
 PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"
-PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.56.0"
-PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.39.0"
+# CO-PIN, not an independent choice: x/crypto v0.55.0 REQUIRES x/net >= v0.57.0, so
+# leaving this at v0.56.0 made the GO-2026-6303 fix unbuildable. Measured 2026-08-29,
+# the kopia leg of the 2026-08-29-r1 build failed with, verbatim:
+#   go: golang.org/x/crypto@v0.55.0 requires golang.org/x/net@v0.57.0, not golang.org/x/net@v0.56.0
+# v0.58.0 rather than the minimum v0.57.0 because the gh leg above ALREADY builds with
+# v0.58.0 under this same Go version on this same box, so it is the value proven here;
+# it also puts both shipped Go binaries on ONE x/net instead of two to reason about.
+# NOTE for whoever bumps x/crypto next: these two move TOGETHER. The failure mode is a
+# hard build error, not a silent downgrade, so it cannot ship a vulnerable binary.
+PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"
+# SECOND co-pin of the same x/crypto v0.55.0 bump: its go.mod requires x/text v0.41.0
+# (indirect), and x/net v0.58.0 requires it directly. These are applied by ONE joint
+# `go get` below, where an explicitly-requested LOWER version is a hard conflict rather
+# than an MVS upgrade — the same failure shape as the x/net pin above, which is why it
+# was worth resolving all of them from the module proxy before rebuilding instead of
+# discovering them one expensive build at a time. Checked at the same time and NOT
+# needing a bump: grpc v1.82.1 (wants only x/net v0.53.0 / x/text v0.36.0, both below
+# these, so MVS takes ours) and x/mod v0.40.0 (wants x/tools, unpinned for kopia).
+PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"
 PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.82.1"
 
 PAPERCUSP_VM_POSTGRES_VERSION="18.6"
