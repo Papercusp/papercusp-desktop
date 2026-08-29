@@ -9,7 +9,16 @@
 # two upstream Go release binaries that were still Grype-red are rebuilt from
 # their signed release commits with only the fixed dependency versions below.
 
-PAPERCUSP_VM_TRUST_REVISION="2026-08-26-r2"
+# BUMP THIS whenever any pin below changes. The cache key is this revision alone
+# (see _pc_vm_cache_valid), so a pin bump WITHOUT a revision bump silently reuses the
+# previously built binary and the change never reaches a bundle. Measured 2026-08-29
+# (D-172): the cached 2026-08-26-r2 kopia embeds golang.org/x/crypto v0.53.0.
+# 2026-08-29-r1 — kopia's golang.org/x/crypto v0.53.0 -> v0.55.0 for GO-2026-6303
+# (High, advisory 2026-08-28): the source-address critical option in the Permissions
+# returned by an authentication callback was enforced only on the PublicKeyCallback
+# and VerifiedPublicKeyCallback paths. gh in this same toolchain already resolves
+# x/crypto v0.55.0, so the version is known to build here.
+PAPERCUSP_VM_TRUST_REVISION="2026-08-29-r1"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -27,7 +36,7 @@ PAPERCUSP_VM_GH_X_TOOLS_VERSION="v0.49.0"
 PAPERCUSP_VM_KOPIA_VERSION="0.23.1"
 PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
 PAPERCUSP_VM_KOPIA_SOURCE_SHA256="5c4267ff00cc09eded390e03b6ff33f59e7df1c8d9230ce001dc509e7cadf8f1"
-PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.53.0"
+PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.55.0"
 PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"
 PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.56.0"
 PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.39.0"
@@ -101,14 +110,77 @@ _pc_vm_cache_valid() {
   "$root/bin/kopia" --version 2>/dev/null | head -1 | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1" || return 1
   [[ "$("$root/postgresql/bin/postgres" --version 2>/dev/null)" == "postgres (PostgreSQL) $PAPERCUSP_VM_POSTGRES_VERSION" ]] || return 1
 
-  python3 - "$root/manifest.json" "$PAPERCUSP_VM_TRUST_REVISION" <<'PY'
+  # The revision is the cache KEY, so it is necessary but not sufficient: a pin edited
+  # without a revision bump would otherwise be silently answered from a stale binary and
+  # never reach a bundle. Measured 2026-08-29 (D-172) on the real cache — the
+  # 2026-08-26-r2 kopia embeds golang.org/x/crypto v0.53.0, carrying GO-2026-6303 (High)
+  # into a signed release. Re-derive the pins here rather than trusting the key alone: the
+  # manifest already RECORDS what was built, so comparing it to what is PINNED now costs
+  # nothing and turns a silent stale hit into a rebuild. Bumping the revision remains the
+  # documented practice; this makes forgetting it non-load-bearing.
+  PC_VM_EXPECTED_PINS="$(cat <<JSON
+{
+  "revision": "$PAPERCUSP_VM_TRUST_REVISION",
+  "node": { "version": "$PAPERCUSP_VM_NODE_VERSION" },
+  "go": { "version": "$PAPERCUSP_VM_GO_VERSION" },
+  "githubCli": {
+    "version": "$PAPERCUSP_VM_GH_VERSION-papercusp.1",
+    "commit": "$PAPERCUSP_VM_GH_COMMIT",
+    "moduleOverrides": {
+      "golang.org/x/mod": "$PAPERCUSP_VM_GH_X_MOD_VERSION",
+      "golang.org/x/net": "$PAPERCUSP_VM_GH_X_NET_VERSION",
+      "golang.org/x/tools": "$PAPERCUSP_VM_GH_X_TOOLS_VERSION"
+    }
+  },
+  "kopia": {
+    "version": "$PAPERCUSP_VM_KOPIA_VERSION-papercusp.1",
+    "commit": "$PAPERCUSP_VM_KOPIA_COMMIT",
+    "moduleOverrides": {
+      "golang.org/x/crypto": "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION",
+      "golang.org/x/mod": "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION",
+      "golang.org/x/net": "$PAPERCUSP_VM_KOPIA_X_NET_VERSION",
+      "golang.org/x/text": "$PAPERCUSP_VM_KOPIA_X_TEXT_VERSION",
+      "google.golang.org/grpc": "$PAPERCUSP_VM_KOPIA_GRPC_VERSION"
+    }
+  },
+  "postgresql": {
+    "version": "$PAPERCUSP_VM_POSTGRES_VERSION",
+    "opensslVersion": "$PAPERCUSP_VM_OPENSSL_VERSION"
+  }
+}
+JSON
+)"
+  export PC_VM_EXPECTED_PINS
+  python3 - "$root/manifest.json" <<'PY'
 import json
+import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as source:
     manifest = json.load(source)
-if manifest.get("revision") != sys.argv[2]:
+expected = json.loads(os.environ["PC_VM_EXPECTED_PINS"])
+
+
+def stale(path, want, got):
+    print(
+        f"  vm-release trust cache STALE: {path} is {got!r}, pinned {want!r} — rebuilding",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
+
+
+def compare(want, got, path=""):
+    if isinstance(want, dict):
+        if not isinstance(got, dict):
+            stale(path or "<root>", want, got)
+        for key, sub in want.items():
+            compare(sub, got.get(key), f"{path}.{key}" if path else key)
+        return
+    if want != got:
+        stale(path, want, got)
+
+
+compare(expected, manifest)
 PY
 }
 
