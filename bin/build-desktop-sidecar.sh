@@ -2936,6 +2936,29 @@ fi
 echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
 SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
 > "$SOURCE_NOTE_FILE"
+
+# WI-4419: this note SHIPS inside the bundle, and the release identity scan reads the bytes that
+# ship — it honours NO path-exclude list, by design. So an absolute build-box path written here is
+# a build-box identity leak (`/home/<user>/...` names both the machine and its operator), and it
+# fails the release build at the very END of a ~12-minute run, long after this line wrote it.
+#
+# The note's VALUE is provenance — WHICH source a tool came from — and that survives relativisation
+# completely intact. So scrub the location rather than dropping the note, and never reach for an
+# exclude: the scan ignores excludes by design, so excluding the path would not even work.
+#
+# Order matters: the most specific prefix must win. The sidecar staging dir is replaced before the
+# repo root and the repo root before $HOME, because on this box the sidecar lives under the repo
+# and the repo lives under $HOME — a $HOME-first pass would rewrite every path to the least
+# informative label of the three.
+_scrub_build_path() {
+  local p="$1"
+  if [[ -n "${SIDECAR_DIR:-}"     ]]; then p="${p//"$SIDECAR_DIR"/<sidecar>}"; fi
+  if [[ -n "${SIDECAR_TMP_DIR:-}" ]]; then p="${p//"$SIDECAR_TMP_DIR"/<sidecar>}"; fi
+  if [[ -n "${REPO_ROOT:-}"       ]]; then p="${p//"$REPO_ROOT"/<repo>}"; fi
+  if [[ -n "${ROOT:-}"            ]]; then p="${p//"$ROOT"/<desktop>}"; fi
+  if [[ -n "${HOME:-}"            ]]; then p="${p//"$HOME"/<home>}"; fi
+  printf '%s' "$p"
+}
 # WI-5651: cross-baking the darwin sidecar on THIS linux host. The client-tool
 # wiring below needs a dedicated cross-darwin path — every host-source branch
 # resolves LINUX binaries, and the darwin Mach-Os can't be exec'd here (so even
@@ -3235,8 +3258,9 @@ WRAP
       fi
       ;;
   esac
+  # Console keeps the real path (build log, not shipped); the NOTE is scrubbed (it ships).
   echo "  $tool: $method ($src)"
-  echo "$tool: $method ($src)" >> "$SOURCE_NOTE_FILE"
+  echo "$tool: $method ($(_scrub_build_path "$src"))" >> "$SOURCE_NOTE_FILE"
 done
 
 # Resolve an executable that may live in an admin-only system directory. Service
@@ -3389,7 +3413,7 @@ else
     exit 1
   fi
   echo "  kopia: copy ($_kopia_src) → $("$SIDECAR_DIR/bin/kopia" --version 2>/dev/null | head -1)"
-  echo "kopia: copy (from system PATH) ($_kopia_src)" >> "$SOURCE_NOTE_FILE"
+  echo "kopia: copy (from system PATH) ($(_scrub_build_path "$_kopia_src"))" >> "$SOURCE_NOTE_FILE"
 fi
 
 # NOTE: zero-cache-server is no longer bundled (SP1 C5, 2026-06-06). The
