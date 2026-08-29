@@ -395,6 +395,25 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
     PAPERCUSP_ROOT: path.join(dir, 'missing-papercusp'),
   };
   delete env.PAPERCUSP_RELEASE_OWNER_NAME;
+  delete env.PROVENANCE_SOURCE_GIT_HEAD;
+  delete env.PROVENANCE_SOURCE_GIT_DIRTY;
+  if (advance) {
+    // EI-21809903601430402 — HERMETICITY, not a product change. This case is about the OWNER-NAME
+    // guard, but the advancing audit=1 input has to cross the clean-source-tree guard
+    // (bin/build-desktop-sidecar.sh, "requires a clean source tree at cut start") to reach the
+    // deliberately-absent Papercusp dependency it asserts on. That guard reads the source
+    // provenance captured from REPO_ROOT — which here is the SHARED fleet checkout, where
+    // gitDirty is essentially always true — so without this the case could never pass on a
+    // developer or CI checkout that has any uncommitted file, and a red here said nothing about
+    // the guard under test. The script documents the seam this uses (same file, "A release
+    // orchestrator that already captured the phase boundary supplies both seams, and remains
+    // authoritative"): supplying the PAIR pins the source state instead of shelling out to git.
+    // Supplied for advance-only inputs, so the rejecting cases still prove they stop before any
+    // filesystem work. The clean-tree guard itself keeps its own coverage in
+    // test/provenance-sidecar-record.test.js.
+    env.PROVENANCE_SOURCE_GIT_HEAD = '0'.repeat(40);
+    env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
+  }
   if (owner !== undefined) env.PAPERCUSP_RELEASE_OWNER_NAME = owner;
   try {
     return spawnSync('bash', [path.join(root, 'bin/build-desktop-sidecar.sh')], {
