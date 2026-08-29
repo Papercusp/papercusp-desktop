@@ -1552,6 +1552,20 @@ def _vm_release_residue_class(rel, is_dir=False):
     if is_dir and low == "bin" and len(parts) >= 2 \
             and parts[-2] == "esbuild" and "node_modules" in parts[:-2]:
         return "build-tool-residue"
+    # D-174: the two rules above miss npm's SHIM directory, `node_modules/.bin`,
+    # which is a THIRD path to the very same executable. Normally that entry is a
+    # symlink or a ~9KB JS wrapper and pruning the real package is enough — which is
+    # why this gap stayed invisible: the r8 bundle carried 9,248 bytes here. Measured
+    # 2026-08-29, npm had instead HARDLINKED the platform binary into it (st_nlink 3),
+    # so the assembled sidecar shipped 10,178,712 bytes of ELF Go at
+    # node_modules/lost-pixel/node_modules/.bin/esbuild and the vm-release gate went
+    # red with 26 High/Critical stdlib CVEs (go1.23.1) — every one from this one file.
+    # Whether the entry is a link or a copy is an npm layout detail we do not control,
+    # so match the PATH rather than the file type; a dangling .bin entry left behind by
+    # the prunes above is dead weight regardless.
+    if not is_dir and low == "esbuild" and len(parts) >= 2 \
+            and parts[-2] == ".bin" and "node_modules" in parts[:-2]:
+        return "build-tool-residue"
 
     # Templates intentionally carry source/tests/config: they are the bytes the
     # runtime materializes into a NEW app, not editable Papercusp implementation.
