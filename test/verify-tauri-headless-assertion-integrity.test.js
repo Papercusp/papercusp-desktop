@@ -43,6 +43,32 @@ test('rechecks the manifest immediately before execution and refuses changed byt
   assert.match(body, /return 3/);
 });
 
+test('executes an immutable work-dir copy for in-repo bash/sh assertion scripts', () => {
+  const snapshot = source.indexOf('snapshot_assertion_script()');
+  const snapshotCall = source.indexOf('snapshot_assertion_script || exit $?');
+  const bootStart = source.indexOf('# ── boot Xvfb');
+  const argumentRewrite = source.indexOf('ASSERTION_ARGS[1]="$ASSERTION_SCRIPT_SNAPSHOT_PATH"');
+  const finalArgRestore = source.indexOf('set -- "${ASSERTION_ARGS[@]}"');
+  const execution = source.lastIndexOf('"$@"');
+
+  assert.ok(snapshot >= 0, 'the immutable assertion-script snapshot helper must exist');
+  assert.ok(snapshotCall > snapshot, 'the assertion-script snapshot helper must be called');
+  assert.ok(bootStart > snapshotCall, 'the assertion script must be frozen before verifier boot');
+  assert.ok(argumentRewrite > snapshot, 'the copied script path must replace the caller path');
+  assert.ok(argumentRewrite < snapshotCall, 'the copied script path must be assigned before the helper returns');
+  assert.ok(finalArgRestore > snapshotCall, 'execution must restore the rewritten assertion argv');
+  assert.ok(execution > finalArgRestore, 'the final command must run after argv rewriting');
+  assert.match(source, /case "\$\(basename -- "\$shell_command"\)" in\s+bash\|sh\)/);
+  assert.match(source, /resolved="\$\(cd "\$ASSERTION_CWD".*readlink -f -- "\$script_arg"/);
+  assert.match(source, /case "\$resolved" in\s+"\$repo_dir_real"\/\*\)/);
+  assert.match(source, /ASSERTION_SCRIPT_SNAPSHOT_PATH="\$WORK\/assertion-script\.sh"/);
+  assert.match(source, /cp -- "\$resolved" "\$tmp"/);
+  assert.match(
+    source,
+    /assertion script snapshot frozen at \$ASSERTION_SCRIPT_SNAPSHOT_PATH .* IMMUTABLE for this run/,
+  );
+});
+
 test('the sha256 manifest turns a mutated assertion file into a failing verdict', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-tauri-assertion-integrity-'));
   try {
