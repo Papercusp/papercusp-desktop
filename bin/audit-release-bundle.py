@@ -1552,20 +1552,21 @@ def _vm_release_residue_class(rel, is_dir=False):
     if is_dir and low == "bin" and len(parts) >= 2 \
             and parts[-2] == "esbuild" and "node_modules" in parts[:-2]:
         return "build-tool-residue"
-    # D-174: the two rules above miss npm's SHIM directory, `node_modules/.bin`,
-    # which is a THIRD path to the very same executable. Normally that entry is a
-    # symlink or a ~9KB JS wrapper and pruning the real package is enough — which is
-    # why this gap stayed invisible: the r8 bundle carried 9,248 bytes here. Measured
-    # 2026-08-29, npm had instead HARDLINKED the platform binary into it (st_nlink 3),
-    # so the assembled sidecar shipped 10,178,712 bytes of ELF Go at
-    # node_modules/lost-pixel/node_modules/.bin/esbuild and the vm-release gate went
-    # red with 26 High/Critical stdlib CVEs (go1.23.1) — every one from this one file.
-    # Whether the entry is a link or a copy is an npm layout detail we do not control,
-    # so match the PATH rather than the file type; a dangling .bin entry left behind by
-    # the prunes above is dead weight regardless.
-    if not is_dir and low == "esbuild" and len(parts) >= 2 \
-            and parts[-2] == ".bin" and "node_modules" in parts[:-2]:
-        return "build-tool-residue"
+    # D-174: npm's SHIM directory, `node_modules/.bin`, is a THIRD path to a
+    # build tool's executable. Normally its entries are symlinks or small JS
+    # wrappers and pruning the real package is enough — which is why this gap
+    # stayed invisible: the r8 bundle carried a 9,248-byte JS shim here.
+    # Measured 2026-08-29, npm instead HARDLINKED the platform binary into
+    # `node_modules/lost-pixel/node_modules/.bin/esbuild` (st_nlink 3), so the
+    # assembled sidecar shipped 10,178,712 bytes of ELF Go and the vm-release
+    # gate went red with 26 High/Critical stdlib CVEs (go1.23.1), every one from
+    # this one file. Whether an entry is a link, JS wrapper, or machine binary is
+    # an npm layout detail we do not control, and `.bin` is never a runtime
+    # entrypoint for this image, so prune the WHOLE shim subtree rather than
+    # maintaining another name-keyed exception.
+    for index, part in enumerate(parts):
+        if part == ".bin" and "node_modules" in parts[:index]:
+            return "build-tool-residue"
 
     # Templates intentionally carry source/tests/config: they are the bytes the
     # runtime materializes into a NEW app, not editable Papercusp implementation.
@@ -3905,8 +3906,25 @@ def main():
             if g["n"] > len(g["files"]):
                 print(f"        … and {g['n'] - len(g['files']):,} more")
 
-    print("\n  Fix the SOURCE — the allowlist in bin/stage-source-tree.sh. Do NOT add an")
-    print("  exception here to make the build pass: that is the bug this gate exists to catch.")
+    # Header ownership findings have a different producer and therefore a different
+    # repair than path/content findings. Pointing them at the staging allowlist is
+    # actionable-looking but cannot change tar's uname/gname fields (EI-21823231988075351).
+    header_metadata_hits = [
+        (rule, name) for rule, name in path_hits
+        if rule.endswith(" (in uid name)") or rule.endswith(" (in gid name)")
+    ]
+    source_or_content_hits = [
+        (rule, name) for rule, name in path_hits
+        if (rule, name) not in header_metadata_hits
+    ]
+    if source_or_content_hits or content_hits:
+        print("\n  Fix the SOURCE — the allowlist in bin/stage-source-tree.sh. Do NOT add an")
+        print("  exception here to make the build pass: that is the bug this gate exists to catch.")
+    if header_metadata_hits:
+        print("\n  Fix the ARCHIVE PRODUCER — the finding is tar header ownership metadata,")
+        print("  not a staged path or file-content leak. Recreate the affected archive with:")
+        print("    tar --owner=0 --group=0 --numeric-owner ...")
+        print(f"  Affected archive: {os.path.basename(bundle)}")
     return 1
 
 
