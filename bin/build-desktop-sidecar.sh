@@ -49,6 +49,12 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # touches nothing but the candidate directory, and it never exits the caller.
 # shellcheck source=lib/source-roots.sh
 source "$HERE/lib/source-roots.sh"
+# Same contract, one layer out: source-roots.sh answers "which tree do we read SOURCE from",
+# pinned-deps.sh answers "and whose node_modules are we reading". Sourcing is likewise safe
+# before the identity check — it only defines functions, and its script dispatcher is guarded
+# on BASH_SOURCE so being sourced never runs anything.
+# shellcheck source=lib/pinned-deps.sh
+source "$HERE/lib/pinned-deps.sh"
 REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
@@ -179,6 +185,24 @@ fi
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   if ! papercusp_assert_release_source_clean "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" "$REPO_ROOT"; then
     echo "       Refusing to build a release-audited sidecar from a dirty source tree." >&2
+    exit 2
+  fi
+  # EI-21832562420831737, the third part: SOURCE cleanliness is only half of what this build
+  # reads. The other half is node_modules, and a pinned worktree has none of its own — so the
+  # cut that shipped r15 overlay-mounted 86 dependency trees whose lower layer was the LIVE
+  # shared checkout, which ~100 agents install into while the build reads it. That is how r14
+  # died (D-187), and with dependency generation switched off (D-186) the only thing that
+  # detected it is gone. Every artifact-side gate still passes, because a bundle built from
+  # torn inputs agrees with itself.
+  #
+  # PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT is how an orchestrator DECLARES the snapshot it took;
+  # unset means "nothing outside this tree is allowed", which is the stricter reading and the
+  # right default. Satisfiable today by construction — a tree holding its own node_modules
+  # passes with no declaration at all. See lib/pinned-deps.sh for the snapshot that makes the
+  # borrowed-storage case satisfiable too, and for why the lower layer is the thing that had
+  # to move. Same placement contract as the gates above: before any toolchain work.
+  if ! papercusp_assert_pinned_deps_decoupled "$REPO_ROOT" "${PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT:-}"; then
+    echo "       Refusing to build a release-audited sidecar from dependencies another tree owns." >&2
     exit 2
   fi
 fi
