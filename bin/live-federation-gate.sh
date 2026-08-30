@@ -1262,12 +1262,20 @@ trap on_external_term TERM INT
 gate_selftest() {  # <label> <script-basename> <logfile> <what-is-broken-if-it-fails>
   local __label="$1" __script="$2" __log="$3" __broken="$4" __source __snapshot __evidence
   __source="$DESKTOP_DIR/bin/lib/$__script"
-  # Keep dirname($0) identical to the source script: these selftests source
-  # federation-asserts.sh and inspect ../ driver files relative to themselves.
-  # A run-dir-only copy is immutable but semantically wrong (it cannot find the
-  # siblings). The dotfile is unique, does not match bin/lib/*.sh sweeps, and is
-  # removed before build/exit; the evidence copy stays with the run.
-  __snapshot="$DESKTOP_DIR/bin/lib/.gate-selftest-snapshot-$__script.$$"
+  # EI-21266614790118256: the snapshot used to live INSIDE bin/lib/ (a dotfile
+  # sibling of the source, so dirname($0) stayed identical and the selftest could
+  # still `source $DIR/federation-asserts.sh` / grep its ../ driver siblings).
+  # But bin/lib/ is git-TRACKED, and the ~2s the script executes is a real window:
+  # a Desktop auto-commit sweep landed inside it once (04226ec6, WI-40905
+  # verification) and committed the ephemeral dotfile, leaving the submodule
+  # dirty after cleanup removed it out from under the commit. Snapshot into the
+  # gate's own untracked $WORK scratch dir instead (exactly where run_smoke's
+  # smoke_snapshot already lives — never git-visible, no sweep can ever see it)
+  # and inject GATE_SELFTEST_LIB_DIR so the selftest still resolves the REAL
+  # bin/lib for everything it only reads (source/grep), preserving the identical
+  # dirname/relative-sibling semantics EI-21245861434158598 required without
+  # ever writing into the tracked tree.
+  __snapshot="$WORK/gate-selftest-snapshot-$__script"
   __evidence="$WORK/selftest-snapshot-$__script"
   # EI-21245861434158598: Bash reads a script progressively. Executing the
   # shared-tree file directly let a peer's legitimate in-place edit shift later
@@ -1281,7 +1289,7 @@ gate_selftest() {  # <label> <script-basename> <logfile> <what-is-broken-if-it-f
     exit 1
   fi
   cp -- "$__snapshot" "$__evidence" 2>/dev/null || true
-  if bash "$__snapshot" >"$__log" 2>&1; then
+  if GATE_SELFTEST_LIB_DIR="$DESKTOP_DIR/bin/lib" bash "$__snapshot" >"$__log" 2>&1; then
     rm -f -- "$__snapshot"
     log "$__label self-test PASS"
     return 0
