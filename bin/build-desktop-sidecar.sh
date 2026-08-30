@@ -454,6 +454,36 @@ __pc_release_sidecar_publish_lock() {
     SIDECAR_PUBLISH_LOCKDIR=""
   fi
 }
+
+# EI-21830176050381484: build.rs may recreate the resource-glob placeholder in
+# the tiny publish window even though real sidecar builders are serialized by
+# sidecar.build.lock. Only that exact, closed placeholder shape is disposable.
+# A directory carrying real output (or any unknown residue) belongs to another
+# writer and must be preserved rather than silently rm -rf'd.
+__pc_is_cargo_sidecar_placeholder() {
+  local dir="$1" marker unexpected
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  [[ ! -e "$dir/serve.mjs" && ! -e "$dir/.sidecar-build-stamp" ]] || return 1
+  [[ -d "$dir/db-sql" && ! -L "$dir/db-sql" ]] || return 1
+  [[ -d "$dir/spa" && ! -L "$dir/spa" ]] || return 1
+
+  for marker in \
+    "$dir/PLACEHOLDER-README.txt" \
+    "$dir/db-sql/PLACEHOLDER-README.txt" \
+    "$dir/spa/PLACEHOLDER-README.txt"; do
+    [[ -f "$marker" && ! -L "$marker" ]] || return 1
+    grep -Fq 'Placeholder created by build.rs so the bundle.resources globs match' "$marker" || return 1
+  done
+
+  unexpected="$(find "$dir" -mindepth 1 \
+    ! -path "$dir/PLACEHOLDER-README.txt" \
+    ! -path "$dir/db-sql" \
+    ! -path "$dir/db-sql/PLACEHOLDER-README.txt" \
+    ! -path "$dir/spa" \
+    ! -path "$dir/spa/PLACEHOLDER-README.txt" \
+    -print -quit 2>/dev/null)"
+  [[ -z "$unexpected" ]]
+}
 SIDECAR_DIR="$SIDECAR_TMP_DIR"
 
 # EI-1869 + EI-21492557010868835: fetched runtime binaries and the expensive
@@ -4722,12 +4752,18 @@ assert_no_transformers_model_fragments "$SIDECAR_DIR/node_modules/@huggingface/t
 # recreate $SIDECAR_FINAL_DIR as a placeholder skeleton. Plain mv then
 # publishes sidecar/sidecar.tmp.<pid>/ NESTED inside it — a silently-corrupt
 # tree the federation gate repacked into a .deb and burned a content-matrix
-# RED on. Portable guard: evict a squatter just before the rename, then
-# verify the publish landed flat and repair the nested shape if the race
-# re-fired inside the tiny check→mv gap.
+# RED on. EI-21830176050381484 narrows the old unconditional rm -rf: only the
+# exact build.rs placeholder is disposable. Any real/unknown sidecar is a
+# second-writer violation and is preserved while this build fails loudly.
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
-  echo "→ WARN: $SIDECAR_FINAL_DIR reappeared mid-publish (concurrent cargo build.rs placeholder) — evicting squatter before the publish rename"
-  rm -rf "$SIDECAR_FINAL_DIR"
+  if __pc_is_cargo_sidecar_placeholder "$SIDECAR_FINAL_DIR"; then
+    echo "→ WARN: verified cargo build.rs placeholder reappeared at $SIDECAR_FINAL_DIR — evicting it before the publish rename"
+    rm -rf "$SIDECAR_FINAL_DIR"
+  else
+    echo "FATAL: $SIDECAR_FINAL_DIR reappeared mid-publish and is NOT the exact cargo build.rs placeholder; refusing to delete another writer's output." >&2
+    echo "       Preserved the unexpected sidecar in place. Re-run after the competing writer exits." >&2
+    exit 6
+  fi
 fi
 # A clean source can still move while this long build runs (for example when
 # git-sync commits a peer's change). Refuse to publish bytes whose source HEAD
@@ -4745,12 +4781,20 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
 fi
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
 _tmp_base="$(basename "$SIDECAR_TMP_DIR")"
-if [[ ! -f "$SIDECAR_FINAL_DIR/serve.mjs" && -d "$SIDECAR_FINAL_DIR/$_tmp_base" ]]; then
+if [[ -d "$SIDECAR_FINAL_DIR/$_tmp_base" ]]; then
   _squat_dir="$SIDECAR_FINAL_DIR.squat.$$"
   mv "$SIDECAR_FINAL_DIR" "$_squat_dir"
   mv "$_squat_dir/$_tmp_base" "$SIDECAR_FINAL_DIR"
-  rm -rf "$_squat_dir"
-  echo "→ repaired nested publish (a squatter raced the final rename)"
+  if __pc_is_cargo_sidecar_placeholder "$_squat_dir"; then
+    rm -rf "$_squat_dir"
+    echo "→ repaired nested publish after a verified cargo build.rs placeholder raced the final rename"
+  else
+    mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
+    mv "$_squat_dir" "$SIDECAR_FINAL_DIR"
+    echo "FATAL: a non-placeholder sidecar raced the final publish rename; restored and preserved that writer's output instead of deleting it." >&2
+    echo "       This staged build was not published. Re-run after the competing writer exits." >&2
+    exit 6
+  fi
 fi
 [[ -f "$SIDECAR_FINAL_DIR/serve.mjs" ]] || { echo "FATAL: published sidecar has no serve.mjs — publish corrupted, refusing to report success" >&2; exit 1; }
 SIDECAR_DIR="$SIDECAR_FINAL_DIR"
