@@ -51,10 +51,11 @@ test('reports healthy when guest SSH answers', async () => {
   assert.equal(JSON.parse(result.stdout).status, 'healthy');
 });
 
-test('accepts an installed Server serve.mjs process without --ensure', async () => {
-  const source = await readFile(script, 'utf8');
-  assert.match(source, /case "\$cmd" in \*serve\.mjs\*\)/);
-  assert.doesNotMatch(source, /serve\.mjs\*--ensure/);
+test('current launcher recognizes only its exact headless or installed Server process shapes', async () => {
+  const source = await readFile(currentBoot, 'utf8');
+  assert.match(source, /"\$NODE"\*"\$SERVE"\*--ensure\*/);
+  assert.match(source, /"\$NODE"\*"\$SIDECAR\/serve\.mjs"\*/);
+  assert.doesNotMatch(source, /case "\$cmd" in \*serve\.mjs/);
 });
 
 test('detects a sidecar lost across a guest reboot even though SSH recovered', async () => {

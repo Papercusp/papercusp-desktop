@@ -289,7 +289,10 @@ is_current_operator_pid() {
   case "$op" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$op" 2>/dev/null || return 1
   cmd="$(process_cmdline "$op")"
-  case "$cmd" in *serve.mjs*--ensure*) return 0 ;; esac
+  case "$cmd" in
+    "$NODE"*"$SERVE"*--ensure*) return 0 ;;
+    "$NODE"*"$SIDECAR/serve.mjs"*) return 0 ;;
+  esac
   return 1
 }
 
