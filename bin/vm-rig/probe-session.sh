@@ -85,6 +85,8 @@
 # Env:    PCUSP_VM_SSH             ssh target (default aviweiss@172.31.44.2)
 #         PCUSP_PARITY_PROBE_AGENT probe identity (default su-live1-imac-probe)
 #         PCUSP_PROBE_BEAT_SEC     beat interval (default 30)
+#         PCUSP_PROBE_WAIT_SEC     max tower-roster convergence wait (default 180)
+#         PCUSP_PROBE_POLL_SEC     tower-roster poll cadence (default 3)
 #         PCUSP_PROBE_PLAN_RUN_ID  Mac-side plan_runs id → a plan-run WAKE HANDLE.
 #                                  Unset ⇒ addressable but NOT wakeable (leg 2
 #                                  reds 'parked'). Default 1 (the run minted for
@@ -94,6 +96,8 @@ set -uo pipefail
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
 AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-imac-probe}"
 BEAT="${PCUSP_PROBE_BEAT_SEC:-30}"
+WAIT_SEC="${PCUSP_PROBE_WAIT_SEC:-180}"
+POLL_SEC="${PCUSP_PROBE_POLL_SEC:-3}"
 PLAN_RUN="${PCUSP_PROBE_PLAN_RUN_ID:-1}"
 TOWER_DSN="${PCUSP_TOWER_DSN:-postgresql://harness_admin:harness_admin_pwd@127.0.0.1:5432/papercusp}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -164,7 +168,15 @@ case "${1:-start}" in
     ;;
 
   start)
-    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)}"
+    case "$WAIT_SEC" in
+      ''|0|*[!0-9]*) echo "FATAL: PCUSP_PROBE_WAIT_SEC must be a positive integer" >&2; exit 2 ;;
+    esac
+    case "$POLL_SEC" in
+      ''|0|*[!0-9]*) echo "FATAL: PCUSP_PROBE_POLL_SEC must be a positive integer" >&2; exit 2 ;;
+    esac
+    WAIT_TRIES=$(( (WAIT_SEC + POLL_SEC - 1) / POLL_SEC ))
+
+    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)} admission_wait=${WAIT_SEC}s"
 
     # A VM reboot clears /tmp. Restore exact, hash-verified checked-in helpers
     # through the canonical deploy seam before retaining the fatal preflight as
@@ -228,16 +240,22 @@ LOOP_EOF
 
     # Verify the ONLY thing that matters: a FRESH row on the TOWER. A live pid on
     # the Mac proves the loop runs, not that gossip crossed the machine boundary.
-    echo "  waiting for the row to reach the tower roster…"
-    for i in $(seq 1 20); do
+    # A healthy gossip channel can take longer than one minute to converge after
+    # a cold sidecar restart. The old fixed 20×3s window false-failed a live loop:
+    # it exited at 60s while the unchanged probe became fresh shortly afterward.
+    # Default to the target-discovery horizon (180s), keep it operator-tunable,
+    # and remain hard-bounded so a genuinely dead producer still fails loudly.
+    echo "  waiting up to ${WAIT_SEC}s for the row to reach the tower roster…"
+    for ((i = 1; i <= WAIT_TRIES; i += 1)); do
       age="$(tower_row)"
       if [ -n "$age" ] && [ "$age" -lt 120 ] 2>/dev/null; then
         echo "  ✓ tower roster: $AGENT fresh (${age}s) — legs 2+3 have a target"
         exit 0
       fi
-      sleep 3
+      sleep "$POLL_SEC"
     done
-    echo "  ✗ $AGENT never became fresh on the tower within 60s" >&2
+    echo "  ✗ $AGENT never became fresh on the tower within ${WAIT_SEC}s" >&2
+    echo "    the remote loop may still be converging; run '$0 status' before classifying this as a transport failure" >&2
     echo "    mac-side log:" >&2
     "${SSH[@]}" "tail -10 '$LOG'" 2>&1 | sed 's/^/      /' >&2
     exit 1
