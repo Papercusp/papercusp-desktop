@@ -2318,6 +2318,36 @@ frame_pressure_note() { # [start-epoch-s] -> one-line frame-scoped reading
 }
 
 MATRIX_RES="${ATTESTATION_WALL_TOKEN:-SKIPPED}"
+# ── credentialed-REST RECHECK immediately before content-matrix (EI-21243220400364630) ──
+# §1b already proves both smoke identities' authenticated REST reads are healthy, but that
+# probe runs BEFORE the sidecar build+repack — a step measured elsewhere in this file at
+# 10-40+ minutes. §2's from-repo leg already re-checks (see the "post-content-matrix
+# recheck" a few hundred lines down); content-matrix had no equivalent recheck, so a REST
+# core budget that drains DURING build (observed live 2026-08-23: aviynw went from
+# remaining=1550 to remaining=0 within ~14 minutes, spanning exactly this window) reached
+# content-matrix with no preflight between it and a stale, since-passed check — turning a
+# credential/quota outage into a product-shaped RED (build=OK, content-matrix=FAIL,
+# from-repo=FAIL) instead of the loud, honest SKIP §1b already gives the same condition
+# when caught earlier. Mirrors §1b/the from-repo recheck exactly; same GATE_FORCE escape.
+if [ "$SKIP_MATRIX" != 1 ] && [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
+  GH_MATRIX_PREFLIGHT_OUTPUT="$(preflight_github_rest_accounts 2>&1)"
+  GH_MATRIX_PREFLIGHT_RC=$?
+  while IFS= read -r GH_MATRIX_PREFLIGHT_LINE; do
+    [ -n "$GH_MATRIX_PREFLIGHT_LINE" ] && log "$GH_MATRIX_PREFLIGHT_LINE"
+  done <<<"$GH_MATRIX_PREFLIGHT_OUTPUT"
+  if [ "$GH_MATRIX_PREFLIGHT_RC" -ne 0 ]; then
+    GH_MATRIX_PREFLIGHT_SUMMARY="$(printf '%s' "$GH_MATRIX_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
+    if [ "${GATE_FORCE:-0}" = 1 ]; then
+      log "credentialed GitHub REST became unhealthy before content-matrix but GATE_FORCE=1 — proceeding anyway: $GH_MATRIX_PREFLIGHT_SUMMARY"
+    else
+      MATRIX_RES="SKIPPED-GITHUB-API"
+      SUMMARY="content-matrix=$MATRIX_RES from-repo=SKIPPED from-repo-witness=SKIPPED local-matrix=SKIPPED build=$([ "$FAIL_BUILD" = 1 ] && echo FAIL || echo OK)"
+      log "credentialed GitHub REST became unhealthy after build but before content-matrix — refusing a product-looking false RED: $GH_MATRIX_PREFLIGHT_SUMMARY"
+      check_staleness
+      verdict "GATE: PARTIAL (github-api-unhealthy-before-content-matrix) — $SUMMARY; $GH_MATRIX_PREFLIGHT_SUMMARY"; exit 1
+    fi
+  fi
+fi
 if [ "$SKIP_MATRIX" != 1 ]; then
   # D-084 / EI-214124: begin the bounded lease at the protected WORK, not at gate entry.
   # The failed 2026-08-26 retry started pc-heavy's 600s clock while build.log was still
