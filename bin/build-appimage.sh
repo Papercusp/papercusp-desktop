@@ -788,7 +788,7 @@ run_appimage_tool_isolated() (
     echo "FATAL: cannot create the private AppImage runtime directory under ${TMPDIR:-/tmp}" >&2
     exit 1
   }
-  trap 'rm -rf -- "$runtime_tmp"' EXIT
+  trap '_status=$?; rm -rf -- "$runtime_tmp"; if [ "$_status" -ne 0 ]; then rm -f -- "$output"; fi; exit "$_status"' EXIT
   echo "   AppImage runtime extraction dir: $runtime_tmp"
   ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 TMPDIR="$runtime_tmp" LDAI_OUTPUT="$output" \
     "$plugin" --appdir "$appdir"
