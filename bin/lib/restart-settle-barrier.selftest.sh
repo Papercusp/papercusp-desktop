@@ -20,7 +20,13 @@
 #
 #   bash bin/lib/restart-settle-barrier.selftest.sh   # exit 0 = PASS, 1 = FAIL
 set -uo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# EI-21266614790118256: honor the same GATE_SELFTEST_LIB_DIR override as
+# federation-asserts.selftest.sh — gate_selftest() now runs this script from an
+# untracked $WORK snapshot outside bin/lib/, so its own BASH_SOURCE no longer
+# sits beside scenarios/restart-settle-barrier.sh. Without this override the
+# scenario file "isn't found" and the selftest SKIPs (exit 0) instead of
+# actually running, silently turning a real regression into a false PASS.
+DIR="${GATE_SELFTEST_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 SCEN="$DIR/scenarios/restart-settle-barrier.sh"
 [ -f "$SCEN" ] || { echo "SKIP: scenario file not found at $SCEN"; exit 0; }
 
