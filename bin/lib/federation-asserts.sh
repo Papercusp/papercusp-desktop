@@ -111,7 +111,10 @@ fed_snapshot_sidecar_bundle() {
 
   destination_parent="$(dirname "$destination")"
   mkdir -p "$destination_parent" || return 1
-  rm -rf "$destination" || return 1
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    echo "fed_snapshot_sidecar_bundle: destination already exists; refusing to remove a possible live snapshot: $destination" >&2
+    return 1
+  fi
 
   fed_copy_sidecar_snapshot() {
     if cp -al "$source_real" "$destination" 2>/dev/null; then
