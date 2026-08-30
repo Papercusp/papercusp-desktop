@@ -57,6 +57,10 @@ WEB_DIR="$REPO_ROOT/apps/operator"
 
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
 REMOTE_DIR="${PCUSP_RIG_SIDECAR_DIR:-/Users/aviweiss/rig-sidecar-current}"
+REMOTE_HOME="${PCUSP_RIG_HOME:-/Users/aviweiss}"
+REMOTE_SERVICE_USER="${PCUSP_RIG_SERVICE_USER:-aviweiss}"
+REMOTE_LAUNCHER="${PCUSP_RIG_CURRENT_LAUNCHER:-${REMOTE_HOME}/.papercusp/vm-rig/boot-headless-current.sh}"
+REMOTE_LAUNCHD_DIR="${PCUSP_RIG_LAUNCHD_DIR:-${REMOTE_HOME}/.papercusp/vm-rig/launchd}"
 # Staging dir for the composed bundle, rsynced to $REMOTE_DIR below. It is pure
 # build OUTPUT and MUST NOT default inside the repo: it used to default to
 # $REPO_ROOT/.rig-sidecar-current, where git-sync's blanket `git add -A` committed
@@ -199,23 +203,46 @@ echo "  ✓ sql/ = locks set; db-sql/ fresh at migration $out_max ($out_count fi
 if [ "$PUSH" = "1" ]; then
   DEPLOY_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   REMOTE_STAGE="${REMOTE_DIR}.incoming.${DEPLOY_ID}"
-  REMOTE_CONTROL="/tmp/papercusp-boot-headless-current.${DEPLOY_ID}.sh"
   REMOTE_STAGE_Q="$(printf '%q' "$REMOTE_STAGE")"
-  REMOTE_CONTROL_Q="$(printf '%q' "$REMOTE_CONTROL")"
+  REMOTE_DIR_Q="$(printf '%q' "$REMOTE_DIR")"
+  REMOTE_HOME_Q="$(printf '%q' "$REMOTE_HOME")"
+  REMOTE_LAUNCHER_Q="$(printf '%q' "$REMOTE_LAUNCHER")"
+  REMOTE_LAUNCHER_DIR_Q="$(printf '%q' "$(dirname "$REMOTE_LAUNCHER")")"
+  REMOTE_LAUNCHD_DIR_Q="$(printf '%q' "$REMOTE_LAUNCHD_DIR")"
+  REMOTE_SERVICE_USER_Q="$(printf '%q' "$REMOTE_SERVICE_USER")"
+  REMOTE_INSTALLER_Q="${REMOTE_LAUNCHD_DIR_Q}/install-launchdaemon.sh"
   echo "→ staging payload on $VM:$REMOTE_STAGE (node_modules/ untouched)"
   # The active directory is not written in place. boot-headless-current.sh
   # validates the complete stage, stops the exact recorded owner PID, swaps the
   # sibling directories atomically, and restores the backup if health fails.
-  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/node_modules"
+  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/node_modules $REMOTE_LAUNCHD_DIR_Q $REMOTE_LAUNCHER_DIR_Q"
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
   rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_STAGE/BUILD-STAMP.txt"
   rsync -a "$OUT/PAYLOAD-MANIFEST.sha256" "$VM:$REMOTE_STAGE/PAYLOAD-MANIFEST.sha256"
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
-  rsync -a --chmod=F755 "$HERE/boot-headless-current.sh" "$VM:$REMOTE_CONTROL"
-  ssh "$VM" "bash $REMOTE_CONTROL_Q --stage $REMOTE_STAGE_Q --cleanup-control $REMOTE_CONTROL_Q"
-  echo "→ staged deploy completed through exact-PID restart/rollback boundary"
+  rsync -a --chmod=F755 "$HERE/boot-headless-current.sh" "$VM:$REMOTE_LAUNCHER"
+  rsync -a --chmod=F755 "$DESKTOP_ROOT/src-tauri/launchd/install-launchdaemon.sh" "$VM:$REMOTE_LAUNCHD_DIR/install-launchdaemon.sh"
+  rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.plist.template"
+  rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.current.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.current.plist.template"
+
+  # Quiesce the system job before the atomic swap. Otherwise launchd can
+  # interpret the deploy's exact-PID stop as a crash and respawn the old payload
+  # into the same port/embedded-Postgres boundary while the swap is in flight.
+  ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --bootout-only"
+  if ! ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --stage $REMOTE_STAGE_Q"; then
+    echo "FATAL: staged deploy failed; restoring current-payload LaunchDaemon around the rollback payload" >&2
+    ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q" || true
+    exit 1
+  fi
+
+  if ! ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q"; then
+    echo "FATAL: LaunchDaemon install/identity verification failed; restoring bounded detached service" >&2
+    ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q" || true
+    exit 1
+  fi
+  echo "→ staged deploy completed and system/com.papercusp.server now supervises the exact current payload"
   echo "→ verify what the far side is RUNNING (not what you think it is):"
   echo "     ssh $VM 'cat $REMOTE_DIR/BUILD-STAMP.txt; shasum -a 256 $REMOTE_DIR/serve.mjs'"
   echo "     ssh $VM 'grep -ao \"\\[sidecar\\] build [^\"\\\`]*\" $REMOTE_DIR/serve.mjs | head -1'"

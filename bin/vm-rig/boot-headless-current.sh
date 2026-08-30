@@ -22,9 +22,9 @@ set -uo pipefail
 
 APP="/Applications/Papercusp Server.app"
 SIDECAR="$APP/Contents/Resources/sidecar"
-CUR="/Users/aviweiss/rig-sidecar-current"
-SHARED="/Users/aviweiss/.papercusp-workspaces/.shared"
-REAL_HOME="/Users/aviweiss"
+REAL_HOME="${PAPERCUSP_RIG_HOME:-/Users/aviweiss}"
+CUR="${PAPERCUSP_RIG_SIDECAR_DIR:-${REAL_HOME}/rig-sidecar-current}"
+SHARED="${PAPERCUSP_RIG_SHARED_ROOT:-${REAL_HOME}/.papercusp-workspaces/.shared}"
 NODE="$SIDECAR/bin/node"
 SERVE="$CUR/serve.mjs"
 LOG="/tmp/serve-current.log"
@@ -37,6 +37,8 @@ HONO_PORT="${PAPERCUSP_HONO_PORT:-3070}"
 STAGE=""
 CLEANUP_CONTROL=""
 SELF_TEST=0
+LAUNCHD_RUN=0
+STOP_ONLY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage)
@@ -53,12 +55,25 @@ while [ "$#" -gt 0 ]; do
       SELF_TEST=1
       shift
       ;;
+    --launchd-run)
+      LAUNCHD_RUN=1
+      shift
+      ;;
+    --stop-only)
+      STOP_ONLY=1
+      shift
+      ;;
     *)
       echo "FATAL: unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+if [ "$LAUNCHD_RUN" = "1" ] && { [ "$STOP_ONLY" = "1" ] || [ -n "$STAGE" ]; }; then
+  echo "FATAL: --launchd-run cannot be combined with --stop-only or --stage" >&2
+  exit 2
+fi
 
 cleanup_control() {
   [ -n "$CLEANUP_CONTROL" ] && rm -f "$CLEANUP_CONTROL" 2>/dev/null || true
@@ -359,6 +374,12 @@ if ! wait_for_port_free 30; then
   exit 1
 fi
 
+if [ "$STOP_ONLY" = "1" ]; then
+  rm -f "$PIDFILE"
+  echo "STOPPED: exact current-payload operator is offline and :${HONO_PORT} is free"
+  exit 0
+fi
+
 if [ -n "$STAGE" ]; then
   if ! swap_payload "$CUR" "$CANDIDATE" "$BACKUP"; then
     echo "FATAL: atomic payload swap failed; previous payload was restored" >&2
@@ -404,7 +425,7 @@ export PAPERCUSP_PG_SEED_PATH="$SIDECAR/db-seed.dump"
 export PAPERCUSP_PG_RESTORE_BIN="$SIDECAR/bin/pg_restore"
 export PAPERCUSP_IDENTITY_DIR="$SHARED/.papercusp/identity"
 export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-identity.json"
-export PAPERCUSP_WORKSPACES_ROOT="/Users/aviweiss/.papercusp-workspaces"
+export PAPERCUSP_WORKSPACES_ROOT="$REAL_HOME/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
 # EI-13317 forensics ride the per-attempt dial trace (peer-dial-registry.ts) —
@@ -501,6 +522,13 @@ launch_operator() {
   echo "LAUNCHED (detached, current) serve.mjs --ensure pid=$pid log=$LOG"
 }
 
+launch_operator_under_launchd() {
+  rm -f "$PIDFILE"
+  printf '%s\n' "$$" > "$PIDFILE"
+  echo "LAUNCHED (launchd-supervised, current) serve.mjs --ensure pid=$$ log=$LOG"
+  exec "$NODE" --heapsnapshot-near-heap-limit=1 "$SERVE" --ensure >>"$LOG" 2>&1
+}
+
 wait_for_health() {
   local timeout="${PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-180}" i
   case "$timeout" in ''|*[!0-9]*) timeout=180 ;; esac
@@ -541,6 +569,10 @@ rollback_deployment() {
   tail -60 "$LOG" >&2
   return 1
 }
+
+if [ "$LAUNCHD_RUN" = "1" ]; then
+  launch_operator_under_launchd
+fi
 
 if ! launch_operator; then
   if [ "$SWAPPED" = "1" ]; then
