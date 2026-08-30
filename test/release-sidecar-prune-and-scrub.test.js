@@ -464,6 +464,20 @@ function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false })
   };
   delete env.PAPERCUSP_BUILD_SHA;
   delete env.PAPERCUSP_DESKTOP_VERSION;
+  if (advance) {
+    // EI-21832562420831737: vm-release now also refuses a source tree that was DIRTY at the
+    // phase boundary, and the advancing case points REPO_ROOT at the SHARED fleet checkout,
+    // where uncommitted files are essentially always present — so without this the case
+    // could never pass on a developer or CI checkout and a red here would say nothing about
+    // the identity preflight under test. Same seam, and same reasoning, as the owner
+    // preflight above: supplying the PAIR pins the source state instead of shelling out to
+    // git, and a release orchestrator that captured the boundary itself remains
+    // authoritative. Supplied for advance-only inputs, so the rejecting cases still prove
+    // they stop at the identity gate before any filesystem work. The clean-source guard
+    // keeps its own coverage in packages/operator-core/lib/sidecar-source-root-coherence.test.ts.
+    env.PROVENANCE_SOURCE_GIT_HEAD = '0'.repeat(40);
+    env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
+  }
   if (sha !== undefined) env.PAPERCUSP_BUILD_SHA = sha;
   if (version !== undefined) env.PAPERCUSP_DESKTOP_VERSION = version;
   try {
