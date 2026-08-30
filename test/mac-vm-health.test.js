@@ -398,3 +398,19 @@ test('vm-rig helpers survive reboot through verified persistent install and prob
   assert.ok(repair >= 0, 'probe-session must repair reboot-cleared helpers through deploy.sh');
   assert.ok(fatal > repair, 'fatal preflight must run after the automatic repair attempt');
 });
+
+test('probe-session admission wait covers cold gossip convergence without becoming unbounded', async () => {
+  const probe = await readFile(probeSession, 'utf8');
+
+  // EI-21836357866181483: a healthy Mac loop once became tower-visible only
+  // after the old fixed 20×3s verifier had already exited red. Keep the default
+  // aligned with parity's 180s target-discovery horizon, but preserve explicit
+  // positive-integer knobs and a finite attempt count.
+  assert.match(probe, /PCUSP_PROBE_WAIT_SEC:-180/);
+  assert.match(probe, /PCUSP_PROBE_POLL_SEC:-3/);
+  assert.match(probe, /WAIT_TRIES=\$\(\( \(WAIT_SEC \+ POLL_SEC - 1\) \/ POLL_SEC \)\)/);
+  assert.match(probe, /for \(\(i = 1; i <= WAIT_TRIES; i \+= 1\)\)/);
+  assert.doesNotMatch(probe, /seq 1 20/);
+  assert.match(probe, /never became fresh on the tower within \$\{WAIT_SEC\}s/);
+  assert.equal(spawnSync('bash', ['-n', probeSession]).status, 0);
+});
