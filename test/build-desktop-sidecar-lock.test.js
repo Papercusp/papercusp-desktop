@@ -309,15 +309,60 @@ test('a build-lock timeout reports the live builder holder instead of an unowned
 const CARGO_INVOCATION = /cargo (?:build|zigbuild) /;
 const FD_CLOSING_SUBSHELL = /\( exec 8>&- 9>&-;/;
 
-const cargoInvocationLines = builder
-  .split('\n')
-  .map((line, i) => ({ line, lineNo: i + 1 }))
-  .filter(({ line }) => CARGO_INVOCATION.test(line) && !/^\s*(?:#|echo\b)/.test(line));
+// A cargo invocation is a LOGICAL command, not a physical line. The builder wraps
+// each one as
+//     ( exec 8>&- 9>&-; cd "$DIR" && \
+//       RUSTFLAGS=... \
+//       cargo build --release )
+// so the fd-closing prefix sits several backslash-continued lines ABOVE the cargo
+// token. Testing per PHYSICAL line reports all three PROTECTED invocations as
+// unprotected — the same false red the predecessor guard was rewritten to kill
+// (see the comment above), reintroduced one level down: the property is
+// per-COMMAND, so the text tested has to be per-command too. This fired for real
+// on 2026-08-30, after the builder moved these invocations onto continuation
+// lines; the script had not regressed.
+const logicalCommands = [];
+for (const [i, raw] of builder.split('\n').entries()) {
+  const pending = logicalCommands.at(-1);
+  if (pending?.continues) {
+    pending.text += '\n' + raw;
+    pending.continues = /\\$/.test(raw);
+  } else {
+    logicalCommands.push({ text: raw, lineNo: i + 1, continues: /\\$/.test(raw) });
+  }
+}
+
+// Joining continuations on its own would WEAKEN the guard: a command could open
+// the fd-closing subshell, CLOSE it, and only then run cargo, and a bare
+// "does the text contain the prefix" test would call that protected. So require
+// the subshell to still be open — paren depth never back to zero — at the point
+// the cargo token actually appears.
+const fdClosedAtCargo = (text) => {
+  const opener = text.search(FD_CLOSING_SUBSHELL);
+  const cargoAt = text.search(CARGO_INVOCATION);
+  if (opener < 0 || cargoAt < 0 || opener > cargoAt) return false;
+  let depth = 1;
+  for (const ch of text.slice(opener + 1, cargoAt)) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return false;
+    }
+  }
+  return true;
+};
+
+const cargoLineOf = ({ text, lineNo }) =>
+  lineNo + (text.slice(0, text.search(CARGO_INVOCATION)).match(/\n/g)?.length ?? 0);
+
+const cargoInvocationLines = logicalCommands
+  .filter(({ text }) => CARGO_INVOCATION.test(text) && !/^\s*(?:#|echo\b)/.test(text))
+  .map((cmd) => ({ ...cmd, lineNo: cargoLineOf(cmd) }));
 
 test('every cargo build closes the sidecar flock fd before sccache can daemonize', () => {
   const unprotected = cargoInvocationLines
-    .filter(({ line }) => !FD_CLOSING_SUBSHELL.test(line))
-    .map(({ lineNo, line }) => `${lineNo}: ${line.trim()}`);
+    .filter(({ text }) => !fdClosedAtCargo(text))
+    .map(({ lineNo, text }) => `${lineNo}: ${text.slice(text.search(CARGO_INVOCATION)).split('\n')[0].trim()}`);
 
   assert.deepEqual(
     unprotected,
@@ -333,6 +378,35 @@ test('every cargo build closes the sidecar flock fd before sccache can daemonize
     3,
     `update this guard when another cargo build is added (found ${cargoInvocationLines.length}: ` +
       `${cargoInvocationLines.map(({ lineNo }) => lineNo).join(', ')})`,
+  );
+});
+
+// Falsifiability control, kept PERMANENTLY in the file rather than run once as a
+// mutation probe: proving this guard can still fail must never require mutating
+// the shared builder script, which git-sync would happily sweep into a commit.
+// The guard above now joins continuations, and joining is exactly the kind of
+// change that can quietly turn a real check into one that passes on anything —
+// so the shapes it must still REJECT are pinned here.
+test('the fd-closing check accepts protected shapes and rejects unprotected ones', () => {
+  // The real shape: prefix several backslash-continued lines above the token.
+  assert.equal(
+    fdClosedAtCargo('( exec 8>&- 9>&-; cd "$D" && \\\n  RUSTFLAGS="x" \\\n  cargo build --release )'),
+    true,
+    'the protected multi-line form must pass, or the guard red-pins a correct script',
+  );
+  // Nested subshell that closes again before cargo — still protected.
+  assert.equal(fdClosedAtCargo('( exec 8>&- 9>&-; ( id ) ; cargo build --release )'), true);
+
+  assert.equal(fdClosedAtCargo('cd "$D" && cargo build --release'), false, 'no subshell at all');
+  assert.equal(
+    fdClosedAtCargo('( exec 8>&- 9>&-; true ) && cargo build --release'),
+    false,
+    'subshell opened AND CLOSED before cargo runs — cargo inherits the fds',
+  );
+  assert.equal(
+    fdClosedAtCargo('cargo build --release; ( exec 8>&- 9>&-; true )'),
+    false,
+    'fd-closing prefix appears only AFTER the cargo token',
   );
 });
 

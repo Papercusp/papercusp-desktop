@@ -148,7 +148,9 @@ function fixture(name) {
   return dir;
 }
 
-function auditSourceBundle(name, files) {
+function auditSourceBundle(name, files, tarOptions = [
+  '--numeric-owner', '--owner=0', '--group=0',
+]) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `p012-${name}-`));
   const source = path.join(dir, 'source');
   const tar = path.join(dir, 'source.tar');
@@ -159,9 +161,7 @@ function auditSourceBundle(name, files) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, contents);
   }
-  execFileSync('tar', [
-    '--numeric-owner', '--owner=0', '--group=0', '-C', source, '-cf', tar, '.',
-  ]);
+  execFileSync('tar', [...tarOptions, '-C', source, '-cf', tar, '.']);
   execFileSync('zstd', ['-q', '-f', '-o', bundle, tar]);
   const result = spawnSync('python3', [AUDIT, bundle], {
     encoding: 'utf8',
@@ -170,6 +170,27 @@ function auditSourceBundle(name, files) {
   fs.rmSync(dir, { recursive: true, force: true });
   return result;
 }
+
+test('tar-header ownership findings point at the archive producer, not the staging allowlist', () => {
+  const result = auditSourceBundle(
+    'header-remediation',
+    { 'ok.txt': 'clean payload\n' },
+    [`--owner=${SYNTHETIC_OWNER}`, `--group=${SYNTHETIC_OWNER}`],
+  );
+  assert.equal(
+    result.status,
+    1,
+    `an archive carrying only header identity must fail:\n${result.stdout}${result.stderr}`,
+  );
+  assert.match(result.stdout, /\[build-[^\]]+ \(in (uid|gid) name\)\]/);
+  assert.match(result.stdout, /Affected archive: source\.tar\.zst/);
+  assert.match(result.stdout, /tar --owner=0 --group=0 --numeric-owner/);
+  assert.doesNotMatch(
+    result.stdout,
+    /Fix the SOURCE — the allowlist in bin\/stage-source-tree\.sh/,
+    'header-only findings must not send the fixer to an unrelated path allowlist',
+  );
+});
 
 // @workos-inc/node 10.10.0 publishes this value as JSDoc @example text in
 // src/pipes/pipes.ts. Keep it split so tracked test source never itself contains
