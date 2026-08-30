@@ -1448,10 +1448,24 @@ local_matrix_due() {
   return 0
 }
 
-ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
-ATTESTATION_PREFLIGHT_RC=$?
+# EI-21247564398769197 — only the content-matrix and from-repo smokes create
+# attestation gists. local-matrix deliberately does not, so an invocation that
+# disables BOTH GitHub-dependent consumers must not make two outward writes just
+# to prove a capability nothing in that window will use.
+attestation_write_preflight_needed() {
+  [ "${SKIP_MATRIX:-0}" != 1 ] || [ "${SKIP_FROMREPO:-0}" != 1 ]
+}
+
+ATTESTATION_PREFLIGHT_OUTPUT=""
+ATTESTATION_PREFLIGHT_RC=0
 ATTESTATION_BLOCKED=0
 ATTESTATION_IDENTITY_BLOCKED=0
+if attestation_write_preflight_needed; then
+  ATTESTATION_PREFLIGHT_OUTPUT="$(preflight_attestation_write_accounts 2>&1)"
+  ATTESTATION_PREFLIGHT_RC=$?
+else
+  log "SKIP: attestation WRITE preflight — content-matrix and from-repo are both disabled, so no attestation-gist consumer is enabled this window."
+fi
 if [ "$ATTESTATION_PREFLIGHT_RC" -ne 0 ]; then
   printf '%s\n' "$ATTESTATION_PREFLIGHT_OUTPUT" >"$WORK/attestation-preflight.out"
   ATTESTATION_PREFLIGHT_SUMMARY="$(printf '%s' "$ATTESTATION_PREFLIGHT_OUTPUT" | tr '\n\t' '  ' | head -c 1800)"
