@@ -189,6 +189,8 @@ export PAPERCUSP_HONO_PORT="$PAPERCUSP_PORT"
 export PAPERCUSP_PG_DATA_DIR="$PAPERCUSP_EMBEDDED_PG_ROOT"
 export PAPERCUSP_PG_SQL_DIR="$ROOT/db-sql"
 export PAPERCUSP_SIDECAR_BIN="$BIN"
+export PUI_COMPANION_WASM="$ROOT/pui-companion.wasm"
+export PUI_INSTALL_MANIFEST="$ROOT/pui-install.json"
 # CONTENT ROOTS. Every one of these resolvers falls back to a cwd-relative probe, and the
 # vm-release systemd unit sets WorkingDirectory=<state root> — NOT the release root — so a
 # cwd-relative probe can never find them here. The bundle lays these directories out at its
