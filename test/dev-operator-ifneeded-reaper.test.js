@@ -82,10 +82,28 @@ async function testPort(attempts = 25) {
 /** Poll `check` every `stepMs` until it returns truthy or `timeoutMs` elapses. */
 async function waitFor(check, { timeoutMs = 10_000, stepMs = 100 } = {}) {
   const deadline = Date.now() + timeoutMs;
+  let lastError;
   for (;;) {
-    const v = check();
+    let v;
+    try {
+      v = check();
+    } catch (err) {
+      // EI-21895475714216965 (second load-sensitive failure mode): several
+      // callers here poll the filesystem — `fs.existsSync(m) && fs.readFileSync(m)`
+      // races its own existsSync, and a loaded box can additionally hand back
+      // EMFILE/ENFILE. A throw from a POLL is "not ready yet", not a verdict:
+      // letting it propagate turned a transient fs hiccup into a test failure
+      // at an arbitrary time, which is indistinguishable from a real red.
+      // Deliberately NOT swallowed forever — the deadline below still fails
+      // the wait, and the last error is surfaced for diagnosis.
+      lastError = err;
+      v = undefined;
+    }
     if (v) return v;
-    if (Date.now() >= deadline) return undefined;
+    if (Date.now() >= deadline) {
+      if (lastError) lastError.waitForTimedOutAfterErrors = true;
+      return undefined;
+    }
     await new Promise((r) => setTimeout(r, stepMs));
   }
 }
@@ -425,7 +443,14 @@ test('restart-storm guard: waits for the port to actually free before restarting
       { timeoutMs: 15_000 },
     );
     assert(twoAttempts, `expected a restart after the port freed — stderr was: ${stderr}`);
-    assert.match(stderr, /STILL held.*waiting up to 30s/, 'wrapper did not log the bounded port-wait diagnosis');
+    // EI-21895475714216965: wait for the positive diagnosis rather than
+    // reading stderr the instant the marker file trips. The negative
+    // assertion below stays instantaneous ON PURPOSE — it is only meaningful
+    // once the positive line has arrived, which the wait now guarantees.
+    const heldDiagnosis = await waitForStderr(() => stderr, /STILL held.*waiting up to 30s/, {
+      timeoutMs: 10_000,
+    });
+    assert(heldDiagnosis, `wrapper did not log the bounded port-wait diagnosis — stderr was: ${stderr}`);
     assert.doesNotMatch(
       stderr,
       /never freed after 30s/,
