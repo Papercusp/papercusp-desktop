@@ -31,6 +31,9 @@ bin_dir="$release_root/bin"
 [[ -x "$bin_dir/node" ]] || die "bundled Node is missing or not executable: bin/node"
 [[ -s "$release_root/serve.mjs" ]] || die "Server runtime is missing or empty: serve.mjs"
 [[ -s "$release_root/scripts/psu.mjs" ]] || die "agent launcher is missing or empty: scripts/psu.mjs"
+[[ -x "$bin_dir/pui" ]] || die "pui is missing or not executable: bin/pui"
+[[ -s "$release_root/pui-companion.wasm" ]] || die "pui companion is missing or empty: pui-companion.wasm"
+[[ -s "$release_root/pui-install.json" ]] || die "pui generation manifest is missing or empty: pui-install.json"
 [[ -d "$release_root/db-sql" ]] || die "migration payload is missing: db-sql/"
 [[ -x "$bin_dir/papercusp-remote-initializer" ]] \
   || die "remote initializer is missing or not executable"
@@ -85,9 +88,11 @@ release_root="$(cd "$release_root" && pwd -P)"
 [[ "$state_root" == /* && -d "$state_root" && -w "$state_root" ]] \
   || die "state root must be an existing writable absolute directory"
 for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
-  papercusp-server papercusp-health psu claude codex omp papercusp-remote-initializer; do
+  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer; do
   [[ -x "$BIN/$entrypoint" ]] || die "missing executable release entrypoint: bin/$entrypoint"
 done
+[[ -s "$ROOT/pui-companion.wasm" ]] || die "pui-companion.wasm is missing or empty"
+[[ -s "$ROOT/pui-install.json" ]] || die "pui-install.json is missing or empty"
 [[ -s "$ROOT/serve.mjs" ]] || die "serve.mjs is missing or empty"
 [[ -s "$ROOT/scripts/psu.mjs" ]] || die "scripts/psu.mjs is missing or empty"
 [[ -d "$ROOT/db-sql" ]] || die "db-sql migration payload is missing"
@@ -270,8 +275,8 @@ for entrypoint in papercusp-install papercusp-rollback papercusp-migrate \
 done
 
 for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
-  papercusp-server papercusp-health psu claude codex omp papercusp-remote-initializer; do
+  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer; do
   [[ -x "$bin_dir/$entrypoint" ]] || die "failed to emit executable bin/$entrypoint"
 done
 
-printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 11 bootstrap entrypoints executable; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"
+printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 12 bootstrap entrypoints executable; pui companion + generation manifest present; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"

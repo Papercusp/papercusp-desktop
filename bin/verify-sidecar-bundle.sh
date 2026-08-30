@@ -176,6 +176,30 @@ for t in $REQUIRED_TOOLS; do
   fi
 done
 
+# PUI is a two-artifact generation, not merely a binary. The signed vm-release
+# must carry the companion and the same P-021 manifest that `pui doctor` reads;
+# otherwise a present bin/pui can still open a blank dock or report an
+# uncheckable generation on the remote host.
+echo "[1/7] pui generation manifest + companion"
+_pui_manifest="$SIDECAR/pui-install.json"
+_pui_companion="$SIDECAR/pui-companion.wasm"
+_repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+_pui_manifest_tool="$_repo_root/apps/tui/scripts/write-install-manifest.py"
+[[ -s "$_pui_companion" ]] || fail "pui-companion.wasm: MISSING or empty from sidecar root"
+[[ -s "$_pui_manifest" ]] || fail "pui-install.json: MISSING or empty from sidecar root"
+if [[ ! -f "$_pui_manifest_tool" ]]; then
+  fail "shared pui manifest verifier is missing: $_pui_manifest_tool"
+elif [[ -s "$_pui_manifest" && -s "$_pui_companion" ]]; then
+  if _pui_verify="$(python3 "$_pui_manifest_tool" verify \
+      --manifest "$_pui_manifest" \
+      --binary "$BIN/pui" \
+      --companion "$_pui_companion" 2>&1)"; then
+    ok "${_pui_verify:-pui binary/companion generation verified}"
+  else
+    fail "pui generation manifest does not verify: $_pui_verify"
+  fi
+fi
+
 # ── [2] script shims ────────────────────────────────────────────────────────
 echo "[2/7] script-shim scan of sidecar/bin"
 for f in "$BIN"/*; do
