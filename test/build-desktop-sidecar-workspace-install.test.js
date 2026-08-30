@@ -417,8 +417,10 @@ test('Debian sibling removal selects only the executable owned by that package',
 test('macOS Server starts without a console login (LaunchDaemon, not a gui-domain LaunchAgent)', () => {
   const launchdDir = path.join(desktopRoot, 'src-tauri/launchd');
   const templatePath = path.join(launchdDir, 'com.papercusp.server.plist.template');
+  const currentTemplatePath = path.join(launchdDir, 'com.papercusp.server.current.plist.template');
   const installerPath = path.join(launchdDir, 'install-launchdaemon.sh');
   const template = fs.readFileSync(templatePath, 'utf8');
+  const currentTemplate = fs.readFileSync(currentTemplatePath, 'utf8');
   const installer = fs.readFileSync(installerPath, 'utf8');
   const rustMain = fs.readFileSync(path.join(desktopRoot, 'src-tauri/src/main.rs'), 'utf8');
   const contract = require(path.join(desktopRoot, 'src-tauri/distribution-contract.json'));
@@ -478,6 +480,29 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
       `install-launchdaemon.sh declares no substitution for ${token}`,
     );
   }
+
+  // EI-216508 / D-104: the exact tower-composed payload uses the same system
+  // service identity instead of a second daemon that can race it for PG/:3070.
+  assert.match(currentTemplate, /<string>com\.papercusp\.server<\/string>/);
+  assert.match(currentTemplate, /__PAPERCUSP_CURRENT_LAUNCHER__<\/string>\s*<string>--launchd-run<\/string>/);
+  assert.match(currentTemplate, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  assert.match(currentTemplate, /<key>KeepAlive<\/key>[\s\S]*?<key>SuccessfulExit<\/key>\s*<false\/>/);
+  assert.match(currentTemplate, /<key>WorkingDirectory<\/key>\s*<string>__PAPERCUSP_CURRENT_PAYLOAD__<\/string>/);
+  assert.match(currentTemplate, /<key>HOME<\/key>\s*<string>__PAPERCUSP_SERVICE_HOME__<\/string>/);
+  assert.match(currentTemplate, /<key>PAPERCUSP_RIG_SIDECAR_DIR<\/key>\s*<string>__PAPERCUSP_CURRENT_PAYLOAD__<\/string>/);
+
+  const currentDeclared = [...new Set(currentTemplate.match(/__PAPERCUSP_[A-Z_]+__/g) || [])];
+  for (const token of currentDeclared) {
+    assert.ok(installer.includes(`//${token}/`), `installer does not substitute current-payload token ${token}`);
+  }
+
+  const unload = installer.indexOf('unload_if_present\nif [ "$SERVICE_KIND" = "current" ]');
+  const exactStop = installer.indexOf('"$CURRENT_LAUNCHER" --stop-only');
+  const bootstrap = installer.indexOf('launchctl bootstrap system "$PLIST_DEST"');
+  assert.ok(unload >= 0 && exactStop > unload && bootstrap > exactStop, 'bootout + exact stop must precede bootstrap');
+  assert.match(installer, /operator_pid" = "\$service_pid"/);
+  assert.match(installer, /lsof -nP -a -p "\$service_pid" -iTCP:"\$CURRENT_PORT" -sTCP:LISTEN/);
+  assert.match(installer, /curl -fsS -m 2 "http:\/\/127\.0\.0\.1:\$\{CURRENT_PORT\}\/api\/health"/);
 
   // The contract recorded linuxUserUnit and no macOS counterpart, which is how
   // the platform asymmetry stayed invisible. Keep both named.

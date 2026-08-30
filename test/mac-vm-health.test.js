@@ -380,9 +380,25 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   assert.match(result.stdout, /SELF-TEST PASS: staged validation rejects missing\/tampered payloads/);
 
   const composer = await readFile(currentComposer, 'utf8');
+  const launcher = await readFile(currentBoot, 'utf8');
   assert.match(composer, /\[ -x "\$HERE\/boot-headless-current\.sh" \]/);
   assert.match(composer, /rsync -a --chmod=F755 "\$HERE\/boot-headless-current\.sh"/);
   assert.match(composer, /PAYLOAD-MANIFEST\.sha256/);
+
+  // D-104: launchd owns the foreground Node PID. The PID recorded before exec
+  // is therefore the same PID operator.json and lsof must report.
+  assert.match(launcher, /--launchd-run\)\s*\n\s*LAUNCHD_RUN=1/);
+  assert.match(launcher, /--stop-only\)\s*\n\s*STOP_ONLY=1/);
+  assert.match(launcher, /printf '%s\\n' "\$\$" > "\$PIDFILE"/);
+  assert.match(launcher, /exec "\$NODE" --heapsnapshot-near-heap-limit=1 "\$SERVE" --ensure/);
+  assert.match(launcher, /STOPPED: exact current-payload operator is offline/);
+
+  const bootout = composer.indexOf('--bootout-only');
+  const deploy = composer.indexOf('--stage $REMOTE_STAGE_Q');
+  const install = composer.indexOf('--current-payload $REMOTE_DIR_Q', deploy);
+  assert.ok(bootout >= 0 && deploy > bootout && install > deploy, 'deploy must bootout, atomically stage, then install supervision');
+  assert.match(composer, /LaunchDaemon install\/identity verification failed; restoring bounded detached service/);
+  assert.equal(spawnSync('bash', ['-n', currentComposer]).status, 0);
 });
 
 test('vm-rig helpers survive reboot through verified persistent install and probe self-repair', async () => {
