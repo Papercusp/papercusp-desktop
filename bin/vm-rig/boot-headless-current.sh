@@ -428,6 +428,20 @@ export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-iden
 export PAPERCUSP_WORKSPACES_ROOT="$REAL_HOME/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
+# EI-21151075708883534: swarm.ts's readEffectiveDhtBootstrapRaw()/readExpectedDhtBootstrap()
+# fall back to these two marker files precisely so an env-less relaunch (e.g. a macOS
+# Server.app self-relaunch via LaunchServices, which does not inherit its LaunchAgent's
+# EnvironmentVariables — EI-8893) still resolves the ISOLATED rig bootstrap instead of
+# silently joining the PUBLIC DHT. The env var above always wins when present, so this write
+# is a no-op for THIS boot's own routing — it exists purely to survive the NEXT, env-less one.
+# Nothing else in the tree provisions these files, so without this write the marker never
+# exists and the fallback path silently drops the host onto the public DHT (measured 2026-08-22,
+# WI-4070: weeks of zero peer discovery misdiagnosed as a dead rig / network fault).
+mkdir -p "$REAL_HOME/.papercusp"
+printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$REAL_HOME/.papercusp/dht-bootstrap.tmp" \
+  && mv "$REAL_HOME/.papercusp/dht-bootstrap.tmp" "$REAL_HOME/.papercusp/dht-bootstrap"
+printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$REAL_HOME/.papercusp/expected-dht-bootstrap.tmp" \
+  && mv "$REAL_HOME/.papercusp/expected-dht-bootstrap.tmp" "$REAL_HOME/.papercusp/expected-dht-bootstrap"
 # EI-13317 forensics ride the per-attempt dial trace (peer-dial-registry.ts) —
 # keep it armed by default on the rig so a reboot never silently drops the
 # evidence stream (su-71c69's reverse-leg legs depend on it).
