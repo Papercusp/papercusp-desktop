@@ -389,7 +389,11 @@ if [ "$RUN_MODE" = deb ]; then
   fed_fresh_display "$DISPLAY_NUM" "$WORK" || exit 1
 else
   SIDECAR_SOURCE="$SIDECAR_SRC"
-  SIDECAR_SNAPSHOT_PARENT="${PAPERCUSP_SMOKE_SIDECAR_SNAPSHOT_PARENT:-$(cd "$DESKTOP_DIR/.." && pwd -P)/.papercusp-smoke-snapshots}"
+  SIDECAR_SNAPSHOT_PARENT="${PAPERCUSP_SMOKE_SIDECAR_SNAPSHOT_PARENT:-$(dirname "$DESKTOP_DIR")/.papercusp-smoke-snapshots}"
+  if ! mkdir -p "$SIDECAR_SNAPSHOT_PARENT" 2>/dev/null; then
+    SIDECAR_SNAPSHOT_PARENT="$WORK"
+    log "sidecar snapshot parent is not writable; falling back to per-run work dir: $SIDECAR_SNAPSHOT_PARENT"
+  fi
   SIDECAR_SNAPSHOT="$SIDECAR_SNAPSHOT_PARENT/${WORK##*/}"
   log "sidecar-bundle fallback: snapshot $SIDECAR_SOURCE under its reader lock (the artifact the .deb ships, minus the Tauri window)"
   [ -f "$SIDECAR_SOURCE/serve.mjs" ] || { echo "FATAL: $SIDECAR_SOURCE/serve.mjs missing — run bin/build-desktop-sidecar.sh"; exit 2; }
