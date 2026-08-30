@@ -38,7 +38,18 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-REPO_ROOT="${REPO_ROOT:-$ROOT/..}"
+# EI-21832562420831737: ONE repo root, resolved ONCE, honoured everywhere. This used to be
+# a plain `${REPO_ROOT:-$ROOT/..}` while a SECOND, independent `REPO="$(cd "$ROOT/.." &&
+# pwd)"` ~4,300 lines below silently ignored the override — so the documented
+# `REPO_ROOT=<pinned> build-desktop-sidecar.sh` (the whole point of a pinned-source
+# release cut) built its JavaScript from the pinned tree and its Rust from the live one,
+# with nothing to notice. See lib/source-roots.sh for why that shape is worse than a
+# crash, and keep `REPO` below assigned FROM this value rather than re-derived.
+# Sourcing here is safe before the identity check: the helper defines a function and
+# touches nothing but the candidate directory, and it never exits the caller.
+# shellcheck source=lib/source-roots.sh
+source "$HERE/lib/source-roots.sh"
+REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
@@ -4329,7 +4340,13 @@ fi
 # cross-platform dock-env prep then puts sidecar/bin on PATH + points
 # PUI_COMPANION_WASM at the bundled plugin. (linux-chat-dock-parity-2026-06-27.)
 echo "→ chat dock: pui + companion wasm + zellij 0.44.3"
-REPO="$(cd "$ROOT/.." && pwd)"
+# EI-21832562420831737: take the ONE root resolved at the top of this script — never
+# re-derive it here. This line used to be `REPO="$(cd "$ROOT/.." && pwd)"`, which ignored
+# the REPO_ROOT override that the rest of the build honours, so a pinned-source cut built
+# everything below (apps/tui, apps/pui-zellij-plugin, the pui build sha, its dirty probe,
+# and the --remap-path-prefix that scrubs build paths out of the shipped binaries) from
+# the LIVE tree while the stamp claimed the pin. Mixed provenance, no error.
+REPO="$REPO_ROOT"
 mkdir -p "$SIDECAR_DIR/bin"
 # Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config.toml
 # `[build] target-dir` — this box redirects ALL builds to ~/.cargo-target, so the
