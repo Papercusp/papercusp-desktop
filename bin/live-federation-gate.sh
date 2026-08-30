@@ -93,6 +93,16 @@
 #   GATE_DISPLAY      (default 250) — Xvfb display base (matrix uses N, from-repo N+2).
 #   OPERATOR_MCP_URL  (default http://127.0.0.1:3070/api/mcp) — curl-MCP endpoint for EI filing.
 #   GATE_NO_FILE      (default 0)   — set 1 to skip EI filing (just log the verdict).
+#   GATE_STREAK_RUNGS (default "10 25 50") — WI-39354: escalation thresholds (consecutive
+#                                     verdict count) for the streak detector below. Crossing
+#                                     each rung files/refreshes its OWN conditionKey, so a
+#                                     sustained bad run reopens louder at 10, 25, 50 instead of
+#                                     staying the one quiet already-seen row every per-reason
+#                                     dedup (RED_REFILE_H / find_open_duplicate) produces on a
+#                                     REPEAT of the same reason. See check_streak_escalation().
+#   GATE_STREAK_SCAN  (default 200) — how many trailing $GATE_VERDICT_LOG lines the streak
+#                                     detector reads per tick (bounded; the bank itself is kept
+#                                     to GATE_VERDICT_KEEP=500).
 #   RED_REFILE_H      (default 24)  — RED-EI dedup window (EI-8385-class fix, 2026-07-09):
 #                                     this gate runs hourly and every prior version filed a
 #                                     BRAND NEW work_items:create bug on every single RED run —
@@ -324,6 +334,9 @@ STATE_DIR="${GATE_STATE_DIR:-$HOME/.papercusp/live-fed-gate}"; mkdir -p "$STATE_
 # a write error is logged and swallowed, and the verdict still goes to stdout regardless.
 GATE_VERDICT_LOG="${GATE_VERDICT_LOG:-$STATE_DIR/verdicts.jsonl}"
 GATE_VERDICT_KEEP="${GATE_VERDICT_KEEP:-500}"
+# WI-39354 streak-escalation thresholds — see check_streak_escalation() below.
+GATE_STREAK_RUNGS="${GATE_STREAK_RUNGS:-10 25 50}"
+GATE_STREAK_SCAN="${GATE_STREAK_SCAN:-200}"
 # P-010: schema 2 adds the immutable-source evidence an ordinary deploy needs
 # to distinguish "this exact green pin was certified" from "some nearby shared
 # working tree happened to pass". These defaults keep early FRESH/SKIPPED exits
@@ -408,10 +421,119 @@ bank_verdict() {  # <the full "GATE: …" line>
   fi
   return 0
 }
+# ── streak escalation (WI-39354 — DETECTOR GAP, not a gate defect) ────────────────
+# 50 consecutive non-GREEN verdicts over 2.5 days (2026-08-13..08-16, all four
+# federation legs "?" — died at the attestation-write-preflight RED above) produced
+# ZERO escalation. Root cause: the per-reason filings in this script (RED_REFILE_H /
+# find_open_duplicate, WI-39604's conditionKey refresh) are CORRECT to go quiet on a
+# REPEAT of the same reason — that is what stops 30+ duplicate tickets for one
+# unresolved regression (EI-8385-class). But "quiet on repeat" also means nothing
+# ever computes the STREAK's own length, so a persistent red produces exactly one
+# quiet, already-seen row forever, never a signal that grows louder as it worsens.
+# This is the same class RELEASE-READINESS.md names as the reason C-001 survived
+# unnoticed: an armed, ticking gate LOOKS like coverage while every tick aborts
+# before the merits — "a dark gate is precisely how C-001 survived."
+#
+# Two signals, both DERIVED from the durable bank (WI-38285) rather than a second,
+# independently-fed counter that could desync from it:
+#   (a) nongreen — consecutive verdicts since the last GREEN.
+#   (b) dark     — consecutive verdicts, within that same window, whose four
+#                  federation legs are ALL "?" (aborted before any leg ran).
+# Both walks EXCLUDE tokens that are provably uninformative rather than counting or
+# resetting on them, mirroring the analogous fix already shipped for the OTHER
+# release gate's own streak (green-checkpoint's EI-2615 / EI-19405864032365760 /
+# EI-21462211894072863 — "a lock collision with an ACTIVE peer proves nothing about
+# health" and "don't count a noop as a red" must not decay into "don't count it"):
+#   - any `FRESH*` token is a cache/backoff early exit that did not attempt
+#     verification this window (and, for content/local-matrix, is why its OWN legs
+#     read "?" — unset vars, not an abort — so counting it into `dark` would alarm
+#     on the gate's healthiest path); it neither counts nor resets either streak.
+#   - `SKIPPED-GATE-IN-FLIGHT` / `SKIPPED-RIG-BUSY` mean a PEER run holds the lock
+#     and will itself record the real verdict; same treatment.
+#   - `GREEN` resets/ends the walk for both streaks (a leg genuinely passed, for
+#     `dark`, only when it is not also all-"?", which GREEN never is).
+_streak_scan() {  # <'nongreen'|'dark'> -> streak length on stdout (0 on any read/parse problem)
+  python3 - "$GATE_VERDICT_LOG" "$1" "$GATE_STREAK_SCAN" <<'PY' 2>/dev/null
+import json, sys
+path, mode, scan = sys.argv[1], sys.argv[2], int(sys.argv[3])
+UNINFORMATIVE_EXACT = {'SKIPPED-GATE-IN-FLIGHT', 'SKIPPED-RIG-BUSY'}
+try:
+    with open(path, encoding='utf-8') as f:
+        lines = f.readlines()[-scan:]
+except OSError:
+    print(0); sys.exit(0)
+streak = 0
+for line in reversed(lines):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        break  # an unparsable line ends the scan rather than mis-counting past it
+    token = str(d.get('verdict', ''))
+    if token == 'GREEN':
+        break
+    if token.startswith('FRESH') or token in UNINFORMATIVE_EXACT:
+        continue
+    if mode == 'nongreen':
+        streak += 1
+        continue
+    legs = d.get('legs') or {}
+    wanted = ('content_matrix', 'from_repo', 'from_repo_witness', 'local_matrix')
+    if all(str(legs.get(k, '?')) == '?' for k in wanted):
+        streak += 1
+    else:
+        break
+print(streak)
+PY
+}
+# Escalates via the SAME file_ei()+conditionKey mechanism every other filing in this
+# script uses (WI-39604) — one FRESH conditionKey per rung, so crossing 10→25→50
+# reopens distinctly even though the underlying reason never stopped being "already
+# tracked" by its own per-reason dedup. Markers live in $STATE_DIR beside the other
+# bare-integer markers (last-red et al.) for the same "must survive PG being down"
+# reason bank_verdict's own header gives; they self-clear the moment the streak they
+# guard returns to 0, so the next bad run re-escalates from rung 1 rather than
+# finding every rung pre-marked "already escalated" from an unrelated past episode.
+check_streak_escalation() {
+  command -v file_ei >/dev/null 2>&1 || return 0  # too early in the script (pre-§0 refusal path) — next real tick retries
+  [ -f "$GATE_VERDICT_LOG" ] || return 0
+  local nongreen dark rung marker
+  nongreen="$(_streak_scan nongreen)"; case "$nongreen" in ''|*[!0-9]*) nongreen=0 ;; esac
+  dark="$(_streak_scan dark)";         case "$dark" in ''|*[!0-9]*) dark=0 ;; esac
+  [ "$nongreen" -eq 0 ] && rm -f "$STATE_DIR"/streak-escalated-nongreen-* 2>/dev/null
+  [ "$dark" -eq 0 ] && rm -f "$STATE_DIR"/streak-escalated-dark-* 2>/dev/null
+  for rung in $GATE_STREAK_RUNGS; do
+    if [ "$nongreen" -ge "$rung" ]; then
+      marker="$STATE_DIR/streak-escalated-nongreen-$rung"
+      if [ ! -f "$marker" ]; then
+        file_ei \
+          "live-federation-gate: $nongreen consecutive non-GREEN verdicts (rung $rung)" \
+          "DETECTOR ESCALATION (WI-39354): $nongreen consecutive non-GREEN verdicts recorded in \$GATE_VERDICT_LOG with no intervening green. Any specific-reason filing above may already be tracked and deliberately quiet (RED_REFILE_H / find_open_duplicate dedup) — this item exists to surface the STREAK LENGTH ITSELF, which nothing else computes, so a persistent red grows louder over time instead of staying one quiet already-seen row. tail -n 50 $GATE_VERDICT_LOG for recent history." \
+          "live-fed-gate-streak-nongreen-$rung:papercusp" \
+          && : >"$marker"
+      fi
+    fi
+    if [ "$dark" -ge "$rung" ]; then
+      marker="$STATE_DIR/streak-escalated-dark-$rung"
+      if [ ! -f "$marker" ]; then
+        file_ei \
+          "live-federation-gate: $dark consecutive DARK verdicts — zero legs exercised (rung $rung)" \
+          "DETECTOR ESCALATION (WI-39354): $dark consecutive verdicts (FRESH*/GREEN early-exits and lock-contention skips excluded) whose four federation legs (content_matrix, from_repo, from_repo_witness, local_matrix) are ALL '?' — the gate is aborting before it exercises a single leg, so no verdict at all is being produced about federation health this window. tail -n 50 $GATE_VERDICT_LOG for recent history." \
+          "live-fed-gate-streak-dark-$rung:papercusp" \
+          && : >"$marker"
+      fi
+    fi
+  done
+  return 0
+}
 # Bank FIRST, then emit: a caller that pipes/drops stdout, or a TERM arriving mid-emit, must
 # not be able to cost us the durable record. The echoed string is byte-identical to what the
-# bare echo produced, so every existing verdict-greping caller is unaffected.
-verdict() { bank_verdict "$1"; echo "$1"; }
+# bare echo produced, so every existing verdict-greping caller is unaffected. check_streak_escalation
+# runs AFTER the bank write (so it sees this tick's own line) and is itself fail-soft: it can only
+# ever add a filing, never block or alter the verdict this function returns.
+verdict() { bank_verdict "$1"; check_streak_escalation; echo "$1"; }
 
 # ── bounded pc-heavy protection (EI-21412456902012315) ────────────────────────
 # pc-heavy owns the unique ABSENT marker path and exports it only when the outer wrapper opted
