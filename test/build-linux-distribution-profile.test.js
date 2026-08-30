@@ -33,6 +33,7 @@ const expectedVmResources = [
   'sidecar/orchestrator/**/*',
   'sidecar/prompts/**/*',
   'sidecar/pui-companion.wasm',
+  'sidecar/pui-install.json',
   'sidecar/rubrics/**/*',
   'sidecar/scripts/**/*',
   'sidecar/serve.mjs',
