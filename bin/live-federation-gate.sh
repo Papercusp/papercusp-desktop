@@ -40,6 +40,15 @@
 #   GATE_FORCE        (default 0)   — set 1 to ignore the freshness TTL and run now.
 #   REBUILD           (default 1)   — rebuild the sidecar from HEAD first (test current code).
 #   GATE_DEB          (unset)       — use this prebuilt .deb instead of rebuild+repack.
+#   GATE_BUILD_BASE_ON_MISSING (default 1) — EI-21713671250062619: when no on-disk
+#                                     Package=papercusp-gui .deb exists to repack (the
+#                                     scavenge-selector's four globs all miss), build ONE
+#                                     fresh base package (`npm run build` in papercusp-desktop,
+#                                     bounded — this runs at most once per oneshot invocation,
+#                                     inside the admission this run already passed) before
+#                                     falling through to GATE: BLOCKED (base-package-missing).
+#                                     Set 0 to keep the pre-fix scavenge-or-block behavior
+#                                     (e.g. an ad-hoc run that must not trigger a real build).
 #   SKIP_MATRIX       (default 0)   — skip the content-matrix leg (reliable, needs a .deb).
 #   SKIP_FROMREPO     (default 0)   — run the from-repo leg. DEFAULT FLIPPED 1→0 2026-07-27
 #                                     by the p2p-release leader (su-e3b21) — this is the
@@ -268,6 +277,7 @@ STORM_GATE="${STORM_GATE:-$(( NPROC * 9 / 10 ))}"
 PRESSURE_GATE="${PRESSURE_GATE:-30}"
 MEMORY_PRESSURE_GATE="${MEMORY_PRESSURE_GATE:-5}"
 REBUILD="${REBUILD:-1}"
+GATE_BUILD_BASE_ON_MISSING="${GATE_BUILD_BASE_ON_MISSING:-1}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"; SKIP_FROMREPO="${SKIP_FROMREPO:-0}"  # from-repo default 1→0, 2026-07-27, D-016 (WI-971 + WI-5783 both resolved)
 # ?superuser=1 REQUIRED (WI-1861 follow-up): a bare /api/mcp rejects projected tool calls with
 # invalid_request_context (needs harness/workspace/role/run/spawn params or superuser) — the
@@ -646,6 +656,7 @@ MATRIX_SKIP_REASON=""
 # the reason string only ANNOTATES the verdict line (EI-18715623477356990's fix) — this condition
 # has to CHANGE the verdict. A detector without an actuator is what let this run for 15 days.
 MATRIX_BASE_DEB_MISSING=0
+BASE_DEB_BUILD_ATTEMPTED=0  # EI-21713671250062619 — did §2 try to self-build a missing base .deb?
 # Wall-clock start of THIS gate run — the default evidence window for frame_pressure_note()
 # below, so a verdict reached BEFORE the local-matrix leg ran (MATRIX_LEG_START_TS unset)
 # still scopes its frame evidence to this run instead of reading a stale bank file.
@@ -2004,14 +2015,43 @@ if [ -z "${GATE_DEB:-}" ]; then
       /tmp/*/Papercusp_integrated.deb)"; then
       :
     else
-      log "no existing Debian candidate declares Package=papercusp-gui — refusing Server-role fallback; skipping content-matrix and local-matrix"
+      log "no existing Debian candidate declares Package=papercusp-gui"
       BASE_DEB=""
-      SKIP_MATRIX=1
-      RUN_LOCAL_MATRIX=0
-      # WI-478707 — this branch disables BOTH federation legs, so the window can prove nothing
-      # about the packaged binary. Record it so §5 can refuse the green outright rather than
-      # emitting one annotated with a skip reason nobody reads. See the flag's own comment at §0.
-      MATRIX_BASE_DEB_MISSING=1
+      if [ "$GATE_BUILD_BASE_ON_MISSING" = 1 ]; then
+        # EI-21713671250062619: the base package the gate repacks into is a FOUND artifact,
+        # not a PRODUCED one — nothing in the repo builds papercusp-gui on a schedule, so the
+        # bundle dir aging out or being replaced by a sibling product's build (measured
+        # 2026-08-28: the bundle dir held only a papercusp-server .deb) silently starves this
+        # gate's federation coverage. Before giving up, build ONE fresh papercusp-gui .deb
+        # ourselves — bounded (this block runs at most once per oneshot invocation, and
+        # already inside the admission this run passed at §1) — then re-select. Only if THAT
+        # also fails, or the fresh build still matches no candidate, do we fall through below.
+        BASE_DEB_BUILD_ATTEMPTED=1
+        log "building a fresh base .deb (bounded, once) before giving up — this may take a while"
+        if ( cd "$DESKTOP_DIR" && npm run build ) >"$WORK/base-build.log" 2>&1; then
+          if BASE_DEB="$(fed_select_newest_deb_by_package papercusp-gui \
+            "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
+            "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
+            "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
+            /tmp/*/Papercusp_integrated.deb)"; then
+            log "fresh base .deb built and selected: $BASE_DEB"
+          else
+            log "built a Debian bundle but no fresh Package=papercusp-gui candidate matched any known glob — giving up ($WORK/base-build.log)"
+            BASE_DEB=""
+          fi
+        else
+          log "BUILD FAILED building a fresh base .deb — $WORK/base-build.log — giving up"
+        fi
+      fi
+      if [ -z "$BASE_DEB" ]; then
+        log "refusing Server-role fallback; skipping content-matrix and local-matrix"
+        SKIP_MATRIX=1
+        RUN_LOCAL_MATRIX=0
+        # WI-478707 — this branch disables BOTH federation legs, so the window can prove nothing
+        # about the packaged binary. Record it so §5 can refuse the green outright rather than
+        # emitting one annotated with a skip reason nobody reads. See the flag's own comment at §0.
+        MATRIX_BASE_DEB_MISSING=1
+      fi
     fi
     if [ -n "$BASE_DEB" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
@@ -2675,7 +2715,12 @@ if [ ${#REDS[@]} -eq 0 ]; then
   # the systemd result is nonzero and the fault is visible without reading the bank.
   if [ "${MATRIX_BASE_DEB_MISSING:-0}" = 1 ]; then
     check_matrix_staleness
-    verdict "GATE: BLOCKED (base-package-missing) — no Package=papercusp-gui .deb existed to repack, so content-matrix AND local-matrix were BOTH disabled and this window exercised ZERO federation coverage; from-repo runs from source and cannot substitute. NOT a green: $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix) ; produce a base package with: cd papercusp-desktop && bash bin/build-desktop-sidecar.sh && npm run build"
+    if [ "${BASE_DEB_BUILD_ATTEMPTED:-0}" = 1 ]; then
+      BUILD_ATTEMPT_CLAUSE=", and this run's own fresh-build attempt (GATE_BUILD_BASE_ON_MISSING=1) also failed to produce a matching candidate — see $WORK/base-build.log"
+    else
+      BUILD_ATTEMPT_CLAUSE=" (GATE_BUILD_BASE_ON_MISSING=0 — no self-build attempted this run)"
+    fi
+    verdict "GATE: BLOCKED (base-package-missing) — no Package=papercusp-gui .deb existed to repack$BUILD_ATTEMPT_CLAUSE, so content-matrix AND local-matrix were BOTH disabled and this window exercised ZERO federation coverage; from-repo runs from source and cannot substitute. NOT a green: $SUMMARY$(matrix_stale_suffix)$(matrix_skip_suffix) ; produce a base package with: cd papercusp-desktop && bash bin/build-desktop-sidecar.sh && npm run build"
     exit 1
   fi
   echo "$(now_s)" >"$STATE_DIR/last-green"; rm -f "$STATE_DIR/stale-ei-filed" "$STATE_DIR/red-ei-filed" "$STATE_DIR/red-ei-legs" "$STATE_DIR/last-red"
