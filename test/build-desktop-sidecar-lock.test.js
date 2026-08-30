@@ -14,6 +14,9 @@ const liveFederationGate = fs.readFileSync(path.join(root, 'bin/live-federation-
 const SIDECAR_PUBLISH_LOCK_FUNCTION = (
   builder.match(/^__pc_acquire_sidecar_publish_lock\(\) \{\n[\s\S]*?^\}$/m) || []
 )[0];
+const SIDECAR_PLACEHOLDER_FUNCTION = (
+  builder.match(/^__pc_is_cargo_sidecar_placeholder\(\) \{\n[\s\S]*?^\}$/m) || []
+)[0];
 
 async function waitForFile(file, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
@@ -57,6 +60,58 @@ test('every release writer uses the shared bounded cooperative sidecar-lock help
     /if \(\( \$\(date \+%s\) >= __pc_build_lock_deadline \)\); then[\s\S]*?__pc_report_sidecar_lock_timeout "\$SIDECAR_BUILD_LOCK" "\$SIDECAR_BUILD_LOCKDIR"/,
     'the macOS build-lock timeout must include lockdir holder context',
   );
+});
+
+test('the publish guard evicts only the exact cargo build.rs placeholder and preserves real output', () => {
+  assert(SIDECAR_PLACEHOLDER_FUNCTION, 'could not extract the shipped cargo-placeholder classifier');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-placeholder-'));
+  const sidecar = path.join(tmp, 'sidecar');
+  const marker = [
+    'Placeholder created by build.rs so the bundle.resources globs match on a',
+    'fresh checkout (EI-160).',
+  ].join('\n');
+  const classify = () => spawnSync(
+    'bash',
+    ['-c', `set -uo pipefail\n${SIDECAR_PLACEHOLDER_FUNCTION}\n__pc_is_cargo_sidecar_placeholder "$1"`, 'bash', sidecar],
+    { encoding: 'utf8' },
+  );
+
+  try {
+    fs.mkdirSync(path.join(sidecar, 'db-sql'), { recursive: true });
+    fs.mkdirSync(path.join(sidecar, 'spa'), { recursive: true });
+    for (const file of [
+      path.join(sidecar, 'PLACEHOLDER-README.txt'),
+      path.join(sidecar, 'db-sql/PLACEHOLDER-README.txt'),
+      path.join(sidecar, 'spa/PLACEHOLDER-README.txt'),
+    ]) {
+      fs.writeFileSync(file, marker);
+    }
+    assert.equal(classify().status, 0, 'the exact build.rs placeholder must be classified as disposable');
+
+    fs.writeFileSync(path.join(sidecar, 'serve.mjs'), 'real sidecar');
+    assert.notEqual(classify().status, 0, 'serve.mjs marks real output and must never be classified as disposable');
+    fs.rmSync(path.join(sidecar, 'serve.mjs'));
+
+    fs.writeFileSync(path.join(sidecar, '.sidecar-build-stamp'), '{}');
+    assert.notEqual(classify().status, 0, 'a build stamp marks real output and must never be classified as disposable');
+    fs.rmSync(path.join(sidecar, '.sidecar-build-stamp'));
+
+    fs.writeFileSync(path.join(sidecar, 'unknown-output'), 'owned by another writer');
+    assert.notEqual(classify().status, 0, 'unknown residue must fail closed instead of being deleted');
+
+    assert.match(
+      builder,
+      /if __pc_is_cargo_sidecar_placeholder "\$SIDECAR_FINAL_DIR"; then[\s\S]*?rm -rf "\$SIDECAR_FINAL_DIR"[\s\S]*?else[\s\S]*?refusing to delete another writer's output[\s\S]*?exit 6/,
+      'the pre-rename guard must gate deletion on the closed placeholder classifier',
+    );
+    assert.match(
+      builder,
+      /if \[\[ -d "\$SIDECAR_FINAL_DIR\/\$_tmp_base" \]\]; then[\s\S]*?if __pc_is_cargo_sidecar_placeholder "\$_squat_dir"; then[\s\S]*?else[\s\S]*?mv "\$SIDECAR_FINAL_DIR" "\$SIDECAR_TMP_DIR"[\s\S]*?mv "\$_squat_dir" "\$SIDECAR_FINAL_DIR"[\s\S]*?exit 6/,
+      'the check-to-rename race must restore a non-placeholder squatter instead of deleting it',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('the scheduled live federation gate waits boundedly for a progressing package writer', () => {
