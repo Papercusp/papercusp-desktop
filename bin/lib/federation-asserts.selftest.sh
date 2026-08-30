@@ -692,11 +692,70 @@ else
 fi
 if grep -q 'fed_snapshot_shell_script "$__source" "$__snapshot"' "$gate_file" \
   && grep -q 'bash "$__snapshot"' "$gate_file" \
-  && grep -qF '__snapshot="$DESKTOP_DIR/bin/lib/.gate-selftest-snapshot-$__script.$$"' "$gate_file" \
+  && grep -qF '__snapshot="$WORK/gate-selftest-snapshot-$__script"' "$gate_file" \
+  && grep -qF 'GATE_SELFTEST_LIB_DIR="$DESKTOP_DIR/bin/lib"' "$gate_file" \
   && ! grep -q 'bash "$DESKTOP_DIR/bin/lib/$__script"' "$gate_file"; then
-  ok "live-federation-gate snapshots its own selftests immutably without changing dirname semantics (EI-21245861434158598)"
+  ok "live-federation-gate snapshots its own selftests immutably, outside the tracked tree, without changing dirname semantics (EI-21245861434158598 / EI-21266614790118256)"
 else
-  bad "live-federation-gate can tear its selftest or move it away from required relative siblings (EI-21245861434158598)"
+  bad "live-federation-gate can tear its selftest, move it away from required relative siblings, or snapshot it back inside the git-tracked bin/lib (EI-21245861434158598 / EI-21266614790118256)"
+fi
+
+# EI-21266614790118256 — BEHAVIORAL proof, not just the static grep above: a live
+# gate_selftest() run must never place its snapshot inside the git-TRACKED bin/lib
+# directory, even transiently. Desktop auto-commit 04226ec6 (WI-40905 verification)
+# committed exactly such a transient dotfile before cleanup could remove it, leaving
+# the submodule dirty. Exercise the REAL gate_selftest() against a slow fixture
+# script inside a throwaway git repo and poll bin/lib for any new path while it
+# runs; $WORK is a POSITIVE CONTROL proving the poll itself can see a snapshot file
+# when one legitimately exists there (so a probe that saw neither would be a broken
+# instrument, not a passing test).
+gateselftest_snippet="$(awk '/^gate_selftest\(\)/{p=1} p{print} p&&/^}$/{exit}' "$gate_file")"
+gs_snapshot_helper_snippet="$(declare -f fed_snapshot_shell_script)"
+if [ -z "$gateselftest_snippet" ]; then
+  bad "could not extract gate_selftest() from live-federation-gate.sh (structure changed — update this test)"
+else
+  GS_ROOT="$(mktemp -d /tmp/fed-selftest-gateselftest.XXXXXX)"
+  GS_DESKTOP="$GS_ROOT/papercusp-desktop"
+  mkdir -p "$GS_DESKTOP/bin/lib"
+  (
+    cd "$GS_DESKTOP" && git init -q && git config user.email t@t && git config user.name t
+  ) >/dev/null 2>&1
+  cat >"$GS_DESKTOP/bin/lib/slow-selftest.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 1
+exit 0
+EOF
+  chmod +x "$GS_DESKTOP/bin/lib/slow-selftest.sh"
+  ( cd "$GS_DESKTOP" && git add -A && git commit -q -m init ) >/dev/null 2>&1
+  GS_WORK="$(mktemp -d /tmp/fed-selftest-gateselftest-work.XXXXXX)"
+  GS_LOG="$GS_WORK/selftest.log"
+  GS_TRACKED_SEEN="$GS_WORK/tracked-snapshot-seen"
+  GS_UNTRACKED_SEEN="$GS_WORK/untracked-snapshot-seen"
+  (
+    DESKTOP_DIR="$GS_DESKTOP" WORK="$GS_WORK" bash -c "
+log() { :; }
+verdict() { :; }
+$gs_snapshot_helper_snippet
+$gateselftest_snippet
+gate_selftest label slow-selftest.sh '$GS_LOG' broken
+"
+  ) >/dev/null 2>&1 &
+  GS_PID=$!
+  for _ in $(seq 1 60); do
+    find "$GS_DESKTOP/bin/lib" -mindepth 1 -maxdepth 1 -name '.gate-selftest-snapshot-*' 2>/dev/null | grep -q . && : >"$GS_TRACKED_SEEN"
+    find "$GS_WORK" -mindepth 1 -maxdepth 1 -name 'gate-selftest-snapshot-*' 2>/dev/null | grep -q . && : >"$GS_UNTRACKED_SEEN"
+    kill -0 "$GS_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  wait "$GS_PID" 2>/dev/null
+  if [ ! -e "$GS_TRACKED_SEEN" ] && [ -e "$GS_UNTRACKED_SEEN" ]; then
+    ok "gate_selftest never places a snapshot inside the git-tracked bin/lib directory (EI-21266614790118256)"
+  elif [ -e "$GS_TRACKED_SEEN" ]; then
+    bad "gate_selftest wrote a snapshot INSIDE the git-tracked bin/lib directory — an auto-commit sweep can commit it (EI-21266614790118256)"
+  else
+    bad "gate_selftest regression probe never observed a snapshot file anywhere — poll window too short or fixture broken; this probe cannot be trusted as written (EI-21266614790118256)"
+  fi
+  rm -rf "$GS_ROOT" "$GS_WORK"
 fi
 if grep -q 'fed_capture_nonempty_with_retry' "$matrix_file" \
   && grep -q 'membership-persistence=PASS' "$matrix_file"; then
