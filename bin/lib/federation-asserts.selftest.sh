@@ -63,6 +63,66 @@ else
   fi
 fi
 
+# EI-21823254822396581: a sidecar smoke must snapshot the shared build output
+# under the writer's reader lock before launching its long-lived instances.
+# The behavioral probe uses a tiny synthetic bundle, so it is hermetic and does
+# not copy the real multi-GB sidecar. First prove the snapshot survives the
+# atomic directory replacement a concurrent publisher performs; then, on hosts
+# with flock(1), prove an exclusive publisher blocks the snapshot until release.
+SIDECAR_SOURCE="$WORK/sidecar-source"
+SIDECAR_SNAPSHOT="$WORK/sidecar-snapshot"
+SIDECAR_LOCK="$SIDECAR_SOURCE.lock"
+mkdir -p "$SIDECAR_SOURCE/bin" "$SIDECAR_SOURCE/node_modules"
+printf 'old-sidecar\n' >"$SIDECAR_SOURCE/serve.mjs"
+printf 'old-node\n' >"$SIDECAR_SOURCE/bin/node"
+if fed_snapshot_sidecar_bundle "$SIDECAR_SOURCE" "$SIDECAR_SNAPSHOT" "$SIDECAR_LOCK" "$SIDECAR_SOURCE.lockdir" 2 >/dev/null 2>&1 \
+  && grep -qx 'old-sidecar' "$SIDECAR_SNAPSHOT/serve.mjs"; then
+  mv "$SIDECAR_SOURCE" "$WORK/sidecar-source-old"
+  mkdir -p "$SIDECAR_SOURCE/bin" "$SIDECAR_SOURCE/node_modules"
+  printf 'new-sidecar\n' >"$SIDECAR_SOURCE/serve.mjs"
+  if grep -qx 'old-sidecar' "$SIDECAR_SNAPSHOT/serve.mjs"; then
+    ok "fed_snapshot_sidecar_bundle keeps a per-run snapshot stable across an atomic sidecar publish (EI-218)"
+  else
+    bad "fed_snapshot_sidecar_bundle snapshot changed after the source sidecar was atomically replaced (EI-218)"
+  fi
+else
+  bad "fed_snapshot_sidecar_bundle could not create a hermetic sidecar snapshot (EI-218)"
+fi
+if command -v flock >/dev/null 2>&1; then
+  SIDECAR_LOCK_READY="$WORK/sidecar-lock-ready"
+  SIDECAR_LOCK_RELEASE="$WORK/sidecar-lock-release"
+  (
+    exec 8>"$SIDECAR_LOCK"
+    flock -x 8
+    : >"$SIDECAR_LOCK_READY"
+    while [ ! -e "$SIDECAR_LOCK_RELEASE" ]; do sleep 0.02; done
+  ) &
+  SIDECAR_HOLDER_PID=$!
+  for _ in $(seq 1 50); do
+    [ -e "$SIDECAR_LOCK_READY" ] && break
+    sleep 0.02
+  done
+  rm -rf "$SIDECAR_SNAPSHOT"
+  fed_snapshot_sidecar_bundle "$SIDECAR_SOURCE" "$SIDECAR_SNAPSHOT" "$SIDECAR_LOCK" "$SIDECAR_SOURCE.lockdir" 2 >"$WORK/sidecar-snapshot.log" 2>&1 &
+  SIDECAR_SNAPSHOT_PID=$!
+  sleep 0.1
+  if kill -0 "$SIDECAR_SNAPSHOT_PID" 2>/dev/null; then
+    : >"$SIDECAR_LOCK_RELEASE"
+    wait "$SIDECAR_HOLDER_PID" 2>/dev/null || true
+    if wait "$SIDECAR_SNAPSHOT_PID" \
+      && grep -qx 'new-sidecar' "$SIDECAR_SNAPSHOT/serve.mjs"; then
+      ok "fed_snapshot_sidecar_bundle waits for an exclusive publisher before copying (EI-218)"
+    else
+      bad "fed_snapshot_sidecar_bundle did not complete after the exclusive publisher released (EI-218)"
+    fi
+  else
+    bad "fed_snapshot_sidecar_bundle ignored an exclusive sidecar publisher lock (EI-218)"
+    : >"$SIDECAR_LOCK_RELEASE"
+    wait "$SIDECAR_HOLDER_PID" 2>/dev/null || true
+    wait "$SIDECAR_SNAPSHOT_PID" 2>/dev/null || true
+  fi
+fi
+
 # WI-40912: a single transient authenticated GET /user failure must not red-pin
 # the entire live federation gate.  Stub gh with file-backed counters because
 # command substitution runs the helper in a subshell.
@@ -420,6 +480,13 @@ if grep -q -- '-u PAPERCUSP_HOME' "$SC_LAUNCH_FILE"; then
   ok "two-instance-hive-from-repo-smoke sc_launch scrubs ambient PAPERCUSP_HOME (EI-15308)"
 else
   bad "two-instance-hive-from-repo-smoke sc_launch no longer scrubs PAPERCUSP_HOME (EI-15308 regression)"
+fi
+if grep -q 'fed_snapshot_sidecar_bundle "\$SIDECAR_SOURCE" "\$SIDECAR_SNAPSHOT"' "$SC_LAUNCH_FILE" \
+  && grep -q 'SIDECAR_SRC="\$SIDECAR_SNAPSHOT"' "$SC_LAUNCH_FILE" \
+  && grep -q 'PAPERCUSP_SMOKE_SIDECAR_LOCK_WAIT_SEC' "$SC_LAUNCH_FILE"; then
+  ok "from-repo sidecar mode snapshots the shared build output before launching instances (EI-218)"
+else
+  bad "from-repo sidecar mode can still launch directly from the shared build output (EI-218)"
 fi
 if grep -q 'PAPERCUSP_PARENT_DEATH_WATCH=0' "$SC_LAUNCH_FILE"; then
   ok "two-instance-hive-from-repo-smoke sc_launch opts out of the desktop parent-death watch for detached headless sidecars (EI-21255273747013942)"

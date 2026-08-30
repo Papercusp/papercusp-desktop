@@ -49,6 +49,128 @@ fed_snapshot_shell_script() {
   bash -n "$snapshot_script"
 }
 
+# fed_snapshot_sidecar_bundle <source> <destination> [lock] [lockdir] [wait-sec]
+#
+# Sidecar builds publish with a short exclusive lock and an atomic directory
+# rename. A federation smoke must never execute the shared output directory:
+# doing so lets a later publish replace the bytes (or lets the smoke's cleanup
+# remove the release input) while the smoke is still serving two instances.
+# Take a shared reader lock while making a per-run snapshot, then launch only
+# from that snapshot. Same-device hardlinks keep the normal 6GB bundle cheap;
+# the independent-copy fallback handles a cross-device snapshot (and a host
+# whose cp lacks --reflink=auto).
+#
+# The lock is deliberately held by the copy operation, not by the long-lived
+# smoke processes. With flock(1) this uses the same sidecar.lock protocol as
+# build-desktop-sidecar.sh and tauri-guarded. macOS has no flock(1), so mirror
+# the builder's PID-stamped mkdir lockdir fallback.
+fed_snapshot_sidecar_bundle() {
+  local source="${1:-}" destination="${2:-}"
+  local source_real lock lockdir wait_sec
+  local destination_parent holder deadline result
+
+  [ -n "$source" ] && [ -d "$source" ] || {
+    echo "fed_snapshot_sidecar_bundle: source sidecar is missing: ${source:-<empty>}" >&2
+    return 1
+  }
+  [ -n "$destination" ] || {
+    echo "fed_snapshot_sidecar_bundle: destination is required" >&2
+    return 1
+  }
+
+  # Resolve symlinked source roots before deriving the lock path. Otherwise a
+  # caller that names a symlink would lock /link.lock while the builder holds
+  # /real/sidecar.lock, defeating the reader/writer protocol.
+  source_real="$(cd "$source" 2>/dev/null && pwd -P)" || {
+    echo "fed_snapshot_sidecar_bundle: could not resolve source sidecar: $source" >&2
+    return 1
+  }
+  lock="${3:-$source_real.lock}"
+  lockdir="${4:-$source_real.lockdir}"
+  wait_sec="${5:-60}"
+  [[ "$wait_sec" =~ ^[0-9]+$ ]] || {
+    echo "fed_snapshot_sidecar_bundle: wait-sec must be a non-negative integer (got '$wait_sec')" >&2
+    return 1
+  }
+
+  # A destination nested in the source would be copied into itself, and a
+  # source/destination alias would make cleanup destructive. Refuse both
+  # before touching either tree.
+  case "$destination/" in
+    "$source_real/"*|"$source_real/")
+      echo "fed_snapshot_sidecar_bundle: destination must not be inside source ($destination)" >&2
+      return 1
+      ;;
+  esac
+  case "$source_real/" in
+    "$destination/"*|"$destination/")
+      echo "fed_snapshot_sidecar_bundle: source must not be inside destination ($source_real)" >&2
+      return 1
+      ;;
+  esac
+
+  destination_parent="$(dirname "$destination")"
+  mkdir -p "$destination_parent" || return 1
+  rm -rf "$destination" || return 1
+
+  fed_copy_sidecar_snapshot() {
+    if cp -al "$source_real" "$destination" 2>/dev/null; then
+      echo "→ sidecar snapshot uses same-device hardlinks: $source_real → $destination" >&2
+      return 0
+    fi
+
+    # cp -al may leave a partial destination after an EXDEV or filesystem
+    # capability failure. Remove it before trying the independent copy.
+    rm -rf "$destination" || return 1
+    if cp -a --reflink=auto "$source_real" "$destination" 2>/dev/null; then
+      echo "→ sidecar snapshot uses an independent copy: $source_real → $destination" >&2
+      return 0
+    fi
+
+    rm -rf "$destination" || return 1
+    cp -a "$source_real" "$destination" || return 1
+    echo "→ sidecar snapshot uses a portable independent copy: $source_real → $destination" >&2
+  }
+
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 8>>"$lock" || exit 1
+      flock -s -w "$wait_sec" 8 || {
+        echo "fed_snapshot_sidecar_bundle: timed out after ${wait_sec}s waiting for sidecar lock $lock" >&2
+        exit 1
+      }
+      fed_copy_sidecar_snapshot
+    )
+    return $?
+  fi
+
+  # BSD/macOS fallback: the sidecar builder uses the same lockdir shape. An
+  # empty/malformed holder is not evidence of a dead writer, so wait until the
+  # bounded deadline instead of deleting an unknown lock.
+  mkdir -p "$(dirname "$lockdir")" || return 1
+  deadline=$(( $(date +%s) + wait_sec ))
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$lockdir"
+      continue
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "fed_snapshot_sidecar_bundle: timed out after ${wait_sec}s waiting for sidecar lockdir $lockdir" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  printf '%s\n' "$$" >"$lockdir/pid" || {
+    rm -rf "$lockdir"
+    return 1
+  }
+  result=0
+  fed_copy_sidecar_snapshot || result=$?
+  rm -rf "$lockdir"
+  return "$result"
+}
+
 # fed_capture_nonempty_with_retry <attempts> <delay-sec> -- <command...>
 #
 # Run a read-side probe until it returns a non-empty value, print that value,

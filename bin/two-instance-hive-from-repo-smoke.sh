@@ -37,13 +37,15 @@
 #              grep, exactly like the directory smoke's createDirectoryGossip
 #              gate.
 #   sidecar  — the documented FALLBACK when the on-disk .deb predates the
-#              from-repo backend and a full tauri rebuild is too heavy: run the
-#              SAME packaged sidecar bundle (src-tauri/sidecar/serve.mjs — the
-#              exact artifact the .deb ships; serve.mjs owns embedded-PG +
-#              migrations + the Hono host + swarm boot) directly under the
-#              bundled node, twice, with isolated HOMEs/ports. Everything the
-#              asserts touch is identical; only the Tauri window chrome (webview
-#              + Xvfb) is absent.
+#              from-repo backend and a full tauri rebuild is too heavy: take a
+#              per-run immutable snapshot of the packaged sidecar bundle
+#              (src-tauri/sidecar/serve.mjs — the exact artifact the .deb ships;
+#              serve.mjs owns embedded-PG + migrations + the Hono host + swarm
+#              boot), then run that snapshot twice with isolated HOMEs/ports.
+#              Everything the asserts touch is identical; only the Tauri window
+#              chrome (webview + Xvfb) is absent. The snapshot prevents a
+#              concurrent release build from replacing the release input under
+#              the smoke, and prevents smoke cleanup from deleting it.
 #   auto     — deb when the .deb exists AND passes the from-repo gate, else
 #              sidecar (loudly).
 #
@@ -134,6 +136,7 @@ WORK="$(mktemp -d /tmp/hive-fromrepo-smoke.XXXXXX)"
 PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
 A_HOME="$WORK/inst-a"; B_HOME="$WORK/inst-b"
 FED_LOG[a]="$WORK/a.log"; FED_LOG[b]="$WORK/b.log"
+SIDECAR_SNAPSHOT=""
 log() { fed_log "$@"; }
 
 bank_instance_logs() {
@@ -153,7 +156,18 @@ cleanup() {
   # when they were needed. Bank at the one exit path every branch shares.
   bank_instance_logs
   log "cleanup (scoped to $WORK)"
-  fed_cleanup_scoped "$WORK"
+  cleanup_rc=0
+  fed_cleanup_scoped "$WORK" || cleanup_rc=$?
+  # Keep the snapshot only when scoped process cleanup failed: deleting a
+  # bundle still used by a surviving sidecar would recreate the same
+  # mid-run-destruction class this snapshot is meant to prevent.
+  if [ -n "${SIDECAR_SNAPSHOT:-}" ]; then
+    if [ "$cleanup_rc" -eq 0 ]; then
+      rm -rf -- "$SIDECAR_SNAPSHOT"
+    else
+      log "preserving sidecar snapshot after cleanup refusal: $SIDECAR_SNAPSHOT"
+    fi
+  fi
 }
 trap cleanup EXIT
 
@@ -288,9 +302,10 @@ echo "mode=$RUN_MODE  repo=$REPO_URL  cupboard=$CUPBOARD_URL (isolated)"
 # ── sidecar-mode launcher (the fed_local_launch analog for `node serve.mjs`) ───
 # Mirrors what Tauri main.rs spawns (serve.mjs owns embedded-PG + migrations +
 # the Hono host): isolated HOME, shared gh config (announce identity), bundled
-# node + gh first on PATH, explicit per-instance ports. The trailing "$WORK"
-# argv is the cleanup marker (serve.ts ignores unknown args; fed_cleanup_scoped
-# greps ps args for $WORK — same trick as fed_start_testnet_dht).
+# node + gh first on PATH, explicit per-instance ports. SIDECAR_SRC is rewritten
+# to the per-run snapshot below before this launcher is called. The trailing
+# "$WORK" argv is the cleanup marker (serve.ts ignores unknown args;
+# fed_cleanup_scoped greps ps args for $WORK — same trick as fed_start_testnet_dht).
 SC_NODE="$SIDECAR_SRC/bin/node"; [ -x "$SC_NODE" ] || SC_NODE="$(command -v node)"
 sc_launch() {
   local home="$1" logf="$2" hono_port="$3" pg_port="$4"; shift 4
@@ -373,8 +388,22 @@ if [ "$RUN_MODE" = deb ]; then
   assert_serve_supports_from_repo "$(fed_sidecar_dir "$PKG")/serve.mjs" ".deb" || exit 2
   fed_fresh_display "$DISPLAY_NUM" "$WORK" || exit 1
 else
-  log "sidecar-bundle fallback: $SIDECAR_SRC (the artifact the .deb ships, minus the Tauri window)"
-  [ -f "$SIDECAR_SRC/serve.mjs" ] || { echo "FATAL: $SIDECAR_SRC/serve.mjs missing — run bin/build-desktop-sidecar.sh"; exit 2; }
+  SIDECAR_SOURCE="$SIDECAR_SRC"
+  SIDECAR_SNAPSHOT_PARENT="${PAPERCUSP_SMOKE_SIDECAR_SNAPSHOT_PARENT:-$(cd "$DESKTOP_DIR/.." && pwd -P)/.papercusp-smoke-snapshots}"
+  SIDECAR_SNAPSHOT="$SIDECAR_SNAPSHOT_PARENT/${WORK##*/}"
+  log "sidecar-bundle fallback: snapshot $SIDECAR_SOURCE under its reader lock (the artifact the .deb ships, minus the Tauri window)"
+  [ -f "$SIDECAR_SOURCE/serve.mjs" ] || { echo "FATAL: $SIDECAR_SOURCE/serve.mjs missing — run bin/build-desktop-sidecar.sh"; exit 2; }
+  if ! fed_snapshot_sidecar_bundle "$SIDECAR_SOURCE" "$SIDECAR_SNAPSHOT" \
+      "${PAPERCUSP_SMOKE_SIDECAR_LOCK:-}" \
+      "${PAPERCUSP_SMOKE_SIDECAR_LOCKDIR:-}" \
+      "${PAPERCUSP_SMOKE_SIDECAR_LOCK_WAIT_SEC:-3600}"; then
+    echo "FATAL: could not establish an immutable per-run sidecar snapshot from $SIDECAR_SOURCE" >&2
+    exit 2
+  fi
+  SIDECAR_SRC="$SIDECAR_SNAPSHOT"
+  SC_NODE="$SIDECAR_SRC/bin/node"; [ -x "$SC_NODE" ] || SC_NODE="$(command -v node)"
+  log "sidecar-bundle snapshot ready: $SIDECAR_SRC"
+  [ -f "$SIDECAR_SRC/serve.mjs" ] || { echo "FATAL: snapshot $SIDECAR_SRC/serve.mjs missing"; exit 2; }
   [ -d "$SIDECAR_SRC/node_modules/@papercusp/embedded-postgres-server" ] || { echo "FATAL: sidecar bundle lacks embedded-postgres-server — incomplete build"; exit 2; }
   assert_serve_supports_from_repo "$SIDECAR_SRC/serve.mjs" "sidecar" || exit 2
 fi
