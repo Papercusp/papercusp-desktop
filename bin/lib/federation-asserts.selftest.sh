@@ -258,6 +258,15 @@ if [ -n "$direct_preflight_ln" ] && [ -n "$direct_testnet_ln" ] \
 else
   bad "direct from-repo witness no longer proves GitHub REST before rig launch (preflight=$direct_preflight_ln testnet=$direct_testnet_ln)"
 fi
+gate_script="$DIR/../live-federation-gate.sh"
+gate_matrix_preflight_ln="$(grep -n 'GH_MATRIX_PREFLIGHT_OUTPUT=.*preflight_github_rest_accounts' "$gate_script" | head -1 | cut -d: -f1)"
+gate_matrix_run_ln="$(grep -n 'run_smoke content-matrix two-instance-content-matrix-smoke.sh' "$gate_script" | head -1 | cut -d: -f1)"
+if [ -n "$gate_matrix_preflight_ln" ] && [ -n "$gate_matrix_run_ln" ] \
+  && [ "$gate_matrix_preflight_ln" -lt "$gate_matrix_run_ln" ]; then
+  ok "live-federation-gate reruns the shared REST preflight immediately before content-matrix, closing the build-window gap (EI-21243220400364630)"
+else
+  bad "live-federation-gate content-matrix has no REST preflight recheck between build and launch (preflight=$gate_matrix_preflight_ln run=$gate_matrix_run_ln)"
+fi
 unset -f gh curl
 unset WI40905_B_HTTP
 
