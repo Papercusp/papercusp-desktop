@@ -33,6 +33,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
+const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
 
 /**
  * A SYNTHETIC owner name, asserted for every AUDIT invocation.
@@ -112,6 +113,12 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     write('README.md', '# source docs\n');
     write('node_modules/lost-pixel/node_modules/@esbuild/linux-x64/bin/esbuild', 'compiler\n');
     write('node_modules/lost-pixel/node_modules/esbuild/bin/esbuild', 'cli shim\n');
+    // npm may hardlink a platform executable into its .bin shim tree rather
+    // than leaving a symlink. The runtime-only profile must prune the whole
+    // shim subtree, not just the known esbuild path.
+    write('node_modules/lost-pixel/node_modules/.bin/esbuild', 'platform binary\n');
+    write('node_modules/lost-pixel/node_modules/.bin/tsc', 'compiler shim\n');
+    write('bin/esbuild', 'a non-node_modules executable path is not this rule\n');
 
     const pruned = vmReleaseAudit('--prune-vm-release', dir);
     assert.equal(pruned.status, 0, `${pruned.stdout}${pruned.stderr}`);
@@ -128,6 +135,7 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'README.md',
       'node_modules/lost-pixel/node_modules/@esbuild',
       'node_modules/lost-pixel/node_modules/esbuild/bin',
+      'node_modules/lost-pixel/node_modules/.bin',
     ]) {
       assert.equal(fs.existsSync(path.join(dir, rel)), false, `${rel} must be pruned`);
     }
@@ -139,6 +147,7 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'templates/papercusp-webapp/src/main.ts',
       'templates/papercusp-webapp/tests/template.test.ts',
       'node_modules/lost-pixel/dist/compare/compare.js',
+      'bin/esbuild',
     ]) {
       assert.equal(fs.existsSync(path.join(dir, rel)), true, `${rel} must survive`);
     }
@@ -158,6 +167,18 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     const certified = vmReleaseAudit('--audit-vm-release', dir);
     assert.equal(certified.status, 0, `${certified.stdout}${certified.stderr}`);
     assert.match(certified.stdout, /VM-RELEASE CLEAN/);
+
+    // The audit must share the same path-level predicate as the prune. An
+    // unpruned arbitrary .bin entry is not allowed to pass merely because it
+    // is a JS wrapper today; a dependency-layout change must still red the
+    // runtime-only contract.
+    write('node_modules/lost-pixel/node_modules/.bin/future-tool', 'future shim\n');
+    const unprunedShim = vmReleaseAudit('--audit-vm-release', dir);
+    assert.equal(unprunedShim.status, 1, `${unprunedShim.stdout}${unprunedShim.stderr}`);
+    assert.match(
+      unprunedShim.stdout,
+      /\[build-tool-residue\].*node_modules\/lost-pixel\/node_modules\/\.bin\/future-tool/,
+    );
 
     // The audit is not a ceremonial post-prune pass: adding one newly forbidden
     // file must make the SAME classifier reject the assembled payload.
@@ -641,6 +662,87 @@ test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judg
   const envTextScrub = sh.indexOf('--scrub-text', overlayCopy);
   assert.ok(envTextScrub > overlayCopy,
     'preserved env-sidecar text must be scrubbed after the overlay restore');
+});
+
+test('sidecar source-note producer scrubs build roots and preserves system provenance', () => {
+  const dir = tmp('source-note-helper');
+  const note = path.join(dir, 'bin', '.pg-tools-source');
+  const sidecar = path.join(dir, 'sidecar.tmp.123');
+  const repo = path.join(dir, 'repo');
+  const desktop = path.join(repo, 'papercusp-desktop');
+  const home = path.join(dir, 'home', 'builder');
+  fs.mkdirSync(path.dirname(note), { recursive: true });
+
+  const script = [
+    'set -euo pipefail',
+    `source ${JSON.stringify(SOURCE_NOTE_HELPER)}`,
+    `SIDECAR_DIR=${JSON.stringify(sidecar)}`,
+    `SIDECAR_TMP_DIR=${JSON.stringify(sidecar)}`,
+    `REPO_ROOT=${JSON.stringify(repo)}`,
+    `ROOT=${JSON.stringify(desktop)}`,
+    `HOME=${JSON.stringify(home)}`,
+    `papercusp_append_pg_tool_source_note ${JSON.stringify(note)} pg_dump symlink ${JSON.stringify(`${sidecar}/node_modules/pg_dump`)}`,
+    `papercusp_append_pg_tool_source_note ${JSON.stringify(note)} psql copy ${JSON.stringify('/usr/lib/postgresql/18/bin/psql')}`,
+    `cat ${JSON.stringify(note)}`,
+  ].join('\n');
+
+  try {
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /pg_dump: symlink \(<sidecar>\/node_modules\/pg_dump\)/);
+    assert.match(r.stdout, /psql: copy \(\/usr\/lib\/postgresql\/18\/bin\/psql\)/);
+    assert.doesNotMatch(r.stdout, /sidecar\.tmp\.123|\/home\/builder/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sidecar source-note producer refuses an unredacted user-root path before writing', () => {
+  const dir = tmp('source-note-reject');
+  const note = path.join(dir, '.pg-tools-source');
+  const script = [
+    'set -u',
+    `source ${JSON.stringify(SOURCE_NOTE_HELPER)}`,
+    `SIDECAR_DIR=${JSON.stringify(path.join(dir, 'sidecar'))}`,
+    `SIDECAR_TMP_DIR=${JSON.stringify(path.join(dir, 'sidecar.tmp'))}`,
+    `REPO_ROOT=${JSON.stringify(path.join(dir, 'repo'))}`,
+    `ROOT=${JSON.stringify(path.join(dir, 'desktop'))}`,
+    `HOME=${JSON.stringify(path.join(dir, 'builder'))}`,
+    `set +e`,
+    `papercusp_append_pg_tool_source_note ${JSON.stringify(note)} pg_dump copy ${JSON.stringify('/home/other-builder/bin/pg_dump')}`,
+    'status=$?',
+    `printf 'status=%s\\n' "$status"`,
+    `[[ ! -e ${JSON.stringify(note)} ]]`,
+  ].join('\n');
+
+  try {
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /refusing to write unredacted build-box path/);
+    assert.match(r.stdout, /status=1/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('build-desktop-sidecar routes path-bearing source-note writes through the producer guard', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  assert.match(sh, /source "\$HERE\/lib\/sidecar-source-note\.sh"/);
+  assert.equal(
+    (sh.match(/^\s*papercusp_append_pg_tool_source_note\b/gm) || []).length,
+    2,
+    'both path-bearing source-note writes must use the producer helper',
+  );
+  assert.match(sh, /papercusp_append_pg_tool_source_note "\$SOURCE_NOTE_FILE" "\$tool" "\$method" "\$src"/);
+  assert.match(
+    sh,
+    /papercusp_append_pg_tool_source_note \\\s*\n\s*"\$SOURCE_NOTE_FILE" "kopia" "copy \(from system PATH\)" "\$_kopia_src"/,
+  );
+  assert.doesNotMatch(
+    sh,
+    /[^\n]*(?:\$src|\$_kopia_src)[^\n]*>> "\$SOURCE_NOTE_FILE"/,
+    'path-bearing source-note writes must not bypass the producer helper',
+  );
 });
 
 test('cross-darwin git vendor prunes git-instaweb before scanning and signing the shipping tree', () => {
