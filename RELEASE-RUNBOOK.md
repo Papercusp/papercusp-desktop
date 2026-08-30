@@ -38,11 +38,22 @@ spot."*
 
 ## 1. Cut the build
 
+⚠ **`bin/release-local.sh` now REQUIRES two env vars before any write** (P-016 /
+EI-20505417131773854, EI-21007848170102877) — a bare invocation with no env
+fails immediately with `ERROR: release source drift` / `ERROR: release cut
+requires PAPERCUSP_RELEASE_OWNER_NAME`. `release:cut` (below) supplies both
+for you; a manual invocation must too:
+
 ```bash
 cd papercusp-desktop
 # <version> <channel>  — channel ∈ stable | beta | alpha
-bin/release-local.sh 0.0.8 alpha                 # Linux only
-WITH_MAC=1 WITH_WINDOWS=1 bin/release-local.sh 0.0.8 alpha   # all three
+PAPERCUSP_EXPECTED_SOURCE_SHA="$(git -C .. rev-parse HEAD)" \
+PAPERCUSP_RELEASE_OWNER_NAME="<your name>" \
+  bin/release-local.sh 0.0.8 alpha                 # Linux only
+WITH_MAC=1 WITH_WINDOWS=1 \
+PAPERCUSP_EXPECTED_SOURCE_SHA="$(git -C .. rev-parse HEAD)" \
+PAPERCUSP_RELEASE_OWNER_NAME="<your name>" \
+  bin/release-local.sh 0.0.8 alpha   # all three
 ```
 
 **Agent lever (preferred): `release:cut`.** The `release:cut` MCP tool is the
