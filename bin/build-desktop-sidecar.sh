@@ -162,18 +162,23 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
   echo "       Pass the immutable source SHA and desktop version explicitly; refusing before toolchain work." >&2
   exit 2
 fi
-# EI-21832562420831737: having DEMANDED an immutable source sha above, check that the tree
-# we are about to read actually IS it, and holds nothing else. Nothing did: the release
-# audit, SBOM and vulnerability gates all inspect the finished bundle, so a cut taken on
-# the shared checkout baked peers' uncommitted bytes into the sidecar while its stamp
-# claimed the pin — and every artifact-side gate passed, because the artifact agreed with
-# itself. See lib/source-roots.sh for why this refuses rather than warns, and for why it
-# is satisfiable today (a tracked-clean pinned worktree passes; the shared tree does not,
-# which is the intended split). Same placement contract as the gate above: before any
-# toolchain or dependency work.
+# EI-21832562420831737: having DEMANDED an immutable source sha above, refuse to read a tree
+# that holds anything else. Nothing did: the release audit, SBOM and vulnerability gates all
+# inspect the FINISHED bundle, so a cut taken on the shared checkout baked peers' uncommitted
+# bytes into the sidecar while its stamp claimed the pin — and every artifact-side gate
+# passed, because the artifact agreed with itself.
+#
+# The verdict is the flag captured at the phase boundary above, NOT a fresh git call: that
+# capture is the authoritative seam (a release orchestrator may supply it directly), it was
+# taken before any build mutation, and re-measuring here would answer a different question a
+# few lines later. `:-true` fails closed if it is somehow unset. See lib/source-roots.sh for
+# why this refuses rather than warns, why it is satisfiable today (a tracked-clean pinned
+# worktree passes; the shared tree does not — the intended split), and why it deliberately
+# does NOT also require HEAD to equal the pin. Same placement contract as the gate above:
+# before any toolchain or dependency work.
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
-  if ! papercusp_assert_release_source_pinned "$REPO_ROOT" "$_vm_release_build_sha"; then
-    echo "       Refusing to build a release-audited sidecar from unpinned source." >&2
+  if ! papercusp_assert_release_source_clean "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" "$REPO_ROOT"; then
+    echo "       Refusing to build a release-audited sidecar from a dirty source tree." >&2
     exit 2
   fi
 fi
