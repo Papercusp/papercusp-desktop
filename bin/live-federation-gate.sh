@@ -307,6 +307,27 @@ ls -dt /tmp/live-fed-gate-[0-9]* 2>/dev/null | tail -n +$(( GATE_KEEP_RUNS + 1 )
 # content-matrix FAIL was silently MASKED out of the verdict. journald captures both streams.
 log() { echo "[live-fed-gate $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
 
+# EI-21242136971962131 — a storm SKIP/downgrade used to name only a bare loadavg/pressure
+# number ("load 149.53 > gate 77") with nothing attributing it, so "the generator/process
+# fan-out" had to be diagnosed by hand, ad hoc, after the fact (as this EI's own filing was).
+# Call this at every storm decision point to name WHAT is dominating the box in the same
+# line the gate already logs. `ps -eo comm` is the kernel-truncated (15 char) process NAME
+# ONLY — never args/cmd/`/proc/<pid>/cmdline` — so this can never render a secret-bearing
+# command line, however loud a caller's argv gets. Best-effort forensics only: any failure
+# here (ps missing, awk missing, no perms) is swallowed and never touches the verdict.
+log_dominant_workloads() {
+  local out
+  out="$(ps -eo pcpu,rss,comm --no-headers 2>/dev/null \
+    | awk '{cpu[$3]+=$1; rss[$3]+=$2; n[$3]++} END{for (c in cpu) printf "%.0f\t%.0f\t%d\t%s\n", cpu[c], rss[c]/1024, n[c], c}' \
+    | sort -rn -k1,1 2>/dev/null | head -8)" || return 0
+  [ -n "$out" ] || return 0
+  log "DOMINANT WORKLOADS (aggregate %cpu / rss MB / proc count / name — comm only, never argv):"
+  while IFS= read -r wl_line; do
+    [ -n "$wl_line" ] && log "  $wl_line"
+  done <<<"$out"
+  printf '%s\n' "$out" >"$WORK/dominant-workloads.out" 2>/dev/null || true
+}
+
 # ── state + staleness (P-013): a gate that silently skips forever LOOKS green. ──
 # last-green/last-run live in a tiny ops state dir. Deliberately a FILE, not PG: the gate
 # must keep working when the operator/PG is down (EI filing is already best-effort curl).
@@ -1416,6 +1437,7 @@ if awk "BEGIN{exit !($ADMIT_VALUE > $ADMIT_GATE)}"; then
     log "$ADMIT_SIGNAL $ADMIT_VALUE > gate $ADMIT_GATE but GATE_FORCE=1 — proceeding anyway (storm downgrade still armed); $ADMIT_CONTEXT."
   else
     log "SKIP: $ADMIT_SIGNAL $ADMIT_VALUE > gate $ADMIT_GATE — the box is genuinely CPU-contended, so the smokes would be starved; retry next window (not a failure). $ADMIT_CONTEXT."
+    log_dominant_workloads
     check_staleness
     skip_cleanup
     verdict "GATE: SKIPPED ($ADMIT_SIGNAL $ADMIT_VALUE > $ADMIT_GATE; $ADMIT_CONTEXT)"; exit 0
@@ -2641,6 +2663,7 @@ STORM_ACTIVE=0
 awk "BEGIN{exit !($LOAD1_END > $STORM_GATE)}" && STORM_ACTIVE=1
 if [ "$STORM_ACTIVE" = 1 ] && storm_downgrade_eligible; then
   log "STORM: load rose to $LOAD1_END (> STORM_GATE $STORM_GATE) during the run — downgrading RED(${REDS[*]}) to SKIPPED (starvation, not signal). $FRAME_NOTE"
+  log_dominant_workloads
   # WI-37464: a storm downgrade is the SECOND unsuppressed expensive outcome — it costs a FULL
   # heavy run and, before this, stamped nothing at all, so it too re-fired every hour. It is the
   # same CLASS as the starvation downgrade above (environmental, not a verdict, may clear on its
