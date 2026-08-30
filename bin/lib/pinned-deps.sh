@@ -83,8 +83,12 @@ papercusp_pinned_deps_trees() {
   [ -n "$_root" ] || return 0
   [ -d "$_root" ] || return 0
 
+  # ⚠ `-type d` ALONE IS A HOLE, and it is the hole that matters: a node_modules which is a
+  # SYMLINK into another tree is `-type l`, so a directory-only enumeration silently omits
+  # the single worst coupling shape from the gate below — the guard reports clean precisely
+  # when it should refuse. Caught by its own suite, not by review.
   ( cd "$_root" 2>/dev/null || exit 0
-    find . -maxdepth 4 -name node_modules -type d \
+    find . -maxdepth 4 -name node_modules \( -type d -o -type l \) \
       -not -path './.papercusp/*' \
       -not -path './node_modules/*' 2>/dev/null \
       | sed 's#^\./##' \
@@ -157,6 +161,17 @@ papercusp_pinned_deps_snapshot() {
     _tmp="$_dst.pinned-deps-tmp.$$"
     _old="$_dst.pinned-deps-old.$$"
     [ -d "$_src" ] || continue
+
+    # A SYMLINKED dependency tree must not be snapshotted through. `cp -al` implies
+    # --no-dereference, so it would faithfully reproduce the symlink and the "snapshot" would
+    # still point at the donor — decoupled in name only, and silently so. Refusing is also
+    # honest about the alternative: dereferencing with -L would turn a 9-second hardlink farm
+    # into a real 15GB copy of somebody else's tree.
+    if [ -L "$_src" ]; then
+      echo "  REFUSING to snapshot through a symlinked dependency tree: $_rel -> $(readlink "$_src")" >&2
+      _fail=1
+      continue
+    fi
 
     mkdir -p "$(dirname "$_dst")" || { _fail=1; continue; }
     rm -rf "$_tmp" 2>/dev/null
@@ -245,7 +260,7 @@ papercusp_pinned_deps_snapshot_locked() {
     bash "$_self" snapshot "$_donor" "$_snap"
 }
 
-# Usage: papercusp_assert_pinned_deps_decoupled <repo_root> [<allowed_root>]
+# Usage: papercusp_assert_pinned_deps_decoupled <repo_root> [<allowed_root>] [<mountinfo>]
 # Returns 0 when every dependency tree the build will read is backed only by storage inside
 # <repo_root> (or inside <allowed_root>, the declared snapshot root). Otherwise prints a
 # diagnosis to stderr and returns 1. The caller decides how to fail.
@@ -274,10 +289,21 @@ papercusp_pinned_deps_snapshot_locked() {
 # reported as not applicable and the symlink axis still runs — overlayfs is Linux-only, so on
 # a platform without procfs shape (1) cannot exist. That is a statement about the platform,
 # not a guess about this tree, which is why it is not treated as "could not tell".
+#
+# <mountinfo> exists so this gate is TESTABLE — the overlay shape it is built to refuse needs
+# root to create, so without an injectable table the only executable coverage would be a
+# source grep, and a guard nobody can run against a real fixture is a guard nobody has
+# falsified. It is a positional PARAMETER and deliberately not an environment variable: an
+# ambient `PAPERCUSP_..._MOUNTINFO=/dev/null` would silently blind a release gate, whereas an
+# argument has to be passed by the caller, and the producer is guard-tested to pass exactly
+# two. Default is the live table.
 papercusp_assert_pinned_deps_decoupled() {
   local _root="${1:-}"
   local _allowed="${2:-}"
+  local _mountinfo="${3:-}"
   local _rel _path _target _fail=0
+
+  [ -n "$_mountinfo" ] || _mountinfo=/proc/self/mountinfo
 
   if [ -z "$_root" ]; then
     echo "ERROR: papercusp_assert_pinned_deps_decoupled needs <repo_root>." >&2
@@ -312,8 +338,8 @@ $(papercusp_pinned_deps_trees "$_root_real")
 EOF
 
   # --- shape 1: an overlay/bind whose backing storage is outside the pinned tree ---------
-  if [ ! -r /proc/self/mountinfo ]; then
-    echo "note: skipping the mount check — no /proc/self/mountinfo on this platform, where" >&2
+  if [ ! -r "$_mountinfo" ]; then
+    echo "note: skipping the mount check — no $_mountinfo on this platform, where" >&2
     echo "      overlayfs does not exist; the symlink check above still ran." >&2
   else
     local _line
@@ -352,7 +378,7 @@ $(awk -v root="$_root_real" -v allowed="$_allowed_real" '
       report(mp, mountroot);
     }
   }
-' /proc/self/mountinfo)
+' "$_mountinfo")
 EOF
   fi
 
