@@ -489,7 +489,10 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   assert.match(currentTemplate, /<key>KeepAlive<\/key>[\s\S]*?<key>SuccessfulExit<\/key>\s*<false\/>/);
   assert.match(currentTemplate, /<key>WorkingDirectory<\/key>\s*<string>__PAPERCUSP_CURRENT_PAYLOAD__<\/string>/);
   assert.match(currentTemplate, /<key>HOME<\/key>\s*<string>__PAPERCUSP_SERVICE_HOME__<\/string>/);
+  assert.match(currentTemplate, /<key>USERPROFILE<\/key>\s*<string>__PAPERCUSP_SERVICE_HOME__<\/string>/);
+  assert.match(currentTemplate, /<key>PAPERCUSP_RIG_HOME<\/key>\s*<string>__PAPERCUSP_SERVICE_HOME__<\/string>/);
   assert.match(currentTemplate, /<key>PAPERCUSP_RIG_SIDECAR_DIR<\/key>\s*<string>__PAPERCUSP_CURRENT_PAYLOAD__<\/string>/);
+  assert.match(currentTemplate, /<key>PAPERCUSP_HONO_PORT<\/key>\s*<string>__PAPERCUSP_CURRENT_PORT__<\/string>/);
 
   const currentDeclared = [...new Set(currentTemplate.match(/__PAPERCUSP_[A-Z_]+__/g) || [])];
   for (const token of currentDeclared) {

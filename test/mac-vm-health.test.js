@@ -391,7 +391,19 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   assert.match(launcher, /--stop-only\)\s*\n\s*STOP_ONLY=1/);
   assert.match(launcher, /printf '%s\\n' "\$\$" > "\$PIDFILE"/);
   assert.match(launcher, /exec "\$NODE" --heapsnapshot-near-heap-limit=1 "\$SERVE" --ensure/);
-  assert.match(launcher, /STOPPED: exact current-payload operator is offline/);
+  assert.match(
+    launcher,
+    /if \[ "\$STOP_ONLY" = "1" \]; then\s*\n\s*rm -f "\$PIDFILE"\s*\n\s*echo "STOPPED: exact current-payload operator is offline[^\n]+"\s*\n\s*exit 0\s*\nfi/,
+    'an intentional stop must clear the exact PID record and exit before either launch path',
+  );
+
+  const launchdBranch = launcher.indexOf('if [ "$LAUNCHD_RUN" = "1" ]');
+  const supervisedLaunch = launcher.indexOf('launch_operator_under_launchd', launchdBranch);
+  const detachedLaunch = launcher.indexOf('if ! launch_operator; then', supervisedLaunch);
+  assert.ok(
+    launchdBranch >= 0 && supervisedLaunch > launchdBranch && detachedLaunch > supervisedLaunch,
+    'launchd mode must exec the supervised foreground process before the detached fallback path',
+  );
 
   const bootout = composer.indexOf('--bootout-only');
   const deploy = composer.indexOf('--stage $REMOTE_STAGE_Q');
