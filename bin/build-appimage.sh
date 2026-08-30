@@ -769,8 +769,36 @@ fi
 #    embeds it) and package the AppDir. No ELF scan → no crash.
 PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | head -1)"
 [ -n "$PLUGIN" ] || { echo "FATAL: linuxdeploy-plugin-appimage not found in ~/.cache/tauri (did the tauri step run?)" >&2; exit 1; }
+
+# APPIMAGE_EXTRACT_AND_RUN makes the type-2 runtime unpack the plugin under
+# "$TMPDIR/appimage_extracted_<hash>". TMPDIR is normally shared by every build
+# on the host, so two concurrent package steps otherwise select the same runtime
+# directory and one process can observe the other's half-extracted tree (the
+# asymmetric 127/0 failure in EI-21829997763481272). Give this invocation an
+# owned parent directory; the subshell trap removes only that directory after
+# appimagetool exits, including failure paths.
+run_appimage_tool_isolated() (
+  set -u
+  local plugin="${1:?appimagetool plugin path required}"
+  local output="${2:?AppImage output path required}"
+  local appdir="${3:?AppDir path required}"
+  local runtime_tmp
+
+  runtime_tmp="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-appimage-runtime.XXXXXX")" || {
+    echo "FATAL: cannot create the private AppImage runtime directory under ${TMPDIR:-/tmp}" >&2
+    exit 1
+  }
+  trap 'rm -rf -- "$runtime_tmp"' EXIT
+  echo "   AppImage runtime extraction dir: $runtime_tmp"
+  ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 TMPDIR="$runtime_tmp" LDAI_OUTPUT="$output" \
+    "$plugin" --appdir "$appdir"
+)
+
 echo "==> packaging with appimagetool → $OUT"
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$OUT" "$PLUGIN" --appdir "$APPDIR"
+run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR" || {
+  echo "FATAL: appimagetool failed to package $APPDIR" >&2
+  exit 1
+}
 [ -f "$OUT" ] || { echo "FATAL: appimagetool did not produce $OUT" >&2; exit 1; }
 
 # 5. Sign for the Tauri updater (minisign .sig). Best-effort — the AppImage itself

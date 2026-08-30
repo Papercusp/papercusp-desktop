@@ -367,7 +367,9 @@ test('the Linux AppImage producer removes Tauri intermediates before audited pac
   const purgeAt = appimageScript.indexOf(
     'purging Tauri-produced same-version AppImage intermediates before audited packaging',
   );
-  const packageAt = appimageScript.indexOf('LDAI_OUTPUT="$OUT"');
+  const packageAt = appimageScript.indexOf(
+    'run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR"',
+  );
 
   assert.ok(tauriAt >= 0, 'build-appimage.sh must retain the Tauri AppDir producer');
   assert.ok(purgeAt > tauriAt, 'Tauri outputs can only be purged after Tauri finishes producing the AppDir');
