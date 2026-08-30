@@ -61,3 +61,93 @@ papercusp_repo_root() {
 
   ( cd "$_candidate" 2>/dev/null && pwd ) || printf '%s\n' "$_candidate"
 }
+
+# Usage: papercusp_assert_release_source_pinned <repo_root> <build_sha>
+# Returns 0 when <repo_root> is a checkout that is TRACKED-CLEAN and sitting on <build_sha>;
+# otherwise prints a diagnosis to stderr and returns 1. The caller decides how to fail.
+#
+# EI-21832562420831737, the second half. A `vm-release` cut's entire contract is "these
+# bytes came from this immutable sha" — it hard-refuses to start without PAPERCUSP_BUILD_SHA
+# — and until this function nothing checked that the tree it was about to read ACTUALLY WAS
+# that sha, or that it held nothing else. The release audit, the SBOM and the vulnerability
+# gate all inspect the finished bundle; not one of them can see the source it came from.
+#
+# Both failure modes are ordinary here, not exotic:
+#   DIRTY. The sidecar is esbuild-bundled from apps/operator/bin/serve.ts, whose import
+#   graph transitively includes packages/operator-core. Building on the shared checkout
+#   bakes whatever peers happen to have uncommitted into the bundle while the stamp claims
+#   the pin. Measured while writing this: the live tree's tracked-dirty count went 30 -> 2
+#   inside one minute as a git-sync sweep landed. There is no zero-dirty instant to wait
+#   for; four consecutive release cuts failed trying to find one.
+#   MISMATCHED. HEAD is simply not required to equal the pin. The guard further down
+#   (`release-audited sidecar source HEAD moved during build`) catches only MOVEMENT, and
+#   the freshness stamp records the pin by construction now (EI-21826568874232796) — so a
+#   build started on the wrong commit produces an artifact that agrees with itself and is
+#   wrong.
+#
+# WHY REFUSING IS SAFE — a gate is only correct if it is SATISFIABLE, and this one is,
+# today: r15 built and published end-to-end from the tracked-clean pinned worktree
+# ~/.papercusp/p046-pinned. So the pinned-source cut passes and the shared-tree cut is
+# refused, which is the intended split. It fires ONLY under vm-release; dogfood and
+# developer builds never reach it.
+#
+# UNTRACKED FILES ARE DELIBERATELY IGNORED (`--untracked-files=no`, and
+# `--ignore-submodules=untracked` for the same reason one level down). Build outputs,
+# scratch dirs and logs are untracked by design and cannot enter the bundle as source; a
+# gate that tripped on them would be unsatisfiable in exactly the situation it exists for,
+# and an unsatisfiable gate gets bypassed rather than obeyed.
+papercusp_assert_release_source_pinned() {
+  local _root="${1:-}"
+  local _pin="${2:-}"
+  local _head _dirty _line _n
+
+  _pin="${_pin//[[:space:]]/}"
+
+  if ! _head="$(git -C "$_root" rev-parse HEAD 2>/dev/null)"; then
+    echo "ERROR: vm-release source root is not a readable git checkout: $_root" >&2
+    echo "       A release-audited cut must be able to name the commit it built from." >&2
+    return 1
+  fi
+
+  # Fails CLOSED: an unreadable status must never read as clean.
+  if ! _dirty="$(git -C "$_root" status --porcelain --untracked-files=no --ignore-submodules=untracked 2>/dev/null)"; then
+    echo "ERROR: could not read the vm-release source tree's status: $_root" >&2
+    return 1
+  fi
+
+  if [[ -n "$_dirty" ]]; then
+    echo "ERROR: vm-release source tree carries uncommitted tracked changes: $_root" >&2
+    _n=0
+    # A while-read loop, not `| head`: under `set -euo pipefail` a pipe closed early by
+    # head can SIGPIPE its producer and take the whole build down on the DIAGNOSTIC path.
+    while IFS= read -r _line; do
+      _n=$((_n + 1))
+      if [[ "$_n" -le 20 ]]; then
+        echo "         $_line" >&2
+      fi
+    done <<< "$_dirty"
+    if [[ "$_n" -gt 20 ]]; then
+      echo "         … and $((_n - 20)) more" >&2
+    fi
+    echo "       Those bytes would be baked into the bundle while its stamp claims $_pin." >&2
+    echo "       Cut from a pinned worktree instead of the shared checkout:" >&2
+    echo "         git -C <repo> worktree add --detach <path> $_pin" >&2
+    echo "       then run THAT worktree's copy of bin/build-desktop-sidecar.sh." >&2
+    return 1
+  fi
+
+  # Prefix match in either direction, matching how the release wrapper compares a short
+  # stamp against a full pin.
+  case "$_head" in
+    "$_pin"*) return 0 ;;
+  esac
+  case "$_pin" in
+    "$_head"*) return 0 ;;
+  esac
+
+  echo "ERROR: vm-release source tree is not on the pinned commit: $_root" >&2
+  echo "       PAPERCUSP_BUILD_SHA = $_pin" >&2
+  echo "       tree HEAD           = $_head" >&2
+  echo "       Check out the pin before building, or pass the sha this tree is actually on." >&2
+  return 1
+}

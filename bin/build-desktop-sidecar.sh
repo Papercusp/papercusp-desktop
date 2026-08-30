@@ -162,6 +162,21 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
   echo "       Pass the immutable source SHA and desktop version explicitly; refusing before toolchain work." >&2
   exit 2
 fi
+# EI-21832562420831737: having DEMANDED an immutable source sha above, check that the tree
+# we are about to read actually IS it, and holds nothing else. Nothing did: the release
+# audit, SBOM and vulnerability gates all inspect the finished bundle, so a cut taken on
+# the shared checkout baked peers' uncommitted bytes into the sidecar while its stamp
+# claimed the pin — and every artifact-side gate passed, because the artifact agreed with
+# itself. See lib/source-roots.sh for why this refuses rather than warns, and for why it
+# is satisfiable today (a tracked-clean pinned worktree passes; the shared tree does not,
+# which is the intended split). Same placement contract as the gate above: before any
+# toolchain or dependency work.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  if ! papercusp_assert_release_source_pinned "$REPO_ROOT" "$_vm_release_build_sha"; then
+    echo "       Refusing to build a release-audited sidecar from unpinned source." >&2
+    exit 2
+  fi
+fi
 unset _vm_release_build_sha _vm_release_desktop_version
 
 # EI-20228051309163209: release builders are invoked from several environments
