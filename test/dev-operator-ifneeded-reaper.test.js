@@ -33,7 +33,11 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const script = path.join(root, 'bin/dev-operator-ifneeded.sh');
+// PROBE_SCRIPT lets `scripts/mutation-probe.sh` point this suite at a COPY of
+// the wrapper outside the tree, so a falsifiability probe never has to mutate
+// the tracked file (git-sync sweeps the whole tree on a schedule and would
+// commit the mutant). Defaults to the real script, so normal runs are unchanged.
+const script = process.env.PROBE_SCRIPT || path.join(root, 'bin/dev-operator-ifneeded.sh');
 
 /** Can we actually take this port right now? Asks the kernel, rather than guessing. */
 function bindable(port) {
@@ -84,6 +88,30 @@ async function waitFor(check, { timeoutMs = 10_000, stepMs = 100 } = {}) {
     if (Date.now() >= deadline) return undefined;
     await new Promise((r) => setTimeout(r, stepMs));
   }
+}
+
+/**
+ * Wait for `re` to appear in an accumulating stderr buffer, then return the match.
+ *
+ * EI-21895475714216965. The marker file and `stderr` are two INDEPENDENT
+ * observation channels: the marker is read synchronously off the filesystem,
+ * while stderr only lands when the child's pipe is drained and the 'data'
+ * handler runs. Waiting on the marker and then reading `stderr` in the very
+ * next statement therefore asserts on a buffer that has never been waited for
+ * — green whenever delivery happens to have kept up, red when it has not.
+ * That is a false-red generator on exactly the busiest runs, which is where
+ * the green-checkpoint gate lives, and a red meaning "the box was loaded" is
+ * indistinguishable at read time from "supervision is broken".
+ *
+ * This does NOT weaken the assertion: the pattern must still appear, and a
+ * wrapper that never logs it still fails — just at the bound instead of
+ * instantly. It only stops the test from reading the channel before it is
+ * legible. `waitFor(() => re.test(stderr))` was already the idiom used by the
+ * never-freed case in this same file; this factors it so every site shares it.
+ */
+async function waitForStderr(getStderr, re, { timeoutMs = 10_000 } = {}) {
+  const hit = await waitFor(() => getStderr().match(re) ?? undefined, { timeoutMs });
+  return hit;
 }
 
 function pidAlive(pid) {
@@ -264,7 +292,9 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
     assert(Number.isInteger(sleeperPid) && sleeperPid > 1, 'wrapper never spawned the dev stack past the guard');
     assert(pidAlive(sleeperPid), 'sleeper should be alive');
 
-    const redirectMatch = stderr.match(/using :(\d+) instead/);
+    // EI-21895475714216965: the marker file and stderr are independent
+    // channels — wait for the redirect line instead of reading it instantly.
+    const redirectMatch = await waitForStderr(() => stderr, /using :(\d+) instead/, { timeoutMs: 10_000 });
     assert(redirectMatch, `wrapper did not log a reserved-port redirect — stderr was: ${stderr}`);
     assert.match(stderr, new RegExp(`:${reservedPort} is papercup-bg-host's reserved port`));
     assert.notEqual(Number(redirectMatch[1]), reservedPort, 'wrapper redirected to the SAME reserved port');
@@ -332,7 +362,14 @@ test('supervision loop: a child-only exit 0 restarts while the wrapper remains l
       { timeoutMs: 12_000 },
     );
     assert(restarted, `child exit 0 ended the wrapper instead of restarting — stderr was: ${stderr}`);
-    assert.match(stderr, /operator dev server exited code=0 — restarting/);
+    // EI-21895475714216965: wait for the log line rather than reading stderr
+    // the instant the marker file trips — see waitForStderr.
+    const loggedRestart = await waitForStderr(
+      () => stderr,
+      /operator dev server exited code=0 — restarting/,
+      { timeoutMs: 10_000 },
+    );
+    assert(loggedRestart, `wrapper did not log the code=0 restart — stderr was: ${stderr}`);
   } finally {
     if (wrapper && !wrapper.killed) {
       try {
