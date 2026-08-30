@@ -103,3 +103,13 @@ __pycache__/
 # here (same reasoning as the .papercusp/ block, WI-4419).
 .vitest-tmp/
 **/.vitest-tmp/
+
+# EI-21266614790118256: defense-in-depth only — live-federation-gate.sh's
+# gate_selftest() no longer creates this dotfile inside bin/lib/ at all (it
+# snapshots into its own untracked $WORK scratch dir instead, injecting
+# GATE_SELFTEST_LIB_DIR so the selftest still resolves its bin/lib siblings).
+# 13 stale copies from earlier runs were found already COMMITTED here (a git-sync
+# sweep landing in the file's brief create→exec→rm window can catch it) and were
+# removed in the same change. Keep this pattern ignored so any future regression
+# to an in-place bin/lib snapshot can never be silently re-committed.
+bin/lib/.gate-selftest-snapshot-*
