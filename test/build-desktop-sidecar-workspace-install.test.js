@@ -499,6 +499,18 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
     assert.ok(installer.includes(`//${token}/`), `installer does not substitute current-payload token ${token}`);
   }
 
+  // EI-218402: the rig's current-payload service executes the checked-in
+  // launcher + bundled Node directly. It must remain installable when the
+  // unrelated native Tauri binary is absent, while ordinary packaged-service
+  // mode still fails closed without that binary.
+  const currentBranchStart = installer.indexOf('if [ -n "$CURRENT_PAYLOAD" ] || [ -n "$CURRENT_LAUNCHER" ]');
+  const packagedBranchStart = installer.indexOf('\nelse\n  [ -x "$BINARY" ]', currentBranchStart);
+  assert.ok(currentBranchStart >= 0 && packagedBranchStart > currentBranchStart);
+  const currentPreflight = installer.slice(currentBranchStart, packagedBranchStart);
+  assert.doesNotMatch(currentPreflight, /\[ -x "\$BINARY" \]/);
+  assert.match(currentPreflight, /\[ -x "\$\{SIDECAR_DIR\}\/bin\/node" \]/);
+  assert.match(installer.slice(packagedBranchStart), /\[ -x "\$BINARY" \]/);
+
   const unload = installer.indexOf('unload_if_present\nif [ "$SERVICE_KIND" = "current" ]');
   const exactStop = installer.indexOf('"$CURRENT_LAUNCHER" --stop-only');
   const bootstrap = installer.indexOf('launchctl bootstrap system "$PLIST_DEST"');

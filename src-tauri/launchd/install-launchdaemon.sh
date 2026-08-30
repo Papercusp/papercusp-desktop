@@ -104,7 +104,12 @@ if [ -n "$CURRENT_PAYLOAD" ] || [ -n "$CURRENT_LAUNCHER" ]; then
   TEMPLATE="${LAUNCHD_DIR}/${LABEL}.current.plist.template"
   [ -x "$CURRENT_LAUNCHER" ] || { echo "FATAL: ${CURRENT_LAUNCHER} is missing or not executable" >&2; exit 1; }
   [ -f "${CURRENT_PAYLOAD}/serve.mjs" ] || { echo "FATAL: ${CURRENT_PAYLOAD}/serve.mjs is missing" >&2; exit 1; }
-  [ -x "$BINARY" ] || { echo "FATAL: ${BINARY} is missing or not executable — install Papercusp Server first" >&2; exit 1; }
+  # EI-21840249871617777: current-payload mode never executes the native Tauri
+  # binary. Its plist runs CURRENT_LAUNCHER, which execs the bundle's Node
+  # runtime against CURRENT_PAYLOAD/serve.mjs. The vm-rig legitimately carries
+  # those sidecar resources without Contents/MacOS/papercusp-server; requiring
+  # that unrelated binary made the persistent repair impossible after reboot
+  # and left the old direct-node LaunchDaemon serving a stale schema instead.
   [ -x "${SIDECAR_DIR}/bin/node" ] || { echo "FATAL: ${SIDECAR_DIR}/bin/node is missing or not executable" >&2; exit 1; }
 else
   [ -x "$BINARY" ] || { echo "FATAL: ${BINARY} is missing or not executable — install Papercusp Server first" >&2; exit 1; }
