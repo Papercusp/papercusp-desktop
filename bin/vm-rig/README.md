@@ -2,16 +2,31 @@
 
 The strongest LOCAL federation proof we have since Hetzner access was lost
 (owner 2026-07-03; D-001 of `shared-pot-p2p-release-readiness-2026-07-03`):
-the tower's live operator (`:3070`) federating with a **separate OS in a
-QEMU/KVM VM** across a real bridge hop. This is the P-059 drill rig, rescued
-from hand-rolled `/tmp` scripts (which a VM reboot deletes — exactly how the
-original `vmcall.sh` got lost).
+the tower's swarm/federation substrate (`papercup-bg-host.service`, bg-host
+substrate primary — **not** the `:3070` release operator; see below)
+federating with a **separate OS in a QEMU/KVM VM** across a real bridge hop.
+This is the P-059 drill rig, rescued from hand-rolled `/tmp` scripts (which a
+VM reboot deletes — exactly how the original `vmcall.sh` got lost).
+
+> ⚠ **`:3070` (`papercup-dev-api.service`, the GREEN release operator) is
+> NOT the swarm end.** Its workers carry no `PAPERCUSP_DHT_BOOTSTRAP` and no
+> marker file, so they join the **PUBLIC DHT by design** (deliberate — see
+> `packages/operator-core/lib/identity/swarm-keypair.ts`: the release
+> process joins the public DHT while staging joins an isolated bootstrap
+> DHT, which is what keeps their shared machine-fingerprint swarm identity
+> from colliding). `:3070` IS still the code-fix/deploy target (see
+> Gotchas), but it never peers with this rig's VM — silence on `:3070`
+> federation checks is expected, not a fault. A large share of a past
+> investigation (WI-4070) went into chasing a `peer_connected` entry on
+> `:3070`/`:3170` that was only ever going to appear in
+> `papercup-bg-host`'s journal, and nearly produced a false "the tower end
+> is ephemeral" finding that had to be retracted.
 
 ## Topology
 
 | End   | What                                                            | Address                                   |
 | ----- | --------------------------------------------------------------- | ----------------------------------------- |
-| tower | live operator (`papercup-dev-api.service`, `:3070`)             | `172.31.44.1` (host side of `macbr0`)     |
+| tower | swarm/federation substrate: `papercup-bg-host.service` (bg-host substrate primary, default port `:3270` — see Env knobs; NOT `:3070`) | `172.31.44.1` (host side of `macbr0`)     |
 | VM    | packaged **Papercusp Server.app** on the macOS (Sonoma) QEMU VM | `172.31.44.2`, ssh `aviweiss@172.31.44.2` |
 
 - Bridge: `macbr0` (`172.31.44.1/24`), VM NIC `mactap0`.
