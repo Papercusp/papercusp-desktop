@@ -4383,7 +4383,52 @@ case "$_PUI_WASM_RUSTFLAGS" in
   *-fuse-ld=lld*) echo "ERROR: native LLD cc-driver flag leaked into wasm32-wasip1 RUSTFLAGS" >&2; exit 1 ;;
 esac
 
-# 1. pui (apps/tui) — release build for the TARGET triple.
+# One release generation must stamp BOTH artifacts. Prefer the immutable cut pin
+# because this shared checkout can advance while the build is running; the
+# captured source provenance is the fallback for a direct dogfood build.
+_PUI_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-${PROVENANCE_SOURCE_GIT_HEAD:-}}"
+if [[ -z "${_PUI_BUILD_SHA//[[:space:]]/}" ]]; then
+  _PUI_BUILD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+fi
+case "${PROVENANCE_SOURCE_GIT_DIRTY:-}" in
+  false) _PUI_BUILD_DIRTY=0 ;;
+  true)  _PUI_BUILD_DIRTY=1 ;;
+  *)
+    if [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=normal -- apps/tui apps/pui-zellij-plugin apps/pui-companion-proto)" ]]; then
+      _PUI_BUILD_DIRTY=1
+    else
+      _PUI_BUILD_DIRTY=0
+    fi
+    ;;
+esac
+_PUI_BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date +%s)}"
+[[ "$_PUI_BUILD_EPOCH" =~ ^[0-9]+$ && "$_PUI_BUILD_EPOCH" -gt 0 ]] \
+  || { echo "ERROR: PUI build epoch is not a positive integer: $_PUI_BUILD_EPOCH" >&2; exit 1; }
+
+# 1. companion zellij plugin (wasm32-wasip1). Build it FIRST so the native
+# binary can embed the exact companion digest rather than `unknown`.
+rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
+( exec 8>&- 9>&-; cd "$REPO/apps/pui-zellij-plugin" && \
+  PUI_BUILD_SHA="$_PUI_BUILD_SHA" \
+  PUI_BUILD_DIRTY="$_PUI_BUILD_DIRTY" \
+  PUI_BUILD_EPOCH="$_PUI_BUILD_EPOCH" \
+  RUSTFLAGS="$_PUI_WASM_RUSTFLAGS" \
+  cargo build --release --target wasm32-wasip1 )
+WASM=""
+for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
+  [[ -f "$_c" ]] && WASM="$_c" && break
+done
+[[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
+cp "$WASM" "$SIDECAR_DIR/pui-companion.wasm"
+# shellcheck source=lib/portable-sha256.sh
+source "$HERE/lib/portable-sha256.sh"
+_PUI_COMPANION_SHA256="$(papercusp_portable_sha256 "$SIDECAR_DIR/pui-companion.wasm")"
+[[ "$_PUI_COMPANION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "ERROR: could not hash the built pui companion" >&2; exit 1; }
+echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
+
+# 2. pui (apps/tui) — release build for the TARGET triple, stamped with the
+# same source/epoch and the just-built companion digest.
 # Close both lock fds in the cargo subtree. RUSTC_WRAPPER may start the
 # long-lived sccache server; if that daemon inherits the build-lock fd 8 it
 # keeps later builders wedged after this shell exits. fd 9 is closed too for
@@ -4411,10 +4456,24 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
     echo "      curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C \"\$HOME/.papercusp\" && mv \"\$HOME/.papercusp/zig-linux-x86_64-0.13.0\" \"\$HOME/.papercusp/zig\")" >&2
     exit 1
   }
-  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && PATH="$_zig_dir:$PATH" SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo zigbuild --release --target "$_pui_triple" )
+  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && \
+    PATH="$_zig_dir:$PATH" \
+    SDKROOT="$HOME/.papercusp/macos-sdk/MacOSX.sdk" \
+    PUI_BUILD_SHA="$_PUI_BUILD_SHA" \
+    PUI_BUILD_DIRTY="$_PUI_BUILD_DIRTY" \
+    PUI_BUILD_EPOCH="$_PUI_BUILD_EPOCH" \
+    PUI_COMPANION_SHA256="$_PUI_COMPANION_SHA256" \
+    RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" \
+    cargo zigbuild --release --target "$_pui_triple" )
   _pui_target_sub="$_pui_triple/release/pui"
 else
-  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" cargo build --release )
+  ( exec 8>&- 9>&-; cd "$REPO/apps/tui" && \
+    PUI_BUILD_SHA="$_PUI_BUILD_SHA" \
+    PUI_BUILD_DIRTY="$_PUI_BUILD_DIRTY" \
+    PUI_BUILD_EPOCH="$_PUI_BUILD_EPOCH" \
+    PUI_COMPANION_SHA256="$_PUI_COMPANION_SHA256" \
+    RUSTFLAGS="${RUSTFLAGS:-} $_PUI_REMAP" \
+    cargo build --release )
   _pui_target_sub="release/pui"
 fi
 # Existence-checked candidates (NOT `find` over a maybe-missing dir — under
@@ -4428,16 +4487,19 @@ done
 [[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
 cp "$PUI_BIN" "$SIDECAR_DIR/bin/pui"; chmod 755 "$SIDECAR_DIR/bin/pui"
 echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
-# 2. companion zellij plugin (wasm32-wasip1) — plugin API version-coupled to zellij 0.44.3.
-rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( exec 8>&- 9>&-; cd "$REPO/apps/pui-zellij-plugin" && RUSTFLAGS="$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1 )
-WASM=""
-for _c in "$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
-  [[ -f "$_c" ]] && WASM="$_c" && break
-done
-[[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
-cp "$WASM" "$SIDECAR_DIR/pui-companion.wasm"
-echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
+
+# The same internal writer the P-021 local install/update command uses emits a
+# release-relative manifest. The signed bundle may move from a staging dir to
+# /opt/papercusp/runtime/releases/<version> without invalidating its paths.
+python3 "$REPO/apps/tui/scripts/write-install-manifest.py" write \
+  --manifest "$SIDECAR_DIR/pui-install.json" \
+  --source-sha "$_PUI_BUILD_SHA" \
+  --source-dirty "$_PUI_BUILD_DIRTY" \
+  --built-at-epoch "$_PUI_BUILD_EPOCH" \
+  --binary "$SIDECAR_DIR/bin/pui" \
+  --companion "$SIDECAR_DIR/pui-companion.wasm" \
+  --relative-paths
+echo "    ✓ generation manifest → sidecar/pui-install.json"
 # 3. zellij 0.44.3 — the plugin API is version-coupled; must match EXACTLY.
 #    OS-aware triple: Linux uses the STATIC musl build (libc-independent → portable
 #    across distros); macOS uses apple-darwin (matching bin/mac-vm-build.sh).
