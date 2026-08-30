@@ -51,6 +51,7 @@ TESTS=(
   rust-path-remap.selftest.sh
   disk-preflight.selftest.sh
   mac-vm-fresh-state.selftest.sh
+  streak-escalation.selftest.sh
 )
 
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.
