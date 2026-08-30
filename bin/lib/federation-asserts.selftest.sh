@@ -12,7 +12,15 @@
 # frameworks don't host shell units. The full rig (the *.sh smokes) is the
 # integration test.
 set -uo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# EI-21266614790118256: gate_selftest() (live-federation-gate.sh) now runs this
+# script from an immutable copy OUTSIDE bin/lib/ (its own untracked $WORK
+# scratch dir, not the git-tracked source tree) so a desktop auto-commit sweep
+# can never catch the ephemeral snapshot mid-run. It injects GATE_SELFTEST_LIB_DIR
+# pointing at the REAL bin/lib so this script still resolves federation-asserts.sh
+# and its ../ driver siblings exactly as if it were running in place. A bare
+# manual invocation (bash bin/lib/federation-asserts.selftest.sh) has no such
+# override and falls back to its own on-disk location, unchanged.
+DIR="${GATE_SELFTEST_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # shellcheck source=federation-asserts.sh
 source "$DIR/federation-asserts.sh"
 set +e   # this self-test owns its own exit codes (asserts may intentionally fail a probe)
@@ -829,9 +837,12 @@ fi
 # this coupling silently defeats the wall's stated intent.
 # Anchored to the PROPERTY — the guard enclosing the repack must consult the local-matrix
 # admission predicate — not to the exact condition text, so a reworded but correct guard passes.
-repack_ln="$(grep -n 'dpkg-deb -b pkg "\$GATE_DEB"' "$gate_file" | head -1 | cut -d: -f1)"
+# Pattern tolerates repack FLAGS changing (e.g. -Zgzip added since this guard was
+# written) — anchored to "repacks pkg/ into $GATE_DEB", not the exact flag set,
+# for the same reason the guard-consult check below is anchored to a property.
+repack_ln="$(grep -nE 'dpkg-deb[^|]* -b pkg "\$GATE_DEB"' "$gate_file" | head -1 | cut -d: -f1)"
 if [ -z "$repack_ln" ]; then
-  bad "live-federation-gate no longer contains the .deb repack (dpkg-deb -b pkg \"\$GATE_DEB\") — the EI-20580419609576585 guard cannot verify anything"
+  bad "live-federation-gate no longer contains the .deb repack (dpkg-deb ... -b pkg \"\$GATE_DEB\") — the EI-20580419609576585 guard cannot verify anything"
 else
   repack_guard="$(head -n "$repack_ln" "$gate_file" | grep -n '^  if \[ ' | tail -1 | cut -d: -f2-)"
   if grep -q 'local_matrix_due' <<<"$repack_guard"; then
