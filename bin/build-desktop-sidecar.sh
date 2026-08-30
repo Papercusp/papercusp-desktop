@@ -183,6 +183,28 @@ fi
 # does NOT also require HEAD to equal the pin. Same placement contract as the gate above:
 # before any toolchain or dependency work.
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  # EI-21904084277182116 / D-186: a release cut does not consume the dependency
+  # generation, so producing one is pure cost — and until now the ONLY thing
+  # switching it off was each orchestrator remembering to export this variable.
+  # Nothing set it here and nothing warned when it was missing, so a cut that
+  # forgot did not fail or degrade: it silently walked every manifest and copied
+  # every tree, and emitted a byte-identical artifact. A cost regression invisible
+  # in its own output is one only a bystander can detect, which is exactly how
+  # this was found — on 2026-08-30 a cut of mine omitted the export, spent 6m54s
+  # copying 86 trees (11.3 GB read / 15.9 GB written), and a peer watching host
+  # PSI opened an urgent escalation about the IO.
+  #
+  # Setting it HERE makes skipping a property of BEING a release cut rather than
+  # of the caller having read D-186. `:-1` keeps the escape hatch honest: an
+  # orchestrator that genuinely wants a generation exports 0 deliberately.
+  #
+  # Scope note: D-186's text says "a PINNED release cut", while its measured
+  # rationale — zero consumers anywhere in the release path — is broader. This
+  # enforces at the vm-release profile, slightly wider than D-186's literal
+  # words; that widening is recorded as its own Decision rather than folded in
+  # silently. Read it there before narrowing this back.
+  export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
+
   if ! papercusp_assert_release_source_clean "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" "$REPO_ROOT"; then
     echo "       Refusing to build a release-audited sidecar from a dirty source tree." >&2
     exit 2
