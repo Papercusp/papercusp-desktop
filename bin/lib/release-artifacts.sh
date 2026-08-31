@@ -628,6 +628,176 @@ release_artifacts_find_provenance() {
   return 1
 }
 
+# Select the GUI and Server installers that the canonical installed-artifact
+# verifier can exercise.  Updater containers (.AppImage/.app.tar.gz) remain in
+# the publish set and are bound by the receipt, but they are not silently
+# substituted for an installer.  A Windows normalized Server zip is similarly
+# resolved back to its raw setup.exe sibling, which is what the VM actually
+# installs; the zip's member bytes are checked by the receipt assertion.
+release_artifacts_smoke_inputs() {
+  local platform="${1:-}" f name dir gui="" server=""
+  shift 2>/dev/null || return 2
+  case "$platform" in
+    linux)
+      for f in "$@"; do
+        name="$(basename "$f")"
+        [[ "$name" == *.sig || "$name" == *.AppImage ]] && continue
+        if [[ "$name" == *.deb ]]; then
+          if [[ "$name" == *[Ss]erver* ]]; then server="$f"; elif [[ -z "$gui" ]]; then gui="$f"; fi
+        fi
+      done
+      ;;
+    mac)
+      for f in "$@"; do
+        name="$(basename "$f")"
+        [[ "$name" == *.sig || "$name" == *.app.tar.gz ]] && continue
+        if [[ "$name" == *.dmg ]]; then
+          if [[ "$name" == *[Ss]erver* ]]; then server="$f"; elif [[ -z "$gui" ]]; then gui="$f"; fi
+        fi
+      done
+      ;;
+    windows)
+      for f in "$@"; do
+        name="$(basename "$f")"
+        [[ "$name" == *.sig || "$name" == *.bin || "$name" == *-setup.zip ]] && continue
+        if [[ "$name" == *[Ss]erver* && "$name" == *-setup.exe ]]; then
+          server="$f"
+        elif [[ "$name" == *-setup.exe || "$name" == *.msi ]]; then
+          [[ -z "$gui" ]] && gui="$f"
+        fi
+      done
+      # The normalized zip is the published Server object, but the raw setup
+      # stub remains beside it for the install proof.  Require exactly one
+      # candidate so a stale same-version stub cannot be selected by order.
+      if [[ -z "$server" && -n "$gui" ]]; then
+        dir="$(dirname "$gui")"
+        shopt -s nullglob
+        local -a candidates=( "$dir"/*Server*-setup.exe "$dir"/*server*-setup.exe )
+        shopt -u nullglob
+        if (( ${#candidates[@]} == 1 )); then server="${candidates[0]}"; fi
+      fi
+      ;;
+    *) return 2 ;;
+  esac
+  [[ -n "$gui" && -n "$server" ]] || {
+    echo "release-artifacts: $platform smoke needs one GUI installer and one matching Server installer (GUI='${gui:-<missing>}' Server='${server:-<missing>}')." >&2
+    return 1
+  }
+  printf '%s\n%s\n' "$gui" "$server"
+}
+
+# Run a real platform verifier when a receipt is absent/stale, then require the
+# receipt it produced.  This keeps hardware orchestration out of the manifest
+# generator while making the publish hand-off self-driving: a normal publish
+# invokes the existing install-and-relaunch verifier; remote rigs can provide
+# PAPERCUSP_PLATFORM_SMOKE_CMD, which receives positional args
+# platform/version/tag/gui/server/provenance and must still write the shared
+# receipt.  A pre-existing valid receipt is reused, so re-publishing a cut does
+# not reinstall an already-verified build.
+release_artifacts_run_platform_smoke() {
+  local tag="${1:-}" version="${2:-}" platform="${3:-}" f provenance inputs gui server
+  shift 3 2>/dev/null || return 2
+  [[ $# -gt 0 ]] || return 1
+
+  if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
+    [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-}" \
+       && "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON//[[:space:]]/}" != "" ]] || {
+      echo "release-artifacts: PAPERCUSP_SKIP_PLATFORM_SMOKE=1 requires PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON (hardware/decision audit)." >&2
+      return 1
+    }
+    echo "release-artifacts: WARNING — platform smoke gate OVERRIDDEN: ${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON}" >&2
+    return 0
+  fi
+  if [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-}" && "${PAPERCUSP_SKIP_PLATFORM_SMOKE}" != "0" ]]; then
+    echo "release-artifacts: PAPERCUSP_SKIP_PLATFORM_SMOKE must be exactly 0 or 1." >&2
+    return 2
+  fi
+
+  # A valid receipt is already the verifier's durable result; do not repeat a
+  # potentially destructive install on a re-publish.
+  if release_artifacts_assert_smoke_receipts "$tag" "$version" "$@" >/dev/null 2>&1; then
+    echo "release-artifacts: existing platform smoke receipt is current; verifier run reused"
+    return 0
+  fi
+
+  provenance="$(release_artifacts_find_provenance "$@" 2>/dev/null || true)"
+  [[ -n "$provenance" ]] || {
+    echo "release-artifacts: cannot run $platform smoke without build-provenance.json." >&2
+    return 1
+  }
+  if [[ -n "${PAPERCUSP_PLATFORM_SMOKE_CMD:-}" ]]; then
+    echo "release-artifacts: running custom $platform platform smoke verifier"
+    PAPERCUSP_PLATFORM_SMOKE_PLATFORM="$platform" \
+    PAPERCUSP_PLATFORM_SMOKE_VERSION="$version" \
+    PAPERCUSP_PLATFORM_SMOKE_TAG="$tag" \
+    PAPERCUSP_PLATFORM_SMOKE_PROVENANCE="$provenance" \
+      bash -c "$PAPERCUSP_PLATFORM_SMOKE_CMD" -- "$platform" "$version" "$tag" "" "" "$provenance"
+    local custom_rc=$?
+    [[ "$custom_rc" -eq 0 ]] || {
+      echo "ERROR: custom $platform platform smoke verifier failed (exit $custom_rc)." >&2
+      return 1
+    }
+  else
+    inputs="$(release_artifacts_smoke_inputs "$platform" "$@" 2>&1)" || {
+      echo "$inputs" >&2
+      echo "       Provide PAPERCUSP_PLATFORM_SMOKE_CMD for a role-specific rig, or use the explicit reasoned hardware override." >&2
+      return 1
+    }
+    gui="$(printf '%s\n' "$inputs" | sed -n '1p')"
+    server="$(printf '%s\n' "$inputs" | sed -n '2p')"
+    local verifier="${PAPERCUSP_PLATFORM_SMOKE_VERIFIER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install-and-relaunch-verify.sh}"
+    [[ -x "$verifier" ]] || {
+      echo "release-artifacts: canonical platform smoke verifier is missing or not executable: $verifier" >&2
+      return 1
+    }
+    echo "release-artifacts: running $platform platform smoke verifier: $(basename "$verifier")"
+    "$verifier" \
+      --platform "$platform" \
+      --artifact "$gui" \
+      --server-artifact "$server" \
+      --expected-version "$version" \
+      --smoke-receipt-tag "$tag" \
+      --smoke-provenance "$provenance" \
+      --json
+    local verifier_rc=$?
+    [[ "$verifier_rc" -eq 0 ]] || {
+      echo "ERROR: $platform platform smoke verifier failed (exit $verifier_rc) — refusing publication." >&2
+      return 1
+    }
+  fi
+  release_artifacts_assert_platform_smoke_receipt "$tag" "$version" "$platform" "$@"
+}
+
+# Group the artifact set by physical platform and run the above gate once per
+# group. This is the invocation counterpart to release_artifacts_assert_smoke_receipts;
+# keeping both classifiers in one helper prevents a new extension from being
+# accepted by one path and skipped by the other.
+release_artifacts_run_smoke_receipts() {
+  local tag="${1:-}" version="${2:-}" f name classified=0
+  shift 2 2>/dev/null || return 2
+  if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
+    release_artifacts_assert_smoke_receipts "$tag" "$version" "$@"
+    return $?
+  fi
+  local -a linux_artifacts=() windows_artifacts=() mac_artifacts=()
+  for f in "$@"; do
+    name="$(basename "$f")"
+    [[ "$name" == *.sig ]] && continue
+    case "$name" in
+      *.AppImage|*.deb) linux_artifacts+=("$f"); classified=1 ;;
+      *.dmg|*.app.tar.gz) mac_artifacts+=("$f"); classified=1 ;;
+      *.exe|*.msi|*-setup.zip|*-setup-*.bin) windows_artifacts+=("$f"); classified=1 ;;
+    esac
+  done
+  [[ "$classified" == "1" ]] || {
+    echo "release-artifacts: artifact ledger contains no platform payloads to smoke-check." >&2
+    return 1
+  }
+  [[ ${#linux_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" linux "${linux_artifacts[@]}" || return $?
+  [[ ${#windows_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" windows "${windows_artifacts[@]}" || return $?
+  [[ ${#mac_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" mac "${mac_artifacts[@]}" || return $?
+}
+
 # ── Durable release retention ────────────────────────────────────────────────
 # A target-dir slot's flock only protects a live launcher.  Once that launcher
 # exits, a later cleanup can mistake a completed cut for an abandoned cache and
