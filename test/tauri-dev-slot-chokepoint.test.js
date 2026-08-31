@@ -397,7 +397,19 @@ test('no launcher routes around the chokepoint with a bare `tauri dev`', () => {
       // came up" to their diagnostics, and a guard that cries wolf on error prose is
       // one somebody eventually deletes. An invocation is unquoted by construction
       // (`tauri dev --config '{...}'` keeps its command words outside the quotes).
-      const code = line.replace(/^\s*#.*$/, '').replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+      // `#` is only HALF the comment syntax in scope. launcherFiles() scans `<repo>/scripts`,
+      // which is overwhelmingly `.mjs` — so a JavaScript `//` comment discussing `tauri dev`
+      // was read as executable code and reported as an offender (WI-1759397: a comment added
+      // to scripts/affected-tests.mjs on 2026-08-31 red @papercusp/desktop::test, and with it
+      // the affected radius of every unrelated change touching this workspace — exactly the
+      // cries-wolf failure the note above warns about, arriving through the dialect it did
+      // not cover). Anchored `^\s*` like the `#` rule, so a real invocation sharing a line
+      // with a trailing comment is still caught rather than silently stripped away.
+      const code = line
+        .replace(/^\s*#.*$/, '')
+        .replace(/^\s*\/\/.*$/, '')
+        .replace(/'[^']*'/g, "''")
+        .replace(/"[^"]*"/g, '""');
       if (!/\btauri\s+dev\b/.test(code)) return;
       // `npm run tauri -- dev` (and `npm run tauri dev`) IS the chokepoint.
       if (/npm\s+run\s+tauri\b/.test(code)) return;
