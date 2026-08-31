@@ -664,6 +664,7 @@ BUILD_PGID=""
 ARCHIVE_TMP=""
 ARCHIVE_SIG_TMP=""
 ARCHIVE_SIG_PUBLISHED=""
+DEB_BUILD_MARKER=""
 stop_build_group() {
   if [ -n "$BUILD_PGID" ] && kill -0 "-$BUILD_PGID" 2>/dev/null; then
     echo "==> stopping build process group $BUILD_PGID (so it cannot orphan into the shared staging dir)" >&2
@@ -681,6 +682,9 @@ stop_build_group() {
   fi
   if [ -n "$ARCHIVE_SIG_TMP" ]; then
     rm -f -- "$ARCHIVE_SIG_TMP"
+  fi
+  if [ -n "$DEB_BUILD_MARKER" ]; then
+    rm -f -- "$DEB_BUILD_MARKER"
   fi
   # The signature is published first and the .deb is the discoverable commit
   # marker. Roll back a signature-only publication after any ordinary failure;
@@ -702,6 +706,18 @@ if ! flock -w "$BUNDLE_LOCK_WAIT" 9; then
   exit 5
 fi
 echo "==> holding deb bundle lock ($BUNDLE_LOCK)"
+
+# Establish the artifact freshness boundary only AFTER acquiring the bundle
+# mutex. Every pre-existing .deb is older than this marker. Sleeping across one
+# whole timestamp tick makes the comparison reliable even on a filesystem with
+# one-second mtime resolution; a build that emits nothing can no longer fall
+# back to an older package and archive it under a fresh timestamp/source SHA.
+mkdir -p "$DEB_DIR"
+DEB_BUILD_MARKER="$(mktemp "$DEB_DIR/.papercusp-deb-build-start.XXXXXX")" || {
+  echo "FATAL: could not create the deb build-start marker under $DEB_DIR." >&2
+  exit 3
+}
+sleep 1
 
 run_bounded_phase() {
   local phase_timeout_sec="$1"
@@ -795,16 +811,25 @@ if [ "$BUILD_RC" -ne 0 ]; then
   exit "$BUILD_RC"
 fi
 
-DEB_PATH="$(find "$DEB_DIR" -maxdepth 1 -iname '*.deb' -newer "$DESKTOP_DIR/package.json" 2>/dev/null | head -1)"
-if [ -z "$DEB_PATH" ]; then
-  # Fallback: the single most-recently-modified .deb in the bundle dir (the
-  # -newer check above can miss on a filesystem with coarse mtime resolution).
-  DEB_PATH="$(find "$DEB_DIR" -maxdepth 1 -iname '*.deb' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+DEB_CANDIDATE_LIST="$(find "$DEB_DIR" -maxdepth 1 -type f -iname '*.deb' \
+  -newer "$DEB_BUILD_MARKER" -printf '%p\n' 2>/dev/null)"
+rm -f -- "$DEB_BUILD_MARKER"
+DEB_BUILD_MARKER=""
+DEB_CANDIDATES=()
+if [[ -n "$DEB_CANDIDATE_LIST" ]]; then
+  mapfile -t DEB_CANDIDATES <<< "$DEB_CANDIDATE_LIST"
 fi
-if [ -z "$DEB_PATH" ] || [ ! -f "$DEB_PATH" ]; then
-  echo "FATAL: build reported success but no .deb found under $DEB_DIR" >&2
+if [ "${#DEB_CANDIDATES[@]}" -eq 0 ]; then
+  echo "FATAL: build reported success but emitted no fresh .deb under $DEB_DIR." >&2
+  echo "       Refusing to select a pre-existing package from an earlier build." >&2
   exit 3
 fi
+if [ "${#DEB_CANDIDATES[@]}" -ne 1 ]; then
+  echo "FATAL: build emitted ${#DEB_CANDIDATES[@]} fresh .deb candidates under $DEB_DIR; expected exactly one." >&2
+  printf '       %s\n' "${DEB_CANDIDATES[@]}" >&2
+  exit 3
+fi
+DEB_PATH="${DEB_CANDIDATES[0]}"
 
 # P-003 / desktop-release-size-reduction-2026-08-14: Tauri emits a
 # data.tar.gz. Recompress it before archiving (and re-sign the changed bytes),
