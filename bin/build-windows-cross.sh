@@ -394,6 +394,7 @@ find "$OUT_DIR" -maxdepth 1 -type f -delete
 # ── Per-role: cross-compile -> stage exe -> ISCC-under-wine -> collect ────────
 run_iscc() {
   local app_id="$1" app_name="$2"
+  local -a _iscc_rcs
   local out_win; out_win="$(winpath "$STAGE/out")"
   rm -rf "$STAGE/out"; mkdir -p "$STAGE/out"
   echo "  ISCC (wine, headless): $app_name"
@@ -404,12 +405,24 @@ run_iscc() {
   # instead of `npm run dev` — which says nothing about their working-tree edit.
   # An explicit WINEDLLOVERRIDES here would override the global default set in
   # ~/.config/environment.d/90-wine-no-menubuilder.conf, so it must repeat it.
+  # The filter is presentation-only. Capture both pipeline statuses before any
+  # other command overwrites PIPESTATUS so an ISCC failure cannot be converted
+  # to success merely because grep ran (or because a partial/stale artifact was
+  # left behind). grep exit 1 means every line was filtered and is benign;
+  # grep exit >=2 is an actual filtering failure.
+  set +e
   WINEPREFIX="$WINEPREFIX_INNO" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree=d;mshtml=d;winemenubuilder.exe=d" \
     xvfb-run -a wine "$ISCC_EXE" \
       "/DAppId=$app_id" "/DAppName=$app_name" "/DAppVersion=$VERSION" \
       "/DBuildRoot=$BUILDROOT_WIN" "/O$out_win" \
       "${SPAN_DEFINE[@]}" "$ISS_WIN" 2>&1 \
-    | grep -vE '^\s*Compressing' || true
+    | grep -vE '^\s*Compressing'
+  _iscc_rcs=("${PIPESTATUS[@]}")
+  set -e
+  (( _iscc_rcs[1] <= 1 )) \
+    || fail "ISCC output filter failed for role '$app_name' (grep exit ${_iscc_rcs[1]})"
+  (( _iscc_rcs[0] == 0 )) \
+    || fail "ISCC failed for role '$app_name' (exit ${_iscc_rcs[0]}) — refusing any artifact left by the failed compiler"
   # Move every produced artifact (setup.exe [+ *-setup-N.bin span slices]) to OUT_DIR.
   local moved=0 f
   shopt -s nullglob
