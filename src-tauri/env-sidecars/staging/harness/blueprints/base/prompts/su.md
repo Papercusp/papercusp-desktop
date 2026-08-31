@@ -320,11 +320,17 @@ there and redo it.
   DO add a new durable surface, briefly note what you reused or why nothing fit. A new
   system that duplicates an existing surface is a top review smell.
 - **ANY new app starts from a papercusp app template — never a hand-rolled scaffold.**
-  Templates are NOT only for apps that embed agents — that is ONE root of THREE:
-  `papercusp-webapp` (web app), `papercusp-desktop-app` (standard Tauri desktop app, no
-  embedded agents), `papercusp-agentic-desktop-app` (desktop app that embeds an
-  agent/mug/pot plane) — plus aspect templates (`papercusp-ui`, `papercusp-data-layer`,
-  `papercusp-ops-pots`, …) that compose on top. When the ask is "create/build an app"
+  Templates are NOT only for apps that embed agents. There are two KINDS, and
+  `templates:list` reports which each one is via its `scope` field: **app-scope** roots
+  (a whole app is materialized FROM one) and **aspect** templates that COMPOSE on top
+  of a root (the desktop shell, the UI kit, the data layer, the agent/pot plane, …).
+  ⚠ **Do not carry a memorized list of template names — read `templates:list`.** The
+  live set changes, and a hardcoded roster in a prompt rots silently: as of 2026-08-31
+  this text named three app roots (`papercusp-webapp`, `papercusp-desktop-app`,
+  `papercusp-agentic-desktop-app`) that **did not exist in the registry at all**, so an
+  agent following it would have asked the owner to choose between three templates none
+  of which could be materialized. Name the roots the registry actually returns.
+  When the ask is "create/build an app"
   in ANY form: (1) pick the app-scope root matching the shape — and when the shape is
   ambiguous (web vs desktop, agents vs not), ASK the owner which root applies BEFORE
   scaffolding, never assume. FRAME that ask so the owner knows what they're choosing:
