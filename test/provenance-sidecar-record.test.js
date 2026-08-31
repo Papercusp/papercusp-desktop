@@ -332,6 +332,76 @@ test('verify-provenance rejects missing or non-boolean gitDirty attestations', (
   );
 });
 
+test('verify-provenance rejects an empty or malformed latest.json platforms map', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const provenance = {
+    version: '0.0.0',
+    buildSha: 'abc1234',
+    gitHead: 'a'.repeat(40),
+    gitDirty: false,
+    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+  };
+  fs.writeFileSync(path.join(dir, 'build-provenance.json'), JSON.stringify(provenance));
+  const manifestPath = path.join(dir, 'latest.json');
+  const run = (manifest, args = []) => {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    return spawnSync('bash', [VERIFIER, dir, '--latest-json', manifestPath, '--json', ...args], {
+      encoding: 'utf8',
+    });
+  };
+
+  for (const [label, manifest] of [
+    ['missing', { version: '0.0.0' }],
+    ['empty', { version: '0.0.0', platforms: {} }],
+    ['null', { version: '0.0.0', platforms: null }],
+    ['array', { version: '0.0.0', platforms: [] }],
+  ]) {
+    const result = run(manifest);
+    assert.equal(result.status, 1, `${label} platforms unexpectedly passed: ${result.stderr || result.stdout}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.match(verdict.failures.join('\n'), /non-empty platforms object/);
+  }
+
+  // Prove the new guard discriminates rather than merely rejecting every
+  // supplied manifest. Build a real Ed25519 signature in Tauri's legacy `Ed`
+  // minisign shape and pass it through the production signature verifier.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const keyId = Buffer.from('0102030405060708', 'hex');
+  const publicDer = publicKey.export({ format: 'der', type: 'spki' });
+  const publicBlock = Buffer.concat([Buffer.from('Ed'), keyId, publicDer.subarray(-32)]);
+  const artifactSignature = crypto.sign(null, fs.readFileSync(artifact), privateKey);
+  const signatureBlock = Buffer.concat([Buffer.from('Ed'), keyId, artifactSignature]);
+  const signatureFile = Buffer.from(
+    `untrusted comment: test signature\n${signatureBlock.toString('base64')}\n`,
+  ).toString('base64');
+  fs.writeFileSync(`${artifact}.sig`, signatureFile);
+  fs.writeFileSync(
+    path.join(dir, 'build-provenance.json'),
+    JSON.stringify({
+      ...provenance,
+      artifacts: [{ ...provenance.artifacts[0], sig: true }],
+    }),
+  );
+
+  const valid = run(
+    {
+      version: '0.0.0',
+      platforms: {
+        'linux-x86_64': {
+          url: `https://example.invalid/${path.basename(artifact)}`,
+          signature: signatureFile,
+        },
+      },
+    },
+    ['--pubkey', publicBlock.toString('base64')],
+  );
+  assert.equal(valid.status, 0, `valid manifest failed: ${valid.stderr || valid.stdout}`);
+  assert.equal(JSON.parse(valid.stdout).manifest['linux-x86_64'].ok, true);
+});
+
 test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
   const out = tmp();
   const artifact = path.join(out, 'Papercusp_GUI_0.0.18_x64-setup.exe');

@@ -220,13 +220,24 @@ if LATEST_JSON:
             manifest = None
         if manifest is not None:
             manifest_report = {}
+            platforms = manifest.get("platforms")
+            if not isinstance(platforms, dict) or not platforms:
+                # An empty (or malformed) platform map is not a harmless
+                # partial manifest: updater clients interpret it as "no update"
+                # and report themselves up to date. The manifest generator
+                # therefore omits an unready product instead of writing one.
+                failures.append(
+                    "latest.json must contain a non-empty platforms object — "
+                    "an empty or malformed map makes updater clients falsely read up to date"
+                )
+                platforms = {}
             # WI-4243: provenance names may carry a subdir (e.g. "deb/App.deb");
             # a manifest url only carries the basename — match on basenames.
             prov_name_by_base = {}
             for a in prov_artifacts:
                 n = a.get("name") or ""
                 prov_name_by_base.setdefault(n.rsplit("/", 1)[-1], n)
-            for platform_key, meta in (manifest.get("platforms") or {}).items():
+            for platform_key, meta in platforms.items():
                 url = (meta or {}).get("url", "")
                 sig_field = ((meta or {}).get("signature", "") or "").strip()
                 base = url.rsplit("/", 1)[-1] if url else ""
