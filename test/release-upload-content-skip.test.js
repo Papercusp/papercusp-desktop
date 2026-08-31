@@ -43,7 +43,7 @@ const source = () => fs.readFileSync(UPLOAD, 'utf8');
 // The helpers are EXTRACTED and evaluated rather than the script being sourced: the
 // script is a top-to-bottom release publisher and sourcing it would try to publish.
 // Extraction is bounded by two structural markers that exist for other reasons.
-function remoteState({ fileBody, remoteSize, remoteEtag }) {
+function remoteState({ fileBody, remoteSize, remoteEtag, etagFailure = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upload-skip-'));
   try {
     const file = path.join(dir, 'artifact.sig');
@@ -64,7 +64,7 @@ function remoteState({ fileBody, remoteSize, remoteEtag }) {
         '[[ -z "${FAKE_SIZE:-}" ]] && exit 1',
         'case "$q" in',
         '  ContentLength) echo "$FAKE_SIZE" ;;',
-        '  ETag) [[ -z "${FAKE_ETAG:-}" ]] && exit 1; echo "\\"$FAKE_ETAG\\"" ;;',
+        '  ETag) [[ "${FAKE_ETAG_MODE:-value}" == error ]] && exit 1; [[ "${FAKE_ETAG_MODE:-value}" == none ]] && { echo None; exit 0; }; [[ -z "${FAKE_ETAG:-}" ]] && exit 1; echo "\\"$FAKE_ETAG\\"" ;;',
         'esac',
         'exit 0',
       ].join('\n'),
@@ -87,6 +87,7 @@ remote_state "some/key" "$TARGET_FILE"
         TARGET_FILE: file,
         FAKE_SIZE: remoteSize === null ? '' : String(remoteSize),
         FAKE_ETAG: remoteEtag === null ? '' : remoteEtag,
+        FAKE_ETAG_MODE: etagFailure ? 'error' : remoteEtag === 'None' ? 'none' : 'value',
       },
     });
     assert.equal(res.status, 0, `harness failed: ${res.stderr}`);
@@ -152,6 +153,29 @@ test('a multipart ETag cannot be compared to a local hash, and says so instead o
   assert.equal(verdict, 'size-only-match');
 });
 
+test('an ETag lookup failure is unknown, never a verified multipart size match', () => {
+  const verdict = remoteState({
+    fileBody: SIG_A,
+    remoteSize: SIG_A.length,
+    remoteEtag: null,
+    etagFailure: true,
+  });
+  assert.equal(
+    verdict,
+    'metadata-unavailable',
+    'a failed authenticated metadata read must not let a same-size large artifact skip upload',
+  );
+});
+
+test('an opaque non-multipart ETag is unknown, not size-only evidence', () => {
+  const verdict = remoteState({
+    fileBody: SIG_A,
+    remoteSize: SIG_A.length,
+    remoteEtag: 'opaque-provider-etag',
+  });
+  assert.equal(verdict, 'metadata-unavailable');
+});
+
 test('BOTH the upload skip and the storage verifier decide via remote_state', () => {
   const src = source();
 
@@ -175,5 +199,16 @@ test('BOTH the upload skip and the storage verifier decide via remote_state', ()
     src,
     /remote_size" == "\$local_size/,
     'the verifier is comparing sizes directly again, which cannot see a stale companion file',
+  );
+
+  const unknownBranches = src.match(/metadata-unavailable\)/g) || [];
+  assert.ok(
+    unknownBranches.length >= 2,
+    'both the upload skip and storage verifier must handle unavailable ETag metadata explicitly',
+  );
+  assert.doesNotMatch(
+    src,
+    /s3api_head_etag[\s\S]{0,260}\|\|\s*true/,
+    'ETag lookup failures must not be swallowed before remote_state can emit metadata-unavailable',
   );
 });

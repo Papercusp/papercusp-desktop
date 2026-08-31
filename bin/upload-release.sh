@@ -118,9 +118,17 @@ s3api_head() {
 # .json, .txt) gets a real content check, and only the multi-GB artifacts fall
 # back to size.
 s3api_head_etag() {
-  aws s3api head-object --endpoint-url "$ENDPOINT" \
+  local etag
+  # Do not turn an unavailable authenticated metadata read into an empty,
+  # apparently-valid value. `remote_state` must distinguish a real multipart
+  # ETag from a transport/auth/provider failure; otherwise a failed lookup
+  # falls through to the size-only path and can skip a stale large artifact.
+  etag="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
     --bucket "$R2_BUCKET" --key "$1" \
-    --query 'ETag' --output text 2>/dev/null | tr -d '"' || true
+    --query 'ETag' --output text 2>/dev/null)" || return 1
+  etag="${etag//\"/}"
+  [[ -n "$etag" && "$etag" != "None" ]] || return 1
+  printf '%s\n' "$etag"
 }
 
 # Anything at or below this is never worth a size-only guess: re-pushing it
@@ -135,7 +143,11 @@ SMALL_ARTIFACT_BYTES=$((8 * 1024 * 1024))
 #   absent          — nothing published at that key
 #   identical       — content PROVEN equal (ETag was a real MD5 and matched)
 #   differs         — content PROVEN different (size differs, or MD5 differs)
-#   size-only-match — sizes agree and that is ALL that could be established
+#   size-only-match       — sizes agree and a valid multipart ETag is present,
+#                            but its content hash is not comparable
+#   metadata-unavailable  — the remote object exists at this size, but its
+#                            authenticated ETag metadata could not be read;
+#                            this is NEVER evidence of byte identity
 #
 # The last verdict is the whole point of this function. `upload-release.sh` used
 # to treat "same size" as "same file" for every artifact, and its own comment
@@ -158,7 +170,10 @@ remote_state() {
   if [[ "$remote_size" != "$local_size" ]]; then
     echo differs; return
   fi
-  etag="$(s3api_head_etag "$key")"
+  if ! etag="$(s3api_head_etag "$key")"; then
+    echo metadata-unavailable
+    return
+  fi
   if [[ "$etag" =~ ^[0-9a-f]{32}$ ]]; then
     if [[ "$etag" == "$(md5sum "$file" | cut -d' ' -f1)" ]]; then
       echo identical
@@ -167,7 +182,14 @@ remote_state() {
     fi
     return
   fi
-  echo size-only-match
+  # Only the documented multipart shape earns the size-only fallback. An
+  # opaque/malformed ETag (or a provider-specific response) is unknown, not
+  # proof that the same-size bytes are safe to skip.
+  if [[ "$etag" =~ ^[0-9a-fA-F]{32}-[0-9]+$ ]]; then
+    echo size-only-match
+  else
+    echo metadata-unavailable
+  fi
 }
 
 # ── What to upload ───────────────────────────────────────────────────────────
@@ -503,6 +525,9 @@ for f in "${ARTIFACTS[@]}"; do
       fi
       echo "==> re-uploading $name (same size, but content could not be verified and it is small)"
       ;;
+    metadata-unavailable)
+      echo "==> remote content metadata unavailable — uploading $name instead of trusting its size"
+      ;;
   esac
   echo "==> uploading $name"
   s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
@@ -575,6 +600,10 @@ for f in "${ARTIFACTS[@]}"; do
         echo "    and it is small enough that there is no excuse for not knowing. Treating as bad." >&2
         STORAGE_BAD=1
       fi
+      ;;
+    metadata-unavailable)
+      echo "  ✗ $name — authenticated remote ETag metadata was unavailable; cannot verify stored bytes." >&2
+      STORAGE_BAD=1
       ;;
     absent)
       echo "  ✗ $name — nothing published at ${KEY_PREFIX}/${TAG}/${name}" >&2
