@@ -386,6 +386,12 @@ if not receipt.get("exercisedArtifacts"):
         f"release-artifacts: malformed {platform} smoke receipt names no exercised artifact"
     )
 
+exercised_names = [
+    pathlib.PurePosixPath(row.get("name", "")).name
+    for row in receipt.get("exercisedArtifacts")
+    if isinstance(row, dict)
+]
+
 rows = receipt.get("artifacts")
 if not isinstance(rows, list) or not rows:
     raise SystemExit(f"release-artifacts: malformed {platform} smoke receipt has no artifacts")
@@ -413,10 +419,12 @@ def row_matches(name, size, sha):
 
 failures = []
 checked = 0
+required_products = set()
 for raw in artifacts:
     path = pathlib.Path(raw)
     if path.name.endswith(".sig"):
         continue
+    required_products.add("server" if "server" in path.name.lower() else "gui")
     if not path.is_file():
         failures.append(f"missing publish artifact: {path}")
         continue
@@ -434,7 +442,11 @@ for raw in artifacts:
                     continue
                 bad_members = []
                 for member in members:
-                    member_hash = hashlib.sha256(archive.read(member)).hexdigest()
+                    member_digest = hashlib.sha256()
+                    with archive.open(member) as member_handle:
+                        for chunk in iter(lambda: member_handle.read(1024 * 1024), b""):
+                            member_digest.update(chunk)
+                    member_hash = member_digest.hexdigest()
                     member_name = pathlib.PurePosixPath(member.filename).name
                     if not row_matches(member_name, member.file_size, member_hash):
                         bad_members.append(member_name)
@@ -450,6 +462,15 @@ for raw in artifacts:
             failures.append(f"cannot inspect Windows smoke payload {path.name}: {exc}")
             continue
     failures.append(f"{path.name} bytes are absent/stale in the {platform} smoke receipt")
+
+exercised_products = {
+    "server" if "server" in name.lower() else "gui" for name in exercised_names if name
+}
+for product in sorted(required_products - exercised_products):
+    failures.append(
+        f"{product} payload is present in the publish set but no {product} installer "
+        "was actually exercised by the smoke verifier"
+    )
 
 if failures:
     print(

@@ -168,7 +168,8 @@ the running operator, in place, keeping its address**:
 bash bin/install-and-relaunch-verify.sh \
   --platform windows \
   --artifact <new-gui-installer> \
-  --server-artifact <matching-server-installer>
+  --server-artifact <matching-server-installer> \
+  --smoke-receipt-tag <desktop-vVERSION[-CHANNEL]>
 ```
 
 Sequence: snapshot the running operator (`/api/health` sha+version + sticky port)
@@ -179,15 +180,32 @@ version **flip** old→new [EI-9002: not a silent no-op update] and (b) the oper
 **sticky port holds** [WI-3783]. The target sha is the artifact's *own*
 `build-provenance.json` sha (D-002 — rollback-safe).
 
+On a PASS, `--smoke-receipt-tag` writes an atomic, content-bound receipt both
+beside `build-provenance.json` (durable audit copy) and under `/tmp` beside the
+tag's artifact ledger (publish hand-off). The receipt distinguishes artifacts
+actually installed from provenance-bound sibling containers, hashes every row,
+and names the build sha/version/platform. Both
+`publish-platform-incremental.sh` and `upload-release.sh` recompute those hashes
+and refuse a missing, copied, GUI-only, or stale receipt before publication.
+Windows Server span zips are checked against the exact stub+slices exercised by
+the verifier. Linux, macOS, and Windows all require the matching split Server
+installer; a GUI-only pass cannot authorize Server bytes.
+
+If platform hardware is genuinely unavailable, the only publication escape is
+explicit and logged: set `PAPERCUSP_SKIP_PLATFORM_SMOKE=1` together with a
+non-empty `PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON`. The flag without a reason is
+itself rejected. This is an exception record, not a smoke PASS.
+
 > ⚠ This **touches the VM** (scp + install + relaunch). Only run it when a build
 > VM is genuinely free to be mutated. Validate the argument surface without VM
 > contact with `bash bin/install-and-relaunch-verify.sh --help`; the script's
 > mock `PC_SSH`/`PC_SCP` harness is the no-VM verification path.
 > For a specific artifact / mac|linux / a different VM, call
 > `bash bin/install-and-relaunch-verify.sh --platform <p> --artifact <path> [flags]`.
-> On Windows the script auto-resolves the exact-version Server stub beside the
-> GUI artifact and fails closed unless its provenance matches and every listed
-> span is present; use `--server-artifact PATH` only to override that location.
+> On every desktop platform the script auto-resolves the exact-version Server
+> installer beside the GUI artifact and fails closed unless its provenance
+> matches. Windows additionally requires every provenance-listed span; use
+> `--server-artifact PATH` only to override the auto-resolved location.
 > For a disposable/reset VM whose host key is intentionally rotated, opt in to
 > the transport overrides explicitly on both legs:
 > `--ssh-option StrictHostKeyChecking=no --ssh-option UserKnownHostsFile=/dev/null

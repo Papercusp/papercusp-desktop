@@ -41,7 +41,7 @@
 #   --platform windows|mac|linux   (default windows — the EI-9002/WI-3783 platform)
 #   --artifact PATH                the NEW installer to push+install (required)
 #   --server-artifact PATH         matching Server installer. Required for the
-#                                  split Windows/macOS products; auto-resolved
+#                                  split Windows/macOS/Linux products; auto-resolved
 #                                  beside --artifact when the exact-version file
 #                                  is unambiguous. Windows Inno spans are read
 #                                  from provenance.
@@ -230,30 +230,13 @@ case "$PLATFORM" in
     # the same remote command before apt's local-file install resolves and
     # configures the dependency closure.
     INSTALL_CMD="${INSTALL_CMD:-sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __ARTIFACT__}"
-    # LINUX relaunch (LIVE-VALIDATED 2026-07-19 on the linux-test VM, WI-5484):
-    # the app is a plain Tauri GUI in the user X session, NOT a systemd service
-    # (the old `systemctl --user restart papercusp-desktop.service` default was
-    # vestigial and a silent no-op — there is no such unit). Two linux-specific
-    # facts drive this sequence: (a) Tauri single-instance — exec'ing the binary
-    # while the OLD GUI is still running is a NO-OP (the new process forwards to
-    # the running instance and exits), so `serve --ensure` never runs on the new
-    # build and the flip silently never happens; (b) UNLIKE windows/WSL, the
-    # `serve.mjs` operator is a CHILD of the GUI and is reaped when the GUI is
-    # killed. So we must CLOSE the old GUI first (mirrors the windows taskkill),
-    # then cold-launch the newly-installed GUI, whose serve --ensure cold-starts
-    # a fresh operator ON THE SAME sticky port (from operator.json) reporting the
-    # new build sha — which is exactly what the flip + port-hold assertions check.
-    # DISPLAY/XAUTHORITY default to the VM's :0 session; override via env if needed.
-    # NOTE the pkill pattern is ANCHORED (^): this whole RELAUNCH_CMD runs in one
-    # remote shell whose OWN command line CONTAINS '/usr/bin/papercusp-desktop'
-    # (the launch step below), so an unanchored `pkill -f '/usr/bin/papercusp-desktop'`
-    # MATCHES AND SIGTERMs ITS OWN SHELL mid-script — the launch never runs, no flip
-    # (live-diagnosed 2026-07-19, WI-5484: the canonical run failed rc=1 while a
-    # split-across-two-ssh-calls manual repro passed, because there the self-match
-    # killed an already-finished pkill shell). The running app's cmdline is exactly
-    # '/usr/bin/papercusp-desktop' (no args), so ^-anchoring matches it but NOT this
-    # shell (whose cmdline starts with 'bash'/'pkill') nor the sidecar node procs.
-    RELAUNCH_CMD="${RELAUNCH_CMD:-pkill -f '^/usr/bin/papercusp-desktop' 2>/dev/null; sleep 2; export DISPLAY=\${DISPLAY:-:0} XAUTHORITY=\${XAUTHORITY:-\$HOME/.Xauthority}; setsid bash -c 'exec /usr/bin/papercusp-desktop' >\$HOME/papercusp-relaunch.log 2>&1 </dev/null & disown; sleep 2; echo relaunched}"
+    SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __SERVER_ARTIFACT__}"
+    # Linux now follows the same thin-GUI / Server-owned runtime contract as the
+    # other platforms. Restart the packaged user service first; only then close
+    # and reopen the GUI shell. A GUI-only relaunch cannot prove the Server
+    # payload, and may attach to an old operator while appearing healthy.
+    # The GUI pkill stays anchored so the remote shell cannot match itself.
+    RELAUNCH_CMD="${RELAUNCH_CMD:-systemctl --user daemon-reload; systemctl --user enable --now papercusp-server.service; systemctl --user restart papercusp-server.service; pkill -f '^/usr/bin/papercusp-desktop' 2>/dev/null || true; sleep 2; export DISPLAY=\${DISPLAY:-:0} XAUTHORITY=\${XAUTHORITY:-\$HOME/.Xauthority}; setsid bash -c 'exec /usr/bin/papercusp-desktop' >\$HOME/papercusp-relaunch.log 2>&1 </dev/null & disown; sleep 2; echo relaunched}"
     ;;
   *) echo "unknown --platform: $PLATFORM (want windows|mac|linux)" >&2; exit 2 ;;
 esac
@@ -392,8 +375,43 @@ elif [[ "$PLATFORM" == "mac" ]]; then
     exit 2
   }
   SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" )
+elif [[ "$PLATFORM" == "linux" ]]; then
+  if [[ -z "$SERVER_ARTIFACT" ]]; then
+    [[ -n "$EXPECTED_VERSION" ]] || {
+      echo "need --server-artifact: cannot auto-resolve the Linux Server deb without an expected version" >&2
+      exit 2
+    }
+    shopt -s nullglob
+    server_candidates=(
+      "$(dirname "$ARTIFACT")"/*Server*_$EXPECTED_VERSION\_*.deb
+      "$(dirname "$ARTIFACT")"/*server*_$EXPECTED_VERSION\_*.deb
+    )
+    shopt -u nullglob
+    if (( ${#server_candidates[@]} != 1 )); then
+      echo "need --server-artifact: expected exactly one Papercusp Server ${EXPECTED_VERSION} deb beside $(basename "$ARTIFACT"), found ${#server_candidates[@]}" >&2
+      exit 2
+    fi
+    SERVER_ARTIFACT="${server_candidates[0]}"
+  fi
+  [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
+  SERVER_PROV="$(find_build_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
+  [[ -f "$SERVER_PROV" ]] || {
+    echo "server provenance not found for $(basename "$SERVER_ARTIFACT")" >&2
+    exit 2
+  }
+  SERVER_SHA="$(json_str buildSha < "$SERVER_PROV")"
+  SERVER_VERSION="$(json_str version < "$SERVER_PROV")"
+  [[ "$SERVER_SHA" == "$EXPECTED_SHA" ]] || {
+    echo "server artifact buildSha mismatch: got '$SERVER_SHA', expected '$EXPECTED_SHA' from the GUI artifact" >&2
+    exit 2
+  }
+  [[ "$SERVER_VERSION" == "$EXPECTED_VERSION" ]] || {
+    echo "server artifact version mismatch: got '$SERVER_VERSION', expected '$EXPECTED_VERSION' from the GUI artifact" >&2
+    exit 2
+  }
+  SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" )
 elif [[ -n "$SERVER_ARTIFACT" ]]; then
-  echo "--server-artifact is supported only for --platform windows|mac" >&2
+  echo "--server-artifact is supported only for --platform windows|mac|linux" >&2
   exit 2
 fi
 SERVER_REMOTE_Q=""
@@ -534,7 +552,8 @@ run_installer() {
   fi
 }
 
-verify_linux_package_configured() {
+verify_linux_package_configured() { # $1=remote quoted artifact, $2=label
+  local remote_artifact="$1" label="$2"
   local status_out="" status_err="" status_detail="" status_rc=0
   local status_stdout_file status_stderr_file
   # Validate the package named by the artifact, rather than hard-coding the
@@ -545,7 +564,7 @@ verify_linux_package_configured() {
   # a healthy dpkg status fail the exact verdict below.
   status_stdout_file="$(mktemp)"
   status_stderr_file="$(mktemp)"
-  if timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "package=\$(dpkg-deb -f $REMOTE_Q Package) && dpkg-query -W -f='\${Status}' \"\$package\"" >"$status_stdout_file" 2>"$status_stderr_file"; then
+  if timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "package=\$(dpkg-deb -f $remote_artifact Package) && dpkg-query -W -f='\${Status}' \"\$package\"" >"$status_stdout_file" 2>"$status_stderr_file"; then
     status_rc=0
   else
     status_rc=$?
@@ -555,11 +574,11 @@ verify_linux_package_configured() {
   rm -f -- "$status_stdout_file" "$status_stderr_file"
   status_detail="${status_out}${status_out:+; }${status_err}"
   if [[ "$status_rc" -eq 124 ]]; then
-    fail_check "Linux package status check timed out after ${INSTALL_TIMEOUT}s — NOT relaunching"
+    fail_check "Linux $label package status check timed out after ${INSTALL_TIMEOUT}s — NOT relaunching"
   elif [[ "$status_rc" -ne 0 ]]; then
-    fail_check "Linux package status check failed with exit $status_rc${status_detail:+ — output: ${status_detail:0:400}} — NOT relaunching"
+    fail_check "Linux $label package status check failed with exit $status_rc${status_detail:+ — output: ${status_detail:0:400}} — NOT relaunching"
   elif [[ "$status_out" != "install ok installed" ]]; then
-    fail_check "Linux package is not configured (dpkg status '$status_out')${status_err:+ — SSH diagnostics: ${status_err:0:400}} — declared dependencies may still be missing; NOT relaunching"
+    fail_check "Linux $label package is not configured (dpkg status '$status_out')${status_err:+ — SSH diagnostics: ${status_err:0:400}} — declared dependencies may still be missing; NOT relaunching"
   fi
 }
 
@@ -574,7 +593,8 @@ if [[ ${#FAILURES[@]} -eq 0 && ${#SERVER_ARTIFACTS[@]} -gt 0 ]]; then
   run_installer "Server" "$SERVER_INSTALL_RUN"
 fi
 if [[ ${#FAILURES[@]} -eq 0 && "$PLATFORM" == "linux" ]]; then
-  verify_linux_package_configured
+  verify_linux_package_configured "$REMOTE_Q" "GUI"
+  [[ ${#FAILURES[@]} -gt 0 ]] || verify_linux_package_configured "$SERVER_REMOTE_Q" "Server"
 fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─

@@ -10,12 +10,15 @@
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } = require('node:fs');
@@ -26,6 +29,7 @@ const { test } = require('node:test');
 const SCRIPT = join(__dirname, '..', 'bin', 'install-and-relaunch-verify.sh');
 const TARGET_SHA = '2363b77a68dee8d79528a4a6a94321cc324ed2f7';
 const VERSION = '0.0.18';
+const SMOKE_TAG = `desktop-v${VERSION}-alpha`;
 
 function executable(dir, name, source) {
   const file = join(dir, name);
@@ -44,7 +48,14 @@ function writeProvenance(dir, sha = TARGET_SHA) {
   writeFileSync(join(dir, 'build-provenance.json'), JSON.stringify({
     version: VERSION,
     buildSha: sha,
-    artifacts: names.map((name) => ({ name })),
+    artifacts: names.filter((name) => existsSync(join(dir, name))).map((name) => {
+      const file = join(dir, name);
+      return {
+        name,
+        bytes: statSync(file).size,
+        sha256: createHash('sha256').update(readFileSync(file)).digest('hex'),
+      };
+    }),
   }));
 }
 
@@ -101,10 +112,17 @@ function linuxFixture({ emitDpkgWarning = false } = {}) {
   mkdirSync(shims);
 
   const deb = join(artifacts, `papercusp-gui_${VERSION}_amd64.deb`);
+  const server = join(artifacts, `Papercusp Server_${VERSION}_amd64.deb`);
   writeFileSync(deb, 'pristine ubuntu deb fixture');
+  writeFileSync(server, 'pristine ubuntu server deb fixture');
   writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
     version: VERSION,
     buildSha: TARGET_SHA,
+    artifacts: [deb, server].map((file) => ({
+      name: basename(file),
+      bytes: statSync(file).size,
+      sha256: createHash('sha256').update(readFileSync(file)).digest('hex'),
+    })),
   }));
 
   const log = join(root, 'transport.log');
@@ -166,7 +184,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, deb, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
+  return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
 function macFixture() {
@@ -183,6 +201,11 @@ function macFixture() {
   writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
     version: VERSION,
     buildSha: TARGET_SHA,
+    artifacts: [dmg, server].map((file) => ({
+      name: basename(file),
+      bytes: statSync(file).size,
+      sha256: createHash('sha256').update(readFileSync(file)).digest('hex'),
+    })),
   }));
 
   const log = join(root, 'transport.log');
@@ -223,6 +246,7 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
     PC_SCP: f.scp,
     MOCK_LOG: f.log,
     MOCK_FLIPPED: f.flipped,
+    PAPERCUSP_SMOKE_RECEIPT_ROOT: f.root,
   };
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
   if (f.updated) env.MOCK_UPDATED = f.updated;
@@ -267,6 +291,52 @@ test('Windows auto-resolves, pushes, and installs the complete Server span befor
     assert.ok(guiInstall >= 0, 'GUI installer was not invoked');
     assert.ok(serverInstall > guiInstall, 'Server must install after GUI');
     assert.ok(relaunch > serverInstall, 'neither app may relaunch before matching Server install finishes');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a passing installed update writes a tag-scoped receipt bound to provenance bytes', () => {
+  const f = fixture();
+  try {
+    const result = runVerify(f, ['--smoke-receipt-tag', SMOKE_TAG]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    const receiptPath = join(f.root, `papercusp-smoke-${SMOKE_TAG}-windows.json`);
+    assert.equal(verdict.smokeReceipt, receiptPath);
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+    assert.equal(receipt.result, 'pass');
+    assert.equal(receipt.tag, SMOKE_TAG);
+    assert.equal(receipt.platform, 'windows');
+    assert.equal(receipt.buildSha, TARGET_SHA);
+    assert.deepEqual(
+      receipt.artifacts.map((artifact) => artifact.name).sort(),
+      [basename(f.gui), basename(f.server), ...f.slices.map((file) => basename(file))].sort(),
+    );
+    assert.ok(receipt.exercisedArtifacts.some((artifact) => artifact.name === basename(f.gui)));
+    assert.ok(receipt.exercisedArtifacts.some((artifact) => artifact.name === basename(f.server)));
+    assert.equal(
+      existsSync(join(f.root, 'artifacts', `platform-smoke-${SMOKE_TAG}-windows.json`)),
+      true,
+      'the auditable copy must live beside build-provenance.json',
+    );
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed update never writes a smoke receipt', () => {
+  const f = fixture();
+  try {
+    const result = runVerify(f, [
+      '--relaunch-cmd', 'exit 17',
+      '--smoke-receipt-tag', SMOKE_TAG,
+    ]);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.equal(
+      existsSync(join(f.root, `papercusp-smoke-${SMOKE_TAG}-windows.json`)),
+      false,
+    );
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -343,8 +413,10 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     assert.equal(verdict.portHeld, true);
 
     const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    assert.ok(lines.some((line) => line.startsWith('SCP ') && line.includes(f.server)), 'Linux Server deb must be pushed');
     const update = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get update -qq'));
-    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes'));
+    const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes') && line.includes(basename(f.deb)));
+    const serverInstall = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes') && line.includes(basename(f.server)));
     const packageCheck = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('dpkg-query -W'));
     const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('setsid bash -c'));
     assert.ok(update >= 0, 'Linux must refresh apt indexes before installing a local deb');
@@ -356,9 +428,11 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
       'Linux must refresh apt indexes before dependency resolution',
     );
     assert.ok(install >= 0, 'Linux must use apt-get local-file installation, not dpkg -i');
+    assert.ok(serverInstall > install, 'Linux must install the matching Server after the GUI');
     assert.equal(lines.some((line) => line.includes('dpkg -i')), false, 'Linux default must not use dependency-blind dpkg -i');
-    assert.ok(packageCheck > install, 'package configuration must be checked after installation');
+    assert.ok(packageCheck > serverInstall, 'package configuration must be checked after both installations');
     assert.ok(relaunch > packageCheck, 'Linux must not relaunch before package configuration is confirmed');
+    assert.ok(lines[relaunch].includes('papercusp-server.service'), 'Linux must restart the Server-owned runtime before the GUI');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

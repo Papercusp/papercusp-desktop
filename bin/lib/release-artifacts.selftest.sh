@@ -50,6 +50,8 @@ TAG="desktop-v0.0.0-selftest-$$"
 TAG_EMPTY="desktop-v0.0.0-selftest-empty-$$"
 TAG_FRESH="desktop-v0.0.0-selftest-fresh-$$"
 TAG_GUARD="desktop-v0.0.0-selftest-guard-$$"
+TAG_SMOKE="desktop-v0.0.0-selftest-smoke-$$"
+export PAPERCUSP_SMOKE_RECEIPT_ROOT="$WORK/smoke-receipts"
 cleanup() {
   rm -rf "$WORK"
   rm -f "$(release_artifacts_manifest_path "$TAG")" "$(release_artifacts_manifest_path "$TAG_EMPTY")" "$(release_artifacts_manifest_path "$TAG_FRESH")" "$(release_artifacts_cut_start_path "$TAG_FRESH")"
@@ -92,6 +94,18 @@ for script in \
     ok "$(basename "$script") uses shared Server span normalization"
   else
     bad "$(basename "$script") bypasses shared Server span normalization"
+  fi
+done
+
+# Both publish handoffs must call the same receipt guard. A correct helper with
+# one bypassing caller would leave incremental or final publication fail-open.
+for script in \
+  "$DIR/../publish-platform-incremental.sh" \
+  "$DIR/../upload-release.sh"; do
+  if grep -Fq 'release_artifacts_assert_smoke_receipts' "$script"; then
+    ok "$(basename "$script") enforces the shared platform smoke receipt"
+  else
+    bad "$(basename "$script") bypasses the platform smoke receipt gate"
   fi
 done
 
@@ -372,6 +386,129 @@ if release_artifacts_assert_fresh "$TAG_FRESH" "$FRESH" >/dev/null 2>&1; then
   bad "freshness guard passed with a missing cut-start stamp"
 else
   ok "freshness guard fails closed when the cut-start stamp is missing"
+fi
+
+# ── EI-20287537474245593: publish requires a byte-bound platform smoke ──────
+SMOKE_DIR="$WORK/smoke-cut"; mkdir -p "$SMOKE_DIR"
+SMOKE_GUI="$SMOKE_DIR/Papercusp GUI_${VER}_amd64.deb"
+SMOKE_SERVER="$SMOKE_DIR/Papercusp Server_${VER}_amd64.deb"
+printf 'gui-payload\n' > "$SMOKE_GUI"
+printf 'server-payload\n' > "$SMOKE_SERVER"
+SMOKE_PROV="$SMOKE_DIR/build-provenance.json"
+SMOKE_BUILD_SHA="selftest-build-sha"
+python3 - "$SMOKE_PROV" "$VER" "$SMOKE_BUILD_SHA" "$SMOKE_GUI" "$SMOKE_SERVER" <<'PY'
+import hashlib, json, pathlib, sys
+out, version, build_sha, *files = sys.argv[1:]
+rows = []
+for raw in files:
+    path = pathlib.Path(raw)
+    payload = path.read_bytes()
+    rows.append({
+        "name": path.name,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    })
+pathlib.Path(out).write_text(json.dumps({
+    "version": version,
+    "buildSha": build_sha,
+    "artifacts": rows,
+}) + "\n")
+PY
+
+if release_artifacts_smoke_receipt_write \
+     "$TAG_SMOKE" "$VER" linux selftest-verifier "$SMOKE_BUILD_SHA" \
+     "$SMOKE_PROV" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null \
+   && release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null 2>&1; then
+  ok "content-bound smoke receipt authorizes the exact GUI+Server platform bytes"
+else
+  bad "a valid content-bound GUI+Server smoke receipt was rejected"
+fi
+
+# Same names/version, changed Server bytes: the prior PASS must become stale.
+printf 'mutated-after-smoke\n' >> "$SMOKE_SERVER"
+if release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null 2>&1; then
+  bad "smoke gate accepted artifact bytes changed after the PASS"
+else
+  ok "smoke gate rejects a same-version artifact mutated after the PASS"
+fi
+printf 'server-payload\n' > "$SMOKE_SERVER"
+
+# A receipt may bind sibling provenance bytes without pretending it exercised
+# them. Publication must still require an actually-exercised artifact per
+# product, so a GUI-only run cannot authorize the split Server payload.
+release_artifacts_smoke_receipt_write \
+  "$TAG_SMOKE" "$VER" linux selftest-verifier "$SMOKE_BUILD_SHA" \
+  "$SMOKE_PROV" "$SMOKE_GUI" >/dev/null
+if release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null 2>&1; then
+  bad "GUI-only smoke receipt authorized an unexercised Server payload"
+else
+  ok "GUI-only smoke receipt cannot authorize a split Server payload"
+fi
+
+# Missing receipts fail closed. The hardware escape needs BOTH the exact flag
+# and an auditable reason; a bare skip flag is still a refusal.
+if release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE-missing" "$VER" "$SMOKE_GUI" >/dev/null 2>&1; then
+  bad "publish smoke guard passed with no receipt"
+else
+  ok "publish smoke guard fails closed when the receipt is absent"
+fi
+if PAPERCUSP_SKIP_PLATFORM_SMOKE=1 \
+   release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE-missing" "$VER" "$SMOKE_GUI" >/dev/null 2>&1; then
+  bad "bare platform-smoke skip flag bypassed without a reason"
+else
+  ok "platform-smoke override refuses a missing reason"
+fi
+if PAPERCUSP_SKIP_PLATFORM_SMOKE=1 \
+   PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON='self-test: no hardware' \
+   release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE-missing" "$VER" "$SMOKE_GUI" >/dev/null 2>&1; then
+  ok "reasoned platform-smoke hardware override is explicit and usable"
+else
+  bad "reasoned platform-smoke hardware override was rejected"
+fi
+
+# The Windows Server artifact published to users is a zip assembled AFTER the
+# VM exercises its Inno stub+slices. Its container bytes need not pre-exist in
+# the receipt, but every archive member must match an exercised, provenance-
+# bound payload byte-for-byte.
+SMOKE_WIN="$WORK/smoke-win"; mkdir -p "$SMOKE_WIN"
+WIN_GUI="$SMOKE_WIN/Papercusp GUI_${VER}_x64-setup.exe"
+WIN_STUB="$SMOKE_WIN/Papercusp Server_${VER}_x64-setup.exe"
+WIN_SLICE="$SMOKE_WIN/Papercusp Server_${VER}_x64-setup-1.bin"
+WIN_ZIP="$SMOKE_WIN/Papercusp Server_${VER}_x64-setup.zip"
+printf 'win-gui\n' > "$WIN_GUI"
+printf 'win-server-stub\n' > "$WIN_STUB"
+printf 'win-server-slice\n' > "$WIN_SLICE"
+WIN_PROV="$SMOKE_WIN/build-provenance.json"
+python3 - "$WIN_PROV" "$WIN_ZIP" "$VER" "$SMOKE_BUILD_SHA" \
+  "$WIN_GUI" "$WIN_STUB" "$WIN_SLICE" <<'PY'
+import hashlib, json, pathlib, sys, zipfile
+out, archive, version, build_sha, *files = sys.argv[1:]
+rows = []
+for raw in files:
+    path = pathlib.Path(raw)
+    payload = path.read_bytes()
+    rows.append({"name": path.name, "bytes": len(payload),
+                 "sha256": hashlib.sha256(payload).hexdigest()})
+with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as handle:
+    for raw in files[1:]:
+        handle.write(raw, pathlib.Path(raw).name)
+pathlib.Path(out).write_text(json.dumps({"version": version,
+    "buildSha": build_sha, "artifacts": rows}) + "\n")
+PY
+if release_artifacts_smoke_receipt_write \
+     "$TAG_SMOKE-win" "$VER" windows selftest-verifier "$SMOKE_BUILD_SHA" \
+     "$WIN_PROV" "$WIN_GUI" "$WIN_STUB" "$WIN_SLICE" >/dev/null \
+   && release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE-win" "$VER" "$WIN_GUI" "$WIN_ZIP" >/dev/null 2>&1; then
+  ok "Windows normalized zip is authorized only by its exact exercised stub+slices"
+else
+  bad "Windows normalized zip did not validate against its exercised payload members"
 fi
 
 # ── reachability leg (incremental publish) ───────────────────────────────────
