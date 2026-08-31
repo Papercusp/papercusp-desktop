@@ -280,13 +280,17 @@ aws s3 cp "$SITE_DIR/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
   --cache-control 'no-cache, max-age=0' --only-show-errors
 
 # ── Verify what actually landed ──────────────────────────────────────────────
-# Fetch the page back over the PUBLIC path — the same way a beta tester will — and
-# re-run the gate on what the host actually serves. Verifying the local file proves
-# nothing about the bytes now sitting on a CDN.
+# Fetch the published objects back over the PUBLIC path — the same way a beta
+# tester (and the installed app) will — and re-run the gate on what the host
+# actually serves. Verifying the local files proves nothing about the bytes now
+# sitting on a CDN. history.json is part of this proof: it is the Update Center's
+# feed, not an incidental sidecar, so a stale/cache-served history must fail the
+# publish just like a stale index or detail page.
 echo
 echo "==> verifying the public read path"
 TMP_PAGE="$(mktemp -d)"
-trap 'rm -rf "$TMP_PAGE"' EXIT
+TMP_HISTORY="$(mktemp)"
+trap 'rm -rf "$TMP_PAGE"; rm -f "$TMP_HISTORY"' EXIT
 HTTP_CODE="$(curl -sS -o "$TMP_PAGE/index.html" -w '%{http_code}' --max-time 30 "${BASE}/index.html" 2>/dev/null)" || true
 
 if [[ -z "$HTTP_CODE" || "$HTTP_CODE" == "000" ]]; then
@@ -304,6 +308,35 @@ if ! diff -q "$SITE_DIR/index.html" "$TMP_PAGE/index.html" >/dev/null; then
   exit 1
 fi
 echo "  ✓ index.html served and byte-identical"
+
+# history.json is what every installed app reads for its Update Center. A
+# successful authenticated upload does not prove that the public hostname (or
+# its CDN cache) serves those same bytes, so fetch and compare it explicitly.
+# Keep the connection-level split identical to the index check above: HTTP 000
+# means the domain is not reachable yet (expected before the one-time custom
+# domain binding), while any HTTP response other than 200 is a real publish
+# failure.
+echo
+echo "==> verifying the public history feed"
+HISTORY_HTTP_CODE="$(curl -sS -o "$TMP_HISTORY" -w '%{http_code}' --max-time 30 "${BASE}/history.json" 2>/dev/null)" || true
+if [[ -z "$HISTORY_HTTP_CODE" || "$HISTORY_HTTP_CODE" == "000" ]]; then
+  HOSTNAME_ONLY="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
+  echo "  ⚠ ${HOSTNAME_ONLY} is not reachable for history.json — the pages ARE uploaded," >&2
+  echo "    but the public Update Center feed is not yet available at this hostname." >&2
+  echo "    Re-run this script after the custom domain is bound." >&2
+  exit 2
+fi
+if [[ "$HISTORY_HTTP_CODE" != "200" ]]; then
+  echo "  ✗ GET history.json returned HTTP $HISTORY_HTTP_CODE" >&2
+  exit 1
+fi
+if ! diff -q "$SITE_DIR/history.json" "$TMP_HISTORY" >/dev/null; then
+  echo "  ✗ served history.json does NOT match what we uploaded" >&2
+  echo "    The installed app would show stale or incomplete release history; refusing to certify this publish." >&2
+  exit 1
+fi
+cp "$TMP_HISTORY" "$TMP_PAGE/history.json"
+echo "  ✓ history.json served and byte-identical"
 
 # Follow one REAL link from the served index and compare that detail page too.
 # Holding pages intentionally have no release/detail links, so the index-only
@@ -326,8 +359,9 @@ else
   echo "  ✓ holding page served; detail-page verification intentionally skipped"
 fi
 
-# The gate again, on BOTH served pages. Belt and braces, and it is nearly free:
-# what we uploaded and what the host serves are two different facts.
+# The gate again, on ALL served page/feed objects. Belt and braces, and it is
+# nearly free: what we uploaded and what the host serves are two different
+# facts, and history.json carries the same agent-written content as the HTML.
 if ! npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$TMP_PAGE"; then
   echo "  ✗ the SERVED page contains identity — it is live. Take it down NOW." >&2
   exit 1
