@@ -934,7 +934,20 @@ echo "✓ archived + updater-signature verified (immutable reflink/copies): $ARC
 
 # Prune to the last $KEEP archived builds (oldest-first deletion), so an
 # unattended repeated build (e.g. a periodic gate) never grows this unbounded.
-mapfile -t ARCHIVED < <(find "$ARCHIVE_DIR" -maxdepth 1 -iname '*.deb' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+# Do not hide a failed census inside process substitution: `mapfile < <(find …)`
+# reports the mapfile status (usually zero) to the parent shell even when find,
+# sort, or cut failed. That would claim a successful release while silently
+# skipping retention. Capture the pipeline directly under pipefail so every
+# enumeration failure is an explicit packaging failure.
+ARCHIVED_LIST=""
+if ! ARCHIVED_LIST="$(find "$ARCHIVE_DIR" -maxdepth 1 -iname '*.deb' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)"; then
+  echo "FATAL: could not enumerate archived Debian packages for retention under $ARCHIVE_DIR." >&2
+  exit 9
+fi
+ARCHIVED=()
+if [[ -n "$ARCHIVED_LIST" ]]; then
+  mapfile -t ARCHIVED <<< "$ARCHIVED_LIST"
+fi
 COUNT="${#ARCHIVED[@]}"
 if [ "$COUNT" -gt "$KEEP" ]; then
   PRUNE_COUNT=$((COUNT - KEEP))

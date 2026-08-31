@@ -103,6 +103,26 @@ function runRealArchiveBlock(source, archive, { pubkey, keep = 10 } = {}) {
   return spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
 }
 
+function runRetentionBlock({ archiveDir, keep = 1, findFailure = false } = {}) {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const start = full.indexOf('# Prune to the last $KEEP archived builds');
+  const end = full.indexOf('echo "=== done:', start);
+  assert.ok(start > 0, 'retention block start not found — did it move or get renamed?');
+  assert.ok(end > start, 'retention block end not found — did it move or get renamed?');
+
+  const harness = [
+    'set -euo pipefail',
+    `ARCHIVE_DIR=${JSON.stringify(archiveDir)}`,
+    `KEEP=${JSON.stringify(keep)}`,
+    findFailure ? 'find() { return 42; }' : '',
+    full.slice(start, end),
+    'echo RETENTION_BLOCK_SURVIVED',
+    '',
+  ].join('\n');
+
+  return spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
+}
+
 test('archive block creates byte-identical content on a distinct inode', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-archive-'));
   try {
@@ -210,6 +230,18 @@ test('retention pruning removes each old signature with its archived deb', () =>
     }
     assert.equal(fs.existsSync(archive), true);
     assert.equal(fs.existsSync(`${archive}.sig`), true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention census failure is a hard error, not a successful no-op', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-retention-'));
+  try {
+    const result = runRetentionBlock({ archiveDir: path.join(tmp, 'archive'), findFailure: true });
+    assert.equal(result.status, 9, `expected retention failure, got ${result.status}: ${result.stderr}`);
+    assert.match(result.stderr, /could not enumerate archived Debian packages for retention/);
+    assert.doesNotMatch(result.stdout, /RETENTION_BLOCK_SURVIVED/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
