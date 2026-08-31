@@ -90,10 +90,24 @@ KEEP=10
 while [ $# -gt 0 ]; do
   case "$1" in
     --debug) DEBUG=1; shift ;;
-    --keep) KEEP="${2:?--keep requires a number}"; shift 2 ;;
+    --keep)
+      [[ $# -ge 2 ]] || { echo "FATAL: --keep requires a number" >&2; exit 2; }
+      KEEP="$2"
+      shift 2
+      ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Retention is destructive: a bad value must fail before signing, building, or
+# pruning anything. Text used to slip through the parser and silently disable
+# the numeric prune branch; zero/negative values could delete every retained
+# archive, including the one just published. Keep at least one archive and
+# require an unambiguous positive integer.
+[[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || {
+  echo "FATAL: --keep must be a positive integer, got '$KEEP'" >&2
+  exit 2
+}
 
 # --- UPDATER SIGNING KEY (EI-20398328195531333) ---
 #

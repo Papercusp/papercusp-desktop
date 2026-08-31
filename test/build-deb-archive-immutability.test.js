@@ -12,6 +12,41 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const scriptPath = path.join(root, 'bin/build-and-archive-deb.sh');
 
+function parseArchiveArgs(args) {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const start = full.indexOf('DEBUG=0');
+  const end = full.indexOf('# --- UPDATER SIGNING KEY', start);
+  assert.ok(start > 0, 'archive argument parser not found — did it move or get renamed?');
+  assert.ok(end > start, 'archive argument parser end not found');
+  const harness = [
+    'set -euo pipefail',
+    full.slice(start, end),
+    'printf "DEBUG=%s KEEP=%s\\n" "$DEBUG" "$KEEP"',
+    '',
+  ].join('\n');
+  return spawnSync('bash', ['-c', harness, 'build-and-archive-deb', ...args], {
+    encoding: 'utf8',
+  });
+}
+
+test('archive argument parser accepts only positive integer retention counts', () => {
+  for (const [label, args, expected] of [
+    ['default', [], 'DEBUG=0 KEEP=10'],
+    ['explicit', ['--keep', '3'], 'DEBUG=0 KEEP=3'],
+  ]) {
+    const result = parseArchiveArgs(args);
+    assert.equal(result.status, 0, `${label} parser failed: ${result.stderr}`);
+    assert.match(result.stdout.trim(), new RegExp(`^${expected.replace(' ', '\\s')}$`));
+  }
+
+  for (const value of ['0', '-1', 'nope', '1.5', '']) {
+    const result = parseArchiveArgs(['--keep', value]);
+    assert.equal(result.status, 2, `invalid --keep ${JSON.stringify(value)} unexpectedly passed`);
+    assert.match(result.stderr, /--keep must be a positive integer/);
+    assert.doesNotMatch(result.stderr, /updater signing key|building|pruning/);
+  }
+});
+
 function signArtifact(artifact) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const publicDer = publicKey.export({ format: 'der', type: 'spki' });
