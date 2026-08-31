@@ -39,9 +39,9 @@ const scriptPath = path.join(root, 'bin/build-and-archive-deb.sh');
 function runBuild({ buildCmd, timeoutSec, lockPath, desktopDir }) {
   const full = fs.readFileSync(scriptPath, 'utf8');
   const start = full.indexOf('BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK');
-  const end = full.indexOf('DEB_PATH="$(find');
+  const end = full.indexOf('DEB_CANDIDATE_LIST="$(find');
   assert.ok(start > 0, 'BUNDLE_LOCK assignment not found — did it move or get renamed?');
-  assert.ok(end > start, 'DEB_PATH lookup not found, or moved before the build block');
+  assert.ok(end > start, 'fresh deb candidate lookup not found, or moved before the build block');
 
   const harness = [
     'set -euo pipefail',
@@ -49,6 +49,8 @@ function runBuild({ buildCmd, timeoutSec, lockPath, desktopDir }) {
     // snapshot. This focused harness never creates one, so preserve the real
     // teardown call while supplying its no-op boundary dependency explicitly.
     'cleanup_deb_source_snapshot() { :; }',
+    `CARGO_TARGET=${JSON.stringify(path.join(desktopDir, 'target'))}`,
+    `DEB_DIR=${JSON.stringify(path.join(desktopDir, 'target/release/bundle/deb'))}`,
     `DESKTOP_DIR=${JSON.stringify(desktopDir)}`,
     `BUILD_CMD=${JSON.stringify(buildCmd)}`,
     full.slice(start, end),
@@ -66,6 +68,80 @@ function runBuild({ buildCmd, timeoutSec, lockPath, desktopDir }) {
     timeout: 20000, // test-level safety net; should never be hit if the fix works
   });
 }
+
+function runBuildThroughArtifactSelection({ tmp, buildCmd }) {
+  const full = fs.readFileSync(scriptPath, 'utf8');
+  const start = full.indexOf('BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK');
+  const end = full.indexOf('# P-003 / desktop-release-size-reduction', start);
+  assert.ok(start > 0 && end > start, 'build-through-selection block not found');
+  const desktopDir = path.join(tmp, 'desktop');
+  const cargoTarget = path.join(tmp, 'target');
+  const debDir = path.join(cargoTarget, 'release/bundle/deb');
+  fs.mkdirSync(desktopDir, { recursive: true });
+  fs.mkdirSync(debDir, { recursive: true });
+  fs.writeFileSync(path.join(desktopDir, 'package.json'), '{}');
+
+  const harness = [
+    'set -euo pipefail',
+    'cleanup_deb_source_snapshot() { :; }',
+    `CARGO_TARGET=${JSON.stringify(cargoTarget)}`,
+    `DEB_DIR=${JSON.stringify(debDir)}`,
+    `DESKTOP_DIR=${JSON.stringify(desktopDir)}`,
+    `BUILD_CMD=${JSON.stringify(buildCmd)}`,
+    full.slice(start, end),
+    'printf "SELECTED=%s\\n" "$DEB_PATH"',
+    '',
+  ].join('\n');
+
+  return {
+    debDir,
+    result: spawnSync('bash', ['-c', harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PAPERCUSP_CGROUP_ROOT: path.join(tmp, 'not-cgroup2'),
+        PAPERCUSP_DEB_BUNDLE_LOCK: path.join(tmp, 'bundle.lock'),
+        PAPERCUSP_DEB_BUILD_TIMEOUT_SEC: '60',
+        PAPERCUSP_DEB_REPACK_TIMEOUT_SEC: '60',
+      },
+      timeout: 20000,
+    }),
+  };
+}
+
+test('a successful build that emits no fresh deb rejects every pre-existing artifact', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-selection-'));
+  try {
+    const debDir = path.join(tmp, 'target/release/bundle/deb');
+    fs.mkdirSync(debDir, { recursive: true });
+    const stale = path.join(debDir, 'stale-from-prior-build.deb');
+    fs.writeFileSync(stale, 'old artifact bytes');
+    fs.utimesSync(stale, 1, 1);
+
+    const { result } = runBuildThroughArtifactSelection({ tmp, buildCmd: 'true' });
+    assert.equal(result.status, 3, result.stderr || result.stdout);
+    assert.match(result.stderr, /emitted no fresh \.deb/);
+    assert.match(result.stderr, /Refusing to select a pre-existing package/);
+    assert.doesNotMatch(result.stdout, /SELECTED=/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a successful build selects the one deb it actually emitted after the freshness marker', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-selection-'));
+  try {
+    const fresh = path.join(tmp, 'target/release/bundle/deb/fresh-build.deb');
+    const { result } = runBuildThroughArtifactSelection({
+      tmp,
+      buildCmd: `printf fresh > ${JSON.stringify(fresh)}`,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, new RegExp(`SELECTED=${fresh.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}`));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test('a build that finishes well within the timeout succeeds normally (rc 0, no FATAL)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-timeout-'));
@@ -146,7 +222,7 @@ test('compile and xz repack have independent phase budgets in the archive wrappe
   );
 
   const compilePhase = source.indexOf('run_bounded_phase "$BUILD_TIMEOUT_SEC"');
-  const debLookup = source.indexOf('DEB_PATH="$(find');
+  const debLookup = source.indexOf('DEB_CANDIDATE_LIST="$(find');
   const repackPhase = source.indexOf('run_bounded_phase "$REPACK_TIMEOUT_SEC"');
   assert.ok(compilePhase > 0 && compilePhase < debLookup, 'compile must run under its budget before artifact selection');
   assert.ok(repackPhase > debLookup, 'xz repack must run later under its own fresh budget');
@@ -229,10 +305,12 @@ test('the independent watchdog bounds the build via the cgroup even when the esc
     const marker = path.join(tmp, 'escaped-still-running-2');
     const full = fs.readFileSync(scriptPath, 'utf8');
     const start = full.indexOf('BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK');
-    const end = full.indexOf('DEB_PATH="$(find');
+    const end = full.indexOf('DEB_CANDIDATE_LIST="$(find');
     const harness = [
       'set -euo pipefail',
       'cleanup_deb_source_snapshot() { :; }',
+      `CARGO_TARGET=${JSON.stringify(path.join(tmp, 'target'))}`,
+      `DEB_DIR=${JSON.stringify(path.join(tmp, 'target/release/bundle/deb'))}`,
       `DESKTOP_DIR=${JSON.stringify(tmp)}`,
       `BUILD_CMD=${JSON.stringify(`setsid bash -c 'sleep 30; touch ${marker}' & wait`)}`,
       full.slice(start, end),
