@@ -751,8 +751,12 @@ gate_selftest label slow-selftest.sh '$GS_LOG' broken
   ) >/dev/null 2>&1 &
   GS_PID=$!
   for _ in $(seq 1 60); do
-    find "$GS_DESKTOP/bin/lib" -mindepth 1 -maxdepth 1 -name '.gate-selftest-snapshot-*' 2>/dev/null | grep -q . && : >"$GS_TRACKED_SEEN"
-    find "$GS_WORK" -mindepth 1 -maxdepth 1 -name 'gate-selftest-snapshot-*' 2>/dev/null | grep -q . && : >"$GS_UNTRACKED_SEEN"
+    # Capture each producer to completion before matching: under `set -o pipefail`
+    # a `| grep -q` consumer exits on the first line and SIGPIPEs the still-writing
+    # `find`, so the pipeline reports 141 even though the match succeeded and the
+    # marker below is never written — turning a real match into a false miss.
+    [ -n "$(find "$GS_DESKTOP/bin/lib" -mindepth 1 -maxdepth 1 -name '.gate-selftest-snapshot-*' 2>/dev/null)" ] && : >"$GS_TRACKED_SEEN"
+    [ -n "$(find "$GS_WORK" -mindepth 1 -maxdepth 1 -name 'gate-selftest-snapshot-*' 2>/dev/null)" ] && : >"$GS_UNTRACKED_SEEN"
     kill -0 "$GS_PID" 2>/dev/null || break
     sleep 0.05
   done
