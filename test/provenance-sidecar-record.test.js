@@ -380,6 +380,51 @@ test('verify-provenance rejects missing or non-boolean gitDirty attestations', (
   );
 });
 
+test('verify-provenance rejects missing or malformed release identity', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const base = {
+    version: '0.0.0',
+    buildSha: 'abc1234',
+    gitHead: 'a'.repeat(40),
+    gitDirty: false,
+    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+  };
+  const provPath = path.join(dir, 'build-provenance.json');
+  const run = (doc) => {
+    fs.writeFileSync(provPath, JSON.stringify(doc));
+    return spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
+  };
+
+  // Positive control: a complete identity still passes without a health probe.
+  const valid = run(base);
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+
+  for (const [label, fields] of [
+    ['missing version', { version: undefined }],
+    ['null version', { version: null }],
+    ['blank version', { version: '   ' }],
+    ['missing buildSha', { buildSha: undefined }],
+    ['null buildSha', { buildSha: null }],
+    ['blank buildSha', { buildSha: '' }],
+  ]) {
+    const doc = { ...base, ...fields };
+    if (fields.version === undefined) delete doc.version;
+    if (fields.buildSha === undefined) delete doc.buildSha;
+    const result = run(doc);
+    assert.equal(result.status, 1, `${label} unexpectedly passed: ${result.stderr || result.stdout}`);
+    const verdict = JSON.parse(result.stdout);
+    const failures = verdict.failures.join('\n');
+    if (Object.prototype.hasOwnProperty.call(fields, 'version')) {
+      assert.match(failures, /version must be a non-empty string/);
+    } else {
+      assert.match(failures, /buildSha must be a non-empty string/);
+    }
+  }
+});
+
 test('verify-provenance rejects a matching health sha carried by an HTTP error response', async (t) => {
   const dir = tmp();
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
