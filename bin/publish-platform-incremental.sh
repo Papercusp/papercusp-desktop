@@ -163,11 +163,11 @@ fi
 # platform can be merged into the live manifest. A same-version rebuild changes
 # the hashes and invalidates the old receipt. Hardware-unavailable publication
 # remains possible only through the shared, reason-required logged override.
-if release_artifacts_assert_smoke_receipts "$TAG" "$VERSION" "${NEW_ARTIFACTS[@]}"; then
-  echo "==> platform smoke gate: $PLATFORM receipt is present and content-bound"
+if release_artifacts_run_smoke_receipts "$TAG" "$VERSION" "${NEW_ARTIFACTS[@]}"; then
+  echo "==> platform smoke gate: $PLATFORM verifier passed and its receipt is content-bound"
 else
-  echo "ERROR: $PLATFORM is built but not smoke-verified for these exact bytes — refusing to merge it into $TAG." >&2
-  echo "       Run bin/install-and-relaunch-verify.sh with --smoke-receipt-tag $TAG, or use" >&2
+  echo "ERROR: $PLATFORM is built but its automatic installed-artifact smoke did not produce a valid receipt for these exact bytes — refusing to merge it into $TAG." >&2
+  echo "       Configure PAPERCUSP_PLATFORM_SMOKE_CMD for a role-specific remote rig, or use" >&2
   echo "       PAPERCUSP_SKIP_PLATFORM_SMOKE=1 plus PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON only for a deliberate hardware exception." >&2
   exit 1
 fi
