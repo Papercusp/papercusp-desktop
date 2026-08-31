@@ -97,15 +97,16 @@ for script in \
   fi
 done
 
-# Both publish handoffs must call the same receipt guard. A correct helper with
-# one bypassing caller would leave incremental or final publication fail-open.
+# Both publish handoffs must call the same automatic verifier runner. A correct
+# receipt assertion with one caller that only checks for a manually-created
+# receipt would leave the normal publish path non-self-driving again.
 for script in \
   "$DIR/../publish-platform-incremental.sh" \
   "$DIR/../upload-release.sh"; do
-  if grep -Fq 'release_artifacts_assert_smoke_receipts' "$script"; then
-    ok "$(basename "$script") enforces the shared platform smoke receipt"
+  if grep -Fq 'release_artifacts_run_smoke_receipts' "$script"; then
+    ok "$(basename "$script") runs the shared platform smoke verifier"
   else
-    bad "$(basename "$script") bypasses the platform smoke receipt gate"
+    bad "$(basename "$script") bypasses the automatic platform smoke verifier"
   fi
 done
 
@@ -425,6 +426,142 @@ else
   bad "a valid content-bound GUI+Server smoke receipt was rejected"
 fi
 
+# The publish-facing runner must actually invoke the canonical verifier when a
+# receipt is absent, pass it the exact GUI+Server installers, and validate the
+# receipt it writes before returning success. A stub exercises the real helper
+# protocol without requiring a VM in this hermetic shell unit.
+AUTO_VERIFIER="$WORK/automatic-platform-smoke-verifier.sh"
+AUTO_LOG="$WORK/automatic-platform-smoke-verifier.log"
+cat > "$AUTO_VERIFIER" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+platform=""; version=""; tag=""; gui=""; server=""; provenance=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --platform) platform="${2:-}"; shift 2 ;;
+    --expected-version) version="${2:-}"; shift 2 ;;
+    --smoke-receipt-tag) tag="${2:-}"; shift 2 ;;
+    --artifact) gui="${2:-}"; shift 2 ;;
+    --server-artifact) server="${2:-}"; shift 2 ;;
+    --smoke-provenance) provenance="${2:-}"; shift 2 ;;
+    --json) shift ;;
+    *) echo "unexpected automatic verifier arg: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$platform" && -n "$version" && -n "$tag" && -f "$gui" \
+   && -f "$server" && -f "$provenance" ]]
+printf '%s\n' "$platform" "$version" "$tag" "$gui" "$server" "$provenance" \
+  > "$PAPERCUSP_AUTO_SMOKE_LOG"
+build_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["buildSha"])' "$provenance")"
+# shellcheck source=release-artifacts.sh
+source "$PAPERCUSP_RELEASE_ARTIFACTS_HELPER"
+release_artifacts_smoke_receipt_write \
+  "$tag" "$version" "$platform" automatic-selftest "$build_sha" \
+  "$provenance" "$gui" "$server" >/dev/null
+STUB
+chmod +x "$AUTO_VERIFIER"
+
+AUTO_TAG="$TAG_SMOKE-automatic"
+AUTO_OUTPUT="$(
+  export PAPERCUSP_AUTO_SMOKE_LOG="$AUTO_LOG"
+  export PAPERCUSP_RELEASE_ARTIFACTS_HELPER="$DIR/release-artifacts.sh"
+  export PAPERCUSP_PLATFORM_SMOKE_VERIFIER="$AUTO_VERIFIER"
+  release_artifacts_run_smoke_receipts \
+    "$AUTO_TAG" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" 2>&1
+)"
+AUTO_RC=$?
+mapfile -t AUTO_ARGS < "$AUTO_LOG" 2>/dev/null
+if [[ "$AUTO_RC" -eq 0 \
+      && "${AUTO_ARGS[0]:-}" == linux \
+      && "${AUTO_ARGS[1]:-}" == "$VER" \
+      && "${AUTO_ARGS[2]:-}" == "$AUTO_TAG" \
+      && "${AUTO_ARGS[3]:-}" == "$SMOKE_GUI" \
+      && "${AUTO_ARGS[4]:-}" == "$SMOKE_SERVER" \
+      && "${AUTO_ARGS[5]:-}" == "$SMOKE_PROV" \
+      && "$AUTO_OUTPUT" == *"smoke receipt verified"* ]]; then
+  ok "automatic smoke runner invokes the canonical verifier with exact GUI+Server inputs"
+else
+  bad "automatic smoke runner did not complete the canonical verifier protocol (rc=$AUTO_RC output=$AUTO_OUTPUT)"
+fi
+
+# A current receipt is the durable result of an already-completed install. A
+# re-publish must reuse it rather than relaunching a potentially destructive
+# verifier. Pointing at a nonexistent verifier proves the helper returns before
+# resolving or executing it.
+AUTO_REUSE_OUTPUT="$(
+  export PAPERCUSP_PLATFORM_SMOKE_VERIFIER="$WORK/verifier-must-not-run"
+  release_artifacts_run_smoke_receipts \
+    "$AUTO_TAG" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" 2>&1
+)"
+AUTO_REUSE_RC=$?
+if [[ "$AUTO_REUSE_RC" -eq 0 && "$AUTO_REUSE_OUTPUT" == *"verifier run reused"* ]]; then
+  ok "automatic smoke runner reuses a current content-bound receipt"
+else
+  bad "automatic smoke runner did not reuse the current receipt (rc=$AUTO_REUSE_RC output=$AUTO_REUSE_OUTPUT)"
+fi
+
+# Remote/macOS/Windows rigs use the custom-command seam. Its documented six
+# positional arguments must carry real installer paths, not empty placeholders,
+# and the helper must still validate the receipt the command produces.
+AUTO_CUSTOM_VERIFIER="$WORK/custom-platform-smoke-verifier.sh"
+AUTO_CUSTOM_LOG="$WORK/custom-platform-smoke-verifier.log"
+cat > "$AUTO_CUSTOM_VERIFIER" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+platform="${1:-}"; version="${2:-}"; tag="${3:-}"
+gui="${4:-}"; server="${5:-}"; provenance="${6:-}"
+[[ -n "$platform" && -n "$version" && -n "$tag" && -f "$gui" \
+   && -f "$server" && -f "$provenance" ]]
+printf '%s\n' "$platform" "$version" "$tag" "$gui" "$server" "$provenance" \
+  > "$PAPERCUSP_AUTO_SMOKE_LOG"
+build_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["buildSha"])' "$provenance")"
+# shellcheck source=release-artifacts.sh
+source "$PAPERCUSP_RELEASE_ARTIFACTS_HELPER"
+release_artifacts_smoke_receipt_write \
+  "$tag" "$version" "$platform" custom-automatic-selftest "$build_sha" \
+  "$provenance" "$gui" "$server" >/dev/null
+STUB
+chmod +x "$AUTO_CUSTOM_VERIFIER"
+AUTO_CUSTOM_TAG="$TAG_SMOKE-custom"
+AUTO_CUSTOM_OUTPUT="$(
+  export PAPERCUSP_AUTO_SMOKE_LOG="$AUTO_CUSTOM_LOG"
+  export PAPERCUSP_RELEASE_ARTIFACTS_HELPER="$DIR/release-artifacts.sh"
+  export PAPERCUSP_AUTO_CUSTOM_VERIFIER="$AUTO_CUSTOM_VERIFIER"
+  export PAPERCUSP_PLATFORM_SMOKE_CMD='exec "$PAPERCUSP_AUTO_CUSTOM_VERIFIER" "$@"'
+  release_artifacts_run_smoke_receipts \
+    "$AUTO_CUSTOM_TAG" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" 2>&1
+)"
+AUTO_CUSTOM_RC=$?
+mapfile -t AUTO_CUSTOM_ARGS < "$AUTO_CUSTOM_LOG" 2>/dev/null
+if [[ "$AUTO_CUSTOM_RC" -eq 0 \
+      && "${AUTO_CUSTOM_ARGS[3]:-}" == "$SMOKE_GUI" \
+      && "${AUTO_CUSTOM_ARGS[4]:-}" == "$SMOKE_SERVER" \
+      && "${AUTO_CUSTOM_ARGS[5]:-}" == "$SMOKE_PROV" \
+      && "$AUTO_CUSTOM_OUTPUT" == *"smoke receipt verified"* ]]; then
+  ok "custom smoke runner receives exact installers and must produce a valid receipt"
+else
+  bad "custom smoke runner did not receive/validate its documented inputs (rc=$AUTO_CUSTOM_RC output=$AUTO_CUSTOM_OUTPUT)"
+fi
+
+# A verifier exit without a receipt is never a PASS, and a hard verifier failure
+# must leave no newly-authorizing canonical or durable receipt behind.
+AUTO_FAIL_VERIFIER="$WORK/failing-platform-smoke-verifier.sh"
+printf '#!/usr/bin/env bash\nexit 23\n' > "$AUTO_FAIL_VERIFIER"
+chmod +x "$AUTO_FAIL_VERIFIER"
+AUTO_FAIL_TAG="$TAG_SMOKE-failing"
+if (
+  export PAPERCUSP_PLATFORM_SMOKE_VERIFIER="$AUTO_FAIL_VERIFIER"
+  release_artifacts_run_smoke_receipts \
+    "$AUTO_FAIL_TAG" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null 2>&1
+); then
+  bad "automatic smoke runner passed a failing verifier"
+elif [[ -e "$(release_artifacts_smoke_receipt_path "$AUTO_FAIL_TAG" linux)" \
+        || -e "$SMOKE_DIR/platform-smoke-${AUTO_FAIL_TAG}-linux.json" ]]; then
+  bad "failing verifier left an authorizing smoke receipt behind"
+else
+  ok "automatic smoke runner fails closed and leaves no receipt after verifier failure"
+fi
+
 # Same names/version, changed Server bytes: the prior PASS must become stale.
 printf 'mutated-after-smoke\n' >> "$SMOKE_SERVER"
 if release_artifacts_assert_smoke_receipts \
@@ -532,6 +669,15 @@ if release_artifacts_smoke_receipt_write \
   ok "Windows normalized zip is authorized only by its exact exercised stub+slices"
 else
   bad "Windows normalized zip did not validate against its exercised payload members"
+fi
+mapfile -t WIN_SMOKE_INPUTS < <(
+  release_artifacts_smoke_inputs windows "$WIN_GUI" "$WIN_ZIP"
+)
+if [[ "${WIN_SMOKE_INPUTS[0]:-}" == "$WIN_GUI" \
+      && "${WIN_SMOKE_INPUTS[1]:-}" == "$WIN_STUB" ]]; then
+  ok "automatic Windows smoke resolves the normalized Server zip back to its installable stub"
+else
+  bad "automatic Windows smoke selected the wrong GUI/Server inputs"
 fi
 
 # ── reachability leg (incremental publish) ───────────────────────────────────
