@@ -115,6 +115,7 @@ import os, sys, json, hashlib, subprocess, pathlib
 
 DIR = pathlib.Path(os.environ["DIR"])
 PROV = pathlib.Path(os.environ["PROV"])
+ROOT_DIR = DIR.resolve()
 HEALTH_SHA = os.environ.get("HEALTH_SHA", "")
 LATEST_JSON = os.environ.get("LATEST_JSON", "")
 PUBKEY = os.environ["PUBKEY"]
@@ -208,11 +209,53 @@ if not prov_artifacts:
 verified_names = set()          # names whose sha256 matched (D-004b anchors on these)
 sig_content_by_name = {}        # name → on-disk .sig text (D-004b compares to manifest)
 
+def safe_artifact_path(name):
+    """Resolve one provenance name without permitting checkout escape.
+
+    Provenance is a relative manifest, not an arbitrary filesystem lookup.  The
+    previous `DIR / name` expression allowed `../outside` and absolute names (and
+    followed symlinks out of DIR), so a forged record could make the verifier
+    certify bytes it was never given.  Validate both POSIX and Windows path
+    semantics because the same record is consumed on all three release hosts,
+    then resolve and enforce containment as a symlink-safe backstop.
+    """
+    if not isinstance(name, str) or not name or "\x00" in name:
+        failures.append(f"artifact name must be a non-empty path-safe string; got {name!r}")
+        return None
+    posix = pathlib.PurePosixPath(name)
+    windows = pathlib.PureWindowsPath(name)
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.anchor)
+        or "\\" in name
+        or ".." in posix.parts
+        or ".." in windows.parts
+        or "." in posix.parts
+        or "." in windows.parts
+    ):
+        failures.append(
+            f"artifact {name!r} has an unsafe path; provenance names must be relative "
+            "to ARTIFACT_DIR and cannot contain absolute roots, backslashes, or dot components"
+        )
+        return None
+    candidate = (DIR / pathlib.Path(*posix.parts)).resolve()
+    try:
+        candidate.relative_to(ROOT_DIR)
+    except ValueError:
+        failures.append(f"artifact {name!r} resolves outside ARTIFACT_DIR")
+        return None
+    return candidate
+
 for a in prov_artifacts:
     name = a.get("name")
     recorded = a.get("sha256")
-    path = DIR / name
+    path = safe_artifact_path(name)
     entry = {"name": name, "present": path.is_file(), "sha256Ok": None, "sigOk": None}
+    if path is None:
+        entry["present"] = False
+        artifacts_report.append(entry)
+        continue
     if not path.is_file():
         failures.append(f"artifact {name!r} recorded in provenance is missing from {DIR}")
         artifacts_report.append(entry)
