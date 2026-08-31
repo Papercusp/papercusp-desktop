@@ -8,9 +8,9 @@
 # What it proves (the sequence, per platform):
 #   1. BEFORE: snapshot the RUNNING operator — /api/health {sha,version} + its
 #      sticky port (from operator.json). This is the pre-update operator.
-#   2. PUSH: scp the new installer artifact to the VM. On Windows, also push the
-#      matching Papercusp Server installer and every provenance-listed Inno
-#      span companion; the GUI does not own the operator.
+#   2. PUSH: scp the new GUI + matching Server installers to the VM; the GUI
+#      does not own the operator. On Windows, also push every provenance-listed
+#      Inno span companion.
 #   3. INSTALL: run the GUI + Server installers. They replace the app bytes on
 #      disk but the OLD operator keeps serving (that is exactly the EI-9002
 #      scenario).
@@ -144,21 +144,6 @@ REMOTE_BASENAME="$(basename "$ARTIFACT")"
 json_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
 
-find_build_provenance() { # $1 = artifact path
-  local dir candidate depth
-  dir="$(cd "$(dirname "$1")" && pwd)"
-  for depth in 0 1 2 3; do
-    candidate="$dir/build-provenance.json"
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-    [[ "$dir" != "/" ]] || break
-    dir="$(dirname "$dir")"
-  done
-  return 1
-}
-
 # Render the remote install command for one macOS DMG role. Product is one of
 # our fixed bundle names, and artifact_placeholder is replaced with the quoted
 # remote path after platform resolution. Keeping this in one helper prevents
@@ -254,7 +239,7 @@ REMOTE_Q="\"$REMOTE_ARTIFACT\""
 # not "the latest release" — so a rollback install is verified the same way.)
 PROV="$SMOKE_PROVENANCE"
 if [[ -z "$PROV" ]]; then
-  PROV="$(find_build_provenance "$ARTIFACT" 2>/dev/null || true)"
+  PROV="$(release_artifacts_find_provenance "$ARTIFACT" 2>/dev/null || true)"
 fi
 if [[ -z "$EXPECTED_SHA" || -z "$EXPECTED_VERSION" ]]; then
   if [[ -n "$PROV" && -f "$PROV" ]]; then
@@ -289,7 +274,7 @@ if [[ "$PLATFORM" == "windows" ]]; then
   fi
   [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
 
-  SERVER_PROV="$(find_build_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
+  SERVER_PROV="$(release_artifacts_find_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
   [[ -f "$SERVER_PROV" ]] || {
     echo "server provenance not found beside $(basename "$SERVER_ARTIFACT"): $SERVER_PROV" >&2
     exit 2
@@ -394,7 +379,7 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     SERVER_ARTIFACT="${server_candidates[0]}"
   fi
   [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
-  SERVER_PROV="$(find_build_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
+  SERVER_PROV="$(release_artifacts_find_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
   [[ -f "$SERVER_PROV" ]] || {
     echo "server provenance not found for $(basename "$SERVER_ARTIFACT")" >&2
     exit 2

@@ -236,6 +236,10 @@ for raw in data.get("artifacts") or []:
     declared_bytes = raw.get("bytes")
     if not isinstance(name, str) or not name or not isinstance(declared_sha, str):
         raise SystemExit("release-artifacts: smoke provenance artifact requires name and sha256")
+    if not isinstance(declared_bytes, int) or declared_bytes < 0:
+        raise SystemExit(
+            f"release-artifacts: smoke provenance artifact requires a non-negative bytes count: {name!r}"
+        )
     relative = pathlib.PurePosixPath(name)
     if relative.is_absolute() or ".." in relative.parts or "\\" in name:
         raise SystemExit(f"release-artifacts: unsafe provenance artifact name: {name!r}")
@@ -248,7 +252,7 @@ for raw in data.get("artifacts") or []:
         raise SystemExit(f"release-artifacts: provenance-listed smoke artifact is missing: {path}")
     size = path.stat().st_size
     actual_sha = digest(path)
-    if declared_bytes is not None and declared_bytes != size:
+    if declared_bytes != size:
         raise SystemExit(
             f"release-artifacts: provenance byte count is stale for {name}: "
             f"{declared_bytes!r} != {size}"
@@ -339,7 +343,7 @@ PY
 # container metadata may differ, but the exact stub+slices exercised on the VM
 # may not. Signature companions are enforced by the separate signature guard.
 release_artifacts_assert_platform_smoke_receipt() {
-  local tag="${1:-}" version="${2:-}" platform="${3:-}" receipt
+  local tag="${1:-}" version="${2:-}" platform="${3:-}" receipt provenance durable_receipt
   shift 3 2>/dev/null || return 2
   [[ $# -gt 0 ]] || {
     echo "release-artifacts: $platform smoke check received no artifacts." >&2
@@ -351,18 +355,40 @@ release_artifacts_assert_platform_smoke_receipt() {
     return 1
   }
 
-  python3 - "$receipt" "$tag" "$version" "$platform" "$@" <<'PY'
+  # Resolve the current provenance independently of the receipt. A copied
+  # hand-off file must not survive a metadata relabel or a provenance rewrite
+  # that happens to leave the payload bytes unchanged.
+  provenance="$(release_artifacts_find_provenance "$@" 2>/dev/null || true)"
+  [[ -n "$provenance" ]] || {
+    echo "release-artifacts: cannot verify $platform smoke receipt without current build-provenance.json." >&2
+    return 1
+  }
+  durable_receipt="$(dirname "$provenance")/platform-smoke-${tag}-${platform}.json"
+  [[ -f "$durable_receipt" ]] || {
+    echo "release-artifacts: durable $platform smoke receipt is missing beside $provenance." >&2
+    return 1
+  }
+  cmp -s "$receipt" "$durable_receipt" || {
+    echo "release-artifacts: canonical and durable $platform smoke receipts disagree — refusing ambiguous evidence." >&2
+    return 1
+  }
+
+  python3 - "$receipt" "$provenance" "$tag" "$version" "$platform" "$@" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 import zipfile
 
-receipt_path, tag, version, platform, *artifacts = sys.argv[1:]
+receipt_path, provenance_path, tag, version, platform, *artifacts = sys.argv[1:]
 try:
     receipt = json.loads(pathlib.Path(receipt_path).read_text(encoding="utf-8"))
 except Exception as exc:
     raise SystemExit(f"release-artifacts: unreadable {platform} smoke receipt: {exc}")
+try:
+    provenance = json.loads(pathlib.Path(provenance_path).read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"release-artifacts: unreadable current build provenance: {exc}")
 
 expected = {
     "schemaVersion": "papercusp-platform-smoke/v1",
@@ -385,6 +411,14 @@ if not receipt.get("exercisedArtifacts"):
     raise SystemExit(
         f"release-artifacts: malformed {platform} smoke receipt names no exercised artifact"
     )
+if receipt.get("buildSha") != provenance.get("buildSha"):
+    raise SystemExit(
+        f"release-artifacts: stale/wrong {platform} smoke receipt buildSha does not match current provenance"
+    )
+if receipt.get("version") != provenance.get("version"):
+    raise SystemExit(
+        f"release-artifacts: stale/wrong {platform} smoke receipt version does not match current provenance"
+    )
 
 exercised_names = [
     pathlib.PurePosixPath(row.get("name", "")).name
@@ -395,6 +429,14 @@ exercised_names = [
 rows = receipt.get("artifacts")
 if not isinstance(rows, list) or not rows:
     raise SystemExit(f"release-artifacts: malformed {platform} smoke receipt has no artifacts")
+
+provenance_rows = provenance.get("artifacts")
+if not isinstance(provenance_rows, list) or not provenance_rows:
+    raise SystemExit("release-artifacts: current build provenance has no artifacts")
+for row in provenance_rows:
+    if not isinstance(row, dict) or not isinstance(row.get("name"), str) \
+       or not isinstance(row.get("sha256"), str) or not isinstance(row.get("bytes"), int):
+        raise SystemExit("release-artifacts: current build provenance has a malformed artifact row")
 
 def hash_file(path):
     h = hashlib.sha256()
@@ -417,6 +459,14 @@ def row_matches(name, size, sha):
         for row in by_basename.get(name, [])
     )
 
+def provenance_matches(name, size, sha):
+    return any(
+        pathlib.PurePosixPath(row.get("name", "")).name == name
+        and row.get("bytes") == size
+        and row.get("sha256") == sha
+        for row in provenance_rows
+    )
+
 failures = []
 checked = 0
 required_products = set()
@@ -430,7 +480,8 @@ for raw in artifacts:
         continue
     size = path.stat().st_size
     sha = hash_file(path)
-    if row_matches(path.name, size, sha):
+    direct_provenance = provenance_matches(path.name, size, sha)
+    if direct_provenance and row_matches(path.name, size, sha):
         checked += 1
         continue
     if platform == "windows" and path.name.endswith("-setup.zip"):
@@ -448,7 +499,8 @@ for raw in artifacts:
                             member_digest.update(chunk)
                     member_hash = member_digest.hexdigest()
                     member_name = pathlib.PurePosixPath(member.filename).name
-                    if not row_matches(member_name, member.file_size, member_hash):
+                    if not row_matches(member_name, member.file_size, member_hash) \
+                       or not provenance_matches(member_name, member.file_size, member_hash):
                         bad_members.append(member_name)
                 if bad_members:
                     failures.append(
@@ -461,10 +513,29 @@ for raw in artifacts:
         except Exception as exc:
             failures.append(f"cannot inspect Windows smoke payload {path.name}: {exc}")
             continue
+    if not direct_provenance:
+        failures.append(f"{path.name} bytes are absent/stale in current build provenance")
+        continue
     failures.append(f"{path.name} bytes are absent/stale in the {platform} smoke receipt")
 
+exercised_rows = receipt.get("exercisedArtifacts")
+if not isinstance(exercised_rows, list):
+    failures.append("exercisedArtifacts is not a list")
+    exercised_rows = []
+for row in exercised_rows:
+    if not isinstance(row, dict):
+        failures.append("exercisedArtifacts contains a non-object row")
+        continue
+    name = pathlib.PurePosixPath(str(row.get("name", ""))).name
+    size = row.get("bytes")
+    sha = row.get("sha256")
+    if not isinstance(name, str) or not isinstance(size, int) or not isinstance(sha, str):
+        failures.append("exercisedArtifacts contains a malformed row")
+    elif not row_matches(name, size, sha) or not provenance_matches(name, size, sha):
+        failures.append(f"exercised artifact {name!r} is not content-bound to current provenance")
+
 exercised_products = {
-    "server" if "server" in name.lower() else "gui" for name in exercised_names if name
+    "server" if "server" in str(name).lower() else "gui" for name in exercised_names if name
 }
 for product in sorted(required_products - exercised_products):
     failures.append(
@@ -500,7 +571,8 @@ release_artifacts_assert_smoke_receipts() {
   local tag="${1:-}" version="${2:-}" f name classified=0
   shift 2 2>/dev/null || return 2
   if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
-    [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-}" ]] || {
+    [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-}" \
+       && "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON//[[:space:]]/}" != "" ]] || {
       echo "release-artifacts: PAPERCUSP_SKIP_PLATFORM_SMOKE=1 requires PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON (hardware/decision audit)." >&2
       return 1
     }
@@ -535,6 +607,25 @@ release_artifacts_assert_smoke_receipts() {
   [[ ${#mac_artifacts[@]} -eq 0 ]] \
     || release_artifacts_assert_platform_smoke_receipt "$tag" "$version" mac "${mac_artifacts[@]}" \
     || return $?
+}
+
+# Find the provenance record that belongs to one or more artifact paths. Release
+# legs normally place it at the bundle root; the bounded parent walk also covers
+# collected role directories without turning an absent record into a broad tree
+# search (which could bind a receipt to an unrelated cut).
+release_artifacts_find_provenance() {
+  local f dir candidate depth
+  for f in "$@"; do
+    [[ -n "$f" ]] || continue
+    dir="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" || continue
+    for depth in 0 1 2 3; do
+      candidate="$dir/build-provenance.json"
+      [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+      [[ "$dir" != "/" ]] || break
+      dir="$(dirname "$dir")"
+    done
+  done
+  return 1
 }
 
 # ── Durable release retention ────────────────────────────────────────────────

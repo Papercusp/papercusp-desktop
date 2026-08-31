@@ -435,6 +435,29 @@ else
 fi
 printf 'server-payload\n' > "$SMOKE_SERVER"
 
+# Receipt metadata must still agree with CURRENT provenance. Re-labeling the
+# same bytes with a different build identity invalidates the prior PASS.
+python3 - "$SMOKE_PROV" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["buildSha"] = "relabeled-after-smoke"
+path.write_text(json.dumps(data) + "\n")
+PY
+if release_artifacts_assert_smoke_receipts \
+     "$TAG_SMOKE" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER" >/dev/null 2>&1; then
+  bad "smoke gate accepted a receipt whose build identity no longer matches provenance"
+else
+  ok "smoke gate rejects a receipt after provenance build identity is relabeled"
+fi
+python3 - "$SMOKE_PROV" "$SMOKE_BUILD_SHA" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["buildSha"] = sys.argv[2]
+path.write_text(json.dumps(data) + "\n")
+PY
+
 # A receipt may bind sibling provenance bytes without pretending it exercised
 # them. Publication must still require an actually-exercised artifact per
 # product, so a GUI-only run cannot authorize the split Server payload.
