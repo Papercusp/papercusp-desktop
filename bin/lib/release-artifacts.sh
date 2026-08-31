@@ -725,26 +725,27 @@ release_artifacts_run_platform_smoke() {
     echo "release-artifacts: cannot run $platform smoke without build-provenance.json." >&2
     return 1
   }
+  inputs="$(release_artifacts_smoke_inputs "$platform" "$@" 2>&1)" || {
+    echo "$inputs" >&2
+    echo "       The automatic verifier requires one GUI installer and one Server installer for the platform." >&2
+    echo "       Use the explicit reasoned hardware override only when that installed-artifact proof cannot run." >&2
+    return 1
+  }
+  gui="$(printf '%s\n' "$inputs" | sed -n '1p')"
+  server="$(printf '%s\n' "$inputs" | sed -n '2p')"
   if [[ -n "${PAPERCUSP_PLATFORM_SMOKE_CMD:-}" ]]; then
     echo "release-artifacts: running custom $platform platform smoke verifier"
     PAPERCUSP_PLATFORM_SMOKE_PLATFORM="$platform" \
     PAPERCUSP_PLATFORM_SMOKE_VERSION="$version" \
     PAPERCUSP_PLATFORM_SMOKE_TAG="$tag" \
     PAPERCUSP_PLATFORM_SMOKE_PROVENANCE="$provenance" \
-      bash -c "$PAPERCUSP_PLATFORM_SMOKE_CMD" -- "$platform" "$version" "$tag" "" "" "$provenance"
+      bash -c "$PAPERCUSP_PLATFORM_SMOKE_CMD" -- "$platform" "$version" "$tag" "$gui" "$server" "$provenance"
     local custom_rc=$?
     [[ "$custom_rc" -eq 0 ]] || {
       echo "ERROR: custom $platform platform smoke verifier failed (exit $custom_rc)." >&2
       return 1
     }
   else
-    inputs="$(release_artifacts_smoke_inputs "$platform" "$@" 2>&1)" || {
-      echo "$inputs" >&2
-      echo "       Provide PAPERCUSP_PLATFORM_SMOKE_CMD for a role-specific rig, or use the explicit reasoned hardware override." >&2
-      return 1
-    }
-    gui="$(printf '%s\n' "$inputs" | sed -n '1p')"
-    server="$(printf '%s\n' "$inputs" | sed -n '2p')"
     local verifier="${PAPERCUSP_PLATFORM_SMOKE_VERIFIER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install-and-relaunch-verify.sh}"
     [[ -x "$verifier" ]] || {
       echo "release-artifacts: canonical platform smoke verifier is missing or not executable: $verifier" >&2
