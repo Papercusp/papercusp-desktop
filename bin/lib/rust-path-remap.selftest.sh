@@ -146,7 +146,22 @@ else
 fi
 
 SIDECAR_SCRIPT="$DIR/../build-desktop-sidecar.sh"
-if grep -q 'papercusp_rustflags_without_native_lld' "$SIDECAR_SCRIPT" && grep -q 'RUSTFLAGS="\$_PUI_WASM_RUSTFLAGS" cargo build --release --target wasm32-wasip1' "$SIDECAR_SCRIPT"; then
+# The wasm build is written as a multi-line env-prefix block (RUSTFLAGS=... \ then
+# the cargo line), so a LINE-oriented grep for the whole command is a false miss
+# even though the sanitized flags are plainly in effect. Join backslash
+# continuations first, then require the assignment and the build on ONE logical
+# line — matching them anywhere in the file would pass on two unrelated sites.
+# No `| grep -q`: an early-exiting consumer here would trip the pipefail
+# predicate gate in run-selftests.sh, and carries the SIGPIPE false-miss it bans.
+SIDECAR_JOINED="$(sed -e ':a' -e '/\\$/{N; s/\\\n[[:space:]]*/ /; ta}' "$SIDECAR_SCRIPT")"
+SIDECAR_WASM_OK=0
+while IFS= read -r _sidecar_line; do
+  case "$_sidecar_line" in
+    *'RUSTFLAGS="$_PUI_WASM_RUSTFLAGS"'*'cargo build --release --target wasm32-wasip1'*)
+      SIDECAR_WASM_OK=1 ;;
+  esac
+done <<<"$SIDECAR_JOINED"
+if [[ "$SIDECAR_JOINED" == *papercusp_rustflags_without_native_lld* ]] && [ "$SIDECAR_WASM_OK" -eq 1 ]; then
   ok "sidecar wasm build uses the native-LLD sanitizer"
 else
   bad "sidecar wasm build bypasses the native-LLD sanitizer"
