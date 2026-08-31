@@ -30,7 +30,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const BIN = path.join(__dirname, '..', 'bin');
 const EMITTER = path.join(BIN, 'emit-build-provenance.sh');
@@ -38,6 +38,54 @@ const VERIFIER = path.join(BIN, 'verify-provenance.sh');
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'prov-sidecar-'));
+}
+
+function startHealthFixtureServer() {
+  const source = String.raw`
+    const http = require('node:http');
+    const server = http.createServer((request, response) => {
+      const body = JSON.stringify({ sha: 'expected-health-sha' });
+      const status = request.url === '/ok' ? 200 : request.url === '/redirect' ? 302 : 500;
+      response.writeHead(status, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      });
+      response.end(body);
+    });
+    server.listen(0, '127.0.0.1', () => {
+      process.stdout.write(String(server.address().port) + '\n');
+    });
+  `;
+  const child = spawn(process.execPath, ['-e', source], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`health fixture server did not start; stderr=${stderr}`));
+    }, 5000);
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const port = Number(stdout.trim());
+      if (!settled && Number.isInteger(port) && port > 0) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ child, baseUrl: `http://127.0.0.1:${port}` });
+      }
+    });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('exit', (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(`health fixture server exited ${code}; stderr=${stderr}`));
+      }
+    });
+  });
 }
 
 /** Run the real emitter; return the parsed build-provenance.json it wrote. */
@@ -330,6 +378,41 @@ test('verify-provenance rejects missing or non-boolean gitDirty attestations', (
     1,
     '--allow-dirty must not convert a wrongly typed attestation into cleanliness proof',
   );
+});
+
+test('verify-provenance rejects a matching health sha carried by an HTTP error response', async (t) => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  fs.writeFileSync(path.join(dir, 'build-provenance.json'), JSON.stringify({
+    version: '0.0.0',
+    buildSha: 'expected-health-sha',
+    gitHead: 'a'.repeat(40),
+    gitDirty: false,
+    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+  }));
+
+  const server = await startHealthFixtureServer();
+  t.after(() => server.child.kill('SIGTERM'));
+
+  for (const [pathName, status] of [['error', 500], ['redirect', 302]]) {
+    const errorResponse = spawnSync(
+      'bash',
+      [VERIFIER, dir, '--health-url', `${server.baseUrl}/${pathName}`, '--json'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(errorResponse.status, 2, errorResponse.stderr || errorResponse.stdout);
+    assert.match(errorResponse.stderr, new RegExp(`returned HTTP ${status}`));
+  }
+
+  const successResponse = spawnSync(
+    'bash',
+    [VERIFIER, dir, '--health-url', `${server.baseUrl}/ok`, '--json'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(successResponse.status, 0, successResponse.stderr || successResponse.stdout);
+  assert.equal(JSON.parse(successResponse.stdout).healthMatch, true);
 });
 
 test('verify-provenance rejects an empty or malformed latest.json platforms map', () => {

@@ -82,7 +82,25 @@ fi
 
 # Resolve the live health sha from --health-url if given (and no explicit sha).
 if [[ -z "$HEALTH_SHA" && -n "$HEALTH_URL" ]]; then
-  HEALTH_SHA="$(curl -s --max-time 8 "$HEALTH_URL" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("sha",""))' 2>/dev/null || true)"
+  HEALTH_RESPONSE_FILE="$(mktemp "${TMPDIR:-/tmp}/papercusp-health-response.XXXXXX")" || {
+    echo "could not create temporary storage for --health-url response" >&2
+    exit 2
+  }
+  HEALTH_HTTP_CODE=""
+  if ! HEALTH_HTTP_CODE="$(curl --silent --show-error --max-time 8 \
+      --output "$HEALTH_RESPONSE_FILE" --write-out '%{http_code}' "$HEALTH_URL")"; then
+    rm -f -- "$HEALTH_RESPONSE_FILE"
+    echo "could not fetch --health-url $HEALTH_URL" >&2
+    exit 2
+  fi
+  if [[ ! "$HEALTH_HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+    rm -f -- "$HEALTH_RESPONSE_FILE"
+    echo "--health-url $HEALTH_URL returned HTTP $HEALTH_HTTP_CODE; refusing an error/redirect body as health evidence" >&2
+    exit 2
+  fi
+  HEALTH_RESPONSE="$(<"$HEALTH_RESPONSE_FILE")"
+  rm -f -- "$HEALTH_RESPONSE_FILE"
+  HEALTH_SHA="$(printf '%s' "$HEALTH_RESPONSE" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("sha",""))' 2>/dev/null || true)"
   [[ -n "$HEALTH_SHA" ]] || { echo "could not fetch/parse a sha from --health-url $HEALTH_URL" >&2; exit 2; }
 fi
 
