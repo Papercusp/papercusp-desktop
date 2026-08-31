@@ -131,6 +131,391 @@ release_artifacts_cut_start_ensure() {
   fi
 }
 
+# ── Content-bound platform smoke receipts ───────────────────────────────────
+# A build result is not a smoke result.  Keep the live install/flip proof beside
+# the artifact ledger, bound to the exact provenance-listed bytes, so neither a
+# copied receipt nor a same-version rebuild can authorize different payloads.
+
+release_artifacts_smoke_receipt_root() {
+  printf '%s\n' "${PAPERCUSP_SMOKE_RECEIPT_ROOT:-/tmp}"
+}
+
+# release_artifacts_smoke_receipt_path <tag> <platform>
+release_artifacts_smoke_receipt_path() {
+  local tag="${1:-}" platform="${2:-}" root
+  [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "release-artifacts: smoke receipt requires a safe non-empty tag (got '$tag')." >&2
+    return 2
+  }
+  case "$platform" in
+    linux|windows|mac) ;;
+    *) echo "release-artifacts: smoke receipt platform must be linux|windows|mac (got '$platform')." >&2; return 2 ;;
+  esac
+  root="$(release_artifacts_smoke_receipt_root)"
+  printf '%s/papercusp-smoke-%s-%s.json\n' "${root%/}" "$tag" "$platform"
+}
+
+# release_artifacts_smoke_receipt_write
+#   <tag> <version> <platform> <verifier> <build-sha> <build-provenance.json>
+#   <artifact-that-was-actually-exercised>...
+#
+# The receipt includes EVERY artifact in the build provenance, while separately
+# naming the installer(s) the verifier actually exercised.  That distinction is
+# load-bearing: macOS/Linux publish updater containers alongside their installed
+# DMG/deb, and a receipt may bind those sibling bytes without claiming each
+# container was itself launched.  Every provenance row is re-hashed here; an
+# absent/mutated sibling makes receipt creation fail rather than quietly reducing
+# the attested set.  A durable copy is written beside build-provenance.json and a
+# tag-scoped hand-off copy is written beside the /tmp artifact ledger.
+release_artifacts_smoke_receipt_write() {
+  local tag="${1:-}" version="${2:-}" platform="${3:-}" verifier="${4:-}"
+  local build_sha="${5:-}" provenance="${6:-}" out root
+  shift 6 2>/dev/null || {
+    echo "release-artifacts: smoke receipt writer requires tag, version, platform, verifier, build sha, provenance, and exercised artifacts." >&2
+    return 2
+  }
+  [[ -n "$version" && -n "$verifier" && -n "$build_sha" ]] || {
+    echo "release-artifacts: smoke receipt writer requires non-empty version, verifier, and build sha." >&2
+    return 2
+  }
+  [[ -f "$provenance" ]] || {
+    echo "release-artifacts: smoke receipt requires build provenance (missing: $provenance)." >&2
+    return 1
+  }
+  [[ $# -gt 0 ]] || {
+    echo "release-artifacts: smoke receipt requires at least one actually-exercised artifact." >&2
+    return 2
+  }
+  out="$(release_artifacts_smoke_receipt_path "$tag" "$platform")" || return $?
+  root="$(dirname "$out")"
+  mkdir -p "$root" || {
+    echo "release-artifacts: cannot create smoke receipt root $root." >&2
+    return 1
+  }
+
+  python3 - "$out" "$tag" "$version" "$platform" "$verifier" "$build_sha" "$provenance" "$@" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import tempfile
+import sys
+
+out, tag, version, platform, verifier, build_sha, provenance, *exercised = sys.argv[1:]
+prov_path = pathlib.Path(provenance).resolve()
+try:
+    data = json.loads(prov_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"release-artifacts: unreadable build provenance {prov_path}: {exc}")
+
+if data.get("version") != version:
+    raise SystemExit(
+        f"release-artifacts: smoke provenance version mismatch: "
+        f"{data.get('version')!r} != {version!r}"
+    )
+if data.get("buildSha") != build_sha:
+    raise SystemExit(
+        f"release-artifacts: smoke provenance buildSha mismatch: "
+        f"{data.get('buildSha')!r} != {build_sha!r}"
+    )
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+rows = []
+for raw in data.get("artifacts") or []:
+    if not isinstance(raw, dict):
+        raise SystemExit("release-artifacts: smoke provenance contains a non-object artifact row")
+    name = raw.get("name")
+    declared_sha = raw.get("sha256")
+    declared_bytes = raw.get("bytes")
+    if not isinstance(name, str) or not name or not isinstance(declared_sha, str):
+        raise SystemExit("release-artifacts: smoke provenance artifact requires name and sha256")
+    relative = pathlib.PurePosixPath(name)
+    if relative.is_absolute() or ".." in relative.parts or "\\" in name:
+        raise SystemExit(f"release-artifacts: unsafe provenance artifact name: {name!r}")
+    path = (prov_path.parent / pathlib.Path(*relative.parts)).resolve()
+    try:
+        path.relative_to(prov_path.parent)
+    except ValueError:
+        raise SystemExit(f"release-artifacts: provenance artifact escapes its root: {name!r}")
+    if not path.is_file():
+        raise SystemExit(f"release-artifacts: provenance-listed smoke artifact is missing: {path}")
+    size = path.stat().st_size
+    actual_sha = digest(path)
+    if declared_bytes is not None and declared_bytes != size:
+        raise SystemExit(
+            f"release-artifacts: provenance byte count is stale for {name}: "
+            f"{declared_bytes!r} != {size}"
+        )
+    if actual_sha != declared_sha:
+        raise SystemExit(
+            f"release-artifacts: provenance sha256 is stale for {name}: "
+            f"{declared_sha} != {actual_sha}"
+        )
+    rows.append({"name": name, "bytes": size, "sha256": actual_sha})
+
+if not rows:
+    raise SystemExit("release-artifacts: smoke provenance names no artifacts")
+
+exercised_rows = []
+for raw_path in exercised:
+    path = pathlib.Path(raw_path).resolve()
+    if not path.is_file():
+        raise SystemExit(f"release-artifacts: exercised smoke artifact is missing: {path}")
+    actual_sha = digest(path)
+    matches = [
+        row for row in rows
+        if pathlib.PurePosixPath(row["name"]).name == path.name
+        and row["bytes"] == path.stat().st_size
+        and row["sha256"] == actual_sha
+    ]
+    if not matches:
+        raise SystemExit(
+            f"release-artifacts: exercised artifact {path.name!r} is not bound by "
+            f"the supplied provenance"
+        )
+    exercised_rows.append({
+        "name": matches[0]["name"],
+        "bytes": path.stat().st_size,
+        "sha256": actual_sha,
+    })
+
+receipt = {
+    "schemaVersion": "papercusp-platform-smoke/v1",
+    "result": "pass",
+    "tag": tag,
+    "version": version,
+    "platform": platform,
+    "buildSha": build_sha,
+    "verifier": verifier,
+    "verifiedAtUtc": datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z"),
+    "provenance": prov_path.name,
+    "exercisedArtifacts": sorted(exercised_rows, key=lambda row: row["name"]),
+    "artifacts": sorted(rows, key=lambda row: row["name"]),
+}
+payload = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+
+def atomic_write(destination):
+    destination = pathlib.Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=destination.name + ".tmp.", dir=str(destination.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+# The provenance-adjacent copy is the durable audit artifact.  Write the /tmp
+# hand-off last so a failed durable write can never leave a newly-authorizing
+# canonical receipt behind.
+sibling = prov_path.parent / f"platform-smoke-{tag}-{platform}.json"
+atomic_write(sibling)
+atomic_write(out)
+print(out)
+PY
+}
+
+# release_artifacts_assert_platform_smoke_receipt
+#   <tag> <version> <platform> <artifact...>
+# Re-hash every publishable artifact.  A Windows spanned-Server zip is accepted
+# only when every contained file is individually bound by the receipt; zip
+# container metadata may differ, but the exact stub+slices exercised on the VM
+# may not. Signature companions are enforced by the separate signature guard.
+release_artifacts_assert_platform_smoke_receipt() {
+  local tag="${1:-}" version="${2:-}" platform="${3:-}" receipt
+  shift 3 2>/dev/null || return 2
+  [[ $# -gt 0 ]] || {
+    echo "release-artifacts: $platform smoke check received no artifacts." >&2
+    return 1
+  }
+  receipt="$(release_artifacts_smoke_receipt_path "$tag" "$platform")" || return $?
+  [[ -f "$receipt" ]] || {
+    echo "release-artifacts: no $platform smoke receipt at $receipt — run the canonical install verifier for this tag before publishing." >&2
+    return 1
+  }
+
+  python3 - "$receipt" "$tag" "$version" "$platform" "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+import zipfile
+
+receipt_path, tag, version, platform, *artifacts = sys.argv[1:]
+try:
+    receipt = json.loads(pathlib.Path(receipt_path).read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"release-artifacts: unreadable {platform} smoke receipt: {exc}")
+
+expected = {
+    "schemaVersion": "papercusp-platform-smoke/v1",
+    "result": "pass",
+    "tag": tag,
+    "version": version,
+    "platform": platform,
+}
+for key, value in expected.items():
+    if receipt.get(key) != value:
+        raise SystemExit(
+            f"release-artifacts: stale/wrong {platform} smoke receipt: "
+            f"{key}={receipt.get(key)!r}, expected {value!r}"
+        )
+if not receipt.get("buildSha") or not receipt.get("verifier"):
+    raise SystemExit(
+        f"release-artifacts: malformed {platform} smoke receipt lacks buildSha/verifier"
+    )
+if not receipt.get("exercisedArtifacts"):
+    raise SystemExit(
+        f"release-artifacts: malformed {platform} smoke receipt names no exercised artifact"
+    )
+
+rows = receipt.get("artifacts")
+if not isinstance(rows, list) or not rows:
+    raise SystemExit(f"release-artifacts: malformed {platform} smoke receipt has no artifacts")
+
+def hash_file(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+by_basename = {}
+for row in rows:
+    if not isinstance(row, dict):
+        continue
+    name = row.get("name")
+    if isinstance(name, str):
+        by_basename.setdefault(pathlib.PurePosixPath(name).name, []).append(row)
+
+def row_matches(name, size, sha):
+    return any(
+        row.get("bytes") == size and row.get("sha256") == sha
+        for row in by_basename.get(name, [])
+    )
+
+failures = []
+checked = 0
+for raw in artifacts:
+    path = pathlib.Path(raw)
+    if path.name.endswith(".sig"):
+        continue
+    if not path.is_file():
+        failures.append(f"missing publish artifact: {path}")
+        continue
+    size = path.stat().st_size
+    sha = hash_file(path)
+    if row_matches(path.name, size, sha):
+        checked += 1
+        continue
+    if platform == "windows" and path.name.endswith("-setup.zip"):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = [member for member in archive.infolist() if not member.is_dir()]
+                if not members:
+                    failures.append(f"empty Windows smoke payload archive: {path.name}")
+                    continue
+                bad_members = []
+                for member in members:
+                    member_hash = hashlib.sha256(archive.read(member)).hexdigest()
+                    member_name = pathlib.PurePosixPath(member.filename).name
+                    if not row_matches(member_name, member.file_size, member_hash):
+                        bad_members.append(member_name)
+                if bad_members:
+                    failures.append(
+                        f"{path.name} contains unverified/stale payload member(s): "
+                        + ", ".join(sorted(bad_members))
+                    )
+                else:
+                    checked += 1
+                continue
+        except Exception as exc:
+            failures.append(f"cannot inspect Windows smoke payload {path.name}: {exc}")
+            continue
+    failures.append(f"{path.name} bytes are absent/stale in the {platform} smoke receipt")
+
+if failures:
+    print(
+        f"release-artifacts: {platform} smoke receipt FAILED content binding:",
+        file=sys.stderr,
+    )
+    for failure in failures:
+        print(f"  {failure}", file=sys.stderr)
+    raise SystemExit(1)
+if checked == 0:
+    raise SystemExit(
+        f"release-artifacts: {platform} smoke receipt checked no publishable artifacts"
+    )
+print(
+    f"release-artifacts: {platform} smoke receipt verified "
+    f"({checked} content-bound artifact(s), verifier={receipt['verifier']})"
+)
+PY
+}
+
+# release_artifacts_assert_smoke_receipts <tag> <version> <artifact...>
+# Group the shared artifact ledger by physical platform and require a receipt for
+# every group.  Hardware unavailability is an operator decision, never an
+# accidental fallback: the bypass requires both an exact flag and a non-empty
+# reason, and logs that reason on every guarded publish path.
+release_artifacts_assert_smoke_receipts() {
+  local tag="${1:-}" version="${2:-}" f name classified=0
+  shift 2 2>/dev/null || return 2
+  if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
+    [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-}" ]] || {
+      echo "release-artifacts: PAPERCUSP_SKIP_PLATFORM_SMOKE=1 requires PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON (hardware/decision audit)." >&2
+      return 1
+    }
+    echo "release-artifacts: WARNING — platform smoke gate OVERRIDDEN: ${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON}" >&2
+    return 0
+  fi
+  if [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-}" && "${PAPERCUSP_SKIP_PLATFORM_SMOKE}" != "0" ]]; then
+    echo "release-artifacts: PAPERCUSP_SKIP_PLATFORM_SMOKE must be exactly 0 or 1." >&2
+    return 2
+  fi
+
+  local -a linux_artifacts=() windows_artifacts=() mac_artifacts=()
+  for f in "$@"; do
+    name="$(basename "$f")"
+    [[ "$name" == *.sig ]] && continue
+    case "$name" in
+      *.AppImage|*.deb) linux_artifacts+=("$f"); classified=1 ;;
+      *.dmg|*.app.tar.gz) mac_artifacts+=("$f"); classified=1 ;;
+      *.exe|*.msi|*-setup.zip|*-setup-*.bin) windows_artifacts+=("$f"); classified=1 ;;
+    esac
+  done
+  [[ "$classified" == "1" ]] || {
+    echo "release-artifacts: artifact ledger contains no platform payloads to smoke-check." >&2
+    return 1
+  }
+  [[ ${#linux_artifacts[@]} -eq 0 ]] \
+    || release_artifacts_assert_platform_smoke_receipt "$tag" "$version" linux "${linux_artifacts[@]}" \
+    || return $?
+  [[ ${#windows_artifacts[@]} -eq 0 ]] \
+    || release_artifacts_assert_platform_smoke_receipt "$tag" "$version" windows "${windows_artifacts[@]}" \
+    || return $?
+  [[ ${#mac_artifacts[@]} -eq 0 ]] \
+    || release_artifacts_assert_platform_smoke_receipt "$tag" "$version" mac "${mac_artifacts[@]}" \
+    || return $?
+}
+
 # ── Durable release retention ────────────────────────────────────────────────
 # A target-dir slot's flock only protects a live launcher.  Once that launcher
 # exits, a later cleanup can mistake a completed cut for an abandoned cache and

@@ -158,6 +158,20 @@ if ! release_artifacts_assert_fresh "$TAG" "${NEW_ARTIFACTS[@]}"; then
   exit 1
 fi
 
+# EI-20287537474245593: "built" is not "smoke-verified". Require the
+# canonical install-and-relaunch verifier's content-bound receipt BEFORE this
+# platform can be merged into the live manifest. A same-version rebuild changes
+# the hashes and invalidates the old receipt. Hardware-unavailable publication
+# remains possible only through the shared, reason-required logged override.
+if release_artifacts_assert_smoke_receipts "$TAG" "$VERSION" "${NEW_ARTIFACTS[@]}"; then
+  echo "==> platform smoke gate: $PLATFORM receipt is present and content-bound"
+else
+  echo "ERROR: $PLATFORM is built but not smoke-verified for these exact bytes — refusing to merge it into $TAG." >&2
+  echo "       Run bin/install-and-relaunch-verify.sh with --smoke-receipt-tag $TAG, or use" >&2
+  echo "       PAPERCUSP_SKIP_PLATFORM_SMOKE=1 plus PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON only for a deliberate hardware exception." >&2
+  exit 1
+fi
+
 # ── [2] fetch the LIVE manifest(s) as the merge base ─────────────────────────
 MERGE_GUI="$(mktemp /tmp/papercusp-merge-base-gui-XXXXXX.json)"
 MERGE_SRV="$(mktemp /tmp/papercusp-merge-base-server-XXXXXX.json)"

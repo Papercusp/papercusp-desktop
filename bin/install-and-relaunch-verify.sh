@@ -61,11 +61,20 @@
 #                                  a timeout FAILS the run (installer may still
 #                                  be running detached on the VM — no relaunch)
 #   --poll-interval SEC            poll cadence while waiting (default 5)
+#   --smoke-receipt-tag TAG        after a PASS, atomically record a content-bound
+#                                  platform smoke receipt for this release tag.
+#                                  Also accepts PAPERCUSP_SMOKE_RECEIPT_TAG.
+#   --smoke-provenance PATH        build-provenance.json to bind; default: nearest
+#                                  ancestor of --artifact (up to the bundle root)
 #   --json                         emit a machine-readable verdict
 # Exit: 0 = flip happened AND port held (update genuinely replaced the operator
 #       in place) · 1 = a verification assertion failed (no-flip / port-moved /
 #       version-mismatch) · 2 = usage/setup (bad args, unreachable, nothing to flip).
 set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/release-artifacts.sh
+source "$HERE/lib/release-artifacts.sh"
 
 PLATFORM="windows"
 ARTIFACT=""
@@ -89,6 +98,8 @@ POLL_INTERVAL="${POLL_INTERVAL:-5}"
 # installer RUNNING detached, so the step must fail loudly, never barrel on.
 INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-900}"
 JSON=0
+SMOKE_RECEIPT_TAG="${PAPERCUSP_SMOKE_RECEIPT_TAG:-}"
+SMOKE_PROVENANCE=""
 SSH_OPTIONS=()
 SCP_OPTIONS=()
 
@@ -117,8 +128,10 @@ while [[ $# -gt 0 ]]; do
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:-}"; shift 2 ;;
+    --smoke-receipt-tag) SMOKE_RECEIPT_TAG="${2:-}"; shift 2 ;;
+    --smoke-provenance) SMOKE_PROVENANCE="${2:-}"; shift 2 ;;
     --json) JSON=1; shift ;;
-    -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -130,6 +143,21 @@ REMOTE_BASENAME="$(basename "$ARTIFACT")"
 # ── JSON field extractors (health body + provenance) ────────────────────────
 json_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
+
+find_build_provenance() { # $1 = artifact path
+  local dir candidate depth
+  dir="$(cd "$(dirname "$1")" && pwd)"
+  for depth in 0 1 2 3; do
+    candidate="$dir/build-provenance.json"
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    [[ "$dir" != "/" ]] || break
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
 
 # Render the remote install command for one macOS DMG role. Product is one of
 # our fixed bundle names, and artifact_placeholder is replaced with the quoted
@@ -241,9 +269,12 @@ REMOTE_Q="\"$REMOTE_ARTIFACT\""
 # ── Resolve expected sha/version from the artifact's own provenance ─────────
 # (D-002 spirit: the target of the flip is the INSTALLED artifact's own build sha,
 # not "the latest release" — so a rollback install is verified the same way.)
+PROV="$SMOKE_PROVENANCE"
+if [[ -z "$PROV" ]]; then
+  PROV="$(find_build_provenance "$ARTIFACT" 2>/dev/null || true)"
+fi
 if [[ -z "$EXPECTED_SHA" || -z "$EXPECTED_VERSION" ]]; then
-  PROV="$(dirname "$ARTIFACT")/build-provenance.json"
-  if [[ -f "$PROV" ]]; then
+  if [[ -n "$PROV" && -f "$PROV" ]]; then
     [[ -z "$EXPECTED_SHA" ]] && EXPECTED_SHA="$(json_str buildSha < "$PROV")"
     [[ -z "$EXPECTED_VERSION" ]] && EXPECTED_VERSION="$(json_str version < "$PROV")"
   fi
@@ -275,7 +306,7 @@ if [[ "$PLATFORM" == "windows" ]]; then
   fi
   [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
 
-  SERVER_PROV="$(dirname "$SERVER_ARTIFACT")/build-provenance.json"
+  SERVER_PROV="$(find_build_provenance "$SERVER_ARTIFACT" 2>/dev/null || true)"
   [[ -f "$SERVER_PROV" ]] || {
     echo "server provenance not found beside $(basename "$SERVER_ARTIFACT"): $SERVER_PROV" >&2
     exit 2
@@ -593,6 +624,26 @@ if [[ ${#FAILURES[@]} -eq 0 ]]; then
   fi
 fi
 
+SMOKE_RECEIPT=""
+if [[ ${#FAILURES[@]} -eq 0 && -n "$SMOKE_RECEIPT_TAG" ]]; then
+  if [[ -z "$PROV" || ! -f "$PROV" ]]; then
+    fail_check "smoke receipt requested for $SMOKE_RECEIPT_TAG but no build-provenance.json could be resolved; pass --smoke-provenance PATH"
+  else
+    EXERCISED_ARTIFACTS=( "$ARTIFACT" "${SERVER_ARTIFACTS[@]}" )
+    SMOKE_RECEIPT_OUT="$(release_artifacts_smoke_receipt_write \
+      "$SMOKE_RECEIPT_TAG" "$EXPECTED_VERSION" "$PLATFORM" \
+      "install-and-relaunch-verify.sh" "$EXPECTED_SHA" "$PROV" \
+      "${EXERCISED_ARTIFACTS[@]}" 2>&1)"
+    SMOKE_RECEIPT_RC=$?
+    if [[ "$SMOKE_RECEIPT_RC" -ne 0 ]]; then
+      fail_check "could not persist content-bound smoke receipt: ${SMOKE_RECEIPT_OUT:0:500}"
+    else
+      SMOKE_RECEIPT="$(printf '%s\n' "$SMOKE_RECEIPT_OUT" | tail -n 1)"
+      note "content-bound platform smoke receipt: $SMOKE_RECEIPT"
+    fi
+  fi
+fi
+
 ok=$([[ ${#FAILURES[@]} -eq 0 ]] && echo true || echo false)
 
 if [[ "$JSON" == "1" ]]; then
@@ -612,6 +663,7 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "portAfter": %s,\n' "$(jstr "$PORT_AFTER")"
   printf '  "flipped": %s,\n' "$FLIPPED"
   printf '  "portHeld": %s,\n' "$([[ -n "$PORT_AFTER" && "$PORT_AFTER" == "$PORT_BEFORE" ]] && echo true || echo false)"
+  printf '  "smokeReceipt": %s,\n' "$(jstr "$SMOKE_RECEIPT")"
   printf '  "failures": ['
   for i in "${!FAILURES[@]}"; do [[ $i -gt 0 ]] && printf ', '; printf '%s' "$(jstr "${FAILURES[$i]}")"; done
   printf '],\n'

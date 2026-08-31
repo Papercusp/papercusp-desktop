@@ -257,6 +257,19 @@ if ! release_artifacts_assert_fresh "$TAG"; then
   exit 1
 fi
 
+# EI-20287537474245593: the final publish hand-off must prove that every
+# platform in this cut passed the canonical installed-artifact smoke against
+# THESE bytes. Receipts are tag/version/platform scoped and re-hashed here, so a
+# copied or pre-rebuild PASS cannot authorize a changed payload. The only bypass
+# is the shared explicit flag + non-empty reason, which logs the exception.
+if ! release_artifacts_assert_smoke_receipts "$TAG" "$VERSION" "${ARTIFACTS[@]}"; then
+  echo "ERROR: this cut is built but not smoke-verified for its exact platform bytes — refusing upload (EI-20287537474245593)." >&2
+  echo "       Run bin/install-and-relaunch-verify.sh with --smoke-receipt-tag $TAG for each platform," >&2
+  echo "       or set PAPERCUSP_SKIP_PLATFORM_SMOKE=1 AND PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON" >&2
+  echo "       for a deliberate, logged hardware-unavailable exception." >&2
+  exit 1
+fi
+
 # Recurrence guard (EI-12913): every artifact URL the manifest(s) ADVERTISE must
 # be in the set we are about to upload. Fail BEFORE uploading — the post-upload
 # fetch-check below catches an advertised-but-missing artifact only once the
