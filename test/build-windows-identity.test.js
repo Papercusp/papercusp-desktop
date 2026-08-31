@@ -70,6 +70,106 @@ const ASSEMBLED_SCAN_CALL = /--scan-dir\s+"\$\{_WIN_SCAN_DIRS\[@\]\}"/;
 // The CALL, not the definition (`run_iscc() {`).
 const ISCC_CALL = /^\s*run_iscc\s+["'$]/;
 
+function extractBashFunction(source, name) {
+  const sourceLines = source.split('\n');
+  const start = sourceLines.findIndex((line) => line === `${name}() {`);
+  assert.ok(start >= 0, `expected ${name}() in the Windows build script`);
+  const end = sourceLines.findIndex((line, index) => index > start && line === '}');
+  assert.ok(end > start, `expected a closing brace for ${name}()`);
+  return sourceLines.slice(start, end + 1).join('\n');
+}
+
+function runIsccHarness(compilerExit) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'win-iscc-status-'));
+  const stage = path.join(dir, 'stage');
+  const outDir = path.join(dir, 'collected');
+  const binDir = path.join(dir, 'bin');
+  const appName = 'Fixture App';
+  const version = '9.8.7-test';
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const xvfbRun = path.join(binDir, 'xvfb-run');
+  fs.writeFileSync(
+    xvfbRun,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'mkdir -p "$TEST_STAGE/out"',
+      'printf "  Compressing fixture payload\\n"',
+      'printf "fixture compiler result\\n"',
+      // A failed compiler that leaves an artifact is the dangerous case: the
+      // old `|| true` path moved this file and returned success.
+      'touch "$TEST_STAGE/out/${TEST_APP_NAME}_${TEST_VERSION}_x64-setup.exe"',
+      'exit "$TEST_COMPILER_EXIT"',
+    ].join('\n'),
+  );
+  fs.chmodSync(xvfbRun, 0o755);
+
+  const harness = [
+    'set -euo pipefail',
+    `STAGE=${JSON.stringify(stage)}`,
+    `OUT_DIR=${JSON.stringify(outDir)}`,
+    `VERSION=${JSON.stringify(version)}`,
+    `WINEPREFIX_INNO=${JSON.stringify(path.join(dir, 'wine'))}`,
+    `ISCC_EXE=${JSON.stringify(path.join(dir, 'ISCC.exe'))}`,
+    `ISS_WIN=${JSON.stringify(path.join(dir, 'fixture.iss'))}`,
+    'BUILDROOT_WIN="$STAGE"',
+    'SPAN_DEFINE=()',
+    'mkdir -p "$STAGE" "$OUT_DIR"',
+    'winpath() { printf "%s\\n" "$1"; }',
+    'fail() { echo "ERROR: $*" >&2; exit 1; }',
+    extractBashFunction(script, 'run_iscc'),
+    'run_iscc fixture-id "$TEST_APP_NAME"',
+  ].join('\n');
+
+  try {
+    return {
+      result: spawnSync('bash', ['-c', harness], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH || ''}`,
+          TEST_STAGE: stage,
+          TEST_APP_NAME: appName,
+          TEST_VERSION: version,
+          TEST_COMPILER_EXIT: String(compilerExit),
+        },
+      }),
+      artifact: path.join(outDir, `${appName}_${version}_x64-setup.exe`),
+    };
+  } finally {
+    // The returned artifact path is useful only for the immediate assertion;
+    // defer cleanup to the caller so it can inspect the filesystem verdict.
+  }
+}
+
+test('run_iscc rejects a failed compiler even when it leaves an expected artifact', () => {
+  const { result, artifact } = runIsccHarness(23);
+  try {
+    assert.notEqual(result.status, 0, `failed ISCC was accepted:\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /ISCC failed for role 'Fixture App' \(exit 23\)/);
+    assert.equal(
+      fs.existsSync(artifact),
+      false,
+      'an artifact left by failed ISCC must not be moved into the collected release output',
+    );
+  } finally {
+    fs.rmSync(path.dirname(path.dirname(artifact)), { recursive: true, force: true });
+  }
+});
+
+test('run_iscc preserves successful compilation while filtering progress noise', () => {
+  const { result, artifact } = runIsccHarness(0);
+  try {
+    assert.equal(result.status, 0, `successful ISCC was rejected:\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /fixture compiler result/);
+    assert.doesNotMatch(result.stdout, /Compressing fixture payload/);
+    assert.equal(fs.existsSync(artifact), true, 'successful ISCC artifact was not collected');
+  } finally {
+    fs.rmSync(path.dirname(path.dirname(artifact)), { recursive: true, force: true });
+  }
+});
+
 test('the Windows cross-build defines a path remap containing --remap-path-prefix', () => {
   const def = find(/^_WIN_REMAP=/);
   assert.equal(def.length, 1, 'expected exactly one _WIN_REMAP definition');
