@@ -248,14 +248,17 @@ def safe_artifact_path(name):
     return candidate
 
 for a in prov_artifacts:
+    if not isinstance(a, dict):
+        failures.append("provenance artifacts must contain only object rows")
+        artifacts_report.append({"name": None, "present": False, "sha256Ok": None, "sigOk": None})
+        continue
     name = a.get("name")
     recorded = a.get("sha256")
     path = safe_artifact_path(name)
-    entry = {"name": name, "present": path.is_file(), "sha256Ok": None, "sigOk": None}
     if path is None:
-        entry["present"] = False
-        artifacts_report.append(entry)
+        artifacts_report.append({"name": name, "present": False, "sha256Ok": None, "sigOk": None})
         continue
+    entry = {"name": name, "present": path.is_file(), "sha256Ok": None, "sigOk": None}
     if not path.is_file():
         failures.append(f"artifact {name!r} recorded in provenance is missing from {DIR}")
         artifacts_report.append(entry)
@@ -314,8 +317,9 @@ if LATEST_JSON:
             # a manifest url only carries the basename — match on basenames.
             prov_name_by_base = {}
             for a in prov_artifacts:
-                n = a.get("name") or ""
-                prov_name_by_base.setdefault(n.rsplit("/", 1)[-1], n)
+                n = a.get("name") if isinstance(a, dict) else None
+                if isinstance(n, str) and n:
+                    prov_name_by_base.setdefault(n.rsplit("/", 1)[-1], n)
             for platform_key, meta in platforms.items():
                 url = (meta or {}).get("url", "")
                 sig_field = ((meta or {}).get("signature", "") or "").strip()
