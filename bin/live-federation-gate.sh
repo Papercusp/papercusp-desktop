@@ -2300,19 +2300,35 @@ _frame_lag_scan() { # <leg-start-epoch-s> — echo "<files> <worst_maxms> <starv
   # banked frame serve.logs belonging to THIS run (mtime after the leg started). The single
   # scanner behind BOTH the starvation downgrade predicate and the verdict-line note below, so
   # the number a verdict PRINTS can never disagree with the number the downgrade DECIDED on.
+  #
+  # The mtime cutoff is expressed with find's own `-newermt @<epoch>` rather than a scratch marker
+  # file. The marker idiom this replaced (`mktemp -u`; `touch -d "@$start_ts"`; `find -newer`) had a
+  # SILENT FALSE-CLEAN failure mode: if the marker could not be created — TMPDIR reaped out from
+  # under a parallel test lane, ENOSPC, a lost mktemp race — then find ERRORS, prints nothing to
+  # stdout (its stderr is discarded here), and this function returns "0 0 0". That is byte-identical
+  # to a genuinely clean scan, so check_local_matrix_frame_starvation below reports CLEAN and an
+  # INSTRUMENT FAILURE silently reads as "the frames were not starved" — the exact false-negative
+  # this scanner exists to prevent, and the bug class the header of
+  # live-federation-gate-frame-pressure-note.test.ts explicitly forbids ("says UNKNOWN rather than
+  # 'clean' when there is no evidence"). `-newermt` needs no temp file, so the whole class is gone.
+  # MEASURED 2026-08-31 on bfs 4.1.1 (this box's find): `-newer <missing>` => 0 rows, rc=1, stderr
+  # "No such file or directory"; `-newermt @0` / `@<now-3600>` select correctly and `@<future>`
+  # selects nothing. Keep the `@<epoch>` form — CLAUDE.md documents that bfs mis-parses
+  # human-relative and some absolute -newermt strings, but honours an epoch predicate.
   local start_ts="${1:-0}" bank_dir="${RIG_BANK_DIR:-$HOME/.papercusp/live-fed-gate/triage}"
-  local f maxms files=0 hits=0 worst=0 marker
+  local f maxms files=0 hits=0 worst=0
+  # find rejects a non-numeric -newermt argument, and a rejected predicate would abort the walk
+  # straight back into the "0 0 0" false-clean this change exists to remove. Pin the documented
+  # 0 default instead of letting an empty or garbage caller value decide.
+  case "$start_ts" in *[!0-9]*|'') start_ts=0 ;; esac
   [ -d "$bank_dir" ] || { echo "0 0 0"; return 0; }
-  marker="$(mktemp -u 2>/dev/null || echo "/tmp/.lfg-starvation-marker.$$")"
-  touch -d "@$start_ts" "$marker" 2>/dev/null || touch "$marker" 2>/dev/null
   while IFS= read -r -d '' f; do
     files=$((files + 1))
     maxms="$(grep -aoE 'maxMs: [0-9.]+' "$f" 2>/dev/null | grep -oE '[0-9.]+' \
       | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{print m+0}')"
     awk "BEGIN{exit !($maxms > $worst)}" 2>/dev/null && worst="$maxms"
     if awk "BEGIN{exit !($maxms > 1000)}" 2>/dev/null; then hits=$((hits + 1)); fi
-  done < <(find "$bank_dir" -maxdepth 1 -name 'serve-*.log' -newer "$marker" -print0 2>/dev/null)
-  rm -f "$marker" 2>/dev/null
+  done < <(find "$bank_dir" -maxdepth 1 -name 'serve-*.log' -newermt "@$start_ts" -print0 2>/dev/null)
   echo "$files $worst $hits"
 }
 check_local_matrix_frame_starvation() { # <leg-start-epoch-s> — true iff a banked frame
