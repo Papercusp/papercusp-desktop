@@ -1754,6 +1754,13 @@ VM_RELEASE_VULNERABILITY_ATTESTATION_PATH = os.path.join(
 VM_RELEASE_GATED_SEVERITIES = {"high", "critical"}
 VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS = 72
 
+# EI-21925061645614369 — how many installed npm package directories we need to SEE on disk before
+# we are willing to insist the SBOM catalogued some. This is only a walk cutoff, not a threshold:
+# the assertion fires on ANY non-zero count, and this just stops the walk early on a huge tree once
+# the answer is already settled. Deliberately small — a bundle with even one node_modules entry and
+# zero npm in its SBOM is already a blind scan.
+_SBOM_NPM_COVERAGE_MIN_PACKAGES = 8
+
 
 def _parse_tool_json(command, label, env=None, timeout=60):
     """Run one metadata command and fail closed on exit/JSON/schema errors."""
@@ -1876,6 +1883,24 @@ def audit_vulnerabilities(args):
             [
                 syft,
                 f"dir:{root}",
+                # EI-21925061645614369 — WITHOUT this flag the vulnerability leg is blind to npm,
+                # which is the largest ecosystem in the bundle. syft's `dir:` source selects the
+                # catalogers tagged `directory`, and in syft 1.51 the javascript tags split:
+                #
+                #   javascript-lock-cataloger     declared, deno, DIRECTORY, javascript, ... npm
+                #   javascript-package-cataloger  IMAGE, installed, javascript, ...
+                #
+                # The lock cataloger reads package-lock.json; a release bundle ships node_modules/
+                # with NO lockfile at the extracted root. So the only cataloger that would read
+                # node_modules/*/package.json is image-tagged and never runs here. Measured on the
+                # r14 bundle: 298 SBOM components, ZERO npm, verdict "green / gatedMatches 0" — over
+                # a tree carrying 26 at/above-high npm findings including a Critical
+                # (form-data@4.0.0, GHSA-fjxv-7rqg-78g4). That 26 is exactly what the GCP image scan
+                # attributes to papercusp-bundled, by an independent method.
+                #
+                # `+` ADDS to the default set rather than replacing it, so binary/golang coverage is
+                # unchanged (284 golang components before and after). Cost: ~6s on a 4.3G tree.
+                "--select-catalogers", "+javascript-package-cataloger",
                 "--source-name", "papercusp-vm-release",
                 "--source-version", source_version,
                 "-o", f"cyclonedx-json={sbom_path}",
@@ -1893,6 +1918,47 @@ def audit_vulnerabilities(args):
         print(f"AUDIT ERROR: syft scan failed ({syft_result.returncode}): "
               f"{detail[:1000]}", file=sys.stderr)
         return 2
+    # ── SBOM COVERAGE ASSERTION (EI-21925061645614369) ────────────────────────────
+    # The flag above fixes the blindness; this is what stops it coming back unnoticed.
+    # Cataloger tags are UPSTREAM data — one retag in a future syft and the npm leg silently
+    # empties again, and an empty leg is indistinguishable from a clean one. This file's own
+    # header already states the rule ("a scan that inspects nothing is indistinguishable from a
+    # scan that found nothing"); the vulnerability leg simply never had it applied.
+    #
+    # So: derive the expectation from the TREE, not from a constant. If the bundle demonstrably
+    # contains installed npm packages, the SBOM must have catalogued some. Fail CLOSED (exit 2,
+    # "unscannable"), never warn — a warning here is a green build with a note nobody reads.
+    npm_dirs_on_disk = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        if os.path.basename(dirpath) == "node_modules":
+            npm_dirs_on_disk += sum(1 for d in dirnames if not d.startswith("."))
+            if npm_dirs_on_disk >= _SBOM_NPM_COVERAGE_MIN_PACKAGES:
+                break
+    if npm_dirs_on_disk:
+        try:
+            with open(sbom_path, encoding="utf-8") as source:
+                sbom_components = json.load(source).get("components") or []
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"AUDIT ERROR: SBOM unreadable for the coverage assertion: {exc}",
+                  file=sys.stderr)
+            return 2
+        npm_in_sbom = sum(
+            1 for component in sbom_components
+            if isinstance(component, dict)
+            and str(component.get("purl", "")).startswith("pkg:npm/")
+        )
+        if npm_in_sbom == 0:
+            print(f"AUDIT ERROR: SBOM catalogued 0 npm packages, but the tree under {root} "
+                  f"contains at least {npm_dirs_on_disk} installed npm package director"
+                  f"{'y' if npm_dirs_on_disk == 1 else 'ies'}. The vulnerability leg is BLIND "
+                  f"to npm and its verdict would be meaningless — refusing to emit one. "
+                  f"Check syft's cataloger tags (`syft cataloger list | grep javascript`): the "
+                  f"installed-package cataloger must be selected for a dir: source.",
+                  file=sys.stderr)
+            return 2
+        print(f"    npm coverage : {npm_in_sbom} package(s) catalogued "
+              f"(tree has >= {npm_dirs_on_disk})")
+
     try:
         with open(grype_path, "w", encoding="utf-8") as report:
             grype_result = subprocess.run(
