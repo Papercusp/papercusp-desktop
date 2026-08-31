@@ -64,7 +64,7 @@ function buildDistributionDeb(role, { forbiddenGui = false, modelFragment = fals
   return { temp, artifact };
 }
 
-function buildDistributionAppImage() {
+function buildDistributionAppImage({ forbiddenGui = false } = {}) {
   const contract = readDistributionContract();
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-distribution-gui-appimage-'));
   const resourceRoot = contract.gui.installedIdentities.linuxResourceRoot.replace(/^\//, '');
@@ -78,6 +78,7 @@ root="squashfs-root/${resourceRoot}"
 mkdir -p "$root/sidecar/spa"
 printf spa > "$root/sidecar/spa/index.html"
 head -c 4096 /dev/zero > "$root/sidecar/spa/chunk.js"
+${forbiddenGui ? 'printf server > "$root/sidecar/serve.mjs"' : ''}
 `,
     { mode: 0o755 },
   );
@@ -94,6 +95,14 @@ function runDistributionCensus(role, artifact, env = {}) {
   const lines = (run.stdout ?? '').trim().split('\n').filter(Boolean);
   const report = lines.length ? JSON.parse(lines.at(-1)) : null;
   return { ...run, report };
+}
+
+function runLegacyAppImageVerifier(artifact) {
+  return spawnSync(
+    'bash',
+    [path.join(root, 'bin', 'verify-appimage-packed-sidecar.sh'), artifact],
+    { encoding: 'utf8' },
+  );
 }
 
 test('GUI/Server distribution contract is fail-closed and archive-aware', () => {
@@ -267,6 +276,41 @@ test('distribution census normalizes the AppImage squashfs root and uses its for
   } finally {
     fs.rmSync(fixture.temp, { recursive: true, force: true });
   }
+});
+
+test('legacy packed-sidecar entrypoint accepts a thin GUI and rejects embedded Server runtime', () => {
+  const cleanFixture = buildDistributionAppImage();
+  const serverFixture = buildDistributionAppImage({ forbiddenGui: true });
+  try {
+    const clean = runLegacyAppImageVerifier(cleanFixture.artifact);
+    assert.equal(clean.status, 0, clean.stderr || clean.stdout);
+    const cleanReport = JSON.parse(clean.stdout.trim().split('\n').filter(Boolean).at(-1));
+    assert.equal(cleanReport.ok, true);
+    assert.equal(cleanReport.reports[0].role, 'gui');
+    assert.equal(cleanReport.reports[0].artifactFormat, 'appimage');
+
+    const withServer = runLegacyAppImageVerifier(serverFixture.artifact);
+    assert.equal(withServer.status, 1, withServer.stderr || withServer.stdout);
+    assert.match(withServer.stderr, /GUI resource escaped the allowlist: sidecar\/serve\.mjs/);
+    assert.match(withServer.stderr, /GUI contains forbidden Server resource: sidecar\/serve\.mjs/);
+
+    const wrapper = readText('bin', 'verify-appimage-packed-sidecar.sh');
+    assert.match(wrapper, /--distribution-census gui linux/);
+    assert.doesNotMatch(wrapper, /gate-sidecar-boots\.sh/);
+  } finally {
+    fs.rmSync(cleanFixture.temp, { recursive: true, force: true });
+    fs.rmSync(serverFixture.temp, { recursive: true, force: true });
+  }
+});
+
+test('Linux fresh-install verifier is explicitly GUI-only and treats self-hosting as failure', () => {
+  const script = readText('bin', 'linux-fresh-install-e2e.sh');
+  assert.match(script, /--distribution-census gui linux/);
+  assert.match(script, /Server\/install\/attachment NOT tested/);
+  assert.match(script, /thin GUI opened an artifact-owned \/api\/health endpoint/);
+  assert.match(script, /GUI opened no artifact-owned \/api\/health endpoint \(never self-hosted\)/);
+  assert.doesNotMatch(script, /AppImage carries a bundled node sidecar/);
+  assert.doesNotMatch(script, /operator answered \/api\/health/);
 });
 
 test('distribution census rejects GUI Server resources and incomplete model fragments', () => {
