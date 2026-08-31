@@ -85,6 +85,102 @@ s3api_head() {
     --query 'ContentLength' --output text 2>/dev/null || true
 }
 
+# ETag of an object in the bucket (quotes stripped), or empty if it is not there.
+#
+# A non-multipart S3 ETag is the MD5 of the object's bytes. Multipart ETags carry
+# a "-<part-count>" suffix and are not comparable to a local hash, so the exact
+# object is fetched and compared instead. A failed metadata read is not treated
+# as proof of identity; the fetch fallback still gets a chance to verify bytes.
+s3api_head_etag() {
+  local etag
+  etag="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" \
+    --query 'ETag' --output text 2>/dev/null)" || return 1
+  etag="${etag//\"/}"
+  [[ -n "$etag" && "$etag" != "None" ]] || return 1
+  printf '%s\n' "$etag"
+}
+
+# Download one already-published object to a caller-owned temporary path. This
+# is the correctness fallback for Android APK/AAB objects: aws-cli uploads
+# artifacts over its multipart threshold, whose ETag is not a content hash.
+s3api_get_object() {
+  local key="$1" out="$2"
+  aws s3api get-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$key" "$out" >/dev/null 2>&1
+}
+
+_mobile_file_size() {
+  stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
+}
+
+_mobile_md5() {
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$1" | cut -d' ' -f1
+  elif command -v md5 >/dev/null 2>&1; then
+    md5 -q "$1"
+  else
+    return 1
+  fi
+}
+
+# Anything whose ETag is not a plain MD5 is compared by fetching the exact
+# remote bytes. A same-size multipart object is never accepted as a match based
+# on size alone; this keeps the installable mobile payload content-bound even
+# when it exceeds the S3 multipart threshold.
+_mobile_remote_content_state() {
+  local key="$1" file="$2" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/papercusp-mobile-remote.XXXXXX")" || {
+    echo metadata-unavailable
+    return
+  }
+  if ! s3api_get_object "$key" "$tmp"; then
+    rm -f "$tmp"
+    echo metadata-unavailable
+    return
+  fi
+  if cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    echo identical
+  else
+    rm -f "$tmp"
+    echo differs
+  fi
+}
+
+# Compare a local artifact with the object already at its published key. This is
+# the single decision used by BOTH the skip path and the storage verifier.
+remote_state() {
+  local key="$1" file="$2" local_size remote_size etag
+  local_size="$(_mobile_file_size "$file")"
+  remote_size="$(s3api_head "$key")"
+  if [[ -z "$remote_size" || "$remote_size" == "None" ]]; then
+    echo absent
+    return
+  fi
+  if [[ "$remote_size" != "$local_size" ]]; then
+    echo differs
+    return
+  fi
+  if ! etag="$(s3api_head_etag "$key")"; then
+    _mobile_remote_content_state "$key" "$file"
+    return
+  fi
+  if [[ "$etag" =~ ^[0-9a-f]{32}$ ]]; then
+    local local_md5=""
+    local_md5="$(_mobile_md5 "$file" 2>/dev/null || true)"
+    if [[ -n "$local_md5" && "$etag" == "$local_md5" ]]; then
+      echo identical
+    elif [[ -n "$local_md5" ]]; then
+      echo differs
+    else
+      _mobile_remote_content_state "$key" "$file"
+    fi
+    return
+  fi
+  _mobile_remote_content_state "$key" "$file"
+}
+
 # ── What to upload: src TAB published-name, from the ONE tested candidate list ─
 # Android is required as a complete provenanced APK+AAB pair unless explicitly
 # opted out. Capture the command status directly: process substitution would hide
@@ -135,7 +231,7 @@ echo "==> mobile brand : $MOBILE_PRODUCT_NAME"
 echo "==> mobile artifacts: ${#PAIRS[@]}"
 for pair in "${PAIRS[@]}"; do
   src="${pair%%$'\t'*}"; name="${pair##*$'\t'}"
-  printf '      %8.1f MB  %s  ←  %s\n' "$(echo "scale=1; $(stat -c%s "$src")/1000000" | bc)" "$name" "$src"
+  printf '      %8.1f MB  %s  ←  %s\n' "$(echo "scale=1; $(_mobile_file_size "$src")/1000000" | bc)" "$name" "$src"
 done
 echo
 
@@ -144,13 +240,20 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit 0
 fi
 
-# ── Upload (skip-if-same-size, same rationale as upload-release.sh) ──────────
+# ── Upload (content-aware skip; multipart objects are fetched and compared) ──
 for pair in "${PAIRS[@]}"; do
   src="${pair%%$'\t'*}"; name="${pair##*$'\t'}"
-  local_size="$(stat -c%s "$src")"
-  if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]; then
-    echo "==> already uploaded, skipping $name"
+  state="$(remote_state "${KEY_PREFIX}/${TAG}/${name}" "$src")"
+  if [[ "$state" == "identical" ]]; then
+    echo "==> already uploaded, content verified; skipping $name"
     continue
+  fi
+  if [[ "$state" == "metadata-unavailable" ]]; then
+    echo "==> remote content verification unavailable; uploading $name"
+  elif [[ "$state" == "absent" ]]; then
+    echo "==> no remote object; uploading $name"
+  else
+    echo "==> remote bytes differ; uploading $name"
   fi
   echo "==> uploading $name"
   s3 cp "$src" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
@@ -162,20 +265,31 @@ echo "==> verifying storage (S3, authenticated)"
 BAD=0
 for pair in "${PAIRS[@]}"; do
   src="${pair%%$'\t'*}"; name="${pair##*$'\t'}"
-  local_size="$(stat -c%s "$src")"
-  remote_size="$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")"
-  if [[ "$remote_size" == "$local_size" ]]; then
-    printf '  ✓ %s (%.1f MB)\n' "$name" "$(echo "scale=1; $local_size/1000000" | bc)"
-  else
-    echo "  ✗ $name — local ${local_size}B but remote '${remote_size}'" >&2
-    BAD=1
-  fi
+  local_size="$(_mobile_file_size "$src")"
+  state="$(remote_state "${KEY_PREFIX}/${TAG}/${name}" "$src")"
+  case "$state" in
+    identical)
+      printf '  ✓ %s (%.1f MB, content verified)\n' "$name" "$(echo "scale=1; $local_size/1000000" | bc)"
+      ;;
+    absent)
+      echo "  ✗ $name — nothing published at ${KEY_PREFIX}/${TAG}/${name}" >&2
+      BAD=1
+      ;;
+    metadata-unavailable)
+      echo "  ✗ $name — authenticated remote content verification unavailable" >&2
+      BAD=1
+      ;;
+    *)
+      echo "  ✗ $name — published bytes differ from local content (local ${local_size}B)" >&2
+      BAD=1
+      ;;
+  esac
 done
 if [[ "$BAD" != "0" ]]; then
   echo "ERROR: mobile artifacts did not land intact." >&2
   exit 1
 fi
-echo "  ✓ all mobile artifacts present in the bucket at full size"
+echo "  ✓ all mobile artifacts present in the bucket and content-verified"
 echo
 echo "Next: re-record the release with --mobile-root so the page links them"
 echo "  (record-release-cli), then publish-release-history.sh."
