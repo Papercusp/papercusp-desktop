@@ -42,6 +42,15 @@ mkdir -p "$ENV_SC"
 cp -al "$SIDECAR/serve.mjs" "$ENV_SC/serve.mjs"
 cp -al "$SIDECAR/spa" "$ENV_SC/spa"
 cp -al "$SIDECAR/db-sql" "$ENV_SC/db-sql"
+# Carry the primary sidecar's immutable provenance beside the child bundle.
+# The request-only launcher must derive its own build identity from these bytes,
+# never from the primary's inherited environment. Older development sidecars
+# without the file remain load-only but are reported as unverified.
+if [[ -s "$SIDECAR/build-provenance.json" ]]; then
+  cp -a "$SIDECAR/build-provenance.json" "$ENV_SC/build-provenance.json"
+elif [[ -s "$SIDECAR/.sidecar-build-stamp" ]]; then
+  cp -a "$SIDECAR/.sidecar-build-stamp" "$ENV_SC/.sidecar-build-stamp"
+fi
 for env_sc_extra in prompts harness; do
   if [[ -e "$SIDECAR/$env_sc_extra" ]]; then
     cp -al "$SIDECAR/$env_sc_extra" "$ENV_SC/$env_sc_extra"
