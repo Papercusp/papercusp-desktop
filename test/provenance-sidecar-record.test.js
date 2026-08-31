@@ -425,6 +425,56 @@ test('verify-provenance rejects missing or malformed release identity', () => {
   }
 });
 
+test('verify-provenance rejects artifact names that escape ARTIFACT_DIR', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const outside = path.join(path.dirname(dir), `prov-outside-${path.basename(dir)}.bin`);
+  // Byte-identical on purpose: before the fix, traversal/absolute/symlink names
+  // all PASS. A different outside payload would fail on sha256 and never prove
+  // that containment—rather than an incidental hash mismatch—is the guard.
+  fs.writeFileSync(outside, 'verified fixture bytes');
+  const provPath = path.join(dir, 'build-provenance.json');
+  const run = (name) => {
+    fs.writeFileSync(
+      provPath,
+      JSON.stringify({
+        version: '0.0.0',
+        buildSha: 'abc1234',
+        gitHead: 'a'.repeat(40),
+        gitDirty: false,
+        artifacts: [{ name, sha256, sig: false }],
+      }),
+    );
+    return spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
+  };
+
+  // Positive control: a normal in-root relative name remains valid.
+  const valid = run(path.basename(artifact));
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+
+  const traversal = run(`../${path.basename(outside)}`);
+  assert.equal(traversal.status, 1, 'a parent traversal unexpectedly passed');
+  assert.match(JSON.parse(traversal.stdout).failures.join('\n'), /unsafe path|outside ARTIFACT_DIR/);
+
+  const absolute = run(outside);
+  assert.equal(absolute.status, 1, 'an absolute artifact path unexpectedly passed');
+  assert.match(JSON.parse(absolute.stdout).failures.join('\n'), /unsafe path/);
+
+  const backslash = run('nested\\artifact.AppImage');
+  assert.equal(backslash.status, 1, 'a Windows-style path unexpectedly passed');
+  assert.match(JSON.parse(backslash.stdout).failures.join('\n'), /unsafe path/);
+
+  // A relative symlink can also resolve outside the root; containment is checked
+  // after resolution so this cannot smuggle arbitrary host bytes into a PASS.
+  const link = path.join(dir, 'linked.AppImage');
+  fs.symlinkSync(outside, link);
+  const symlink = run(path.basename(link));
+  assert.equal(symlink.status, 1, 'a symlink escaping ARTIFACT_DIR unexpectedly passed');
+  assert.match(JSON.parse(symlink.stdout).failures.join('\n'), /outside ARTIFACT_DIR/);
+});
+
 test('verify-provenance rejects a matching health sha carried by an HTTP error response', async (t) => {
   const dir = tmp();
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
