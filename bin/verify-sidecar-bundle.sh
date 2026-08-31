@@ -121,6 +121,10 @@ _is_target_format() {
 #   scripts/psu.mjs, which resolves/installs the user's backend through the one
 #   maintained launcher surface. The other workspace-host wrappers work the
 #   same way: scripts are the product entrypoints, not build-host shims.
+#   papercusp-deliver-material — credential-material delivery (D-215). Listed here for exactly
+#     the same reason as the initializer below, and separately from it because it is a DIFFERENT
+#     program on a DIFFERENT protocol: without it the git and agent channels throw at bind on
+#     every real host, since bind only OBSERVES that the material file exists.
 #   papercusp-remote-initializer — the workspace-host initialization entrypoint
 #     (WORKSPACE_HOST_REMOTE_INITIALIZER_ENTRYPOINT / workspace-host-bootstrap.ts). Unlike the
 #     tools above it is spawned by the CONTROLLER over SSH on a provisioned VM, not by this
@@ -133,7 +137,7 @@ if [[ "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == "vm-release" \
    || -f "$SIDECAR/apps/operator/runtime/vm-release-threat-boundary.json" ]]; then
   WORKSPACE_HOST_TOOLS="papercusp-install papercusp-rollback papercusp-migrate papercusp-server papercusp-health psu claude codex omp"
 fi
-REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer"
+REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer papercusp-deliver-material"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
 # whose flags we don't control are not executed).
 probe_args() {
@@ -215,10 +219,12 @@ for f in "$BIN"/*; do
       # Node + serve.mjs/scripts/psu.mjs (or curl for bounded loopback health),
       # and the focused producer test executes their success/reject paths.
       ok "$b (allowlisted workspace-host release entrypoint)" ;;
-    papercusp-remote-initializer)
-      # Allowlisted for the OPPOSITE reason to the pg wrappers: this is not a shim fronting a
-      # build-host binary, it is a self-contained esbuild bundle whose only external dependency
-      # is `node`, which this same manifest requires in sidecar/bin. Section [6] proves it runs.
+    papercusp-remote-initializer|papercusp-deliver-material)
+      # Allowlisted for the OPPOSITE reason to the pg wrappers: these are not shims fronting a
+      # build-host binary, they are self-contained esbuild bundles whose only external dependency
+      # is `node`, which this same manifest requires in sidecar/bin. Section [6] proves the
+      # initializer runs a real protocol cycle; delivery's own cycle needs a credential-material
+      # payload, so it is proven by its unit suite rather than executed here.
       ok "$b (allowlisted self-contained bundle)" ;;
     psql|pg_dump|pg_dumpall|pg_restore)
       # generated LD_LIBRARY_PATH wrappers (Linux); must front a real binary

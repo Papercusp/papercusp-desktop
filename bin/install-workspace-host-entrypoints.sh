@@ -37,6 +37,10 @@ bin_dir="$release_root/bin"
 [[ -d "$release_root/db-sql" ]] || die "migration payload is missing: db-sql/"
 [[ -x "$bin_dir/papercusp-remote-initializer" ]] \
   || die "remote initializer is missing or not executable"
+# D-215: credential-material delivery is its OWN program on its own protocol. It is a REQUIRED
+# release material, and without it the git/agent channels throw at bind on every real host.
+[[ -x "$bin_dir/papercusp-deliver-material" ]] \
+  || die "credential-material delivery entrypoint is missing or not executable"
 
 # EI-21548386804468550: the pinned vm-release PostgreSQL tree includes real
 # client binaries, and the builder historically exposed them through absolute
@@ -88,7 +92,8 @@ release_root="$(cd "$release_root" && pwd -P)"
 [[ "$state_root" == /* && -d "$state_root" && -w "$state_root" ]] \
   || die "state root must be an existing writable absolute directory"
 for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
-  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer; do
+  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer \
+  papercusp-deliver-material; do
   [[ -x "$BIN/$entrypoint" ]] || die "missing executable release entrypoint: bin/$entrypoint"
 done
 [[ -s "$ROOT/pui-companion.wasm" ]] || die "pui-companion.wasm is missing or empty"
@@ -277,8 +282,9 @@ for entrypoint in papercusp-install papercusp-rollback papercusp-migrate \
 done
 
 for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
-  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer; do
+  papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer \
+  papercusp-deliver-material; do
   [[ -x "$bin_dir/$entrypoint" ]] || die "failed to emit executable bin/$entrypoint"
 done
 
-printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 12 bootstrap entrypoints executable; pui companion + generation manifest present; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"
+printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 13 bootstrap entrypoints executable; pui companion + generation manifest present; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"

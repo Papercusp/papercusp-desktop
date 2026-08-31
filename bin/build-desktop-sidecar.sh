@@ -2763,37 +2763,56 @@ echo "  ✓ orchestrator bins bundled → $ORCH_DST/bin"
 # bundle that looks complete. `verify-sidecar-bundle.sh` re-checks the finished package and runs a
 # real protocol cycle against it, so this is the producer half of a two-sided guard.
 DEPLOY_DRIVER_SRC="$REPO_ROOT/libs/generic/deployment-driver"
-REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
-echo "→ esbuild-bundling the workspace-host remote initializer from $DEPLOY_DRIVER_SRC"
-if [[ ! -f "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" ]]; then
-  echo "ERROR: remote initializer entrypoint not found at $DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" >&2
-  echo "       D-103/D-110 require this executable in every workspace-host bundle; refusing to ship without it." >&2
-  exit 1
-fi
 mkdir -p "$SIDECAR_DIR/bin"
-# The TypeScript entrypoint owns its `#!/usr/bin/env node` line and esbuild preserves it. Do not
-# add the same text with `--banner:js`: that produces a second shebang on line 2, which Node parses
-# as JavaScript and rejects before the initializer can enforce argv or read the protocol request.
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$DEPLOY_DRIVER_SRC/bin/papercusp-remote-initializer.ts" \
-  --bundle --platform=node --format=esm --target=node22 \
-  "${MINIFY_ARGS[@]}" \
-  --outfile="$REMOTE_INIT_BIN")
-chmod 755 "$REMOTE_INIT_BIN"
-if [[ ! -s "$REMOTE_INIT_BIN" ]]; then
-  echo "ERROR: $REMOTE_INIT_BIN was not produced (or is empty) by esbuild" >&2
-  exit 1
-fi
-if [[ ! -x "$REMOTE_INIT_BIN" ]]; then
-  echo "ERROR: $REMOTE_INIT_BIN is present but not executable — the host spawns it directly" >&2
-  exit 1
-fi
-# Assert the shebang survived the bundle: the host spawns this file by path, so without a
-# shebang it is an ordinary data file with the executable bit set and exec() fails ENOEXEC.
-if ! head -c 2 "$REMOTE_INIT_BIN" | grep -q '#!'; then
-  echo "ERROR: $REMOTE_INIT_BIN has no '#!' line — exec() on the host would fail ENOEXEC" >&2
-  exit 1
-fi
-echo "  ✓ remote initializer bundled → $REMOTE_INIT_BIN ($(wc -c < "$REMOTE_INIT_BIN") bytes)"
+# ONE loop over BOTH controller-spawned programs, not two hand-written blocks. They fail the same
+# invisible way, so a second copy of these checks would be a second place to forget the next one:
+#   papercusp-remote-initializer — the initialization + credential-lifecycle protocol
+#     (WORKSPACE_HOST_REMOTE_INITIALIZER_ENTRYPOINT).
+#   papercusp-deliver-material   — credential-material delivery. Its OWN protocol, argv and
+#     entrypoint, deliberately NOT on the initialization protocol
+#     (WORKSPACE_HOST_CREDENTIAL_DELIVERY_ENTRYPOINT, D-215 point 1). Without it the `git` and
+#     `agent` channels throw at bind on every real host, because bind only OBSERVES that the
+#     material file exists and nothing else in the bundle writes it.
+# Both are in WORKSPACE_HOST_REQUIRED_RELEASE_MATERIALS, so a bundle missing either is refused by
+# the release gate — but only after it is built, which is why this fails closed here first.
+for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; do
+  _wh_src="$DEPLOY_DRIVER_SRC/bin/$_wh_entrypoint.ts"
+  _wh_bin="$SIDECAR_DIR/bin/$_wh_entrypoint"
+  echo "→ esbuild-bundling $_wh_entrypoint from $DEPLOY_DRIVER_SRC"
+  if [[ ! -f "$_wh_src" ]]; then
+    echo "ERROR: workspace-host entrypoint not found at $_wh_src" >&2
+    echo "       D-103/D-110/D-215 require this executable in every workspace-host bundle; refusing to ship without it." >&2
+    exit 1
+  fi
+  # Bundled self-contained (same reasoning as the orchestrator bins above): the host runs these as
+  # separate `node` processes with no node_modules tree and no tsx, over an SSH invocation where a
+  # module-resolution failure surfaces as an opaque non-zero exit.
+  #
+  # The TypeScript entrypoint owns its `#!/usr/bin/env node` line and esbuild preserves it. Do not
+  # add the same text with `--banner:js`: that produces a second shebang on line 2, which Node
+  # parses as JavaScript and rejects before the program can enforce argv or read its request.
+  (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$_wh_src" \
+    --bundle --platform=node --format=esm --target=node22 \
+    "${MINIFY_ARGS[@]}" \
+    --outfile="$_wh_bin")
+  chmod 755 "$_wh_bin"
+  if [[ ! -s "$_wh_bin" ]]; then
+    echo "ERROR: $_wh_bin was not produced (or is empty) by esbuild" >&2
+    exit 1
+  fi
+  if [[ ! -x "$_wh_bin" ]]; then
+    echo "ERROR: $_wh_bin is present but not executable — the host spawns it directly" >&2
+    exit 1
+  fi
+  # Assert the shebang survived the bundle: the host spawns this file by path, so without a
+  # shebang it is an ordinary data file with the executable bit set and exec() fails ENOEXEC.
+  if ! head -c 2 "$_wh_bin" | grep -q '#!'; then
+    echo "ERROR: $_wh_bin has no '#!' line — exec() on the host would fail ENOEXEC" >&2
+    exit 1
+  fi
+  echo "  ✓ $_wh_entrypoint bundled → $_wh_bin ($(wc -c < "$_wh_bin") bytes)"
+done
+REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
 
 # Bundle the embedded-postgres-server package (real PG with logical
 # replication enabled). This is the ONLY desktop DB — the legacy
