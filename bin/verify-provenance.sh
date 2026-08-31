@@ -121,9 +121,24 @@ git_dirty_at_emit = prov.get("gitDirtyAtEmit")
 reused = prov.get("reused", False)  # absent on pre-P-002 provenance ⇒ treat as fresh
 
 # ── 1. build-start source cleanliness ──────────────────────────────────────
-if git_dirty is True and not ALLOW_DIRTY:
-    failures.append("gitDirty is true — release INPUT was dirty at cut start (pass --allow-dirty to override)")
-git_dirty_ok = not (git_dirty is True and not ALLOW_DIRTY)
+# This is an attestation, not a truthiness hint: only the JSON boolean false
+# proves a clean cut start. Missing/null/string/numeric values are malformed and
+# must not collapse into the same result. --allow-dirty overrides only an exact
+# boolean true; it never turns an absent or wrongly typed attestation into proof.
+if git_dirty is False:
+    git_dirty_ok = True
+elif git_dirty is True:
+    git_dirty_ok = ALLOW_DIRTY
+    if ALLOW_DIRTY:
+        notes.append("gitDirty is true — accepted only because --allow-dirty was set")
+    else:
+        failures.append("gitDirty is true — release INPUT was dirty at cut start (pass --allow-dirty to override)")
+else:
+    git_dirty_ok = False
+    failures.append(
+        "gitDirty must be the JSON boolean false "
+        f"(or true only with --allow-dirty); got {git_dirty!r}"
+    )
 if git_dirty_at_emit is True and git_dirty is False:
     notes.append("gitDirtyAtEmit is true — cutter-authored post-preflight mutations were present; build-start source remained clean")
 

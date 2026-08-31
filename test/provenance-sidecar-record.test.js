@@ -290,6 +290,48 @@ test('verify-provenance gates build-start dirt, not later cutter mutations', () 
   assert.match(JSON.parse(dirty.stdout).failures.join('\n'), /release INPUT was dirty at cut start/);
 });
 
+test('verify-provenance rejects missing or non-boolean gitDirty attestations', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  fs.writeFileSync(artifact, 'verified fixture bytes');
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const base = {
+    version: '0.0.0',
+    buildSha: 'abc1234',
+    gitHead: 'a'.repeat(40),
+    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+  };
+  const provPath = path.join(dir, 'build-provenance.json');
+  const run = (doc, args = []) => {
+    fs.writeFileSync(provPath, JSON.stringify(doc));
+    return spawnSync('bash', [VERIFIER, dir, '--json', ...args], { encoding: 'utf8' });
+  };
+
+  for (const [label, fields] of [
+    ['missing', {}],
+    ['null', { gitDirty: null }],
+    ['string', { gitDirty: 'false' }],
+    ['number', { gitDirty: 0 }],
+  ]) {
+    const result = run({ ...base, ...fields });
+    assert.equal(result.status, 1, `${label} gitDirty unexpectedly passed: ${result.stderr || result.stdout}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.gitDirtyOk, false, `${label} gitDirty was reported as clean`);
+    assert.match(verdict.failures.join('\n'), /gitDirty must be the JSON boolean false/);
+  }
+
+  const explicitOverride = run({ ...base, gitDirty: true }, ['--allow-dirty']);
+  assert.equal(explicitOverride.status, 0, explicitOverride.stderr || explicitOverride.stdout);
+  assert.equal(JSON.parse(explicitOverride.stdout).gitDirtyOk, true);
+
+  const malformedOverride = run({ ...base, gitDirty: 'false' }, ['--allow-dirty']);
+  assert.equal(
+    malformedOverride.status,
+    1,
+    '--allow-dirty must not convert a wrongly typed attestation into cleanliness proof',
+  );
+});
+
 test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
   const out = tmp();
   const artifact = path.join(out, 'Papercusp_GUI_0.0.18_x64-setup.exe');
