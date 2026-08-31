@@ -35,6 +35,7 @@ const test = require('node:test');
 // (scripts/mutation-probe.sh tier 2). Mutating the real file in place would race
 // git-sync, which sweeps and commits the whole working tree on a timer.
 const UPLOAD = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'upload-release.sh');
+const MOBILE_UPLOAD = path.join(__dirname, '..', 'bin', 'upload-mobile-release.sh');
 
 const source = () => fs.readFileSync(UPLOAD, 'utf8');
 
@@ -43,7 +44,7 @@ const source = () => fs.readFileSync(UPLOAD, 'utf8');
 // The helpers are EXTRACTED and evaluated rather than the script being sourced: the
 // script is a top-to-bottom release publisher and sourcing it would try to publish.
 // Extraction is bounded by two structural markers that exist for other reasons.
-function remoteState({ fileBody, remoteSize, remoteEtag, etagFailure = false }) {
+function remoteState({ fileBody, remoteSize, remoteEtag, etagFailure = false, scriptPath = UPLOAD }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upload-skip-'));
   try {
     const file = path.join(dir, 'artifact.sig');
@@ -83,7 +84,7 @@ remote_state "some/key" "$TARGET_FILE"
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
-        UPLOAD_SCRIPT: UPLOAD,
+        UPLOAD_SCRIPT: scriptPath,
         TARGET_FILE: file,
         FAKE_SIZE: remoteSize === null ? '' : String(remoteSize),
         FAKE_ETAG: remoteEtag === null ? '' : remoteEtag,
@@ -211,4 +212,60 @@ test('BOTH the upload skip and the storage verifier decide via remote_state', ()
     /s3api_head_etag[\s\S]{0,260}\|\|\s*true/,
     'ETag lookup failures must not be swallowed before remote_state can emit metadata-unavailable',
   );
+});
+
+test('mobile upload skip and storage verification are content-aware too', () => {
+  const src = fs.readFileSync(MOBILE_UPLOAD, 'utf8');
+
+  // Positive control: establish that both real mobile loops consult the
+  // decision function before asserting the old size-only shape is absent.
+  const remoteStateCall = 'remote_state "${KEY_PREFIX}/${TAG}/${name}" "$src"';
+  const uses = src.split(remoteStateCall).length - 1;
+  assert.ok(
+    uses >= 2,
+    'expected mobile upload and verify loops to consult remote_state, found ' + uses,
+  );
+  assert.match(src, /s3api_head_etag\(\)/);
+  assert.match(src, /SMALL_ARTIFACT_BYTES=/);
+  assert.equal(
+    src.includes('if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]'),
+    false,
+    'mobile upload must not skip solely because ContentLength equals the local size',
+  );
+  assert.equal(
+    src.includes('if [[ "$remote_size" == "$local_size" ]]'),
+    false,
+    'mobile storage verification must not report success from ContentLength alone',
+  );
+  assert.match(src, /metadata-unavailable/, 'mobile path must fail closed when ETag metadata is unavailable');
+});
+
+test('mobile remote_state catches a stale same-size APK signature', () => {
+  assert.equal(SIG_A.length, SIG_B.length);
+  const verdict = remoteState({
+    scriptPath: MOBILE_UPLOAD,
+    fileBody: SIG_A,
+    remoteSize: SIG_B.length,
+    remoteEtag: md5(SIG_B),
+  });
+  assert.equal(verdict, 'differs');
+});
+
+test('mobile remote_state distinguishes multipart and unavailable metadata', () => {
+  const multipart = remoteState({
+    scriptPath: MOBILE_UPLOAD,
+    fileBody: SIG_A,
+    remoteSize: SIG_A.length,
+    remoteEtag: md5(SIG_A) + '-7',
+  });
+  assert.equal(multipart, 'size-only-match');
+
+  const unavailable = remoteState({
+    scriptPath: MOBILE_UPLOAD,
+    fileBody: SIG_A,
+    remoteSize: SIG_A.length,
+    remoteEtag: null,
+    etagFailure: true,
+  });
+  assert.equal(unavailable, 'metadata-unavailable');
 });
