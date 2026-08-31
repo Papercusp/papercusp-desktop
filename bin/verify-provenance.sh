@@ -138,6 +138,24 @@ git_dirty = prov.get("gitDirty")
 git_dirty_at_emit = prov.get("gitDirtyAtEmit")
 reused = prov.get("reused", False)  # absent on pre-P-002 provenance ⇒ treat as fresh
 
+# Release identity is not optional metadata.  Without a non-empty version or
+# buildSha this record cannot say WHICH bytes were verified, and the optional
+# health dimension is skipped when no --health-url/--health-sha is supplied.
+# The old verifier therefore returned PASS while reporting version/buildSha as
+# null — a provenance-shaped file with no release identity at all.  Reject
+# missing, null, non-string, and blank values before any other dimension can
+# make that incomplete record look authoritative.
+if not isinstance(version, str) or not version.strip():
+    failures.append(
+        "version must be a non-empty string identifying the release; "
+        f"got {version!r}"
+    )
+if not isinstance(build_sha, str) or not build_sha.strip():
+    failures.append(
+        "buildSha must be a non-empty string identifying the built operator; "
+        f"got {build_sha!r}"
+    )
+
 # ── 1. build-start source cleanliness ──────────────────────────────────────
 # This is an attestation, not a truthiness hint: only the JSON boolean false
 # proves a clean cut start. Missing/null/string/numeric values are malformed and
