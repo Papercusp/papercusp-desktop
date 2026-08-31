@@ -17,6 +17,12 @@
 #   ssh aviweiss@172.31.44.2 'bash /tmp/boot-headless-devsource.sh'
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dev-source still consumes a packaged seed when one is present; use the same
+# manifest-checked resource-root selection as the packaged/current launchers.
+# shellcheck source=/dev/null
+source "$HERE/seed-resource-root.sh"
+
 APP="/Applications/Papercusp Server.app"
 SIDECAR="$APP/Contents/Resources/sidecar"        # only for the bundled node runtime
 SHARED="/Users/aviweiss/.papercusp-workspaces/.shared"
@@ -71,6 +77,12 @@ export PAPERCUSP_IDENTITY_DIR="$SHARED/.papercusp/identity"
 export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-identity.json"
 export PAPERCUSP_WORKSPACES_ROOT="/Users/aviweiss/.papercusp-workspaces"
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
+
+if PAPERCUSP_SEED_DIR="$(resolve_seed_resource_dir "$SIDECAR" "$APP/Contents/Resources" "$APP" "$DEVSRC" 2>/dev/null)"; then
+  export PAPERCUSP_SEED_DIR
+else
+  unset PAPERCUSP_SEED_DIR
+fi
 
 echo "boot-devsource: HOME=$HOME  DEVSRC=$DEVSRC"
 echo "boot-devsource: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  DHT=$PAPERCUSP_DHT_BOOTSTRAP  PORT=$PAPERCUSP_HONO_PORT"

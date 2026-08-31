@@ -26,6 +26,13 @@
 # out first so a concurrent GUI login always wins).
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Keep seed selection identical to the current/WSL/dev-source rig launchers.
+# The helper accepts an explicit path only as a hint and requires a valid
+# manifest before exporting it.
+# shellcheck source=/dev/null
+source "$HERE/seed-resource-root.sh"
+
 APP="/Applications/Papercusp Server.app"
 SIDECAR="$APP/Contents/Resources/sidecar"
 RES="$APP/Contents/Resources"
@@ -80,7 +87,11 @@ export PAPERCUSP_PROMPTS_DIR="$SIDECAR/prompts"
 export PAPERCUSP_PG_PORT="${PAPERCUSP_PG_PORT:-18213}"
 export PAPERCUSP_PG_DATA_DIR="$SHARED/embedded-pg-data"
 export PAPERCUSP_PG_SQL_DIR="$SIDECAR/db-sql"
-export PAPERCUSP_SEED_DIR="$RES/seed"
+if PAPERCUSP_SEED_DIR="$(resolve_seed_resource_dir "$SIDECAR" "$RES" "$APP" 2>/dev/null)"; then
+  export PAPERCUSP_SEED_DIR
+else
+  unset PAPERCUSP_SEED_DIR
+fi
 export PAPERCUSP_PG_SEED_PATH="$SIDECAR/db-seed.dump"
 [ -s "$PAPERCUSP_PG_SEED_PATH" ] || export PAPERCUSP_PG_SEED_PATH="$SIDECAR/db-seed.tar.gz"
 export PAPERCUSP_PG_RESTORE_BIN="$SIDECAR/bin/pg_restore"

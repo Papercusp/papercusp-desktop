@@ -31,6 +31,13 @@
 #     point elsewhere.
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Seed is a sibling resource of sidecar in packaged layouts. Resolve it through
+# the shared manifest-checked helper so a wrong Windows app path cannot poison
+# the WSL boot with a foreign/empty seed.
+# shellcheck source=/dev/null
+source "$HERE/seed-resource-root.sh"
+
 CUR="${PAPERCUSP_RIG_DIR:-/home/papercup/rig-sidecar-current}"
 REAL_HOME="/home/papercup"
 SHARED="$REAL_HOME/.papercusp-workspaces/.shared"
@@ -82,7 +89,11 @@ export PAPERCUSP_PROMPTS_DIR="$CUR/prompts"
 export PAPERCUSP_PG_PORT="${PAPERCUSP_PG_PORT:-18213}"
 export PAPERCUSP_PG_DATA_DIR="$SHARED/embedded-pg-data"
 export PAPERCUSP_PG_SQL_DIR="$CUR/db-sql"
-[ -d "$CUR/seed" ] && export PAPERCUSP_SEED_DIR="$CUR/seed"
+if PAPERCUSP_SEED_DIR="$(resolve_seed_resource_dir "$CUR" "$CUR" "${PAPERCUSP_SERVER_APP:-}" 2>/dev/null)"; then
+  export PAPERCUSP_SEED_DIR
+else
+  unset PAPERCUSP_SEED_DIR
+fi
 export PAPERCUSP_PG_SEED_PATH="$CUR/db-seed.dump"
 [ -s "$PAPERCUSP_PG_SEED_PATH" ] || export PAPERCUSP_PG_SEED_PATH="$CUR/db-seed.tar.gz"
 export PAPERCUSP_PG_RESTORE_BIN="$CUR/bin/pg_restore"
