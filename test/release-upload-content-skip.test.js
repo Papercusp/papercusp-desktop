@@ -35,7 +35,8 @@ const test = require('node:test');
 // (scripts/mutation-probe.sh tier 2). Mutating the real file in place would race
 // git-sync, which sweeps and commits the whole working tree on a timer.
 const UPLOAD = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'upload-release.sh');
-const MOBILE_UPLOAD = path.join(__dirname, '..', 'bin', 'upload-mobile-release.sh');
+const MOBILE_UPLOAD =
+  process.env.PROBE_MOBILE_SCRIPT || path.join(__dirname, '..', 'bin', 'upload-mobile-release.sh');
 
 const source = () => fs.readFileSync(UPLOAD, 'utf8');
 
@@ -44,7 +45,15 @@ const source = () => fs.readFileSync(UPLOAD, 'utf8');
 // The helpers are EXTRACTED and evaluated rather than the script being sourced: the
 // script is a top-to-bottom release publisher and sourcing it would try to publish.
 // Extraction is bounded by two structural markers that exist for other reasons.
-function remoteState({ fileBody, remoteSize, remoteEtag, etagFailure = false, scriptPath = UPLOAD }) {
+function remoteState({
+  fileBody,
+  remoteBody = fileBody,
+  remoteSize,
+  remoteEtag,
+  etagFailure = false,
+  getFailure = false,
+  scriptPath = UPLOAD,
+}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upload-skip-'));
   try {
     const file = path.join(dir, 'artifact.sig');
@@ -62,6 +71,7 @@ function remoteState({ fileBody, remoteSize, remoteEtag, etagFailure = false, sc
         'for ((i=1;i<=$#;i++)); do',
         '  if [[ "${!i}" == "--query" ]]; then j=$((i+1)); q="${!j}"; fi',
         'done',
+        'if [[ "$*" == *"get-object"* ]]; then [[ "${FAKE_GET_MODE:-value}" == error ]] && exit 1; printf "%s" "${FAKE_REMOTE_BODY:-}" > "${!#}"; echo "{}"; exit 0; fi',
         '[[ -z "${FAKE_SIZE:-}" ]] && exit 1',
         'case "$q" in',
         '  ContentLength) echo "$FAKE_SIZE" ;;',
@@ -88,6 +98,8 @@ remote_state "some/key" "$TARGET_FILE"
         TARGET_FILE: file,
         FAKE_SIZE: remoteSize === null ? '' : String(remoteSize),
         FAKE_ETAG: remoteEtag === null ? '' : remoteEtag,
+        FAKE_REMOTE_BODY: remoteBody,
+        FAKE_GET_MODE: getFailure ? 'error' : 'value',
         FAKE_ETAG_MODE: etagFailure ? 'error' : remoteEtag === 'None' ? 'none' : 'value',
       },
     });
@@ -160,6 +172,7 @@ test('an ETag lookup failure is unknown, never a verified multipart size match',
     remoteSize: SIG_A.length,
     remoteEtag: null,
     etagFailure: true,
+    getFailure: true,
   });
   assert.equal(
     verdict,
@@ -226,7 +239,7 @@ test('mobile upload skip and storage verification are content-aware too', () => 
     'expected mobile upload and verify loops to consult remote_state, found ' + uses,
   );
   assert.match(src, /s3api_head_etag\(\)/);
-  assert.match(src, /SMALL_ARTIFACT_BYTES=/);
+  assert.match(src, /s3api_get_object\(\)/);
   assert.equal(
     src.includes('if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]'),
     false,
@@ -251,14 +264,24 @@ test('mobile remote_state catches a stale same-size APK signature', () => {
   assert.equal(verdict, 'differs');
 });
 
-test('mobile remote_state distinguishes multipart and unavailable metadata', () => {
-  const multipart = remoteState({
+test('mobile remote_state compares multipart bytes instead of trusting the ETag suffix', () => {
+  const staleMultipart = remoteState({
     scriptPath: MOBILE_UPLOAD,
     fileBody: SIG_A,
     remoteSize: SIG_A.length,
+    remoteBody: SIG_B,
+    remoteEtag: md5(SIG_B) + '-7',
+  });
+  assert.equal(staleMultipart, 'differs');
+
+  const sameMultipart = remoteState({
+    scriptPath: MOBILE_UPLOAD,
+    fileBody: SIG_A,
+    remoteSize: SIG_A.length,
+    remoteBody: SIG_A,
     remoteEtag: md5(SIG_A) + '-7',
   });
-  assert.equal(multipart, 'size-only-match');
+  assert.equal(sameMultipart, 'identical');
 
   const unavailable = remoteState({
     scriptPath: MOBILE_UPLOAD,
@@ -266,6 +289,7 @@ test('mobile remote_state distinguishes multipart and unavailable metadata', () 
     remoteSize: SIG_A.length,
     remoteEtag: null,
     etagFailure: true,
+    getFailure: true,
   });
   assert.equal(unavailable, 'metadata-unavailable');
 });
