@@ -678,6 +678,24 @@ test('verify-provenance binds latest.json URLs to the release path and signed ar
     path.basename(spacedArtifact),
   );
 
+  const literalSpace = run(
+    manifestFor(`${releaseBase}/${releaseTag}/${path.basename(spacedArtifact)}`, spacedArtifactSignature),
+  );
+  assert.equal(literalSpace.status, 1, 'a literal-space URL unexpectedly passed');
+  assert.match(JSON.parse(literalSpace.stdout).failures.join('\n'), /without whitespace/);
+
+  const dotSegment = run(
+    manifestFor(`${releaseBase}/${releaseTag}/../${path.basename(artifact)}`),
+  );
+  assert.equal(dotSegment.status, 1, 'a dot-segment URL unexpectedly passed');
+  assert.match(JSON.parse(dotSegment.stdout).failures.join('\n'), /unsafe dot or separator|release tag/);
+
+  const malformedEncoding = run(
+    manifestFor(`${releaseBase}/${releaseTag}/%ZZ${path.basename(artifact)}`),
+  );
+  assert.equal(malformedEncoding.status, 1, 'a malformed percent-encoding unexpectedly passed');
+  assert.match(JSON.parse(malformedEncoding.stdout).failures.join('\n'), /malformed percent-encoding/);
+
   const wrongVersion = run({
     ...manifestFor(canonicalUrl),
     version: '9.9.9',

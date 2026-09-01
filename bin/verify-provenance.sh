@@ -111,7 +111,7 @@ DIR="$DIR" PROV="$PROV" HEALTH_SHA="$HEALTH_SHA" LATEST_JSON="$LATEST_JSON" \
 PUBKEY="$PUBKEY" NODE_HELPER="$NODE_HELPER" \
 REQUIRE_SIGNED="$REQUIRE_SIGNED" ALLOW_DIRTY="$ALLOW_DIRTY" JSON="$JSON" \
 python3 <<'PY'
-import os, sys, json, hashlib, subprocess, pathlib
+import os, sys, json, hashlib, subprocess, pathlib, re
 from urllib.parse import unquote, urlsplit
 
 DIR = pathlib.Path(os.environ["DIR"])
@@ -305,7 +305,7 @@ for a in prov_artifacts:
         artifacts_report.append(entry)
         continue
     actual_bytes = path.stat().st_size
-    entry["bytesOk"] = isinstance(recorded_bytes, int) and actual_bytes == recorded_bytes
+    entry["bytesOk"] = type(recorded_bytes) is int and actual_bytes == recorded_bytes
     if not entry["bytesOk"]:
         failures.append(
             f"artifact {name!r} bytes {actual_bytes} != recorded {recorded_bytes} (LABELED!=PACKED)"
@@ -395,13 +395,6 @@ if LATEST_JSON:
                 n = a.get("name") if isinstance(a, dict) else None
                 if isinstance(n, str) and n:
                     prov_names_by_base.setdefault(n.rsplit("/", 1)[-1], set()).add(n)
-            for base_name, names in prov_names_by_base.items():
-                if len(names) > 1:
-                    failures.append(
-                        f"provenance artifact basename {base_name!r} is ambiguous across "
-                        f"{len(names)} rows; latest.json cannot bind it to one artifact"
-                    )
-
             for platform_key, meta in platforms.items():
                 ok = True
                 base = ""
@@ -422,9 +415,15 @@ if LATEST_JSON:
                     ok = False
 
                 observed_tag = None
-                if not isinstance(url, str) or not url or url != url.strip():
+                if (
+                    not isinstance(url, str)
+                    or not url
+                    or url != url.strip()
+                    or any(character.isspace() for character in url)
+                ):
                     failures.append(
-                        f"latest.json[{platform_key}] url must be a non-empty trimmed string"
+                        f"latest.json[{platform_key}] url must be a non-empty URL string "
+                        "without whitespace"
                     )
                     ok = False
                 else:
@@ -466,20 +465,43 @@ if LATEST_JSON:
                             )
                             ok = False
                         else:
-                            try:
-                                decoded_segments = [
-                                    unquote(segment, errors="strict") for segment in raw_segments
-                                ]
-                            except (UnicodeError, ValueError) as e:
+                            if any(
+                                not re.fullmatch(r"(?:[^%]|%[0-9A-Fa-f]{2})*", segment)
+                                for segment in raw_segments
+                            ):
                                 failures.append(
-                                    f"latest.json[{platform_key}] url path encoding is malformed: {e}"
+                                    f"latest.json[{platform_key}] url path contains malformed "
+                                    "percent-encoding"
                                 )
                                 decoded_segments = []
                                 ok = False
+                            else:
+                                try:
+                                    decoded_segments = [
+                                        unquote(segment, errors="strict") for segment in raw_segments
+                                    ]
+                                except (UnicodeError, ValueError) as e:
+                                    failures.append(
+                                        f"latest.json[{platform_key}] url path encoding is malformed: {e}"
+                                    )
+                                    decoded_segments = []
+                                    ok = False
 
                             if decoded_segments:
                                 observed_tag = decoded_segments[-2]
                                 base = decoded_segments[-1]
+                                if any(
+                                    segment in (".", "..")
+                                    or "/" in segment
+                                    or "\\" in segment
+                                    or "\x00" in segment
+                                    for segment in decoded_segments
+                                ):
+                                    failures.append(
+                                        f"latest.json[{platform_key}] url path contains an "
+                                        "unsafe dot or separator segment"
+                                    )
+                                    ok = False
                                 if (
                                     not base
                                     or "/" in base
@@ -501,6 +523,11 @@ if LATEST_JSON:
                                     ok = False
 
                 names = prov_names_by_base.get(base, set())
+                if len(names) > 1:
+                    failures.append(
+                        f"latest.json[{platform_key}] url basename {base!r} is ambiguous "
+                        f"across {len(names)} provenance rows"
+                    )
                 name = next(iter(names)) if len(names) == 1 else None
                 if name is None:
                     failures.append(f"latest.json[{platform_key}] url {base!r} is not an artifact in this provenance"); ok = False
