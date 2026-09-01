@@ -320,7 +320,7 @@ test('verify-provenance gates build-start dirt, not later cutter mutations', () 
     gitDirty: false,
     gitHeadAtEmit: 'a'.repeat(40),
     gitDirtyAtEmit: true,
-    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+    artifacts: [{ name: path.basename(artifact), bytes: fs.statSync(artifact).size, sha256, sig: false }],
   };
   const provPath = path.join(dir, 'build-provenance.json');
   fs.writeFileSync(provPath, JSON.stringify(base));
@@ -347,7 +347,7 @@ test('verify-provenance rejects missing or non-boolean gitDirty attestations', (
     version: '0.0.0',
     buildSha: 'abc1234',
     gitHead: 'a'.repeat(40),
-    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+    artifacts: [{ name: path.basename(artifact), bytes: fs.statSync(artifact).size, sha256, sig: false }],
   };
   const provPath = path.join(dir, 'build-provenance.json');
   const run = (doc, args = []) => {
@@ -390,7 +390,7 @@ test('verify-provenance rejects missing or malformed release identity', () => {
     buildSha: 'abc1234',
     gitHead: 'a'.repeat(40),
     gitDirty: false,
-    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+    artifacts: [{ name: path.basename(artifact), bytes: fs.statSync(artifact).size, sha256, sig: false }],
   };
   const provPath = path.join(dir, 'build-provenance.json');
   const run = (doc) => {
@@ -425,6 +425,55 @@ test('verify-provenance rejects missing or malformed release identity', () => {
   }
 });
 
+test('verify-provenance rejects malformed artifact rows instead of certifying their bytes', () => {
+  const dir = tmp();
+  const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
+  const bytes = Buffer.from('verified fixture bytes');
+  fs.writeFileSync(artifact, bytes);
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  const validRow = {
+    name: path.basename(artifact),
+    bytes: bytes.length,
+    sha256,
+    sig: false,
+  };
+  const provPath = path.join(dir, 'build-provenance.json');
+  const base = {
+    version: '0.0.0',
+    buildSha: 'abc1234',
+    gitHead: 'a'.repeat(40),
+    gitDirty: false,
+  };
+  const run = (artifacts) => {
+    fs.writeFileSync(provPath, JSON.stringify({ ...base, artifacts }));
+    return spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
+  };
+
+  const valid = run([validRow]);
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+  assert.equal(JSON.parse(valid.stdout).artifacts[0].bytesOk, true);
+
+  for (const [label, rows, expected] of [
+    ['missing bytes', [{ ...validRow, bytes: undefined }], /bytes must be a non-negative integer/],
+    ['wrong bytes', [{ ...validRow, bytes: bytes.length + 1 }], /bytes .* != recorded/],
+    ['string sig', [{ ...validRow, sig: 'false' }], /sig must be a JSON boolean/],
+    ['missing sig', [{ ...validRow, sig: undefined }], /sig must be a JSON boolean/],
+    ['numeric sha256', [{ ...validRow, sha256: 123 }], /sha256 must be a 64-character hex string/],
+    ['duplicate name', [validRow, { ...validRow }], /duplicate artifact row/],
+  ]) {
+    const result = run(rows);
+    assert.equal(result.status, 1, `${label} unexpectedly passed: ${result.stderr || result.stdout}`);
+    assert.match(JSON.parse(result.stdout).failures.join('\n'), expected);
+  }
+
+  const objectInsteadOfRows = run({ one: validRow });
+  assert.equal(objectInsteadOfRows.status, 1, 'a non-array artifacts value unexpectedly passed');
+  assert.match(
+    JSON.parse(objectInsteadOfRows.stdout).failures.join('\n'),
+    /artifacts must be an array/,
+  );
+});
+
 test('verify-provenance rejects artifact names that escape ARTIFACT_DIR', () => {
   const dir = tmp();
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
@@ -444,7 +493,7 @@ test('verify-provenance rejects artifact names that escape ARTIFACT_DIR', () => 
         buildSha: 'abc1234',
         gitHead: 'a'.repeat(40),
         gitDirty: false,
-        artifacts: [{ name, sha256, sig: false }],
+        artifacts: [{ name, bytes: fs.statSync(artifact).size, sha256, sig: false }],
       }),
     );
     return spawnSync('bash', [VERIFIER, dir, '--json'], { encoding: 'utf8' });
@@ -485,7 +534,7 @@ test('verify-provenance rejects a matching health sha carried by an HTTP error r
     buildSha: 'expected-health-sha',
     gitHead: 'a'.repeat(40),
     gitDirty: false,
-    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+    artifacts: [{ name: path.basename(artifact), bytes: fs.statSync(artifact).size, sha256, sig: false }],
   }));
 
   const server = await startHealthFixtureServer();
@@ -510,7 +559,7 @@ test('verify-provenance rejects a matching health sha carried by an HTTP error r
   assert.equal(JSON.parse(successResponse.stdout).healthMatch, true);
 });
 
-test('verify-provenance binds latest.json URLs to the release target and signed artifact', () => {
+test('verify-provenance binds latest.json URLs to the release path and signed artifact', () => {
   const dir = tmp();
   const releaseBase = 'https://example.invalid/releases';
   const releaseTag = 'desktop-v0.0.0-alpha';
@@ -600,15 +649,15 @@ test('verify-provenance binds latest.json URLs to the release target and signed 
   assert.equal(valid.status, 0, `valid manifest failed: ${valid.stderr || valid.stdout}`);
   assert.equal(JSON.parse(valid.stdout).manifest['linux-x86_64'].ok, true);
 
-  // The old basename-only check returned PASS for both of these byte-identical
-  // controls. A signed filename is not enough: the updater would download from
-  // the manifest URL, so its release host and release tag are part of identity.
-  const foreignHost = run(
+  // The artifact CDN is deliberately movable independently of the app's baked
+  // manifest host. A host change with the SAME release suffix must remain valid.
+  const movableCdn = run(
     manifestFor(`https://attacker.invalid/releases/${releaseTag}/${path.basename(artifact)}`),
   );
-  assert.equal(foreignHost.status, 1, 'a foreign manifest host unexpectedly passed');
-  assert.match(JSON.parse(foreignHost.stdout).failures.join('\n'), /release host/);
+  assert.equal(movableCdn.status, 0, movableCdn.stderr || movableCdn.stdout);
 
+  // The old basename-only check returned PASS here. The bytes and signature are
+  // unchanged, so only the stale release path can explain the rejection.
   const staleTag = run(
     manifestFor(`${releaseBase}/desktop-v9.9.9-alpha/${path.basename(artifact)}`),
   );
@@ -628,6 +677,13 @@ test('verify-provenance binds latest.json URLs to the release target and signed 
     JSON.parse(encodedName.stdout).manifest['linux-x86_64'].url_basename,
     path.basename(spacedArtifact),
   );
+
+  const wrongVersion = run({
+    ...manifestFor(canonicalUrl),
+    version: '9.9.9',
+  });
+  assert.equal(wrongVersion.status, 1, 'a manifest/provenance version mismatch unexpectedly passed');
+  assert.match(JSON.parse(wrongVersion.stdout).failures.join('\n'), /version .* does not match/);
 });
 
 test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
