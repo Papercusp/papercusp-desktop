@@ -97,9 +97,13 @@ if [[ "${PROVENANCE_SOURCE_GIT_HEAD+x}" != "${PROVENANCE_SOURCE_GIT_DIRTY+x}" ]]
   echo "ERROR: PROVENANCE_SOURCE_GIT_HEAD and PROVENANCE_SOURCE_GIT_DIRTY must be supplied together" >&2
   exit 2
 fi
+_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST=""
 if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh" ]]; then
+  _OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/papercusp-sidecar-dirty-source.XXXXXX")"
+  export PROVENANCE_SOURCE_DIRTY_MANIFEST="$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
   _provenance_source_output="$(
-    bash "$HERE/emit-build-provenance.sh" --capture-source "$REPO_ROOT"
+    bash "$HERE/emit-build-provenance.sh" --capture-source \
+      "$REPO_ROOT" "$PROVENANCE_SOURCE_DIRTY_MANIFEST"
   )" || {
     echo "ERROR: could not capture sidecar source provenance before build mutations" >&2
     exit 2
@@ -673,7 +677,7 @@ papercusp_require_free_gb "$SIDECAR_DIR" "${PAPERCUSP_SIDECAR_MIN_FREE_GB:-8}" "
 # already-gone path is a silent no-op; the trap never fires MID-run (only at
 # actual process exit), so it cannot race the overlay-preservation read that
 # copies FROM OLD_DIR just after the swap.
-trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}' EXIT
+trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}; [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"' EXIT
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
