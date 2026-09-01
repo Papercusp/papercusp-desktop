@@ -37,8 +37,116 @@ const test = require('node:test');
 const UPLOAD = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'upload-release.sh');
 const MOBILE_UPLOAD =
   process.env.PROBE_MOBILE_SCRIPT || path.join(__dirname, '..', 'bin', 'upload-mobile-release.sh');
+const CHANNEL_HELPERS = path.join(__dirname, '..', 'bin', 'lib', 'gen-latest-manifest.sh');
 
 const source = () => fs.readFileSync(UPLOAD, 'utf8');
+
+// Execute the REAL public-manifest verifier functions against a fake public
+// host. Only the two outward I/O seams are replaced: curl reads fixture files,
+// and artifact range probes are a no-op because these tests are about manifest
+// identity + feed enumeration. The channel paths still come from the canonical
+// gen-latest-manifest.sh registry used by the publisher itself.
+function publicManifestVerification({
+  version = '9.8.7',
+  channel = 'stable',
+  manifestName = 'latest.json',
+  localIdentity = { version, channel },
+  feedPaths,
+}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-public-manifest-'));
+  try {
+    const script = source();
+    const verifierStart = script.indexOf('verify_public_manifest_identity() {');
+    const verifierEnd = script.indexOf('\nverify_public_manifest_feeds "$LATEST_JSON"', verifierStart);
+    assert.notEqual(verifierStart, -1, 'public manifest identity verifier is missing');
+    assert.notEqual(verifierEnd, -1, 'public manifest verifier invocation boundary is missing');
+
+    const verifier = path.join(dir, 'public-manifest-verifier.sh');
+    fs.writeFileSync(verifier, script.slice(verifierStart, verifierEnd));
+
+    const manifestBody = `${JSON.stringify({ ...localIdentity, platforms: {} }, null, 2)}\n`;
+    const localManifest = path.join(dir, manifestName);
+    fs.writeFileSync(localManifest, manifestBody);
+
+    const feeds = path.join(dir, 'feeds');
+    for (const feedPath of feedPaths) {
+      const fixture = path.join(feeds, feedPath);
+      fs.mkdirSync(path.dirname(fixture), { recursive: true });
+      // The served bytes deliberately equal the local manifest. Identity tests
+      // therefore cannot pass/fail merely because diff noticed different bytes.
+      fs.writeFileSync(fixture, manifestBody);
+    }
+
+    const requestLog = path.join(dir, 'requests.log');
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, 'curl'),
+      [
+        '#!/bin/bash',
+        'set -euo pipefail',
+        'args=("$@")',
+        'out=""',
+        'url=""',
+        'for ((i=0; i<${#args[@]}; i++)); do',
+        '  [[ "${args[$i]}" == "-o" ]] && out="${args[$((i + 1))]}"',
+        '  [[ "${args[$i]}" == http://* || "${args[$i]}" == https://* ]] && url="${args[$i]}"',
+        'done',
+        'relative="${url#"$FAKE_BASE"/}"',
+        'printf "%s\\n" "$relative" >> "$FAKE_REQUEST_LOG"',
+        'fixture="$FAKE_FEEDS/$relative"',
+        'if [[ ! -f "$fixture" ]]; then',
+        '  : > "$out"',
+        '  printf 404',
+        '  exit 0',
+        'fi',
+        'cp "$fixture" "$out"',
+        'printf 200',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const harness = `
+set -euo pipefail
+. "$CHANNEL_HELPERS"
+. "$VERIFIER"
+probe_public_manifest_artifacts() { :; }
+BASE="$FAKE_BASE"
+R2_BUCKET=test-bucket
+VERSION="$EXPECTED_VERSION"
+CHANNEL="$EXPECTED_CHANNEL"
+PUBLIC_MANIFEST_DIR="$PUBLIC_TMP"
+mkdir -p "$PUBLIC_MANIFEST_DIR"
+verify_public_manifest_feeds "$LOCAL_MANIFEST" "$MANIFEST_NAME" "$MANIFEST_NAME"
+`;
+    const result = spawnSync('bash', ['-c', harness], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CHANNEL_HELPERS,
+        VERIFIER: verifier,
+        FAKE_BASE: 'https://updates.example.invalid/secret',
+        FAKE_FEEDS: feeds,
+        FAKE_REQUEST_LOG: requestLog,
+        EXPECTED_VERSION: version,
+        EXPECTED_CHANNEL: channel,
+        LOCAL_MANIFEST: localManifest,
+        MANIFEST_NAME: manifestName,
+        PUBLIC_TMP: path.join(dir, 'public'),
+      },
+    });
+
+    return {
+      ...result,
+      requestPaths: fs.existsSync(requestLog)
+        ? fs.readFileSync(requestLog, 'utf8').trim().split('\n').filter(Boolean)
+        : [],
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 // Run `remote_state` from the real script against a stubbed `aws`.
 //
